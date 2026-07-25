@@ -1,3 +1,6 @@
+/**
+ * 从全局生成、下载和错误状态派生吉祥物动画状态，并短暂保留成功或失败反馈。
+ */
 import { useEffect, useRef, useState } from 'react';
 import type { MascotStatus } from '../components/shared/mascot/Mascot';
 import { useAppStore, type AppState } from '../store/useAppStore';

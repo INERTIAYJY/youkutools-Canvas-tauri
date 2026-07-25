@@ -1,3 +1,6 @@
+/**
+ * AI 执行层共享类型，覆盖生成参数、模型协议、轮询映射以及各媒体结果结构。
+ */
 export interface AIGenerateParams {
   prompt: string;
   model: string;      // model value (e.g. 'ppio/qwen/qwen3.5-397b-a17b')

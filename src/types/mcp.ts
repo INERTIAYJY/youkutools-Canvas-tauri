@@ -1,3 +1,6 @@
+/**
+ * MCP bridge、工具描述和调用结果的跨前后端协议类型。
+ */
 import type { AgentToolSchema } from '../services/chat/agentToolSchemas';
 
 export interface McpBridgeSessionInfo {

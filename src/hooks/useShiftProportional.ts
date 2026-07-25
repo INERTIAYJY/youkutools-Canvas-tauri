@@ -1,3 +1,6 @@
+/**
+ * 跟踪 Shift 比例锁定状态，并提供节点缩放时保持宽高比的纯计算辅助函数。
+ */
 import { useRef, useEffect } from 'react';
 
 /**

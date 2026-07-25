@@ -1,3 +1,6 @@
+/**
+ * React 应用入口，根据查询参数选择主窗口或独立窗口，并在挂载前应用窗口主题。
+ */
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'

@@ -1,3 +1,6 @@
+/**
+ * 计算多选节点的几何边界、相邻间距和平均分布位置，不直接写入画布 Store。
+ */
 import type { Node as RFNode } from '@xyflow/react';
 import type { BaseNodeData } from '../types';
 import { getNodeBounds, getParentOffset } from './nodeBounds.js';

@@ -1,3 +1,6 @@
+/**
+ * 定义图片、视频和音频 Provider Adapter 契约，并按能力注册和解析媒体执行适配器。
+ */
 import type {
   AIAudioGenParams,
   AIImageGenParams,

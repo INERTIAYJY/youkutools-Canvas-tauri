@@ -1,3 +1,6 @@
+/**
+ * 声明 APIMart Seedance 视频模型能力表，并将通用生成参数映射为各模型请求字段。
+ */
 export type ApimartSeedanceRatioField = 'aspect_ratio' | 'size';
 export type ApimartSeedanceAudioField = 'audio' | 'generate_audio';
 

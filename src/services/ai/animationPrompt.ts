@@ -1,3 +1,6 @@
+/**
+ * 生成角色动作 Sprite Sheet 提示词，并统一帧数、动作阶段和画面比例约束。
+ */
 import type { AnimationAction } from '../../types';
 import { ANIMATION_ACTION_LABELS, ANIMATION_FRAME_GRIDS } from '../../types';
 

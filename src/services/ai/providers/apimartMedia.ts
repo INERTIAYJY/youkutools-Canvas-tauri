@@ -1,3 +1,6 @@
+/**
+ * APIMart 媒体 Provider Adapter，封装图片、视频和音频任务的提交、轮询与结果归一化。
+ */
 import { DEFAULT_BASE_URLS } from '../../../constants/api';
 import { useAppStore } from '../../../store/useAppStore';
 import type { AIAudioGenParams, AudioGenerationResult } from '../../../types/aiTypes';

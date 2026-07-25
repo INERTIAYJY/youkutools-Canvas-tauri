@@ -1,3 +1,6 @@
+/**
+ * 从 cURL、Fetch、Axios、Python、HTTP 或 OpenAPI 示例中提取可编辑的模型执行协议草稿。
+ */
 import type { GeneralModelCategory } from '../../types';
 import type {
   ModelProtocolAuthConfig,

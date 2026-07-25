@@ -1,3 +1,6 @@
+/**
+ * 以受限并发执行相互独立的批任务，保持输入顺序并允许返回部分成功结果。
+ */
 export interface SettledBatch<T> {
   results: T[];
   failedCount: number;

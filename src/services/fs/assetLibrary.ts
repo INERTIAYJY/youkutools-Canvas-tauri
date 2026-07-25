@@ -1,5 +1,5 @@
 /**
- * fs/assetLibrary — 全局资产库（项目无关）+ 外部文件夹 + 永久保存
+ * fs/assetLibrary — 全局资产库（项目无关）+ 外部文件夹 + 全局资产
  * 全局 file 目录、递归遍历外部文件夹、添加文件/文件夹、保存到永久目录、删除永久文件。
  */
 import { writeFile, readFile as tauriReadFile, mkdir, exists, stat, readDir } from '@tauri-apps/plugin-fs';
@@ -231,7 +231,7 @@ export async function saveAssetToPermanent(
   return saveToPermanent(entry.path);
 }
 
-/** 删除永久保存的文件（移入回收站） */
+/** 删除全局资产的文件（移入回收站） */
 export async function deletePermanentFile(filePath: string): Promise<void> {
   await moveToTrash(filePath);
 }

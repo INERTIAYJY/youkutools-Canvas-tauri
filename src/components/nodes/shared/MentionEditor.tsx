@@ -1646,7 +1646,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
               <Icon icon="solar:gallery-bold" width="14" height="14" />
             </span>
             <span className="text-sm text-canvas-text">引用资产</span>
-            <span className="ml-auto text-[10px] text-canvas-text-muted">永久保存</span>
+            <span className="ml-auto text-[10px] text-canvas-text-muted">全局资产</span>
           </button>
         </div>
       )}

@@ -30,7 +30,7 @@ export interface CharacterReferenceImage {
   assetId?: string;
   relativePath?: string;
   imageUrl?: string;
-  /** 仅项目角色可关联来源节点；永久角色不得依赖该字段。 */
+  /** 仅项目角色可关联来源节点；全局角色不得依赖该字段。 */
   sourceNodeId?: string;
   prompt: string;
   createdAt: number;

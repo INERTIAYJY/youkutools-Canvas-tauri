@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Edge, Node } from '@xyflow/react';
 import { useAppStore } from '../../src/store/useAppStore';
-import { countUnreadDramaAssets } from '../../src/store/store.dramaAssets';
+import {
+  countUnreadDramaAssets,
+  isEligibleCharacterReferenceNode,
+} from '../../src/store/store.dramaAssets';
+import { filterCharacterLibraryCanvasElements } from '../../src/store/store.nodes';
 import type { DramaCharacter } from '../../src/types/dramaAssets';
 import { emptyDramaAssetLibrary } from '../../src/types/dramaAssets';
+import type { BaseNodeData } from '../../src/types';
 
 const characterLibraryMocks = vi.hoisted(() => ({
   loadGlobalCharacterCards: vi.fn(async () => [] as DramaCharacter[]),
@@ -42,6 +48,12 @@ function sampleCharacter(overrides: Partial<DramaCharacter> = {}): DramaCharacte
     source: 'ai',
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
 }
 
 describe('dramaAssets store', () => {
@@ -195,6 +207,163 @@ describe('dramaAssets store', () => {
       avatarReferenceImageId: 'ref-avatar',
       avatarCrop: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 },
     }));
+  });
+
+  it('accepts only materialized image nodes as character references', () => {
+    expect(isEligibleCharacterReferenceNode({
+      type: 'ai-image',
+      data: { label: '图像', type: 'ai-image', imageUrl: 'asset://image.png' },
+    })).toBe(true);
+    expect(isEligibleCharacterReferenceNode({
+      type: 'ai-image',
+      data: { label: '图像', type: 'ai-image' },
+    })).toBe(false);
+    expect(isEligibleCharacterReferenceNode({
+      type: 'ai-video',
+      data: { label: '视频', type: 'ai-video', imageUrl: 'asset://poster.png' },
+    })).toBe(false);
+  });
+
+  it('persists a project character reference before hiding its source node', async () => {
+    const pendingSave = deferred<string | undefined>();
+    const commitToHistory = vi.fn();
+    useAppStore.setState({
+      dramaAssets: {
+        ...emptyDramaAssetLibrary(),
+        characters: [sampleCharacter()],
+      },
+      nodes: [{
+        id: 'node-image',
+        type: 'ai-image',
+        position: { x: 0, y: 0 },
+        data: {
+          label: '角色图',
+          type: 'ai-image',
+          imageUrl: 'asset://character.png',
+          prompt: '银发剑客',
+        },
+      }],
+      saveCurrentProjectSilent: vi.fn(() => pendingSave.promise),
+      commitToHistory,
+    });
+
+    const capture = useAppStore.getState().captureImageNodeToCharacter({
+      nodeId: 'node-image',
+      scope: 'project',
+      characterId: 'char_1',
+      kind: 'full_body',
+      prompt: '全身银发剑客',
+      hideNode: true,
+    });
+
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).not.toBe(true);
+    expect(commitToHistory).not.toHaveBeenCalled();
+
+    pendingSave.resolve('p1');
+    await expect(capture).resolves.toEqual(expect.objectContaining({ characterId: 'char_1' }));
+    const state = useAppStore.getState();
+    expect(state.dramaAssets.characters[0].referenceImages).toEqual([
+      expect.objectContaining({
+        kind: 'full_body',
+        sourceNodeId: 'node-image',
+        imageUrl: 'asset://character.png',
+        prompt: '全身银发剑客',
+      }),
+    ]);
+    expect(state.nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+    expect(state.nodes[0].data.characterLibraryLinks).toEqual([
+      expect.objectContaining({ scope: 'project', characterId: 'char_1' }),
+    ]);
+    expect(commitToHistory).toHaveBeenCalledOnce();
+  });
+
+  it('rolls back a failed project character capture and keeps the node visible', async () => {
+    useAppStore.setState({
+      dramaAssets: emptyDramaAssetLibrary(),
+      nodes: [{
+        id: 'node-image',
+        type: 'source-image',
+        position: { x: 0, y: 0 },
+        data: { label: '角色图', type: 'source-image', imageUrl: 'asset://character.png' },
+      }],
+      saveCurrentProjectSilent: vi.fn(async () => undefined),
+      commitToHistory: vi.fn(),
+    });
+
+    const result = await useAppStore.getState().captureImageNodeToCharacter({
+      nodeId: 'node-image',
+      scope: 'project',
+      newCharacter: sampleCharacter({ id: 'new-character', name: '新角色' }),
+      kind: 'primary',
+      prompt: '',
+      hideNode: true,
+    });
+
+    expect(result).toBeNull();
+    expect(useAppStore.getState().dramaAssets.characters).toEqual([]);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).not.toBe(true);
+    expect(useAppStore.getState().commitToHistory).not.toHaveBeenCalled();
+  });
+
+  it('filters hidden nodes and their connected edges without deleting graph data', () => {
+    const nodes: Node<BaseNodeData>[] = [
+      {
+        id: 'hidden',
+        type: 'ai-image',
+        position: { x: 0, y: 0 },
+        data: { label: '隐藏', type: 'ai-image', hiddenByCharacterLibrary: true },
+      },
+      {
+        id: 'visible',
+        type: 'ai-text',
+        position: { x: 100, y: 0 },
+        data: { label: '显示', type: 'ai-text' },
+      },
+    ];
+    const edges: Edge[] = [{ id: 'edge', source: 'hidden', target: 'visible' }];
+
+    const rendered = filterCharacterLibraryCanvasElements(nodes, edges);
+
+    expect(rendered.nodes.map((node) => node.id)).toEqual(['visible']);
+    expect(rendered.edges).toEqual([]);
+    expect(nodes).toHaveLength(2);
+    expect(edges).toHaveLength(1);
+  });
+
+  it('restores a hidden source and keeps shared nodes hidden until the last character is deleted', () => {
+    const commitToHistory = vi.fn();
+    useAppStore.setState({
+      dramaAssets: {
+        ...emptyDramaAssetLibrary(),
+        characters: [sampleCharacter()],
+      },
+      nodes: [{
+        id: 'node-image',
+        type: 'ai-image',
+        position: { x: 0, y: 0 },
+        data: {
+          label: '角色图',
+          type: 'ai-image',
+          imageUrl: 'asset://character.png',
+          hiddenByCharacterLibrary: true,
+          characterLibraryLinks: [
+            { scope: 'project', characterId: 'char_1', referenceImageId: 'ref-1' },
+            { scope: 'project', characterId: 'char_2', referenceImageId: 'ref-2' },
+          ],
+        },
+      }],
+      commitToHistory,
+    });
+
+    useAppStore.getState().deleteDramaAsset('character', 'char_1');
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toEqual([
+      { scope: 'project', characterId: 'char_2', referenceImageId: 'ref-2' },
+    ]);
+
+    expect(useAppStore.getState().restoreCharacterLibraryNode('node-image')).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(false);
+    expect(commitToHistory).toHaveBeenCalledTimes(2);
   });
 
   it('loads permanent characters and copies them into the project independently', async () => {

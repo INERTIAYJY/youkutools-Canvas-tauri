@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, generateId } from '../store/useAppStore';
@@ -12,6 +12,7 @@ import type {
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import {
+  avatarCropBase,
   CHARACTER_REFERENCE_KIND_LABELS,
   cropImageStyle,
 } from './character/characterReferencePresentation';
@@ -82,8 +83,7 @@ function AvatarCropEditor({
   const initializedFor = useRef<string | null>(null);
 
   const makeCrop = (nextZoom: number, nextX: number, nextY: number, imageRatio = ratio) => {
-    const baseWidth = imageRatio >= 1 ? 1 / imageRatio : 1;
-    const baseHeight = imageRatio >= 1 ? 1 : imageRatio;
+    const { baseWidth, baseHeight } = avatarCropBase(imageRatio);
     const width = clamp(baseWidth / nextZoom, 0.04, 1);
     const height = clamp(baseHeight / nextZoom, 0.04, 1);
     return {
@@ -102,8 +102,7 @@ function AvatarCropEditor({
     initializedFor.current = reference.id;
 
     if (crop) {
-      const baseWidth = nextRatio >= 1 ? 1 / nextRatio : 1;
-      const baseHeight = nextRatio >= 1 ? 1 : nextRatio;
+      const { baseWidth, baseHeight } = avatarCropBase(nextRatio);
       setZoom(clamp(Math.min(baseWidth / crop.width, baseHeight / crop.height), 1, 3));
       setFocusX(crop.width >= 1 ? 0.5 : crop.x / (1 - crop.width));
       setFocusY(crop.height >= 1 ? 0.5 : crop.y / (1 - crop.height));
@@ -172,7 +171,7 @@ function AvatarCropEditor({
   );
 }
 
-interface CharacterAssetDialogProps {
+interface CharacterAssetEditorDialogProps {
   isOpen: boolean;
   scope: CharacterLibraryScope;
   character: DramaCharacter | null;
@@ -181,14 +180,296 @@ interface CharacterAssetDialogProps {
   onSaved: (characterId: string) => void;
 }
 
-export default function CharacterAssetDialog({
+interface CharacterNodeCaptureDialogProps {
+  isOpen: boolean;
+  sourceNodeId: string;
+  /** 从角色库发起时预选当前角色，右键菜单发起时不传 */
+  initialScope?: CharacterLibraryScope;
+  initialCharacterId?: string;
+  onClose: () => void;
+}
+
+type CharacterAssetDialogProps = CharacterAssetEditorDialogProps | CharacterNodeCaptureDialogProps;
+
+function CharacterNodeCaptureDialog({
+  isOpen,
+  sourceNodeId,
+  initialScope,
+  initialCharacterId,
+  onClose,
+}: CharacterNodeCaptureDialogProps) {
+  const {
+    sourceNode,
+    projectCharacters,
+    globalCharacters,
+    loadGlobalCharacters,
+    captureImageNodeToCharacter,
+    showToast,
+  } = useAppStore(
+    useShallow((state) => ({
+      sourceNode: state.nodes.find((node) => node.id === sourceNodeId),
+      projectCharacters: state.dramaAssets.characters,
+      globalCharacters: state.globalCharacters,
+      loadGlobalCharacters: state.loadGlobalCharacters,
+      captureImageNodeToCharacter: state.captureImageNodeToCharacter,
+      showToast: state.showToast,
+    })),
+  );
+  const [scope, setScope] = useState<CharacterLibraryScope>(initialScope ?? 'project');
+  const [targetMode, setTargetMode] = useState<'existing' | 'new'>(
+    initialCharacterId || projectCharacters.length > 0 ? 'existing' : 'new',
+  );
+  const [selectedCharacterId, setSelectedCharacterId] = useState(
+    initialCharacterId ?? projectCharacters[0]?.id ?? '',
+  );
+  const [name, setName] = useState('');
+  const [identity, setIdentity] = useState('');
+  const [summary, setSummary] = useState('');
+  const [kind, setKind] = useState<CharacterReferenceKind>('primary');
+  const [prompt, setPrompt] = useState(sourceNode?.data.prompt ?? '');
+  const [hideNode, setHideNode] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (scope === 'global') void loadGlobalCharacters();
+  }, [loadGlobalCharacters, scope]);
+
+  const characters = scope === 'project' ? projectCharacters : globalCharacters;
+  const effectiveCharacterId = characters.some((character) => character.id === selectedCharacterId)
+    ? selectedCharacterId
+    : characters[0]?.id ?? '';
+  const imageUrl = sourceNode?.data.imageUrl ?? sourceNode?.data.thumbnailUrl;
+
+  const switchScope = (nextScope: CharacterLibraryScope) => {
+    const nextCharacters = nextScope === 'project' ? projectCharacters : globalCharacters;
+    setScope(nextScope);
+    setSelectedCharacterId(nextCharacters[0]?.id ?? '');
+    setTargetMode(nextCharacters.length > 0 ? 'existing' : 'new');
+  };
+
+  const handleCapture = async () => {
+    if (!sourceNode || !imageUrl) {
+      showToast('该节点没有可用的角色图片', 'error');
+      return;
+    }
+
+    let newCharacter: DramaCharacter | undefined;
+    if (targetMode === 'new') {
+      const normalizedName = name.trim();
+      if (!normalizedName) {
+        showToast('请填写角色名称', 'error');
+        return;
+      }
+      newCharacter = {
+        ...createEmptyCharacter(),
+        name: normalizedName,
+        key: normalizeAssetKey(normalizedName),
+        identity: identity.trim(),
+        summary: summary.trim(),
+      };
+    } else if (!effectiveCharacterId) {
+      showToast('请选择角色', 'error');
+      return;
+    }
+
+    setSaving(true);
+    const result = await captureImageNodeToCharacter({
+      nodeId: sourceNodeId,
+      scope,
+      characterId: targetMode === 'existing' ? effectiveCharacterId : undefined,
+      newCharacter,
+      kind,
+      prompt: prompt.trim(),
+      hideNode,
+    });
+    setSaving(false);
+    if (!result) return;
+    showToast(hideNode ? '已添加到角色库，画布节点已隐藏' : '已添加到角色库');
+    onClose();
+  };
+
+  return (
+    <ModalOverlay
+      isOpen={isOpen}
+      onClose={onClose}
+      ariaLabel="添加到角色库"
+      className="character-capture-dialog"
+    >
+      <header className="character-dialog-header">
+        <div>
+          <h2>添加到角色库</h2>
+          <p>{sourceNode?.data.label || '图片节点'}</p>
+        </div>
+        <PopupCloseButton onClick={onClose} />
+      </header>
+
+      <div className="character-capture-body">
+        <section className="character-capture-preview" aria-label="待添加图片">
+          <div className="character-capture-image">
+            {imageUrl ? (
+              <img src={imageUrl} alt="" draggable={false} />
+            ) : (
+              <Icon icon="lucide:image-off" width="28" height="28" aria-hidden="true" />
+            )}
+          </div>
+          <div>
+            <span>来源节点</span>
+            <strong>{sourceNode?.data.label || '图片节点'}</strong>
+          </div>
+        </section>
+
+        <section className="character-capture-options" aria-label="角色与参考图信息">
+          <div className="character-capture-group">
+            <span className="character-capture-label">保存范围</span>
+            <div className="character-capture-segmented" role="tablist" aria-label="保存范围">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={scope === 'project'}
+                className={scope === 'project' ? 'is-active' : ''}
+                onClick={() => switchScope('project')}
+              >
+                本项目
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={scope === 'global'}
+                className={scope === 'global' ? 'is-active' : ''}
+                onClick={() => switchScope('global')}
+              >
+                全局资产
+              </button>
+            </div>
+          </div>
+
+          <div className="character-capture-group">
+            <span className="character-capture-label">添加方式</span>
+            <div className="character-capture-segmented" role="tablist" aria-label="添加方式">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={targetMode === 'existing'}
+                className={targetMode === 'existing' ? 'is-active' : ''}
+                disabled={characters.length === 0}
+                onClick={() => setTargetMode('existing')}
+              >
+                已有角色
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={targetMode === 'new'}
+                className={targetMode === 'new' ? 'is-active' : ''}
+                onClick={() => setTargetMode('new')}
+              >
+                新建角色
+              </button>
+            </div>
+          </div>
+
+          {targetMode === 'existing' ? (
+            <label className="character-field character-field-wide">
+              <span>角色</span>
+              <select
+                autoFocus
+                value={effectiveCharacterId}
+                onChange={(event) => setSelectedCharacterId(event.target.value)}
+              >
+                {characters.map((character) => (
+                  <option key={character.id} value={character.id}>{character.name}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <div className="character-capture-new-fields">
+              <label className="character-field character-field-wide">
+                <span>角色名称</span>
+                <input
+                  autoFocus
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="例如：沈砚"
+                />
+              </label>
+              <label className="character-field">
+                <span>身份</span>
+                <input
+                  value={identity}
+                  onChange={(event) => setIdentity(event.target.value)}
+                  placeholder="职业或身份"
+                />
+              </label>
+              <label className="character-field character-field-wide">
+                <span>简介</span>
+                <textarea
+                  value={summary}
+                  onChange={(event) => setSummary(event.target.value)}
+                  rows={2}
+                  placeholder="角色背景与核心特征"
+                />
+              </label>
+            </div>
+          )}
+
+          <div className="character-capture-reference-fields">
+            <label className="character-field">
+              <span>图片用途</span>
+              <select
+                value={kind}
+                onChange={(event) => setKind(event.target.value as CharacterReferenceKind)}
+              >
+                {REFERENCE_KINDS.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="character-field character-field-wide">
+              <span>图片提示词</span>
+              <textarea
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                rows={3}
+                placeholder="记录生成该形象时使用的提示词"
+              />
+            </label>
+          </div>
+
+          <label className="character-capture-hide-option">
+            <input
+              type="checkbox"
+              checked={hideNode}
+              onChange={(event) => setHideNode(event.target.checked)}
+            />
+            <span>添加后隐藏画布节点</span>
+          </label>
+        </section>
+      </div>
+
+      <footer className="character-dialog-footer">
+        <button type="button" className="character-button-secondary" onClick={onClose}>取消</button>
+        <button
+          type="button"
+          className="character-button-primary text-white"
+          disabled={saving || !sourceNode}
+          onClick={() => void handleCapture()}
+        >
+          <Icon icon="lucide:contact-round" width="15" height="15" aria-hidden="true" />
+          {saving ? '添加中…' : '添加到角色库'}
+        </button>
+      </footer>
+    </ModalOverlay>
+  );
+}
+
+function CharacterAssetEditorDialog({
   isOpen,
   scope,
   character,
   initialReferenceId,
   onClose,
   onSaved,
-}: CharacterAssetDialogProps) {
+}: CharacterAssetEditorDialogProps) {
   const { saveCharacterCard, showToast } = useAppStore(
     useShallow((state) => ({
       saveCharacterCard: state.saveCharacterCard,
@@ -305,7 +586,7 @@ export default function CharacterAssetDialog({
     const saved = await saveCharacterCard(scope, payload);
     setSaving(false);
     if (!saved) return;
-    showToast(scope === 'project' ? '角色已保存到本项目' : '角色已永久保存');
+    showToast(scope === 'project' ? '角色已保存到本项目' : '角色已保存到全局资产');
     onSaved(payload.id);
     onClose();
   };
@@ -320,7 +601,7 @@ export default function CharacterAssetDialog({
       <header className="character-dialog-header">
         <div>
           <h2>{character ? '编辑角色' : '新建角色'}</h2>
-          <p>{scope === 'project' ? '保存到本项目' : '永久保存到角色库'}</p>
+          <p>{scope === 'project' ? '保存到本项目' : '保存到全局资产'}</p>
         </div>
         <PopupCloseButton onClick={onClose} />
       </header>
@@ -516,4 +797,10 @@ export default function CharacterAssetDialog({
       </footer>
     </ModalOverlay>
   );
+}
+
+export default function CharacterAssetDialog(props: CharacterAssetDialogProps) {
+  return 'sourceNodeId' in props
+    ? <CharacterNodeCaptureDialog {...props} />
+    : <CharacterAssetEditorDialog {...props} />;
 }

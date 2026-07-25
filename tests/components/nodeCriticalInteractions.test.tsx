@@ -168,6 +168,33 @@ beforeEach(() => {
 });
 
 describe('critical canvas node interactions', () => {
+  it('NodeContextMenu exposes character capture only when the callback is available', async () => {
+    await installReactHookDriver();
+    vi.stubGlobal('window', { innerWidth: 1280, innerHeight: 800 });
+    const { NodeContextMenu } = await import('../../src/components/canvas/NodeContextMenu');
+    const baseProps = {
+      visible: true,
+      position: { x: 10, y: 10 },
+      menuRef: { current: null },
+      onCopy: vi.fn(),
+      onCut: vi.fn(),
+      onDuplicate: vi.fn(),
+      onDelete: vi.fn(),
+    };
+
+    const withCapture = NodeContextMenu({ ...baseProps, onAddToCharacter: vi.fn() });
+    expect(findElement(
+      withCapture,
+      (element) => element.type === 'span' && element.props.children === '添加到角色库…',
+    )).toBeTruthy();
+
+    const withoutCapture = NodeContextMenu(baseProps);
+    expect(() => findElement(
+      withoutCapture,
+      (element) => element.type === 'span' && element.props.children === '添加到角色库…',
+    )).toThrow('Element not found');
+  });
+
   it('ImageNode cancels a pending crop when the canvas revision changes', async () => {
     let revision = 1;
     const store = createStore([{

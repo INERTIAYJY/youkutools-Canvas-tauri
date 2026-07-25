@@ -10,6 +10,7 @@ const MENU_ITEMS = [
   { label: '剪切', shortcut: 'Ctrl X', action: 'cut' as const },
   { label: '创建副本', shortcut: 'Ctrl D', action: 'duplicate' as const },
   { label: '解除分组', shortcut: '', action: 'ungroup' as const, groupOnly: true },
+  { label: '添加到角色库…', shortcut: '', action: 'addToCharacter' as const, conditional: true },
   { label: '复制媒体', shortcut: '', action: 'copyMedia' as const, conditional: true, dynamicLabel: true },
   { label: '在 PS 中打开', shortcut: '', action: 'openInPS' as const, conditional: true },
   { label: '在剪映中打开', shortcut: '', action: 'openInJianying' as const, conditional: true },
@@ -20,7 +21,7 @@ const MENU_ITEMS = [
 ];
 
 const MENU_W = 176;
-const MENU_H = 356; // 视频节点最多 9 items + 1 sep
+const MENU_H = 390; // 图像节点最多 10 items + 1 sep
 const TEXT_SELECTION_MENU_EXTRA_H = 78; // 2 text-selection items + separator
 
 interface NodeContextMenuProps {
@@ -33,6 +34,7 @@ interface NodeContextMenuProps {
   onCopyText?: () => void;
   onCutText?: () => void;
   onDuplicate: () => void;
+  onAddToCharacter?: () => void;
   onUngroup?: () => void;
   onDelete: () => void;
   onShowInFolder?: () => void;
@@ -43,7 +45,7 @@ interface NodeContextMenuProps {
   onCopyMedia?: () => void;
   copyMediaLabel?: string;
 }
-function NodeContextMenu({
+export function NodeContextMenu({
   visible,
   position,
   menuRef,
@@ -53,6 +55,7 @@ function NodeContextMenu({
   onCopyText,
   onCutText,
   onDuplicate,
+  onAddToCharacter,
   onUngroup,
   onDelete,
   onShowInFolder,
@@ -76,6 +79,7 @@ function NodeContextMenu({
     copy: onCopy,
     cut: onCut,
     duplicate: onDuplicate,
+    addToCharacter: onAddToCharacter || (() => {}),
     delete: onDelete,
     showInFolder: onShowInFolder || (() => {}),
     saveAs: onSaveAs || (() => {}),
@@ -93,6 +97,7 @@ function NodeContextMenu({
     if (item.conditional && item.action === 'openInJianying' && !onOpenInJianying) return false;
     if (item.conditional && item.action === 'openInPremiere' && !onOpenInPremiere) return false;
     if (item.conditional && item.action === 'copyMedia' && !onCopyMedia) return false;
+    if (item.conditional && item.action === 'addToCharacter' && !onAddToCharacter) return false;
     return true;
   });
 

@@ -23,6 +23,8 @@ const STRUCTURAL_NODE_DATA_KEYS = [
   'storyboardColPositions',
   'storyboardExtracted',
   'storyboardOverrides',
+  'characterLibraryLinks',
+  'hiddenByCharacterLibrary',
 ] as const satisfies readonly (keyof BaseNodeData)[];
 
 function createSnapshot(

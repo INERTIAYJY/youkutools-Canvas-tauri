@@ -7,6 +7,7 @@ import type { AppState } from './useAppStore';
 import type {
   CharacterCropRect,
   CharacterReferenceImage,
+  CharacterReferenceKind,
   DramaAsset,
   DramaAssetKind,
   DramaAssetLibrary,
@@ -23,7 +24,7 @@ import {
   purposeLabel,
 } from '../services/dramaAssetPrompt';
 import { generateId } from './store.utils';
-import type { BaseNodeData } from '../types';
+import type { BaseNodeData, CharacterLibraryNodeLink } from '../types';
 import {
   clearGlobalCharacterCards,
   deleteGlobalCharacterCard,
@@ -32,6 +33,36 @@ import {
 } from '../services/characterLibraryService';
 
 export type CharacterLibraryScope = 'project' | 'global';
+
+const CHARACTER_REFERENCE_NODE_TYPES = new Set([
+  'ai-image',
+  'source-image',
+  'ai-panorama',
+  'ai-storyboard',
+  'ai-animation',
+]);
+
+export function isEligibleCharacterReferenceNode(
+  node: Pick<Node<BaseNodeData>, 'type' | 'data'> | undefined,
+): boolean {
+  if (!node?.type || !CHARACTER_REFERENCE_NODE_TYPES.has(node.type)) return false;
+  return Boolean(node.data.imageUrl || node.data.thumbnailUrl);
+}
+
+export interface CaptureImageNodeToCharacterInput {
+  nodeId: string;
+  scope: CharacterLibraryScope;
+  characterId?: string;
+  newCharacter?: DramaCharacter;
+  kind: CharacterReferenceKind;
+  prompt: string;
+  hideNode: boolean;
+}
+
+export interface CaptureImageNodeToCharacterResult {
+  characterId: string;
+  referenceImageId: string;
+}
 
 export interface DramaAssetsSlice {
   dramaAssets: DramaAssetLibrary;
@@ -91,6 +122,14 @@ export interface DramaAssetsSlice {
   copyGlobalCharacterToProject: (characterId: string) => string | null;
   deleteGlobalCharacter: (characterId: string) => Promise<boolean>;
   clearGlobalCharacters: () => Promise<boolean>;
+  captureImageNodeToCharacter: (
+    input: CaptureImageNodeToCharacterInput,
+  ) => Promise<CaptureImageNodeToCharacterResult | null>;
+  createImageNodeFromCharacterReference: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    referenceImageId: string,
+  ) => string | null;
 }
 
 export function countUnreadDramaAssets(library: DramaAssetLibrary): number {
@@ -258,6 +297,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
   deleteDramaAsset: (kind, id) => {
     const lib = get().dramaAssets;
     if (kind === 'character') {
+      get().releaseCharacterLibraryNodes('project', id);
       set({ dramaAssets: { ...lib, characters: lib.characters.filter((c) => c.id !== id) } });
     } else if (kind === 'scene') {
       set({ dramaAssets: { ...lib, scenes: lib.scenes.filter((c) => c.id !== id) } });
@@ -284,7 +324,10 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   clearDramaAssetsByKind: (kind) => {
     const lib = get().dramaAssets;
-    if (kind === 'character') set({ dramaAssets: { ...lib, characters: [] } });
+    if (kind === 'character') {
+      get().releaseCharacterLibraryNodes('project');
+      set({ dramaAssets: { ...lib, characters: [] } });
+    }
     else if (kind === 'scene') set({ dramaAssets: { ...lib, scenes: [] } });
     else set({ dramaAssets: { ...lib, props: [] } });
     silentSave(get);
@@ -480,7 +523,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     try {
       set({ globalCharacters: await loadGlobalCharacterCards() });
     } catch {
-      get().showToast?.('永久角色加载失败', 'error');
+      get().showToast?.('全局角色加载失败', 'error');
     } finally {
       set({ globalCharactersLoading: false });
     }
@@ -511,7 +554,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
       }));
       return true;
     } catch {
-      get().showToast?.('永久角色保存失败', 'error');
+      get().showToast?.('全局角色保存失败', 'error');
       return false;
     }
   },
@@ -563,9 +606,10 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
       set((state) => ({
         globalCharacters: state.globalCharacters.filter((item) => item.id !== characterId),
       }));
+      get().releaseCharacterLibraryNodes('global', characterId);
       return true;
     } catch {
-      get().showToast?.('永久角色删除失败', 'error');
+      get().showToast?.('全局角色删除失败', 'error');
       return false;
     }
   },
@@ -574,10 +618,152 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     try {
       await clearGlobalCharacterCards();
       set({ globalCharacters: [] });
+      get().releaseCharacterLibraryNodes('global');
       return true;
     } catch {
-      get().showToast?.('永久角色清空失败', 'error');
+      get().showToast?.('全局角色清空失败', 'error');
       return false;
     }
+  },
+
+  captureImageNodeToCharacter: async (input) => {
+    const initialState = get();
+    const sourceNode = initialState.nodes.find((node) => node.id === input.nodeId);
+    if (!sourceNode || !isEligibleCharacterReferenceNode(sourceNode)) {
+      initialState.showToast?.('该节点没有可用的角色图片', 'error');
+      return null;
+    }
+    const projectId = initialState.currentProjectId;
+    if (!projectId) return null;
+
+    const characters = input.scope === 'project'
+      ? initialState.dramaAssets.characters
+      : initialState.globalCharacters;
+    const baseCharacter = input.characterId
+      ? characters.find((character) => character.id === input.characterId)
+      : input.newCharacter;
+    if (!baseCharacter) {
+      initialState.showToast?.('请选择角色', 'error');
+      return null;
+    }
+
+    const previousLink = sourceNode.data.characterLibraryLinks?.find((link) => (
+      link.scope === input.scope && link.characterId === baseCharacter.id
+    ));
+    const previousReference = baseCharacter.referenceImages?.find((reference) => (
+      reference.id === previousLink?.referenceImageId
+      || (input.scope === 'project' && reference.sourceNodeId === sourceNode.id)
+    ));
+    const now = Date.now();
+    const reference: CharacterReferenceImage = {
+      id: previousReference?.id ?? `reference-${generateId()}`,
+      kind: input.kind,
+      assetId: sourceNode.data.assetId,
+      relativePath: sourceNode.data.relativePath,
+      imageUrl: sourceNode.data.imageUrl ?? sourceNode.data.thumbnailUrl,
+      sourceNodeId: sourceNode.id,
+      prompt: input.prompt,
+      createdAt: previousReference?.createdAt ?? now,
+      updatedAt: now,
+    };
+    const nextCharacter = upsertCharacterReference(
+      baseCharacter,
+      reference,
+      !baseCharacter.primaryReferenceImageId || input.kind === 'primary',
+    );
+
+    if (input.scope === 'project') {
+      const previousLibrary = initialState.dramaAssets;
+      const exists = previousLibrary.characters.some((item) => item.id === nextCharacter.id);
+      set({
+        dramaAssets: {
+          ...previousLibrary,
+          characters: exists
+            ? previousLibrary.characters.map((item) => item.id === nextCharacter.id ? nextCharacter : item)
+            : [...previousLibrary.characters, nextCharacter],
+        },
+      });
+      const persistedProjectId = await get().saveCurrentProjectSilent();
+      if (!persistedProjectId) {
+        if (get().currentProjectId === projectId) set({ dramaAssets: previousLibrary });
+        get().showToast?.('角色保存失败，画布节点保持显示', 'error');
+        return null;
+      }
+    } else {
+      try {
+        const persisted = await saveGlobalCharacterCard(nextCharacter);
+        set((state) => ({
+          globalCharacters: state.globalCharacters.some((item) => item.id === persisted.id)
+            ? state.globalCharacters.map((item) => item.id === persisted.id ? persisted : item)
+            : [persisted, ...state.globalCharacters],
+        }));
+      } catch {
+        get().showToast?.('全局角色保存失败，画布节点保持显示', 'error');
+        return null;
+      }
+    }
+
+    if (get().currentProjectId === projectId && get().nodes.some((node) => node.id === sourceNode.id)) {
+      const link: CharacterLibraryNodeLink = {
+        scope: input.scope,
+        characterId: nextCharacter.id,
+        referenceImageId: reference.id,
+      };
+      const linked = get().linkNodeToCharacter(sourceNode.id, link, input.hideNode);
+      if (linked) void get().saveCurrentProjectSilent();
+    }
+    return { characterId: nextCharacter.id, referenceImageId: reference.id };
+  },
+
+  createImageNodeFromCharacterReference: (scope, characterId, referenceImageId) => {
+    const state = get();
+    const characters = scope === 'project'
+      ? state.dramaAssets.characters
+      : state.globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    const reference = character?.referenceImages?.find((item) => item.id === referenceImageId);
+    if (!character || !reference?.imageUrl) {
+      state.showToast?.('参考图不可用', 'error');
+      return null;
+    }
+    const linkedNode = state.nodes.find((node) => (
+      node.id === reference.sourceNodeId
+      || node.data.characterLibraryLinks?.some((link) => (
+        link.scope === scope
+        && link.characterId === characterId
+        && link.referenceImageId === referenceImageId
+      ))
+    ));
+    if (linkedNode) return linkedNode.id;
+
+    const nodeId = `node-${generateId()}`;
+    const link: CharacterLibraryNodeLink = { scope, characterId, referenceImageId };
+    state.addNode({
+      id: nodeId,
+      type: 'source-image',
+      position: pickSpawnPosition(state.nodes as Node<BaseNodeData>[]),
+      data: {
+        label: `${character.name} · 参考图`,
+        type: 'source-image',
+        role: 'source',
+        status: 'success',
+        prompt: reference.prompt,
+        imageUrl: reference.imageUrl,
+        thumbnailUrl: reference.imageUrl,
+        assetId: reference.assetId,
+        relativePath: reference.relativePath,
+        nodeWidth: 280,
+        nodeHeight: 280,
+        characterLibraryLinks: [link],
+      },
+    });
+    if (scope === 'project') {
+      void state.addCharacterReferenceImage('project', characterId, {
+        ...reference,
+        sourceNodeId: nodeId,
+        updatedAt: Date.now(),
+      });
+    }
+    return nodeId;
   },
 });

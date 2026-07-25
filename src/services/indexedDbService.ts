@@ -180,7 +180,7 @@ export async function putGlobalCharacter(character: DramaCharacter): Promise<voi
     tx.objectStore(STORE_GLOBAL_CHARACTERS).put(character);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error ?? new Error(`永久角色 ${character.id} 保存失败`));
+    tx.onabort = () => reject(tx.error ?? new Error(`全局角色 ${character.id} 保存失败`));
   });
 }
 

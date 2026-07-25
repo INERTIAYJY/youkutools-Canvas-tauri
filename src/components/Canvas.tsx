@@ -42,6 +42,7 @@ import { useConnectionDropMenu } from '../hooks/useConnectionDropMenu';
 import { useCanvasContextMenu } from '../hooks/useCanvasContextMenu';
 import { useNodeContextMenu } from '../hooks/useNodeContextMenu';
 import { useAppStore } from '../store/useAppStore';
+import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
 import type { BaseNodeData } from '../types';
 import type { Node as RFNode, NodeTypes, Connection, Edge, OnMove } from '@xyflow/react';
@@ -64,6 +65,8 @@ const DirectorDeskNodeLazy = lazy(() => import('./nodes/DirectorDeskNode'));
 function DirectorDeskNode(props: { id: string; data: BaseNodeData; selected?: boolean }) {
   return <Suspense fallback={null}><DirectorDeskNodeLazy {...props} /></Suspense>;
 }
+
+const CharacterAssetDialog = lazy(() => import('./CharacterAssetDialog'));
 
 // ── Node types mapping ──
 const nodeTypes: NodeTypes = {
@@ -487,6 +490,10 @@ function CanvasInner() {
     handleCopyMedia,
     showCopyMedia,
     copyMediaLabel,
+    characterCaptureNodeId,
+    handleAddToCharacter,
+    closeCharacterCapture,
+    showAddToCharacter,
   } = useNodeContextMenu();
   const isGroupNode = nodeCtxMenu.nodeId
     ? nodes.find((n) => n.id === nodeCtxMenu.nodeId && n.type === 'group') != null
@@ -835,12 +842,17 @@ function CanvasInner() {
     [smoothLine],
   );
 
-  // 仅派生渲染状态，不把节点选中效果写回可持久化的边数据。
+  const renderableGraph = useMemo(
+    () => filterCharacterLibraryCanvasElements(nodes, edges),
+    [edges, nodes],
+  );
+
+  // 仅派生渲染状态，不把隐藏和节点选中效果写回可持久化的边数据。
   const renderedEdges = useMemo(() => {
-    if (selectedNodeIds.length === 0) return edges;
+    if (selectedNodeIds.length === 0) return renderableGraph.edges;
 
     const selectedIds = new Set(selectedNodeIds);
-    return edges.map((edge) => {
+    return renderableGraph.edges.map((edge) => {
       if (!selectedIds.has(edge.source) && !selectedIds.has(edge.target)) return edge;
       return {
         ...edge,
@@ -853,7 +865,7 @@ function CanvasInner() {
         },
       };
     });
-  }, [edges, selectedNodeIds, smoothLine]);
+  }, [renderableGraph.edges, selectedNodeIds, smoothLine]);
 
   // ── Node change handler ──
   const handleNodesChange = useCallback(
@@ -1003,7 +1015,7 @@ function CanvasInner() {
     <ResizeSnapContext.Provider value={resizeSnapApi}>
     <div ref={canvasRootRef} className="absolute inset-0">
       <ReactFlow
-        nodes={nodes}
+        nodes={renderableGraph.nodes}
         edges={renderedEdges}
         onConnect={onConnect}
         onConnectEnd={handleConnectEnd}
@@ -1147,6 +1159,7 @@ function CanvasInner() {
         onCopyText={handleCopyText}
         onCutText={handleCutText}
         onDuplicate={handleDuplicate}
+        onAddToCharacter={showAddToCharacter ? handleAddToCharacter : undefined}
         onUngroup={isGroupNode ? handleUngroup : undefined}
         onDelete={handleDelete}
         onShowInFolder={showInFolder ? handleShowInFolder : undefined}
@@ -1157,6 +1170,17 @@ function CanvasInner() {
         onCopyMedia={showCopyMedia ? handleCopyMedia : undefined}
         copyMediaLabel={copyMediaLabel}
       />
+
+      {characterCaptureNodeId ? createPortal(
+        <Suspense fallback={null}>
+          <CharacterAssetDialog
+            isOpen
+            sourceNodeId={characterCaptureNodeId}
+            onClose={closeCharacterCapture}
+          />
+        </Suspense>,
+        document.body,
+      ) : null}
 
       {/* Multi-select toolbar */}
       <MultiSelectToolbar />

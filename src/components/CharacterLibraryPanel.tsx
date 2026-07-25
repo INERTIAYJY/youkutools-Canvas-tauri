@@ -8,10 +8,7 @@ import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
-import {
-  CHARACTER_REFERENCE_KIND_LABELS,
-  cropImageStyle,
-} from './character/characterReferencePresentation';
+import { cropImageStyle } from './character/characterReferencePresentation';
 
 type CharacterLibraryScope = 'project' | 'global';
 
@@ -22,11 +19,11 @@ function characterAvatar(character: DramaCharacter): CharacterReferenceImage | u
     ?? references[0];
 }
 
-function CharacterAvatar({ character, large = false }: { character: DramaCharacter; large?: boolean }) {
+function CharacterAvatar({ character }: { character: DramaCharacter }) {
   const reference = characterAvatar(character);
   const cropped = reference?.id === character.avatarReferenceImageId && character.avatarCrop;
   return (
-    <span className={`character-avatar ${large ? 'is-large' : ''}`}>
+    <span className="character-avatar">
       {reference?.imageUrl ? (
         <img
           src={reference.imageUrl}
@@ -36,7 +33,7 @@ function CharacterAvatar({ character, large = false }: { character: DramaCharact
           style={cropped ? cropImageStyle(character.avatarCrop) : undefined}
         />
       ) : (
-        <Icon icon="lucide:user-round" width={large ? 32 : 22} height={large ? 32 : 22} aria-hidden="true" />
+        <Icon icon="lucide:user-round" width={22} height={22} aria-hidden="true" />
       )}
     </span>
   );
@@ -54,6 +51,10 @@ export default function CharacterLibraryPanel() {
     copyGlobalCharacterToProject,
     deleteDramaAsset,
     deleteGlobalCharacter,
+    nodes,
+    restoreCharacterLibraryNode,
+    createImageNodeFromCharacterReference,
+    setSelectedNodeIds,
     showToast,
   } = useAppStore(
     useShallow((state) => ({
@@ -67,6 +68,10 @@ export default function CharacterLibraryPanel() {
       copyGlobalCharacterToProject: state.copyGlobalCharacterToProject,
       deleteDramaAsset: state.deleteDramaAsset,
       deleteGlobalCharacter: state.deleteGlobalCharacter,
+      nodes: state.nodes,
+      restoreCharacterLibraryNode: state.restoreCharacterLibraryNode,
+      createImageNodeFromCharacterReference: state.createImageNodeFromCharacterReference,
+      setSelectedNodeIds: state.setSelectedNodeIds,
       showToast: state.showToast,
     })),
   );
@@ -77,6 +82,8 @@ export default function CharacterLibraryPanel() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogCharacter, setDialogCharacter] = useState<DramaCharacter | null>(null);
   const [dialogReferenceId, setDialogReferenceId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [captureNodeId, setCaptureNodeId] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) void loadGlobalCharacters();
@@ -109,6 +116,33 @@ export default function CharacterLibraryPanel() {
   const selectedReference = selectedCharacter?.referenceImages?.find(
     (reference) => reference.id === effectiveReferenceId,
   ) ?? null;
+  const sourceNode = useMemo(() => {
+    if (!selectedCharacter || !selectedReference) return null;
+    return nodes.find((node) => (
+      node.id === selectedReference.sourceNodeId
+      || node.data.characterLibraryLinks?.some((link) => (
+        link.scope === scope
+        && link.characterId === selectedCharacter.id
+        && link.referenceImageId === selectedReference.id
+      ))
+    )) ?? null;
+  }, [nodes, scope, selectedCharacter, selectedReference]);
+  const canvasActionLabel = sourceNode
+    ? sourceNode.data.hiddenByCharacterLibrary
+      ? '显示并定位节点'
+      : '定位画布节点'
+    : '添加到画布';
+  const canvasActionIcon = sourceNode
+    ? sourceNode.data.hiddenByCharacterLibrary
+      ? 'lucide:eye'
+      : 'lucide:locate-fixed'
+    : 'lucide:square-plus';
+
+  // 画布上还没进过角色库的图片节点，可当作新视角参考图
+  const pickableNodes = useMemo(() => nodes.filter((node) => (
+    !node.data.hiddenByCharacterLibrary
+    && (node.data.imageUrl || node.data.thumbnailUrl)
+  )), [nodes]);
 
   const switchScope = (nextScope: CharacterLibraryScope) => {
     setScope(nextScope);
@@ -127,7 +161,7 @@ export default function CharacterLibraryPanel() {
     if (scope === 'project') {
       const copiedId = await copyCharacterToGlobal(selectedCharacter.id);
       if (!copiedId) return;
-      showToast('已复制到永久保存');
+      showToast('已复制到全局资产');
       setScope('global');
       setSelectedCharacterId(copiedId);
       setSelectedReferenceId(null);
@@ -143,7 +177,7 @@ export default function CharacterLibraryPanel() {
 
   const handleDelete = async () => {
     if (!selectedCharacter) return;
-    const target = scope === 'project' ? '本项目' : '永久保存';
+    const target = scope === 'project' ? '本项目' : '全局资产';
     if (!window.confirm(`从${target}删除「${selectedCharacter.name}」？`)) return;
     if (scope === 'project') {
       deleteDramaAsset('character', selectedCharacter.id);
@@ -155,6 +189,28 @@ export default function CharacterLibraryPanel() {
     setSelectedReferenceId(null);
   };
 
+  const handleCanvasAction = () => {
+    if (!selectedCharacter || !selectedReference) return;
+    let nodeId = sourceNode?.id ?? null;
+    if (sourceNode?.data.hiddenByCharacterLibrary) {
+      restoreCharacterLibraryNode(sourceNode.id);
+      showToast('节点已显示');
+    } else if (!sourceNode) {
+      nodeId = createImageNodeFromCharacterReference(
+        scope,
+        selectedCharacter.id,
+        selectedReference.id,
+      );
+      if (!nodeId) return;
+      showToast('已将角色参考图添加到画布');
+    }
+    if (!nodeId) return;
+
+    setOpen(false);
+    setSelectedNodeIds([nodeId]);
+    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId } }));
+  };
+
   return (
     <>
       <ModalOverlay
@@ -163,24 +219,6 @@ export default function CharacterLibraryPanel() {
         ariaLabel="角色库"
         className="character-library-panel"
       >
-        <header className="character-library-header">
-          <div className="character-library-heading">
-            <span className="character-library-heading-icon" aria-hidden="true">
-              <Icon icon="lucide:contact-round" width="18" height="18" />
-            </span>
-            <div>
-              <h2>角色库</h2>
-            </div>
-          </div>
-          <div className="character-library-header-actions">
-            <button type="button" className="character-button-primary text-white" onClick={() => openEditor(null)}>
-              <Icon icon="lucide:plus" width="15" height="15" aria-hidden="true" />
-              新建角色
-            </button>
-            <PopupCloseButton onClick={() => setOpen(false)} />
-          </div>
-        </header>
-
         <div className="character-library-toolbar">
           <div className="character-library-tabs" role="tablist" aria-label="角色保存范围">
             <button
@@ -200,7 +238,7 @@ export default function CharacterLibraryPanel() {
               className={scope === 'global' ? 'is-active' : ''}
               onClick={() => switchScope('global')}
             >
-              永久保存
+              全局资产
               <span>{globalCharacters.length}</span>
             </button>
           </div>
@@ -217,18 +255,29 @@ export default function CharacterLibraryPanel() {
               </button>
             ) : null}
           </label>
+          <button type="button" className="character-library-new" onClick={() => openEditor(null)}>
+            <Icon icon="lucide:plus" width="13" height="13" aria-hidden="true" />
+            新建角色
+          </button>
+          <PopupCloseButton onClick={() => setOpen(false)} />
         </div>
 
         <main className="character-library-content">
           {scope === 'global' && globalCharactersLoading ? (
             <div className="character-library-empty">
               <Icon icon="lucide:loader-circle" className="animate-spin" width="26" height="26" aria-hidden="true" />
-              <p>正在读取永久角色…</p>
+              <p>正在读取全局角色…</p>
             </div>
           ) : selectedCharacter ? (
-            <>
+            <section className="character-library-gallery" aria-label="多图参考">
+              <CharacterReferenceGallery
+                references={selectedCharacter.referenceImages ?? []}
+                selectedId={effectiveReferenceId}
+                onSelect={setSelectedReferenceId}
+                onEdit={(referenceId) => openEditor(selectedCharacter, referenceId)}
+              />
+
               <section className="character-library-profile" aria-label="当前角色">
-                <CharacterAvatar character={selectedCharacter} large />
                 <div className="character-library-profile-copy">
                   <div className="character-library-profile-name">
                     <h3>{selectedCharacter.name}</h3>
@@ -238,13 +287,28 @@ export default function CharacterLibraryPanel() {
                   <p>{selectedCharacter.summary || selectedCharacter.visualNotes || '尚未填写角色简介'}</p>
                 </div>
                 <div className="character-library-profile-actions">
+                  {selectedReference ? (
+                    <button type="button" data-tooltip={canvasActionLabel} aria-label={canvasActionLabel} onClick={handleCanvasAction}>
+                      <Icon icon={canvasActionIcon} width="16" height="16" aria-hidden="true" />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    data-tooltip="从画布添加视角图"
+                    aria-label="从画布添加视角图"
+                    aria-expanded={pickerOpen}
+                    className={pickerOpen ? 'is-active' : ''}
+                    onClick={() => setPickerOpen((open) => !open)}
+                  >
+                    <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
+                  </button>
                   <button type="button" data-tooltip="编辑角色" aria-label="编辑角色" onClick={() => openEditor(selectedCharacter)}>
                     <Icon icon="lucide:pencil" width="16" height="16" aria-hidden="true" />
                   </button>
                   <button
                     type="button"
-                    data-tooltip={scope === 'project' ? '复制到永久保存' : '复制到本项目'}
-                    aria-label={scope === 'project' ? '复制到永久保存' : '复制到本项目'}
+                    data-tooltip={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
+                    aria-label={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
                     onClick={() => void handleCopy()}
                   >
                     <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
@@ -255,61 +319,28 @@ export default function CharacterLibraryPanel() {
                 </div>
               </section>
 
-              <div className="character-library-reference-area">
-                <section className="character-library-gallery" aria-label="多图参考">
-                  <div className="character-library-section-title">
-                    <h4>形象参考</h4>
-                    <span>{selectedCharacter.referenceImages?.length ?? 0} 张</span>
-                  </div>
-                  <CharacterReferenceGallery
-                    references={selectedCharacter.referenceImages ?? []}
-                    selectedId={effectiveReferenceId}
-                    primaryReferenceImageId={selectedCharacter.primaryReferenceImageId}
-                    avatarReferenceImageId={selectedCharacter.avatarReferenceImageId}
-                    avatarCrop={selectedCharacter.avatarCrop}
-                    onSelect={setSelectedReferenceId}
-                    onEdit={(referenceId) => openEditor(selectedCharacter, referenceId)}
-                  />
-                </section>
-
-                <aside className="character-library-reference-detail" aria-label="参考图详情">
-                  {selectedReference ? (
-                    <>
-                      <div className="character-library-section-title">
-                        <h4>{CHARACTER_REFERENCE_KIND_LABELS[selectedReference.kind]}</h4>
-                        <button
-                          type="button"
-                          data-tooltip="编辑图片信息"
-                          aria-label="编辑图片信息"
-                          onClick={() => openEditor(selectedCharacter, selectedReference.id)}
-                        >
-                          <Icon icon="lucide:sliders-horizontal" width="15" height="15" aria-hidden="true" />
-                        </button>
-                      </div>
-                      <div className="character-library-prompt">
-                        <span>图片提示词</span>
-                        <p>{selectedReference.prompt || '这张参考图还没有记录提示词。'}</p>
-                      </div>
-                      <dl className="character-library-facts">
-                        <div>
-                          <dt>主视觉</dt>
-                          <dd>{selectedCharacter.primaryReferenceImageId === selectedReference.id ? '是' : '否'}</dd>
-                        </div>
-                        <div>
-                          <dt>头像来源</dt>
-                          <dd>{selectedCharacter.avatarReferenceImageId === selectedReference.id ? '是' : '否'}</dd>
-                        </div>
-                      </dl>
-                    </>
-                  ) : (
-                    <div className="character-library-detail-empty">
-                      <Icon icon="lucide:mouse-pointer-click" width="24" height="24" aria-hidden="true" />
-                      <span>选择一张图片查看提示词</span>
-                    </div>
-                  )}
-                </aside>
-              </div>
-            </>
+              {pickerOpen ? (
+                <div className="character-node-picker" role="listbox" aria-label="选择画布图片节点">
+                  {pickableNodes.length === 0 ? (
+                    <span className="character-node-picker-empty">画布上没有可用的图片节点</span>
+                  ) : pickableNodes.map((node) => (
+                    <button
+                      key={node.id}
+                      type="button"
+                      role="option"
+                      aria-selected={false}
+                      onClick={() => {
+                        setCaptureNodeId(node.id);
+                        setPickerOpen(false);
+                      }}
+                    >
+                      <img src={node.data.imageUrl ?? node.data.thumbnailUrl} alt="" draggable={false} />
+                      <span>{node.data.label || '图片节点'}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </section>
           ) : (
             <div className="character-library-empty">
               <Icon icon="lucide:contact-round" width="34" height="34" aria-hidden="true" />
@@ -326,7 +357,7 @@ export default function CharacterLibraryPanel() {
 
         <footer className="character-library-strip" aria-label="角色列表">
           <div className="character-library-strip-label">
-            <span>{scope === 'project' ? '本项目角色' : '永久角色'}</span>
+            <span>{scope === 'project' ? '本项目角色' : '全局角色'}</span>
             <strong>{characters.length}</strong>
           </div>
           <div className="character-library-strip-list" role="list">
@@ -360,6 +391,17 @@ export default function CharacterLibraryPanel() {
             setSelectedCharacterId(characterId);
             setSelectedReferenceId(null);
           }}
+        />,
+        document.body,
+      ) : null}
+
+      {captureNodeId ? createPortal(
+        <CharacterAssetDialog
+          isOpen
+          sourceNodeId={captureNodeId}
+          initialScope={scope}
+          initialCharacterId={selectedCharacter?.id}
+          onClose={() => setCaptureNodeId(null)}
         />,
         document.body,
       ) : null}

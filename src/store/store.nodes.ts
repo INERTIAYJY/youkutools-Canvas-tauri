@@ -12,7 +12,12 @@ import {
 } from '@xyflow/react';
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
-import type { BaseNodeData, NodeGroup, StoryboardCellOverride } from '../types';
+import type {
+  BaseNodeData,
+  CharacterLibraryNodeLink,
+  NodeGroup,
+  StoryboardCellOverride,
+} from '../types';
 import type { MediaGenerationIntent, MediaGenerationResult } from '../types/media';
 import { generateId, getNextDisplayId } from './store.utils';
 import { BATCH_NODE_LIMIT } from './store.chat';
@@ -106,6 +111,21 @@ function pruneDeletedNodesAndEmptyGroups(
   };
 }
 
+export function filterCharacterLibraryCanvasElements(
+  nodes: Node<BaseNodeData>[],
+  edges: Edge[],
+): { nodes: Node<BaseNodeData>[]; edges: Edge[] } {
+  const visibleNodes = nodes.filter((node) => node.data.hiddenByCharacterLibrary !== true);
+  if (visibleNodes.length === nodes.length) return { nodes, edges };
+  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
+  return {
+    nodes: visibleNodes,
+    edges: edges.filter(
+      (edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target),
+    ),
+  };
+}
+
 function requestDirectorDeskRuntimeForNodes(
   nodes: Node<BaseNodeData>[],
   get: () => AppState,
@@ -150,6 +170,16 @@ export interface NodeSlice {
   updateNodeDataTransient: (nodeId: string, data: Partial<BaseNodeData>) => void;
   /** 原子批量更新节点数据（一次历史提交）。 */
   updateNodesDataBatch: (nodeIds: string[], data: Partial<BaseNodeData>) => void;
+  linkNodeToCharacter: (
+    nodeId: string,
+    link: CharacterLibraryNodeLink,
+    hideNode: boolean,
+  ) => boolean;
+  restoreCharacterLibraryNode: (nodeId: string) => boolean;
+  releaseCharacterLibraryNodes: (
+    scope: CharacterLibraryNodeLink['scope'],
+    characterId?: string,
+  ) => string[];
   deleteNode: (nodeId: string) => void;
   /** 原子批量删除多个节点（一次 commitToHistory，一次退场动画） */
   deleteNodesBatch: (nodeIds: string[]) => void;
@@ -413,6 +443,88 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         ? { ...node, data: { ...node.data, ...data } as BaseNodeData }
         : node),
     }));
+  },
+
+  linkNodeToCharacter: (nodeId, link, hideNode) => {
+    const node = get().nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return false;
+    const previousLinks = node.data.characterLibraryLinks ?? [];
+    const retainedLinks = previousLinks.filter(
+      (item) => item.scope !== link.scope || item.characterId !== link.characterId,
+    );
+    const nextLinks = [...retainedLinks, link];
+    const nextHidden = node.data.hiddenByCharacterLibrary === true || hideNode;
+    const sameLink = previousLinks.length === nextLinks.length
+      && previousLinks.every((item, index) => (
+        item.scope === nextLinks[index].scope
+        && item.characterId === nextLinks[index].characterId
+        && item.referenceImageId === nextLinks[index].referenceImageId
+      ));
+    if (sameLink && nextHidden === (node.data.hiddenByCharacterLibrary === true)) return false;
+
+    get().commitToHistory();
+    set((state) => ({
+      nodes: state.nodes.map((candidate) => candidate.id === nodeId
+        ? {
+            ...candidate,
+            selected: hideNode ? false : candidate.selected,
+            data: {
+              ...candidate.data,
+              characterLibraryLinks: nextLinks,
+              hiddenByCharacterLibrary: nextHidden || undefined,
+            },
+          }
+        : candidate),
+      selectedNodeIds: hideNode
+        ? state.selectedNodeIds.filter((id) => id !== nodeId)
+        : state.selectedNodeIds,
+    }));
+    return true;
+  },
+
+  restoreCharacterLibraryNode: (nodeId) => {
+    const node = get().nodes.find((candidate) => candidate.id === nodeId);
+    if (!node?.data.hiddenByCharacterLibrary) return false;
+    get().commitToHistory();
+    set((state) => ({
+      nodes: state.nodes.map((candidate) => candidate.id === nodeId
+        ? {
+            ...candidate,
+            data: { ...candidate.data, hiddenByCharacterLibrary: false },
+          }
+        : candidate),
+    }));
+    return true;
+  },
+
+  releaseCharacterLibraryNodes: (scope, characterId) => {
+    const affectedNodes = get().nodes.filter((node) => (
+      node.data.characterLibraryLinks ?? []
+    ).some((link) => (
+      link.scope === scope && (characterId === undefined || link.characterId === characterId)
+    )));
+    if (affectedNodes.length === 0) return [];
+
+    get().commitToHistory();
+    const restoredNodeIds: string[] = [];
+    set((state) => ({
+      nodes: state.nodes.map((node) => {
+        const links = node.data.characterLibraryLinks ?? [];
+        const nextLinks = links.filter((link) => (
+          link.scope !== scope || (characterId !== undefined && link.characterId !== characterId)
+        ));
+        if (nextLinks.length === links.length) return node;
+        const data = { ...node.data };
+        if (nextLinks.length > 0) data.characterLibraryLinks = nextLinks;
+        else delete data.characterLibraryLinks;
+        if (data.hiddenByCharacterLibrary && nextLinks.length === 0) {
+          data.hiddenByCharacterLibrary = false;
+          restoredNodeIds.push(node.id);
+        }
+        return { ...node, data };
+      }),
+    }));
+    return restoredNodeIds;
   },
 
   duplicateNode: (nodeId) => {

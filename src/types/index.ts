@@ -68,6 +68,12 @@ export interface StoryboardCellOverride {
   relativePath?: string; // 项目目录内的相对路径（持久化优先）
 }
 
+export interface CharacterLibraryNodeLink {
+  scope: 'project' | 'global';
+  characterId: string;
+  referenceImageId: string;
+}
+
 // 节点数据接口
 export interface BaseNodeData {
   label: string;
@@ -96,6 +102,10 @@ export interface BaseNodeData {
   /** 由短剧资产一键创建的图像节点：反查绑定 */
   dramaAssetId?: string;
   dramaAssetKind?: import('./dramaAssets').DramaAssetKind;
+  /** 角色参考图与当前项目节点的反向关联；全局角色本身不保存项目节点 ID。 */
+  characterLibraryLinks?: CharacterLibraryNodeLink[];
+  /** 仅表示该节点当前由角色库收纳隐藏，节点与连线仍保留在项目数据中。 */
+  hiddenByCharacterLibrary?: boolean;
   mattingMask?: string;       // 遮罩编辑器蒙版数据（data URL，独立于图片存储）
   annotation?: string;        // 旧版标注数据（data URL，透明 PNG；仅用于兼容读取）
   annotationLayer?: ImageAnnotationLayer; // 可编辑矢量标注层，独立于原图存储

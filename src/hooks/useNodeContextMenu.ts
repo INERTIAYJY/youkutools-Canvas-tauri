@@ -14,6 +14,7 @@ import {
 import { copyImage as copyImageToClipboard, copyFile as copyFileToClipboard } from '../services/clipboardService';
 import type { BaseNodeData, NodeType } from '../types';
 import type { Node as RFNode } from '@xyflow/react';
+import { isEligibleCharacterReferenceNode } from '../store/store.dramaAssets';
 
 export interface NodeContextMenuState {
   visible: boolean;
@@ -37,6 +38,7 @@ export function useNodeContextMenu() {
     nodeId: null,
     textSelection: null,
   });
+  const [characterCaptureNodeId, setCharacterCaptureNodeId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const closeMenu = useCallback(() => {
@@ -158,6 +160,17 @@ export function useNodeContextMenu() {
   const currentNode = nodes.find((n) => n.id === menu.nodeId);
   const nodeType = (currentNode?.type) as NodeType | undefined;
   const nodeData = currentNode?.data as BaseNodeData | undefined;
+  const showAddToCharacter = isEligibleCharacterReferenceNode(currentNode);
+
+  const handleAddToCharacter = useCallback(() => {
+    if (!menu.nodeId) return;
+    setCharacterCaptureNodeId(menu.nodeId);
+    closeMenu();
+  }, [closeMenu, menu.nodeId]);
+
+  const closeCharacterCapture = useCallback(() => {
+    setCharacterCaptureNodeId(null);
+  }, []);
   const showInFolder = menu.nodeId != null
     && nodeType != null
     && mediaTypes.includes(nodeType)
@@ -357,5 +370,9 @@ export function useNodeContextMenu() {
     handleCopyMedia,
     showCopyMedia,
     copyMediaLabel,
+    characterCaptureNodeId,
+    handleAddToCharacter,
+    closeCharacterCapture,
+    showAddToCharacter,
   };
 }

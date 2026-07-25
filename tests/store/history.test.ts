@@ -315,4 +315,38 @@ describe('batch canvas history', () => {
       storyboardExtracted: [false],
     });
   });
+
+  it('undoes and redoes character-library node hiding with its association', async () => {
+    useAppStore.setState({
+      nodes: [node('character-image', { type: 'ai-image', imageUrl: 'asset://character.png' })],
+      history: [],
+      historyIndex: -1,
+    });
+
+    expect(useAppStore.getState().linkNodeToCharacter('character-image', {
+      scope: 'project',
+      characterId: 'character-1',
+      referenceImageId: 'reference-1',
+    }, true)).toBe(true);
+    expect(useAppStore.getState().nodes[0].data).toMatchObject({
+      hiddenByCharacterLibrary: true,
+      characterLibraryLinks: [{
+        scope: 'project',
+        characterId: 'character-1',
+        referenceImageId: 'reference-1',
+      }],
+    });
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBeUndefined();
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toBeUndefined();
+
+    await expect(useAppStore.getState().redo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toEqual([{
+      scope: 'project',
+      characterId: 'character-1',
+      referenceImageId: 'reference-1',
+    }]);
+  });
 });

@@ -1,3 +1,6 @@
+/**
+ * 汇总当前项目的 Agent 任务，按会话和状态筛选并复用时间线提供任务控制入口。
+ */
 import { useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { AgentTask } from '../../types/agent';

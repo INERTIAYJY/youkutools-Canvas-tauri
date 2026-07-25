@@ -1,3 +1,6 @@
+/**
+ * 在规划、协作和自主三种 Agent 模式间切换，并展示各模式固定权限含义。
+ */
 import type { AgentMode } from '../../types/agent';
 
 interface AgentModeSelectorProps {

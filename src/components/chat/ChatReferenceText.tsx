@@ -1,3 +1,6 @@
+/**
+ * 解析并渲染消息中的节点、模型、Skill 和快捷指令引用，提供定位画布与查看详情交互。
+ */
 import { Icon } from '@iconify/react';
 import { useAppStore, type AppState } from '../../store/useAppStore';
 

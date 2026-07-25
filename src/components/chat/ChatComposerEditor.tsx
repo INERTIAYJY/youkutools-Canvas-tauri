@@ -1,3 +1,6 @@
+/**
+ * 对话输入的可编辑文本层，维护节点、模型和 Skill 引用令牌并向外暴露插入与聚焦 API。
+ */
 import {
   forwardRef,
   useCallback,

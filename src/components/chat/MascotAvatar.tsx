@@ -1,3 +1,6 @@
+/**
+ * 聊天标题、空状态和助手消息共用的轻量品牌头像。
+ */
 import { useId } from 'react';
 
 interface MascotAvatarProps {

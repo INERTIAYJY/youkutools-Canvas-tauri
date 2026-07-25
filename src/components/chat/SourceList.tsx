@@ -1,3 +1,6 @@
+/**
+ * 展示 Agent 回复引用的网页来源，并通过安全 URL 归一化后交给系统浏览器打开。
+ */
 import { Icon } from '@iconify/react';
 import type { WebSource } from '../../types/chat';
 import { normalizePublicWebUrl } from '../../services/chat/webAccessGrantService';

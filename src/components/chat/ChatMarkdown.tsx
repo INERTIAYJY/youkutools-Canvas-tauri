@@ -1,3 +1,6 @@
+/**
+ * 渲染对话消息的受限 Markdown 子集，并把画布、模型与 Skill 引用交给专用引用组件处理。
+ */
 import { useState, type ReactNode } from 'react';
 import { Icon } from '@iconify/react';
 import ChatReferenceText, { type ChatReferenceHandlers } from './ChatReferenceText';

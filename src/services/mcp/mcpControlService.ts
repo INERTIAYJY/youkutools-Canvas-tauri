@@ -1,3 +1,6 @@
+/**
+ * MCP 前端控制层，将本地 bridge 请求映射到受 Policy 约束的 Agent 工具和专用审计任务。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import type { AgentMode } from '../../types/agent';
 import type { ChatConversation, ChatMessage } from '../../types/chat';

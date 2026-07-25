@@ -1,3 +1,6 @@
+/**
+ * 封装 MCP Tauri bridge 的启动、停止、状态查询、响应回传和请求事件监听。
+ */
 import type {
   McpBridgeRequestEvent,
   McpBridgeResponseInput,

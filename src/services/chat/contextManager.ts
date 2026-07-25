@@ -25,6 +25,7 @@ import {
   type ProjectMemory,
 } from '../../types/memory';
 import { rankProjectMemories } from './memoryRetrieval';
+import { buildLearnedPromptContext } from './promptLearningService';
 
 // ============================================
 // 阈值
@@ -343,9 +344,16 @@ export async function assembleAgentContext(
   const { conversationId, projectId, systemPrompt, userMessage, signal } = options;
   const excludeIds = new Set(options.excludeMessageIds ?? []);
   const spec = resolveAssistantContextSpec();
-  const memoryBlock = projectId ? buildMemoryBlock(projectId, userMessage) : '';
+  const [persistedResult, learnedPromptBlock] = await Promise.all([
+    loadMessages(conversationId, 0, 200),
+    projectId ? buildLearnedPromptContext(projectId, userMessage) : Promise.resolve(''),
+  ]);
+  const memoryBlock = [
+    projectId ? buildMemoryBlock(projectId, userMessage) : '',
+    learnedPromptBlock,
+  ].filter(Boolean).join('\n\n');
 
-  const { messages: persisted } = await loadMessages(conversationId, 0, 200);
+  const { messages: persisted } = persistedResult;
   let summary = getConversationSummary(conversationId);
   let history = selectHistoryMessages(persisted, excludeIds, summary);
   let result = buildMessages(systemPrompt, memoryBlock, summary, history, userMessage, spec.inputBudget);

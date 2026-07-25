@@ -135,6 +135,11 @@ export default function AssetsPanel() {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [editingPath, setEditingPath] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState('');
+  const [filterRowExpanded, setFilterRowExpanded] = useState(false);
+  const [filterRowOverflow, setFilterRowOverflow] = useState(false);
+  const [visibleFilterItemCount, setVisibleFilterItemCount] = useState(Number.POSITIVE_INFINITY);
+  const filterRowRef = useRef<HTMLDivElement | null>(null);
+  const filterListRef = useRef<HTMLDivElement | null>(null);
 
   const folders = useMemo(() => assetFolders ?? [], [assetFolders]);
 
@@ -218,6 +223,7 @@ export default function AssetsPanel() {
 
   const handleClose = useCallback(() => {
     setSelectedProjectId(null); // 复位项目选择，下次打开默认当前项目
+    setFilterRowExpanded(false);
     setAssetsPanelOpen(false);
   }, [setAssetsPanelOpen]);
 
@@ -270,6 +276,71 @@ export default function AssetsPanel() {
     for (const f of files) for (const t of f.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, MAX_TAG_CHIPS);
   }, [files]);
+
+  const listedCategories = useMemo(
+    () => ALL_CATEGORIES.filter((category) => categoryCounts[category] > 0),
+    [categoryCounts],
+  );
+
+  const measureFilterRowOverflow = useCallback(() => {
+    const row = filterRowRef.current;
+    const list = filterListRef.current;
+    if (!row || !list) return;
+
+    const rowStyle = window.getComputedStyle(row);
+    const availableWidth = row.clientWidth
+      - (Number.parseFloat(rowStyle.paddingLeft) || 0)
+      - (Number.parseFloat(rowStyle.paddingRight) || 0);
+    const rowGap = Number.parseFloat(rowStyle.columnGap) || 0;
+    const listGap = Number.parseFloat(window.getComputedStyle(list).columnGap) || 0;
+    const items = Array.from(list.children) as HTMLElement[];
+    const itemWidths = items.map((item) => {
+      const itemStyle = window.getComputedStyle(item);
+      return item.getBoundingClientRect().width
+        + (Number.parseFloat(itemStyle.marginLeft) || 0)
+        + (Number.parseFloat(itemStyle.marginRight) || 0);
+    });
+    const contentWidth = itemWidths.reduce((total, width) => total + width, 0)
+      + Math.max(0, items.length - 1) * listGap;
+    const hasOverflow = contentWidth > availableWidth + 1;
+
+    setFilterRowOverflow(hasOverflow);
+    if (!hasOverflow) {
+      setVisibleFilterItemCount(items.length);
+      setFilterRowExpanded(false);
+      return;
+    }
+    if (filterRowExpanded) {
+      setVisibleFilterItemCount(items.length);
+      return;
+    }
+
+    const collapsedWidth = availableWidth - 28 - rowGap;
+    let usedWidth = 0;
+    let visibleCount = 0;
+    for (const width of itemWidths) {
+      const nextWidth = usedWidth + (visibleCount > 0 ? listGap : 0) + width;
+      if (nextWidth > collapsedWidth) break;
+      usedWidth = nextWidth;
+      visibleCount++;
+    }
+    if (items[visibleCount - 1]?.hasAttribute('data-filter-separator')) visibleCount--;
+    setVisibleFilterItemCount(visibleCount);
+  }, [filterRowExpanded]);
+
+  useEffect(() => {
+    if (!assetsPanelOpen || visibleTab === 'drama') return;
+    const row = filterRowRef.current;
+    if (!row) return;
+
+    const frame = window.requestAnimationFrame(measureFilterRowOverflow);
+    const resizeObserver = new ResizeObserver(measureFilterRowOverflow);
+    resizeObserver.observe(row);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+    };
+  }, [assetsPanelOpen, categoryCounts, measureFilterRowOverflow, tagList, visibleTab]);
 
   // 过滤（分类 + 标签 + 搜索）
   const filteredFiles = useMemo(() => {
@@ -540,33 +611,57 @@ export default function AssetsPanel() {
               )}
 
               {/* 分类 + 标签筛选 */}
-              <div className="assets-category-row">
-                <button
-                  type="button" className={`assets-cat-chip ${activeCategory === null ? 'active' : ''}`}
-                  onClick={() => { setActiveCategory(null); setVisibleCount(PAGE_SIZE); }}
-                >
-                  全部<span className="assets-cat-count">{files.length}</span>
-                </button>
-                {ALL_CATEGORIES.filter((cat) => categoryCounts[cat] > 0).map((cat) => (
+              <div
+                ref={filterRowRef}
+                className={`assets-category-row ${filterRowExpanded ? 'expanded' : ''}`}
+              >
+                <div ref={filterListRef} id="assets-filter-list" className="assets-category-list">
                   <button
-                    key={cat} type="button"
-                    className={`assets-cat-chip ${activeCategory === cat ? 'active' : ''}`}
-                    onClick={() => { setActiveCategory(cat); setVisibleCount(PAGE_SIZE); }}
+                    type="button"
+                    className={`assets-cat-chip ${activeCategory === null ? 'active' : ''} ${filterRowExpanded || visibleFilterItemCount > 0 ? '' : 'assets-filter-item-hidden'}`}
+                    onClick={() => { setActiveCategory(null); setVisibleCount(PAGE_SIZE); }}
                   >
-                    {CATEGORY_ICONS[cat]} {CATEGORY_LABELS[cat]}
-                    <span className="assets-cat-count">{categoryCounts[cat]}</span>
+                    全部<span className="assets-cat-count">{files.length}</span>
                   </button>
-                ))}
-                {tagList.length > 0 && <span className="assets-chip-sep" />}
-                {tagList.map(([tag, count]) => (
+                  {listedCategories.map((cat, index) => (
+                    <button
+                      key={cat} type="button"
+                      className={`assets-cat-chip ${activeCategory === cat ? 'active' : ''} ${filterRowExpanded || index + 1 < visibleFilterItemCount ? '' : 'assets-filter-item-hidden'}`}
+                      onClick={() => { setActiveCategory(cat); setVisibleCount(PAGE_SIZE); }}
+                    >
+                      {CATEGORY_ICONS[cat]} {CATEGORY_LABELS[cat]}
+                      <span className="assets-cat-count">{categoryCounts[cat]}</span>
+                    </button>
+                  ))}
+                  {tagList.length > 0 && (
+                    <span
+                      data-filter-separator
+                      className={`assets-chip-sep ${filterRowExpanded || listedCategories.length + 1 < visibleFilterItemCount ? '' : 'assets-filter-item-hidden'}`}
+                    />
+                  )}
+                  {tagList.map(([tag, count], index) => (
+                    <button
+                      key={tag} type="button"
+                      className={`assets-cat-chip assets-tag-chip ${activeTag === tag ? 'active' : ''} ${filterRowExpanded || listedCategories.length + index + 2 < visibleFilterItemCount ? '' : 'assets-filter-item-hidden'}`}
+                      onClick={() => { setActiveTag((t) => (t === tag ? null : tag)); setVisibleCount(PAGE_SIZE); }}
+                    >
+                      #{tag}<span className="assets-cat-count">{count}</span>
+                    </button>
+                  ))}
+                </div>
+                {filterRowOverflow && (
                   <button
-                    key={tag} type="button"
-                    className={`assets-cat-chip assets-tag-chip ${activeTag === tag ? 'active' : ''}`}
-                    onClick={() => { setActiveTag((t) => (t === tag ? null : tag)); setVisibleCount(PAGE_SIZE); }}
+                    type="button"
+                    className="assets-filter-more"
+                    aria-controls="assets-filter-list"
+                    aria-expanded={filterRowExpanded}
+                    aria-label={filterRowExpanded ? '收起标签' : '展开更多标签'}
+                    title={filterRowExpanded ? '收起标签' : '更多标签'}
+                    onClick={() => setFilterRowExpanded((expanded) => !expanded)}
                   >
-                    #{tag}<span className="assets-cat-count">{count}</span>
+                    <Icon icon={filterRowExpanded ? 'lucide:chevron-up' : 'lucide:ellipsis'} aria-hidden="true" />
                   </button>
-                ))}
+                )}
               </div>
 
               {/* 文件瀑布流 */}

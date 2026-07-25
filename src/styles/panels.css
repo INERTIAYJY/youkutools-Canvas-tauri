@@ -627,13 +627,30 @@
 /* Category filters */
 .assets-category-row {
   display: flex;
+  align-items: flex-start;
   gap: 6px;
   padding: 10px;
   flex-shrink: 0;
+}
+.assets-category-list {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: stretch;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.assets-category-row.expanded .assets-category-list {
   flex-wrap: wrap;
+  overflow: visible;
+}
+.assets-filter-item-hidden {
+  visibility: hidden;
 }
 .assets-cat-chip {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
@@ -662,6 +679,32 @@
 .assets-cat-count {
   font-size: 10px;
   opacity: 0.7;
+}
+.assets-filter-more {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 27px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--theme-card);
+  color: var(--theme-text-secondary);
+  cursor: pointer;
+  transition: var(--transition-control);
+}
+.assets-filter-more svg {
+  width: 15px;
+  height: 15px;
+}
+.assets-filter-more:hover {
+  color: var(--theme-text);
+  background: var(--theme-hover);
+}
+.assets-filter-more:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }
 
 /* File waterfall (masonry) */
@@ -1165,6 +1208,7 @@
 }
 [data-theme='light'] .assets-tab,
 [data-theme='light'] .assets-cat-chip,
+[data-theme='light'] .assets-filter-more,
 [data-theme='light'] .assets-folder-chip {
   color: var(--assets-light-muted);
 }
@@ -1180,6 +1224,7 @@
   color: color-mix(in srgb, var(--brand) 78%, var(--theme-text));
 }
 [data-theme='light'] .assets-cat-chip,
+[data-theme='light'] .assets-filter-more,
 [data-theme='light'] .assets-search,
 [data-theme='light'] .assets-column-stepper,
 [data-theme='light'] .assets-project-select,
@@ -1188,6 +1233,7 @@
   border-color: var(--assets-light-control-border);
 }
 [data-theme='light'] .assets-cat-chip:hover:not(:disabled),
+[data-theme='light'] .assets-filter-more:hover,
 [data-theme='light'] .assets-project-select:hover {
   background-color: var(--theme-surface);
   border-color: color-mix(in srgb, var(--theme-text-secondary) 58%, var(--theme-surface));

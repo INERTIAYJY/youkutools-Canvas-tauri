@@ -280,6 +280,7 @@ export default function DramaAssetsPanel() {
     clearDramaAssetsByKind,
     bindDramaAssetImage,
     unbindDramaAssetImage,
+    setCharacterLibraryOpen,
     showToast,
   } = useAppStore(
     useShallow((s) => ({
@@ -290,6 +291,7 @@ export default function DramaAssetsPanel() {
       clearDramaAssetsByKind: s.clearDramaAssetsByKind,
       bindDramaAssetImage: s.bindDramaAssetImage,
       unbindDramaAssetImage: s.unbindDramaAssetImage,
+      setCharacterLibraryOpen: s.setCharacterLibraryOpen,
       showToast: s.showToast,
     })),
   );
@@ -404,7 +406,16 @@ export default function DramaAssetsPanel() {
                   {lastExtractLabel}
                 </span>
               ) : null}
-              <div className="relative w-[180px] ml-auto shrink-0">
+              {(tab === 'all' || tab === 'character') ? (
+                <button
+                  type="button"
+                  className="ml-auto shrink-0 rounded-lg border border-canvas-border px-2.5 py-1.5 text-[11px] text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text"
+                  onClick={() => setCharacterLibraryOpen(true)}
+                >
+                  打开角色库
+                </button>
+              ) : null}
+              <div className={`${tab === 'all' || tab === 'character' ? '' : 'ml-auto'} relative w-[180px] shrink-0`}>
                 <svg
                   className="absolute left-2.5 top-1/2 -translate-y-1/2 text-canvas-text-muted"
                   width="12"

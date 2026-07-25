@@ -1072,6 +1072,7 @@ export default function Sidebar() {
     toggleAvatarMenu,
     nodePickerOpen,
     setAssetsPanelOpen,
+    setCharacterLibraryOpen,
     setHistoryPanelOpen,
     unreadDramaAssetCount,
   } = useAppStore(
@@ -1081,6 +1082,7 @@ export default function Sidebar() {
         toggleAvatarMenu: s.toggleAvatarMenu,
         nodePickerOpen: s.nodePickerOpen,
         setAssetsPanelOpen: s.setAssetsPanelOpen,
+        setCharacterLibraryOpen: s.setCharacterLibraryOpen,
         setHistoryPanelOpen: s.setHistoryPanelOpen,
         unreadDramaAssetCount: countUnreadDramaAssets(s.dramaAssets),
       })),
@@ -1143,6 +1145,17 @@ export default function Sidebar() {
             {unreadDramaAssetCount > 99 ? '99+' : unreadDramaAssetCount}
           </span>
         ) : null}
+      </button>
+
+      {/* Character library */}
+      <button
+        type="button"
+        className="sidebar-btn-v3"
+        data-tooltip="角色库"
+        aria-label="打开角色库"
+        onClick={() => setCharacterLibraryOpen(true)}
+      >
+        <Icon icon="lucide:contact-round" width="20" height="20" aria-hidden="true" />
       </button>
 
       {/* History */}

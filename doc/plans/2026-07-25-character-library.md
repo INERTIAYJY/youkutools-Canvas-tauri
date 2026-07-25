@@ -60,6 +60,8 @@
 
 ### Task 4: 独立角色库界面
 
+**Status:** Complete (2026-07-25)
+
 **Files:**
 - Create: `src/components/CharacterLibraryPanel.tsx`
 - Create: `src/components/CharacterAssetDialog.tsx`
@@ -79,6 +81,8 @@
 5. 运行类型、定向 ESLint和构建，并在桌面与窄窗口截图检查布局。
 
 ### Task 5: 节点右键入库与隐藏恢复
+
+**Status:** Pending user confirmation after Stage 2
 
 **Files:**
 - Modify: `src/types/index.ts`

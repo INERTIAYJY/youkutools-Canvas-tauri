@@ -19,6 +19,7 @@ export interface UISlice {
   activeNodeId: string | null;
   dialogPosition: { x: number; y: number } | null;
   assetsPanelOpen: boolean;
+  characterLibraryOpen: boolean;
   historyPanelOpen: boolean;
   minimapVisible: boolean;
   directorDeskRuntimeRequest: {
@@ -55,6 +56,7 @@ export interface UISlice {
   openNodeDialog: (nodeId: string, position?: { x: number; y: number }) => void;
   closeNodeDialog: () => void;
   setAssetsPanelOpen: (open: boolean) => void;
+  setCharacterLibraryOpen: (open: boolean) => void;
   setHistoryPanelOpen: (open: boolean) => void;
   toggleMinimap: () => void;
   requestDirectorDeskRuntime: (instanceId: string, openAfterInstall?: boolean) => void;
@@ -74,6 +76,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   activeNodeId: null,
   dialogPosition: null,
   assetsPanelOpen: false,
+  characterLibraryOpen: false,
   historyPanelOpen: false,
   minimapVisible: true,
   directorDeskRuntimeRequest: null,
@@ -85,6 +88,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
         settingsOpen: true,
         settingsInitialTab: tab ?? null,
         assetsPanelOpen: false,
+        characterLibraryOpen: false,
         historyPanelOpen: false,
         dramaAssetsPanelOpen: false,
         chatOpen: false,
@@ -96,6 +100,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
     settingsInitialTab: 'api',
     pendingApiKeyConnectionId: connectionId ?? null,
     assetsPanelOpen: false,
+    characterLibraryOpen: false,
     historyPanelOpen: false,
     dramaAssetsPanelOpen: false,
     chatOpen: false,
@@ -114,15 +119,27 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
     ? {
         settingsOpen: false,
         assetsPanelOpen: true,
+        characterLibraryOpen: false,
         historyPanelOpen: false,
         dramaAssetsPanelOpen: false,
         chatOpen: false,
       }
     : { assetsPanelOpen: false, dramaAssetsPanelOpen: false }),
+  setCharacterLibraryOpen: (open) => set(open
+    ? {
+        settingsOpen: false,
+        assetsPanelOpen: false,
+        characterLibraryOpen: true,
+        historyPanelOpen: false,
+        dramaAssetsPanelOpen: false,
+        chatOpen: false,
+      }
+    : { characterLibraryOpen: false }),
   setHistoryPanelOpen: (open) => set(open
     ? {
         settingsOpen: false,
         assetsPanelOpen: false,
+        characterLibraryOpen: false,
         historyPanelOpen: true,
         dramaAssetsPanelOpen: false,
         chatOpen: false,

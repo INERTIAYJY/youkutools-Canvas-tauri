@@ -202,6 +202,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     ? {
         dramaAssetsPanelOpen: true,
         assetsPanelOpen: true,
+        characterLibraryOpen: false,
         historyPanelOpen: false,
         settingsOpen: false,
         chatOpen: false,

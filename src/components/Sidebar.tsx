@@ -1,4 +1,7 @@
-﻿import { useEffect, useRef, useState } from 'react';
+/**
+ * 应用主侧栏，集中承载节点创建、项目入口、功能面板切换、更新状态与快捷操作。
+ */
+import { useEffect, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { createPortal } from 'react-dom';
 import type { JSX } from 'react';

@@ -1,3 +1,6 @@
+/**
+ * 展示导演台运行时的安装确认、下载进度、错误重试和取消状态。
+ */
 import { Icon } from '@iconify/react';
 import { createPortal } from 'react-dom';
 import ModalOverlay from '../shared/ModalOverlay';

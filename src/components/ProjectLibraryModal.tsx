@@ -1,3 +1,6 @@
+/**
+ * 项目库弹窗，提供项目搜索、排序、创建、重命名、打开和删除等管理操作。
+ */
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Icon } from '@iconify/react';
 import { motion } from 'framer-motion';

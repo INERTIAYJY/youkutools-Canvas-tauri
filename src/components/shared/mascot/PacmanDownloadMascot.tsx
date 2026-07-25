@@ -1,3 +1,6 @@
+/**
+ * 导演台运行时下载界面的 Three.js 状态吉祥物，根据下载与完成阶段切换动画。
+ */
 import { useEffect, useRef } from 'react';
 import {
   AmbientLight,

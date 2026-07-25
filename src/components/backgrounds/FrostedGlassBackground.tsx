@@ -1,3 +1,6 @@
+/**
+ * 使用 Three.js 渲染主题感知的磨砂玻璃动态背景，并随容器尺寸和可见性管理渲染循环。
+ */
 import { useEffect, useRef } from 'react';
 import {
   ACESFilmicToneMapping,

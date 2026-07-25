@@ -1,3 +1,6 @@
+/**
+ * 在 Portal 层绘制跨平台覆盖式滚动条，跟踪目标容器滚动、尺寸和指针拖拽状态。
+ */
 import {
   useCallback,
   useEffect,

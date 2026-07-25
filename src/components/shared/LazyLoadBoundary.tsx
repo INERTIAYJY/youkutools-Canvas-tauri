@@ -1,3 +1,6 @@
+/**
+ * 为根视图和按需功能提供统一懒加载占位与错误边界，避免单个异步模块拖垮整页。
+ */
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
 type LazyLoadVariant = 'root' | 'feature';

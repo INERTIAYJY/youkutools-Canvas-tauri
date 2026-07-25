@@ -1,3 +1,6 @@
+/**
+ * 协调导演台运行时检测、下载、取消和打开窗口，并维护下载对话框阶段状态。
+ */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import {

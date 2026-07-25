@@ -1,3 +1,6 @@
+/**
+ * 弹窗和浮层共用的图标关闭按钮，统一尺寸、标签和按钮属性透传。
+ */
 import { Icon } from '@iconify/react';
 import type { ButtonHTMLAttributes } from 'react';
 

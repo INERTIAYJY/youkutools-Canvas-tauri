@@ -1,3 +1,6 @@
+/**
+ * 在多选节点间绘制可拖拽间距手柄，用于交互式调整或一键平均分布水平和垂直间距。
+ */
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useReactFlow, useViewport } from '@xyflow/react';
 import { useAppStore } from '../../store/useAppStore';

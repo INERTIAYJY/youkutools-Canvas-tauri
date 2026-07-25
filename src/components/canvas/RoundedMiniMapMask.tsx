@@ -1,3 +1,6 @@
+/**
+ * 修正 React Flow 小地图遮罩路径，为视口窗口生成稳定的圆角内框。
+ */
 import { useEffect } from 'react';
 
 const MASK_SELECTOR = '.react-flow__minimap-mask';

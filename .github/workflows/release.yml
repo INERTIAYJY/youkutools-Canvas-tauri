@@ -74,27 +74,27 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'AI Canvas v__VERSION__ - 设置交互与 Intel Mac 支持'
+          releaseName: 'AI Canvas v__VERSION__ - 角色库与创作偏好'
           releaseBody: |
             ## ✨ 版本摘要
 
-            AI Canvas v0.6.5 聚焦设置交互体验、节点尺寸一致性与发布稳定性，并新增 Intel Mac 安装包。
+            AI Canvas v0.6.6 新增全局角色库和媒体提示词偏好学习，并完善资产与画布交互体验。
 
-            ## 🔧 设置与交互优化
+            ## 🎭 角色库
 
-            - 项目设置中的比例与分辨率改用节点选择器，补全可选项并统一交互。
-            - 修复项目设置保存时的 IndexedDB 竞态条件与保存串行化问题。
-            - 修复画布右键菜单定位偏差、浅色主题选中态文字对比度等界面问题。
+            - 新增全局角色库，支持角色资料、多张参考图和项目间复用。
+            - 支持头像裁切、从画布节点捕获角色素材，以及全局资产重命名。
+            - 完善角色数据持久化和旧项目数据兼容读取。
 
-            ## 🧩 节点与画布
+            ## 🧠 创作偏好
 
-            - 提取宽高比尺寸计算逻辑并统一应用到节点创建流程。
-            - 修复新建节点尺寸与所选比例、分辨率不一致的问题。
+            - 对话助手可从用户确认的媒体提示词中学习创作偏好，用于后续上下文组装。
 
-            ## 🍎 macOS 发布
+            ## 🧩 资产与画布
 
-            - 新增 Intel Mac（x64）安装包，同时继续提供 Apple Silicon（arm64）安装包。
-            - Intel Mac 版本不包含本地 ONNX Runtime，本地 ONNX 图像处理能力不可用；其他画布与 AI 模型功能不受影响。
+            - 优化资产标签栏溢出展开交互。
+            - 优化节点工具栏缩放补偿与默认分区顺序。
+            - 修复画布右键菜单定位，并改善 macOS 窗口最大化行为。
 
             ## 📦 下载
 

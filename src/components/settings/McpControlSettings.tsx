@@ -1,3 +1,6 @@
+/**
+ * MCP 本地控制设置页，管理 bridge 会话、一次性令牌和外部客户端启动命令。
+ */
 import { useEffect, useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import AnimatedButton from '../shared/AnimatedButton';

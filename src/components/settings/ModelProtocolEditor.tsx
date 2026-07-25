@@ -1,3 +1,6 @@
+/**
+ * 编辑自定义模型的请求、鉴权、轮询与响应映射协议，并在保存前执行结构校验。
+ */
 import { Icon } from '@iconify/react';
 import { useId, useMemo, useRef, useState } from 'react';
 import type {

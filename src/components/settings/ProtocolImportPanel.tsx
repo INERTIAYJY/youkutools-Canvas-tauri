@@ -1,3 +1,6 @@
+/**
+ * 接收多种 API 请求示例，展示协议识别结果与置信度，并把用户确认的草稿交给模型编辑器。
+ */
 import { Icon } from '@iconify/react';
 import { useMemo, useState } from 'react';
 import type { GeneralModelCategory } from '../../types';

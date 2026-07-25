@@ -1,3 +1,6 @@
+/**
+ * 展示导演台运行时占用空间，并协调关闭窗口后移除本地运行时文件。
+ */
 import { useEffect, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { useAppStore } from '../../store/useAppStore';

@@ -164,13 +164,16 @@
 .node-floating-toolbar {
   --toolbar-offset-x: 0px;
   --toolbar-reveal-delay: 220ms;
+  --toolbar-zoom-compensation: var(--node-toolbar-zoom-compensation, 1);
   position: absolute;
   z-index: 10;
   display: flex;
   gap: 2px;
   opacity: 0;
   visibility: hidden;
-  transform: translate(var(--toolbar-offset-x), 8px) scale(0.94);
+  translate: var(--toolbar-offset-x) 0;
+  scale: var(--toolbar-zoom-compensation);
+  transform: translateY(8px) scale(0.94);
   transform-origin: center bottom;
   transition:
     opacity 1000ms var(--ease-out-expo),
@@ -188,7 +191,7 @@
 .node.selected .node-floating-toolbar {
   opacity: 1;
   visibility: visible;
-  transform: translate(var(--toolbar-offset-x), 0) scale(1);
+  transform: translateY(0) scale(1);
   pointer-events: auto;
   transition-delay: var(--toolbar-reveal-delay), var(--toolbar-reveal-delay), 0s;
 }
@@ -440,6 +443,7 @@
   gap: 8px;
   color: var(--theme-text-muted);
   font-size: 13px;
+  border-radius: 10px;
 }
 
 .node-preview-loading {

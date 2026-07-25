@@ -101,6 +101,8 @@ const isMacOS = typeof navigator !== 'undefined'
 const shouldUseMacTrackpadPan = isTauri && isMacOS;
 const easeOutCubic = (progress: number) => 1 - (1 - progress) ** 3;
 const CANVAS_INTERACTING_CLASS = 'canvas-interacting';
+const NODE_TOOLBAR_MIN_SCREEN_SCALE = 0.8;
+const NODE_TOOLBAR_MAX_SCREEN_SCALE = 1.25;
 
 // ── 交互模式预设（冻结对象，避免每次 render 产生新身份，导致 React Flow 内部 effect 重跑、拖拽掉帧）──
 const DEFAULT_INTERACTION = Object.freeze({
@@ -351,7 +353,24 @@ function CanvasInner() {
     startY: number;
     detail: CanvasPanByDetail;
   } | null>(null);
+  const canvasRootRef = useRef<HTMLDivElement>(null);
   const activeInteractionsRef = useRef(new Set<'node' | 'viewport'>());
+
+  const updateNodeToolbarScale = useCallback((zoom: number) => {
+    if (!Number.isFinite(zoom) || zoom <= 0) return;
+    const clampedScreenScale = Math.min(
+      NODE_TOOLBAR_MAX_SCREEN_SCALE,
+      Math.max(NODE_TOOLBAR_MIN_SCREEN_SCALE, zoom),
+    );
+    canvasRootRef.current?.style.setProperty(
+      '--node-toolbar-zoom-compensation',
+      String(clampedScreenScale / zoom),
+    );
+  }, []);
+
+  useEffect(() => {
+    updateNodeToolbarScale(reactFlowInstance.getViewport().zoom);
+  }, [reactFlowInstance, updateNodeToolbarScale]);
 
   const setCanvasInteraction = useCallback((kind: 'node' | 'viewport', active: boolean) => {
     if (active) activeInteractionsRef.current.add(kind);
@@ -375,13 +394,14 @@ function CanvasInner() {
   }, [setCanvasInteraction]);
 
   const handleCanvasViewportMove = useCallback<OnMove>((_, viewport) => {
+    updateNodeToolbarScale(viewport.zoom);
     const activePan = activeCanvasPanRef.current;
     if (!activePan) return;
     activePan.detail.onProgress?.({
       deltaX: viewport.x - activePan.startX,
       deltaY: viewport.y - activePan.startY,
     });
-  }, []);
+  }, [updateNodeToolbarScale]);
 
   // 节点进场动画（translateY）会让 React Flow 在挂载瞬间测得偏移的 handle 锚点并缓存，
   // 导致连线起止点错位。进场动画结束（落位 translateY:0）后重新测量该节点的 handle。
@@ -981,7 +1001,7 @@ function CanvasInner() {
 
   return (
     <ResizeSnapContext.Provider value={resizeSnapApi}>
-    <div className="absolute inset-0">
+    <div ref={canvasRootRef} className="absolute inset-0">
       <ReactFlow
         nodes={nodes}
         edges={renderedEdges}

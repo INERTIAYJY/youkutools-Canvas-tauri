@@ -37,13 +37,13 @@ export const IMAGE_BUTTONS: ToolbarButtonDef[] = [
   { key: 'repaint',        label: '重绘',        icon: 'mdi:draw',                       defaultZone: 'Primary' },
   { key: 'upscale',        label: '高清超分',    icon: 'mdi:image-auto-adjust',          defaultZone: 'Primary' },
   { key: 'subjectMatting', label: '自动识别主体',icon: 'mdi:hexagon-outline',             defaultZone: 'Primary' },
-  { key: 'annotate',       label: '标注',        icon: 'mdi:draw-pen',                   defaultZone: 'Secondary' },
-  { key: 'crop',           label: '裁切',        icon: 'mdi:crop',                       defaultZone: 'Secondary' },
-  { key: 'compose',        label: '多图编辑',    icon: 'mdi:layers-triple-outline',      defaultZone: 'Secondary' },
-  { key: 'upload',         label: '上传图片',    icon: 'mdi:upload',                     defaultZone: 'Secondary' },
-  { key: 'copyFile',      label: '复制图像',    icon: 'mdi:content-copy',             defaultZone: 'Secondary' },
-  { key: 'fullscreen',     label: '全屏显示',    icon: 'mdi:fullscreen',                defaultZone: 'Secondary' },
+  { key: 'annotate',       label: '标注',        icon: 'mdi:draw-pen',                   defaultZone: 'Primary' },
+  { key: 'crop',           label: '裁切',        icon: 'mdi:crop',                       defaultZone: 'Primary' },
+  { key: 'compose',        label: '多图编辑',    icon: 'mdi:layers-triple-outline',      defaultZone: 'Primary' },
+  { key: 'upload',         label: '上传图片',    icon: 'mdi:upload',                     defaultZone: 'Primary' },
+  { key: 'copyFile',       label: '复制图像',    icon: 'mdi:content-copy',               defaultZone: 'Secondary' },
   { key: 'history',        label: '生成历史',    icon: 'mdi:history',                  defaultZone: 'Secondary' },
+  { key: 'fullscreen',     label: '全屏显示',    icon: 'mdi:fullscreen',                defaultZone: 'Secondary' },
 ];
 
 /** 音频节点按钮 */
@@ -75,12 +75,12 @@ function buildLayout(buttons: ToolbarButtonDef[], version = 1): ToolbarLayout {
 export const DEFAULT_TEXT_LAYOUT      = buildLayout(TEXT_BUTTONS);
 export const DEFAULT_VIDEO_LAYOUT     = buildLayout(VIDEO_BUTTONS);
 export const DEFAULT_PANORAMA_LAYOUT  = buildLayout(PANORAMA_BUTTONS);
-export const DEFAULT_IMAGE_LAYOUT     = buildLayout(IMAGE_BUTTONS, 5);
+export const DEFAULT_IMAGE_LAYOUT     = buildLayout(IMAGE_BUTTONS, 7);
 export const DEFAULT_AUDIO_LAYOUT     = buildLayout(AUDIO_BUTTONS);
 
 /** 迁移图像工具栏的新内置能力，同时保留用户已有分区、排序和删减。 */
 export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): ToolbarLayout {
-  if (nodeType !== 'ai-image' || layout.version >= 5) return layout;
+  if (nodeType !== 'ai-image' || layout.version >= 7) return layout;
 
   let cameraStudioInserted = layout.zones.some((zone) => zone.buttonKeys.includes('cameraStudio'));
 
@@ -134,7 +134,30 @@ export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): T
     });
   }
 
-  return { ...layout, zones, version: 5 };
+  const legacyDefaultLayouts = [
+    [
+      ['matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale', 'subjectMatting'],
+      ['annotate', 'crop', 'compose', 'upload', 'copyFile', 'fullscreen', 'history'],
+    ],
+    [
+      [
+        'matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale',
+        'subjectMatting', 'annotate', 'crop', 'compose', 'upload', 'copyFile',
+      ],
+      ['fullscreen', 'history'],
+    ],
+  ];
+  const usesLegacyDefaultLayout = legacyDefaultLayouts.some((legacyZones) => (
+    zones.length === legacyZones.length
+    && zones.every((zone, index) => (
+      zone.buttonKeys.length === legacyZones[index].length
+      && zone.buttonKeys.every((key, keyIndex) => key === legacyZones[index][keyIndex])
+    ))
+  ));
+
+  if (usesLegacyDefaultLayout) return getDefaultLayout('ai-image');
+
+  return { ...layout, zones, version: 7 };
 }
 
 /** 根据 nodeType 获取按钮注册表 */

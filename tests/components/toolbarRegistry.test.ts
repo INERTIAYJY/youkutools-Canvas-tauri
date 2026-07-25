@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getDefaultLayout,
   getButtonRegistry,
   migrateToolbarLayout,
 } from '../../src/components/nodes/shared/toolbar/toolbarRegistry';
@@ -9,7 +10,8 @@ describe('toolbar layout migration', () => {
     const keys = getButtonRegistry('ai-image').map((button) => button.key);
     expect(keys).toContain('cameraStudio');
     expect(keys).toContain('history');
-    expect(keys.indexOf('fullscreen')).toBeLessThan(keys.indexOf('history'));
+    expect(keys.indexOf('copyFile')).toBeLessThan(keys.indexOf('history'));
+    expect(keys.indexOf('history')).toBeLessThan(keys.indexOf('fullscreen'));
     expect(keys).not.toContain('multiAngle');
   });
 
@@ -22,7 +24,7 @@ describe('toolbar layout migration', () => {
     });
 
     expect(migrated).toEqual({
-      version: 5,
+      version: 7,
       zones: [
         { id: 'custom', name: '自定义', buttonKeys: ['crop', 'cameraStudio', 'upload', 'history'] },
       ],
@@ -36,16 +38,16 @@ describe('toolbar layout migration', () => {
         { id: 'custom', name: '自定义', buttonKeys: ['multiAngle', 'cameraStudio', 'upload'] },
       ],
     })).toEqual({
-      version: 5,
+      version: 7,
       zones: [
         { id: 'custom', name: '自定义', buttonKeys: ['cameraStudio', 'upload', 'history'] },
       ],
     });
   });
 
-  it('does not alter current layouts or unrelated node types', () => {
+  it('keeps custom button zoning while advancing the image layout version', () => {
     const current = { version: 5, zones: [{ id: 'custom', name: '自定义', buttonKeys: ['crop', 'history'] }] };
-    expect(migrateToolbarLayout('ai-image', current)).toBe(current);
+    expect(migrateToolbarLayout('ai-image', current)).toEqual({ ...current, version: 7 });
     expect(migrateToolbarLayout('ai-video', { ...current, version: 1 })).toEqual({ ...current, version: 1 });
   });
 
@@ -54,7 +56,7 @@ describe('toolbar layout migration', () => {
       version: 3,
       zones: [{ id: 'secondary', name: 'Secondary', buttonKeys: ['crop'] }],
     })).toEqual({
-      version: 5,
+      version: 7,
       zones: [{ id: 'secondary', name: 'Secondary', buttonKeys: ['crop', 'history'] }],
     });
   });
@@ -68,12 +70,74 @@ describe('toolbar layout migration', () => {
         buttonKeys: ['upload', 'copyFile', 'history', 'fullscreen'],
       }],
     })).toEqual({
-      version: 5,
+      version: 7,
       zones: [{
         id: 'secondary',
         name: 'Secondary',
         buttonKeys: ['upload', 'copyFile', 'fullscreen', 'history'],
       }],
     });
+  });
+
+  it('places copy, history, and fullscreen after the image toolbar divider', () => {
+    expect(getDefaultLayout('ai-image')).toEqual({
+      version: 7,
+      zones: [
+        {
+          id: 'zone-0',
+          name: 'Primary',
+          buttonKeys: [
+            'matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale',
+            'subjectMatting', 'annotate', 'crop', 'compose', 'upload',
+          ],
+        },
+        {
+          id: 'zone-1',
+          name: 'Secondary',
+          buttonKeys: ['copyFile', 'history', 'fullscreen'],
+        },
+      ],
+    });
+  });
+
+  it('updates the old default image layout without changing custom layouts', () => {
+    const migrated = migrateToolbarLayout('ai-image', {
+      version: 5,
+      zones: [
+        {
+          id: 'zone-0',
+          name: 'Primary',
+          buttonKeys: ['matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale', 'subjectMatting'],
+        },
+        {
+          id: 'zone-1',
+          name: 'Secondary',
+          buttonKeys: ['annotate', 'crop', 'compose', 'upload', 'copyFile', 'fullscreen', 'history'],
+        },
+      ],
+    });
+
+    expect(migrated).toEqual(getDefaultLayout('ai-image'));
+  });
+
+  it('updates the previous v6 default image layout', () => {
+    expect(migrateToolbarLayout('ai-image', {
+      version: 6,
+      zones: [
+        {
+          id: 'zone-0',
+          name: 'Primary',
+          buttonKeys: [
+            'matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale',
+            'subjectMatting', 'annotate', 'crop', 'compose', 'upload', 'copyFile',
+          ],
+        },
+        {
+          id: 'zone-1',
+          name: 'Secondary',
+          buttonKeys: ['fullscreen', 'history'],
+        },
+      ],
+    })).toEqual(getDefaultLayout('ai-image'));
   });
 });

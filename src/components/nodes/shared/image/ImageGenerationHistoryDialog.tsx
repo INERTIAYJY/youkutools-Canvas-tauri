@@ -1,3 +1,6 @@
+/**
+ * 展示当前图片节点的生成历史，支持恢复历史结果、查看参数和全屏预览。
+ */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { convertFileSrc } from '@tauri-apps/api/core';

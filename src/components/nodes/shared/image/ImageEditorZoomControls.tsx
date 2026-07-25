@@ -1,3 +1,6 @@
+/**
+ * 图片编辑器通用缩放控件，统一放大、缩小、复位与可访问标签。
+ */
 import { Icon } from '@iconify/react';
 
 interface ImageEditorZoomControlsProps {

@@ -1,3 +1,6 @@
+/**
+ * 提供图片裁切框的比例约束与居中计算，保证预设裁切区域始终落在媒体边界内。
+ */
 import { type Crop, centerCrop, makeAspectCrop } from 'react-image-crop';
 
 const DEFAULT_CROP_PERCENT = 80;

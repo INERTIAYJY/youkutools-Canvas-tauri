@@ -1,3 +1,6 @@
+/**
+ * 定义摄影棚相机与灯光状态、预设和提示词转换规则，供 3D 面板与节点操作复用。
+ */
 export type CameraStudioMode = 'camera' | 'lighting' | 'dual';
 export type CameraDistance = 'far' | 'full' | 'medium' | 'close' | 'extreme-close';
 export type CameraLens = '15mm' | '24mm' | '35mm' | '50mm' | '85mm' | '200mm' | 'fisheye';

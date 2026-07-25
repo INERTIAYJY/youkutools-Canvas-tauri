@@ -1,3 +1,6 @@
+/**
+ * 收集高级预设运行参数，预览步骤并把确认后的执行请求交给预设序列服务。
+ */
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';

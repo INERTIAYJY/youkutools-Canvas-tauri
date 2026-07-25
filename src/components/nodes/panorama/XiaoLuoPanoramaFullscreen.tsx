@@ -1,3 +1,6 @@
+/**
+ * 全屏承载小逻全景查看器，并把截图结果和关闭操作回传给全景节点。
+ */
 import { memo } from 'react';
 import {
   PanoramaViewer,

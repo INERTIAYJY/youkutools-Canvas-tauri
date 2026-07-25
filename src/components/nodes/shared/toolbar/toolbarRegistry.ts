@@ -78,7 +78,11 @@ export const DEFAULT_PANORAMA_LAYOUT  = buildLayout(PANORAMA_BUTTONS);
 export const DEFAULT_IMAGE_LAYOUT     = buildLayout(IMAGE_BUTTONS, 7);
 export const DEFAULT_AUDIO_LAYOUT     = buildLayout(AUDIO_BUTTONS);
 
-/** 迁移图像工具栏的新内置能力，同时保留用户已有分区、排序和删减。 */
+/**
+ * 迁移图像工具栏的新内置能力与默认分区。
+ * 只有能精确识别为历史默认值的布局才会整体换新；其他布局仅执行必要的能力迁移，
+ * 保留用户已有的分区、排序和删减结果。
+ */
 export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): ToolbarLayout {
   if (nodeType !== 'ai-image' || layout.version >= 7) return layout;
 
@@ -134,6 +138,7 @@ export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): T
     });
   }
 
+  // v5 和短暂使用过的 v6 默认布局都迁移到“复制、历史、全屏”右侧分区。
   const legacyDefaultLayouts = [
     [
       ['matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale', 'subjectMatting'],

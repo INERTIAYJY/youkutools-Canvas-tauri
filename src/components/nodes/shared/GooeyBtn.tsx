@@ -1,3 +1,6 @@
+/**
+ * 为节点连接点提供带语义色的黏性悬停反馈，不承载连接或 Store 业务逻辑。
+ */
 import React, { useEffect, useId, useRef } from "react";
 
 interface GooeyBtnProps {

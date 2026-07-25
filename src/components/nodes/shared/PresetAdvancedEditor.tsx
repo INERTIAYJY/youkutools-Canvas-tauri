@@ -1,3 +1,6 @@
+/**
+ * 编辑高级预设的参数定义、模板和多步骤节点序列，并提供即时结构校验。
+ */
 import { Icon } from '@iconify/react';
 import type {
   ModelOption,

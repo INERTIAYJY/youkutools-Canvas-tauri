@@ -1,3 +1,6 @@
+/**
+ * 小逻摄影棚全屏面板，以 3D 控件编辑相机和灯光参数并生成可回填的提示词片段。
+ */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import * as THREE from 'three';

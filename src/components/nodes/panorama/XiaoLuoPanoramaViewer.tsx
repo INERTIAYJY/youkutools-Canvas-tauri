@@ -1,3 +1,6 @@
+/**
+ * 画布节点内的轻量全景查看器，封装核心实例、截图命令和主题同步。
+ */
 import { Icon } from '@iconify/react';
 import {
   forwardRef,

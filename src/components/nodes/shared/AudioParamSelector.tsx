@@ -1,3 +1,6 @@
+/**
+ * 音频节点参数选择器，根据语音、音乐或音效用途展示对应格式、声音和时长配置。
+ */
 import { Icon } from '@iconify/react';
 import { memo, useEffect, useRef, useState } from 'react';
 import type { AudioOutputFormat, AudioTtsVoice } from '../../../types/aiTypes';

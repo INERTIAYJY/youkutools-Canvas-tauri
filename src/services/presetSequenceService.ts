@@ -1,3 +1,6 @@
+/**
+ * 构建并顺序执行高级预设步骤，在每一步生成派生节点、连线和对应模型任务。
+ */
 import type { Edge, Node } from '@xyflow/react';
 import type {
   BaseNodeData,

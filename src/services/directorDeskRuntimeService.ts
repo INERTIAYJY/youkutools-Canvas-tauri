@@ -1,3 +1,6 @@
+/**
+ * 封装导演台运行时的安装状态、下载进度、安装控制和打开入口等 Tauri 调用。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 

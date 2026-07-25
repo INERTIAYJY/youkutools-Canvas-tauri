@@ -1,3 +1,6 @@
+/**
+ * 校验高级预设参数定义与取值，并安全渲染提示词模板变量。
+ */
 import type {
   PresetAdvancedConfig,
   PresetParameterDefinition,

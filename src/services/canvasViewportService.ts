@@ -1,3 +1,6 @@
+/**
+ * 定义画布平移动画事件协议，让浮层和编辑器通过统一事件请求视口位移。
+ */
 export const CANVAS_PAN_BY_EVENT = 'canvas-pan-by';
 export const CANVAS_PAN_DURATION_MS = 280;
 

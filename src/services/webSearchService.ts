@@ -1,3 +1,6 @@
+/**
+ * 调用已配置的网页搜索 Provider，统一解析结果、分配引用并登记后续网页读取授权。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store/useAppStore';
 import type { WebSource } from '../types/chat';

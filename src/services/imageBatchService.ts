@@ -1,3 +1,6 @@
+/**
+ * 保存批量图片生成结果并原子更新源节点及派生节点，允许部分任务失败后保留成功项。
+ */
 import type { Node } from '@xyflow/react';
 import type { BaseNodeData } from '../types';
 import type { BatchImageResult, ImageGenerationResult } from '../types/aiTypes';

@@ -1,3 +1,6 @@
+/**
+ * 跟踪异步画布派生操作的项目、源节点和 revision，阻止过期结果写回当前画布。
+ */
 interface CanvasDerivationState {
   currentProjectId: string | null;
   nodes: ReadonlyArray<{ id: string }>;

@@ -1,3 +1,6 @@
+/**
+ * 将当前画布转换为受尺寸和体积约束的项目缩略图，必要时借助 Worker 合成媒体占位。
+ */
 import { toCanvas } from 'html-to-image';
 import type {
   ProjectSnapshotEdge,

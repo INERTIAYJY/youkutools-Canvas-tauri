@@ -1,3 +1,6 @@
+/**
+ * 项目缩略图合成 Worker：根据节点、连线和媒体位图绘制离屏画布并返回压缩结果。
+ */
 export interface ProjectSnapshotRect {
   x: number;
   y: number;

@@ -1,3 +1,6 @@
+/**
+ * 定义导演台独立窗口通信协议，并负责窗口创建、消息转发和实例生命周期管理。
+ */
 import {
   buildDirectorDeskWindowUrl,
   type DirectorExtensionAction,

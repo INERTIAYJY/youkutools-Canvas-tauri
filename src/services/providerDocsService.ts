@@ -1,3 +1,6 @@
+/**
+ * 通过原生受限读取接口获取 Provider 文档，并提取标题、正文与同源候选链接。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import { normalizeProviderDocUrl } from './chat/providerDocsGrantService';
 

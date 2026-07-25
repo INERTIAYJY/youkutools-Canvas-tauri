@@ -1,3 +1,6 @@
+/**
+ * 缓存最近一次画布指针坐标，为 Agent 和快捷创建操作提供稳定的节点落点。
+ */
 export interface CanvasPointerPosition {
   x: number;
   y: number;

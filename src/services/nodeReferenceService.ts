@@ -1,3 +1,6 @@
+/**
+ * 解析工作流输入中的画布节点、剧本资产和本地资产引用，并替换为可提交的实际内容。
+ */
 import { useAppStore } from '../store/useAppStore';
 
 /** 解析 workflowInputs 值中的 @{nodeId:label} / @drama{id:name} 引用，替换为对应输出内容 */

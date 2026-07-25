@@ -1,3 +1,6 @@
+/**
+ * 通过受限 Tauri 命令读取公开网页，归一化正文、链接与来源并执行体积裁剪。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import type { WebSource } from '../types/chat';
 import { normalizePublicWebUrl } from './chat/webAccessGrantService';

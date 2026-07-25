@@ -1,3 +1,6 @@
+/**
+ * 从生成提示词提取有限标签并写入项目资产索引，供资产库筛选和检索使用。
+ */
 import { getAllAssetMeta, putAssetMeta } from '../indexedDbService';
 import { identifyAsset } from './assetIndex';
 

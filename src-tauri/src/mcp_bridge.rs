@@ -1,3 +1,6 @@
+//! 本地 MCP loopback 控制桥，负责会话鉴权、帧协议、前端事件转发和响应超时。
+//! 监听范围固定为本机，令牌与活动连接仅保存在进程内存中。
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

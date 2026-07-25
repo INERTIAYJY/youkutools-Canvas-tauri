@@ -1,3 +1,6 @@
+//! 导演台运行时的下载、校验、解压、安装和自定义 URI 协议服务。
+//! 所有归档入口、磁盘体积和安装路径都在写入前执行边界校验。
+
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

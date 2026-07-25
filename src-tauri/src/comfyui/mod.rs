@@ -1,18 +1,18 @@
-/// ComfyUI 启动逻辑
-///
-/// 统一策略：优先定位 main.py 与配套 Python 解释器**直接启动**——只有这样才能
-/// 注入 API 参数，并绕过整合包启动器的环境/custom_nodes 检测（秋叶启动器每次
-/// 启动都会做插件校验，用户要求跳过）。bat 脚本与启动器 exe 仅作兜底。
-///
-/// 兼容三类发行版（均以实机目录结构验证）：
-///  · GitHub 原生 / 秋叶整合包：<root>/main.py（秋叶 Python 在 <root>/python/）
-///  · 官方便携版：<root>/ComfyUI/main.py + <root>/python_embeded/
-///  · 官方 Comfy Desktop（v0.20+）：<base>/ComfyUI-Installs/ComfyUI/ComfyUI/main.py，
-///    venv 在同目录 .venv/；用户可能选 <base> 或 <base>/Comfy Desktop（Electron 安装目录）
-///
-/// 启动参数：--listen 开放 HTTP API；--enable-cors-header 允许跨源（本应用打包后
-/// 从 tauri://localhost 直连 ComfyUI 必需）。GPU 无需参数——CUDA 可用时默认启用，
-/// 三种发行版的 Python 环境都自带 CUDA 版 torch（兜底 bat 亦优先 run_nvidia_gpu.bat）。
+//! ComfyUI 启动逻辑。
+//!
+//! 统一策略：优先定位 main.py 与配套 Python 解释器**直接启动**——只有这样才能
+//! 注入 API 参数，并绕过整合包启动器的环境/custom_nodes 检测（秋叶启动器每次
+//! 启动都会做插件校验，用户要求跳过）。bat 脚本与启动器 exe 仅作兜底。
+//!
+//! 兼容三类发行版（均以实机目录结构验证）：
+//!  · GitHub 原生 / 秋叶整合包：<root>/main.py（秋叶 Python 在 <root>/python/）
+//!  · 官方便携版：<root>/ComfyUI/main.py + <root>/python_embeded/
+//!  · 官方 Comfy Desktop（v0.20+）：<base>/ComfyUI-Installs/ComfyUI/ComfyUI/main.py，
+//!    venv 在同目录 .venv/；用户可能选 <base> 或 <base>/Comfy Desktop（Electron 安装目录）
+//!
+//! 启动参数：--listen 开放 HTTP API；--enable-cors-header 允许跨源（本应用打包后
+//! 从 tauri://localhost 直连 ComfyUI 必需）。GPU 无需参数——CUDA 可用时默认启用，
+//! 三种发行版的 Python 环境都自带 CUDA 版 torch（兜底 bat 亦优先 run_nvidia_gpu.bat）。
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

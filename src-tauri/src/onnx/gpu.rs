@@ -1,5 +1,5 @@
-/// GPU 检测与 DirectML 能力探测（仅在 worker 进程中调用）
-/// 主进程永远不碰此模块，确保 DirectML 初始化死锁不会影响主进程。
+//! GPU 检测与 DirectML 能力探测（仅在 worker 进程中调用）。
+//! 主进程永远不碰此模块，确保 DirectML 初始化死锁不会影响主进程。
 
 /// GPU 适配器信息
 #[derive(Debug, Clone)]

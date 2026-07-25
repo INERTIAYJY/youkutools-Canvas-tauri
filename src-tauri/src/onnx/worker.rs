@@ -1,9 +1,9 @@
-/// ONNX Worker 进程（通过 `--onnx-worker` CLI 参数进入）
-///
-/// # 职责
-/// - 对主进程完全隔离：即使 DirectML 初始化驱动级死锁，也只杀死本进程
-/// - stdin/stdout JSON lines 协议与主进程通信
-/// - 处理四类请求：probe（GPU 探测）、upscale（超分）、matting（主体识别）、quit（退出）
+//! ONNX Worker 进程（通过 `--onnx-worker` CLI 参数进入）。
+//!
+//! # 职责
+//! - 对主进程完全隔离：即使 DirectML 初始化驱动级死锁，也只杀死本进程
+//! - stdin/stdout JSON lines 协议与主进程通信
+//! - 处理四类请求：probe（GPU 探测）、upscale（超分）、matting（主体识别）、quit（退出）
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};

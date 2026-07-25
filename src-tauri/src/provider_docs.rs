@@ -1,3 +1,5 @@
+//! Provider 文档的受限原生读取器，执行 URL、DNS/IP、重定向和响应体积校验。
+
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;

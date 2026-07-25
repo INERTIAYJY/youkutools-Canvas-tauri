@@ -1,3 +1,6 @@
+//! Agent 网页搜索与公开页面读取的原生安全边界。
+//! 仅允许固定搜索端点和通过 DNS/IP、重定向及体积检查的公开 HTTP(S) 地址。
+
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;

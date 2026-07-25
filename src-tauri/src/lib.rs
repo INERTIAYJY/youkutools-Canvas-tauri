@@ -1,3 +1,5 @@
+//! AI Canvas Tauri 库入口，装配插件、窗口、命令、事件与原生服务状态。
+
 use base64::Engine;
 use std::collections::HashMap;
 use std::sync::{

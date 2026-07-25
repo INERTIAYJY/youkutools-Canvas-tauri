@@ -1,3 +1,5 @@
+//! 支持取消、进度事件、磁盘空间检查和临时文件原子落盘的长时间文件传输服务。
+
 use reqwest::blocking::Response;
 use serde::Serialize;
 use std::{

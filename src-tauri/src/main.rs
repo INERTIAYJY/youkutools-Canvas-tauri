@@ -1,3 +1,5 @@
+//! AI Canvas 桌面进程入口；按 CLI 参数进入隔离的 ONNX Worker 或启动 Tauri 主应用。
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {

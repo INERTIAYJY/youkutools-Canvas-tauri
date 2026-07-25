@@ -1,5 +1,5 @@
-/// ONNX GPU 能力缓存配置
-/// 主进程负责读写，worker 负责探测；缓存决定后续推理用哪个 EP。
+//! ONNX GPU 能力缓存配置。
+//! 主进程负责读写，worker 负责探测；缓存决定后续推理使用哪个 EP。
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

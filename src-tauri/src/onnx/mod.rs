@@ -1,15 +1,15 @@
-/// ONNX Runtime 模块（主进程侧）
-///
-/// # v2 架构：子进程隔离
-/// - 所有 ONNX 推理在独立的 `--onnx-worker` 子进程中执行
-/// - 主进程永不触碰 DirectML / Session 初始化
-/// - 首次使用自动探测 GPU 能力（探针推理），结果缓存到 `onnx_gpu_config.json`
-/// - DirectML 失败自动回退 CPU，对前端透明
-///
-/// 子模块：
-/// - `worker` — Worker 子进程（probe / upscale / matting 三种推理）
-/// - `gpu`   — DXGI 适配器枚举 + DirectML 探针
-/// - `config` — GPU 配置缓存（ep / device_id / device_name）
+//! ONNX Runtime 模块（主进程侧）。
+//!
+//! # v2 架构：子进程隔离
+//! - 所有 ONNX 推理在独立的 `--onnx-worker` 子进程中执行
+//! - 主进程永不触碰 DirectML / Session 初始化
+//! - 首次使用自动探测 GPU 能力（探针推理），结果缓存到 `onnx_gpu_config.json`
+//! - DirectML 失败自动回退 CPU，对前端透明
+//!
+//! 子模块：
+//! - `worker` — Worker 子进程（probe / upscale / matting 三种推理）
+//! - `gpu`   — DXGI 适配器枚举 + DirectML 探针
+//! - `config` — GPU 配置缓存（ep / device_id / device_name）
 
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub mod worker;

@@ -4,7 +4,19 @@ import { countUnreadDramaAssets } from '../../src/store/store.dramaAssets';
 import type { DramaCharacter } from '../../src/types/dramaAssets';
 import { emptyDramaAssetLibrary } from '../../src/types/dramaAssets';
 
+const characterLibraryMocks = vi.hoisted(() => ({
+  loadGlobalCharacterCards: vi.fn(async () => [] as DramaCharacter[]),
+  saveGlobalCharacterCard: vi.fn(async (character: DramaCharacter) => character),
+  deleteGlobalCharacterCard: vi.fn(async () => undefined),
+  clearGlobalCharacterCards: vi.fn(async () => undefined),
+}));
+
+vi.mock('../../src/services/characterLibraryService', () => characterLibraryMocks);
+
 beforeEach(() => {
+  vi.clearAllMocks();
+  characterLibraryMocks.loadGlobalCharacterCards.mockResolvedValue([]);
+  characterLibraryMocks.saveGlobalCharacterCard.mockImplementation(async (character) => character);
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     saveCurrentProjectSilent: vi.fn(async () => 'p1'),
@@ -100,15 +112,123 @@ describe('dramaAssets store', () => {
     let asset = useAppStore.getState().dramaAssets.characters[0];
     expect(asset.imageNodeId).toBe('node-img');
     expect(asset.imageUrl).toBe('https://cdn/x.png');
+    expect(asset.referenceImages).toEqual([
+      expect.objectContaining({
+        kind: 'primary',
+        sourceNodeId: 'node-img',
+        imageUrl: 'https://cdn/x.png',
+      }),
+    ]);
 
     useAppStore.getState().syncDramaAssetImageFromNode('node-img', 'https://cdn/y.png');
     asset = useAppStore.getState().dramaAssets.characters[0];
     expect(asset.imageUrl).toBe('https://cdn/y.png');
+    expect(asset.referenceImages?.[0].imageUrl).toBe('https://cdn/y.png');
 
     useAppStore.getState().unbindDramaAssetImage('character', 'char_1');
     asset = useAppStore.getState().dramaAssets.characters[0];
     expect(asset.imageNodeId).toBeUndefined();
     expect(asset.imageUrl).toBeUndefined();
+    expect(asset.referenceImages).toEqual([]);
+  });
+
+  it('adds multiple references without duplicating the same source node', async () => {
+    useAppStore.setState({
+      dramaAssets: {
+        ...emptyDramaAssetLibrary(),
+        characters: [sampleCharacter()],
+      },
+    });
+    const reference = {
+      id: 'ref-full',
+      kind: 'full_body' as const,
+      imageUrl: 'https://cdn/full.png',
+      sourceNodeId: 'node-full',
+      prompt: '全身提示词',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    await useAppStore.getState().addCharacterReferenceImage(
+      'project',
+      'char_1',
+      reference,
+      { makePrimary: true },
+    );
+    await useAppStore.getState().addCharacterReferenceImage(
+      'project',
+      'char_1',
+      { ...reference, imageUrl: 'https://cdn/full-v2.png', updatedAt: 2 },
+    );
+
+    const character = useAppStore.getState().dramaAssets.characters[0];
+    expect(character.referenceImages).toHaveLength(1);
+    expect(character.referenceImages?.[0].imageUrl).toBe('https://cdn/full-v2.png');
+    expect(character.primaryReferenceImageId).toBe('ref-full');
+  });
+
+  it('stores a normalized avatar crop against a reference', async () => {
+    useAppStore.setState({
+      dramaAssets: {
+        ...emptyDramaAssetLibrary(),
+        characters: [sampleCharacter({
+          referenceImages: [{
+            id: 'ref-avatar',
+            kind: 'avatar',
+            imageUrl: 'https://cdn/avatar.png',
+            prompt: '',
+            createdAt: 1,
+            updatedAt: 1,
+          }],
+        })],
+      },
+    });
+
+    await useAppStore.getState().setCharacterAvatar(
+      'project',
+      'char_1',
+      'ref-avatar',
+      { x: 0.1, y: 0.2, width: 0.5, height: 0.5 },
+    );
+
+    expect(useAppStore.getState().dramaAssets.characters[0]).toEqual(expect.objectContaining({
+      avatarReferenceImageId: 'ref-avatar',
+      avatarCrop: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 },
+    }));
+  });
+
+  it('loads permanent characters and copies them into the project independently', async () => {
+    characterLibraryMocks.loadGlobalCharacterCards.mockResolvedValue([
+      sampleCharacter({ id: 'global-1', name: '永久角色', key: '永久角色' }),
+    ]);
+
+    await useAppStore.getState().loadGlobalCharacters();
+    expect(useAppStore.getState().globalCharacters).toHaveLength(1);
+
+    const projectId = useAppStore.getState().copyGlobalCharacterToProject('global-1');
+    expect(projectId).toBeTruthy();
+    expect(projectId).not.toBe('global-1');
+    expect(useAppStore.getState().dramaAssets.characters[0].name).toBe('永久角色');
+  });
+
+  it('copies a project character to permanent storage before updating state', async () => {
+    useAppStore.setState({
+      dramaAssets: {
+        ...emptyDramaAssetLibrary(),
+        characters: [sampleCharacter()],
+      },
+    });
+    characterLibraryMocks.saveGlobalCharacterCard.mockImplementation(async (character) => ({
+      ...character,
+      imageNodeId: undefined,
+    }));
+
+    const globalId = await useAppStore.getState().copyCharacterToGlobal('char_1');
+
+    expect(characterLibraryMocks.saveGlobalCharacterCard).toHaveBeenCalledOnce();
+    expect(globalId).toBeTruthy();
+    expect(globalId).not.toBe('char_1');
+    expect(useAppStore.getState().globalCharacters[0].id).toBe(globalId);
   });
 
   it('createImageNodeFromDramaAsset creates node, fills prompt, binds', () => {

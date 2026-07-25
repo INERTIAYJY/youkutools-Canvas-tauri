@@ -10,6 +10,7 @@ const EXPECTED_STORES = [
   'chatConversations',
   'chatMessages',
   'config',
+  'globalCharacters',
   'history',
   'metadata',
   'presets',
@@ -40,7 +41,7 @@ beforeEach(() => {
 });
 
 describe('indexedDbService schema', () => {
-  it('creates the complete v15 schema for a fresh database', async () => {
+  it('creates the complete v16 schema for a fresh database', async () => {
     const service = await import('../../src/services/indexedDbService');
     await service.saveProjectToDb({
       id: 'project-fresh',
@@ -52,7 +53,7 @@ describe('indexedDbService schema', () => {
     });
 
     const db = await openDatabase(DB_NAME);
-    expect(db.version).toBe(15);
+    expect(db.version).toBe(16);
     expect([...db.objectStoreNames]).toEqual(EXPECTED_STORES);
 
     const taskStore = db.transaction('agentTasks', 'readonly').objectStore('agentTasks');
@@ -108,8 +109,33 @@ describe('indexedDbService schema', () => {
       }),
     ]);
     const upgradedDb = await openDatabase(DB_NAME);
-    expect(upgradedDb.version).toBe(15);
+    expect(upgradedDb.version).toBe(16);
     expect([...upgradedDb.objectStoreNames]).toEqual(EXPECTED_STORES);
     upgradedDb.close();
+  });
+
+  it('persists and removes global character cards', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const card = {
+      kind: 'character' as const,
+      id: 'global-character',
+      key: '全局角色',
+      name: '全局角色',
+      summary: '简介',
+      visualNotes: '外形',
+      identity: '身份',
+      importance: 'main' as const,
+      confirmed: true,
+      createdAt: 1,
+      updatedAt: 2,
+      source: 'manual' as const,
+      referenceImages: [],
+    };
+
+    await service.putGlobalCharacter(card);
+    expect(await service.getAllGlobalCharacters()).toEqual([card]);
+
+    await service.deleteGlobalCharacter('global-character');
+    expect(await service.getAllGlobalCharacters()).toEqual([]);
   });
 });

@@ -5,9 +5,10 @@ import type { AgentMode, AgentTask } from '../types/agent';
 import type { ConversationContextSummary } from '../types/chat';
 import type { ProjectMemory } from '../types/memory';
 import type { PresetAdvancedConfig, SkillManifest, UserPresetMode } from '../types';
+import type { DramaCharacter } from '../types/dramaAssets';
 
 const DB_NAME = 'ai-canvas-db';
-const DB_VERSION = 15; // v15: project-scoped output history with bounded retention
+const DB_VERSION = 16; // v16: global character library
 const STORE_PROJECTS = 'projects';
 const STORE_WORKFLOWS = 'workflows';
 const STORE_CONFIG = 'config';
@@ -24,6 +25,7 @@ const STORE_AGENT_TASKS = 'agentTasks';
 const STORE_PROJECT_MEMORIES = 'projectMemories';
 const STORE_TOOLBAR_LAYOUTS = 'toolbarLayouts';
 const STORE_METADATA = 'metadata';
+const STORE_GLOBAL_CHARACTERS = 'globalCharacters';
 
 const CONFIG_KEY = 'app-config';
 
@@ -131,6 +133,11 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_METADATA)) {
         db.createObjectStore(STORE_METADATA, { keyPath: 'id' });
       }
+      // v16: project-independent character cards. Reference images use stable asset identity.
+      if (!db.objectStoreNames.contains(STORE_GLOBAL_CHARACTERS)) {
+        const characterStore = db.createObjectStore(STORE_GLOBAL_CHARACTERS, { keyPath: 'id' });
+        characterStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -159,6 +166,52 @@ export async function saveProjectToDb(record: ProjectRecord): Promise<void> {
     };
     tx.onerror = () => fail(tx.error);
     tx.onabort = () => fail(tx.error);
+  });
+}
+
+// ============================================
+// Global character library CRUD
+// ============================================
+
+export async function putGlobalCharacter(character: DramaCharacter): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_GLOBAL_CHARACTERS, 'readwrite');
+    tx.objectStore(STORE_GLOBAL_CHARACTERS).put(character);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error(`永久角色 ${character.id} 保存失败`));
+  });
+}
+
+export async function getAllGlobalCharacters(): Promise<DramaCharacter[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(STORE_GLOBAL_CHARACTERS, 'readonly')
+      .objectStore(STORE_GLOBAL_CHARACTERS)
+      .getAll();
+    request.onsuccess = () => resolve(request.result as DramaCharacter[]);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function deleteGlobalCharacter(id: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_GLOBAL_CHARACTERS, 'readwrite');
+    tx.objectStore(STORE_GLOBAL_CHARACTERS).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearGlobalCharacters(): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_GLOBAL_CHARACTERS, 'readwrite');
+    tx.objectStore(STORE_GLOBAL_CHARACTERS).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
 

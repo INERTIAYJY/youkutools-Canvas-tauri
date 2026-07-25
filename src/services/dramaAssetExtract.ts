@@ -4,12 +4,17 @@
 import type {
   DramaAssetImportance,
   DramaAssetKind,
+  DramaAssetLibrary,
   DramaCharacter,
   DramaExtractModelResponse,
   DramaProp,
   DramaScene,
 } from '../types/dramaAssets';
-import { DRAMA_ASSET_KIND_LABEL, DRAMA_EXTRACT_MARKER } from '../types/dramaAssets';
+import {
+  DRAMA_ASSET_KIND_LABEL,
+  DRAMA_EXTRACT_MARKER,
+  normalizeDramaAssetLibrary,
+} from '../types/dramaAssets';
 
 const IMPORTANCE: DramaAssetImportance[] = ['main', 'supporting', 'minor'];
 
@@ -321,10 +326,11 @@ export function postProcessDramaExtractOutput(
 
 /** 按 key/name 合并入库，保留旧 id 与图片绑定 */
 export function mergeDramaExtractIntoLibrary(
-  library: import('../types/dramaAssets').DramaAssetLibrary,
+  library: DramaAssetLibrary,
   parsed: DramaExtractParseResult,
   meta?: { sourceNodeId?: string; modelId?: string },
-): import('../types/dramaAssets').DramaAssetLibrary {
+): DramaAssetLibrary {
+  const normalizedLibrary = normalizeDramaAssetLibrary(library);
   const mergeList = <T extends { id: string; key: string; name: string; imageNodeId?: string; imageUrl?: string; confirmed: boolean; createdAt: number; source: string }>(
     existing: T[],
     incoming: T[],
@@ -334,11 +340,18 @@ export function mergeDramaExtractIntoLibrary(
       const idx = result.findIndex((e) => e.key === item.key || e.name === item.name);
       if (idx >= 0) {
         const old = result[idx];
+        const oldCharacter = old as Partial<DramaCharacter>;
         result[idx] = {
           ...item,
           id: old.id,
           imageNodeId: old.imageNodeId,
           imageUrl: old.imageUrl,
+          ...('referenceImages' in old ? {
+            referenceImages: oldCharacter.referenceImages,
+            primaryReferenceImageId: oldCharacter.primaryReferenceImageId,
+            avatarReferenceImageId: oldCharacter.avatarReferenceImageId,
+            avatarCrop: oldCharacter.avatarCrop,
+          } : {}),
           confirmed: old.confirmed,
           createdAt: old.createdAt,
           updatedAt: Date.now(),
@@ -352,7 +365,8 @@ export function mergeDramaExtractIntoLibrary(
   };
 
   return {
-    version: 1,
+    ...normalizedLibrary,
+    version: 2,
     lastExtract: {
       at: Date.now(),
       kinds: [parsed.kind],
@@ -361,16 +375,16 @@ export function mergeDramaExtractIntoLibrary(
     },
     characters:
       parsed.kind === 'character'
-        ? mergeList(library.characters, parsed.characters)
-        : library.characters,
+        ? mergeList(normalizedLibrary.characters, parsed.characters)
+        : normalizedLibrary.characters,
     scenes:
       parsed.kind === 'scene'
-        ? mergeList(library.scenes, parsed.scenes)
-        : library.scenes,
+        ? mergeList(normalizedLibrary.scenes, parsed.scenes)
+        : normalizedLibrary.scenes,
     props:
       parsed.kind === 'prop'
-        ? mergeList(library.props, parsed.props)
-        : library.props,
+        ? mergeList(normalizedLibrary.props, parsed.props)
+        : normalizedLibrary.props,
   };
 }
 

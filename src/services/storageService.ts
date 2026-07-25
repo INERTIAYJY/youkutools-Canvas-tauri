@@ -32,6 +32,7 @@ import { exists } from '@tauri-apps/plugin-fs';
 import type { BaseNodeData, ProjectSettings, StoryboardCellOverride } from '../types';
 import { getAssetUrlFromPath, getProjectDataDir, joinPath, listDirectoryFiles } from './fs/core';
 import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
+import { normalizeDramaAssetLibrary } from '../types/dramaAssets';
 
 interface PersistedNodeLike {
   data?: BaseNodeData;
@@ -183,7 +184,13 @@ export async function loadProjectData(id: string): Promise<ProjectSaveData | nul
   try {
     const record = await getProjectById(id);
     if (!record) return null;
-    return { ...record, nodes: await restoreProjectNodes(record.nodes, id) } as ProjectSaveData;
+    return {
+      ...record,
+      nodes: await restoreProjectNodes(record.nodes, id),
+      dramaAssets: normalizeDramaAssetLibrary(
+        (record as ProjectSaveData).dramaAssets,
+      ),
+    } as ProjectSaveData;
   } catch (error) {
     console.error('Load project data failed:', error);
     return null;

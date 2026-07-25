@@ -96,15 +96,20 @@ export function formatDramaAssetTextBrief(asset: DramaAsset): string {
 export function resolveDramaAssetImageRef(
   asset: DramaAsset,
   nodes: Array<{ id: string; data?: Record<string, unknown> }>,
-): { imageNodeId: string; imageUrl: string } | null {
-  if (!asset.imageNodeId) return null;
-  const node = nodes.find((n) => n.id === asset.imageNodeId);
+): { imageNodeId?: string; imageUrl: string } | null {
+  const reference = asset.kind === 'character'
+    ? asset.referenceImages?.find((item) => item.id === asset.primaryReferenceImageId)
+      || asset.referenceImages?.[0]
+    : undefined;
+  const imageNodeId = reference?.sourceNodeId || asset.imageNodeId;
+  const node = imageNodeId ? nodes.find((item) => item.id === imageNodeId) : undefined;
   const imageUrl =
     (node?.data?.imageUrl as string | undefined)
     || (node?.data?.thumbnailUrl as string | undefined)
+    || reference?.imageUrl
     || asset.imageUrl;
   if (!imageUrl || !String(imageUrl).trim()) return null;
-  return { imageNodeId: asset.imageNodeId, imageUrl };
+  return { imageNodeId, imageUrl };
 }
 
 function joinParts(parts: Array<string | undefined | false>): string {

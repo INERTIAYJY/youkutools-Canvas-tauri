@@ -5,11 +5,14 @@ import type { StateCreator } from 'zustand';
 import type { Node } from '@xyflow/react';
 import type { AppState } from './useAppStore';
 import type {
+  CharacterCropRect,
+  CharacterReferenceImage,
   DramaAsset,
   DramaAssetKind,
   DramaAssetLibrary,
+  DramaCharacter,
 } from '../types/dramaAssets';
-import { emptyDramaAssetLibrary } from '../types/dramaAssets';
+import { emptyDramaAssetLibrary, normalizeDramaCharacter } from '../types/dramaAssets';
 import type { DramaExtractParseResult } from '../services/dramaAssetExtract';
 import { mergeDramaExtractIntoLibrary, normalizeAssetKey } from '../services/dramaAssetExtract';
 import {
@@ -21,9 +24,19 @@ import {
 } from '../services/dramaAssetPrompt';
 import { generateId } from './store.utils';
 import type { BaseNodeData } from '../types';
+import {
+  clearGlobalCharacterCards,
+  deleteGlobalCharacterCard,
+  loadGlobalCharacterCards,
+  saveGlobalCharacterCard,
+} from '../services/characterLibraryService';
+
+export type CharacterLibraryScope = 'project' | 'global';
 
 export interface DramaAssetsSlice {
   dramaAssets: DramaAssetLibrary;
+  globalCharacters: DramaCharacter[];
+  globalCharactersLoading: boolean;
   dramaAssetsPanelOpen: boolean;
   setDramaAssetsPanelOpen: (open: boolean) => void;
   markDramaAssetsViewed: () => void;
@@ -57,6 +70,27 @@ export interface DramaAssetsSlice {
    * 返回新节点 id；失败返回 null。
    */
   createImageNodeFromDramaAsset: (kind: DramaAssetKind, id: string) => string | null;
+  loadGlobalCharacters: () => Promise<void>;
+  saveCharacterCard: (
+    scope: CharacterLibraryScope,
+    character: DramaCharacter,
+  ) => Promise<boolean>;
+  addCharacterReferenceImage: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    reference: CharacterReferenceImage,
+    options?: { makePrimary?: boolean },
+  ) => Promise<boolean>;
+  setCharacterAvatar: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    referenceImageId: string,
+    crop: CharacterCropRect,
+  ) => Promise<boolean>;
+  copyCharacterToGlobal: (characterId: string) => Promise<string | null>;
+  copyGlobalCharacterToProject: (characterId: string) => string | null;
+  deleteGlobalCharacter: (characterId: string) => Promise<boolean>;
+  clearGlobalCharacters: () => Promise<boolean>;
 }
 
 export function countUnreadDramaAssets(library: DramaAssetLibrary): number {
@@ -94,6 +128,55 @@ function silentSave(get: () => AppState) {
   void get().saveCurrentProjectSilent?.();
 }
 
+function upsertCharacterReference(
+  character: DramaCharacter,
+  reference: CharacterReferenceImage,
+  makePrimary: boolean,
+): DramaCharacter {
+  const references = [...(character.referenceImages ?? [])];
+  const existingIndex = references.findIndex((item) =>
+    item.id === reference.id
+    || Boolean(reference.sourceNodeId && item.sourceNodeId === reference.sourceNodeId),
+  );
+  const persistedReference = existingIndex >= 0
+    ? { ...references[existingIndex], ...reference, id: references[existingIndex].id }
+    : reference;
+  if (existingIndex >= 0) references[existingIndex] = persistedReference;
+  else references.push(persistedReference);
+  return normalizeDramaCharacter({
+    ...character,
+    referenceImages: references,
+    primaryReferenceImageId: makePrimary || !character.primaryReferenceImageId
+      ? persistedReference.id
+      : character.primaryReferenceImageId,
+    imageNodeId: makePrimary || !character.imageNodeId
+      ? persistedReference.sourceNodeId
+      : character.imageNodeId,
+    imageUrl: makePrimary || !character.imageUrl
+      ? persistedReference.imageUrl
+      : character.imageUrl,
+    updatedAt: Date.now(),
+  });
+}
+
+function cloneCharacter(character: DramaCharacter): DramaCharacter {
+  const now = Date.now();
+  return normalizeDramaCharacter({
+    ...character,
+    id: `character-${generateId()}`,
+    createdAt: now,
+    updatedAt: now,
+    source: 'manual',
+    referenceImages: (character.referenceImages ?? []).map((reference) => ({
+      ...reference,
+      sourceNodeId: undefined,
+      createdAt: now,
+      updatedAt: now,
+    })),
+    imageNodeId: undefined,
+  });
+}
+
 function pickSpawnPosition(nodes: Node<BaseNodeData>[]): { x: number; y: number } {
   if (nodes.length === 0) return { x: 120, y: 120 };
   let maxX = 0;
@@ -111,6 +194,8 @@ function pickSpawnPosition(nodes: Node<BaseNodeData>[]): { x: number; y: number 
 
 export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsSlice> = (set, get) => ({
   dramaAssets: emptyDramaAssetLibrary(),
+  globalCharacters: [],
+  globalCharactersLoading: false,
   dramaAssetsPanelOpen: false,
 
   setDramaAssetsPanelOpen: (open) => set(open
@@ -219,6 +304,21 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
         } as Partial<DramaAsset>),
       ),
     });
+    if (kind === 'character') {
+      const prompt = typeof node?.data?.prompt === 'string' ? node.data.prompt : '';
+      void get().addCharacterReferenceImage('project', id, {
+        id: `reference-${generateId()}`,
+        kind: 'primary',
+        assetId: node?.data?.assetId as string | undefined,
+        relativePath: node?.data?.relativePath as string | undefined,
+        imageUrl: resolvedUrl,
+        sourceNodeId: imageNodeId,
+        prompt,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }, { makePrimary: true });
+      return;
+    }
     silentSave(get);
   },
 
@@ -227,8 +327,19 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     const strip = (list: DramaAsset[]): DramaAsset[] =>
       list.map((item) => {
         if (item.id !== id) return item;
-        const { imageNodeId: _n, imageUrl: _u, ...rest } = item;
-        return { ...rest, updatedAt: Date.now() } as DramaAsset;
+        const rest = { ...item };
+        delete rest.imageNodeId;
+        delete rest.imageUrl;
+        return item.kind === 'character'
+          ? {
+              ...rest,
+              referenceImages: [],
+              primaryReferenceImageId: undefined,
+              avatarReferenceImageId: undefined,
+              avatarCrop: undefined,
+              updatedAt: Date.now(),
+            } as DramaAsset
+          : { ...rest, updatedAt: Date.now() } as DramaAsset;
       });
     set({ dramaAssets: mapKindList(lib, kind, strip) });
     silentSave(get);
@@ -240,10 +351,24 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
     const syncList = <T extends DramaAsset>(list: T[]): T[] =>
       list.map((item) => {
-        if (item.imageNodeId === imageNodeId) {
-          if (item.imageUrl === imageUrl) return item;
+        const matchingReference = item.kind === 'character'
+          ? item.referenceImages?.find((reference) => reference.sourceNodeId === imageNodeId)
+          : undefined;
+        if (item.imageNodeId === imageNodeId || matchingReference) {
+          if (item.imageUrl === imageUrl && matchingReference?.imageUrl === imageUrl) return item;
           changed = true;
-          return { ...item, imageUrl, updatedAt: Date.now() };
+          return {
+            ...item,
+            imageUrl: item.imageNodeId === imageNodeId ? imageUrl : item.imageUrl,
+            ...(item.kind === 'character' ? {
+              referenceImages: (item.referenceImages ?? []).map((reference) =>
+                reference.sourceNodeId === imageNodeId
+                  ? { ...reference, imageUrl, updatedAt: Date.now() }
+                  : reference,
+              ),
+            } : {}),
+            updatedAt: Date.now(),
+          };
         }
         return item;
       });
@@ -347,5 +472,111 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     get().showToast(`已创建「${label}」图像节点，可直接生成`);
 
     return nodeId;
+  },
+
+  loadGlobalCharacters: async () => {
+    set({ globalCharactersLoading: true });
+    try {
+      set({ globalCharacters: await loadGlobalCharacterCards() });
+    } catch {
+      get().showToast?.('永久角色加载失败', 'error');
+    } finally {
+      set({ globalCharactersLoading: false });
+    }
+  },
+
+  saveCharacterCard: async (scope, character) => {
+    const normalized = normalizeDramaCharacter(character);
+    if (scope === 'project') {
+      const current = get().dramaAssets;
+      const exists = current.characters.some((item) => item.id === normalized.id);
+      set({
+        dramaAssets: {
+          ...current,
+          characters: exists
+            ? current.characters.map((item) => item.id === normalized.id ? normalized : item)
+            : [...current.characters, normalized],
+        },
+      });
+      silentSave(get);
+      return true;
+    }
+    try {
+      const persisted = await saveGlobalCharacterCard(normalized);
+      set((state) => ({
+        globalCharacters: state.globalCharacters.some((item) => item.id === persisted.id)
+          ? state.globalCharacters.map((item) => item.id === persisted.id ? persisted : item)
+          : [persisted, ...state.globalCharacters],
+      }));
+      return true;
+    } catch {
+      get().showToast?.('永久角色保存失败', 'error');
+      return false;
+    }
+  },
+
+  addCharacterReferenceImage: async (scope, characterId, reference, options) => {
+    const characters = scope === 'project'
+      ? get().dramaAssets.characters
+      : get().globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character) return false;
+    const next = upsertCharacterReference(character, reference, options?.makePrimary === true);
+    return get().saveCharacterCard(scope, next);
+  },
+
+  setCharacterAvatar: async (scope, characterId, referenceImageId, crop) => {
+    const characters = scope === 'project'
+      ? get().dramaAssets.characters
+      : get().globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character?.referenceImages?.some((reference) => reference.id === referenceImageId)) {
+      return false;
+    }
+    return get().saveCharacterCard(scope, normalizeDramaCharacter({
+      ...character,
+      avatarReferenceImageId: referenceImageId,
+      avatarCrop: crop,
+      updatedAt: Date.now(),
+    }));
+  },
+
+  copyCharacterToGlobal: async (characterId) => {
+    const character = get().dramaAssets.characters.find((item) => item.id === characterId);
+    if (!character) return null;
+    const copy = cloneCharacter(character);
+    return await get().saveCharacterCard('global', copy) ? copy.id : null;
+  },
+
+  copyGlobalCharacterToProject: (characterId) => {
+    const character = get().globalCharacters.find((item) => item.id === characterId);
+    if (!character) return null;
+    const copy = cloneCharacter(character);
+    void get().saveCharacterCard('project', copy);
+    return copy.id;
+  },
+
+  deleteGlobalCharacter: async (characterId) => {
+    try {
+      await deleteGlobalCharacterCard(characterId);
+      set((state) => ({
+        globalCharacters: state.globalCharacters.filter((item) => item.id !== characterId),
+      }));
+      return true;
+    } catch {
+      get().showToast?.('永久角色删除失败', 'error');
+      return false;
+    }
+  },
+
+  clearGlobalCharacters: async () => {
+    try {
+      await clearGlobalCharacterCards();
+      set({ globalCharacters: [] });
+      return true;
+    } catch {
+      get().showToast?.('永久角色清空失败', 'error');
+      return false;
+    }
   },
 });

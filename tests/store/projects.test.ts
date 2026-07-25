@@ -227,7 +227,7 @@ describe('project switching', () => {
         finishFirstSave = () => resolve(record.id);
       })
     ));
-    const dramaAssets = { version: 1 as const, characters: [], scenes: [], props: [] };
+    const dramaAssets = { version: 2 as const, characters: [], scenes: [], props: [] };
     useAppStore.setState({
       projects: [{ id: 'project-settings', name: 'Settings', createdAt: 1, updatedAt: 1 }],
       currentProjectId: 'project-settings',

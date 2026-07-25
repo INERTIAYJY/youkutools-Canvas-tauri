@@ -400,9 +400,9 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       nodes: [],
       edges: [],
       groups: [],
-      dramaAssets: { version: 1 as const, characters: [], scenes: [], props: [] },
+      dramaAssets: { version: 2 as const, characters: [], scenes: [], props: [] },
     }));
-    fileService.saveProject({ ...project, nodes: [], edges: [], groups: [], dramaAssets: { version: 1, characters: [], scenes: [], props: [] } }).catch((e) => console.warn('[创建项目] 保存失败:', e));
+    fileService.saveProject({ ...project, nodes: [], edges: [], groups: [], dramaAssets: { version: 2, characters: [], scenes: [], props: [] } }).catch((e) => console.warn('[创建项目] 保存失败:', e));
     fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
     setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
   },
@@ -457,7 +457,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         edges: [],
         history: [],
         historyIndex: -1,
-        dramaAssets: { version: 1 as const, characters: [], scenes: [], props: [] },
+        dramaAssets: { version: 2 as const, characters: [], scenes: [], props: [] },
         operationLogs: [],
         ...retainedChatState,
       });
@@ -479,7 +479,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
               edges: [],
               history: [],
               historyIndex: -1,
-              dramaAssets: { version: 1 as const, characters: [], scenes: [], props: [] },
+              dramaAssets: { version: 2 as const, characters: [], scenes: [], props: [] },
               operationLogs: [],
             }
           : {}),

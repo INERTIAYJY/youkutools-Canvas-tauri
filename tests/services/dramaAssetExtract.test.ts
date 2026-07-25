@@ -13,7 +13,10 @@ import {
   listDramaAssetsFlat,
 } from '../../src/services/dramaAssetPrompt';
 import type { DramaAssetLibrary, DramaCharacter } from '../../src/types/dramaAssets';
-import { emptyDramaAssetLibrary } from '../../src/types/dramaAssets';
+import {
+  emptyDramaAssetLibrary,
+  normalizeDramaAssetLibrary,
+} from '../../src/types/dramaAssets';
 import { DRAMA_EXTRACT_MARKER } from '../../src/types/dramaAssets';
 
 describe('normalizeAssetKey', () => {
@@ -145,7 +148,7 @@ describe('postProcessDramaExtractOutput', () => {
 describe('mergeDramaExtractIntoLibrary', () => {
   it('preserves id and image bindings on re-extract same name', () => {
     const existing: DramaAssetLibrary = {
-      version: 1,
+      version: 2,
       characters: [
         {
           kind: 'character',
@@ -162,6 +165,18 @@ describe('mergeDramaExtractIntoLibrary', () => {
           source: 'ai',
           imageNodeId: 'node-img-1',
           imageUrl: 'https://example.com/a.png',
+          referenceImages: [
+            {
+              id: 'ref-1',
+              kind: 'primary',
+              imageUrl: 'https://example.com/a.png',
+              sourceNodeId: 'node-img-1',
+              prompt: '旧提示词',
+              createdAt: 1000,
+              updatedAt: 1000,
+            },
+          ],
+          primaryReferenceImageId: 'ref-1',
         },
       ],
       scenes: [],
@@ -189,6 +204,8 @@ describe('mergeDramaExtractIntoLibrary', () => {
     expect(next.characters[0].id).toBe('char_keep_me');
     expect(next.characters[0].imageNodeId).toBe('node-img-1');
     expect(next.characters[0].imageUrl).toBe('https://example.com/a.png');
+    expect(next.characters[0].referenceImages).toEqual(existing.characters[0].referenceImages);
+    expect(next.characters[0].primaryReferenceImageId).toBe('ref-1');
     expect(next.characters[0].confirmed).toBe(true);
     expect(next.characters[0].summary).toBe('新简介');
     expect(next.characters[0].identity).toBe('新身份');
@@ -220,6 +237,81 @@ describe('mergeDramaExtractIntoLibrary', () => {
     );
     const next = mergeDramaExtractIntoLibrary(existing, parsed);
     expect(next.characters.map((c) => c.name).sort()).toEqual(['乙', '甲']);
+  });
+});
+
+describe('normalizeDramaAssetLibrary', () => {
+  it('migrates a v1 character image binding into the first reference image', () => {
+    const library = normalizeDramaAssetLibrary({
+      version: 1,
+      characters: [
+        {
+          kind: 'character',
+          id: 'legacy-character',
+          key: '旧角色',
+          name: '旧角色',
+          summary: '简介',
+          visualNotes: '外形',
+          identity: '身份',
+          importance: 'main',
+          imageNodeId: 'legacy-node',
+          imageUrl: 'data:image/png;base64,legacy',
+          confirmed: true,
+          createdAt: 10,
+          updatedAt: 20,
+          source: 'manual',
+        },
+      ],
+      scenes: [],
+      props: [],
+    });
+
+    expect(library.version).toBe(2);
+    expect(library.characters[0].referenceImages).toEqual([
+      expect.objectContaining({
+        id: 'ref-legacy-character-legacy',
+        kind: 'primary',
+        imageUrl: 'data:image/png;base64,legacy',
+        sourceNodeId: 'legacy-node',
+      }),
+    ]);
+    expect(library.characters[0].primaryReferenceImageId).toBe('ref-legacy-character-legacy');
+  });
+
+  it('does not duplicate an already migrated reference image', () => {
+    const reference = {
+      id: 'ref-existing',
+      kind: 'full_body' as const,
+      imageUrl: 'https://example.com/full.png',
+      prompt: '全身',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const library = normalizeDramaAssetLibrary({
+      version: 2,
+      characters: [{
+        kind: 'character',
+        id: 'current-character',
+        key: '当前角色',
+        name: '当前角色',
+        summary: '',
+        visualNotes: '',
+        identity: '',
+        importance: 'main',
+        confirmed: true,
+        createdAt: 1,
+        updatedAt: 1,
+        source: 'manual',
+        imageNodeId: 'legacy-node',
+        imageUrl: 'https://example.com/legacy.png',
+        referenceImages: [reference],
+        primaryReferenceImageId: reference.id,
+      }],
+      scenes: [],
+      props: [],
+    });
+
+    expect(library.characters[0].referenceImages).toEqual([reference]);
   });
 });
 

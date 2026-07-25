@@ -2,6 +2,7 @@
  * 解析工作流输入中的画布节点、剧本资产和本地资产引用，并替换为可提交的实际内容。
  */
 import { useAppStore } from '../store/useAppStore';
+import { resolveDramaAssetImageRef } from './dramaAssetPrompt';
 
 /** 解析 workflowInputs 值中的 @{nodeId:label} / @drama{id:name} 引用，替换为对应输出内容 */
 export function resolveNodeReferences(value: string): string {
@@ -18,14 +19,11 @@ export function resolveNodeReferences(value: string): string {
       || lib.scenes.find((a) => a.id === dramaId)
       || lib.props.find((a) => a.id === dramaId);
     if (!asset) return dramaName || _match;
-    if (asset.imageNodeId) {
-      const imgNode = nodes.find((n) => n.id === asset.imageNodeId);
-      const imageUrl =
-        (imgNode?.data?.imageUrl as string | undefined)
-        || (imgNode?.data?.thumbnailUrl as string | undefined)
-        || asset.imageUrl;
-      if (imageUrl && String(imageUrl).trim()) return imageUrl;
-    }
+    const imageReference = resolveDramaAssetImageRef(
+      asset,
+      nodes as Array<{ id: string; data?: Record<string, unknown> }>,
+    );
+    if (imageReference) return imageReference.imageUrl;
     // 无图：展开单条简介字段（与 formatDramaAssetTextBrief 同信息，避免循环依赖用内联）
     const parts = [
       asset.name,

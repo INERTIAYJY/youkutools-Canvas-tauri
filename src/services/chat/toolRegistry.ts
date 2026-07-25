@@ -1,3 +1,6 @@
+/**
+ * Agent 工具的注册、可用性过滤与本地 schema 校验中心；实际权限仍由 Policy Engine 决定。
+ */
 import type { AgentMode } from '../../types/agent';
 import type { ProposedToolCall, ToolResultSummary, WebSource } from '../../types/chat';
 import {

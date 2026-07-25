@@ -1,3 +1,6 @@
+/**
+ * 注册预设查询与执行工具，负责参数校验、节点派生以及串行预设步骤的画布落地。
+ */
 import type { Node } from '@xyflow/react';
 import { createPresetNode, resolvePresetAction } from '../../../components/nodes/shared/toolbar/presetAction';
 import { useAppStore } from '../../../store/useAppStore';

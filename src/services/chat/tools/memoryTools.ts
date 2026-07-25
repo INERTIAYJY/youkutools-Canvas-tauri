@@ -1,3 +1,6 @@
+/**
+ * 注册项目记忆建议工具；候选内容经裁剪后仍须用户确认才能写入长期记忆。
+ */
 import { useAppStore } from '../../../store/useAppStore';
 import { registerAgentTool } from '../toolRegistry';
 import {

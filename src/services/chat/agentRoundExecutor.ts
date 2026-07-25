@@ -1,3 +1,7 @@
+/**
+ * 执行 Agent 的单个模型轮次，串联上下文、流式响应、工具提案与执行结果。
+ * 任务预算、审批等待和步骤快照在此轮次边界内统一更新。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import {
   streamAssistantReply,

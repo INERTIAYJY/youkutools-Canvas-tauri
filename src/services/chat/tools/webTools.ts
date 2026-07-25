@@ -1,3 +1,6 @@
+/**
+ * 注册受限网页搜索与读取工具，读取 URL 必须来自任务级访问授权并保留可追溯引用。
+ */
 import { useAppStore } from '../../../store/useAppStore';
 import { readWebPage } from '../../webPageService';
 import { searchWeb } from '../../webSearchService';

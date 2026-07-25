@@ -1,3 +1,6 @@
+/**
+ * 注册画布查询与写入工具，并通过命令注册表、项目校验和 revision 防护执行节点操作。
+ */
 import type { Node } from '@xyflow/react';
 import { getLastCanvasPointerPosition } from '../../canvasPointerService';
 import { useAppStore } from '../../../store/useAppStore';

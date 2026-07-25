@@ -1,3 +1,6 @@
+/**
+ * 定义并发布进程内 Agent 生命周期事件，供任务指标、调试和 UI 观察者订阅。
+ */
 import type {
   AgentExpertRole,
   AgentStepStatus,

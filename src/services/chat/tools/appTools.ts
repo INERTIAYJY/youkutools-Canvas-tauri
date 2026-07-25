@@ -1,3 +1,6 @@
+/**
+ * 注册应用级只读工具，为 Agent 提供已配置模型和有限运行状态查询。
+ */
 import { useAppStore } from '../../../store/useAppStore';
 import {
   getConfiguredModelGroups,

@@ -1,3 +1,7 @@
+/**
+ * 对话提交与恢复的统一控制层，按会话模式分派普通回复、Agent 任务和显式媒体生成。
+ * 组件只调用本模块，不直接拼接运行时、调度器或审批流程。
+ */
 import { runMediaGeneration } from '../ai/generationRuntime';
 import {
   buildAssistantSystemPrompt,

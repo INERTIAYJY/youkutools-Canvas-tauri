@@ -1,3 +1,7 @@
+/**
+ * 创建和管理任务级 Provider 配置草稿，负责协议示例分析、字段裁剪与凭据排除。
+ * 草稿有数量和存活期限制，不直接写入正式配置。
+ */
 import type {
   ApiProviderConfig,
   GeneralModelCategory,

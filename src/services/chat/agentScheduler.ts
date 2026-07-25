@@ -1,3 +1,6 @@
+/**
+ * 按会话串行调度 Agent 执行，同一会话只运行一个任务，不同会话可独立推进。
+ */
 export interface ConversationAgentExecution {
   taskId: string;
   conversationId: string;

@@ -1,3 +1,6 @@
+/**
+ * 按当前消息的词项相关性、记忆类型优先级和时间因素排序项目记忆。
+ */
 import {
   PROJECT_MEMORY_KIND_PRIORITY,
   type ProjectMemory,

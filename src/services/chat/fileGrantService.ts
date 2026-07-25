@@ -1,3 +1,6 @@
+/**
+ * 管理会话级本地文件授权和受限文本读取；真实路径与运行时控制器只保存在内存中。
+ */
 import {
   readAgentAuthorizedTextFile,
   selectAgentTextFiles,

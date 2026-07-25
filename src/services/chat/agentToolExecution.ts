@@ -1,3 +1,6 @@
+/**
+ * 执行已注册的 Agent 工具调用，串联参数校验、Policy 决策、审批、指标和生命周期事件。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import type {
   AgentApprovalResolution,

@@ -1,3 +1,6 @@
+/**
+ * 管理 Agent 任务级网页访问授权与引用编号，仅允许读取搜索结果或用户目标中明确出现的公开 URL。
+ */
 import type { WebSource } from '../../types/chat';
 
 const SENSITIVE_QUERY_KEYS = new Set([

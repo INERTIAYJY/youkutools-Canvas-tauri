@@ -1,3 +1,6 @@
+/**
+ * 注册 Provider 文档读取、配置草稿生成与确认写入工具，文档内容不能直接修改正式配置。
+ */
 import { useAppStore } from '../../../store/useAppStore';
 import type { GeneralModelCategory } from '../../../types';
 import { readProviderDocsPage } from '../../providerDocsService';

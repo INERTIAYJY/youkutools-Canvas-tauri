@@ -1,3 +1,6 @@
+/**
+ * 校验 Agent 画布检查点后按历史快照回退任务写入，并记录回退事件。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import {
   validateAgentTaskCanvasRewind,

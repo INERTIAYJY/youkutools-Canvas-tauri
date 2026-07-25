@@ -1,3 +1,6 @@
+/**
+ * 记录经过字段白名单裁剪的 Agent 生命周期事件与累计指标，避免敏感正文进入任务日志。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import {
   DEFAULT_AGENT_TASK_METRICS,

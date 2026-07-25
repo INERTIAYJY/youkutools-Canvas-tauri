@@ -1,3 +1,6 @@
+/**
+ * 解析 Skill 文档的受限 frontmatter，并将声明信息与正文拆分供 Agent 上下文使用。
+ */
 import type { SkillManifest } from '../../types';
 
 const FRONTMATTER_BOUNDARY = '---';

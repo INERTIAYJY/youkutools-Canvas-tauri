@@ -1,3 +1,6 @@
+/**
+ * 管理任务级 Provider 文档访问图，限制同源链接深度、页面数量和累计文本体积。
+ */
 const MAX_PROVIDER_DOC_PAGES = 8;
 const MAX_PROVIDER_DOC_DEPTH = 2;
 const MAX_PROVIDER_DOC_TEXT_CHARS = 80_000;

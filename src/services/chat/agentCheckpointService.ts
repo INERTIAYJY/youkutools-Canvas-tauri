@@ -1,3 +1,6 @@
+/**
+ * 生成 Agent 工具输入指纹并校验画布检查点，为重复写入抑制和安全回退提供依据。
+ */
 import type {
   AgentCanvasCheckpoint,
   AgentStep,

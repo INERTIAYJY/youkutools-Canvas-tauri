@@ -1,3 +1,6 @@
+/**
+ * 注册图片、视频和音频生成工具；媒体调用必须沿用显式模型引用、统一运行时和逐次确认策略。
+ */
 import { useAppStore } from '../../../store/useAppStore';
 import type {
   AudioGenerationPurpose,

@@ -1,3 +1,6 @@
+/**
+ * 注册会话授权文件的列举、受限读取和文本导出工具，不向模型暴露真实本地路径。
+ */
 import { saveAgentTextOutput } from '../../fileService';
 import { getCanvasPointerPosition } from '../../canvasPointerService';
 import { useAppStore } from '../../../store/useAppStore';

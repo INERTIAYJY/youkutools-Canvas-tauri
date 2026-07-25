@@ -1,3 +1,6 @@
+/**
+ * 管理 Agent 媒体占位节点从创建到成功或失败的生命周期，并拒绝过期画布派生结果。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import type { MediaGenerationResult } from '../../types/media';
 import {

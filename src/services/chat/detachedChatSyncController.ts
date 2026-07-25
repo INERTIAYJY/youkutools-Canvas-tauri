@@ -1,3 +1,6 @@
+/**
+ * 连接独立对话窗口与主窗口 Store，生成只读快照并把窗口操作路由回唯一写入源。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import type { ApiProviderConfig, GeneralModelConfig } from '../../types';
 import type { AgentTask } from '../../types/agent';

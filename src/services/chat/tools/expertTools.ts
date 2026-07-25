@@ -1,3 +1,6 @@
+/**
+ * 注册只读专家审阅工具，将受限角色参数映射到独立专家任务服务。
+ */
 import {
   AGENT_EXPERT_ROLES,
   type AgentExpertRole,

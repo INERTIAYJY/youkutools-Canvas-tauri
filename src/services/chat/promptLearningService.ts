@@ -1,8 +1,13 @@
+/**
+ * 从当前项目的成功媒体生成历史中提取少量相关样本，供 Agent 学习提示词表达习惯。
+ * 历史内容会先经过类型过滤、去重和脱敏，只作为不可信上下文，不产生新的持久化数据。
+ */
 import {
   getHistoryEntriesPage,
   type HistoryRecord,
 } from '../indexedDbService';
 
+// 同时限制数据库读取量、单条样本长度和最终注入量，避免学习上下文挤占正常对话预算。
 const HISTORY_SAMPLE_LIMIT_PER_KIND = 12;
 const CONTEXT_SAMPLE_LIMIT = 4;
 const SAMPLE_CHAR_LIMIT = 260;
@@ -21,6 +26,7 @@ const IMAGE_INTENT_RE = /(?:生图|图片|图像|插画|海报|照片|绘画|画
 const VIDEO_INTENT_RE = /(?:视频|动画|分镜|镜头|运镜|转场|时长|video|animation|shot|camera movement)/i;
 const CREATIVE_INTENT_RE = /(?:生成|创作|设计|制作|提示词|prompt|generate|create|design)/i;
 
+/** 根据当前请求选择可复用的历史媒体类型；非创作意图不加载历史。 */
 export function inferPromptLearningKinds(query: string): LearnedMediaKind[] {
   const image = IMAGE_INTENT_RE.test(query);
   const video = VIDEO_INTENT_RE.test(query);
@@ -35,6 +41,7 @@ export function inferPromptLearningKinds(query: string): LearnedMediaKind[] {
 
 function terms(value: string): Set<string> {
   const normalized = value.toLocaleLowerCase().normalize('NFKC');
+  // 拉丁文本按词提取，中文使用相邻双字，以较低成本兼顾两类提示词的相关性排序。
   const output = new Set(normalized.match(/[a-z0-9_-]{2,}/g) ?? []);
   const cjk = [...normalized].filter((char) => /[\u3400-\u9fff]/.test(char));
   for (let index = 0; index < cjk.length - 1; index += 1) {
@@ -50,6 +57,7 @@ function lexicalSimilarity(left: Set<string>, right: Set<string>): number {
   return matches / left.size;
 }
 
+/** 移除不能进入模型上下文的媒体数据、链接、本地引用、绝对路径和常见凭据。 */
 function sanitizePromptSample(prompt: string): string {
   return prompt
     .normalize('NFKC')
@@ -92,6 +100,7 @@ export function buildPromptLearningBlock(
       || seen.has(dedupeKey)
     ) return [];
     seen.add(dedupeKey);
+    // 相关性决定主要排序，45 天半衰期只用于让近期习惯在相近候选中稍微靠前。
     const ageDays = Math.max(0, now - record.timestamp) / DAY_MS;
     const relevance = lexicalSimilarity(queryTerms, terms(prompt));
     const recency = 2 ** (-ageDays / 45);
@@ -116,6 +125,10 @@ export function buildPromptLearningBlock(
   ].join('\n').slice(0, CONTEXT_CHAR_LIMIT);
 }
 
+/**
+ * 按媒体类型并行读取有限历史；IndexedDB 不可用或读取失败时静默降级为空上下文，
+ * 避免提示词学习这一增强能力阻断正常对话。
+ */
 export async function buildLearnedPromptContext(
   projectId: string,
   query: string,

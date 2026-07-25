@@ -344,10 +344,12 @@ export async function assembleAgentContext(
   const { conversationId, projectId, systemPrompt, userMessage, signal } = options;
   const excludeIds = new Set(options.excludeMessageIds ?? []);
   const spec = resolveAssistantContextSpec();
+  // 对话历史与提示词样本互不依赖，并行读取可避免给每轮 Agent 响应叠加串行存储延迟。
   const [persistedResult, learnedPromptBlock] = await Promise.all([
     loadMessages(conversationId, 0, 200),
     projectId ? buildLearnedPromptContext(projectId, userMessage) : Promise.resolve(''),
   ]);
+  // 学习样本复用记忆块的预算入口，使后续裁剪和压缩仍由统一上下文预算控制。
   const memoryBlock = [
     projectId ? buildMemoryBlock(projectId, userMessage) : '',
     learnedPromptBlock,

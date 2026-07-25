@@ -1,3 +1,6 @@
+/**
+ * 汇总并幂等注册全部 Agent 工具域，同时提供测试环境下的完整注销入口。
+ */
 import { registerCanvasAgentTools } from './canvasTools';
 import { registerMediaAgentTools } from './mediaTools';
 import { registerFileAgentTools } from './fileTools';

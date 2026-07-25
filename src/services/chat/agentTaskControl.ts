@@ -1,3 +1,6 @@
+/**
+ * 管理 AgentTask 状态机、运行时取消控制器和审批 Promise，统一约束任务状态迁移。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import {
   AGENT_TERMINAL_STATUSES,

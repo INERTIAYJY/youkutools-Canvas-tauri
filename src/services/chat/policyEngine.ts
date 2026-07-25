@@ -1,3 +1,6 @@
+/**
+ * Agent 工具权限的本地固定策略矩阵，根据模式和 effect 返回放行、确认或拒绝决策。
+ */
 import type { AgentMode } from '../../types/agent';
 import type {
   AgentToolDefinition,

@@ -1,3 +1,6 @@
+/**
+ * 运行无工具、只读的 Agent 专家审阅子任务，并限制并发数量、画布快照和结果体积。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import {
   AGENT_EXPERT_ROLES,

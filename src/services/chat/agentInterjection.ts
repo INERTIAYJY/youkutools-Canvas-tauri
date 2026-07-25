@@ -1,3 +1,6 @@
+/**
+ * 保存 Agent 执行期间用户追加的临时指令，并在下一轮模型调用前一次性取出。
+ */
 export interface AgentInterjection {
   id: string;
   text: string;

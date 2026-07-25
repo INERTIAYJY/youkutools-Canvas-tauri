@@ -35,17 +35,33 @@ function TitlebarInner({
 }: {
   getCurrentWindow: typeof import('@tauri-apps/api/window').getCurrentWindow;
 }) {
-  const [isMaximized, setIsMaximized] = useState(false);
+  const [isWindowExpanded, setIsWindowExpanded] = useState(false);
   const appWindow = getCurrentWindow();
   const sidebarFloating = useAppStore((state) => state.config.sidebarFloating) !== false
-    && !isMaximized;
+    && !isWindowExpanded;
 
   useEffect(() => {
-    const check = () => appWindow.isMaximized().then(setIsMaximized);
+    const check = () => {
+      const statePromise = isMacOS
+        ? appWindow.isFullscreen()
+        : appWindow.isMaximized();
+      statePromise.then(setIsWindowExpanded);
+    };
     check();
     const unlistenPromise = appWindow.onResized(check);
     return () => { unlistenPromise.then((fn) => fn()); };
   }, [appWindow]);
+
+  const toggleWindowExpanded = async () => {
+    if (!isMacOS) {
+      await appWindow.toggleMaximize();
+      return;
+    }
+
+    const isFullscreen = await appWindow.isFullscreen();
+    await appWindow.setFullscreen(!isFullscreen);
+    setIsWindowExpanded(!isFullscreen);
+  };
 
   if (isMacOS) {
     return (
@@ -74,11 +90,11 @@ function TitlebarInner({
             <MinimizeIcon />
           </MacTrafficLight>
           <MacTrafficLight
-            label={isMaximized ? '还原' : '最大化'}
+            label={isWindowExpanded ? '退出全屏' : '全屏'}
             className="bg-emerald-400 hover:bg-emerald-300"
-            onClick={() => appWindow.toggleMaximize()}
+            onClick={() => { void toggleWindowExpanded(); }}
           >
-            {isMaximized ? <RestoreIcon /> : <MaximizeIcon />}
+            {isWindowExpanded ? <RestoreIcon /> : <MaximizeIcon />}
           </MacTrafficLight>
         </div>
       </div>
@@ -104,12 +120,12 @@ function TitlebarInner({
 
       {/* Maximize / Restore */}
       <AnimatedButton
-        onClick={() => appWindow.toggleMaximize()}
+        onClick={() => { void toggleWindowExpanded(); }}
         className="w-10 h-9 flex items-center justify-center text-canvas-text-muted
                    hover:bg-canvas-hover hover:text-canvas-text-secondary transition-colors"
-        aria-label={isMaximized ? '还原' : '最大化'}
+        aria-label={isWindowExpanded ? '还原' : '最大化'}
       >
-        {isMaximized ? (
+        {isWindowExpanded ? (
           <svg width="10" height="10" viewBox="0 0 10 10">
             <rect x="2" y="0" width="8" height="8" rx="1" fill="none" stroke="currentColor" strokeWidth="1" />
             <rect x="0" y="2" width="8" height="8" rx="1" fill="currentColor" />

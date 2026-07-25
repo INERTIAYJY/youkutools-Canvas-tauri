@@ -641,6 +641,29 @@ textarea:focus {
   outline: none;
 }
 
+/* Native selects keep their platform popup, while the closed control matches the app UI. */
+select:not([multiple]):not([size]) {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-inline-end: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--theme-text-secondary) 50%),
+    linear-gradient(135deg, var(--theme-text-secondary) 50%, transparent 50%);
+  background-position:
+    calc(100% - 13px) calc(50% - 2px),
+    calc(100% - 8px) calc(50% - 2px);
+  background-repeat: no-repeat;
+  background-size: 5px 5px;
+  color-scheme: inherit;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+select:not([multiple]):not([size]):disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 /* WebView2 may render the native option popup outside the themed select surface. */
 select {
   color-scheme: inherit;
@@ -654,6 +677,15 @@ select optgroup {
 
 select option:disabled {
   color: var(--theme-text-muted);
+}
+
+@media (forced-colors: active) {
+  select:not([multiple]):not([size]) {
+    -webkit-appearance: auto;
+    appearance: auto;
+    padding-inline-end: revert;
+    background-image: none;
+  }
 }
 
 :where(

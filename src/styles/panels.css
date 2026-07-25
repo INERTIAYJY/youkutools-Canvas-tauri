@@ -429,6 +429,78 @@
   color: #fdba74;
 }
 
+/* Light surfaces need more separation than the translucent dark-theme treatment. */
+[data-theme='light'] .wf-panel-backdrop {
+  background: color-mix(in srgb, var(--theme-text) 28%, transparent);
+}
+[data-theme='light'] .wf-panel {
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--theme-surface) 96%, transparent),
+      color-mix(in srgb, var(--theme-surface) 96%, transparent)
+    ) padding-box,
+    var(--glass-bevel-border) border-box;
+}
+[data-theme='light'] .wf-section-title,
+[data-theme='light'] .wf-file-placeholder,
+[data-theme='light'] .wf-empty {
+  color: var(--theme-text-secondary);
+}
+[data-theme='light'] .wf-input {
+  background: var(--theme-card);
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 44%, var(--theme-surface));
+}
+[data-theme='light'] .wf-input::placeholder {
+  color: var(--theme-text-secondary);
+}
+[data-theme='light'] .wf-cat-chip {
+  background: var(--theme-card);
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 34%, var(--theme-surface));
+}
+[data-theme='light'] .wf-cat-chip:hover {
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 62%, var(--theme-surface));
+}
+[data-theme='light'] .wf-cat-chip.active {
+  color: color-mix(in srgb, var(--brand) 82%, var(--theme-text));
+  border-color: color-mix(in srgb, var(--brand) 68%, var(--theme-surface));
+}
+[data-theme='light'] .wf-file-area {
+  background: var(--white-alpha-03);
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 58%, var(--theme-surface));
+}
+[data-theme='light'] .wf-file-area:hover {
+  border-color: var(--brand);
+}
+[data-theme='light'] .wf-btn-primary {
+  color: color-mix(in srgb, var(--brand) 82%, var(--theme-text));
+  border-color: color-mix(in srgb, var(--brand) 58%, var(--theme-surface));
+}
+[data-theme='light'] .wf-btn-primary:disabled {
+  color: var(--theme-text-muted);
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 36%, var(--theme-surface));
+  opacity: 0.72;
+}
+[data-theme='light'] .wf-file-selected,
+[data-theme='light'] .wf-msg-success {
+  color: color-mix(in srgb, var(--success) 68%, var(--theme-text));
+}
+[data-theme='light'] .wf-msg-error,
+[data-theme='light'] .wf-item-del:hover {
+  color: color-mix(in srgb, var(--danger) 72%, var(--theme-text));
+}
+[data-theme='light'] .wf-ionode-prompt {
+  color: color-mix(in srgb, var(--brand) 76%, var(--theme-text));
+}
+[data-theme='light'] .wf-ionode-image {
+  color: color-mix(in srgb, var(--node-image) 64%, var(--theme-text));
+}
+[data-theme='light'] .wf-ionode-video {
+  color: color-mix(in srgb, var(--node-video) 68%, var(--theme-text));
+}
+[data-theme='light'] .wf-ionode-audio {
+  color: color-mix(in srgb, var(--node-audio) 70%, var(--theme-text));
+}
+
 /* ============================================
    Assets Panel — centered frosted modal
    ============================================ */
@@ -455,7 +527,7 @@
   display: flex;
   flex-direction: column;
   background:
-    linear-gradient(var(--glass-bg), var(--glass-bg)) padding-box,
+    linear-gradient(var(--glass-panel-bg), var(--glass-panel-bg)) padding-box,
     var(--glass-bevel-border) border-box;
   backdrop-filter: blur(var(--glass-blur-lg));
   border: 1px solid transparent;
@@ -1074,6 +1146,82 @@
   padding: 14px;
   font-size: 12px;
   color: var(--theme-text-muted);
+}
+
+/* Keep the light glass surface translucent while giving its controls an opaque foreground. */
+[data-theme='light'] .assets-panel {
+  --assets-light-muted: color-mix(in srgb, var(--theme-text-secondary) 78%, var(--theme-text));
+  --assets-light-control-bg: color-mix(in srgb, var(--theme-surface) 90%, transparent);
+  --assets-light-control-border: color-mix(in srgb, var(--theme-text-secondary) 38%, var(--theme-surface));
+}
+[data-theme='light'] .assets-panel-subtitle,
+[data-theme='light'] .assets-empty,
+[data-theme='light'] .assets-card-name,
+[data-theme='light'] .assets-load-sentinel {
+  color: var(--assets-light-muted);
+}
+[data-theme='light'] .assets-tabs {
+  border-bottom-color: var(--assets-light-control-border);
+}
+[data-theme='light'] .assets-tab,
+[data-theme='light'] .assets-cat-chip,
+[data-theme='light'] .assets-folder-chip {
+  color: var(--assets-light-muted);
+}
+[data-theme='light'] .assets-tab-count {
+  background: var(--assets-light-control-bg);
+  color: var(--assets-light-muted);
+}
+[data-theme='light'] .assets-tab.active {
+  border-bottom-color: var(--brand);
+}
+[data-theme='light'] .assets-tab.active .assets-tab-count,
+[data-theme='light'] .assets-cat-chip.active {
+  color: color-mix(in srgb, var(--brand) 78%, var(--theme-text));
+}
+[data-theme='light'] .assets-cat-chip,
+[data-theme='light'] .assets-search,
+[data-theme='light'] .assets-column-stepper,
+[data-theme='light'] .assets-project-select,
+[data-theme='light'] .assets-folder-chip {
+  background-color: var(--assets-light-control-bg);
+  border-color: var(--assets-light-control-border);
+}
+[data-theme='light'] .assets-cat-chip:hover:not(:disabled),
+[data-theme='light'] .assets-project-select:hover {
+  background-color: var(--theme-surface);
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 58%, var(--theme-surface));
+}
+[data-theme='light'] .assets-search:focus-within,
+[data-theme='light'] .assets-project-select:focus {
+  background-color: var(--theme-surface);
+  border-color: var(--brand);
+}
+[data-theme='light'] .assets-waterfall-card {
+  background: color-mix(in srgb, var(--theme-surface) 86%, transparent);
+  border-color: var(--assets-light-control-border);
+}
+[data-theme='light'] .assets-waterfall-card:hover {
+  background: var(--theme-surface);
+  border-color: color-mix(in srgb, var(--theme-text-secondary) 58%, var(--theme-surface));
+}
+[data-theme='light'] .assets-cat-chip:disabled,
+[data-theme='light'] .assets-column-stepper button:disabled {
+  opacity: 0.55;
+}
+[data-theme='light'] .assets-card-cat-tag.cat-image {
+  color: color-mix(in srgb, var(--node-image) 62%, var(--theme-text));
+}
+[data-theme='light'] .assets-card-cat-tag.cat-video {
+  color: color-mix(in srgb, var(--node-video) 68%, var(--theme-text));
+}
+[data-theme='light'] .assets-card-cat-tag.cat-audio {
+  color: color-mix(in srgb, var(--node-audio) 70%, var(--theme-text));
+}
+[data-theme='light'] .assets-card-cat-tag.cat-text,
+[data-theme='light'] .assets-card-tag,
+[data-theme='light'] .assets-card-tag button {
+  color: color-mix(in srgb, var(--brand) 76%, var(--theme-text));
 }
 
 /* 卡片轻量入场（无 layout reflow 动画，性能友好） */

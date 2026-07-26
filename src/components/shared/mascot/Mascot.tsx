@@ -1,7 +1,7 @@
 /**
  * Mascot — Three.js 吉祥物
  *
- * 一个柔和明暗过渡的圆球，会自然眨眼，眼睛跟随鼠标方向，
+ * 一个带短绒毛的柔和圆球，会自然眨眼，眼睛跟随鼠标方向，
  * 鼠标悬浮在球体上时整体高亮。
  *
  * 请求模型时（loading=true）球体本体逐面炸裂、飞散成粒子云；
@@ -24,8 +24,10 @@ import {
   AmbientLight,
   Group,
   MeshPhysicalMaterial,
+  ShaderMaterial,
   Color,
   Mesh,
+  InstancedMesh,
   SphereGeometry,
   MeshBasicMaterial,
   DoubleSide,
@@ -34,6 +36,12 @@ import {
   Vector2,
   Raycaster,
   MathUtils,
+  Matrix4,
+  DataTexture,
+  RGBAFormat,
+  UnsignedByteType,
+  RepeatWrapping,
+  LinearFilter,
   Timer,
 } from 'three';
 
@@ -59,6 +67,10 @@ const THINKING_POINTER_PRIORITY_MS = 900;
 const THINKING_GAZE_LERP = 0.2;
 const THINKING_GAZE_MIN_INTERVAL = 0.8;
 const THINKING_GAZE_MAX_INTERVAL = 1.4;
+const FUR_SHELL_COUNT = 20;
+const FUR_LENGTH = 0.18;
+const FUR_NOISE_SIZE = 64;
+const FUR_NOISE_SCALE = 1.15;
 
 const THINKING_GAZE_POINTS = [
   [-0.34, 0.2],
@@ -161,6 +173,104 @@ const MASCOT_PALETTE: Record<MascotTheme, {
   },
 };
 
+function createFurNoiseTexture() {
+  const data = new Uint8Array(FUR_NOISE_SIZE * FUR_NOISE_SIZE * 4);
+  const randomAt = (x: number, y: number, seed: number) => {
+    let value = Math.imul(x + 1, 374761393)
+      ^ Math.imul(y + 1, 668265263)
+      ^ seed;
+    value = Math.imul(value ^ (value >>> 13), 1274126177);
+    return ((value ^ (value >>> 16)) >>> 0) / 0xffffffff;
+  };
+
+  for (let y = 0; y < FUR_NOISE_SIZE; y += 1) {
+    for (let x = 0; x < FUR_NOISE_SIZE; x += 1) {
+      const offset = (y * FUR_NOISE_SIZE + x) * 4;
+      const strandLength = 0.72 + Math.pow(randomAt(x, y, 0x51f15e), 0.65) * 0.28;
+      const colorVariation = randomAt(x, y, 0x9e3779);
+      data[offset] = Math.round(strandLength * 255);
+      data[offset + 1] = Math.round(colorVariation * 255);
+      data[offset + 2] = 255;
+      data[offset + 3] = 255;
+    }
+  }
+
+  const texture = new DataTexture(
+    data,
+    FUR_NOISE_SIZE,
+    FUR_NOISE_SIZE,
+    RGBAFormat,
+    UnsignedByteType,
+  );
+  texture.wrapS = RepeatWrapping;
+  texture.wrapT = RepeatWrapping;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+const FUR_VERTEX_SHADER = `
+uniform float uFurLength;
+
+varying vec2 vFurUv;
+varying vec3 vFurNormal;
+varying float vFurLayer;
+
+void main() {
+  float shellScale = 1.0;
+  vec4 shellPosition = vec4(position, 1.0);
+
+  #ifdef USE_INSTANCING
+    shellScale = length(instanceMatrix[0].xyz);
+    shellPosition = instanceMatrix * shellPosition;
+  #endif
+
+  vFurLayer = clamp((shellScale - 1.0) / uFurLength, 0.0, 1.0);
+  vFurUv = uv;
+  vFurNormal = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * shellPosition;
+}
+`;
+
+const FUR_FRAGMENT_SHADER = `
+uniform sampler2D uFurNoise;
+uniform vec3 uFurColor;
+uniform vec3 uGlowColor;
+uniform float uNoiseScale;
+uniform float uSmoothness;
+uniform float uOpacity;
+uniform float uGlow;
+
+varying vec2 vFurUv;
+varying vec3 vFurNormal;
+varying float vFurLayer;
+
+void main() {
+  vec4 noiseSample = texture2D(uFurNoise, vFurUv * uNoiseScale);
+  float strandLength = max(noiseSample.r, 0.02);
+  float strandPosition = vFurLayer / strandLength;
+  if (strandPosition >= 1.0) discard;
+
+  float tipFade = pow(1.0 - strandPosition, uSmoothness);
+  float layerAlpha = mix(0.14, 0.055, vFurLayer);
+  float alpha = tipFade * layerAlpha * uOpacity;
+  if (alpha < 0.008) discard;
+
+  vec3 normal = normalize(vFurNormal);
+  vec3 lightDirection = normalize(vec3(-0.48, 0.72, 1.0));
+  float diffuse = max(dot(normal, lightDirection), 0.0);
+  float rim = pow(1.0 - abs(normal.z), 2.2);
+  float variation = mix(0.94, 1.02, noiseSample.g);
+  vec3 color = uFurColor * (0.72 + 0.25 * diffuse + 0.08 * rim) * variation;
+  color += uGlowColor * uGlow * (0.18 + 0.34 * rim);
+
+  gl_FragColor = vec4(color, alpha);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+
 /** 生成竖直胶囊（圆角矩形）形状，用作眼睛 */
 function makeEyeShape(width: number, height: number): Shape {
   const w = width / 2;
@@ -260,7 +370,7 @@ export default function Mascot({
     const head = new Group();
     scene.add(head);
 
-    /* ── 球体：暗色主题为哑光陶瓷，浅色主题为珍珠烟灰缎面 ── */
+    /* ── 球体内核：负责实体明暗、射线命中和加载形态 ── */
     const sphereMat = new MeshPhysicalMaterial({
       color: initialPalette.body,
       roughness: initialPalette.roughness,
@@ -280,6 +390,39 @@ export default function Mascot({
     );
     sphere.renderOrder = 1;
     head.add(sphere);
+
+    /* ── 短绒：参考 shells 技术，以实例缩放把多层球面合并为一次绘制 ── */
+    const furNoise = createFurNoiseTexture();
+    const furGeometry = new SphereGeometry(SPHERE_RADIUS, 48, 32);
+    const furUniforms = {
+      uFurNoise: { value: furNoise },
+      uFurColor: { value: new Color(initialPalette.body) },
+      uGlowColor: { value: new Color(initialPalette.emissive) },
+      uFurLength: { value: FUR_LENGTH },
+      uNoiseScale: { value: FUR_NOISE_SCALE },
+      uSmoothness: { value: 1.65 },
+      uOpacity: { value: 1 },
+      uGlow: { value: 0 },
+    };
+    const furMat = new ShaderMaterial({
+      uniforms: furUniforms,
+      vertexShader: FUR_VERTEX_SHADER,
+      fragmentShader: FUR_FRAGMENT_SHADER,
+      transparent: true,
+      depthWrite: false,
+    });
+    const fur = new InstancedMesh(furGeometry, furMat, FUR_SHELL_COUNT);
+    const furMatrix = new Matrix4();
+    for (let index = 0; index < FUR_SHELL_COUNT; index += 1) {
+      const layer = (FUR_SHELL_COUNT - index) / FUR_SHELL_COUNT;
+      const scale = 1 + FUR_LENGTH * layer;
+      furMatrix.makeScale(scale, scale, scale);
+      fur.setMatrixAt(index, furMatrix);
+    }
+    fur.instanceMatrix.needsUpdate = true;
+    fur.computeBoundingSphere();
+    fur.renderOrder = 2;
+    head.add(fur);
 
     const shadowShape = new Shape();
     shadowShape.absellipse(0, 0, 0.58, 0.11, 0, Math.PI * 2, false, 0);
@@ -465,6 +608,7 @@ export default function Mascot({
         sphereMat.clearcoat = palette.clearcoat;
         sphereMat.clearcoatRoughness = palette.clearcoatRoughness;
         sphereMat.needsUpdate = true;
+        furUniforms.uFurColor.value.setHex(palette.body);
         eyeMat.color.setHex(palette.eyes);
         shadowMat.color.setHex(palette.shadow);
         rimLight.intensity = palette.rimLightIntensity;
@@ -554,6 +698,8 @@ export default function Mascot({
         targetEmissive,
         0.1,
       );
+      furUniforms.uGlowColor.value.copy(sphereMat.emissive);
+      furUniforms.uGlow.value = sphereMat.emissiveIntensity;
       rimLight.intensity = MathUtils.lerp(
         rimLight.intensity,
         activePalette.rimLightIntensity + (hasStatusColor ? activePalette.statusRimBoost : 0),
@@ -611,6 +757,7 @@ export default function Mascot({
       // 头部：跟随偏航 + 过渡自转（自转靠眼睛体现，故转的是头部而非粒子球）
       head.rotation.y = headYaw + spinAngle;
       sphereMat.opacity = activePalette.opacity * (1 - fade);
+      furUniforms.uOpacity.value = 1 - fade;
       eyeMat.opacity = 1 - fade;
       shadowMat.opacity = activePalette.shadowOpacity * (1 - fade);
       head.visible = fade < 0.995;
@@ -655,6 +802,9 @@ export default function Mascot({
       window.removeEventListener('blur', handleWindowLeave);
       sphere.geometry.dispose();
       sphereMat.dispose();
+      furGeometry.dispose();
+      furMat.dispose();
+      furNoise.dispose();
       shadowGeo.dispose();
       shadowMat.dispose();
       eyeGeo.dispose();

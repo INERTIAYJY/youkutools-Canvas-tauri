@@ -74,7 +74,9 @@ export default function App() {
     y: mascotY,
     handlePointerDownCapture: handleMascotPointerDownCapture,
     handleDragStart: handleMascotDragStart,
+    handleDrag: handleMascotDrag,
     handleDragEnd: handleMascotDragEnd,
+    getDragForce: getMascotDragForce,
     consumeDragClick: consumeMascotDragClick,
   } = useMascotDrag();
 
@@ -358,6 +360,7 @@ export default function App() {
               dragMomentum={false}
               onPointerDownCapture={handleMascotPointerDownCapture}
               onDragStart={handleMascotDragStart}
+              onDrag={handleMascotDrag}
               onDragEnd={handleMascotDragEnd}
             >
               <motion.div
@@ -412,6 +415,7 @@ export default function App() {
                         status={mascotStatus}
                         theme={effectiveTheme}
                         reduceMotion={Boolean(reduceMotion)}
+                        getDragForce={getMascotDragForce}
                       />
                     )}
                   </Suspense>

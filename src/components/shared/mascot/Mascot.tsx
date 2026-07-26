@@ -67,10 +67,14 @@ const THINKING_POINTER_PRIORITY_MS = 900;
 const THINKING_GAZE_LERP = 0.2;
 const THINKING_GAZE_MIN_INTERVAL = 0.8;
 const THINKING_GAZE_MAX_INTERVAL = 1.4;
-const FUR_SHELL_COUNT = 20;
-const FUR_LENGTH = 0.18;
-const FUR_NOISE_SIZE = 64;
-const FUR_NOISE_SCALE = 1.15;
+const FUR_SHELL_COUNT = 48;
+const FUR_LENGTH = 0.22;
+const FUR_NOISE_SIZE = 128;
+const FUR_NOISE_SCALE = 1.5;
+const FUR_DRAG_BEND = 0.72;
+const FUR_DRAG_SPRING = 90;
+const FUR_DRAG_DAMPING = 11;
+const FUR_DRAG_REST_THRESHOLD = 0.002;
 
 const THINKING_GAZE_POINTS = [
   [-0.34, 0.2],
@@ -186,7 +190,10 @@ function createFurNoiseTexture() {
   for (let y = 0; y < FUR_NOISE_SIZE; y += 1) {
     for (let x = 0; x < FUR_NOISE_SIZE; x += 1) {
       const offset = (y * FUR_NOISE_SIZE + x) * 4;
-      const strandLength = 0.72 + Math.pow(randomAt(x, y, 0x51f15e), 0.65) * 0.28;
+      const strandSeed = randomAt(x, y, 0x51f15e);
+      const strandLength = strandSeed > 0.52
+        ? 0.72 + Math.pow(randomAt(x, y, 0x7f4a7c), 0.65) * 0.28
+        : 0;
       const colorVariation = randomAt(x, y, 0x9e3779);
       data[offset] = Math.round(strandLength * 255);
       data[offset + 1] = Math.round(colorVariation * 255);
@@ -212,6 +219,7 @@ function createFurNoiseTexture() {
 
 const FUR_VERTEX_SHADER = `
 uniform float uFurLength;
+uniform vec2 uDragForce;
 
 varying vec2 vFurUv;
 varying vec3 vFurNormal;
@@ -223,10 +231,14 @@ void main() {
 
   #ifdef USE_INSTANCING
     shellScale = length(instanceMatrix[0].xyz);
-    shellPosition = instanceMatrix * shellPosition;
   #endif
 
   vFurLayer = clamp((shellScale - 1.0) / uFurLength, 0.0, 1.0);
+  vec3 furDirection = normalize(normal + vec3(0.08, -0.2, 0.0));
+  float strandHeight = length(position) * uFurLength * vFurLayer;
+  vec3 dragDirection = vec3(-uDragForce.x, uDragForce.y, 0.0);
+  vec3 dragBend = dragDirection * strandHeight * vFurLayer * ${FUR_DRAG_BEND.toFixed(2)};
+  shellPosition = vec4(position + furDirection * strandHeight + dragBend, 1.0);
   vFurUv = uv;
   vFurNormal = normalize(normalMatrix * normal);
   gl_Position = projectionMatrix * modelViewMatrix * shellPosition;
@@ -252,17 +264,16 @@ void main() {
   float strandPosition = vFurLayer / strandLength;
   if (strandPosition >= 1.0) discard;
 
-  float tipFade = pow(1.0 - strandPosition, uSmoothness);
-  float layerAlpha = mix(0.14, 0.055, vFurLayer);
-  float alpha = tipFade * layerAlpha * uOpacity;
-  if (alpha < 0.008) discard;
+  float alpha = pow(1.0 - strandPosition, uSmoothness) * uOpacity;
+  if (alpha < 0.02) discard;
 
   vec3 normal = normalize(vFurNormal);
   vec3 lightDirection = normalize(vec3(-0.48, 0.72, 1.0));
   float diffuse = max(dot(normal, lightDirection), 0.0);
   float rim = pow(1.0 - abs(normal.z), 2.2);
   float variation = mix(0.94, 1.02, noiseSample.g);
-  vec3 color = uFurColor * (0.72 + 0.25 * diffuse + 0.08 * rim) * variation;
+  float rootShade = mix(0.72, 1.0, strandPosition * strandPosition);
+  vec3 color = uFurColor * (0.72 + 0.25 * diffuse + 0.08 * rim) * variation * rootShade;
   color += uGlowColor * uGlow * (0.18 + 0.34 * rim);
 
   gl_FragColor = vec4(color, alpha);
@@ -298,6 +309,8 @@ interface MascotProps {
   theme?: MascotTheme;
   /** 遵循系统减弱动态偏好，保留状态反馈但移除空间运动 */
   reduceMotion?: boolean;
+  /** 读取拖拽速度形成的受力，不触发 React 逐帧重渲染 */
+  getDragForce?: () => { x: number; y: number; active: boolean };
 }
 
 export default function Mascot({
@@ -305,6 +318,7 @@ export default function Mascot({
   status = 'idle',
   theme = 'dark',
   reduceMotion = false,
+  getDragForce,
 }: MascotProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // 把最新 loading 放进 ref，供常驻渲染循环读取（避免重建场景）
@@ -313,6 +327,7 @@ export default function Mascot({
   const statusChangedAtRef = useRef(0);
   const themeRef = useRef(theme);
   const reduceMotionRef = useRef(reduceMotion);
+  const getDragForceRef = useRef(getDragForce);
   useEffect(() => {
     loadingRef.current = loading;
   }, [loading]);
@@ -328,6 +343,9 @@ export default function Mascot({
   useEffect(() => {
     reduceMotionRef.current = reduceMotion;
   }, [reduceMotion]);
+  useEffect(() => {
+    getDragForceRef.current = getDragForce;
+  }, [getDragForce]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -399,8 +417,9 @@ export default function Mascot({
       uFurColor: { value: new Color(initialPalette.body) },
       uGlowColor: { value: new Color(initialPalette.emissive) },
       uFurLength: { value: FUR_LENGTH },
+      uDragForce: { value: new Vector2(0, 0) },
       uNoiseScale: { value: FUR_NOISE_SCALE },
-      uSmoothness: { value: 1.65 },
+      uSmoothness: { value: 0.9 },
       uOpacity: { value: 1 },
       uGlow: { value: 0 },
     };
@@ -414,7 +433,7 @@ export default function Mascot({
     const fur = new InstancedMesh(furGeometry, furMat, FUR_SHELL_COUNT);
     const furMatrix = new Matrix4();
     for (let index = 0; index < FUR_SHELL_COUNT; index += 1) {
-      const layer = (FUR_SHELL_COUNT - index) / FUR_SHELL_COUNT;
+      const layer = (index + 1) / FUR_SHELL_COUNT;
       const scale = 1 + FUR_LENGTH * layer;
       furMatrix.makeScale(scale, scale, scale);
       fur.setMatrixAt(index, furMatrix);
@@ -541,6 +560,8 @@ export default function Mascot({
     let headYaw = 0;
     const targetEmissiveColor = new Color(initialPalette.emissive);
     const targetRimColor = new Color(DEFAULT_RIM_COLOR);
+    const dragForce = new Vector2(0, 0);
+    const dragForceVelocity = new Vector2(0, 0);
 
     /* ── 渲染循环（限帧 + 后台暂停，同 NebulaBackground）── */
     const clock = new Timer();
@@ -555,9 +576,16 @@ export default function Mascot({
       const motionEnabled = !reduceMotionRef.current;
       const visualStatus = statusRef.current;
       const isHovering = motionEnabled && finePointerQuery.matches && hovering;
+      const reportedDragForce = getDragForceRef.current?.();
+      const dragMotionActive = motionEnabled && Boolean(
+        reportedDragForce?.active
+        || dragForce.lengthSq() > FUR_DRAG_REST_THRESHOLD * FUR_DRAG_REST_THRESHOLD
+        || dragForceVelocity.lengthSq() > FUR_DRAG_REST_THRESHOLD * FUR_DRAG_REST_THRESHOLD,
+      );
       const isActive = motionEnabled && (
         loadingRef.current
         || isHovering
+        || dragMotionActive
         || blinkStart >= 0
         || loadObj.val > 0.002
         || now - lastPointerMoveAt < POINTER_ACTIVITY_MS
@@ -569,6 +597,34 @@ export default function Mascot({
       lastTime = now - (elapsed % frameInterval);
       clock.update(); // Timer 必须每帧 update，否则 getElapsed 恒为 0
       const t = clock.getElapsed();
+
+      if (!motionEnabled) {
+        dragForce.set(0, 0);
+        dragForceVelocity.set(0, 0);
+      } else {
+        const deltaSeconds = Math.min(elapsed / 1000, 1 / 30);
+        const targetX = reportedDragForce?.active ? reportedDragForce.x : 0;
+        const targetY = reportedDragForce?.active ? reportedDragForce.y : 0;
+        dragForceVelocity.x += (
+          (targetX - dragForce.x) * FUR_DRAG_SPRING
+          - dragForceVelocity.x * FUR_DRAG_DAMPING
+        ) * deltaSeconds;
+        dragForceVelocity.y += (
+          (targetY - dragForce.y) * FUR_DRAG_SPRING
+          - dragForceVelocity.y * FUR_DRAG_DAMPING
+        ) * deltaSeconds;
+        dragForce.x += dragForceVelocity.x * deltaSeconds;
+        dragForce.y += dragForceVelocity.y * deltaSeconds;
+
+        if (!reportedDragForce?.active
+          && dragForce.lengthSq() <= FUR_DRAG_REST_THRESHOLD * FUR_DRAG_REST_THRESHOLD
+          && dragForceVelocity.lengthSq()
+            <= FUR_DRAG_REST_THRESHOLD * FUR_DRAG_REST_THRESHOLD) {
+          dragForce.set(0, 0);
+          dragForceVelocity.set(0, 0);
+        }
+      }
+      furUniforms.uDragForce.value.copy(dragForce);
 
       if (visualStatus !== previousVisualStatus) {
         if (visualStatus === 'thinking') {

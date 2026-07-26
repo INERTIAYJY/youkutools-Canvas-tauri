@@ -14,6 +14,13 @@ const VIEWPORT_INSET = 8;
 const DEFAULT_RIGHT = 20;
 const DEFAULT_BOTTOM = 160;
 const DRAG_THRESHOLD = 5;
+const DRAG_FORCE_VELOCITY = 700;
+
+export interface MascotDragForce {
+  x: number;
+  y: number;
+  active: boolean;
+}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -53,6 +60,7 @@ export function useMascotDrag() {
   const relativePositionRef = useRef(initialPosition);
   const hasCustomPositionRef = useRef(Boolean(normalizePosition(storedPosition)));
   const dragStartRef = useRef({ x: 0, y: 0 });
+  const dragForceRef = useRef<MascotDragForce>({ x: 0, y: 0, active: false });
   const suppressClickUntilRef = useRef(0);
   const pointerGestureRef = useRef<{
     pointerId: number;
@@ -139,13 +147,30 @@ export function useMascotDrag() {
 
   const handleDragStart = useCallback(() => {
     dragStartRef.current = { x: x.get(), y: y.get() };
+    dragForceRef.current = { x: 0, y: 0, active: true };
     suppressClickUntilRef.current = Date.now() + 1000;
   }, [x, y]);
+
+  const handleDrag = useCallback((
+    _event: MouseEvent | TouchEvent | PointerEvent,
+    info: PanInfo,
+  ) => {
+    dragForceRef.current = {
+      x: clamp(info.velocity.x / DRAG_FORCE_VELOCITY, -1, 1),
+      y: clamp(info.velocity.y / DRAG_FORCE_VELOCITY, -1, 1),
+      active: true,
+    };
+  }, []);
 
   const handleDragEnd = useCallback((
     _event: MouseEvent | TouchEvent | PointerEvent,
     info: PanInfo,
   ) => {
+    dragForceRef.current = {
+      x: clamp(info.velocity.x / DRAG_FORCE_VELOCITY, -1, 1),
+      y: clamp(info.velocity.y / DRAG_FORCE_VELOCITY, -1, 1),
+      active: false,
+    };
     const distance = Math.hypot(info.offset.x, info.offset.y);
     if (distance < DRAG_THRESHOLD) {
       x.set(dragStartRef.current.x);
@@ -174,13 +199,17 @@ export function useMascotDrag() {
     return true;
   }, []);
 
+  const getDragForce = useCallback(() => dragForceRef.current, []);
+
   return {
     constraintsRef,
     x,
     y,
     handlePointerDownCapture,
     handleDragStart,
+    handleDrag,
     handleDragEnd,
+    getDragForce,
     consumeDragClick,
   };
 }

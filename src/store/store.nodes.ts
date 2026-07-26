@@ -175,7 +175,8 @@ export interface NodeSlice {
     link: CharacterLibraryNodeLink,
     hideNode: boolean,
   ) => boolean;
-  restoreCharacterLibraryNode: (nodeId: string) => boolean;
+  /** 在画布上隐藏/显示被角色库收纳的节点，可来回切换。 */
+  setCharacterLibraryNodeHidden: (nodeId: string, hidden: boolean) => boolean;
   releaseCharacterLibraryNodes: (
     scope: CharacterLibraryNodeLink['scope'],
     characterId?: string,
@@ -482,17 +483,22 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     return true;
   },
 
-  restoreCharacterLibraryNode: (nodeId) => {
+  setCharacterLibraryNodeHidden: (nodeId, hidden) => {
     const node = get().nodes.find((candidate) => candidate.id === nodeId);
-    if (!node?.data.hiddenByCharacterLibrary) return false;
+    if (!node || (node.data.hiddenByCharacterLibrary === true) === hidden) return false;
     get().commitToHistory();
     set((state) => ({
       nodes: state.nodes.map((candidate) => candidate.id === nodeId
         ? {
             ...candidate,
-            data: { ...candidate.data, hiddenByCharacterLibrary: false },
+            selected: hidden ? false : candidate.selected,
+            data: { ...candidate.data, hiddenByCharacterLibrary: hidden },
           }
         : candidate),
+      // 隐藏的节点不能留在选中集里，否则后续操作会作用到看不见的节点上
+      selectedNodeIds: hidden
+        ? state.selectedNodeIds.filter((id) => id !== nodeId)
+        : state.selectedNodeIds,
     }));
     return true;
   },

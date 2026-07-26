@@ -269,3 +269,25 @@ export const DRAMA_MENTION_PREFIX = '@drama{';
 export function formatDramaMention(id: string, name: string): string {
   return `@drama{${id}:${name}}`;
 }
+
+/** 角色多参考图时的选图后缀：`资产id#参考图id`，`#all` 表示拼成一张 */
+export const DRAMA_MENTION_MERGE_ALL = 'all';
+
+export function buildDramaMentionId(assetId: string, pick?: string): string {
+  return pick ? `${assetId}#${pick}` : assetId;
+}
+
+export function parseDramaMentionId(raw: string): {
+  assetId: string;
+  referenceImageId?: string;
+  mergeAll: boolean;
+} {
+  const separator = raw.indexOf('#');
+  if (separator < 0) return { assetId: raw, mergeAll: false };
+  const pick = raw.slice(separator + 1);
+  return {
+    assetId: raw.slice(0, separator),
+    referenceImageId: pick === DRAMA_MENTION_MERGE_ALL ? undefined : pick,
+    mergeAll: pick === DRAMA_MENTION_MERGE_ALL,
+  };
+}

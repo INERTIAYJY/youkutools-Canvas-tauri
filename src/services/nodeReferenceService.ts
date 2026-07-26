@@ -3,6 +3,7 @@
  */
 import { useAppStore } from '../store/useAppStore';
 import { resolveDramaAssetImageRef } from './dramaAssetPrompt';
+import { parseDramaMentionId } from '../types/dramaAssets';
 
 /** 解析 workflowInputs 值中的 @{nodeId:label} / @drama{id:name} 引用，替换为对应输出内容 */
 export function resolveNodeReferences(value: string): string {
@@ -14,14 +15,17 @@ export function resolveNodeReferences(value: string): string {
   cleaned = cleaned.replace(/@drama\{([^:]+):([^}]+)\}/g, (_match, dramaId: string, dramaName: string) => {
     // 延迟 require 形状的 import 在顶部已有 store；简介格式与 promptResolver 一致
     const lib = store.dramaAssets;
+    // 工作流文本输入只能塞一个地址，#all 在这里退化成主视觉那一张
+    const { assetId, referenceImageId } = parseDramaMentionId(dramaId);
     const asset =
-      lib.characters.find((a) => a.id === dramaId)
-      || lib.scenes.find((a) => a.id === dramaId)
-      || lib.props.find((a) => a.id === dramaId);
+      lib.characters.find((a) => a.id === assetId)
+      || lib.scenes.find((a) => a.id === assetId)
+      || lib.props.find((a) => a.id === assetId);
     if (!asset) return dramaName || _match;
     const imageReference = resolveDramaAssetImageRef(
       asset,
       nodes as Array<{ id: string; data?: Record<string, unknown> }>,
+      referenceImageId,
     );
     if (imageReference) return imageReference.imageUrl;
     // 无图：展开单条简介字段（与 formatDramaAssetTextBrief 同信息，避免循环依赖用内联）

@@ -165,6 +165,8 @@ export default function PresetManager() {
 
   // Load selected preset
   useEffect(() => {
+    if (!presetManagerOpen) return;
+
     queueMicrotask(() => {
       if (!selectedId) {
         setName('');
@@ -203,7 +205,7 @@ export default function PresetManager() {
         }
       }
     });
-  }, [activeTab, selectedId, userPresets]);
+  }, [activeTab, presetManagerOpen, selectedId, userPresets]);
 
   // When switching tabs, select first preset
   useEffect(() => {

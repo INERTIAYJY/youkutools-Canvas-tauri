@@ -361,9 +361,17 @@ describe('dramaAssets store', () => {
       { scope: 'project', characterId: 'char_2', referenceImageId: 'ref-2' },
     ]);
 
-    expect(useAppStore.getState().restoreCharacterLibraryNode('node-image')).toBe(true);
+    expect(useAppStore.getState().setCharacterLibraryNodeHidden('node-image', false)).toBe(true);
     expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(false);
     expect(commitToHistory).toHaveBeenCalledTimes(2);
+
+    // 显示之后还能再隐藏回去，不是单向门
+    expect(useAppStore.getState().setCharacterLibraryNodeHidden('node-image', true)).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+    expect(useAppStore.getState().selectedNodeIds).not.toContain('node-image');
+    // 状态没变化时不提交历史
+    expect(useAppStore.getState().setCharacterLibraryNodeHidden('node-image', true)).toBe(false);
+    expect(commitToHistory).toHaveBeenCalledTimes(3);
   });
 
   it('loads permanent characters and copies them into the project independently', async () => {

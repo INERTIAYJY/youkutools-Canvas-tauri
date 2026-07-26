@@ -25,6 +25,7 @@ import { DOWNLOAD_MASCOT_EVENT } from './components/shared/ModelDownloadDialog';
 import UpdateBubble from './components/shared/mascot/UpdateBubble';
 import LazyLoadBoundary, { LazyLoadFallback } from './components/shared/LazyLoadBoundary';
 import { useMascotStatus } from './hooks/useMascotStatus';
+import { useMascotDrag } from './hooks/useMascotDrag';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -67,6 +68,15 @@ export default function App() {
   useAutoSave();
   useReferencedImageWatcher();
   useTooltipAutoPlacement();
+  const {
+    constraintsRef: mascotDragConstraintsRef,
+    x: mascotX,
+    y: mascotY,
+    handlePointerDownCapture: handleMascotPointerDownCapture,
+    handleDragStart: handleMascotDragStart,
+    handleDragEnd: handleMascotDragEnd,
+    consumeDragClick: consumeMascotDragClick,
+  } = useMascotDrag();
 
   const featureVisibility = useAppStore(
     useShallow((state) => ({
@@ -332,63 +342,83 @@ export default function App() {
       {/* Sidebar — outside the overflow-hidden container so it's not clipped */}
       <Sidebar />
 
-      {/* 吉祥物 — 右下角浮动预览，默认隐藏，Ctrl+Shift+M 切换 */}
+      {/* 吉祥物 — 可拖动浮层，默认隐藏，Ctrl+Shift+M 切换 */}
       {mascotVisible && (
         <LazyLoadBoundary label="吉祥物">
-          <motion.div
-            className="fixed bottom-40 right-5 z-50 h-[100px] w-[100px] pointer-events-auto"
-            animate={mascotShrink
-              ? { transform: reduceMotion ? 'scale(1)' : 'scale(0.94)', opacity: 0 }
-              : { transform: 'scale(1)', opacity: 1 }}
-            transition={{ duration: reduceMotion ? 0.12 : 0.18, ease: [0.23, 1, 0.32, 1] }}
+          <div
+            ref={mascotDragConstraintsRef}
+            className="pointer-events-none fixed inset-2 z-50"
           >
-            <button
-              type="button"
-              className="h-full w-full rounded-full border-0 bg-transparent p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
-              onClick={() => { void handleMascotActivate(); }}
-              disabled={mascotShrink}
-              aria-label={mascotStatus === 'thinking'
-                ? '打开画布助手，正在思考'
-                : mascotStatus === 'success'
-                  ? '打开画布助手，任务已完成'
-                  : mascotStatus === 'error'
-                    ? '打开画布助手，任务失败'
-                    : '打开画布助手'}
-              data-tooltip={mascotStatus === 'thinking'
-                ? '画布助手：思考中'
-                : mascotStatus === 'success'
-                  ? '画布助手：已完成'
-                  : mascotStatus === 'error'
-                    ? '画布助手：任务失败'
-                    : '打开画布助手'}
+            <motion.div
+              className="pointer-events-auto absolute left-0 top-0 h-[100px] w-[100px] touch-none"
+              style={{ x: mascotX, y: mascotY }}
+              drag={!mascotShrink}
+              dragConstraints={mascotDragConstraintsRef}
+              dragElastic={0}
+              dragMomentum={false}
+              onPointerDownCapture={handleMascotPointerDownCapture}
+              onDragStart={handleMascotDragStart}
+              onDragEnd={handleMascotDragEnd}
             >
-              <Suspense
-                fallback={(
-                  <div
-                    className="flex h-full w-full items-center justify-center"
-                    role="status"
-                    aria-label="正在加载吉祥物"
-                  >
-                    <span
-                      className="h-5 w-5 animate-spin rounded-full border-2 border-canvas-border border-t-canvas-text-secondary motion-reduce:animate-none"
-                      aria-hidden="true"
-                    />
-                  </div>
-                )}
+              <motion.div
+                className="h-full w-full"
+                animate={mascotShrink
+                  ? { scale: reduceMotion ? 1 : 0.94, opacity: 0 }
+                  : { scale: 1, opacity: 1 }}
+                transition={{ duration: reduceMotion ? 0.12 : 0.18, ease: [0.23, 1, 0.32, 1] }}
               >
-                {updating ? (
-                  <PacmanMascot />
-                ) : (
-                  <Mascot
-                    loading={mascotLoading}
-                    status={mascotStatus}
-                    theme={effectiveTheme}
-                    reduceMotion={Boolean(reduceMotion)}
-                  />
-                )}
-              </Suspense>
-            </button>
-          </motion.div>
+                <button
+                  type="button"
+                  className="h-full w-full cursor-grab rounded-full border-0 bg-transparent p-0 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
+                  onClick={(event) => {
+                    if (consumeMascotDragClick(event)) return;
+                    void handleMascotActivate();
+                  }}
+                  disabled={mascotShrink}
+                  aria-label={mascotStatus === 'thinking'
+                    ? '打开画布助手，正在思考'
+                    : mascotStatus === 'success'
+                      ? '打开画布助手，任务已完成'
+                      : mascotStatus === 'error'
+                        ? '打开画布助手，任务失败'
+                        : '打开画布助手'}
+                  data-tooltip={mascotStatus === 'thinking'
+                    ? '画布助手：思考中'
+                    : mascotStatus === 'success'
+                      ? '画布助手：已完成'
+                      : mascotStatus === 'error'
+                        ? '画布助手：任务失败'
+                        : '打开画布助手'}
+                >
+                  <Suspense
+                    fallback={(
+                      <div
+                        className="flex h-full w-full items-center justify-center"
+                        role="status"
+                        aria-label="正在加载吉祥物"
+                      >
+                        <span
+                          className="h-5 w-5 animate-spin rounded-full border-2 border-canvas-border border-t-canvas-text-secondary motion-reduce:animate-none"
+                          aria-hidden="true"
+                        />
+                      </div>
+                    )}
+                  >
+                    {updating ? (
+                      <PacmanMascot />
+                    ) : (
+                      <Mascot
+                        loading={mascotLoading}
+                        status={mascotStatus}
+                        theme={effectiveTheme}
+                        reduceMotion={Boolean(reduceMotion)}
+                      />
+                    )}
+                  </Suspense>
+                </button>
+              </motion.div>
+            </motion.div>
+          </div>
         </LazyLoadBoundary>
       )}
 

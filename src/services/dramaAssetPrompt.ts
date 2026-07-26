@@ -92,13 +92,17 @@ export function formatDramaAssetTextBrief(asset: DramaAsset): string {
   return lines.join('\n');
 }
 
-/** 已绑图像节点且该节点已有图时，才视为「可引图」 */
+/** 已绑图像节点且该节点已有图时，才视为「可引图」；指定 referenceImageId 时引用角色的那一张参考图 */
 export function resolveDramaAssetImageRef(
   asset: DramaAsset,
   nodes: Array<{ id: string; data?: Record<string, unknown> }>,
+  referenceImageId?: string,
 ): { imageNodeId?: string; imageUrl: string } | null {
   const reference = asset.kind === 'character'
-    ? asset.referenceImages?.find((item) => item.id === asset.primaryReferenceImageId)
+    ? (referenceImageId
+      ? asset.referenceImages?.find((item) => item.id === referenceImageId)
+      : undefined)
+      || asset.referenceImages?.find((item) => item.id === asset.primaryReferenceImageId)
       || asset.referenceImages?.[0]
     : undefined;
   const imageNodeId = reference?.sourceNodeId || asset.imageNodeId;
@@ -110,6 +114,24 @@ export function resolveDramaAssetImageRef(
     || asset.imageUrl;
   if (!imageUrl || !String(imageUrl).trim()) return null;
   return { imageNodeId, imageUrl };
+}
+
+/** 角色的全部参考图地址（按库内顺序），用于 @drama{id#all} 拼成一张 */
+export function collectCharacterReferenceUrls(
+  asset: DramaAsset,
+  nodes: Array<{ id: string; data?: Record<string, unknown> }>,
+): string[] {
+  if (asset.kind !== 'character') return [];
+  return (asset.referenceImages ?? [])
+    .map((reference) => {
+      const node = reference.sourceNodeId
+        ? nodes.find((item) => item.id === reference.sourceNodeId)
+        : undefined;
+      return (node?.data?.imageUrl as string | undefined)
+        || (node?.data?.thumbnailUrl as string | undefined)
+        || reference.imageUrl;
+    })
+    .filter((url): url is string => !!url && !!url.trim());
 }
 
 function joinParts(parts: Array<string | undefined | false>): string {

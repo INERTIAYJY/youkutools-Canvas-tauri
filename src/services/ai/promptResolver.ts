@@ -5,6 +5,8 @@ import { useAppStore } from '../../store/useAppStore';
 import { readFileToDataUrl, getFileCategory } from '../fileService';
 import { resolveNodeImageUrl, mergeImageWithOverlays } from './imageUtils';
 import { cropImageCell, cropImageByRanges } from '../../components/nodes/shared/image/imageUtils';
+import { parseDramaMentionId } from '../../types/dramaAssets';
+import type { DramaAsset } from '../../types/dramaAssets';
 import type { BaseNodeData, ImageAnnotationLayer, StoryboardCellOverride } from '../../types';
 
 interface PromptImageEntry {
@@ -26,6 +28,20 @@ async function mergePromptImageOverlays(url: string, entry: PromptImageEntry): P
   }
   if (!entry.mattingMask && !annotation) return url;
   return mergeImageWithOverlays(url, entry.mattingMask, annotation);
+}
+
+/** @drama{id#all} — 把角色的全部参考图拼成一张，失败（不足两张/加载不了）时返回 null 走单图路径 */
+async function resolveMergedCharacterImage(
+  asset: DramaAsset,
+  nodes: Array<{ id: string; data?: Record<string, unknown> }>,
+): Promise<string | null> {
+  const { collectCharacterReferenceUrls } = await import('../dramaAssetPrompt');
+  const urls = collectCharacterReferenceUrls(asset, nodes);
+  if (urls.length < 2) return null;
+  const resolved = (await Promise.all(urls.map((url) => resolveNodeImageUrl(url))))
+    .filter((url): url is string => !!url);
+  const { mergeReferenceImages } = await import('../characterReferenceMerge');
+  return mergeReferenceImages(resolved);
 }
 
 /**
@@ -131,16 +147,36 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
     if (match[2] !== undefined) {
       const dramaId = match[2];
       const dramaName = match[3] || '';
+      const { assetId, referenceImageId, mergeAll } = parseDramaMentionId(dramaId);
       const {
         findDramaAsset,
         formatDramaAssetTextBrief,
         resolveDramaAssetImageRef,
       } = await import('../dramaAssetPrompt');
-      const dramaAsset = findDramaAsset(store.dramaAssets, dramaId);
+      const dramaAsset = findDramaAsset(store.dramaAssets, assetId);
+      const mergedUrl = dramaAsset && mergeAll
+        ? await resolveMergedCharacterImage(
+          dramaAsset,
+          nodes as Array<{ id: string; data?: Record<string, unknown> }>,
+        )
+        : null;
+      if (dramaAsset && mergedUrl) {
+        const key = `drama:${dramaId}`;
+        let idx = imageKeyToIndex.get(key);
+        if (idx === undefined) {
+          idx = imageEntries.length + 1;
+          imageKeyToIndex.set(key, idx);
+          imageEntries.push({ url: mergedUrl });
+        }
+        parts.push(`图片${idx}（${dramaAsset.name || dramaName} 全部参考图）`);
+        lastIndex = chipRegex.lastIndex;
+        continue;
+      }
       if (dramaAsset) {
         const imgRef = resolveDramaAssetImageRef(
           dramaAsset,
           nodes as Array<{ id: string; data?: Record<string, unknown> }>,
+          referenceImageId,
         );
         if (imgRef) {
           const imgNode = nodes.find((n) => n.id === imgRef.imageNodeId);
@@ -324,6 +360,21 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
     formatDramaAssetTextBrief,
     resolveDramaAssetImageRef,
   } = await import('../dramaAssetPrompt');
+
+  // 下面是同步 replace，@drama{id#all} 的拼图得先异步做好
+  const dramaMergedMap = new Map<string, string>();
+  for (const m of rawPrompt.matchAll(/@drama\{([^:]+):([^}]+)\}/g)) {
+    const { assetId, mergeAll } = parseDramaMentionId(m[1]);
+    if (!mergeAll || dramaMergedMap.has(m[1])) continue;
+    const asset = findDramaAsset(store.dramaAssets, assetId);
+    if (!asset) continue;
+    const merged = await resolveMergedCharacterImage(
+      asset,
+      nodes as Array<{ id: string; data?: Record<string, unknown> }>,
+    );
+    if (merged) dramaMergedMap.set(m[1], merged);
+  }
+
   const imageKeyToIndex = new Map<string, number>();
 
   const prompt = rawPrompt.replace(
@@ -349,11 +400,24 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
     }
 
     if (dramaId !== undefined) {
-      const dramaAsset = findDramaAsset(store.dramaAssets, dramaId);
+      const { assetId, referenceImageId } = parseDramaMentionId(dramaId);
+      const mergedUrl = dramaMergedMap.get(dramaId);
+      if (mergedUrl) {
+        const key = `drama:${dramaId}`;
+        let idx = imageKeyToIndex.get(key);
+        if (idx === undefined) {
+          idx = imageEntries.length + 1;
+          imageKeyToIndex.set(key, idx);
+          imageEntries.push({ url: mergedUrl });
+        }
+        return `图片${idx}`;
+      }
+      const dramaAsset = findDramaAsset(store.dramaAssets, assetId);
       if (dramaAsset) {
         const imgRef = resolveDramaAssetImageRef(
           dramaAsset,
           nodes as Array<{ id: string; data?: Record<string, unknown> }>,
+          referenceImageId,
         );
         if (imgRef) {
           const imgNode = nodes.find((n) => n.id === imgRef.imageNodeId);

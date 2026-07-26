@@ -52,7 +52,7 @@ export default function CharacterLibraryPanel() {
     deleteDramaAsset,
     deleteGlobalCharacter,
     nodes,
-    restoreCharacterLibraryNode,
+    setCharacterLibraryNodeHidden,
     createImageNodeFromCharacterReference,
     setSelectedNodeIds,
     showToast,
@@ -69,7 +69,7 @@ export default function CharacterLibraryPanel() {
       deleteDramaAsset: state.deleteDramaAsset,
       deleteGlobalCharacter: state.deleteGlobalCharacter,
       nodes: state.nodes,
-      restoreCharacterLibraryNode: state.restoreCharacterLibraryNode,
+      setCharacterLibraryNodeHidden: state.setCharacterLibraryNodeHidden,
       createImageNodeFromCharacterReference: state.createImageNodeFromCharacterReference,
       setSelectedNodeIds: state.setSelectedNodeIds,
       showToast: state.showToast,
@@ -84,6 +84,7 @@ export default function CharacterLibraryPanel() {
   const [dialogReferenceId, setDialogReferenceId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [captureNodeId, setCaptureNodeId] = useState<string | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (open) void loadGlobalCharacters();
@@ -177,8 +178,7 @@ export default function CharacterLibraryPanel() {
 
   const handleDelete = async () => {
     if (!selectedCharacter) return;
-    const target = scope === 'project' ? '本项目' : '全局资产';
-    if (!window.confirm(`从${target}删除「${selectedCharacter.name}」？`)) return;
+    setDeleteConfirmOpen(false);
     if (scope === 'project') {
       deleteDramaAsset('character', selectedCharacter.id);
     } else if (!await deleteGlobalCharacter(selectedCharacter.id)) {
@@ -193,7 +193,7 @@ export default function CharacterLibraryPanel() {
     if (!selectedCharacter || !selectedReference) return;
     let nodeId = sourceNode?.id ?? null;
     if (sourceNode?.data.hiddenByCharacterLibrary) {
-      restoreCharacterLibraryNode(sourceNode.id);
+      setCharacterLibraryNodeHidden(sourceNode.id, false);
       showToast('节点已显示');
     } else if (!sourceNode) {
       nodeId = createImageNodeFromCharacterReference(
@@ -292,6 +292,18 @@ export default function CharacterLibraryPanel() {
                       <Icon icon={canvasActionIcon} width="16" height="16" aria-hidden="true" />
                     </button>
                   ) : null}
+                  {sourceNode && !sourceNode.data.hiddenByCharacterLibrary ? (
+                    <button
+                      type="button"
+                      data-tooltip="在画布中隐藏"
+                      aria-label="在画布中隐藏"
+                      onClick={() => {
+                        if (setCharacterLibraryNodeHidden(sourceNode.id, true)) showToast('节点已隐藏');
+                      }}
+                    >
+                      <Icon icon="lucide:eye-off" width="16" height="16" aria-hidden="true" />
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     data-tooltip="从画布添加视角图"
@@ -313,7 +325,7 @@ export default function CharacterLibraryPanel() {
                   >
                     <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
                   </button>
-                  <button type="button" data-tooltip="删除角色" aria-label="删除角色" onClick={() => void handleDelete()}>
+                  <button type="button" data-tooltip="删除角色" aria-label="删除角色" onClick={() => setDeleteConfirmOpen(true)}>
                     <Icon icon="lucide:trash-2" width="16" height="16" aria-hidden="true" />
                   </button>
                 </div>
@@ -392,6 +404,39 @@ export default function CharacterLibraryPanel() {
             setSelectedReferenceId(null);
           }}
         />,
+        document.body,
+      ) : null}
+
+      {deleteConfirmOpen && selectedCharacter ? createPortal(
+        <ModalOverlay
+          isOpen
+          onClose={() => setDeleteConfirmOpen(false)}
+          ariaLabel="确认删除角色"
+          className="character-confirm-dialog"
+          motionPreset="quick"
+        >
+          <div className="character-confirm-body">
+            <span className="character-confirm-icon" aria-hidden="true">
+              <Icon icon="lucide:trash-2" width="18" height="18" />
+            </span>
+            <div>
+              <h3>删除「{selectedCharacter.name}」？</h3>
+              <p>
+                {scope === 'project'
+                  ? `将从本项目移除该角色及其 ${selectedCharacter.referenceImages?.length ?? 0} 张参考图，画布上被收纳的节点会重新显示。`
+                  : `将从全局资产永久删除该角色及其 ${selectedCharacter.referenceImages?.length ?? 0} 张参考图，删除后无法恢复。`}
+              </p>
+            </div>
+          </div>
+          <footer className="character-dialog-footer">
+            <button type="button" className="character-button-secondary" onClick={() => setDeleteConfirmOpen(false)}>
+              取消
+            </button>
+            <button type="button" className="character-button-danger" onClick={() => void handleDelete()}>
+              删除角色
+            </button>
+          </footer>
+        </ModalOverlay>,
         document.body,
       ) : null}
 

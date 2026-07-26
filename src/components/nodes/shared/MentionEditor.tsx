@@ -13,6 +13,13 @@ import { springSmooth, fadeFast } from '../../../utils/motion';
 import { AnimatePresence, motion } from 'framer-motion';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import PopupCloseButton from '../../shared/PopupCloseButton';
+import {
+  DRAMA_MENTION_MERGE_ALL,
+  buildDramaMentionId,
+  parseDramaMentionId,
+} from '../../../types/dramaAssets';
+import type { CharacterReferenceImage } from '../../../types/dramaAssets';
+import { CHARACTER_REFERENCE_KIND_LABELS } from '../../character/characterReferencePresentation';
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 /** 本地文件路径 → asset URL（Tauri 端，不会失效）；非 Tauri 返回 undefined */
@@ -396,13 +403,19 @@ function renderPromptToNodes(
       let thumb: string | undefined;
       try {
         const lib = useAppStore.getState().dramaAssets;
+        const { assetId, referenceImageId } = parseDramaMentionId(dramaId);
         const found =
-          lib.characters.find((a) => a.id === dramaId)
-          || lib.scenes.find((a) => a.id === dramaId)
-          || lib.props.find((a) => a.id === dramaId);
+          lib.characters.find((a) => a.id === assetId)
+          || lib.scenes.find((a) => a.id === assetId)
+          || lib.props.find((a) => a.id === assetId);
         if (found) {
           kind = found.kind;
-          if (found.imageNodeId) {
+          const picked = referenceImageId && found.kind === 'character'
+            ? found.referenceImages?.find((image) => image.id === referenceImageId)
+            : undefined;
+          if (picked) {
+            thumb = picked.imageUrl;
+          } else if (found.imageNodeId) {
             const n = useAppStore.getState().nodes.find((x) => x.id === found.imageNodeId);
             thumb =
               bestNodeThumb(n?.data ?? {})
@@ -763,14 +776,20 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   const dramaMentionItems = useMemo(() => {
     if (!showMention) return [];
     const items = [
-      ...dramaAssets.characters.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl })),
-      ...dramaAssets.scenes.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl })),
-      ...dramaAssets.props.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl })),
+      ...dramaAssets.characters.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl, referenceImages: a.referenceImages })),
+      ...dramaAssets.scenes.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl, referenceImages: undefined })),
+      ...dramaAssets.props.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl, referenceImages: undefined })),
     ];
     if (!mentionQuery) return items.slice(0, 20);
     const q = mentionQuery.toLowerCase();
     return items.filter((a) => a.name.toLowerCase().includes(q)).slice(0, 20);
   }, [showMention, dramaAssets, mentionQuery]);
+
+  // 展开了参考图二级菜单的角色 id（多图角色才有）
+  const [dramaRefPickerId, setDramaRefPickerId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!showMention) setDramaRefPickerId(null);
+  }, [showMention]);
 
   // ── Clear saved range when both mention menu and asset picker are closed ──
   // （@ 菜单切到资产弹窗时需保留光标范围，供选中资产后插入芯片）
@@ -1010,6 +1029,42 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
     [emitDOM],
   );
 
+  /** 把光标放回 @ 处，供插入芯片 */
+  const restoreMentionCursor = useCallback(() => {
+    const el = editorRef.current;
+    if (el) el.focus();
+    const saved = savedMentionRangeRef.current;
+    savedMentionRangeRef.current = null;
+    if (!saved) return;
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(saved);
+    }
+  }, []);
+
+  /** 二级菜单：引用角色的某一张参考图，或把全部参考图拼成一张 */
+  const handleSelectDramaReference = useCallback(
+    (
+      item: { id: string; name: string; kind: string },
+      pick: string,
+      thumb?: string,
+    ) => {
+      restoreMentionCursor();
+      deleteAtChar();
+      insertDramaChipAtCursor(
+        buildDramaMentionId(item.id, pick),
+        item.name,
+        item.kind,
+        thumb,
+      );
+      setShowMention(false);
+      setMentionQuery('');
+      setDramaRefPickerId(null);
+    },
+    [restoreMentionCursor, deleteAtChar, insertDramaChipAtCursor],
+  );
+
   const handleSelectDramaMention = useCallback(
     (item: { id: string; name: string; kind: string; imageNodeId?: string; imageUrl?: string }) => {
       // 仅当绑图节点上已有真实图片时，才 @ 图像节点；否则始终 @drama 芯片（解析时展开单条简介）
@@ -1025,17 +1080,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
           return;
         }
       }
-      const el = editorRef.current;
-      if (el) el.focus();
-      const saved = savedMentionRangeRef.current;
-      savedMentionRangeRef.current = null;
-      if (saved) {
-        const sel = window.getSelection();
-        if (sel) {
-          sel.removeAllRanges();
-          sel.addRange(saved);
-        }
-      }
+      restoreMentionCursor();
       deleteAtChar();
       let thumb: string | undefined;
       if (item.imageNodeId) {
@@ -1048,7 +1093,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
       setShowMention(false);
       setMentionQuery('');
     },
-    [nodes, handleSelectCanvasMention, deleteAtChar, insertDramaChipAtCursor],
+    [nodes, handleSelectCanvasMention, restoreMentionCursor, deleteAtChar, insertDramaChipAtCursor],
   );
 
   // ── Insert an asset reference chip ──
@@ -1540,6 +1585,10 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
               </div>
               {dramaMentionItems.map((item) => {
                 const kindLabel = item.kind === 'character' ? '人物' : item.kind === 'scene' ? '场景' : '道具';
+                const references: CharacterReferenceImage[] = (item.referenceImages ?? [])
+                  .filter((reference) => !!reference.imageUrl);
+                const multiRef = references.length > 1;
+                const expanded = multiRef && dramaRefPickerId === item.id;
                 let thumb: string | undefined;
                 let hasImage = false;
                 if (item.imageNodeId) {
@@ -1551,33 +1600,81 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
                     || item.imageUrl
                   );
                 }
+                if (!thumb && references[0]) thumb = references[0].imageUrl;
+                if (!hasImage && references.length > 0) hasImage = true;
                 return (
-                  <button
-                    key={`drama-${item.id}`}
-                    type="button"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      handleSelectDramaMention(item);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-hover transition-colors text-left"
-                  >
-                    <span className="w-6 h-6 rounded flex items-center justify-center text-[10px] shrink-0 overflow-hidden bg-violet-500/15 text-violet-300">
-                      {hasImage && thumb ? (
-                        <img src={thumb} alt="" className="w-full h-full object-cover rounded" />
-                      ) : (
-                        kindLabel[0]
+                  <div key={`drama-${item.id}`}>
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        // 多张参考图先展开二级菜单，让用户挑图或选合并
+                        if (multiRef) setDramaRefPickerId(expanded ? null : item.id);
+                        else handleSelectDramaMention(item);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-hover transition-colors text-left"
+                    >
+                      <span className="w-6 h-6 rounded flex items-center justify-center text-[10px] shrink-0 overflow-hidden bg-violet-500/15 text-violet-300">
+                        {hasImage && thumb ? (
+                          <img src={thumb} alt="" className="w-full h-full object-cover rounded" />
+                        ) : (
+                          kindLabel[0]
+                        )}
+                      </span>
+                      <div className="min-w-0 flex-1 flex items-center gap-1 overflow-hidden">
+                        <span className="text-sm text-canvas-text truncate">{item.name}</span>
+                        <span className="text-[10px] text-canvas-text-muted shrink-0">{kindLabel}</span>
+                        {hasImage ? (
+                          <span className="text-[10px] text-indigo-300 bg-indigo-500/15 px-1 py-px rounded shrink-0">有图</span>
+                        ) : (
+                          <span className="text-[10px] text-canvas-text-muted bg-canvas-hover px-1 py-px rounded shrink-0">简介</span>
+                        )}
+                      </div>
+                      {multiRef && (
+                        <span className="shrink-0 flex items-center gap-1 text-[10px] text-canvas-text-muted">
+                          {references.length} 图
+                          <Icon icon={expanded ? 'lucide:chevron-down' : 'lucide:chevron-right'} width="12" height="12" />
+                        </span>
                       )}
-                    </span>
-                    <div className="min-w-0 flex-1 flex items-center gap-1 overflow-hidden">
-                      <span className="text-sm text-canvas-text truncate">{item.name}</span>
-                      <span className="text-[10px] text-canvas-text-muted shrink-0">{kindLabel}</span>
-                      {hasImage ? (
-                        <span className="text-[10px] text-indigo-300 bg-indigo-500/15 px-1 py-px rounded shrink-0">有图</span>
-                      ) : (
-                        <span className="text-[10px] text-canvas-text-muted bg-canvas-hover px-1 py-px rounded shrink-0">简介</span>
-                      )}
-                    </div>
-                  </button>
+                    </button>
+
+                    {expanded && (
+                      <div className="pl-6 pb-1 border-l border-canvas-border ml-4">
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            handleSelectDramaReference(item, DRAMA_MENTION_MERGE_ALL, references[0]?.imageUrl);
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-canvas-hover transition-colors text-left"
+                        >
+                          <span className="w-5 h-5 rounded flex items-center justify-center shrink-0 bg-indigo-500/15 text-indigo-300">
+                            <Icon icon="lucide:layout-grid" width="12" height="12" />
+                          </span>
+                          <span className="text-xs text-canvas-text">全部拼成一张</span>
+                          <span className="ml-auto text-[10px] text-canvas-text-muted">{references.length} 图合并</span>
+                        </button>
+                        {references.map((reference) => (
+                          <button
+                            key={reference.id}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              handleSelectDramaReference(item, reference.id, reference.imageUrl);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-canvas-hover transition-colors text-left"
+                          >
+                            <span className="w-5 h-5 rounded shrink-0 overflow-hidden bg-canvas-hover">
+                              <img src={reference.imageUrl} alt="" className="w-full h-full object-cover" />
+                            </span>
+                            <span className="text-xs text-canvas-text truncate">
+                              {CHARACTER_REFERENCE_KIND_LABELS[reference.kind]}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </>

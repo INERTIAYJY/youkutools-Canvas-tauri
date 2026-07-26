@@ -308,6 +308,12 @@ export type CanvasBackground =
 /** 画布交互模式：default = Figma 风格（左键框选 / 右键·中键平移 / 滚轮缩放）；classic = 传统（左键平移 / Shift+拖动框选 / 滚轮纵横平移 / Ctrl+滚轮缩放） */
 export type InteractionMode = 'default' | 'classic';
 
+/** 吉祥物在可拖动视口中的相对位置，x/y 均为 0-1。 */
+export interface MascotPosition {
+  x: number;
+  y: number;
+}
+
 export interface AppConfig {
   providers: Record<string, ApiProviderConfig>;
   /** 当前用于 Agent 联网搜索的厂商；旧配置未设置时优先沿用 Tavily。 */
@@ -327,6 +333,7 @@ export interface AppConfig {
   windowGlassFrame?: boolean; // 是否显示主窗口玻璃外框，默认 true
   titlebarFloating?: boolean; // 标题栏是否悬浮显示（macOS 红绿灯内移并带毛玻璃胶囊），默认 true
   mascotVisible?: boolean;   // 是否显示吉祥物，默认 false
+  mascotPosition?: MascotPosition; // 吉祥物相对视口位置，未设置时使用右下角默认位置
   assetFolders?: string[];    // 资产管理中登记的外部本地文件夹路径（引用不拷贝）
   assetWaterfallColumns?: number; // 资产管理瀑布流列数，默认 3，范围 2-6
   photoshopPath?: string;    // Photoshop 安装路径，自动检测失败时手动配置

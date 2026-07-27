@@ -18,6 +18,8 @@ const TRACK_INSET = 4;
 const HIT_SIZE = 8;
 const MIN_THUMB_SIZE = 36;
 const SCROLL_INTENT_WINDOW_MS = 300;
+const DISCONNECTED_TARGET_SWEEP_MS = 5000;
+const DISCOVERY_EXCLUSION_SELECTOR = '[data-overlay-scrollbar="off"], .react-flow__node';
 const SCROLL_KEYS = new Set([
   'ArrowDown',
   'ArrowLeft',
@@ -293,8 +295,7 @@ function ScrollbarOverlay({ target }: ScrollbarOverlayProps) {
       }
     };
     const resizeObserver = new ResizeObserver(scheduleGeometry);
-    const contentObserver = new MutationObserver(scheduleGeometry);
-    const positionObserver = new MutationObserver(scheduleGeometry);
+    const geometryObserver = new MutationObserver(scheduleGeometry);
 
     target.addEventListener('scroll', handleScroll, { passive: true });
     target.addEventListener('wheel', markScrollIntent, { passive: true });
@@ -302,10 +303,14 @@ function ScrollbarOverlay({ target }: ScrollbarOverlayProps) {
     target.addEventListener('keydown', handleScrollKey);
     window.addEventListener('resize', scheduleGeometry, { passive: true });
     resizeObserver.observe(target);
-    contentObserver.observe(target, { childList: true, characterData: true, subtree: true });
-    let positionAncestor: HTMLElement | null = target;
+    geometryObserver.observe(target, {
+      attributeFilter: ['class', 'style'],
+      attributes: true,
+      childList: true,
+    });
+    let positionAncestor: HTMLElement | null = target.parentElement;
     while (positionAncestor && positionAncestor !== document.body) {
-      positionObserver.observe(positionAncestor, {
+      geometryObserver.observe(positionAncestor, {
         attributeFilter: ['class', 'style'],
         attributes: true,
       });
@@ -319,8 +324,7 @@ function ScrollbarOverlay({ target }: ScrollbarOverlayProps) {
       target.removeEventListener('keydown', handleScrollKey);
       window.removeEventListener('resize', scheduleGeometry);
       resizeObserver.disconnect();
-      contentObserver.disconnect();
-      positionObserver.disconnect();
+      geometryObserver.disconnect();
       if (geometryFrame) cancelAnimationFrame(geometryFrame);
       clearHideTimer();
     };
@@ -409,46 +413,46 @@ export default function OverlayScrollbarLayer() {
 
   useEffect(() => {
     const knownTargets = knownTargetsRef.current;
-    const pendingRoots = new Set<HTMLElement>();
-    let shouldPublishTargets = false;
-    let scanFrame = 0;
+    const inspectedTargets = new WeakSet<HTMLElement>();
+    let initialScanFrame = 0;
+    let initialScanIdle: number | null = null;
 
     const getTargetEntries = () => Array.from(
       knownTargets,
       ([target, id]) => ({ id, target }),
     );
 
-    const publishTargets = () => {
-      let changed = false;
+    const publishTargets = (targetsChanged = false) => {
       for (const target of knownTargets.keys()) {
         if (target.isConnected) continue;
         target.removeAttribute('data-overlay-scrollbar');
         knownTargets.delete(target);
-        changed = true;
+        targetsChanged = true;
       }
-      if (changed) setTargets(getTargetEntries());
+      if (targetsChanged) setTargets(getTargetEntries());
     };
 
-    const registerTarget = (element: HTMLElement) => {
-      if (knownTargets.has(element) || element.closest('[data-overlay-scrollbar="off"]')) return;
-      if (!hasScrollableAxis(getPotentialScrollAxes(element))) return;
+    const registerTarget = (element: HTMLElement, forceRecheck = false): boolean => {
+      if (knownTargets.has(element)) return false;
+      if (!forceRecheck && inspectedTargets.has(element)) return false;
+      inspectedTargets.add(element);
+      if (!hasScrollableAxis(getPotentialScrollAxes(element))) return false;
 
       knownTargets.set(element, nextTargetIdRef.current++);
       element.setAttribute('data-overlay-scrollbar', 'managed');
-      setTargets(getTargetEntries());
+      return true;
     };
 
-    const registerTargetAndAncestors = (element: HTMLElement) => {
+    const registerTargetAndAncestors = (element: HTMLElement, forceRecheck = false): boolean => {
+      if (element.closest(DISCOVERY_EXCLUSION_SELECTOR)) return false;
+
+      let changed = false;
       let candidate: HTMLElement | null = element;
       while (candidate) {
-        registerTarget(candidate);
+        changed = registerTarget(candidate, forceRecheck) || changed;
         candidate = candidate.parentElement;
       }
-    };
-
-    const scanAddedSubtree = (root: HTMLElement) => {
-      registerTargetAndAncestors(root);
-      root.querySelectorAll<HTMLElement>('*').forEach(registerTarget);
+      return changed;
     };
 
     const getClosestHtmlElement = (target: EventTarget | null): HTMLElement | null => {
@@ -457,72 +461,65 @@ export default function OverlayScrollbarLayer() {
       return element instanceof HTMLElement ? element : null;
     };
 
-    const flushScans = () => {
-      scanFrame = 0;
-      pendingRoots.forEach(scanAddedSubtree);
-      pendingRoots.clear();
-      if (shouldPublishTargets) {
-        shouldPublishTargets = false;
-        publishTargets();
+    const discoverInitialTargets = () => {
+      initialScanFrame = 0;
+      initialScanIdle = null;
+      const root = document.body;
+      if (!root) return;
+
+      let changed = registerTarget(root);
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+        acceptNode: (node) => (
+          node instanceof HTMLElement && node.matches(DISCOVERY_EXCLUSION_SELECTOR)
+            ? NodeFilter.FILTER_REJECT
+            : NodeFilter.FILTER_ACCEPT
+        ),
+      });
+      let candidate = walker.nextNode();
+      while (candidate) {
+        if (candidate instanceof HTMLElement) changed = registerTarget(candidate) || changed;
+        candidate = walker.nextNode();
       }
-    };
-
-    const scheduleFlush = () => {
-      if (!scanFrame) scanFrame = requestAnimationFrame(flushScans);
-    };
-
-    const scheduleAddedSubtreeScan = (element: HTMLElement) => {
-      for (const root of pendingRoots) {
-        if (root.contains(element)) return;
-        if (element.contains(root)) pendingRoots.delete(root);
-      }
-      pendingRoots.add(element);
-      scheduleFlush();
-    };
-
-    const schedulePublishTargets = () => {
-      shouldPublishTargets = true;
-      scheduleFlush();
+      publishTargets(changed);
     };
 
     const handlePotentialScrollArea = (event: Event) => {
       const target = getClosestHtmlElement(event.target);
-      if (target) registerTargetAndAncestors(target);
+      publishTargets(target ? registerTargetAndAncestors(target) : false);
+    };
+    const handleFocusedScrollArea = (event: FocusEvent) => {
+      const target = getClosestHtmlElement(event.target);
+      publishTargets(target ? registerTargetAndAncestors(target, true) : false);
     };
     const handleScrollCapture = (event: Event) => {
       const target = event.target instanceof Document ? document.scrollingElement : event.target;
-      if (target instanceof HTMLElement) registerTarget(target);
+      const changed = target instanceof HTMLElement
+        && !target.closest(DISCOVERY_EXCLUSION_SELECTOR)
+        && registerTarget(target, true);
+      publishTargets(changed);
     };
-    const mutationObserver = new MutationObserver((records) => {
-      records.forEach((record) => {
-        record.addedNodes.forEach((node) => {
-          if (node instanceof HTMLElement) scheduleAddedSubtreeScan(node);
-        });
-        if (record.removedNodes.length > 0) schedulePublishTargets();
-      });
-    });
 
-    mutationObserver.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-    });
-    document.addEventListener('scroll', handleScrollCapture, true);
+    const captureOptions = { capture: true, passive: true } as const;
+    document.addEventListener('scroll', handleScrollCapture, captureOptions);
     document.addEventListener('pointerover', handlePotentialScrollArea, true);
-    document.addEventListener('focusin', handlePotentialScrollArea, true);
-    document.addEventListener('input', handlePotentialScrollArea, true);
-    document.addEventListener('load', handlePotentialScrollArea, true);
-    document.addEventListener('transitionend', handlePotentialScrollArea, true);
-    scheduleAddedSubtreeScan(document.documentElement);
+    document.addEventListener('focusin', handleFocusedScrollArea, true);
+    const disconnectedTargetSweep = window.setInterval(
+      () => publishTargets(),
+      DISCONNECTED_TARGET_SWEEP_MS,
+    );
+    if (typeof window.requestIdleCallback === 'function') {
+      initialScanIdle = window.requestIdleCallback(discoverInitialTargets, { timeout: 500 });
+    } else {
+      initialScanFrame = requestAnimationFrame(discoverInitialTargets);
+    }
 
     return () => {
-      mutationObserver.disconnect();
       document.removeEventListener('scroll', handleScrollCapture, true);
       document.removeEventListener('pointerover', handlePotentialScrollArea, true);
-      document.removeEventListener('focusin', handlePotentialScrollArea, true);
-      document.removeEventListener('input', handlePotentialScrollArea, true);
-      document.removeEventListener('load', handlePotentialScrollArea, true);
-      document.removeEventListener('transitionend', handlePotentialScrollArea, true);
-      if (scanFrame) cancelAnimationFrame(scanFrame);
+      document.removeEventListener('focusin', handleFocusedScrollArea, true);
+      window.clearInterval(disconnectedTargetSweep);
+      if (initialScanIdle !== null) window.cancelIdleCallback(initialScanIdle);
+      if (initialScanFrame) cancelAnimationFrame(initialScanFrame);
       knownTargets.forEach((_, target) => target.removeAttribute('data-overlay-scrollbar'));
       knownTargets.clear();
     };

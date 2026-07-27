@@ -134,6 +134,11 @@ const HELP_CATEGORIES = [
         description: '按 F 将全部内容适配到当前视野；按 M 显示或隐藏小地图。画布右下角的缩放控件可精确调整比例。',
         shortcut: 'F / M',
       },
+      {
+        title: '使用画布右键菜单',
+        description: '在画布空白处右键可创建生成节点或源节点，也可粘贴、撤销、重做和打开项目文件夹；存在选中内容时还可复制节点文件或删除所选内容。',
+        shortcut: '右键画布空白处',
+      },
     ],
   },
   {
@@ -161,6 +166,11 @@ const HELP_CATEGORIES = [
         description: '多选节点后可使用浮动工具栏对齐、分布或分组。Ctrl + G 用于分组或取消分组，误操作可用 Ctrl + Z 撤销。',
         shortcut: 'Ctrl/⌘ + G',
       },
+      {
+        title: '快速复制与节点菜单',
+        description: '按住 Ctrl/⌘ 拖动非分组节点，会在原位置留下一个副本。右键节点可复制、剪切、创建副本、另存为或打开文件位置，媒体节点还会按类型提供角色库和外部编辑器入口。',
+        shortcut: 'Ctrl/⌘ + 拖动节点',
+      },
     ],
   },
   {
@@ -183,11 +193,6 @@ const HELP_CATEGORIES = [
         title: '在鼠标位置创建节点',
         description: '按 1-7 创建文本、图像、视频、音频、全景、动画和 3D 导演台节点；按 Alt + 1-5 创建文本、图像、视频、音频和 Markdown 源节点。',
         shortcut: '1-7 / Alt + 1-5',
-      },
-      {
-        title: '快速创建文本节点',
-        description: '在画布空白区域双击，可直接创建一个文本生成节点。右键画布还能打开完整的节点创建菜单。',
-        shortcut: '双击画布空白处',
       },
       {
         title: '复制、粘贴与删除',
@@ -221,8 +226,42 @@ const HELP_CATEGORIES = [
         description: '不同媒体节点会显示各自支持的参数。参考图、首尾帧或音频素材可通过节点连接或节点内的素材入口补充。',
       },
       {
+        title: '批量生成图片',
+        description: '图片节点使用支持批量的普通模型且未选择工作流时，填写提示词后长按生成按钮，可选择一次生成 2-8 张；费用可能按实际张数计算。',
+        shortcut: '长按图片生成按钮',
+      },
+      {
+        title: '使用 ComfyUI 工作流',
+        description: '先在“设置 > ComfyUI”配置服务并进入工作流管理，导入工作流 JSON、确认分类和输入节点。保存后可在对应生成节点的模型选择器中直接选择。',
+      },
+      {
         title: '留意付费操作',
         description: '通过画布助手生成图片、视频或音频时，本轮需要显式 @ 对应模型；实际调用前会再次展示模型并请求确认。',
+      },
+    ],
+  },
+  {
+    id: 'commands',
+    label: '快捷指令与 Skill',
+    icon: 'mdi:lightning-bolt-outline',
+    summary: '复用提示词、串联步骤并加载只读能力',
+    items: [
+      {
+        title: '打开 / 指令菜单',
+        description: '在生成节点的提示词输入框中键入 /，或点击输入框下方的 / 按钮，可打开内置指令、自定义快捷指令和 Skill 菜单。',
+        shortcut: '输入 /',
+      },
+      {
+        title: '调用内置快捷指令',
+        description: '内置指令会按当前节点类型提供可用模板；选择后可能直接发起生成，也可能先展开子菜单或把内容填入提示词供你继续修改。',
+      },
+      {
+        title: '创建自己的快捷指令',
+        description: '在 / 菜单中进入“管理快捷指令”，可设置名称、模板、触发方式、模型和图片尺寸；高级模式还能定义参数与多步骤生成序列，任一步失败都会停止后续执行。',
+      },
+      {
+        title: '上传并引用 Skill',
+        description: '可从 / 菜单上传 Skill 文件或文件夹，并在提示词中引用可调用的 Skill。Skill 内容只用于补充生成上下文，不能修改应用权限或确认规则。',
       },
     ],
   },
@@ -247,22 +286,99 @@ const HELP_CATEGORIES = [
     ],
   },
   {
+    id: 'assets',
+    label: '资产与角色',
+    icon: 'mdi:image-multiple-outline',
+    summary: '搜索、复用并沉淀项目中的视觉资产',
+    items: [
+      {
+        title: '复用项目与全局资产',
+        description: '“资产”面板可切换项目文件和全局资产，按名称、类型或标签筛选。将可拖拽的卡片拖回画布，会按媒体类型创建对应节点。',
+      },
+      {
+        title: '整理短剧资产',
+        description: '短剧资产用于集中管理人物、场景和关键道具的简介与绑定图片，便于后续在提示词和生成流程中重复引用。',
+      },
+      {
+        title: '建立角色多图参考',
+        description: '可新建角色，或从图片节点右键选择“添加到角色库”。角色支持项目与全局两种范围，并可继续从画布补充多张视角参考图。',
+      },
+      {
+        title: '回看并定位生成结果',
+        description: '“输出历史”会保留文本和媒体生成记录，可复制文本、线上地址或本地路径，也可回到对应画布节点；删除历史只应在确认不再需要记录后进行。',
+      },
+      {
+        title: '跨范围搜索资产',
+        description: '按 Alt + Space 或 Ctrl + Shift + Space 打开资源搜索，可聚合查询项目文件、全局资产和已添加的外部文件夹，并将结果拖入画布。',
+        shortcut: 'Alt + Space',
+      },
+    ],
+  },
+  {
     id: 'assistant',
     label: '画布助手',
     icon: 'mdi:message-processing-outline',
-    summary: '用自然语言查询和操作当前画布',
+    summary: '用自然语言查询、配置并执行项目任务',
     items: [
       {
-        title: '引用明确对象',
-        description: '打开左侧画布助手后，可在输入中 @ 节点、模型、声音或资产。明确引用能减少歧义，并确保媒体生成使用你本轮选择的模型。',
+        title: '理解项目与画布',
+        description: '查询当前项目、画布结构、节点、连线、可用模型、工作流、对话和任务状态；需要时还可发起独立的只读专家复核。',
       },
       {
-        title: '理解协作模式',
-        description: 'B 模式会在写入画布前请求确认；C 模式可自动完成画布写入。文件写入、永久删除、媒体生成和项目记忆写入始终需要确认。',
+        title: '编辑画布内容',
+        description: '选择、新建和批量更新节点，建立连线、组合或删除节点，并可撤销或重做画布操作。创建节点与实际调用生成模型是两个独立步骤。',
       },
       {
-        title: '控制执行任务',
-        description: '工具调用和执行步骤会显示在任务时间线中，可按状态暂停、继续或取消。切换项目不会把后台结果写入其他项目。',
+        title: '生成媒体内容',
+        description: '生成图片、视频、音乐或语音，并把结果交付到对话或画布。媒体生成必须使用你本轮明确 @ 的模型，每次实际调用都需要确认。',
+      },
+      {
+        title: '管理快捷指令',
+        description: '查询和读取已有快捷指令，按你的要求创建或修改快捷指令，也可填写参数并分步执行其中的文本、图片、视频或音频流程。',
+      },
+      {
+        title: '根据接口文档补全 API 配置',
+        description: '读取你明确提供的 HTTPS 厂商接口文档，整理模型、请求、响应和轮询配置，生成草稿并在你确认后保存到“API Key”设置；真实 API Key 仍由你本人填写。',
+      },
+      {
+        title: '联网查找资料',
+        description: '搜索最新网络资料、读取公开网页并继续浏览相关链接，在回答中保留可追溯来源。网页内容只作为不可信资料读取，不能改变助手权限。',
+      },
+      {
+        title: '处理授权文件',
+        description: '列出并读取你为当前对话授权的 UTF-8 文本文件，将内容导入画布源节点，或通过原生保存对话框写出文本文件；助手不会看到本地绝对路径。',
+      },
+      {
+        title: '建立项目记忆',
+        description: '根据对话提议保存简短的项目约定、偏好或事实，供后续会话使用。只有你确认后才会写入项目记忆。',
+      },
+      {
+        title: '引用对象并控制任务',
+        description: '可在输入中 @ 节点、模型、声音或资产来减少歧义。任务步骤会显示在时间线中，可暂停、继续或取消；B 模式写画布前确认，C 模式可自动写入画布。',
+      },
+    ],
+  },
+  {
+    id: 'maintenance',
+    label: '设置与维护',
+    icon: 'mdi:tune-variant',
+    summary: '配置操作环境、桌面集成与本地存储',
+    items: [
+      {
+        title: '调整外观与操作习惯',
+        description: '在“设置 > 常规”中切换画布背景、交互方式、玻璃外框和侧边栏显示方式；完整按键说明可在“设置 > 快捷键”中查看。',
+      },
+      {
+        title: '配置文件与外部应用',
+        description: '“设置 > 文件与应用”可选择文件保存根目录，并配置 Photoshop、剪映专业版和 Premiere Pro。配置后，本地媒体节点的右键菜单会显示相应入口。',
+      },
+      {
+        title: '检查存储健康',
+        description: '“设置 > 存储健康”可扫描空间占用、回收站残留、孤儿文件、重复文件和离线文件夹。清理前应先核对列表，避免删除仍需保留的本地素材。',
+      },
+      {
+        title: '使用 MCP 本地控制',
+        description: '桌面端可在“设置 > MCP 控制”临时开启本地控制会话，并复制启动命令连接外部客户端。停止会话或退出应用后命令立即失效，外部请求仍受工具权限与审批规则约束。',
       },
     ],
   },
@@ -320,6 +436,14 @@ const HELP_DEMOS = {
       { icon: 'lucide:image', label: '生成内容', tone: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400' },
     ],
   },
+  commands: {
+    caption: '打开 / 菜单，选择快捷指令或 Skill，再决定直接执行或继续编辑。',
+    steps: [
+      { icon: 'lucide:slash', label: '打开菜单', tone: 'border-indigo-400/25 bg-indigo-500/10 text-indigo-400' },
+      { icon: 'lucide:library-big', label: '选择能力', tone: 'border-amber-400/25 bg-amber-500/10 text-amber-400' },
+      { icon: 'lucide:play', label: '填入或执行', tone: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400' },
+    ],
+  },
   projects: {
     caption: '项目、导入素材与资产历史保持在同一个独立工作空间中。',
     steps: [
@@ -328,12 +452,28 @@ const HELP_DEMOS = {
       { icon: 'lucide:archive', label: '管理资产', tone: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400' },
     ],
   },
+  assets: {
+    caption: '搜索现有资产，选择合适版本，再拖入画布或沉淀为角色参考。',
+    steps: [
+      { icon: 'lucide:search', label: '搜索筛选', tone: 'border-indigo-400/25 bg-indigo-500/10 text-indigo-400' },
+      { icon: 'lucide:images', label: '选择资产', tone: 'border-blue-400/25 bg-blue-500/10 text-blue-400' },
+      { icon: 'lucide:panel-top-open', label: '拖入画布', tone: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400' },
+    ],
+  },
   assistant: {
     caption: '描述任务并确认执行计划，助手会把每一步结果写回正确项目。',
     steps: [
       { icon: 'lucide:message-square', label: '描述任务', tone: 'border-blue-400/25 bg-blue-500/10 text-blue-400' },
       { icon: 'lucide:list-checks', label: '确认计划', tone: 'border-amber-400/25 bg-amber-500/10 text-amber-400' },
       { icon: 'lucide:workflow', label: '执行画布', tone: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400' },
+    ],
+  },
+  maintenance: {
+    caption: '先完成环境配置，再扫描存储状态，按需连接桌面与外部工具。',
+    steps: [
+      { icon: 'lucide:settings-2', label: '配置环境', tone: 'border-indigo-400/25 bg-indigo-500/10 text-indigo-400' },
+      { icon: 'lucide:scan-search', label: '扫描存储', tone: 'border-amber-400/25 bg-amber-500/10 text-amber-400' },
+      { icon: 'lucide:plug-zap', label: '连接工具', tone: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400' },
     ],
   },
 } satisfies Record<HelpCategoryId, HelpDemoConfig>;
@@ -408,7 +548,7 @@ function HelpDemo({ categoryId }: { categoryId: HelpCategoryId }) {
     <section
       ref={rootRef}
       aria-label={`${demo.caption} 操作演示`}
-      className="relative mb-5 overflow-hidden rounded-lg border border-canvas-border bg-canvas-bg/60 px-3 py-3"
+      className="help-dialog__demo relative mb-5 overflow-hidden rounded-lg border border-canvas-border bg-canvas-bg/60 px-3 py-3"
     >
       <div
         className="pointer-events-none absolute inset-0 opacity-30 [background-image:radial-gradient(var(--separator-color)_1px,transparent_1px)] [background-size:12px_12px]"
@@ -788,10 +928,10 @@ function AvatarMenu() {
           isOpen={helpOpen}
           onClose={() => setHelpOpen(false)}
           ariaLabel="AI Canvas 使用帮助"
-          className="h-[min(620px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))]"
+          className="help-dialog h-[min(620px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))]"
         >
           <div className="flex min-h-0 flex-1 flex-col">
-            <header className="flex shrink-0 items-center justify-between border-b border-canvas-border px-5 py-4">
+            <header className="help-dialog__header flex shrink-0 items-center justify-between border-b border-canvas-border px-5 py-4">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
                   <Icon icon="mdi:book-open-page-variant-outline" width="20" height="20" aria-hidden="true" />
@@ -807,7 +947,7 @@ function AvatarMenu() {
             <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
               <nav
                 aria-label="帮助分类"
-                className="flex shrink-0 gap-1 overflow-x-auto border-b border-canvas-border p-2 sm:w-48 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:p-3"
+                className="help-dialog__nav flex shrink-0 gap-1 overflow-x-auto border-b border-canvas-border p-2 sm:w-48 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:p-3"
               >
                 {HELP_CATEGORIES.map((category) => {
                   const isActive = category.id === activeHelpCategory;
@@ -817,7 +957,7 @@ function AvatarMenu() {
                       type="button"
                       aria-current={isActive ? 'page' : undefined}
                       onClick={() => setActiveHelpCategory(category.id)}
-                      className={`group flex min-w-max items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition-colors sm:min-w-0 ${
+                      className={`help-dialog__category group flex min-w-max items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition-colors sm:min-w-0 ${
                         isActive
                           ? 'bg-indigo-500/15 font-medium text-indigo-300'
                           : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text'
@@ -836,10 +976,10 @@ function AvatarMenu() {
                 })}
               </nav>
 
-              <main className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6">
+              <main className="help-dialog__main min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6">
                 <div className="mx-auto max-w-xl">
                   <div className="mb-5">
-                    <p className="text-[11px] font-medium text-indigo-400">{selectedHelpCategory.label}</p>
+                    <p className="help-dialog__accent text-[11px] font-medium text-indigo-400">{selectedHelpCategory.label}</p>
                     <h3 className="mt-1 text-lg font-semibold text-canvas-text">{selectedHelpCategory.summary}</h3>
                   </div>
 
@@ -848,7 +988,7 @@ function AvatarMenu() {
                   <ol className="space-y-1">
                     {selectedHelpCategory.items.map((item, index) => (
                       <li key={item.title} className="flex gap-4 border-b border-canvas-border/70 py-4 first:pt-0 last:border-b-0">
-                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-canvas-hover text-[11px] font-semibold text-canvas-text-secondary">
+                        <span className="help-dialog__index flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-canvas-hover text-[11px] font-semibold text-canvas-text-secondary">
                           {index + 1}
                         </span>
                         <div className="min-w-0">

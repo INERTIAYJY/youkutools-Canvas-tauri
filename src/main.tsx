@@ -21,8 +21,9 @@ async function applyInitialChatWindowTheme() {
 
   let effectiveTheme: AppConfig['theme'] = 'dark'
   try {
-    const { loadConfig } = await import('./services/fileService')
-    const config = await loadConfig() as AppConfig | null
+    // 只要主题字段，不必为此去读凭据存储
+    const { loadConfigWithoutSecrets } = await import('./services/fileService')
+    const config = await loadConfigWithoutSecrets() as AppConfig | null
     effectiveTheme = config?.canvasBackground === 'off-white'
       ? 'light'
       : config?.theme === 'light' ? 'light' : 'dark'

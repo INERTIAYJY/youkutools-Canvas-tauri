@@ -19,6 +19,7 @@ import type {
 import AnimatedButton from '../shared/AnimatedButton';
 import { defaultModelGroups } from '../nodes/shared/defaultModels';
 import { shouldListProviderConnection } from './apiKeySettingsUtils';
+import { isSecretStoreAvailable } from '../../services/providerSecretService';
 import DreaminaLoginModal from './DreaminaLoginModal';
 import ProviderConnectionDialog from './ProviderConnectionDialog';
 
@@ -78,6 +79,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     revision: 0,
   });
   const [pendingDeleteId, setPendingDeleteId] = useState<string>();
+  // 凭据存在 Rust 侧的凭据存储里；不可用时只能本次会话有效，得在用户填写前就说清楚
+  const [secretStoreAvailable, setSecretStoreAvailable] = useState(true);
 
   const [dreaminaLoading, setDreaminaLoading] = useState(false);
   const [dreaminaStatusMsg, setDreaminaStatusMsg] = useState('首次登录时会自动准备即梦组件');
@@ -180,6 +183,14 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     },
     [],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    void isSecretStoreAvailable().then((available) => {
+      if (!cancelled) setSecretStoreAvailable(available);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const applyDreaminaRuntime = useCallback((runtime: DreaminaRuntime) => {
     setDreaminaRuntime(runtime);
@@ -357,6 +368,12 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="settings-pane-body provider-settings-body">
+        {!secretStoreAvailable && (
+          <p className="provider-secret-warning">
+            <Icon icon="mdi:shield-alert-outline" width="14" />
+            当前环境无法保存凭据，API Key 不会写入本地，仅本次会话有效。
+          </p>
+        )}
         {providerItems.length === 0 ? (
           <div className="provider-empty-state">
             <span className="provider-empty-icon"><Icon icon="mdi:key-chain-variant" width="24" /></span>

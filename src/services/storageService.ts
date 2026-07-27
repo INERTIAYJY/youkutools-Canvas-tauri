@@ -34,6 +34,7 @@ import { getAssetUrlFromPath, getProjectDataDir, joinPath } from './fs/core';
 import { walkDirectoryFiles } from './fs/assetLibrary';
 import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
 import { normalizeDramaAssetLibrary } from '../types/dramaAssets';
+import { restoreConfigSecrets, stripConfigSecrets } from './providerSecretService';
 
 interface PersistedNodeLike {
   data?: BaseNodeData;
@@ -241,19 +242,62 @@ export async function deleteWorkflow(id: string): Promise<void> {
   }
 }
 
-/** 保存应用配置到 IndexedDB */
-export async function saveConfig(data: unknown): Promise<void> {
+/**
+ * 保存应用配置到 IndexedDB。
+ * 凭据先摘进 Rust 侧凭据存储，数据库里只留引用；存储失败也不落明文。
+ * @returns 未能写入凭据存储、仅本次会话有效的连接 ID
+ */
+export async function saveConfig(data: unknown): Promise<string[]> {
   try {
-    await saveConfigToDb(data);
+    const { config, unstored } = await stripConfigSecrets(data);
+    await saveConfigToDb(config);
     console.log('Config saved to IndexedDB');
+    return unstored;
   } catch (error) {
     console.error('Save config failed:', error);
     throw error;
   }
 }
 
-/** 从 IndexedDB 加载应用配置 */
+export interface LoadedConfig {
+  config: unknown | null;
+  /** 引用存在但凭据存储里读不到的连接 ID，需要用户重新输入 */
+  missingSecrets: string[];
+}
+
+/**
+ * 从 IndexedDB 加载应用配置，并按引用从凭据存储补回凭据。
+ * 遇到旧版明文配置会迁进凭据存储并立刻回写清理后的记录。
+ */
+export async function loadConfigWithSecrets(): Promise<LoadedConfig> {
+  try {
+    const raw = await loadConfigFromDb();
+    if (raw === null || raw === undefined) return { config: null, missingSecrets: [] };
+
+    const { config, migrated, missing } = await restoreConfigSecrets(raw);
+    if (migrated) {
+      // 明文已进凭据存储，立刻覆盖掉数据库里的旧记录
+      const { config: scrubbed } = await stripConfigSecrets(config);
+      await saveConfigToDb(scrubbed);
+      console.log('[storage] 已将明文 API Key 迁移到凭据存储并清理数据库记录');
+    }
+    return { config, missingSecrets: missing };
+  } catch (error) {
+    console.error('Load config failed:', error);
+    return { config: null, missingSecrets: [] };
+  }
+}
+
+/** 从 IndexedDB 加载应用配置（凭据已补回）。 */
 export async function loadConfig(): Promise<unknown | null> {
+  return (await loadConfigWithSecrets()).config;
+}
+
+/**
+ * 只读取配置本体，不触碰凭据存储。
+ * 供只关心主题、窗口尺寸这类非凭据字段的早期启动路径使用，省掉无谓的凭据读取。
+ */
+export async function loadConfigWithoutSecrets(): Promise<unknown | null> {
   try {
     return await loadConfigFromDb();
   } catch (error) {

@@ -260,7 +260,13 @@ export interface ProviderModelSelection {
 
 export interface ApiProviderConfig {
   name: string;
+  /**
+   * 运行期明文凭据，只存在于内存。持久化时由 providerSecretService 摘进 Rust 侧的
+   * 凭据存储（Renderer 不可直读），数据库里只留 apiKeyRef，不再写入明文。
+   */
   apiKey: string;
+  /** 凭据在凭据存储中的条目名；由持久化层维护，业务代码不要直接读写。 */
+  apiKeyRef?: string;
   baseUrl?: string;
   /** 内置目录定义 ID；自定义连接的配置 key 与目录定义 ID 不同。 */
   catalogId?: string;
@@ -280,7 +286,7 @@ export interface DreaminaAuthData {
   username?: string;          // 账户昵称
   credit?: string;            // 额度余额文本
   loginTs?: number;           // 登录时间戳
-  cookie?: string;            // 遗留字段（旧 cookie 方案），已弃用
+  cookie?: string;            // 遗留字段（旧 cookie 方案），已弃用且不再持久化（属凭据）
 }
 
 // 即梦 OAuth 登录运行态（对应 Rust LoginRuntime 快照）

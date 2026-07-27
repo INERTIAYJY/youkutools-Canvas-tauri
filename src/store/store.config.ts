@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import * as fileService from '../services/fileService';
 import { setBaseDataDir, syncAuthorizedDirectories } from '../services/fileService';
+import { deleteProviderSecret } from '../services/providerSecretService';
 
 const defaultConfig: AppConfig = {
   providers: {},
@@ -383,6 +384,9 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     clearLocalModelPreferences(references);
     set({ config: nextConfig, nodes: nextNodes.nodes, projects: nextProjects });
 
+    // 连接已删除，同步清掉凭据存储里的条目，避免留下孤立凭据
+    await deleteProviderSecret(providerName);
+
     const currentProjectId = state.currentProjectId;
     if (currentProjectChanged && currentProjectId) {
       await get().saveCurrentProjectSilent();
@@ -455,12 +459,17 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     }
     try {
       const normalizedConfig = migrateLegacyGeneralModels(config);
-      await fileService.saveConfig(normalizedConfig);
+      // 凭据由持久化层写入 Rust 侧凭据存储；写不进去时不会落明文，只能本次会话有效
+      const unstored = await fileService.saveConfig(normalizedConfig);
       if (normalizedConfig !== config) set({ config: normalizedConfig });
       // 同步 baseDataDir 到 fileService
       setBaseDataDir(normalizedConfig.baseDataDir);
       await syncAuthorizedDirectories(normalizedConfig);
-      if (!options?.silent) showToast('设置已保存');
+      if (unstored.length > 0) {
+        showToast('凭据存储不可用，API Key 仅本次会话有效，重启后需重新填写', 'error');
+      } else if (!options?.silent) {
+        showToast('设置已保存');
+      }
     } catch {
       showToast('设置保存失败', 'error');
     }
@@ -468,8 +477,11 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
 
   loadConfig: async () => {
     let saved: unknown | null;
+    let missingSecrets: string[];
     try {
-      saved = await fileService.loadConfig();
+      const loaded = await fileService.loadConfigWithSecrets();
+      saved = loaded.config;
+      missingSecrets = loaded.missingSecrets;
     } catch {
       set({ configHydrated: false });
       console.warn('[设置] 配置加载失败，已阻止默认值覆盖持久化配置');
@@ -485,6 +497,13 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...(saved as AppConfig) });
     syncNodeToolbarMode(cfg.nodeToolbarMode);
     set({ config: cfg, configHydrated: true });
+    if (missingSecrets.length > 0) {
+      console.warn('[设置] 凭据存储中缺少以下连接的凭据:', missingSecrets);
+      get().showToast(
+        `有 ${missingSecrets.length} 个连接的 API Key 未能读取，请在设置中重新填写`,
+        'error',
+      );
+    }
     try {
       setBaseDataDir(cfg.baseDataDir);
       await syncAuthorizedDirectories(cfg);

@@ -69,6 +69,25 @@ fn is_within(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
+/// 自定义命令一律不得触碰凭据目录。
+/// 少了这道判断，被注入的 Renderer 可以用 copy_file_streamed 把凭据文件复制进
+/// 项目素材目录，而那里是 Renderer 可读的，等于绕过 secret_* 命令整份读走。
+fn is_secret_path<R: Runtime>(app: &tauri::AppHandle<R>, resolved: &Path) -> bool {
+    let Ok(secret_dir) = crate::secret_store::secret_dir(app) else {
+        return false;
+    };
+    is_under_secret_dir(&secret_dir, resolved)
+}
+
+/// 凭据目录可能尚未创建（无法 canonicalize），因此同时按原始路径与解析后路径比对。
+fn is_under_secret_dir(secret_dir: &Path, resolved: &Path) -> bool {
+    let normalized = secret_dir.components().collect::<PathBuf>();
+    is_within(resolved, &normalized)
+        || secret_dir
+            .canonicalize()
+            .is_ok_and(|canonical| is_within(resolved, &canonical))
+}
+
 /// 解析路径的真实位置：存在则 canonicalize；写入场景下允许目标不存在，改用父目录解析。
 /// canonicalize 会展开 `..` 与符号链接，避免用软链把授权目录指到别处。
 fn resolve_path(raw: &str, access: PathAccess) -> Result<PathBuf, String> {
@@ -152,6 +171,9 @@ pub fn authorize_path_with_roots<R: Runtime>(
     extra_roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
     let resolved = resolve_path(raw, access)?;
+    if is_secret_path(app, &resolved) {
+        return Err("凭据目录不允许通过该命令访问".to_string());
+    }
     if !is_authorized(app, &resolved, access, extra_roots) {
         return Err(format!(
             "路径未获授权，请先在设置中添加该目录: {}",
@@ -269,6 +291,20 @@ pub fn authorize_launch_target<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuses_paths_inside_the_secret_dir() {
+        let secret_dir = PathBuf::from("/data/app/secrets");
+
+        assert!(is_under_secret_dir(&secret_dir, &secret_dir));
+        assert!(is_under_secret_dir(
+            &secret_dir,
+            Path::new("/data/app/secrets/credentials.json"),
+        ));
+        // 同级目录不能被误判，否则会挡掉正常的项目素材路径
+        assert!(!is_under_secret_dir(&secret_dir, Path::new("/data/app/projects/a.png")));
+        assert!(!is_under_secret_dir(&secret_dir, Path::new("/data/app/secrets-backup/x")));
+    }
 
     #[test]
     fn rejects_relative_and_empty_paths() {

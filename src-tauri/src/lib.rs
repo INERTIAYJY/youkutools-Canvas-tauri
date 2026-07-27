@@ -25,6 +25,7 @@ mod mcp_bridge;
 pub mod onnx;
 mod path_policy;
 mod provider_docs;
+mod secret_store;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
 static CHAT_WINDOW_LOCK_OFFSET: Mutex<(i32, i32)> = Mutex::new((0, 0));
@@ -999,6 +1000,10 @@ pub fn run() {
             mcp_bridge::mcp_bridge_stop,
             mcp_bridge::mcp_bridge_status,
             mcp_bridge::mcp_bridge_respond,
+            secret_store::secret_set,
+            secret_store::secret_get,
+            secret_store::secret_delete,
+            secret_store::secret_store_available,
         ])
         .on_window_event(|window, event| {
             // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。
@@ -1042,6 +1047,10 @@ pub fn run() {
             }
         })
         .setup(|_app| {
+            // 凭据目录只允许本进程的 secret_* 命令访问：从 fs 与 asset scope 中拒掉，
+            // 否则 Renderer 能绕过命令直接读走整份凭据文件
+            secret_store::deny_secret_dir_access(_app.handle());
+
             // 调试构建自动打开 DevTools（方便排查打包后白屏等问题）
             #[cfg(debug_assertions)]
             {

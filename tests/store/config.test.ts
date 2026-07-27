@@ -1,14 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../src/types';
 
-const fileMocks = vi.hoisted(() => ({
-  loadConfig: vi.fn(),
-  loadProjectsList: vi.fn(async () => [] as Array<Record<string, unknown>>),
-  saveProject: vi.fn(async (record: { id: string }) => record.id),
-  saveConfig: vi.fn<(config: unknown) => Promise<void>>(async () => undefined),
-  setBaseDataDir: vi.fn(),
-  syncAuthorizedDirectories: vi.fn(async () => undefined),
-}));
+const fileMocks = vi.hoisted(() => {
+  const loadConfig = vi.fn();
+  return {
+    loadConfig,
+    // 凭据改由凭据存储托管后，store 走 loadConfigWithSecrets；沿用 loadConfig 的桩数据
+    loadConfigWithSecrets: vi.fn(async () => ({
+      config: await loadConfig(),
+      missingSecrets: [] as string[],
+    })),
+    loadProjectsList: vi.fn(async () => [] as Array<Record<string, unknown>>),
+    saveProject: vi.fn(async (record: { id: string }) => record.id),
+    saveConfig: vi.fn<(config: unknown) => Promise<string[]>>(async () => []),
+    setBaseDataDir: vi.fn(),
+    syncAuthorizedDirectories: vi.fn(async () => undefined),
+  };
+});
 
 vi.mock('../../src/services/fileService', () => fileMocks);
 
@@ -17,10 +25,16 @@ import { useAppStore } from '../../src/store/useAppStore';
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   fileMocks.loadConfig.mockReset();
+  fileMocks.loadConfigWithSecrets.mockReset();
+  fileMocks.loadConfigWithSecrets.mockImplementation(async () => ({
+    config: await fileMocks.loadConfig(),
+    missingSecrets: [],
+  }));
+  fileMocks.saveConfig.mockReset();
+  fileMocks.saveConfig.mockResolvedValue([]);
   fileMocks.loadProjectsList.mockReset();
   fileMocks.loadProjectsList.mockResolvedValue([]);
   fileMocks.saveProject.mockClear();
-  fileMocks.saveConfig.mockClear();
   fileMocks.setBaseDataDir.mockClear();
   fileMocks.syncAuthorizedDirectories.mockReset();
   fileMocks.syncAuthorizedDirectories.mockResolvedValue(undefined);

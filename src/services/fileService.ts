@@ -95,6 +95,8 @@ export {
   deleteWorkflow,
   saveConfig,
   loadConfig,
+  loadConfigWithSecrets,
+  loadConfigWithoutSecrets,
   savePreset,
   loadPresets,
   deletePreset,

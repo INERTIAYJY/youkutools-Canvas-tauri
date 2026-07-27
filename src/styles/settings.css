@@ -820,6 +820,19 @@
   color: var(--danger-light);
   font-size: 10px;
 }
+.provider-secret-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--warning-alpha-30, rgba(245, 169, 127, 0.3));
+  border-radius: 7px;
+  background: var(--warning-alpha-10, rgba(245, 169, 127, 0.1));
+  color: var(--theme-text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
 .provider-empty-state {
   display: flex;
   min-height: 230px;

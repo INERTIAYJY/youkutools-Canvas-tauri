@@ -154,16 +154,16 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
       });
   }, [nodeId, nodes, edges]);
 
+  // ── Dock 动效状态 ──
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const onHoverStart = useCallback((idx: number) => setHoverIndex(idx), []);
+  const onHoverEnd = useCallback(() => setHoverIndex(null), []);
+
   if (connectedNodes.length === 0) return null;
 
   const handleClick = (nodeId: string, label: string) => {
     onInsertMention?.(`@{${nodeId}:${label}}`);
   };
-
-  // ── Dock 动效状态 ──
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const onHoverStart = useCallback((idx: number) => setHoverIndex(idx), []);
-  const onHoverEnd = useCallback(() => setHoverIndex(null), []);
 
   const externalIndex = hoveredMentionNodeId
     ? connectedNodes.findIndex((n) => n.id === hoveredMentionNodeId || n.sbCells?.some((c) => c.mentionId === hoveredMentionNodeId))

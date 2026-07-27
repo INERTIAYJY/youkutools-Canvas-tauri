@@ -134,6 +134,7 @@ function DonutChart({ segments, total, size = 160 }: {
   const outerR = size * 0.46;
   const cornerR = size * 0.02;
   const gapDeg = 2;
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   if (segments.length === 0 || total === 0) {
     return (
@@ -155,8 +156,6 @@ function DonutChart({ segments, total, size = 160 }: {
     cursor += sweep;
     return { ...seg, start, sweep, pct: (seg.value / total) * 100 };
   });
-
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   return (
     <div className="flex flex-col items-center gap-3">

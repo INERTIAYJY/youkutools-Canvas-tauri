@@ -9,6 +9,29 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
+type MarkdownUrlKind = 'link' | 'image';
+
+const SAFE_DATA_IMAGE_URL = /^data:image\/(?:avif|gif|jpe?g|png|webp);base64,[a-z0-9+/=]+$/i;
+
+function isSafeMarkdownUrl(url: string, kind: MarkdownUrlKind): boolean {
+  // URL parsers ignore ASCII control characters around schemes. Remove them before
+  // checking so inputs such as `java\u0000script:` cannot bypass the allowlist.
+  const normalized = Array.from(url, (char) => {
+    const code = char.charCodeAt(0);
+    return code <= 0x20 || code === 0x7f ? '' : char;
+  }).join('');
+  if (!normalized) return false;
+
+  if (kind === 'image' && SAFE_DATA_IMAGE_URL.test(normalized)) return true;
+
+  const scheme = normalized.match(/^([a-z][a-z0-9+.-]*):/i)?.[1].toLowerCase();
+  if (!scheme) return true;
+
+  return kind === 'link'
+    ? scheme === 'http' || scheme === 'https' || scheme === 'mailto'
+    : scheme === 'http' || scheme === 'https';
+}
+
 export function renderMarkdown(md: string): string {
   if (!md) return '';
 
@@ -41,6 +64,7 @@ export function renderMarkdown(md: string): string {
     /!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g,
     (_: string, alt: string, url: string) => {
       const cleanUrl = url.replace(/\s+"[^"]*"$/, '');
+      if (!isSafeMarkdownUrl(cleanUrl, 'image')) return alt;
       const titleMatch = url.match(/\s+"([^"]*)"$/);
       const title = titleMatch ? ` title="${escapeHtml(titleMatch[1])}"` : '';
       return `<img src="${escapeHtml(cleanUrl)}" alt="${escapeHtml(alt)}"${title} />`;
@@ -52,6 +76,7 @@ export function renderMarkdown(md: string): string {
     /\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g,
     (_: string, text: string, url: string) => {
       const cleanUrl = url.replace(/\s+"[^"]*"$/, '');
+      if (!isSafeMarkdownUrl(cleanUrl, 'link')) return text;
       const titleMatch = url.match(/\s+"([^"]*)"$/);
       const title = titleMatch ? ` title="${escapeHtml(titleMatch[1])}"` : '';
       return `<a href="${escapeHtml(cleanUrl)}"${title} rel="noopener">${text}</a>`;

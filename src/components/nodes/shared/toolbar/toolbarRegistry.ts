@@ -5,12 +5,24 @@ import type { ToolbarButtonDef, ToolbarZoneLayout, ToolbarLayout } from '../../.
 
 // ── 通用图标（复用 inline SVG 太繁琐，用 iconify name，回退到 emoji）──
 
+export const TOOLBAR_MORE_KEY = 'more';
+
+function createMoreButton(defaultZone: string): ToolbarButtonDef {
+  return {
+    key: TOOLBAR_MORE_KEY,
+    label: '更多',
+    icon: 'mdi:dots-horizontal',
+    defaultZone,
+  };
+}
+
 /** 文本节点按钮 */
 export const TEXT_BUTTONS: ToolbarButtonDef[] = [
   { key: 'copy',           label: '复制',        icon: 'mdi:content-copy',             defaultZone: '常用' },
   { key: 'clearEmptyLines',label: '清除空行',    icon: 'mdi:format-line-spacing',       defaultZone: '常用' },
   { key: 'showPrompt',     label: '查看提示词',  icon: 'mdi:message-text-outline',      defaultZone: '常用' },
   { key: 'fullscreen',     label: '全屏显示',    icon: 'mdi:fullscreen',                defaultZone: '常用' },
+  createMoreButton('常用'),
 ];
 
 /** 视频节点按钮 */
@@ -18,6 +30,7 @@ export const VIDEO_BUTTONS: ToolbarButtonDef[] = [
   { key: 'copyFile',      label: '复制视频',    icon: 'mdi:content-copy',             defaultZone: '常用' },
   { key: 'captureFrame',   label: '截取当前帧',  icon: 'mdi:camera-outline',            defaultZone: '常用' },
   { key: 'fullscreen',     label: '全屏预览',    icon: 'mdi:fullscreen',                defaultZone: '常用' },
+  createMoreButton('常用'),
 ];
 
 /** 全景图节点按钮 */
@@ -26,6 +39,7 @@ export const PANORAMA_BUTTONS: ToolbarButtonDef[] = [
   { key: 'toggleMode',     label: '切换视图模式',icon: 'mdi:rotate-3d',                  defaultZone: '常用' },
   { key: 'screenshot',     label: '截图当前视角',icon: 'mdi:camera',                     defaultZone: '常用' },
   { key: 'fullscreen',     label: '全屏显示',    icon: 'mdi:fullscreen',                defaultZone: '常用' },
+  createMoreButton('常用'),
 ];
 
 /** 图像节点按钮 */
@@ -40,6 +54,7 @@ export const IMAGE_BUTTONS: ToolbarButtonDef[] = [
   { key: 'annotate',       label: '标注',        icon: 'mdi:draw-pen',                   defaultZone: 'Primary' },
   { key: 'crop',           label: '裁切',        icon: 'mdi:crop',                       defaultZone: 'Primary' },
   { key: 'compose',        label: '多图编辑',    icon: 'mdi:layers-triple-outline',      defaultZone: 'Primary' },
+  createMoreButton('Primary'),
   { key: 'upload',         label: '上传图片',    icon: 'mdi:upload',                     defaultZone: 'Primary' },
   { key: 'copyFile',       label: '复制图像',    icon: 'mdi:content-copy',               defaultZone: 'Secondary' },
   { key: 'history',        label: '生成历史',    icon: 'mdi:history',                  defaultZone: 'Secondary' },
@@ -53,6 +68,7 @@ export const AUDIO_BUTTONS: ToolbarButtonDef[] = [
   { key: 'copyFile',      label: '复制音频',    icon: 'mdi:content-copy',             defaultZone: '常用' },
   { key: 'upload',         label: '上传音频',    icon: 'mdi:upload',                     defaultZone: '常用' },
   { key: 'fullscreen',     label: '全屏显示',    icon: 'mdi:fullscreen',                defaultZone: '常用' },
+  createMoreButton('常用'),
 ];
 
 // ── 默认布局 ──
@@ -72,19 +88,19 @@ function buildLayout(buttons: ToolbarButtonDef[], version = 1): ToolbarLayout {
   return { zones, version };
 }
 
-export const DEFAULT_TEXT_LAYOUT      = buildLayout(TEXT_BUTTONS);
-export const DEFAULT_VIDEO_LAYOUT     = buildLayout(VIDEO_BUTTONS);
-export const DEFAULT_PANORAMA_LAYOUT  = buildLayout(PANORAMA_BUTTONS);
-export const DEFAULT_IMAGE_LAYOUT     = buildLayout(IMAGE_BUTTONS, 7);
-export const DEFAULT_AUDIO_LAYOUT     = buildLayout(AUDIO_BUTTONS);
+export const DEFAULT_TEXT_LAYOUT      = buildLayout(TEXT_BUTTONS, 2);
+export const DEFAULT_VIDEO_LAYOUT     = buildLayout(VIDEO_BUTTONS, 2);
+export const DEFAULT_PANORAMA_LAYOUT  = buildLayout(PANORAMA_BUTTONS, 2);
+export const DEFAULT_IMAGE_LAYOUT     = buildLayout(IMAGE_BUTTONS, 8);
+export const DEFAULT_AUDIO_LAYOUT     = buildLayout(AUDIO_BUTTONS, 2);
 
 /**
  * 迁移图像工具栏的新内置能力与默认分区。
  * 只有能精确识别为历史默认值的布局才会整体换新；其他布局仅执行必要的能力迁移，
  * 保留用户已有的分区、排序和删减结果。
  */
-export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): ToolbarLayout {
-  if (nodeType !== 'ai-image' || layout.version >= 7) return layout;
+function migrateImageLayoutToV7(layout: ToolbarLayout): ToolbarLayout {
+  if (layout.version >= 7) return layout;
 
   let cameraStudioInserted = layout.zones.some((zone) => zone.buttonKeys.includes('cameraStudio'));
 
@@ -165,6 +181,43 @@ export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): T
   return { ...layout, zones, version: 7 };
 }
 
+/**
+ * 为旧布局补入一次“更多”按钮。布局升到当前版本后，用户主动隐藏“更多”不会再被补回。
+ */
+export function migrateToolbarLayout(nodeType: string, layout: ToolbarLayout): ToolbarLayout {
+  const targetVersion = nodeType === 'ai-image'
+    ? 8
+    : ['ai-text', 'ai-video', 'ai-panorama', 'ai-audio'].includes(nodeType)
+      ? 2
+      : layout.version;
+  if (layout.version >= targetVersion) return layout;
+
+  const migrated = nodeType === 'ai-image' ? migrateImageLayoutToV7(layout) : layout;
+  if (migrated.version >= targetVersion) return migrated;
+
+  const moreButton = getButtonRegistry(nodeType).find((button) => button.key === TOOLBAR_MORE_KEY);
+  if (!moreButton) return migrated;
+
+  let zones = migrated.zones.map((zone) => ({ ...zone, buttonKeys: [...zone.buttonKeys] }));
+  const alreadyAdded = zones.some((zone) => zone.buttonKeys.includes(TOOLBAR_MORE_KEY));
+  if (!alreadyAdded) {
+    let targetIndex = zones.findIndex((zone) => zone.name === moreButton.defaultZone);
+    if (targetIndex < 0) targetIndex = zones.length - 1;
+
+    if (targetIndex >= 0) {
+      const targetZone = zones[targetIndex];
+      const buttonKeys = [...targetZone.buttonKeys];
+      const composeIndex = nodeType === 'ai-image' ? buttonKeys.indexOf('compose') : -1;
+      buttonKeys.splice(composeIndex >= 0 ? composeIndex + 1 : buttonKeys.length, 0, TOOLBAR_MORE_KEY);
+      zones[targetIndex] = { ...targetZone, buttonKeys };
+    } else {
+      zones = [{ id: 'zone-more', name: moreButton.defaultZone, buttonKeys: [TOOLBAR_MORE_KEY] }];
+    }
+  }
+
+  return { ...migrated, zones, version: targetVersion };
+}
+
 /** 根据 nodeType 获取按钮注册表 */
 export function getButtonRegistry(nodeType: string): ToolbarButtonDef[] {
   switch (nodeType) {
@@ -175,6 +228,16 @@ export function getButtonRegistry(nodeType: string): ToolbarButtonDef[] {
     case 'ai-audio':    return AUDIO_BUTTONS;
     default:            return [];
   }
+}
+
+/** 返回未出现在当前布局中的内置按钮；“更多”自身不收纳自己。 */
+export function getHiddenDefaultToolbarButtons(
+  registry: ToolbarButtonDef[],
+  activeButtonKeys: ReadonlySet<string>,
+): ToolbarButtonDef[] {
+  return registry.filter((button) => (
+    button.key !== TOOLBAR_MORE_KEY && !activeButtonKeys.has(button.key)
+  ));
 }
 
 /** 根据 nodeType 获取默认布局 */

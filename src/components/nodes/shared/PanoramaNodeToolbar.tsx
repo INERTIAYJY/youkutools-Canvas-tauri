@@ -7,7 +7,12 @@ import type { NodeType, BaseNodeData } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useToolbarEdit } from '../../../hooks/useToolbarEdit';
 import ToolbarEditor from './toolbar/ToolbarEditor';
-import { getButtonRegistry } from './toolbar/toolbarRegistry';
+import ToolbarMoreMenu from './toolbar/ToolbarMoreMenu';
+import {
+  getButtonRegistry,
+  getHiddenDefaultToolbarButtons,
+  TOOLBAR_MORE_KEY,
+} from './toolbar/toolbarRegistry';
 import { resolvePresetAction, resolvePresetDef, createPresetNode } from './toolbar/presetAction';
 import { executeGeneration } from '../../../services/generationService';
 import { useAppStore } from '../../../store/useAppStore';
@@ -52,6 +57,38 @@ function PanoramaNodeToolbar({ nodeId, onUpload, onToggleMode, previewMode, onSc
     screenshot: (e) => { e.stopPropagation(); onScreenshot?.(); },
     fullscreen: (e) => { e.stopPropagation(); onFullscreen?.(); },
   };
+  const hiddenDefaultButtons = getHiddenDefaultToolbarButtons(registry, edit.activeButtonKeys);
+
+  const renderActionButton = (key: string) => {
+    const def = registry.find((button) => button.key === key);
+    const handler = actionMap[key];
+    const isPreset = !def;
+
+    const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
+    if (!def && !presetDef) return null;
+
+    const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
+    const clickHandler = handler ?? handlePresetClick(key);
+
+    if (key === 'toggleMode') {
+      return (
+        <AnimatedButton key={key} className="ftb-btn icon-only act-mode"
+          data-tooltip={previewMode === '360' ? '切换到图片视图' : '切换到360全景'}
+          aria-label="切换视图模式" onClick={clickHandler}>
+          {previewMode === '360'
+            ? <Icon icon="mdi:image-outline" width={14} height={14} />
+            : <Icon icon="mdi:rotate-3d" width={14} height={14} />}
+        </AnimatedButton>
+      );
+    }
+
+    return (
+      <AnimatedButton key={key} className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''}`}
+        data-tooltip={resolvedDef.label} aria-label={resolvedDef.label} onClick={clickHandler}>
+        <Icon icon={resolvedDef.icon} width={14} height={14} />
+      </AnimatedButton>
+    );
+  };
 
   if (edit.isEditing) {
     return <ToolbarEditor edit={edit} nodeType={nodeType} />;
@@ -62,36 +99,17 @@ function PanoramaNodeToolbar({ nodeId, onUpload, onToggleMode, previewMode, onSc
       <div className="pano-toolbar-main nodrag">
         {edit.layout.zones.map((zone, zi) => (
           <div key={zone.id} className="img-toolbar-zone nodrag">
-            {zone.buttonKeys.map((key) => {
-            const def = registry.find((d) => d.key === key);
-            const handler = actionMap[key];
-            const isPreset = !def;
-
-            const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
-            if (!def && !presetDef) return null;
-
-            const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
-            const clickHandler = handler ?? handlePresetClick(key);
-
-              if (key === 'toggleMode') {
-                return (
-                  <AnimatedButton key={key} className="ftb-btn icon-only act-mode"
-                    data-tooltip={previewMode === '360' ? '切换到图片视图' : '切换到360全景'}
-                    aria-label="切换视图模式" onClick={clickHandler}>
-                    {previewMode === '360'
-                      ? <Icon icon="mdi:image-outline" width={14} height={14} />
-                      : <Icon icon="mdi:rotate-3d" width={14} height={14} />}
-                  </AnimatedButton>
-                );
-              }
-
-              return (
-                <AnimatedButton key={key} className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''}`}
-                  data-tooltip={resolvedDef.label} aria-label={resolvedDef.label} onClick={clickHandler}>
-                  <Icon icon={resolvedDef.icon} width={14} height={14} />
-                </AnimatedButton>
-              );
-            })}
+            {zone.buttonKeys.map((key) => (
+              key === TOOLBAR_MORE_KEY
+                ? (
+                  <ToolbarMoreMenu
+                    key={key}
+                    items={hiddenDefaultButtons}
+                    renderItem={renderActionButton}
+                  />
+                )
+                : renderActionButton(key)
+            ))}
             {zi < edit.layout.zones.length - 1 && <div className="ftb-divider pano-toolbar-divider" />}
           </div>
         ))}

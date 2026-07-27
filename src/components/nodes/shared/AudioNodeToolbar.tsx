@@ -7,7 +7,12 @@ import type { NodeType, BaseNodeData } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useToolbarEdit } from '../../../hooks/useToolbarEdit';
 import ToolbarEditor from './toolbar/ToolbarEditor';
-import { getButtonRegistry } from './toolbar/toolbarRegistry';
+import ToolbarMoreMenu from './toolbar/ToolbarMoreMenu';
+import {
+  getButtonRegistry,
+  getHiddenDefaultToolbarButtons,
+  TOOLBAR_MORE_KEY,
+} from './toolbar/toolbarRegistry';
 import { resolvePresetAction, resolvePresetDef, createPresetNode } from './toolbar/presetAction';
 import { executeGeneration } from '../../../services/generationService';
 import { requestPresetSequence } from '../../../services/presetSequenceService';
@@ -81,6 +86,38 @@ function AudioNodeToolbar({
       />
     </AnimatedButton>
   );
+  const hiddenDefaultButtons = getHiddenDefaultToolbarButtons(registry, edit.activeButtonKeys);
+
+  const renderActionButton = (key: string) => {
+    const def = registry.find((button) => button.key === key);
+    const handler = actionMap[key];
+    const isPreset = !def;
+
+    const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
+    if (!def && !presetDef) return null;
+
+    const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
+    const clickHandler = handler ?? handlePresetClick(key);
+
+    if (key === 'togglePlay') {
+      return (
+        <AnimatedButton key={key} className="ftb-btn icon-only act-toggle-play rounded-[6px]"
+          data-tooltip={isPlaying ? '暂停' : '播放'} aria-label={isPlaying ? '暂停' : '播放'}
+          onClick={clickHandler}>
+          <Icon icon={isPlaying ? 'mdi:pause' : 'mdi:play'} width={14} height={14} />
+        </AnimatedButton>
+      );
+    }
+
+    if (key === 'transcribe') return renderTranscribeButton(key);
+
+    return (
+      <AnimatedButton key={key} className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
+        data-tooltip={resolvedDef.label} aria-label={resolvedDef.label} onClick={clickHandler}>
+        <Icon icon={resolvedDef.icon} width={14} height={14} />
+      </AnimatedButton>
+    );
+  };
 
   if (edit.isEditing) {
     return <ToolbarEditor edit={edit} nodeType={nodeType} />;
@@ -90,44 +127,20 @@ function AudioNodeToolbar({
     <div className="node-floating-toolbar text-toolbar nodrag" {...edit.longPressHandlers}>
       {edit.layout.zones.map((zone, zi) => (
         <div key={zone.id} className="img-toolbar-zone nodrag">
-          {zone.buttonKeys.map((key) => {
-            const def = registry.find((d) => d.key === key);
-            const handler = actionMap[key];
-            const isPreset = !def;
-
-            const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
-            if (!def && !presetDef) return null;
-
-            const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
-            const clickHandler = handler ?? handlePresetClick(key);
-
-            if (key === 'togglePlay') {
-              return (
-                <AnimatedButton key={key} className="ftb-btn icon-only act-toggle-play rounded-[6px]"
-                  data-tooltip={isPlaying ? '暂停' : '播放'} aria-label={isPlaying ? '暂停' : '播放'}
-                  onClick={clickHandler}>
-                  <Icon icon={isPlaying ? 'mdi:pause' : 'mdi:play'} width={14} height={14} />
-                </AnimatedButton>
-              );
-            }
-
-            if (key === 'transcribe') return renderTranscribeButton(key);
-
-            return (
-              <AnimatedButton key={key} className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
-                data-tooltip={resolvedDef.label} aria-label={resolvedDef.label} onClick={clickHandler}>
-                <Icon icon={resolvedDef.icon} width={14} height={14} />
-              </AnimatedButton>
-            );
-          })}
+          {zone.buttonKeys.map((key) => (
+            key === TOOLBAR_MORE_KEY
+              ? (
+                <ToolbarMoreMenu
+                  key={key}
+                  items={hiddenDefaultButtons}
+                  renderItem={renderActionButton}
+                />
+              )
+              : renderActionButton(key)
+          ))}
           {zi < edit.layout.zones.length - 1 && <div className="ftb-divider img-toolbar-main-divider" />}
         </div>
       ))}
-      {!edit.activeButtonKeys.has('transcribe') && (
-        <div className="img-toolbar-zone nodrag">
-          {renderTranscribeButton('transcribe-fallback')}
-        </div>
-      )}
     </div>
   );
 }

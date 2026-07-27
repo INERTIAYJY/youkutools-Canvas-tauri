@@ -309,6 +309,9 @@ export type CanvasBackground =
 /** 画布交互模式：default = Figma 风格（左键框选 / 右键·中键平移 / 滚轮缩放）；classic = 传统（左键平移 / Shift+拖动框选 / 滚轮纵横平移 / Ctrl+滚轮缩放） */
 export type InteractionMode = 'default' | 'classic';
 
+/** 节点顶部工具栏显示方式 */
+export type NodeToolbarMode = 'icons' | 'icons-and-text';
+
 /** 吉祥物在可拖动视口中的相对位置，x/y 均为 0-1。 */
 export interface MascotPosition {
   x: number;
@@ -322,6 +325,7 @@ export interface AppConfig {
   theme: 'dark' | 'light';
   canvasBackground?: CanvasBackground; // 画布背景主题
   interactionMode?: InteractionMode; // 画布交互模式，默认 'default'
+  nodeToolbarMode?: NodeToolbarMode; // 节点顶部工具栏显示方式，默认 'icons'
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）
   customBackgroundOpacity?: number; // 自定义背景透明度 0-1，默认 0.3

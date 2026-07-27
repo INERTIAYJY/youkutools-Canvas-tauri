@@ -24,7 +24,7 @@ import DirectorDeskStorageManager from './settings/DirectorDeskStorageManager';
 import McpControlSettings from './settings/McpControlSettings';
 import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
-import type { CanvasBackground as CanvasBg, InteractionMode } from '../types';
+import type { CanvasBackground as CanvasBg, InteractionMode, NodeToolbarMode } from '../types';
 import type { BackgroundDetection } from '../services/backgroundService';
 
 import type { SettingsTab } from '../store/store.ui';
@@ -63,6 +63,15 @@ const INTERACTION_MODE_OPTIONS: {
       { key: '鼠标右键', action: '打开菜单' },
     ],
   },
+];
+
+const NODE_TOOLBAR_MODE_OPTIONS: {
+  id: NodeToolbarMode;
+  label: string;
+  icon: string;
+}[] = [
+  { id: 'icons', label: '极简图标', icon: 'lucide:circle-dot' },
+  { id: 'icons-and-text', label: '图标 + 文本', icon: 'lucide:panel-top' },
 ];
 
 /** 是否运行在 macOS（用于快捷键修饰键显示） */
@@ -122,6 +131,7 @@ export default function SettingsPanel() {
   const sidebarFloating = config.sidebarFloating !== false; // 默认开启
   const windowGlassFrame = config.windowGlassFrame !== false; // 默认开启
   const interactionMode = config.interactionMode ?? 'default';
+  const nodeToolbarMode = config.nodeToolbarMode ?? 'icons';
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
@@ -877,6 +887,40 @@ export default function SettingsPanel() {
                   </div>
                 </section>
                 )}
+
+                {/* 节点顶部工具栏显示方式 */}
+                <section>
+                  <h3 className="text-sm font-medium text-canvas-text mb-3">节点工具栏</h3>
+                  <div
+                    className="grid grid-cols-2 gap-1 rounded-lg border border-canvas-border bg-canvas-card p-1"
+                    role="radiogroup"
+                    aria-label="节点工具栏显示方式"
+                  >
+                    {NODE_TOOLBAR_MODE_OPTIONS.map((option) => {
+                      const active = nodeToolbarMode === option.id;
+                      return (
+                        <AnimatedButton
+                          key={option.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={async () => {
+                            updateConfig({ nodeToolbarMode: option.id });
+                            await saveConfig();
+                          }}
+                          className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
+                            active
+                              ? 'bg-indigo-500/15 text-indigo-400 shadow-sm'
+                              : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text'
+                          }`}
+                        >
+                          <Icon icon={option.icon} width="14" height="14" aria-hidden="true" />
+                          <span>{option.label}</span>
+                        </AnimatedButton>
+                      );
+                    })}
+                  </div>
+                </section>
 
                 {/* 主窗口玻璃外框 */}
                 <div>

@@ -22,9 +22,15 @@ const defaultConfig: AppConfig = {
   generalModels: [],
   mascotVisible: false,
   interactionMode: 'default',
+  nodeToolbarMode: 'icons',
 };
 
 const MODEL_PREF_KEY = 'canvas-model-prefs';
+
+function syncNodeToolbarMode(mode: AppConfig['nodeToolbarMode']): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.dataset.nodeToolbarMode = mode ?? 'icons';
+}
 
 interface RemovedModelReferences {
   generalModelIds: Set<string>;
@@ -280,6 +286,9 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if ('baseDataDir' in partial && partial.baseDataDir !== undefined) {
       setBaseDataDir(partial.baseDataDir);
     }
+    if ('nodeToolbarMode' in partial) {
+      syncNodeToolbarMode(partial.nodeToolbarMode);
+    }
   },
 
   setProviderKey: (providerName, key) =>
@@ -468,11 +477,13 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     }
 
     if (!saved) {
+      syncNodeToolbarMode(defaultConfig.nodeToolbarMode);
       set({ configHydrated: true });
       return;
     }
 
     const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...(saved as AppConfig) });
+    syncNodeToolbarMode(cfg.nodeToolbarMode);
     set({ config: cfg, configHydrated: true });
     try {
       setBaseDataDir(cfg.baseDataDir);

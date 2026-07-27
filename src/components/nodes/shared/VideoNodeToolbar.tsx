@@ -7,7 +7,12 @@ import type { NodeType, BaseNodeData } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useToolbarEdit } from '../../../hooks/useToolbarEdit';
 import ToolbarEditor from './toolbar/ToolbarEditor';
-import { getButtonRegistry } from './toolbar/toolbarRegistry';
+import ToolbarMoreMenu from './toolbar/ToolbarMoreMenu';
+import {
+  getButtonRegistry,
+  getHiddenDefaultToolbarButtons,
+  TOOLBAR_MORE_KEY,
+} from './toolbar/toolbarRegistry';
 import { resolvePresetAction, resolvePresetDef, createPresetNode } from './toolbar/presetAction';
 import { executeGeneration } from '../../../services/generationService';
 import { requestPresetSequence } from '../../../services/presetSequenceService';
@@ -51,6 +56,31 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
     captureFrame: (e) => { e.stopPropagation(); onCaptureFrame(); },
     fullscreen: (e) => { e.stopPropagation(); onFullscreen(); },
   };
+  const hiddenDefaultButtons = getHiddenDefaultToolbarButtons(registry, edit.activeButtonKeys);
+
+  const renderActionButton = (key: string) => {
+    const def = registry.find((button) => button.key === key);
+    const handler = actionMap[key];
+    const isPreset = !def;
+
+    const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
+    if (!def && !presetDef) return null;
+
+    const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
+    const clickHandler = handler ?? handlePresetClick(key);
+
+    return (
+      <AnimatedButton
+        key={key}
+        className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
+        data-tooltip={resolvedDef.label}
+        aria-label={resolvedDef.label}
+        onClick={clickHandler}
+      >
+        <Icon icon={resolvedDef.icon} width={14} height={14} />
+      </AnimatedButton>
+    );
+  };
 
   if (edit.isEditing) {
     return <ToolbarEditor edit={edit} nodeType={nodeType} />;
@@ -60,29 +90,17 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
     <div className="node-floating-toolbar text-toolbar nodrag" {...edit.longPressHandlers}>
       {edit.layout.zones.map((zone, zi) => (
         <div key={zone.id} className="img-toolbar-zone nodrag">
-          {zone.buttonKeys.map((key) => {
-            const def = registry.find((d) => d.key === key);
-            const handler = actionMap[key];
-            const isPreset = !def;
-
-            const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
-            if (!def && !presetDef) return null;
-
-            const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
-            const clickHandler = handler ?? handlePresetClick(key);
-
-            return (
-              <AnimatedButton
-                key={key}
-                className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
-                data-tooltip={resolvedDef.label}
-                aria-label={resolvedDef.label}
-                onClick={clickHandler}
-              >
-                <Icon icon={resolvedDef.icon} width={14} height={14} />
-              </AnimatedButton>
-            );
-          })}
+          {zone.buttonKeys.map((key) => (
+            key === TOOLBAR_MORE_KEY
+              ? (
+                <ToolbarMoreMenu
+                  key={key}
+                  items={hiddenDefaultButtons}
+                  renderItem={renderActionButton}
+                />
+              )
+              : renderActionButton(key)
+          ))}
           {zi < edit.layout.zones.length - 1 && <div className="ftb-divider img-toolbar-main-divider" />}
         </div>
       ))}

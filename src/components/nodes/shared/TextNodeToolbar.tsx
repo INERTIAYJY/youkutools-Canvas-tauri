@@ -7,7 +7,12 @@ import type { BaseNodeData, NodeType } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useToolbarEdit } from '../../../hooks/useToolbarEdit';
 import ToolbarEditor from './toolbar/ToolbarEditor';
-import { getButtonRegistry } from './toolbar/toolbarRegistry';
+import ToolbarMoreMenu from './toolbar/ToolbarMoreMenu';
+import {
+  getButtonRegistry,
+  getHiddenDefaultToolbarButtons,
+  TOOLBAR_MORE_KEY,
+} from './toolbar/toolbarRegistry';
 import { resolvePresetAction, resolvePresetDef, createPresetNode } from './toolbar/presetAction';
 import { executeGeneration } from '../../../services/generationService';
 import { requestPresetSequence } from '../../../services/presetSequenceService';
@@ -78,6 +83,45 @@ function TextNodeToolbar({ nodeId, data, onCopy, onClearEmptyLines, onShowPrompt
     showPrompt: (e) => { e.stopPropagation(); onShowPrompt(); },
     fullscreen: (e) => { e.stopPropagation(); onFullscreen(); },
   };
+  const hiddenDefaultButtons = getHiddenDefaultToolbarButtons(registry, edit.activeButtonKeys);
+
+  const renderActionButton = (key: string) => {
+    const def = registry.find((button) => button.key === key);
+    const handler = actionMap[key];
+    const isPreset = !def;
+
+    const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
+    if (!def && !presetDef) return null;
+
+    const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
+    const clickHandler = handler ?? handlePresetClick(key);
+
+    if (key === 'copy' && copied) {
+      return (
+        <AnimatedButton
+          key={key}
+          className="ftb-btn icon-only act-copy rounded-[6px]"
+          data-tooltip="已复制"
+          aria-label="复制"
+          onClick={clickHandler}
+        >
+          <Icon icon="mdi:check" width={12} height={12} />
+        </AnimatedButton>
+      );
+    }
+
+    return (
+      <AnimatedButton
+        key={key}
+        className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
+        data-tooltip={resolvedDef.label}
+        aria-label={resolvedDef.label}
+        onClick={clickHandler}
+      >
+        <Icon icon={resolvedDef.icon} width={12} height={12} />
+      </AnimatedButton>
+    );
+  };
 
   // ── 编辑态 ──
   if (edit.isEditing) {
@@ -92,45 +136,17 @@ function TextNodeToolbar({ nodeId, data, onCopy, onClearEmptyLines, onShowPrompt
     >
       {edit.layout.zones.map((zone, zi) => (
         <div key={zone.id} className="img-toolbar-zone nodrag">
-          {zone.buttonKeys.map((key) => {
-            const def = registry.find((d) => d.key === key);
-            const handler = actionMap[key];
-            const isPreset = !def;
-
-            // 查找预设的显示信息
-            const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
-            if (!def && !presetDef) return null;
-
-            const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
-            const clickHandler = handler ?? handlePresetClick(key);
-
-            // copy 按钮有 copied 态
-            if (key === 'copy' && copied) {
-              return (
-                <AnimatedButton
+          {zone.buttonKeys.map((key) => (
+            key === TOOLBAR_MORE_KEY
+              ? (
+                <ToolbarMoreMenu
                   key={key}
-                  className="ftb-btn icon-only act-copy rounded-[6px]"
-                  data-tooltip="已复制"
-                  aria-label="复制"
-                  onClick={clickHandler}
-                >
-                  <Icon icon="mdi:check" width={12} height={12} />
-                </AnimatedButton>
-              );
-            }
-
-            return (
-              <AnimatedButton
-                key={key}
-                className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
-                data-tooltip={resolvedDef.label}
-                aria-label={resolvedDef.label}
-                onClick={clickHandler}
-              >
-                <Icon icon={resolvedDef.icon} width={12} height={12} />
-              </AnimatedButton>
-            );
-          })}
+                  items={hiddenDefaultButtons}
+                  renderItem={renderActionButton}
+                />
+              )
+              : renderActionButton(key)
+          ))}
           {zi < edit.layout.zones.length - 1 && (
             <div className="ftb-divider img-toolbar-main-divider" />
           )}

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getDefaultLayout,
   getButtonRegistry,
+  getHiddenDefaultToolbarButtons,
   migrateToolbarLayout,
 } from '../../src/components/nodes/shared/toolbar/toolbarRegistry';
 
@@ -12,6 +13,7 @@ describe('toolbar layout migration', () => {
     expect(keys).toContain('history');
     expect(keys.indexOf('copyFile')).toBeLessThan(keys.indexOf('history'));
     expect(keys.indexOf('history')).toBeLessThan(keys.indexOf('fullscreen'));
+    expect(keys.indexOf('compose') + 1).toBe(keys.indexOf('more'));
     expect(keys).not.toContain('multiAngle');
   });
 
@@ -24,9 +26,9 @@ describe('toolbar layout migration', () => {
     });
 
     expect(migrated).toEqual({
-      version: 7,
+      version: 8,
       zones: [
-        { id: 'custom', name: '自定义', buttonKeys: ['crop', 'cameraStudio', 'upload', 'history'] },
+        { id: 'custom', name: '自定义', buttonKeys: ['crop', 'cameraStudio', 'upload', 'history', 'more'] },
       ],
     });
   });
@@ -38,17 +40,23 @@ describe('toolbar layout migration', () => {
         { id: 'custom', name: '自定义', buttonKeys: ['multiAngle', 'cameraStudio', 'upload'] },
       ],
     })).toEqual({
-      version: 7,
+      version: 8,
       zones: [
-        { id: 'custom', name: '自定义', buttonKeys: ['cameraStudio', 'upload', 'history'] },
+        { id: 'custom', name: '自定义', buttonKeys: ['cameraStudio', 'upload', 'history', 'more'] },
       ],
     });
   });
 
   it('keeps custom button zoning while advancing the image layout version', () => {
     const current = { version: 5, zones: [{ id: 'custom', name: '自定义', buttonKeys: ['crop', 'history'] }] };
-    expect(migrateToolbarLayout('ai-image', current)).toEqual({ ...current, version: 7 });
-    expect(migrateToolbarLayout('ai-video', { ...current, version: 1 })).toEqual({ ...current, version: 1 });
+    expect(migrateToolbarLayout('ai-image', current)).toEqual({
+      version: 8,
+      zones: [{ id: 'custom', name: '自定义', buttonKeys: ['crop', 'history', 'more'] }],
+    });
+    expect(migrateToolbarLayout('ai-video', { ...current, version: 1 })).toEqual({
+      version: 2,
+      zones: [{ id: 'custom', name: '自定义', buttonKeys: ['crop', 'history', 'more'] }],
+    });
   });
 
   it('adds history to existing v3 image layouts once', () => {
@@ -56,8 +64,8 @@ describe('toolbar layout migration', () => {
       version: 3,
       zones: [{ id: 'secondary', name: 'Secondary', buttonKeys: ['crop'] }],
     })).toEqual({
-      version: 7,
-      zones: [{ id: 'secondary', name: 'Secondary', buttonKeys: ['crop', 'history'] }],
+      version: 8,
+      zones: [{ id: 'secondary', name: 'Secondary', buttonKeys: ['crop', 'history', 'more'] }],
     });
   });
 
@@ -70,25 +78,25 @@ describe('toolbar layout migration', () => {
         buttonKeys: ['upload', 'copyFile', 'history', 'fullscreen'],
       }],
     })).toEqual({
-      version: 7,
+      version: 8,
       zones: [{
         id: 'secondary',
         name: 'Secondary',
-        buttonKeys: ['upload', 'copyFile', 'fullscreen', 'history'],
+        buttonKeys: ['upload', 'copyFile', 'fullscreen', 'history', 'more'],
       }],
     });
   });
 
   it('places copy, history, and fullscreen after the image toolbar divider', () => {
     expect(getDefaultLayout('ai-image')).toEqual({
-      version: 7,
+      version: 8,
       zones: [
         {
           id: 'zone-0',
           name: 'Primary',
           buttonKeys: [
             'matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale',
-            'subjectMatting', 'annotate', 'crop', 'compose', 'upload',
+            'subjectMatting', 'annotate', 'crop', 'compose', 'more', 'upload',
           ],
         },
         {
@@ -98,6 +106,37 @@ describe('toolbar layout migration', () => {
         },
       ],
     });
+  });
+
+  it('adds More once to legacy layouts and preserves an intentional current-version removal', () => {
+    const migrated = migrateToolbarLayout('ai-text', {
+      version: 1,
+      zones: [{ id: 'primary', name: '常用', buttonKeys: ['copy'] }],
+    });
+    expect(migrated).toEqual({
+      version: 2,
+      zones: [{ id: 'primary', name: '常用', buttonKeys: ['copy', 'more'] }],
+    });
+
+    const hiddenMore = {
+      version: 2,
+      zones: [{ id: 'primary', name: '常用', buttonKeys: ['copy'] }],
+    };
+    expect(migrateToolbarLayout('ai-text', hiddenMore)).toBe(hiddenMore);
+  });
+
+  it('collects only hidden built-in buttons inside More', () => {
+    const registry = getButtonRegistry('ai-text');
+    const hidden = getHiddenDefaultToolbarButtons(registry, new Set(['copy', 'more']));
+    expect(hidden.map((button) => button.key)).toEqual([
+      'clearEmptyLines', 'showPrompt', 'fullscreen',
+    ]);
+  });
+
+  it('registers More in every editable node toolbar', () => {
+    for (const nodeType of ['ai-text', 'ai-image', 'ai-video', 'ai-audio', 'ai-panorama']) {
+      expect(getButtonRegistry(nodeType).map((button) => button.key)).toContain('more');
+    }
   });
 
   it('updates the old default image layout without changing custom layouts', () => {

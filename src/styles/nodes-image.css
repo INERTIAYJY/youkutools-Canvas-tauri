@@ -240,6 +240,7 @@
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  pointer-events: auto;
   white-space: nowrap;
 }
 

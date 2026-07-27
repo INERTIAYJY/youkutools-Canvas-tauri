@@ -55,6 +55,12 @@ afterEach(() => {
   resetAgentSchedulerForTests();
 });
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function arrangeTask(task: AgentTask): AgentTask {
   useAppStore.setState({
     currentProjectId: task.projectId,
@@ -129,6 +135,30 @@ describe('agent resume validation', () => {
   it('allows resuming a paused task below the lifetime cap', () => {
     arrangeTask(createTask('task-fresh', 'project-1', 'conversation-1', 'paused'));
     expect(validateTaskResumable('task-fresh')).toEqual({ ok: true });
+  });
+
+  it('refuses to resume a task that is already running or queued', () => {
+    arrangeTask(createTask('task-queued', 'project-1', 'conversation-1', 'paused'));
+    const running = deferred();
+    scheduleConversationAgentExecution({
+      taskId: 'other-task',
+      conversationId: 'conversation-1',
+      run: () => running.promise,
+    });
+    scheduleConversationAgentExecution({
+      taskId: 'task-queued',
+      conversationId: 'conversation-1',
+      run: async () => undefined,
+    });
+
+    // 会话内有任务在跑，被恢复的任务只是排队，状态仍是 paused
+    expect(readTask('task-queued').status).toBe('paused');
+    expect(validateTaskResumable('task-queued')).toMatchObject({
+      ok: false,
+      errorCode: 'AGENT_RESUME_ALREADY_SCHEDULED',
+    });
+
+    running.resolve();
   });
 
   it('refuses to resume once the lifetime budget is exhausted', () => {

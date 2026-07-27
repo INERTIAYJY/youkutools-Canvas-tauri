@@ -24,6 +24,7 @@ import { enqueueAgentInterjection } from './agentInterjection';
 import {
   getActiveConversationAgentTaskId,
   scheduleConversationAgentExecution,
+  type AgentScheduleResult,
 } from './agentScheduler';
 import { getAvailableAgentTools } from './toolRegistry';
 import { ensureAgentToolsRegistered } from './tools';
@@ -280,9 +281,9 @@ function scheduleAgentTaskExecution(
   assistantMessageId: string,
   onProgress?: () => void,
   resume = false,
-): void {
+): AgentScheduleResult | undefined {
   const task = useAppStore.getState().agentTasks.find((item) => item.id === taskId);
-  if (!task) return;
+  if (!task) return undefined;
   const scheduled = scheduleConversationAgentExecution({
     taskId,
     conversationId: task.conversationId,
@@ -301,9 +302,10 @@ function scheduleAgentTaskExecution(
       console.error('[AgentScheduler] failed to execute chat task:', error);
     },
   });
-  if (scheduled.state === 'queued') {
+  if (scheduled.state !== 'started') {
     useAppStore.getState().updateMessage(assistantMessageId, { status: 'queued' });
   }
+  return scheduled;
 }
 
 export function resumeAgentTaskExecution(
@@ -331,7 +333,9 @@ export function resumeAgentTaskExecution(
     budget: extendAgentSegmentBudget(task),
     resumeCount: (task.resumeCount ?? 0) + 1,
   });
-  scheduleAgentTaskExecution(taskId, message.id, onProgress, true);
+  const scheduled = scheduleAgentTaskExecution(taskId, message.id, onProgress, true);
+  // 排队等待期间就切到 queued：状态若停在 paused，界面会继续显示「继续」按钮引诱重复点击
+  if (scheduled?.state === 'queued') prepareAgentTaskResume(taskId);
   return { ok: true };
 }
 

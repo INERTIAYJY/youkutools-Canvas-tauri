@@ -36,6 +36,10 @@ export const AGENT_ERROR_HINTS: Record<string, AgentRecoveryHint> = {
   AGENT_RESUME_PROJECT_NOT_ACTIVE: { title: '项目未加载', hint: '请先切回该任务所属的项目，再点击继续。' },
   AGENT_RESUME_CONVERSATION_GONE: { title: '会话已删除', hint: '来源对话不存在或已删除，无法继续该任务。' },
   AGENT_RESUME_NO_MESSAGE: { title: '消息缺失', hint: '找不到对应的助手消息，请重新发送消息。' },
+  AGENT_RESUME_ALREADY_SCHEDULED: {
+    title: '已在队列中',
+    hint: '该任务已排在执行队列里，等当前任务结束后会自动继续。',
+  },
 };
 
 export function getAgentRecoveryHint(code?: string): AgentRecoveryHint | undefined {

@@ -10,7 +10,10 @@ import {
   type AgentTaskStatus,
 } from '../../types/agent';
 import { evaluateAgentResumeBudget } from './agentBudgetService';
-import { cancelConversationAgentExecutions } from './agentScheduler';
+import {
+  cancelConversationAgentExecutions,
+  isAgentExecutionScheduled,
+} from './agentScheduler';
 import { appendAgentEvent } from './agentJournal';
 import { emitAgentLifecycleEvent } from './agentLifecycle';
 
@@ -221,6 +224,15 @@ export function validateTaskResumable(taskId: string): AgentResumeValidation {
   const task = store.agentTasks.find((item) => item.id === taskId);
   if (!task) {
     return { ok: false, errorCode: 'AGENT_RESUME_TASK_NOT_FOUND', message: '任务不存在' };
+  }
+  // 先于状态判断：会话内有任务在跑时，恢复的任务会排队等待且状态仍是 paused，
+  // 此时重复点击既会重复入队，也会白白消耗 resumeCount 与终身预算。
+  if (isAgentExecutionScheduled(taskId)) {
+    return {
+      ok: false,
+      errorCode: 'AGENT_RESUME_ALREADY_SCHEDULED',
+      message: '任务已在执行队列中，请等待当前任务完成',
+    };
   }
   if (!['paused', 'failed'].includes(task.status)) {
     return { ok: false, errorCode: 'AGENT_RESUME_NOT_RESUMABLE', message: '任务当前状态不支持继续' };

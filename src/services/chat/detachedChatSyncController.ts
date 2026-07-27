@@ -254,6 +254,8 @@ export function handleDetachedChatAction(
 
     case 'replan_agent_task': {
       try {
+        // 先撤掉排队中的旧执行项，否则重新规划后它仍会被出队执行一次
+        cancelScheduledAgentExecution(action.taskId);
         requestAgentReplan(action.taskId);
       } catch {
         store.showToast('该任务当前状态无法重新规划', 'error');

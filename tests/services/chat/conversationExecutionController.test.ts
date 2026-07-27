@@ -1,9 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentScheduleResult } from '../../../src/services/chat/agentScheduler';
 
-const schedulerMocks = vi.hoisted(() => ({
-  activeTaskId: undefined as string | undefined,
-  schedule: vi.fn(() => ({ state: 'running' as const })),
-}));
+const schedulerMocks = vi.hoisted(() => {
+  // 记录已入队的任务，让 isAgentExecutionScheduled 能反映真实调度器的去重行为
+  const scheduledTaskIds = new Set<string>();
+  return {
+    activeTaskId: undefined as string | undefined,
+    scheduledTaskIds,
+    schedule: vi.fn((execution: { taskId: string }): AgentScheduleResult => {
+      scheduledTaskIds.add(execution.taskId);
+      return { state: 'started', position: 0 };
+    }),
+    isScheduled: vi.fn((taskId: string) => scheduledTaskIds.has(taskId)),
+  };
+});
 
 const interjectionMocks = vi.hoisted(() => ({
   enqueue: vi.fn(() => true),
@@ -12,6 +22,7 @@ const interjectionMocks = vi.hoisted(() => ({
 vi.mock('../../../src/services/chat/agentScheduler', () => ({
   getActiveConversationAgentTaskId: () => schedulerMocks.activeTaskId,
   scheduleConversationAgentExecution: schedulerMocks.schedule,
+  isAgentExecutionScheduled: schedulerMocks.isScheduled,
 }));
 
 vi.mock('../../../src/services/chat/agentInterjection', async (importOriginal) => ({
@@ -55,8 +66,16 @@ function arrangeConversation(): void {
 beforeEach(() => {
   arrangeConversation();
   schedulerMocks.activeTaskId = undefined;
+  schedulerMocks.scheduledTaskIds.clear();
   schedulerMocks.schedule.mockReset();
-  schedulerMocks.schedule.mockReturnValue({ state: 'running' });
+  schedulerMocks.schedule.mockImplementation((execution: { taskId: string }) => {
+    schedulerMocks.scheduledTaskIds.add(execution.taskId);
+    return { state: 'started', position: 0 };
+  });
+  schedulerMocks.isScheduled.mockReset();
+  schedulerMocks.isScheduled.mockImplementation(
+    (taskId: string) => schedulerMocks.scheduledTaskIds.has(taskId),
+  );
   interjectionMocks.enqueue.mockReset();
   interjectionMocks.enqueue.mockReturnValue(true);
 });
@@ -150,6 +169,35 @@ describe('agent task resume budget', () => {
     expect(task.resumeCount).toBe(1);
     expect(task.budget).toMatchObject({ maxModelRounds: 24, maxToolCalls: 48 });
     expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a second resume while the task is still queued', () => {
+    arrangePausedTask();
+
+    expect(resumeAgentTaskExecution('task-paused')).toEqual({ ok: true });
+    expect(resumeAgentTaskExecution('task-paused')).toMatchObject({
+      ok: false,
+      errorCode: 'AGENT_RESUME_ALREADY_SCHEDULED',
+    });
+
+    // 第二次点击既不能重复入队，也不能再吃掉一次继续额度
+    expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
+    const task = useAppStore.getState().agentTasks[0];
+    expect(task.resumeCount).toBe(1);
+    expect(task.budget.maxModelRounds).toBe(24);
+  });
+
+  it('marks a queued resume as queued so the UI stops offering 继续', () => {
+    arrangePausedTask();
+    schedulerMocks.schedule.mockImplementationOnce((execution: { taskId: string }) => {
+      schedulerMocks.scheduledTaskIds.add(execution.taskId);
+      return { state: 'queued', position: 1 };
+    });
+
+    expect(resumeAgentTaskExecution('task-paused')).toEqual({ ok: true });
+
+    expect(useAppStore.getState().agentTasks[0].status).toBe('queued');
+    expect(useAppStore.getState().messages[0].status).toBe('queued');
   });
 
   it('refuses to resume and stops widening the budget at the lifetime cap', () => {

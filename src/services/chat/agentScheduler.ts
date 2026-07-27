@@ -10,7 +10,8 @@ export interface ConversationAgentExecution {
 }
 
 export interface AgentScheduleResult {
-  state: 'started' | 'queued';
+  /** already_scheduled：同一任务已在运行或已在队列中，本次调用未产生新的排队项。 */
+  state: 'started' | 'queued' | 'already_scheduled';
   position: number;
 }
 
@@ -55,12 +56,31 @@ export function scheduleConversationAgentExecution(
   execution: ConversationAgentExecution,
 ): AgentScheduleResult {
   const state = getOrCreateState(execution.conversationId);
+
+  // 同一任务已在运行或已排队时按现状返回：重复入队会让它被执行多次。
+  if (state.activeTaskId === execution.taskId) {
+    return { state: 'already_scheduled', position: 0 };
+  }
+  const pendingIndex = state.pending.findIndex((item) => item.taskId === execution.taskId);
+  if (pendingIndex >= 0) {
+    return { state: 'already_scheduled', position: pendingIndex + 1 };
+  }
+
   if (!state.activeTaskId) {
     startExecution(state, execution);
     return { state: 'started', position: 0 };
   }
   state.pending.push(execution);
   return { state: 'queued', position: state.pending.length };
+}
+
+/** 任务是否已在调度中（正在运行或排队中）。 */
+export function isAgentExecutionScheduled(taskId: string): boolean {
+  for (const state of queues.values()) {
+    if (state.activeTaskId === taskId) return true;
+    if (state.pending.some((item) => item.taskId === taskId)) return true;
+  }
+  return false;
 }
 
 export function cancelScheduledAgentExecution(taskId: string): boolean {

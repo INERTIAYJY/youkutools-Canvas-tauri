@@ -396,6 +396,8 @@ export default function ChatPanel({
     onReplan: (taskId: string) => {
       if (detached) { void emitAction({ type: 'replan_agent_task', taskId }); return; }
       try {
+        // 先撤掉排队中的旧执行项，否则重新规划后它仍会被出队执行一次
+        cancelScheduledAgentExecution(taskId);
         requestAgentReplan(taskId);
       } catch {
         showToast('该任务当前状态无法重新规划', 'error');

@@ -129,7 +129,11 @@ async function requestStandardImages(
     requestBody.response_format = 'url';
   }
   if (imageUrls.length > 0) {
-    requestBody.image_urls = imageUrls;
+    if (params.imageReferenceRequestMode === 'generation-json-image-data-urls') {
+      requestBody.image = imageUrls;
+    } else {
+      requestBody.image_urls = imageUrls;
+    }
   }
 
   return corsSafeFetch(apiUrl, {

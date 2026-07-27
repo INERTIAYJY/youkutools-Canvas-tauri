@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentTask } from '../../../src/types/agent';
 
 const streamAssistantReplyMock = vi.hoisted(() => vi.fn());
+const assembleAgentContextMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/services/ai/assistantStream', () => ({
   streamAssistantReply: streamAssistantReplyMock,
@@ -9,10 +10,7 @@ vi.mock('../../../src/services/ai/assistantStream', () => ({
 
 vi.mock('../../../src/services/chat/contextManager', () => ({
   ContextBudgetError: class ContextBudgetError extends Error { readonly code = 'CONTEXT_ERROR'; },
-  assembleAgentContext: vi.fn(async () => ({
-    messages: [{ role: 'user', content: 'update canvas' }],
-    usage: {},
-  })),
+  assembleAgentContext: assembleAgentContextMock,
   estimateModelMessagesTokens: vi.fn(() => 1),
   resolveAssistantContextSpec: vi.fn(() => ({ inputBudget: 100_000 })),
 }));
@@ -83,6 +81,11 @@ beforeEach(() => {
     agentTasks: [createTask()],
   });
   streamAssistantReplyMock.mockReset();
+  assembleAgentContextMock.mockReset();
+  assembleAgentContextMock.mockResolvedValue({
+    messages: [{ role: 'user', content: 'update canvas' }],
+    usage: {},
+  });
 });
 
 afterEach(() => {
@@ -105,6 +108,40 @@ function arrangeStream() {
 }
 
 describe('agent runtime diagnostics', () => {
+  it('marks older conversation requests as context outside the current task boundary', async () => {
+    assembleAgentContextMock.mockResolvedValue({
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: '帮我规划一个科幻短片' },
+        { role: 'assistant', content: '我先为你创建短片节点' },
+        { role: 'user', content: '只配置 RightAPI 厂商' },
+      ],
+      usage: {},
+    });
+    streamAssistantReplyMock.mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'usage', inputTokens: 4, outputTokens: 1 });
+    });
+
+    await runAgentLoop({
+      taskId: 'task-diagnostics',
+      systemPrompt: 'system',
+      userMessage: '只配置 RightAPI 厂商',
+      signal: new AbortController().signal,
+    });
+
+    const messages = streamAssistantReplyMock.mock.calls[0]?.[0].messages as Array<{
+      role: string;
+      content: string;
+    }>;
+    expect(messages.at(-1)).toEqual({ role: 'user', content: '只配置 RightAPI 厂商' });
+    expect(messages.at(-2)).toMatchObject({
+      role: 'system',
+      content: expect.stringContaining('是本任务的唯一执行目标'),
+    });
+    expect(messages.at(-2)?.content).toContain('不得回头执行历史中的其他请求');
+    expect(messages.at(-3)).toEqual({ role: 'assistant', content: '我先为你创建短片节点' });
+  });
+
   it('records usage, lifecycle events, and a canvas checkpoint', async () => {
     const lifecycleTypes: string[] = [];
     const unsubscribe = subscribeAgentLifecycle((event) => {

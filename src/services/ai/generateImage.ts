@@ -21,7 +21,7 @@ import type { AIImageGenParams, BatchImageResult, ImageGenerationResult } from '
 import { MAX_IMAGE_BATCH_COUNT } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { resolvePromptWithImageRefs } from './promptResolver';
-import { resolveImageUrlArray } from './imageUtils';
+import { resolveImageDataUrlArray, resolveImageUrlArray } from './imageUtils';
 import { generateImageStandardBatch } from './providers/standardImage';
 import { generateVolcengineImagesBatch } from './providers/volcengineImage';
 import { generateRunningHubImagesBatch } from './providers/runninghubImage';
@@ -133,8 +133,17 @@ export async function generateImagesBatch(
     return singleResult(await generateDreaminaImage({ prompt, model, imageSize, aspectRatio, imageUrls: allImageUrls, nodeId: params.nodeId }, signal));
   }
 
-  // 将本地图片 URL 上传到远端图床，转为公网 URL（apimart 走 apimart 图床，其他走 uguu.se）
-  allImageUrls = await resolveImageUrlArray(allImageUrls, provider);
+  const generalModel = provider === 'general' ? resolveGeneralModel(model) : undefined;
+  if (provider === 'general' && !generalModel) {
+    throw new Error('未找到该通用模型配置\n请在「设置 → API Key」中检查');
+  }
+  const usesImageDataUrls = !params.workflowId
+    && generalModel?.imageReferenceRequestMode === 'generation-json-image-data-urls';
+
+  // 参考图传输格式由通用模型配置决定；其他 Provider 保持上传图床的既有行为。
+  allImageUrls = usesImageDataUrls
+    ? await resolveImageDataUrlArray(allImageUrls, signal)
+    : await resolveImageUrlArray(allImageUrls, provider);
   if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
 
   // ComfyUI 工作流执行路径
@@ -161,15 +170,21 @@ export async function generateImagesBatch(
   // 尚未迁移的 Provider 继续走兼容分支。
   switch (provider) {
     case 'general': {
-      const gm = resolveGeneralModel(model);
-      if (!gm) throw new Error('未找到该通用模型配置\n请在「设置 → API Key」中检查');
+      if (!generalModel) {
+        throw new Error('未找到该通用模型配置\n请在「设置 → API Key」中检查');
+      }
+      const gm = generalModel;
       const connection = resolveGeneralModelConnection(model);
       if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
       if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
       const dimensions = mapImageDimensions(imageSize, aspectRatio);
-      const hasExplicitReferenceRequestMode = allImageUrls.length > 0
-        && gm.imageReferenceRequestMode !== undefined;
-      if (gm.executionProfile && !hasExplicitReferenceRequestMode) {
+      const hasExplicitStandardRequestMode = allImageUrls.length > 0
+        && gm.imageReferenceRequestMode !== undefined
+        && !(
+          gm.imageReferenceRequestMode === 'generation-json-image-data-urls'
+          && gm.executionProfile?.preset === 'custom'
+        );
+      if (gm.executionProfile && !hasExplicitStandardRequestMode) {
         const urls = await runConfiguredModelProtocol({
           model: gm,
           category: 'image',

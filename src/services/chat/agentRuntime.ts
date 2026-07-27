@@ -35,6 +35,12 @@ export {
 
 export type AgentLoopCallbacks = AgentRoundCallbacks;
 
+const CURRENT_TASK_BOUNDARY = [
+  '当前 AgentTask 边界：紧随本消息之后的最后一条 user 消息是本任务的唯一执行目标。',
+  '此前的 user 请求和 assistant 承诺只能作为背景，不得当作待执行工作；只有当前目标明确引用时才能继续它们。',
+  '当前目标完成后应结束任务，不得回头执行历史中的其他请求。',
+].join('');
+
 export interface AgentLoopOptions {
   taskId: string;
   systemPrompt: string;
@@ -75,6 +81,11 @@ export async function runAgentLoop({
         content: resumeContext,
       });
     }
+    const currentUserIndex = messages.map((message) => message.role).lastIndexOf('user');
+    messages.splice(currentUserIndex >= 0 ? currentUserIndex : messages.length, 0, {
+      role: 'system',
+      content: CURRENT_TASK_BOUNDARY,
+    });
   } catch (error) {
     if (signal.aborted) throw error;
     if (error instanceof ContextBudgetError) {

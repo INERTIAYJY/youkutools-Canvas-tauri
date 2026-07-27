@@ -2,7 +2,7 @@
  * 注册 Provider 文档读取、配置草稿生成与确认写入工具，文档内容不能直接修改正式配置。
  */
 import { useAppStore } from '../../../store/useAppStore';
-import type { GeneralModelCategory } from '../../../types';
+import type { GeneralModelCategory, ImageReferenceRequestMode } from '../../../types';
 import { readProviderDocsPage } from '../../providerDocsService';
 import {
   createProviderConfigDraft,
@@ -32,6 +32,11 @@ interface ProviderConfigApplyInput {
 }
 
 const MODEL_CATEGORIES: GeneralModelCategory[] = ['text', 'image', 'video', 'audio'];
+const IMAGE_REFERENCE_REQUEST_MODES: ImageReferenceRequestMode[] = [
+  'generation-json-image-urls',
+  'generation-json-image-data-urls',
+  'edits-multipart',
+];
 
 function providerDocsError(error: unknown) {
   // Tauri invoke 的拒绝是纯字符串而非 Error，直接丢弃会把真实原因（如域名解析、
@@ -203,6 +208,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
         '每个模型必须提供准确的 modelId、提交请求和提交响应；异步接口还要同时提供轮询请求和轮询响应。',
         'OpenAPI 文档中的 string、0、空对象和空数组是有效的结构占位符，不要因此拒绝调用。',
         'Gemini 图片 generateContent 会自动规范化 IMAGE、contents 和 inlineData.data，不要求真实 Base64 响应样例。',
+        '图片接口若使用 image 字段接收 data:image/...;base64,... 数组，应把 imageReferenceRequestMode 设为 generation-json-image-data-urls。',
         'docs、developer 等文档站地址不能作为 baseUrl；必须使用用户实际调用模型的 API 网关地址。',
         '当文档示例使用 loading、example 等占位主机时，通过 baseUrl 提供文档或用户明确声明的实际接口地址。',
         '所有模型必须属于同一个 HTTPS Base URL。不得传入 API Key、Token、Authorization 值或其他真实凭据。',
@@ -228,6 +234,10 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
                 modelId: { type: 'string', minLength: 1, maxLength: 160 },
                 name: { type: 'string', minLength: 1, maxLength: 120 },
                 category: { type: 'string', enum: MODEL_CATEGORIES },
+                imageReferenceRequestMode: {
+                  type: 'string',
+                  enum: IMAGE_REFERENCE_REQUEST_MODES,
+                },
                 submitRequest: { type: 'string', minLength: 1, maxLength: 20_000 },
                 submitResponse: { type: 'string', minLength: 1, maxLength: 20_000 },
                 pollRequest: { type: 'string', minLength: 1, maxLength: 20_000 },

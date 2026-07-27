@@ -238,6 +238,7 @@ export type GeneralModelCategory = 'text' | 'image' | 'audio' | 'video';
 
 export type ImageReferenceRequestMode =
   | 'generation-json-image-urls'
+  | 'generation-json-image-data-urls'
   | 'edits-multipart';
 
 export type ProviderCatalogAdapter = 'openai-compatible' | 'local-manifest';

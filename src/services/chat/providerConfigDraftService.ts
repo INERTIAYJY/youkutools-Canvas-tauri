@@ -5,6 +5,7 @@
 import type {
   ApiProviderConfig,
   GeneralModelCategory,
+  ImageReferenceRequestMode,
   ProviderModelSelection,
 } from '../../types';
 import type { ModelExecutionProfile } from '../../types/aiTypes';
@@ -31,6 +32,7 @@ export interface ProviderConfigModelExamples extends ModelProtocolExamples {
   modelId?: string;
   name?: string;
   category?: GeneralModelCategory;
+  imageReferenceRequestMode?: ImageReferenceRequestMode;
 }
 
 export interface ProviderConfigDraftInput {
@@ -146,14 +148,21 @@ function createModelSelection(
     preset: 'custom',
     protocol: result.protocol,
   };
+  const category = result.category ?? examples.category ?? 'text';
+  const imageReferenceRequestMode = examples.imageReferenceRequestMode
+    ?? result.imageReferenceRequestMode;
+  if (imageReferenceRequestMode && category !== 'image') {
+    throw new Error(`模型“${displayName || result.modelId}”只有图片分类可以配置参考图请求协议`);
+  }
   return {
     baseUrl: normalizeBaseUrl(result.baseUrl),
     selection: {
       id: result.modelId,
       name: displayName || result.modelId,
-      category: result.category ?? examples.category ?? 'text',
+      category,
       provider: connectionId,
       executionProfile,
+      ...(imageReferenceRequestMode ? { imageReferenceRequestMode } : {}),
     },
   };
 }
@@ -166,10 +175,19 @@ export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string
     video: '视频',
     audio: '音频',
   };
+  const referenceModeLabels: Record<ImageReferenceRequestMode, string> = {
+    'generation-json-image-urls': '公网 URL 数组',
+    'generation-json-image-data-urls': 'data URL 数组',
+    'edits-multipart': 'Multipart 图片文件',
+  };
   return [
     `连接：${draft.connectionName}`,
     `地址：${draft.baseUrl}`,
-    `模型：${models.map((model) => `${model.name}（${categoryLabels[model.category]}）`).join('、')}`,
+    `模型：${models.map((model) => (
+      `${model.name}（${categoryLabels[model.category]}${model.imageReferenceRequestMode
+        ? `，参考图：${referenceModeLabels[model.imageReferenceRequestMode]}`
+        : ''}）`
+    )).join('、')}`,
     '不会写入 API Key：新连接保持空白，已有连接保留原值',
   ].join('\n');
 }

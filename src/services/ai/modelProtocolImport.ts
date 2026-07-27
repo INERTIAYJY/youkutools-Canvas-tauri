@@ -1,7 +1,7 @@
 /**
  * 从 cURL、Fetch、Axios、Python、HTTP 或 OpenAPI 示例中提取可编辑的模型执行协议草稿。
  */
-import type { GeneralModelCategory } from '../../types';
+import type { GeneralModelCategory, ImageReferenceRequestMode } from '../../types';
 import type {
   ModelProtocolAuthConfig,
   ModelProtocolBodyEncoding,
@@ -25,6 +25,7 @@ export interface ModelProtocolImportResult {
   baseUrl?: string;
   modelId?: string;
   category?: GeneralModelCategory;
+  imageReferenceRequestMode?: ImageReferenceRequestMode;
   protocol?: NormalizedModelExecutionProtocol;
   confidence: ModelProtocolImportConfidence;
   formats: ModelProtocolImportFormat[];
@@ -667,7 +668,9 @@ function mapBodyValue(
   if (['format', 'audioformat', 'responseformat'].includes(normalized) && category === 'audio') return '{{audioFormat}}';
   if (['speed', 'audiospeed'].includes(normalized) && category === 'audio') return '{{audioSpeed}}';
   if (['imageurls', 'images', 'referenceimages'].includes(normalized)) return '{{imageUrls}}';
-  if (['image', 'inputimage', 'referenceimage', 'firstframeimage'].includes(normalized)) return '{{imageUrls.0}}';
+  if (['image', 'inputimage', 'referenceimage', 'firstframeimage'].includes(normalized)) {
+    return Array.isArray(value) ? '{{imageUrls}}' : '{{imageUrls.0}}';
+  }
   if (Array.isArray(value)) return value.map((item) => mapNestedBody(item, category));
   if (isRecord(value)) return Object.fromEntries(Object.entries(value)
     .map(([nestedKey, nestedValue]) => [nestedKey, mapBodyValue(nestedKey, nestedValue, category)]));
@@ -686,6 +689,28 @@ function mapRequestBody(body: ProtocolJsonValue | undefined, category: GeneralMo
   return Object.fromEntries(Object.entries(body)
     .filter(([key]) => !isCredentialKey(key))
     .map(([key, value]) => [key, mapBodyValue(key, value, category)]));
+}
+
+function inferImageReferenceRequestMode(
+  request: ParsedRequest,
+  category: GeneralModelCategory,
+): ImageReferenceRequestMode | undefined {
+  if (category !== 'image' || !isRecord(request.body)) return undefined;
+  for (const [key, value] of Object.entries(request.body)) {
+    const normalized = normalizedKey(key);
+    if (['imageurls', 'images', 'referenceimages'].includes(normalized)) {
+      return 'generation-json-image-urls';
+    }
+    if (!['image', 'inputimage', 'referenceimage', 'firstframeimage'].includes(normalized)) {
+      continue;
+    }
+    if (request.bodyEncoding === 'multipart') return 'edits-multipart';
+    const values = Array.isArray(value) ? value : [value];
+    if (values.some((item) => typeof item === 'string' && /^data:image\//i.test(item.trim()))) {
+      return 'generation-json-image-data-urls';
+    }
+  }
+  return undefined;
 }
 
 function normalizeGenerateContentImageBody(
@@ -950,6 +975,7 @@ function buildFields(result: Omit<ModelProtocolImportResult, 'fields'>): ModelPr
   add('base-url', '连接地址', result.baseUrl);
   add('model', '模型 ID', result.modelId);
   add('category', '模型分类', result.category);
+  add('image-reference', '参考图请求', result.imageReferenceRequestMode);
   add('submit', '提交请求', result.protocol ? `${result.protocol.submit.method} ${result.protocol.submit.path}` : undefined);
   add('task-id', '任务 ID 路径', result.protocol?.response.taskIdPath);
   add('poll', '查询请求', result.protocol?.poll ? `${result.protocol.poll.method} ${result.protocol.poll.path}` : undefined);
@@ -1021,6 +1047,7 @@ export function analyzeModelProtocolDocument(
   const submitResponse = submitRequest.response;
   const pollResponse = pollRequest?.response;
   const category = options.category ?? inferCategory(submitRequest, pollResponse ?? submitResponse);
+  const imageReferenceRequestMode = inferImageReferenceRequestMode(submitRequest, category);
   const modelId = options.modelId?.trim() || findModelId(submitRequest.body);
   if (!modelId) warnings.push('未从请求体识别到模型 ID，需要手动填写模型。');
   if (!submitResponse) warnings.push('未识别到提交响应示例，无法可靠推断返回值路径。');
@@ -1158,6 +1185,7 @@ export function analyzeModelProtocolDocument(
     baseUrl: baseResolution?.baseUrl,
     modelId,
     category,
+    imageReferenceRequestMode,
     protocol,
     confidence,
     formats,

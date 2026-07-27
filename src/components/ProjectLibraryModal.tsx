@@ -60,11 +60,12 @@ function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
 }
 
 export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryModalProps) {
-  const { projects, currentProjectId, createProject, switchProject, deleteProject } = useAppStore(
+  const { projects, currentProjectId, createProject, renameProject, switchProject, deleteProject } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
       currentProjectId: state.currentProjectId,
       createProject: state.createProject,
+      renameProject: state.renameProject,
       switchProject: state.switchProject,
       deleteProject: state.deleteProject,
     })),
@@ -73,6 +74,9 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   const [sort, setSort] = useState<ProjectSort>('updated');
   const [isCreating, setIsCreating] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const [renameTargetId, setRenameTargetId] = useState<string | null>(null);
+  const [renameProjectName, setRenameProjectName] = useState('');
+  const [isRenaming, setIsRenaming] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<CanvasProject | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -112,6 +116,9 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
     setQuery('');
     setIsCreating(false);
     setNewProjectName('');
+    setRenameTargetId(null);
+    setRenameProjectName('');
+    setIsRenaming(false);
     setDeleteTarget(null);
     setIsDeleting(false);
     onClose();
@@ -120,6 +127,11 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   const requestClose = () => {
     if (deleteTarget) {
       setDeleteTarget(null);
+      return;
+    }
+    if (renameTargetId) {
+      setRenameTargetId(null);
+      setRenameProjectName('');
       return;
     }
     closeLibrary();
@@ -136,6 +148,36 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
     if (!name) return;
     createProject(name);
     closeLibrary();
+  };
+
+  const beginRenameProject = (project: CanvasProject) => {
+    setIsCreating(false);
+    setNewProjectName('');
+    setRenameTargetId(project.id);
+    setRenameProjectName(project.name);
+  };
+
+  const cancelRenameProject = () => {
+    if (isRenaming) return;
+    setRenameTargetId(null);
+    setRenameProjectName('');
+  };
+
+  const submitRenameProject = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!renameTargetId || isRenaming) return;
+    const name = renameProjectName.trim();
+    if (!name) return;
+
+    setIsRenaming(true);
+    try {
+      if (await renameProject(renameTargetId, name)) {
+        setRenameTargetId(null);
+        setRenameProjectName('');
+      }
+    } finally {
+      setIsRenaming(false);
+    }
   };
 
   const confirmDeleteProject = async () => {
@@ -256,6 +298,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
             {visibleProjects.map((project) => {
               const isCurrent = project.id === currentProjectId;
+              const isEditingName = renameTargetId === project.id;
               return (
                 <div
                   key={project.id}
@@ -271,40 +314,93 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                     aria-label={`打开项目 ${project.name}`}
                     aria-current={isCurrent ? 'page' : undefined}
                     onClick={() => openProject(project.id)}
+                    disabled={isEditingName || isRenaming}
                     className="block w-full border-b border-canvas-border text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
                   >
                     <ProjectSnapshotPreview snapshot={project.snapshot} />
                   </button>
 
-                  <div className="flex min-h-14 items-center">
-                    <button
-                      type="button"
-                      onClick={() => openProject(project.id)}
-                      className="min-w-0 flex-1 px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span className="truncate text-xs font-medium text-canvas-text">{project.name}</span>
-                        {isCurrent ? (
-                          <span className="shrink-0 rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">当前</span>
-                        ) : null}
-                      </span>
-                      <span className="mt-1 block text-[10px] text-canvas-text-muted">
-                        {formatProjectTimestamp(project.updatedAt)}
-                      </span>
-                    </button>
-
-                    {canDeleteProject(project) ? (
+                  {isEditingName ? (
+                    <form onSubmit={(event) => void submitRenameProject(event)} className="flex min-h-14 items-center gap-1.5 px-2">
+                      <label className="min-w-0 flex-1">
+                        <span className="sr-only">项目名称</span>
+                        <input
+                          autoFocus
+                          value={renameProjectName}
+                          onChange={(event) => setRenameProjectName(event.target.value)}
+                          onFocus={(event) => event.currentTarget.select()}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') {
+                              event.preventDefault();
+                              cancelRenameProject();
+                            }
+                          }}
+                          disabled={isRenaming}
+                          className="h-8 w-full rounded-md border border-indigo-400/60 bg-canvas-card px-2 text-xs text-canvas-text outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:opacity-60"
+                        />
+                      </label>
+                      <button
+                        type="submit"
+                        aria-label="保存项目名称"
+                        data-tooltip="保存"
+                        disabled={!renameProjectName.trim() || isRenaming}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-indigo-400 transition-colors hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Icon icon={isRenaming ? 'mdi:loading' : 'mdi:check'} width="17" height="17" className={isRenaming ? 'animate-spin' : undefined} aria-hidden="true" />
+                      </button>
                       <button
                         type="button"
-                        aria-label={`删除项目 ${project.name}`}
-                        data-tooltip="删除项目"
-                        onClick={() => setDeleteTarget(project)}
-                        className="mr-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                        aria-label="取消重命名"
+                        data-tooltip="取消"
+                        disabled={isRenaming}
+                        onClick={cancelRenameProject}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:opacity-40"
                       >
-                        <Icon icon="mdi:trash-can-outline" width="17" height="17" aria-hidden="true" />
+                        <Icon icon="mdi:close" width="17" height="17" aria-hidden="true" />
                       </button>
-                    ) : null}
-                  </div>
+                    </form>
+                  ) : (
+                    <div className="flex min-h-14 items-center">
+                      <button
+                        type="button"
+                        onClick={() => openProject(project.id)}
+                        className="min-w-0 flex-1 px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-xs font-medium text-canvas-text">{project.name}</span>
+                          {isCurrent ? (
+                            <span className="shrink-0 rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">当前</span>
+                          ) : null}
+                        </span>
+                        <span className="mt-1 block text-[10px] text-canvas-text-muted">
+                          {formatProjectTimestamp(project.updatedAt)}
+                        </span>
+                      </button>
+
+                      <div className="mr-2 flex shrink-0 items-center gap-0.5">
+                        <button
+                          type="button"
+                          aria-label={`重命名项目 ${project.name}`}
+                          data-tooltip="重命名"
+                          onClick={() => beginRenameProject(project)}
+                          className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border"
+                        >
+                          <Icon icon="mdi:pencil-outline" width="17" height="17" aria-hidden="true" />
+                        </button>
+                        {canDeleteProject(project) ? (
+                          <button
+                            type="button"
+                            aria-label={`删除项目 ${project.name}`}
+                            data-tooltip="删除项目"
+                            onClick={() => setDeleteTarget(project)}
+                            className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                          >
+                            <Icon icon="mdi:trash-can-outline" width="17" height="17" aria-hidden="true" />
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}

@@ -13,6 +13,18 @@
   justify-content: flex-start;
 }
 
+[data-theme='light'] .pano-node .node-upload-btn {
+  border-color: var(--theme-border);
+  background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
+  color: var(--theme-text-secondary);
+}
+
+[data-theme='light'] .pano-node .node-upload-btn:hover {
+  border-color: var(--border-secondary);
+  background: var(--theme-hover);
+  color: var(--theme-text);
+}
+
 .pano-node .image-preview-container,
 .pano-node .image-preview-img {
   flex: 1;

@@ -5,6 +5,70 @@ import {
 } from '../../src/services/ai/modelProtocolImport';
 
 describe('model protocol document import', () => {
+  it('imports an async image API with data URL reference arrays', () => {
+    const result = analyzeModelProtocolExamples({
+      submitRequest: `
+curl -sS -X POST "https://www.right.codes/draw/v1/images/generations" \\
+  -H "Authorization: Bearer sk-placeholder" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "nano-banana-fast",
+    "prompt": "参考这张图修改风格",
+    "n": 1,
+    "size": "16:9",
+    "imageSize": "1K",
+    "async": true,
+    "image": ["data:image/png;base64,{BASE64_IMAGE}"]
+  }'`,
+      submitResponse: `{
+        "task_id": "task_0123456789abcdef",
+        "status": "processing",
+        "progress": 0
+      }`,
+      pollRequest: `
+curl -sS "https://www.right.codes/v1/tasks/task_0123456789abcdef" \\
+  -H "Authorization: Bearer sk-placeholder"`,
+      pollResponse: `{
+        "task_id": "task_0123456789abcdef",
+        "status": "completed",
+        "progress": 100,
+        "data": [{ "url": "https://cdn.example.com/result.png" }]
+      }`,
+    });
+
+    expect(result).toMatchObject({
+      baseUrl: 'https://www.right.codes',
+      modelId: 'nano-banana-fast',
+      category: 'image',
+      imageReferenceRequestMode: 'generation-json-image-data-urls',
+      protocol: {
+        mode: 'async',
+        submit: {
+          path: '/draw/v1/images/generations',
+          body: {
+            model: '{{model}}',
+            prompt: '{{prompt}}',
+            n: '{{n}}',
+            size: '{{aspectRatio}}',
+            imageSize: '{{imageSize}}',
+            async: true,
+            image: '{{imageUrls}}',
+          },
+        },
+        response: { taskIdPath: 'task_id' },
+        poll: {
+          path: '/v1/tasks/{{submit.task_id}}',
+          response: {
+            statusPath: 'status',
+            result: { urlPath: 'data.*.url' },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('sk-placeholder');
+    expect(JSON.stringify(result)).not.toContain('{BASE64_IMAGE}');
+  });
+
   it('imports explicitly separated submit and polling examples', () => {
     const result = analyzeModelProtocolExamples({
       submitRequest: `

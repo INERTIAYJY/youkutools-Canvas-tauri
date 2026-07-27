@@ -7,7 +7,9 @@ const transportMocks = vi.hoisted(() => ({
 vi.mock('../../src/services/ai/httpTransport', () => transportMocks);
 
 import { streamAssistantReply } from '../../src/services/ai/assistantStream';
+import { generateImagesBatch } from '../../src/services/ai/generateImage';
 import { generateText } from '../../src/services/ai/generateText';
+import { resolveImageDataUrlArray } from '../../src/services/ai/imageUtils';
 import { generateImageStandard } from '../../src/services/ai/providers/standardImage';
 import { useAppStore } from '../../src/store/useAppStore';
 
@@ -95,6 +97,134 @@ describe('model request transport boundary', () => {
       model: 'gpt-image-2',
       image_urls: ['https://cdn.example/reference.png'],
     });
+  });
+
+  it('sends base64 reference arrays through the JSON image field', async () => {
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({
+      data: [{ url: 'https://cdn.example/generated.png' }],
+    }));
+    const image = 'data:image/png;base64,iVBORw0KGgo=';
+
+    await generateImageStandard({
+      apiKey: 'secret',
+      baseUrl: 'https://gateway.example/v1',
+      modelName: 'custom-image-model',
+      prompt: '参考角色生成场景',
+      dimensions: { width: 1024, height: 1024 },
+      imageUrls: [image],
+      imageReferenceRequestMode: 'generation-json-image-data-urls',
+    });
+
+    const [, init] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: 'custom-image-model',
+      image: [image],
+    });
+    expect(JSON.parse(String(init.body))).not.toHaveProperty('image_urls');
+  });
+
+  it('converts remote reference images into base64 data URLs', async () => {
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response(
+      Uint8Array.from([137, 80, 78, 71]),
+      { status: 200, headers: { 'Content-Type': 'image/png' } },
+    ));
+
+    await expect(resolveImageDataUrlArray([
+      'https://cdn.example/reference.png',
+    ])).resolves.toEqual([
+      'data:image/png;base64,iVBORw==',
+    ]);
+  });
+
+  it('keeps data URL references in a configured async image protocol', async () => {
+    const image = 'data:image/png;base64,iVBORw0KGgo=';
+    useAppStore.setState((state) => ({
+      config: {
+        ...state.config,
+        providers: {
+          ...state.config.providers,
+          rightapi: {
+            name: 'RightAPI',
+            apiKey: 'secret',
+            baseUrl: 'https://www.right.codes/draw/v1',
+          },
+        },
+        generalModels: [{
+          id: 'rightapi-image',
+          name: 'RightAPI 图片',
+          modelId: 'nano-banana-fast',
+          category: 'image',
+          providerConfigId: 'rightapi',
+          imageReferenceRequestMode: 'generation-json-image-data-urls',
+          executionProfile: {
+            preset: 'custom',
+            protocol: {
+              version: 2,
+              mode: 'async',
+              submit: {
+                method: 'POST',
+                path: '/images/generations',
+                body: {
+                  model: '{{model}}',
+                  prompt: '{{prompt}}',
+                  n: '{{n}}',
+                  size: '{{aspectRatio}}',
+                  imageSize: '{{imageSize}}',
+                  async: true,
+                  image: '{{imageUrls}}',
+                },
+              },
+              response: { type: 'json', taskIdPath: 'task_id' },
+              poll: {
+                method: 'GET',
+                path: '/v1/tasks/{{submit.task_id}}',
+                pathMode: 'origin',
+                response: {
+                  statusPath: 'status',
+                  successValues: ['completed'],
+                  failureValues: ['failed'],
+                  result: { urlPath: 'data.*.url' },
+                  errorPath: 'error.message',
+                  progressPath: 'progress',
+                },
+                intervalMs: 1000,
+              },
+            },
+          },
+        }],
+      },
+    }));
+    transportMocks.corsSafeFetch
+      .mockResolvedValueOnce(jsonResponse({ task_id: 'task-123', status: 'processing' }))
+      .mockResolvedValueOnce(jsonResponse({
+        task_id: 'task-123',
+        status: 'completed',
+        progress: 100,
+        data: [{ url: 'https://cdn.example/result.png' }],
+      }));
+
+    await expect(generateImagesBatch({
+      provider: 'general',
+      model: 'general/rightapi-image',
+      prompt: '改成赛博朋克风格',
+      imageSize: '1K',
+      aspectRatio: '16:9',
+      image_urls: [image],
+    }, 1)).resolves.toMatchObject({
+      results: [{ url: 'https://cdn.example/result.png' }],
+    });
+
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(2);
+    const [submitUrl, submitInit] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+    expect(submitUrl).toBe('https://www.right.codes/draw/v1/images/generations');
+    expect(JSON.parse(String(submitInit.body))).toMatchObject({
+      model: 'nano-banana-fast',
+      async: true,
+      image: [image],
+    });
+    expect(transportMocks.corsSafeFetch.mock.calls[1]?.[0]).toBe(
+      'https://www.right.codes/v1/tasks/task-123',
+    );
   });
 
   it('explains when an image endpoint returns an HTML page instead of JSON', async () => {

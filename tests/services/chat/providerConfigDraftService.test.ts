@@ -64,6 +64,41 @@ beforeEach(() => {
 });
 
 describe('provider config draft service', () => {
+  it('preserves the inferred data URL reference mode in an async image draft', () => {
+    const draft = createProviderConfigDraft('task-rightapi', {
+      connectionName: 'RightAPI',
+      models: [{
+        modelId: 'nano-banana-fast',
+        name: 'Nano Banana Fast',
+        category: 'image',
+        submitRequest: `
+curl -X POST https://www.right.codes/draw/v1/images/generations \\
+  -H "Authorization: Bearer sk-placeholder" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"nano-banana-fast","prompt":"test","async":true,"image":["data:image/png;base64,{BASE64_IMAGE}"]}'`,
+        submitResponse: '{"task_id":"task-rightapi","status":"processing"}',
+        pollRequest: 'curl https://www.right.codes/v1/tasks/task-rightapi -H "Authorization: Bearer sk-placeholder"',
+        pollResponse: '{"status":"completed","data":[{"url":"https://cdn.example.com/result.png"}]}',
+      }],
+    });
+
+    expect(draft.config.selectedModels?.[0]).toMatchObject({
+      id: 'nano-banana-fast',
+      category: 'image',
+      imageReferenceRequestMode: 'generation-json-image-data-urls',
+      executionProfile: {
+        preset: 'custom',
+        protocol: {
+          mode: 'async',
+          submit: { body: { image: '{{imageUrls}}' } },
+          poll: { path: '/v1/tasks/{{submit.task_id}}' },
+        },
+      },
+    });
+    expect(draft.summary).toContain('参考图：data URL 数组');
+    expect(JSON.stringify(draft)).not.toContain('sk-placeholder');
+  });
+
   it('merges multiple model protocols into one credential-free provider draft', () => {
     const draft = createProviderConfigDraft('task-1', createInput(), 1_000);
 

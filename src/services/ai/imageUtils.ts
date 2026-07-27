@@ -3,6 +3,68 @@
  */
 import { uploadToRemote, isLocalImageUrl } from '../uploadService';
 import { getAssetUrlFromPath } from '../fileService';
+import { corsSafeFetch } from './httpTransport';
+
+const BASE64_IMAGE_DATA_URL_RE = /^data:image\/[^;,]+(?:;[^,]*)*;base64,/i;
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  avif: 'image/avif',
+  gif: 'image/gif',
+  jpeg: 'image/jpeg',
+  jpg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+
+function encodeBytesBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function inferImageMimeType(url: string): string | undefined {
+  const path = (() => {
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return url.split(/[?#]/, 1)[0];
+    }
+  })();
+  const extension = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  return extension ? IMAGE_MIME_BY_EXTENSION[extension] : undefined;
+}
+
+async function referenceImageToDataUrl(
+  url: string,
+  index: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (BASE64_IMAGE_DATA_URL_RE.test(url)) return url;
+
+  const usesWebViewFetch = /^(asset:|blob:|data:|file:)/i.test(url)
+    || url.includes('asset.localhost');
+  const response = await (usesWebViewFetch
+    ? fetch(url, { signal })
+    : corsSafeFetch(url, { signal }));
+  if (!response.ok) {
+    throw new Error(`读取参考图 ${index + 1} 失败 (${response.status})`);
+  }
+
+  const blob = await response.blob();
+  if (blob.size === 0) throw new Error(`参考图 ${index + 1} 内容为空`);
+  const blobMime = blob.type.split(';')[0].trim().toLowerCase();
+  const responseMime = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase();
+  const mimeType = [blobMime, responseMime].find((value) => value?.startsWith('image/'))
+    ?? inferImageMimeType(url);
+  if (!mimeType?.startsWith('image/')) {
+    throw new Error(`参考图 ${index + 1} 不是受支持的图片格式`);
+  }
+
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return `data:${mimeType};base64,${encodeBytesBase64(bytes)}`;
+}
 
 /** 加载图片（自动处理远程 URL 的 CORS） */
 export async function loadImage(src: string): Promise<HTMLImageElement> {
@@ -125,4 +187,12 @@ export async function resolveImageUrlArray(urls: string[], provider = ''): Promi
       return url;
     }),
   );
+}
+
+/** 将参考图统一转换为 JSON 图片接口可接收的 base64 data URL 数组。 */
+export async function resolveImageDataUrlArray(
+  urls: string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return Promise.all(urls.map((url, index) => referenceImageToDataUrl(url, index, signal)));
 }

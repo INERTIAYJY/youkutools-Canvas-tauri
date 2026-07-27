@@ -445,6 +445,17 @@ export default function ModelProtocolEditor({
     setFormRevision((current) => current + 1);
   };
 
+  const insertJsonReferenceArray = (fieldName: string) => {
+    if (!fieldName) return;
+    updateProtocol((draft) => {
+      const body = isJsonObject(draft.submit.body) ? draft.submit.body : {};
+      body[fieldName] = '{{imageUrls}}';
+      draft.submit.bodyEncoding = 'json';
+      draft.submit.body = body;
+    });
+    setFormRevision((current) => current + 1);
+  };
+
   const updateSubmit = (patch: Partial<ModelProtocolRequestTemplate>) => {
     updateProtocol((draft) => {
       draft.submit = { ...draft.submit, ...patch };
@@ -570,6 +581,7 @@ export default function ModelProtocolEditor({
               )}
             >
               <option value="generation-json-image-urls">生成接口 JSON（image_urls）</option>
+              <option value="generation-json-image-data-urls">生成接口 JSON（image，data URL 数组）</option>
               <option value="edits-multipart">编辑接口 Multipart（图片文件）</option>
             </select>
           </label>
@@ -721,6 +733,16 @@ export default function ModelProtocolEditor({
                     <option value="image">image: imageUrls.0</option>
                     <option value="file">file: imageUrls.0</option>
                     <option value="reference_image">reference_image: imageUrls.0</option>
+                  </select>
+                </label>
+              ) : null}
+              {model.category === 'image' && protocol.submit.bodyEncoding !== 'multipart' ? (
+                <label className="provider-protocol-field">
+                  <span>插入参考图字段</span>
+                  <select value="" onChange={(event) => insertJsonReferenceArray(event.target.value)}>
+                    <option value="">选择字段</option>
+                    <option value="image">image: imageUrls</option>
+                    <option value="image_urls">image_urls: imageUrls</option>
                   </select>
                 </label>
               ) : null}

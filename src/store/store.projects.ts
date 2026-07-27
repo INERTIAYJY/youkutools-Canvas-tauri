@@ -186,6 +186,7 @@ export interface ProjectSlice {
   projectName: string;
   _autoSaveFailedNotified?: boolean;
   setProjectName: (name: string) => void;
+  renameProject: (id: string, name: string) => Promise<boolean>;
   updateProjectSettings: (settings: ProjectSettings) => Promise<boolean>;
   captureCurrentProjectSnapshot: (
     options?: CaptureProjectSnapshotOptions,
@@ -209,56 +210,99 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   setProjectName: (name) => {
     const state = get();
     const currentProjectId = state.currentProjectId;
-    const project = state.projects.find((p) => p.id === currentProjectId);
-    if (!currentProjectId || !project) {
+    if (!currentProjectId) {
       set({ projectName: name });
       return;
     }
+    if (state.projects.find((project) => project.id === currentProjectId)?.name === name.trim()) return;
+    void get().renameProject(currentProjectId, name);
+  },
 
-    const nextDataFolder = fileService.buildProjectFolderName(name, currentProjectId);
+  renameProject: async (id, name) => {
+    const nextName = name.trim();
+    if (!nextName) return false;
+
+    const initialState = get();
+    const project = initialState.projects.find((item) => item.id === id);
+    if (!project) return false;
+
+    const persistedProject = initialState.currentProjectId === id
+      ? null
+      : await fileService.loadProjectData(id);
+    if (initialState.currentProjectId !== id && !persistedProject) {
+      get().showToast('无法读取项目，重命名失败', 'error');
+      return false;
+    }
+
+    const updatedAt = Date.now();
+    const nextDataFolder = fileService.buildProjectFolderName(nextName, id);
     const oldDataFolder = project.dataFolder;
     const dataFolderChanged = oldDataFolder !== nextDataFolder;
 
-    set((s) => ({
-      projectName: name,
-      projects: s.projects.map((p) =>
-        p.id === currentProjectId ? { ...p, name } : p
+    set((state) => ({
+      ...(state.currentProjectId === id ? { projectName: nextName } : {}),
+      projects: state.projects.map((item) =>
+        item.id === id ? { ...item, name: nextName, updatedAt } : item
       ),
     }));
 
-    if (!dataFolderChanged) return;
-
-    (async () => {
-      const renamed = await fileService.renameProjectDataDir(currentProjectId, oldDataFolder, nextDataFolder);
-      if (!renamed) return;
-
+    try {
+      const renamed = dataFolderChanged
+        ? await fileService.renameProjectDataDir(id, oldDataFolder, nextDataFolder)
+        : null;
       const latest = get();
-      const latestProject = latest.projects.find((p) => p.id === currentProjectId);
-      if (!latestProject) return;
+      if (!latest.projects.some((item) => item.id === id)) return false;
 
-      const patch: Partial<Pick<AppState, 'nodes' | 'projects'>> = {
-        projects: latest.projects.map((p) =>
-          p.id === currentProjectId ? { ...p, dataFolder: renamed.dataFolder, updatedAt: Date.now() } : p
-        ),
-      };
-
-      if (latest.currentProjectId === currentProjectId) {
-        patch.nodes = await remapProjectNodePaths(latest.nodes, renamed.oldDir, renamed.newDir);
+      let nextNodes: Node<BaseNodeData>[];
+      let record: ProjectSaveData;
+      if (latest.currentProjectId === id) {
+        nextNodes = renamed
+          ? await remapProjectNodePaths(latest.nodes, renamed.oldDir, renamed.newDir)
+          : latest.nodes;
+        const latestProject = latest.projects.find((item) => item.id === id)!;
+        record = {
+          id,
+          name: nextName,
+          createdAt: latestProject.createdAt,
+          updatedAt,
+          snapshot: latestProject.snapshot,
+          dataFolder: renamed?.dataFolder ?? latestProject.dataFolder,
+          settings: latestProject.settings,
+          nodes: nextNodes,
+          edges: latest.edges,
+          groups: latest.groups,
+          dramaAssets: latest.dramaAssets,
+        };
+      } else {
+        const source = persistedProject ?? await fileService.loadProjectData(id);
+        if (!source) throw new Error('无法读取项目数据');
+        nextNodes = renamed
+          ? await remapProjectNodePaths(source.nodes as Node<BaseNodeData>[], renamed.oldDir, renamed.newDir)
+          : source.nodes as Node<BaseNodeData>[];
+        record = {
+          ...source,
+          name: nextName,
+          updatedAt,
+          dataFolder: renamed?.dataFolder ?? source.dataFolder,
+          nodes: nextNodes,
+        };
       }
 
-      set(patch);
-
-      const after = get();
-      const savedProject = after.projects.find((p) => p.id === currentProjectId);
-      if (savedProject && after.currentProjectId === currentProjectId) {
-        fileService.saveProject({
-          ...savedProject,
-          nodes: after.nodes,
-          edges: after.edges,
-          groups: after.groups,
-        }).catch((e) => console.warn('[项目重命名] 保存失败:', e));
-      }
-    })().catch((e) => console.warn('[项目重命名] 数据目录重命名失败:', e));
+      set((state) => ({
+        ...(state.currentProjectId === id ? { projectName: nextName, nodes: nextNodes } : {}),
+        projects: state.projects.map((item) => (
+          item.id === id
+            ? { ...item, name: nextName, updatedAt, dataFolder: record.dataFolder }
+            : item
+        )),
+      }));
+      await enqueueProjectSave(record);
+      return true;
+    } catch (error) {
+      console.warn('[项目重命名] 保存失败:', error);
+      get().showToast('项目重命名保存失败', 'error');
+      return false;
+    }
   },
 
   updateProjectSettings: async (settings) => {

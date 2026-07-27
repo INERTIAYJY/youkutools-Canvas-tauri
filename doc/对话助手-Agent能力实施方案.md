@@ -1243,6 +1243,64 @@ type PolicyDecision =
 - 生产构建：`npx vite build --outDir <系统临时目录> --emptyOutDir` 通过；仅保留仓库既有动态导入和 chunk 体积警告。
 - 视觉检查：按用户明确要求，本阶段未执行视觉验证；审批卡改动的桌面/独立窗口实际呈现留到 P5-C 验收。
 
+### P5-B 补充：图片 data URL 文档导入
+
+**状态：** `[x]`
+
+#### 目标
+
+让 Agent 在读取自定义图片接口文档后，能够识别 `image: ["data:image/...;base64,..."]` 参考图协议，生成可执行的声明式异步协议并保存正确的参考图传输模式；不扩大 API Key、网页读取或配置写入权限。
+
+#### 实际文件
+
+- 修改：`src/services/ai/modelProtocolImport.ts`
+- 修改：`src/services/chat/providerConfigDraftService.ts`
+- 修改：`src/services/chat/tools/providerConfigTools.ts`
+- 修改：`tests/services/modelProtocolImport.test.ts`
+- 修改：`tests/services/chat/providerConfigDraftService.test.ts`
+- 修改：`tests/services/chat/providerConfigTools.test.ts`
+
+#### 实施结果
+
+- [x] 协议导入器按请求示例区分图片标量与数组：`image` 数组映射为 `{{imageUrls}}`，单图字段继续映射为 `{{imageUrls.0}}`。
+- [x] 图片请求中的 `image_urls`、data URL `image` 和 multipart 图片字段可分别推断为公网 URL 数组、data URL 数组和 Multipart 文件模式。
+- [x] `provider_config_preview` schema 允许 Agent 显式声明参考图模式，用于文档正文明确但代码示例不足的情况；草稿服务再次校验该字段只能用于图片模型。
+- [x] Agent 生成的 Provider 草稿会保存 `imageReferenceRequestMode`，审批摘要展示参考图传输方式，应用草稿后仍由现有 `config_write` 固定审批边界保护。
+- [x] RightAPI 异步图片示例可解析提交路径、顶层 `task_id`、跨前缀任务查询路径、状态和 `data.*.url` 结果，同时不会保留示例中的 Token 或 Base64 占位正文。
+- [x] 真实 API Key 不进入 Agent 工具参数、模型上下文或草稿；新连接仍保持空密钥并由用户在设置弹窗中填写。
+
+#### 回滚
+
+移除协议导入结果中的 `imageReferenceRequestMode` 推断、Agent 工具的同名 schema 字段和草稿复制逻辑即可回滚；不涉及数据库迁移、依赖或安全配置。
+
+#### 完成记录
+
+- 完成日期：2026-07-27
+- 定向测试：`npx vitest run tests/services/modelProtocolImport.test.ts tests/services/chat/providerConfigDraftService.test.ts tests/services/chat/providerConfigTools.test.ts`，3 个文件、23 个测试通过。
+- 类型与 Lint：`npm run typecheck` 和 6 个阶段 TypeScript 文件定向 ESLint 通过。
+
+### P5-F 补充：Agent 当前任务边界
+
+**状态：** `[x]`
+
+#### 目标
+
+防止新 AgentTask 在完成当前用户指令后，把会话历史中的旧用户请求或旧 assistant 承诺误判为待执行工作；保留历史语义背景，不改变工具权限和审批边界。
+
+#### 实施结果
+
+- [x] Agent Runtime 在会话历史与当前 user 消息之间注入本地固定的任务边界，明确最后一条 user 消息是唯一可执行目标。
+- [x] 历史 user 请求和 assistant 承诺仅作背景；只有当前目标明确引用时才可继续，完成当前目标后必须结束任务。
+- [x] 边界内容不嵌入用户原文，避免把不可信用户内容提升为 system 指令。
+- [x] 恢复任务仍注入已完成步骤摘要和重复写抑制，不改变 Policy Engine、B/C 模式或审批矩阵。
+
+#### 完成记录
+
+- 完成日期：2026-07-27
+- 回归覆盖：旧科幻短片请求和 assistant 创建承诺保留在历史中时，当前 RightAPI 配置消息仍位于任务边界之后，历史指令不得被继续执行。
+- 定向测试：Agent Runtime、单轮执行、恢复摘要、会话调度、主/独立窗口控制、上下文与 Provider 配置共 8 个文件、25 个测试通过。
+- 类型、Lint 与构建：`npm run typecheck`、`npm run test:typecheck`、2 个改动代码文件定向 ESLint 和临时目录 Vite 生产构建通过；仅保留仓库既有构建警告。
+
 ### P5-D：通用联网搜索、受控网页提取和来源引用
 
 **状态：** `[x]`
@@ -1869,3 +1927,5 @@ type PolicyDecision =
 | 2026-07-25 | 8.16 | 完成跨入口提示词学习：普通画布生图、全景和视频成功历史成为 Agent 的项目内学习样本，按当前意图相关性与时间衰减筛选并在脱敏、限长和不可信数据边界内辅助补足媒体提示词。 |
 | 2026-07-25 | 8.17 / 角色库 S1 | 完成多图角色 v2、旧单图迁移、IndexedDB v16 永久角色 store、永久参考图复制和项目/永久独立副本 Store Action；未开放 UI 或节点隐藏入口。 |
 | 2026-07-25 | 8.17 / 角色库 S2 | 完成独立角色库入口、项目/永久标签、搜索、多图画廊、角色头像条、角色编辑、逐图提示词和头像裁切；节点右键入库与默认隐藏保留到 S3。 |
+| 2026-07-27 | P5-B 补充 | Agent 厂商文档导入支持 `image` data URL 数组，自动或显式保存参考图传输模式，并保持 API Key 隔离与 `config_write` 固定审批。 |
+| 2026-07-27 | P5-F 补充 | Agent 每次执行都在历史与当前 user 消息之间固定当前任务边界，防止旧请求和旧 assistant 承诺在完成新任务后被再次执行。 |

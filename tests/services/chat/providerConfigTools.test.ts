@@ -124,6 +124,40 @@ describe('provider config agent tools', () => {
     expect(result.modelContent).not.toContain('<token>');
   });
 
+  it('accepts and persists a data URL reference mode declared from image API docs', async () => {
+    const input = previewInput();
+    input.models[0].submitRequest = `
+curl https://gateway.example.com/v1/images/generations \\
+  -H "Authorization: Bearer <token>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"image-pro","prompt":"glass cube","image":["data:image/png;base64,{BASE64_IMAGE}"]}'`;
+    const toolInput = {
+      ...input,
+      models: [{
+        ...input.models[0],
+        imageReferenceRequestMode: 'generation-json-image-data-urls' as const,
+      }],
+    };
+    const prepared = prepareAgentToolCall({
+      callId: 'call-data-url-preview',
+      toolId: 'provider_config_preview',
+      input: toolInput,
+    }, context);
+    expect(prepared).toMatchObject({ ok: true });
+
+    const result = await getAgentTool('provider_config_preview')!.execute(context, toolInput);
+
+    expect(result).toMatchObject({ status: 'success' });
+    const draft = getProviderConfigDraft(context.taskId, readDraftId(result.modelContent));
+    expect(draft.config.selectedModels?.[0]).toMatchObject({
+      imageReferenceRequestMode: 'generation-json-image-data-urls',
+      executionProfile: {
+        protocol: { submit: { body: { image: '{{imageUrls}}' } } },
+      },
+    });
+    expect(draft.summary).toContain('参考图：data URL 数组');
+  });
+
   it('falls back to a recent user example when a retry omits the Fetch request', async () => {
     useAppStore.setState({
       messages: [{

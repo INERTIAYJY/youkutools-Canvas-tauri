@@ -219,10 +219,23 @@ fn copy_files_impl(paths: &[String]) -> Result<(), String> {
 
 /// 将一组文件路径写入系统剪贴板，三平台通用。
 #[tauri::command]
-pub async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+pub async fn copy_files_to_clipboard(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    crate::path_policy::ensure_trusted_caller(&webview)?;
     if paths.is_empty() {
         return Err("文件路径列表为空".to_string());
     }
+    // 只允许把已授权目录内的文件放进剪贴板，避免被注入的 Renderer 借剪贴板外带任意文件
+    let paths = paths
+        .iter()
+        .map(|path| {
+            crate::path_policy::authorize_path(&app, path, crate::path_policy::PathAccess::Read)
+                .map(|resolved| resolved.to_string_lossy().into_owned())
+        })
+        .collect::<Result<Vec<String>, String>>()?;
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {

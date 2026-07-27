@@ -331,6 +331,32 @@ function buildSkillChipEl(skillId: string, skillName: string): HTMLSpanElement {
   return span;
 }
 
+const WF_CHIP_ICON_PATH = 'M3.5 1.5h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2c0-1.1.9-2 2-2m7 7h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2c0-1.1.9-2 2-2m-6-1V10q0 1.5 1.5 1.5h2.5';
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** 工作流芯片的连线图标，用 DOM API 构造，避免任何 HTML 字符串拼接。 */
+function buildWorkflowChipIconEl(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('width', '14');
+  svg.setAttribute('height', '14');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  const path = document.createElementNS(SVG_NS, 'path');
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', '#f5a97f');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  path.setAttribute('d', WF_CHIP_ICON_PATH);
+  svg.appendChild(path);
+  return svg;
+}
+
+function buildChipTextEl(className: string, text: string): HTMLSpanElement {
+  const el = document.createElement('span');
+  el.className = className;
+  el.textContent = text;
+  return el;
+}
+
 /** Build a workflow IO chip — label prefix (⚡ T#id :) + editable value area. */
 function buildWorkflowChipEl(
   ioNodeId: string,
@@ -350,11 +376,12 @@ function buildWorkflowChipEl(
   const prefix = document.createElement('span');
   prefix.className = 'prompt-chip-wf-prefix';
   prefix.contentEditable = 'false';
-  prefix.innerHTML =
-    `<svg width="14" height="14" viewBox="0 0 16 16"><path fill="none" stroke="#f5a97f" stroke-linecap="round" stroke-linejoin="round" d="M3.5 1.5h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2c0-1.1.9-2 2-2m7 7h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2c0-1.1.9-2 2-2m-6-1V10q0 1.5 1.5 1.5h2.5"/></svg>` +
-    `<span class="prompt-chip-icon">${icon}</span>` +
-    `<span class="prompt-chip-wf-id">#${ioNodeId}</span>` +
-    `<span class="prompt-chip-wf-colon">:</span>`;
+  // ioNodeId 来自提示词文本（项目数据 / Agent 写入），一律走 textContent；
+  // 此处绝不能用 HTML 字符串拼接，否则可闭合标签注入事件属性执行脚本。
+  prefix.appendChild(buildWorkflowChipIconEl());
+  prefix.appendChild(buildChipTextEl('prompt-chip-icon', icon));
+  prefix.appendChild(buildChipTextEl('prompt-chip-wf-id', `#${ioNodeId}`));
+  prefix.appendChild(buildChipTextEl('prompt-chip-wf-colon', ':'));
   span.appendChild(prefix);
 
   const valueArea = document.createElement('span');

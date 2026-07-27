@@ -9,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Webview};
+
+use crate::path_policy::{authorize_path, ensure_trusted_caller, PathAccess};
 
 const BUFFER_SIZE: usize = 1024 * 1024;
 const MIN_FREE_SPACE_RESERVE: u64 = 64 * 1024 * 1024;
@@ -249,14 +251,19 @@ where
 #[tauri::command]
 pub async fn copy_file_streamed(
     app: AppHandle,
+    webview: Webview,
     task_id: String,
     source_path: String,
     destination_path: String,
 ) -> Result<FileTransferResult, String> {
+    ensure_trusted_caller(&webview)?;
+    // 源文件必须是用户显式给过的（对话框选中、拖入、已登记的素材目录），
+    // 否则本命令等于把任意文件搬进项目目录，再经 asset 协议读走。
+    let source = authorize_path(&app, &source_path, PathAccess::Read)?;
+    let destination = authorize_path(&app, &destination_path, PathAccess::Write)?;
+
     let task_id_for_worker = task_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let source = PathBuf::from(source_path);
-        let destination = PathBuf::from(destination_path);
         let total_bytes = fs::metadata(&source)
             .map_err(|e| format!("读取源文件信息失败: {e}"))?
             .len();
@@ -296,13 +303,16 @@ pub async fn copy_file_streamed(
 #[tauri::command]
 pub async fn download_file_streamed(
     app: AppHandle,
+    webview: Webview,
     task_id: String,
     url: String,
     destination_path: String,
 ) -> Result<FileTransferResult, String> {
+    ensure_trusted_caller(&webview)?;
+    let destination = authorize_path(&app, &destination_path, PathAccess::Write)?;
+
     let task_id_for_worker = task_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let destination = PathBuf::from(destination_path);
         download_to_file(
             &app,
             &task_id_for_worker,

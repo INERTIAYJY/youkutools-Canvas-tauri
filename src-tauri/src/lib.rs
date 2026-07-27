@@ -23,6 +23,7 @@ mod dreamina;
 mod file_transfer;
 mod mcp_bridge;
 pub mod onnx;
+mod path_policy;
 mod provider_docs;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -605,44 +606,73 @@ mod proxy_http_tests {
     }
 }
 
-/// 将文件或目录移动到系统回收站/废纸篓
+/// 将文件或目录移动到系统回收站/废纸篓。
+/// 只接受应用自有数据目录或用户已授权目录内的路径，避免被注入的 Renderer 删除任意文件。
 #[tauri::command]
-async fn move_to_trash(path: String) -> Result<(), String> {
-    trash::delete(std::path::Path::new(&path)).map_err(|e| format!("移动文件到回收站失败: {}", e))
+async fn move_to_trash(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    path: String,
+) -> Result<(), String> {
+    path_policy::ensure_trusted_caller(&webview)?;
+    let target = path_policy::authorize_path(&app, &path, path_policy::PathAccess::Read)?;
+    trash::delete(&target).map_err(|e| format!("移动文件到回收站失败: {}", e))
 }
 
-/// 使用指定应用打开文件（直接调用系统进程 API，绕过 shell 插件权限限制）
+/// 使用指定应用打开文件（直接调用系统进程 API，绕过 shell 插件权限限制）。
+/// 待打开文件必须已授权，被启动的程序必须是系统已安装应用且不在应用可写目录内。
 #[tauri::command]
-async fn open_with_app(app_path: String, file_path: String) -> Result<(), String> {
+async fn open_with_app(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    app_path: String,
+    file_path: String,
+) -> Result<(), String> {
+    path_policy::ensure_trusted_caller(&webview)?;
+    let target = path_policy::authorize_path(&app, &file_path, path_policy::PathAccess::Read)?;
+    let launch_target = path_policy::authorize_launch_target(&app, &app_path)?;
+
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new(&app_path)
-            .arg(&file_path)
+        std::process::Command::new(&launch_target)
+            .arg(&target)
             .spawn()
             .map_err(|e| format!("启动应用失败: {e}"))?;
     }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .args(["-a", &app_path, &file_path])
+            .arg("-a")
+            .arg(&launch_target)
+            .arg(&target)
             .spawn()
             .map_err(|e| format!("启动应用失败: {e}"))?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = (app_path, file_path);
+        let _ = (launch_target, target);
         return Err("不支持的操作系统".to_string());
     }
     Ok(())
 }
 
 /// 在系统文件管理器中打开目录，或定位并选中文件。
-/// 路径会先规范化，避免系统文件管理器在参数无效时回退到默认目录。
+/// 路径会先校验授权并规范化：既避免暴露任意目录，也避免系统文件管理器在参数无效时回退到默认目录。
 #[tauri::command]
-async fn reveal_in_file_manager(path: String, select: bool) -> Result<(), String> {
-    let canonical_path = std::path::PathBuf::from(&path)
-        .canonicalize()
-        .map_err(|e| format!("目标路径不存在或无法访问（{path}）: {e}"))?;
+async fn reveal_in_file_manager(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    path: String,
+    select: bool,
+) -> Result<(), String> {
+    path_policy::ensure_trusted_caller(&webview)?;
+    // 设置面板里可以定位应用安装目录，因此这里额外允许自身安装/资源目录。
+    let canonical_path = path_policy::authorize_path_with_roots(
+        &app,
+        &path,
+        path_policy::PathAccess::Read,
+        &path_policy::app_install_roots(&app),
+    )?;
 
     if !select && !canonical_path.is_dir() {
         return Err(format!(
@@ -971,6 +1001,12 @@ pub fn run() {
             mcp_bridge::mcp_bridge_respond,
         ])
         .on_window_event(|window, event| {
+            // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if window.label() == "main" || window.label() == "chat-assistant" {
+                    path_policy::grant_dropped_paths(window.app_handle(), paths);
+                }
+            }
             if window.label() == "chat-assistant" {
                 if let tauri::WindowEvent::Resized(size) = event {
                     let Ok(scale_factor) = window.scale_factor() else {

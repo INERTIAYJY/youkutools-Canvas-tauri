@@ -632,12 +632,26 @@ async fn run_in_worker(
 #[tauri::command]
 pub async fn image_upscale(
     app: tauri::AppHandle,
+    webview: tauri::Webview,
     input_path: String,
     output_path: String,
     model_name: String,
     task_id: String,
 ) -> Result<String, String> {
-    let input = PathBuf::from(&input_path);
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    // 输入输出都来自 Renderer；不校验等于任意文件读取与任意位置覆盖写
+    let input = crate::path_policy::authorize_path(
+        &app,
+        &input_path,
+        crate::path_policy::PathAccess::Read,
+    )?;
+    let output_path = crate::path_policy::authorize_path(
+        &app,
+        &output_path,
+        crate::path_policy::PathAccess::Write,
+    )?
+    .to_string_lossy()
+    .into_owned();
     if !input.is_file() {
         return Err(format!("输入文件不存在: {input_path}"));
     }
@@ -714,12 +728,25 @@ pub async fn image_upscale(
 #[tauri::command]
 pub async fn subject_matting(
     app: tauri::AppHandle,
+    webview: tauri::Webview,
     input_path: String,
     output_path: String,
     model_name: String,
     task_id: String,
 ) -> Result<String, String> {
-    let input = PathBuf::from(&input_path);
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    let input = crate::path_policy::authorize_path(
+        &app,
+        &input_path,
+        crate::path_policy::PathAccess::Read,
+    )?;
+    let output_path = crate::path_policy::authorize_path(
+        &app,
+        &output_path,
+        crate::path_policy::PathAccess::Write,
+    )?
+    .to_string_lossy()
+    .into_owned();
     if !input.is_file() {
         return Err(format!("输入文件不存在: {input_path}"));
     }
@@ -993,11 +1020,18 @@ fn compose_character_direction_grid(subject_path: &Path, output_path: &Path) -> 
 #[tauri::command]
 pub async fn character_direction_grid(
     app: tauri::AppHandle,
+    webview: tauri::Webview,
     input_path: String,
     model_name: String,
     task_id: String,
 ) -> Result<String, String> {
-    let input = PathBuf::from(&input_path);
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    // 中间产物与宫格图都写在输入文件旁边，因此只需校验输入路径
+    let input = crate::path_policy::authorize_path(
+        &app,
+        &input_path,
+        crate::path_policy::PathAccess::Read,
+    )?;
     if !input.is_file() {
         return Err(format!("输入文件不存在: {input_path}"));
     }
@@ -1009,6 +1043,7 @@ pub async fn character_direction_grid(
 
     if let Err(error) = subject_matting(
         app,
+        webview,
         input_path,
         subject_path_string,
         model_name,

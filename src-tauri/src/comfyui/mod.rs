@@ -269,7 +269,12 @@ fn launch_unix(comfy_path: &str) -> Result<String, String> {
 
 /// Tauri command: 启动 ComfyUI
 #[tauri::command]
-pub async fn launch_comfyui(comfy_path: String) -> Result<String, String> {
+pub async fn launch_comfyui(
+    webview: tauri::Webview,
+    comfy_path: String,
+) -> Result<String, String> {
+    // 只有自有本地窗口能触发进程启动；目录内容仍由下面的已知文件名探测约束。
+    crate::path_policy::ensure_trusted_caller(&webview)?;
     let path = Path::new(&comfy_path);
     if !path.exists() || !path.is_dir() {
         return Err(format!("ComfyUI 目录不存在: {}", comfy_path));

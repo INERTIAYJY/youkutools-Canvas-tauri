@@ -205,7 +205,12 @@ describe('critical canvas node interactions', () => {
     }], () => revision);
     const saveResult = deferred<{ assetUrl: string; filePath: string }>();
 
-    await installReactHookDriver((initialValue, index) => index === 7 ? true : initialValue);
+    // 强制打开裁切编辑器：按 ImageNode 里 useState 的声明顺序数，isCrop 是第 7 个（下标 6）。
+    // 在它之前增删 useState 会让本用例找不到 CropEditorMock，届时按声明顺序重新数一次。
+    const IS_CROP_STATE_INDEX = 6;
+    await installReactHookDriver((initialValue, index) => (
+      index === IS_CROP_STATE_INDEX ? true : initialValue
+    ));
     installStoreMock(store);
     installCommonNodeMocks();
     vi.doMock('../../src/components/nodes/shared/image/CropEditor', () => ({

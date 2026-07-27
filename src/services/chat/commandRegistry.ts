@@ -103,12 +103,10 @@ registry.set('query', async (plan) => {
   const nodes = store.nodes;
   const targetIds = new Set(plan.targetNodeIds);
 
-  let matchCount = 0;
   const summaryParts: string[] = [];
 
   if (targetIds.size > 0) {
-    matchCount = targetIds.size;
-    summaryParts.push(`找到 ${matchCount} 个匹配节点`);
+    summaryParts.push(`找到 ${targetIds.size} 个匹配节点`);
     const matchedNodes = nodes.filter((n) => targetIds.has(n.id));
     for (const n of matchedNodes) {
       const data = n.data as BaseNodeData;
@@ -140,7 +138,6 @@ registry.set('query', async (plan) => {
         summaryParts.push(`  ${label}: ${count} 个`);
       }
     }
-    matchCount = nodes.length;
   }
 
   return {

@@ -608,7 +608,9 @@ async function parseDataTransferItems(dt: DataTransfer): Promise<ParsedDTItem[]>
         const dataUrl = await blobToDataUrl(file);
         items.push({ kind: 'image', dataUrl });
         continue;
-      } catch {}
+      } catch {
+        // 读取失败时继续走下面的路径探测与兜底
+      }
     }
     // Try to detect file path for Tauri drag-drop
     try {
@@ -620,14 +622,18 @@ async function parseDataTransferItems(dt: DataTransfer): Promise<ParsedDTItem[]>
           continue;
         }
       }
-    } catch {}
+    } catch {
+      // 非 Tauri 环境或无路径权限时忽略，改用 dataUrl 兜底
+    }
     // Fallback: try reading as dataUrl
     try {
       const dataUrl = await blobToDataUrl(file);
       if (imageExts.includes(ext)) {
         items.push({ kind: 'image', dataUrl });
       }
-    } catch {}
+    } catch {
+      // 兜底也失败则跳过该文件
+    }
   }
 
   // Process text/uri-list/html data
@@ -661,15 +667,21 @@ async function parseDataTransferItems(dt: DataTransfer): Promise<ParsedDTItem[]>
   return items;
 }
 
+/** Tauri / 宿主环境扩展出来的字段，标准 DOM 类型里没有声明 */
+type FileSystemHandleCapableTransfer = DataTransfer & {
+  getAsFileSystemHandle?: () => Promise<unknown>;
+};
+type PathBearingFile = File & { path?: string };
+
 async function getAsFileSystemHandle(dt: DataTransfer): Promise<string | null> {
   try {
-    const entries = await (dt as any).getAsFileSystemHandle?.();
+    const entries = await (dt as FileSystemHandleCapableTransfer).getAsFileSystemHandle?.();
     if (!entries) return null;
     // For multiple items, just return the first path
     const files = dt.files;
     if (files.length > 0) {
       // On Tauri/Windows, files may have a path property
-      const file = files[0] as any;
+      const file = files[0] as PathBearingFile;
       if (file.path) return file.path;
     }
     return null;

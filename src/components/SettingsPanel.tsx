@@ -22,7 +22,7 @@ import ApiKeySettings from './settings/ApiKeySettings';
 import StorageHealthCenter from './settings/StorageHealthCenter';
 import DirectorDeskStorageManager from './settings/DirectorDeskStorageManager';
 import McpControlSettings from './settings/McpControlSettings';
-import { BACKGROUND_OPTIONS } from './backgrounds/CanvasBackground';
+import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
 import type { CanvasBackground as CanvasBg, InteractionMode } from '../types';
 import type { BackgroundDetection } from '../services/backgroundService';
@@ -124,7 +124,7 @@ export default function SettingsPanel() {
   const interactionMode = config.interactionMode ?? 'default';
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
   const [projectDir, setProjectDir] = useState<string | null>(null);
   const [defaultBaseDir, setDefaultBaseDir] = useState<string | null>(null);
   const [appExecutableDir, setAppExecutableDir] = useState<string | null>(null);
@@ -136,12 +136,13 @@ export default function SettingsPanel() {
   const [bgDetection, setBgDetection] = useState<BackgroundDetection | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 外部（如 Agent 保存厂商配置后）请求打开指定标签页时切换过去，消费后清空
-  useEffect(() => {
-    if (!settingsOpen || !settingsInitialTab) return;
-    setActiveTab(settingsInitialTab);
+  // 外部（如 Agent 保存厂商配置后）请求的标签页在渲染期直接生效，不用 effect 回写 state；
+  // 用户手动切换即视为消费掉该请求（关闭面板时 store 也会清空它）
+  const activeTab = (settingsOpen ? settingsInitialTab : null) ?? selectedTab;
+  const selectTab = (tab: SettingsTab) => {
+    setSelectedTab(tab);
     setSettingsInitialTab(null);
-  }, [settingsOpen, settingsInitialTab, setSettingsInitialTab]);
+  };
 
   // 加载应用、默认存储和当前项目目录
   useEffect(() => {
@@ -417,7 +418,7 @@ export default function SettingsPanel() {
             ].map(({ id, label }) => (
               <AnimatedButton
                 key={id}
-                onClick={() => setActiveTab(id as SettingsTab)}
+                onClick={() => selectTab(id as SettingsTab)}
                 className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left transition-colors ${
                   activeTab === id ? 'bg-indigo-500/15 text-indigo-400' : 'text-canvas-text-secondary hover:bg-canvas-hover'
                 }`}

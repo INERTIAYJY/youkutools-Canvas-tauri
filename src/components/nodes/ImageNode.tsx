@@ -1,7 +1,7 @@
 ﻿/**
  * ImageNode 图像节点 — 在画布上渲染图像内容，支持上传/粘贴图片、遮罩编辑、工具栏、全屏预览
  */
-import { memo, lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, lazy, Suspense, useCallback, useRef, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { Node } from '@xyflow/react';
 import type {
@@ -157,11 +157,11 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   }, [doUpload, id, nodeWidth, updateNodeData]);
 
   const [isCameraStudio, setIsCameraStudio] = useState(false);
-  const [imgLoadError, setImgLoadError] = useState(false);
-  const [imgLoaded, setImgLoaded] = useState(false);
-  const [mattingError, setMattingError] = useState(false);
-  const [annotateError, setAnnotateError] = useState(false);
-  const [fullscreenError, setFullscreenError] = useState(false);
+  // 加载状态按来源记账：来源一变旧状态自然失效，无需 effect 逐个重置
+  const [imgState, setImgState] = useState<{ src?: string; loaded?: boolean; failed?: boolean }>({});
+  const [fullscreenFailedSrc, setFullscreenFailedSrc] = useState<string | undefined>();
+  const [mattingFailedSrc, setMattingFailedSrc] = useState<string | undefined>();
+  const [annotateFailedSrc, setAnnotateFailedSrc] = useState<string | undefined>();
   const imagePreviewRef = useRef<HTMLImageElement>(null);
   const [fullscreenOrigin, setFullscreenOrigin] = useState<{ left: number; top: number; width: number; height: number } | undefined>();
 
@@ -172,18 +172,12 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const displaySrc = withPreviewRevision(rawDisplaySrc, previewRevision);
   const annotationLayer = data.annotationLayer;
 
-  // 当 imageUrl 或外部文件版本变化时重置加载错误状态
-  useEffect(() => {
-    setImgLoadError(false);
-    setFullscreenError(false);
-    setImgLoaded(false);
-  }, [displaySrc]);
-  useEffect(() => {
-    setMattingError(false);
-  }, [data.mattingMask]);
-  useEffect(() => {
-    setAnnotateError(false);
-  }, [data.annotation]);
+  // imageUrl 或外部文件版本变化后，下面这些标记自动回到初始态
+  const imgLoaded = imgState.src === displaySrc && !!imgState.loaded;
+  const imgLoadError = imgState.src === displaySrc && !!imgState.failed;
+  const fullscreenError = !!displaySrc && fullscreenFailedSrc === displaySrc;
+  const mattingError = !!data.mattingMask && mattingFailedSrc === data.mattingMask;
+  const annotateError = !!data.annotation && annotateFailedSrc === data.annotation;
 
   const handleOpenCameraStudio = useCallback(() => setIsCameraStudio(true), []);
   const handleCloseCameraStudio = useCallback(() => setIsCameraStudio(false), []);
@@ -734,79 +728,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const [isDownloadingModel, setIsDownloadingModel] = useState(false);
   const modelName = 'realesrgan-x4.onnx';
 
-  /** 检查模型可用性 → 若缺失则弹出下载确认 */
-  const handleUpscale = useCallback(async () => {
-    const filePath = data.filePath as string | undefined;
-    if (!filePath) {
-      useAppStore.getState().showToast('该图片没有本地文件，无法超分', 'error');
-      return;
-    }
-
-    // 检查模型是否存在
-    const modelExists = await checkModelExists(modelName);
-    if (!modelExists) {
-      setDownloadPrompt(true);
-      return;
-    }
-
-    // 模型已就绪 → 直接执行超分
-    await doUpscale(filePath);
-  }, [data.filePath, modelName]);
-
-  /** 重绘 — 打开 PromptPanel 对话框 */
-  const handleRepaint = useCallback(() => {
-    const el = document.querySelector(`.react-flow__node[data-id="${id}"]`);
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      useAppStore.getState().openNodeDialog(id, { x: rect.left + rect.width / 2, y: rect.bottom });
-    } else {
-      useAppStore.getState().openNodeDialog(id);
-    }
-  }, [id]);
-
-  /** 复制图像到系统剪贴板（位图，可粘贴到 PS / 聊天） */
-  const handleCopyImage = useCallback(async () => {
-    const store = useAppStore.getState();
-    const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
-    if (!imageUrl) {
-      store.showToast('没有可用的图片', 'error');
-      return;
-    }
-    const ok = await copyImageToClipboard(imageUrl);
-    store.showToast(ok ? '已复制图像到剪贴板' : '复制失败', ok ? undefined : 'error');
-  }, [data.imageUrl, data.thumbnailUrl]);
-
-  /** 确认下载模型 */
-  const handleDownloadConfirm = useCallback(async () => {
-    setDownloadPrompt(false);
-    setIsDownloadingModel(true);
-    try {
-      await downloadModel(modelName);
-      useAppStore.getState().showToast('模型下载完成，开始超分...', 'success');
-    } catch (err: unknown) {
-      // Tauri 2 invoke reject 抛出的是字符串或 { message } 对象，非标准 Error
-      const message =
-        typeof err === 'string' ? err
-        : err instanceof Error ? err.message
-        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
-        : '模型下载失败';
-      useAppStore.getState().showToast(message, 'error');
-      setIsDownloadingModel(false);
-      return;
-    }
-    setIsDownloadingModel(false);
-
-    // 下载完成 → 继续执行超分
-    const filePath = data.filePath as string;
-    await doUpscale(filePath);
-  }, [data.filePath, modelName]);
-
-  /** 取消下载 */
-  const handleDownloadCancel = useCallback(() => {
-    setDownloadPrompt(false);
-    setIsDownloadingModel(false);
-  }, []);
-
   /** 执行实际的超分推理 */
   const doUpscale = useCallback(async (filePath: string) => {
     setIsUpscaling(true);
@@ -876,6 +797,80 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     }
   }, [id, data.label, nodeWidth, modelName, updateNodeDataTransient]);
 
+  /** 检查模型可用性 → 若缺失则弹出下载确认 */
+  const handleUpscale = useCallback(async () => {
+    const filePath = data.filePath as string | undefined;
+    if (!filePath) {
+      useAppStore.getState().showToast('该图片没有本地文件，无法超分', 'error');
+      return;
+    }
+
+    // 检查模型是否存在
+    const modelExists = await checkModelExists(modelName);
+    if (!modelExists) {
+      setDownloadPrompt(true);
+      return;
+    }
+
+    // 模型已就绪 → 直接执行超分
+    await doUpscale(filePath);
+  }, [data.filePath, doUpscale, modelName]);
+
+  /** 重绘 — 打开 PromptPanel 对话框 */
+  const handleRepaint = useCallback(() => {
+    const el = document.querySelector(`.react-flow__node[data-id="${id}"]`);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      useAppStore.getState().openNodeDialog(id, { x: rect.left + rect.width / 2, y: rect.bottom });
+    } else {
+      useAppStore.getState().openNodeDialog(id);
+    }
+  }, [id]);
+
+  /** 复制图像到系统剪贴板（位图，可粘贴到 PS / 聊天） */
+  const handleCopyImage = useCallback(async () => {
+    const store = useAppStore.getState();
+    const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
+    if (!imageUrl) {
+      store.showToast('没有可用的图片', 'error');
+      return;
+    }
+    const ok = await copyImageToClipboard(imageUrl);
+    store.showToast(ok ? '已复制图像到剪贴板' : '复制失败', ok ? undefined : 'error');
+  }, [data.imageUrl, data.thumbnailUrl]);
+
+  /** 确认下载模型 */
+  const handleDownloadConfirm = useCallback(async () => {
+    setDownloadPrompt(false);
+    setIsDownloadingModel(true);
+    try {
+      await downloadModel(modelName);
+      useAppStore.getState().showToast('模型下载完成，开始超分...', 'success');
+    } catch (err: unknown) {
+      // Tauri 2 invoke reject 抛出的是字符串或 { message } 对象，非标准 Error
+      const message =
+        typeof err === 'string' ? err
+        : err instanceof Error ? err.message
+        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
+        : '模型下载失败';
+      useAppStore.getState().showToast(message, 'error');
+      setIsDownloadingModel(false);
+      return;
+    }
+    setIsDownloadingModel(false);
+
+    // 下载完成 → 继续执行超分
+    const filePath = data.filePath as string;
+    await doUpscale(filePath);
+  }, [data.filePath, doUpscale, modelName]);
+
+  /** 取消下载 */
+  const handleDownloadCancel = useCallback(() => {
+    setDownloadPrompt(false);
+    setIsDownloadingModel(false);
+  }, []);
+
+
   /* ════════════════════════════════════════════
      Subject Matting — ONNX RMBG-1.4 主体识别
      ════════════════════════════════════════════ */
@@ -883,49 +878,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const [isMattingRunning, setIsMattingRunning] = useState(false);
   const [mattingDownloadPrompt, setMattingDownloadPrompt] = useState(false);
   const [isDownloadingMattingModel, setIsDownloadingMattingModel] = useState(false);
-
-  const handleSubjectMatting = useCallback(async () => {
-    const filePath = data.filePath as string | undefined;
-    if (!filePath) {
-      useAppStore.getState().showToast('该图片没有本地文件，无法识别主体', 'error');
-      return;
-    }
-
-    const modelExists = await checkModelExists(mattingModelName);
-    if (!modelExists) {
-      setMattingDownloadPrompt(true);
-      return;
-    }
-
-    await doSubjectMatting(filePath);
-  }, [data.filePath, mattingModelName]);
-
-  const handleMattingDownloadConfirm = useCallback(async () => {
-    setMattingDownloadPrompt(false);
-    setIsDownloadingMattingModel(true);
-    try {
-      await downloadModel(mattingModelName);
-      useAppStore.getState().showToast('模型下载完成，开始识别主体...', 'success');
-    } catch (err: unknown) {
-      const message =
-        typeof err === 'string' ? err
-        : err instanceof Error ? err.message
-        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
-        : '模型下载失败';
-      useAppStore.getState().showToast(message, 'error');
-      setIsDownloadingMattingModel(false);
-      return;
-    }
-    setIsDownloadingMattingModel(false);
-
-    const filePath = data.filePath as string;
-    await doSubjectMatting(filePath);
-  }, [data.filePath, mattingModelName]);
-
-  const handleMattingDownloadCancel = useCallback(() => {
-    setMattingDownloadPrompt(false);
-    setIsDownloadingMattingModel(false);
-  }, []);
 
   const doSubjectMatting = useCallback(async (filePath: string) => {
     setIsMattingRunning(true);
@@ -983,6 +935,50 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     }
   }, [id, data.label, nodeWidth, mattingModelName, updateNodeDataTransient]);
 
+  const handleSubjectMatting = useCallback(async () => {
+    const filePath = data.filePath as string | undefined;
+    if (!filePath) {
+      useAppStore.getState().showToast('该图片没有本地文件，无法识别主体', 'error');
+      return;
+    }
+
+    const modelExists = await checkModelExists(mattingModelName);
+    if (!modelExists) {
+      setMattingDownloadPrompt(true);
+      return;
+    }
+
+    await doSubjectMatting(filePath);
+  }, [data.filePath, doSubjectMatting, mattingModelName]);
+
+  const handleMattingDownloadConfirm = useCallback(async () => {
+    setMattingDownloadPrompt(false);
+    setIsDownloadingMattingModel(true);
+    try {
+      await downloadModel(mattingModelName);
+      useAppStore.getState().showToast('模型下载完成，开始识别主体...', 'success');
+    } catch (err: unknown) {
+      const message =
+        typeof err === 'string' ? err
+        : err instanceof Error ? err.message
+        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
+        : '模型下载失败';
+      useAppStore.getState().showToast(message, 'error');
+      setIsDownloadingMattingModel(false);
+      return;
+    }
+    setIsDownloadingMattingModel(false);
+
+    const filePath = data.filePath as string;
+    await doSubjectMatting(filePath);
+  }, [data.filePath, doSubjectMatting, mattingModelName]);
+
+  const handleMattingDownloadCancel = useCallback(() => {
+    setMattingDownloadPrompt(false);
+    setIsDownloadingMattingModel(false);
+  }, []);
+
+
   const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴图像');
 
   return (
@@ -1011,7 +1007,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     </svg>
                     <span className="text-xs">图片加载失败</span>
                     <button
-                      onClick={(e) => { e.stopPropagation(); setImgLoadError(false); }}
+                      onClick={(e) => { e.stopPropagation(); setImgState({}); }}
                       className="text-[10px] px-2 py-0.5 rounded bg-canvas-hover hover:bg-canvas-border transition-colors"
                     >
                       重新加载
@@ -1024,8 +1020,8 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     alt="Generated"
                     className={`image-preview-img compact img-reveal${imgLoaded ? ' is-loaded' : ''}`}
                     data-source-url={data.sourceUrl}
-                    onLoad={() => setImgLoaded(true)}
-                    onError={() => setImgLoadError(true)}
+                    onLoad={() => setImgState({ src: displaySrc, loaded: true })}
+                    onError={() => setImgState({ src: displaySrc, failed: true })}
                     onDoubleClick={(e) => { e.stopPropagation(); handleOpenFullscreen(); }}
                   />
                 )}
@@ -1034,7 +1030,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     src={data.mattingMask as string}
                     alt="Mask"
                     className="image-preview-mask"
-                    onError={() => setMattingError(true)}
+                    onError={() => setMattingFailedSrc(data.mattingMask as string)}
                   />
                 )}
                 {annotationLayer ? (
@@ -1043,13 +1039,13 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                       src={data.annotation as string}
                       alt="Annotation"
                       className="image-preview-mask"
-                      onError={() => setAnnotateError(true)}
+                      onError={() => setAnnotateFailedSrc(data.annotation as string)}
                     />
                   ) : null}>
                     <AnnotationLayer
                       layer={annotationLayer}
                       legacyUrl={data.annotation as string | undefined}
-                      onLegacyError={() => setAnnotateError(true)}
+                      onLegacyError={() => setAnnotateFailedSrc(data.annotation as string)}
                       className="image-annotation-layer"
                       fit="cover"
                     />
@@ -1059,7 +1055,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     src={data.annotation as string}
                     alt="Annotation"
                     className="image-preview-mask"
-                    onError={() => setAnnotateError(true)}
+                    onError={() => setAnnotateFailedSrc(data.annotation as string)}
                   />
                 ) : null}
                 {/* 超分加载动画：光晕流动 + 扫描光带 */}
@@ -1269,7 +1265,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             </svg>
             <span className="text-sm">图片加载失败</span>
             <button
-              onClick={() => setFullscreenError(false)}
+              onClick={() => setFullscreenFailedSrc(undefined)}
               className="text-xs px-3 py-1 rounded bg-canvas-hover hover:bg-canvas-border transition-colors"
             >
               重新加载
@@ -1282,7 +1278,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             className="fullscreen-img-view"
             originRect={fullscreenOrigin}
             onClose={handleCloseFullscreen}
-            onError={() => setFullscreenError(true)}
+            onError={() => setFullscreenFailedSrc(displaySrc)}
           />
         )}
       </FullscreenOverlay>

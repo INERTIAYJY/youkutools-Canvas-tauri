@@ -80,6 +80,7 @@ function floodFill(
   }
 }
 
+/** 调用方只在打开时挂载本组件（关闭即卸载），因此状态靠卸载重置，无需 effect 复位。 */
 export default function MattingEditor({
   isOpen,
   imageUrl,
@@ -97,7 +98,8 @@ export default function MattingEditor({
   const [tool, setTool] = useState<MattingTool>('brush');
   const [brushMode, setBrushMode] = useState<BrushMode>('normal');
   const [brushSize, setBrushSize] = useState(40);
-  const [historyIdx, setHistoryIdx] = useState(-1);
+  // 撤销栈游标 + 长度：长度必须进 state，渲染期读 historyRef.current 会读到过期值
+  const [history, setHistory] = useState({ idx: -1, len: 0 });
 
   // ── 缩放 / 平移 ──
   const stageRef = useRef<HTMLDivElement>(null);
@@ -107,6 +109,7 @@ export default function MattingEditor({
   const [panReady, setPanReady] = useState(false); // 空格按下 → 进入平移就绪态（手型光标）
   const spaceDown = useRef(false);
   const isPanning = useRef(false);
+  const [panning, setPanning] = useState(false); // 仅用于光标样式，渲染期不能读 isPanning.current
   const panStart = useRef({ x: 0, y: 0, ox: 0, oy: 0 });
 
   // 每个画布单位对应的屏幕像素（含缩放）——用于让画笔光标圆圈与实际笔触直径一致
@@ -181,7 +184,7 @@ export default function MattingEditor({
         }
         ctx.putImageData(initial, 0, 0);
         historyRef.current = [initial];
-        setHistoryIdx(0);
+        setHistory({ idx: 0, len: 1 });
       };
       maskImg.src = initialMask;
       return;
@@ -189,7 +192,7 @@ export default function MattingEditor({
 
     const initial = ctx.getImageData(0, 0, canvas.width, canvas.height);
     historyRef.current = [initial];
-    setHistoryIdx(0);
+    setHistory({ idx: 0, len: 1 });
   }, [initialMask, recomputeDispScale]);
 
   // ── History management ──
@@ -200,13 +203,13 @@ export default function MattingEditor({
     if (!ctx) return;
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-    // Use functional update to get current historyIdx
-    setHistoryIdx((currentIdx) => {
-      const newHistory = historyRef.current.slice(0, currentIdx + 1);
+    // Use functional update to get current history cursor
+    setHistory((current) => {
+      const newHistory = historyRef.current.slice(0, current.idx + 1);
       newHistory.push(imageData);
       if (newHistory.length > 30) newHistory.shift();
       historyRef.current = newHistory;
-      return newHistory.length - 1;
+      return { idx: newHistory.length - 1, len: newHistory.length };
     });
   }, []);
 
@@ -219,19 +222,6 @@ export default function MattingEditor({
     if (!imageData) return;
     ctx.putImageData(imageData, 0, 0);
   }, []);
-
-  // ── Reset on open ──
-  useEffect(() => {
-    if (isOpen) {
-      setTool('brush');
-      setBrushMode('normal');
-      setBrushSize(40);
-      historyRef.current = [];
-      setHistoryIdx(-1);
-      setScale(1);
-      setOffset({ x: 0, y: 0 });
-    }
-  }, [isOpen]);
 
   // ── Coordinate conversion ──
   const getCanvasCoords = useCallback(
@@ -258,6 +248,7 @@ export default function MattingEditor({
       // 中键 或 空格+左键 → 平移视图（不绘制）
       if (e.button === 1 || spaceDown.current) {
         isPanning.current = true;
+        setPanning(true);
         panStart.current = { x: e.clientX, y: e.clientY, ox: offsetRef.current.x, oy: offsetRef.current.y };
         canvas.setPointerCapture(e.pointerId);
         return;
@@ -337,6 +328,7 @@ export default function MattingEditor({
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (isPanning.current) {
         isPanning.current = false;
+        setPanning(false);
         canvasRef.current?.releasePointerCapture(e.pointerId);
         return;
       }
@@ -353,20 +345,20 @@ export default function MattingEditor({
 
   // ── Undo / Redo / Clear ──
   const handleUndo = useCallback(() => {
-    setHistoryIdx((currentIdx) => {
-      const newIdx = currentIdx - 1;
-      if (newIdx < 0) return currentIdx;
+    setHistory((current) => {
+      const newIdx = current.idx - 1;
+      if (newIdx < 0) return current;
       restoreHistory(newIdx);
-      return newIdx;
+      return { ...current, idx: newIdx };
     });
   }, [restoreHistory]);
 
   const handleRedo = useCallback(() => {
-    setHistoryIdx((currentIdx) => {
-      const newIdx = currentIdx + 1;
-      if (newIdx >= historyRef.current.length) return currentIdx;
+    setHistory((current) => {
+      const newIdx = current.idx + 1;
+      if (newIdx >= historyRef.current.length) return current;
       restoreHistory(newIdx);
-      return newIdx;
+      return { ...current, idx: newIdx };
     });
   }, [restoreHistory]);
 
@@ -507,8 +499,8 @@ export default function MattingEditor({
           onUndo={handleUndo}
           onRedo={handleRedo}
           onClear={handleClear}
-          canUndo={historyIdx > 0}
-          canRedo={historyIdx < historyRef.current.length - 1}
+          canUndo={history.idx > 0}
+          canRedo={history.idx < history.len - 1}
         />
         <ImageEditorZoomControls
           scale={scale}
@@ -539,7 +531,7 @@ export default function MattingEditor({
               style={{
                 opacity: MASK_DISPLAY_ALPHA,
                 ...(panReady
-                  ? { cursor: isPanning.current ? 'grabbing' : 'grab' }
+                  ? { cursor: panning ? 'grabbing' : 'grab' }
                   : tool !== 'bucket'
                     ? {
                         cursor: `url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="${cursorD}" height="${cursorD}" viewBox="0 0 ${cursorD} ${cursorD}"><circle cx="${cursorD / 2}" cy="${cursorD / 2}" r="${cursorD / 2 - 1}" fill="none" stroke="white" stroke-width="1" opacity="0.8"/></svg>') ${cursorD / 2} ${cursorD / 2}, auto`,

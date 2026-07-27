@@ -188,7 +188,10 @@ export default function ZoomableImage({ src, alt = '', className = '', onError, 
     const cx = e.clientX - rect.left - rect.width / 2;
     const cy = e.clientY - rect.top - rect.height / 2;
     zoomTo(scale > MIN_SCALE ? MIN_SCALE : 2, cx, cy);
-  }, [containerEl, scale, zoomTo]);
+    // containerEl 是 useImageViewportGesture 返回的 ref，本身恒定；把它列进依赖会让
+    // react-hooks/preserve-manual-memoization 判定依赖与推断不符而放弃编译优化。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scale, zoomTo]);
 
   const stepZoom = useCallback((dir: 1 | -1) => {
     zoomTo(scale * (dir > 0 ? 1.4 : 1 / 1.4), 0, 0);

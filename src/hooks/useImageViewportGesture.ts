@@ -50,9 +50,12 @@ export function useImageViewportGesture({
   const dragStart = useRef<{ x: number; y: number; tx: number; ty: number; pointerId: number } | null>(null);
   const gestureEndTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 把最新配置放进 ref，让稳定的处理器读取，避免反复重绑监听
+  // 把最新配置放进 ref，让稳定的处理器读取，避免反复重绑监听。
+  // 只能在提交后写，渲染期改 ref 会让并发渲染读到不一致的值；处理器都在绘制后才触发。
   const cfgRef = useRef({ minScale, maxScale, panScale, enableWheelPan, pinchSensitivity, panButtons });
-  cfgRef.current = { minScale, maxScale, panScale, enableWheelPan, pinchSensitivity, panButtons };
+  useEffect(() => {
+    cfgRef.current = { minScale, maxScale, panScale, enableWheelPan, pinchSensitivity, panButtons };
+  }, [minScale, maxScale, panScale, enableWheelPan, pinchSensitivity, panButtons]);
 
   useEffect(() => {
     scaleRef.current = scale;

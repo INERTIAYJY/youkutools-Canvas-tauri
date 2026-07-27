@@ -38,10 +38,23 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
   const cols = Math.max(1, (data.storyboardCols as number) || 3);
   const rows = Math.max(1, (data.storyboardRows as number) || 3);
   const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
-  const extracted = (data.storyboardExtracted as boolean[] | undefined) ?? [];
-  const overrides = (data.storyboardOverrides as (StoryboardCellOverride | null)[] | undefined) ?? [];
-  const rowPositions = (data.storyboardRowPositions as number[] | undefined) ?? [];
-  const colPositions = (data.storyboardColPositions as number[] | undefined) ?? [];
+  // 字段缺省时 ?? [] 每次渲染都是新数组，会让下游 useMemo/useCallback 依赖恒变
+  const extracted = useMemo(
+    () => (data.storyboardExtracted as boolean[] | undefined) ?? [],
+    [data.storyboardExtracted],
+  );
+  const overrides = useMemo(
+    () => (data.storyboardOverrides as (StoryboardCellOverride | null)[] | undefined) ?? [],
+    [data.storyboardOverrides],
+  );
+  const rowPositions = useMemo(
+    () => (data.storyboardRowPositions as number[] | undefined) ?? [],
+    [data.storyboardRowPositions],
+  );
+  const colPositions = useMemo(
+    () => (data.storyboardColPositions as number[] | undefined) ?? [],
+    [data.storyboardColPositions],
+  );
   const isCustomGrid = rowPositions.length > 0 || colPositions.length > 0;
   const revisionFor = useReferencedImageRevisions([
     data.filePath,
@@ -54,7 +67,7 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
   const vRanges = useMemo(() => (isCustomGrid ? [0, ...colPositions, 100] : []), [isCustomGrid, colPositions]);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const [editing, setEditing] = useState(false);
+  const [editRequested, setEditRequested] = useState(false);
   // 拖出中的格：{ idx, x, y } —— 用于渲染跟随光标的幽灵预览
   const [drag, setDrag] = useState<{ idx: number; x: number; y: number } | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -109,31 +122,29 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
     return arr;
   }, [rows, cols, isCustomGrid, hRanges, vRanges]);
 
+  // 取消选中即退出编辑态：派生而非用 effect 回写，避免多一轮渲染
+  const editing = editRequested && !!selected;
+
   // ── 双击进入/退出编辑 ──
   const toggleEditing = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    setEditing((v) => !v);
+    setEditRequested((v) => !v);
   }, []);
 
   // Esc 退出编辑态
   useEffect(() => {
     if (!editing) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditing(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditRequested(false); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [editing]);
-
-  // 节点失去选中 → 退出编辑态
-  useEffect(() => {
-    if (!selected) setEditing(false);
-  }, [selected]);
 
   // 点击节点外部 → 失焦退出编辑态
   useEffect(() => {
     if (!editing) return;
     const onPointerDown = (e: PointerEvent) => {
       if (wrapperRef.current && !wrapperRef.current.contains(e.target as Element)) {
-        setEditing(false);
+        setEditRequested(false);
       }
     };
     document.addEventListener('pointerdown', onPointerDown);

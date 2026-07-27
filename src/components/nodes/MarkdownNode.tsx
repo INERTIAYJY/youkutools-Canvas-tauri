@@ -116,7 +116,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     const result = await handleUpload();
     if (!result) return;
 
-    let textContent = '';
+    let textContent: string;
     if (result.dataUrl.startsWith('data:text/')) {
       const base64 = result.dataUrl.split(',')[1];
       try {

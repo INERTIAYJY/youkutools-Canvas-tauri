@@ -148,14 +148,14 @@ function DonutChart({ segments, total, size = 160 }: {
     );
   }
 
-  // 计算每个扇叶的角度范围
+  // 计算每个扇叶的角度范围（用循环累加，不在 map 回调里改写外层变量）
   let cursor = 0;
-  const slices = segments.map((seg) => {
+  const slices = [];
+  for (const seg of segments) {
     const sweep = (seg.value / total) * 360;
-    const start = cursor;
+    slices.push({ ...seg, start: cursor, sweep, pct: (seg.value / total) * 100 });
     cursor += sweep;
-    return { ...seg, start, sweep, pct: (seg.value / total) * 100 };
-  });
+  }
 
   return (
     <div className="flex flex-col items-center gap-3">

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { CharacterReferenceImage } from '../../types/dramaAssets';
 import { CHARACTER_REFERENCE_KIND_LABELS } from './characterReferencePresentation';
@@ -33,15 +33,15 @@ export default function CharacterReferenceGallery({
     return () => observer.disconnect();
   }, [references.length]);
 
-  // 图片可能被替换，清掉已经不存在的比例，避免旧值影响排版
-  useEffect(() => {
+  // 记录比例时顺手丢掉已不存在的条目：图片可能被替换，旧值会影响重新加入时的排版。
+  // 放在 onLoad 里而不是 effect 里，避免多一轮级联渲染。
+  const recordRatio = (referenceId: string, ratio: number) => {
     setRatios((previous) => {
-      const alive = Object.fromEntries(
-        Object.entries(previous).filter(([id]) => references.some((item) => item.id === id)),
-      );
-      return Object.keys(alive).length === Object.keys(previous).length ? previous : alive;
+      if (previous[referenceId] === ratio) return previous;
+      const alive = Object.entries(previous).filter(([id]) => references.some((item) => item.id === id));
+      return { ...Object.fromEntries(alive), [referenceId]: ratio };
     });
-  }, [references]);
+  };
 
   const layout = useMemo(
     // 比例未知的先按 1 排，onLoad 拿到真实尺寸后自动重排
@@ -87,12 +87,7 @@ export default function CharacterReferenceGallery({
                     onLoad={(event) => {
                       const { naturalWidth, naturalHeight } = event.currentTarget;
                       if (!naturalWidth || !naturalHeight) return;
-                      const ratio = naturalWidth / naturalHeight;
-                      setRatios((previous) => (
-                        previous[reference.id] === ratio
-                          ? previous
-                          : { ...previous, [reference.id]: ratio }
-                      ));
+                      recordRatio(reference.id, naturalWidth / naturalHeight);
                     }}
                   />
                 ) : (

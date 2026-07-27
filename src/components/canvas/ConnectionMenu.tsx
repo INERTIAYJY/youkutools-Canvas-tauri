@@ -46,15 +46,16 @@ function ConnectionMenu({
   onSelect,
   connectionMenuMap,
 }: ConnectionMenuProps) {
-  if (!visible) return null;
-
-  const items = connectionMenuMap[sourceNodeType];
-  if (!items?.length) return null;
-
+  // Hook 必须在任何提前 return 之前调用，否则显示/隐藏切换会错位 Hook 顺序
   const safePos = useMemo(
     () => calcFixedPosition(position.x, position.y, MENU_W, MENU_H),
     [position.x, position.y],
   );
+
+  if (!visible) return null;
+
+  const items = connectionMenuMap[sourceNodeType];
+  if (!items?.length) return null;
 
   return (
     <AnimatePresence>

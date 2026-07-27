@@ -98,7 +98,7 @@ export function renderMarkdown(md: string): string {
   let inList: 'ul' | 'ol' | null = null;
 
   for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
+    const line = lines[i];
 
     // ── 9. 标题 #-###### ──
     const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);

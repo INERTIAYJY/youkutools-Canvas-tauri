@@ -6,7 +6,13 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // 构建产物不参与检查：src-tauri/target 里有 Rust 依赖自带的 JS，会淹没真实告警
+  globalIgnores([
+    'dist',
+    'dist-ssr',
+    'src-tauri/target',
+    'src-tauri/gen',
+  ]),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -17,6 +23,15 @@ export default defineConfig([
     ],
     languageOptions: {
       globals: globals.browser,
+    },
+    rules: {
+      // 保留 _ 前缀表示「按签名占位、有意不用」的既有约定
+      '@typescript-eslint/no-unused-vars': ['error', {
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrorsIgnorePattern: '^_',
+        destructuredArrayIgnorePattern: '^_',
+      }],
     },
   },
 ])

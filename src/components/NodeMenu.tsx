@@ -9,6 +9,7 @@ import { Icon } from '@iconify/react';
 import { springSmooth, fadeFast } from '../utils/motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, computeImageNodeDimensions } from '../store/useAppStore';
+import { generateId } from '../store/store.utils';
 import type { NodeType } from '../types';
 import { NODE_TYPE_CONFIG } from '../types';
 import { calcFixedPosition } from '../utils/popupPosition';
@@ -89,7 +90,7 @@ export default function NodeMenu() {
     const isDirector = type === 'ai-director';
     const pos = getCanvasPointerPosition();
     const newNode: Record<string, unknown> = {
-      id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      id: `node-${generateId()}`,
       type,
       position: pos,
       data: {
@@ -163,7 +164,7 @@ export default function NodeMenu() {
       }
 
       addNode({
-        id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        id: `node-${generateId()}`,
         type: info.type,
         position: pos,
         data: nodeData,

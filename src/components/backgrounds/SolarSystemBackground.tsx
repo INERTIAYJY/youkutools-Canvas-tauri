@@ -46,7 +46,8 @@ export default function SolarSystemBackground() {
 
   // 自动轮播行星（每 80 秒切换）
   useEffect(() => {
-    setVisible(true);
+    // 等一帧再加可见类，保证淡入过渡真的从初始状态开始（同步 setState 会被同一帧吞掉）
+    const fadeInFrame = requestAnimationFrame(() => setVisible(true));
     intervalRef.current = setInterval(() => {
       setActiveIndex((prev) => {
         const next = (prev + 1) % PLANET_IDS.length;
@@ -55,6 +56,7 @@ export default function SolarSystemBackground() {
       });
     }, 80000);
     return () => {
+      cancelAnimationFrame(fadeInFrame);
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, []);

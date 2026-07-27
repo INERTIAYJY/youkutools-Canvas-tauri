@@ -72,9 +72,11 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     })),
   );
 
-  const [connectionDialogOpen, setConnectionDialogOpen] = useState(false);
-  const [editingConnectionId, setEditingConnectionId] = useState<string>();
-  const [connectionDialogRevision, setConnectionDialogRevision] = useState(0);
+  // 三者总是一起变化，合成一份状态；revision 用于每次打开时重挂载对话框
+  const [dialog, setDialog] = useState<{ open: boolean; connectionId?: string; revision: number }>({
+    open: false,
+    revision: 0,
+  });
   const [pendingDeleteId, setPendingDeleteId] = useState<string>();
 
   const [dreaminaLoading, setDreaminaLoading] = useState(false);
@@ -155,6 +157,17 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     () => providerItems.map((item) => getProviderDefinition(item.id, item.config)?.id || item.id),
     [providerItems],
   );
+
+  // Agent 保存厂商配置后请求补填密钥：在渲染期直接生效，不用 effect 回写本地 state。
+  // 任何一次手动开关对话框都视为消费掉该请求（关闭设置面板时 store 也会清空它）。
+  const requestedConnectionId = pendingApiKeyConnectionId && config.providers[pendingApiKeyConnectionId]
+    ? pendingApiKeyConnectionId
+    : null;
+  const connectionDialogOpen = dialog.open || !!requestedConnectionId;
+  const editingConnectionId = requestedConnectionId ?? dialog.connectionId;
+  const connectionDialogKey = requestedConnectionId
+    ? `pending-${requestedConnectionId}`
+    : dialog.revision;
 
   const editingConfig = editingConnectionId
     ? providerItems.find((item) => item.id === editingConnectionId)?.config
@@ -275,32 +288,19 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Agent 保存厂商配置后请求补填密钥：自动打开对应连接的编辑框，消费后清空
-  useEffect(() => {
-    if (!pendingApiKeyConnectionId) return;
-    if (config.providers[pendingApiKeyConnectionId]) {
-      setEditingConnectionId(pendingApiKeyConnectionId);
-      setConnectionDialogRevision((revision) => revision + 1);
-      setConnectionDialogOpen(true);
-    }
-    setPendingApiKeyConnectionId(null);
-  }, [pendingApiKeyConnectionId, config.providers, setPendingApiKeyConnectionId]);
-
   const openAddDialog = () => {
-    setEditingConnectionId(undefined);
-    setConnectionDialogRevision((revision) => revision + 1);
-    setConnectionDialogOpen(true);
+    setPendingApiKeyConnectionId(null);
+    setDialog((previous) => ({ open: true, connectionId: undefined, revision: previous.revision + 1 }));
   };
 
   const openEditDialog = (connectionId: string) => {
-    setEditingConnectionId(connectionId);
-    setConnectionDialogRevision((revision) => revision + 1);
-    setConnectionDialogOpen(true);
+    setPendingApiKeyConnectionId(null);
+    setDialog((previous) => ({ open: true, connectionId, revision: previous.revision + 1 }));
   };
 
   const closeConnectionDialog = () => {
-    setConnectionDialogOpen(false);
-    setEditingConnectionId(undefined);
+    setPendingApiKeyConnectionId(null);
+    setDialog((previous) => ({ open: false, connectionId: undefined, revision: previous.revision }));
   };
 
   const handleSaveConnection = async (
@@ -500,7 +500,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       </div>
 
       <ProviderConnectionDialog
-        key={connectionDialogRevision}
+        key={connectionDialogKey}
         isOpen={connectionDialogOpen}
         connectionId={editingConnectionId}
         initialConfig={editingConfig}

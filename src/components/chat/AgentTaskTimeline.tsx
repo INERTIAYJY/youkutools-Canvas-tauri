@@ -54,6 +54,7 @@ const PAUSE_REASON_LABELS: Record<string, string> = {
   tool_call_budget_exhausted: '已达工具调用上限',
   tool_result_budget_exhausted: '工具结果已达上限',
   context_budget_exhausted: '上下文接近模型上限',
+  lifetime_budget_exhausted: '已达任务总预算上限',
   context_compression_failed: '上下文压缩失败',
   step_skipped_replan_required: '已跳过步骤，需重新规划',
   replan_requested: '已请求重新规划',

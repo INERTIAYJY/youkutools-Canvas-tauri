@@ -70,6 +70,7 @@ export const createAgentSlice: StateCreator<AppState, [], [], AgentSlice> = (set
       steps: [],
       modelRounds: 0,
       toolCallCount: 0,
+      resumeCount: 0,
       budget: {
         ...DEFAULT_AGENT_TASK_BUDGET,
         ...input.budget,

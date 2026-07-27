@@ -26,6 +26,7 @@ function normalizeTask(task: AgentTask): AgentTask {
     steps: task.steps ?? [],
     modelRounds: task.modelRounds ?? 0,
     toolCallCount: task.toolCallCount ?? 0,
+    resumeCount: task.resumeCount ?? 0,
     budget: {
       ...DEFAULT_AGENT_TASK_BUDGET,
       ...task.budget,

@@ -252,10 +252,17 @@ export function handleDetachedChatAction(
       }
       break;
 
-    case 'replan_agent_task':
-      requestAgentReplan(action.taskId);
-      resumeAgentTaskExecution(action.taskId);
+    case 'replan_agent_task': {
+      try {
+        requestAgentReplan(action.taskId);
+      } catch {
+        store.showToast('该任务当前状态无法重新规划', 'error');
+        break;
+      }
+      const result = resumeAgentTaskExecution(action.taskId);
+      if (!result.ok) store.showToast(result.message ?? '无法重新规划该任务', 'error');
       break;
+    }
 
     case 'rewind_agent_task':
       void rewindAgentTaskCanvas(action.taskId).then((result) => {

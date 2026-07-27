@@ -200,6 +200,51 @@ export interface ProjectSlice {
   initFromDb: () => Promise<void>;
 }
 
+type ProjectSliceSet = Parameters<StateCreator<AppState, [], [], ProjectSlice>>[0];
+type ProjectSliceGet = Parameters<StateCreator<AppState, [], [], ProjectSlice>>[1];
+
+/**
+ * 重命名事务的补偿动作：把物理目录、文件夹名映射、内存中的项目名与素材路径一并
+ * 恢复到重命名前的状态。缺少它时，目录已改名而记录未落盘，重启后会按旧 dataFolder
+ * 去找已经改名的目录，导致素材全部丢失。
+ */
+async function rollbackProjectRename(params: {
+  set: ProjectSliceSet;
+  get: ProjectSliceGet;
+  id: string;
+  previousProject: CanvasProject;
+  previousDataFolder: string | undefined;
+  renamed: fileService.ProjectDataDirRenameResult | null;
+}): Promise<void> {
+  const { set, get, id, previousProject, previousDataFolder, renamed } = params;
+  try {
+    await fileService.revertProjectDataDirRename(id, renamed, previousDataFolder);
+
+    const current = get();
+    const restoredNodes = renamed && current.currentProjectId === id
+      ? await remapProjectNodePaths(current.nodes, renamed.newDir, renamed.oldDir)
+      : null;
+
+    set((state) => ({
+      ...(state.currentProjectId === id
+        ? { projectName: previousProject.name, ...(restoredNodes ? { nodes: restoredNodes } : {}) }
+        : {}),
+      projects: state.projects.map((item) => (
+        item.id === id
+          ? {
+            ...item,
+            name: previousProject.name,
+            updatedAt: previousProject.updatedAt,
+            dataFolder: previousDataFolder,
+          }
+          : item
+      )),
+    }));
+  } catch (error) {
+    console.error('[项目重命名] 回滚失败:', error);
+  }
+}
+
 export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = (set, get) => ({
   projects: [
     { id: 'default', name: '默认画布', createdAt: Date.now(), updatedAt: Date.now() },
@@ -246,8 +291,9 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       ),
     }));
 
+    let renamed: fileService.ProjectDataDirRenameResult | null = null;
     try {
-      const renamed = dataFolderChanged
+      renamed = dataFolderChanged
         ? await fileService.renameProjectDataDir(id, oldDataFolder, nextDataFolder)
         : null;
       const latest = get();
@@ -299,8 +345,16 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       await enqueueProjectSave(record);
       return true;
     } catch (error) {
-      console.warn('[项目重命名] 保存失败:', error);
-      get().showToast('项目重命名保存失败', 'error');
+      console.warn('[项目重命名] 保存失败，开始回滚:', error);
+      await rollbackProjectRename({
+        get,
+        set,
+        id,
+        previousProject: project,
+        previousDataFolder: oldDataFolder,
+        renamed,
+      });
+      get().showToast('项目重命名失败，已恢复原名称', 'error');
       return false;
     }
   },

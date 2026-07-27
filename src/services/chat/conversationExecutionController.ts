@@ -34,10 +34,10 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import type { ChatMessage } from '../../types/chat';
 import {
-  DEFAULT_AGENT_TASK_BUDGET,
   type AgentApprovalResolution,
   type AgentMode,
 } from '../../types/agent';
+import { extendAgentSegmentBudget } from './agentBudgetService';
 import type { MediaGenerationIntent } from '../../types/media';
 import {
   failMediaPlaceholderLifecycle,
@@ -326,14 +326,11 @@ export function resumeAgentTaskExecution(
     };
   }
 
-  const nextBudget = { ...task.budget };
-  if (task.modelRounds >= task.budget.maxModelRounds) {
-    nextBudget.maxModelRounds = task.modelRounds + DEFAULT_AGENT_TASK_BUDGET.maxModelRounds;
-  }
-  if (task.toolCallCount >= task.budget.maxToolCalls) {
-    nextBudget.maxToolCalls = task.toolCallCount + DEFAULT_AGENT_TASK_BUDGET.maxToolCalls;
-  }
-  store.updateAgentTask(taskId, { budget: nextBudget });
+  // 单段额度放宽后仍夹在终身上限内；继续次数计入 maxResumes（validateTaskResumable 已校验）
+  store.updateAgentTask(taskId, {
+    budget: extendAgentSegmentBudget(task),
+    resumeCount: (task.resumeCount ?? 0) + 1,
+  });
   scheduleAgentTaskExecution(taskId, message.id, onProgress, true);
   return { ok: true };
 }

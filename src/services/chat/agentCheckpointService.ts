@@ -3,6 +3,7 @@
  */
 import type {
   AgentCanvasCheckpoint,
+  AgentReplanReason,
   AgentStep,
   AgentTask,
 } from '../../types/agent';
@@ -43,19 +44,43 @@ export function findSucceededDuplicateWrite(
     && step.toolCall.effect !== 'read');
 }
 
+const REPLAN_TRIGGER_LINES: Record<AgentReplanReason, string> = {
+  user_requested: '用户要求重新规划本任务。',
+  step_skipped: '用户跳过了当前待确认的步骤并要求重新规划；被跳过的步骤不得重试。',
+};
+
+/** 重新规划与普通继续的区别必须让模型看见，否则两者行为完全一致。 */
+function buildReplanDirective(task: AgentTask): string {
+  if (!task.replanRequest) return '';
+  return [
+    REPLAN_TRIGGER_LINES[task.replanRequest.reason],
+    '放弃此前的计划，不要接着上一步继续执行。',
+    '先读取当前画布与下方步骤摘要的真实状态，输出一份新的计划并说明与原计划的差异，再开始执行。',
+    '已经成功的写操作保持有效，不得重复执行。',
+  ].join('\n');
+}
+
 export function buildAgentResumeContext(task: AgentTask): string {
+  const sections: string[] = [];
+  const replanDirective = buildReplanDirective(task);
+  if (replanDirective) sections.push(replanDirective);
+
   const completed = task.steps.filter((step) =>
     ['succeeded', 'failed', 'skipped'].includes(step.status));
-  if (completed.length === 0) return '';
-  const lines = completed.slice(-20).map((step) => {
-    const state = step.status === 'succeeded' ? '成功' : step.status === 'failed' ? '失败' : '跳过';
-    const result = step.outputSummary || step.toolCall?.resultSummary || step.errorCode || '无结果摘要';
-    return `- ${state}：${step.title}（${step.toolCall?.toolId ?? step.kind}）— ${result}`;
-  });
-  return [
-    '这是该任务恢复前已经持久化的步骤摘要。成功的写操作不得重复执行；继续前先读取当前画布状态并重新规划。',
-    ...lines,
-  ].join('\n').slice(0, 12_000);
+  if (completed.length > 0) {
+    const lines = completed.slice(-20).map((step) => {
+      const state = step.status === 'succeeded' ? '成功' : step.status === 'failed' ? '失败' : '跳过';
+      const result = step.outputSummary || step.toolCall?.resultSummary || step.errorCode || '无结果摘要';
+      return `- ${state}：${step.title}（${step.toolCall?.toolId ?? step.kind}）— ${result}`;
+    });
+    sections.push([
+      '这是该任务恢复前已经持久化的步骤摘要。成功的写操作不得重复执行；继续前先确认当前画布状态，再接着未完成的部分推进。',
+      ...lines,
+    ].join('\n'));
+  }
+
+  if (sections.length === 0) return '';
+  return sections.join('\n\n').slice(0, 12_000);
 }
 
 export interface AgentRewindValidation {

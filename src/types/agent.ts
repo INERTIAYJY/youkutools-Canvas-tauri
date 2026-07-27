@@ -55,7 +55,22 @@ export type AgentApprovalStatus =
   | 'rejected'
   | 'expired';
 
-export interface AgentTaskBudget {
+/**
+ * 任务终身上限：跨全部执行段（含每次「继续」与「重新规划」）累计。
+ * 单段预算每次继续都会重新放宽，只有这层上限能约束任务的总成本。
+ * 本改动之前持久化的任务不带这些字段，读取时用 resolveAgentLifetimeBudget 回退到默认值。
+ */
+export interface AgentTaskLifetimeBudget {
+  maxTotalModelRounds: number;
+  maxTotalToolCalls: number;
+  /** 累计 input + output token 上限 */
+  maxTotalTokens: number;
+  /** 最大继续（含重新规划）次数 */
+  maxResumes: number;
+}
+
+/** 单段执行预算；终身上限见 AgentTaskLifetimeBudget。 */
+export interface AgentTaskBudget extends Partial<AgentTaskLifetimeBudget> {
   maxModelRounds: number;
   maxToolCalls: number;
   maxParallelReadTools: number;
@@ -135,11 +150,15 @@ export interface AgentCanvasCheckpoint {
   historyIndexAfter: number;
 }
 
-export const DEFAULT_AGENT_TASK_BUDGET: AgentTaskBudget = {
+export const DEFAULT_AGENT_TASK_BUDGET: AgentTaskBudget & AgentTaskLifetimeBudget = {
   maxModelRounds: 12,
   maxToolCalls: 24,
   maxParallelReadTools: 3,
   maxReadRetries: 3,
+  maxTotalModelRounds: 60,
+  maxTotalToolCalls: 120,
+  maxTotalTokens: 1_500_000,
+  maxResumes: 8,
 };
 
 export interface AgentToolCallSnapshot {
@@ -197,6 +216,19 @@ export interface AgentStep {
   errorMessage?: string;
 }
 
+export type AgentReplanReason = 'user_requested' | 'step_skipped';
+
+/**
+ * 待消费的重新规划请求。
+ *
+ * pausedReason 在 prepareAgentTaskResume 中会被清空，无法把「重新规划」和普通「继续」
+ * 区分开；该请求独立持久化，由 Runtime 组装上下文时读取并清除，确保要求真正传给模型。
+ */
+export interface AgentReplanRequest {
+  requestedAt: number;
+  reason: AgentReplanReason;
+}
+
 export interface AgentTask {
   id: string;
   projectId: string;
@@ -209,6 +241,10 @@ export interface AgentTask {
   currentStepId?: string;
   modelRounds: number;
   toolCallCount: number;
+  /** 已执行的「继续 / 重新规划」次数，受 maxResumes 约束（历史记录可能缺省）。 */
+  resumeCount?: number;
+  /** 用户请求重新规划后待模型消费的指令；消费后清除。 */
+  replanRequest?: AgentReplanRequest;
   budget: AgentTaskBudget;
   /** 任务创建时由用户显式引用的 Skill 计算，只能缩小 Registry 可见集合。 */
   toolAllowlist?: string[];

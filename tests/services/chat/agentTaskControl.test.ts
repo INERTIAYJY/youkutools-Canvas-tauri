@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentTask, AgentTaskStatus } from '../../../src/types/agent';
 import {
+  consumeAgentReplanRequest,
+  prepareAgentTaskResume,
+  requestAgentReplan,
   runAgentTask,
+  skipAgentStep,
   stopConversationAgentTasks,
   stopProjectAgentTasks,
+  validateTaskResumable,
 } from '../../../src/services/chat/agentTaskControl';
+import { DEFAULT_AGENT_TASK_BUDGET } from '../../../src/types/agent';
 import {
   getConversationAgentQueueTaskIds,
   resetAgentSchedulerForTests,
@@ -47,6 +53,107 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAgentSchedulerForTests();
+});
+
+function arrangeTask(task: AgentTask): AgentTask {
+  useAppStore.setState({
+    currentProjectId: task.projectId,
+    agentTasks: [task],
+    conversations: [{
+      id: task.conversationId,
+      projectId: task.projectId,
+      title: 'Resume test',
+      titleSource: 'auto',
+      pinned: false,
+      archived: false,
+      agentMode: 'autonomous',
+      createdAt: 1,
+      updatedAt: 1,
+      messageCount: 0,
+    }],
+  });
+  return task;
+}
+
+function readTask(id: string): AgentTask {
+  return useAppStore.getState().agentTasks.find((task) => task.id === id)!;
+}
+
+describe('agent replan requests', () => {
+  it('keeps the replan request until the runtime consumes it', () => {
+    arrangeTask(createTask('task-replan', 'project-1', 'conversation-1', 'paused'));
+
+    requestAgentReplan('task-replan');
+    expect(readTask('task-replan')).toMatchObject({
+      status: 'paused',
+      pausedReason: 'replan_requested',
+      replanRequest: { reason: 'user_requested' },
+    });
+
+    // 继续前的清理会抹掉 pausedReason，重新规划要求必须活到组装模型上下文时
+    prepareAgentTaskResume('task-replan');
+    expect(readTask('task-replan').pausedReason).toBeUndefined();
+    expect(readTask('task-replan').replanRequest).toMatchObject({ reason: 'user_requested' });
+
+    consumeAgentReplanRequest('task-replan');
+    expect(readTask('task-replan').replanRequest).toBeUndefined();
+  });
+
+  it('requests a replan when a pending step is skipped', () => {
+    const task = createTask('task-skip', 'project-1', 'conversation-1', 'running');
+    arrangeTask({
+      ...task,
+      steps: [{
+        id: 'step-1',
+        taskId: task.id,
+        index: 0,
+        kind: 'tool',
+        title: 'Write canvas',
+        status: 'waiting_approval',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+    });
+
+    skipAgentStep('task-skip', 'step-1');
+
+    expect(readTask('task-skip')).toMatchObject({
+      status: 'paused',
+      pausedReason: 'step_skipped_replan_required',
+      replanRequest: { reason: 'step_skipped' },
+    });
+  });
+});
+
+describe('agent resume validation', () => {
+  it('allows resuming a paused task below the lifetime cap', () => {
+    arrangeTask(createTask('task-fresh', 'project-1', 'conversation-1', 'paused'));
+    expect(validateTaskResumable('task-fresh')).toEqual({ ok: true });
+  });
+
+  it('refuses to resume once the lifetime budget is exhausted', () => {
+    arrangeTask({
+      ...createTask('task-spent', 'project-1', 'conversation-1', 'paused'),
+      modelRounds: DEFAULT_AGENT_TASK_BUDGET.maxTotalModelRounds,
+    });
+
+    expect(validateTaskResumable('task-spent')).toMatchObject({
+      ok: false,
+      errorCode: 'AGENT_LIFETIME_BUDGET_EXHAUSTED',
+    });
+  });
+
+  it('refuses to resume after the maximum number of resumes', () => {
+    arrangeTask({
+      ...createTask('task-looped', 'project-1', 'conversation-1', 'failed'),
+      resumeCount: DEFAULT_AGENT_TASK_BUDGET.maxResumes,
+    });
+
+    expect(validateTaskResumable('task-looped')).toMatchObject({
+      ok: false,
+      errorCode: 'AGENT_LIFETIME_BUDGET_EXHAUSTED',
+    });
+  });
 });
 
 describe('agent task control', () => {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BaseNodeData } from '../../src/types';
+import type { ProjectDataDirRenameResult } from '../../src/services/fs/core';
 
 const fileMocks = vi.hoisted(() => ({
   deleteProjectData: vi.fn(async () => undefined),
@@ -8,6 +9,12 @@ const fileMocks = vi.hoisted(() => ({
   ensureProjectDataDir: vi.fn(async () => 'project-dir'),
   loadProjectData: vi.fn(),
   saveProject: vi.fn(async (record: { id: string }) => record.id),
+  buildProjectFolderName: vi.fn((name: string, projectId: string) => (
+    `${name}-${projectId.replace(/-/g, '').slice(0, 8)}`
+  )),
+  renameProjectDataDir: vi.fn(async (): Promise<ProjectDataDirRenameResult | null> => null),
+  revertProjectDataDirRename: vi.fn(async () => undefined),
+  getAssetUrlFromPath: vi.fn(async (path: string) => `asset://${path}`),
 }));
 const pollMocks = vi.hoisted(() => ({
   resumePendingTasks: vi.fn(async () => undefined),
@@ -47,6 +54,8 @@ beforeEach(() => {
   fileMocks.deleteProjectData.mockClear();
   fileMocks.deleteProjectDataDir.mockClear();
   fileMocks.saveProject.mockClear();
+  fileMocks.renameProjectDataDir.mockClear();
+  fileMocks.revertProjectDataDirRename.mockClear();
   pollMocks.resumePendingTasks.mockClear();
   snapshotMocks.captureCurrentCanvasSnapshot.mockReset();
   snapshotMocks.captureCurrentCanvasSnapshot.mockResolvedValue(null);
@@ -465,6 +474,63 @@ describe('project switching', () => {
     expect(useAppStore.getState().activeConversationId).toBeNull();
     expect(loadConversationsForProject).toHaveBeenCalledWith('project-next');
     expect(fileMocks.deleteProjectData).toHaveBeenCalledWith('project-old');
+  });
+
+  it('rolls back the name, data folder and asset paths when the rename save fails', async () => {
+    const showToast = vi.fn();
+    const renameResult = {
+      oldDir: '/base/Old-project1',
+      newDir: '/base/New-project1',
+      oldFolder: 'Old-project1',
+      dataFolder: 'New-project1',
+      renamed: true,
+    };
+    fileMocks.renameProjectDataDir.mockResolvedValueOnce(renameResult);
+    fileMocks.saveProject.mockRejectedValueOnce(new Error('disk full'));
+    useAppStore.setState({
+      projects: [{
+        id: 'project1',
+        name: 'Old',
+        createdAt: 1,
+        updatedAt: 1,
+        dataFolder: 'Old-project1',
+      }],
+      currentProjectId: 'project1',
+      projectName: 'Old',
+      nodes: [{
+        id: 'image-node',
+        type: 'ai-image',
+        position: { x: 0, y: 0 },
+        data: {
+          label: 'Image node',
+          type: 'ai-image',
+          filePath: '/base/Old-project1/images/a.png',
+          imageUrl: 'asset:///base/Old-project1/images/a.png',
+        },
+      }],
+      edges: [],
+      groups: [],
+      showToast,
+    });
+
+    const renamed = await useAppStore.getState().renameProject('project1', 'New');
+
+    expect(renamed).toBe(false);
+    expect(fileMocks.revertProjectDataDirRename)
+      .toHaveBeenCalledWith('project1', renameResult, 'Old-project1');
+
+    const state = useAppStore.getState();
+    expect(state.projectName).toBe('Old');
+    expect(state.projects[0]).toMatchObject({
+      name: 'Old',
+      updatedAt: 1,
+      dataFolder: 'Old-project1',
+    });
+    expect(state.nodes[0].data).toMatchObject({
+      filePath: '/base/Old-project1/images/a.png',
+      imageUrl: 'asset:///base/Old-project1/images/a.png',
+    });
+    expect(showToast).toHaveBeenCalledWith('项目重命名失败，已恢复原名称', 'error');
   });
 
   it('keeps the project visible when persistent cascade deletion fails', async () => {

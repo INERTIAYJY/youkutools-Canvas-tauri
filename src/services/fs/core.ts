@@ -256,6 +256,7 @@ export async function ensureProjectDataDir(projectId: string): Promise<string | 
 export interface ProjectDataDirRenameResult {
   oldDir: string;
   newDir: string;
+  oldFolder: string;
   dataFolder: string;
   renamed: boolean;
 }
@@ -284,7 +285,7 @@ export async function renameProjectDataDir(
 
   if (!oldDir || !newDir || oldDir === newDir) {
     registerProjectFolder(projectId, newFolderName);
-    return oldDir && newDir ? { oldDir, newDir, dataFolder: newFolderName, renamed: false } : null;
+    return oldDir && newDir ? { oldDir, newDir, oldFolder, dataFolder: newFolderName, renamed: false } : null;
   }
 
   try {
@@ -294,13 +295,13 @@ export async function renameProjectDataDir(
       await rename(oldDir, newDir);
       registerProjectFolder(projectId, newFolderName);
       notifyProjectDiskChanged();
-      return { oldDir, newDir, dataFolder: newFolderName, renamed: true };
+      return { oldDir, newDir, oldFolder, dataFolder: newFolderName, renamed: true };
     }
 
     if (!oldExists) {
       registerProjectFolder(projectId, newFolderName);
       await mkdir(newDir, { recursive: true });
-      return { oldDir, newDir, dataFolder: newFolderName, renamed: false };
+      return { oldDir, newDir, oldFolder, dataFolder: newFolderName, renamed: false };
     }
 
     console.warn('[fileService] Project data dir rename skipped because target exists:', newDir);
@@ -308,6 +309,31 @@ export async function renameProjectDataDir(
   } catch (err) {
     console.warn('[fileService] renameProjectDataDir failed:', oldDir, '→', newDir, err);
     return null;
+  }
+}
+
+/**
+ * 回滚 renameProjectDataDir：把目录改回旧路径，并恢复文件夹名映射。
+ * 供重命名事务的后续步骤（路径重映射、落盘）失败时调用，避免磁盘目录、
+ * 内存映射与已持久化的 dataFolder 三者不一致导致重启后找不到素材。
+ */
+export async function revertProjectDataDirRename(
+  projectId: string,
+  result: ProjectDataDirRenameResult | null,
+  fallbackFolderName?: string,
+): Promise<void> {
+  const restoredFolder = result?.oldFolder?.trim() || fallbackFolderName?.trim();
+  if (restoredFolder) _projectFolders.set(projectId, restoredFolder);
+  else _projectFolders.delete(projectId);
+
+  if (!result?.renamed || !isTauriEnv()) return;
+  try {
+    if (await exists(result.newDir) && !(await exists(result.oldDir))) {
+      await rename(result.newDir, result.oldDir);
+      notifyProjectDiskChanged();
+    }
+  } catch (err) {
+    console.error('[fileService] revertProjectDataDirRename failed:', result.newDir, '→', result.oldDir, err);
   }
 }
 

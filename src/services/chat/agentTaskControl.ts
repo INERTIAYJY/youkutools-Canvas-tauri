@@ -5,9 +5,11 @@ import { useAppStore } from '../../store/useAppStore';
 import {
   AGENT_TERMINAL_STATUSES,
   type AgentApprovalResolution,
+  type AgentReplanReason,
   type AgentTask,
   type AgentTaskStatus,
 } from '../../types/agent';
+import { evaluateAgentResumeBudget } from './agentBudgetService';
 import { cancelConversationAgentExecutions } from './agentScheduler';
 import { appendAgentEvent } from './agentJournal';
 import { emitAgentLifecycleEvent } from './agentLifecycle';
@@ -245,6 +247,10 @@ export function validateTaskResumable(taskId: string): AgentResumeValidation {
       message: '来源对话不存在或已删除，无法继续',
     };
   }
+  const lifetime = evaluateAgentResumeBudget(task);
+  if (lifetime.exceeded) {
+    return { ok: false, errorCode: lifetime.errorCode, message: lifetime.message };
+  }
   return { ok: true };
 }
 
@@ -269,6 +275,10 @@ export function resolveAgentApproval(
   return true;
 }
 
+/**
+ * 清掉上一段执行留下的暂停/错误痕迹。
+ * 注意不要清除 replanRequest：它要一直留到 Runtime 把重新规划要求写进模型上下文为止。
+ */
 export function prepareAgentTaskResume(taskId: string): AgentTask {
   return transitionAgentTask(taskId, 'queued', {
     pausedReason: undefined,
@@ -302,14 +312,30 @@ export function skipAgentStep(taskId: string, stepId: string): AgentTask {
     steps,
     currentStepId: stepId,
     pausedReason: 'step_skipped_replan_required',
+    replanRequest: { requestedAt: now, reason: 'step_skipped' },
   });
 }
 
-export function requestAgentReplan(taskId: string): AgentTask {
+export function requestAgentReplan(
+  taskId: string,
+  reason: AgentReplanReason = 'user_requested',
+): AgentTask {
   activeControllers.get(taskId)?.abort();
   return transitionAgentTask(taskId, 'paused', {
     pausedReason: 'replan_requested',
+    replanRequest: { requestedAt: Date.now(), reason },
   });
+}
+
+/**
+ * 取出并清除待消费的重新规划请求。
+ * 由 Runtime 在把指令写进模型上下文后调用，避免下一次普通「继续」重复要求重新规划。
+ */
+export function consumeAgentReplanRequest(taskId: string): void {
+  const store = useAppStore.getState();
+  const task = store.agentTasks.find((item) => item.id === taskId);
+  if (!task?.replanRequest) return;
+  store.updateAgentTask(taskId, { replanRequest: undefined });
 }
 
 export function isAgentTaskRunning(taskId: string): boolean {

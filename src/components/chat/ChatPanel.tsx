@@ -395,9 +395,17 @@ export default function ChatPanel({
     },
     onReplan: (taskId: string) => {
       if (detached) { void emitAction({ type: 'replan_agent_task', taskId }); return; }
-      requestAgentReplan(taskId);
-      resumeAgentTaskExecution(taskId, scrollToBottom);
-      showToast('正在重新规划任务', 'info');
+      try {
+        requestAgentReplan(taskId);
+      } catch {
+        showToast('该任务当前状态无法重新规划', 'error');
+        return;
+      }
+      const result = resumeAgentTaskExecution(taskId, scrollToBottom);
+      showToast(
+        result.ok ? '正在重新规划任务' : (result.message ?? '无法重新规划该任务'),
+        result.ok ? 'info' : 'error',
+      );
     },
     onRewind: (taskId: string) => {
       if (detached) { void emitAction({ type: 'rewind_agent_task', taskId }); return; }

@@ -23,8 +23,12 @@ vi.mock('../../../src/services/chat/tools', () => ({
   ensureAgentToolsRegistered: vi.fn(),
 }));
 
-import { submitConversationMessage } from '../../../src/services/chat/conversationExecutionController';
+import {
+  resumeAgentTaskExecution,
+  submitConversationMessage,
+} from '../../../src/services/chat/conversationExecutionController';
 import { useAppStore } from '../../../src/store/useAppStore';
+import { DEFAULT_AGENT_TASK_BUDGET, type AgentTask } from '../../../src/types/agent';
 
 function arrangeConversation(): void {
   useAppStore.setState(useAppStore.getInitialState(), true);
@@ -99,6 +103,71 @@ describe('conversation execution controller', () => {
         agentTaskId: 'task-active',
       }),
     ]);
+    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+  });
+});
+
+function arrangePausedTask(partial: Partial<AgentTask> = {}): AgentTask {
+  const task: AgentTask = {
+    id: 'task-paused',
+    projectId: 'project-1',
+    conversationId: 'conversation-1',
+    userMessageId: 'message-user',
+    mode: 'autonomous',
+    goal: 'keep going',
+    status: 'paused',
+    steps: [],
+    modelRounds: 12,
+    toolCallCount: 24,
+    resumeCount: 0,
+    budget: { ...DEFAULT_AGENT_TASK_BUDGET },
+    createdAt: 1,
+    updatedAt: 1,
+    ...partial,
+  };
+  useAppStore.setState({
+    agentTasks: [task],
+    messages: [{
+      id: 'message-assistant',
+      conversationId: 'conversation-1',
+      role: 'assistant',
+      content: '',
+      timestamp: 1,
+      status: 'done',
+      agentTaskId: task.id,
+    }],
+  });
+  return task;
+}
+
+describe('agent task resume budget', () => {
+  it('counts the resume and widens the segment budget within the lifetime cap', () => {
+    arrangePausedTask();
+
+    expect(resumeAgentTaskExecution('task-paused')).toEqual({ ok: true });
+
+    const task = useAppStore.getState().agentTasks[0];
+    expect(task.resumeCount).toBe(1);
+    expect(task.budget).toMatchObject({ maxModelRounds: 24, maxToolCalls: 48 });
+    expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to resume and stops widening the budget at the lifetime cap', () => {
+    const spent = DEFAULT_AGENT_TASK_BUDGET.maxTotalModelRounds;
+    arrangePausedTask({
+      modelRounds: spent,
+      resumeCount: 4,
+      budget: { ...DEFAULT_AGENT_TASK_BUDGET, maxModelRounds: spent },
+    });
+
+    expect(resumeAgentTaskExecution('task-paused')).toMatchObject({
+      ok: false,
+      errorCode: 'AGENT_LIFETIME_BUDGET_EXHAUSTED',
+    });
+
+    const task = useAppStore.getState().agentTasks[0];
+    expect(task.resumeCount).toBe(4);
+    expect(task.budget.maxModelRounds).toBe(spent);
     expect(schedulerMocks.schedule).not.toHaveBeenCalled();
   });
 });

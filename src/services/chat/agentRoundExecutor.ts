@@ -32,6 +32,10 @@ import {
   estimateModelMessagesTokens,
   resolveAssistantContextSpec,
 } from './contextManager';
+import {
+  AGENT_LIFETIME_BUDGET_PAUSE_REASON,
+  evaluateAgentLifetimeUsage,
+} from './agentBudgetService';
 import { drainAgentInterjections } from './agentInterjection';
 import { addAgentTaskMetrics, appendAgentEvent } from './agentJournal';
 import {
@@ -511,6 +515,18 @@ export async function executeAgentRound({
       ].join('\n'),
     });
   }
+
+  // 终身上限先于单段预算判定：累计 token 没有单段计数器，只能在这里逐轮复核
+  const lifetime = evaluateAgentLifetimeUsage(task);
+  if (lifetime.exceeded) {
+    transitionTask(taskId, 'paused', {
+      pausedReason: AGENT_LIFETIME_BUDGET_PAUSE_REASON,
+      errorCode: lifetime.errorCode,
+    });
+    callbacks.onError?.(lifetime.message ?? '任务已达终身预算上限，任务已暂停');
+    return { outcome: 'paused', fullText, totalToolResultChars };
+  }
+
   if (task.modelRounds >= task.budget.maxModelRounds) {
     transitionTask(taskId, 'paused', { pausedReason: 'model_round_budget_exhausted' });
     callbacks.onError?.('已达到模型规划轮次上限，任务已暂停');

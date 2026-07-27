@@ -22,6 +22,7 @@ import {
   type AgentRoundCallbacks,
 } from './agentRoundExecutor';
 import {
+  consumeAgentReplanRequest,
   transitionAgentTask,
   waitForAgentApproval,
   type AgentExecutionOutcome,
@@ -80,6 +81,8 @@ export async function runAgentLoop({
         role: 'system',
         content: resumeContext,
       });
+      // 重新规划要求已写入本次请求上下文，清除后下一次普通「继续」不再重复要求重规划
+      consumeAgentReplanRequest(taskId);
     }
     const currentUserIndex = messages.map((message) => message.role).lastIndexOf('user');
     messages.splice(currentUserIndex >= 0 ? currentUserIndex : messages.length, 0, {

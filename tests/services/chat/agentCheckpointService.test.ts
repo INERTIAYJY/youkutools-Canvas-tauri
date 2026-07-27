@@ -47,6 +47,33 @@ describe('agent canvas checkpoints', () => {
     expect(buildAgentResumeContext(task([existing]))).toContain('updated node #3');
   });
 
+  it('tells the model to drop the previous plan only when a replan was requested', () => {
+    const existing = step(0, {
+      historyIndexBefore: 2, historyIndexAfter: 3, revisionBefore: 4, revisionAfter: 5,
+    });
+    existing.outputSummary = 'updated node #3';
+    const plainResume = buildAgentResumeContext(task([existing]));
+    const replan = buildAgentResumeContext({
+      ...task([existing]),
+      replanRequest: { requestedAt: 10, reason: 'user_requested' },
+    });
+
+    expect(plainResume).not.toContain('放弃此前的计划');
+    expect(replan).toContain('用户要求重新规划本任务');
+    expect(replan).toContain('放弃此前的计划');
+    expect(replan).not.toBe(plainResume);
+    // 步骤摘要在两种恢复下都要保留
+    expect(replan).toContain('updated node #3');
+  });
+
+  it('carries a replan request even when no step has finished yet', () => {
+    expect(buildAgentResumeContext(task([]))).toBe('');
+    expect(buildAgentResumeContext({
+      ...task([]),
+      replanRequest: { requestedAt: 10, reason: 'step_skipped' },
+    })).toContain('被跳过的步骤不得重试');
+  });
+
   it('creates the same fingerprint for semantically identical object key order', () => {
     expect(fingerprintToolInput('tool', { a: 1, b: { x: 2 } }))
       .toBe(fingerprintToolInput('tool', { b: { x: 2 }, a: 1 }));

@@ -24,6 +24,12 @@ export const AGENT_ERROR_HINTS: Record<string, AgentRecoveryHint> = {
   CONTEXT_COMPRESSION_FAILED: { title: '上下文压缩失败', hint: '请检查助手模型是否可用，然后点击继续。' },
   CONTEXT_INPUT_TOO_LARGE: { title: '输入过大', hint: '请精简当前消息，或更换上下文更大的模型。' },
 
+  // 任务总预算
+  AGENT_LIFETIME_BUDGET_EXHAUSTED: {
+    title: '已达任务总预算',
+    hint: '该任务累计消耗（轮次 / 工具调用 / token / 继续次数）已达上限，请基于当前结果新建任务继续。',
+  },
+
   // 继续前校验
   AGENT_RESUME_TASK_NOT_FOUND: { title: '任务不存在', hint: '该任务已不存在，无法继续。' },
   AGENT_RESUME_NOT_RESUMABLE: { title: '状态不可继续', hint: '任务当前状态不支持继续。' },

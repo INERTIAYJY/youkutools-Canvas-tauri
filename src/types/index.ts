@@ -220,6 +220,8 @@ export interface ProjectVisualStyleSettings {
 export interface ProjectGenerationDefaults {
   imageAspectRatio?: string;
   imageSize?: string;
+  /** 视频画面比例：'16:9' 横屏、'9:16' 竖屏等；应用到节点的 seedanceRatio。 */
+  videoAspectRatio?: string;
   videoResolution?: '480p' | '720p' | '1080p' | '4k';
   videoDuration?: number;
 }

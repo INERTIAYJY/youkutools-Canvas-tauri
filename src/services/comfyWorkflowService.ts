@@ -6,7 +6,7 @@
 import { useAppStore } from '../store/useAppStore';
 import type { WorkflowIONode } from '../types';
 import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
-import { mapImageDimensions } from './aiDimensions';
+import { mapImageDimensions, mapVideoDimensions } from './aiDimensions';
 import { resolveNodeReferences } from './nodeReferenceService';
 import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
@@ -272,10 +272,12 @@ function injectDimensionsIntoWorkflow(
 function injectVideoParamsIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   videoResolution: number,
+  videoRatio: string | undefined,
   videoFps: number,
   videoFrames: number,
   mentionedNodeIds?: string[],
 ): void {
+  const dims = mapVideoDimensions(videoResolution, videoRatio);
   for (const [nodeId, nodeData] of Object.entries(workflowObj)) {
     if (!nodeData || typeof nodeData !== 'object') continue;
     // 有指定节点时，只修改被 @ 的节点
@@ -283,10 +285,10 @@ function injectVideoParamsIntoWorkflow(
     const inputs = nodeData.inputs as Record<string, unknown> | undefined;
     if (!inputs) continue;
 
-    // 注入 width/height 到 latent 或 image 节点
+    // 注入 width/height 到 latent 或 image 节点（按所选比例换算，与图片工作流一致）
     if (inputs.width !== undefined && typeof inputs.width === 'number' && inputs.height !== undefined && typeof inputs.height === 'number') {
-      inputs.width = videoResolution;
-      inputs.height = videoResolution;
+      inputs.width = dims.width;
+      inputs.height = dims.height;
     }
 
     // 注入帧率到视频相关节点
@@ -559,7 +561,12 @@ export async function executeComfyUIVideoGenerate(
   params: AIVideoGenParams,
   externalSignal?: AbortSignal,
 ): Promise<{ url: string }> {
-  const { workflowId, workflowInputs, prompt, videoResolution = 832, videoFps = 24, videoFrames = 77 } = params;
+  const {
+    workflowId, workflowInputs, prompt,
+    videoResolution = 832, videoFps = 24, videoFrames = 77,
+    // 画面比例决定注入工作流的 width/height；未设置时按 16:9
+    seedanceRatio = '16:9',
+  } = params;
   const comfyUrl = useAppStore.getState().config.comfyUIUrl?.trim() || '';
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
@@ -590,6 +597,7 @@ export async function executeComfyUIVideoGenerate(
     injectVideoParamsIntoWorkflow(
       workflowObj,
       videoResolution,
+      seedanceRatio,
       videoFps,
       videoFrames,
       workflowInputs ? Object.keys(workflowInputs) : undefined,

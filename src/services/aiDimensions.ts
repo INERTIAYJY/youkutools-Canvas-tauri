@@ -1,3 +1,35 @@
+/** 视频画面比例选项；'adaptive' 由模型自行决定，不参与像素换算。 */
+export const VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
+
+/** 视频尺寸按 8 对齐：ComfyUI latent 与多数视频模型都要求边长是 8 的倍数。 */
+function alignTo8(value: number): number {
+  return Math.max(64, Math.round(value / 8) * 8);
+}
+
+/**
+ * 将视频分辨率 + 比例映射为像素尺寸。
+ *
+ * 与图片不同，这里的分辨率数值是**长边**：1280 + 16:9 得到 1280×720，
+ * 与常见视频档位一致；若按短边解释会得到 1280×2276 这种不可用尺寸。
+ */
+export function mapVideoDimensions(
+  baseResolution: number,
+  aspectRatio: string | undefined,
+): { width: number; height: number } {
+  const longSide = Number.isFinite(baseResolution) && baseResolution > 0
+    ? Math.round(baseResolution)
+    : 832;
+
+  const [w, h] = (aspectRatio ?? '').split(':').map(Number);
+  if (!w || !h || w <= 0 || h <= 0) {
+    return { width: alignTo8(longSide), height: alignTo8(longSide) };
+  }
+
+  return w >= h
+    ? { width: alignTo8(longSide), height: alignTo8(longSide * (h / w)) }
+    : { width: alignTo8(longSide * (w / h)), height: alignTo8(longSide) };
+}
+
 /** 将画质 + 比例映射为像素尺寸 */
 export function mapImageDimensions(
   imageSize: string,

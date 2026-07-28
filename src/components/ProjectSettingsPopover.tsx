@@ -331,7 +331,7 @@ export default function ProjectSettingsPopover({
   };
 
   const handleGenerationChange = (
-    key: 'imageAspectRatio' | 'imageSize' | 'videoResolution' | 'videoDuration',
+    key: 'imageAspectRatio' | 'imageSize' | 'videoAspectRatio' | 'videoResolution' | 'videoDuration',
     value: string | number | undefined,
   ) => {
     setDraft((current) => ({
@@ -353,6 +353,9 @@ export default function ProjectSettingsPopover({
           }
         : {
             ...current.generation,
+            videoAspectRatio: enabled
+              ? current.generation?.videoAspectRatio ?? '16:9'
+              : undefined,
             videoResolution: enabled
               ? current.generation?.videoResolution ?? '720p'
               : undefined,
@@ -365,7 +368,9 @@ export default function ProjectSettingsPopover({
     draft.generation?.imageAspectRatio || draft.generation?.imageSize,
   );
   const videoDefaultsEnabled = Boolean(
-    draft.generation?.videoResolution || draft.generation?.videoDuration,
+    draft.generation?.videoAspectRatio
+    || draft.generation?.videoResolution
+    || draft.generation?.videoDuration,
   );
 
   const handleSubmit = async (event: FormEvent) => {
@@ -674,17 +679,18 @@ export default function ProjectSettingsPopover({
                   <div className="grid min-h-[68px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5">
                     <div className="min-w-0">
                       <div className="text-xs font-medium text-canvas-text">视频输出</div>
-                      <div className="mt-0.5 text-[11px] text-canvas-text-muted">分辨率与时长</div>
+                      <div className="mt-0.5 text-[11px] text-canvas-text-muted">比例、分辨率与时长</div>
                     </div>
                     <div className="flex items-center gap-2">
                       {videoDefaultsEnabled ? (
                         <VideoParamSelector
                           provider="dreamina"
                           seedanceResolution={draft.generation?.videoResolution ?? '720p'}
+                          seedanceRatio={draft.generation?.videoAspectRatio ?? '16:9'}
                           seedanceDuration={draft.generation?.videoDuration ?? 5}
                           onChangeSeedanceResolution={(value) => handleGenerationChange('videoResolution', value)}
+                          onChangeSeedanceRatio={(value) => handleGenerationChange('videoAspectRatio', value)}
                           onChangeSeedanceDuration={(value) => handleGenerationChange('videoDuration', value)}
-                          showSeedanceRatio={false}
                           showGenerateAudio={false}
                         />
                       ) : (

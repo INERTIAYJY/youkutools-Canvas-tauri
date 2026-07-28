@@ -6,6 +6,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
+import { VIDEO_ASPECT_RATIOS } from '../../../services/aiDimensions';
 
 interface VideoParamSelectorProps {
   provider?: string;
@@ -74,6 +75,12 @@ export default function VideoParamSelector({
     ? getApimartSeedanceCapability(selectedModel)
     : undefined;
   const isSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
+  // 非 Seedance（ComfyUI / RunningHub / 自建模型）：比例换算成 width/height 后注入请求
+  const genericRatios = VIDEO_ASPECT_RATIOS.map((value) => ({ value, label: value }));
+  const showGenericRatio = showSeedanceRatio;
+  const genericRatio = genericRatios.some((item) => item.value === seedanceRatio)
+    ? seedanceRatio
+    : VIDEO_ASPECT_RATIOS[0];
   const isVolcengine = provider === 'volcengine';
   const seedanceResolutions = apimartCapability
     ? apimartCapability.resolutions.map((value) => ({ value, label: value === '4k' ? '4K' : value }))
@@ -158,7 +165,9 @@ export default function VideoParamSelector({
     ? showSeedanceRatio
       ? `时长${displayedDuration}s · ${displayedRatio}`
       : `${displayedResolution} · 时长${displayedDuration}s`
-    : `帧数${videoFrames} · 帧率${videoFps} · 分辨率${videoResolution}`;
+    : showGenericRatio
+      ? `${genericRatio} · ${videoResolution} · 帧数${videoFrames}`
+      : `帧数${videoFrames} · 帧率${videoFps} · 分辨率${videoResolution}`;
 
   return (
     <div className="ui-schema-renderer" data-ui-schema-placement="videoParams" ref={ref}>
@@ -203,7 +212,7 @@ export default function VideoParamSelector({
                   <div className="img-rp-quality-area mb-2">
                     <div className="img-rp-section-label">
                       宽高比
-                      <span className="rh-tip" data-tooltip="决定输出视频的画面比例。自适应 = 由模型智能决定。">!</span>
+                      <span className="rh-tip" data-tooltip="决定输出视频的画面形状：16:9 横屏、9:16 竖屏，自适应 = 由模型智能决定。">!</span>
                     </div>
                     <div className="img-rp-quality-segmented rh-video-resolution-seg">
                       {seedanceRatios.map((opt) => (
@@ -280,11 +289,32 @@ export default function VideoParamSelector({
               </>
             ) : (
               <>
+                {showGenericRatio && (
+                  <div className="img-rp-quality-area mb-2">
+                    <div className="img-rp-section-label">
+                      画面比例
+                      <span className="rh-tip" data-tooltip="决定输出视频的画面形状：16:9 横屏、9:16 竖屏。分辨率为长边，短边按比例换算后注入工作流的 width/height。">!</span>
+                    </div>
+                    <div className="img-rp-quality-segmented rh-video-resolution-seg">
+                      {genericRatios.map((opt) => (
+                        <AnimatedButton
+                          key={opt.value}
+                          type="button"
+                          className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${genericRatio === opt.value ? 'active' : ''}`}
+                          onClick={() => onChangeSeedanceRatio?.(opt.value)}
+                        >
+                          {opt.label}
+                        </AnimatedButton>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* ComfyUI / RunningHub 分辨率 */}
                 <div className="img-rp-quality-area mb-2" data-ui-schema-field="rhVideoResolution" data-ui-schema-type="segmented" data-ui-schema-value-type="number" data-ui-schema-default="832">
                   <div className="img-rp-section-label">
-                    分辨率
-                    <span className="rh-tip" data-tooltip="分辨率越高细节越清晰、边缘更稳定。同时显存占用与生成耗时会明显增加。">!</span>
+                    分辨率（长边）
+                    <span className="rh-tip" data-tooltip="画面长边像素，短边由上方比例换算。分辨率越高细节越清晰、边缘更稳定，显存占用与生成耗时也明显增加。">!</span>
                   </div>
                   <div className="img-rp-quality-segmented rh-video-resolution-seg">
                     {COMBO_RESOLUTIONS.map((res) => (

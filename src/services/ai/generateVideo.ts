@@ -14,6 +14,7 @@ import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { normalizeFrames8n1 } from './modelProtocol';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
+import { mapVideoDimensions } from '../aiDimensions';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from '../pollManager';
 import { collectDirectorImageUrls } from '../directorDeskService';
 import type { BaseNodeData } from '../../types';
@@ -148,8 +149,11 @@ export async function generateVideo(
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
     if (gm.executionProfile) {
       const frames = params.videoFrames ?? 121;
-      const width = params.videoResolution ?? 1152;
-      const height = 768;
+      // 尺寸按所选比例换算，不再固定高度 768
+      const { width, height } = mapVideoDimensions(
+        params.videoResolution ?? 1152,
+        params.seedanceRatio ?? '16:9',
+      );
       const fps = params.videoFps ?? 24;
       const duration = params.seedanceDuration ?? 10;
       const urls = await runConfiguredModelProtocol({

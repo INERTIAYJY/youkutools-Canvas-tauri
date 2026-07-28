@@ -37,6 +37,10 @@ export const PROJECT_IMAGE_ASPECT_RATIOS = [
   '21:9', '1:4', '4:1', '1:6', '6:1', '1:8', '8:1',
 ] as const;
 export const PROJECT_IMAGE_SIZES = ['720p', '1K', '2K', '4K'] as const;
+/** 视频画面比例：与 Seedance / APIMart 文档一致，'adaptive' 表示由模型自行决定。 */
+export const PROJECT_VIDEO_ASPECT_RATIOS = [
+  '16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'adaptive',
+] as const;
 export const PROJECT_VIDEO_RESOLUTIONS = ['480p', '720p', '1080p', '4k'] as const;
 
 const NODE_MODEL_KIND: Partial<Record<NodeType, ProjectModelKind>> = {
@@ -117,6 +121,9 @@ export function normalizeProjectSettings(settings: ProjectSettings): ProjectSett
   const imageSize = PROJECT_IMAGE_SIZES.includes(
     generation?.imageSize as (typeof PROJECT_IMAGE_SIZES)[number],
   ) ? generation?.imageSize : undefined;
+  const videoAspectRatio = PROJECT_VIDEO_ASPECT_RATIOS.includes(
+    generation?.videoAspectRatio as (typeof PROJECT_VIDEO_ASPECT_RATIOS)[number],
+  ) ? generation?.videoAspectRatio : undefined;
   const videoResolution = PROJECT_VIDEO_RESOLUTIONS.includes(
     generation?.videoResolution as (typeof PROJECT_VIDEO_RESOLUTIONS)[number],
   ) ? generation?.videoResolution : undefined;
@@ -135,8 +142,16 @@ export function normalizeProjectSettings(settings: ProjectSettings): ProjectSett
       ? { promptSuffix: clean(settings.promptSuffix) }
       : {}),
     ...(defaultModels && Object.keys(defaultModels).length > 0 ? { defaultModels } : {}),
-    ...(imageAspectRatio || imageSize || videoResolution || videoDuration
-      ? { generation: { imageAspectRatio, imageSize, videoResolution, videoDuration } }
+    ...(imageAspectRatio || imageSize || videoAspectRatio || videoResolution || videoDuration
+      ? {
+          generation: {
+            imageAspectRatio,
+            imageSize,
+            videoAspectRatio,
+            videoResolution,
+            videoDuration,
+          },
+        }
       : {}),
   };
 }
@@ -210,6 +225,9 @@ export function applyProjectDefaultsToNodeData(
     }
   }
   if (data.type === 'ai-video') {
+    if (settings.generation?.videoAspectRatio && (!hasPrompt || !data.seedanceRatio)) {
+      next.seedanceRatio = settings.generation.videoAspectRatio;
+    }
     if (settings.generation?.videoResolution && (!hasPrompt || !data.seedanceResolution)) {
       next.seedanceResolution = settings.generation.videoResolution;
     }

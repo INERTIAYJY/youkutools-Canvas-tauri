@@ -181,6 +181,7 @@ export async function runMediaGeneration(
       prompt: effectivePrompt,
       model: model.requestModel,
       provider: model.provider,
+      seedanceRatio: projectSettings?.generation?.videoAspectRatio,
       seedanceResolution: projectSettings?.generation?.videoResolution,
       seedanceDuration: projectSettings?.generation?.videoDuration,
     }, signal);

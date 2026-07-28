@@ -89,7 +89,7 @@ function stubInitializationActions() {
     loadConversationsForProject: vi.fn(async () => undefined),
     repairInterruptedForProject: vi.fn(async () => undefined),
     loadProjectMemoriesForProject: vi.fn(async () => undefined),
-    repairInterruptedAgentTasksForProject: vi.fn(async () => undefined),
+    repairInterruptedAgentTasksForProject: vi.fn(async () => []),
   });
 }
 

@@ -739,7 +739,7 @@ export default function ProviderConnectionDialog({
               <div className="mb-3 flex min-h-8 items-center justify-between gap-3 rounded-md border border-canvas-border bg-white/[0.03] px-2.5 py-1.5">
                 <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-canvas-text-secondary">
                   <Icon icon="mdi:eye-outline" width="14" />
-                  节点列表显示
+                  是否在对应类型节点中显示
                 </span>
                 <div className="flex min-w-0 flex-wrap justify-end gap-1" role="group" aria-label="节点列表显示分类">
                   <button

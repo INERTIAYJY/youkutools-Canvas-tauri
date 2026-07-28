@@ -22,7 +22,14 @@ export interface XiaoLuoPanoramaViewerHandle {
 
 interface XiaoLuoPanoramaViewerProps {
   imageUrl: string;
+  /** 视角模式：为 false 时盖上遮罩，把拖拽/滚轮让回画布（节点可拖动、可缩放） */
+  interactive?: boolean;
+  /** 遮罩被单击（非拖拽）时请求进入视角模式 */
+  onActivate?: () => void;
 }
+
+/** 按下与抬起的位移超过该像素数即视为拖动节点，不触发激活 */
+const ACTIVATE_DRAG_TOLERANCE = 4;
 
 function cropScreenshot(dataUrl: string, aspect?: number | null): Promise<string | null> {
   if (!aspect || aspect <= 0) return Promise.resolve(dataUrl);
@@ -75,8 +82,9 @@ function cropScreenshot(dataUrl: string, aspect?: number | null): Promise<string
 const XiaoLuoPanoramaViewer = forwardRef<
   XiaoLuoPanoramaViewerHandle,
   XiaoLuoPanoramaViewerProps
->(function XiaoLuoPanoramaViewer({ imageUrl }, forwardedRef) {
+>(function XiaoLuoPanoramaViewer({ imageUrl, interactive = false, onActivate }, forwardedRef) {
   const coreRef = useRef<PanoramaCoreHandle>(null);
+  const veilDownRef = useRef<{ x: number; y: number } | null>(null);
   const [viewerKey, setViewerKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -94,8 +102,25 @@ const XiaoLuoPanoramaViewer = forwardRef<
     },
   }), []);
 
+  // 遮罩上的按下/抬起：位移小于容差才算「单击激活」，拖动节点不会误进视角模式。
+  // 事件不阻断冒泡，React Flow 照常接管拖拽。
+  const handleVeilPointerDown = (event: React.PointerEvent) => {
+    veilDownRef.current = { x: event.clientX, y: event.clientY };
+  };
+
+  const handleVeilPointerUp = (event: React.PointerEvent) => {
+    const down = veilDownRef.current;
+    veilDownRef.current = null;
+    if (!down) return;
+    const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+    if (moved <= ACTIVATE_DRAG_TOLERANCE) onActivate?.();
+  };
+
   return (
-    <div className="xiaoluo-pano-shell is-compact nodrag nowheel" data-ui-stop="1">
+    <div
+      className={`xiaoluo-pano-shell is-compact${interactive ? ' is-interactive nodrag nowheel' : ''}`}
+      data-ui-stop="1"
+    >
       <PanoramaCore
         key={viewerKey}
         ref={coreRef}
@@ -117,6 +142,22 @@ const XiaoLuoPanoramaViewer = forwardRef<
         <div className="xiaoluo-pano-status" role="status">
           <span className="spinner" />
           <span>载入中...</span>
+        </div>
+      ) : null}
+
+      {interactive ? (
+        <div className="xiaoluo-pano-active-badge">视角模式 · Esc 退出</div>
+      ) : !loading && !error ? (
+        <div
+          className="xiaoluo-pano-veil"
+          onPointerDown={handleVeilPointerDown}
+          onPointerUp={handleVeilPointerUp}
+          onPointerCancel={() => { veilDownRef.current = null; }}
+        >
+          <span className="xiaoluo-pano-veil-hint">
+            <Icon icon="lucide:move-3d" width="12" height="12" />
+            点击转动视角
+          </span>
         </div>
       ) : null}
 

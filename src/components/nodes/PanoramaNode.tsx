@@ -3,7 +3,7 @@
  * 使用 XiaoLuo-Panorama 的嵌入式核心，支持节点内预览、全屏漫游与截图。
  */
 import { Icon } from '@iconify/react';
-import { lazy, memo, Suspense, useCallback, useRef } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { PanoramaCaptureResult } from 'xiaoluo-vr-panorama';
 import type { BaseNodeData } from '../../types';
@@ -58,6 +58,9 @@ function AIPanoramaNode({ id, data, selected }: { id: string; data: BaseNodeData
   const nodeHeight = (data.nodeHeight as number) || 200;
 
   const compactViewerRef = useRef<XiaoLuoPanoramaViewerHandle>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  /** 视角模式：单击全景预览进入后才由查看器接管拖拽，否则拖拽用于移动节点 */
+  const [panoActive, setPanoActive] = useState(false);
 
   const previewMode = (data.previewMode as 'image' | '360') || 'image';
   const isFullscreen = (data.panoFullscreen as boolean) || false;
@@ -71,6 +74,7 @@ function AIPanoramaNode({ id, data, selected }: { id: string; data: BaseNodeData
   );
 
   const toggleMode = useCallback(() => {
+    setPanoActive(false); // 切回静态图预览时一并退出视角模式
     updateNodeDataTransient(id, {
       previewMode: previewMode === '360' ? 'image' : '360',
     } as Partial<BaseNodeData>);
@@ -203,6 +207,28 @@ function AIPanoramaNode({ id, data, selected }: { id: string; data: BaseNodeData
   const hasImage = Boolean(panoramaUrl);
   const show360 = hasImage && previewMode === '360';
   const showImage = hasImage && previewMode === 'image';
+  /** 只有 360 预览在场时视角模式才生效，避免节点换图后残留激活态 */
+  const panoInteractive = show360 && panoActive;
+
+  // 视角模式的退出：点击节点外部（画布空白、别的节点）或按 Esc。
+  // 全屏漫游打开时把 Esc 让给全屏 overlay。
+  useEffect(() => {
+    if (!panoInteractive || isFullscreen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && wrapperRef.current?.contains(target)) return;
+      setPanoActive(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPanoActive(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [panoInteractive, isFullscreen]);
 
   const handleOpenFullscreen = useCallback(() => {
     if (!hasImage) return;
@@ -211,7 +237,7 @@ function AIPanoramaNode({ id, data, selected }: { id: string; data: BaseNodeData
 
   return (
     <>
-      <div className="node-wrapper" style={{ width: nodeWidth }}>
+      <div ref={wrapperRef} className="node-wrapper" style={{ width: nodeWidth }}>
         <NodeLabel
           kind="ai-panorama"
           label={displayLabel}
@@ -220,7 +246,7 @@ function AIPanoramaNode({ id, data, selected }: { id: string; data: BaseNodeData
           onRename={handleRename}
         />
         <div
-          className={`node pano-node ${selected ? 'selected' : ''} ${data.status === 'loading' || isUploading ? 'loading' : ''} ${justCompleted ? 'just-completed' : ''}`}
+          className={`node pano-node ${selected ? 'selected' : ''} ${panoInteractive ? 'is-pano-active' : ''} ${data.status === 'loading' || isUploading ? 'loading' : ''} ${justCompleted ? 'just-completed' : ''}`}
           style={{ height: nodeHeight }}
         >
           <div
@@ -246,7 +272,12 @@ function AIPanoramaNode({ id, data, selected }: { id: string; data: BaseNodeData
             )}
 
             {show360 ? (
-              <XiaoLuoPanoramaViewer ref={compactViewerRef} imageUrl={panoramaUrl} />
+              <XiaoLuoPanoramaViewer
+                ref={compactViewerRef}
+                imageUrl={panoramaUrl}
+                interactive={panoInteractive}
+                onActivate={() => setPanoActive(true)}
+              />
             ) : showImage ? (
               <div className="image-preview-container">
                 <img

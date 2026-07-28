@@ -45,12 +45,82 @@
   background: var(--theme-bg);
 }
 
-.xiaoluo-pano-shell.is-compact {
+/* 只有进入视角模式后才是抓手光标；未激活时保持节点默认的拖动光标 */
+.xiaoluo-pano-shell.is-compact.is-interactive {
   cursor: grab;
 }
 
-.xiaoluo-pano-shell.is-compact:active {
+.xiaoluo-pano-shell.is-compact.is-interactive:active {
   cursor: grabbing;
+}
+
+/* 未激活时的遮罩：接住指针事件，让拖拽移动节点、滚轮缩放画布 */
+.xiaoluo-pano-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+}
+
+.xiaoluo-pano-veil-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--white-alpha-12);
+  border-radius: 999px;
+  background: rgba(10, 10, 15, 0.55);
+  backdrop-filter: blur(var(--glass-blur-sm));
+  color: var(--theme-text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity var(--transition-base), transform var(--transition-base);
+}
+
+.xiaoluo-pano-veil:hover .xiaoluo-pano-veil-hint {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 视角模式角标 */
+.xiaoluo-pano-active-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 4;
+  padding: 3px 7px;
+  border: 1px solid var(--brand-alpha-30);
+  border-radius: 6px;
+  background: rgba(10, 10, 15, 0.55);
+  backdrop-filter: blur(var(--glass-blur-sm));
+  color: var(--brand-light);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+[data-theme='light'] .xiaoluo-pano-veil-hint,
+[data-theme='light'] .xiaoluo-pano-active-badge {
+  border-color: var(--theme-border);
+  background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
+}
+
+[data-theme='light'] .xiaoluo-pano-veil-hint {
+  color: var(--theme-text-secondary);
+}
+
+/* 视角模式下给节点一圈品牌色描边，提示指针已被全景接管 */
+.pano-node.is-pano-active {
+  border-color: var(--brand-alpha-30);
+  box-shadow: 0 0 0 1px var(--brand-alpha-30), 0 8px 32px rgba(99, 102, 241, 0.16);
 }
 
 .xiaoluo-pano-shell .xiaoluo-panorama-core,

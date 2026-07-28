@@ -661,18 +661,59 @@
   overflow: visible !important;
 }
 
-/* Resize handle — bottom-right corner */
-.node-resize-handle {
+/* ── Resize handles — 四角 + 四边共 8 个把手 ──
+   容器铺满节点卡片本身不吃事件，只有把手可拖。 */
+.node-resize-handles {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 14px;
-  height: 14px;
-  cursor: nwse-resize;
+  inset: 0;
+  pointer-events: none;
   z-index: 5;
 }
 
-.node-resize-handle::after {
+.node-resize-handle {
+  position: absolute;
+  pointer-events: auto;
+}
+
+/* 角把手：14×14，压在卡片四角内侧 */
+.node-resize-handle--nw,
+.node-resize-handle--ne,
+.node-resize-handle--sw,
+.node-resize-handle--se {
+  width: 14px;
+  height: 14px;
+}
+
+.node-resize-handle--nw { left: 0; top: 0; cursor: nwse-resize; }
+.node-resize-handle--ne { right: 0; top: 0; cursor: nesw-resize; }
+.node-resize-handle--sw { left: 0; bottom: 0; cursor: nesw-resize; }
+.node-resize-handle--se { right: 0; bottom: 0; cursor: nwse-resize; }
+
+/* 边把手：骑在边线上的 6px 窄条，两端让出角把手，避免与节点内容抢事件 */
+.node-resize-handle--n,
+.node-resize-handle--s {
+  left: 14px;
+  right: 14px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.node-resize-handle--n { top: -3px; }
+.node-resize-handle--s { bottom: -3px; }
+
+.node-resize-handle--w,
+.node-resize-handle--e {
+  top: 14px;
+  bottom: 14px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.node-resize-handle--w { left: -3px; }
+.node-resize-handle--e { right: -3px; }
+
+/* 只有右下角画出可见的三角，其余把手靠光标形状提示 */
+.node-resize-handle--se::after {
   content: '';
   position: absolute;
   right: 3px;
@@ -683,9 +724,18 @@
   border-width: 0 0 8px 8px;
   border-color: transparent transparent var(--theme-text-muted) transparent;
   border-radius: 0 2px 8px 0;
+  /* 默认隐藏：只在鼠标悬浮该节点（或正在缩放）时露出把手 */
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out-quart);
 }
 
-.node-resize-handle:hover::after {
+/* 缩放过程中指针可能滑出节点范围，用 .is-resizing 兜住，避免把手中途消失 */
+.react-flow__node:hover .node-resize-handle--se::after,
+.node-resize-handle--se.is-resizing::after {
+  opacity: 1;
+}
+
+.node-resize-handle--se:hover::after {
   border-color: transparent transparent #a8a8f3 transparent;
 }
 

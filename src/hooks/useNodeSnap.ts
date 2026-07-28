@@ -394,13 +394,20 @@ function pickCloser(a: SnapPoint | null, b: SnapPoint | null): SnapPoint | null 
   return b.diff < a.diff ? b : a;
 }
 
+/** 缩放方向：-1 = 该轴的左/上边在动，1 = 右/下边在动，0 = 该轴不变 */
+export interface ResizeDirection {
+  x: -1 | 0 | 1;
+  y: -1 | 0 | 1;
+}
+
 /** 缩放吸附桥接：节点内的 ResizeHandle 通过此 Context 调用 Canvas 持有的吸附逻辑 */
 export interface ResizeSnapApi {
   onResizeStart: (nodeId: string) => void;
   applyResizeSnap: (
     nodeId: string,
     width: number,
-    height: number
+    height: number,
+    direction?: ResizeDirection
   ) => { width: number; height: number };
   onResizeStop: () => void;
 }
@@ -427,6 +434,8 @@ export function useNodeSnap() {
   const resizeCtx = useRef<{
     left: number;
     top: number;
+    right: number;
+    bottom: number;
     otherX: number[];
     otherY: number[];
   } | null>(null);
@@ -606,8 +615,8 @@ export function useNodeSnap() {
   );
 
   // ── 缩放吸附 ──
-  // 右下角把手缩放：节点左/上边固定，仅右/下边随尺寸移动。
-  // 故只对「移动的右边/下边」与其他节点的边/中线做吸附，命中即对齐并画引导线。
+  // 缩放时对边固定：向右/下拖则左/上边不动，向左/上拖则右/下边不动。
+  // 故只对「正在移动的那条边」与其他节点的边/中线做吸附，命中即对齐并画引导线。
   const onResizeStart = useCallback(
     (nodeId: string) => {
       const { nodeMap, otherXEdges, otherXCenters, otherYEdges, otherYCenters } =
@@ -621,6 +630,8 @@ export function useNodeSnap() {
       resizeCtx.current = {
         left: b.left,
         top: b.top,
+        right: b.right,
+        bottom: b.bottom,
         otherX: [...otherXEdges, ...otherXCenters],
         otherY: [...otherYEdges, ...otherYCenters],
       };
@@ -629,24 +640,37 @@ export function useNodeSnap() {
   );
 
   const applyResizeSnap = useCallback(
-    (_nodeId: string, width: number, height: number): { width: number; height: number } => {
+    (
+      _nodeId: string,
+      width: number,
+      height: number,
+      direction: ResizeDirection = { x: 1, y: 1 },
+    ): { width: number; height: number } => {
       const ctx = resizeCtx.current;
       if (!ctx) return { width, height };
-      const { left, top, otherX, otherY } = ctx;
+      const { left, top, right, bottom, otherX, otherY } = ctx;
 
       const lines: SnapLine[] = [];
       let snappedWidth = width;
       let snappedHeight = height;
 
-      const bestX = findBestSnap([left + width], otherX);
-      if (bestX) {
-        snappedWidth = bestX.targetValue - left;
-        lines.push({ kind: 'alignment', type: 'vertical', position: bestX.targetValue });
+      // 移动的竖边：右拖 → left + width；左拖 → right - width（右边固定）
+      if (direction.x !== 0) {
+        const movingX = direction.x === 1 ? left + width : right - width;
+        const bestX = findBestSnap([movingX], otherX);
+        if (bestX) {
+          snappedWidth = direction.x === 1 ? bestX.targetValue - left : right - bestX.targetValue;
+          lines.push({ kind: 'alignment', type: 'vertical', position: bestX.targetValue });
+        }
       }
-      const bestY = findBestSnap([top + height], otherY);
-      if (bestY) {
-        snappedHeight = bestY.targetValue - top;
-        lines.push({ kind: 'alignment', type: 'horizontal', position: bestY.targetValue });
+      // 移动的横边：下拖 → top + height；上拖 → bottom - height（下边固定）
+      if (direction.y !== 0) {
+        const movingY = direction.y === 1 ? top + height : bottom - height;
+        const bestY = findBestSnap([movingY], otherY);
+        if (bestY) {
+          snappedHeight = direction.y === 1 ? bestY.targetValue - top : bottom - bestY.targetValue;
+          lines.push({ kind: 'alignment', type: 'horizontal', position: bestY.targetValue });
+        }
       }
 
       setSnapLines(lines);

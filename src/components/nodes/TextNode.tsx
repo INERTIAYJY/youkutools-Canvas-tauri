@@ -14,7 +14,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { uploadSourceFile } from '../../services/fileService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { textNodeHeight } from '../../utils/num';
-import { useShiftProportional, useProportionalLock, computeResize } from '../../hooks/useShiftProportional';
+import ResizeHandle from './shared/ResizeHandle';
 
 function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
   const justCompleted = useCompletionFlash(data.status);
@@ -92,103 +92,16 @@ function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; se
     }
   }, [finishInlineEdit]);
 
-  // ── Shift 等比缩放 ──
-  const shiftHeld = useShiftProportional();
-  const { lockRef, reset: resetProportional, lock: lockProportional } = useProportionalLock();
-
-  // ── Resize ──
-  const isResizing = useRef(false);
-  const resizeStart = useRef({ x: 0, y: 0, width: 280, height: 160 });
-  const resizeHandleRef = useRef<HTMLDivElement>(null);
+  // ── Resize（四角 + 四边，Shift 锁比例；逻辑统一在 ResizeHandle 内）──
   const nodeWidth = (data.nodeWidth as number) || 280;
   const nodeHeight = (data.nodeHeight as number) || 160;
 
-  // 最新值 refs（供原生事件闭包读取）
-  const latestResizeRef = useRef({ id, nodeWidth, nodeHeight, updateNodeDataTransient, commitToHistory });
-  useEffect(() => {
-    latestResizeRef.current = { id, nodeWidth, nodeHeight, updateNodeDataTransient, commitToHistory };
-  }, [commitToHistory, id, nodeHeight, nodeWidth, updateNodeDataTransient]);
-
-  useEffect(() => {
-    const el = resizeHandleRef.current;
-    if (!el) return;
-
-    const onNativePointerDown = (e: PointerEvent) => {
-      e.preventDefault();
-      e.stopPropagation(); // 阻止冒泡到 React 根节点 → React Flow 收不到 → 不框选
-
-      const {
-        id: nid,
-        nodeWidth: nw,
-        nodeHeight: nh,
-        updateNodeDataTransient: updateTransient,
-        commitToHistory: commitHistory,
-      } = latestResizeRef.current;
-      isResizing.current = true;
-      resizeStart.current = { x: e.clientX, y: e.clientY, width: nw, height: nh };
-      resetProportional();
-
-      let historyCommitted = false;
-      let lastWidth = nw;
-      let lastHeight = nh;
-
-      const handlePointerMove = (ev: PointerEvent) => {
-        if (!isResizing.current) return;
-
-        let baseW = resizeStart.current.width;
-        let baseH = resizeStart.current.height;
-        let dx = ev.clientX - resizeStart.current.x;
-        let dy = ev.clientY - resizeStart.current.y;
-        let ratio = baseH > 0 ? baseW / baseH : 1;
-        let useProportional = false;
-
-        if (shiftHeld.current) {
-          if (lockRef.current.w === 0) {
-            lockProportional(baseW, baseH, resizeStart.current.x, resizeStart.current.y);
-          }
-          baseW = lockRef.current.w;
-          baseH = lockRef.current.h;
-          dx = ev.clientX - lockRef.current.x;
-          dy = ev.clientY - lockRef.current.y;
-          ratio = lockRef.current.ratio;
-          useProportional = true;
-        } else {
-          resetProportional();
-        }
-
-        const { width: newWidth, height: newHeight } = computeResize(
-          baseW, baseH, dx, dy, ratio, 200, 120, useProportional,
-        );
-
-        if (newWidth === lastWidth && newHeight === lastHeight) return;
-        if (!historyCommitted) {
-          commitHistory();
-          historyCommitted = true;
-        }
-        lastWidth = newWidth;
-        lastHeight = newHeight;
-        updateTransient(nid, { nodeWidth: newWidth, nodeHeight: newHeight } as Partial<BaseNodeData>);
-      };
-
-      const handlePointerUp = () => {
-        isResizing.current = false;
-        if (historyCommitted) commitHistory();
-        document.removeEventListener('pointermove', handlePointerMove);
-        document.removeEventListener('pointerup', handlePointerUp);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      };
-
-      document.body.style.cursor = 'nwse-resize';
-      document.body.style.userSelect = 'none';
-      document.addEventListener('pointermove', handlePointerMove);
-      document.addEventListener('pointerup', handlePointerUp);
-    };
-
-    el.addEventListener('pointerdown', onNativePointerDown, true);
-    return () => el.removeEventListener('pointerdown', onNativePointerDown, true);
-  }, [shiftHeld, lockRef, resetProportional, lockProportional]);
-
+  const handleResize = useCallback(
+    (newWidth: number, newHeight: number) => {
+      updateNodeDataTransient(id, { nodeWidth: newWidth, nodeHeight: newHeight } as Partial<BaseNodeData>);
+    },
+    [id, updateNodeDataTransient],
+  );
 
   // ── Toolbar actions ──
   const handleCopyToClipboardFn = useCallback(
@@ -402,9 +315,18 @@ function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; se
         </Handle>
       </div>
 
-      {/* Resize handle — outside .node to avoid overflow:hidden + border-radius clipping */}
+      {/* Resize handles — outside .node to avoid overflow:hidden + border-radius clipping */}
       {!isEditing && (
-        <div className="node-resize-handle nokey nodrag nopan" ref={resizeHandleRef} />
+        <ResizeHandle
+          nodeId={id}
+          currentWidth={nodeWidth}
+          currentHeight={nodeHeight}
+          minWidth={200}
+          minHeight={120}
+          onResizeStart={commitToHistory}
+          onResizeEnd={commitToHistory}
+          onResize={handleResize}
+        />
       )}
     </div>
 

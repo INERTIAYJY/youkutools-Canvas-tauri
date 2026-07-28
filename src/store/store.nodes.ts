@@ -168,6 +168,8 @@ export interface NodeSlice {
   updateNodeData: (nodeId: string, data: Partial<BaseNodeData>) => void;
   /** 高频手势内更新节点数据，不创建历史快照；调用方负责提交手势开始和结束状态。 */
   updateNodeDataTransient: (nodeId: string, data: Partial<BaseNodeData>) => void;
+  /** 高频手势内更新节点位置（左/上边缩放要反向移动节点），同样不写历史。 */
+  updateNodePositionTransient: (nodeId: string, position: { x: number; y: number }) => void;
   /** 原子批量更新节点数据（一次历史提交）。 */
   updateNodesDataBatch: (nodeIds: string[], data: Partial<BaseNodeData>) => void;
   linkNodeToCharacter: (
@@ -431,6 +433,14 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     set((state) => ({
       nodes: state.nodes.map((node) =>
         node.id === nodeId ? { ...node, data: { ...node.data, ...data } as BaseNodeData } : node
+      ),
+    }));
+  },
+
+  updateNodePositionTransient: (nodeId, position) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        node.id === nodeId ? { ...node, position } : node
       ),
     }));
   },

@@ -64,12 +64,13 @@ export function useProportionalLock() {
  *
  * @param baseW  基准宽度（自由模式=拖拽起点宽；比例模式=Shift按下瞬间的宽）
  * @param baseH  基准高度
- * @param dx     基准 X 方向偏移
- * @param dy     基准 Y 方向偏移
+ * @param dx     宽度方向的有效增量（已按把手方向取好符号）
+ * @param dy     高度方向的有效增量（已按把手方向取好符号）
  * @param ratio  宽高比
  * @param minW   最小宽度
  * @param minH   最小高度
- * @param useProportional  是否启用量保持
+ * @param useProportional  是否启用等比保持
+ * @param axis   驱动轴：'both' = 角把手；'x' = 左右边把手；'y' = 上下边把手
  */
 export function computeResize(
   baseW: number,
@@ -80,15 +81,17 @@ export function computeResize(
   minW: number,
   minH: number,
   useProportional: boolean,
+  axis: 'both' | 'x' | 'y' = 'both',
 ): { width: number; height: number } {
   if (!useProportional) {
     return {
-      width: Math.max(minW, baseW + dx),
-      height: Math.max(minH, baseH + dy),
+      width: axis === 'y' ? baseW : Math.max(minW, baseW + dx),
+      height: axis === 'x' ? baseH : Math.max(minH, baseH + dy),
     };
   }
 
   // 比例模式：以变化更大的轴向为主导，另一轴按比例计算。
+  // 边把手只有一个驱动轴，另一轴完全由比例推导。
   // 最小尺寸也换算到同一比例，避免触底时被 minW / minH 拉伸变形。
   const rawW = baseW + dx;
   const rawH = baseH + dy;
@@ -96,7 +99,8 @@ export function computeResize(
   let width: number;
   let height: number;
 
-  if (Math.abs(dx) >= Math.abs(dy)) {
+  const widthDrives = axis === 'x' || (axis === 'both' && Math.abs(dx) >= Math.abs(dy));
+  if (widthDrives) {
     width = Math.max(minW, minH * safeRatio, rawW);
     height = width / safeRatio;
   } else {

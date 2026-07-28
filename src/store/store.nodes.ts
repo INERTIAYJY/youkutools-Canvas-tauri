@@ -163,7 +163,7 @@ export interface NodeSlice {
     artifact: MediaGenerationResult,
     position?: { x: number; y: number },
   ) => string;
-  /** 在原位复制一个节点（新 id / displayId，不带边）—— 用于 Ctrl 拖拽复制 */
+  /** 在原位复制一个节点，并让拖出的副本继承入口边——用于 Ctrl 拖拽复制。 */
   duplicateNode: (nodeId: string) => void;
   updateNodeData: (nodeId: string, data: Partial<BaseNodeData>) => void;
   /** 高频手势内更新节点数据，不创建历史快照；调用方负责提交手势开始和结束状态。 */
@@ -540,8 +540,8 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     if (!src || src.type === 'group') return;
     state.commitToHistory();
 
-    // 身份对调：克隆留在原位，承接原节点的边与编号（= 不动的「原始」）；
-    // 被拖动的那个节点改成新编号、断开所有边（= 拖出去的干净副本）。
+    // 身份对调：克隆留在原位并承接原节点的边与编号；被拖动的节点
+    // 改成新编号，同时额外继承一份入口边。
     const cloneId = `node-${generateId()}`;
     const newDisplayId = getNextDisplayId(state.nodes);
 
@@ -560,13 +560,16 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
           : n,
       );
       nodes.push(clone);
-      // 原本指向被拖节点的边改指向克隆（边留在原位）
-      const edges = s.edges.map((e) =>
+      // 原边改连到原位克隆，拖出的节点仅继承入口边，避免复制输出影响下游。
+      const remappedEdges = s.edges.map((e) =>
         e.source === nodeId || e.target === nodeId
           ? { ...e, source: e.source === nodeId ? cloneId : e.source, target: e.target === nodeId ? cloneId : e.target }
           : e,
       );
-      return { nodes, edges };
+      const inheritedIncomingEdges = s.edges
+        .filter((edge) => edge.target === nodeId)
+        .map((edge) => ({ ...edge, id: `edge-${generateId()}` }));
+      return { nodes, edges: [...remappedEdges, ...inheritedIncomingEdges] };
     });
   },
 

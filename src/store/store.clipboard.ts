@@ -132,19 +132,20 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
     const childNodes = newNodes.filter((n) => n.type !== 'group');
     get().addNodesTransient([...groupNodes, ...childNodes]);
 
-    // Re-create edges between pasted nodes
+    // Re-create incoming edges for pasted nodes. Internal sources are remapped to
+    // their pasted copies, while external sources keep pointing to the new nodes.
     const { edges } = get();
-    clipboard.nodes.forEach((node) => {
-      const newSourceId = idMap.get(node.id);
-      if (!newSourceId) return;
-      edges
-        .filter((e) => e.source === node.id && idMap.has(e.target))
-        .forEach((e) => {
-          set((s) => ({
-            edges: [...s.edges, { ...e, id: `edge-${generateId()}`, source: newSourceId, target: idMap.get(e.target)! }],
-          }));
-      });
-    });
+    const newEdges = edges
+      .filter((edge) => idMap.has(edge.target))
+      .map((edge) => ({
+        ...edge,
+        id: `edge-${generateId()}`,
+        source: idMap.get(edge.source) ?? edge.source,
+        target: idMap.get(edge.target)!,
+      }));
+    if (newEdges.length > 0) {
+      set((state) => ({ edges: [...state.edges, ...newEdges] }));
+    }
 
     get().commitToHistory();
     get().showToast(`已粘贴 ${clipboard.nodes.length} 个节点`);

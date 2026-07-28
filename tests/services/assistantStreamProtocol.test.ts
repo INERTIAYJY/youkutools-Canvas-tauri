@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildAssistantSystemPrompt,
   resolveAssistantModel,
   streamAssistantReply,
 } from '../../src/services/ai/assistantStream';
 import { runAssistantPipeline } from '../../src/services/chat/assistantService';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { ModelExecutionProfile } from '../../src/types/aiTypes';
+import type { UserSkill } from '../../src/types';
 
 const configureAssistant = (executionProfile: ModelExecutionProfile) => {
   useAppStore.setState((state) => ({
@@ -149,5 +151,51 @@ describe('assistant custom protocol boundary', () => {
       nonStream: true,
       onEvent: vi.fn(),
     })).rejects.toThrow('OpenAI SSE');
+  });
+});
+
+describe('buildAssistantSystemPrompt 的 Skill 索引', () => {
+  const skill = (partial: Partial<UserSkill> = {}): UserSkill => ({
+    id: 'skill-1',
+    name: 'Canvas audit',
+    description: 'Audit the canvas',
+    fileName: 'SKILL.md',
+    content: 'Review the canvas.',
+    sourceType: 'file',
+    createdAt: 1,
+    ...partial,
+  });
+
+  it('没有可见 Skill 时不产生空的索引段', () => {
+    useAppStore.setState({ userSkills: [] });
+    const prompt = buildAssistantSystemPrompt({ agentTools: true });
+    expect(prompt).not.toContain('可用 Skill');
+  });
+
+  it('注入索引与不可信边界说明，并给出 skill_load 使用规则', () => {
+    useAppStore.setState({
+      userSkills: [skill({ manifest: { whenToUse: '发布工作流之前使用' } })],
+    });
+    const prompt = buildAssistantSystemPrompt({ agentTools: true });
+    expect(prompt).toContain('可用 Skill');
+    expect(prompt).toContain('skillId: skill-1');
+    expect(prompt).toContain('发布工作流之前使用');
+    expect(prompt).toContain('skill_load');
+    expect(prompt).toContain('不可信');
+    expect(prompt).toContain('主动加载不会改变本次任务的工具权限');
+  });
+
+  it('disable-model-invocation 的 Skill 名称不出现在系统提示词中', () => {
+    useAppStore.setState({
+      userSkills: [skill({ name: '内部审计流程', manifest: { disableModelInvocation: true } })],
+    });
+    const prompt = buildAssistantSystemPrompt({ agentTools: true });
+    expect(prompt).not.toContain('内部审计流程');
+    expect(prompt).not.toContain('可用 Skill');
+  });
+
+  it('旧命令分支不注入 Skill 索引', () => {
+    useAppStore.setState({ userSkills: [skill()] });
+    expect(buildAssistantSystemPrompt()).not.toContain('可用 Skill');
   });
 });

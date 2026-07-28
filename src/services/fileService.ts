@@ -899,6 +899,67 @@ export async function uploadSkillFile(source: SkillUploadSource = 'folder'): Pro
   }
 }
 
+const SKILL_RESOURCE_PATH_ERROR = 'Skill 资料路径无效，只能使用 Skill 内相对路径';
+
+/**
+ * 校验 Skill 附属资料的相对路径，返回规范化结果。
+ *
+ * 拒绝绝对路径、盘符、scheme、`~`、`.`/`..` 段、空段和非文本扩展名；
+ * 抛出的错误只含相对路径，不泄露任何本地绝对路径。
+ */
+export function assertSafeSkillRelativePath(relativePath: string): string {
+  const normalized = relativePath.trim().replace(/\\/g, '/');
+  if (!normalized) throw new Error(SKILL_RESOURCE_PATH_ERROR);
+  // 冒号同时挡掉 Windows 盘符和 file:// 等 scheme。
+  if (normalized.includes(':')) throw new Error(SKILL_RESOURCE_PATH_ERROR);
+  if (normalized.startsWith('/') || normalized.startsWith('~')) {
+    throw new Error(SKILL_RESOURCE_PATH_ERROR);
+  }
+
+  const segments = normalized.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    throw new Error(SKILL_RESOURCE_PATH_ERROR);
+  }
+  if (!isSkillTextFile(segments[segments.length - 1])) {
+    throw new Error('Skill 资料只支持 .md / .txt / .json');
+  }
+  return segments.join('/');
+}
+
+/** 列出某个文件夹型 Skill 自带的资料相对路径；非 Tauri、非目录或读取失败时返回空数组。 */
+export async function listSkillResourceFiles(
+  storagePath: string | undefined,
+  limit: number,
+): Promise<string[]> {
+  if (!isTauriEnv() || !storagePath || limit <= 0) return [];
+  try {
+    if (!(await exists(storagePath))) return [];
+    const files = await collectSkillFiles(storagePath);
+    return files.slice(0, limit).map((file) => file.relativePath);
+  } catch (error) {
+    console.warn('[Skill 资料] 列出附属文件失败:', error);
+    return [];
+  }
+}
+
+/** 按相对路径读取某个 Skill 目录内的 UTF-8 文本资料，路径必须仍落在该 Skill 子树内。 */
+export async function readSkillResourceFile(
+  storagePath: string,
+  relativePath: string,
+): Promise<string> {
+  const safePath = assertSafeSkillRelativePath(relativePath);
+  if (!isTauriEnv()) throw new Error('当前环境不支持读取 Skill 附属资料');
+
+  const root = storagePath.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!root) throw new Error(SKILL_RESOURCE_PATH_ERROR);
+  const target = `${root}/${safePath}`;
+  // 规范化后必须仍在该 Skill 自己的子树内。
+  if (!target.startsWith(`${root}/`)) throw new Error(SKILL_RESOURCE_PATH_ERROR);
+  if (!(await exists(target))) throw new Error(`Skill 资料不存在: ${safePath}`);
+
+  return decodeUtf8Text(await tauriReadFile(target));
+}
+
 /**
  * 从单个文件路径构建 AssetFileEntry（用于节点 filePath 引用）
  * 尝试 stat 获取文件大小，失败则返回 null

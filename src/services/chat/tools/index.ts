@@ -4,6 +4,7 @@
 import { registerCanvasAgentTools } from './canvasTools';
 import { registerMediaAgentTools } from './mediaTools';
 import { registerFileAgentTools } from './fileTools';
+import { registerSkillAgentTools } from './skillTools';
 import { registerMemoryAgentTools } from './memoryTools';
 import { registerPresetAgentTools } from './presetTools';
 import { registerExpertAgentTools } from './expertTools';
@@ -33,6 +34,7 @@ function getRegistrationFactories(): AgentToolRegistrationFactory[] {
     registerCanvasAgentTools,
     registerMediaAgentTools,
     registerFileAgentTools,
+    registerSkillAgentTools,
     registerMemoryAgentTools,
     registerPresetAgentTools,
     registerExpertAgentTools,

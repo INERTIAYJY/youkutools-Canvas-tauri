@@ -26,6 +26,9 @@ import {
 } from '../../types/memory';
 import { rankProjectMemories } from './memoryRetrieval';
 import { buildLearnedPromptContext } from './promptLearningService';
+import { estimateTokens } from './tokenEstimate';
+
+export { estimateTokens };
 
 // ============================================
 // 阈值
@@ -49,18 +52,6 @@ export class ContextBudgetError extends Error {
 // ============================================
 // token 估算
 // ============================================
-
-const CJK_PATTERN = /[⺀-鿿豈-﫿＀-￯]/g;
-
-/**
- * 估算文本 token 数。
- * CJK 字符按 1 token/字，其余按 4 字符/token。仅用于预算判断，非精确值。
- */
-export function estimateTokens(text: string): number {
-  if (!text) return 0;
-  const cjkCount = text.match(CJK_PATTERN)?.length ?? 0;
-  return Math.ceil(cjkCount + (text.length - cjkCount) / 4);
-}
 
 /** 每条消息的结构开销（role、分隔符等）估算值 */
 const PER_MESSAGE_OVERHEAD = 8;

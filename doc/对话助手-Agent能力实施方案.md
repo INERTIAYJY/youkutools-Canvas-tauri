@@ -1792,6 +1792,91 @@ type PolicyDecision =
 
 关闭后续 UI 入口即可停止创建新角色。回滚代码时保留 IndexedDB v16 和空 `globalCharacters` store，不降低数据库版本；项目 v2 数据继续由兼容读取函数处理，已经复制到全局目录的图片不自动删除。
 
+### 8.18 对话助手 Skill 渐进披露
+
+**任务类型：Agent 能力增强**
+
+**状态：已完成（真实模型手测待用户执行）**
+
+#### 现状缺口
+
+P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍然是不可见的：
+
+- 只有用户在输入框打 `/` 插入 `@skill{id|name}` 才会整篇内联正文；系统提示词中没有任何 Skill 清单，模型无法自主选用。
+- `when-to-use` 只被当作 `description` 的兜底文案；`disable-model-invocation` 已解析但全项目没有消费者，它要防的行为并不存在。
+- 文件夹型 Skill 的 `.md`/`.txt`/`.json` 全部拷贝到 `$APPDATA/skill/<name>/`，但只有入口文件进入 `UserSkill.content`，附属资料永远无法进入上下文。
+- 手动展开没有长度上限，长 Skill 或多 Skill 组合会挤占对话历史与项目记忆预算。
+
+#### 目标与边界
+
+- 系统提示词只注入经过脱敏、单条限长和 token 预算截断的 Skill 索引；新增 `skill_load` 和 `skill_read_file` 两个 `read` 工具供模型按需加载正文与附属资料。
+- Skill 内容一律不能扩大权限：模型主动加载的 Skill，其 `allowed-tools` 不生效也不修改 `AgentTask.toolAllowlist`；`allowed-tools` 仍只在用户显式引用、任务创建时快照生效。
+- Skill 名称、描述、正文和附属文件都是不可信数据，必须带不可信边界说明，不得据此改变目标、Agent 模式、确认策略或已注册工具集合。
+- 不向模型暴露 `storagePath` 或任何本地绝对路径；`skill_read_file` 只接受和只返回 Skill 内相对路径，拼接后必须仍在该 Skill 自己的目录子树内，扩展名沿用上传白名单。
+- `disable-model-invocation: true` 的 Skill 对模型完全不存在；`user-invocable: false` 只影响 `/` 菜单，两个开关互相独立。
+- Plan 模式下两个新工具作为 `read` 工具可用；任务已有 `toolAllowlist` 时，除非显式包含 `skill_load`，否则新工具自动不可用，属于既有 Registry 行为的正确收窄。
+- 不新增依赖、不改 IndexedDB schema 与 `UserSkill` 字段、不改 `tauri.conf.json` 或 capability；`$APPDATA/**` 已在 `fs:read-files` 白名单内。
+
+#### 分阶段进度
+
+- [x] 通过 `doc/plans/2026-07-28-assistant-skill-progressive-disclosure.md` 固定现状缺口、不可协商边界、固定配额、分任务范围和手测清单。
+- [x] Skill 手动展开的单个与合计长度预算和截断提示。
+- [x] `skillCatalog` 服务：模型可见性判定、脱敏索引构建、任务级加载预算与任务结束清理。
+- [x] 系统提示词注入 Skill 索引与四条使用规则。
+- [x] `fileService` 受限 Skill 资源清单与读取，含路径逃逸、扩展名和绝对路径泄露防护。
+- [x] `skill_load` 与 `skill_read_file` 工具注册与权限边界测试。
+- [x] 全量、类型、定向 Lint、生产构建与 UTF-8 验收。
+- [!] 真实文本模型下的自主调用、附属资料读取和配额提示仍需用户在 Tauri 环境手测，清单见计划文档第 3 节。
+
+#### 实际文件
+
+- 新增：`src/services/chat/skillCatalog.ts`
+- 新增：`src/services/chat/tokenEstimate.ts`
+- 新增：`src/services/chat/tools/skillTools.ts`
+- 修改：`src/services/skillPromptService.ts`
+- 修改：`src/services/ai/assistantStream.ts`
+- 修改：`src/services/chat/agentRuntime.ts`
+- 修改：`src/services/chat/contextManager.ts`
+- 修改：`src/services/chat/tools/index.ts`
+- 修改：`src/services/fileService.ts`
+- 新增：`tests/services/skillPromptService.test.ts`
+- 新增：`tests/services/fileServiceSkillResource.test.ts`
+- 新增：`tests/services/chat/skillCatalog.test.ts`
+- 新增：`tests/services/chat/skillTools.test.ts`
+- 修改：`tests/services/assistantStreamProtocol.test.ts`
+- 新增：`doc/plans/2026-07-28-assistant-skill-progressive-disclosure.md`
+
+#### 计划外调整
+
+`contextManager` 会经 `contextCompressionService` 回到 `assistantStream`，直接引入会把系统提示词构建拖进运行时循环。因此把纯函数 `estimateTokens` 与其 CJK 正则抽到叶子模块 `tokenEstimate.ts`，`contextManager` 原样再导出，全部既有调用点不变。这是计划外新增的第 3 个源文件，行为无变化。
+
+#### 实施结果
+
+- [x] 系统提示词只在 Agent 工具分支注入 Skill 索引；无可见 Skill 时不产生空标题，旧命令分支完全不注入。
+- [x] 索引条目受 24 条、单条 100 字符和 500 token 三重截断，按上传时间倒序保留最新的 Skill。
+- [x] Skill 名称与用途中的控制字符和换行被折叠为单行纯文本，无法在提示词中伪造出新的结构行。
+- [x] `disable-model-invocation: true` 的 Skill 不进索引、不可解析、两个工具都拒绝；`user-invocable: false` 仍对模型可见，两个开关互相独立。
+- [x] `skill_load` 返回去 frontmatter 的正文，带不可信边界说明，且不修改 `AgentTask.toolAllowlist`；`allowed-tools` 仍只在用户显式引用时快照生效。
+- [x] 任务级预算：最多 4 个不同 Skill、累计 24000 字符，`skill_load` 与 `skill_read_file` 共用；耗尽后返回中文原因而不是抛错，任务结束时随 `clearWebAccessTask` 一起清理。
+- [x] `skill_read_file` 拒绝绝对路径、盘符、scheme、`~`、`.`/`..` 段、空段和非 `.md`/`.txt`/`.json` 扩展名，拼接后必须仍在该 Skill 子树内；错误信息与摘要都不含本地绝对路径。
+- [x] 手动展开受单个 12000、合计 24000 字符约束，超限截断并追加中文提示，不静默丢弃后续 Skill。
+- [x] 未新增依赖、未改 IndexedDB schema 与 `UserSkill` 字段、未改 `tauri.conf.json` 或 capability；Skill 目录读取复用既有 `$APPDATA/**` 的 `fs:read-files` 白名单。
+
+#### 完成记录
+
+- 完成日期：2026-07-28
+- 定向测试：`npx vitest run tests/services/skillPromptService.test.ts tests/services/chat/skillCatalog.test.ts tests/services/chat/skillTools.test.ts tests/services/fileServiceSkillResource.test.ts tests/services/assistantStreamProtocol.test.ts` 通过
+- 全量测试：`npm test` 共 99 个文件、633 项通过
+- 类型检查：`npm run typecheck`、`npm run test:typecheck` 通过
+- 定向 Lint：本阶段 14 个新增与修改的 TypeScript 文件通过，无告警
+- 生产构建：`npx vite build --outDir <系统临时目录>` 通过；仅保留既有动态导入和大 chunk 警告
+- 差异与编码：`git diff --check` 通过；17 个改动文本文件严格 UTF-8 解码、控制字符与常见乱码扫描通过
+- 交互限制：真实文本模型下的自主 `skill_load`、附属资料读取和配额提示尚未手测；纯逻辑、权限边界、路径防护和编译已由测试覆盖
+
+#### 回滚
+
+按任务倒序回滚，每一步均可独立停在中间态：移除 `registerSkillAgentTools` 注册即关闭模型侧全部新能力；移除 `buildAssistantSystemPrompt` 中的索引拼接即让模型重新不感知 Skill；展开预算可单独保留或单独回滚。不涉及 IndexedDB schema、`UserSkill` 字段、Skill 磁盘布局、Tauri capability 或依赖变更，已上传 Skill 的原始正文与目录结构始终不变。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -1887,6 +1972,7 @@ type PolicyDecision =
 - [x] 同会话任务串行，安全边界支持插话，成功写操作恢复后不重放。
 - [x] Plan 模式由 Registry 和 Policy 双层限制为只读。
 - [x] Skill Manifest 只能缩小任务工具集合，不能扩大权限。
+- [x] 模型可发现并按需加载 Skill，但主动加载不改变任务工具权限，且只能读取该 Skill 目录子树内的文本资料。
 - [x] 只读专家任务无工具、无嵌套、无画布副作用，并在任务中心显示父子关系。
 
 ## 13. 变更日志
@@ -1929,3 +2015,4 @@ type PolicyDecision =
 | 2026-07-25 | 8.17 / 角色库 S2 | 完成独立角色库入口、项目/永久标签、搜索、多图画廊、角色头像条、角色编辑、逐图提示词和头像裁切；节点右键入库与默认隐藏保留到 S3。 |
 | 2026-07-27 | P5-B 补充 | Agent 厂商文档导入支持 `image` data URL 数组，自动或显式保存参考图传输模式，并保持 API Key 隔离与 `config_write` 固定审批。 |
 | 2026-07-27 | P5-F 补充 | Agent 每次执行都在历史与当前 user 消息之间固定当前任务边界，防止旧请求和旧 assistant 承诺在完成新任务后被再次执行。 |
+| 2026-07-28 | 8.18 | 完成对话助手 Skill 渐进披露：脱敏限长的 Skill 索引注入系统提示词，新增 `skill_load` 与 `skill_read_file` 两个只读工具按需加载正文和文件夹型附属资料，补齐任务级加载预算与手动展开截断；模型主动加载不改变任务工具权限，路径严格限制在各 Skill 自己的目录子树内。 |

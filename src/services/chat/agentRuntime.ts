@@ -17,6 +17,7 @@ import {
 import { buildAgentResumeContext } from './agentCheckpointService';
 import { clearProviderDocsTask } from './providerDocsGrantService';
 import { clearWebAccessTask } from './webAccessGrantService';
+import { clearSkillCatalogTask } from './skillCatalog';
 import {
   executeAgentRound,
   type AgentRoundCallbacks,
@@ -126,5 +127,6 @@ export async function runAgentLoop({
     closeAgentInterjectionBuffer(taskId);
     clearProviderDocsTask(taskId);
     clearWebAccessTask(taskId);
+    clearSkillCatalogTask(taskId);
   }
 }

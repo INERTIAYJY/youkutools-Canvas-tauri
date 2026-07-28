@@ -4,6 +4,34 @@ import { stripSkillFrontmatter } from './chat/skillManifest';
 
 export const SKILL_REF_REGEX = /@skill\{([^|}]+)\|([^}]+)\}/g;
 const TEMPLATE_PLACEHOLDER = '{{ 文章内容 }}';
+const TRUNCATION_NOTICE = '……（本 Skill 内容超出长度上限，已截断）';
+
+/**
+ * Skill 正文长度配额。手动展开与模型主动加载共用同一套上限，
+ * 避免长 Skill 或多 Skill 组合挤占对话历史与项目记忆预算。
+ */
+export const SKILL_CONTENT_LIMITS = {
+  /** 单个 Skill 正文上限。 */
+  singleSkillChars: 12000,
+  /** 一次手动展开的合计上限。 */
+  expansionTotalChars: 24000,
+  /** 剩余额度低于此值时，后续 Skill 只保留截断提示行。 */
+  minUsefulChars: 500,
+} as const;
+
+/** 超限时截断到 limit 并追加固定中文提示，不静默丢弃内容。 */
+export function truncateSkillContent(
+  content: string,
+  limit: number,
+): { content: string; truncated: boolean } {
+  const bounded = Math.max(0, limit);
+  if (content.length <= bounded) return { content, truncated: false };
+  const head = content.slice(0, bounded);
+  return {
+    content: head ? `${head}\n\n${TRUNCATION_NOTICE}` : TRUNCATION_NOTICE,
+    truncated: true,
+  };
+}
 
 function fillSkillTemplate(template: string, input: string): string {
   if (template.includes(TEMPLATE_PLACEHOLDER)) {
@@ -51,11 +79,17 @@ export function expandSkillReferences(prompt: string, userSkills: UserSkill[]): 
   const promptWithoutSkills = prompt.replace(SKILL_REF_REGEX, '').trim();
   const expandedParts: string[] = [];
 
+  let remaining = SKILL_CONTENT_LIMITS.expansionTotalChars;
   for (const ref of refs) {
     const skill = skillMap.get(ref[1]);
     if (!skill) continue;
+    const content = stripSkillFrontmatter(skill.content);
+    const limit = remaining < SKILL_CONTENT_LIMITS.minUsefulChars
+      ? 0
+      : Math.min(SKILL_CONTENT_LIMITS.singleSkillChars, remaining);
+    remaining -= Math.min(content.length, limit);
     expandedParts.push(fillSkillTemplate(
-      stripSkillFrontmatter(skill.content),
+      truncateSkillContent(content, limit).content,
       promptWithoutSkills,
     ));
   }

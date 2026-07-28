@@ -334,6 +334,7 @@ export interface AppConfig {
   canvasBackground?: CanvasBackground; // 画布背景主题
   interactionMode?: InteractionMode; // 画布交互模式，默认 'default'
   nodeToolbarMode?: NodeToolbarMode; // 节点顶部工具栏显示方式，默认 'icons'
+  canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）
   customBackgroundOpacity?: number; // 自定义背景透明度 0-1，默认 0.3

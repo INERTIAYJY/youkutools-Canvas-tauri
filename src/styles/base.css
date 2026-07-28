@@ -466,6 +466,9 @@ body {
 /* 主窗口玻璃外框：真实留出 5px 透明带，内外高光分别勾勒窗口与内容边缘。 */
 .app-shell {
   --app-shell-inset: 0px;
+  /* 内置聊天助手面板尺寸；操作记录浮层按此让位 */
+  --chat-panel-width: 400px;
+  --chat-panel-inset: 12px;
   --app-shell-content-radius: 16px;
   isolation: isolate;
 }

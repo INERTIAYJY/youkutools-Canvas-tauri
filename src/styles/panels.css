@@ -1397,9 +1397,9 @@
    Chat Panel — AI 对话助手悬浮面板（右侧）
    ============================================ */
 .chat-panel {
-  right: 12px;
-  bottom: 12px;
-  width: 400px;
+  right: var(--chat-panel-inset);
+  bottom: var(--chat-panel-inset);
+  width: var(--chat-panel-width);
   max-width: calc(100vw - 64px);
   height: calc(100vh - 40px);
   background:

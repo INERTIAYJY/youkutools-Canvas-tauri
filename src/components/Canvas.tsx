@@ -37,6 +37,7 @@ import CanvasToolbar from './canvas/CanvasToolbar';
 import RoundedMiniMapMask from './canvas/RoundedMiniMapMask';
 import MultiSelectToolbar from './canvas/MultiSelectToolbar';
 import CanvasEmptyState from './canvas/CanvasEmptyState';
+import HistoryTimelinePanel from './canvas/HistoryTimelinePanel';
 import SelectedNodeFlowEdge from './canvas/SelectedNodeFlowEdge';
 import { useConnectionDropMenu } from '../hooks/useConnectionDropMenu';
 import { useCanvasContextMenu } from '../hooks/useCanvasContextMenu';
@@ -1093,6 +1094,11 @@ function CanvasInner() {
           className="canvas-controls !bg-canvas-card !border-canvas-border !shadow-lg !rounded-xl overflow-hidden"
           showInteractive={false}
         />
+
+        {/* 操作记录 — 撤销 / 还原 + 可回溯的操作列表 */}
+        <Panel position="top-right" className="canvas-history-slot">
+          <HistoryTimelinePanel />
+        </Panel>
 
         {/* Toolbar */}
         <Panel position="bottom-right" className="flex items-center gap-2">

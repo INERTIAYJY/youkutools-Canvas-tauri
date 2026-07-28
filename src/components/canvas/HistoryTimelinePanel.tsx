@@ -1,0 +1,189 @@
+/**
+ * HistoryTimelinePanel 操作记录 — 画布右上角浮层。
+ *
+ * 顶部是撤销 / 重做按钮，下面按时间倒序列出可回溯的画布操作，并标出当前所在位置。
+ * 记录名称由前后快照的差异推断（见 utils/historyOperationLabels），不依赖调用点传参。
+ *
+ * 与「最近打开的项目」一致：平时只露一条小竖线，鼠标悬浮（或键盘聚焦）才滑出面板；
+ * 点图钉可锁定常显（写入配置，重启保留）。内置聊天助手展开时整体左移，让出助手宽度。
+ * 外层容器只有竖线那么大（16×48），面板用绝对定位挂在它上面 —— 这样收起时画布右上角
+ * 不会留下一块吃掉拖拽的透明死区；面板是容器的子节点，指针移到面板上仍算悬浮。
+ * 注意不能用「容器 pointer-events-none + 子元素 auto」的写法：Chrome 下 pointer-events
+ * 为 none 的元素不会进入 :hover，group-hover 永远不触发。
+ */
+import { useMemo, useState } from 'react';
+import { Icon } from '@iconify/react';
+import { useShallow } from 'zustand/react/shallow';
+import { useAppStore } from '../../store/useAppStore';
+import AnimatedButton from '../shared/AnimatedButton';
+import {
+  describeCanvasChange,
+  type HistoryOperationLabel,
+  type HistorySnapshotLike,
+} from '../../utils/historyOperationLabels';
+
+interface TimelineRow extends HistoryOperationLabel {
+  /** 该操作完成后所处的历史下标；撤销到此处即回到这一步之前 */
+  index: number;
+}
+
+export default function HistoryTimelinePanel() {
+  const [expanded, setExpanded] = useState(true);
+  const { history, historyIndex, undo, redo, pinned, chatOpen, chatPanelDetached } = useAppStore(
+    useShallow((state) => ({
+      history: state.history,
+      historyIndex: state.historyIndex,
+      undo: state.undo,
+      redo: state.redo,
+      pinned: !!state.config.canvasHistoryPinned,
+      chatOpen: state.chatOpen,
+      chatPanelDetached: state.chatPanelDetached,
+    })),
+  );
+  const updateConfig = useAppStore((state) => state.updateConfig);
+  const saveConfig = useAppStore((state) => state.saveConfig);
+  // 只有内置（未拆出独立窗口）的助手才会占住画布右侧
+  const chatDocked = chatOpen && !chatPanelDetached;
+
+  const togglePinned = () => {
+    updateConfig({ canvasHistoryPinned: !pinned });
+    void saveConfig({ silent: true });
+  };
+  // 最新一条操作的效果只存在于实时状态里（commitToHistory 记录的是改动前快照），
+  // 因此实时状态单独订阅、单独 memo，避免拖拽时重算整条列表。
+  const liveNodes = useAppStore((state) => state.nodes);
+  const liveEdges = useAppStore((state) => state.edges);
+  const liveGroups = useAppStore((state) => state.groups);
+
+  const canUndo = historyIndex >= 0 && history.length > 0;
+  const canRedo = historyIndex < history.length - 1;
+
+  const committedRows = useMemo<TimelineRow[]>(() => {
+    if (!expanded) return [];
+    const rows: TimelineRow[] = [];
+    for (let index = 1; index < history.length; index += 1) {
+      rows.push({
+        ...describeCanvasChange(
+          history[index - 1] as HistorySnapshotLike,
+          history[index] as HistorySnapshotLike,
+        ),
+        index: index - 1,
+      });
+    }
+    return rows;
+  }, [expanded, history]);
+
+  const latestRow = useMemo<TimelineRow | null>(() => {
+    if (!expanded || history.length === 0) return null;
+    // 只有停在最新位置时，实时状态才是「最后一次操作的结果」
+    if (historyIndex !== history.length - 1) return null;
+    const previous = history[history.length - 1] as HistorySnapshotLike;
+    const live: HistorySnapshotLike = {
+      nodes: liveNodes,
+      edges: liveEdges,
+      groups: liveGroups,
+    };
+    const label = describeCanvasChange(previous, live);
+    if (label.title === '画布修改') return null;
+    return { ...label, index: history.length - 1 };
+  }, [expanded, history, historyIndex, liveNodes, liveEdges, liveGroups]);
+
+  // 倒序展示：最近的操作在最上面，紧贴撤销 / 重做按钮
+  const orderedRows = useMemo(
+    () => [...committedRows, ...(latestRow ? [latestRow] : [])].reverse(),
+    [committedRows, latestRow],
+  );
+
+  return (
+    <div
+      className="canvas-history-wrap group/history relative h-12 w-4 select-none"
+      data-pinned={pinned ? 'true' : 'false'}
+      data-chat-open={chatDocked ? 'true' : 'false'}
+    >
+      <span
+        aria-hidden="true"
+        className="canvas-history-hint absolute right-0 top-0 flex h-12 w-4 items-center justify-end
+                   transition-opacity duration-150
+                   group-hover/history:opacity-0 group-focus-within/history:opacity-0"
+      >
+        <span className="h-8 w-0.5 rounded-full bg-canvas-text-muted/35" />
+      </span>
+      <div
+        className="canvas-history-panel glass-bevel glass-bevel--floating
+                   absolute right-0 top-0
+                   pointer-events-none translate-x-[calc(100%+0.75rem)] opacity-0
+                   transition-[transform,opacity] duration-200 ease-out will-change-transform
+                   motion-reduce:transition-opacity
+                   group-hover/history:pointer-events-auto group-hover/history:translate-x-0 group-hover/history:opacity-100
+                   group-focus-within/history:pointer-events-auto group-focus-within/history:translate-x-0 group-focus-within/history:opacity-100"
+      >
+      <div className="canvas-history-panel__head">
+        <AnimatedButton
+          type="button"
+          className="canvas-history-btn"
+          data-tooltip="撤销 (Ctrl+Z)"
+          aria-label="撤销"
+          disabled={!canUndo}
+          onClick={() => { void undo(); }}
+        >
+          <Icon icon="mdi:undo" width="15" />
+        </AnimatedButton>
+        <AnimatedButton
+          type="button"
+          className="canvas-history-btn"
+          data-tooltip="还原 (Ctrl+Shift+Z)"
+          aria-label="还原"
+          disabled={!canRedo}
+          onClick={() => { void redo(); }}
+        >
+          <Icon icon="mdi:redo" width="15" />
+        </AnimatedButton>
+        <span className="canvas-history-panel__title">操作记录</span>
+        <AnimatedButton
+          type="button"
+          className={`canvas-history-btn${pinned ? ' canvas-history-btn--on' : ' canvas-history-btn--ghost'}`}
+          aria-label={pinned ? '取消锁定常显' : '锁定常显'}
+          aria-pressed={pinned}
+          data-tooltip={pinned ? '取消锁定' : '锁定常显'}
+          onClick={togglePinned}
+        >
+          <Icon icon={pinned ? 'mdi:pin' : 'mdi:pin-outline'} width="14" />
+        </AnimatedButton>
+        <AnimatedButton
+          type="button"
+          className="canvas-history-btn canvas-history-btn--ghost"
+          aria-label={expanded ? '收起操作记录' : '展开操作记录'}
+          data-tooltip={expanded ? '收起' : '展开'}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <Icon icon={expanded ? 'mdi:chevron-up' : 'mdi:chevron-down'} width="15" />
+        </AnimatedButton>
+      </div>
+
+      {expanded && (
+        <ul className="canvas-history-list" aria-label="画布操作记录">
+          {orderedRows.length === 0 ? (
+            <li className="canvas-history-empty">暂无操作记录</li>
+          ) : (
+            orderedRows.map((row) => {
+              const isCurrent = row.index === historyIndex;
+              const isUndone = row.index > historyIndex;
+              return (
+                <li
+                  key={`${row.index}-${row.title}`}
+                  className={`canvas-history-item${isCurrent ? ' is-current' : ''}${isUndone ? ' is-undone' : ''}`}
+                >
+                  <Icon icon={row.icon} width="13" className="canvas-history-item__icon" />
+                  <span className="canvas-history-item__title">{row.title}</span>
+                  {isCurrent && <span className="canvas-history-item__badge">当前</span>}
+                </li>
+              );
+            })
+          )}
+        </ul>
+      )}
+      </div>
+    </div>
+  );
+}

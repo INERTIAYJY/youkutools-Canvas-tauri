@@ -280,3 +280,155 @@
 .gooey-btn-right .gooey-btn::before {
   padding: 19px 26px 19px 10px;
 }
+
+/* ── 操作记录浮层（画布右上角） ── */
+/* 下移到顶部 Header / Windows 窗口按钮那一条带以下，避免视觉上挤在一起 */
+.canvas-history-slot {
+  margin-top: 80px !important;
+}
+
+/* 内置聊天助手展开时整体左移，让出助手面板的宽度（数值跟随 .chat-panel） */
+.canvas-history-wrap {
+  transition: transform 0.28s ease-out;
+}
+
+.canvas-history-wrap[data-chat-open='true'] {
+  transform: translateX(calc(-1 * (var(--chat-panel-width) + var(--chat-panel-inset))));
+}
+
+/* 锁定常显：覆盖悬浮才展开的默认态 */
+.canvas-history-wrap[data-pinned='true'] .canvas-history-panel {
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.canvas-history-wrap[data-pinned='true'] .canvas-history-hint {
+  opacity: 0;
+}
+
+.canvas-history-btn--on {
+  background: color-mix(in srgb, var(--brand) 20%, transparent);
+  color: var(--brand);
+}
+
+.canvas-history-btn--on:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brand) 28%, transparent);
+  color: var(--brand);
+}
+
+.canvas-history-panel {
+  width: 208px;
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  background: var(--floating-surface-bg, color-mix(in srgb, var(--theme-surface) 60%, transparent));
+  backdrop-filter: blur(18px);
+  overflow: hidden;
+  font-size: 11px;
+}
+
+.canvas-history-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 6px;
+}
+
+.canvas-history-panel__title {
+  flex: 1;
+  min-width: 0;
+  padding-left: 4px;
+  color: var(--theme-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.canvas-history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--theme-text-secondary);
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
+}
+
+.canvas-history-btn:hover:not(:disabled) {
+  background: var(--theme-hover);
+  color: var(--theme-text);
+}
+
+.canvas-history-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.canvas-history-btn--ghost {
+  color: var(--theme-text-muted);
+}
+
+.canvas-history-list {
+  max-height: 220px;
+  margin: 0;
+  padding: 0 4px 4px;
+  overflow-y: auto;
+  list-style: none;
+  border-top: 1px solid color-mix(in srgb, var(--theme-border) 60%, transparent);
+}
+
+.canvas-history-empty {
+  padding: 10px 8px;
+  color: var(--theme-text-muted);
+  text-align: center;
+}
+
+.canvas-history-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: 7px;
+  color: var(--theme-text-secondary);
+  line-height: 16px;
+}
+
+.canvas-history-item__icon {
+  flex-shrink: 0;
+  color: var(--theme-text-muted);
+}
+
+.canvas-history-item__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-history-item.is-current {
+  background: color-mix(in srgb, var(--brand) 14%, transparent);
+  color: var(--theme-text);
+}
+
+.canvas-history-item.is-current .canvas-history-item__icon {
+  color: var(--brand);
+}
+
+/* 已被撤销、可重做的操作 */
+.canvas-history-item.is-undone {
+  opacity: 0.45;
+}
+
+.canvas-history-item__badge {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+  color: var(--brand);
+  font-size: 9px;
+}

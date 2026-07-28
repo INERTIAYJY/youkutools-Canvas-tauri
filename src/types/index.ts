@@ -81,6 +81,8 @@ export interface BaseNodeData {
   displayId?: number;         // 节点展示编号（#10, #11, ...）
   role?: 'generator' | 'source'; // 节点角色：生成器（有AI对话框） vs 源节点（上传/粘贴内容）
   fileName?: string;           // 上传的文件名（源节点使用）
+  /** 素材来源方式：粘贴 / 拖入。这类节点渲染为透明背景（无卡片底），只显示图片本身 */
+  sourceOrigin?: 'paste' | 'drop';
   prompt?: string;           // 提示词
   output?: string;            // 输出结果（文本/URL等）
   status?: 'idle' | 'loading' | 'success' | 'error';

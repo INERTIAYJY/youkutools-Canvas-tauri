@@ -21,7 +21,7 @@ export interface ClipboardSlice {
   pasteNodes: (position: { x: number; y: number }) => void;
   pasteExternalContent: (position: { x: number; y: number }) => Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  pasteExternalFromDataTransfer: (dt: any, position: { x: number; y: number }, maxItems?: number, actionName?: string) => Promise<void>;
+  pasteExternalFromDataTransfer: (dt: any, position: { x: number; y: number }, maxItems?: number, actionName?: string, origin?: 'paste' | 'drop') => Promise<void>;
 }
 
 // ---- helper: 粘贴媒体落盘 ----
@@ -272,7 +272,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
             type: 'ai-image',
             position: nodePos,
             data: {
-              label: '粘贴图像', type: 'ai-image', role: 'source', imageUrl: media.url,
+              label: '粘贴图像', type: 'ai-image', role: 'source', sourceOrigin: 'paste', imageUrl: media.url,
               filePath: media.filePath, fileName: media.fileName, status: 'success', ...dims,
             },
           };
@@ -340,7 +340,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
                 type: 'ai-image',
                 position: nodePos,
                 data: {
-                  label: '粘贴图像', type: 'ai-image', role: 'source', imageUrl: media.url,
+                  label: '粘贴图像', type: 'ai-image', role: 'source', sourceOrigin: 'paste', imageUrl: media.url,
                   filePath: media.filePath, fileName: media.fileName, status: 'success', ...dims,
                 },
               };
@@ -383,7 +383,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
                     type: 'ai-image',
                     position: uriNodePos,
                     data: {
-                      label: srcName, type: 'ai-image', role: 'source', imageUrl: media.url,
+                      label: srcName, type: 'ai-image', role: 'source', sourceOrigin: 'paste', imageUrl: media.url,
                       filePath: media.filePath, fileName: media.fileName, status: 'success', ...dims,
                     },
                   };
@@ -454,7 +454,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
     }
   },
 
-  pasteExternalFromDataTransfer: async (dt, position, maxItems = 10, actionName = '粘贴') => {
+  pasteExternalFromDataTransfer: async (dt, position, maxItems = 10, actionName = '粘贴', origin = 'paste') => {
     if (!dt) return;
     const currentProjectId = get().currentProjectId;
     const projectId = currentProjectId && currentProjectId !== 'default' ? currentProjectId : null;
@@ -485,7 +485,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
         type: 'ai-image',
         position: { x: position.x + offsets[idx].x, y: position.y + offsets[idx].y },
         data: {
-          label: '粘贴图像', type: 'ai-image', role: 'source', imageUrl: media.url,
+          label: '粘贴图像', type: 'ai-image', role: 'source', sourceOrigin: origin, imageUrl: media.url,
           filePath: media.filePath, fileName: media.fileName, status: 'success', ...dims,
         },
       };
@@ -551,7 +551,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
             id: nodeId,
             type: 'ai-image',
             position: { x: position.x + off.x, y: position.y + off.y },
-            data: { label: fileName, type: 'ai-image', role: 'source', status: 'loading', nodeWidth: 280, nodeHeight: 160 },
+            data: { label: fileName, type: 'ai-image', role: 'source', sourceOrigin: origin, status: 'loading', nodeWidth: 280, nodeHeight: 160 },
           };
           addPastedNode(newNode);
           pastedCount++;

@@ -633,6 +633,14 @@
   padding: 2px;
 }
 
+/* 粘贴 / 拖入的图片节点：去掉毛玻璃卡片底，只留图片本身（透明 PNG 可透出画布）。
+   加载中仍保留卡片底，否则 spinner 会悬空在画布上。 */
+.image-node.frameless:not(.loading) {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .video-node {
   position: relative;
   overflow: visible !important;

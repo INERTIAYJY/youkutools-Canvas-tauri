@@ -192,6 +192,8 @@ describe('APIMart video polling', () => {
       resolveReferenceInput: async () => ({
         prompt: 'prompt',
         imageUrls: ['asset://localhost/reference.png'],
+        videoUrls: ['https://cdn.example/reference.mp4'],
+        audioUrls: ['https://cdn.example/reference.mp3'],
       }),
     })).rejects.toThrow('APIMart 视频生成失败: 参考图片无法访问');
 
@@ -204,11 +206,27 @@ describe('APIMart video polling', () => {
     expect(submitBody).toMatchObject({
       model: 'doubao-seedance-2.0-fast',
       image_urls: ['https://upload.example/reference.png'],
+      video_urls: ['https://cdn.example/reference.mp4'],
+      audio_urls: ['https://cdn.example/reference.mp3'],
       resolution: '720p',
       size: '16:9',
       duration: 10,
       generate_audio: true,
     });
+  });
+
+  it('validates Seedance 2.0 video and audio reference limits', () => {
+    expect(() => buildApimartSeedanceRequest(
+      'doubao-seedance-2.0',
+      'prompt',
+      { videoUrls: ['1.mp4', '2.mp4', '3.mp4', '4.mp4'] },
+    )).toThrow('最多支持 3 个参考视频');
+
+    expect(() => buildApimartSeedanceRequest(
+      'doubao-seedance-2.0-mini',
+      'prompt',
+      { audioUrls: ['1.mp3', '2.mp3', '3.mp3', '4.mp3'] },
+    )).toThrow('最多支持 3 个参考音频');
   });
 });
 

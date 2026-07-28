@@ -87,7 +87,7 @@ const HTTP_METHOD_RE = /\bmethod\s*:\s*(["'])(GET|POST)\1/i;
 const CALLBACK_KEY_RE = /(?:callback|webhook|notify|notification)[_-]?(?:url|uri)|(?:callback|webhook)/i;
 const AUTH_VALUE_RE = /(?:bearer\s+)?(?:<[^>]+>|\{\{[^}]+}}|\$\{[^}]+}|YOUR_[A-Z_]+|sk-[A-Za-z0-9_-]+|[A-Za-z0-9_-]{20,})/i;
 const API_PREFIX_SEGMENT_RE = /^(?:api|openai|anthropic|v\d+(?:\.\d+)?)$/i;
-const TASK_CONTAINER_RE = /^(?:tasks?|jobs?|predictions?|requests?|operations?)$/i;
+const TASK_CONTAINER_RE = /^(?:tasks?|jobs?|predictions?|requests?|operations?|videos?)$/i;
 const URL_VALUE_RE = /^(?:https?:\/\/|data:[^;,]+;base64,)/i;
 const GENERATE_CONTENT_PATH_RE = /\/models\/[^/]+:generateContent\/?$/i;
 
@@ -667,6 +667,17 @@ function mapBodyValue(
   if (['voice', 'audiovoice'].includes(normalized)) return '{{audioVoice}}';
   if (['format', 'audioformat', 'responseformat'].includes(normalized) && category === 'audio') return '{{audioFormat}}';
   if (['speed', 'audiospeed'].includes(normalized) && category === 'audio') return '{{audioSpeed}}';
+  if (category === 'video') {
+    if (['firstimage', 'firstframeimage'].includes(normalized)) return '{{firstImage}}';
+    if (['lastimage', 'lastframeimage'].includes(normalized)) return '{{lastImage}}';
+    if (['referenceimageurls', 'referenceimages'].includes(normalized)) return '{{referenceImageUrls}}';
+    if (normalized === 'videourls') return '{{videoUrls}}';
+    if (normalized === 'referencevideourl') return '{{referenceVideoUrl}}';
+    if (['referencevideourls', 'referencevideos'].includes(normalized)) return '{{referenceVideoUrls}}';
+    if (normalized === 'audiourls') return '{{audioUrls}}';
+    if (normalized === 'audiourl') return '{{audioUrl}}';
+    if (['referenceaudios', 'referenceaudiourls'].includes(normalized)) return '{{referenceAudioUrls}}';
+  }
   if (['imageurls', 'images', 'referenceimages'].includes(normalized)) return '{{imageUrls}}';
   if (['image', 'inputimage', 'referenceimage', 'firstframeimage'].includes(normalized)) {
     return Array.isArray(value) ? '{{imageUrls}}' : '{{imageUrls.0}}';
@@ -946,17 +957,19 @@ function withTaskPlaceholder(
   pollUrl: URL,
   query: Record<string, ProtocolJsonValue>,
   warnings: string[],
+  taskIdPath: string,
 ): { path: string; query: Record<string, ProtocolJsonValue>; preferredKey?: string } {
+  const taskPlaceholder = `{{submit.${taskIdPath}}}`;
   const nextQuery = { ...query };
   const queryKey = Object.keys(nextQuery).find((key) => /(?:task|job|video|request|prediction).*id|^id$/i.test(key));
   if (queryKey) {
-    nextQuery[queryKey] = '{{submit.task_id}}';
+    nextQuery[queryKey] = taskPlaceholder;
     return { path: pollUrl.pathname, query: nextQuery, preferredKey: normalizedKey(queryKey) };
   }
   const segments = pollUrl.pathname.split('/').filter(Boolean);
   const containerIndex = segments.findIndex((segment) => TASK_CONTAINER_RE.test(segment));
   if (containerIndex >= 0 && segments[containerIndex + 1]) {
-    segments[containerIndex + 1] = '{{submit.task_id}}';
+    segments[containerIndex + 1] = taskPlaceholder;
     return { path: `/${segments.join('/')}`, query: nextQuery, preferredKey: 'taskid' };
   }
   warnings.push('未能确定轮询请求中的任务 ID 位置，请手动检查轮询 path 或 query。');
@@ -1091,7 +1104,7 @@ export function analyzeModelProtocolDocument(
     const pollUrl = urls[1];
     const pollQuery = { ...pollRequest.query };
     if (auth.type === 'query' && auth.name) delete pollQuery[auth.name];
-    const templated = withTaskPlaceholder(pollUrl, pollQuery, warnings);
+    const templated = withTaskPlaceholder(pollUrl, pollQuery, warnings, taskIdPath);
     const statusPath = inferStatusPath(pollResponse);
     const urlPath = inferUrlPath(pollResponse);
     const textPath = category === 'text' ? inferTextPath(pollResponse) : undefined;

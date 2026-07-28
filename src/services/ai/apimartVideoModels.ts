@@ -17,6 +17,8 @@ export interface ApimartSeedanceCapability {
   audioField?: ApimartSeedanceAudioField;
   defaultAudio?: boolean;
   maxImageReferences: number;
+  maxVideoReferences?: number;
+  maxAudioReferences?: number;
 }
 
 export interface ApimartSeedanceRequestParams {
@@ -25,6 +27,8 @@ export interface ApimartSeedanceRequestParams {
   duration?: number;
   generateAudio?: boolean;
   imageUrls?: string[];
+  videoUrls?: string[];
+  audioUrls?: string[];
 }
 
 const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
@@ -83,6 +87,8 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     audioField: 'generate_audio',
     defaultAudio: true,
     maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
   },
   'doubao-seedance-2.0-fast': {
     modelId: 'doubao-seedance-2.0-fast',
@@ -97,6 +103,8 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     audioField: 'generate_audio',
     defaultAudio: true,
     maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
   },
   'doubao-seedance-2.0-mini': {
     modelId: 'doubao-seedance-2.0-mini',
@@ -111,6 +119,8 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     audioField: 'generate_audio',
     defaultAudio: true,
     maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
   },
 };
 
@@ -137,8 +147,20 @@ export function buildApimartSeedanceRequest(
   if (!capability) return null;
 
   const imageUrls = (params.imageUrls ?? []).filter(Boolean);
+  const videoUrls = (params.videoUrls ?? []).filter(Boolean);
+  const audioUrls = (params.audioUrls ?? []).filter(Boolean);
   if (imageUrls.length > capability.maxImageReferences) {
     throw new Error(`APIMart ${model} 最多支持 ${capability.maxImageReferences} 张参考图`);
+  }
+  if (videoUrls.length > (capability.maxVideoReferences ?? 0)) {
+    throw new Error(capability.maxVideoReferences
+      ? `APIMart ${model} 最多支持 ${capability.maxVideoReferences} 个参考视频`
+      : `APIMart ${model} 不支持参考视频`);
+  }
+  if (audioUrls.length > (capability.maxAudioReferences ?? 0)) {
+    throw new Error(capability.maxAudioReferences
+      ? `APIMart ${model} 最多支持 ${capability.maxAudioReferences} 个参考音频`
+      : `APIMart ${model} 不支持参考音频`);
   }
 
   const resolution = params.resolution && capability.resolutions.includes(params.resolution)
@@ -163,6 +185,8 @@ export function buildApimartSeedanceRequest(
     [capability.ratioField]: ratio,
   };
   if (imageUrls.length > 0) body.image_urls = imageUrls;
+  if (videoUrls.length > 0) body.video_urls = videoUrls;
+  if (audioUrls.length > 0) body.audio_urls = audioUrls;
   if (capability.audioField) {
     body[capability.audioField] = params.generateAudio ?? capability.defaultAudio ?? false;
   }

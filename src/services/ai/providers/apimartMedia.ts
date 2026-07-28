@@ -188,7 +188,12 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       return generateApimartVideo(apiKey, baseUrl, modelName, prompt, params.nodeId, {}, signal);
     }
     const referenceInput = await resolveReferenceInput();
-    if (!referenceInput.prompt.trim() && referenceInput.imageUrls.length === 0) {
+    if (
+      !referenceInput.prompt.trim()
+      && referenceInput.imageUrls.length === 0
+      && referenceInput.videoUrls.length === 0
+      && referenceInput.audioUrls.length === 0
+    ) {
       throw new Error('提示词不能为空');
     }
     const imageUrls = await resolveImageUrlArray(referenceInput.imageUrls, 'apimart');
@@ -199,6 +204,8 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       duration: params.seedanceDuration,
       generateAudio: params.generateAudio,
       imageUrls,
+      videoUrls: referenceInput.videoUrls,
+      audioUrls: referenceInput.audioUrls,
     }, signal);
   },
 

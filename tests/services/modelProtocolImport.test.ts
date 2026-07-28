@@ -108,7 +108,7 @@ fetch(url, { method: "GET", headers });`,
         mode: 'async',
         response: { taskIdPath: 'data.0.task_id' },
         poll: {
-          path: '/tasks/{{submit.task_id}}',
+          path: '/tasks/{{submit.data.0.task_id}}',
           response: {
             statusPath: 'data.status',
             result: { urlPath: 'data.result.images.*.url.*' },
@@ -207,7 +207,7 @@ fetch(url, { method: "GET", headers });
         },
         poll: {
           method: 'GET',
-          path: '/tasks/{{submit.task_id}}',
+          path: '/tasks/{{submit.data.0.task_id}}',
           query: { language: 'zh' },
           response: {
             statusPath: 'data.status',
@@ -274,7 +274,7 @@ curl --location --request GET 'https://apihub.agnes-ai.com/agnesapi?video_id=<VI
         response: { taskIdPath: 'video_id' },
         poll: {
           path: '/agnesapi',
-          query: { video_id: '{{submit.task_id}}' },
+          query: { video_id: '{{submit.video_id}}' },
           response: {
             statusPath: 'status',
             result: { urlPath: 'url' },
@@ -284,6 +284,80 @@ curl --location --request GET 'https://apihub.agnes-ai.com/agnesapi?video_id=<VI
         },
       },
     });
+    expect(JSON.stringify(result)).not.toContain('YOUR_API_KEY');
+  });
+
+  it('imports an OpenAI-style async video protocol with reference media fields', () => {
+    const result = analyzeModelProtocolExamples({
+      submitRequest: `
+curl -X POST https://www.geeknow.top/v1/videos \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "doubao-seedance-2-0-260128",
+    "prompt": "A cinematic product video",
+    "duration": 6,
+    "aspect_ratio": "16:9",
+    "resolution": "720P",
+    "generate_audio": true,
+    "first_image": "https://cdn.example/first.png",
+    "last_image": "https://cdn.example/last.png",
+    "reference_image_urls": ["https://cdn.example/product.png"],
+    "video_urls": ["https://cdn.example/source.mp4"],
+    "reference_video_urls": ["https://cdn.example/motion.mp4"],
+    "audio_urls": ["https://cdn.example/source.mp3"],
+    "reference_audio_urls": ["https://cdn.example/music.mp3"]
+  }'`,
+      submitResponse: `{
+        "id": "task_video_1",
+        "object": "video",
+        "status": "queued"
+      }`,
+      pollRequest: `
+curl -X GET https://www.geeknow.top/v1/videos/task_video_1 \\
+  -H "Authorization: Bearer YOUR_API_KEY"`,
+      pollResponse: `{
+        "id": "task_video_1",
+        "status": "completed",
+        "video_url": "https://cdn.example/result.mp4",
+        "error": null
+      }`,
+    });
+
+    expect(result.warnings).toEqual([]);
+    expect(result).toMatchObject({
+      modelId: 'doubao-seedance-2-0-260128',
+      category: 'video',
+      protocol: {
+        mode: 'async',
+        submit: {
+          body: {
+            model: '{{model}}',
+            prompt: '{{prompt}}',
+            duration: '{{duration}}',
+            aspect_ratio: '{{aspectRatio}}',
+            resolution: '{{seedanceResolution}}',
+            generate_audio: '{{generateAudio}}',
+            first_image: '{{firstImage}}',
+            last_image: '{{lastImage}}',
+            reference_image_urls: '{{referenceImageUrls}}',
+            video_urls: '{{videoUrls}}',
+            reference_video_urls: '{{referenceVideoUrls}}',
+            audio_urls: '{{audioUrls}}',
+            reference_audio_urls: '{{referenceAudioUrls}}',
+          },
+        },
+        response: { taskIdPath: 'id' },
+        poll: {
+          response: {
+            statusPath: 'status',
+            result: { urlPath: 'video_url' },
+            errorPath: 'error',
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(result.protocol?.poll)).toContain('{{submit.id}}');
     expect(JSON.stringify(result)).not.toContain('YOUR_API_KEY');
   });
 

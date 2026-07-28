@@ -3,10 +3,11 @@
  * - Seedance 模型 → Seedance 参数（分辨率、宽高比、时长、有声视频）
  * - 其他 provider → ComfyUI / RunningHub 参数（像素分辨率、帧率、帧数）
  */
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
 import { VIDEO_ASPECT_RATIOS } from '../../../services/aiDimensions';
+import { useAppStore } from '../../../store/useAppStore';
 
 interface VideoParamSelectorProps {
   provider?: string;
@@ -56,6 +57,10 @@ const COMBO_FPS_OPTIONS = [
   { value: 30, label: '30帧' },
 ];
 
+function protocolUsesVariable(source: string, ...variables: string[]): boolean {
+  return variables.some((variable) => new RegExp(`{{\\s*${variable}\\s*}}`).test(source));
+}
+
 export default function VideoParamSelector({
   provider, selectedModel,
   videoResolution = 832, videoFps = 24, videoFrames = 77,
@@ -70,11 +75,34 @@ export default function VideoParamSelector({
   const [editingFrames, setEditingFrames] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const framesInputRef = useRef<HTMLInputElement>(null);
+  const generalModels = useAppStore((state) => state.config.generalModels);
+
+  const customProtocolSource = useMemo(() => {
+    if (provider !== 'general' || !selectedModel) return '';
+    const generalModelId = selectedModel.replace(/^general\//, '');
+    const generalModel = generalModels?.find((model) => model.id === generalModelId);
+    return generalModel?.executionProfile?.protocol
+      ? JSON.stringify(generalModel.executionProfile.protocol)
+      : '';
+  }, [generalModels, provider, selectedModel]);
 
   const apimartCapability = provider === 'apimart'
     ? getApimartSeedanceCapability(selectedModel)
     : undefined;
-  const isSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
+  const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
+  const customUsesDuration = protocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
+  const customUsesResolution = protocolUsesVariable(
+    customProtocolSource,
+    'resolution',
+    'seedanceResolution',
+  );
+  const customUsesRatio = protocolUsesVariable(customProtocolSource, 'aspectRatio', 'seedanceRatio');
+  const customUsesAudio = protocolUsesVariable(customProtocolSource, 'generateAudio');
+  const usesDurationControls = isNativeSeedance
+    || customUsesDuration
+    || customUsesResolution
+    || customUsesRatio
+    || customUsesAudio;
   // 非 Seedance（ComfyUI / RunningHub / 自建模型）：比例换算成 width/height 后注入请求
   const genericRatios = VIDEO_ASPECT_RATIOS.map((value) => ({ value, label: value }));
   const showGenericRatio = showSeedanceRatio;
@@ -87,7 +115,9 @@ export default function VideoParamSelector({
     : SEEDANCE_RESOLUTIONS;
   const seedanceRatios = apimartCapability
     ? apimartCapability.ratios.map((value) => ({ value, label: value }))
-    : SEEDANCE_RATIOS;
+    : isNativeSeedance
+      ? SEEDANCE_RATIOS
+      : genericRatios;
   const minDuration = apimartCapability?.minDuration ?? 2;
   const maxDuration = apimartCapability?.maxDuration ?? 15;
   const displayedDuration = Math.min(maxDuration, Math.max(minDuration, seedanceDuration));
@@ -100,7 +130,10 @@ export default function VideoParamSelector({
   const durationTicks = Array.from(new Set([minDuration, 5, 8, 10, 12, maxDuration]))
     .filter((value) => value >= minDuration && value <= maxDuration)
     .sort((a, b) => a - b);
-  const supportsAudio = isVolcengine || Boolean(apimartCapability?.audioField);
+  const showResolutionControl = isNativeSeedance || customUsesResolution;
+  const showRatioControl = showSeedanceRatio && (isNativeSeedance || customUsesRatio);
+  const showDurationControl = isNativeSeedance || customUsesDuration;
+  const supportsAudio = isVolcengine || Boolean(apimartCapability?.audioField) || customUsesAudio;
   const displayedGenerateAudio = generateAudio ?? apimartCapability?.defaultAudio ?? false;
 
   useEffect(() => {
@@ -161,10 +194,16 @@ export default function VideoParamSelector({
   );
 
   // ── 触发按钮文案 ──
-  const triggerLabel = isSeedance
-    ? showSeedanceRatio
-      ? `时长${displayedDuration}s · ${displayedRatio}`
-      : `${displayedResolution} · 时长${displayedDuration}s`
+  const durationLabelParts = [
+    showResolutionControl ? displayedResolution : '',
+    showDurationControl ? `时长${displayedDuration}s` : '',
+    showRatioControl ? displayedRatio : '',
+  ].filter(Boolean);
+  const durationTriggerLabel = durationLabelParts.length > 0
+    ? durationLabelParts.join(' · ')
+    : displayedGenerateAudio ? '有声视频' : '无声视频';
+  const triggerLabel = usesDurationControls
+    ? durationTriggerLabel
     : showGenericRatio
       ? `${genericRatio} · ${videoResolution} · 帧数${videoFrames}`
       : `帧数${videoFrames} · 帧率${videoFps} · 分辨率${videoResolution}`;
@@ -186,10 +225,10 @@ export default function VideoParamSelector({
 
         {open && (
           <div className="img-ratio-popup ui-schema-popup ui-schema-video-params-popup" style={{ display: 'block' }}>
-            {isSeedance ? (
+            {usesDurationControls ? (
               <>
                 {/* Seedance 分辨率 */}
-                <div className="img-rp-quality-area mb-2">
+                {showResolutionControl && <div className="img-rp-quality-area mb-2">
                   <div className="img-rp-section-label">
                     分辨率
                     <span className="rh-tip" data-tooltip="分辨率越高细节越清晰，但生成耗时会明显增加。4K 仅 Seedance 2.0 支持。">!</span>
@@ -206,9 +245,9 @@ export default function VideoParamSelector({
                       </AnimatedButton>
                     ))}
                   </div>
-                </div>
+                </div>}
 
-                {showSeedanceRatio && (
+                {showRatioControl && (
                   <div className="img-rp-quality-area mb-2">
                     <div className="img-rp-section-label">
                       宽高比
@@ -230,8 +269,9 @@ export default function VideoParamSelector({
                 )}
 
                 {/* Seedance 时长 */}
+                {(showDurationControl || (showGenerateAudio && supportsAudio)) && (
                 <div className="rh-v5-meta-panel">
-                  <div className="rh-vram-adv-row">
+                  {showDurationControl && <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label">
                       <span>生成时长（秒）</span>
                       <span className="rh-tip" data-tooltip={`整数秒，范围 ${minDuration}-${maxDuration}。值越大视频越长、耗时越高。`}>!</span>
@@ -261,7 +301,7 @@ export default function VideoParamSelector({
                         ))}
                       </div>
                     </div>
-                  </div>
+                  </div>}
 
 
                   {/* 有声视频开关 — 仅支持音频参数的 Seedance 模型显示 */}
@@ -286,6 +326,7 @@ export default function VideoParamSelector({
                   </div>
                   )}
                 </div>
+                )}
               </>
             ) : (
               <>

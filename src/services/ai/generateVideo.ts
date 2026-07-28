@@ -12,7 +12,7 @@ import { resolvePromptWithImageRefs } from './promptResolver';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
-import { normalizeFrames8n1 } from './modelProtocol';
+import { normalizeFrames8n1, type ModelProtocolVariables } from './modelProtocol';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
 import { mapVideoDimensions } from '../aiDimensions';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from '../pollManager';
@@ -21,27 +21,46 @@ import type { BaseNodeData } from '../../types';
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
 
-/** 收集连入当前视频节点的参考图（含 3D 导演台截图） */
-function collectConnectedReferenceImages(nodeId: string | undefined): string[] {
-  if (!nodeId) return [];
+interface VideoReferenceInput {
+  prompt: string;
+  imageUrls: string[];
+  videoUrls: string[];
+  audioUrls: string[];
+}
+
+interface ConnectedReferenceMedia {
+  imageUrls: string[];
+  videoUrls: string[];
+  audioUrls: string[];
+}
+
+function pushUniqueUrl(urls: string[], seen: Set<string>, value: unknown): void {
+  if (typeof value !== 'string') return;
+  const url = value.trim();
+  if (!url || seen.has(url)) return;
+  seen.add(url);
+  urls.push(url);
+}
+
+/** 收集连入当前视频节点的参考媒体（图片包含 3D 导演台截图）。 */
+function collectConnectedReferenceMedia(nodeId: string | undefined): ConnectedReferenceMedia {
+  const empty = { imageUrls: [], videoUrls: [], audioUrls: [] };
+  if (!nodeId) return empty;
   const { nodes, edges } = useAppStore.getState();
   const sourceIds = edges.filter((e) => e.target === nodeId).map((e) => e.source);
-  const urls: string[] = [];
-  const seen = new Set<string>();
-  const push = (url: unknown) => {
-    if (typeof url !== 'string') return;
-    const u = url.trim();
-    if (!u || seen.has(u)) return;
-    seen.add(u);
-    urls.push(u);
-  };
+  const media: ConnectedReferenceMedia = { imageUrls: [], videoUrls: [], audioUrls: [] };
+  const imageSeen = new Set<string>();
+  const videoSeen = new Set<string>();
+  const audioSeen = new Set<string>();
   for (const sid of sourceIds) {
     const node = nodes.find((n) => n.id === sid);
     if (!node) continue;
     const data = node.data as BaseNodeData;
     const type = (data.type as string) || node.type || '';
     if (type === 'ai-director') {
-      for (const u of collectDirectorImageUrls(data)) push(u);
+      for (const url of collectDirectorImageUrls(data)) {
+        pushUniqueUrl(media.imageUrls, imageSeen, url);
+      }
       continue;
     }
     if (
@@ -50,10 +69,85 @@ function collectConnectedReferenceImages(nodeId: string | undefined): string[] {
       || type === 'ai-panorama'
       || type === 'ai-storyboard'
     ) {
-      push(data.imageUrl || data.thumbnailUrl);
+      pushUniqueUrl(media.imageUrls, imageSeen, data.imageUrl || data.thumbnailUrl);
+      continue;
     }
+    pushUniqueUrl(media.videoUrls, videoSeen, data.videoUrl);
+    pushUniqueUrl(media.audioUrls, audioSeen, data.audioUrl);
   }
+  return media;
+}
+
+function mergeUniqueUrls(primary: string[], additional: string[]): string[] {
+  const urls = [...primary];
+  const seen = new Set(urls);
+  for (const url of additional) pushUniqueUrl(urls, seen, url);
   return urls;
+}
+
+async function resolveVideoReferenceInput(
+  rawPrompt: string,
+  nodeId: string | undefined,
+): Promise<VideoReferenceInput> {
+  const promptInput = await resolvePromptWithImageRefs(rawPrompt);
+  const connected = collectConnectedReferenceMedia(nodeId);
+  return {
+    prompt: promptInput.prompt,
+    imageUrls: mergeUniqueUrls(promptInput.imageUrls, connected.imageUrls),
+    videoUrls: connected.videoUrls,
+    audioUrls: connected.audioUrls,
+  };
+}
+
+export function buildGeneralVideoProtocolVariables(
+  modelId: string,
+  params: AIVideoGenParams,
+  referenceInput: VideoReferenceInput,
+): ModelProtocolVariables {
+  const frames = params.videoFrames ?? 121;
+  const videoResolution = params.videoResolution ?? 1152;
+  const aspectRatio = params.seedanceRatio ?? '16:9';
+  const { width, height } = mapVideoDimensions(videoResolution, aspectRatio);
+  const fps = params.videoFps ?? 24;
+  const duration = params.seedanceDuration ?? 5;
+  const seedanceResolution = params.seedanceResolution ?? '720p';
+  const firstImage = referenceInput.imageUrls[0];
+  const lastImage = referenceInput.imageUrls.length > 1
+    ? referenceInput.imageUrls[referenceInput.imageUrls.length - 1]
+    : undefined;
+
+  return {
+    model: modelId,
+    prompt: referenceInput.prompt,
+    size: `${width}x${height}`,
+    aspectRatio,
+    width,
+    height,
+    frames,
+    frames8n1: normalizeFrames8n1(frames),
+    fps,
+    duration,
+    resolution: seedanceResolution,
+    videoResolution,
+    videoFrames: frames,
+    videoFps: fps,
+    seedanceResolution,
+    seedanceRatio: aspectRatio,
+    seedanceDuration: duration,
+    generateAudio: params.generateAudio ?? false,
+    imageUrls: referenceInput.imageUrls,
+    firstImage,
+    lastImage,
+    referenceImageUrls: referenceInput.imageUrls,
+    videoUrls: referenceInput.videoUrls,
+    referenceVideoUrl: referenceInput.videoUrls[0],
+    referenceVideoUrls: referenceInput.videoUrls,
+    audioUrls: referenceInput.audioUrls,
+    audioUrl: referenceInput.audioUrls[0],
+    referenceAudioUrls: referenceInput.audioUrls,
+    n: 1,
+    batchCount: 1,
+  };
 }
 
 export async function generateVideo(
@@ -76,12 +170,7 @@ export async function generateVideo(
       params,
       prompt,
       resolveReferenceInput: async () => {
-        const referenceInput = await resolvePromptWithImageRefs(rawPrompt);
-        const imageUrls = [...referenceInput.imageUrls];
-        for (const url of collectConnectedReferenceImages(params.nodeId)) {
-          if (!imageUrls.includes(url)) imageUrls.push(url);
-        }
-        return { prompt: referenceInput.prompt, imageUrls };
+        return resolveVideoReferenceInput(rawPrompt, params.nodeId);
       },
       signal,
     });
@@ -89,17 +178,13 @@ export async function generateVideo(
 
   // 即梦视频：无参考图 → text2video；有参考图 → image2video
   if (provider === 'dreamina') {
-    const { prompt: dreaminaPrompt, imageUrls } = await resolvePromptWithImageRefs(rawPrompt);
-    const connected = collectConnectedReferenceImages(params.nodeId);
-    const merged = [...imageUrls];
-    for (const u of connected) {
-      if (!merged.includes(u)) merged.push(u);
-    }
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    const dreaminaPrompt = referenceInput.prompt;
     if (!dreaminaPrompt.trim()) throw new Error('提示词不能为空');
     return generateDreaminaVideo({
       prompt: dreaminaPrompt,
       model,
-      imageUrls: merged,
+      imageUrls: referenceInput.imageUrls,
       nodeId: params.nodeId,
       ratio: params.seedanceRatio,
       duration: params.seedanceDuration,
@@ -120,11 +205,9 @@ export async function generateVideo(
       throw new Error('未配置 火山方舟 的服务地址\n请在「设置 → API Key」中添加');
     }
     const modelName = extractModelName(model, provider);
-    const { prompt: resolvedPrompt, imageUrls } = await resolvePromptWithImageRefs(rawPrompt);
-    const mergedImageUrls = [...imageUrls];
-    for (const url of collectConnectedReferenceImages(params.nodeId)) {
-      if (!mergedImageUrls.includes(url)) mergedImageUrls.push(url);
-    }
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    const resolvedPrompt = referenceInput.prompt;
+    const mergedImageUrls = referenceInput.imageUrls;
     if (!resolvedPrompt.trim() && mergedImageUrls.length === 0) {
       throw new Error('提示词不能为空');
     }
@@ -148,40 +231,20 @@ export async function generateVideo(
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
     if (gm.executionProfile) {
-      const frames = params.videoFrames ?? 121;
-      // 尺寸按所选比例换算，不再固定高度 768
-      const { width, height } = mapVideoDimensions(
-        params.videoResolution ?? 1152,
-        params.seedanceRatio ?? '16:9',
+      const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+      const remoteImageUrls = await resolveImageUrlArray(
+        referenceInput.imageUrls,
+        connection.providerConfigId,
       );
-      const fps = params.videoFps ?? 24;
-      const duration = params.seedanceDuration ?? 10;
       const urls = await runConfiguredModelProtocol({
         model: gm,
         category: 'video',
         nodeId: params.nodeId,
         signal,
-        variables: {
-          model: gm.modelId,
-          prompt,
-          size: `${width}x${height}`,
-          aspectRatio: params.seedanceRatio,
-          width,
-          height,
-          frames,
-          frames8n1: normalizeFrames8n1(frames),
-          fps,
-          duration,
-          videoResolution: params.videoResolution,
-          videoFrames: params.videoFrames,
-          videoFps: params.videoFps,
-          seedanceResolution: params.seedanceResolution,
-          seedanceRatio: params.seedanceRatio,
-          seedanceDuration: params.seedanceDuration,
-          generateAudio: params.generateAudio,
-          n: 1,
-          batchCount: 1,
-        },
+        variables: buildGeneralVideoProtocolVariables(gm.modelId, params, {
+          ...referenceInput,
+          imageUrls: remoteImageUrls,
+        }),
       });
       const url = urls[0];
       if (!url) throw new Error('视频生成完成但未返回结果');

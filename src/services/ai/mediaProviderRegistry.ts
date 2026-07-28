@@ -26,6 +26,8 @@ export interface VideoProviderRequest {
   resolveReferenceInput: () => Promise<{
     prompt: string;
     imageUrls: string[];
+    videoUrls: string[];
+    audioUrls: string[];
   }>;
   signal?: AbortSignal;
 }

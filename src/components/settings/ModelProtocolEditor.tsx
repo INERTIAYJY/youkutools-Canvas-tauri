@@ -81,9 +81,12 @@ const CATEGORY_VARIABLES: Record<GeneralModelCategory, string[]> = {
   text: ['model', 'prompt', 'messages', 'stream', 'tools', 'toolChoice'],
   image: ['model', 'prompt', 'imageSize', 'aspectRatio', 'size', 'width', 'height', 'n', 'batchCount', 'imageUrls'],
   video: [
-    'model', 'prompt', 'size', 'width', 'height', 'frames', 'frames8n1', 'fps', 'duration',
+    'model', 'prompt', 'size', 'aspectRatio', 'resolution', 'width', 'height', 'frames',
+    'frames8n1', 'fps', 'duration',
     'videoResolution', 'videoFrames', 'videoFps', 'seedanceResolution', 'seedanceRatio',
-    'seedanceDuration', 'generateAudio',
+    'seedanceDuration', 'generateAudio', 'imageUrls', 'firstImage',
+    'lastImage', 'referenceImageUrls', 'videoUrls', 'referenceVideoUrl', 'referenceVideoUrls',
+    'audioUrls', 'audioUrl', 'referenceAudioUrls',
   ],
   audio: [
     'model', 'prompt', 'audioVoice', 'audioFormat', 'audioSpeed', 'duration',
@@ -133,6 +136,16 @@ function createPreviewVariables(model: ProviderModelSelection): ModelProtocolVar
       seedanceRatio: '16:9',
       seedanceDuration: 5,
       generateAudio: false,
+      imageUrls: ['https://cdn.example/reference-first.png', 'https://cdn.example/reference-last.png'],
+      firstImage: 'https://cdn.example/reference-first.png',
+      lastImage: 'https://cdn.example/reference-last.png',
+      referenceImageUrls: ['https://cdn.example/reference-first.png'],
+      videoUrls: ['https://cdn.example/reference.mp4'],
+      referenceVideoUrl: 'https://cdn.example/reference.mp4',
+      referenceVideoUrls: ['https://cdn.example/reference.mp4'],
+      audioUrls: ['https://cdn.example/reference.mp3'],
+      audioUrl: 'https://cdn.example/reference.mp3',
+      referenceAudioUrls: ['https://cdn.example/reference.mp3'],
     };
   }
   return {
@@ -151,9 +164,11 @@ function createResponseSample(): ProtocolJsonValue {
   return {
     task_id: 'task_example',
     video_id: 'video_example',
+    id: 'task_example',
     status: 'completed',
     progress: 100,
     url: 'https://cdn.example/result.mp4',
+    video_url: 'https://cdn.example/result.mp4',
     data: [{
       url: 'https://cdn.example/result.png',
       b64_json: 'aGVsbG8=',
@@ -426,6 +441,12 @@ export default function ModelProtocolEditor({
         body.ratio = '{{seedanceRatio}}';
         body.duration = '{{seedanceDuration}}';
       }
+      if (mapping === 'seedance-openai') {
+        body.resolution = '{{seedanceResolution}}';
+        body.aspect_ratio = '{{aspectRatio}}';
+        body.duration = '{{duration}}';
+        body.generate_audio = '{{generateAudio}}';
+      }
       draft.submit.body = body;
     });
     setFormRevision((current) => current + 1);
@@ -450,6 +471,30 @@ export default function ModelProtocolEditor({
     updateProtocol((draft) => {
       const body = isJsonObject(draft.submit.body) ? draft.submit.body : {};
       body[fieldName] = '{{imageUrls}}';
+      draft.submit.bodyEncoding = 'json';
+      draft.submit.body = body;
+    });
+    setFormRevision((current) => current + 1);
+  };
+
+  const insertVideoReferenceField = (mapping: string) => {
+    const mappings: Record<string, string> = {
+      image_urls: 'imageUrls',
+      first_image: 'firstImage',
+      last_image: 'lastImage',
+      reference_image_urls: 'referenceImageUrls',
+      video_urls: 'videoUrls',
+      reference_video_url: 'referenceVideoUrl',
+      reference_video_urls: 'referenceVideoUrls',
+      audio_urls: 'audioUrls',
+      audio_url: 'audioUrl',
+      reference_audio_urls: 'referenceAudioUrls',
+    };
+    const variable = mappings[mapping];
+    if (!variable) return;
+    updateProtocol((draft) => {
+      const body = isJsonObject(draft.submit.body) ? draft.submit.body : {};
+      body[mapping] = `{{${variable}}}`;
       draft.submit.bodyEncoding = 'json';
       draft.submit.body = body;
     });
@@ -722,6 +767,7 @@ export default function ModelProtocolEditor({
                     {model.category === 'image' ? <option value="image-semantic">resolution + aspect_ratio</option> : null}
                     {model.category === 'video' ? <option value="video-standard">resolution + num_frames + frame_rate</option> : null}
                     {model.category === 'video' ? <option value="seedance">Seedance resolution + ratio + duration</option> : null}
+                    {model.category === 'video' ? <option value="seedance-openai">Seedance resolution + aspect_ratio + duration</option> : null}
                   </select>
                 </label>
               ) : null}
@@ -743,6 +789,24 @@ export default function ModelProtocolEditor({
                     <option value="">选择字段</option>
                     <option value="image">image: imageUrls</option>
                     <option value="image_urls">image_urls: imageUrls</option>
+                  </select>
+                </label>
+              ) : null}
+              {model.category === 'video' && protocol.submit.bodyEncoding !== 'multipart' ? (
+                <label className="provider-protocol-field">
+                  <span>插入参考素材字段</span>
+                  <select value="" onChange={(event) => insertVideoReferenceField(event.target.value)}>
+                    <option value="">选择字段</option>
+                    <option value="image_urls">image_urls</option>
+                    <option value="first_image">first_image</option>
+                    <option value="last_image">last_image</option>
+                    <option value="reference_image_urls">reference_image_urls</option>
+                    <option value="video_urls">video_urls</option>
+                    <option value="reference_video_url">reference_video_url</option>
+                    <option value="reference_video_urls">reference_video_urls</option>
+                    <option value="audio_urls">audio_urls</option>
+                    <option value="audio_url">audio_url</option>
+                    <option value="reference_audio_urls">reference_audio_urls</option>
                   </select>
                 </label>
               ) : null}

@@ -89,7 +89,9 @@ async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOver
 ): Promise<T> {
   let filePath = data.relativePath ? joinPath(projectDir, data.relativePath) : data.filePath;
   if (filePath && !(await exists(filePath).catch(() => false))) filePath = undefined;
-  if (!filePath && data.assetId) filePath = await resolveIndexedAssetPath(data.assetId) ?? undefined;
+  if (!filePath && data.assetId) {
+    filePath = await resolveIndexedAssetPath(data.assetId).catch(() => null) ?? undefined;
+  }
   if (!filePath) return data;
 
   const identity = await identifyAsset(filePath, {
@@ -97,8 +99,18 @@ async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOver
     rootPath: projectDir,
     projectId,
     source: 'project',
-  });
-  const restored = { ...data, assetId: identity.assetId, relativePath: identity.relativePath, filePath } as T;
+  }).catch(() => null);
+  if (!identity) {
+    console.warn('[项目加载] 单个资产索引恢复失败，已保留节点', {
+      projectId,
+      assetId: data.assetId,
+    });
+  }
+  const restored = {
+    ...data,
+    ...(identity ? { assetId: identity.assetId, relativePath: identity.relativePath } : {}),
+    filePath,
+  } as T;
   const previousDiskName = (data.relativePath ?? data.filePath)?.split(/[/\\]/).pop();
   const currentDiskName = filePath.split(/[/\\]/).pop();
   if ('label' in restored && previousDiskName && currentDiskName && previousDiskName !== currentDiskName) {
@@ -121,24 +133,58 @@ async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOver
   return restored;
 }
 
-async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<unknown> {
-  if (!Array.isArray(nodes)) return nodes;
-  const projectDir = await getProjectDataDir(projectId);
-  if (!projectDir) return nodes;
-  // 先刷新项目目录索引（含分组子文件夹），使外部重命名/移动后的文件能在按 assetId 恢复节点前被重新识别。
-  const diskFiles = await walkDirectoryFiles(projectDir);
-  await Promise.all(diskFiles.map((file) => identifyAsset(file.path, {
+async function restoreAssetReferenceSafely<T extends BaseNodeData | StoryboardCellOverride>(
+  data: T,
+  projectId: string,
+  projectDir: string,
+): Promise<T> {
+  try {
+    return await restoreAssetReference(data, projectId, projectDir);
+  } catch {
+    console.warn('[项目加载] 单个资产展示信息恢复失败，已保留节点', {
+      projectId,
+      assetId: data.assetId,
+    });
+    return data;
+  }
+}
+
+async function refreshProjectAssetIndex(projectId: string, projectDir: string): Promise<void> {
+  let diskFiles: Awaited<ReturnType<typeof walkDirectoryFiles>>;
+  try {
+    diskFiles = await walkDirectoryFiles(projectDir);
+  } catch {
+    console.warn('[项目加载] 资产目录扫描失败，已继续加载画布', { projectId });
+    return;
+  }
+
+  const results = await Promise.allSettled(diskFiles.map((file) => identifyAsset(file.path, {
     rootPath: projectDir,
     projectId,
     source: 'project',
     size: file.size,
   })));
+  const failedCount = results.filter((result) => result.status === 'rejected').length;
+  if (failedCount > 0) {
+    console.warn('[项目加载] 部分资产索引刷新失败，已继续加载画布', {
+      projectId,
+      failedCount,
+    });
+  }
+}
+
+async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<unknown> {
+  if (!Array.isArray(nodes)) return nodes;
+  const projectDir = await getProjectDataDir(projectId);
+  if (!projectDir) return nodes;
+  // 先刷新项目目录索引（含分组子文件夹），使外部重命名/移动后的文件能在按 assetId 恢复节点前被重新识别。
+  await refreshProjectAssetIndex(projectId, projectDir);
   return Promise.all((nodes as PersistedNodeLike[]).map(async (node) => {
     if (!node.data) return node;
-    let data = await restoreAssetReference(node.data, projectId, projectDir);
+    let data = await restoreAssetReferenceSafely(node.data, projectId, projectDir);
     if (Array.isArray(data.storyboardOverrides)) {
       const storyboardOverrides = await Promise.all(data.storyboardOverrides.map(async (override) => (
-        override ? restoreAssetReference(override, projectId, projectDir) : null
+        override ? restoreAssetReferenceSafely(override, projectId, projectDir) : null
       )));
       data = { ...data, storyboardOverrides };
     }
@@ -180,7 +226,7 @@ export async function loadProjectsList(): Promise<ProjectSaveData[]> {
     return await getAllProjects();
   } catch (error) {
     console.error('Load projects list failed:', error);
-    return [];
+    throw error;
   }
 }
 
@@ -189,9 +235,15 @@ export async function loadProjectData(id: string): Promise<ProjectSaveData | nul
   try {
     const record = await getProjectById(id);
     if (!record) return null;
+    let nodes = record.nodes;
+    try {
+      nodes = await restoreProjectNodes(record.nodes, id);
+    } catch {
+      console.warn('[项目加载] 资产恢复未完成，已使用原始画布数据', { projectId: id });
+    }
     return {
       ...record,
-      nodes: await restoreProjectNodes(record.nodes, id),
+      nodes,
       dramaAssets: normalizeDramaAssetLibrary(
         (record as ProjectSaveData).dramaAssets,
       ),

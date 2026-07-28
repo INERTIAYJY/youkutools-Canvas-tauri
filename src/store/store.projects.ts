@@ -14,9 +14,28 @@ import { captureCurrentCanvasSnapshot } from '../services/projectSnapshotService
 import { stopProjectAgentTasks } from '../services/chat/agentTaskControl';
 import { cancelProjectCanvasDerivations } from '../services/canvasDerivationGuard';
 import { clearConversationFileGrants } from '../services/chat/fileGrantService';
+import {
+  getLastActiveProjectId,
+  setLastActiveProjectId,
+} from '../services/indexedDbService';
+
+type ProjectLoadStatus = 'loading' | 'ready' | 'error';
+let activeProjectMetadataWrite: Promise<void> = Promise.resolve();
 
 function getProjectGroups(data: { groups?: unknown } | null | undefined): NodeGroup[] {
   return Array.isArray(data?.groups) ? (data.groups as NodeGroup[]) : [];
+}
+
+function hasProjectCanvasData(data: ProjectSaveData | null): data is ProjectSaveData {
+  return Boolean(data && Array.isArray(data.nodes) && Array.isArray(data.edges));
+}
+
+function rememberActiveProject(projectId: string): void {
+  activeProjectMetadataWrite = activeProjectMetadataWrite
+    .then(() => setLastActiveProjectId(projectId))
+    .catch(() => {
+      console.warn('[项目] 最近打开项目记录失败', { projectId });
+    });
 }
 
 function replacePathPrefix(path: string | undefined, oldDir: string, newDir: string): string | undefined {
@@ -163,7 +182,7 @@ function enqueueProjectSave(record: ProjectSaveData): Promise<string> {
 function createCurrentProjectSaveRecord(state: AppState): ProjectSaveData | null {
   const projectId = state.currentProjectId;
   const project = state.projects.find((item) => item.id === projectId);
-  if (!projectId || !project) return null;
+  if (!projectId || !project || state.projectLoadStatus !== 'ready') return null;
 
   return {
     id: projectId,
@@ -184,6 +203,7 @@ export interface ProjectSlice {
   projects: CanvasProject[];
   currentProjectId: string | null;
   projectName: string;
+  projectLoadStatus: ProjectLoadStatus;
   _autoSaveFailedNotified?: boolean;
   setProjectName: (name: string) => void;
   renameProject: (id: string, name: string) => Promise<boolean>;
@@ -251,6 +271,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   ],
   currentProjectId: 'default',
   projectName: '新项目',
+  projectLoadStatus: 'loading',
 
   setProjectName: (name) => {
     const state = get();
@@ -270,6 +291,10 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     const initialState = get();
     const project = initialState.projects.find((item) => item.id === id);
     if (!project) return false;
+    if (initialState.currentProjectId === id && initialState.projectLoadStatus !== 'ready') {
+      get().showToast('项目尚未成功加载，已阻止重命名保存', 'error');
+      return false;
+    }
 
     const persistedProject = initialState.currentProjectId === id
       ? null
@@ -364,6 +389,10 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     const projectId = state.currentProjectId;
     const previousProject = state.projects.find((project) => project.id === projectId);
     if (!projectId || !previousProject) return false;
+    if (state.projectLoadStatus !== 'ready') {
+      get().showToast('项目尚未成功加载，已阻止设置保存', 'error');
+      return false;
+    }
 
     const nextProject: CanvasProject = {
       ...previousProject,
@@ -398,7 +427,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     const state = get();
     const projectId = state.currentProjectId;
     const project = state.projects.find((item) => item.id === projectId);
-    if (!projectId || !project) return undefined;
+    if (!projectId || !project || state.projectLoadStatus !== 'ready') return undefined;
 
     if (state.nodes.length === 0) {
       lastCapturedCanvasState = null;
@@ -495,6 +524,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       projects: [...state.projects, project],
       currentProjectId: project.id,
       projectName: project.name,
+      projectLoadStatus: 'ready',
       nodes: [],
       edges: [],
       groups: [],
@@ -502,6 +532,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     }));
     fileService.saveProject({ ...project, nodes: [], edges: [], groups: [], dramaAssets: { version: 2, characters: [], scenes: [], props: [] } }).catch((e) => console.warn('[创建项目] 保存失败:', e));
     fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
+    rememberActiveProject(id);
     setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
   },
 
@@ -551,6 +582,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         projects: [{ id: newId, name: '默认画布', createdAt: now, updatedAt: now, dataFolder: newFolder }],
         currentProjectId: newId,
         projectName: '默认画布',
+        projectLoadStatus: 'ready',
         nodes: [],
         edges: [],
         history: [],
@@ -561,6 +593,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       });
       fileService.saveProject({ id: newId, name: '默认画布', createdAt: now, updatedAt: now, dataFolder: newFolder, nodes: [], edges: [] }).catch((e) => console.warn('[重建默认项目] 保存失败:', e));
       fileService.ensureProjectDataDir(newId).catch((e) => console.warn('[重建默认项目] 数据目录初始化失败:', e));
+      rememberActiveProject(newId);
       setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
     } else {
       const nextId = isCurrent ? filtered[0]?.id ?? null : state.currentProjectId;
@@ -569,6 +602,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       set({
         projects: filtered,
         currentProjectId: nextId,
+        ...(isCurrent ? { projectLoadStatus: nextId ? 'loading' as const : 'ready' as const } : {}),
         ...retainedChatState,
         ...(isCurrent
           ? {
@@ -584,25 +618,26 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       });
 
       if (isCurrent && nextId) {
-        try {
-          const data = await fileService.loadProjectData(nextId);
-          const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
-          if (data?.nodes) {
-            set({
-              nodes: data.nodes as Node<BaseNodeData>[],
-              edges: (data.edges as Edge[]) || [],
-              groups: getProjectGroups(data),
-              dramaAssets: data.dramaAssets ?? emptyDramaAssetLibrary(),
-            });
-          } else {
-            set({ dramaAssets: emptyDramaAssetLibrary() });
-          }
+        const data = await fileService.loadProjectData(nextId);
+        const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
+        if (hasProjectCanvasData(data)) {
+          set({
+            nodes: data.nodes as Node<BaseNodeData>[],
+            edges: data.edges as Edge[],
+            groups: getProjectGroups(data),
+            dramaAssets: data.dramaAssets ?? emptyDramaAssetLibrary(),
+            projectLoadStatus: 'ready',
+          });
+          rememberActiveProject(nextId);
           setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
           get().loadConversationsForProject(nextId).catch((e) => console.warn('[删除项目] 加载会话失败:', e));
           get().repairInterruptedForProject(nextId).catch((e) => console.warn('[删除项目] 修复中断消息失败:', e));
           get().loadAgentTasksForProject(nextId).catch((e) => console.warn('[删除项目] 加载 Agent 任务失败:', e));
           get().loadProjectMemoriesForProject(nextId).catch((e) => console.warn('[删除项目] 加载项目记忆失败:', e));
-        } catch { /* Keep empty canvas */ }
+        } else {
+          set({ projectLoadStatus: 'error', dramaAssets: emptyDramaAssetLibrary() });
+          get().showToast('替代项目加载失败，已阻止空画布覆盖原数据', 'error');
+        }
       }
     }
 
@@ -619,12 +654,14 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     if (currentProjectId && currentProjectId !== id) {
       cancelProjectCanvasDerivations(currentProjectId);
     }
-    const snapshotRecord = createCurrentProjectSaveRecord(get());
-    void get().captureCurrentProjectSnapshot({
-      allowProjectChange: true,
-      persistRecord: snapshotRecord,
-    });
-    await get().saveCurrentProject();
+    if (get().projectLoadStatus === 'ready') {
+      const snapshotRecord = createCurrentProjectSaveRecord(get());
+      void get().captureCurrentProjectSnapshot({
+        allowProjectChange: true,
+        persistRecord: snapshotRecord,
+      });
+      await get().saveCurrentProject();
+    }
     if (!isLatestSwitch()) return;
     // Clean up undo-trash dirs from the old project before switching
     await fileService.flushUndoTrashDirs();
@@ -639,29 +676,22 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     if (!isLatestSwitch()) return;
     const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
     if (!isLatestSwitch()) return;
-    if (data?.nodes) {
-      set({
-        currentProjectId: id,
-        projectName: project.name,
-        nodes: data.nodes as Node<BaseNodeData>[],
-        edges: (data.edges as Edge[]) || [],
-        groups: getProjectGroups(data),
-        history: [],
-        historyIndex: -1,
-        dramaAssets: data.dramaAssets ?? emptyDramaAssetLibrary(),
-      });
-    } else {
-      set({
-        currentProjectId: id,
-        projectName: project.name,
-        groups: [],
-        nodes: [],
-        edges: [],
-        history: [],
-        historyIndex: -1,
-        dramaAssets: emptyDramaAssetLibrary(),
-      });
+    if (!hasProjectCanvasData(data)) {
+      get().showToast('项目加载失败，已保留当前画布并阻止覆盖保存', 'error');
+      return;
     }
+    set({
+      currentProjectId: id,
+      projectName: project.name,
+      projectLoadStatus: 'ready',
+      nodes: data.nodes as Node<BaseNodeData>[],
+      edges: data.edges as Edge[],
+      groups: getProjectGroups(data),
+      history: [],
+      historyIndex: -1,
+      dramaAssets: data.dramaAssets ?? emptyDramaAssetLibrary(),
+    });
+    rememberActiveProject(id);
     // 恢复当前项目的待续轮询任务
     resumePendingTasks(id).catch((e) => console.warn('[切换项目] 恢复待续任务失败:', e));
     // 加载聊天会话
@@ -675,7 +705,12 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   },
 
   saveCurrentProject: async () => {
-    const record = createCurrentProjectSaveRecord(get());
+    const state = get();
+    if (state.currentProjectId && state.projectLoadStatus !== 'ready') {
+      state.showToast('项目尚未成功加载，已阻止覆盖保存', 'error');
+      return undefined;
+    }
+    const record = createCurrentProjectSaveRecord(state);
     if (!record) return undefined;
     try {
       await enqueueProjectSave(record);
@@ -695,7 +730,15 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
 
   /** 静默保存（不弹 toast），用于自动保存 */
   saveCurrentProjectSilent: async () => {
-    const record = createCurrentProjectSaveRecord(get());
+    const state = get();
+    if (state.currentProjectId && state.projectLoadStatus !== 'ready') {
+      if (state.projectLoadStatus === 'error' && !state._autoSaveFailedNotified) {
+        state.showToast('项目加载失败，已阻止空画布覆盖原数据', 'error');
+        set({ _autoSaveFailedNotified: true });
+      }
+      return undefined;
+    }
+    const record = createCurrentProjectSaveRecord(state);
     if (!record) return undefined;
     try {
       await enqueueProjectSave(record);
@@ -730,26 +773,35 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         const current = get().currentProjectId;
         const exists = mapped.find((p) => p.id === current);
         const targetId = exists ? current : mapped[0].id;
-        set({ projects: mapped, currentProjectId: targetId! });
+        set({ projects: mapped, projectLoadStatus: 'loading' });
 
         const data = await fileService.loadProjectData(targetId!);
-        if (data) {
+        if (hasProjectCanvasData(data)) {
           const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
           set({
+            currentProjectId: targetId!,
             projectName: data.name || '已加载项目',
             nodes: data.nodes as Node<BaseNodeData>[],
-            edges: (data.edges as Edge[]) || [],
+            edges: data.edges as Edge[],
             groups: getProjectGroups(data),
             history: [],
             historyIndex: -1,
             dramaAssets: data.dramaAssets ?? emptyDramaAssetLibrary(),
+            projectLoadStatus: 'ready',
           });
+          rememberActiveProject(targetId!);
+        } else {
+          set({ currentProjectId: null, projectLoadStatus: 'error' });
+          get().showToast('项目加载失败，已阻止空画布覆盖原数据', 'error');
+          return;
         }
         // 恢复待续轮询任务
         resumePendingTasks(targetId!).catch((e) => console.warn('[加载项目] 恢复待续任务失败:', e));
       }
     } catch (error) {
       console.error('Load failed:', error);
+      set({ currentProjectId: null, projectLoadStatus: 'error' });
+      get().showToast('项目列表读取失败，未创建空项目', 'error');
     }
   },
 
@@ -770,30 +822,41 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         }));
         fileService.registerProjectFolders(mapped);
         mapped.sort((a, b) => b.updatedAt - a.updatedAt);
-        const lastId = mapped[0].id;
-        activeProjectId = lastId;
+        const rememberedProjectId = await getLastActiveProjectId().catch(() => null);
+        const targetId = rememberedProjectId
+          && mapped.some((project) => project.id === rememberedProjectId)
+          ? rememberedProjectId
+          : mapped[0].id;
 
-        const data = await fileService.loadProjectData(lastId);
+        const data = await fileService.loadProjectData(targetId);
         const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
-        if (data) {
+        if (hasProjectCanvasData(data)) {
+          activeProjectId = targetId;
           set({
             projects: mapped,
-            currentProjectId: lastId,
+            currentProjectId: targetId,
             projectName: data.name || '新项目',
-            nodes: (data.nodes as Node<BaseNodeData>[]) || [],
-            edges: (data.edges as Edge[]) || [],
+            nodes: data.nodes as Node<BaseNodeData>[],
+            edges: data.edges as Edge[],
             groups: getProjectGroups(data),
             dramaAssets: data.dramaAssets ?? emptyDramaAssetLibrary(),
+            projectLoadStatus: 'ready',
           });
+          rememberActiveProject(targetId);
         } else {
           set({
             projects: mapped,
-            currentProjectId: lastId,
+            currentProjectId: null,
+            projectName: '',
+            nodes: [],
+            edges: [],
             groups: [],
             dramaAssets: emptyDramaAssetLibrary(),
+            projectLoadStatus: 'error',
           });
+          get().showToast('项目加载失败，已阻止空画布覆盖原数据', 'error');
         }
-        fileService.ensureProjectDataDir(lastId).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
+        fileService.ensureProjectDataDir(targetId).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
       } else {
         const id = generateProjectId();
         activeProjectId = id;
@@ -805,9 +868,14 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
           projects: [{ id, name: '默认画布', createdAt: now, updatedAt: now, dataFolder }],
           currentProjectId: id,
           projectName: '默认画布',
+          nodes: [],
+          edges: [],
+          groups: [],
+          projectLoadStatus: 'ready',
         });
         await fileService.saveProject(defaultProject).catch((e) => console.warn('[初始化] 创建默认项目失败:', e));
         fileService.ensureProjectDataDir(id).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
+        rememberActiveProject(id);
       }
       // 恢复当前项目的待续轮询任务
       if (activeProjectId) {
@@ -824,6 +892,8 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       }
     } catch (error) {
       console.error('Init from IndexedDB failed:', error);
+      set({ currentProjectId: null, projectLoadStatus: 'error' });
+      get().showToast('项目数据读取失败，未创建空项目', 'error');
     }
   },
 });

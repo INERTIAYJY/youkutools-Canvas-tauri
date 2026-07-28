@@ -259,6 +259,7 @@ describe('config hydration guard', () => {
       ],
       currentProjectId: 'current-project',
       projectName: '当前项目',
+      projectLoadStatus: 'ready',
       nodes: [
         {
           id: 'general-node',

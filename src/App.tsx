@@ -153,14 +153,18 @@ export default function App() {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const win = getCurrentWindow();
-        unlisten = await win.onCloseRequested(async () => {
-          const store = useAppStore.getState();
-          await store.captureCurrentProjectSnapshot();
-          await store.saveCurrentProjectSilent();
-          await fileService.flushUndoTrashDirs();
-          const { stopMcpBridge } = await import('./services/mcp/mcpBridgeService');
-          await stopMcpBridge().catch(() => {});
-          win.destroy();
+        unlisten = await win.onCloseRequested(async (event) => {
+          event.preventDefault();
+          try {
+            const store = useAppStore.getState();
+            await store.captureCurrentProjectSnapshot();
+            await store.saveCurrentProjectSilent();
+            await fileService.flushUndoTrashDirs();
+            const { stopMcpBridge } = await import('./services/mcp/mcpBridgeService');
+            await stopMcpBridge().catch(() => {});
+          } finally {
+            await win.destroy();
+          }
         });
       } catch { /* non-Tauri env */ }
     })();

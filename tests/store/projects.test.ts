@@ -8,6 +8,8 @@ const fileMocks = vi.hoisted(() => ({
   flushUndoTrashDirs: vi.fn(async () => undefined),
   ensureProjectDataDir: vi.fn(async () => 'project-dir'),
   loadProjectData: vi.fn(),
+  loadProjectsList: vi.fn(),
+  registerProjectFolders: vi.fn(),
   saveProject: vi.fn(async (record: { id: string }) => record.id),
   buildProjectFolderName: vi.fn((name: string, projectId: string) => (
     `${name}-${projectId.replace(/-/g, '').slice(0, 8)}`
@@ -21,6 +23,10 @@ const pollMocks = vi.hoisted(() => ({
 }));
 const snapshotMocks = vi.hoisted(() => ({
   captureCurrentCanvasSnapshot: vi.fn(async () => null as string | null),
+}));
+const metadataMocks = vi.hoisted(() => ({
+  getLastActiveProjectId: vi.fn(async () => null as string | null),
+  setLastActiveProjectId: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../src/services/fileService', () => ({
@@ -36,6 +42,12 @@ vi.mock('../../src/services/pollManager', () => ({
 }));
 
 vi.mock('../../src/services/projectSnapshotService', () => snapshotMocks);
+vi.mock('../../src/services/indexedDbService', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/indexedDbService')>(
+    '../../src/services/indexedDbService',
+  );
+  return { ...actual, ...metadataMocks };
+});
 
 import { useAppStore } from '../../src/store/useAppStore';
 
@@ -50,7 +62,9 @@ beforeEach(() => {
     }
   });
   useAppStore.setState(useAppStore.getInitialState(), true);
+  useAppStore.setState({ projectLoadStatus: 'ready' });
   fileMocks.loadProjectData.mockReset();
+  fileMocks.loadProjectsList.mockReset();
   fileMocks.deleteProjectData.mockClear();
   fileMocks.deleteProjectDataDir.mockClear();
   fileMocks.saveProject.mockClear();
@@ -59,7 +73,25 @@ beforeEach(() => {
   pollMocks.resumePendingTasks.mockClear();
   snapshotMocks.captureCurrentCanvasSnapshot.mockReset();
   snapshotMocks.captureCurrentCanvasSnapshot.mockResolvedValue(null);
+  metadataMocks.getLastActiveProjectId.mockReset();
+  metadataMocks.getLastActiveProjectId.mockResolvedValue(null);
+  metadataMocks.setLastActiveProjectId.mockClear();
 });
+
+function stubInitializationActions() {
+  useAppStore.setState({
+    loadConfig: vi.fn(async () => undefined),
+    loadWorkflows: vi.fn(async () => undefined),
+    loadPresets: vi.fn(async () => undefined),
+    loadSkills: vi.fn(async () => undefined),
+    loadCustomStyles: vi.fn(async () => undefined),
+    loadToolbarLayouts: vi.fn(async () => undefined),
+    loadConversationsForProject: vi.fn(async () => undefined),
+    repairInterruptedForProject: vi.fn(async () => undefined),
+    loadProjectMemoriesForProject: vi.fn(async () => undefined),
+    repairInterruptedAgentTasksForProject: vi.fn(async () => undefined),
+  });
+}
 
 describe('project switching', () => {
   it('saves the current project before loading and isolates target project state', async () => {
@@ -393,6 +425,53 @@ describe('project switching', () => {
     expect(useAppStore.getState().nodes.map((node) => node.id)).toEqual(['node-c']);
   });
 
+  it('keeps the current project ready when the latest concurrent switch fails', async () => {
+    const pendingLoads = new Map<string, (value: unknown) => void>();
+    fileMocks.loadProjectData.mockImplementation((projectId: string) => new Promise((resolve) => {
+      pendingLoads.set(projectId, resolve);
+    }));
+    useAppStore.setState({
+      projects: [
+        { id: 'project-a', name: 'Project A', createdAt: 1, updatedAt: 1 },
+        { id: 'project-b', name: 'Project B', createdAt: 2, updatedAt: 2 },
+        { id: 'project-c', name: 'Project C', createdAt: 3, updatedAt: 3 },
+      ],
+      currentProjectId: 'project-a',
+      projectName: 'Project A',
+      projectLoadStatus: 'ready',
+      nodes: [{
+        id: 'node-a',
+        type: 'ai-text',
+        position: { x: 0, y: 0 },
+        data: { label: 'Node A', type: 'ai-text' },
+      }],
+      saveCurrentProject: vi.fn(async () => 'project-a'),
+    });
+
+    const switchToB = useAppStore.getState().switchProject('project-b');
+    await vi.waitFor(() => expect(pendingLoads.has('project-b')).toBe(true));
+    const switchToC = useAppStore.getState().switchProject('project-c');
+    await vi.waitFor(() => expect(pendingLoads.has('project-c')).toBe(true));
+
+    pendingLoads.get('project-c')?.(null);
+    await switchToC;
+    pendingLoads.get('project-b')?.({
+      id: 'project-b',
+      name: 'Project B',
+      createdAt: 2,
+      updatedAt: 2,
+      nodes: [],
+      edges: [],
+    });
+    await switchToB;
+
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: 'project-a',
+      projectLoadStatus: 'ready',
+    });
+    expect(useAppStore.getState().nodes.map((node) => node.id)).toEqual(['node-a']);
+  });
+
   it('removes deleted project chat state and loads conversations for the replacement project', async () => {
     const loadConversationsForProject = vi.fn(async () => undefined);
     const repairInterruptedForProject = vi.fn(async () => undefined);
@@ -547,5 +626,111 @@ describe('project switching', () => {
     expect(useAppStore.getState().projects.map((project) => project.id)).toEqual(['project-old']);
     expect(fileMocks.deleteProjectDataDir).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith('项目删除失败，本地数据未清理', 'error');
+  });
+
+  it('blocks persistence when the current project did not load successfully', async () => {
+    const showToast = vi.fn();
+    useAppStore.setState({
+      projects: [{ id: 'project-broken', name: 'Broken', createdAt: 1, updatedAt: 1 }],
+      currentProjectId: 'project-broken',
+      projectName: 'Broken',
+      projectLoadStatus: 'error',
+      nodes: [],
+      edges: [],
+      groups: [],
+      showToast,
+    });
+
+    await expect(useAppStore.getState().saveCurrentProjectSilent()).resolves.toBeUndefined();
+    await expect(useAppStore.getState().saveCurrentProject()).resolves.toBeUndefined();
+
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith('项目加载失败，已阻止空画布覆盖原数据', 'error');
+    expect(showToast).toHaveBeenCalledWith('项目尚未成功加载，已阻止覆盖保存', 'error');
+  });
+
+  it('keeps the current canvas when switching to a project that cannot be loaded', async () => {
+    const showToast = vi.fn();
+    fileMocks.loadProjectData.mockResolvedValue(null);
+    useAppStore.setState({
+      projects: [
+        { id: 'project-current', name: 'Current', createdAt: 1, updatedAt: 2 },
+        { id: 'project-broken', name: 'Broken', createdAt: 2, updatedAt: 3 },
+      ],
+      currentProjectId: 'project-current',
+      projectName: 'Current',
+      projectLoadStatus: 'ready',
+      nodes: [{
+        id: 'current-node',
+        type: 'ai-text',
+        position: { x: 1, y: 2 },
+        data: { label: 'Current node', type: 'ai-text' },
+      }],
+      saveCurrentProject: vi.fn(async () => 'project-current'),
+      showToast,
+    });
+
+    await useAppStore.getState().switchProject('project-broken');
+
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: 'project-current',
+      projectLoadStatus: 'ready',
+    });
+    expect(useAppStore.getState().nodes.map((node) => node.id)).toEqual(['current-node']);
+    expect(metadataMocks.setLastActiveProjectId).not.toHaveBeenCalledWith('project-broken');
+    expect(showToast).toHaveBeenCalledWith('项目加载失败，已保留当前画布并阻止覆盖保存', 'error');
+  });
+
+  it('restores the last successfully opened project instead of the newest saved project', async () => {
+    stubInitializationActions();
+    metadataMocks.getLastActiveProjectId.mockResolvedValue('project-remembered');
+    fileMocks.loadProjectsList.mockResolvedValue([
+      {
+        id: 'project-newest', name: 'Newest', createdAt: 2, updatedAt: 20, nodes: [], edges: [],
+      },
+      {
+        id: 'project-remembered', name: 'Remembered', createdAt: 1, updatedAt: 10, nodes: [], edges: [],
+      },
+    ]);
+    fileMocks.loadProjectData.mockResolvedValue({
+      id: 'project-remembered',
+      name: 'Remembered',
+      createdAt: 1,
+      updatedAt: 10,
+      nodes: [{
+        id: 'remembered-node',
+        type: 'ai-text',
+        position: { x: 3, y: 4 },
+        data: { label: 'Remembered node', type: 'ai-text' },
+      }],
+      edges: [],
+      groups: [],
+    });
+
+    await useAppStore.getState().initFromDb();
+
+    expect(fileMocks.loadProjectData).toHaveBeenCalledWith('project-remembered');
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: 'project-remembered',
+      projectLoadStatus: 'ready',
+    });
+    expect(useAppStore.getState().nodes.map((node) => node.id)).toEqual(['remembered-node']);
+    expect(metadataMocks.setLastActiveProjectId).toHaveBeenCalledWith('project-remembered');
+  });
+
+  it('does not create or save an empty project when startup loading fails', async () => {
+    const showToast = vi.fn();
+    stubInitializationActions();
+    fileMocks.loadProjectsList.mockRejectedValue(new Error('indexeddb unavailable'));
+    useAppStore.setState({ showToast });
+
+    await useAppStore.getState().initFromDb();
+
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: null,
+      projectLoadStatus: 'error',
+    });
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith('项目数据读取失败，未创建空项目', 'error');
   });
 });

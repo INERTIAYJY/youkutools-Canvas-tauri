@@ -28,6 +28,7 @@ const STORE_METADATA = 'metadata';
 const STORE_GLOBAL_CHARACTERS = 'globalCharacters';
 
 const CONFIG_KEY = 'app-config';
+const LAST_ACTIVE_PROJECT_KEY = 'last-active-project';
 
 interface ProjectRecord {
   id: string;
@@ -781,6 +782,37 @@ export async function markHistoryMigrationCompleted(projectId: string): Promise<
     });
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** 读取上次成功打开的项目；复用 metadata store，不需要升级 schema。 */
+export async function getLastActiveProjectId(): Promise<string | null> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(STORE_METADATA, 'readonly')
+      .objectStore(STORE_METADATA)
+      .get(LAST_ACTIVE_PROJECT_KEY);
+    request.onsuccess = () => {
+      const projectId = (request.result as { projectId?: unknown } | undefined)?.projectId;
+      resolve(typeof projectId === 'string' && projectId.trim() ? projectId : null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/** 仅在项目成功载入后更新，避免把加载失败的空状态记成最近项目。 */
+export async function setLastActiveProjectId(projectId: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_METADATA, 'readwrite');
+    tx.objectStore(STORE_METADATA).put({
+      id: LAST_ACTIVE_PROJECT_KEY,
+      projectId,
+      updatedAt: Date.now(),
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
   });
 }
 

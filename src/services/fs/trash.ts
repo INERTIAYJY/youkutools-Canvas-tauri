@@ -129,14 +129,44 @@ export async function deleteProjectDataDir(projectId: string): Promise<void> {
   }
 }
 
+/** 判断路径是否位于某个项目的数据目录内（大小写不敏感，兼容 Windows 反斜杠）。 */
+export function isPathInsideDir(filePath: string, dirPath: string): boolean {
+  const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+  const normalizedDir = dirPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  if (!normalizedDir) return false;
+  return normalizedPath.startsWith(`${normalizedDir}/`);
+}
+
+/**
+ * 节点文件是否属于指定项目。
+ *
+ * 跨项目复制粘贴会让副本的 filePath 仍指向源项目（详见 store.clipboard 的跨项目落地逻辑），
+ * 这类路径一旦被当成「本项目的文件」删除，源项目的素材就会被搬进 .trash 并最终进系统废纸篓。
+ * 因此删除前必须确认文件确实在本项目目录内。
+ */
+export async function isProjectOwnedFile(
+  filePath: string,
+  projectId: string | null,
+): Promise<boolean> {
+  if (!projectId) return false;
+  const projectDir = await getProjectDataDir(projectId).catch(() => null);
+  if (!projectDir) return false;
+  return isPathInsideDir(filePath, projectDir);
+}
+
 /** 尝试删除节点关联的本地文件（如果有 filePath，移入 undo-trash 暂存，撤销时可还原）。
- *  keepPaths：仍被存活节点引用的 filePath 集合 —— 命中则跳过，避免复制节点删除时连累原节点文件。 */
+ *  keepPaths：仍被存活节点引用的 filePath 集合 —— 命中则跳过，避免复制节点删除时连累原节点文件。
+ *  projectId：当前项目 —— 文件不在该项目目录内时一律不删，避免误删其他项目的素材。 */
 export async function deleteNodeFile(
   nodeData: { filePath?: string },
   keepPaths?: Set<string>,
+  projectId?: string | null,
 ): Promise<void> {
   const fp = nodeData.filePath;
-  if (fp && typeof fp === 'string' && !keepPaths?.has(fp)) {
-    await moveToUndoTrash(fp);
+  if (!fp || typeof fp !== 'string' || keepPaths?.has(fp)) return;
+  if (projectId !== undefined && !(await isProjectOwnedFile(fp, projectId))) {
+    console.warn('[fileService] 跳过删除非本项目文件:', fp);
+    return;
   }
+  await moveToUndoTrash(fp);
 }

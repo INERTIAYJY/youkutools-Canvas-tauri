@@ -252,11 +252,14 @@ export const createHistorySlice: StateCreator<AppState, [], [], HistorySlice> = 
 
     const entry = history[targetIndex];
     const targetNodeIds = new Set(entry.nodes.map((node) => node.id));
+    const projectId = get().currentProjectId;
+    // 只回收本项目目录内的文件：跨项目粘贴的副本 filePath 仍指向源项目，误删会丢源项目素材
     const trashPromises = nodes.flatMap((node) => {
       const filePath = node.data.filePath;
-      return filePath && !targetNodeIds.has(node.id)
-        ? [fileService.moveToUndoTrash(filePath)]
-        : [];
+      if (!filePath || targetNodeIds.has(node.id)) return [];
+      return [fileService.isProjectOwnedFile(filePath, projectId).then((owned) => (
+        owned ? fileService.moveToUndoTrash(filePath) : undefined
+      ))];
     });
     if (trashPromises.length > 0) await Promise.allSettled(trashPromises);
 

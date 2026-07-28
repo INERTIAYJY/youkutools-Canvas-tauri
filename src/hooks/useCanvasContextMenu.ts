@@ -207,7 +207,7 @@ export function useCanvasContextMenu() {
         .filter((p): p is string => !!p),
     );
     for (const node of state.nodes.filter((n) => allIds.includes(n.id))) {
-      fileService.deleteNodeFile(node.data as BaseNodeData, keepPaths).catch(() => {});
+      fileService.deleteNodeFile(node.data as BaseNodeData, keepPaths, state.currentProjectId).catch(() => {});
     }
 
     useAppStore.getState().commitToHistory();

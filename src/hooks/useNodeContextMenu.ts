@@ -104,7 +104,7 @@ export function useNodeContextMenu() {
   const handleCopyText = useCallback(async () => {
     if (!menu.textSelection) return;
     await navigator.clipboard?.writeText(menu.textSelection.text).catch(() => {});
-    useAppStore.setState({ clipboard: { nodes: [], groups: [] } });
+    useAppStore.setState({ clipboard: { nodes: [], groups: [], projectId: null } });
     window.getSelection()?.removeAllRanges();
     closeMenu();
     useAppStore.getState().showToast('已复制选中文字');
@@ -118,7 +118,7 @@ export function useNodeContextMenu() {
 
     await navigator.clipboard?.writeText(text).catch(() => {});
     updateNodeData(menu.nodeId, { output: output.slice(0, start) + output.slice(end) });
-    useAppStore.setState({ clipboard: { nodes: [], groups: [] } });
+    useAppStore.setState({ clipboard: { nodes: [], groups: [], projectId: null } });
     window.getSelection()?.removeAllRanges();
     closeMenu();
     useAppStore.getState().showToast('已剪切选中文字');

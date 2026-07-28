@@ -187,7 +187,7 @@ export function useKeyboardShortcuts() {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
         if (hasActiveTextSelection()) {
           // 交给浏览器原生复制选中文本；清空节点剪贴板，避免之后 Ctrl+V 误粘节点
-          useAppStore.setState({ clipboard: { nodes: [], groups: [] } });
+          useAppStore.setState({ clipboard: { nodes: [], groups: [], projectId: null } });
           return;
         }
         if (useAppStore.getState().selectedNodeIds.length > 0) {
@@ -272,7 +272,7 @@ export function useKeyboardShortcuts() {
             .filter((p): p is string => !!p),
         );
         for (const node of state.nodes.filter((n) => allIds.includes(n.id))) {
-          fileService.deleteNodeFile(node.data as BaseNodeData, keepPaths).catch(() => {});
+          fileService.deleteNodeFile(node.data as BaseNodeData, keepPaths, state.currentProjectId).catch(() => {});
         }
 
         // Single commit — undo always goes back to the real pre-delete state
@@ -420,7 +420,7 @@ export function useKeyboardShortcuts() {
             // Clear stale internal clipboard — when the user switches away,
             // they may have copied external content. If we don't clear, the
             // next Ctrl+V will still paste the old in-app copied nodes.
-            useAppStore.setState({ clipboard: { nodes: [], groups: [] } });
+            useAppStore.setState({ clipboard: { nodes: [], groups: [], projectId: null } });
           }
         });
 

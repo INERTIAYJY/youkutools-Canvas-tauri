@@ -8,9 +8,15 @@ import type { BaseNodeData, NodeGroup } from '../types';
 import { generateId, computeImageNodeDimensions, blobToDataUrl } from './store.utils';
 import { textNodeHeight } from '../utils/num';
 import * as fileService from '../services/fileService';
+import { useAppStore } from './useAppStore';
 
 export interface ClipboardSlice {
-  clipboard: { nodes: Node<BaseNodeData>[]; groups: NodeGroup[] };
+  clipboard: {
+    nodes: Node<BaseNodeData>[];
+    groups: NodeGroup[];
+    /** 复制时所在项目；粘贴到别的项目时需要把媒体文件复制过来 */
+    projectId: string | null;
+  };
   copySelectedNodes: () => void;
   pasteNodes: (position: { x: number; y: number }) => void;
   pasteExternalContent: (position: { x: number; y: number }) => Promise<void>;
@@ -54,8 +60,57 @@ async function persistPastedMedia(
   return { url: dataUrl };
 }
 
+/** 节点数据里指向本地媒体文件的字段 */
+const MEDIA_URL_KEYS = ['imageUrl', 'videoUrl', 'audioUrl', 'thumbnailUrl'] as const;
+
+/**
+ * 把跨项目粘贴的副本落到当前项目：源文件复制进本项目数据目录，节点改指新文件。
+ *
+ * 不这么做的话副本的 filePath 仍指向源项目 —— 在本项目删除副本会把源项目的素材
+ * 搬进 .trash，切换项目时再被送进系统废纸箱，源项目直接丢素材。
+ * 复制失败时清掉本地引用（保留远程 sourceUrl 展示），也绝不让它继续指向源项目。
+ */
+async function relocatePastedNodeMedia(
+  nodeId: string,
+  sourceFilePath: string,
+  targetProjectId: string,
+): Promise<void> {
+  const store = useAppStore.getState();
+  const copied = await fileService.copyFileToProjectData(sourceFilePath, targetProjectId)
+    .catch(() => null);
+
+  const current = useAppStore.getState().nodes.find((node) => node.id === nodeId);
+  if (!current) return; // 节点已被删除，无需回填
+
+  if (!copied) {
+    const cleared: Partial<BaseNodeData> = {
+      filePath: undefined,
+      assetId: undefined,
+      relativePath: undefined,
+    };
+    for (const key of MEDIA_URL_KEYS) {
+      if (current.data[key]) cleared[key] = (current.data.sourceUrl as string | undefined) ?? undefined;
+    }
+    store.updateNodeDataTransient(nodeId, cleared);
+    store.showToast('粘贴的媒体文件复制失败，已保留节点但未落地文件', 'error');
+    return;
+  }
+
+  const next: Partial<BaseNodeData> = {
+    filePath: copied.filePath,
+    fileName: copied.fileName,
+    // assetId / relativePath 由保存时按新路径重新识别，这里必须清掉源项目的身份
+    assetId: undefined,
+    relativePath: undefined,
+  };
+  for (const key of MEDIA_URL_KEYS) {
+    if (current.data[key]) next[key] = copied.assetUrl;
+  }
+  store.updateNodeDataTransient(nodeId, next);
+}
+
 export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice> = (set, get) => ({
-  clipboard: { nodes: [], groups: [] },
+  clipboard: { nodes: [], groups: [], projectId: null },
 
   copySelectedNodes: () => {
     const { nodes, selectedNodeIds, groups } = get();
@@ -75,9 +130,14 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
       }
     }
 
-    const copiedNodes = nodes.filter((n) => idsToCopy.has(n.id));
-    const copiedGroups = groups.filter((g) => idsToCopy.has(g.id));
-    set({ clipboard: { nodes: copiedNodes, groups: copiedGroups } });
+    // data 做浅快照：不与源节点共享同一对象，之后编辑源节点不会改到剪贴板内容
+    const copiedNodes = nodes
+      .filter((n) => idsToCopy.has(n.id))
+      .map((n) => ({ ...n, data: { ...n.data } }));
+    const copiedGroups = groups.filter((g) => idsToCopy.has(g.id)).map((g) => ({ ...g }));
+    set({
+      clipboard: { nodes: copiedNodes, groups: copiedGroups, projectId: get().currentProjectId },
+    });
   },
 
   pasteNodes: (_position) => {
@@ -149,6 +209,16 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
 
     get().commitToHistory();
     get().showToast(`已粘贴 ${clipboard.nodes.length} 个节点`);
+
+    // 跨项目粘贴：把媒体文件复制进当前项目，副本不再引用源项目的文件
+    const targetProjectId = get().currentProjectId;
+    if (targetProjectId && targetProjectId !== clipboard.projectId) {
+      for (const node of newNodes) {
+        const sourceFilePath = node.data.filePath;
+        if (typeof sourceFilePath !== 'string' || !sourceFilePath) continue;
+        void relocatePastedNodeMedia(node.id, sourceFilePath, targetProjectId);
+      }
+    }
   },
 
   pasteExternalContent: async (position) => {

@@ -605,7 +605,8 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     for (const id of idsToDelete) {
       const n = nodes.find((nn) => nn.id === id);
       if (n && !n.data.artifactId) {
-        fileService.deleteNodeFile(n.data as BaseNodeData, keepPaths).catch((e) => console.warn('[删除节点] 文件清理失败:', e));
+        fileService.deleteNodeFile(n.data as BaseNodeData, keepPaths, get().currentProjectId)
+          .catch((e) => console.warn('[删除节点] 文件清理失败:', e));
       }
     }
 
@@ -656,7 +657,8 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     for (const id of idsToDelete) {
       const n = nodes.find((nn) => nn.id === id);
       if (n && !n.data.artifactId) {
-        fileService.deleteNodeFile(n.data as BaseNodeData, keepPaths).catch((e) => console.warn('[批量删除] 文件清理失败:', e));
+        fileService.deleteNodeFile(n.data as BaseNodeData, keepPaths, get().currentProjectId)
+          .catch((e) => console.warn('[批量删除] 文件清理失败:', e));
       }
     }
 

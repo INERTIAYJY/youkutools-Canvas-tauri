@@ -6,6 +6,8 @@ const fileMocks = vi.hoisted(() => ({
   deleteNodeFile: vi.fn(async () => undefined),
   moveToUndoTrash: vi.fn(async () => undefined),
   restoreFromUndoTrash: vi.fn(async () => undefined),
+  // 重做前会先确认文件属于当前项目，默认放行以保持既有断言
+  isProjectOwnedFile: vi.fn(async () => true),
 }));
 const nodeExitMocks = vi.hoisted(() => {
   const pending = new Set<Promise<void>>();

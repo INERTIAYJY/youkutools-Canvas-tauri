@@ -30,7 +30,8 @@ import {
 } from './indexedDbService';
 import { exists } from '@tauri-apps/plugin-fs';
 import type { BaseNodeData, ProjectSettings, StoryboardCellOverride } from '../types';
-import { getAssetUrlFromPath, getProjectDataDir, joinPath, listDirectoryFiles } from './fs/core';
+import { getAssetUrlFromPath, getProjectDataDir, joinPath } from './fs/core';
+import { walkDirectoryFiles } from './fs/assetLibrary';
 import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
 import { normalizeDramaAssetLibrary } from '../types/dramaAssets';
 
@@ -49,12 +50,15 @@ async function serializeAssetReference(
   const normalizedDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
   if (!normalizedPath.toLowerCase().startsWith(`${normalizedDir.toLowerCase()}/`)) return data;
 
+  // 文件可能已被外部删除/移动：identifyAsset 会 stat 失败抛错，
+  // 不拦住的话整个项目保存都会失败（下次加载再按 assetId 重新识别）
   const identity = await identifyAsset(normalizedPath, {
     assetId: data.assetId,
     rootPath: normalizedDir,
     projectId,
     source: 'project',
-  });
+  }).catch(() => null);
+  if (!identity) return data;
   const serialized = { ...data, assetId: identity.assetId, relativePath: identity.relativePath };
   delete serialized.filePath;
   return serialized;
@@ -120,8 +124,8 @@ async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<u
   if (!Array.isArray(nodes)) return nodes;
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return nodes;
-  // 先刷新项目目录索引，使外部重命名/移动后的文件能在按 assetId 恢复节点前被重新识别。
-  const diskFiles = await listDirectoryFiles(projectDir);
+  // 先刷新项目目录索引（含分组子文件夹），使外部重命名/移动后的文件能在按 assetId 恢复节点前被重新识别。
+  const diskFiles = await walkDirectoryFiles(projectDir);
   await Promise.all(diskFiles.map((file) => identifyAsset(file.path, {
     rootPath: projectDir,
     projectId,

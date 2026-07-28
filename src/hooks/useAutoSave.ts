@@ -60,6 +60,9 @@ export function useAutoSave() {
       const state = useAppStore.getState();
       if (!state.currentProjectId) return;
 
+      // 分组成员或分组名变化后，把节点文件搬进对应文件夹；有搬动会再触发一轮保存
+      void state.syncGroupFiles();
+
       if (state.currentProjectId !== projectIdRef.current) {
         projectIdRef.current = state.currentProjectId;
         fingerprintRef.current = structureFingerprint(

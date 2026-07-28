@@ -9,6 +9,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { appDataDir, localDataDir } from '@tauri-apps/api/path';
 import { identifyAsset } from './fs/assetIndex';
+import { walkDirectoryFiles } from './fs/assetLibrary';
 import {
   isTauriEnv,
   getMimeType,
@@ -22,7 +23,6 @@ import {
   resolveUniqueDestPath,
   buildNodeFileName,
   notifyProjectDiskChanged,
-  listDirectoryFiles,
   getFileCategory,
   CATEGORY_EXTENSIONS,
   type AssetFileEntry,
@@ -524,11 +524,12 @@ export async function renameProjectFileToLabel(
 export async function listProjectFiles(projectId: string): Promise<AssetFileEntry[]> {
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return [];
-  const allFiles = await listDirectoryFiles(projectDir);
-  // Filter out files inside AppData subdirectory
+  // 递归：节点文件可能位于分组子文件夹内
+  const allFiles = await walkDirectoryFiles(projectDir);
+  // Filter out files inside AppData / .trash subdirectories (可能嵌套在分组文件夹内)
   const files = allFiles.filter((f) => {
-    const relative = f.path.substring(projectDir.length).replace(/\\/g, '/');
-    return !relative.startsWith('/AppData/') && !relative.startsWith('AppData/');
+    const relative = f.path.substring(projectDir.length).replace(/\\/g, '/').replace(/^\//, '');
+    return !relative.split('/').slice(0, -1).some((dir) => dir === 'AppData' || dir === '.trash');
   });
   return Promise.all(files.map(async (file) => {
     const identity = await identifyAsset(file.path, {

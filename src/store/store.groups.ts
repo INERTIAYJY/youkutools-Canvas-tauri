@@ -3,18 +3,143 @@
  */
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
-import type { NodeGroup } from '../types';
+import type { BaseNodeData, NodeGroup, StoryboardCellOverride } from '../types';
 import { GROUP_COLOR_PALETTE } from '../types';
 import { generateId } from './store.utils';
+import {
+  ensureGroupFolder,
+  getAssetUrlFromPath,
+  getProjectDataDir,
+  moveProjectFileToFolder,
+  renameGroupFolder,
+  sanitizeFolderName,
+} from '../services/fileService';
 
 export interface GroupSlice {
   groups: NodeGroup[];
   groupSelectedNodes: () => void;
   ungroupSelectedNodes: () => void;
   renameGroup: (id: string, name: string) => void;
+  /** 把节点文件搬到所属分组的文件夹（未分组则搬回项目根目录），由自动保存驱动 */
+  syncGroupFiles: () => Promise<void>;
 }
 
-export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set, get) => ({
+/** 一次移动的结果：新路径 + 重建的展示 URL + 项目内相对路径 */
+interface MovedFile {
+  filePath: string;
+  assetUrl: string;
+  relativePath: string;
+}
+
+async function describeFile(filePath: string, folder: string | null): Promise<MovedFile> {
+  const fileName = filePath.replace(/\\/g, '/').split('/').pop() ?? '';
+  return {
+    filePath,
+    assetUrl: await getAssetUrlFromPath(filePath),
+    relativePath: folder ? `${folder}/${fileName}` : fileName,
+  };
+}
+
+async function moveFile(
+  filePath: string | undefined,
+  projectDir: string,
+  folder: string | null,
+): Promise<MovedFile | null> {
+  const moved = await moveProjectFileToFolder(filePath, projectDir, folder);
+  return moved ? describeFile(moved, folder) : null;
+}
+
+/** 文件夹整体改名后，把仍指向旧文件夹的路径改写到新文件夹（文件本身已随文件夹一起搬走） */
+function repointToRenamedFolder(
+  filePath: string | undefined,
+  oldPrefix: string,
+  newPrefix: string,
+): string | null {
+  if (!filePath) return null;
+  const normalized = filePath.replace(/\\/g, '/');
+  return normalized.startsWith(oldPrefix) ? newPrefix + normalized.slice(oldPrefix.length) : null;
+}
+
+/** 把移动结果回填到节点数据；期间 filePath 已被改写时保持原样（新文件由下一轮搬运） */
+function applyNodeMove(data: BaseNodeData, expectedPath: string | undefined, moved: MovedFile): BaseNodeData {
+  if (data.filePath !== expectedPath) return data;
+  const next: BaseNodeData = { ...data, filePath: moved.filePath, relativePath: moved.relativePath };
+  if (next.thumbnailUrl && next.thumbnailUrl === next.imageUrl) next.thumbnailUrl = moved.assetUrl;
+  if (next.imageUrl) next.imageUrl = moved.assetUrl;
+  if (next.videoUrl) next.videoUrl = moved.assetUrl;
+  if (next.audioUrl) next.audioUrl = moved.assetUrl;
+  return next;
+}
+
+function applyOverrideMove(
+  override: StoryboardCellOverride,
+  expectedPath: string | undefined,
+  moved: MovedFile,
+): StoryboardCellOverride {
+  if (override.filePath !== expectedPath) return override;
+  return { ...override, filePath: moved.filePath, relativePath: moved.relativePath, url: moved.assetUrl };
+}
+
+// 自动保存每 2 秒可能触发一次，重入会让同一个文件被搬两次
+let syncingGroupFiles = false;
+
+export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set, get) => {
+  /**
+   * 分组文件夹整体改名后，把节点里仍指向旧文件夹的路径改写过去。
+   * 不做则所有 filePath 立刻失效：搬运找不到源文件，保存时 stat 直接抛错。
+   */
+  const repointGroupPaths = async (projectId: string, oldName: string, newName: string) => {
+    const oldFolder = sanitizeFolderName(oldName);
+    const newFolder = sanitizeFolderName(newName);
+    if (oldFolder === newFolder) return;
+    const projectDir = await getProjectDataDir(projectId);
+    if (!projectDir || get().currentProjectId !== projectId) return;
+
+    const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    const oldPrefix = `${root}/${oldFolder}/`;
+    const newPrefix = `${root}/${newFolder}/`;
+
+    // getAssetUrlFromPath 是异步的，先把改写计划算好，再一次性回填
+    const patches: { nodeId: string; index: number | null; oldPath: string; moved: MovedFile }[] = [];
+    for (const node of get().nodes) {
+      const data = node.data as BaseNodeData;
+      const repointed = repointToRenamedFolder(data.filePath, oldPrefix, newPrefix);
+      if (repointed) {
+        patches.push({ nodeId: node.id, index: null, oldPath: data.filePath!, moved: await describeFile(repointed, newFolder) });
+      }
+      const overrides = data.storyboardOverrides;
+      if (!Array.isArray(overrides)) continue;
+      for (let i = 0; i < overrides.length; i++) {
+        const cellPath = repointToRenamedFolder(overrides[i]?.filePath, oldPrefix, newPrefix);
+        if (cellPath) {
+          patches.push({ nodeId: node.id, index: i, oldPath: overrides[i]!.filePath!, moved: await describeFile(cellPath, newFolder) });
+        }
+      }
+    }
+    if (patches.length === 0) return;
+
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        const own = patches.filter((p) => p.nodeId === n.id);
+        if (own.length === 0) return n;
+        let data = n.data as BaseNodeData;
+        for (const patch of own) {
+          if (patch.index === null) {
+            data = applyNodeMove(data, patch.oldPath, patch.moved);
+            continue;
+          }
+          const list = data.storyboardOverrides;
+          if (!Array.isArray(list) || !list[patch.index]) continue;
+          const next = [...list];
+          next[patch.index] = applyOverrideMove(list[patch.index]!, patch.oldPath, patch.moved);
+          if (next[patch.index] !== list[patch.index]) data = { ...data, storyboardOverrides: next };
+        }
+        return data === n.data ? n : { ...n, data };
+      }),
+    }));
+  };
+
+  return {
   groups: [],
 
   groupSelectedNodes: () => {
@@ -88,10 +213,14 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
     const usedColors = new Set(groups.map((g) => g.color));
     const color = GROUP_COLOR_PALETTE.find((c) => !usedColors.has(c)) || GROUP_COLOR_PALETTE[0];
 
+    // 分组名同时也是本地文件夹名，重名会撞同一个文件夹，所以创建时就去重
+    let groupName = '分组';
+    for (let i = 2; groups.some((g) => g.name === groupName); i++) groupName = `分组 ${i}`;
+
     const groupId = `group-${generateId()}`;
     const newGroup: NodeGroup = {
       id: groupId,
-      name: '分组',
+      name: groupName,
       nodeIds: candidateIds,
       color,
       createdAt: Date.now(),
@@ -118,6 +247,8 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
         ),
       ],
     }));
+
+    void ensureGroupFolder(get().currentProjectId, newGroup.name);
 
     get().showToast(`已创建「${newGroup.name}」（${candidateIds.length} 个节点）`);
   },
@@ -193,9 +324,74 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
   },
 
   renameGroup: (id, name) => {
+    const oldName = get().groups.find((g) => g.id === id)?.name;
+    if (!oldName || oldName === name) return;
+
     get().commitToHistory();
     set((s) => ({
       groups: s.groups.map((g) => (g.id === id ? { ...g, name } : g)),
+      // 分组节点的 label 是显示与持久化的来源，一并改掉
+      nodes: s.nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, label: name } } : n)),
     }));
+
+    const projectId = get().currentProjectId;
+    void renameGroupFolder(projectId, oldName, name).then((ok) => {
+      if (!ok) {
+        get().showToast(`分组文件夹「${name}」已存在，未同步改名`, 'error');
+        return;
+      }
+      if (projectId) return repointGroupPaths(projectId, oldName, name);
+    });
   },
-});
+
+  syncGroupFiles: async () => {
+    if (syncingGroupFiles) return;
+    const projectId = get().currentProjectId;
+    if (!projectId) return;
+    const projectDir = await getProjectDataDir(projectId);
+    if (!projectDir) return;
+
+    syncingGroupFiles = true;
+    try {
+      const { nodes, groups } = get();
+      const folderOfGroup = new Map(groups.map((g) => [g.id, sanitizeFolderName(g.name)]));
+
+      for (const node of nodes) {
+        if (node.type === 'group') continue;
+        if (get().currentProjectId !== projectId) return;   // 项目已切换，停手
+        const folder = node.parentId ? folderOfGroup.get(node.parentId) ?? null : null;
+        const data = node.data as BaseNodeData;
+
+        const moved = await moveFile(data.filePath, projectDir, folder);
+        if (moved) {
+          set((s) => ({
+            nodes: s.nodes.map((n) => (
+              n.id === node.id ? { ...n, data: applyNodeMove(n.data as BaseNodeData, data.filePath, moved) } : n
+            )),
+          }));
+        }
+
+        const overrides = data.storyboardOverrides;
+        if (!Array.isArray(overrides)) continue;
+        for (let i = 0; i < overrides.length; i++) {
+          const override = overrides[i];
+          const movedCell = override ? await moveFile(override.filePath, projectDir, folder) : null;
+          if (!movedCell) continue;
+          set((s) => ({
+            nodes: s.nodes.map((n) => {
+              if (n.id !== node.id) return n;
+              const current = (n.data as BaseNodeData).storyboardOverrides;
+              if (!Array.isArray(current) || !current[i]) return n;
+              const next = [...current];
+              next[i] = applyOverrideMove(current[i]!, override!.filePath, movedCell);
+              return { ...n, data: { ...(n.data as BaseNodeData), storyboardOverrides: next } };
+            }),
+          }));
+        }
+      }
+    } finally {
+      syncingGroupFiles = false;
+    }
+  },
+  };
+};

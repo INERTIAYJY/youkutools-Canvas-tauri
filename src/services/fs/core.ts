@@ -253,6 +253,88 @@ export async function ensureProjectDataDir(projectId: string): Promise<string | 
   }
 }
 
+/** 为画布分组在项目目录下创建同名子文件夹（已存在则复用） */
+export async function ensureGroupFolder(
+  projectId: string | null,
+  groupName: string,
+): Promise<string | null> {
+  if (!isTauriEnv() || !projectId) return null;
+  const dataDir = await ensureProjectDataDir(projectId);
+  if (!dataDir) return null;
+  const dirPath = joinPath(dataDir, sanitizeFolderName(groupName));
+  try {
+    if (!(await exists(dirPath))) {
+      await mkdir(dirPath, { recursive: true });
+      notifyProjectDiskChanged();
+    }
+    return dirPath;
+  } catch (err) {
+    console.warn('[fileService] ensureGroupFolder failed:', dirPath, err);
+    return null;
+  }
+}
+
+/** 分组改名时同步重命名其本地文件夹；目标已存在或改名失败时返回 false */
+export async function renameGroupFolder(
+  projectId: string | null,
+  oldName: string,
+  newName: string,
+): Promise<boolean> {
+  if (!isTauriEnv() || !projectId) return true;
+  const dataDir = await getProjectDataDir(projectId);
+  if (!dataDir) return true;
+  const oldPath = joinPath(dataDir, sanitizeFolderName(oldName));
+  const newPath = joinPath(dataDir, sanitizeFolderName(newName));
+  if (oldPath === newPath) return true;
+  try {
+    if (await exists(newPath)) return false;
+    // 旧文件夹不存在（如旧项目的分组）时直接建新的
+    if (await exists(oldPath)) await rename(oldPath, newPath);
+    else await mkdir(newPath, { recursive: true });
+    notifyProjectDiskChanged();
+    return true;
+  } catch (err) {
+    console.warn('[fileService] renameGroupFolder failed:', oldPath, '→', newPath, err);
+    return false;
+  }
+}
+
+/**
+ * 把项目目录内的文件移动到分组文件夹（groupFolder 为 null 表示移回项目根目录）。
+ * 仅处理项目根目录或其一级子文件夹中的文件；外部引用文件、更深的嵌套、
+ * .trash/AppData 内的文件以及已在目标目录的文件一律不动，返回 null。
+ * @returns 新的绝对路径，未移动或失败时为 null
+ */
+export async function moveProjectFileToFolder(
+  filePath: string | undefined,
+  projectDir: string,
+  groupFolder: string | null,
+): Promise<string | null> {
+  if (!isTauriEnv() || !filePath) return null;
+  const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalized = filePath.replace(/\\/g, '/');
+  if (!normalized.startsWith(`${root}/`)) return null;
+  const segments = normalized.slice(root.length + 1).split('/');
+  if (segments.length > 2) return null;
+  const currentFolder = segments.length === 2 ? segments[0] : null;
+  if (currentFolder === '.trash' || currentFolder === 'AppData') return null;
+  if (currentFolder === groupFolder) return null;
+
+  const fileName = segments[segments.length - 1];
+  const targetDir = groupFolder ? joinPath(root, groupFolder) : root;
+  try {
+    // 源文件可能已被删除或随文件夹改名搬走，此时不该建目录也不该报错
+    if (!(await exists(normalized))) return null;
+    if (groupFolder && !(await exists(targetDir))) await mkdir(targetDir, { recursive: true });
+    const destPath = await resolveUniqueDestPath(targetDir, fileName);
+    await rename(normalized, destPath);
+    return destPath;
+  } catch (err) {
+    console.warn('[fileService] moveProjectFileToFolder failed:', normalized, '→', targetDir, err);
+    return null;
+  }
+}
+
 export interface ProjectDataDirRenameResult {
   oldDir: string;
   newDir: string;

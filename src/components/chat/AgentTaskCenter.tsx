@@ -46,12 +46,23 @@ export default function AgentTaskCenter({
   }, [tasks]);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-canvas-bg/30" aria-label="Agent 任务中心">
-      <header className="flex min-h-12 items-center gap-2 border-b border-canvas-border px-3">
-        <Icon icon="mdi:progress-wrench" width="17" className="text-indigo-300" />
+    <section className="agent-task-center flex min-h-0 flex-1 flex-col" aria-label="Agent 任务中心">
+      <header className="agent-task-center__header flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="返回对话"
+          title="返回对话"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-canvas-text-muted
+                     transition-colors hover:bg-canvas-hover hover:text-canvas-text
+                     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
+        >
+          <Icon icon="mdi:arrow-left" width="18" />
+        </button>
+        <Icon icon="mdi:progress-wrench" width="17" className="text-[var(--brand)]" />
         <h2 className="text-sm font-semibold text-canvas-text">任务中心</h2>
         <span className="text-[11px] tabular-nums text-canvas-text-muted">{activeCount} 运行中</span>
-        <div className="ml-auto flex items-center rounded-md border border-canvas-border bg-canvas-surface p-0.5" role="tablist">
+        <div className="agent-task-center__tabs ml-auto flex items-center rounded-md border p-0.5" role="tablist">
           {(['active', 'all'] as const).map((item) => (
             <button
               key={item}
@@ -59,24 +70,14 @@ export default function AgentTaskCenter({
               role="tab"
               aria-selected={view === item}
               onClick={() => setView(item)}
-              className={`min-h-7 rounded px-2 text-[11px] transition-colors ${
-                view === item ? 'bg-canvas-hover text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text'
+              className={`agent-task-center__tab min-h-7 rounded px-2 text-[11px] transition-colors ${
+                view === item ? 'is-active text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text'
               }`}
             >
               {item === 'active' ? '进行中' : '全部'}
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="关闭任务中心"
-          title="关闭任务中心"
-          className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted
-                     hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
-        >
-          <Icon icon="mdi:close" width="17" />
-        </button>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -88,13 +89,13 @@ export default function AgentTaskCenter({
         ) : visible.map((task) => (
           <section
             key={task.id}
-            className={`border-b border-canvas-border/70 px-3 py-3 ${
-              task.parentTaskId ? 'ml-4 border-l border-l-emerald-400/30 bg-canvas-surface/20' : ''
+            className={`agent-task-center__item border-b px-3 py-3 ${
+              task.parentTaskId ? 'agent-task-center__item--child ml-4 border-l' : ''
             }`}
           >
             <div className="flex items-start gap-2">
               {task.expertRole && (
-                <Icon icon="mdi:account-search-outline" width="15" className="mt-0.5 shrink-0 text-emerald-300" />
+                <Icon icon="mdi:account-search-outline" width="15" className="mt-0.5 shrink-0 text-[var(--success)]" />
               )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-medium text-canvas-text">
@@ -108,7 +109,7 @@ export default function AgentTaskCenter({
                     : conversationNames.get(task.conversationId) ?? '已删除会话'}
                 </p>
                 {!task.parentTaskId && (childCounts.get(task.id) ?? 0) > 0 && (
-                  <p className="mt-0.5 text-[10px] text-emerald-300/80">
+                  <p className="mt-0.5 text-[10px] text-[var(--success)]">
                     {childCounts.get(task.id)} 个只读专家任务
                   </p>
                 )}

@@ -1423,6 +1423,92 @@
   box-shadow: var(--glass-bevel-inset);
 }
 
+/* Task center uses theme tokens directly because alpha Tailwind utilities retain dark RGB values. */
+.agent-task-center {
+  background: color-mix(in srgb, var(--theme-bg) 42%, transparent);
+}
+
+.agent-task-center__header {
+  border-color: var(--theme-border);
+  background: color-mix(in srgb, var(--theme-surface) 48%, transparent);
+}
+
+.agent-task-center__tabs {
+  border-color: var(--theme-border);
+  background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
+}
+
+.agent-task-center__tab.is-active {
+  background: var(--theme-hover);
+}
+
+.agent-task-center__item {
+  border-color: color-mix(in srgb, var(--theme-border) 72%, transparent);
+}
+
+.agent-task-center__item--child {
+  border-left-color: color-mix(in srgb, var(--success) 42%, transparent);
+  background: color-mix(in srgb, var(--theme-surface) 22%, transparent);
+}
+
+[data-theme='light'] .agent-task-center {
+  background: color-mix(in srgb, var(--theme-bg) 28%, var(--theme-surface));
+}
+
+[data-theme='light'] .agent-task-center__header {
+  background: color-mix(in srgb, var(--theme-surface) 94%, transparent);
+}
+
+[data-theme='light'] .agent-task-center__item--child {
+  background: color-mix(in srgb, var(--theme-card) 74%, transparent);
+}
+
+[data-theme='light'] .agent-task-center [class~='border-canvas-border/60'],
+[data-theme='light'] .agent-task-center [class~='border-canvas-border/50'] {
+  border-color: color-mix(in srgb, var(--theme-border) 72%, transparent);
+}
+
+[data-theme='light'] .agent-task-center [class~='bg-canvas-hover/60'] {
+  background-color: color-mix(in srgb, var(--theme-hover) 60%, transparent);
+}
+
+[data-theme='light'] .agent-task-center [class~='hover:bg-canvas-hover/25']:hover,
+[data-theme='light'] .agent-task-center [class~='hover:bg-canvas-hover/35']:hover {
+  background-color: color-mix(in srgb, var(--theme-hover) 58%, transparent);
+}
+
+[data-theme='light'] .agent-task-center [class~='text-slate-400'] {
+  color: var(--theme-text-muted);
+}
+
+[data-theme='light'] .agent-task-center [class~='text-indigo-300'],
+[data-theme='light'] .agent-task-center [class~='text-indigo-400'],
+[data-theme='light'] .agent-task-center [class~='text-violet-400'] {
+  color: color-mix(in srgb, var(--brand) 84%, black);
+}
+
+[data-theme='light'] .agent-task-center [class~='text-emerald-300/80'],
+[data-theme='light'] .agent-task-center [class~='text-emerald-400'] {
+  color: color-mix(in srgb, var(--success) 68%, black);
+}
+
+[data-theme='light'] .agent-task-center [class~='text-sky-400'] {
+  color: color-mix(in srgb, var(--info) 72%, black);
+}
+
+[data-theme='light'] .agent-task-center [class~='text-amber-200'],
+[data-theme='light'] .agent-task-center [class~='text-amber-300'],
+[data-theme='light'] .agent-task-center [class~='text-amber-300/90'],
+[data-theme='light'] .agent-task-center [class~='text-amber-400'] {
+  color: color-mix(in srgb, var(--warning) 72%, black);
+}
+
+[data-theme='light'] .agent-task-center [class~='text-red-400'],
+[data-theme='light'] .agent-task-center [class~='text-red-400/85'],
+[data-theme='light'] .agent-task-center [class~='text-red-400/90'] {
+  color: color-mix(in srgb, var(--danger) 72%, black);
+}
+
 .chat-panel-header,
 .chat-panel-input-area {
   position: relative;

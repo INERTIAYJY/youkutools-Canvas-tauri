@@ -132,6 +132,7 @@ export default function SettingsPanel() {
   const windowGlassFrame = config.windowGlassFrame !== false; // 默认开启
   const interactionMode = config.interactionMode ?? 'default';
   const nodeToolbarMode = config.nodeToolbarMode ?? 'icons';
+  const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
@@ -921,6 +922,48 @@ export default function SettingsPanel() {
                     })}
                   </div>
                 </section>
+
+                {/* 节点标题（node-label）是否显示 */}
+                <div>
+                  <h3 className="text-sm font-medium text-canvas-text mb-3">节点标题</h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateConfig({ nodeLabelVisible: !nodeLabelVisible });
+                      saveConfig();
+                    }}
+                    aria-pressed={nodeLabelVisible}
+                    className={`sidebar-pref-card${nodeLabelVisible ? ' is-floating' : ''}`}
+                  >
+                    {/* 迷你节点预览：顶部小标签 + 节点卡片 */}
+                    <div className="sidebar-pref-window flex items-center justify-center pt-3" aria-hidden="true">
+                      <div className="relative w-[62px]">
+                        <div
+                          className={`absolute -top-[10px] left-0 right-0 flex items-center gap-1 transition-opacity duration-200 ${
+                            nodeLabelVisible ? 'opacity-100' : 'opacity-0'
+                          }`}
+                        >
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-indigo-400/70" />
+                          <span className="h-1 flex-1 rounded-full bg-canvas-border" />
+                        </div>
+                        <div className="h-9 w-full rounded-[6px] border border-canvas-border bg-canvas-bg" />
+                      </div>
+                    </div>
+
+                    <div className="sidebar-pref-text">
+                      <div className="sidebar-pref-title">显示节点标题</div>
+                      <div className="sidebar-pref-desc">
+                        {nodeLabelVisible
+                          ? '节点上方显示类型图标与名称，双击可重命名'
+                          : '隐藏节点上方的标题栏，画布更简洁'}
+                      </div>
+                    </div>
+
+                    <div className="sidebar-pref-switch" aria-hidden="true">
+                      <span />
+                    </div>
+                  </button>
+                </div>
 
                 {/* 主窗口玻璃外框 */}
                 <div>

@@ -24,6 +24,7 @@ const defaultConfig: AppConfig = {
   mascotVisible: false,
   interactionMode: 'default',
   nodeToolbarMode: 'icons',
+  nodeLabelVisible: true,
 };
 
 const MODEL_PREF_KEY = 'canvas-model-prefs';
@@ -31,6 +32,11 @@ const MODEL_PREF_KEY = 'canvas-model-prefs';
 function syncNodeToolbarMode(mode: AppConfig['nodeToolbarMode']): void {
   if (typeof document === 'undefined') return;
   document.documentElement.dataset.nodeToolbarMode = mode ?? 'icons';
+}
+
+function syncNodeLabelVisible(visible: AppConfig['nodeLabelVisible']): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.dataset.nodeLabelVisible = visible === false ? 'false' : 'true';
 }
 
 interface RemovedModelReferences {
@@ -290,6 +296,9 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if ('nodeToolbarMode' in partial) {
       syncNodeToolbarMode(partial.nodeToolbarMode);
     }
+    if ('nodeLabelVisible' in partial) {
+      syncNodeLabelVisible(partial.nodeLabelVisible);
+    }
   },
 
   setProviderKey: (providerName, key) =>
@@ -490,12 +499,14 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
 
     if (!saved) {
       syncNodeToolbarMode(defaultConfig.nodeToolbarMode);
+      syncNodeLabelVisible(defaultConfig.nodeLabelVisible);
       set({ configHydrated: true });
       return;
     }
 
     const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...(saved as AppConfig) });
     syncNodeToolbarMode(cfg.nodeToolbarMode);
+    syncNodeLabelVisible(cfg.nodeLabelVisible);
     set({ config: cfg, configHydrated: true });
     if (missingSecrets.length > 0) {
       console.warn('[设置] 凭据存储中缺少以下连接的凭据:', missingSecrets);

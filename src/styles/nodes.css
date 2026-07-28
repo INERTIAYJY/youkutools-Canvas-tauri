@@ -131,6 +131,11 @@
   flex-shrink: 0;
 }
 
+/* 设置中关闭「显示节点标题」后隐藏标签（保留 DOM，项目快照仍可读取标题） */
+[data-node-label-visible='false'] .node-label {
+  display: none;
+}
+
 /* Upload button on node-preview top-right corner (source nodes) */
 .node-upload-btn {
   position: absolute !important;

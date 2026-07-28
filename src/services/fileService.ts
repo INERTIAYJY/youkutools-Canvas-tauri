@@ -45,6 +45,34 @@ interface NativeFileTransferResult {
   contentType: string | null;
 }
 
+const downloadDestinationQueues = new Map<string, Promise<void>>();
+
+async function withDownloadDestinationLock<T>(
+  dataDir: string,
+  fileName: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lockKey = `${dataDir}\n${sanitizeFileName(fileName)}`;
+  const previous = downloadDestinationQueues.get(lockKey);
+  const waitForTurn = previous?.catch(() => undefined) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = waitForTurn.then(() => gate);
+  downloadDestinationQueues.set(lockKey, tail);
+
+  await waitForTurn;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (downloadDestinationQueues.get(lockKey) === tail) {
+      downloadDestinationQueues.delete(lockKey);
+    }
+  }
+}
+
 function createTransferTaskId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `transfer-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -463,11 +491,17 @@ export async function downloadUrlAndSave(
       : extractFileNameFromUrl(url, fallbackPrefix);
     const dataDir = await ensureProjectDataDir(projectId);
     if (!dataDir) return null;
-    const destPath = await resolveUniqueDestPath(dataDir, fileName);
-    const result = await runNativeFileTransfer(
-      'download_file_streamed',
-      { url, destinationPath: destPath },
-      options,
+    const result = await withDownloadDestinationLock(
+      dataDir,
+      fileName,
+      async () => {
+        const destPath = await resolveUniqueDestPath(dataDir, fileName);
+        return runNativeFileTransfer(
+          'download_file_streamed',
+          { url, destinationPath: destPath },
+          options,
+        );
+      },
     );
     notifyProjectDiskChanged();
     const toAssetUrl = await getConvertFileSrc();

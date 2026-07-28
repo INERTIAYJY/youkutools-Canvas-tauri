@@ -1,0 +1,104 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  ensureProjectDataDir: vi.fn(),
+  invoke: vi.fn(),
+  notifyProjectDiskChanged: vi.fn(),
+  resolveUniqueDestPath: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  exists: vi.fn(),
+  mkdir: vi.fn(),
+  readDir: vi.fn(),
+  readFile: vi.fn(),
+  rename: vi.fn(),
+  stat: vi.fn(),
+  writeFile: vi.fn(),
+}));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: vi.fn(),
+  invoke: mocks.invoke,
+}));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
+vi.mock('@tauri-apps/api/path', () => ({ appDataDir: vi.fn(), localDataDir: vi.fn() }));
+vi.mock('../../src/services/fs/core', () => ({
+  CATEGORY_EXTENSIONS: {},
+  arrayBufferToBase64: vi.fn(),
+  buildNodeFileName: (label: string, ext: string) => `${label}${ext}`,
+  ensureProjectDataDir: mocks.ensureProjectDataDir,
+  getConvertFileSrc: () => (path: string) => `asset://${path}`,
+  getFileCategory: vi.fn(),
+  getMimeType: vi.fn(),
+  getProjectDataDir: vi.fn(),
+  isTauriEnv: () => true,
+  joinPath: (...parts: string[]) => parts.join('/'),
+  notifyProjectDiskChanged: mocks.notifyProjectDiskChanged,
+  resolveUniqueDestPath: mocks.resolveUniqueDestPath,
+  sanitizeFileName: (name: string) => name,
+  sanitizeFolderName: (name: string) => name,
+}));
+
+import { downloadUrlAndSave } from '../../src/services/fileService';
+
+describe('downloadUrlAndSave', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.ensureProjectDataDir.mockResolvedValue('/project/data');
+  });
+
+  it('serializes same-name downloads until the first destination exists', async () => {
+    const existingPaths = new Set<string>();
+    mocks.resolveUniqueDestPath.mockImplementation(async (dataDir: string, fileName: string) => {
+      const dotIndex = fileName.lastIndexOf('.');
+      const baseName = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+      const extension = dotIndex > 0 ? fileName.slice(dotIndex) : '';
+      let candidate = `${dataDir}/${fileName}`;
+      let counter = 1;
+      while (existingPaths.has(candidate)) {
+        candidate = `${dataDir}/${baseName}_${counter}${extension}`;
+        counter += 1;
+      }
+      return candidate;
+    });
+
+    let releaseFirstDownload: () => void = () => undefined;
+    const firstDownloadGate = new Promise<void>((resolve) => {
+      releaseFirstDownload = resolve;
+    });
+    let downloadCount = 0;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, string>) => {
+      if (command !== 'download_file_streamed') return undefined;
+      downloadCount += 1;
+      if (downloadCount === 1) await firstDownloadGate;
+      existingPaths.add(args.destinationPath);
+      return { path: args.destinationPath, totalBytes: 1, contentType: 'image/png' };
+    });
+
+    const first = downloadUrlAndSave(
+      'https://example.com/first.png',
+      'project-1',
+      'ai-image',
+      'AI 图片',
+    );
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
+
+    const second = downloadUrlAndSave(
+      'https://example.com/second.png',
+      'project-1',
+      'ai-image',
+      'AI 图片',
+    );
+    await vi.waitFor(() => expect(mocks.ensureProjectDataDir).toHaveBeenCalledTimes(2));
+
+    expect(mocks.resolveUniqueDestPath).toHaveBeenCalledTimes(1);
+    releaseFirstDownload();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { filePath: '/project/data/AI 图片.png', assetUrl: 'asset:///project/data/AI 图片.png' },
+      { filePath: '/project/data/AI 图片_1.png', assetUrl: 'asset:///project/data/AI 图片_1.png' },
+    ]);
+    expect(mocks.resolveUniqueDestPath).toHaveBeenCalledTimes(2);
+  });
+});

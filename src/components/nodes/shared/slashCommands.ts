@@ -305,7 +305,7 @@ const TEXT_COMMANDS: SlashCommandItem[] = [
 1. 只输出一个 JSON 对象，kind 必须为 "character"。
 2. 每条人物只要**一套默认主造型**；禁止「流泪/受伤/年轻时」等状态变体。
 3. 禁止输出：三视图、白底设定集、8K、镜头运镜、分镜、对白原文大段。
-4. visualNotes 用短关键词描述外形要点；wardrobeDefault 为一套默认服装简述。
+4. visualNotes 用短关键词描述外形要点；wardrobeDefault 为一套默认服装简述；voiceNotes 用短关键词描述音色、口音与语速。
 5. 同名角色合并，别名写入 aliases。
 6. importance 只能是 main | supporting | minor。
 
@@ -322,6 +322,7 @@ const TEXT_COMMANDS: SlashCommandItem[] = [
       "summary": "一句话简介",
       "visualNotes": "外形要点关键词",
       "wardrobeDefault": "默认造型简述",
+      "voiceNotes": "音色/口音/语速要点",
       "personality": "性格要点",
       "storyRole": "剧情功能",
       "importance": "main",

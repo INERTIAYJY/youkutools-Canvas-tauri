@@ -64,6 +64,7 @@ export function formatDramaAssetTextBrief(asset: DramaAsset): string {
     if (c.summary) lines.push(`- 简介：${c.summary}`);
     if (c.visualNotes) lines.push(`- 外形要点：${c.visualNotes}`);
     if (c.wardrobeDefault) lines.push(`- 默认造型：${c.wardrobeDefault}`);
+    if (c.voiceNotes) lines.push(`- 声音：${c.voiceNotes}`);
     if (c.storyRole) lines.push(`- 剧情功能：${c.storyRole}`);
     if (c.relationships?.length) {
       lines.push(

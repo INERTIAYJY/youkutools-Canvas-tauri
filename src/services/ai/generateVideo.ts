@@ -9,6 +9,7 @@ import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
 import type { AIVideoGenParams } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { resolvePromptWithImageRefs } from './promptResolver';
+import { collectConnectedReferenceMedia, mergeUniqueUrls } from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
@@ -16,8 +17,6 @@ import { normalizeFrames8n1, type ModelProtocolVariables } from './modelProtocol
 import { mediaProviderRegistry } from './mediaProviderRegistry';
 import { mapVideoDimensions } from '../aiDimensions';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from '../pollManager';
-import { collectDirectorImageUrls } from '../directorDeskService';
-import type { BaseNodeData } from '../../types';
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
 
@@ -26,63 +25,6 @@ interface VideoReferenceInput {
   imageUrls: string[];
   videoUrls: string[];
   audioUrls: string[];
-}
-
-interface ConnectedReferenceMedia {
-  imageUrls: string[];
-  videoUrls: string[];
-  audioUrls: string[];
-}
-
-function pushUniqueUrl(urls: string[], seen: Set<string>, value: unknown): void {
-  if (typeof value !== 'string') return;
-  const url = value.trim();
-  if (!url || seen.has(url)) return;
-  seen.add(url);
-  urls.push(url);
-}
-
-/** 收集连入当前视频节点的参考媒体（图片包含 3D 导演台截图）。 */
-function collectConnectedReferenceMedia(nodeId: string | undefined): ConnectedReferenceMedia {
-  const empty = { imageUrls: [], videoUrls: [], audioUrls: [] };
-  if (!nodeId) return empty;
-  const { nodes, edges } = useAppStore.getState();
-  const sourceIds = edges.filter((e) => e.target === nodeId).map((e) => e.source);
-  const media: ConnectedReferenceMedia = { imageUrls: [], videoUrls: [], audioUrls: [] };
-  const imageSeen = new Set<string>();
-  const videoSeen = new Set<string>();
-  const audioSeen = new Set<string>();
-  for (const sid of sourceIds) {
-    const node = nodes.find((n) => n.id === sid);
-    if (!node) continue;
-    const data = node.data as BaseNodeData;
-    const type = (data.type as string) || node.type || '';
-    if (type === 'ai-director') {
-      for (const url of collectDirectorImageUrls(data)) {
-        pushUniqueUrl(media.imageUrls, imageSeen, url);
-      }
-      continue;
-    }
-    if (
-      type === 'ai-image'
-      || type === 'source-image'
-      || type === 'ai-panorama'
-      || type === 'ai-storyboard'
-    ) {
-      pushUniqueUrl(media.imageUrls, imageSeen, data.imageUrl || data.thumbnailUrl);
-      continue;
-    }
-    pushUniqueUrl(media.videoUrls, videoSeen, data.videoUrl);
-    pushUniqueUrl(media.audioUrls, audioSeen, data.audioUrl);
-  }
-  return media;
-}
-
-function mergeUniqueUrls(primary: string[], additional: string[]): string[] {
-  const urls = [...primary];
-  const seen = new Set(urls);
-  for (const url of additional) pushUniqueUrl(urls, seen, url);
-  return urls;
 }
 
 async function resolveVideoReferenceInput(

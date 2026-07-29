@@ -7,6 +7,7 @@ import { registerFileAgentTools } from './fileTools';
 import { registerSkillAgentTools } from './skillTools';
 import { registerMemoryAgentTools } from './memoryTools';
 import { registerPresetAgentTools } from './presetTools';
+import { registerDramaAssetAgentTools } from './dramaAssetTools';
 import { registerExpertAgentTools } from './expertTools';
 import { registerSubAgentAgentTools } from './subAgentTools';
 import { registerProviderConfigAgentTools } from './providerConfigTools';
@@ -38,6 +39,7 @@ function getRegistrationFactories(): AgentToolRegistrationFactory[] {
     registerSkillAgentTools,
     registerMemoryAgentTools,
     registerPresetAgentTools,
+    registerDramaAssetAgentTools,
     registerExpertAgentTools,
     registerSubAgentAgentTools,
     registerProviderConfigAgentTools,

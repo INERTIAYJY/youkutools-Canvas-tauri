@@ -790,6 +790,14 @@ function CharacterAssetEditorDialog({
               onChange={(event) => patchDraft({ wardrobeDefault: event.target.value || undefined })}
             />
           </label>
+          <label className="character-field character-field-wide">
+            <span>声音特征</span>
+            <input
+              value={draft.voiceNotes ?? ''}
+              onChange={(event) => patchDraft({ voiceNotes: event.target.value || undefined })}
+              placeholder="音色、口音、语速，例如：低沉沙哑，语速偏慢，带轻微南方口音"
+            />
+          </label>
         </section>
 
         <section className="character-dialog-references" aria-label="参考图">

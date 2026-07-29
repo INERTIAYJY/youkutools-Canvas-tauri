@@ -93,6 +93,8 @@ export interface DramaCharacter extends DramaAssetBase {
   personality?: string;
   relationships?: Array<{ targetName: string; relation: string }>;
   wardrobeDefault?: string;
+  /** 音色 / 口音 / 语速等声音特征，供 TTS 与配音提示词使用 */
+  voiceNotes?: string;
   referenceImages?: CharacterReferenceImage[];
   primaryReferenceImageId?: string;
   avatarReferenceImageId?: string;

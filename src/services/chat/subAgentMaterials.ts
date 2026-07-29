@@ -116,13 +116,18 @@ function buildMentionedNodesSection(
 }
 
 function formatAsset(asset: DramaAssetBase): string {
-  const extra = asset as DramaAssetBase & { identity?: string; wardrobeDefault?: string };
+  const extra = asset as DramaAssetBase & {
+    identity?: string;
+    wardrobeDefault?: string;
+    voiceNotes?: string;
+  };
   const parts = [
     asset.name,
     asset.summary,
     asset.visualNotes,
     extra.identity,
     extra.wardrobeDefault,
+    extra.voiceNotes,
   ].filter((value): value is string => !!value && value.trim().length > 0);
   return sanitizeDomainText(parts.join('，')).slice(0, SUB_AGENT_MATERIAL_LIMITS.assetChars);
 }

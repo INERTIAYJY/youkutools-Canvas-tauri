@@ -6,6 +6,7 @@ import { executeComfyUIAudioGenerate } from '../comfyWorkflowService';
 import { downloadUrlAndSave, saveBinaryToProjectData } from '../fileService';
 import type { AIAudioGenParams, AudioGenerationResult } from '../../types/aiTypes';
 import { resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
+import { collectConnectedReferenceMedia } from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
@@ -63,6 +64,8 @@ export async function generateAudio(
 
   // 解析 @{nodeId:label} 引用为对应节点的实际输出内容
   const prompt = resolveNodeReferences(rawPrompt);
+  // 连线的音频节点作为音色参考（角色库绑定的声音正是通过这条线进来的）
+  const referenceAudioUrls = collectConnectedReferenceMedia(params.nodeId).audioUrls;
 
   // ComfyUI 工作流执行路径
   if (params.workflowId) {
@@ -97,6 +100,9 @@ export async function generateAudio(
           musicTitle: params.musicTitle,
           musicLyrics: params.musicLyrics,
           musicBpm: params.musicBpm,
+          audioUrls: referenceAudioUrls,
+          audioUrl: referenceAudioUrls[0],
+          referenceAudioUrls,
           n: 1,
           batchCount: 1,
         },

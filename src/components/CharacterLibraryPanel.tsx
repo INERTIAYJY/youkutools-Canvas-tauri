@@ -69,6 +69,7 @@ export default function CharacterLibraryPanel() {
     removeCharacterVoiceClip,
     setCharacterPrimaryVoice,
     createAudioNodeFromCharacterVoice,
+    createVoiceOverNodeFromCharacterVoice,
     setSelectedNodeIds,
     showToast,
   } = useAppStore(
@@ -90,6 +91,7 @@ export default function CharacterLibraryPanel() {
       removeCharacterVoiceClip: state.removeCharacterVoiceClip,
       setCharacterPrimaryVoice: state.setCharacterPrimaryVoice,
       createAudioNodeFromCharacterVoice: state.createAudioNodeFromCharacterVoice,
+      createVoiceOverNodeFromCharacterVoice: state.createVoiceOverNodeFromCharacterVoice,
       setSelectedNodeIds: state.setSelectedNodeIds,
       showToast: state.showToast,
     })),
@@ -236,13 +238,24 @@ export default function CharacterLibraryPanel() {
     }
   };
 
-  const handleVoiceToCanvas = (clip: CharacterVoiceClip) => {
-    if (!selectedCharacter) return;
-    const nodeId = createAudioNodeFromCharacterVoice(scope, selectedCharacter.id, clip.id);
-    if (!nodeId) return;
+  const focusNode = (nodeId: string) => {
     setOpen(false);
     setSelectedNodeIds([nodeId]);
     window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId } }));
+  };
+
+  const handleVoiceToCanvas = (clip: CharacterVoiceClip) => {
+    if (!selectedCharacter) return;
+    const nodeId = createAudioNodeFromCharacterVoice(scope, selectedCharacter.id, clip.id);
+    if (nodeId) focusNode(nodeId);
+  };
+
+  const handleVoiceOver = (clip: CharacterVoiceClip) => {
+    if (!selectedCharacter) return;
+    const nodeId = createVoiceOverNodeFromCharacterVoice(scope, selectedCharacter.id, clip.id);
+    if (!nodeId) return;
+    showToast('已创建配音节点，声音已连线为音色参考');
+    focusNode(nodeId);
   };
 
   const openEditor = (character: DramaCharacter | null, referenceId?: string | null) => {
@@ -485,6 +498,14 @@ export default function CharacterLibraryPanel() {
                               onClick={() => void setCharacterPrimaryVoice(scope, selectedCharacter.id, clip.id)}
                             >
                               <Icon icon="lucide:star" width="13" height="13" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              data-tooltip="用这个声音生成台词"
+                              aria-label="用这个声音生成台词"
+                              onClick={() => handleVoiceOver(clip)}
+                            >
+                              <Icon icon="lucide:mic" width="13" height="13" aria-hidden="true" />
                             </button>
                             <button
                               type="button"

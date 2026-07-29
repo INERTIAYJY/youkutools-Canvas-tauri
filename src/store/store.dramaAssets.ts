@@ -184,6 +184,15 @@ export interface DramaAssetsSlice {
     characterId: string,
     clipId: string,
   ) => string | null;
+  /**
+   * 用角色声音配台词：把声音节点连到新建的生成音频节点，
+   * 音频生成会把连线上的音频作为音色参考。返回生成节点 id。
+   */
+  createVoiceOverNodeFromCharacterVoice: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    clipId: string,
+  ) => string | null;
 }
 
 export function countUnreadDramaAssets(library: DramaAssetLibrary): number {
@@ -1024,6 +1033,61 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
         updatedAt: Date.now(),
       });
     }
+    return nodeId;
+  },
+
+  createVoiceOverNodeFromCharacterVoice: (scope, characterId, clipId) => {
+    const voiceNodeId = get().createAudioNodeFromCharacterVoice(scope, characterId, clipId);
+    if (!voiceNodeId) return null;
+
+    const state = get();
+    const characters = scope === 'project'
+      ? state.dramaAssets.characters
+      : state.globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character) return null;
+    const clip = character.voiceClips?.find((item) => item.id === clipId);
+    const voiceNode = state.nodes.find((node) => node.id === voiceNodeId);
+
+    const nodeId = `node-${generateId()}`;
+    const position = voiceNode
+      ? { x: voiceNode.position.x + 340, y: voiceNode.position.y }
+      : pickSpawnPosition(state.nodes as Node<BaseNodeData>[]);
+    const newNode: Node<BaseNodeData> = {
+      id: nodeId,
+      type: 'ai-audio',
+      position,
+      data: {
+        label: `${character.name} · 配音`,
+        type: 'ai-audio',
+        role: 'generator',
+        status: 'idle',
+        prompt: clip?.transcript ?? '',
+        audioPurpose: 'speech',
+        nodeWidth: 260,
+        nodeHeight: 160,
+      },
+    };
+
+    // 回填本地偏好模型（与侧栏添加音频节点一致）
+    try {
+      const raw = localStorage.getItem('canvas-model-prefs');
+      if (raw) {
+        const prefs: Record<string, string> = JSON.parse(raw);
+        const modelValue = prefs['ai-audio'];
+        if (modelValue && modelValue.includes('::')) {
+          const [provider, model] = modelValue.split('::');
+          if (provider && model) {
+            newNode.data.provider = provider;
+            newNode.data.model = model;
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    state.addNode(newNode);
+    // 连线即引用：生成音频时这条线上的声音会作为音色参考
+    state.onConnect({ source: voiceNodeId, target: nodeId, sourceHandle: null, targetHandle: null });
     return nodeId;
   },
 });

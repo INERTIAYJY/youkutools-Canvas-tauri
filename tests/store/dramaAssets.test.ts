@@ -4,6 +4,7 @@ import { useAppStore } from '../../src/store/useAppStore';
 import {
   countUnreadDramaAssets,
   isEligibleCharacterReferenceNode,
+  isEligibleCharacterVoiceNode,
 } from '../../src/store/store.dramaAssets';
 import { filterCharacterLibraryCanvasElements } from '../../src/store/store.nodes';
 import type { DramaCharacter } from '../../src/types/dramaAssets';
@@ -461,6 +462,69 @@ describe('dramaAssets store', () => {
     const asset = useAppStore.getState().dramaAssets.characters[0];
     expect(asset.name).toBe('新 角色');
     expect(asset.key).toBe('新角色');
+  });
+
+  it('binds an audio node as a character voice and wires a voice-over node', async () => {
+    const audioNode = {
+      id: 'audio-1',
+      type: 'ai-audio',
+      position: { x: 0, y: 0 },
+      data: {
+        type: 'ai-audio',
+        label: '旁白音频',
+        audioUrl: 'asset:///project/data/voice.mp3',
+        filePath: '/project/data/voice.mp3',
+        assetId: 'asset-voice',
+      },
+    } as unknown as Node<BaseNodeData>;
+    useAppStore.setState({
+      nodes: [audioNode],
+      dramaAssets: { ...emptyDramaAssetLibrary(), characters: [sampleCharacter()] },
+    });
+
+    const clipId = await useAppStore.getState().bindAudioNodeToCharacterVoice({
+      nodeId: 'audio-1',
+      scope: 'project',
+      characterId: 'char_1',
+      transcript: '你终于来了。',
+    });
+
+    expect(clipId).toBeTruthy();
+    const character = useAppStore.getState().dramaAssets.characters[0];
+    expect(character.primaryVoiceClipId).toBe(clipId);
+    // 与节点共用同一份本地文件，不复制副本
+    expect(character.voiceClips?.[0]).toEqual(expect.objectContaining({
+      sourceNodeId: 'audio-1',
+      filePath: '/project/data/voice.mp3',
+      assetId: 'asset-voice',
+      transcript: '你终于来了。',
+    }));
+
+    const voiceOverId = useAppStore.getState()
+      .createVoiceOverNodeFromCharacterVoice('project', 'char_1', clipId!);
+    expect(voiceOverId).toBeTruthy();
+
+    const state = useAppStore.getState();
+    const voiceOverNode = state.nodes.find((node) => node.id === voiceOverId);
+    expect(voiceOverNode?.type).toBe('ai-audio');
+    expect(voiceOverNode?.data.prompt).toBe('你终于来了。');
+    // 连线即引用：音频生成会把这条线上的声音作为音色参考
+    expect(state.edges.some((edge) => edge.source === 'audio-1' && edge.target === voiceOverId)).toBe(true);
+  });
+
+  it('rejects audio nodes without an audio product', () => {
+    expect(isEligibleCharacterVoiceNode({
+      type: 'ai-audio',
+      data: { type: 'ai-audio', label: '空音频' } as BaseNodeData,
+    })).toBe(false);
+    expect(isEligibleCharacterVoiceNode({
+      type: 'source-image',
+      data: { type: 'source-image', label: '图片', audioUrl: 'x' } as unknown as BaseNodeData,
+    })).toBe(false);
+    expect(isEligibleCharacterVoiceNode({
+      type: 'source-audio',
+      data: { type: 'source-audio', label: '音频', audioUrl: 'x' } as unknown as BaseNodeData,
+    })).toBe(true);
   });
 
   it('unbind fully removes image fields', () => {

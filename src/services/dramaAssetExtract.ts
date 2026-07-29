@@ -112,6 +112,7 @@ export function parseCharacterItems(items: Array<Record<string, unknown>>): Dram
       personality: asString(raw.personality) || undefined,
       wardrobeDefault:
         asString(raw.wardrobeDefault) || asString(raw.wardrobe_default) || undefined,
+      voiceNotes: asString(raw.voiceNotes) || asString(raw.voice_notes) || undefined,
       relationships: Array.isArray(raw.relationships)
         ? raw.relationships
             .map((r) => {
@@ -232,6 +233,7 @@ export function formatDramaExtractMarkdown(
       lines.push(`- 简介：${c.summary}`);
       if (c.visualNotes) lines.push(`- 外形要点：${c.visualNotes}`);
       if (c.wardrobeDefault) lines.push(`- 默认造型：${c.wardrobeDefault}`);
+      if (c.voiceNotes) lines.push(`- 声音：${c.voiceNotes}`);
       if (c.storyRole) lines.push(`- 剧情功能：${c.storyRole}`);
       if (c.relationships?.length) {
         lines.push(`- 关系：${c.relationships.map((r) => `${r.targetName}（${r.relation}）`).join('；')}`);

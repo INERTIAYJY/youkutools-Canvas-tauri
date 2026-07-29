@@ -16,6 +16,12 @@ export type CharacterReferenceKind =
   | 'outfit'
   | 'other';
 
+export type CharacterVoiceKind =
+  | 'timbre'
+  | 'line'
+  | 'emotion'
+  | 'other';
+
 /** 头像裁剪区域，坐标与尺寸均为相对原图的 0-1 值。 */
 export interface CharacterCropRect {
   x: number;
@@ -29,10 +35,33 @@ export interface CharacterReferenceImage {
   kind: CharacterReferenceKind;
   assetId?: string;
   relativePath?: string;
+  /** 运行期本地绝对路径；保存项目时与画布节点一样收敛为 assetId + relativePath */
+  filePath?: string;
   imageUrl?: string;
   /** 仅项目角色可关联来源节点；全局角色不得依赖该字段。 */
   sourceNodeId?: string;
   prompt: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 角色声音片段：上传的音频文件或画布音频节点的产物。 */
+export interface CharacterVoiceClip {
+  id: string;
+  kind: CharacterVoiceKind;
+  /** 展示名，缺省时回退到用途标签 */
+  label?: string;
+  assetId?: string;
+  relativePath?: string;
+  /** 运行期本地绝对路径；保存项目时与画布节点一样收敛为 assetId + relativePath */
+  filePath?: string;
+  audioUrl?: string;
+  /** 仅项目角色可关联来源节点；全局角色不得依赖该字段。 */
+  sourceNodeId?: string;
+  /** 台词文本或音色描述 */
+  transcript: string;
+  /** 音频时长（秒），读取失败时缺省 */
+  durationSec?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -68,6 +97,9 @@ export interface DramaCharacter extends DramaAssetBase {
   primaryReferenceImageId?: string;
   avatarReferenceImageId?: string;
   avatarCrop?: CharacterCropRect;
+  voiceClips?: CharacterVoiceClip[];
+  /** 主音色片段 id，配音与音色参考默认取它 */
+  primaryVoiceClipId?: string;
 }
 
 export interface DramaScene extends DramaAssetBase {
@@ -139,6 +171,13 @@ const CHARACTER_REFERENCE_KINDS = new Set<CharacterReferenceKind>([
   'other',
 ]);
 
+const CHARACTER_VOICE_KINDS = new Set<CharacterVoiceKind>([
+  'timbre',
+  'line',
+  'emotion',
+  'other',
+]);
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value != null && typeof value === 'object'
     ? value as Record<string, unknown>
@@ -177,8 +216,9 @@ function normalizeReferenceImage(
   const imageUrl = typeof reference.imageUrl === 'string' ? reference.imageUrl : undefined;
   const assetId = typeof reference.assetId === 'string' ? reference.assetId : undefined;
   const relativePath = typeof reference.relativePath === 'string' ? reference.relativePath : undefined;
+  const filePath = typeof reference.filePath === 'string' ? reference.filePath : undefined;
   const sourceNodeId = typeof reference.sourceNodeId === 'string' ? reference.sourceNodeId : undefined;
-  if (!imageUrl && !assetId && !relativePath && !sourceNodeId) return null;
+  if (!imageUrl && !assetId && !relativePath && !filePath && !sourceNodeId) return null;
   const rawKind = typeof reference.kind === 'string' ? reference.kind : '';
   const kind = CHARACTER_REFERENCE_KINDS.has(rawKind as CharacterReferenceKind)
     ? rawKind as CharacterReferenceKind
@@ -190,11 +230,51 @@ function normalizeReferenceImage(
     kind,
     assetId,
     relativePath,
+    filePath,
     imageUrl,
     sourceNodeId,
     prompt: typeof reference.prompt === 'string' ? reference.prompt : '',
     createdAt: finiteNumber(reference.createdAt, fallbackTime),
     updatedAt: finiteNumber(reference.updatedAt, fallbackTime),
+  };
+}
+
+function normalizeVoiceClip(
+  value: unknown,
+  characterId: string,
+  index: number,
+  fallbackTime: number,
+): CharacterVoiceClip | null {
+  const clip = asRecord(value);
+  if (!clip) return null;
+  const audioUrl = typeof clip.audioUrl === 'string' ? clip.audioUrl : undefined;
+  const assetId = typeof clip.assetId === 'string' ? clip.assetId : undefined;
+  const relativePath = typeof clip.relativePath === 'string' ? clip.relativePath : undefined;
+  const filePath = typeof clip.filePath === 'string' ? clip.filePath : undefined;
+  const sourceNodeId = typeof clip.sourceNodeId === 'string' ? clip.sourceNodeId : undefined;
+  if (!audioUrl && !assetId && !relativePath && !filePath && !sourceNodeId) return null;
+  const rawKind = typeof clip.kind === 'string' ? clip.kind : '';
+  const kind = CHARACTER_VOICE_KINDS.has(rawKind as CharacterVoiceKind)
+    ? rawKind as CharacterVoiceKind
+    : 'other';
+  const durationSec = typeof clip.durationSec === 'number' && Number.isFinite(clip.durationSec)
+    && clip.durationSec > 0
+    ? clip.durationSec
+    : undefined;
+  const label = typeof clip.label === 'string' && clip.label.trim() ? clip.label : undefined;
+  return {
+    id: typeof clip.id === 'string' && clip.id.trim() ? clip.id : `voice-${characterId}-${index}`,
+    kind,
+    label,
+    assetId,
+    relativePath,
+    filePath,
+    audioUrl,
+    sourceNodeId,
+    transcript: typeof clip.transcript === 'string' ? clip.transcript : '',
+    durationSec,
+    createdAt: finiteNumber(clip.createdAt, fallbackTime),
+    updatedAt: finiteNumber(clip.updatedAt, fallbackTime),
   };
 }
 
@@ -233,12 +313,28 @@ export function normalizeDramaCharacter(character: DramaCharacter): DramaCharact
     ? character.avatarReferenceImageId
     : referenceImages.find((reference) => reference.kind === 'avatar')?.id;
 
+  const voiceClips = (Array.isArray(character.voiceClips) ? character.voiceClips : [])
+    .map((clip, index) => normalizeVoiceClip(
+      clip,
+      character.id,
+      index,
+      character.updatedAt || character.createdAt,
+    ))
+    .filter((clip): clip is CharacterVoiceClip => clip !== null);
+  const voiceClipIds = new Set(voiceClips.map((clip) => clip.id));
+  const primaryVoiceClipId = character.primaryVoiceClipId
+    && voiceClipIds.has(character.primaryVoiceClipId)
+    ? character.primaryVoiceClipId
+    : voiceClips[0]?.id;
+
   return {
     ...character,
     referenceImages,
     primaryReferenceImageId,
     avatarReferenceImageId,
     avatarCrop: avatarReferenceImageId ? normalizeCropRect(character.avatarCrop) : undefined,
+    voiceClips,
+    primaryVoiceClipId,
   };
 }
 

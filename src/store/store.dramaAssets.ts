@@ -8,6 +8,8 @@ import type {
   CharacterCropRect,
   CharacterReferenceImage,
   CharacterReferenceKind,
+  CharacterVoiceClip,
+  CharacterVoiceKind,
   DramaAsset,
   DramaAssetKind,
   DramaAssetLibrary,
@@ -42,11 +44,21 @@ const CHARACTER_REFERENCE_NODE_TYPES = new Set([
   'ai-animation',
 ]);
 
+const CHARACTER_VOICE_NODE_TYPES = new Set(['ai-audio', 'source-audio']);
+
 export function isEligibleCharacterReferenceNode(
   node: Pick<Node<BaseNodeData>, 'type' | 'data'> | undefined,
 ): boolean {
   if (!node?.type || !CHARACTER_REFERENCE_NODE_TYPES.has(node.type)) return false;
   return Boolean(node.data.imageUrl || node.data.thumbnailUrl);
+}
+
+/** 可绑定为角色声音的画布节点：生成音频与上传音频，且已有音频产物 */
+export function isEligibleCharacterVoiceNode(
+  node: Pick<Node<BaseNodeData>, 'type' | 'data'> | undefined,
+): boolean {
+  if (!node?.type || !CHARACTER_VOICE_NODE_TYPES.has(node.type)) return false;
+  return Boolean(node.data.audioUrl);
 }
 
 export interface CaptureImageNodeToCharacterInput {
@@ -62,6 +74,17 @@ export interface CaptureImageNodeToCharacterInput {
 export interface CaptureImageNodeToCharacterResult {
   characterId: string;
   referenceImageId: string;
+}
+
+export interface BindAudioNodeToCharacterVoiceInput {
+  nodeId: string;
+  scope: CharacterLibraryScope;
+  characterId: string;
+  kind?: CharacterVoiceKind;
+  label?: string;
+  transcript?: string;
+  durationSec?: number;
+  makePrimary?: boolean;
 }
 
 export interface DramaAssetsSlice {
@@ -94,7 +117,7 @@ export interface DramaAssetsSlice {
     imageUrl?: string,
   ) => void;
   unbindDramaAssetImage: (kind: DramaAssetKind, id: string) => void;
-  /** 图像生成成功后：按 imageNodeId / dramaAssetId 回写 imageUrl */
+  /** 生成成功后：按 imageNodeId / dramaAssetId 回写 imageUrl，音频节点则刷新已绑定的角色声音 */
   syncDramaAssetImageFromNode: (imageNodeId: string, imageUrl: string) => void;
   /**
    * 从资产创建图像节点并填入定妆/场景/道具 prompt，自动绑定。
@@ -129,6 +152,37 @@ export interface DramaAssetsSlice {
     scope: CharacterLibraryScope,
     characterId: string,
     referenceImageId: string,
+  ) => string | null;
+  addCharacterVoiceClip: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    clip: CharacterVoiceClip,
+    options?: { makePrimary?: boolean },
+  ) => Promise<boolean>;
+  updateCharacterVoiceClip: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    clipId: string,
+    patch: Partial<Pick<CharacterVoiceClip, 'kind' | 'label' | 'transcript'>>,
+  ) => Promise<boolean>;
+  removeCharacterVoiceClip: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    clipId: string,
+  ) => Promise<boolean>;
+  setCharacterPrimaryVoice: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    clipId: string,
+  ) => Promise<boolean>;
+  /** 把画布音频节点绑定为角色声音，返回声音片段 id */
+  bindAudioNodeToCharacterVoice: (
+    input: BindAudioNodeToCharacterVoiceInput,
+  ) => Promise<string | null>;
+  createAudioNodeFromCharacterVoice: (
+    scope: CharacterLibraryScope,
+    characterId: string,
+    clipId: string,
   ) => string | null;
 }
 
@@ -198,6 +252,31 @@ function upsertCharacterReference(
   });
 }
 
+function upsertCharacterVoiceClip(
+  character: DramaCharacter,
+  clip: CharacterVoiceClip,
+  makePrimary: boolean,
+): DramaCharacter {
+  const clips = [...(character.voiceClips ?? [])];
+  const existingIndex = clips.findIndex((item) =>
+    item.id === clip.id
+    || Boolean(clip.sourceNodeId && item.sourceNodeId === clip.sourceNodeId),
+  );
+  const persistedClip = existingIndex >= 0
+    ? { ...clips[existingIndex], ...clip, id: clips[existingIndex].id }
+    : clip;
+  if (existingIndex >= 0) clips[existingIndex] = persistedClip;
+  else clips.push(persistedClip);
+  return normalizeDramaCharacter({
+    ...character,
+    voiceClips: clips,
+    primaryVoiceClipId: makePrimary || !character.primaryVoiceClipId
+      ? persistedClip.id
+      : character.primaryVoiceClipId,
+    updatedAt: Date.now(),
+  });
+}
+
 function cloneCharacter(character: DramaCharacter): DramaCharacter {
   const now = Date.now();
   return normalizeDramaCharacter({
@@ -208,6 +287,12 @@ function cloneCharacter(character: DramaCharacter): DramaCharacter {
     source: 'manual',
     referenceImages: (character.referenceImages ?? []).map((reference) => ({
       ...reference,
+      sourceNodeId: undefined,
+      createdAt: now,
+      updatedAt: now,
+    })),
+    voiceClips: (character.voiceClips ?? []).map((clip) => ({
+      ...clip,
       sourceNodeId: undefined,
       createdAt: now,
       updatedAt: now,
@@ -355,6 +440,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
         kind: 'primary',
         assetId: node?.data?.assetId as string | undefined,
         relativePath: node?.data?.relativePath as string | undefined,
+        filePath: node?.data?.filePath as string | undefined,
         imageUrl: resolvedUrl,
         sourceNodeId: imageNodeId,
         prompt,
@@ -391,10 +477,35 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   syncDramaAssetImageFromNode: (imageNodeId, imageUrl) => {
     const lib = get().dramaAssets;
+    const node = get().nodes.find((n) => n.id === imageNodeId);
+    // 重新生成会换一份本地文件，绑定关系跟着节点走
+    const nodeFileIdentity = {
+      assetId: node?.data?.assetId as string | undefined,
+      relativePath: node?.data?.relativePath as string | undefined,
+      filePath: node?.data?.filePath as string | undefined,
+    };
     let changed = false;
 
     const syncList = <T extends DramaAsset>(list: T[]): T[] =>
       list.map((item) => {
+        // 音频节点重新生成后刷新已绑定的角色声音（同一节点不会既是图像又是音频来源）
+        const voiceClips: CharacterVoiceClip[] = item.kind === 'character'
+          ? item.voiceClips ?? []
+          : [];
+        const matchingVoiceClip = voiceClips.find((clip) => clip.sourceNodeId === imageNodeId);
+        if (matchingVoiceClip) {
+          if (matchingVoiceClip.audioUrl === imageUrl) return item;
+          changed = true;
+          return {
+            ...item,
+            voiceClips: voiceClips.map((clip) =>
+              clip.sourceNodeId === imageNodeId
+                ? { ...clip, ...nodeFileIdentity, audioUrl: imageUrl, updatedAt: Date.now() }
+                : clip,
+            ),
+            updatedAt: Date.now(),
+          };
+        }
         const matchingReference = item.kind === 'character'
           ? item.referenceImages?.find((reference) => reference.sourceNodeId === imageNodeId)
           : undefined;
@@ -407,7 +518,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
             ...(item.kind === 'character' ? {
               referenceImages: (item.referenceImages ?? []).map((reference) =>
                 reference.sourceNodeId === imageNodeId
-                  ? { ...reference, imageUrl, updatedAt: Date.now() }
+                  ? { ...reference, ...nodeFileIdentity, imageUrl, updatedAt: Date.now() }
                   : reference,
               ),
             } : {}),
@@ -425,7 +536,6 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     };
 
     // 按节点 data.dramaAssetId 补绑（一键创建路径兜底）
-    const node = get().nodes.find((n) => n.id === imageNodeId);
     const dramaAssetId = node?.data?.dramaAssetId as string | undefined;
     const dramaAssetKind = node?.data?.dramaAssetKind as DramaAssetKind | undefined;
     if (dramaAssetId && dramaAssetKind) {
@@ -660,6 +770,8 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
       kind: input.kind,
       assetId: sourceNode.data.assetId,
       relativePath: sourceNode.data.relativePath,
+      // 与节点共用同一份本地文件，不复制副本
+      filePath: sourceNode.data.filePath,
       imageUrl: sourceNode.data.imageUrl ?? sourceNode.data.thumbnailUrl,
       sourceNodeId: sourceNode.id,
       prompt: input.prompt,
@@ -752,6 +864,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
         thumbnailUrl: reference.imageUrl,
         assetId: reference.assetId,
         relativePath: reference.relativePath,
+        filePath: reference.filePath,
         nodeWidth: 280,
         nodeHeight: 280,
         characterLibraryLinks: [link],
@@ -760,6 +873,153 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     if (scope === 'project') {
       void state.addCharacterReferenceImage('project', characterId, {
         ...reference,
+        sourceNodeId: nodeId,
+        updatedAt: Date.now(),
+      });
+    }
+    return nodeId;
+  },
+
+  addCharacterVoiceClip: async (scope, characterId, clip, options) => {
+    const characters = scope === 'project'
+      ? get().dramaAssets.characters
+      : get().globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character) return false;
+    return get().saveCharacterCard(
+      scope,
+      upsertCharacterVoiceClip(character, clip, options?.makePrimary === true),
+    );
+  },
+
+  updateCharacterVoiceClip: async (scope, characterId, clipId, patch) => {
+    const characters = scope === 'project'
+      ? get().dramaAssets.characters
+      : get().globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character?.voiceClips?.some((clip) => clip.id === clipId)) return false;
+    return get().saveCharacterCard(scope, normalizeDramaCharacter({
+      ...character,
+      voiceClips: character.voiceClips.map((clip) =>
+        clip.id === clipId ? { ...clip, ...patch, updatedAt: Date.now() } : clip,
+      ),
+      updatedAt: Date.now(),
+    }));
+  },
+
+  removeCharacterVoiceClip: async (scope, characterId, clipId) => {
+    const characters = scope === 'project'
+      ? get().dramaAssets.characters
+      : get().globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character?.voiceClips?.some((clip) => clip.id === clipId)) return false;
+    const rest = character.voiceClips.filter((clip) => clip.id !== clipId);
+    return get().saveCharacterCard(scope, normalizeDramaCharacter({
+      ...character,
+      voiceClips: rest,
+      primaryVoiceClipId: character.primaryVoiceClipId === clipId
+        ? rest[0]?.id
+        : character.primaryVoiceClipId,
+      updatedAt: Date.now(),
+    }));
+  },
+
+  setCharacterPrimaryVoice: async (scope, characterId, clipId) => {
+    const characters = scope === 'project'
+      ? get().dramaAssets.characters
+      : get().globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    if (!character?.voiceClips?.some((clip) => clip.id === clipId)) return false;
+    return get().saveCharacterCard(scope, normalizeDramaCharacter({
+      ...character,
+      primaryVoiceClipId: clipId,
+      updatedAt: Date.now(),
+    }));
+  },
+
+  bindAudioNodeToCharacterVoice: async (input) => {
+    const state = get();
+    const sourceNode = state.nodes.find((node) => node.id === input.nodeId);
+    if (!sourceNode || !isEligibleCharacterVoiceNode(sourceNode)) {
+      state.showToast?.('该节点没有可用的音频', 'error');
+      return null;
+    }
+    const characters = input.scope === 'project'
+      ? state.dramaAssets.characters
+      : state.globalCharacters;
+    const character = characters.find((item) => item.id === input.characterId);
+    if (!character) {
+      state.showToast?.('请选择角色', 'error');
+      return null;
+    }
+
+    const existing = character.voiceClips?.find((clip) => (
+      (input.scope === 'project' && clip.sourceNodeId === sourceNode.id)
+      || Boolean(sourceNode.data.assetId && clip.assetId === sourceNode.data.assetId)
+    ));
+    const now = Date.now();
+    const clip: CharacterVoiceClip = {
+      id: existing?.id ?? `voice-${generateId()}`,
+      kind: input.kind ?? existing?.kind ?? 'timbre',
+      label: input.label?.trim() || existing?.label || sourceNode.data.label || undefined,
+      assetId: sourceNode.data.assetId,
+      relativePath: sourceNode.data.relativePath,
+      // 与节点共用同一份本地文件，不复制副本
+      filePath: sourceNode.data.filePath,
+      audioUrl: sourceNode.data.audioUrl,
+      // 全局角色不保存项目节点 ID
+      sourceNodeId: input.scope === 'project' ? sourceNode.id : undefined,
+      transcript: input.transcript
+        ?? existing?.transcript
+        ?? (typeof sourceNode.data.prompt === 'string' ? sourceNode.data.prompt : ''),
+      durationSec: input.durationSec ?? existing?.durationSec,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    const saved = await get().addCharacterVoiceClip(input.scope, character.id, clip, {
+      makePrimary: input.makePrimary === true,
+    });
+    return saved ? clip.id : null;
+  },
+
+  createAudioNodeFromCharacterVoice: (scope, characterId, clipId) => {
+    const state = get();
+    const characters = scope === 'project'
+      ? state.dramaAssets.characters
+      : state.globalCharacters;
+    const character = characters.find((item) => item.id === characterId);
+    const clip = character?.voiceClips?.find((item) => item.id === clipId);
+    if (!character || !clip?.audioUrl) {
+      state.showToast?.('角色声音不可用', 'error');
+      return null;
+    }
+    const linkedNode = clip.sourceNodeId
+      ? state.nodes.find((node) => node.id === clip.sourceNodeId)
+      : undefined;
+    if (linkedNode) return linkedNode.id;
+
+    const nodeId = `node-${generateId()}`;
+    state.addNode({
+      id: nodeId,
+      type: 'source-audio',
+      position: pickSpawnPosition(state.nodes as Node<BaseNodeData>[]),
+      data: {
+        label: `${character.name} · ${clip.label?.trim() || '角色声音'}`,
+        type: 'source-audio',
+        role: 'source',
+        status: 'success',
+        prompt: clip.transcript,
+        audioUrl: clip.audioUrl,
+        assetId: clip.assetId,
+        relativePath: clip.relativePath,
+        filePath: clip.filePath,
+        nodeWidth: 260,
+        nodeHeight: 160,
+      },
+    });
+    if (scope === 'project') {
+      void state.addCharacterVoiceClip('project', characterId, {
+        ...clip,
         sourceNodeId: nodeId,
         updatedAt: Date.now(),
       });

@@ -9,7 +9,11 @@ import {
   getAllGlobalCharacters,
   putGlobalCharacter,
 } from './indexedDbService';
-import type { CharacterReferenceImage, DramaCharacter } from '../types/dramaAssets';
+import type {
+  CharacterReferenceImage,
+  CharacterVoiceClip,
+  DramaCharacter,
+} from '../types/dramaAssets';
 import { normalizeDramaCharacter } from '../types/dramaAssets';
 import {
   getAssetUrlFromPath,
@@ -25,6 +29,16 @@ import {
 function detachProjectReference(reference: CharacterReferenceImage): CharacterReferenceImage {
   const persisted = { ...reference };
   delete persisted.sourceNodeId;
+  // 全局角色的文件在全局资产目录，不保留项目本地路径
+  delete persisted.filePath;
+  return persisted;
+}
+
+function detachProjectVoiceClip(clip: CharacterVoiceClip): CharacterVoiceClip {
+  const persisted = { ...clip };
+  delete persisted.sourceNodeId;
+  // 全局角色的文件在全局资产目录，不保留项目本地路径
+  delete persisted.filePath;
   return persisted;
 }
 
@@ -35,16 +49,104 @@ export function prepareGlobalCharacter(character: DramaCharacter): DramaCharacte
   return {
     ...detached,
     referenceImages: (normalized.referenceImages ?? []).map(detachProjectReference),
+    voiceClips: (normalized.voiceClips ?? []).map(detachProjectVoiceClip),
+  };
+}
+
+/** data URL 的 mime 子类型与浏览器音频容器扩展名不一致，落盘时按此表还原 */
+const AUDIO_MIME_EXTENSIONS: Record<string, string> = {
+  mpeg: 'mp3',
+  mp4: 'm4a',
+  'x-m4a': 'm4a',
+  'x-wav': 'wav',
+  wave: 'wav',
+};
+
+function urlExtensionHints(url?: string): { mimeSubtype?: string; pathExtension?: string } {
+  return {
+    mimeSubtype: url?.match(/^data:[a-z]+\/([a-zA-Z0-9.+-]+);/i)?.[1]?.toLowerCase(),
+    pathExtension: url
+      ?.split(/[?#]/, 1)[0]
+      ?.match(/\.([a-zA-Z0-9]{2,5})$/)?.[1]
+      ?.toLowerCase(),
   };
 }
 
 function extensionForReference(reference: CharacterReferenceImage): string {
-  const dataMime = reference.imageUrl?.match(/^data:image\/([a-zA-Z0-9.+-]+);/i)?.[1];
-  if (dataMime) return dataMime === 'jpeg' ? 'jpg' : dataMime;
-  const pathExtension = reference.imageUrl
-    ?.split(/[?#]/, 1)[0]
-    ?.match(/\.([a-zA-Z0-9]{2,5})$/)?.[1];
-  return pathExtension?.toLowerCase() || 'png';
+  const { mimeSubtype, pathExtension } = urlExtensionHints(reference.imageUrl);
+  if (mimeSubtype) return mimeSubtype === 'jpeg' ? 'jpg' : mimeSubtype;
+  return pathExtension || 'png';
+}
+
+function extensionForVoiceClip(clip: CharacterVoiceClip): string {
+  const { mimeSubtype, pathExtension } = urlExtensionHints(clip.audioUrl);
+  if (mimeSubtype) return AUDIO_MIME_EXTENSIONS[mimeSubtype] ?? mimeSubtype;
+  return pathExtension || 'mp3';
+}
+
+interface GlobalMediaInput {
+  id: string;
+  /** 落盘文件名中的用途片段 */
+  kind: string;
+  assetId?: string;
+  /** 项目内共用的本地文件；有它就直接复制该文件，不必回查资产索引 */
+  filePath?: string;
+  url?: string;
+  extension: string;
+  category: 'image' | 'audio';
+}
+
+interface GlobalMediaResult {
+  assetId?: string;
+  relativePath?: string;
+  url?: string;
+}
+
+/** 把项目内或内存中的媒体固化到全局资产目录；保存失败返回 null 由调用方决定错误文案。 */
+async function persistGlobalMedia(
+  characterName: string,
+  media: GlobalMediaInput,
+): Promise<GlobalMediaResult | null> {
+  const existing = media.assetId
+    ? await getAssetIndexById(media.assetId)
+    : undefined;
+  if (existing?.source === 'global') {
+    return {
+      assetId: media.assetId,
+      relativePath: existing.relativePath,
+      url: await getAssetUrlFromPath(existing.path),
+    };
+  }
+
+  const sourcePath = media.filePath
+    ?? (media.assetId ? await resolveIndexedAssetPath(media.assetId) : null);
+  const fileName = sanitizeFileName(
+    `${characterName}-${media.kind}-${media.id}.${media.extension}`,
+  );
+  const entry: AssetFileEntry = {
+    assetId: media.assetId,
+    name: sourcePath?.split(/[\\/]/).pop() || fileName,
+    path: sourcePath || `virtual://character-${media.category}/${media.id}`,
+    assetUrl: media.url,
+    size: 0,
+    category: media.category,
+    availability: 'online',
+    source: sourcePath ? 'project' : undefined,
+  };
+  const savedPath = await saveAssetToPermanent(entry);
+  if (!savedPath) return null;
+
+  const globalDir = await getGlobalFilesDir();
+  if (!globalDir) throw new Error('全局资产目录不可用');
+  const identity = await identifyAsset(savedPath, {
+    rootPath: globalDir,
+    source: 'global',
+  });
+  return {
+    assetId: identity.assetId,
+    relativePath: identity.relativePath,
+    url: await getAssetUrlFromPath(savedPath),
+  };
 }
 
 async function persistGlobalReference(
@@ -54,57 +156,59 @@ async function persistGlobalReference(
   const detached = detachProjectReference(reference);
   if (!isTauriEnv()) return detached;
 
-  const existing = reference.assetId
-    ? await getAssetIndexById(reference.assetId)
-    : undefined;
-  if (existing?.source === 'global') {
-    return {
-      ...detached,
-      relativePath: existing.relativePath,
-      imageUrl: await getAssetUrlFromPath(existing.path),
-    };
-  }
-
-  const sourcePath = reference.assetId
-    ? await resolveIndexedAssetPath(reference.assetId)
-    : null;
-  const fileName = sanitizeFileName(
-    `${characterName}-${reference.kind}-${reference.id}.${extensionForReference(reference)}`,
-  );
-  const entry: AssetFileEntry = {
+  const persisted = await persistGlobalMedia(characterName, {
+    id: reference.id,
+    kind: reference.kind,
     assetId: reference.assetId,
-    name: sourcePath?.split(/[\\/]/).pop() || fileName,
-    path: sourcePath || `virtual://character-reference/${reference.id}`,
-    assetUrl: reference.imageUrl,
-    size: 0,
+    filePath: reference.filePath,
+    url: reference.imageUrl,
+    extension: extensionForReference(reference),
     category: 'image',
-    availability: 'online',
-    source: sourcePath ? 'project' : undefined,
-  };
-  const savedPath = await saveAssetToPermanent(entry);
-  if (!savedPath) {
-    throw new Error(`角色参考图 ${reference.id} 保存失败`);
-  }
-  const globalDir = await getGlobalFilesDir();
-  if (!globalDir) throw new Error('全局资产目录不可用');
-  const identity = await identifyAsset(savedPath, {
-    rootPath: globalDir,
-    source: 'global',
   });
+  if (!persisted) throw new Error(`角色参考图 ${reference.id} 保存失败`);
   return {
     ...detached,
-    assetId: identity.assetId,
-    relativePath: identity.relativePath,
-    imageUrl: await getAssetUrlFromPath(savedPath),
+    assetId: persisted.assetId ?? detached.assetId,
+    relativePath: persisted.relativePath,
+    imageUrl: persisted.url,
   };
 }
 
-async function persistGlobalReferences(character: DramaCharacter): Promise<DramaCharacter> {
+async function persistGlobalVoiceClip(
+  characterName: string,
+  clip: CharacterVoiceClip,
+): Promise<CharacterVoiceClip> {
+  const detached = detachProjectVoiceClip(clip);
+  if (!isTauriEnv()) return detached;
+
+  const persisted = await persistGlobalMedia(characterName, {
+    id: clip.id,
+    kind: clip.kind,
+    assetId: clip.assetId,
+    filePath: clip.filePath,
+    url: clip.audioUrl,
+    extension: extensionForVoiceClip(clip),
+    category: 'audio',
+  });
+  if (!persisted) throw new Error(`角色声音 ${clip.id} 保存失败`);
+  return {
+    ...detached,
+    assetId: persisted.assetId ?? detached.assetId,
+    relativePath: persisted.relativePath,
+    audioUrl: persisted.url,
+  };
+}
+
+async function persistGlobalMediaOfCharacter(character: DramaCharacter): Promise<DramaCharacter> {
   const references: CharacterReferenceImage[] = [];
   for (const reference of character.referenceImages ?? []) {
     references.push(await persistGlobalReference(character.name, reference));
   }
-  return { ...character, referenceImages: references };
+  const voiceClips: CharacterVoiceClip[] = [];
+  for (const clip of character.voiceClips ?? []) {
+    voiceClips.push(await persistGlobalVoiceClip(character.name, clip));
+  }
+  return { ...character, referenceImages: references, voiceClips };
 }
 
 export async function loadGlobalCharacterCards(): Promise<DramaCharacter[]> {
@@ -115,7 +219,10 @@ export async function loadGlobalCharacterCards(): Promise<DramaCharacter[]> {
 }
 
 export async function saveGlobalCharacterCard(character: DramaCharacter): Promise<DramaCharacter> {
-  const persisted = await persistGlobalReferences(prepareGlobalCharacter(character));
+  // 先落盘再剥离项目字段：复制到全局目录时还要用项目内共用的 filePath 作为来源
+  const persisted = prepareGlobalCharacter(
+    await persistGlobalMediaOfCharacter(normalizeDramaCharacter(character)),
+  );
   await putGlobalCharacter(persisted);
   return persisted;
 }

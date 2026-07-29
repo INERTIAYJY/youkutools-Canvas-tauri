@@ -1,14 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
-import type { CharacterReferenceImage, DramaCharacter } from '../types/dramaAssets';
+import { isEligibleCharacterVoiceNode } from '../store/store.dramaAssets';
+import type {
+  CharacterReferenceImage,
+  CharacterVoiceClip,
+  DramaCharacter,
+} from '../types/dramaAssets';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
-import { cropImageStyle } from './character/characterReferencePresentation';
+import {
+  CHARACTER_VOICE_KIND_LABELS,
+  cropImageStyle,
+  formatVoiceDuration,
+  voiceClipTitle,
+} from './character/characterReferencePresentation';
+import { readAudioDuration } from './character/characterVoiceMedia';
 
 type CharacterLibraryScope = 'project' | 'global';
 
@@ -54,6 +65,10 @@ export default function CharacterLibraryPanel() {
     nodes,
     setCharacterLibraryNodeHidden,
     createImageNodeFromCharacterReference,
+    bindAudioNodeToCharacterVoice,
+    removeCharacterVoiceClip,
+    setCharacterPrimaryVoice,
+    createAudioNodeFromCharacterVoice,
     setSelectedNodeIds,
     showToast,
   } = useAppStore(
@@ -71,6 +86,10 @@ export default function CharacterLibraryPanel() {
       nodes: state.nodes,
       setCharacterLibraryNodeHidden: state.setCharacterLibraryNodeHidden,
       createImageNodeFromCharacterReference: state.createImageNodeFromCharacterReference,
+      bindAudioNodeToCharacterVoice: state.bindAudioNodeToCharacterVoice,
+      removeCharacterVoiceClip: state.removeCharacterVoiceClip,
+      setCharacterPrimaryVoice: state.setCharacterPrimaryVoice,
+      createAudioNodeFromCharacterVoice: state.createAudioNodeFromCharacterVoice,
       setSelectedNodeIds: state.setSelectedNodeIds,
       showToast: state.showToast,
     })),
@@ -83,8 +102,16 @@ export default function CharacterLibraryPanel() {
   const [dialogCharacter, setDialogCharacter] = useState<DramaCharacter | null>(null);
   const [dialogReferenceId, setDialogReferenceId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+  // 记角色归属，切换角色时自然失效，不必在 effect 里回收状态
+  const [playingVoice, setPlayingVoice] = useState<{
+    characterId: string;
+    clipId: string;
+  } | null>(null);
+  const [bindingVoice, setBindingVoice] = useState(false);
   const [captureNodeId, setCaptureNodeId] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const voicePlayerRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
     if (open) void loadGlobalCharacters();
@@ -144,11 +171,78 @@ export default function CharacterLibraryPanel() {
     !node.data.hiddenByCharacterLibrary
     && (node.data.imageUrl || node.data.thumbnailUrl)
   )), [nodes]);
+  // 画布上带音频产物的节点，可绑定为角色声音
+  const pickableAudioNodes = useMemo(
+    () => nodes.filter((node) => isEligibleCharacterVoiceNode(node)),
+    [nodes],
+  );
+  const voiceClips = selectedCharacter?.voiceClips ?? [];
+  const playingVoiceClipId = playingVoice?.characterId === selectedCharacter?.id
+    ? playingVoice?.clipId ?? null
+    : null;
+
+  // 切换角色或关闭面板时停止试听，避免声音跟着上一个角色继续播
+  useEffect(() => {
+    voicePlayerRef.current?.pause();
+  }, [open, scope, selectedCharacter?.id]);
 
   const switchScope = (nextScope: CharacterLibraryScope) => {
     setScope(nextScope);
     setSelectedCharacterId(null);
     setSelectedReferenceId(null);
+    setVoicePickerOpen(false);
+  };
+
+  const toggleVoicePlayback = (clip: CharacterVoiceClip) => {
+    const player = voicePlayerRef.current;
+    if (!player || !clip.audioUrl || !selectedCharacter) return;
+    if (playingVoiceClipId === clip.id) {
+      player.pause();
+      return;
+    }
+    player.src = clip.audioUrl;
+    void player.play()
+      .then(() => setPlayingVoice({ characterId: selectedCharacter.id, clipId: clip.id }))
+      .catch(() => showToast('音频播放失败', 'error'));
+  };
+
+  const handleBindVoiceNode = async (nodeId: string) => {
+    if (!selectedCharacter) return;
+    const node = nodes.find((item) => item.id === nodeId);
+    const audioUrl = node?.data.audioUrl;
+    if (!audioUrl) {
+      showToast('该节点没有可用的音频', 'error');
+      return;
+    }
+    setVoicePickerOpen(false);
+    setBindingVoice(true);
+    const clipId = await bindAudioNodeToCharacterVoice({
+      nodeId,
+      scope,
+      characterId: selectedCharacter.id,
+      label: node?.data.label,
+      durationSec: await readAudioDuration(audioUrl),
+    });
+    setBindingVoice(false);
+    if (!clipId) return;
+    showToast(scope === 'project' ? '已绑定到本项目角色声音' : '已绑定到全局角色声音');
+  };
+
+  const handleRemoveVoiceClip = async (clip: CharacterVoiceClip) => {
+    if (!selectedCharacter) return;
+    if (playingVoiceClipId === clip.id) voicePlayerRef.current?.pause();
+    if (await removeCharacterVoiceClip(scope, selectedCharacter.id, clip.id)) {
+      showToast('已移除该声音');
+    }
+  };
+
+  const handleVoiceToCanvas = (clip: CharacterVoiceClip) => {
+    if (!selectedCharacter) return;
+    const nodeId = createAudioNodeFromCharacterVoice(scope, selectedCharacter.id, clip.id);
+    if (!nodeId) return;
+    setOpen(false);
+    setSelectedNodeIds([nodeId]);
+    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId } }));
   };
 
   const openEditor = (character: DramaCharacter | null, referenceId?: string | null) => {
@@ -310,7 +404,10 @@ export default function CharacterLibraryPanel() {
                     aria-label="从画布添加视角图"
                     aria-expanded={pickerOpen}
                     className={pickerOpen ? 'is-active' : ''}
-                    onClick={() => setPickerOpen((open) => !open)}
+                    onClick={() => {
+                      setVoicePickerOpen(false);
+                      setPickerOpen((open) => !open);
+                    }}
                   >
                     <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
                   </button>
@@ -352,6 +449,133 @@ export default function CharacterLibraryPanel() {
                   ))}
                 </div>
               ) : null}
+
+              <section className="character-voice-dock" aria-label="角色声音">
+                <div className="character-voice-dock-head">
+                  <Icon icon="lucide:audio-lines" width="14" height="14" aria-hidden="true" />
+                  <span>角色声音</span>
+                  <strong>{voiceClips.length}</strong>
+                  <button
+                    type="button"
+                    data-tooltip="绑定画布音频节点"
+                    aria-label="绑定画布音频节点"
+                    aria-expanded={voicePickerOpen}
+                    className={voicePickerOpen ? 'is-active' : ''}
+                    disabled={bindingVoice}
+                    onClick={() => {
+                      setPickerOpen(false);
+                      setVoicePickerOpen((current) => !current);
+                    }}
+                  >
+                    <Icon icon="lucide:link" width="15" height="15" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    data-tooltip="上传音频"
+                    aria-label="上传音频"
+                    onClick={() => openEditor(selectedCharacter)}
+                  >
+                    <Icon icon="lucide:upload" width="15" height="15" aria-hidden="true" />
+                  </button>
+                </div>
+
+                {voicePickerOpen ? (
+                  <div className="character-voice-picker" role="listbox" aria-label="选择画布音频节点">
+                    {pickableAudioNodes.length === 0 ? (
+                      <span className="character-node-picker-empty">画布上没有可用的音频节点</span>
+                    ) : pickableAudioNodes.map((node) => (
+                      <button
+                        key={node.id}
+                        type="button"
+                        role="option"
+                        aria-selected={false}
+                        onClick={() => void handleBindVoiceNode(node.id)}
+                      >
+                        <Icon icon="lucide:audio-lines" width="15" height="15" aria-hidden="true" />
+                        <span>{node.data.label || '音频节点'}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                {voiceClips.length === 0 ? (
+                  <p className="character-voice-dock-empty">
+                    {bindingVoice ? '正在绑定…' : '还没有声音，可绑定画布音频节点或上传音频'}
+                  </p>
+                ) : (
+                  <div className="character-voice-chips" role="list">
+                    {voiceClips.map((clip) => (
+                      <div
+                        key={clip.id}
+                        role="listitem"
+                        className={`character-voice-chip${
+                          clip.id === selectedCharacter.primaryVoiceClipId ? ' is-primary' : ''
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          className="character-voice-play"
+                          aria-label={playingVoiceClipId === clip.id ? '暂停试听' : '试听'}
+                          disabled={!clip.audioUrl}
+                          onClick={() => toggleVoicePlayback(clip)}
+                        >
+                          <Icon
+                            icon={playingVoiceClipId === clip.id ? 'lucide:pause' : 'lucide:play'}
+                            width="13"
+                            height="13"
+                            aria-hidden="true"
+                          />
+                        </button>
+                        <span className="character-voice-chip-copy">
+                          <strong>{voiceClipTitle(clip)}</strong>
+                          <span>
+                            {CHARACTER_VOICE_KIND_LABELS[clip.kind]} · {formatVoiceDuration(clip.durationSec)}
+                          </span>
+                        </span>
+                        <span className="character-voice-chip-actions">
+                          <button
+                            type="button"
+                            data-tooltip="设为主音色"
+                            aria-label="设为主音色"
+                            className={clip.id === selectedCharacter.primaryVoiceClipId ? 'is-active' : ''}
+                            onClick={() => void setCharacterPrimaryVoice(scope, selectedCharacter.id, clip.id)}
+                          >
+                            <Icon icon="lucide:star" width="13" height="13" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            data-tooltip={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
+                            aria-label={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
+                            onClick={() => handleVoiceToCanvas(clip)}
+                          >
+                            <Icon
+                              icon={clip.sourceNodeId ? 'lucide:locate-fixed' : 'lucide:square-plus'}
+                              width="13"
+                              height="13"
+                              aria-hidden="true"
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            data-tooltip="移除该声音"
+                            aria-label="移除该声音"
+                            onClick={() => void handleRemoveVoiceClip(clip)}
+                          >
+                            <Icon icon="lucide:trash-2" width="13" height="13" aria-hidden="true" />
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <audio
+                ref={voicePlayerRef}
+                className="sr-only"
+                onPause={() => setPlayingVoice(null)}
+                onEnded={() => setPlayingVoice(null)}
+              />
             </section>
           ) : (
             <div className="character-library-empty">

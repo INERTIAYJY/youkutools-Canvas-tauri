@@ -1,6 +1,7 @@
 import type {
   CharacterCropRect,
   CharacterReferenceImage,
+  CharacterVoiceClip,
 } from '../../types/dramaAssets';
 
 export const CHARACTER_REFERENCE_KIND_LABELS: Record<CharacterReferenceImage['kind'], string> = {
@@ -12,6 +13,25 @@ export const CHARACTER_REFERENCE_KIND_LABELS: Record<CharacterReferenceImage['ki
   outfit: '服装',
   other: '其他',
 };
+
+export const CHARACTER_VOICE_KIND_LABELS: Record<CharacterVoiceClip['kind'], string> = {
+  timbre: '音色参考',
+  line: '台词样本',
+  emotion: '情绪演绎',
+  other: '其他',
+};
+
+/** 声音片段展示名：优先自定义名，其次用途标签 */
+export function voiceClipTitle(clip: CharacterVoiceClip): string {
+  return clip.label?.trim() || CHARACTER_VOICE_KIND_LABELS[clip.kind];
+}
+
+export function formatVoiceDuration(durationSec?: number): string {
+  if (!durationSec || !Number.isFinite(durationSec) || durationSec <= 0) return '--:--';
+  const total = Math.round(durationSec);
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, '0')}`;
+}
 
 /** 头像框宽高比，裁切编辑器与角色条头像共用，保证裁出来的区域不会被拉伸 */
 export const AVATAR_ASPECT = 9 / 11;

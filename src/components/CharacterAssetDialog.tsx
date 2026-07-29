@@ -3,10 +3,13 @@ import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, generateId } from '../store/useAppStore';
 import { normalizeAssetKey } from '../services/dramaAssetExtract';
+import { saveDataUrlToProjectData } from '../services/fileService';
 import type {
   CharacterCropRect,
   CharacterReferenceImage,
   CharacterReferenceKind,
+  CharacterVoiceClip,
+  CharacterVoiceKind,
   DramaCharacter,
 } from '../types/dramaAssets';
 import ModalOverlay from './shared/ModalOverlay';
@@ -14,13 +17,22 @@ import PopupCloseButton from './shared/PopupCloseButton';
 import {
   avatarCropBase,
   CHARACTER_REFERENCE_KIND_LABELS,
+  CHARACTER_VOICE_KIND_LABELS,
   cropImageStyle,
+  formatVoiceDuration,
+  voiceClipTitle,
 } from './character/characterReferencePresentation';
+import { readAudioDuration, readAudioFile } from './character/characterVoiceMedia';
 
 type CharacterLibraryScope = 'project' | 'global';
 
 const REFERENCE_KINDS = Object.entries(CHARACTER_REFERENCE_KIND_LABELS) as Array<[
   CharacterReferenceKind,
+  string,
+]>;
+
+const VOICE_KINDS = Object.entries(CHARACTER_VOICE_KIND_LABELS) as Array<[
+  CharacterVoiceKind,
   string,
 ]>;
 
@@ -40,6 +52,7 @@ function createEmptyCharacter(): DramaCharacter {
     updatedAt: now,
     source: 'manual',
     referenceImages: [],
+    voiceClips: [],
   };
 }
 
@@ -48,6 +61,7 @@ function cloneCharacter(character: DramaCharacter): DramaCharacter {
     ...character,
     relationships: character.relationships?.map((relationship) => ({ ...relationship })),
     referenceImages: character.referenceImages?.map((reference) => ({ ...reference })) ?? [],
+    voiceClips: character.voiceClips?.map((clip) => ({ ...clip })) ?? [],
     avatarCrop: character.avatarCrop ? { ...character.avatarCrop } : undefined,
   };
 }
@@ -472,10 +486,11 @@ function CharacterAssetEditorDialog({
   onClose,
   onSaved,
 }: CharacterAssetEditorDialogProps) {
-  const { saveCharacterCard, showToast } = useAppStore(
+  const { saveCharacterCard, showToast, currentProjectId } = useAppStore(
     useShallow((state) => ({
       saveCharacterCard: state.saveCharacterCard,
       showToast: state.showToast,
+      currentProjectId: state.currentProjectId,
     })),
   );
   const initialDraft = useMemo(
@@ -489,12 +504,22 @@ function CharacterAssetEditorDialog({
     ?? initialDraft.referenceImages?.[0]?.id
     ?? null,
   );
+  const [selectedVoiceClipId, setSelectedVoiceClipId] = useState<string | null>(
+    initialDraft.primaryVoiceClipId ?? initialDraft.voiceClips?.[0]?.id ?? null,
+  );
+  const [playingVoiceClipId, setPlayingVoiceClipId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const voiceInputRef = useRef<HTMLInputElement>(null);
+  const voicePlayerRef = useRef<HTMLAudioElement>(null);
 
   const selectedReference = useMemo(
     () => draft.referenceImages?.find((reference) => reference.id === selectedReferenceId) ?? null,
     [draft.referenceImages, selectedReferenceId],
+  );
+  const selectedVoiceClip = useMemo(
+    () => draft.voiceClips?.find((clip) => clip.id === selectedVoiceClipId) ?? null,
+    [draft.voiceClips, selectedVoiceClipId],
   );
 
   const patchDraft = (patch: Partial<DramaCharacter>) => {
@@ -514,6 +539,24 @@ function CharacterAssetEditorDialog({
     }));
   };
 
+  /**
+   * 上传的角色媒体与画布节点一样落到项目 data 目录，只保留本地路径；
+   * 全局角色先留内存 data URL，保存时由角色库服务写入全局资产目录。
+   */
+  const storeUploadToProject = async (
+    file: File,
+    read: (file: File) => Promise<string>,
+  ): Promise<{ url: string; filePath?: string }> => {
+    const dataUrl = await read(file);
+    if (scope !== 'project' || !currentProjectId || currentProjectId === 'default') {
+      return { url: dataUrl };
+    }
+    const stored = await saveDataUrlToProjectData(dataUrl, currentProjectId, file.name);
+    return stored?.assetUrl
+      ? { url: stored.assetUrl, filePath: stored.filePath }
+      : { url: dataUrl };
+  };
+
   const handleFiles = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     const shouldAssignPrimary = !draft.primaryReferenceImageId;
@@ -521,14 +564,18 @@ function CharacterAssetEditorDialog({
     if (files.length === 0) return;
     try {
       const now = Date.now();
-      const references = await Promise.all(files.map(async (file, index) => ({
-        id: `reference-${generateId()}`,
-        kind: shouldAssignPrimary && index === 0 ? 'primary' as const : 'other' as const,
-        imageUrl: await readImageFile(file),
-        prompt: '',
-        createdAt: now + index,
-        updatedAt: now + index,
-      })));
+      const references = await Promise.all(files.map(async (file, index) => {
+        const stored = await storeUploadToProject(file, readImageFile);
+        return {
+          id: `reference-${generateId()}`,
+          kind: shouldAssignPrimary && index === 0 ? 'primary' as const : 'other' as const,
+          imageUrl: stored.url,
+          filePath: stored.filePath,
+          prompt: '',
+          createdAt: now + index,
+          updatedAt: now + index,
+        };
+      }));
       setDraft((current) => {
         const nextReferences = [...(current.referenceImages ?? []), ...references];
         return {
@@ -542,6 +589,82 @@ function CharacterAssetEditorDialog({
     } catch {
       showToast('图片读取失败', 'error');
     }
+  };
+
+  const patchVoiceClip = (patch: Partial<CharacterVoiceClip>) => {
+    if (!selectedVoiceClipId) return;
+    setDraft((current) => ({
+      ...current,
+      updatedAt: Date.now(),
+      voiceClips: (current.voiceClips ?? []).map((clip) =>
+        clip.id === selectedVoiceClipId
+          ? { ...clip, ...patch, updatedAt: Date.now() }
+          : clip,
+      ),
+    }));
+  };
+
+  const handleVoiceFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (files.length === 0) return;
+    try {
+      const now = Date.now();
+      const clips: CharacterVoiceClip[] = [];
+      for (const [index, file] of files.entries()) {
+        const stored = await storeUploadToProject(file, readAudioFile);
+        clips.push({
+          id: `voice-${generateId()}`,
+          kind: 'timbre',
+          label: file.name.replace(/\.[^.]+$/, ''),
+          audioUrl: stored.url,
+          filePath: stored.filePath,
+          transcript: '',
+          durationSec: await readAudioDuration(stored.url),
+          createdAt: now + index,
+          updatedAt: now + index,
+        });
+      }
+      setDraft((current) => ({
+        ...current,
+        voiceClips: [...(current.voiceClips ?? []), ...clips],
+        primaryVoiceClipId: current.primaryVoiceClipId ?? clips[0]?.id,
+        updatedAt: Date.now(),
+      }));
+      setSelectedVoiceClipId(clips[0]?.id ?? null);
+    } catch {
+      showToast('音频读取失败', 'error');
+    }
+  };
+
+  const toggleVoicePlayback = (clip: CharacterVoiceClip) => {
+    const player = voicePlayerRef.current;
+    if (!player || !clip.audioUrl) return;
+    if (playingVoiceClipId === clip.id) {
+      player.pause();
+      setPlayingVoiceClipId(null);
+      return;
+    }
+    player.src = clip.audioUrl;
+    void player.play()
+      .then(() => setPlayingVoiceClipId(clip.id))
+      .catch(() => showToast('音频播放失败', 'error'));
+  };
+
+  const removeSelectedVoiceClip = () => {
+    if (!selectedVoiceClipId) return;
+    if (playingVoiceClipId === selectedVoiceClipId) {
+      voicePlayerRef.current?.pause();
+      setPlayingVoiceClipId(null);
+    }
+    const rest = (draft.voiceClips ?? []).filter((clip) => clip.id !== selectedVoiceClipId);
+    patchDraft({
+      voiceClips: rest,
+      primaryVoiceClipId: draft.primaryVoiceClipId === selectedVoiceClipId
+        ? rest[0]?.id
+        : draft.primaryVoiceClipId,
+    });
+    setSelectedVoiceClipId(rest[0]?.id ?? null);
   };
 
   const removeSelectedReference = () => {
@@ -783,6 +906,134 @@ function CharacterAssetEditorDialog({
               ) : null}
             </div>
           ) : null}
+
+          <div className="character-voice-block">
+            <div className="character-reference-toolbar">
+              <div>
+                <h3>角色声音</h3>
+                <span>{draft.voiceClips?.length ?? 0} 段</span>
+              </div>
+              <button type="button" onClick={() => voiceInputRef.current?.click()}>
+                <Icon icon="lucide:audio-lines" width="15" height="15" aria-hidden="true" />
+                上传音频
+              </button>
+              <input
+                ref={voiceInputRef}
+                className="sr-only"
+                type="file"
+                accept="audio/*"
+                multiple
+                onChange={(event) => void handleVoiceFiles(event)}
+              />
+            </div>
+
+            {(draft.voiceClips?.length ?? 0) === 0 ? (
+              <button
+                type="button"
+                className="character-reference-add-empty"
+                onClick={() => voiceInputRef.current?.click()}
+              >
+                <Icon icon="lucide:mic" width="20" height="20" aria-hidden="true" />
+                <span>上传音色参考或台词样本，也可在角色库里绑定画布音频节点</span>
+              </button>
+            ) : (
+              <div className="character-voice-clip-list" role="list" aria-label="已绑定声音">
+                {(draft.voiceClips ?? []).map((clip) => (
+                  <div
+                    key={clip.id}
+                    role="listitem"
+                    className={`character-voice-clip${clip.id === selectedVoiceClipId ? ' is-selected' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="character-voice-play"
+                      aria-label={playingVoiceClipId === clip.id ? '暂停试听' : '试听'}
+                      disabled={!clip.audioUrl}
+                      onClick={() => toggleVoicePlayback(clip)}
+                    >
+                      <Icon
+                        icon={playingVoiceClipId === clip.id ? 'lucide:pause' : 'lucide:play'}
+                        width="14"
+                        height="14"
+                        aria-hidden="true"
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      className="character-voice-clip-main"
+                      onClick={() => setSelectedVoiceClipId(clip.id)}
+                    >
+                      <strong>{voiceClipTitle(clip)}</strong>
+                      <span>
+                        {CHARACTER_VOICE_KIND_LABELS[clip.kind]} · {formatVoiceDuration(clip.durationSec)}
+                        {clip.sourceNodeId ? ' · 画布节点' : ''}
+                      </span>
+                    </button>
+                    {draft.primaryVoiceClipId === clip.id ? (
+                      <span className="character-voice-primary-tag">主音色</span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {selectedVoiceClip ? (
+              <div className="character-voice-editor">
+                <div className="character-voice-editor-fields">
+                  <label className="character-field">
+                    <span>声音名称</span>
+                    <input
+                      value={selectedVoiceClip.label ?? ''}
+                      onChange={(event) => patchVoiceClip({ label: event.target.value })}
+                      placeholder="例如：低沉男声"
+                    />
+                  </label>
+                  <label className="character-field">
+                    <span>用途</span>
+                    <select
+                      value={selectedVoiceClip.kind}
+                      onChange={(event) => patchVoiceClip({
+                        kind: event.target.value as CharacterVoiceKind,
+                      })}
+                    >
+                      {VOICE_KINDS.map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label className="character-field">
+                  <span>台词 / 音色描述</span>
+                  <textarea
+                    value={selectedVoiceClip.transcript}
+                    onChange={(event) => patchVoiceClip({ transcript: event.target.value })}
+                    rows={3}
+                    placeholder="记录该音频的台词内容或音色特征"
+                  />
+                </label>
+                <div className="character-reference-actions">
+                  <button
+                    type="button"
+                    className={draft.primaryVoiceClipId === selectedVoiceClip.id ? 'is-active' : ''}
+                    onClick={() => patchDraft({ primaryVoiceClipId: selectedVoiceClip.id })}
+                  >
+                    <Icon icon="lucide:star" width="14" height="14" aria-hidden="true" />
+                    主音色
+                  </button>
+                  <button type="button" className="is-danger" onClick={removeSelectedVoiceClip}>
+                    <Icon icon="lucide:trash-2" width="14" height="14" aria-hidden="true" />
+                    移除
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <audio
+              ref={voicePlayerRef}
+              className="sr-only"
+              onEnded={() => setPlayingVoiceClipId(null)}
+            />
+          </div>
         </section>
       </div>
 

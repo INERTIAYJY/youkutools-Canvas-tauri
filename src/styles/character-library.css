@@ -1025,6 +1025,288 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+/* ── 角色声音 ── */
+
+/* 悬浮在形象参考左下角，与右下角的角色卡分列两侧 */
+.character-voice-dock {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  z-index: 2;
+  display: flex;
+  max-width: min(420px, 44%);
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+}
+
+.character-voice-dock-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--theme-text-muted);
+  font-size: 10px;
+}
+
+.character-voice-dock-head strong {
+  margin-right: auto;
+  color: var(--theme-text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.character-voice-dock-head > button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  color: var(--theme-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.character-voice-dock-head > button:hover,
+.character-voice-dock-head > button.is-active {
+  color: var(--theme-text);
+  background: var(--theme-card);
+  border-color: var(--theme-border);
+}
+
+.character-voice-dock-head > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.character-voice-dock-empty {
+  margin: 0;
+  color: var(--theme-text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.character-voice-chips {
+  display: flex;
+  max-height: 132px;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+}
+
+.character-voice-chip {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px;
+  border: 1px solid var(--theme-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--theme-bg) 52%, transparent);
+}
+
+.character-voice-chip.is-primary {
+  border-color: color-mix(in srgb, var(--node-audio-light) 58%, var(--theme-border));
+}
+
+.character-voice-play {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: var(--theme-text-secondary);
+  background: var(--theme-card);
+  border: 1px solid var(--theme-border);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.character-voice-play:hover {
+  color: var(--node-audio-light);
+  border-color: color-mix(in srgb, var(--node-audio-light) 58%, var(--theme-border));
+}
+
+.character-voice-play:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.character-voice-chip-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.character-voice-chip-copy strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.character-voice-chip-copy > span {
+  color: var(--theme-text-muted);
+  font-size: 10px;
+}
+
+.character-voice-chip-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.character-voice-chip-actions button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  color: var(--theme-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.character-voice-chip-actions button:hover {
+  color: var(--theme-text);
+  background: var(--theme-card);
+  border-color: var(--theme-border);
+}
+
+.character-voice-chip-actions button.is-active {
+  color: var(--node-audio-light);
+}
+
+/* 画布音频节点选择列表，展开在声音卡内部 */
+.character-voice-picker {
+  display: flex;
+  max-height: 168px;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--theme-bg) 62%, transparent);
+}
+
+.character-voice-picker > button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 7px;
+  color: var(--theme-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.character-voice-picker > button:hover {
+  color: var(--theme-text);
+  background: var(--theme-card);
+  border-color: color-mix(in srgb, var(--node-audio-light) 58%, var(--theme-border));
+}
+
+.character-voice-picker > button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 编辑角色弹窗里的声音区 */
+.character-voice-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.character-voice-clip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.character-voice-clip {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--theme-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--theme-bg) 52%, transparent);
+}
+
+.character-voice-clip.is-selected {
+  border-color: color-mix(in srgb, var(--node-audio-light) 58%, var(--theme-border));
+}
+
+.character-voice-clip-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.character-voice-clip-main strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.character-voice-clip-main > span {
+  color: var(--theme-text-muted);
+  font-size: 10px;
+}
+
+.character-voice-primary-tag {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--node-audio-light) 58%, var(--theme-border));
+  border-radius: 5px;
+  color: var(--node-audio-light);
+  font-size: 10px;
+}
+
+.character-voice-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.character-voice-editor-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.7fr);
+  gap: 10px;
+}
+
 @media (max-width: 920px) {
   .character-library-panel,
   .character-capture-dialog,
@@ -1037,6 +1319,13 @@
 
   .character-library-strip-label {
     width: 70px;
+  }
+
+  /* 窄面板下角色卡会占满整行，声音卡改为叠在其上方 */
+  .character-voice-dock {
+    right: 10px;
+    bottom: 76px;
+    max-width: none;
   }
 
   .character-dialog-body {
@@ -1132,7 +1421,8 @@
   }
 
   .character-reference-editor-main,
-  .character-crop-editor {
+  .character-crop-editor,
+  .character-voice-editor-fields {
     grid-template-columns: 1fr;
   }
 

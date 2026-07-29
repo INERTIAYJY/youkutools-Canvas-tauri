@@ -33,6 +33,7 @@ import type { BaseNodeData, ProjectSettings, StoryboardCellOverride } from '../t
 import { getAssetUrlFromPath, getProjectDataDir, joinPath, stripVerbatimPrefix } from './fs/core';
 import { walkDirectoryFiles } from './fs/assetLibrary';
 import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
+import type { DramaAssetLibrary } from '../types/dramaAssets';
 import { normalizeDramaAssetLibrary } from '../types/dramaAssets';
 import { restoreConfigSecrets, stripConfigSecrets } from './providerSecretService';
 
@@ -41,11 +42,27 @@ interface PersistedNodeLike {
   [key: string]: unknown;
 }
 
-async function serializeAssetReference(
-  data: BaseNodeData | StoryboardCellOverride,
+/**
+ * 画布节点、宫格覆盖图、角色库参考图与角色声音共用同一套本地文件关联：
+ * 运行期持有 filePath，落库时收敛为 assetId + relativePath，加载时再重建。
+ */
+interface AssetReferenceLike {
+  filePath?: string;
+  assetId?: string;
+  relativePath?: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  audioUrl?: string;
+  url?: string;
+  label?: string;
+  fileName?: string;
+}
+
+async function serializeAssetReference<T extends AssetReferenceLike>(
+  data: T,
   projectId: string,
   projectDir: string,
-): Promise<BaseNodeData | StoryboardCellOverride> {
+): Promise<T> {
   if (!data.filePath) return data;
   const normalizedPath = data.filePath.replace(/\\/g, '/');
   const normalizedDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -60,8 +77,8 @@ async function serializeAssetReference(
     source: 'project',
   }).catch(() => null);
   if (!identity) return data;
-  const serialized = { ...data, assetId: identity.assetId, relativePath: identity.relativePath };
-  delete serialized.filePath;
+  const serialized: T = { ...data, assetId: identity.assetId, relativePath: identity.relativePath };
+  delete (serialized as AssetReferenceLike).filePath;
   return serialized;
 }
 
@@ -71,10 +88,10 @@ async function serializeProjectNodes(nodes: unknown, projectId: string): Promise
   if (!projectDir) return nodes;
   return Promise.all((nodes as PersistedNodeLike[]).map(async (node) => {
     if (!node.data) return node;
-    let data = await serializeAssetReference(node.data, projectId, projectDir) as BaseNodeData;
+    let data = await serializeAssetReference(node.data, projectId, projectDir);
     if (Array.isArray(data.storyboardOverrides)) {
       const storyboardOverrides = await Promise.all(data.storyboardOverrides.map(async (override) => (
-        override ? serializeAssetReference(override, projectId, projectDir) as Promise<StoryboardCellOverride> : null
+        override ? serializeAssetReference(override as StoryboardCellOverride, projectId, projectDir) : null
       )));
       data = { ...data, storyboardOverrides };
     }
@@ -82,7 +99,7 @@ async function serializeProjectNodes(nodes: unknown, projectId: string): Promise
   }));
 }
 
-async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOverride>(
+async function restoreAssetReference<T extends AssetReferenceLike>(
   data: T,
   projectId: string,
   projectDir: string,
@@ -114,9 +131,12 @@ async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOver
   } as T;
   const previousDiskName = (data.relativePath ?? data.filePath)?.split(/[/\\]/).pop();
   const currentDiskName = filePath.split(/[/\\]/).pop();
-  if ('label' in restored && previousDiskName && currentDiskName && previousDiskName !== currentDiskName) {
+  const previousLabel = restored.label;
+  if (
+    previousLabel !== undefined
+    && previousDiskName && currentDiskName && previousDiskName !== currentDiskName
+  ) {
     const previousFileName = restored.fileName;
-    const previousLabel = restored.label;
     const stem = (name: string) => name.replace(/\.[^.]+$/, '');
     restored.fileName = currentDiskName;
     if (
@@ -134,7 +154,7 @@ async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOver
   return restored;
 }
 
-async function restoreAssetReferenceSafely<T extends BaseNodeData | StoryboardCellOverride>(
+async function restoreAssetReferenceSafely<T extends AssetReferenceLike>(
   data: T,
   projectId: string,
   projectDir: string,
@@ -193,6 +213,49 @@ async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<u
   }));
 }
 
+/** 角色库参考图与角色声音与画布节点共用本地文件，落库时同样只保留 assetId + relativePath */
+async function serializeProjectDramaAssets(
+  library: DramaAssetLibrary | undefined,
+  projectId: string,
+): Promise<DramaAssetLibrary | undefined> {
+  if (!library?.characters.length) return library;
+  const projectDir = await getProjectDataDir(projectId);
+  if (!projectDir) return library;
+  const characters = await Promise.all(library.characters.map(async (character) => ({
+    ...character,
+    referenceImages: await Promise.all((character.referenceImages ?? []).map((reference) =>
+      serializeAssetReference(reference, projectId, projectDir))),
+    voiceClips: await Promise.all((character.voiceClips ?? []).map((clip) =>
+      serializeAssetReference(clip, projectId, projectDir))),
+  })));
+  return { ...library, characters };
+}
+
+async function restoreProjectDramaAssets(
+  library: DramaAssetLibrary,
+  projectId: string,
+): Promise<DramaAssetLibrary> {
+  if (!library.characters.length) return library;
+  const projectDir = await getProjectDataDir(projectId);
+  if (!projectDir) return library;
+  const characters = await Promise.all(library.characters.map(async (character) => {
+    const referenceImages = await Promise.all((character.referenceImages ?? []).map((reference) =>
+      restoreAssetReferenceSafely(reference, projectId, projectDir)));
+    const voiceClips = await Promise.all((character.voiceClips ?? []).map((clip) =>
+      restoreAssetReferenceSafely(clip, projectId, projectDir)));
+    const primaryReference = referenceImages.find(
+      (reference) => reference.id === character.primaryReferenceImageId,
+    ) ?? referenceImages[0];
+    return {
+      ...character,
+      referenceImages,
+      voiceClips,
+      imageUrl: primaryReference?.imageUrl ?? character.imageUrl,
+    };
+  }));
+  return { ...library, characters };
+}
+
 export interface ProjectSaveData {
   id: string;
   name: string;
@@ -212,7 +275,12 @@ export interface ProjectSaveData {
 /** 保存项目到 IndexedDB */
 export async function saveProject(data: ProjectSaveData): Promise<string> {
   try {
-    await saveProjectToDb({ ...data, nodes: await serializeProjectNodes(data.nodes, data.id) });
+    const payload: ProjectSaveData = {
+      ...data,
+      nodes: await serializeProjectNodes(data.nodes, data.id),
+      dramaAssets: await serializeProjectDramaAssets(data.dramaAssets, data.id),
+    };
+    await saveProjectToDb(payload);
     console.log('Project saved to IndexedDB:', data.id);
     return data.id;
   } catch (error) {
@@ -242,13 +310,13 @@ export async function loadProjectData(id: string): Promise<ProjectSaveData | nul
     } catch {
       console.warn('[项目加载] 资产恢复未完成，已使用原始画布数据', { projectId: id });
     }
-    return {
-      ...record,
-      nodes,
-      dramaAssets: normalizeDramaAssetLibrary(
-        (record as ProjectSaveData).dramaAssets,
-      ),
-    } as ProjectSaveData;
+    let dramaAssets = normalizeDramaAssetLibrary((record as ProjectSaveData).dramaAssets);
+    try {
+      dramaAssets = await restoreProjectDramaAssets(dramaAssets, id);
+    } catch {
+      console.warn('[项目加载] 角色库本地文件恢复未完成，已使用原始角色数据', { projectId: id });
+    }
+    return { ...record, nodes, dramaAssets } as ProjectSaveData;
   } catch (error) {
     console.error('Load project data failed:', error);
     return null;

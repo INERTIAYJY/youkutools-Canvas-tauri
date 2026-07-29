@@ -49,6 +49,46 @@ describe('MCP control service', () => {
     );
   });
 
+  it('不向 MCP 暴露会产生模型开销的子智能体工具', async () => {
+    const tools = await listMcpTools();
+    expect(tools.some((tool) => tool.name === 'agent_run_sub_agent')).toBe(false);
+    // 其余只读工具不受影响
+    expect(tools.some((tool) => tool.name === 'canvas_query')).toBe(true);
+  });
+
+  it('即使客户端按名字直接调用也拒绝执行子智能体工具', async () => {
+    const before = useAppStore.getState().agentTasks.length;
+    const result = await handleMcpBridgeRequest({
+      sessionId: 'session-1',
+      requestId: 'session-1:req-blocked',
+      method: 'tools/call',
+      params: {
+        name: 'agent_run_sub_agent',
+        arguments: { profileId: 'built-in:script-analyst', assignment: '分析' },
+      },
+    }) as { isError: boolean; summary: string };
+
+    expect(result.isError).toBe(true);
+    expect(result.summary).toContain('不对 MCP 客户端开放');
+    // 被拦下的调用不应留下审计任务
+    expect(useAppStore.getState().agentTasks.length).toBe(before);
+  });
+
+  it('某个工具的 isAvailable 抛错时不影响其余工具的发现', async () => {
+    registerAgentTool({
+      id: 'broken_probe',
+      title: '异常探针',
+      description: '用于验证发现阶段的容错',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      effect: 'read',
+      isAvailable: () => { throw new Error('isAvailable 故障'); },
+      execute: async () => ({ status: 'success', summary: '', modelContent: '' }),
+    });
+    const tools = await listMcpTools();
+    expect(tools.some((tool) => tool.name === 'broken_probe')).toBe(false);
+    expect(tools.some((tool) => tool.name === 'canvas_query')).toBe(true);
+  });
+
   it('creates an audited task and returns tool model content', async () => {
     const execute = vi.fn(async () => ({
       status: 'success' as const,

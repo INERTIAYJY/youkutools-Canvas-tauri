@@ -209,10 +209,18 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
     }, signal);
   },
 
-  generateAudio({ params, prompt, signal }) {
+  generateAudio({ params, prompt, referenceAudioUrls, signal }) {
     const { apiKey, baseUrl } = resolveApimartConnection();
     const modelName = extractModelName(params.model, params.provider);
     const capability = getApimartAudioCapability(modelName);
+    // APIMart 的 TTS 是 OpenAI 兼容的 /audio/speech，Flow Music 走歌词与风格参数，
+    // 两者都没有音色参考入参；连了声音却被静默丢弃会让用户误以为生效，这里显式说明。
+    if (referenceAudioUrls.length > 0) {
+      useAppStore.getState().showToast?.(
+        `APIMart 音频模型「${modelName}」不支持音色参考，已忽略连线音频`,
+        'error',
+      );
+    }
     if (capability === 'speech') {
       return generateApimartSpeech(apiKey, baseUrl, {
         model: modelName,

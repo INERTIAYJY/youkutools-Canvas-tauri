@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     currentProjectId: 'project-1',
     nodes: [],
     updateNodeDataTransient: vi.fn(),
+    showToast: vi.fn(),
   },
   generateApimartImagesBatch: vi.fn(),
   generateApimartVideo: vi.fn(),
@@ -222,6 +223,7 @@ describe('MediaProviderRegistry', () => {
         audioSpeed: 1.25,
       },
       prompt: 'resolved speech',
+      referenceAudioUrls: [],
       signal,
     });
 
@@ -239,6 +241,39 @@ describe('MediaProviderRegistry', () => {
     );
   });
 
+  it('tells the user APIMart speech ignores connected voice references', async () => {
+    mocks.getApimartAudioCapability.mockReturnValue('speech');
+    const adapter = mediaProviderRegistry.getAudioAdapter('apimart');
+
+    await adapter?.generateAudio({
+      params: {
+        prompt: 'raw prompt',
+        model: 'apimart/gpt-4o-mini-tts',
+        provider: 'apimart',
+      },
+      prompt: 'resolved speech',
+      referenceAudioUrls: ['asset:///project/data/voice.mp3'],
+    });
+
+    expect(mocks.storeState.showToast).toHaveBeenCalledWith(
+      expect.stringContaining('不支持音色参考'),
+      'error',
+    );
+    // 不支持就不能编造入参：请求体保持原样
+    expect(mocks.generateApimartSpeech).toHaveBeenCalledWith(
+      'secret',
+      'https://api.example',
+      {
+        model: 'gpt-4o-mini-tts',
+        input: 'resolved speech',
+        voice: 'alloy',
+        format: 'wav',
+        speed: 1,
+      },
+      undefined,
+    );
+  });
+
   it('keeps APIMart credential errors inside the adapter boundary', async () => {
     mocks.storeState.config.providers.apimart.apiKey = '';
     const adapter = mediaProviderRegistry.getAudioAdapter('apimart');
@@ -250,6 +285,7 @@ describe('MediaProviderRegistry', () => {
         provider: 'apimart',
       },
       prompt: 'speech',
+      referenceAudioUrls: [],
     })).toThrow('未配置 apimart 的 API Key');
   });
 });

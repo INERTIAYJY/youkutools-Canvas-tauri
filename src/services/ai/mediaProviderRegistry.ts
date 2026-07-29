@@ -35,6 +35,8 @@ export interface VideoProviderRequest {
 export interface AudioProviderRequest {
   params: AIAudioGenParams;
   prompt: string;
+  /** 连入该节点的音频（角色库绑定的声音走这条线）；能吃音色参考的 adapter 自行映射 */
+  referenceAudioUrls: string[];
   signal?: AbortSignal;
 }
 

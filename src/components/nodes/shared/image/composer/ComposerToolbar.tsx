@@ -1,12 +1,16 @@
-﻿/**
- * ComposerToolbar — 合成器顶栏：加图层 / 画布设置 / 适配 / 导出
+/**
+ * ComposerToolbar — 合成器底部命令栏
+ *
+ * 分组：历史（撤销/重做）→ 工具（选择/画笔/橡皮）→ 添加图层（图片/文字/形状）
+ * → 画布（尺寸/背景）→ 视图（适配）→ 合成。形状收进下拉，避免横向按钮过多。
  */
 import { useRef, useState } from 'react';
 import AnimatedButton from '../../../../shared/AnimatedButton';
 import QualityRatioSelector from '../../QualityRatioSelector';
+import { rangeFill } from './composerRange';
 import { useAppStore } from '../../../../../store/useAppStore';
 import type { BaseNodeData } from '../../../../../types';
-import type { CanvasBg } from '../../../../../types/composerTypes';
+import type { CanvasBg, LayerType } from '../../../../../types/composerTypes';
 import type { ComposerApi } from './useComposer';
 
 interface Props {
@@ -16,6 +20,8 @@ interface Props {
   onExport: () => void;
   onClose: () => void;
 }
+
+type MenuKey = 'canvas' | 'bg' | 'shape' | 'brush';
 
 /** 画质档位 → 长边像素 */
 const QUALITY_LONG_EDGE: Record<string, number> = {
@@ -55,22 +61,33 @@ const BG_PRESETS: { label: string; value: CanvasBg }[] = [
   { label: '黑', value: '#000000' },
 ];
 
+const SHAPES: { type: Extract<LayerType, 'rect' | 'ellipse' | 'line' | 'arrow'>; label: string }[] = [
+  { type: 'rect', label: '矩形' },
+  { type: 'ellipse', label: '椭圆' },
+  { type: 'line', label: '直线' },
+  { type: 'arrow', label: '箭头' },
+];
+
 export default function ComposerToolbar({ composer, canExport, onFit, onExport, onClose }: Props) {
-  const { canvas, setCanvas, addImageLayer, addText, addShape } = composer;
+  const {
+    canvas, updateCanvas, addImageLayer, addText, addShape,
+    tool, setTool, brush, setBrush, undo, redo, canUndo, canRedo,
+  } = composer;
   const fileRef = useRef<HTMLInputElement>(null);
-  const [menu, setMenu] = useState<'canvas' | 'bg' | null>(null);
+  const [menu, setMenu] = useState<MenuKey | null>(null);
+  const toggleMenu = (key: MenuKey) => setMenu((cur) => (cur === key ? null : key));
 
   // 画布尺寸：比例由实时画布反推（随打开的图片/缩放同步回显），画质档位本地维护
   const [sizeQuality, setSizeQuality] = useState('1K');
   const sizeRatio = detectRatio(canvas.width, canvas.height);
   const handleRatioChange = (ratio: string) => {
     const { w, h } = dimsFromRatioQuality(ratio, sizeQuality);
-    setCanvas((cv) => ({ ...cv, width: w, height: h }));
+    updateCanvas({ width: w, height: h });
   };
   const handleQualityChange = (quality: string) => {
     setSizeQuality(quality);
     const { w, h } = dimsFromRatioQuality(sizeRatio, quality);
-    setCanvas((cv) => ({ ...cv, width: w, height: h }));
+    updateCanvas({ width: w, height: h });
   };
 
   const imageNodes = useAppStore((s) => s.nodes).filter(
@@ -89,6 +106,69 @@ export default function ComposerToolbar({ composer, canExport, onFit, onExport, 
   return (
     <div data-tauri-drag-region className="composer-toolbar">
       <div className="composer-toolbar-main">
+        {/* 历史 */}
+        <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="撤销 (⌘Z)" aria-label="撤销" disabled={!canUndo} onClick={undo}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+            <path d="M9 14L4 9l5-5" />
+            <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+          </svg>
+        </AnimatedButton>
+        <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="重做 (⇧⌘Z)" aria-label="重做" disabled={!canRedo} onClick={redo}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+            <path d="M15 14l5-5-5-5" />
+            <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+          </svg>
+        </AnimatedButton>
+
+        <div className="crop-bar-divider" />
+
+        {/* 工具 */}
+        <AnimatedButton className={`crop-aspect-btn icon-only${tool === 'select' ? ' active' : ''}`} data-tooltip="选择 (V)" aria-label="选择工具" onClick={() => setTool('select')}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+            <path d="M4 3l7 17 2.5-6.5L20 11z" />
+          </svg>
+        </AnimatedButton>
+        <div className="composer-dd">
+          <AnimatedButton
+            className={`crop-aspect-btn icon-only${tool === 'brush' ? ' active' : ''}`}
+            data-tooltip="画笔 (B) — 再次点击设置笔刷"
+            aria-label="画笔"
+            onClick={() => (tool === 'brush' ? toggleMenu('brush') : setTool('brush'))}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+              <path d="M15 4l5 5L9 20H4v-5z" />
+              <path d="M13.5 5.5l5 5" />
+            </svg>
+          </AnimatedButton>
+          {menu === 'brush' && (
+            <div className="composer-menu composer-brush-menu" onMouseLeave={() => setMenu(null)}>
+              <div className="composer-menu-custom">
+                <span>颜色</span>
+                <input type="color" value={brush.color} onChange={(e) => setBrush({ color: e.target.value })} />
+              </div>
+              <div className="composer-menu-custom">
+                <span>粗细 {brush.size}px</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={120}
+                  value={brush.size}
+                  style={rangeFill(brush.size, 1, 120)}
+                  onChange={(e) => setBrush({ size: +e.target.value })}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+        <AnimatedButton className={`crop-aspect-btn icon-only${tool === 'eraser' ? ' active' : ''}`} data-tooltip="橡皮 (E)" aria-label="橡皮" onClick={() => setTool('eraser')}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+            <path d="M4 15l7-7 6 6-5 5H6z" />
+            <path d="M9 20h11" />
+          </svg>
+        </AnimatedButton>
+
+        <div className="crop-bar-divider" />
+
         {/* 添加图层 */}
         <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="上传图片" aria-label="上传图片" onClick={() => fileRef.current?.click()}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
@@ -99,107 +179,105 @@ export default function ComposerToolbar({ composer, canExport, onFit, onExport, 
         </AnimatedButton>
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={handleUpload} />
 
-      <div className="composer-dd">
-        <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="从画布添加图片" aria-label="从画布添加图片" onClick={() => setMenu(menu === 'canvas' ? null : 'canvas')}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <circle cx="8.5" cy="9" r="1.5" />
-            <path d="M21 15l-5-5L5 21" />
-          </svg>
-        </AnimatedButton>
-        {menu === 'canvas' && (
-          <div className="composer-menu" onMouseLeave={() => setMenu(null)}>
-            {imageNodes.length === 0 && <div className="composer-menu-empty">画布暂无图片节点</div>}
-            {imageNodes.map((n) => {
-              const d = n.data as BaseNodeData;
-              return (
-                <button
-                  key={n.id}
-                  type="button"
-                  className="composer-menu-item"
-                  onClick={() => { addImageLayer(d.imageUrl as string, (d.label as string) || '图片'); setMenu(null); }}
-                >
-                  <img src={d.imageUrl as string} alt="" />
-                  <span>{(d.label as string) || '图片'}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <div className="crop-bar-divider" />
-      <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="文字" aria-label="文字" onClick={() => addText()}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <path d="M5 6V4h14v2M9 20h6M12 4v16" />
-        </svg>
-      </AnimatedButton>
-      <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="矩形" aria-label="矩形" onClick={() => addShape('rect')}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <rect x="4" y="6" width="16" height="12" rx="1" />
-        </svg>
-      </AnimatedButton>
-      <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="椭圆" aria-label="椭圆" onClick={() => addShape('ellipse')}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <ellipse cx="12" cy="12" rx="8" ry="6" />
-        </svg>
-      </AnimatedButton>
-      <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="直线" aria-label="直线" onClick={() => addShape('line')}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <line x1="5" y1="19" x2="19" y2="5" />
-        </svg>
-      </AnimatedButton>
-      <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="箭头" aria-label="箭头" onClick={() => addShape('arrow')}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <path d="M5 12h12M13 6l6 6-6 6" />
-        </svg>
-      </AnimatedButton>
-
-      <div className="crop-bar-divider" />
-      {/* 画布尺寸 — 比例 + 画质 */}
-      <QualityRatioSelector
-        imageSize={sizeQuality}
-        aspectRatio={sizeRatio}
-        onChangeImageSize={handleQualityChange}
-        onChangeAspectRatio={handleRatioChange}
-        showAdaptive={false}
-        placement="bottom"
-      />
-
-      {/* 背景 */}
-      <div className="composer-dd">
-        <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="背景" aria-label="背景" onClick={() => setMenu(menu === 'bg' ? null : 'bg')}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <path d="M3 12h18M12 3v18" />
-          </svg>
-        </AnimatedButton>
-        {menu === 'bg' && (
-          <div className="composer-menu" onMouseLeave={() => setMenu(null)}>
-            {BG_PRESETS.map((b) => (
-              <button key={b.label} type="button" className={`composer-menu-item row${canvas.bg === b.value ? ' active' : ''}`} onClick={() => { setCanvas((cv) => ({ ...cv, bg: b.value })); setMenu(null); }}>
-                {b.label}
-              </button>
-            ))}
-            <div className="composer-menu-custom">
-              <span>自定义</span>
-              <input type="color" value={canvas.bg === 'transparent' ? '#ffffff' : canvas.bg} onChange={(e) => setCanvas((cv) => ({ ...cv, bg: e.target.value }))} />
+        <div className="composer-dd">
+          <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="从画布添加图片" aria-label="从画布添加图片" onClick={() => toggleMenu('canvas')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="9" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </AnimatedButton>
+          {menu === 'canvas' && (
+            <div className="composer-menu" onMouseLeave={() => setMenu(null)}>
+              {imageNodes.length === 0 && <div className="composer-menu-empty">画布暂无图片节点</div>}
+              {imageNodes.map((n) => {
+                const d = n.data as BaseNodeData;
+                return (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className="composer-menu-item"
+                    onClick={() => { addImageLayer(d.imageUrl as string, (d.label as string) || '图片'); setMenu(null); }}
+                  >
+                    <img src={d.imageUrl as string} alt="" />
+                    <span>{(d.label as string) || '图片'}</span>
+                  </button>
+                );
+              })}
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="适配画布" aria-label="适配画布" onClick={onFit}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
-        </svg>
-      </AnimatedButton>
-      <AnimatedButton className="crop-action-btn confirm" data-tooltip="合成为新节点" aria-label="导出" disabled={!canExport} onClick={onExport}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-          <path d="M3 17l5-5 3 3 8-8" />
-        </svg>
-        <span>合成</span>
-      </AnimatedButton>
+        <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="文字" aria-label="文字" onClick={() => addText()}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+            <path d="M5 6V4h14v2M9 20h6M12 4v16" />
+          </svg>
+        </AnimatedButton>
+
+        <div className="composer-dd">
+          <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="形状" aria-label="形状" onClick={() => toggleMenu('shape')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+              <rect x="3" y="10" width="11" height="11" rx="1" />
+              <circle cx="15.5" cy="7.5" r="4.5" />
+            </svg>
+          </AnimatedButton>
+          {menu === 'shape' && (
+            <div className="composer-menu" onMouseLeave={() => setMenu(null)}>
+              {SHAPES.map((s) => (
+                <button key={s.type} type="button" className="composer-menu-item row" onClick={() => { addShape(s.type); setMenu(null); }}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="crop-bar-divider" />
+
+        {/* 画布尺寸 — 比例 + 画质 */}
+        <QualityRatioSelector
+          imageSize={sizeQuality}
+          aspectRatio={sizeRatio}
+          onChangeImageSize={handleQualityChange}
+          onChangeAspectRatio={handleRatioChange}
+          showAdaptive={false}
+          placement="bottom"
+        />
+
+        {/* 背景 */}
+        <div className="composer-dd">
+          <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="背景" aria-label="背景" onClick={() => toggleMenu('bg')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M3 12h18M12 3v18" />
+            </svg>
+          </AnimatedButton>
+          {menu === 'bg' && (
+            <div className="composer-menu" onMouseLeave={() => setMenu(null)}>
+              {BG_PRESETS.map((b) => (
+                <button key={b.label} type="button" className={`composer-menu-item row${canvas.bg === b.value ? ' active' : ''}`} onClick={() => { updateCanvas({ bg: b.value }); setMenu(null); }}>
+                  {b.label}
+                </button>
+              ))}
+              <div className="composer-menu-custom">
+                <span>自定义</span>
+                <input type="color" value={canvas.bg === 'transparent' ? '#ffffff' : canvas.bg} onChange={(e) => updateCanvas({ bg: e.target.value }, 'canvas-bg')} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="适配画布 (⌘0)" aria-label="适配画布" onClick={onFit}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+          </svg>
+        </AnimatedButton>
+        <AnimatedButton className="crop-action-btn confirm" data-tooltip="合成为新节点" aria-label="导出" disabled={!canExport} onClick={onExport}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+            <path d="M3 17l5-5 3 3 8-8" />
+          </svg>
+          <span>合成</span>
+        </AnimatedButton>
       </div>
 
       <AnimatedButton className="composer-toolbar-close crop-aspect-btn crop-aspect-close act-cancel" data-tooltip="关闭 (Esc)" aria-label="关闭" onClick={onClose}>

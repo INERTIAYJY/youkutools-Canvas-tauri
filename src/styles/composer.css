@@ -12,6 +12,11 @@
 }
 
 .composer-root {
+  /* 右侧属性面板占位：工作区与底部命令栏都按这个宽度让位，避免画面被面板压住 */
+  --composer-side-w: 268px;
+  --composer-side-gap: 20px;
+  --composer-side-reserve: calc(var(--composer-side-w) + var(--composer-side-gap) * 2);
+
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -22,11 +27,16 @@
   animation: composerRootBloom 1000ms var(--ease-out-expo) both;
 }
 
+/* 收起面板后只给展开按钮留一条窄边 */
+.composer-root.side-collapsed {
+  --composer-side-reserve: 60px;
+}
+
 /* ── 底部命令栏 ── */
 .composer-toolbar-dock {
   position: fixed;
   bottom: 24px;
-  left: calc(50% - 122px);
+  left: calc(50% - var(--composer-side-reserve) / 2);
   translate: -50% 0;
   z-index: 40;
   display: flex;
@@ -34,7 +44,7 @@
   justify-content: center;
   gap: 12px;
   width: max-content;
-  max-width: min(calc(100vw - 292px), 1062px);
+  max-width: min(calc(100vw - var(--composer-side-reserve) - 48px), 1062px);
   pointer-events: none;
   white-space: nowrap;
 }
@@ -46,7 +56,7 @@
   align-items: center;
   gap: 1px;
   width: max-content;
-  max-width: min(calc(100vw - 434px), 920px);
+  max-width: min(calc(100vw - var(--composer-side-reserve) - 190px), 920px);
   padding: 6px;
   pointer-events: auto;
   background: color-mix(in srgb, var(--theme-surface) 95%, transparent);
@@ -104,12 +114,42 @@
   background: color-mix(in srgb, var(--theme-text) 8%, transparent);
 }
 
-/* ── 主体：舞台 + 右侧面板 ── */
+/* 当前工具高亮（画笔/橡皮/选择） */
+.composer-toolbar .crop-aspect-btn.active {
+  color: var(--brand-light, var(--brand));
+  background: var(--brand-alpha-10);
+}
+.composer-toolbar .crop-aspect-btn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* 笔刷设置弹层 */
+.composer-brush-menu { min-width: 200px; }
+.composer-brush-menu .composer-menu-custom {
+  border-top: none;
+  margin-top: 0;
+}
+.composer-menu-custom input[type='color'] {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* ── 主体：舞台 + 右侧面板 ──
+   padding-right 把面板宽度从工作区里扣掉，舞台按容器 clientWidth 建 Stage，
+   于是画面永远不会跑到面板底下。 */
 .composer-body {
   position: relative;
   flex: 1;
   display: flex;
   min-height: 0;
+  padding-right: var(--composer-side-reserve);
+  transition: padding-right var(--transition-base, 200ms) ease;
 }
 
 .composer-stage-wrap {
@@ -121,6 +161,9 @@
   animation: composerStageBloom 1000ms var(--ease-out-expo) 120ms both;
   background: transparent;
 }
+
+/* 画笔 / 橡皮模式 */
+.composer-stage-wrap.drawing { cursor: crosshair; }
 
 /* 拖入图片高亮 */
 .composer-stage-wrap.drag-over::after {
@@ -253,17 +296,18 @@
 /* ── 右侧面板 ── */
 .composer-side {
   position: absolute;
-  top: 24px;
-  right: 24px;
-  bottom: 24px;
+  top: var(--composer-side-gap);
+  right: var(--composer-side-gap);
+  bottom: var(--composer-side-gap);
   z-index: 35;
-  width: 244px;
+  width: var(--composer-side-w);
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 12px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: color-mix(in srgb, var(--theme-surface) 95%, transparent);
   backdrop-filter: blur(24px);
   border: 1px solid color-mix(in srgb, var(--theme-border) 80%, transparent);
@@ -271,6 +315,43 @@
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
   animation: composerSideReveal 1000ms var(--ease-out-expo) 380ms both;
 }
+
+.composer-side.collapsed { display: none; }
+.composer-side.no-enter { animation: none; }
+
+.composer-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.composer-side-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--theme-text);
+}
+
+/* 收起后的展开把手 */
+.composer-side-expand {
+  position: absolute;
+  top: var(--composer-side-gap);
+  right: 12px;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--theme-text);
+  background: color-mix(in srgb, var(--theme-surface) 95%, transparent);
+  backdrop-filter: blur(24px);
+  border: 1px solid color-mix(in srgb, var(--theme-border) 80%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+.composer-side-expand:hover { background: var(--theme-hover); }
 
 @keyframes composerRootBloom {
   from {
@@ -343,8 +424,16 @@
   }
 }
 
-.composer-side-section { margin-bottom: 12px; }
+.composer-side-section {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--theme-border) 55%, transparent);
+}
+.composer-side-section:last-child { border-bottom: none; padding-bottom: 0; }
 .composer-side-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -352,13 +441,23 @@
   color: var(--theme-text-secondary);
   margin-bottom: 8px;
 }
+.composer-title-action {
+  border: none;
+  background: transparent;
+  color: var(--brand);
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+  padding: 0;
+}
 
 .composer-layer-list { display: flex; flex-direction: column; gap: 3px; }
 .composer-layer-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 7px;
+  gap: 5px;
+  padding: 4px 6px;
   border-radius: 7px;
   border: 1px solid transparent;
   cursor: pointer;
@@ -371,7 +470,26 @@
   background: var(--brand-alpha-10);
   border-color: var(--brand-alpha-30);
 }
+.composer-layer-item.dragging { opacity: 0.45; }
 .composer-layer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-layer-thumb {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+.composer-layer-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  background: var(--theme-surface, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--brand-alpha-30);
+  border-radius: 5px;
+  color: var(--theme-text);
+  font-size: 12px;
+}
 
 .composer-icon-btn {
   border: none;
@@ -382,6 +500,7 @@
   padding: 2px;
   color: var(--theme-text-secondary);
 }
+.composer-icon-btn.on { color: var(--brand); }
 .composer-icon-btn.danger:hover { color: var(--danger); }
 
 .composer-field {
@@ -393,8 +512,20 @@
   font-size: 12px;
   color: var(--theme-text);
 }
-.composer-field > span { flex-shrink: 0; }
-.composer-field input[type='range'] { flex: 1; }
+/* 标签与数值各占固定列宽 —— 不同字数的标签也能让滑杆轨道左右端严格对齐 */
+.composer-field > span {
+  flex-shrink: 0;
+  width: 42px;
+}
+.composer-field-value {
+  flex-shrink: 0;
+  width: 38px;
+  font-style: normal;
+  font-size: 11px;
+  text-align: right;
+  color: var(--theme-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
 .composer-field input[type='number'] {
   width: 72px;
   padding: 4px 6px;
@@ -414,7 +545,138 @@
   cursor: pointer;
 }
 
+/* ── 滑杆 ──
+   轨道用渐变画出「已填充」区间：单极从左端起算，双极（如亮度 -1~1）从中点起算，
+   区间由 --range-from / --range-to 传入（见 composerUi.tsx 的 rangeFill）。 */
+.composer-side input[type='range'],
+.composer-menu-custom input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-side input[type='range']::-webkit-slider-runnable-track,
+.composer-menu-custom input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      to right,
+      transparent 0 var(--range-from, 0%),
+      var(--brand) var(--range-from, 0%) var(--range-to, 0%),
+      transparent var(--range-to, 0%) 100%
+    ),
+    color-mix(in srgb, var(--theme-text) 14%, transparent);
+}
+
+.composer-side input[type='range']::-webkit-slider-thumb,
+.composer-menu-custom input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px; /* (轨道高 4 - 滑块 12) / 2 */
+  border-radius: 50%;
+  background: var(--theme-surface, #fff);
+  border: 1px solid color-mix(in srgb, var(--theme-text) 22%, transparent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 120ms var(--ease-out-expo, ease), box-shadow 120ms ease;
+}
+
+.composer-side input[type='range']:hover::-webkit-slider-thumb,
+.composer-menu-custom input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+  border-color: var(--brand);
+}
+.composer-side input[type='range']:active::-webkit-slider-thumb,
+.composer-menu-custom input[type='range']:active::-webkit-slider-thumb {
+  transform: scale(1.05);
+  border-color: var(--brand);
+  box-shadow: 0 0 0 4px var(--brand-alpha-10), 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+.composer-side input[type='range']:focus-visible {
+  outline: 2px solid var(--brand-alpha-30);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
+/* Firefox（浏览器端开发时用得到，Tauri 内是 WebKit/Chromium） */
+.composer-side input[type='range']::-moz-range-track,
+.composer-menu-custom input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      to right,
+      transparent 0 var(--range-from, 0%),
+      var(--brand) var(--range-from, 0%) var(--range-to, 0%),
+      transparent var(--range-to, 0%) 100%
+    ),
+    color-mix(in srgb, var(--theme-text) 14%, transparent);
+}
+.composer-side input[type='range']::-moz-range-thumb,
+.composer-menu-custom input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--theme-surface, #fff);
+  border: 1px solid color-mix(in srgb, var(--theme-text) 22%, transparent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-side input[type='range']::-webkit-slider-thumb,
+  .composer-menu-custom input[type='range']::-webkit-slider-thumb {
+    transition: none;
+  }
+}
+
+.composer-select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--theme-surface, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  color: var(--theme-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 数值输入网格（X/Y/宽/高/旋转…） */
+.composer-num-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.composer-num {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--theme-text-secondary);
+}
+.composer-num > span { flex-shrink: 0; min-width: 22px; }
+.composer-num input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--theme-surface, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  color: var(--theme-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .composer-seg { display: inline-flex; gap: 2px; }
+.composer-seg.wrap { flex-wrap: wrap; justify-content: flex-end; }
 .composer-seg button {
   min-width: 26px;
   padding: 4px 6px;
@@ -425,6 +687,7 @@
   border-radius: 6px;
   cursor: pointer;
 }
+.composer-seg button:hover { background: var(--theme-hover); }
 .composer-seg button.active { color: var(--brand); border-color: var(--brand-alpha-30); background: var(--brand-alpha-10); }
 
 /* ── 连线文件展示框 ── */
@@ -490,18 +753,19 @@
 }
 
 @media (max-width: 760px) {
-  .composer-side {
-    top: 12px;
-    right: 12px;
-    bottom: 12px;
-    width: 210px;
-    padding: 10px;
+  .composer-root {
+    --composer-side-w: 210px;
+    --composer-side-gap: 12px;
   }
+
+  .composer-side { padding: 10px; }
+
+  .composer-num-grid { grid-template-columns: minmax(0, 1fr); }
 
   .composer-toolbar-dock {
     bottom: 12px;
     left: 8px;
-    width: calc(100vw - 226px);
+    width: calc(100vw - var(--composer-side-reserve) - 16px);
     max-width: none;
     translate: none;
     justify-content: flex-start;

@@ -116,3 +116,15 @@ describe('复制内置典范', () => {
     expect(SUB_AGENT_LIMITS.defaultRounds).toBeLessThanOrEqual(SUB_AGENT_LIMITS.maxRounds);
   });
 });
+
+describe('SubAgentPanel', () => {
+  it('作为 AI 助手内的面板渲染，标题不与内部标题重复', async () => {
+    const { default: SubAgentPanel } = await import('../../src/components/chat/SubAgentPanel');
+    const markup = renderToStaticMarkup(<SubAgentPanel onClose={() => {}} />);
+    // 标题由面板标题栏承担，内部 h3 被 hideHeading 抑制，避免重复标题
+    expect(markup).not.toContain('<h3');
+    expect(markup).toContain('2 个');
+    expect(markup).toContain('剧本分析师');
+    expect(markup).toContain('新建');
+  });
+});

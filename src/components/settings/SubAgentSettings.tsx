@@ -110,7 +110,12 @@ export function SubAgentProfileList({
   );
 }
 
-export default function SubAgentSettings() {
+export interface SubAgentSettingsProps {
+  /** 嵌入到已有标题栏（如 AI 助手面板）时隐藏内部标题，避免重复。 */
+  hideHeading?: boolean;
+}
+
+export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps = {}) {
   const subAgentProfiles = useAppStore((state) => state.subAgentProfiles);
   const userSkills = useAppStore((state) => state.userSkills);
   const createSubAgentProfile = useAppStore((state) => state.createSubAgentProfile);
@@ -201,7 +206,9 @@ export default function SubAgentSettings() {
     <div className="space-y-4">
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-medium text-canvas-text">子智能体</h3>
+          {hideHeading
+            ? <span />
+            : <h3 className="text-sm font-medium text-canvas-text">子智能体</h3>}
           <AnimatedButton
             onClick={startCreate}
             className="flex items-center gap-1.5 rounded-lg bg-indigo-500/15 px-3 py-1.5 text-xs text-indigo-400 hover:bg-indigo-500/25"

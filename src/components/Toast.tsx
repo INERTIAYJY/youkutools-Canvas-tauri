@@ -3,6 +3,7 @@
  */
 import { Icon } from '@iconify/react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
 import PopupCloseButton from './shared/PopupCloseButton';
@@ -13,11 +14,11 @@ export default function Toast() {
     useShallow((s) => ({ toast: s.toast, dismissToast: s.dismissToast })),
   );
 
-  return (
+  return createPortal(
     <AnimatePresence>
       {toast.visible && (
         <motion.div
-          className="fixed top-16 left-1/2 z-[100]"
+          className="fixed top-16 left-1/2 z-[300]"
           style={{ x: '-50%' }}
           initial={{ opacity: 0, y: -10, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -59,6 +60,7 @@ export default function Toast() {
           </div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

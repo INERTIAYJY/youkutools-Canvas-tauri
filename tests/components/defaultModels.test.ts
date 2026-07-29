@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  defaultModelGroups,
   findMediaModelOption,
   getConfiguredModelGroups,
 } from '../../src/components/nodes/shared/defaultModels';
@@ -20,6 +21,63 @@ function createConfig(selectedModels: ProviderModelSelection[]): AppConfig {
 }
 
 describe('内置厂商动态模型目录', () => {
+  it('内置 GRSAI 官网当前完整模型目录', () => {
+    const models = defaultModelGroups.find((group) => group.id === 'grsai')?.models ?? [];
+
+    expect(models.map((model) => model.value)).toEqual([
+      'grsai/gpt-image-2',
+      'grsai/gpt-image-2-vip',
+      'grsai/nano-banana-pro',
+      'grsai/nano-banana-2',
+      'grsai/nano-banana-2-lite',
+      'grsai/nano-banana-pro-vt',
+      'grsai/nano-banana-fast',
+      'grsai/nano-banana-2-cl',
+      'grsai/nano-banana-pro-cl',
+      'grsai/nano-banana-2-2k-cl',
+      'grsai/nano-banana-pro-4k-vip',
+      'grsai/nano-banana-pro-vip',
+      'grsai/nano-banana-2-4k-cl',
+      'grsai/gpt-5.4',
+      'grsai/gpt-5.5',
+      'grsai/gemini-3.1-flash-lite',
+      'grsai/gemini-3.1-pro',
+      'grsai/gemini-3.5-flash',
+      'grsai/gemini-3-flash',
+      'grsai/gemini-3-pro',
+      'grsai/gemini-2.5-flash',
+      'grsai/gemini-2.5-pro',
+    ]);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-image'))).toHaveLength(13);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-text'))).toHaveLength(9);
+  });
+
+  it('把已选的 GRSAI 旧版模型 ID 映射到当前官网模型', () => {
+    const config: AppConfig = {
+      providers: {
+        grsai: {
+          name: 'GRSAI',
+          apiKey: 'configured',
+          catalogId: 'grsai',
+          selectedModels: [{
+            id: 'nanobanana-pro',
+            name: 'NanobananaPRO',
+            category: 'image',
+            provider: 'grsai',
+          }],
+        },
+      },
+      theme: 'dark',
+    };
+
+    expect(getConfiguredModelGroups(config, 'ai-image')
+      .find((group) => group.id === 'grsai')?.models).toContainEqual(expect.objectContaining({
+      value: 'grsai/nano-banana-pro',
+      provider: 'grsai',
+      label: 'Nano Banana Pro',
+    }));
+  });
+
   it('把已选但未预置的模型加入对应类别和厂商分组', () => {
     const config = createConfig([
       {

@@ -26,6 +26,7 @@ import type { ConfigSlice } from './store.config';
 import type { WorkflowSlice } from './store.workflows';
 import type { PresetSlice } from './store.presets';
 import type { SkillSlice } from './store.skills';
+import type { SubAgentSlice } from './store.subAgents';
 import type { GroupSlice } from './store.groups';
 import type { ClipboardSlice } from './store.clipboard';
 import type { ProjectSlice } from './store.projects';
@@ -45,6 +46,7 @@ import { createConfigSlice } from './store.config';
 import { createWorkflowSlice } from './store.workflows';
 import { createPresetSlice } from './store.presets';
 import { createSkillSlice } from './store.skills';
+import { createSubAgentSlice } from './store.subAgents';
 import { createGroupSlice } from './store.groups';
 import { createClipboardSlice } from './store.clipboard';
 import { createProjectSlice } from './store.projects';
@@ -68,6 +70,7 @@ export type AppState = NodeSlice
   & WorkflowSlice
   & PresetSlice
   & SkillSlice
+  & SubAgentSlice
   & StyleSlice
   & GroupSlice
   & ClipboardSlice
@@ -89,6 +92,7 @@ export const useAppStore = create<AppState>()((...a) => ({
   ...createWorkflowSlice(...a),
   ...createPresetSlice(...a),
   ...createSkillSlice(...a),
+  ...createSubAgentSlice(...a),
   ...createStyleSlice(...a),
   ...createGroupSlice(...a),
   ...createClipboardSlice(...a),

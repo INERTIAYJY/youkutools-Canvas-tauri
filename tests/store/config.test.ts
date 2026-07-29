@@ -147,6 +147,18 @@ describe('config hydration guard', () => {
           baseUrl: 'https://api.grsai.com/',
           catalogId: 'grsai',
         },
+        'grsai-v1': {
+          name: 'GRSAI V1',
+          apiKey: 'grsai-v1-secret',
+          baseUrl: 'https://api.grsai.com/v1/',
+          catalogId: 'grsai',
+        },
+        'grsai-global': {
+          name: 'GRSAI Global',
+          apiKey: 'grsai-global-secret',
+          baseUrl: 'https://grsaiapi.com/v1/',
+          catalogId: 'grsai',
+        },
         'grsai-custom': {
           name: 'GRSAI Custom',
           apiKey: 'custom-secret',
@@ -161,7 +173,13 @@ describe('config hydration guard', () => {
     await useAppStore.getState().loadConfig();
 
     expect(useAppStore.getState().config.providers.grsai.baseUrl).toBe(
-      'https://api.grsai.com/v1',
+      'https://grsai.dakka.com.cn/v1',
+    );
+    expect(useAppStore.getState().config.providers['grsai-v1'].baseUrl).toBe(
+      'https://grsai.dakka.com.cn/v1',
+    );
+    expect(useAppStore.getState().config.providers['grsai-global'].baseUrl).toBe(
+      'https://grsai.dakka.com.cn/v1',
     );
     expect(useAppStore.getState().config.providers['grsai-custom'].baseUrl).toBe(
       'https://gateway.example/grsai',

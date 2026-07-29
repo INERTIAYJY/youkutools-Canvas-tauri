@@ -25,6 +25,7 @@ import ChatHeader from './ChatHeader';
 import ChatMessages from './ChatMessages';
 import ChatInput from './ChatInput';
 import ProjectMemoryPanel from './ProjectMemoryPanel';
+import SubAgentPanel from './SubAgentPanel';
 import AgentTaskCenter from './AgentTaskCenter';
 import {
   emitAction,
@@ -82,7 +83,9 @@ export default function ChatPanel({
   const {
     chatOpen,
     chatPanelDetached,
+    chatComposerDraft,
     closeChat,
+    clearChatComposerDraft,
     setChatPanelDetached,
     activeConversationId,
     conversations,
@@ -107,7 +110,9 @@ export default function ChatPanel({
     useShallow((s) => ({
       chatOpen: s.chatOpen,
       chatPanelDetached: s.chatPanelDetached,
+      chatComposerDraft: s.chatComposerDraft,
       closeChat: s.closeChat,
+      clearChatComposerDraft: s.clearChatComposerDraft,
       setChatPanelDetached: s.setChatPanelDetached,
       activeConversationId: s.activeConversationId,
       conversations: s.conversations,
@@ -197,6 +202,7 @@ export default function ChatPanel({
   const pendingConversationDraftRef = useRef<string | null>(null);
   const [viewMode, setViewMode] = useState<'list' | 'chat'>('chat');
   const [showMemoryPanel, setShowMemoryPanel] = useState(false);
+  const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
   const [showTaskCenter, setShowTaskCenter] = useState(false);
   const currentProjectMemories = effectiveProjectId
     ? projectMemories.filter((memory) => memory.projectId === effectiveProjectId)
@@ -321,6 +327,28 @@ export default function ChatPanel({
     }
     updateInputDraft(text);
   }, [effectiveActiveConversationId, effectiveProjectId, handleNewConversation, updateInputDraft]);
+
+  useEffect(() => {
+    if (detached || !chatComposerDraft || !effectiveProjectId) return;
+    let focusFrame = 0;
+    const draftFrame = requestAnimationFrame(() => {
+      handleExampleClick(chatComposerDraft);
+      clearChatComposerDraft();
+      focusFrame = requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent('chat-focus-composer'));
+      });
+    });
+    return () => {
+      cancelAnimationFrame(draftFrame);
+      if (focusFrame) cancelAnimationFrame(focusFrame);
+    };
+  }, [
+    chatComposerDraft,
+    clearChatComposerDraft,
+    detached,
+    effectiveProjectId,
+    handleExampleClick,
+  ]);
 
   const handleAddMediaToCanvas = useCallback((messageId: string) => {
     if (detached) return;
@@ -606,6 +634,7 @@ export default function ChatPanel({
               onOpenMemory={!detached && effectiveProjectId
                 ? () => setShowMemoryPanel(true)
                 : undefined}
+              onOpenSubAgents={detached ? undefined : () => setShowSubAgentPanel(true)}
               onOpenTasks={() => setShowTaskCenter(true)}
               activeTaskCount={effectiveAgentTasks.filter((task) =>
                 !['completed', 'failed', 'stopped'].includes(task.status)).length}
@@ -723,6 +752,11 @@ export default function ChatPanel({
                 onDelete={removeProjectMemory}
                 onClose={() => setShowMemoryPanel(false)}
               />
+            )}
+
+            {/* 子智能体配置面板（主窗口） */}
+            {showSubAgentPanel && !detached && (
+              <SubAgentPanel onClose={() => setShowSubAgentPanel(false)} />
             )}
           </motion.aside>
       )}

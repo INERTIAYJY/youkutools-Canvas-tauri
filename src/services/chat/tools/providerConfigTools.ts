@@ -7,8 +7,11 @@ import { readProviderDocsPage } from '../../providerDocsService';
 import {
   createProviderConfigDraft,
   deleteProviderConfigDraft,
+  describeProviderModelMerge,
   getProviderConfigDraft,
-  getProviderConfigDraftSummary,
+  mergeProviderModels,
+  peekProviderConfigDraft,
+  type ProviderConfigDraft,
   type ProviderConfigDraftInput,
 } from '../providerConfigDraftService';
 import {
@@ -118,6 +121,28 @@ function createProviderConfigDraftWithConversationFallback(
     }
     throw error;
   }
+}
+
+
+/**
+ * 预演草稿并入现有连接的结果。
+ *
+ * 已有连接一律走合并：保留原有模型，同 ID 由草稿覆盖，新模型追加；
+ * Base URL 不一致时视为不同网关，拒绝合并而不是悄悄改写。
+ */
+function planProviderConfigMerge(draft: ProviderConfigDraft) {
+  const existing = useAppStore.getState().config.providers[draft.connectionId];
+  const draftModels = draft.config.selectedModels ?? [];
+  if (!existing) {
+    return { existing: undefined, merge: mergeProviderModels([], draftModels) };
+  }
+  if (existing.baseUrl && existing.baseUrl !== draft.baseUrl) {
+    throw new Error(
+      `连接“${existing.name}”当前的 Base URL 是 ${existing.baseUrl}，与本次草稿的 ${draft.baseUrl} 不一致；`
+      + '不同网关的模型不能并入同一个连接，请改用新连接名称，或先在设置里调整该连接地址',
+    );
+  }
+  return { existing, merge: mergeProviderModels(existing.selectedModels, draftModels) };
 }
 
 export function registerProviderConfigAgentTools(): Array<() => void> {
@@ -301,34 +326,48 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
           };
         }
       },
-      summarizeInput: (input) => (
-        getProviderConfigDraftSummary(input.draftId)
-        ?? '保存 API 厂商配置（不会写入 API Key）'
-      ),
+      summarizeInput: (input) => {
+        const draft = peekProviderConfigDraft(input.draftId);
+        if (!draft) return '保存 API 厂商配置（不会写入 API Key）';
+        // 审批卡必须让用户看清这是并入还是新建，以及原有模型会不会受影响
+        try {
+          return `${draft.summary}\n${describeProviderModelMerge(planProviderConfigMerge(draft).merge)}`;
+        } catch (error) {
+          return `${draft.summary}\n无法并入：${error instanceof Error ? error.message : '连接不兼容'}`;
+        }
+      },
       execute: async (context, input) => {
         try {
           const draft = getProviderConfigDraft(context.taskId, input.draftId);
           const store = useAppStore.getState();
           if (!store.configHydrated) throw new Error('配置尚未完成加载，不能保存厂商连接');
-          const existing = store.config.providers[draft.connectionId];
+          const { existing, merge } = planProviderConfigMerge(draft);
           if (existing && existing.catalogId !== 'custom-openai') {
             throw new Error('Agent 不能覆盖内置厂商连接');
           }
+          const draftCatalog = draft.config.catalogModels ?? [];
           store.saveProviderConfig(draft.connectionId, {
             ...draft.config,
             apiKey: existing?.apiKey ?? '',
+            selectedModels: merge.merged,
+            catalogModels: mergeProviderModels(existing?.catalogModels, draftCatalog).merged,
+            visibleModelCategories: [...new Set([
+              ...(existing?.visibleModelCategories ?? []),
+              ...(draft.config.visibleModelCategories ?? []),
+            ])],
           });
           await useAppStore.getState().saveConfig();
           deleteProviderConfigDraft(context.taskId, input.draftId);
           // 保存成功后打开设置的 API Key 页并弹出该连接编辑框，方便用户立即补填密钥
           useAppStore.getState().openApiKeySettings(draft.connectionId);
+          const mergeNote = describeProviderModelMerge(merge);
           return {
             status: 'success' as const,
-            summary: `已保存“${draft.connectionName}”API 厂商配置，API Key 未被修改`,
+            summary: `已保存“${draft.connectionName}”API 厂商配置（${mergeNote}），API Key 未被修改`,
             modelContent: [
-              `已保存连接“${draft.connectionName}”，包含 ${draft.config.selectedModels?.length ?? 0} 个模型。`,
+              `已保存连接“${draft.connectionName}”：${mergeNote}，该连接现有 ${merge.merged.length} 个模型。`,
               existing
-                ? '已保留该连接原有 API Key。'
+                ? '已保留该连接原有 API Key 和本次未涉及的模型。'
                 : '新连接的 API Key 保持空白，已自动打开设置的 API Key 页并弹出该连接编辑框，请用户在其中填写密钥。',
             ].join('\n'),
           };

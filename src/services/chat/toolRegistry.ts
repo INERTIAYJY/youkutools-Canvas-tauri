@@ -98,7 +98,14 @@ export function getAvailableAgentTools(
       context.toolAllowlist !== undefined
       && !context.toolAllowlist.includes(definition.id)
     ) return false;
-    return definition.isAvailable ? definition.isAvailable(context) : true;
+    if (!definition.isAvailable) return true;
+    try {
+      return definition.isAvailable(context);
+    } catch (error) {
+      // 单个工具的可用性判断出错不应拖垮整份列表（例如 MCP 工具发现没有真实任务上下文）。
+      console.error(`[AgentToolRegistry] isAvailable failed for ${definition.id}:`, error);
+      return false;
+    }
   });
 }
 

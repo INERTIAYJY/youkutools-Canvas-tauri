@@ -25,6 +25,24 @@ import {
 } from './mcpBridgeService';
 
 const MCP_CONVERSATION_TITLE = 'MCP 控制';
+
+/**
+ * 工具发现时没有真实 AgentTask，只能给一个占位 ID。
+ *
+ * 因此工具的 isAvailable 不得依赖 context.taskId 去查任务：发现阶段查不到任务，
+ * 会让该工具从 MCP 列表里静默消失。需要任务上下文的判断请放在 authorize 里。
+ */
+export const MCP_TOOL_DISCOVERY_TASK_ID = 'mcp-tool-discovery';
+
+/**
+ * 不通过 MCP 暴露、也不允许 MCP 调用的工具。
+ *
+ * agent_run_sub_agent 是 read effect，Policy 对只读工具一律自动执行，但它内部会跑
+ * 完整的子智能体循环并产生真实模型开销。对话内由用户发起尚可接受，外部 MCP 客户端
+ * 直接调用则会在零确认下花钱，且它也没有「主任务」语境。
+ */
+const MCP_BLOCKED_TOOL_IDS = new Set(['agent_run_sub_agent']);
+
 const activeRequestTasks = new Map<string, string>();
 
 function createId(prefix: string): string {
@@ -93,12 +111,12 @@ export async function listMcpTools(): Promise<McpToolDescriptor[]> {
   const current = getCurrentMcpContext();
   if (!current) return [];
   return getAvailableAgentTools({
-    taskId: 'mcp-tool-discovery',
+    taskId: MCP_TOOL_DISCOVERY_TASK_ID,
     projectId: current.projectId,
     conversationId: current.conversation.id,
     mode: current.conversation.agentMode,
     baseRevision: useAppStore.getState().getCurrentRevision(),
-  }).map((definition) => ({
+  }).filter((definition) => !MCP_BLOCKED_TOOL_IDS.has(definition.id)).map((definition) => ({
     name: definition.id,
     title: definition.title,
     description: definition.description,
@@ -123,6 +141,15 @@ async function callMcpTool(
     };
   }
   const name = typeof request.params.name === 'string' ? request.params.name : '';
+  // 仅从发现列表移除不构成约束，客户端可以直接按名字调用，执行路径必须同样拦截。
+  if (MCP_BLOCKED_TOOL_IDS.has(name)) {
+    const message = `工具“${name}”不对 MCP 客户端开放`;
+    return {
+      isError: true,
+      summary: message,
+      content: [{ type: 'text', text: message }],
+    };
+  }
   const input = request.params.arguments && typeof request.params.arguments === 'object'
     ? request.params.arguments
     : {};

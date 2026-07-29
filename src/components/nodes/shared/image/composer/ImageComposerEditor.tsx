@@ -1,14 +1,15 @@
-﻿/**
+/**
  * ImageComposerEditor — 多图自由编辑 / 拼图合成器（基于 react-konva）
  *
- * 能力（标准版）：多图层自由变换（移动/缩放/旋转/层级/透明度）、文字、基础形状，
- * 可设画布尺寸与背景，最终合成为透明 PNG 并按现有「loading 节点 → 回填」流程建新节点。
+ * 能力：多图层自由变换（移动/缩放/旋转/翻转/层级/透明度/混合模式）、图片调色滤镜、
+ * 主体抠图、文字、基础形状、自由画笔与橡皮、对齐与拖拽吸附、撤销重做，
+ * 最终合成为透明 PNG 并按现有「loading 节点 → 回填」流程建新节点。
  *
  * 与裁切/扩图一致：onStart() 即时建 loading 节点，onSave(dataUrl, meta) 回填结果。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Konva from 'konva';
-import { Stage, Layer as KLayer, Rect, Ellipse, Image as KImage, Text as KText, Line, Arrow, Transformer } from 'react-konva';
+import { Stage, Layer as KLayer, Rect, Line, Transformer } from 'react-konva';
 import FullscreenOverlay from '../../../../shared/FullscreenOverlay';
 import { setExternalDropCaptured } from '../../../../../utils/dropCapture';
 import { useAppStore } from '../../../../../store/useAppStore';
@@ -20,7 +21,10 @@ import ImageEditorZoomControls from '../ImageEditorZoomControls';
 import { useComposer } from './useComposer';
 import ComposerToolbar from './ComposerToolbar';
 import ComposerSidePanel from './ComposerSidePanel';
-import type { Layer } from '../../../../../types/composerTypes';
+import ComposerLayerNode from './ComposerLayerNode';
+import { NO_GUIDES, alignOffset, fitScaleFactor, snapDuringDrag } from './composerGeometry';
+import type { SnapGuides } from './composerGeometry';
+import type { AlignDir, Layer } from '../../../../../types/composerTypes';
 
 interface ImageComposerEditorProps {
   isOpen: boolean;
@@ -35,6 +39,8 @@ interface ImageComposerEditorProps {
 const MAX_SEED = 2048;
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
 const MATTING_MODEL = 'rmbg-1.4.onnx';
+/** 吸附触发距离（屏幕像素，换算到页面坐标时再除以相机缩放） */
+const SNAP_PX = 6;
 
 const errMessage = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err
@@ -45,8 +51,9 @@ const errMessage = (err: unknown, fallback: string): string =>
 export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose, onStart, onSave }: ImageComposerEditorProps) {
   const cmp = useComposer();
   const {
-    layers, selectedId, setSelectedId, selectedLayer,
-    canvas, setCanvas, updateLayer, removeLayer, addImageLayer, reset,
+    layers, selectedId, setSelectedId, selectedLayer, canvas, updateCanvas,
+    updateLayer, removeLayer, duplicateLayer, reorderLayer, addImageLayer,
+    addBrushStroke, tool, setTool, brush, undo, redo, clearHistory, reset,
   } = cmp;
 
   const stageWrapRef = useRef<HTMLDivElement>(null);
@@ -58,7 +65,24 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
   const [camScale, setCamScale] = useState(1);
   const [camPos, setCamPos] = useState({ x: 0, y: 0 });
   const [editingText, setEditingText] = useState<{ id: string; left: number; top: number; width: number; fontPx: number } | null>(null);
+  const [guides, setGuides] = useState<SnapGuides>(NO_GUIDES);
+  const [sideCollapsed, setSideCollapsed] = useState(false);
+  const [sideToggled, setSideToggled] = useState(false);
+  const [draft, setDraft] = useState<number[] | null>(null);
+  const draftRef = useRef<number[] | null>(null);
+  const drawingRef = useRef(false);
   const seededRef = useRef(false);
+
+  /** 笔画点位以 ref 为准，收笔时才读取（避免在 setState 更新器里做副作用） */
+  const setDraftPoints = useCallback((points: number[] | null) => {
+    draftRef.current = points;
+    setDraft(points);
+  }, []);
+
+  const registerNode = useCallback((id: string, node: Konva.Node | null) => {
+    if (node) nodeRefs.current.set(id, node);
+    else nodeRefs.current.delete(id);
+  }, []);
 
   /* ── 居中适配相机 ── */
   const fitToView = useCallback((pageW: number, pageH: number, sw: number, sh: number) => {
@@ -66,6 +90,10 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     setCamScale(scale);
     setCamPos({ x: (sw - pageW * scale) / 2, y: (sh - pageH * scale) / 2 });
   }, []);
+
+  const handleFit = useCallback(() => {
+    fitToView(canvas.width, canvas.height, stageSize.w, stageSize.h);
+  }, [canvas.width, canvas.height, fitToView, stageSize.w, stageSize.h]);
 
   const handleZoomChange = useCallback((nextScale: number) => {
     const next = clamp(nextScale, 0.05, 8);
@@ -105,31 +133,36 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
         const img = await loadSafeImage(imageUrl);
         const W = Math.min(img.naturalWidth, MAX_SEED);
         const H = Math.round((img.naturalHeight / img.naturalWidth) * W);
-        setCanvas({ width: W, height: H, bg: 'transparent' });
+        updateCanvas({ width: W, height: H, bg: 'transparent' }, null);
         fitToView(W, H, stageSize.w, stageSize.h);
         await addImageLayer(imageUrl, '底图');
       } catch {
         /* 加载失败时仍可手动加图 */
+      } finally {
+        // 底图属于初始状态，不该被撤销掉
+        clearHistory();
       }
     })();
-  }, [isOpen, stageSize.w, stageSize.h, imageUrl, setCanvas, fitToView, addImageLayer]);
+  }, [isOpen, stageSize.w, stageSize.h, imageUrl, updateCanvas, fitToView, addImageLayer, clearHistory]);
 
   /* ── 关闭时复位 ── */
   const handleClose = useCallback(() => {
     reset();
     seededRef.current = false;
     setEditingText(null);
+    setDraftPoints(null);
     onClose();
-  }, [reset, onClose]);
+  }, [reset, onClose, setDraftPoints]);
 
-  /* ── Transformer 跟随选中 ── */
+  /* ── Transformer 跟随选中（锁定图层与绘制模式下不挂控制点）── */
   useEffect(() => {
     const tr = trRef.current;
     if (!tr) return;
-    const node = selectedId ? nodeRefs.current.get(selectedId) : null;
+    const layer = selectedId ? layers.find((l) => l.id === selectedId) : null;
+    const node = layer && !layer.locked && tool === 'select' ? nodeRefs.current.get(layer.id) : null;
     tr.nodes(node ? [node] : []);
     tr.getLayer()?.batchDraw();
-  }, [selectedId, layers]);
+  }, [selectedId, layers, tool]);
 
   /* ── 滚轮：ctrl 缩放（trackpad 捏合）/ 否则平移（双指滑动）── */
   const onWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
@@ -149,13 +182,61 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     }
   }, [camScale, camPos]);
 
-  /* ── 点击空白取消选中 ── */
-  const onStageMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
+  /* ── 画笔 / 橡皮 ── */
+  const pagePointer = useCallback(() => {
+    const stage = stageRef.current;
+    return stage?.getRelativePointerPosition() ?? null;
+  }, []);
+
+  const onStagePointerDown = useCallback((e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
+    if (tool !== 'select') {
+      const p = pagePointer();
+      if (!p) return;
+      drawingRef.current = true;
+      setDraftPoints([p.x, p.y]);
+      return;
+    }
     const t = e.target;
     if (t === t.getStage() || t.name() === 'page-bg') setSelectedId(null);
-  }, [setSelectedId]);
+  }, [pagePointer, setDraftPoints, setSelectedId, tool]);
+
+  const onStagePointerMove = useCallback(() => {
+    if (!drawingRef.current) return;
+    const p = pagePointer();
+    if (!p) return;
+    setDraftPoints([...(draftRef.current ?? []), p.x, p.y]);
+  }, [pagePointer, setDraftPoints]);
+
+  const finishStroke = useCallback(() => {
+    if (!drawingRef.current) return;
+    drawingRef.current = false;
+    const points = draftRef.current;
+    setDraftPoints(null);
+    if (points && points.length >= 4) addBrushStroke(points, tool === 'eraser');
+  }, [addBrushStroke, setDraftPoints, tool]);
+
+  /* ── 拖拽：吸附 + 回写 ── */
+  const otherNodes = useCallback((excludeId: string) => {
+    const list: Konva.Node[] = [];
+    for (const [id, node] of nodeRefs.current) {
+      if (id === excludeId) continue;
+      const layer = layers.find((l) => l.id === id);
+      if (layer?.visible) list.push(node);
+    }
+    return list;
+  }, [layers]);
+
+  const handleDragMove = useCallback((id: string, node: Konva.Node, evt: DragEvent) => {
+    // 按住 Alt 临时关闭吸附
+    if (evt.altKey) {
+      setGuides(NO_GUIDES);
+      return;
+    }
+    setGuides(snapDuringDrag(node, otherNodes(id), canvas, SNAP_PX / camScale));
+  }, [camScale, canvas, otherNodes]);
 
   const syncFromNode = useCallback((id: string, node: Konva.Node) => {
+    setGuides(NO_GUIDES);
     updateLayer(id, {
       x: node.x(), y: node.y(),
       rotation: node.rotation(),
@@ -178,8 +259,8 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
       id: layer.id,
       left,
       top,
-      width: layer.width * layer.scaleX * camScale,
-      fontPx: layer.fontSize * layer.scaleY * camScale,
+      width: layer.width * Math.abs(layer.scaleX) * camScale,
+      fontPx: layer.fontSize * Math.abs(layer.scaleY) * camScale,
     });
   }, [camPos, camScale, setSelectedId]);
 
@@ -188,7 +269,29 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     setEditingText(null);
   }, [editingText, updateLayer]);
 
-  /* ── 键盘：删除选中图层 / 取消选中 ──
+  /* ── 对齐 / 适配画布 ── */
+  const alignSelected = useCallback((dir: AlignDir) => {
+    if (!selectedLayer) return;
+    const node = nodeRefs.current.get(selectedLayer.id);
+    if (!node) return;
+    const { dx, dy } = alignOffset(node, canvas, dir);
+    updateLayer(selectedLayer.id, { x: selectedLayer.x + dx, y: selectedLayer.y + dy });
+  }, [canvas, selectedLayer, updateLayer]);
+
+  const fitSelectedToCanvas = useCallback((mode: 'contain' | 'cover') => {
+    if (!selectedLayer) return;
+    const node = nodeRefs.current.get(selectedLayer.id);
+    if (!node) return;
+    const k = fitScaleFactor(node, canvas, mode);
+    updateLayer(selectedLayer.id, {
+      scaleX: selectedLayer.scaleX * k,
+      scaleY: selectedLayer.scaleY * k,
+      x: canvas.width / 2,
+      y: canvas.height / 2,
+    });
+  }, [canvas, selectedLayer, updateLayer]);
+
+  /* ── 键盘：撤销/重做、删除、微调、层级、工具切换 ──
    * 捕获阶段拦截：阻止 React Flow / 全局快捷键在编辑器打开时删除底层节点。
    * 输入框内（数值/颜色/文字编辑）不拦截，交还原生行为。 */
   useEffect(() => {
@@ -197,22 +300,71 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
       if (editingText) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      const stop = () => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
+
+      if (mod && e.key.toLowerCase() === 'z') {
+        stop();
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'y') { stop(); redo(); return; }
+      if (mod && e.key.toLowerCase() === 'd' && selectedId) { stop(); duplicateLayer(selectedId); return; }
+      if (mod && (e.key === ']' || e.key === '[') && selectedId) {
+        stop();
+        reorderLayer(selectedId, e.key === ']' ? 'up' : 'down');
+        return;
+      }
+      if (mod && e.key === '0') { stop(); handleFit(); return; }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         // 始终拦截（无论是否选中），避免误删画布节点
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
+        stop();
         if (selectedId) removeLayer(selectedId);
-      } else if (e.key === 'Escape' && selectedId) {
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        setSelectedId(null);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (tool !== 'select') { stop(); setTool('select'); return; }
+        if (selectedId) { stop(); setSelectedId(null); }
+        return;
+      }
+      if (e.key.startsWith('Arrow') && selectedId) {
+        const layer = cmp.layersRef.current.find((l) => l.id === selectedId);
+        if (!layer) return;
+        stop();
+        const step = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+        updateLayer(selectedId, { x: layer.x + dx, y: layer.y + dy }, `nudge:${selectedId}`);
+        return;
+      }
+      if (!mod && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'v') { setTool('select'); }
+        else if (k === 'b') { setTool('brush'); }
+        else if (k === 'e') { setTool('eraser'); }
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [isOpen, selectedId, editingText, removeLayer, setSelectedId]);
+  }, [isOpen, selectedId, editingText, tool, cmp.layersRef, removeLayer, setSelectedId,
+    setTool, undo, redo, duplicateLayer, reorderLayer, updateLayer, handleFit]);
+
+  /* ── 剪贴板粘贴图片 ── */
+  useEffect(() => {
+    if (!isOpen) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const file = items.find((it) => it.kind === 'file' && it.type.startsWith('image/'))?.getAsFile();
+      if (!file) return;
+      e.preventDefault();
+      const reader = new FileReader();
+      reader.onload = () => addImageLayer(reader.result as string, '粘贴图片');
+      reader.readAsDataURL(file);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [isOpen, addImageLayer]);
 
   /* ── 外部拖拽图片加入图层 ── */
   const [isDragOver, setIsDragOver] = useState(false);
@@ -317,6 +469,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     const stage = stageRef.current;
     if (!stage || layers.length === 0) return;
     setSelectedId(null);
+    setGuides(NO_GUIDES);
     requestAnimationFrame(() => {
       try {
         const prev = { scale: camScale, pos: { ...camPos }, w: stageSize.w, h: stageSize.h };
@@ -343,103 +496,19 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     });
   }, [layers.length, camScale, camPos, stageSize, canvas, onStart, onSave, reset, setSelectedId]);
 
-  /* ── 渲染单个图层 ── */
-  const renderLayer = (layer: Layer) => {
-    if (!layer.visible) return null;
-    const common = {
-      id: layer.id,
-      x: layer.x,
-      y: layer.y,
-      rotation: layer.rotation,
-      scaleX: layer.scaleX,
-      scaleY: layer.scaleY,
-      opacity: layer.opacity,
-      draggable: true,
-      onMouseDown: () => setSelectedId(layer.id),
-      onTap: () => setSelectedId(layer.id),
-      onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => syncFromNode(layer.id, e.target),
-      onTransformEnd: (e: Konva.KonvaEventObject<Event>) => syncFromNode(layer.id, e.target),
-      ref: (node: Konva.Node | null) => {
-        if (node) nodeRefs.current.set(layer.id, node);
-        else nodeRefs.current.delete(layer.id);
-      },
-    };
-
-    switch (layer.type) {
-      case 'image':
-        return (
-          <KImage
-            key={layer.id}
-            {...common}
-            image={layer.image}
-            width={layer.width}
-            height={layer.height}
-            offsetX={layer.width / 2}
-            offsetY={layer.height / 2}
-          />
-        );
-      case 'rect':
-        return (
-          <Rect
-            key={layer.id}
-            {...common}
-            width={layer.width}
-            height={layer.height}
-            offsetX={layer.width / 2}
-            offsetY={layer.height / 2}
-            fill={layer.fill}
-            stroke={layer.strokeWidth > 0 ? layer.stroke : undefined}
-            strokeWidth={layer.strokeWidth}
-            cornerRadius={layer.cornerRadius}
-          />
-        );
-      case 'ellipse':
-        return (
-          <Ellipse
-            key={layer.id}
-            {...common}
-            radiusX={layer.width / 2}
-            radiusY={layer.height / 2}
-            fill={layer.fill}
-            stroke={layer.strokeWidth > 0 ? layer.stroke : undefined}
-            strokeWidth={layer.strokeWidth}
-          />
-        );
-      case 'text':
-        return (
-          <KText
-            key={layer.id}
-            {...common}
-            text={layer.text}
-            fontSize={layer.fontSize}
-            fontFamily={layer.fontFamily}
-            fontStyle={layer.fontStyle}
-            fill={layer.fill}
-            align={layer.align}
-            width={layer.width}
-            offsetX={layer.width / 2}
-            visible={editingText?.id !== layer.id}
-            onDblClick={() => beginTextEdit(layer)}
-            onDblTap={() => beginTextEdit(layer)}
-          />
-        );
-      case 'line':
-        return <Line key={layer.id} {...common} points={layer.points} stroke={layer.stroke} strokeWidth={layer.strokeWidth} lineCap="round" />;
-      case 'arrow':
-        return <Arrow key={layer.id} {...common} points={layer.points} stroke={layer.stroke} fill={layer.stroke} strokeWidth={layer.strokeWidth} pointerLength={layer.strokeWidth * 3} pointerWidth={layer.strokeWidth * 3} />;
-      default:
-        return null;
-    }
-  };
+  /** 画布外沿一圈的参考线长度，超出画布也能看到 */
+  const guideSpan = useMemo(() => ({
+    x: -canvas.width, y: -canvas.height, w: canvas.width * 3, h: canvas.height * 3,
+  }), [canvas.width, canvas.height]);
 
   return (
     <FullscreenOverlay isOpen={isOpen} onClose={handleClose} title="多图编辑" hidePanel className="composer-overlay">
-      <div className="composer-root" onClick={(e) => e.stopPropagation()}>
+      <div className={`composer-root${sideCollapsed ? ' side-collapsed' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="composer-toolbar-dock">
           <ComposerToolbar
             composer={cmp}
             canExport={layers.length > 0}
-            onFit={() => fitToView(canvas.width, canvas.height, stageSize.w, stageSize.h)}
+            onFit={handleFit}
             onExport={handleExport}
             onClose={handleClose}
           />
@@ -454,7 +523,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
 
         <div className="composer-body">
           <div
-            className={`composer-stage-wrap${isDragOver ? ' drag-over' : ''}`}
+            className={`composer-stage-wrap${isDragOver ? ' drag-over' : ''}${tool !== 'select' ? ' drawing' : ''}`}
             ref={stageWrapRef}
             onDragOver={onDomDragOver}
             onDragLeave={onDomDragLeave}
@@ -470,16 +539,49 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
                 x={camPos.x}
                 y={camPos.y}
                 onWheel={onWheel}
-                onMouseDown={onStageMouseDown}
-                onTouchStart={onStageMouseDown}
+                onMouseDown={onStagePointerDown}
+                onTouchStart={onStagePointerDown}
+                onMouseMove={onStagePointerMove}
+                onTouchMove={onStagePointerMove}
+                onMouseUp={finishStroke}
+                onTouchEnd={finishStroke}
+                onMouseLeave={finishStroke}
               >
                 <KLayer>
                   {/* 画布底：纯色才绘制（透明则不画，导出保留 alpha；空白处点击命中 Stage 即取消选中）。
                       棋盘格仅作 DOM 背景，不进入导出 */}
                   {canvas.bg !== 'transparent' && (
-                    <Rect name="page-bg" x={0} y={0} width={canvas.width} height={canvas.height} fill={canvas.bg} />
+                    <Rect name="page-bg" x={0} y={0} width={canvas.width} height={canvas.height} fill={canvas.bg} listening={tool === 'select'} />
                   )}
-                  {layers.map(renderLayer)}
+                  {layers.map((layer) => (
+                    <ComposerLayerNode
+                      key={layer.id}
+                      layer={layer}
+                      interactive={tool === 'select'}
+                      hidden={editingText?.id === layer.id}
+                      onSelect={setSelectedId}
+                      onDragMove={handleDragMove}
+                      onDragEnd={syncFromNode}
+                      onTransformEnd={syncFromNode}
+                      onBeginTextEdit={beginTextEdit}
+                      registerNode={registerNode}
+                    />
+                  ))}
+
+                  {/* 正在绘制的笔画（收笔才落成图层） */}
+                  {draft && (
+                    <Line
+                      points={draft}
+                      stroke={brush.color}
+                      strokeWidth={brush.size}
+                      tension={0.4}
+                      lineCap="round"
+                      lineJoin="round"
+                      listening={false}
+                      globalCompositeOperation={tool === 'eraser' ? 'destination-out' : 'source-over'}
+                    />
+                  )}
+
                   <Transformer
                     ref={trRef}
                     rotateEnabled
@@ -490,6 +592,26 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
                     anchorFill="#fff"
                     boundBoxFunc={(oldBox, newBox) => (newBox.width < 8 || newBox.height < 8 ? oldBox : newBox)}
                   />
+
+                  {/* 吸附参考线 */}
+                  {guides.v !== null && (
+                    <Line
+                      points={[guides.v, guideSpan.y, guides.v, guideSpan.y + guideSpan.h]}
+                      stroke="#ec4899"
+                      strokeWidth={1 / camScale}
+                      dash={[6 / camScale, 4 / camScale]}
+                      listening={false}
+                    />
+                  )}
+                  {guides.h !== null && (
+                    <Line
+                      points={[guideSpan.x, guides.h, guideSpan.x + guideSpan.w, guides.h]}
+                      stroke="#ec4899"
+                      strokeWidth={1 / camScale}
+                      dash={[6 / camScale, 4 / camScale]}
+                      listening={false}
+                    />
+                  )}
                 </KLayer>
               </Stage>
             )}
@@ -534,8 +656,13 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
           <ComposerSidePanel
             composer={cmp}
             nodeId={nodeId}
+            collapsed={sideCollapsed}
+            animateIn={!sideToggled}
+            onToggleCollapsed={() => { setSideToggled(true); setSideCollapsed((v) => !v); }}
             onMatteSubject={handleMatteSubject}
             mattingLayerId={mattingLayerId}
+            onAlign={alignSelected}
+            onFitLayer={fitSelectedToCanvas}
           />
         </div>
       </div>

@@ -11,7 +11,8 @@ export const VOLCENGINE_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3';
 
 /** GRSAI */
 export const GRSAI_LEGACY_BASE_URL = 'https://api.grsai.com';
-export const GRSAI_BASE_URL = `${GRSAI_LEGACY_BASE_URL}/v1`;
+export const GRSAI_GLOBAL_BASE_URL = 'https://grsaiapi.com/v1';
+export const GRSAI_BASE_URL = 'https://grsai.dakka.com.cn/v1';
 
 /** 即梦 Dreamina */
 export const DREAMINA_BASE_URL = 'https://api.dreamina.com';

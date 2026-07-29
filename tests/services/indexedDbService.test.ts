@@ -18,6 +18,7 @@ const EXPECTED_STORES = [
   'projects',
   'skills',
   'styles',
+  'subAgentProfiles',
   'toolbarLayouts',
   'workflows',
 ];
@@ -41,7 +42,7 @@ beforeEach(() => {
 });
 
 describe('indexedDbService schema', () => {
-  it('creates the complete v16 schema for a fresh database', async () => {
+  it('creates the complete v17 schema for a fresh database', async () => {
     const service = await import('../../src/services/indexedDbService');
     await service.saveProjectToDb({
       id: 'project-fresh',
@@ -53,7 +54,7 @@ describe('indexedDbService schema', () => {
     });
 
     const db = await openDatabase(DB_NAME);
-    expect(db.version).toBe(16);
+    expect(db.version).toBe(17);
     expect([...db.objectStoreNames]).toEqual(EXPECTED_STORES);
 
     const taskStore = db.transaction('agentTasks', 'readonly').objectStore('agentTasks');
@@ -109,7 +110,7 @@ describe('indexedDbService schema', () => {
       }),
     ]);
     const upgradedDb = await openDatabase(DB_NAME);
-    expect(upgradedDb.version).toBe(16);
+    expect(upgradedDb.version).toBe(17);
     expect([...upgradedDb.objectStoreNames]).toEqual(EXPECTED_STORES);
     upgradedDb.close();
   });

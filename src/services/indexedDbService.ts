@@ -8,7 +8,7 @@ import type { PresetAdvancedConfig, SkillManifest, UserPresetMode } from '../typ
 import type { DramaCharacter } from '../types/dramaAssets';
 
 const DB_NAME = 'ai-canvas-db';
-const DB_VERSION = 16; // v16: global character library
+const DB_VERSION = 17; // v17: user-configured sub-agent profiles
 const STORE_PROJECTS = 'projects';
 const STORE_WORKFLOWS = 'workflows';
 const STORE_CONFIG = 'config';
@@ -26,6 +26,7 @@ const STORE_PROJECT_MEMORIES = 'projectMemories';
 const STORE_TOOLBAR_LAYOUTS = 'toolbarLayouts';
 const STORE_METADATA = 'metadata';
 const STORE_GLOBAL_CHARACTERS = 'globalCharacters';
+const STORE_SUB_AGENT_PROFILES = 'subAgentProfiles';
 
 const CONFIG_KEY = 'app-config';
 const LAST_ACTIVE_PROJECT_KEY = 'last-active-project';
@@ -138,6 +139,11 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_GLOBAL_CHARACTERS)) {
         const characterStore = db.createObjectStore(STORE_GLOBAL_CHARACTERS, { keyPath: 'id' });
         characterStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
+      // v17: user-configured read-only sub-agent profiles. Built-in presets are not stored.
+      if (!db.objectStoreNames.contains(STORE_SUB_AGENT_PROFILES)) {
+        const subAgentStore = db.createObjectStore(STORE_SUB_AGENT_PROFILES, { keyPath: 'id' });
+        subAgentStore.createIndex('updatedAt', 'updatedAt', { unique: false });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -487,6 +493,52 @@ export async function deleteSkillFromDb(id: string): Promise<void> {
     const tx = db.transaction(STORE_SKILLS, 'readwrite');
     const store = tx.objectStore(STORE_SKILLS);
     store.delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ============================================
+// Sub-agent profiles CRUD (v17)
+// ============================================
+
+export interface SubAgentProfileRecord {
+  id: string;
+  name: string;
+  description: string;
+  skillId?: string;
+  instructions?: string;
+  materials: string[];
+  maxRounds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export async function saveSubAgentProfileToDb(record: SubAgentProfileRecord): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SUB_AGENT_PROFILES, 'readwrite');
+    tx.objectStore(STORE_SUB_AGENT_PROFILES).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getAllSubAgentProfiles(): Promise<SubAgentProfileRecord[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SUB_AGENT_PROFILES, 'readonly');
+    const request = tx.objectStore(STORE_SUB_AGENT_PROFILES).getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function deleteSubAgentProfileFromDb(id: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SUB_AGENT_PROFILES, 'readwrite');
+    tx.objectStore(STORE_SUB_AGENT_PROFILES).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

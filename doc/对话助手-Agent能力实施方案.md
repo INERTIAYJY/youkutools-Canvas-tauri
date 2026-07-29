@@ -1877,6 +1877,100 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 按任务倒序回滚，每一步均可独立停在中间态：移除 `registerSkillAgentTools` 注册即关闭模型侧全部新能力；移除 `buildAssistantSystemPrompt` 中的索引拼接即让模型重新不感知 Skill；展开预算可单独保留或单独回滚。不涉及 IndexedDB schema、`UserSkill` 字段、Skill 磁盘布局、Tauri capability 或依赖变更，已上传 Skill 的原始正文与目录结构始终不变。
 
+### 8.19 用户可配置的只读领域子智能体
+
+**任务类型：Agent 能力增强**
+
+**状态：已完成（真实模型手测待用户执行）**
+
+#### 目标与边界
+
+在 P4-D 只读专家的基础上，让主任务能并行派出多个由用户自己配置的领域子智能体（剧本分析、分镜等），产出结构化结果回传主任务，由主任务走既有审批流落地画布。
+
+- 角色是配置数据不是代码：`SubAgentProfile` 可绑定 Skill 或内联提示词，用户在设置页自行增删改；内置「剧本分析师」「分镜师」两个典范作范本，不落库、不可删、可复制为自定义副本。
+- 子智能体绝对只读：`mode` 固定 `plan`、`toolAllowlist` 固定为只读子集、不可嵌套；任何产出都只是文本，落地必须由父任务调画布工具并经确认。
+- 材料范围由用户显式决定：只供给父任务目标中 `@{nodeId:label}` 显式引用的节点正文和当前项目短剧资产，子智能体不能自行扩大读取范围。
+- 领域正文使用新的脱敏口径，只剥密钥与真实系统绝对路径，不套用会把「3/15 那场戏」误判为本地路径的既有规则。
+- 并行复用 round executor 既有的 `read` 工具并发（`maxParallelReadTools`），不修改会话调度器；子智能体不写画布、不产生会话消息，因此绕过会话串行队列。
+- 子智能体不加载会话历史，自建隔离消息序列（角色说明书 + 材料 + 分派任务），复用 `executeAgentRound` 而非 `runAgentLoop`。
+- 成本可控：父任务与全部子任务共用任务组预算池，并发 3、单父任务 6 个子任务、单子任务 1–6 轮。
+- 子智能体请求一律 `trackAbort: false`，不劫持全局取消控制器。
+- 不新增依赖、不改 Tauri capability；IndexedDB 升到 v17 只新增一个空 store。
+
+#### 分阶段进度
+
+- [x] 通过 `doc/plans/2026-07-29-domain-sub-agents.md` 固定现状复用点、不可协商边界、固定配额、分任务范围和手测清单。
+- [x] 子智能体配置模型、内置典范与 v17 持久化。
+- [x] 材料供给与领域脱敏口径。
+- [x] 子智能体运行器与任务组预算池。
+- [x] `agent_run_sub_agent` 工具与系统提示词索引。
+- [x] 配置界面与任务中心并发子任务展示。
+- [x] 全量、类型、定向 Lint、生产构建与 UTF-8 验收。
+- [!] 真实文本模型下的并行派出、分镜落地审批和配额提示仍需用户在 Tauri 环境手测，清单见计划文档第 5 节。
+
+#### 实际文件
+
+- 新增：`src/types/subAgent.ts`
+- 新增：`src/services/chat/subAgentProfileService.ts`
+- 新增：`src/services/chat/subAgentMaterials.ts`
+- 新增：`src/services/chat/subAgentService.ts`
+- 新增：`src/services/chat/tools/subAgentTools.ts`
+- 新增：`src/store/store.subAgents.ts`
+- 新增：`src/components/settings/SubAgentSettings.tsx`
+- 修改：`src/services/chat/agentBudgetService.ts`
+- 修改：`src/services/chat/agentLifecycle.ts`
+- 修改：`src/services/chat/tools/index.ts`
+- 修改：`src/services/ai/assistantStream.ts`
+- 修改：`src/services/indexedDbService.ts`
+- 修改：`src/store/useAppStore.ts`
+- 修改：`src/store/store.ui.ts`
+- 修改：`src/store/store.projects.ts`
+- 修改：`src/components/SettingsPanel.tsx`
+- 修改：`src/components/chat/AgentTaskCenter.tsx`
+- 新增：`tests/services/chat/subAgentProfileService.test.ts`
+- 新增：`tests/services/chat/subAgentMaterials.test.ts`
+- 新增：`tests/services/chat/subAgentService.test.ts`
+- 新增：`tests/services/chat/subAgentTools.test.ts`
+- 新增：`tests/components/subAgentSettings.test.tsx`
+- 修改：`tests/services/indexedDbService.test.ts`
+- 修改：`tests/store/projects.test.ts`
+- 新增：`doc/plans/2026-07-29-domain-sub-agents.md`
+
+#### 计划外调整
+
+1. 索引构建函数放在 `subAgentProfileService` 而不是工具模块：`assistantStream` 需要它，而工具模块经 `subAgentService → agentRoundExecutor` 会回到 `assistantStream` 形成运行时循环。
+2. 新增 `sub_agent.task` 生命周期事件，而不是复用 `expert.task`：后者的 `role` 是 `AgentExpertRole` 枚举，子智能体没有对应值，复用会写入不实字段。
+3. 设置页列表拆出 props 驱动的 `SubAgentProfileList`：项目没有 jsdom/testing-library，`renderToStaticMarkup` 下 Zustand 订阅读到的是初始快照，拆分后可按项目既有方式用 props 渲染验证，同时结构更清晰。
+
+#### 实施结果
+
+- [x] 角色是配置数据：`SubAgentProfile` 可绑定 Skill 或内联提示词，用户在设置页自建；内置「剧本分析师」「分镜师」不落库、不可编辑删除、可复制为自定义副本。
+- [x] 子智能体以 `mode: 'plan'` 和固定只读 `toolAllowlist`（`canvas_query`/`skill_load`/`skill_read_file`）创建，不含任何写工具、联网工具或文件工具；审批一旦被触发即判定权限收窄失效并直接失败。
+- [x] 不可嵌套：子任务无法再派子智能体，工具 `authorize` 与运行器双重拦截。
+- [x] 材料只含用户 `@{nodeId:label}` 显式引用的节点正文与当前项目短剧资产；未引用节点不出现，引用已删除节点时跳过而不抛错。
+- [x] 领域脱敏新口径：保留「3/15 那场戏」等正常斜杠表达，只剥离密钥、凭据、盘符路径与系统目录绝对路径。
+- [x] 隔离上下文：不加载会话历史，消息序列固定为角色说明书 + 材料 + 分派任务，复用 `executeAgentRound`。
+- [x] 并行复用 round executor 既有的 `read` 工具并发，未修改会话调度器。
+- [x] 成本可控：任务组 token 预算池为父任务终身预算的 2 倍，单父任务 6 个子任务、单子任务 1–6 轮、8 次工具调用；产出 6000 字符、持久化摘要 1000 字符。
+- [x] 派出子智能体不修改父任务 `toolAllowlist`；产出带不可信边界说明并明确落地需由主任务执行并经用户确认。
+- [x] 父任务停止时子任务级联标记 `stopped`；模型出错时标记 `failed` 并回传错误码。
+- [x] 未新增依赖、未改 `tauri.conf.json` 或 capability；IndexedDB 升到 v17 只新增一个空 store。
+
+#### 完成记录
+
+- 完成日期：2026-07-29
+- 定向测试：`npx vitest run tests/services/chat/subAgentProfileService.test.ts tests/services/chat/subAgentMaterials.test.ts tests/services/chat/subAgentService.test.ts tests/services/chat/subAgentTools.test.ts tests/components/subAgentSettings.test.tsx` 通过
+- 全量测试：`npm test` 共 105 个文件、715 项通过
+- 类型检查：`npm run typecheck`、`npm run test:typecheck` 通过
+- 定向 Lint：26 个改动 TypeScript/TSX 文件通过，无错误无告警
+- 生产构建：`npx vite build --outDir <系统临时目录>` 通过；仅保留既有动态导入和大 chunk 警告
+- 差异与编码：`git diff --check` 通过；26 个改动文本文件严格 UTF-8 解码、控制字符与常见乱码扫描通过
+- 交互限制：真实文本模型下的并行派出、分镜表落地审批和配额提示尚未手测；纯逻辑、权限边界、材料脱敏和编译已由测试覆盖
+
+#### 回滚
+
+按任务倒序：移除工具注册即关闭全部子智能体能力；移除系统提示词索引拼接即让模型不再感知；设置页入口可独立摘除。IndexedDB 保留 v17 与空 `subAgentProfiles` store，不降版本；内置典范不落库，回滚无残留数据。既有只读专家 `agent_run_expert_review` 与本阶段互不影响。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -1973,6 +2067,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - [x] Plan 模式由 Registry 和 Policy 双层限制为只读。
 - [x] Skill Manifest 只能缩小任务工具集合，不能扩大权限。
 - [x] 模型可发现并按需加载 Skill，但主动加载不改变任务工具权限，且只能读取该 Skill 目录子树内的文本资料。
+- [x] 用户可自建只读领域子智能体并被主任务并行派出，子智能体无写权限，产出必须由主任务经用户确认后落地。
 - [x] 只读专家任务无工具、无嵌套、无画布副作用，并在任务中心显示父子关系。
 
 ## 13. 变更日志
@@ -2015,4 +2110,5 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 | 2026-07-25 | 8.17 / 角色库 S2 | 完成独立角色库入口、项目/永久标签、搜索、多图画廊、角色头像条、角色编辑、逐图提示词和头像裁切；节点右键入库与默认隐藏保留到 S3。 |
 | 2026-07-27 | P5-B 补充 | Agent 厂商文档导入支持 `image` data URL 数组，自动或显式保存参考图传输模式，并保持 API Key 隔离与 `config_write` 固定审批。 |
 | 2026-07-27 | P5-F 补充 | Agent 每次执行都在历史与当前 user 消息之间固定当前任务边界，防止旧请求和旧 assistant 承诺在完成新任务后被再次执行。 |
+| 2026-07-29 | 8.19 | 完成用户可配置的只读领域子智能体：角色由 Skill 或内联提示词定义并可在设置页自建，内置剧本分析师与分镜师两个典范；新增 `agent_run_sub_agent` 只读工具，复用 round executor 既有的 read 并发实现并行分工，材料限定为用户 @ 引用的节点正文与项目短剧资产，产出由主任务走既有审批流落地画布。 |
 | 2026-07-28 | 8.18 | 完成对话助手 Skill 渐进披露：脱敏限长的 Skill 索引注入系统提示词，新增 `skill_load` 与 `skill_read_file` 两个只读工具按需加载正文和文件夹型附属资料，补齐任务级加载预算与手动展开截断；模型主动加载不改变任务工具权限，路径严格限制在各 Skill 自己的目录子树内。 |

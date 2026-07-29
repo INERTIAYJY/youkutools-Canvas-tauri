@@ -62,6 +62,31 @@ export function evaluateAgentLifetimeUsage(task: AgentTask): AgentLifetimeBudget
   return { exceeded: false };
 }
 
+/** 父任务与其全部子任务共用的 token 预算倍率。 */
+export const AGENT_GROUP_TOKEN_MULTIPLIER = 2;
+
+/**
+ * 任务组累计用量：父任务与其全部子任务的 token 之和。
+ *
+ * 子智能体可并行派出多个，各自有独立的单任务预算，只靠单任务上限无法约束总开销，
+ * 因此派出新子任务前必须先过这一层。
+ */
+export function evaluateAgentGroupUsage(
+  parentTask: AgentTask,
+  childTasks: AgentTask[],
+): AgentLifetimeBudgetStatus {
+  const limits = resolveAgentLifetimeBudget(parentTask.budget);
+  const groupLimit = limits.maxTotalTokens * AGENT_GROUP_TOKEN_MULTIPLIER;
+  const tokens = totalAgentTaskTokens(parentTask)
+    + childTasks.reduce((sum, task) => sum + totalAgentTaskTokens(task), 0);
+  if (tokens >= groupLimit) {
+    return exhausted(
+      `本任务与其子智能体累计 token 已达上限（${groupLimit.toLocaleString()}），请基于当前结果新建任务`,
+    );
+  }
+  return { exceeded: false };
+}
+
 /** 继续前的完整校验：累计用量 + 继续次数。 */
 export function evaluateAgentResumeBudget(task: AgentTask): AgentLifetimeBudgetStatus {
   const usage = evaluateAgentLifetimeUsage(task);

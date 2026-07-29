@@ -62,6 +62,16 @@ export type AgentLifecycleEventInput =
       phase: 'start' | 'end';
       outcome?: 'completed' | 'failed' | 'stopped';
       errorCode?: string;
+    }
+  | {
+      type: 'sub_agent.task';
+      parentTaskId: string;
+      childTaskId: string;
+      /** 子智能体配置 ID；名称是用户输入，不进事件以免污染日志。 */
+      profileId: string;
+      phase: 'start' | 'end';
+      outcome?: 'completed' | 'failed' | 'stopped';
+      errorCode?: string;
     };
 
 export type AgentLifecycleEvent = AgentLifecycleEventInput & {

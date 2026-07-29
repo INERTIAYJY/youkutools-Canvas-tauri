@@ -22,6 +22,7 @@ import ApiKeySettings from './settings/ApiKeySettings';
 import StorageHealthCenter from './settings/StorageHealthCenter';
 import DirectorDeskStorageManager from './settings/DirectorDeskStorageManager';
 import McpControlSettings from './settings/McpControlSettings';
+import SubAgentSettings from './settings/SubAgentSettings';
 import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
 import type { CanvasBackground as CanvasBg, InteractionMode, NodeToolbarMode } from '../types';
@@ -425,6 +426,7 @@ export default function SettingsPanel() {
               { id: 'storage', label: '存储健康' },
               { id: 'comfyui', label: 'ComfyUI' },
               { id: 'shortcuts', label: '快捷键' },
+              { id: 'sub-agents', label: '子智能体' },
               { id: 'mcp', label: 'MCP 控制' },
             ].map(({ id, label }) => (
               <AnimatedButton
@@ -1211,6 +1213,7 @@ export default function SettingsPanel() {
               </>
             )}
 
+            {activeTab === 'sub-agents' && <SubAgentSettings />}
             {activeTab === 'mcp' && <McpControlSettings />}
           </div>
         </div>

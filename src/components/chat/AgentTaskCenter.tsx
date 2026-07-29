@@ -94,8 +94,12 @@ export default function AgentTaskCenter({
             }`}
           >
             <div className="flex items-start gap-2">
-              {task.expertRole && (
-                <Icon icon="mdi:account-search-outline" width="15" className="mt-0.5 shrink-0 text-[var(--success)]" />
+              {task.parentTaskId && (
+                <Icon
+                  icon={task.expertRole ? 'mdi:account-search-outline' : 'mdi:account-multiple-outline'}
+                  width="15"
+                  className="mt-0.5 shrink-0 text-[var(--success)]"
+                />
               )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-medium text-canvas-text">
@@ -110,7 +114,7 @@ export default function AgentTaskCenter({
                 </p>
                 {!task.parentTaskId && (childCounts.get(task.id) ?? 0) > 0 && (
                   <p className="mt-0.5 text-[10px] text-[var(--success)]">
-                    {childCounts.get(task.id)} 个只读专家任务
+                    {childCounts.get(task.id)} 个只读子任务
                   </p>
                 )}
               </div>

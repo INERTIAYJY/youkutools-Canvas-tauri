@@ -84,6 +84,7 @@ function stubInitializationActions() {
     loadWorkflows: vi.fn(async () => undefined),
     loadPresets: vi.fn(async () => undefined),
     loadSkills: vi.fn(async () => undefined),
+    loadSubAgentProfiles: vi.fn(async () => undefined),
     loadCustomStyles: vi.fn(async () => undefined),
     loadToolbarLayouts: vi.fn(async () => undefined),
     loadConversationsForProject: vi.fn(async () => undefined),

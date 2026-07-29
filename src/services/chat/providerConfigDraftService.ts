@@ -167,6 +167,57 @@ function createModelSelection(
   };
 }
 
+export interface ProviderModelMergeResult {
+  /** 合并后的模型列表：保留原有模型，同 ID 由草稿覆盖，新模型追加在后。 */
+  merged: ProviderModelSelection[];
+  /** 草稿中原本不存在的模型 ID。 */
+  addedIds: string[];
+  /** 草稿覆盖了同 ID 原有模型的模型 ID。 */
+  updatedIds: string[];
+  /** 本次未涉及、原样保留的模型 ID。 */
+  keptIds: string[];
+}
+
+/**
+ * 把草稿模型并入已有连接，而不是整体替换。
+ *
+ * 用户说「给这个连接再加一个模型」时，草稿里只有那一个模型；直接替换会静默
+ * 删掉该连接下其余模型和它们在 generalModels 中的关联项。
+ */
+export function mergeProviderModels(
+  existingModels: ProviderModelSelection[] | undefined,
+  draftModels: ProviderModelSelection[],
+): ProviderModelMergeResult {
+  const existing = existingModels ?? [];
+  const draftById = new Map(draftModels.map((model) => [model.id, model]));
+  const existingIds = new Set(existing.map((model) => model.id));
+
+  const merged = existing.map((model) => draftById.get(model.id) ?? model);
+  const addedIds: string[] = [];
+  for (const model of draftModels) {
+    if (existingIds.has(model.id)) continue;
+    merged.push(model);
+    addedIds.push(model.id);
+  }
+
+  return {
+    merged,
+    addedIds,
+    updatedIds: draftModels.filter((model) => existingIds.has(model.id)).map((model) => model.id),
+    keptIds: existing.filter((model) => !draftById.has(model.id)).map((model) => model.id),
+  };
+}
+
+/** 合并结果的中文说明，用于审批卡与回传模型的观察结果。 */
+export function describeProviderModelMerge(result: ProviderModelMergeResult): string {
+  const parts = [
+    result.addedIds.length > 0 ? `新增 ${result.addedIds.length} 个模型` : '',
+    result.updatedIds.length > 0 ? `更新 ${result.updatedIds.length} 个同 ID 模型` : '',
+    result.keptIds.length > 0 ? `保留原有 ${result.keptIds.length} 个模型` : '',
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join('，') : '模型列表无变化';
+}
+
 export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string {
   const models = draft.config.selectedModels ?? [];
   const categoryLabels: Record<GeneralModelCategory, string> = {
@@ -271,9 +322,17 @@ export function deleteProviderConfigDraft(taskId: string, draftId: string): void
 }
 
 export function getProviderConfigDraftSummary(draftId: string): string | undefined {
+  return peekProviderConfigDraft(draftId)?.summary;
+}
+
+/**
+ * 按 draftId 直查草稿，不做任务归属校验。
+ * 仅供只读的摘要展示使用；写入路径必须走带 taskId 校验的 getProviderConfigDraft。
+ */
+export function peekProviderConfigDraft(draftId: string): ProviderConfigDraft | undefined {
   const draft = drafts.get(draftId);
   if (!draft || draft.expiresAt <= Date.now()) return undefined;
-  return draft.summary;
+  return draft;
 }
 
 export function clearProviderConfigDraftsForTests(): void {

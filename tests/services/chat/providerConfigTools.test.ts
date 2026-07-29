@@ -218,11 +218,113 @@ curl https://gateway.example.com/v1/images/generations \\
     });
   });
 
+
+  it('并入已有连接时保留原有模型，不再整体替换', async () => {
+    useAppStore.getState().saveProviderConfig('custom-existing', {
+      name: '我的连接',
+      apiKey: 'existing-secret-value',
+      baseUrl: 'https://gateway.example.com/v1',
+      catalogId: 'custom-openai',
+      selectedModels: [
+        { id: 'text-a', name: '文本A', category: 'text', provider: 'custom-existing' },
+        { id: 'text-b', name: '文本B', category: 'text', provider: 'custom-existing' },
+        { id: 'video-c', name: '视频C', category: 'video', provider: 'custom-existing' },
+      ],
+    });
+
+    const preview = await getAgentTool('provider_config_preview')!.execute(
+      context,
+      previewInput('custom-existing'),
+    );
+    const draftId = readDraftId(preview.modelContent);
+    const result = await getAgentTool('provider_config_apply')!.execute(context, { draftId });
+
+    expect(result.status).toBe('success');
+    const saved = useAppStore.getState().config.providers['custom-existing'];
+    expect(saved.selectedModels?.map((model) => model.id))
+      .toEqual(['text-a', 'text-b', 'video-c', 'image-pro']);
+    expect(saved.apiKey).toBe('existing-secret-value');
+    // generalModels 中的原有关联项不能被连带删除
+    expect((useAppStore.getState().config.generalModels ?? []).map((model) => model.modelId).sort())
+      .toEqual(['image-pro', 'text-a', 'text-b', 'video-c']);
+    expect(result.summary).toContain('新增 1 个模型');
+    expect(result.summary).toContain('保留原有 3 个模型');
+  });
+
+  it('同 ID 模型由草稿覆盖，其余模型原样保留', async () => {
+    useAppStore.getState().saveProviderConfig('custom-existing', {
+      name: '我的连接',
+      apiKey: 'k',
+      baseUrl: 'https://gateway.example.com/v1',
+      catalogId: 'custom-openai',
+      selectedModels: [
+        { id: 'image-pro', name: '旧名字', category: 'image', provider: 'custom-existing' },
+        { id: 'text-a', name: '文本A', category: 'text', provider: 'custom-existing' },
+      ],
+    });
+
+    const preview = await getAgentTool('provider_config_preview')!.execute(
+      context,
+      previewInput('custom-existing'),
+    );
+    const result = await getAgentTool('provider_config_apply')!.execute(
+      context,
+      { draftId: readDraftId(preview.modelContent) },
+    );
+
+    const saved = useAppStore.getState().config.providers['custom-existing'];
+    expect(saved.selectedModels?.map((model) => model.id)).toEqual(['image-pro', 'text-a']);
+    expect(saved.selectedModels?.find((model) => model.id === 'image-pro')?.name)
+      .toBe('Image Pro');
+    expect(result.summary).toContain('更新 1 个同 ID 模型');
+    expect(result.summary).toContain('保留原有 1 个模型');
+  });
+
+  it('Base URL 与已有连接不一致时拒绝并入，不改动原配置', async () => {
+    useAppStore.getState().saveProviderConfig('custom-existing', {
+      name: '我的连接',
+      apiKey: 'k',
+      baseUrl: 'https://other-gateway.example.com/v1',
+      catalogId: 'custom-openai',
+      selectedModels: [
+        { id: 'text-a', name: '文本A', category: 'text', provider: 'custom-existing' },
+      ],
+    });
+
+    const preview = await getAgentTool('provider_config_preview')!.execute(
+      context,
+      previewInput('custom-existing'),
+    );
+    const draftId = readDraftId(preview.modelContent);
+    const summary = getAgentTool('provider_config_apply')!.summarizeInput!({ draftId });
+    const result = await getAgentTool('provider_config_apply')!.execute(context, { draftId });
+
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('不同网关');
+    expect(summary).toContain('无法并入');
+    const saved = useAppStore.getState().config.providers['custom-existing'];
+    expect(saved.selectedModels?.map((model) => model.id)).toEqual(['text-a']);
+    expect(saved.baseUrl).toBe('https://other-gateway.example.com/v1');
+  });
+
+  it('审批卡摘要说明新建连接的模型数量', async () => {
+    const preview = await getAgentTool('provider_config_preview')!.execute(
+      context,
+      previewInput(),
+    );
+    const summary = getAgentTool('provider_config_apply')!.summarizeInput!({
+      draftId: readDraftId(preview.modelContent),
+    });
+    expect(summary).toContain('新增 1 个模型');
+    expect(summary).not.toContain('保留原有');
+  });
+
   it('applies an approved draft while preserving an existing API Key', async () => {
+    // Base URL 必须与草稿一致，否则会被「不同网关不可并入」守卫拒绝（见上方用例）。
     useAppStore.getState().saveProviderConfig('custom-existing', {
       name: 'Old Name',
       apiKey: 'existing-secret-value',
-      baseUrl: 'https://old.example.com/v1',
+      baseUrl: 'https://gateway.example.com/v1',
       catalogId: 'custom-openai',
       selectedModels: [],
     });

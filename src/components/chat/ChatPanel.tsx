@@ -83,7 +83,9 @@ export default function ChatPanel({
   const {
     chatOpen,
     chatPanelDetached,
+    chatComposerDraft,
     closeChat,
+    clearChatComposerDraft,
     setChatPanelDetached,
     activeConversationId,
     conversations,
@@ -108,7 +110,9 @@ export default function ChatPanel({
     useShallow((s) => ({
       chatOpen: s.chatOpen,
       chatPanelDetached: s.chatPanelDetached,
+      chatComposerDraft: s.chatComposerDraft,
       closeChat: s.closeChat,
+      clearChatComposerDraft: s.clearChatComposerDraft,
       setChatPanelDetached: s.setChatPanelDetached,
       activeConversationId: s.activeConversationId,
       conversations: s.conversations,
@@ -323,6 +327,28 @@ export default function ChatPanel({
     }
     updateInputDraft(text);
   }, [effectiveActiveConversationId, effectiveProjectId, handleNewConversation, updateInputDraft]);
+
+  useEffect(() => {
+    if (detached || !chatComposerDraft || !effectiveProjectId) return;
+    let focusFrame = 0;
+    const draftFrame = requestAnimationFrame(() => {
+      handleExampleClick(chatComposerDraft);
+      clearChatComposerDraft();
+      focusFrame = requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent('chat-focus-composer'));
+      });
+    });
+    return () => {
+      cancelAnimationFrame(draftFrame);
+      if (focusFrame) cancelAnimationFrame(focusFrame);
+    };
+  }, [
+    chatComposerDraft,
+    clearChatComposerDraft,
+    detached,
+    effectiveProjectId,
+    handleExampleClick,
+  ]);
 
   const handleAddMediaToCanvas = useCallback((messageId: string) => {
     if (detached) return;

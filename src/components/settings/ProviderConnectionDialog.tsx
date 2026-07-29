@@ -19,7 +19,9 @@ import {
   type ProviderDefinition,
 } from '../../services/ai/providerCatalogService';
 import type { ModelProtocolImportResult } from '../../services/ai/modelProtocolImport';
+import { emitCloseChatWindow } from '../../services/chat/chatWindowService';
 import { testProviderConnection } from '../../services/testConnection';
+import { useAppStore } from '../../store/useAppStore';
 import AnimatedButton from '../shared/AnimatedButton';
 import ModalOverlay from '../shared/ModalOverlay';
 import PopupCloseButton from '../shared/PopupCloseButton';
@@ -45,6 +47,15 @@ const PROVIDER_LINKS: Record<string, string> = {
   'zhipu-search': 'https://open.bigmodel.cn/usercenter/apikeys',
   exa: 'https://dashboard.exa.ai/api-keys',
 };
+
+const PROVIDER_ASSISTANT_PROMPT = [
+  '请根据厂商 API 文档帮我添加自定义接口模型配置。',
+  '',
+  '请提取并核对模型 ID、显示名称、模型类型、实际 API Base URL、请求格式、响应格式，以及异步接口的轮询方式。先生成不含 API Key 的配置草稿供我确认，确认前不要写入设置。',
+  '',
+  '文档链接或文档文本：',
+  '【请在这里粘贴公开 HTTPS 文档链接，或直接粘贴接口文档文本】',
+].join('\n');
 
 type CatalogStatus = 'idle' | 'loading' | 'ready' | 'warning' | 'error';
 
@@ -277,6 +288,12 @@ export default function ProviderConnectionDialog({
       setCatalogStatus('error');
       setCatalogMessage(error instanceof Error ? error.message : '模型列表拉取失败');
     }
+  };
+
+  const handleAssistantAdd = async () => {
+    const store = useAppStore.getState();
+    if (store.chatPanelDetached) await emitCloseChatWindow();
+    store.openChatWithDraft(PROVIDER_ASSISTANT_PROMPT);
   };
 
   const handleTestWebSearchConnection = async () => {
@@ -702,6 +719,14 @@ export default function ProviderConnectionDialog({
                           撤销导入
                         </AnimatedButton>
                       ) : null}
+                      <AnimatedButton
+                        type="button"
+                        className="provider-secondary-btn h-7"
+                        onClick={() => void handleAssistantAdd()}
+                      >
+                        <Icon icon="mdi:message-processing-outline" width="14" />
+                        调用助手添加
+                      </AnimatedButton>
                       <AnimatedButton
                         type="button"
                         className="provider-secondary-btn h-7"

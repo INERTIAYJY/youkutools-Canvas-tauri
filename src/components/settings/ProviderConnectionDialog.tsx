@@ -492,12 +492,8 @@ export default function ProviderConnectionDialog({
       ariaLabel={editing ? '编辑 API 厂商' : '添加 API 厂商'}
       className="provider-dialog"
       closeOnBackdrop={false}
-      draggable
     >
-      <header
-        className="provider-dialog-header cursor-move select-none touch-none"
-        data-modal-drag-handle
-      >
+      <header className="provider-dialog-header">
         <div>
           <span className="provider-dialog-kicker">{editing ? '编辑连接' : '新建连接'}</span>
           <h3>{isWebSearchProvider ? '联网搜索' : definition ? definition.name : '选择 API 厂商'}</h3>

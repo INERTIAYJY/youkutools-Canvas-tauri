@@ -371,204 +371,206 @@ export default function CharacterLibraryPanel() {
                 onEdit={(referenceId) => openEditor(selectedCharacter, referenceId)}
               />
 
-              <section className="character-library-profile" aria-label="当前角色">
-                <div className="character-library-profile-copy">
-                  <div className="character-library-profile-name">
-                    <h3>{selectedCharacter.name}</h3>
-                    {selectedCharacter.identity ? <span>{selectedCharacter.identity}</span> : null}
-                    {selectedCharacter.storyRole ? <span>{selectedCharacter.storyRole}</span> : null}
-                  </div>
-                  <p>{selectedCharacter.summary || selectedCharacter.visualNotes || '尚未填写角色简介'}</p>
-                </div>
-                <div className="character-library-profile-actions">
-                  {selectedReference ? (
-                    <button type="button" data-tooltip={canvasActionLabel} aria-label={canvasActionLabel} onClick={handleCanvasAction}>
-                      <Icon icon={canvasActionIcon} width="16" height="16" aria-hidden="true" />
-                    </button>
-                  ) : null}
-                  {sourceNode && !sourceNode.data.hiddenByCharacterLibrary ? (
-                    <button
-                      type="button"
-                      data-tooltip="在画布中隐藏"
-                      aria-label="在画布中隐藏"
-                      onClick={() => {
-                        if (setCharacterLibraryNodeHidden(sourceNode.id, true)) showToast('节点已隐藏');
-                      }}
-                    >
-                      <Icon icon="lucide:eye-off" width="16" height="16" aria-hidden="true" />
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    data-tooltip="从画布添加视角图"
-                    aria-label="从画布添加视角图"
-                    aria-expanded={pickerOpen}
-                    className={pickerOpen ? 'is-active' : ''}
-                    onClick={() => {
-                      setVoicePickerOpen(false);
-                      setPickerOpen((open) => !open);
-                    }}
-                  >
-                    <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
-                  </button>
-                  <button type="button" data-tooltip="编辑角色" aria-label="编辑角色" onClick={() => openEditor(selectedCharacter)}>
-                    <Icon icon="lucide:pencil" width="16" height="16" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    data-tooltip={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
-                    aria-label={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
-                    onClick={() => void handleCopy()}
-                  >
-                    <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
-                  </button>
-                  <button type="button" data-tooltip="删除角色" aria-label="删除角色" onClick={() => setDeleteConfirmOpen(true)}>
-                    <Icon icon="lucide:trash-2" width="16" height="16" aria-hidden="true" />
-                  </button>
-                </div>
-              </section>
-
-              {pickerOpen ? (
-                <div className="character-node-picker" role="listbox" aria-label="选择画布图片节点">
-                  {pickableNodes.length === 0 ? (
-                    <span className="character-node-picker-empty">画布上没有可用的图片节点</span>
-                  ) : pickableNodes.map((node) => (
-                    <button
-                      key={node.id}
-                      type="button"
-                      role="option"
-                      aria-selected={false}
-                      onClick={() => {
-                        setCaptureNodeId(node.id);
-                        setPickerOpen(false);
-                      }}
-                    >
-                      <img src={node.data.imageUrl ?? node.data.thumbnailUrl} alt="" draggable={false} />
-                      <span>{node.data.label || '图片节点'}</span>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              <section className="character-voice-dock" aria-label="角色声音">
-                <div className="character-voice-dock-head">
-                  <Icon icon="lucide:audio-lines" width="14" height="14" aria-hidden="true" />
-                  <span>角色声音</span>
-                  <strong>{voiceClips.length}</strong>
-                  <button
-                    type="button"
-                    data-tooltip="绑定画布音频节点"
-                    aria-label="绑定画布音频节点"
-                    aria-expanded={voicePickerOpen}
-                    className={voicePickerOpen ? 'is-active' : ''}
-                    disabled={bindingVoice}
-                    onClick={() => {
-                      setPickerOpen(false);
-                      setVoicePickerOpen((current) => !current);
-                    }}
-                  >
-                    <Icon icon="lucide:link" width="15" height="15" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    data-tooltip="上传音频"
-                    aria-label="上传音频"
-                    onClick={() => openEditor(selectedCharacter)}
-                  >
-                    <Icon icon="lucide:upload" width="15" height="15" aria-hidden="true" />
-                  </button>
-                </div>
-
-                {voicePickerOpen ? (
-                  <div className="character-voice-picker" role="listbox" aria-label="选择画布音频节点">
-                    {pickableAudioNodes.length === 0 ? (
-                      <span className="character-node-picker-empty">画布上没有可用的音频节点</span>
-                    ) : pickableAudioNodes.map((node) => (
+              <div className="character-library-dock">
+                {pickerOpen ? (
+                  <div className="character-node-picker" role="listbox" aria-label="选择画布图片节点">
+                    {pickableNodes.length === 0 ? (
+                      <span className="character-node-picker-empty">画布上没有可用的图片节点</span>
+                    ) : pickableNodes.map((node) => (
                       <button
                         key={node.id}
                         type="button"
                         role="option"
                         aria-selected={false}
-                        onClick={() => void handleBindVoiceNode(node.id)}
+                        onClick={() => {
+                          setCaptureNodeId(node.id);
+                          setPickerOpen(false);
+                        }}
                       >
-                        <Icon icon="lucide:audio-lines" width="15" height="15" aria-hidden="true" />
-                        <span>{node.data.label || '音频节点'}</span>
+                        <img src={node.data.imageUrl ?? node.data.thumbnailUrl} alt="" draggable={false} />
+                        <span>{node.data.label || '图片节点'}</span>
                       </button>
                     ))}
                   </div>
                 ) : null}
 
-                {voiceClips.length === 0 ? (
-                  <p className="character-voice-dock-empty">
-                    {bindingVoice ? '正在绑定…' : '还没有声音，可绑定画布音频节点或上传音频'}
-                  </p>
-                ) : (
-                  <div className="character-voice-chips" role="list">
-                    {voiceClips.map((clip) => (
-                      <div
-                        key={clip.id}
-                        role="listitem"
-                        className={`character-voice-chip${
-                          clip.id === selectedCharacter.primaryVoiceClipId ? ' is-primary' : ''
-                        }`}
-                      >
+                <section className="character-voice-dock" aria-label="角色声音">
+                  <div className="character-voice-dock-head">
+                    <Icon icon="lucide:audio-lines" width="14" height="14" aria-hidden="true" />
+                    <span>角色声音</span>
+                    <strong>{voiceClips.length}</strong>
+                    <button
+                      type="button"
+                      data-tooltip="绑定画布音频节点"
+                      aria-label="绑定画布音频节点"
+                      aria-expanded={voicePickerOpen}
+                      className={voicePickerOpen ? 'is-active' : ''}
+                      disabled={bindingVoice}
+                      onClick={() => {
+                        setPickerOpen(false);
+                        setVoicePickerOpen((current) => !current);
+                      }}
+                    >
+                      <Icon icon="lucide:link" width="15" height="15" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      data-tooltip="上传音频"
+                      aria-label="上传音频"
+                      onClick={() => openEditor(selectedCharacter)}
+                    >
+                      <Icon icon="lucide:upload" width="15" height="15" aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  {voicePickerOpen ? (
+                    <div className="character-voice-picker" role="listbox" aria-label="选择画布音频节点">
+                      {pickableAudioNodes.length === 0 ? (
+                        <span className="character-node-picker-empty">画布上没有可用的音频节点</span>
+                      ) : pickableAudioNodes.map((node) => (
                         <button
+                          key={node.id}
                           type="button"
-                          className="character-voice-play"
-                          aria-label={playingVoiceClipId === clip.id ? '暂停试听' : '试听'}
-                          disabled={!clip.audioUrl}
-                          onClick={() => toggleVoicePlayback(clip)}
+                          role="option"
+                          aria-selected={false}
+                          onClick={() => void handleBindVoiceNode(node.id)}
                         >
-                          <Icon
-                            icon={playingVoiceClipId === clip.id ? 'lucide:pause' : 'lucide:play'}
-                            width="13"
-                            height="13"
-                            aria-hidden="true"
-                          />
+                          <Icon icon="lucide:audio-lines" width="15" height="15" aria-hidden="true" />
+                          <span>{node.data.label || '音频节点'}</span>
                         </button>
-                        <span className="character-voice-chip-copy">
-                          <strong>{voiceClipTitle(clip)}</strong>
-                          <span>
-                            {CHARACTER_VOICE_KIND_LABELS[clip.kind]} · {formatVoiceDuration(clip.durationSec)}
-                          </span>
-                        </span>
-                        <span className="character-voice-chip-actions">
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {voiceClips.length === 0 ? (
+                    <p className="character-voice-dock-empty">
+                      {bindingVoice ? '正在绑定…' : '还没有声音，可绑定画布音频节点或上传音频'}
+                    </p>
+                  ) : (
+                    <div className="character-voice-chips" role="list">
+                      {voiceClips.map((clip) => (
+                        <div
+                          key={clip.id}
+                          role="listitem"
+                          className={`character-voice-chip${
+                            clip.id === selectedCharacter.primaryVoiceClipId ? ' is-primary' : ''
+                          }`}
+                        >
                           <button
                             type="button"
-                            data-tooltip="设为主音色"
-                            aria-label="设为主音色"
-                            className={clip.id === selectedCharacter.primaryVoiceClipId ? 'is-active' : ''}
-                            onClick={() => void setCharacterPrimaryVoice(scope, selectedCharacter.id, clip.id)}
-                          >
-                            <Icon icon="lucide:star" width="13" height="13" aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
-                            data-tooltip={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
-                            aria-label={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
-                            onClick={() => handleVoiceToCanvas(clip)}
+                            className="character-voice-play"
+                            aria-label={playingVoiceClipId === clip.id ? '暂停试听' : '试听'}
+                            disabled={!clip.audioUrl}
+                            onClick={() => toggleVoicePlayback(clip)}
                           >
                             <Icon
-                              icon={clip.sourceNodeId ? 'lucide:locate-fixed' : 'lucide:square-plus'}
+                              icon={playingVoiceClipId === clip.id ? 'lucide:pause' : 'lucide:play'}
                               width="13"
                               height="13"
                               aria-hidden="true"
                             />
                           </button>
-                          <button
-                            type="button"
-                            data-tooltip="移除该声音"
-                            aria-label="移除该声音"
-                            onClick={() => void handleRemoveVoiceClip(clip)}
-                          >
-                            <Icon icon="lucide:trash-2" width="13" height="13" aria-hidden="true" />
-                          </button>
-                        </span>
-                      </div>
-                    ))}
+                          <span className="character-voice-chip-copy">
+                            <strong>{voiceClipTitle(clip)}</strong>
+                            <span>
+                              {CHARACTER_VOICE_KIND_LABELS[clip.kind]} · {formatVoiceDuration(clip.durationSec)}
+                            </span>
+                          </span>
+                          <span className="character-voice-chip-actions">
+                            <button
+                              type="button"
+                              data-tooltip="设为主音色"
+                              aria-label="设为主音色"
+                              className={clip.id === selectedCharacter.primaryVoiceClipId ? 'is-active' : ''}
+                              onClick={() => void setCharacterPrimaryVoice(scope, selectedCharacter.id, clip.id)}
+                            >
+                              <Icon icon="lucide:star" width="13" height="13" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              data-tooltip={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
+                              aria-label={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
+                              onClick={() => handleVoiceToCanvas(clip)}
+                            >
+                              <Icon
+                                icon={clip.sourceNodeId ? 'lucide:locate-fixed' : 'lucide:square-plus'}
+                                width="13"
+                                height="13"
+                                aria-hidden="true"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              data-tooltip="移除该声音"
+                              aria-label="移除该声音"
+                              onClick={() => void handleRemoveVoiceClip(clip)}
+                            >
+                              <Icon icon="lucide:trash-2" width="13" height="13" aria-hidden="true" />
+                            </button>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="character-library-profile" aria-label="当前角色">
+                  <div className="character-library-profile-copy">
+                    <div className="character-library-profile-name">
+                      <h3>{selectedCharacter.name}</h3>
+                      {selectedCharacter.identity ? <span>{selectedCharacter.identity}</span> : null}
+                      {selectedCharacter.storyRole ? <span>{selectedCharacter.storyRole}</span> : null}
+                    </div>
+                    <p>{selectedCharacter.summary || selectedCharacter.visualNotes || '尚未填写角色简介'}</p>
                   </div>
-                )}
-              </section>
+                  <div className="character-library-profile-actions">
+                    {selectedReference ? (
+                      <button type="button" data-tooltip={canvasActionLabel} aria-label={canvasActionLabel} onClick={handleCanvasAction}>
+                        <Icon icon={canvasActionIcon} width="16" height="16" aria-hidden="true" />
+                      </button>
+                    ) : null}
+                    {sourceNode && !sourceNode.data.hiddenByCharacterLibrary ? (
+                      <button
+                        type="button"
+                        data-tooltip="在画布中隐藏"
+                        aria-label="在画布中隐藏"
+                        onClick={() => {
+                          if (setCharacterLibraryNodeHidden(sourceNode.id, true)) showToast('节点已隐藏');
+                        }}
+                      >
+                        <Icon icon="lucide:eye-off" width="16" height="16" aria-hidden="true" />
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      data-tooltip="从画布添加视角图"
+                      aria-label="从画布添加视角图"
+                      aria-expanded={pickerOpen}
+                      className={pickerOpen ? 'is-active' : ''}
+                      onClick={() => {
+                        setVoicePickerOpen(false);
+                        setPickerOpen((open) => !open);
+                      }}
+                    >
+                      <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
+                    </button>
+                    <button type="button" data-tooltip="编辑角色" aria-label="编辑角色" onClick={() => openEditor(selectedCharacter)}>
+                      <Icon icon="lucide:pencil" width="16" height="16" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      data-tooltip={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
+                      aria-label={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
+                      onClick={() => void handleCopy()}
+                    >
+                      <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
+                    </button>
+                    <button type="button" data-tooltip="删除角色" aria-label="删除角色" onClick={() => setDeleteConfirmOpen(true)}>
+                      <Icon icon="lucide:trash-2" width="16" height="16" aria-hidden="true" />
+                    </button>
+                  </div>
+                </section>
+              </div>
 
               <audio
                 ref={voicePlayerRef}

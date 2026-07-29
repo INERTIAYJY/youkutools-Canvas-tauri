@@ -262,13 +262,21 @@
   padding: 10px;
 }
 
-/* 悬浮在形象参考右下角 */
-.character-library-profile {
+/* 悬浮在形象参考右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条 */
+.character-library-dock {
   position: absolute;
   right: 10px;
   bottom: 10px;
   z-index: 2;
+  display: flex;
   max-width: min(560px, calc(100% - 20px));
+  max-height: calc(100% - 20px);
+  flex-direction: column;
+  gap: 8px;
+}
+
+.character-library-profile {
+  flex: 0 0 auto;
   gap: 10px;
   padding: 8px 10px;
   border: 1px solid var(--theme-border);
@@ -369,12 +377,9 @@
 
 /* 画布图片节点选择条，浮在角色卡上方 */
 .character-node-picker {
-  position: absolute;
-  right: 10px;
-  bottom: 78px;
-  z-index: 3;
   display: flex;
-  max-width: calc(100% - 20px);
+  min-height: 0;
+  flex: 0 1 auto;
   align-items: center;
   gap: 6px;
   overflow-x: auto;
@@ -1027,15 +1032,15 @@
 
 /* ── 角色声音 ── */
 
-/* 悬浮在形象参考左下角，与右下角的角色卡分列两侧 */
+/* 紧贴角色卡上方，比角色卡窄一档，右对齐收成阶梯 */
 .character-voice-dock {
-  position: absolute;
-  bottom: 10px;
-  left: 10px;
-  z-index: 2;
   display: flex;
-  max-width: min(420px, 44%);
+  width: 70%;
+  min-width: min(100%, 240px);
+  min-height: 0;
+  flex: 0 1 auto;
   flex-direction: column;
+  align-self: flex-end;
   gap: 6px;
   padding: 8px 10px;
   border: 1px solid var(--theme-border);
@@ -1319,13 +1324,6 @@
 
   .character-library-strip-label {
     width: 70px;
-  }
-
-  /* 窄面板下角色卡会占满整行，声音卡改为叠在其上方 */
-  .character-voice-dock {
-    right: 10px;
-    bottom: 76px;
-    max-width: none;
   }
 
   .character-dialog-body {

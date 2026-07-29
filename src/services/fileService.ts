@@ -1063,7 +1063,6 @@ export async function revealFileInFolder(filePath: string): Promise<void> {
   }
 
   try {
-    const { invoke } = await import('@tauri-apps/api/core');
     await invoke('reveal_in_file_manager', { path: filePath, select: true });
   } catch (err) {
     console.error('[fileService] revealFileInFolder 失败:', filePath, err);
@@ -1078,7 +1077,6 @@ export async function openDirectoryInFileManager(dirPath: string): Promise<void>
     return;
   }
 
-  const { invoke } = await import('@tauri-apps/api/core');
   await invoke('reveal_in_file_manager', { path: dirPath, select: false });
 }
 
@@ -1092,7 +1090,6 @@ export async function openDirectoryInFileManager(dirPath: string): Promise<void>
  */
 async function launchApp(appPath: string, filePath: string): Promise<boolean> {
   try {
-    const { invoke } = await import('@tauri-apps/api/core');
     await invoke('open_with_app', { appPath, filePath });
     return true;
   } catch (err) {

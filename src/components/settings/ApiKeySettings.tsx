@@ -22,6 +22,7 @@ import { shouldListProviderConnection } from './apiKeySettingsUtils';
 import { isSecretStoreAvailable } from '../../services/providerSecretService';
 import DreaminaLoginModal from './DreaminaLoginModal';
 import ProviderConnectionDialog from './ProviderConnectionDialog';
+import { invoke } from '@tauri-apps/api/core';
 
 interface ProviderListItem {
   id: string;
@@ -178,7 +179,6 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
 
   const tauriInvoke = useCallback(
     async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
-      const { invoke } = await import('@tauri-apps/api/core');
       return invoke<T>(command, args);
     },
     [],

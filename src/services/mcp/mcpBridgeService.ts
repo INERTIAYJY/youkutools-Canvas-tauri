@@ -6,24 +6,21 @@ import type {
   McpBridgeResponseInput,
   McpBridgeSessionInfo,
 } from '../../types/mcp';
+import { invoke } from '@tauri-apps/api/core';
 
 export async function startMcpBridge(token: string): Promise<McpBridgeSessionInfo> {
-  const { invoke } = await import('@tauri-apps/api/core');
   return invoke<McpBridgeSessionInfo>('mcp_bridge_start', { token });
 }
 
 export async function stopMcpBridge(): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
   await invoke('mcp_bridge_stop');
 }
 
 export async function getMcpBridgeStatus(): Promise<McpBridgeSessionInfo | null> {
-  const { invoke } = await import('@tauri-apps/api/core');
   return invoke<McpBridgeSessionInfo | null>('mcp_bridge_status');
 }
 
 export async function respondToMcpBridge(response: McpBridgeResponseInput): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
   await invoke('mcp_bridge_respond', { response });
 }
 

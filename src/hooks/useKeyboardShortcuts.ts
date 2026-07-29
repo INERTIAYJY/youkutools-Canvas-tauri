@@ -12,6 +12,7 @@ import { cancelNodePolling } from '../services/pollManager';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
 import type { Node as RFNode } from '@xyflow/react';
 import type { BaseNodeData, NodeType } from '../types';
+import { invoke } from '@tauri-apps/api/core';
 
 interface NodeShortcutDefinition {
   type: NodeType;
@@ -125,7 +126,6 @@ export function useKeyboardShortcuts() {
         e.preventDefault();
         e.stopPropagation();
         try {
-          const { invoke } = await import('@tauri-apps/api/core');
           await invoke('toggle_devtools');
         } catch { /* 非 Tauri 环境 */ }
         return;

@@ -13,6 +13,7 @@
 import { useAppStore } from '../store/useAppStore';
 import { APIMART_BASE_URL } from '../constants/api';
 import { isTauriEnv } from './fs/core';
+import { invoke } from '@tauri-apps/api/core';
 
 const DEFAULT_UPLOAD_BASE = APIMART_BASE_URL;
 
@@ -210,7 +211,6 @@ async function uploadToUguu(url: string): Promise<string> {
 
   // Tauri 环境：走 Rust proxy_fetch 绕过浏览器 CORS
   if (isTauriEnv()) {
-    const { invoke } = await import('@tauri-apps/api/core');
     const { body, contentType } = await formDataToBase64(formData);
     const result = await invoke<{ status: number; body: string }>('proxy_fetch', {
       req: {

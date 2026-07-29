@@ -28,6 +28,7 @@ import type { CanvasBackground as CanvasBg, InteractionMode, NodeToolbarMode } f
 import type { BackgroundDetection } from '../services/backgroundService';
 
 import type { SettingsTab } from '../store/store.ui';
+import { invoke } from '@tauri-apps/api/core';
 
 const INTERACTION_MODE_OPTIONS: {
   id: InteractionMode;
@@ -288,7 +289,6 @@ export default function SettingsPanel() {
     setComfyUiLaunching(true);
     setComfyStatus('starting');
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       await invoke<string>('launch_comfyui', { comfyPath });
 
       // 进程已拉起，但 ComfyUI 导入依赖需要数十秒 —— 轮询 API 直到就绪

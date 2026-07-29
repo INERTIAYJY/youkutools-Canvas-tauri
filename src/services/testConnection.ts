@@ -4,6 +4,7 @@
 import { APIMART_BASE_URL, VOLCENGINE_BASE_URL } from '../constants/api';
 import type { WebSearchProviderId } from '../types';
 import { corsSafeFetch } from './ai/httpTransport';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface TestResult {
   success: boolean;
@@ -82,7 +83,6 @@ async function testWebSearch(
   if (typeof window === 'undefined' || !('__TAURI__' in window || '__TAURI_INTERNALS__' in window)) {
     return { success: false, error: '联网搜索连接测试仅在 Tauri 桌面环境可用' };
   }
-  const { invoke } = await import('@tauri-apps/api/core');
   await invoke('assistant_web_search', {
     request: {
       provider,

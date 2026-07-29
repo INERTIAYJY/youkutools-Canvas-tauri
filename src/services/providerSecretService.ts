@@ -11,6 +11,7 @@
  * 等无 Rust 侧的场景）凭据仅本次会话有效，由调用方提示用户重新输入。
  */
 import { isTauriEnv } from './fs/core';
+import { invoke } from '@tauri-apps/api/core';
 
 /** 配置中代替明文凭据的引用前缀，便于识别与迁移。 */
 const SECRET_REF_PREFIX = 'secret:';
@@ -71,7 +72,6 @@ async function invokeSecret<T>(
   command: 'secret_set' | 'secret_get' | 'secret_delete',
   args: Record<string, unknown>,
 ): Promise<T> {
-  const { invoke } = await import('@tauri-apps/api/core');
   return invoke<T>(command, args);
 }
 
@@ -79,7 +79,6 @@ async function invokeSecret<T>(
 export async function isSecretStoreAvailable(): Promise<boolean> {
   if (!isTauriEnv()) return false;
   try {
-    const { invoke } = await import('@tauri-apps/api/core');
     return await invoke<boolean>('secret_store_available');
   } catch (error) {
     console.warn('[providerSecret] 凭据存储探测失败:', error);

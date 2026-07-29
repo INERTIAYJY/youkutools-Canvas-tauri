@@ -10,6 +10,7 @@ import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../../store/useAppStore';
 import type { BaseNodeData, StoryboardCellOverride } from '../../../types';
 
@@ -41,7 +42,10 @@ interface SbCellItem {
 }
 
 export default function ConnectedNodesPreview({ nodeId, onInsertMention }: ConnectedNodesPreviewProps) {
-  const { nodes, edges } = useAppStore();
+  // 只订阅画布数据：对话框打开期间的聊天流式、轮询进度等无关变更不再触发重渲染
+  const { nodes, edges } = useAppStore(
+    useShallow((s) => ({ nodes: s.nodes, edges: s.edges })),
+  );
   const hoveredMentionNodeId = useAppStore((s) => s.hoveredMentionNodeId);
 
   // ── 宫格弹出浮层状态 ──

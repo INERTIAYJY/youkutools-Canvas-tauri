@@ -6,6 +6,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../../store/useAppStore';
 import { generateId } from '../../../store/store.utils';
 import type {
@@ -124,6 +125,7 @@ const panelVariants = {
 };
 
 export default function PresetManager() {
+  // 只订阅用到的字段：面板常驻在节点对话框内，避免被无关的 store 变更带着重渲染
   const {
     userPresets,
     presetManagerOpen,
@@ -132,7 +134,17 @@ export default function PresetManager() {
     updateUserPreset,
     deleteUserPreset,
     showToast,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((s) => ({
+      userPresets: s.userPresets,
+      presetManagerOpen: s.presetManagerOpen,
+      setPresetManagerOpen: s.setPresetManagerOpen,
+      addUserPreset: s.addUserPreset,
+      updateUserPreset: s.updateUserPreset,
+      deleteUserPreset: s.deleteUserPreset,
+      showToast: s.showToast,
+    })),
+  );
 
   const [activeTab, setActiveTab] = useState<PresetNodeType>('ai-text');
   const [selectedId, setSelectedId] = useState<string | null>(null);

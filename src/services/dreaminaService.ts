@@ -10,6 +10,7 @@ import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
 import { useAppStore } from '../store/useAppStore';
 import { logAiRequest } from './ai/httpTransport';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 const DREAMINA_RATIOS = ['21:9', '16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'];
 
@@ -49,7 +50,6 @@ async function invokeTauri<T>(
   args?: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const { invoke } = await import('@tauri-apps/api/core');
   try {
     if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
     logAiRequest(`tauri://${cmd}`, {
@@ -85,7 +85,6 @@ async function invokeTauri<T>(
 
 async function resolveOutputUrl(o: DreaminaOutput): Promise<string> {
   if (o.localPath) {
-    const { convertFileSrc } = await import('@tauri-apps/api/core');
     return convertFileSrc(o.localPath);
   }
   return o.url;

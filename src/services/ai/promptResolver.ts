@@ -6,6 +6,12 @@ import { readFileToDataUrl, getFileCategory } from '../fileService';
 import { resolveNodeImageUrl, mergeImageWithOverlays } from './imageUtils';
 import { cropImageCell, cropImageByRanges } from '../../components/nodes/shared/image/imageUtils';
 import { parseDramaMentionId } from '../../types/dramaAssets';
+import {
+  collectCharacterReferenceUrls,
+  findDramaAsset,
+  formatDramaAssetTextBrief,
+  resolveDramaAssetImageRef,
+} from '../dramaAssetPrompt';
 import type { DramaAsset } from '../../types/dramaAssets';
 import type { BaseNodeData, ImageAnnotationLayer, StoryboardCellOverride } from '../../types';
 
@@ -35,7 +41,6 @@ async function resolveMergedCharacterImage(
   asset: DramaAsset,
   nodes: Array<{ id: string; data?: Record<string, unknown> }>,
 ): Promise<string | null> {
-  const { collectCharacterReferenceUrls } = await import('../dramaAssetPrompt');
   const urls = collectCharacterReferenceUrls(asset, nodes);
   if (urls.length < 2) return null;
   const resolved = (await Promise.all(urls.map((url) => resolveNodeImageUrl(url))))
@@ -148,11 +153,6 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
       const dramaId = match[2];
       const dramaName = match[3] || '';
       const { assetId, referenceImageId, mergeAll } = parseDramaMentionId(dramaId);
-      const {
-        findDramaAsset,
-        formatDramaAssetTextBrief,
-        resolveDramaAssetImageRef,
-      } = await import('../dramaAssetPrompt');
       const dramaAsset = findDramaAsset(store.dramaAssets, assetId);
       const mergedUrl = dramaAsset && mergeAll
         ? await resolveMergedCharacterImage(
@@ -354,12 +354,6 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
       }
     }
   }
-
-  const {
-    findDramaAsset,
-    formatDramaAssetTextBrief,
-    resolveDramaAssetImageRef,
-  } = await import('../dramaAssetPrompt');
 
   // 下面是同步 replace，@drama{id#all} 的拼图得先异步做好
   const dramaMergedMap = new Map<string, string>();

@@ -43,6 +43,7 @@ import {
   registerCanvasDerivation,
   type CanvasDerivationGuard,
 } from '../../services/canvasDerivationGuard';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
@@ -753,7 +754,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
       const result = await imageUpscale(filePath, outputPath, modelName, taskId);
 
-      const { convertFileSrc } = await import('@tauri-apps/api/core');
       const assetUrl = convertFileSrc(result.output_path);
 
       const store = useAppStore.getState();
@@ -894,7 +894,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
       const result = await subjectMatting(filePath, outputPath, mattingModelName, taskId);
 
-      const { convertFileSrc } = await import('@tauri-apps/api/core');
       const assetUrl = convertFileSrc(result.subject_path);
 
       const store = useAppStore.getState();

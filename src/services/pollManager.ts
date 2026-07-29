@@ -28,6 +28,7 @@ import {
   RUNNINGHUB_MODEL_BASE_URL,
   VOLCENGINE_BASE_URL,
 } from '../constants/api';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 // ═══════════════════════════════════════════
 // AbortController 注册表 — 节点删除时取消轮询
@@ -619,7 +620,6 @@ async function resumeDreamina(task: PendingTask): Promise<void> {
   const signal = registerNodePolling(nodeId);
 
   try {
-    const { invoke, convertFileSrc } = await import('@tauri-apps/api/core');
     const out = await pollTask<DreaminaQuery, DreaminaOutput>({
       fetchState: () => invoke<DreaminaQuery>('dreamina_query_result', { submitId: taskId }),
       isComplete: (r) =>

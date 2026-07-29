@@ -25,6 +25,7 @@ import ComposerLayerNode from './ComposerLayerNode';
 import { NO_GUIDES, alignOffset, fitScaleFactor, snapDuringDrag } from './composerGeometry';
 import type { SnapGuides } from './composerGeometry';
 import type { AlignDir, Layer } from '../../../../../types/composerTypes';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 interface ImageComposerEditorProps {
   isOpen: boolean;
@@ -399,7 +400,6 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     let unlisten: (() => void) | null = null;
     (async () => {
       const { listen } = await import('@tauri-apps/api/event');
-      const { convertFileSrc } = await import('@tauri-apps/api/core');
       const ul = await listen<{ type: string; paths: string[] }>('tauri://drag-drop', async (event) => {
         const { type, paths } = event.payload;
         if (type === 'enter' || type === 'over') { setIsDragOver(true); return; }
@@ -453,7 +453,6 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
       const outputPath = `${saved.filePath.replace(/\.[^.]+$/, '')}_subject.png`;
       const result = await subjectMatting(saved.filePath, outputPath, MATTING_MODEL, `composer-matting-${Date.now()}`);
       // 3. 载回并原位替换图层图片
-      const { convertFileSrc } = await import('@tauri-apps/api/core');
       const img = await loadSafeImage(convertFileSrc(result.subject_path));
       updateLayer(layer.id, { image: img, src: img.src, width: img.naturalWidth, height: img.naturalHeight } as Partial<Layer>);
       store.showToast(`主体识别完成 (${result.input_size})`);

@@ -20,6 +20,7 @@ import { checkForUpdate, downloadAndInstallUpdate } from '../services/updateServ
 import AnimatedButton from './shared/AnimatedButton';
 import PopupCloseButton from './shared/PopupCloseButton';
 import ProjectLibraryModal from './ProjectLibraryModal';
+import { invoke } from '@tauri-apps/api/core';
 
 /**
  * Sidebar 侧边栏面板 — 左侧节点类型列表、上传入口、项目切换、拖拽添加节点
@@ -1315,7 +1316,6 @@ export default function Sidebar() {
             const { emitCloseChatWindow } = await import('../services/chat/chatWindowService');
             try {
               await emitCloseChatWindow();
-              const { invoke } = await import('@tauri-apps/api/core');
               await invoke('close_chat_window');
             } catch { /* ignore */ }
             store.setChatPanelDetached(false);

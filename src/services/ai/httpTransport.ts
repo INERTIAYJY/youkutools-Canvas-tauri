@@ -1,4 +1,5 @@
 /** Fetch-compatible AI transport with a Tauri-native streaming path that bypasses WebView CORS. */
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 type ProxyFetchStreamEvent =
   | { event: 'meta'; status: number; headers: [string, string][] }
@@ -217,7 +218,6 @@ export async function corsSafeFetch(url: string, init: RequestInit = {}): Promis
   }
   const headers = Array.from(requestHeaders.entries());
   if (signal?.aborted) throw createAbortError();
-  const { Channel, invoke } = await import('@tauri-apps/api/core');
   const requestId = createRequestId();
   return new Promise<Response>((resolve, reject) => {
     let controller: ReadableStreamDefaultController<Uint8Array>;

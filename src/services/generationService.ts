@@ -17,6 +17,7 @@ import {
   resolveProjectGenerationPrompt,
 } from './projectSettingsService';
 import { postProcessDramaExtractOutput } from './dramaAssetExtract';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 export interface GenerationResult {
   success: boolean;
@@ -131,7 +132,6 @@ export async function executeGeneration(
           );
           if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
 
-          const { convertFileSrc } = await import('@tauri-apps/api/core');
           const sourceNode = useAppStore.getState().nodes.find((item) => item.id === nodeId);
           if (sourceNode) {
             store.addNode({

@@ -10,6 +10,7 @@ import type {
   GeneralModelConfig,
   ProjectSettings,
 } from '../types';
+import { GRSAI_BASE_URL, GRSAI_LEGACY_BASE_URL } from '../constants/api';
 import * as fileService from '../services/fileService';
 import { setBaseDataDir, syncAuthorizedDirectories } from '../services/fileService';
 import { deleteProviderSecret } from '../services/providerSecretService';
@@ -232,10 +233,25 @@ function sanitizeGeneralModel(
 }
 
 function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
-  const generalModels = (config.generalModels ?? []) as LegacyGeneralModelConfig[];
-  if (generalModels.length === 0) return config;
+  let providerUrlsChanged = false;
+  const normalizedProviders = Object.fromEntries(
+    Object.entries(config.providers).map(([providerId, provider]) => {
+      const normalizedBaseUrl = provider.baseUrl?.trim().replace(/\/+$/, '');
+      const isGrsai = providerId === 'grsai' || provider.catalogId === 'grsai';
+      if (!isGrsai || normalizedBaseUrl !== GRSAI_LEGACY_BASE_URL) {
+        return [providerId, provider];
+      }
+      providerUrlsChanged = true;
+      return [providerId, { ...provider, baseUrl: GRSAI_BASE_URL }];
+    }),
+  );
+  const normalizedConfig = providerUrlsChanged
+    ? { ...config, providers: normalizedProviders }
+    : config;
+  const generalModels = (normalizedConfig.generalModels ?? []) as LegacyGeneralModelConfig[];
+  if (generalModels.length === 0) return normalizedConfig;
 
-  const providers = { ...config.providers };
+  const providers = { ...normalizedConfig.providers };
   const connectionBySignature = new Map<string, string>();
   for (const [providerId, provider] of Object.entries(providers)) {
     if (provider.catalogId !== 'custom-openai') continue;
@@ -281,7 +297,7 @@ function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
     return sanitizeGeneralModel(model, providerConfigId);
   });
 
-  return { ...config, providers, generalModels: migratedModels };
+  return { ...normalizedConfig, providers, generalModels: migratedModels };
 }
 
 export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (set, get) => ({

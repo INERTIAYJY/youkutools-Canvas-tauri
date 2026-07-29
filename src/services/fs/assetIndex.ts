@@ -12,6 +12,7 @@ import {
   putAssetMeta,
   type AssetIndexRecord,
 } from '../indexedDbService';
+import { stripVerbatimPrefix } from './core';
 
 export type AssetSource = AssetIndexRecord['source'];
 
@@ -25,7 +26,7 @@ export interface IdentifyAssetOptions {
 }
 
 function normalizePath(path: string): string {
-  return path.replace(/\\/g, '/').replace(/\/+$/, '');
+  return stripVerbatimPrefix(path).replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 export function getRelativeAssetPath(path: string, rootPath: string): string | undefined {

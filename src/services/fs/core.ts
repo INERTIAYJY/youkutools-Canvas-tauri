@@ -137,6 +137,19 @@ export function sanitizeFileName(name: string): string {
   return name.replace(FILENAME_ILLEGAL_CHARS, '_');
 }
 
+/**
+ * 去掉 Windows 的 `\\?\` verbatim 前缀。
+ * 旧版本的原生命令把 canonicalize 后的路径直接返回给前端，这类路径被存进了节点数据，
+ * 会让所有「文件是否在项目目录内」的前缀比较失配（改名不同步文件、分组搬运被跳过、
+ * relativePath 写不进去），且全是静默失败。新路径已在 Rust 侧去前缀，这里只修旧数据。
+ */
+export function stripVerbatimPrefix(path: string): string {
+  const match = /^[\\/]{2}\?[\\/](UNC[\\/])?/.exec(path);
+  if (!match) return path;
+  const rest = path.slice(match[0].length);
+  return match[1] ? `\\\\${rest}` : rest;
+}
+
 // ============================================
 // Project data directory — local file storage for media assets
 // ============================================
@@ -312,7 +325,7 @@ export async function moveProjectFileToFolder(
 ): Promise<string | null> {
   if (!isTauriEnv() || !filePath) return null;
   const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
-  const normalized = filePath.replace(/\\/g, '/');
+  const normalized = stripVerbatimPrefix(filePath).replace(/\\/g, '/');
   if (!normalized.startsWith(`${root}/`)) return null;
   const segments = normalized.slice(root.length + 1).split('/');
   if (segments.length > 2) return null;

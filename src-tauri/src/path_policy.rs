@@ -50,6 +50,33 @@ pub fn ensure_trusted_caller<R: Runtime>(webview: &Webview<R>) -> Result<(), Str
     Ok(())
 }
 
+/// canonicalize 后去掉 Windows 的 `\\?\` verbatim 前缀。
+///
+/// 命令返回的路径会被前端存进节点数据，而前端所有「这个文件在不在项目目录里」的判断
+/// 都是字符串前缀比较（改名同步、分组搬运、相对路径索引）。带前缀的路径一律比不中，
+/// 且失败都是静默的。fs 插件和前端拼出来的路径本来就是普通形式，这里统一成同一种。
+fn canonicalize_simplified(path: &Path) -> std::io::Result<PathBuf> {
+    Ok(simplify_verbatim(path.canonicalize()?))
+}
+
+#[cfg(windows)]
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    match text.strip_prefix(r"\\?\") {
+        // `\\?\UNC\server\share` 还原成 `\\server\share`
+        Some(rest) => PathBuf::from(
+            rest.strip_prefix(r"UNC\")
+                .map_or_else(|| rest.to_string(), |unc| format!(r"\\{unc}")),
+        ),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// 应用自有的可写数据目录（项目素材、配置、缓存都在其中）。
 fn app_owned_roots<R: Runtime>(app: &tauri::AppHandle<R>) -> Vec<PathBuf> {
     let path = app.path();
@@ -61,7 +88,7 @@ fn app_owned_roots<R: Runtime>(app: &tauri::AppHandle<R>) -> Vec<PathBuf> {
     ]
     .into_iter()
     .flatten()
-    .filter_map(|dir| dir.canonicalize().ok())
+    .filter_map(|dir| canonicalize_simplified(&dir).ok())
     .collect()
 }
 
@@ -83,9 +110,7 @@ fn is_secret_path<R: Runtime>(app: &tauri::AppHandle<R>, resolved: &Path) -> boo
 fn is_under_secret_dir(secret_dir: &Path, resolved: &Path) -> bool {
     let normalized = secret_dir.components().collect::<PathBuf>();
     is_within(resolved, &normalized)
-        || secret_dir
-            .canonicalize()
-            .is_ok_and(|canonical| is_within(resolved, &canonical))
+        || canonicalize_simplified(secret_dir).is_ok_and(|canonical| is_within(resolved, &canonical))
 }
 
 /// 解析路径的真实位置：存在则 canonicalize；写入场景下允许目标不存在，改用父目录解析。
@@ -104,7 +129,7 @@ fn resolve_path(raw: &str, access: PathAccess) -> Result<PathBuf, String> {
         return Err(format!("只接受绝对路径: {trimmed}"));
     }
 
-    if let Ok(canonical) = path.canonicalize() {
+    if let Ok(canonical) = canonicalize_simplified(&path) {
         return Ok(canonical);
     }
     if access == PathAccess::Read {
@@ -119,8 +144,7 @@ fn resolve_path(raw: &str, access: PathAccess) -> Result<PathBuf, String> {
         Some(Component::Normal(name)) => name.to_owned(),
         _ => return Err(format!("路径缺少有效的文件名: {trimmed}")),
     };
-    let canonical_parent = parent
-        .canonicalize()
+    let canonical_parent = canonicalize_simplified(parent)
         .map_err(|e| format!("目标目录不存在或无法访问（{}）: {e}", parent.display()))?;
     Ok(canonical_parent.join(file_name))
 }
@@ -207,13 +231,13 @@ pub fn app_install_roots<R: Runtime>(app: &tauri::AppHandle<R>) -> Vec<PathBuf> 
     let mut roots = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            if let Ok(canonical) = dir.canonicalize() {
+            if let Ok(canonical) = canonicalize_simplified(dir) {
                 roots.push(canonical);
             }
         }
     }
     if let Ok(resource_dir) = app.path().resource_dir() {
-        if let Ok(canonical) = resource_dir.canonicalize() {
+        if let Ok(canonical) = canonicalize_simplified(&resource_dir) {
             roots.push(canonical);
         }
     }
@@ -248,8 +272,8 @@ pub fn authorize_launch_target<R: Runtime>(
     if !path.is_absolute() {
         return Err(format!("只接受绝对路径或已安装的应用名: {trimmed}"));
     }
-    let canonical = path
-        .canonicalize()
+    // 与 app_owned_roots 同样去掉 verbatim 前缀，否则下面的 is_within 恒不成立
+    let canonical = canonicalize_simplified(&path)
         .map_err(|e| format!("应用路径不存在或无法访问（{trimmed}）: {e}"))?;
 
     // 关键约束：不允许启动位于应用可写目录内的程序（Renderer 可以往那里落文件）。
@@ -322,9 +346,33 @@ mod tests {
 
         let resolved = resolve_path(&traversal.to_string_lossy(), PathAccess::Read)
             .expect("含 .. 的已存在路径应可解析");
-        assert_eq!(resolved, nested.canonicalize().expect("目录可解析"));
+        assert_eq!(
+            resolved,
+            simplify_verbatim(nested.canonicalize().expect("目录可解析")),
+        );
 
         std::fs::remove_dir_all(&nested).ok();
+    }
+
+    /// 返回给前端的路径不能带 `\\?\`：前端靠前缀比较判断文件是否在项目目录内，
+    /// 带前缀会让改名同步、分组搬运、相对路径索引全部静默失效。
+    #[test]
+    fn resolved_paths_never_keep_the_verbatim_prefix() {
+        let dir = std::env::temp_dir();
+        let existing = resolve_path(&dir.to_string_lossy(), PathAccess::Read).expect("临时目录可解析");
+        let missing = resolve_path(
+            &dir.join("ai-canvas-verbatim-probe.bin").to_string_lossy(),
+            PathAccess::Write,
+        )
+        .expect("父目录存在时应可解析");
+
+        for path in [existing, missing] {
+            assert!(
+                !path.to_string_lossy().starts_with(r"\\?\"),
+                "路径仍带 verbatim 前缀: {}",
+                path.display(),
+            );
+        }
     }
 
     #[test]

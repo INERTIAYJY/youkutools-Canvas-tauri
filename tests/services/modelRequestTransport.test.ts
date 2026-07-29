@@ -9,6 +9,7 @@ vi.mock('../../src/services/ai/httpTransport', () => transportMocks);
 import { streamAssistantReply } from '../../src/services/ai/assistantStream';
 import { generateImagesBatch } from '../../src/services/ai/generateImage';
 import { generateText } from '../../src/services/ai/generateText';
+import { parseResponseError } from '../../src/services/ai/httpUtils';
 import { resolveImageDataUrlArray } from '../../src/services/ai/imageUtils';
 import { generateImageStandard } from '../../src/services/ai/providers/standardImage';
 import { useAppStore } from '../../src/store/useAppStore';
@@ -26,6 +27,28 @@ beforeEach(() => {
 });
 
 describe('model request transport boundary', () => {
+  it('adds actionable guidance to ambiguous API Key errors', async () => {
+    const response = new Response(JSON.stringify({
+      error: { message: 'apikey error' },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+
+    await expect(parseResponseError(response, '图片生成失败 (400)')).rejects.toThrow(
+      'apikey error（请确认使用模型 API Key，而非账户令牌；若密钥正确，请检查账户权限和积分余额）',
+    );
+  });
+
+  it('reads the top-level error string used by the new GRSAI generation API', async () => {
+    const response = new Response(JSON.stringify({
+      id: '',
+      status: 'failed',
+      error: 'insufficient credits',
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+
+    await expect(parseResponseError(response, '图片生成失败 (400)')).rejects.toThrow(
+      'insufficient credits',
+    );
+  });
+
   it('routes ordinary text generation through the shared transport', async () => {
     useAppStore.setState((state) => ({
       config: {

@@ -217,12 +217,12 @@ function CharacterNodeCaptureDialog({
   );
   const [scope, setScope] = useState<CharacterLibraryScope>(initialScope ?? 'project');
   const [targetMode, setTargetMode] = useState<'existing' | 'new'>(
-    initialCharacterId || projectCharacters.length > 0 ? 'existing' : 'new',
+    initialCharacterId ? 'existing' : 'new',
   );
   const [selectedCharacterId, setSelectedCharacterId] = useState(
     initialCharacterId ?? projectCharacters[0]?.id ?? '',
   );
-  const [name, setName] = useState('');
+  const [name, setName] = useState(sourceNode?.data.label || '');
   const [identity, setIdentity] = useState('');
   const [summary, setSummary] = useState('');
   const [kind, setKind] = useState<CharacterReferenceKind>('primary');
@@ -244,7 +244,9 @@ function CharacterNodeCaptureDialog({
     const nextCharacters = nextScope === 'project' ? projectCharacters : globalCharacters;
     setScope(nextScope);
     setSelectedCharacterId(nextCharacters[0]?.id ?? '');
-    setTargetMode(nextCharacters.length > 0 ? 'existing' : 'new');
+    setTargetMode((currentMode) => (
+      currentMode === 'existing' && nextCharacters.length === 0 ? 'new' : currentMode
+    ));
   };
 
   const handleCapture = async () => {
@@ -349,21 +351,21 @@ function CharacterNodeCaptureDialog({
               <button
                 type="button"
                 role="tab"
+                aria-selected={targetMode === 'new'}
+                className={targetMode === 'new' ? 'is-active' : ''}
+                onClick={() => setTargetMode('new')}
+              >
+                新建角色
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={targetMode === 'existing'}
                 className={targetMode === 'existing' ? 'is-active' : ''}
                 disabled={characters.length === 0}
                 onClick={() => setTargetMode('existing')}
               >
                 已有角色
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={targetMode === 'new'}
-                className={targetMode === 'new' ? 'is-active' : ''}
-                onClick={() => setTargetMode('new')}
-              >
-                新建角色
               </button>
             </div>
           </div>

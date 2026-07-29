@@ -30,7 +30,7 @@ import {
 } from './indexedDbService';
 import { exists } from '@tauri-apps/plugin-fs';
 import type { BaseNodeData, ProjectSettings, StoryboardCellOverride } from '../types';
-import { getAssetUrlFromPath, getProjectDataDir, joinPath } from './fs/core';
+import { getAssetUrlFromPath, getProjectDataDir, joinPath, stripVerbatimPrefix } from './fs/core';
 import { walkDirectoryFiles } from './fs/assetLibrary';
 import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
 import { normalizeDramaAssetLibrary } from '../types/dramaAssets';
@@ -87,7 +87,8 @@ async function restoreAssetReference<T extends BaseNodeData | StoryboardCellOver
   projectId: string,
   projectDir: string,
 ): Promise<T> {
-  let filePath = data.relativePath ? joinPath(projectDir, data.relativePath) : data.filePath;
+  const storedPath = data.filePath ? stripVerbatimPrefix(data.filePath) : undefined;
+  let filePath = data.relativePath ? joinPath(projectDir, data.relativePath) : storedPath;
   if (filePath && !(await exists(filePath).catch(() => false))) filePath = undefined;
   if (!filePath && data.assetId) {
     filePath = await resolveIndexedAssetPath(data.assetId).catch(() => null) ?? undefined;

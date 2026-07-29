@@ -10,7 +10,8 @@ export const APIMART_BASE_URL = 'https://api.apib.ai/v1';
 export const VOLCENGINE_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3';
 
 /** GRSAI */
-export const GRSAI_BASE_URL = 'https://api.grsai.com';
+export const GRSAI_LEGACY_BASE_URL = 'https://api.grsai.com';
+export const GRSAI_BASE_URL = `${GRSAI_LEGACY_BASE_URL}/v1`;
 
 /** 即梦 Dreamina */
 export const DREAMINA_BASE_URL = 'https://api.dreamina.com';

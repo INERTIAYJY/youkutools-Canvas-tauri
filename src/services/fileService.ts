@@ -16,6 +16,7 @@ import {
   arrayBufferToBase64,
   sanitizeFileName,
   sanitizeFolderName,
+  stripVerbatimPrefix,
   joinPath,
   getConvertFileSrc,
   ensureProjectDataDir,
@@ -526,7 +527,7 @@ export async function renameProjectFileToLabel(
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return null;
 
-  const normPath = filePath.replace(/\\/g, '/');
+  const normPath = stripVerbatimPrefix(filePath).replace(/\\/g, '/');
   const normDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
   // 只重命名项目目录内的文件，外部引用文件保持不动
   if (!normPath.startsWith(`${normDir}/`)) return null;
@@ -543,7 +544,9 @@ export async function renameProjectFileToLabel(
   if (newName === oldName) return null; // 名称未变化
 
   try {
-    const destPath = await resolveUniqueDestPath(projectDir, newName);
+    // 就地改名：分组内的文件留在自己的子文件夹，否则会被搬回项目根目录
+    const currentDir = normPath.slice(0, normPath.length - oldName.length - 1);
+    const destPath = await resolveUniqueDestPath(currentDir, newName);
     await rename(filePath, destPath);
     notifyProjectDiskChanged();
     const convertFileSrc = await getConvertFileSrc();

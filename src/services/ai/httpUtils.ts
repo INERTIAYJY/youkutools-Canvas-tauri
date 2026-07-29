@@ -7,7 +7,7 @@
 /**
  * 解析 fetch 响应的错误信息并抛出。
  *
- * 统一处理 `!response.ok` 场景：优先取 JSON 中的 `error.message`，
+ * 统一处理 `!response.ok` 场景：优先读取常见 JSON 错误字段，
  * 否则截取原始响应文本（最多 200 字符）追加到默认消息后。
  *
  * @param response  fetch 返回的 Response 对象
@@ -18,10 +18,26 @@ export async function parseResponseError(response: Response, defaultMsg: string)
   const errorBody = await response.text().catch(() => '');
   let errorMsg = defaultMsg;
   try {
-    const err = JSON.parse(errorBody);
-    errorMsg = err.error?.message || errorMsg;
+    const payload = JSON.parse(errorBody) as unknown;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const record = payload as Record<string, unknown>;
+      const error = record.error;
+      if (typeof error === 'string' && error.trim()) {
+        errorMsg = error.trim();
+      } else if (error && typeof error === 'object' && !Array.isArray(error)) {
+        const message = (error as Record<string, unknown>).message;
+        if (typeof message === 'string' && message.trim()) errorMsg = message.trim();
+      } else if (typeof record.message === 'string' && record.message.trim()) {
+        errorMsg = record.message.trim();
+      } else if (typeof record.msg === 'string' && record.msg.trim()) {
+        errorMsg = record.msg.trim();
+      }
+    }
   } catch {
     if (errorBody) errorMsg += `: ${errorBody.slice(0, 200)}`;
+  }
+  if (/\bapi[\s_-]*key\b/i.test(errorMsg)) {
+    errorMsg += '（请确认使用模型 API Key，而非账户令牌；若密钥正确，请检查账户权限和积分余额）';
   }
   throw new Error(errorMsg);
 }

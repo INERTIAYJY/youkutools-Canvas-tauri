@@ -38,7 +38,7 @@ const PROVIDER_LINKS: Record<string, string> = {
   apimart: 'https://apimart.ai/register?aff=ZnmCKm',
   volcengine: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
   'runninghub-model': 'https://www.runninghub.cn?inviteCode=iadc40jt',
-  grsai: 'https://grsai.com/zh/dashboard/user-info',
+  grsai: 'https://grsai.com/zh/dashboard/api-keys',
   dreamina: 'https://www.dreamina.com',
   tavily: 'https://app.tavily.com',
   bocha: 'https://open.bochaai.com/dashboard',
@@ -618,7 +618,7 @@ export default function ProviderConnectionDialog({
                   onClick={() => void openExternal(PROVIDER_LINKS[definition.id])}
                 >
                   <Icon icon="mdi:open-in-new" width="13" />
-                  前往厂商控制台
+                  {definition.id === 'grsai' ? '前往 API Key 页面' : '前往厂商控制台'}
                 </button>
               )}
 

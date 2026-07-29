@@ -138,6 +138,36 @@ describe('config hydration guard', () => {
     expect(saved?.generalModels?.[0]).toEqual(model);
   });
 
+  it('migrates the legacy GRSAI default URL without changing custom endpoints', async () => {
+    fileMocks.loadConfig.mockResolvedValue({
+      providers: {
+        grsai: {
+          name: 'GRSAI',
+          apiKey: 'grsai-secret',
+          baseUrl: 'https://api.grsai.com/',
+          catalogId: 'grsai',
+        },
+        'grsai-custom': {
+          name: 'GRSAI Custom',
+          apiKey: 'custom-secret',
+          baseUrl: 'https://gateway.example/grsai',
+          catalogId: 'grsai',
+        },
+      },
+      theme: 'dark',
+      generalModels: [],
+    });
+
+    await useAppStore.getState().loadConfig();
+
+    expect(useAppStore.getState().config.providers.grsai.baseUrl).toBe(
+      'https://api.grsai.com/v1',
+    );
+    expect(useAppStore.getState().config.providers['grsai-custom'].baseUrl).toBe(
+      'https://gateway.example/grsai',
+    );
+  });
+
   it('syncs custom provider models without copying credentials or addresses', () => {
     useAppStore.getState().saveProviderConfig('custom-current', {
       name: '当前连接',

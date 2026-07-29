@@ -50,7 +50,7 @@ export function SubAgentProfileList({
       {profiles.map((profile) => (
         <div
           key={profile.id}
-          className="rounded-lg border border-canvas-border bg-white/[0.02] p-3"
+          className="rounded-lg border border-canvas-border bg-canvas-card p-3"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
@@ -94,7 +94,7 @@ export function SubAgentProfileList({
                   </AnimatedButton>
                   <AnimatedButton
                     onClick={() => onDelete(profile)}
-                    className="rounded p-1.5 text-canvas-text-muted hover:bg-red-500/15 hover:text-red-400"
+                    className="rounded p-1.5 text-canvas-text-muted hover:bg-red-500/10 hover:text-red-500"
                     title="删除"
                     aria-label={`删除 ${profile.name}`}
                   >
@@ -211,7 +211,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
             : <h3 className="text-sm font-medium text-canvas-text">子智能体</h3>}
           <AnimatedButton
             onClick={startCreate}
-            className="flex items-center gap-1.5 rounded-lg bg-indigo-500/15 px-3 py-1.5 text-xs text-indigo-400 hover:bg-indigo-500/25"
+            className="flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-light"
           >
             <Icon icon="mdi:plus" width="14" />
             新建
@@ -231,7 +231,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
       />
 
       {draft && (
-        <div className="space-y-3 rounded-lg border border-indigo-400/25 bg-indigo-500/[0.04] p-3">
+        <div className="space-y-3 rounded-lg border border-brand/30 bg-canvas-card p-3">
           <h4 className="text-xs font-medium text-canvas-text">
             {editingId === 'new' ? '新建子智能体' : '编辑子智能体'}
           </h4>
@@ -243,7 +243,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
               maxLength={SUB_AGENT_LIMITS.nameChars}
               placeholder="例如：台词润色师"
-              className="w-full rounded-md border border-canvas-border bg-canvas-bg px-2.5 py-1.5 text-xs text-canvas-text"
+              className="w-full rounded-md border border-canvas-border bg-canvas-surface px-2.5 py-1.5 text-xs text-canvas-text"
             />
           </label>
 
@@ -256,7 +256,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
               onChange={(e) => setDraft({ ...draft, description: e.target.value })}
               maxLength={SUB_AGENT_LIMITS.descriptionChars}
               placeholder="例如：需要把书面台词改得更口语时"
-              className="w-full rounded-md border border-canvas-border bg-canvas-bg px-2.5 py-1.5 text-xs text-canvas-text"
+              className="w-full rounded-md border border-canvas-border bg-canvas-surface px-2.5 py-1.5 text-xs text-canvas-text"
             />
           </label>
 
@@ -265,7 +265,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
             <select
               value={draft.skillId ?? ''}
               onChange={(e) => setDraft({ ...draft, skillId: e.target.value || undefined })}
-              className="w-full rounded-md border border-canvas-border bg-canvas-bg px-2.5 py-1.5 text-xs text-canvas-text"
+              className="w-full rounded-md border border-canvas-border bg-canvas-surface px-2.5 py-1.5 text-xs text-canvas-text"
             >
               <option value="">不绑定，使用下方提示词</option>
               {userSkills.map((skill) => (
@@ -284,7 +284,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
               maxLength={SUB_AGENT_LIMITS.instructionsChars}
               rows={5}
               placeholder="描述这个角色的分析框架和输出格式"
-              className="w-full resize-y rounded-md border border-canvas-border bg-canvas-bg px-2.5 py-1.5 text-xs text-canvas-text"
+              className="w-full resize-y rounded-md border border-canvas-border bg-canvas-surface px-2.5 py-1.5 text-xs text-canvas-text"
             />
           </label>
 
@@ -297,7 +297,7 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
                   onClick={() => toggleMaterial(material)}
                   className={`rounded-md px-2.5 py-1.5 text-[11px] transition-colors ${
                     draft.materials.includes(material)
-                      ? 'bg-indigo-500/20 text-indigo-300'
+                      ? 'bg-brand text-white'
                       : 'bg-canvas-hover text-canvas-text-muted'
                   }`}
                 >
@@ -322,16 +322,16 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
               max={SUB_AGENT_LIMITS.maxRounds}
               value={draft.maxRounds}
               onChange={(e) => setDraft({ ...draft, maxRounds: Number(e.target.value) })}
-              className="w-24 rounded-md border border-canvas-border bg-canvas-bg px-2.5 py-1.5 text-xs text-canvas-text"
+              className="w-24 rounded-md border border-canvas-border bg-canvas-surface px-2.5 py-1.5 text-xs text-canvas-text"
             />
           </label>
 
-          {error && <p className="text-[11px] text-red-400">{error}</p>}
+          {error && <p className="text-[11px] text-red-500">{error}</p>}
 
           <div className="flex items-center gap-2">
             <AnimatedButton
               onClick={() => void handleSave()}
-              className="rounded-lg bg-indigo-500/20 px-3 py-1.5 text-xs text-indigo-300 hover:bg-indigo-500/30"
+              className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-light"
             >
               保存
             </AnimatedButton>

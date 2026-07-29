@@ -10,7 +10,11 @@ import type {
   GeneralModelConfig,
   ProjectSettings,
 } from '../types';
-import { GRSAI_BASE_URL, GRSAI_LEGACY_BASE_URL } from '../constants/api';
+import {
+  GRSAI_BASE_URL,
+  GRSAI_GLOBAL_BASE_URL,
+  GRSAI_LEGACY_BASE_URL,
+} from '../constants/api';
 import * as fileService from '../services/fileService';
 import { setBaseDataDir, syncAuthorizedDirectories } from '../services/fileService';
 import { deleteProviderSecret } from '../services/providerSecretService';
@@ -238,7 +242,10 @@ function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
     Object.entries(config.providers).map(([providerId, provider]) => {
       const normalizedBaseUrl = provider.baseUrl?.trim().replace(/\/+$/, '');
       const isGrsai = providerId === 'grsai' || provider.catalogId === 'grsai';
-      if (!isGrsai || normalizedBaseUrl !== GRSAI_LEGACY_BASE_URL) {
+      const isLegacyGrsaiUrl = normalizedBaseUrl === GRSAI_LEGACY_BASE_URL
+        || normalizedBaseUrl === `${GRSAI_LEGACY_BASE_URL}/v1`
+        || normalizedBaseUrl === GRSAI_GLOBAL_BASE_URL;
+      if (!isGrsai || !isLegacyGrsaiUrl) {
         return [providerId, provider];
       }
       providerUrlsChanged = true;

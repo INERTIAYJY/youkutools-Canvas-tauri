@@ -124,7 +124,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
     id: 'grsai',
     name: 'GRSAI',
-    description: '图像生成模型服务',
+    description: '图像生成与多模态文本模型服务',
     badgeText: 'GR',
     authType: 'api-key',
     catalogAdapter: 'local-manifest',

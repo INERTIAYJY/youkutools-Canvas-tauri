@@ -184,10 +184,13 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
   async generateVideo({ params, prompt, resolveReferenceInput, signal }) {
     const { apiKey, baseUrl } = resolveApimartConnection();
     const modelName = extractModelName(params.model, params.provider);
+    const referenceInput = await resolveReferenceInput();
     if (!isApimartSeedanceModel(modelName)) {
+      if (referenceInput.operation === 'video-to-video') {
+        throw new Error(`APIMart 视频模型 "${modelName}" 暂不支持视频到视频生成`);
+      }
       return generateApimartVideo(apiKey, baseUrl, modelName, prompt, params.nodeId, {}, signal);
     }
-    const referenceInput = await resolveReferenceInput();
     if (
       !referenceInput.prompt.trim()
       && referenceInput.imageUrls.length === 0
@@ -206,6 +209,7 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       imageUrls,
       videoUrls: referenceInput.videoUrls,
       audioUrls: referenceInput.audioUrls,
+      operation: referenceInput.operation,
     }, signal);
   },
 

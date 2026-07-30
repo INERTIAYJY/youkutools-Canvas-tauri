@@ -6,7 +6,11 @@ import { DEFAULT_BASE_URLS } from '../../constants/api';
 import { resolveNodeReferences } from '../nodeReferenceService';
 import { generateDreaminaVideo } from '../dreaminaService';
 import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
-import type { AIVideoGenParams } from '../../types/aiTypes';
+import type {
+  AIVideoGenParams,
+  VideoGenerationOperation,
+  VideoGenerationReferenceInput,
+} from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { collectPromptNodeMediaUrls, resolvePromptWithMediaRefs } from './promptResolver';
 import { collectConnectedReferenceMedia, mergeUniqueUrls } from './connectedReferenceMedia';
@@ -20,31 +24,45 @@ import { savePendingTask, updatePendingTask, removePendingTask, registerNodePoll
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
 
-interface VideoReferenceInput {
-  prompt: string;
-  imageUrls: string[];
-  videoUrls: string[];
-  audioUrls: string[];
+export function resolveVideoGenerationOperation(
+  imageUrls: readonly string[],
+  videoUrls: readonly string[],
+): VideoGenerationOperation {
+  if (videoUrls.length > 0) return 'video-to-video';
+  if (imageUrls.length > 0) return 'image-to-video';
+  return 'text-to-video';
 }
 
 async function resolveVideoReferenceInput(
   rawPrompt: string,
   nodeId: string | undefined,
-): Promise<VideoReferenceInput> {
+): Promise<VideoGenerationReferenceInput> {
   const promptInput = await resolvePromptWithMediaRefs(rawPrompt);
   const connected = collectConnectedReferenceMedia(nodeId);
+  const imageUrls = mergeUniqueUrls(promptInput.imageUrls, connected.imageUrls);
+  const videoUrls = mergeUniqueUrls(promptInput.videoUrls, connected.videoUrls);
   return {
     prompt: promptInput.prompt,
-    imageUrls: mergeUniqueUrls(promptInput.imageUrls, connected.imageUrls),
-    videoUrls: mergeUniqueUrls(promptInput.videoUrls, connected.videoUrls),
+    imageUrls,
+    videoUrls,
     audioUrls: mergeUniqueUrls(promptInput.audioUrls, connected.audioUrls),
+    operation: resolveVideoGenerationOperation(imageUrls, videoUrls),
   };
+}
+
+function assertVideoOperationSupported(
+  referenceInput: VideoGenerationReferenceInput,
+  target: string,
+): void {
+  if (referenceInput.operation === 'video-to-video') {
+    throw new Error(`${target} 暂不支持视频到视频生成，请选择支持该能力的模型`);
+  }
 }
 
 export function buildGeneralVideoProtocolVariables(
   modelId: string,
   params: AIVideoGenParams,
-  referenceInput: VideoReferenceInput,
+  referenceInput: VideoGenerationReferenceInput,
 ): ModelProtocolVariables {
   const frames = params.videoFrames ?? 121;
   const videoResolution = params.videoResolution ?? 1152;
@@ -77,6 +95,7 @@ export function buildGeneralVideoProtocolVariables(
     seedanceRatio: aspectRatio,
     seedanceDuration: duration,
     generateAudio: params.generateAudio ?? false,
+    videoOperation: referenceInput.operation,
     imageUrls: referenceInput.imageUrls,
     firstImage,
     lastImage,
@@ -105,6 +124,10 @@ export async function generateVideo(
   if (params.workflowId) {
     const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
     const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
+    const videoUrls = mergeUniqueUrls(mentionedMedia.videoUrls, connectedMedia.videoUrls);
+    if (videoUrls.length > 0) {
+      throw new Error('ComfyUI 视频工作流暂未接入视频 IO，请移除视频引用或改用支持视频到视频的模型');
+    }
     return executeComfyUIVideoGenerate(
       { ...params, prompt },
       signal,
@@ -127,6 +150,7 @@ export async function generateVideo(
   // 即梦视频：无参考图 → text2video；有参考图 → image2video
   if (provider === 'dreamina') {
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    assertVideoOperationSupported(referenceInput, '即梦视频模型');
     const dreaminaPrompt = referenceInput.prompt;
     if (!dreaminaPrompt.trim()) throw new Error('提示词不能为空');
     return generateDreaminaVideo({
@@ -154,6 +178,7 @@ export async function generateVideo(
     }
     const modelName = extractModelName(model, provider);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    assertVideoOperationSupported(referenceInput, '火山方舟当前视频接口');
     const resolvedPrompt = referenceInput.prompt;
     const mergedImageUrls = referenceInput.imageUrls;
     if (!resolvedPrompt.trim() && mergedImageUrls.length === 0) {
@@ -178,8 +203,8 @@ export async function generateVideo(
     const connection = resolveGeneralModelConnection(model);
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
     if (gm.executionProfile) {
-      const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
       const remoteImageUrls = await resolveImageUrlArray(
         referenceInput.imageUrls,
         connection.providerConfigId,
@@ -198,11 +223,12 @@ export async function generateVideo(
       if (!url) throw new Error('视频生成完成但未返回结果');
       return { url };
     }
+    assertVideoOperationSupported(referenceInput, '该通用模型的旧版视频协议');
     return executeGeneralAsyncTask(
       connection.apiKey,
       connection.baseUrl,
       gm.modelId,
-      prompt,
+      referenceInput.prompt,
       'videos',
       connection.providerConfigId,
       params.nodeId,

@@ -50,6 +50,7 @@ const ALLOWED_VARIABLE_ROOTS = new Set([
   'seedanceRatio',
   'seedanceDuration',
   'generateAudio',
+  'videoOperation',
   'imageUrls',
   'firstImage',
   'lastImage',

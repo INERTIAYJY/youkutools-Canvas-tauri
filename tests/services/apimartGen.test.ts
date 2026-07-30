@@ -194,6 +194,7 @@ describe('APIMart video polling', () => {
         imageUrls: ['asset://localhost/reference.png'],
         videoUrls: ['https://cdn.example/reference.mp4'],
         audioUrls: ['https://cdn.example/reference.mp3'],
+        operation: 'video-to-video',
       }),
     })).rejects.toThrow('APIMart 视频生成失败: 参考图片无法访问');
 
@@ -227,6 +228,14 @@ describe('APIMart video polling', () => {
       'prompt',
       { audioUrls: ['1.mp3', '2.mp3', '3.mp3', '4.mp3'] },
     )).toThrow('最多支持 3 个参考音频');
+  });
+
+  it('rejects video-to-video for Seedance generations without that capability', () => {
+    expect(() => buildApimartSeedanceRequest(
+      'doubao-seedance-1-5-pro',
+      'prompt',
+      { videoUrls: ['reference.mp4'], operation: 'video-to-video' },
+    )).toThrow('不支持 video-to-video');
   });
 });
 

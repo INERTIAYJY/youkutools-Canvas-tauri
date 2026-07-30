@@ -161,6 +161,9 @@ describe('MediaProviderRegistry', () => {
       resolveReferenceInput: vi.fn().mockResolvedValue({
         prompt: 'reference-resolved prompt',
         imageUrls: ['https://cdn.example/reference.png'],
+        videoUrls: [],
+        audioUrls: [],
+        operation: 'image-to-video',
       }),
       signal,
     });
@@ -177,13 +180,22 @@ describe('MediaProviderRegistry', () => {
         duration: 8,
         generateAudio: true,
         imageUrls: ['https://cdn.example/reference.png'],
+        videoUrls: [],
+        audioUrls: [],
+        operation: 'image-to-video',
       },
       signal,
     );
   });
 
-  it('does not resolve reference images for legacy APIMart video models', async () => {
-    const resolveReferenceInput = vi.fn();
+  it('keeps legacy APIMart video generation for requests without video references', async () => {
+    const resolveReferenceInput = vi.fn().mockResolvedValue({
+      prompt: 'node-resolved prompt',
+      imageUrls: [],
+      videoUrls: [],
+      audioUrls: [],
+      operation: 'text-to-video',
+    });
     const adapter = mediaProviderRegistry.getVideoAdapter('apimart');
 
     await adapter?.generateVideo({
@@ -196,7 +208,7 @@ describe('MediaProviderRegistry', () => {
       resolveReferenceInput,
     });
 
-    expect(resolveReferenceInput).not.toHaveBeenCalled();
+    expect(resolveReferenceInput).toHaveBeenCalledOnce();
     expect(mocks.generateApimartVideo).toHaveBeenCalledWith(
       'secret',
       'https://api.example',
@@ -206,6 +218,28 @@ describe('MediaProviderRegistry', () => {
       {},
       undefined,
     );
+  });
+
+  it('rejects video references before submitting a legacy APIMart request', async () => {
+    const adapter = mediaProviderRegistry.getVideoAdapter('apimart');
+
+    await expect(adapter?.generateVideo({
+      params: {
+        prompt: 'restyle this clip',
+        model: 'apimart/legacy-video-model',
+        provider: 'apimart',
+      },
+      prompt: 'restyle this clip',
+      resolveReferenceInput: vi.fn().mockResolvedValue({
+        prompt: 'restyle this clip',
+        imageUrls: [],
+        videoUrls: ['https://cdn.example/reference.mp4'],
+        audioUrls: [],
+        operation: 'video-to-video',
+      }),
+    })).rejects.toThrow('暂不支持视频到视频生成');
+
+    expect(mocks.generateApimartVideo).not.toHaveBeenCalled();
   });
 
   it('routes APIMart speech models through the registered audio capability', async () => {

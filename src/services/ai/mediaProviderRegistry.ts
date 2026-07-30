@@ -7,6 +7,7 @@ import type {
   AIVideoGenParams,
   AudioGenerationResult,
   BatchImageResult,
+  VideoGenerationReferenceInput,
 } from '../../types/aiTypes';
 import { apimartMediaProviderAdapter } from './providers/apimartMedia';
 
@@ -23,12 +24,7 @@ export interface ImageProviderRequest {
 export interface VideoProviderRequest {
   params: AIVideoGenParams;
   prompt: string;
-  resolveReferenceInput: () => Promise<{
-    prompt: string;
-    imageUrls: string[];
-    videoUrls: string[];
-    audioUrls: string[];
-  }>;
+  resolveReferenceInput: () => Promise<VideoGenerationReferenceInput>;
   signal?: AbortSignal;
 }
 

@@ -241,6 +241,36 @@ describe('declarative model execution protocol', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('renders video-to-video operation semantics into a custom request', () => {
+    const protocol: ModelExecutionProtocol = {
+      version: 1,
+      mode: 'sync',
+      submit: {
+        method: 'POST',
+        path: '/videos',
+        body: {
+          operation: '{{videoOperation}}',
+          video_urls: '{{videoUrls}}',
+        },
+      },
+      resultUrlPath: 'data.url',
+    };
+
+    const preview = previewModelProtocolRequest({
+      baseUrl: 'https://preview.invalid/v1',
+      protocol,
+      variables: {
+        videoOperation: 'video-to-video',
+        videoUrls: ['https://cdn.example/reference.mp4'],
+      },
+    });
+
+    expect(preview.body).toEqual({
+      operation: 'video-to-video',
+      video_urls: ['https://cdn.example/reference.mp4'],
+    });
+  });
+
   it('normalizes arbitrary video frame counts to 8 * n + 1', () => {
     expect(normalizeFrames8n1(77)).toBe(81);
     expect(normalizeFrames8n1(121)).toBe(121);

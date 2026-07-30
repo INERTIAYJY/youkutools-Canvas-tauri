@@ -1,6 +1,8 @@
 /**
  * 声明 APIMart Seedance 视频模型能力表，并将通用生成参数映射为各模型请求字段。
  */
+import type { VideoGenerationOperation } from '../../types/aiTypes';
+
 export type ApimartSeedanceRatioField = 'aspect_ratio' | 'size';
 export type ApimartSeedanceAudioField = 'audio' | 'generate_audio';
 
@@ -16,6 +18,7 @@ export interface ApimartSeedanceCapability {
   defaultDuration: number;
   audioField?: ApimartSeedanceAudioField;
   defaultAudio?: boolean;
+  operations: readonly VideoGenerationOperation[];
   maxImageReferences: number;
   maxVideoReferences?: number;
   maxAudioReferences?: number;
@@ -29,6 +32,7 @@ export interface ApimartSeedanceRequestParams {
   imageUrls?: string[];
   videoUrls?: string[];
   audioUrls?: string[];
+  operation?: VideoGenerationOperation;
 }
 
 const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
@@ -46,6 +50,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     minDuration: 2,
     maxDuration: 12,
     defaultDuration: 5,
+    operations: ['text-to-video', 'image-to-video'],
     maxImageReferences: 9,
   },
   'doubao-seedance-1-0-pro-quality': {
@@ -58,6 +63,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     minDuration: 2,
     maxDuration: 12,
     defaultDuration: 5,
+    operations: ['text-to-video', 'image-to-video'],
     maxImageReferences: 9,
   },
   'doubao-seedance-1-5-pro': {
@@ -72,6 +78,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     defaultDuration: 5,
     audioField: 'audio',
     defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video'],
     maxImageReferences: 9,
   },
   'doubao-seedance-2.0': {
@@ -86,6 +93,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     defaultDuration: 5,
     audioField: 'generate_audio',
     defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
     maxImageReferences: 9,
     maxVideoReferences: 3,
     maxAudioReferences: 3,
@@ -102,6 +110,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     defaultDuration: 5,
     audioField: 'generate_audio',
     defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
     maxImageReferences: 9,
     maxVideoReferences: 3,
     maxAudioReferences: 3,
@@ -118,6 +127,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     defaultDuration: 5,
     audioField: 'generate_audio',
     defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
     maxImageReferences: 9,
     maxVideoReferences: 3,
     maxAudioReferences: 3,
@@ -149,6 +159,13 @@ export function buildApimartSeedanceRequest(
   const imageUrls = (params.imageUrls ?? []).filter(Boolean);
   const videoUrls = (params.videoUrls ?? []).filter(Boolean);
   const audioUrls = (params.audioUrls ?? []).filter(Boolean);
+  const operation = params.operation
+    ?? (videoUrls.length > 0
+      ? 'video-to-video'
+      : imageUrls.length > 0 ? 'image-to-video' : 'text-to-video');
+  if (!capability.operations.includes(operation)) {
+    throw new Error(`APIMart ${model} 不支持 ${operation}`);
+  }
   if (imageUrls.length > capability.maxImageReferences) {
     throw new Error(`APIMart ${model} 最多支持 ${capability.maxImageReferences} 张参考图`);
   }

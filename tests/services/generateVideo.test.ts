@@ -1,6 +1,10 @@
 import type { Node } from '@xyflow/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildGeneralVideoProtocolVariables, generateVideo } from '../../src/services/ai/generateVideo';
+import {
+  buildGeneralVideoProtocolVariables,
+  generateVideo,
+  resolveVideoGenerationOperation,
+} from '../../src/services/ai/generateVideo';
 import { resolvePromptWithImageRefs, resolvePromptWithMediaRefs } from '../../src/services/ai/promptResolver';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { BaseNodeData } from '../../src/types';
@@ -99,6 +103,12 @@ describe('video prompt media references', () => {
 });
 
 describe('general video protocol variables', () => {
+  it('derives the operation from the strongest referenced visual input', () => {
+    expect(resolveVideoGenerationOperation([], [])).toBe('text-to-video');
+    expect(resolveVideoGenerationOperation(['first.png'], [])).toBe('image-to-video');
+    expect(resolveVideoGenerationOperation(['first.png'], ['reference.mp4'])).toBe('video-to-video');
+  });
+
   it('maps duration controls and reference media to stable custom-protocol aliases', () => {
     const variables = buildGeneralVideoProtocolVariables(
       'doubao-seedance-2-0-260128',
@@ -119,6 +129,7 @@ describe('general video protocol variables', () => {
         imageUrls: ['https://cdn.example/first.png', 'https://cdn.example/last.png'],
         videoUrls: ['https://cdn.example/reference.mp4'],
         audioUrls: ['https://cdn.example/reference.mp3'],
+        operation: 'video-to-video',
       },
     );
 
@@ -136,6 +147,7 @@ describe('general video protocol variables', () => {
       resolution: '720p',
       seedanceResolution: '720p',
       generateAudio: true,
+      videoOperation: 'video-to-video',
       firstImage: 'https://cdn.example/first.png',
       lastImage: 'https://cdn.example/last.png',
       referenceImageUrls: ['https://cdn.example/first.png', 'https://cdn.example/last.png'],
@@ -155,6 +167,7 @@ describe('general video protocol variables', () => {
         imageUrls: ['https://cdn.example/only.png'],
         videoUrls: [],
         audioUrls: [],
+        operation: 'image-to-video',
       },
     );
 
@@ -166,6 +179,7 @@ describe('general video protocol variables', () => {
       videoFps: 24,
       firstImage: 'https://cdn.example/only.png',
       generateAudio: false,
+      videoOperation: 'image-to-video',
     });
     expect(variables.lastImage).toBeUndefined();
   });

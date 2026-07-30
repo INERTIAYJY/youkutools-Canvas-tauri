@@ -208,6 +208,19 @@ export interface BatchImageResult {
   failedCount: number;
 }
 
+export type VideoGenerationOperation =
+  | 'text-to-video'
+  | 'image-to-video'
+  | 'video-to-video';
+
+export interface VideoGenerationReferenceInput {
+  prompt: string;
+  imageUrls: string[];
+  videoUrls: string[];
+  audioUrls: string[];
+  operation: VideoGenerationOperation;
+}
+
 export interface AIVideoGenParams {
   prompt: string;
   model: string;

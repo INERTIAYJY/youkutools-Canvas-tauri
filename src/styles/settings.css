@@ -548,8 +548,8 @@
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
+  gap: 10px;
+  padding: 9px 10px;
   background: var(--theme-card);
   border: 1px solid var(--theme-border);
   border-radius: 10px;
@@ -572,9 +572,9 @@
 .sidebar-pref-window {
   position: relative;
   flex-shrink: 0;
-  width: 104px;
-  height: 64px;
-  border-radius: 9px;
+  width: 88px;
+  height: 52px;
+  border-radius: 8px;
   border: 1px solid var(--theme-border);
   background: var(--theme-surface);
   box-shadow: inset 0 0 0 1px var(--white-alpha-03);
@@ -588,12 +588,12 @@
 /* 画布内容（几条占位线，靠右） */
 .sidebar-pref-content {
   position: absolute;
-  left: 28px;
-  right: 12px;
-  top: 14px;
+  left: 24px;
+  right: 10px;
+  top: 11px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 .sidebar-pref-content span {
   height: 4px;
@@ -608,9 +608,9 @@
 .sidebar-pref-bar {
   position: absolute;
   top: 50%;
-  left: 8px;
+  left: 7px;
   transform: translateY(-50%);
-  width: 10px;
+  width: 9px;
   height: 62%;
   border-radius: 5px;
   background: linear-gradient(180deg, var(--brand-light), var(--brand));

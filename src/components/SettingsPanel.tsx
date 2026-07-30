@@ -494,10 +494,10 @@ export default function SettingsPanel() {
             )}
 
             {activeTab === 'comfyui' && (
-              <div className="space-y-6">
+              <div className="space-y-4">
                 {/* ComfyUI 安装目录 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">ComfyUI 安装目录</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">ComfyUI 安装目录</h3>
                   <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
                     <div className="text-xs text-canvas-text-muted mb-1.5">ComfyUI 根目录路径</div>
                     {comfyUIPath ? (
@@ -577,7 +577,7 @@ export default function SettingsPanel() {
 
                 {/* ComfyUI 服务地址 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">ComfyUI 服务地址</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">ComfyUI 服务地址</h3>
                   <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
                     <div className="text-xs text-canvas-text-muted mb-1.5">后端地址</div>
                     <input
@@ -598,7 +598,7 @@ export default function SettingsPanel() {
 
                 {/* ComfyUI 工作流 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">ComfyUI 工作流</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">ComfyUI 工作流</h3>
                   <div className="bg-canvas-card border border-canvas-border rounded-lg p-2 flex items-center gap-3">
                     <div className="w-9 h-9 rounded-lg bg-purple-500/15 text-purple-400 flex items-center justify-center shrink-0">
                       <Icon icon="lucide:workflow" width="18" height="18" />
@@ -621,10 +621,10 @@ export default function SettingsPanel() {
             )}
 
             {activeTab === 'general' && (
-              <div className="space-y-6">
+              <div className="space-y-4">
                 {/* 画布背景主题 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">画布背景</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">画布背景</h3>
                   <div className="grid grid-cols-3 gap-2">
                     {BACKGROUND_OPTIONS.map(({ value, label, theme }) => {
                       const isActive = (config.canvasBackground || 'default') === value;
@@ -648,7 +648,7 @@ export default function SettingsPanel() {
                             setBgDetection(null);
                             await saveConfig();
                           }}
-                          className={`flex flex-col items-center gap-2 p-1 rounded-lg border transition-colors ${
+                          className={`flex flex-col items-center gap-1.5 p-1 rounded-lg border transition-colors ${
                             isActive
                               ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
                               : 'border-canvas-border bg-canvas-card text-canvas-text-secondary hover:border-canvas-hover'
@@ -891,7 +891,7 @@ export default function SettingsPanel() {
 
                 {/* 节点顶部工具栏显示方式 */}
                 <section>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">节点工具栏</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">节点工具栏</h3>
                   <div
                     className="grid grid-cols-2 gap-1 rounded-lg border border-canvas-border bg-canvas-card p-1"
                     role="radiogroup"
@@ -925,7 +925,7 @@ export default function SettingsPanel() {
 
                 {/* 节点标题（node-label）是否显示 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">节点标题</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">节点标题</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -936,17 +936,17 @@ export default function SettingsPanel() {
                     className={`sidebar-pref-card${nodeLabelVisible ? ' is-floating' : ''}`}
                   >
                     {/* 迷你节点预览：顶部小标签 + 节点卡片 */}
-                    <div className="sidebar-pref-window flex items-center justify-center pt-3" aria-hidden="true">
-                      <div className="relative w-[62px]">
+                    <div className="sidebar-pref-window flex items-center justify-center pt-2" aria-hidden="true">
+                      <div className="relative w-[52px]">
                         <div
-                          className={`absolute -top-[10px] left-0 right-0 flex items-center gap-1 transition-opacity duration-200 ${
+                          className={`absolute -top-[9px] left-0 right-0 flex items-center gap-1 transition-opacity duration-200 ${
                             nodeLabelVisible ? 'opacity-100' : 'opacity-0'
                           }`}
                         >
                           <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-indigo-400/70" />
                           <span className="h-1 flex-1 rounded-full bg-canvas-border" />
                         </div>
-                        <div className="h-9 w-full rounded-[6px] border border-canvas-border bg-canvas-bg" />
+                        <div className="h-7 w-full rounded-[5px] border border-canvas-border bg-canvas-bg" />
                       </div>
                     </div>
 
@@ -967,7 +967,7 @@ export default function SettingsPanel() {
 
                 {/* 主窗口玻璃外框 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">窗口外观</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">窗口外观</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -986,7 +986,7 @@ export default function SettingsPanel() {
                           windowGlassFrame ? 'inset-[5px] rounded-[5px]' : 'inset-0 rounded-[8px]'
                         }`}
                       >
-                        <span className="h-8 w-2 shrink-0 rounded-sm bg-indigo-400/35" />
+                        <span className="h-6 w-1.5 shrink-0 rounded-sm bg-indigo-400/35" />
                         <span className="h-1 flex-1 rounded-full bg-canvas-border" />
                       </div>
                     </div>
@@ -1008,7 +1008,7 @@ export default function SettingsPanel() {
 
                 {/* 侧边栏是否悬浮显示 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">侧边栏</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">侧边栏</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -1044,10 +1044,10 @@ export default function SettingsPanel() {
             )}
 
             {activeTab === 'files' && (
-              <div className="space-y-6">
+              <div className="space-y-4">
                 {/* 文件保存位置 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">文件保存位置</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">文件保存位置</h3>
                   <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
                     {/* 保存根目录选择 */}
                     <div className="mb-3">
@@ -1137,7 +1137,7 @@ export default function SettingsPanel() {
 
                 {/* 外部编辑器路径 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-3">外部编辑器</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">外部编辑器</h3>
                   <div className="bg-canvas-card border border-canvas-border rounded-lg p-2 divide-y divide-canvas-border">
                     {[
                       {

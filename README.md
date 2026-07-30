@@ -6,7 +6,7 @@
 
 > 基于 **Tauri 2 + React 19 + React Flow 12** 的本地优先 AI 多模态画布与对话 Agent 桌面应用。
 
-AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown、分镜和 360° 全景组织成可连接的画布节点。你可以在同一个项目中编排生成链路、管理本地素材与 ComfyUI 工作流，也可以通过对话助手查询或修改画布、生成媒体、读取授权文件并沉淀项目记忆。
+AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown、分镜、360° 全景和手绘笔记组织成可连接的画布节点。你可以在同一个项目中编排生成链路、管理角色库与本地素材、执行 ComfyUI 工作流，也可以通过对话助手查询或修改画布、生成媒体、派出只读子智能体、读取授权文件并沉淀项目记忆。
 
 ![Version](https://img.shields.io/badge/version-0.6.13-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
@@ -23,14 +23,20 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 
 | 能力 | 说明 |
 | --- | --- |
-| 多模态节点画布 | 文本、图像、视频、音频、逐帧动画、Markdown、分镜、全景、3D 导演台和源文件节点统一连接与编排。 |
-| 画布生产力 | React Flow 无限画布、小地图、网格、吸附参考线、多选对齐与分布、分组、复制粘贴、撤销重做。 |
-| 多种生成后端 | 支持云端模型、自定义通用模型接口、ComfyUI 工作流、Dreamina 登录态调用和本地 ONNX 推理。 |
-| 对话 Agent | 多会话、流式响应、B/C 两种执行模式、工具调用、审批卡片、任务时间线、上下文压缩和项目记忆。 |
-| 本地优先存储 | 项目数据目录保存媒体文件，IndexedDB v14 持久化项目、配置、会话、Agent 任务、资产索引和项目记忆。 |
+| 多模态节点画布 | 文本、图像、视频、音频、逐帧动画、Markdown、分镜、全景、3D 导演台、源文件和画布笔记节点统一连接与编排。 |
+| 画布生产力 | React Flow 无限画布、小地图、网格、吸附参考线、多选对齐与分布、分组、复制粘贴、撤销重做和操作记录浮层。 |
+| 画布笔记与绘图 | 矩形、菱形、椭圆、箭头、直线、自由绘制、文本与图片笔记，可调线条、填充、粗糙度和层级。 |
+| 多种生成后端 | 支持云端模型、自定义模型执行协议、ComfyUI 工作流、Dreamina 登录态调用和本地 ONNX 推理。 |
+| 对话 Agent | 多会话、流式响应、Plan/B/C 三种执行模式、工具调用、审批卡片、任务时间线、上下文压缩和项目记忆。 |
+| 只读子智能体 | 用户可在助手内自定义领域角色，主任务按需派出并行只读子智能体，产出脱敏后回传。 |
+| 角色库与短剧资产 | 全局与项目级角色卡、多参考图、声音绑定与配音出口，以及短剧人物、场景和道具资产。 |
+| 本地 MCP 控制桥 | 手动开启的会话级 stdio MCP 适配器，让外部客户端复用同一套工具、Policy、审批和任务时间线。 |
+| 本地优先存储 | 项目数据目录保存媒体文件，IndexedDB v17 持久化项目、配置、会话、Agent 任务、资产索引、角色和项目记忆。 |
+| 凭据隔离 | API Key 由 Rust 独占的本地凭据文件保管，不写入 IndexedDB，Renderer 只能按条目名逐条索取。 |
+| 项目整体迁移 | 项目记录、对话、项目记忆和本地素材可打包成单个 `.aicanvas` 归档并以全新项目 ID 导入。 |
 | 桌面原生能力 | Tauri 负责窗口、文件对话框、拖拽、剪贴板、文件传输、更新、本地模型和系统文件操作。 |
 | 按需 3D 导演台 | 首次创建导演台节点时下载固定且经过校验的运行资源，并在 Tauri 独立窗口中完成场景摆位、机位预演和截图回传。 |
-| 有限 Web 降级 | 可单独运行 Vite 前端；文件与持久化能力按浏览器环境降级，原生能力不可用时会受限。 |
+| 有限 Web 降级 | 可单独运行 Vite 前端；文件、凭据与持久化能力按浏览器环境降级，原生能力不可用时会受限。 |
 
 ## 功能概览
 
@@ -38,22 +44,34 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 
 - 无限画布支持缩放、平移、小地图、网格背景、适应视图和多种交互模式。
 - 节点支持拖拽、框选、多选、吸附、对齐、平均分布、分组、连线、复制、剪切、粘贴和删除。
-- 画布结构变更接入历史快照，可撤销和重做；多节点写入按批次提交历史。
+- 画布结构变更接入历史快照，可撤销和重做；多节点写入按批次提交历史，右上角操作记录浮层可回看时间线。
 - 支持选中节点批量生成；存在连线依赖时按拓扑顺序执行，无依赖节点可并发执行。
 - 系统剪贴板、文件拖放和资产面板可把图片、视频、音频与文本带入画布。
+- 画布绘图工具栏提供矩形、菱形、椭圆、箭头、直线、自由绘制、文本笔记、图片笔记和橡皮擦；笔记与普通节点共用同一套选择、吸附、分组和历史语义。
+- 节点工具栏可编辑：常用操作可固定在栏内，其余收进「更多」菜单，布局按节点类型持久化。
 
 ### AI 与媒体
 
 - 文本节点支持流式生成、多轮内容、提示词预设、Skill、风格和 `@` 节点引用。
-- 图像节点支持文生图、图生图、批量结果，以及裁剪、扩图、标注、抠图、自由视角和宫格编辑。
-- 视频节点支持文生视频、图生视频、分辨率、帧率、时长和有声视频等模型参数。
-- 音频节点支持音乐、语音生成、上传、播放和结果管理。
+- 图像节点支持文生图、图生图、批量结果、生成历史，以及裁剪、扩图、标注、抠图、多图合成、机位工作台和宫格编辑。
+- 视频节点支持文生视频、图生视频、视频到视频，以及分辨率、帧率、时长、画面比例、参考音频和有声视频等模型参数。
+- 音频节点支持音乐、语音生成、参考音色、上传、播放和结果管理。
 - 动画节点支持动作与帧数配置、Sprite Sheet 生成和预览。
 - 分镜节点支持自定义宫格、单格覆盖、素材拖入和画格提取。
-- 全景节点使用 Three.js 预览 360° 图像，并可将视角截图生成新图片节点。
+- 全景节点预览 360° 图像，并可将视角截图生成新图片节点。
 - 3D 导演台节点在独立窗口中进行场景摆位、相机预演和画面捕获，结果可回写节点并继续用于图生视频。
-- ComfyUI 工作流可从 JSON 导入，在工作流面板配置后由节点执行。
+- 图片、视频、音频三类参考媒体使用同一套连线与提示词引用语义，由统一的媒体 Provider 注册表分发到厂商适配器。
+- 自定义模型执行协议可描述请求、响应和轮询映射，并支持从厂商文档智能导入。
+- ComfyUI 工作流可从 JSON 导入，在工作流面板配置后由节点执行，支持图片与音频输入注入。
+- 高级预设可编排多步生成序列，逐步派生节点、连线和模型任务。
 - 本地 ONNX Worker 提供图片超分、主体抠图和角色方向图等能力，避免阻塞 Tauri 主进程。
+
+### 角色库与短剧资产
+
+- 全局角色库跨项目保存角色卡、多张参考图和头像裁切；项目角色可从画布节点直接捕获。
+- 角色可绑定多段声音、设置主声音并记录标签与台词，并从角色声音直接创建音频节点或配音生成节点。
+- 声音节点通过连线作为音色参考进入生成链路，角色台词会预填到生成节点。
+- 短剧资产面板管理人物、场景和道具，可在提示词中通过 `@` 引用。
 
 ### 3D 导演台
 
@@ -69,23 +87,38 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 
 对话助手既可以嵌入主窗口，也可以打开为独立窗口。每个会话归属于当前项目，并独立保存模式、消息、任务与上下文。
 
+- **Plan 规划模式**：只允许只读工具，用于先出方案再动手。
 - **B 协作模式**：读取和查询自动执行，新增、更新、连接、分组或删除画布节点前需要确认。
 - **C 自主模式**：画布写操作可自动执行，但仍必须校验项目和 canvas revision，并写入撤销历史。
-- **固定审批边界**：文件写入、媒体生成和项目记忆写入在两种模式下都需要用户确认。
-- **工具注册表**：画布查询与操作、媒体生成、会话级文件读取/导出、项目记忆均通过本地 schema 和 effect 校验。
-- **媒体交付**：生成结果可以返回对话、加入画布，或同时交付到两端；付费媒体请求逐次确认。
-- **任务控制**：时间线展示规划、工具、Observation、审批和回答步骤，支持暂停、继续、停止与重新规划。
+- **固定审批边界**：文件写入、永久删除、媒体生成、项目记忆写入和厂商配置写入在所有模式下都需要用户确认。
+- **工具注册表**：画布查询与操作、媒体生成、预设编排、会话级文件读取/导出、网页搜索与读取、Skill 加载、厂商文档与配置、短剧资产和项目记忆均通过本地 schema 和 effect 校验。
+- **只读子智能体**：可在助手内自定义领域角色（说明书来自 Skill 或内联提示词），主任务按需并行派出，材料范围由用户勾选，产出脱敏后回传。
+- **专家复核**：内置只读复核角色可对画布结构、工作流风险和素材复用给出意见。
+- **媒体交付**：生成结果可以返回对话、加入画布，或同时交付到两端；付费媒体请求逐次确认，落盘失败时保留临时结果并可重试保存。
+- **任务控制**：时间线展示规划、工具、Observation、审批和回答步骤，支持暂停、继续、停止、插话与重新规划；任务中心汇总跨会话任务。
 - **后台与恢复**：切换会话后任务可继续运行；应用重启后未完成任务恢复为暂停状态，不会静默续跑。
 - **上下文与记忆**：显示上下文占用并在预算触发时压缩；项目记忆只能由 Agent 提议并经用户确认后保存。
 
-Agent 的本地 Policy Engine 不接受提示词、模型输出、Skill、网页或文件内容修改权限规则。文件授权只在当前运行时内保存，并绑定到具体会话；模型只接收 `grantId`、显示名和经过限制的内容，不接收授权路径。API Key 仅从本地 provider 配置读取，不写入消息或 Agent 操作日志。
+Agent 的本地 Policy Engine 不接受提示词、模型输出、Skill、网页或文件内容修改权限规则。文件授权只在当前运行时内保存，并绑定到具体会话；模型只接收 `grantId`、显示名和经过限制的内容，不接收授权路径。API Key 由 Rust 侧凭据存储保管，Renderer 按条目名逐条索取，不写入消息或 Agent 操作日志。
+
+### 本地 MCP 控制桥
+
+设置页可手动开启会话级 MCP 控制桥，让 Codex 等 MCP 客户端复用应用内已有的能力边界，而不是绕过它。
+
+- Rust 在 `127.0.0.1` 随机端口监听，每次开启会话生成一次性 256 位令牌；令牌不进入配置、IndexedDB 或事件负载。
+- 工具发现直接来自 Tool Registry；调用继续经过本地 schema、可用性、Policy Engine、执行前项目与授权复核和结果脱敏。
+- 每次调用在专用「MCP 控制」会话中创建可持久化 AgentTask 和步骤，审批仍在 AI Canvas 内的审批卡片完成。
+- MCP 不能批准自己的高影响操作，不能读取 API Key，也不会新增通用 Shell、任意路径读写或任意 HTTP 能力。
+- 会话默认关闭；停止、窗口关闭或应用退出会立即使令牌失效。
 
 ### 项目、资产与桌面体验
 
-- 多项目切换会同步恢复画布、工作流、对话、Agent 任务和项目记忆。
-- 资产库支持项目资产索引、外部文件夹登记、独立搜索窗口、缩略图和拖回画布。
-- 文件删除优先进入可恢复流程；长时间复制和下载支持进度与取消。
-- 深色/浅色主题、多种画布背景、自定义标题栏、全局快捷键和桌面更新。
+- 多项目切换会同步恢复画布、工作流、对话、Agent 任务、短剧资产和项目记忆。
+- 项目库以缩略图卡片展示，会话标签栏支持快速切换；项目设置可配置创作基线（默认模型、比例等）。
+- 项目可整体导出为 `.aicanvas` 归档并导入为全新项目，包含项目记录、对话、项目记忆和本地素材。
+- 资产库支持项目资产索引、外部文件夹登记、独立搜索窗口、缩略图和拖回画布；分组可与本地文件夹同步。
+- 文件删除优先进入可恢复流程；长时间复制和下载支持进度与取消；存储健康中心展示占用与清理入口。
+- 深色主题与低饱和马卡龙浅色主题、多种画布背景、自定义标题栏、全局快捷键和桌面更新。
 - Windows/macOS 文件定位与指定应用打开；浏览器模式下原生功能会明确降级。
 
 ## 技术栈
@@ -97,11 +130,13 @@ Agent 的本地 Policy Engine 不接受提示词、模型输出、Skill、网页
 | [React Flow 12](https://reactflow.dev/) | 节点画布、连线与视图控制 |
 | [Zustand 5](https://zustand.docs.pmnd.rs/) | Slice 化全局状态管理 |
 | [Tailwind CSS 3](https://tailwindcss.com/) | 组件样式与 `canvas-*` 设计 token |
-| [Three.js](https://threejs.org/) | 360° 全景与图形渲染 |
+| [Three.js](https://threejs.org/) | 全景、背景与图形渲染 |
 | [Konva](https://konvajs.org/) | 图像标注与组合编辑器 |
+| [MCP SDK](https://modelcontextprotocol.io/) | 本地 stdio MCP 控制桥适配器 |
 | [Framer Motion](https://motion.dev/) / [GSAP](https://gsap.com/) | 界面与复杂动效 |
-| [@iconify/react](https://iconify.design/) | 图标体系 |
-| IndexedDB | 项目元数据、配置、会话、任务、记忆与资产索引 |
+| [@iconify/react](https://iconify.design/) / [lucide-react](https://lucide.dev/) | 图标体系 |
+| [Vitest](https://vitest.dev/) | 服务、Store、Hook 与组件逻辑测试 |
+| IndexedDB | 项目元数据、配置、会话、任务、角色、记忆与资产索引 |
 
 ## 快速开始
 
@@ -143,6 +178,12 @@ npm run typecheck
 # ESLint 检查
 npm run lint
 
+# 单元测试（Vitest）
+npm run test
+
+# lint + 类型检查 + 测试
+npm run check
+
 # 前端生产构建
 npm run build
 
@@ -166,35 +207,46 @@ npm run director:update -- v0.3.2
 AI-Canvas-tauri/
 ├── src/
 │   ├── components/
-│   │   ├── canvas/           # 画布工具栏、菜单、多选与分布交互
-│   │   ├── chat/             # 多会话、Agent 时间线、审批、上下文与记忆 UI
+│   │   ├── canvas/           # 画布工具栏、绘图工具、菜单、多选、分布与操作记录
+│   │   ├── noteNodes/        # 画布笔记的形状、文本和图片渲染
+│   │   ├── chat/             # 多会话、Agent 时间线、审批、任务中心、子智能体与记忆 UI
 │   │   ├── nodes/            # AI、源文件、动画、分镜、全景和导演台节点
+│   │   ├── character/        # 角色参考图与声音素材展示
 │   │   ├── director/         # 导演台下载确认、进度和安装编排
-│   │   ├── settings/         # API、存储和桌面能力设置
+│   │   ├── settings/         # 厂商连接、模型协议、MCP、子智能体和存储设置
 │   │   └── shared/           # 跨模块通用组件
-│   ├── hooks/                # 快捷键、自动保存、吸附、节点创建等交互 Hooks
+│   ├── hooks/                # 快捷键、自动保存、吸附、绘图、节点创建等交互 Hooks
 │   ├── services/
-│   │   ├── ai/               # 文本/图片/视频/音频生成与 Generation Runtime
-│   │   ├── chat/             # Agent 控制、按需 Runtime、Tool Registry、Policy、上下文与记忆
+│   │   ├── ai/               # 文本/图片/视频/音频生成、模型协议与 Generation Runtime
+│   │   ├── chat/             # Agent 控制、按需 Runtime、Tool Registry、Policy、子智能体、上下文与记忆
+│   │   ├── mcp/              # MCP 控制服务与本地 bridge 客户端
 │   │   └── fs/               # 文件基础设施、资产库、索引、回收站与存储健康
-│   ├── store/                # Zustand 聚合入口与业务 slices
+│   ├── store/                # Zustand 聚合入口与 19 个业务 slice
 │   ├── styles/               # 全局功能样式与 React Flow 覆盖
-│   ├── types/                # 画布、AI、聊天、Agent、媒体和记忆类型
+│   ├── types/                # 画布、AI、聊天、Agent、媒体、笔记、角色和记忆类型
 │   ├── utils/                # 批量执行、几何、动画与资源工具
 │   ├── App.tsx               # 主窗口装配
 │   └── main.tsx              # 主窗口/聊天窗口/资产窗口入口
 ├── src-tauri/
 │   ├── src/
 │   │   ├── lib.rs            # Tauri Builder、窗口和 command 注册
+│   │   ├── path_policy.rs    # 原生文件命令的调用方与路径校验
+│   │   ├── secret_store.rs   # Rust 独占的本地凭据存储
+│   │   ├── mcp_bridge.rs     # 本地 MCP loopback 控制桥
+│   │   ├── project_archive.rs # 项目归档打包与解包
+│   │   ├── assistant_web.rs  # 受限网页搜索与读取
+│   │   ├── provider_docs.rs  # 受限厂商文档读取
 │   │   ├── director_desk_runtime.rs # 导演台下载、校验、安装和本地协议
 │   │   ├── file_transfer.rs  # 可取消文件传输
+│   │   ├── clipboard.rs      # 系统剪贴板文件写入
 │   │   ├── comfyui/          # 本地 ComfyUI 启动能力
 │   │   ├── dreamina.rs       # Dreamina 登录与生成运行时
 │   │   └── onnx/             # ONNX Worker、下载和推理
 │   ├── Cargo.toml
 │   └── tauri.conf.json
-├── doc/                      # 架构、开发、产品方案和发版文档
-├── scripts/                  # Git Hook、版本同步和导演台 Release 清单
+├── tests/                    # Vitest 服务、Store、Hook、组件与脚本测试
+├── doc/                      # 架构、开发、ADR、方案和发版文档
+├── scripts/                  # Git Hook、版本同步、MCP 适配器和导演台 Release 清单
 ├── package.json
 ├── vite.config.ts
 └── tailwind.config.js
@@ -204,18 +256,25 @@ AI-Canvas-tauri/
 
 | 模块 | 说明 |
 | --- | --- |
-| `src/components/Canvas.tsx` | React Flow 集成边界，编排节点、连线和画布事件。 |
+| `src/components/Canvas.tsx` | React Flow 集成边界，编排节点、连线、笔记绘图和画布事件。 |
 | `src/components/nodes/` | 节点渲染、节点交互和共享媒体编辑能力。 |
 | `src/components/chat/ChatPanel.tsx` | 主窗口与独立窗口复用的对话容器。 |
-| `src/services/ai/` | 多模态生成、流式协议、Provider 适配和统一媒体生成入口。 |
+| `src/services/ai/` | 多模态生成、流式协议、模型执行协议、Provider 适配和统一媒体生成入口。 |
+| `src/services/ai/mediaProviderRegistry.ts` | 图片、视频、音频参考媒体到厂商适配器的统一分发。 |
 | `src/services/chat/agentTaskControl.ts` | 启动期轻量任务控制，负责状态迁移、同步中止、审批等待和调度队列清理。 |
 | `src/services/chat/agentRuntime.ts` | ChatPanel 按需加载的多轮模型、上下文和工具执行循环。 |
 | `src/services/chat/toolRegistry.ts` | Agent 工具注册、可用性过滤和本地 schema 校验。 |
-| `src/services/chat/policyEngine.ts` | B/C 模式与工具 effect 的固定权限矩阵。 |
-| `src/store/useAppStore.ts` | Zustand 聚合入口，组合画布、项目、聊天、Agent、记忆和配置状态。 |
+| `src/services/chat/policyEngine.ts` | Plan/B/C 模式与工具 effect 的固定权限矩阵。 |
+| `src/services/chat/subAgentService.ts` | 只读子智能体的隔离上下文、工具子集、任务组预算与产出脱敏。 |
+| `src/services/mcp/mcpControlService.ts` | MCP 请求到受 Policy 约束的 Agent 工具与专用审计任务的映射。 |
+| `src/store/useAppStore.ts` | Zustand 聚合入口，组合画布、项目、聊天、Agent、记忆、资产和配置状态。 |
 | `src/services/fileService.ts` | Tauri 文件能力与浏览器降级的统一前端入口。 |
-| `src/services/indexedDbService.ts` | IndexedDB v14 schema、升级和领域 CRUD。 |
+| `src/services/indexedDbService.ts` | IndexedDB v17 schema、升级和领域 CRUD。 |
+| `src/services/providerSecretService.ts` | 持久化前摘出 API Key，交由 Rust 凭据存储保管。 |
+| `src/services/projectTransferService.ts` | 项目整体导出与以全新项目 ID 导入。 |
 | `src/services/directorDeskWindowService.ts` | 导演台独立窗口、会话切换和受限事件通信。 |
+| `src-tauri/src/path_policy.rs` | 自定义原生命令的调用方窗口校验与真实路径授权校验。 |
+| `src-tauri/src/secret_store.rs` | 凭据文件读写，三条访问路径均拒绝 Renderer 直读。 |
 | `src-tauri/src/director_desk_runtime.rs` | 固定 Release 下载、SHA-256 校验、版本化安装和 `director-desk://` 协议。 |
 | `src-tauri/src/lib.rs` | Tauri 插件、窗口生命周期与原生 command 装配。 |
 
@@ -223,15 +282,17 @@ AI-Canvas-tauri/
 
 主窗口启动只加载 Agent 的轻量控制层。模型上下文组装、流式协议和工具轮次执行随 ChatPanel 按需加载；删除会话或项目仍会同步中止后台任务，不会等待异步模块加载。
 
-当前生产 sourcemap 构建中，共享启动 chunk 为 `499.57 KiB`，gzip 后为 `158.25 KiB`。Agent 控制层拆分使该 chunk 减少 `17.18 KiB gzip`。图片标注、抠图、扩图、自定义宫格和 3D 运行时也保持按需加载。
+在 `0.6.13` 的生产构建中，包含 Store 与 `agentTaskControl.ts` 的共享启动 chunk 为 `559.12 kB`，gzip 后为 `175.98 kB`。`agentRuntime.ts` 位于 ChatPanel chunk，`agentRoundExecutor.ts` 与 `contextManager.ts` 位于独立的按需 chunk。图片合成、抠图、扩图、机位工作台、自定义宫格、全景和 3D 运行时也保持按需加载。
 
 ## 开发约束
 
 - 共享状态通过 `useAppStore` 的 Store Action 修改，画布结构写入必须接入历史记录。
 - 组件只负责展示和交互；Provider、Agent Policy、文件和持久化协议位于对应 Service。
-- 新 Agent 工具通过 `registerAgentTool()` 注册，声明本地 schema 和准确的 effect。
+- 新 Agent 工具通过 `registerAgentTool()` 注册，声明本地 schema 和准确的 effect；MCP 不扩大工具集合。
 - 文件能力统一经过 `fileService.ts` 或 `services/fs/`，不在组件中直接调用 Tauri fs 插件。
-- 新模型优先扩展共享模型目录和 Provider adapter，避免在多个节点散落 provider/model 分支。
+- 新增原生文件类 command 必须经过 `path_policy.rs` 的调用方与路径校验。
+- API Key 只经 `providerSecretService.ts` 进入 Rust 凭据存储，不写入 IndexedDB、消息或日志。
+- 新模型优先扩展共享模型目录、模型执行协议和 Provider adapter，避免在多个节点散落 provider/model 分支。
 - Store Slice 会进入主窗口启动图。顶层只导入轻量依赖；模型协议、Provider 和编辑器运行时应由懒加载功能边界按需引入。
 - 同步取消、状态迁移和删除前清理不得依赖动态导入，应放入轻量控制模块。
 - 样式优先使用 Tailwind 与 `canvas-*` token；React Flow 覆盖集中在 `src/styles/reactflow.css`。
@@ -246,7 +307,10 @@ AI-Canvas-tauri/
 - [对话式画布助手功能方案](doc/对话式画布助手-功能方案.md)
 - [对话助手 Agent 能力实施方案](doc/对话助手-Agent能力实施方案.md)
 - [打包与发版流程](doc/打包与发版流程.md)
+- [ADR 0001：Agent 预设工具](doc/adr/0001-agent-preset-tools.md)
+- [ADR 0002：Agent Runtime 演进](doc/adr/0002-agent-runtime-evolution.md)
 - [ADR 0003：3D 导演台使用按需下载运行时](doc/adr/0003-director-desk-prebuilt-runtime.md)
+- [ADR 0004：使用会话级本地 MCP 控制桥](doc/adr/0004-local-mcp-control-bridge.md)
 
 ## License
 
@@ -255,6 +319,10 @@ AI-Canvas-tauri/
 允许学习、研究、内部使用、修改和集成使用。禁止未经授权的套壳销售、白标分发、源码转售、商业再分发及将本项目作为同类产品进行商业化。
 
 本项目并非 OSI 定义下的开源项目。如需商业授权，请联系版权方。
+
+### 第三方素材
+
+画布笔记的工具条与属性面板视觉设计参考自 [Excalidraw](https://github.com/excalidraw/excalidraw)，其许可证见 [doc/licenses/excalidraw-MIT.txt](doc/licenses/excalidraw-MIT.txt)。
 
 ## Contact
 

@@ -60,7 +60,10 @@ function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
 }
 
 export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryModalProps) {
-  const { projects, currentProjectId, createProject, renameProject, switchProject, deleteProject } = useAppStore(
+  const {
+    projects, currentProjectId, createProject, renameProject, switchProject, deleteProject,
+    exportProject, importProject,
+  } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
       currentProjectId: state.currentProjectId,
@@ -68,6 +71,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
       renameProject: state.renameProject,
       switchProject: state.switchProject,
       deleteProject: state.deleteProject,
+      exportProject: state.exportProject,
+      importProject: state.importProject,
     })),
   );
   const [query, setQuery] = useState('');
@@ -79,6 +84,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   const [isRenaming, setIsRenaming] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<CanvasProject | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
 
@@ -177,6 +184,27 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
       }
     } finally {
       setIsRenaming(false);
+    }
+  };
+
+  const runExportProject = async (project: CanvasProject) => {
+    if (exportingId || isImporting) return;
+    setExportingId(project.id);
+    try {
+      await exportProject(project.id);
+    } finally {
+      setExportingId(null);
+    }
+  };
+
+  const runImportProject = async () => {
+    if (isImporting || exportingId) return;
+    setIsImporting(true);
+    try {
+      const projectId = await importProject();
+      if (projectId) closeLibrary();
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -280,6 +308,23 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
 
             <button
               type="button"
+              onClick={() => void runImportProject()}
+              disabled={isImporting || exportingId !== null}
+              data-tooltip="从 .aicanvas 项目包导入"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-canvas-border bg-canvas-card px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Icon
+                icon={isImporting ? 'mdi:loading' : 'mdi:tray-arrow-down'}
+                width="17"
+                height="17"
+                aria-hidden="true"
+                className={isImporting ? 'animate-spin' : undefined}
+              />
+              {isImporting ? '正在导入' : '导入'}
+            </button>
+
+            <button
+              type="button"
               onClick={() => setIsCreating(true)}
               className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-500 px-3 text-xs font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={isCreating}
@@ -378,6 +423,22 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                       </button>
 
                       <div className="mr-2 flex shrink-0 items-center gap-0.5">
+                        <button
+                          type="button"
+                          aria-label={`导出项目 ${project.name}`}
+                          data-tooltip="导出项目包"
+                          disabled={exportingId !== null || isImporting}
+                          onClick={() => void runExportProject(project)}
+                          className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Icon
+                            icon={exportingId === project.id ? 'mdi:loading' : 'mdi:tray-arrow-up'}
+                            width="17"
+                            height="17"
+                            aria-hidden="true"
+                            className={exportingId === project.id ? 'animate-spin' : undefined}
+                          />
+                        </button>
                         <button
                           type="button"
                           aria-label={`重命名项目 ${project.name}`}

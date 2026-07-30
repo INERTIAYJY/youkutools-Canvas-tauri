@@ -24,6 +24,7 @@ mod file_transfer;
 mod mcp_bridge;
 pub mod onnx;
 mod path_policy;
+mod project_archive;
 mod provider_docs;
 mod secret_store;
 
@@ -965,6 +966,8 @@ pub fn run() {
             assistant_web::assistant_web_search,
             assistant_web::assistant_web_extract,
             provider_docs::provider_docs_read,
+            project_archive::pack_project_archive,
+            project_archive::unpack_project_archive,
             file_transfer::copy_file_streamed,
             file_transfer::download_file_streamed,
             file_transfer::cancel_file_transfer,

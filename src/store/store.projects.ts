@@ -14,6 +14,7 @@ import { captureCurrentCanvasSnapshot } from '../services/projectSnapshotService
 import { stopProjectAgentTasks } from '../services/chat/agentTaskControl';
 import { cancelProjectCanvasDerivations } from '../services/canvasDerivationGuard';
 import { clearConversationFileGrants } from '../services/chat/fileGrantService';
+import { exportProjectArchive, importProjectArchive } from '../services/projectTransferService';
 import {
   getLastActiveProjectId,
   setLastActiveProjectId,
@@ -212,6 +213,8 @@ export interface ProjectSlice {
     options?: CaptureProjectSnapshotOptions,
   ) => Promise<string | undefined>;
   createProject: (name?: string) => Promise<string | undefined>;
+  exportProject: (id: string) => Promise<boolean>;
+  importProject: () => Promise<string | undefined>;
   deleteProject: (id: string) => Promise<void>;
   switchProject: (id: string) => void;
   saveCurrentProject: () => Promise<string | undefined>;
@@ -578,6 +581,67 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     rememberActiveProject(id);
     setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
     return id;
+  },
+
+  exportProject: async (id) => {
+    const state = get();
+    const project = state.projects.find((item) => item.id === id);
+    if (!project) return false;
+
+    // 导出读的是 IndexedDB 里已落盘的记录，当前项目必须先把内存改动写回去。
+    if (state.currentProjectId === id) {
+      if (state.projectLoadStatus !== 'ready') {
+        state.showToast('项目尚未成功加载，已阻止导出', 'error');
+        return false;
+      }
+      void get().captureCurrentProjectSnapshot();
+      if (await get().saveCurrentProjectSilent() !== id) {
+        get().showToast('项目保存失败，已取消导出', 'error');
+        return false;
+      }
+    }
+
+    try {
+      const result = await exportProjectArchive(id);
+      if (!result) return false;
+      get().showToast(`已导出「${project.name}」，含 ${result.assetCount} 个素材`);
+      return true;
+    } catch (error) {
+      console.error('[项目导出] 失败:', error);
+      get().showToast(error instanceof Error ? `项目导出失败：${error.message}` : '项目导出失败', 'error');
+      return false;
+    }
+  },
+
+  importProject: async () => {
+    let result: Awaited<ReturnType<typeof importProjectArchive>>;
+    try {
+      result = await importProjectArchive();
+    } catch (error) {
+      console.error('[项目导入] 失败:', error);
+      get().showToast(error instanceof Error ? `项目导入失败：${error.message}` : '项目导入失败', 'error');
+      return undefined;
+    }
+    if (!result) return undefined;
+
+    const project: CanvasProject = {
+      id: result.projectId,
+      name: result.projectName,
+      createdAt: result.createdAt,
+      updatedAt: result.updatedAt,
+      dataFolder: result.dataFolder,
+      settings: result.settings,
+      snapshot: result.snapshot,
+    };
+    set((state) => ({ projects: [...state.projects, project] }));
+    // 缺素材不阻断导入，只在提示里说明，与项目加载时保留节点的策略一致。
+    if (result.missingAssetCount > 0) {
+      get().showToast(`已导入「${result.projectName}」，${result.missingAssetCount} 个素材未找到`, 'info');
+    } else {
+      get().showToast(`已导入「${result.projectName}」，含 ${result.assetCount} 个素材`);
+    }
+    get().switchProject(result.projectId);
+    return result.projectId;
   },
 
   deleteProject: async (id) => {

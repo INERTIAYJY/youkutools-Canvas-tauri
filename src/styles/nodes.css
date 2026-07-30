@@ -988,7 +988,7 @@
 .fullscreen-body {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 18px;
+  padding: 12px 14px;
 }
 
 /* ============ Fullscreen editor (textarea-based) ============ */

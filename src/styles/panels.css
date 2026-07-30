@@ -120,7 +120,7 @@
 
 /* Panel section */
 .wf-panel-section {
-  padding: 6px 10px 14px;
+  padding: 6px 10px 11px;
 }
 .wf-section-title {
   display: flex;
@@ -211,7 +211,7 @@
 .wf-file-area {
   border: 1px dashed var(--separator-color);
   border-radius: 8px;
-  padding: 14px;
+  padding: 11px;
   cursor: pointer;
   transition: border-color var(--transition-base), background var(--transition-base);
 }
@@ -255,7 +255,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
+  padding: 6px 12px;
   font-size: 13px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
@@ -293,7 +293,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 24px 10px;
+  padding: 18px 10px;
   color: var(--theme-text-muted);
   font-size: 13px;
   text-align: center;
@@ -744,7 +744,7 @@
   align-items: center;
   justify-content: center;
   gap: 10px;
-  padding: 40px 20px;
+  padding: 28px 20px;
   color: var(--theme-text-muted);
   font-size: 13px;
 }

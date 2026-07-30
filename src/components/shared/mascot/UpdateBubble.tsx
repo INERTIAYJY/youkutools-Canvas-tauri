@@ -26,7 +26,7 @@ export default function UpdateBubble({ info, visible, onUpdate, onDismiss, updat
           {/* 聊天气泡尖角 — 指向右下吉祥物 */}
           <div className="absolute -bottom-2 right-6 w-4 h-4 rotate-45 bg-canvas-card border-r border-b border-canvas-border" />
 
-          <div className="relative bg-canvas-card border border-canvas-border rounded-xl p-4 shadow-xl">
+          <div className="relative bg-canvas-card border border-canvas-border rounded-xl p-3 shadow-xl">
             <p className="text-sm text-canvas-text font-semibold mb-1">
               发现新版本 v{info.version}
             </p>

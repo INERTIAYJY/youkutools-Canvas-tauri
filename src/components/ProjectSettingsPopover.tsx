@@ -418,7 +418,7 @@ export default function ProjectSettingsPopover({
             </header>
 
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
-              <section className="grid gap-3 px-4 py-4">
+              <section className="grid gap-3 px-3 py-3">
                 <SectionTitle icon="lucide:palette">创作基线</SectionTitle>
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3">
                   <div className="grid gap-1.5">
@@ -596,7 +596,7 @@ export default function ProjectSettingsPopover({
                 </div>
               </section>
 
-              <section className="grid gap-3 border-t border-border-subtle px-4 py-4">
+              <section className="grid gap-3 border-t border-border-subtle px-3 py-3">
                 <SectionTitle icon="lucide:cpu">默认模型</SectionTitle>
                 <div className="grid gap-2">
                   {MODEL_ROWS.map((row) => {
@@ -643,7 +643,7 @@ export default function ProjectSettingsPopover({
                 </div>
               </section>
 
-              <section className="grid gap-3 border-t border-border-subtle px-4 py-4">
+              <section className="grid gap-3 border-t border-border-subtle px-3 py-3">
                 <SectionTitle icon="lucide:scan">输出默认</SectionTitle>
                 <div className="grid gap-2">
                   <div className="grid min-h-[68px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5">

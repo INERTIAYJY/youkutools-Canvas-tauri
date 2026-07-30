@@ -176,7 +176,7 @@ export default function ImageGenerationHistoryDialog({
           <PopupCloseButton onClick={handleClose} />
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {loading ? (
             <div className="flex min-h-48 items-center justify-center gap-2 text-xs text-canvas-text-muted">
               <Icon icon="mdi:loading" width={18} height={18} className="animate-spin" aria-hidden="true" />

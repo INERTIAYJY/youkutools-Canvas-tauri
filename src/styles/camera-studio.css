@@ -12,7 +12,7 @@
 .camera-studio-overlay .fullscreen-header {
   position: relative;
   min-height: 48px;
-  padding: 8px 12px 8px 16px;
+  padding: 7px 12px 7px 12px;
 }
 
 .camera-studio-overlay .fullscreen-title {
@@ -177,7 +177,7 @@
   grid-template-columns: minmax(0, 1fr) 28px;
   gap: 6px 10px;
   min-height: 98px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-top: 1px solid var(--theme-border);
   background: var(--theme-surface);
 }
@@ -238,7 +238,7 @@
   gap: 14px;
   min-width: 0;
   min-height: 0;
-  padding: 16px;
+  padding: 12px;
   overflow-y: auto;
   background: var(--theme-surface);
 }
@@ -433,7 +433,7 @@
 
 .camera-studio-generate {
   gap: 6px;
-  padding: 0 14px;
+  padding: 0 12px;
   border: 1px solid var(--node-image-light);
   background: var(--node-image-bg);
   color: var(--node-image-text);
@@ -501,7 +501,7 @@
   }
 
   .camera-studio-controls {
-    padding: 14px 12px;
+    padding: 11px 12px;
   }
 }
 

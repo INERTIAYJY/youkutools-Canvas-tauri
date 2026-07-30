@@ -932,7 +932,7 @@ function AvatarMenu() {
           className="help-dialog h-[min(620px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))]"
         >
           <div className="flex min-h-0 flex-1 flex-col">
-            <header className="help-dialog__header flex shrink-0 items-center justify-between border-b border-canvas-border px-5 py-4">
+            <header className="help-dialog__header flex shrink-0 items-center justify-between border-b border-canvas-border px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
                   <Icon icon="mdi:book-open-page-variant-outline" width="20" height="20" aria-hidden="true" />
@@ -977,7 +977,7 @@ function AvatarMenu() {
                 })}
               </nav>
 
-              <main className="help-dialog__main min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6">
+              <main className="help-dialog__main min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5 sm:py-4">
                 <div className="mx-auto max-w-xl">
                   <div className="mb-5">
                     <p className="help-dialog__accent text-[11px] font-medium text-indigo-400">{selectedHelpCategory.label}</p>
@@ -988,7 +988,7 @@ function AvatarMenu() {
 
                   <ol className="space-y-1">
                     {selectedHelpCategory.items.map((item, index) => (
-                      <li key={item.title} className="flex gap-4 border-b border-canvas-border/70 py-4 first:pt-0 last:border-b-0">
+                      <li key={item.title} className="flex gap-4 border-b border-canvas-border/70 py-3 first:pt-0 last:border-b-0">
                         <span className="help-dialog__index flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-canvas-hover text-[11px] font-semibold text-canvas-text-secondary">
                           {index + 1}
                         </span>
@@ -1027,7 +1027,7 @@ function AvatarMenu() {
           ariaLabel="关于 AI Canvas"
           className="w-[420px] max-h-[85vh] overflow-y-auto"
         >
-        <div className="p-4 space-y-4">
+        <div className="p-3 space-y-3">
           {/* Header */}
           <div className="flex items-center gap-4">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-500/20">

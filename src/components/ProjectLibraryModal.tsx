@@ -293,7 +293,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
         <main
           inert={deleteTarget ? true : undefined}
           aria-hidden={deleteTarget ? true : undefined}
-          className="min-h-0 flex-1 overflow-y-auto bg-canvas-bg/60 p-4"
+          className="min-h-0 flex-1 overflow-y-auto bg-canvas-bg/60 p-3"
         >
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
             {visibleProjects.map((project) => {
@@ -408,7 +408,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
             {isCreating ? (
               <form
                 onSubmit={submitNewProject}
-                className="flex min-h-[188px] flex-col justify-between rounded-lg border border-indigo-400/40 bg-canvas-surface p-4 ring-2 ring-indigo-500/10"
+                className="flex min-h-[188px] flex-col justify-between rounded-lg border border-indigo-400/40 bg-canvas-surface p-3 ring-2 ring-indigo-500/10"
               >
                 <div className="flex flex-1 flex-col items-center justify-center gap-3">
                   <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">

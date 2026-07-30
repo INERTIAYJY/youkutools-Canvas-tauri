@@ -69,7 +69,7 @@ export default function ModelDownloadDialog({
       {showPrompt && (
         <div data-tauri-drag-region className="fullscreen-overlay fixed inset-0 flex items-center justify-center bg-black/60" style={{ zIndex: 15 }} onClick={onCancel}>
           <div
-            className="bg-canvas-card border border-canvas-border rounded-xl p-4 max-w-sm mx-4 shadow-2xl"
+            className="bg-canvas-card border border-canvas-border rounded-xl p-3 max-w-sm mx-4 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3 mb-4">
@@ -113,7 +113,7 @@ export default function ModelDownloadDialog({
           transition={{ duration: 0.25, ease: 'easeOut' }}
           style={{ zIndex: 15 }}
         >
-          <div className="bg-black border border-canvas-border rounded-xl px-5 py-4 max-w-sm mx-4 shadow-2xl text-center">
+          <div className="bg-black border border-canvas-border rounded-xl px-4 py-3 max-w-sm mx-4 shadow-2xl text-center">
             {/* Pacman 吃豆人 — 延迟入场，与右下角吉祥物收放衔接 */}
             <motion.div
               initial={{ opacity: 0, scale: 0.3 }}

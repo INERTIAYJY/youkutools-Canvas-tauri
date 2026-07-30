@@ -8,7 +8,7 @@ import { generateDreaminaVideo } from '../dreaminaService';
 import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
 import type { AIVideoGenParams } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
-import { resolvePromptWithImageRefs } from './promptResolver';
+import { collectPromptNodeMediaUrls, resolvePromptWithMediaRefs } from './promptResolver';
 import { collectConnectedReferenceMedia, mergeUniqueUrls } from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { pollTask } from '../pollTask';
@@ -31,13 +31,13 @@ async function resolveVideoReferenceInput(
   rawPrompt: string,
   nodeId: string | undefined,
 ): Promise<VideoReferenceInput> {
-  const promptInput = await resolvePromptWithImageRefs(rawPrompt);
+  const promptInput = await resolvePromptWithMediaRefs(rawPrompt);
   const connected = collectConnectedReferenceMedia(nodeId);
   return {
     prompt: promptInput.prompt,
     imageUrls: mergeUniqueUrls(promptInput.imageUrls, connected.imageUrls),
-    videoUrls: connected.videoUrls,
-    audioUrls: connected.audioUrls,
+    videoUrls: mergeUniqueUrls(promptInput.videoUrls, connected.videoUrls),
+    audioUrls: mergeUniqueUrls(promptInput.audioUrls, connected.audioUrls),
   };
 }
 
@@ -103,10 +103,12 @@ export async function generateVideo(
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点（唇形同步等）
   if (params.workflowId) {
+    const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
+    const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
     return executeComfyUIVideoGenerate(
       { ...params, prompt },
       signal,
-      collectConnectedReferenceMedia(params.nodeId).audioUrls,
+      mergeUniqueUrls(mentionedMedia.audioUrls, connectedMedia.audioUrls),
     );
   }
 

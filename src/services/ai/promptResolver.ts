@@ -319,12 +319,53 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
   return { content: contentArr, textContent: textContent || rawPrompt.trim() };
 }
 
-/** 解析 prompt 中的 @{nodeId:label} 引用：图片节点 URL 提取到 image_urls，文本/视频/音频节点内联替换到 prompt
- *  图片节点有蒙版/标注时自动合并到原图 */
-export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ prompt: string; imageUrls: string[] }> {
+export interface PromptMediaReferences {
+  prompt: string;
+  imageUrls: string[];
+  videoUrls: string[];
+  audioUrls: string[];
+}
+
+/** 收集提示词中直接 @ 的视频/音频节点产物，不改变提示词文本。 */
+export function collectPromptNodeMediaUrls(rawPrompt: string): Pick<PromptMediaReferences, 'videoUrls' | 'audioUrls'> {
+  const { nodes } = useAppStore.getState();
+  const videoUrls: string[] = [];
+  const audioUrls: string[] = [];
+  const videoSeen = new Set<string>();
+  const audioSeen = new Set<string>();
+
+  for (const match of rawPrompt.matchAll(/@\{([^:]+):[^}]+\}/g)) {
+    const rawNodeId = match[1];
+    if (rawNodeId.includes('/cell/')) continue;
+    const node = nodes.find((item) => item.id === rawNodeId);
+    if (!node) continue;
+
+    const videoUrl = typeof node.data.videoUrl === 'string' ? node.data.videoUrl.trim() : '';
+    if (videoUrl && !videoSeen.has(videoUrl)) {
+      videoSeen.add(videoUrl);
+      videoUrls.push(videoUrl);
+    }
+
+    const audioUrl = typeof node.data.audioUrl === 'string' ? node.data.audioUrl.trim() : '';
+    if (audioUrl && !audioSeen.has(audioUrl)) {
+      audioSeen.add(audioUrl);
+      audioUrls.push(audioUrl);
+    }
+  }
+
+  return { videoUrls, audioUrls };
+}
+
+/** 解析 prompt 中的 @{nodeId:label} 引用，按需把视频/音频节点提取为独立媒体参数。 */
+async function resolvePromptReferences(
+  rawPrompt: string,
+  extractMediaReferences: boolean,
+): Promise<PromptMediaReferences> {
   const store = useAppStore.getState();
   const { nodes } = store;
   const imageEntries: PromptImageEntry[] = [];
+  const videoUrls: string[] = [];
+  const audioUrls: string[] = [];
   // groups: 1=@asset  2,3=@drama  4,5=@node
   const chipRegex = /@asset\{([^}]+)\}|@drama\{([^:]+):([^}]+)\}|@\{([^:]+):([^}]+)\}/g;
 
@@ -370,6 +411,8 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
   }
 
   const imageKeyToIndex = new Map<string, number>();
+  const videoKeyToIndex = new Map<string, number>();
+  const audioKeyToIndex = new Map<string, number>();
 
   const prompt = rawPrompt.replace(
     chipRegex,
@@ -517,9 +560,27 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
     }
 
     const videoUrl = node.data.videoUrl as string | undefined;
-    if (typeof videoUrl === 'string' && videoUrl.trim()) return videoUrl;
+    if (typeof videoUrl === 'string' && videoUrl.trim()) {
+      if (!extractMediaReferences) return videoUrl;
+      let idx = videoKeyToIndex.get(rawNodeId);
+      if (idx === undefined) {
+        idx = videoUrls.length + 1;
+        videoKeyToIndex.set(rawNodeId, idx);
+        videoUrls.push(videoUrl.trim());
+      }
+      return `视频${idx}`;
+    }
     const audioUrl = node.data.audioUrl as string | undefined;
-    if (typeof audioUrl === 'string' && audioUrl.trim()) return audioUrl;
+    if (typeof audioUrl === 'string' && audioUrl.trim()) {
+      if (!extractMediaReferences) return audioUrl;
+      let idx = audioKeyToIndex.get(rawNodeId);
+      if (idx === undefined) {
+        idx = audioUrls.length + 1;
+        audioKeyToIndex.set(rawNodeId, idx);
+        audioUrls.push(audioUrl.trim());
+      }
+      return `音频${idx}`;
+    }
 
     return '';
   }).trim();
@@ -536,5 +597,16 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
     }),
   );
 
+  return { prompt, imageUrls, videoUrls, audioUrls };
+}
+
+/** 图片生成兼容入口：图片 URL 独立提取，视频/音频仍按旧行为内联到 prompt。 */
+export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ prompt: string; imageUrls: string[] }> {
+  const { prompt, imageUrls } = await resolvePromptReferences(rawPrompt, false);
   return { prompt, imageUrls };
+}
+
+/** 视频生成入口：图片、视频和音频引用都提取为对应的独立媒体参数。 */
+export async function resolvePromptWithMediaRefs(rawPrompt: string): Promise<PromptMediaReferences> {
+  return resolvePromptReferences(rawPrompt, true);
 }

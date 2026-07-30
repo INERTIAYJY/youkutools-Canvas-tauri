@@ -1,5 +1,102 @@
-import { describe, expect, it } from 'vitest';
-import { buildGeneralVideoProtocolVariables } from '../../src/services/ai/generateVideo';
+import type { Node } from '@xyflow/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildGeneralVideoProtocolVariables, generateVideo } from '../../src/services/ai/generateVideo';
+import { resolvePromptWithImageRefs, resolvePromptWithMediaRefs } from '../../src/services/ai/promptResolver';
+import { useAppStore } from '../../src/store/useAppStore';
+import type { BaseNodeData } from '../../src/types';
+
+const comfyMocks = vi.hoisted(() => ({
+  executeVideo: vi.fn(),
+}));
+
+vi.mock('../../src/services/comfyWorkflowService', () => ({
+  executeComfyUIVideoGenerate: comfyMocks.executeVideo,
+}));
+
+beforeEach(() => {
+  useAppStore.setState(useAppStore.getInitialState(), true);
+  comfyMocks.executeVideo.mockReset();
+  comfyMocks.executeVideo.mockResolvedValue({ url: 'https://cdn.example/result.mp4' });
+});
+
+describe('video prompt media references', () => {
+  it('extracts mentioned audio nodes once as reference media', async () => {
+    const audioNode: Node<BaseNodeData> = {
+      id: 'audio-1',
+      type: 'ai-audio',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '角色台词',
+        type: 'ai-audio',
+        audioUrl: 'https://cdn.example/dialogue.mp3',
+      },
+    };
+    useAppStore.setState({ nodes: [audioNode] });
+
+    const result = await resolvePromptWithMediaRefs(
+      '让 @{audio-1:角色台词} 驱动画面，并保持 @{audio-1:角色台词} 的节奏',
+    );
+
+    expect(result).toEqual({
+      prompt: '让 音频1 驱动画面，并保持 音频1 的节奏',
+      imageUrls: [],
+      videoUrls: [],
+      audioUrls: ['https://cdn.example/dialogue.mp3'],
+    });
+  });
+
+  it('keeps the image-generation resolver compatible with inline audio URLs', async () => {
+    const audioNode: Node<BaseNodeData> = {
+      id: 'audio-1',
+      type: 'source-audio',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '参考声音',
+        type: 'source-audio',
+        audioUrl: 'https://cdn.example/reference.wav',
+      },
+    };
+    useAppStore.setState({ nodes: [audioNode] });
+
+    await expect(resolvePromptWithImageRefs('@{audio-1:参考声音}')).resolves.toEqual({
+      prompt: 'https://cdn.example/reference.wav',
+      imageUrls: [],
+    });
+  });
+
+  it('passes mentioned audio into ComfyUI audio IO and deduplicates a matching edge', async () => {
+    const audioNode: Node<BaseNodeData> = {
+      id: 'audio-1',
+      type: 'ai-audio',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '角色台词',
+        type: 'ai-audio',
+        audioUrl: 'https://cdn.example/dialogue.mp3',
+      },
+    };
+    useAppStore.setState({
+      nodes: [audioNode],
+      edges: [{ id: 'audio-to-video', source: 'audio-1', target: 'video-1' }],
+    });
+
+    await generateVideo({
+      model: 'comfyui/lipsync',
+      provider: 'comfyui',
+      prompt: '按照 @{audio-1:角色台词} 对口型',
+      workflowId: 'lipsync',
+      nodeId: 'video-1',
+    });
+
+    expect(comfyMocks.executeVideo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: '按照 https://cdn.example/dialogue.mp3 对口型',
+      }),
+      undefined,
+      ['https://cdn.example/dialogue.mp3'],
+    );
+  });
+});
 
 describe('general video protocol variables', () => {
   it('maps duration controls and reference media to stable custom-protocol aliases', () => {

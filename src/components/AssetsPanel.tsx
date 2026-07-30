@@ -41,6 +41,7 @@ import AssetThumb from './shared/AssetThumb';
 import PopupCloseButton from './shared/PopupCloseButton';
 import { springSmooth, fadeFast } from '../utils/motion';
 import { countUnreadDramaAssets } from '../store/store.dramaAssets';
+import { distributeToColumns } from './assets/waterfallColumns';
 
 const DramaAssetsPanel = lazy(() => import('./DramaAssetsPanel'));
 
@@ -683,23 +684,29 @@ export default function AssetsPanel() {
                       </div>
                     ) : (
                       <>
-                        {visibleFiles.map((file) => (
-                          <AssetCard
-                            key={assetKey(file)}
-                            file={file}
-                            isProject={activeTab === 'project'}
-                            draggable={isDraggableEntry(file)}
-                            onDragStart={(e) => handleCardDragStart(file, e)}
-                            editing={editingPath === assetKey(file)}
-                            tagDraft={editingPath === assetKey(file) ? tagDraft : ''}
-                            onToggleEdit={() => { const key = assetKey(file); setEditingPath((p) => (p === key ? null : key)); setTagDraft(''); }}
-                            onTagDraftChange={setTagDraft}
-                            onAddTag={(t) => { addTag(file, t); setTagDraft(''); }}
-                            onRemoveTag={(t) => removeTag(file, t)}
-                            onSave={() => handleSavePermanent(file)}
-                            onDelete={() => handleDeletePermanent(file)}
-                          />
-                        ))}
+                        <div className="assets-waterfall-cols">
+                          {distributeToColumns(visibleFiles, waterfallColumns).map((column, columnIndex) => (
+                            <div className="assets-waterfall-col" key={columnIndex}>
+                              {column.map((file) => (
+                                <AssetCard
+                                  key={assetKey(file)}
+                                  file={file}
+                                  isProject={activeTab === 'project'}
+                                  draggable={isDraggableEntry(file)}
+                                  onDragStart={(e) => handleCardDragStart(file, e)}
+                                  editing={editingPath === assetKey(file)}
+                                  tagDraft={editingPath === assetKey(file) ? tagDraft : ''}
+                                  onToggleEdit={() => { const key = assetKey(file); setEditingPath((p) => (p === key ? null : key)); setTagDraft(''); }}
+                                  onTagDraftChange={setTagDraft}
+                                  onAddTag={(t) => { addTag(file, t); setTagDraft(''); }}
+                                  onRemoveTag={(t) => removeTag(file, t)}
+                                  onSave={() => handleSavePermanent(file)}
+                                  onDelete={() => handleDeletePermanent(file)}
+                                />
+                              ))}
+                            </div>
+                          ))}
+                        </div>
                         {visibleCount < filteredFiles.length && (
                           <div ref={sentinelRef} className="assets-load-sentinel">加载更多…</div>
                         )}

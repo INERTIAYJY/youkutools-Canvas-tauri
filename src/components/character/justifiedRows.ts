@@ -9,6 +9,8 @@ export interface JustifiedLayout {
   rows: JustifiedRow[];
   /** 行宽（px）；等于容器宽，或在图片过"竖"时等比缩小 */
   width: number;
+  /** 所有行占据的总高（px，含行间距）；等比缩小后不超过容器高 */
+  height: number;
 }
 
 /** 顺序贪心分行，每行的宽高比之和尽量接近平均值；行数不超过 rowCount，每行至少一张 */
@@ -67,8 +69,10 @@ export function justifiedRows(
 
   const gaps = gap * (best.rows.length - 1);
   const scale = best.total > boxHeight ? (boxHeight - gaps) / (best.total - gaps) : 1;
+  const rows = best.rows.map((items, index) => ({ items, height: best.heights[index] * scale }));
   return {
     width: boxWidth * scale,
-    rows: best.rows.map((items, index) => ({ items, height: best.heights[index] * scale })),
+    height: rows.reduce((sum, row) => sum + row.height, 0) + gaps,
+    rows,
   };
 }

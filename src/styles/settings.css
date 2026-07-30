@@ -54,7 +54,7 @@
   font-size: 11px;
   font-weight: 600;
   color: #fff;
-  background: linear-gradient(135deg, #7c5cff, #b06cff);
+  background: linear-gradient(135deg, var(--brand), var(--node-markdown));
   margin-bottom: 12px;
 }
 .dreamina-login-modal-message {
@@ -134,8 +134,8 @@
   padding: 8px 12px;
   border-radius: 8px;
   font-size: 12px;
-  color: var(--error-text, #ff7a7a);
-  background: var(--error-bg, rgba(255, 80, 80, 0.1));
+  color: var(--danger-light);
+  background: var(--danger-bg);
 }
 .dreamina-login-modal-actions {
   display: flex;
@@ -169,8 +169,8 @@
   color: var(--brand-light);
 }
 .settings-save-btn:hover:not(:disabled) {
-  background: rgba(99, 102, 241, 0.22);
-  border-color: rgba(99, 102, 241, 0.4);
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
   color: var(--brand-pale);
 }
 .settings-save-btn:disabled {

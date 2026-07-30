@@ -60,6 +60,8 @@
 }
 
 .character-button-primary {
+  /* 不写 color 会继承面板的 --theme-text：浅色主题下变成深字压深底 */
+  color: #fff;
   background: var(--node-text);
 }
 
@@ -93,7 +95,7 @@
   border: 1px solid transparent;
   border-radius: 7px;
   color: #fff;
-  background: #dc2626;
+  background: var(--danger);
   font-size: 12px;
   font-weight: 550;
   cursor: pointer;
@@ -101,7 +103,7 @@
 }
 
 .character-button-danger:hover {
-  background: #b91c1c;
+  background: var(--danger-light);
 }
 
 .character-confirm-dialog {
@@ -125,8 +127,8 @@
   flex: 0 0 auto;
   place-items: center;
   border-radius: 8px;
-  color: #ef4444;
-  background: color-mix(in srgb, #ef4444 16%, transparent);
+  color: var(--danger-light);
+  background: var(--danger-bg);
 }
 
 .character-confirm-body h3 {
@@ -262,15 +264,20 @@
   padding: 10px;
 }
 
-/* 悬浮在形象参考右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条 */
+/* 悬浮在形象参考右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条。
+   图片按容器高度等比缩小时四周会留 letterbox 空白，所以这里贴的是 justifiedRows
+   算出的图片框（--character-stage-*），而不是 gallery 容器边缘——否则卡片会正好
+   跨在图片与面板底色的分界线上，半深半浅。 */
 .character-library-dock {
+  --stage-w: min(100%, var(--character-stage-width, 100%));
+  --stage-h: min(100%, var(--character-stage-height, 100%));
   position: absolute;
-  right: 10px;
-  bottom: 10px;
+  right: calc((100% - var(--stage-w)) / 2 + 10px);
+  bottom: calc((100% - var(--stage-h)) / 2 + 10px);
   z-index: 2;
   display: flex;
-  max-width: min(560px, calc(100% - 20px));
-  max-height: calc(100% - 20px);
+  max-width: min(560px, calc(var(--stage-w) - 20px));
+  max-height: calc(var(--stage-h) - 20px);
   flex-direction: column;
   gap: 8px;
 }
@@ -283,7 +290,7 @@
   border-radius: 10px;
   background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
   backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  box-shadow: var(--glass-shadow-floating);
 }
 
 /* 头像框与裁切编辑器共用 9/11，裁出来的区域直接贴合不会拉伸 */
@@ -388,7 +395,7 @@
   border-radius: 10px;
   background: color-mix(in srgb, var(--theme-surface) 92%, transparent);
   backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  box-shadow: var(--glass-shadow-floating);
 }
 
 .character-node-picker-empty {
@@ -1047,7 +1054,7 @@
   border-radius: 10px;
   background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
   backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  box-shadow: var(--glass-shadow-floating);
 }
 
 .character-voice-dock-head {

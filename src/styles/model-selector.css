@@ -51,7 +51,7 @@
 /* Workflow trigger state */
 .model-selector-trigger.has-workflow {
   color: var(--brand-light);
-  border-color: rgba(99, 102, 241, 0.2);
+  border-color: color-mix(in srgb, var(--brand) 20%, transparent);
   background: var(--brand-alpha-08);
 }
 .model-selector-trigger.has-workflow .model-selector-icon {
@@ -87,30 +87,43 @@
   background: var(--theme-border);
   color: var(--theme-text-secondary);
 }
-.text-model-icon-badge[data-badge="OA"] { background: rgba(99, 102, 241, 0.2); color: #818cf8; }
-.text-model-icon-badge[data-badge="M"]  { background: rgba(168, 85, 247, 0.2); color: #a855f7; }
-.text-model-icon-badge[data-badge="AM"] { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
-.text-model-icon-mini[data-badge="OA"]  { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
-.text-model-icon-mini[data-badge="M"]   { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
-.text-model-icon-mini[data-badge="AM"]  { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
-.text-model-icon-mini[data-badge="PP"]  { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-.text-model-icon-mini[data-badge="MX"]  { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-.text-model-icon-mini[data-badge="QW"]  { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
-.text-model-icon-mini[data-badge="DS"]  { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
-.text-model-icon-mini[data-badge="KM"]  { background: rgba(251, 146, 60, 0.15); color: #fb923c; }
-.text-model-icon-mini[data-badge="NB"]  { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
-.text-model-icon-mini[data-badge="NP"]  { background: rgba(16, 185, 129, 0.15); color: #10b981; }
-.text-model-icon-mini[data-badge="ND"]  { background: rgba(5, 150, 105, 0.15); color: #059669; }
-.text-model-icon-mini[data-badge="SD"]  { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
-.text-model-icon-mini[data-badge="DB"]  { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
-.text-model-icon-mini[data-badge="DL"]  { background: rgba(147, 197, 253, 0.15); color: #93c5fd; }
-.text-model-icon-mini[data-badge="V"]   { background: rgba(16, 185, 129, 0.15); color: #10b981; }
-.text-model-icon-mini[data-badge="GR"]  { background: rgba(244, 114, 182, 0.15); color: #f472b6; }
-.text-model-icon-mini[data-badge="JM"]  { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-.text-model-icon-mini[data-badge="RH"]  { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; }
-.text-model-icon-mini[data-badge="BP"]  { background: rgba(6, 182, 212, 0.15); color: #06b6d4; }
-.text-model-icon-mini[data-badge="B2"]  { background: rgba(14, 165, 233, 0.15); color: #0ea5e9; }
-.text-model-icon-mini[data-badge="RW"]  { background: rgba(99, 102, 241, 0.15); color: #a5b4fc; }
+/* Vendor badges carry their own brand hue; tint and glyph are both derived from
+   --badge-hue so the light theme can darken the glyph without losing the identity.
+   厂商徽标各带品牌色，底色与字形都由 --badge-hue 推导，浅色主题下可只压暗字形而保留辨识度。 */
+.text-model-icon-badge[data-badge],
+.text-model-icon-mini[data-badge] {
+  background: color-mix(in srgb, var(--badge-hue) 18%, transparent);
+  color: var(--badge-hue);
+}
+[data-theme='light'] .text-model-icon-badge[data-badge],
+[data-theme='light'] .text-model-icon-mini[data-badge] {
+  background: color-mix(in srgb, var(--badge-hue) 22%, transparent);
+  color: color-mix(in srgb, var(--badge-hue) 62%, var(--theme-text));
+}
+.text-model-icon-badge[data-badge="OA"] { --badge-hue: #818cf8; }
+.text-model-icon-badge[data-badge="M"]  { --badge-hue: #a855f7; }
+.text-model-icon-badge[data-badge="AM"] { --badge-hue: #4ade80; }
+.text-model-icon-mini[data-badge="OA"]  { --badge-hue: #818cf8; }
+.text-model-icon-mini[data-badge="M"]   { --badge-hue: #a855f7; }
+.text-model-icon-mini[data-badge="AM"]  { --badge-hue: #4ade80; }
+.text-model-icon-mini[data-badge="PP"]  { --badge-hue: #fbbf24; }
+.text-model-icon-mini[data-badge="MX"]  { --badge-hue: #34d399; }
+.text-model-icon-mini[data-badge="QW"]  { --badge-hue: #60a5fa; }
+.text-model-icon-mini[data-badge="DS"]  { --badge-hue: #a78bfa; }
+.text-model-icon-mini[data-badge="KM"]  { --badge-hue: #fb923c; }
+.text-model-icon-mini[data-badge="NB"]  { --badge-hue: #22c55e; }
+.text-model-icon-mini[data-badge="NP"]  { --badge-hue: #10b981; }
+.text-model-icon-mini[data-badge="ND"]  { --badge-hue: #059669; }
+.text-model-icon-mini[data-badge="SD"]  { --badge-hue: #818cf8; }
+.text-model-icon-mini[data-badge="DB"]  { --badge-hue: #60a5fa; }
+.text-model-icon-mini[data-badge="DL"]  { --badge-hue: #93c5fd; }
+.text-model-icon-mini[data-badge="V"]   { --badge-hue: #10b981; }
+.text-model-icon-mini[data-badge="GR"]  { --badge-hue: #f472b6; }
+.text-model-icon-mini[data-badge="JM"]  { --badge-hue: #fbbf24; }
+.text-model-icon-mini[data-badge="RH"]  { --badge-hue: #8b5cf6; }
+.text-model-icon-mini[data-badge="BP"]  { --badge-hue: #06b6d4; }
+.text-model-icon-mini[data-badge="B2"]  { --badge-hue: #0ea5e9; }
+.text-model-icon-mini[data-badge="RW"]  { --badge-hue: #a5b4fc; }
 
 /* Workflow icon in trigger */
 .model-selector-icon svg {
@@ -126,8 +139,8 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: rgba(99, 102, 241, 0.15);
-  color: #a5b4fc;
+  background: var(--brand-alpha-15);
+  color: var(--brand-pale);
 }
 
 /* Workflow section empty state */
@@ -207,7 +220,7 @@
 
 /* Workflow group separator */
 .model-group-wf {
-  border-top: 1px solid rgba(99, 102, 241, 0.2);
+  border-top: 1px solid color-mix(in srgb, var(--brand) 20%, transparent);
   margin-top: 2px;
 }
 
@@ -345,7 +358,7 @@
   color: var(--theme-text-secondary);
 }
 .model-item.disabled.active {
-  background: rgba(99, 102, 241, 0.06);
+  background: color-mix(in srgb, var(--brand) 6%, transparent);
 }
 
 /* Lock icon for disabled groups */

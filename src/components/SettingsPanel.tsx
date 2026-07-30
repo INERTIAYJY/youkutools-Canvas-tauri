@@ -663,7 +663,7 @@ export default function SettingsPanel() {
                               : value === 'nebula'
                               ? 'bg-gradient-to-b from-[#0a0514] via-[#14081e] to-[#0a0514]'
                               : value === 'off-white'
-                              ? 'bg-[#F5F0EB]'
+                              ? 'bg-[#F4F6FB]'
                               : value === 'frosted-glass'
                               ? 'canvas-bg-frosted-preview'
                               : value === 'custom'

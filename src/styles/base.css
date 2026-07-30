@@ -29,6 +29,7 @@
   --brand-pale: #a5b4fc;
   --brand-alpha-04: rgba(99, 102, 241, 0.04);
   --brand-alpha-05: rgba(99, 102, 241, 0.05);
+  --brand-alpha-08: rgba(99, 102, 241, 0.08);
   --brand-alpha-10: rgba(99, 102, 241, 0.10);
   --brand-alpha-12: rgba(99, 102, 241, 0.12);
   --brand-alpha-15: rgba(99, 102, 241, 0.15);
@@ -72,6 +73,91 @@
   --warning: #f97316;
   --warning-light: #fb923c;
   --warning-bg: rgba(249, 115, 22, 0.15);
+
+  /* Amber accent — workflow chips & vendor badges / 琥珀强调色 — 工作流 chip 与厂商徽标 ── */
+  --accent-amber: #f59e0b;
+  --accent-amber-text: #fbbf24;
+  --accent-amber-bg: rgba(245, 158, 11, 0.10);
+  --accent-amber-border: rgba(245, 158, 11, 0.25);
+
+  /* Disabled foreground / 禁用态前景色 ── */
+  --text-disabled: #444455;
+
+  /* Media well — 图片/图标衬底（透明图会露出这一层，所以要跟随主题；
+     压在图片之上的徽标、遮罩不用这个，它们两个主题下都该是深色）── */
+  --media-well: rgba(0, 0, 0, 0.35);
+  --media-well-soft: rgba(0, 0, 0, 0.20);
+
+  /* ── Stock Tailwind palette, channel form / Tailwind 原生调色板（通道写法）──
+     These back the `text-red-400`, `bg-emerald-500/10`, … utilities (see tailwind.config.js).
+     Dark values are the stock Tailwind hexes, so the dark theme is unchanged; the light
+     theme re-tints the whole ramp to macaron in one place.
+     这些变量支撑 text-red-400 / bg-emerald-500/10 等工具类（见 tailwind.config.js）。
+     暗色沿用 Tailwind 原生色值保持不变，浅色主题在一处统一改写为马卡龙色阶。
+
+     Shade roles follow how this codebase actually uses them, not Tailwind's ramp:
+     300/400 are foreground (text/icon/border) shades, 500 is a tint & fill shade.
+     色阶语义按本项目实际用法：300/400 是前景色（文字/图标/描边），500 是底色与填充色。 */
+  --tw-indigo-50: 238 242 255;
+  --tw-indigo-100: 224 231 255;
+  --tw-indigo-200: 199 210 254;
+  --tw-indigo-300: 165 180 252;
+  --tw-indigo-400: 129 140 248;
+  --tw-indigo-500: 99 102 241;
+  --tw-indigo-600: 79 70 229;
+
+  --tw-purple-400: 192 132 252;
+  --tw-purple-500: 168 85 247;
+  --tw-purple-600: 147 51 234;
+
+  --tw-violet-300: 196 181 253;
+  --tw-violet-400: 167 139 250;
+  --tw-violet-500: 139 92 246;
+  --tw-violet-600: 124 58 237;
+
+  --tw-fuchsia-400: 232 121 249;
+  --tw-fuchsia-500: 217 70 239;
+  --tw-fuchsia-600: 192 38 211;
+
+  --tw-pink-400: 244 114 182;
+  --tw-pink-500: 236 72 153;
+
+  --tw-red-200: 254 202 202;
+  --tw-red-300: 252 165 165;
+  --tw-red-400: 248 113 113;
+  --tw-red-500: 239 68 68;
+
+  --tw-amber-200: 253 230 138;
+  --tw-amber-300: 252 211 77;
+  --tw-amber-400: 251 191 36;
+  --tw-amber-500: 245 158 11;
+
+  --tw-yellow-400: 250 204 21;
+  --tw-yellow-500: 234 179 8;
+
+  --tw-emerald-100: 209 250 229;
+  --tw-emerald-200: 167 243 208;
+  --tw-emerald-300: 110 231 183;
+  --tw-emerald-400: 52 211 153;
+  --tw-emerald-500: 16 185 129;
+
+  --tw-green-300: 134 239 172;
+  --tw-green-400: 74 222 128;
+  --tw-green-500: 34 197 94;
+
+  --tw-blue-400: 96 165 250;
+  --tw-blue-500: 59 130 246;
+
+  --tw-sky-100: 224 242 254;
+  --tw-sky-200: 186 230 253;
+  --tw-sky-300: 125 211 252;
+  --tw-sky-400: 56 189 248;
+
+  --tw-orange-400: 251 146 60;
+  --tw-orange-500: 249 115 22;
+
+  --tw-cyan-400: 34 211 238;
+  --tw-cyan-500: 6 182 212;
 
   /* White Alpha Series / 白色透明度系列 ── */
   --white-alpha-03: rgba(255, 255, 255, 0.03);
@@ -167,74 +253,189 @@
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   Light Theme / 浅色主题
-   Switches theme layer, alpha series, borders, glass & scrollbar to light values.
-   切换主题层、透明度系列、边框、毛玻璃和滚动条为浅色值。
+   Light Theme — Macaron / 浅色主题 — 马卡龙
+   Cool off-white neutrals + low-saturation pastel accents.
+   偏冷的米白中性色 + 低饱和马卡龙强调色。
+
+   Accent convention / 强调色约定：
+   base (--brand / --node-* / --success …) 是柔和的马卡龙色，用于填充、描边、圆点；
+   `-light` / `-pale` / `-text` 变体在浅色主题下**加深**一档，因为它们几乎都被
+   当作浅色/淡色底上的前景文字使用（暗色主题里"更亮"才可读，浅色主题里反之）。
    ════════════════════════════════════════════════════════════════════════ */
 [data-theme='light'] {
   color-scheme: light;
 
   /* Theme Layer / 主题层 ── */
-  --theme-bg: #F5F0EB;
+  --theme-bg: #F4F6FB;
   --theme-surface: #FFFFFF;
-  --theme-card: #F8F6F3;
-  --theme-border: #E5E0D8;
-  --theme-hover: #EDE8E0;
-  --theme-text: #1a1a2e;
-  --theme-text-secondary: #6b6b7b;
-  --theme-text-muted: #6c6c7a;
+  --theme-card: #F8FAFD;
+  --theme-border: #E4E8F2;
+  --theme-hover: #EEF1F8;
+  --theme-text: #33364D;
+  --theme-text-secondary: #6E7488;
+  --theme-text-muted: #767D92;
 
-  /* Semantics remain the same but adjust backgrounds for readability / 语义色保持一致，仅调整背景 */
-  --success-bg: rgba(16, 185, 129, 0.10);
-  --danger-bg: rgba(239, 68, 68, 0.10);
-  --info-bg: rgba(59, 130, 246, 0.10);
-  --warning-bg: rgba(249, 115, 22, 0.10);
+  /* Brand — macaron periwinkle / 品牌色 — 马卡龙紫罗兰 ── */
+  --brand: #7280E4;
+  --brand-light: #5A69D4;
+  --brand-hover: #5F6DD8;
+  --brand-pale: #4F5ECB;
 
-  /* Node type backgrounds — lighter for light theme / 节点类型背景 — 浅色主题下调浅 */
-  --node-text-bg: rgba(99, 102, 241, 0.10);
-  --node-image-bg: rgba(16, 185, 129, 0.10);
-  --node-video-bg: rgba(59, 130, 246, 0.10);
-  --node-audio-bg: rgba(249, 115, 22, 0.10);
-  --node-panorama-bg: rgba(6, 182, 212, 0.10);
-  --node-markdown-bg: rgba(168, 85, 247, 0.10);
+  /* Node type colors — macaron / 节点类型颜色 — 马卡龙 ── */
+  --node-text: #7280E4;
+  --node-text-light: #5A69D4;
+  --node-text-bg: rgba(114, 128, 228, 0.14);
+  --node-image: #6ECBAA;
+  --node-image-light: #23937A;
+  --node-image-text: #23937A;
+  --node-image-bg: rgba(110, 203, 170, 0.20);
+  --node-video: #7FBBF2;
+  --node-video-light: #3B7EC4;
+  --node-video-bg: rgba(127, 187, 242, 0.20);
+  --node-audio: #F4AC7D;
+  --node-audio-light: #C06E33;
+  --node-audio-bg: rgba(244, 172, 125, 0.22);
+  --node-panorama: #6FCBD6;
+  --node-panorama-light: #26838F;
+  --node-panorama-bg: rgba(111, 203, 214, 0.20);
+  --node-markdown: #B294E6;
+  --node-markdown-light: #7F55C6;
+  --node-markdown-bg: rgba(178, 148, 230, 0.18);
 
-  /* Brand alphas — lighter for light theme / 品牌透明度 — 浅色主题下调浅 */
-  --brand-alpha-04: rgba(99, 102, 241, 0.04);
-  --brand-alpha-05: rgba(99, 102, 241, 0.06);
-  --brand-alpha-10: rgba(99, 102, 241, 0.08);
-  --brand-alpha-12: rgba(99, 102, 241, 0.10);
-  --brand-alpha-15: rgba(99, 102, 241, 0.12);
-  --brand-alpha-20: rgba(99, 102, 241, 0.15);
-  --brand-alpha-25: rgba(99, 102, 241, 0.18);
-  --brand-alpha-30: rgba(99, 102, 241, 0.22);
+  /* Semantic State Colors — macaron / 语义状态色 — 马卡龙 ── */
+  --success: #6ECBAA;
+  --success-light: #23937A;
+  --success-text: #23937A;
+  --success-bg: rgba(110, 203, 170, 0.20);
+  --danger: #E27C89;
+  --danger-light: #CE4F62;
+  --danger-pale: #C24357;
+  --danger-bg: rgba(226, 124, 137, 0.18);
+  --info: #7FBBF2;
+  --info-light: #3B7EC4;
+  --info-bg: rgba(127, 187, 242, 0.20);
+  --warning: #F4AC7D;
+  --warning-light: #C06E33;
+  --warning-bg: rgba(244, 172, 125, 0.22);
 
-  /* White Alpha → Black Alpha for overlays & subtle layers / 遮罩和微妙层切换为黑色透明度 */
-  --white-alpha-03: rgba(0, 0, 0, 0.03);
-  --white-alpha-04: rgba(0, 0, 0, 0.04);
-  --white-alpha-06: rgba(0, 0, 0, 0.06);
-  --white-alpha-08: rgba(0, 0, 0, 0.08);
-  --white-alpha-10: rgba(0, 0, 0, 0.10);
-  --white-alpha-12: rgba(0, 0, 0, 0.12);
-  --white-alpha-15: rgba(0, 0, 0, 0.15);
+  /* Amber accent — macaron butter / 琥珀强调色 — 马卡龙奶油黄 ── */
+  --accent-amber: #EDBE63;
+  --accent-amber-text: #A87A24;
+  --accent-amber-bg: rgba(237, 190, 99, 0.22);
+  --accent-amber-border: rgba(237, 190, 99, 0.42);
+
+  /* Disabled foreground / 禁用态前景色 ── */
+  --text-disabled: #A9AEC0;
+
+  /* Media well / 图片衬底 ── */
+  --media-well: color-mix(in srgb, var(--theme-text) 6%, var(--theme-card));
+  --media-well-soft: color-mix(in srgb, var(--theme-text) 4%, var(--theme-card));
+
+  /* ── Stock Tailwind palette → macaron / Tailwind 原生调色板 → 马卡龙 ──
+     Families that map onto an existing macaron accent are pinned to it (indigo→品牌紫罗兰,
+     emerald/green→薄荷, blue/sky→天蓝, orange→杏色, cyan→水绿, red→玫瑰, amber/yellow→奶油黄,
+     purple→薰衣草) so there is one palette rather than two that drift apart. The rest
+     (violet / fuchsia / pink) keep their own hue at macaron saturation, since node types
+     rely on them staying distinguishable. */
+  --tw-indigo-50: 249 250 252;
+  --tw-indigo-100: 244 245 251;
+  --tw-indigo-200: 224 226 246;
+  --tw-indigo-300: 117 130 217;
+  --tw-indigo-400: 90 105 212;
+  --tw-indigo-500: 114 128 228;
+  --tw-indigo-600: 65 83 219;
+
+  --tw-purple-400: 127 85 198;
+  --tw-purple-500: 178 148 230;
+  --tw-purple-600: 119 66 211;
+
+  --tw-violet-300: 152 120 209;
+  --tw-violet-400: 136 95 206;
+  --tw-violet-500: 177 149 225;
+  --tw-violet-600: 118 72 196;
+
+  --tw-fuchsia-400: 182 66 197;
+  --tw-fuchsia-500: 209 136 218;
+  --tw-fuchsia-600: 149 64 160;
+
+  --tw-pink-400: 194 73 132;
+  --tw-pink-500: 217 139 177;
+
+  --tw-red-200: 244 222 225;
+  --tw-red-300: 209 103 117;
+  --tw-red-400: 206 79 98;
+  --tw-red-500: 226 124 137;
+
+  --tw-amber-200: 242 225 194;
+  --tw-amber-300: 175 127 35;
+  --tw-amber-400: 168 122 36;
+  --tw-amber-500: 237 190 99;
+
+  --tw-yellow-400: 168 122 36;
+  --tw-yellow-500: 237 190 99;
+
+  --tw-emerald-100: 239 247 244;
+  --tw-emerald-200: 207 234 224;
+  --tw-emerald-300: 65 151 120;
+  --tw-emerald-400: 35 147 122;
+  --tw-emerald-500: 110 203 170;
+
+  --tw-green-300: 65 151 120;
+  --tw-green-400: 35 147 122;
+  --tw-green-500: 110 203 170;
+
+  --tw-blue-400: 59 126 196;
+  --tw-blue-500: 127 187 242;
+
+  --tw-sky-100: 239 246 251;
+  --tw-sky-200: 211 230 246;
+  --tw-sky-300: 55 140 217;
+  --tw-sky-400: 59 126 196;
+
+  --tw-orange-400: 192 110 51;
+  --tw-orange-500: 244 172 125;
+
+  --tw-cyan-400: 38 131 143;
+  --tw-cyan-500: 111 203 214;
+
+  /* Brand alphas / 品牌透明度 ── */
+  --brand-alpha-04: rgba(114, 128, 228, 0.05);
+  --brand-alpha-05: rgba(114, 128, 228, 0.07);
+  --brand-alpha-08: rgba(114, 128, 228, 0.09);
+  --brand-alpha-10: rgba(114, 128, 228, 0.10);
+  --brand-alpha-12: rgba(114, 128, 228, 0.12);
+  --brand-alpha-15: rgba(114, 128, 228, 0.14);
+  --brand-alpha-20: rgba(114, 128, 228, 0.17);
+  --brand-alpha-25: rgba(114, 128, 228, 0.20);
+  --brand-alpha-30: rgba(114, 128, 228, 0.24);
+
+  /* White Alpha → cool ink alpha for overlays & subtle layers / 遮罩和微妙层切换为冷调墨色透明度 */
+  --white-alpha-03: rgba(51, 54, 77, 0.03);
+  --white-alpha-04: rgba(51, 54, 77, 0.04);
+  --white-alpha-06: rgba(51, 54, 77, 0.06);
+  --white-alpha-08: rgba(51, 54, 77, 0.07);
+  --white-alpha-10: rgba(51, 54, 77, 0.09);
+  --white-alpha-12: rgba(51, 54, 77, 0.11);
+  --white-alpha-15: rgba(51, 54, 77, 0.14);
 
   /* Border Variants / 边框变体 ── */
-  --separator-color: rgba(26, 26, 46, 0.14);
-  --border-subtle: rgba(0, 0, 0, 0.06);
-  --border-secondary: #d4d0c8;
-  --border-focus: rgba(99, 102, 241, 0.45);
+  --separator-color: rgba(51, 54, 77, 0.12);
+  --border-subtle: rgba(51, 54, 77, 0.06);
+  --border-secondary: #DCE1EE;
+  --border-focus: rgba(114, 128, 228, 0.45);
 
   /* Scrollbar / 滚动条 ── */
-  --scrollbar-thumb: #c0bdb5;
-  --scrollbar-thumb-hover: #a5a29a;
-  --scrollbar-thumb-active: #8a8780;
+  --scrollbar-thumb: #CBD1E0;
+  --scrollbar-thumb-hover: #B0B7CB;
+  --scrollbar-thumb-active: #949CB3;
 
   /* Glass / Frosted Surface / 毛玻璃表面 ── */
   --glass-bg: rgba(255, 255, 255, 0.95);
-  --glass-bg-light: rgba(255, 255, 255, 0.55);
-  --glass-bg-node: rgba(255, 255, 255, 0.88);
-  --glass-panel-bg: rgba(255, 255, 255, 0.84);
-  --glass-ring: rgba(0, 0, 0, 0.10);
-  --glass-ring-strong: rgba(0, 0, 0, 0.06);
+  --glass-bg-light: rgba(255, 255, 255, 0.58);
+  --glass-bg-node: rgba(255, 255, 255, 0.90);
+  --glass-panel-bg: rgba(252, 253, 255, 0.86);
+  --glass-ring: rgba(51, 54, 77, 0.10);
+  --glass-ring-strong: rgba(51, 54, 77, 0.06);
   --minimap-mask: color-mix(in srgb, var(--theme-text) 14%, transparent);
   --glass-bevel-border: linear-gradient(
     160deg,
@@ -265,30 +466,30 @@
    Tailwind resolves colors at build time; override generated utility classes here.
    Tailwind 在构建时解析颜色，此处覆盖生成的工具类。
    ════════════════════════════════════════════════════════════════════════ */
-[data-theme='light'] .text-canvas-text { color: #1a1a2e; }
-[data-theme='light'] .text-canvas-text\/90 { color: rgb(26 26 46 / 0.9); }
-[data-theme='light'] .focus\:text-canvas-text\/90:focus { color: rgb(26 26 46 / 0.9); }
-[data-theme='light'] .text-canvas-text-secondary { color: #6b6b7b; }
-[data-theme='light'] .text-canvas-text-secondary\/80 { color: rgb(107 107 123 / 0.8); }
-[data-theme='light'] .text-canvas-text-muted { color: #6c6c7a; }
+[data-theme='light'] .text-canvas-text { color: #33364D; }
+[data-theme='light'] .text-canvas-text\/90 { color: rgb(51 54 77 / 0.9); }
+[data-theme='light'] .focus\:text-canvas-text\/90:focus { color: rgb(51 54 77 / 0.9); }
+[data-theme='light'] .text-canvas-text-secondary { color: #6E7488; }
+[data-theme='light'] .text-canvas-text-secondary\/80 { color: rgb(110 116 136 / 0.8); }
+[data-theme='light'] .text-canvas-text-muted { color: #767D92; }
 [data-theme='light'] .hover\:text-canvas-text:hover { color: var(--theme-text); }
 [data-theme='light'] .hover\:text-canvas-text-secondary:hover { color: var(--theme-text-secondary); }
 
-[data-theme='light'] .bg-canvas-bg { background-color: #F5F0EB; }
-[data-theme='light'] .bg-canvas-bg\/60 { background-color: rgb(245 240 235 / 0.6); }
+[data-theme='light'] .bg-canvas-bg { background-color: #F4F6FB; }
+[data-theme='light'] .bg-canvas-bg\/60 { background-color: rgb(244 246 251 / 0.6); }
 /* app-box 在浅色主题下背景透明，由 CanvasBackground 的米白层负责 */
 [data-theme='light'] .app-box { background-color: transparent; }
 [data-theme='light'] .bg-canvas-surface { background-color: #FFFFFF; }
 [data-theme='light'] .bg-canvas-surface\/60 { background-color: rgb(255 255 255 / 0.6); }
 [data-theme='light'] .bg-canvas-surface\/80 { background-color: rgb(255 255 255 / 0.8); }
 [data-theme='light'] .bg-canvas-surface\/95 { background-color: rgb(255 255 255 / 0.95); }
-[data-theme='light'] .bg-canvas-card { background-color: #F8F6F3; }
-[data-theme='light'] .bg-canvas-card\/80 { background-color: rgb(248 246 243 / 0.8); }
-[data-theme='light'] .bg-canvas-card\/95 { background-color: rgb(248 246 243 / 0.95); }
-[data-theme='light'] .bg-canvas-hover { background-color: #EDE8E0; }
+[data-theme='light'] .bg-canvas-card { background-color: #F8FAFD; }
+[data-theme='light'] .bg-canvas-card\/80 { background-color: rgb(248 250 253 / 0.8); }
+[data-theme='light'] .bg-canvas-card\/95 { background-color: rgb(248 250 253 / 0.95); }
+[data-theme='light'] .bg-canvas-hover { background-color: #EEF1F8; }
 [data-theme='light'] .hover\:bg-canvas-border:hover { background-color: var(--theme-border); }
 [data-theme='light'] .hover\:bg-canvas-card:hover { background-color: var(--theme-card); }
-[data-theme='light'] .hover\:bg-canvas-hover:hover { background-color: #EDE8E0; }
+[data-theme='light'] .hover\:bg-canvas-hover:hover { background-color: #EEF1F8; }
 [data-theme='light'] .hover\:bg-canvas-hover\/80:hover {
   background-color: color-mix(in srgb, var(--theme-hover) 80%, transparent);
 }
@@ -298,9 +499,9 @@
   background-color: color-mix(in srgb, var(--theme-text-muted) 60%, transparent);
 }
 
-[data-theme='light'] .border-canvas-border { border-color: #E5E0D8; }
-[data-theme='light'] .border-border-subtle { border-color: rgba(0, 0, 0, 0.06); }
-[data-theme='light'] .border-border-secondary { border-color: #d4d0c8; }
+[data-theme='light'] .border-canvas-border { border-color: #E4E8F2; }
+[data-theme='light'] .border-border-subtle { border-color: rgba(51, 54, 77, 0.06); }
+[data-theme='light'] .border-border-secondary { border-color: #DCE1EE; }
 [data-theme='light'] .hover\:border-canvas-border\/80:hover {
   border-color: color-mix(in srgb, var(--theme-border) 80%, transparent);
 }
@@ -309,9 +510,38 @@
   border-color: var(--theme-text-secondary);
 }
 
-[data-theme='light'] .shadow-canvas-border { --tw-shadow-color: #E5E0D8; }
-[data-theme='light'] .ring-canvas-border { --tw-ring-color: #E5E0D8; }
-[data-theme='light'] .divide-canvas-border { --tw-divide-opacity: 1; border-color: rgb(229 224 216 / var(--tw-divide-opacity, 1)); }
+[data-theme='light'] .shadow-canvas-border { --tw-shadow-color: #E4E8F2; }
+[data-theme='light'] .ring-canvas-border { --tw-ring-color: #E4E8F2; }
+[data-theme='light'] .divide-canvas-border { --tw-divide-opacity: 1; border-color: rgb(228 232 242 / var(--tw-divide-opacity, 1)); }
+
+/* Accent utilities resolve to dark-theme hexes at build time; re-point them at the
+   macaron tokens so the light theme stays in one palette.
+   强调色工具类在构建时固化为暗色主题色值，此处改指向马卡龙令牌，保证浅色主题同一套调色板。 */
+[data-theme='light'] .bg-brand { background-color: var(--brand); }
+[data-theme='light'] .bg-brand\/10 { background-color: var(--brand-alpha-10); }
+[data-theme='light'] .bg-brand\/15 { background-color: var(--brand-alpha-15); }
+[data-theme='light'] .bg-brand-light { background-color: var(--brand-light); }
+[data-theme='light'] .text-brand { color: var(--brand-pale); }
+[data-theme='light'] .text-brand-light { color: var(--brand-light); }
+[data-theme='light'] .border-brand\/30 { border-color: var(--brand-alpha-30); }
+[data-theme='light'] .border-brand\/40 { border-color: color-mix(in srgb, var(--brand) 40%, transparent); }
+[data-theme='light'] .border-brand-light { border-color: var(--brand-light); }
+[data-theme='light'] .border-brand-light\/50 { border-color: color-mix(in srgb, var(--brand-light) 50%, transparent); }
+[data-theme='light'] .ring-brand\/15 { --tw-ring-color: var(--brand-alpha-15); }
+[data-theme='light'] .shadow-brand\/30 { --tw-shadow-color: var(--brand-alpha-30); }
+
+[data-theme='light'] .text-node-text-light { color: var(--node-text-light); }
+[data-theme='light'] .text-node-image-light { color: var(--node-image-light); }
+[data-theme='light'] .text-node-video-light { color: var(--node-video-light); }
+[data-theme='light'] .text-node-audio-light { color: var(--node-audio-light); }
+[data-theme='light'] .bg-node-text\/15 { background-color: var(--node-text-bg); }
+[data-theme='light'] .bg-node-image\/15 { background-color: var(--node-image-bg); }
+[data-theme='light'] .bg-node-video\/15 { background-color: var(--node-video-bg); }
+[data-theme='light'] .bg-node-audio\/15 { background-color: var(--node-audio-bg); }
+[data-theme='light'] .ring-node-text\/25 { --tw-ring-color: color-mix(in srgb, var(--node-text) 30%, transparent); }
+[data-theme='light'] .ring-node-image\/25 { --tw-ring-color: color-mix(in srgb, var(--node-image) 45%, transparent); }
+[data-theme='light'] .ring-node-video\/25 { --tw-ring-color: color-mix(in srgb, var(--node-video) 45%, transparent); }
+[data-theme='light'] .ring-node-audio\/25 { --tw-ring-color: color-mix(in srgb, var(--node-audio) 45%, transparent); }
 
 /* ════════════════════════════════════════════════════════════════════════
    Unified Glass Utility / 统一毛玻璃工具类

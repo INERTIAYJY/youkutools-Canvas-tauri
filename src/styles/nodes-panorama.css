@@ -120,7 +120,7 @@
 /* 视角模式下给节点一圈品牌色描边，提示指针已被全景接管 */
 .pano-node.is-pano-active {
   border-color: var(--brand-alpha-30);
-  box-shadow: 0 0 0 1px var(--brand-alpha-30), 0 8px 32px rgba(99, 102, 241, 0.16);
+  box-shadow: 0 0 0 1px var(--brand-alpha-30), 0 8px 32px color-mix(in srgb, var(--brand) 16%, transparent);
 }
 
 .xiaoluo-pano-shell .xiaoluo-panorama-core,

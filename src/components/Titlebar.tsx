@@ -75,23 +75,24 @@ function TitlebarInner({
           className="glass-bevel glass-bevel--floating flex items-center gap-1.5 rounded-full border border-canvas-border
                      bg-canvas-surface/45 px-2 py-1.5 shadow-lg shadow-black/20 backdrop-blur-xl"
         >
+          {/* 交通灯用 macOS 系统色，不跟随主题调色板 —— 它是窗口控件而非应用配色 */}
           <MacTrafficLight
             label="关闭"
-            className="bg-red-400 hover:bg-red-300"
+            className="bg-[#ff5f57] hover:bg-[#ff7b74]"
             onClick={() => appWindow.close()}
           >
             <CloseIcon />
           </MacTrafficLight>
           <MacTrafficLight
             label="最小化"
-            className="bg-amber-400 hover:bg-amber-300"
+            className="bg-[#febc2e] hover:bg-[#ffcb55]"
             onClick={() => appWindow.minimize()}
           >
             <MinimizeIcon />
           </MacTrafficLight>
           <MacTrafficLight
             label={isWindowExpanded ? '退出全屏' : '全屏'}
-            className="bg-emerald-400 hover:bg-emerald-300"
+            className="bg-[#28c840] hover:bg-[#4dd662]"
             onClick={() => { void toggleWindowExpanded(); }}
           >
             {isWindowExpanded ? <RestoreIcon /> : <MaximizeIcon />}

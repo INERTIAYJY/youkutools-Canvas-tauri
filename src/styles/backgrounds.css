@@ -11,12 +11,15 @@
   pointer-events: none;
 }
 
-/* ── 米白浅色背景 ── */
+/* ── 米白浅色背景（马卡龙冷调）── */
 .canvas-bg-off-white {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background: rgba(245, 240, 235, 0.98);
+  background:
+    radial-gradient(circle at 12% 8%, rgba(114, 128, 228, 0.07) 0%, transparent 46%),
+    radial-gradient(circle at 88% 82%, rgba(110, 203, 170, 0.06) 0%, transparent 44%),
+    rgba(244, 246, 251, 0.98);
   pointer-events: none;
 }
 /* 细网格纹理 */
@@ -25,7 +28,7 @@
   position: absolute;
   inset: 0;
   background-image:
-    radial-gradient(circle, rgba(0, 0, 0, 0.06) 1px, transparent 1px);
+    radial-gradient(circle, rgba(51, 54, 77, 0.05) 1px, transparent 1px);
   background-size: 8px 8px;
   pointer-events: none;
 }

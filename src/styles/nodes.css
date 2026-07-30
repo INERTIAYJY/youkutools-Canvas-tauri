@@ -54,7 +54,7 @@
 
 .node.selected {
   border-color: var(--brand-alpha-25);
-  box-shadow: 0 0 0 1px var(--brand-alpha-20), 0 8px 32px rgba(99, 102, 241, 0.12);
+  box-shadow: 0 0 0 1px var(--brand-alpha-20), 0 8px 32px color-mix(in srgb, var(--brand) 12%, transparent);
 }
 
 /* ════════════════════════════════════════════
@@ -421,7 +421,7 @@
   background: linear-gradient(
     115deg,
     transparent 38%,
-    rgba(99, 102, 241, 0.0) 44%,
+    transparent 44%,
     rgba(129, 140, 248, 0.55) 50%,
     rgba(56, 189, 248, 0.35) 54%,
     transparent 62%
@@ -442,7 +442,8 @@
   border-radius: 14px;
 }
 
-/* 角标文字 */
+/* 角标文字 —— 浮在图片上方，两个主题都用深色胶囊 + 亮色前景，
+   因此这里的颜色刻意写死，不跟随主题令牌（否则浅色主题会变成深底深字）。 */
 .upscale-glow-label {
   position: absolute;
   left: 50%;
@@ -741,7 +742,7 @@
 }
 
 .node-resize-handle--se:hover::after {
-  border-color: transparent transparent #a8a8f3 transparent;
+  border-color: transparent transparent var(--brand-light) transparent;
 }
 
 .image-preview-img.compact {
@@ -1283,8 +1284,8 @@
 }
 
 .markdown-mode-btn.active {
-  background: rgba(168, 85, 247, 0.15);
-  border-color: rgba(168, 85, 247, 0.4);
+  background: color-mix(in srgb, var(--node-markdown) 15%, transparent);
+  border-color: color-mix(in srgb, var(--node-markdown) 40%, transparent);
   color: rgb(192, 132, 252);
 }
 
@@ -1348,7 +1349,7 @@
 .markdown-rendered code {
   font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
   font-size: 11px;
-  background: rgba(168, 85, 247, 0.12);
+  background: color-mix(in srgb, var(--node-markdown) 12%, transparent);
   padding: 1px 5px;
   border-radius: 3px;
   color: rgb(192, 132, 252);
@@ -1373,7 +1374,7 @@
 .markdown-rendered blockquote {
   margin: 6px 0;
   padding: 4px 10px;
-  border-left: 3px solid rgba(168, 85, 247, 0.5);
+  border-left: 3px solid color-mix(in srgb, var(--node-markdown) 50%, transparent);
   color: var(--theme-text-secondary);
   background: rgba(26, 26, 38, 0.4);
   border-radius: 0 4px 4px 0;

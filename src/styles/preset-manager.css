@@ -144,7 +144,7 @@
 .preset-manager-new-btn:hover {
   border-color: var(--brand);
   color: var(--brand);
-  background: rgba(99, 102, 241, 0.08);
+  background: color-mix(in srgb, var(--brand) 8%, transparent);
 }
 
 .preset-manager-list {

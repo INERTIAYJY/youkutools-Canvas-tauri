@@ -203,7 +203,7 @@
 }
 .wf-cat-chip.active {
   color: var(--brand-light);
-  border-color: rgba(99, 102, 241, 0.4);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
   background: var(--brand-alpha-12);
 }
 
@@ -216,7 +216,7 @@
   transition: border-color var(--transition-base), background var(--transition-base);
 }
 .wf-file-area:hover {
-  border-color: rgba(99, 102, 241, 0.3);
+  border-color: color-mix(in srgb, var(--brand) 30%, transparent);
   background: var(--brand-alpha-04);
 }
 .wf-file-placeholder {
@@ -266,11 +266,11 @@
 .wf-btn-primary {
   background: var(--brand-alpha-15);
   color: var(--brand-light);
-  border-color: rgba(99, 102, 241, 0.25);
+  border-color: color-mix(in srgb, var(--brand) 25%, transparent);
 }
 .wf-btn-primary:hover:not(:disabled) {
-  background: rgba(99, 102, 241, 0.25);
-  border-color: rgba(99, 102, 241, 0.4);
+  background: color-mix(in srgb, var(--brand) 25%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
 }
 .wf-btn-primary:disabled {
   opacity: 0.35;
@@ -413,20 +413,20 @@
   opacity: 0.7;
 }
 .wf-ionode-prompt {
-  background: rgba(99, 102, 241, 0.12);
-  color: #a5b4fc;
+  background: var(--node-text-bg);
+  color: var(--brand-pale);
 }
 .wf-ionode-image {
-  background: rgba(16, 185, 129, 0.12);
-  color: #6ee7b7;
+  background: var(--node-image-bg);
+  color: var(--node-image-text);
 }
 .wf-ionode-video {
-  background: rgba(59, 130, 246, 0.12);
-  color: #93c5fd;
+  background: var(--node-video-bg);
+  color: var(--node-video-light);
 }
 .wf-ionode-audio {
-  background: rgba(249, 115, 22, 0.12);
-  color: #fdba74;
+  background: var(--node-audio-bg);
+  color: var(--node-audio-light);
 }
 
 /* Light surfaces need more separation than the translucent dark-theme treatment. */
@@ -620,7 +620,7 @@
   color: var(--theme-text-secondary);
 }
 .assets-tab.active .assets-tab-count {
-  background: rgba(129, 140, 248, 0.15);
+  background: color-mix(in srgb, var(--brand-light) 15%, transparent);
   color: var(--brand-light);
 }
 
@@ -669,8 +669,8 @@
 }
 .assets-cat-chip.active {
   color: var(--brand-light);
-  background: rgba(129, 140, 248, 0.12);
-  border-color: rgba(129, 140, 248, 0.25);
+  background: color-mix(in srgb, var(--brand-light) 12%, transparent);
+  border-color: color-mix(in srgb, var(--brand-light) 25%, transparent);
 }
 .assets-cat-chip:disabled {
   opacity: 0.35;
@@ -723,14 +723,21 @@
 }
 .assets-file-waterfall {
   padding: 8px 0 10px;
-  columns: 3;
-  column-gap: 10px;
 }
-.assets-file-waterfall[data-columns="2"] { columns: 2; }
-.assets-file-waterfall[data-columns="3"] { columns: 3; }
-.assets-file-waterfall[data-columns="4"] { columns: 4; }
-.assets-file-waterfall[data-columns="5"] { columns: 5; }
-.assets-file-waterfall[data-columns="6"] { columns: 6; }
+/* 列数由 distributeToColumns 在 JS 里分好，这里只负责等分宽度。
+   不用 CSS `columns` 是因为它按列高均衡灌列，会打乱阅读顺序、且图片加载时卡片会跳列。 */
+.assets-waterfall-cols {
+  display: flex;
+  align-items: flex-start; /* 每列都从顶端起排 → 首行卡片顶部必然齐平 */
+  gap: 10px;
+}
+.assets-waterfall-col {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 0; /* 等分：卡片宽度只跟列数有关，不随卡片数量变化 */
+  flex-direction: column;
+  gap: 12px;
+}
 .assets-empty {
   display: flex;
   flex-direction: column;
@@ -740,7 +747,6 @@
   padding: 40px 20px;
   color: var(--theme-text-muted);
   font-size: 13px;
-  column-span: all;
 }
 .assets-spinner {
   width: 24px;
@@ -753,8 +759,6 @@
 
 /* Waterfall card */
 .assets-waterfall-card {
-  break-inside: avoid;
-  margin-bottom: 12px;
   border-radius: 8px;
   overflow: hidden;
   background: var(--white-alpha-03);
@@ -771,7 +775,7 @@
   position: relative;
   width: 100%;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--media-well);
 }
 .assets-card-img {
   display: block;
@@ -787,7 +791,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--media-well-soft);
 }
 .assets-card-icon {
   font-size: 32px;
@@ -1177,7 +1181,7 @@
   font-size: 10px;
   font-weight: 500;
   color: #fff;
-  background: rgba(99, 102, 241, 0.85);
+  background: color-mix(in srgb, var(--brand) 85%, transparent);
   border-radius: 4px;
   pointer-events: none;
   line-height: 1.5;
@@ -1372,7 +1376,7 @@
   transition: color var(--transition-base), background var(--transition-base);
 }
 .asset-search-winbtn:hover { color: var(--theme-text); background: var(--white-alpha-08); }
-.asset-search-winbtn.close:hover { color: #fff; background: rgba(239, 68, 68, 0.75); }
+.asset-search-winbtn.close:hover { color: #fff; background: color-mix(in srgb, var(--danger) 75%, transparent); }
 .asset-search-title {
   font-size: 17px;
   font-weight: 600;

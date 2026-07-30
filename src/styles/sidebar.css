@@ -67,7 +67,7 @@
 
 /* Add button */
 .add-btn-v3 {
-  color: rgba(129, 140, 248, 0.7);
+  color: color-mix(in srgb, var(--brand-light) 70%, transparent);
 }
 .add-btn-v3:hover,
 .add-btn-v3.active {
@@ -91,7 +91,7 @@
   height: 14px;
   padding: 0 3px;
   border-radius: 7px;
-  background: #7c3aed;
+  background: var(--node-markdown-light);
   color: #fff;
   font-size: 9px;
   font-weight: 600;

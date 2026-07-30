@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
@@ -13,6 +14,7 @@ import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
+import type { ReferenceStageBox } from './character/CharacterReferenceGallery';
 import {
   CHARACTER_VOICE_KIND_LABELS,
   cropImageStyle,
@@ -99,6 +101,13 @@ export default function CharacterLibraryPanel() {
   const [scope, setScope] = useState<CharacterLibraryScope>('project');
   const [search, setSearch] = useState('');
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
+  // 图片按容器高等比缩小后左右会留白，浮层要贴图片边缘，否则卡片会跨在图片与面板底色的分界上
+  const [referenceStage, setReferenceStage] = useState<ReferenceStageBox | null>(null);
+  const handleStageResize = useCallback((next: ReferenceStageBox | null) => {
+    setReferenceStage((previous) => (
+      previous?.width === next?.width && previous?.height === next?.height ? previous : next
+    ));
+  }, []);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogCharacter, setDialogCharacter] = useState<DramaCharacter | null>(null);
@@ -376,12 +385,20 @@ export default function CharacterLibraryPanel() {
               <p>正在读取全局角色…</p>
             </div>
           ) : selectedCharacter ? (
-            <section className="character-library-gallery" aria-label="多图参考">
+            <section
+              className="character-library-gallery"
+              aria-label="多图参考"
+              style={referenceStage ? {
+                '--character-stage-width': `${referenceStage.width}px`,
+                '--character-stage-height': `${referenceStage.height}px`,
+              } as CSSProperties : undefined}
+            >
               <CharacterReferenceGallery
                 references={selectedCharacter.referenceImages ?? []}
                 selectedId={effectiveReferenceId}
                 onSelect={setSelectedReferenceId}
                 onEdit={(referenceId) => openEditor(selectedCharacter, referenceId)}
+                onStageResize={handleStageResize}
               />
 
               <div className="character-library-dock">

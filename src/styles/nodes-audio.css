@@ -18,6 +18,8 @@
   height: auto;
 }
 
+/* 播放遮罩浮在波形图上，两个主题都是深色蒙版，因此前景色刻意写死为亮橙，
+   不跟随 --node-audio-light（浅色主题下该令牌会变深，深底深字不可读）。 */
 .audio-play-overlay {
   position: absolute;
   inset: 0;
@@ -31,7 +33,7 @@
 
 .audio-waveform-wrapper:hover .audio-play-overlay {
   background: var(--black-alpha-50);
-  color: var(--node-audio-light);
+  color: #fb923c;
 }
 
 /* ── Time label (bottom-left during playback) ── */

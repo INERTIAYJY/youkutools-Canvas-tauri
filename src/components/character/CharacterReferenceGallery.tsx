@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { CharacterReferenceImage } from '../../types/dramaAssets';
 import { CHARACTER_REFERENCE_KIND_LABELS } from './characterReferencePresentation';
@@ -6,11 +6,18 @@ import { justifiedRows } from './justifiedRows';
 
 const GAP = 8;
 
+export interface ReferenceStageBox {
+  width: number;
+  height: number;
+}
+
 interface CharacterReferenceGalleryProps {
   references: CharacterReferenceImage[];
   selectedId: string | null;
   onSelect: (referenceId: string) => void;
   onEdit: (referenceId: string) => void;
+  /** 汇报实际铺开的图片框；容器留白时浮层要贴图片边缘而不是容器边缘 */
+  onStageResize?: (stage: ReferenceStageBox | null) => void;
 }
 
 export default function CharacterReferenceGallery({
@@ -18,6 +25,7 @@ export default function CharacterReferenceGallery({
   selectedId,
   onSelect,
   onEdit,
+  onStageResize,
 }: CharacterReferenceGalleryProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
@@ -48,6 +56,10 @@ export default function CharacterReferenceGallery({
     () => justifiedRows(references.map((item) => ratios[item.id] ?? 1), box.width, box.height, GAP),
     [box.height, box.width, ratios, references],
   );
+
+  useEffect(() => {
+    onStageResize?.(layout ? { width: layout.width, height: layout.height } : null);
+  }, [layout, onStageResize]);
 
   if (references.length === 0) {
     return (

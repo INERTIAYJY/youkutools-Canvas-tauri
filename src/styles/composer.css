@@ -177,7 +177,7 @@
   font-size: 15px;
   font-weight: 600;
   color: var(--brand, #6366f1);
-  background: rgba(99, 102, 241, 0.12);
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
   border: 2px dashed var(--brand, #6366f1);
   border-radius: 12px;
   pointer-events: none;

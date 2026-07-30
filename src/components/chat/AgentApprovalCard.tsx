@@ -156,7 +156,7 @@ export default function AgentApprovalCard({
           type="button"
           disabled={needsModelSelection && !selectedModelAvailable}
           onClick={handleConfirm}
-          className="min-h-8 rounded-md bg-amber-400 px-3 py-1 text-xs font-medium text-black hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+          className="min-h-8 rounded-md bg-amber-500 px-3 py-1 text-xs font-medium text-black hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
         >
           {needsModelSelection ? '确认生成' : '确认执行'}
         </button>

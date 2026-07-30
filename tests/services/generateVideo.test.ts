@@ -6,6 +6,11 @@ import {
   resolveVideoGenerationOperation,
 } from '../../src/services/ai/generateVideo';
 import { resolvePromptWithImageRefs, resolvePromptWithMediaRefs } from '../../src/services/ai/promptResolver';
+import {
+  collectConnectedReferenceMedia,
+  getMediaReferenceUrls,
+  mergeMediaReferences,
+} from '../../src/services/ai/connectedReferenceMedia';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { BaseNodeData } from '../../src/types';
 
@@ -43,6 +48,15 @@ describe('video prompt media references', () => {
 
     expect(result).toEqual({
       prompt: '让 音频1 驱动画面，并保持 音频1 的节奏',
+      references: [{
+        kind: 'audio',
+        url: 'https://cdn.example/dialogue.mp3',
+        origin: 'prompt',
+        role: 'reference_audio',
+        sourceNodeId: 'audio-1',
+        filePath: undefined,
+        sourceUrl: undefined,
+      }],
       imageUrls: [],
       videoUrls: [],
       audioUrls: ['https://cdn.example/dialogue.mp3'],
@@ -99,6 +113,88 @@ describe('video prompt media references', () => {
       undefined,
       ['https://cdn.example/dialogue.mp3'],
     );
+  });
+
+  it('collects all three connected media kinds and keeps local and remote transports distinct', () => {
+    const imageNode: Node<BaseNodeData> = {
+      id: 'image-1',
+      type: 'source-image',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '首帧',
+        type: 'source-image',
+        imageUrl: 'asset://localhost/first.png',
+        sourceUrl: 'https://cdn.example/first.png',
+        filePath: 'C:\\project\\first.png',
+      },
+    };
+    const videoNode: Node<BaseNodeData> = {
+      id: 'video-ref',
+      type: 'source-video',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '动作参考',
+        type: 'source-video',
+        videoUrl: 'asset://localhost/reference.mp4',
+        sourceUrl: 'https://cdn.example/reference.mp4',
+        filePath: 'C:\\project\\reference.mp4',
+      },
+    };
+    const audioNode: Node<BaseNodeData> = {
+      id: 'audio-ref',
+      type: 'source-audio',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '声音参考',
+        type: 'source-audio',
+        audioUrl: 'asset://localhost/reference.wav',
+        sourceUrl: 'https://cdn.example/reference.wav',
+        filePath: 'C:\\project\\reference.wav',
+      },
+    };
+    useAppStore.setState({
+      nodes: [imageNode, videoNode, audioNode],
+      edges: [
+        { id: 'image-edge', source: 'image-1', target: 'video-1' },
+        { id: 'video-edge', source: 'video-ref', target: 'video-1' },
+        { id: 'audio-edge', source: 'audio-ref', target: 'video-1' },
+      ],
+    });
+
+    const media = collectConnectedReferenceMedia('video-1');
+
+    expect(media.imageUrls).toEqual(['https://cdn.example/first.png']);
+    expect(media.videoUrls).toEqual(['https://cdn.example/reference.mp4']);
+    expect(media.audioUrls).toEqual(['https://cdn.example/reference.wav']);
+    expect(media.references).toMatchObject([
+      { kind: 'image', sourceNodeId: 'image-1', origin: 'connection' },
+      { kind: 'video', sourceNodeId: 'video-ref', origin: 'connection' },
+      { kind: 'audio', sourceNodeId: 'audio-ref', origin: 'connection' },
+    ]);
+    expect(getMediaReferenceUrls(media.references, 'audio', 'local')).toEqual([
+      'asset://localhost/reference.wav',
+    ]);
+  });
+
+  it('deduplicates by media kind and local URL while preserving first-source metadata', () => {
+    const first = {
+      kind: 'audio' as const,
+      url: 'asset://localhost/reference.wav',
+      origin: 'prompt' as const,
+      role: 'reference_audio' as const,
+      sourceNodeId: 'prompt-audio',
+    };
+    const merged = mergeMediaReferences(
+      [first],
+      [
+        { ...first, origin: 'connection', sourceNodeId: 'connected-audio' },
+        { ...first, kind: 'video', role: 'reference' },
+      ],
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toMatchObject({ origin: 'prompt', sourceNodeId: 'prompt-audio' });
+    expect(merged[1].kind).toBe('video');
   });
 });
 

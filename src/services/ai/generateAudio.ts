@@ -3,11 +3,17 @@
  */
 import { resolveNodeReferences } from '../nodeReferenceService';
 import { executeComfyUIAudioGenerate } from '../comfyWorkflowService';
-import { downloadUrlAndSave, isTauriEnv, saveBinaryToProjectData } from '../fileService';
-import type { AIAudioGenParams, AudioGenerationResult } from '../../types/aiTypes';
+import { downloadUrlAndSave, isTauriEnv, readFileToDataUrl, saveBinaryToProjectData } from '../fileService';
+import type { AIAudioGenParams, AudioGenerationResult, MediaReference } from '../../types/aiTypes';
 import type { MediaPersistenceStatus } from '../../types/media';
 import { resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
-import { collectConnectedReferenceMedia } from './connectedReferenceMedia';
+import {
+  collectConnectedReferenceMedia,
+  getMediaReferenceUrl,
+  getMediaReferenceUrls,
+  mergeMediaReferences,
+} from './connectedReferenceMedia';
+import { collectPromptNodeMediaUrls } from './promptResolver';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
@@ -23,6 +29,20 @@ export interface PersistedAudioGenerationResult {
 }
 
 export const AUDIO_PERSIST_FAILED_MESSAGE = '音频未能写入项目目录，当前是临时地址';
+
+async function resolveGeneralAudioReferenceUrls(
+  references: readonly MediaReference[],
+): Promise<string[]> {
+  return Promise.all(references.filter((reference) => reference.kind === 'audio').map(async (reference) => {
+    const url = getMediaReferenceUrl(reference);
+    if (/^https?:\/\//i.test(url) || url.startsWith('data:')) return url;
+    if (reference.filePath) {
+      const dataUrl = await readFileToDataUrl(reference.filePath);
+      if (dataUrl) return dataUrl;
+    }
+    throw new Error('通用模型无法读取本地音频参考，请重新导入文件或使用提供上传能力的模型');
+  }));
+}
 
 function buildSafeAudioFileName(label: string, format: string): string {
   const printableLabel = Array.from(label, (character) =>
@@ -85,12 +105,19 @@ export async function generateAudio(
 
   // 解析 @{nodeId:label} 引用为对应节点的实际输出内容
   const prompt = resolveNodeReferences(rawPrompt);
-  // 连线的音频节点作为音色参考（角色库绑定的声音正是通过这条线进来的）
-  const referenceAudioUrls = collectConnectedReferenceMedia(params.nodeId).audioUrls;
+  // @ 引用和连线统一收集；角色库绑定的声音仍通过连线进入。
+  const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
+  const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
+  const references = mergeMediaReferences(mentionedMedia.references, connectedMedia.references);
+  const referenceAudioUrls = getMediaReferenceUrls(references, 'audio');
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点
   if (params.workflowId) {
-    return executeComfyUIAudioGenerate({ ...params, prompt }, signal, referenceAudioUrls);
+    return executeComfyUIAudioGenerate(
+      { ...params, prompt },
+      signal,
+      getMediaReferenceUrls(references, 'audio', 'local'),
+    );
   }
 
   const registeredAdapter = mediaProviderRegistry.getAudioAdapter(provider);
@@ -106,6 +133,7 @@ export async function generateAudio(
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
     if (gm.executionProfile) {
+      const protocolAudioUrls = await resolveGeneralAudioReferenceUrls(references);
       const urls = await runConfiguredModelProtocol({
         model: gm,
         category: 'audio',
@@ -121,9 +149,9 @@ export async function generateAudio(
           musicTitle: params.musicTitle,
           musicLyrics: params.musicLyrics,
           musicBpm: params.musicBpm,
-          audioUrls: referenceAudioUrls,
-          audioUrl: referenceAudioUrls[0],
-          referenceAudioUrls,
+          audioUrls: protocolAudioUrls,
+          audioUrl: protocolAudioUrls[0],
+          referenceAudioUrls: protocolAudioUrls,
           n: 1,
           batchCount: 1,
         },

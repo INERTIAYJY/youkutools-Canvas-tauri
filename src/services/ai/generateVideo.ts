@@ -3,17 +3,24 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import { DEFAULT_BASE_URLS } from '../../constants/api';
+import { readFileToDataUrl } from '../fileService';
 import { resolveNodeReferences } from '../nodeReferenceService';
 import { generateDreaminaVideo } from '../dreaminaService';
 import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
 import type {
   AIVideoGenParams,
+  MediaReference,
   VideoGenerationOperation,
   VideoGenerationReferenceInput,
 } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { collectPromptNodeMediaUrls, resolvePromptWithMediaRefs } from './promptResolver';
-import { collectConnectedReferenceMedia, mergeUniqueUrls } from './connectedReferenceMedia';
+import {
+  collectConnectedReferenceMedia,
+  getMediaReferenceUrl,
+  getMediaReferenceUrls,
+  mergeMediaReferences,
+} from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
@@ -33,20 +40,71 @@ export function resolveVideoGenerationOperation(
   return 'text-to-video';
 }
 
+function assignVideoReferenceRoles(references: readonly MediaReference[]): MediaReference[] {
+  const imageIndexes = references.flatMap((reference, index) => (
+    reference.kind === 'image' ? [index] : []
+  ));
+  const firstImageIndex = imageIndexes[0];
+  const lastImageIndex = imageIndexes.length > 1 ? imageIndexes[imageIndexes.length - 1] : undefined;
+  return references.map((reference, index) => {
+    if (reference.kind === 'audio') return { ...reference, role: 'reference_audio' };
+    if (index === firstImageIndex) return { ...reference, role: 'first_frame' };
+    if (index === lastImageIndex) return { ...reference, role: 'last_frame' };
+    return { ...reference, role: 'reference' };
+  });
+}
+
+function isRemoteHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url) && !url.includes('asset.localhost');
+}
+
+function assertRemoteVideoAudioReferences(
+  referenceInput: VideoGenerationReferenceInput,
+  target: string,
+): void {
+  for (const [kind, urls] of [
+    ['视频', referenceInput.videoUrls],
+    ['音频', referenceInput.audioUrls],
+  ] as const) {
+    if (urls.some((url) => !isRemoteHttpUrl(url))) {
+      throw new Error(`${target} 的${kind}参考必须是公网 URL；本地文件需由该 Provider 的官方上传接口转换后再提交`);
+    }
+  }
+}
+
+async function resolveGeneralProtocolMediaUrls(
+  references: readonly MediaReference[],
+  kind: 'video' | 'audio',
+): Promise<string[]> {
+  return Promise.all(references.filter((reference) => reference.kind === kind).map(async (reference) => {
+    const url = getMediaReferenceUrl(reference);
+    if (isRemoteHttpUrl(url) || url.startsWith('data:')) return url;
+    if (reference.filePath) {
+      const dataUrl = await readFileToDataUrl(reference.filePath);
+      if (dataUrl) return dataUrl;
+    }
+    throw new Error(`通用模型无法读取本地${kind === 'video' ? '视频' : '音频'}参考，请重新导入文件或使用提供上传能力的模型`);
+  }));
+}
+
 async function resolveVideoReferenceInput(
   rawPrompt: string,
   nodeId: string | undefined,
 ): Promise<VideoGenerationReferenceInput> {
   const promptInput = await resolvePromptWithMediaRefs(rawPrompt);
   const connected = collectConnectedReferenceMedia(nodeId);
-  const imageUrls = mergeUniqueUrls(promptInput.imageUrls, connected.imageUrls);
-  const videoUrls = mergeUniqueUrls(promptInput.videoUrls, connected.videoUrls);
+  const references = assignVideoReferenceRoles(
+    mergeMediaReferences(promptInput.references, connected.references),
+  );
+  const imageUrls = getMediaReferenceUrls(references, 'image');
+  const videoUrls = getMediaReferenceUrls(references, 'video');
   return {
     prompt: promptInput.prompt,
     imageUrls,
     videoUrls,
-    audioUrls: mergeUniqueUrls(promptInput.audioUrls, connected.audioUrls),
+    audioUrls: getMediaReferenceUrls(references, 'audio'),
     operation: resolveVideoGenerationOperation(imageUrls, videoUrls),
+    references,
   };
 }
 
@@ -124,14 +182,15 @@ export async function generateVideo(
   if (params.workflowId) {
     const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
     const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
-    const videoUrls = mergeUniqueUrls(mentionedMedia.videoUrls, connectedMedia.videoUrls);
+    const references = mergeMediaReferences(mentionedMedia.references, connectedMedia.references);
+    const videoUrls = getMediaReferenceUrls(references, 'video', 'local');
     if (videoUrls.length > 0) {
       throw new Error('ComfyUI 视频工作流暂未接入视频 IO，请移除视频引用或改用支持视频到视频的模型');
     }
     return executeComfyUIVideoGenerate(
       { ...params, prompt },
       signal,
-      mergeUniqueUrls(mentionedMedia.audioUrls, connectedMedia.audioUrls),
+      getMediaReferenceUrls(references, 'audio', 'local'),
     );
   }
 
@@ -141,7 +200,11 @@ export async function generateVideo(
       params,
       prompt,
       resolveReferenceInput: async () => {
-        return resolveVideoReferenceInput(rawPrompt, params.nodeId);
+        const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+        if (provider === 'apimart') {
+          assertRemoteVideoAudioReferences(referenceInput, 'APIMart');
+        }
+        return referenceInput;
       },
       signal,
     });
@@ -205,10 +268,11 @@ export async function generateVideo(
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
     if (gm.executionProfile) {
-      const remoteImageUrls = await resolveImageUrlArray(
-        referenceInput.imageUrls,
-        connection.providerConfigId,
-      );
+      const [remoteImageUrls, videoUrls, audioUrls] = await Promise.all([
+        resolveImageUrlArray(referenceInput.imageUrls, connection.providerConfigId),
+        resolveGeneralProtocolMediaUrls(referenceInput.references ?? [], 'video'),
+        resolveGeneralProtocolMediaUrls(referenceInput.references ?? [], 'audio'),
+      ]);
       const urls = await runConfiguredModelProtocol({
         model: gm,
         category: 'video',
@@ -217,6 +281,8 @@ export async function generateVideo(
         variables: buildGeneralVideoProtocolVariables(gm.modelId, params, {
           ...referenceInput,
           imageUrls: remoteImageUrls,
+          videoUrls,
+          audioUrls,
         }),
       });
       const url = urls[0];

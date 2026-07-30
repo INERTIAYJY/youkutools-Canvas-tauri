@@ -213,12 +213,38 @@ export type VideoGenerationOperation =
   | 'image-to-video'
   | 'video-to-video';
 
+export type MediaReferenceKind = 'image' | 'video' | 'audio';
+
+export type MediaReferenceOrigin = 'prompt' | 'connection';
+
+export type MediaReferenceRole =
+  | 'reference'
+  | 'first_frame'
+  | 'last_frame'
+  | 'reference_audio';
+
+/**
+ * 画布生成入口统一使用的参考媒体描述。
+ * url 用于本地展示或本地工作流；远端模型优先使用仍然可访问的 sourceUrl。
+ */
+export interface MediaReference {
+  kind: MediaReferenceKind;
+  url: string;
+  origin: MediaReferenceOrigin;
+  role: MediaReferenceRole;
+  sourceNodeId?: string;
+  filePath?: string;
+  sourceUrl?: string;
+}
+
 export interface VideoGenerationReferenceInput {
   prompt: string;
   imageUrls: string[];
   videoUrls: string[];
   audioUrls: string[];
   operation: VideoGenerationOperation;
+  /** 新入口始终提供；可选仅用于兼容已有 Provider adapter 和测试夹具。 */
+  references?: MediaReference[];
 }
 
 export interface AIVideoGenParams {

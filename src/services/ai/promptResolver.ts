@@ -14,6 +14,8 @@ import {
 } from '../dramaAssetPrompt';
 import type { DramaAsset } from '../../types/dramaAssets';
 import type { BaseNodeData, ImageAnnotationLayer, StoryboardCellOverride } from '../../types';
+import type { MediaReference } from '../../types/aiTypes';
+import { mergeMediaReferences, toLegacyReferenceMedia } from './connectedReferenceMedia';
 
 interface PromptImageEntry {
   url: string;
@@ -21,6 +23,8 @@ interface PromptImageEntry {
   annotation?: string;
   annotationLayer?: ImageAnnotationLayer;
   filePath?: string;
+  sourceNodeId?: string;
+  sourceUrl?: string;
 }
 
 async function mergePromptImageOverlays(url: string, entry: PromptImageEntry): Promise<string> {
@@ -321,18 +325,18 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
 
 export interface PromptMediaReferences {
   prompt: string;
+  references: MediaReference[];
   imageUrls: string[];
   videoUrls: string[];
   audioUrls: string[];
 }
 
 /** 收集提示词中直接 @ 的视频/音频节点产物，不改变提示词文本。 */
-export function collectPromptNodeMediaUrls(rawPrompt: string): Pick<PromptMediaReferences, 'videoUrls' | 'audioUrls'> {
+export function collectPromptNodeMediaUrls(
+  rawPrompt: string,
+): Pick<PromptMediaReferences, 'references' | 'videoUrls' | 'audioUrls'> {
   const { nodes } = useAppStore.getState();
-  const videoUrls: string[] = [];
-  const audioUrls: string[] = [];
-  const videoSeen = new Set<string>();
-  const audioSeen = new Set<string>();
+  const references: MediaReference[] = [];
 
   for (const match of rawPrompt.matchAll(/@\{([^:]+):[^}]+\}/g)) {
     const rawNodeId = match[1];
@@ -341,19 +345,38 @@ export function collectPromptNodeMediaUrls(rawPrompt: string): Pick<PromptMediaR
     if (!node) continue;
 
     const videoUrl = typeof node.data.videoUrl === 'string' ? node.data.videoUrl.trim() : '';
-    if (videoUrl && !videoSeen.has(videoUrl)) {
-      videoSeen.add(videoUrl);
-      videoUrls.push(videoUrl);
+    if (videoUrl) {
+      references.push({
+        kind: 'video',
+        url: videoUrl,
+        origin: 'prompt',
+        role: 'reference',
+        sourceNodeId: rawNodeId,
+        filePath: node.data.filePath as string | undefined,
+        sourceUrl: node.data.sourceUrl as string | undefined,
+      });
     }
 
     const audioUrl = typeof node.data.audioUrl === 'string' ? node.data.audioUrl.trim() : '';
-    if (audioUrl && !audioSeen.has(audioUrl)) {
-      audioSeen.add(audioUrl);
-      audioUrls.push(audioUrl);
+    if (audioUrl) {
+      references.push({
+        kind: 'audio',
+        url: audioUrl,
+        origin: 'prompt',
+        role: 'reference_audio',
+        sourceNodeId: rawNodeId,
+        filePath: node.data.filePath as string | undefined,
+        sourceUrl: node.data.sourceUrl as string | undefined,
+      });
     }
   }
 
-  return { videoUrls, audioUrls };
+  const media = toLegacyReferenceMedia(mergeMediaReferences([], references));
+  return {
+    references: media.references,
+    videoUrls: media.videoUrls,
+    audioUrls: media.audioUrls,
+  };
 }
 
 /** 解析 prompt 中的 @{nodeId:label} 引用，按需把视频/音频节点提取为独立媒体参数。 */
@@ -364,8 +387,7 @@ async function resolvePromptReferences(
   const store = useAppStore.getState();
   const { nodes } = store;
   const imageEntries: PromptImageEntry[] = [];
-  const videoUrls: string[] = [];
-  const audioUrls: string[] = [];
+  const mediaReferences: MediaReference[] = [];
   // groups: 1=@asset  2,3=@drama  4,5=@node
   const chipRegex = /@asset\{([^}]+)\}|@drama\{([^:]+):([^}]+)\}|@\{([^:]+):([^}]+)\}/g;
 
@@ -469,6 +491,8 @@ async function resolvePromptReferences(
               annotation: (imgNode?.data?.annotation as string | undefined) || undefined,
               annotationLayer: imgNode?.data?.annotationLayer,
               filePath: (imgNode?.data?.filePath as string | undefined) || undefined,
+              sourceNodeId: imgRef.imageNodeId,
+              sourceUrl: (imgNode?.data?.sourceUrl as string | undefined) || undefined,
             });
           }
           return `图片${idx}`;
@@ -489,7 +513,7 @@ async function resolvePromptReferences(
         if (idx === undefined) {
           idx = imageEntries.length + 1;
           imageKeyToIndex.set(key, idx);
-          imageEntries.push({ url: sbUrl });
+          imageEntries.push({ url: sbUrl, sourceNodeId: rawNodeId });
         }
         return `图片${idx}`;
       }
@@ -520,7 +544,7 @@ async function resolvePromptReferences(
             if (idx === undefined) {
               idx = imageEntries.length + 1;
               imageKeyToIndex.set(key, idx);
-              imageEntries.push({ url: first });
+              imageEntries.push({ url: first, sourceNodeId: rawNodeId });
             }
             return `图片${idx}`;
           }
@@ -538,6 +562,8 @@ async function resolvePromptReferences(
           annotation: (node.data.annotation as string | undefined) || undefined,
           annotationLayer: node.data.annotationLayer,
           filePath: (node.data.filePath as string | undefined) || undefined,
+          sourceNodeId: rawNodeId,
+          sourceUrl: (node.data.sourceUrl as string | undefined) || undefined,
         });
       }
       if (nodeType === 'ai-director' && Array.isArray(node.data.directorCaptureUrls)) {
@@ -546,7 +572,7 @@ async function resolvePromptReferences(
           const capKey = `node:${rawNodeId}:cap:${i}`;
           if (!imageKeyToIndex.has(capKey)) {
             imageKeyToIndex.set(capKey, imageEntries.length + 1);
-            imageEntries.push({ url });
+            imageEntries.push({ url, sourceNodeId: rawNodeId });
           }
         }
       }
@@ -564,9 +590,17 @@ async function resolvePromptReferences(
       if (!extractMediaReferences) return videoUrl;
       let idx = videoKeyToIndex.get(rawNodeId);
       if (idx === undefined) {
-        idx = videoUrls.length + 1;
+        idx = videoKeyToIndex.size + 1;
         videoKeyToIndex.set(rawNodeId, idx);
-        videoUrls.push(videoUrl.trim());
+        mediaReferences.push({
+          kind: 'video',
+          url: videoUrl.trim(),
+          origin: 'prompt',
+          role: 'reference',
+          sourceNodeId: rawNodeId,
+          filePath: node.data.filePath as string | undefined,
+          sourceUrl: node.data.sourceUrl as string | undefined,
+        });
       }
       return `视频${idx}`;
     }
@@ -575,9 +609,17 @@ async function resolvePromptReferences(
       if (!extractMediaReferences) return audioUrl;
       let idx = audioKeyToIndex.get(rawNodeId);
       if (idx === undefined) {
-        idx = audioUrls.length + 1;
+        idx = audioKeyToIndex.size + 1;
         audioKeyToIndex.set(rawNodeId, idx);
-        audioUrls.push(audioUrl.trim());
+        mediaReferences.push({
+          kind: 'audio',
+          url: audioUrl.trim(),
+          origin: 'prompt',
+          role: 'reference_audio',
+          sourceNodeId: rawNodeId,
+          filePath: node.data.filePath as string | undefined,
+          sourceUrl: node.data.sourceUrl as string | undefined,
+        });
       }
       return `音频${idx}`;
     }
@@ -585,19 +627,36 @@ async function resolvePromptReferences(
     return '';
   }).trim();
 
-  const imageUrls = await Promise.all(
+  const imageReferences = await Promise.all(
     imageEntries.map(async (entry) => {
       const url = await resolveNodeImageUrl(entry.url, entry.filePath);
+      let resolvedUrl = url;
       try {
-        return await mergePromptImageOverlays(url, entry);
+        resolvedUrl = await mergePromptImageOverlays(url, entry);
       } catch (err) {
         console.error('[aiService] Failed to merge overlays:', err);
-        return url;
       }
+      const hasOverlays = Boolean(entry.mattingMask || entry.annotation || entry.annotationLayer);
+      return {
+        kind: 'image',
+        url: resolvedUrl,
+        origin: 'prompt',
+        role: 'reference',
+        sourceNodeId: entry.sourceNodeId,
+        filePath: entry.filePath,
+        sourceUrl: hasOverlays ? undefined : entry.sourceUrl,
+      } satisfies MediaReference;
     }),
   );
 
-  return { prompt, imageUrls, videoUrls, audioUrls };
+  const media = toLegacyReferenceMedia(mergeMediaReferences(imageReferences, mediaReferences));
+  return {
+    prompt,
+    references: media.references,
+    imageUrls: media.imageUrls,
+    videoUrls: media.videoUrls,
+    audioUrls: media.audioUrls,
+  };
 }
 
 /** 图片生成兼容入口：图片 URL 独立提取，视频/音频仍按旧行为内联到 prompt。 */

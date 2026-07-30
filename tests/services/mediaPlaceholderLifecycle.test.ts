@@ -24,6 +24,7 @@ const artifact: MediaGenerationResult = {
   modelId: 'test',
   provider: 'apimart',
   deliveryMode: 'both',
+  persistence: 'saved',
   createdAt: 1,
 };
 

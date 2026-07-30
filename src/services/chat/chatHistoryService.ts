@@ -34,6 +34,14 @@ function toConversationRecord(c: ChatConversation): ChatConversationRecord {
   return { ...c };
 }
 
+/** persistence 是后加的字段，旧记录按有无 filePath 推断，避免历史消息误报未保存。 */
+function fromMediaResultRecord(value: unknown): MediaGenerationResult | undefined {
+  if (!value) return undefined;
+  const artifact = value as MediaGenerationResult;
+  if (artifact.persistence) return artifact;
+  return { ...artifact, persistence: artifact.filePath ? 'saved' : 'skipped' };
+}
+
 function fromConversationRecord(r: ChatConversationRecord): ChatConversation {
   return {
     ...r,
@@ -89,7 +97,7 @@ function fromMessageRecord(r: ChatMessageRecord): ChatMessage {
     executionResults: r.executionResults as CommandResult[] | undefined,
     mediaStatus: r.mediaStatus as MediaGenerationStatus | undefined,
     mediaError: r.mediaError,
-    mediaResult: r.mediaResult as MediaGenerationResult | undefined,
+    mediaResult: fromMediaResultRecord(r.mediaResult),
     canvasStatus: r.canvasStatus as CanvasMaterializationStatus | undefined,
     canvasNodeId: r.canvasNodeId,
     canvasError: r.canvasError,

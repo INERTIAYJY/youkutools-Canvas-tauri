@@ -5,6 +5,11 @@ const mocks = vi.hoisted(() => ({
   generateVideo: vi.fn(),
   generateAudio: vi.fn(),
   persistAudioGenerationResult: vi.fn(),
+  downloadUrlAndSave: vi.fn(),
+  saveDataUrlToProjectData: vi.fn(),
+  saveBinaryToProjectData: vi.fn(),
+  isTauriEnv: vi.fn(() => true),
+  tagGeneratedProjectAssetSafely: vi.fn(),
   storeState: {
     config: {
       generalModels: [],
@@ -42,11 +47,21 @@ vi.mock('../../src/services/ai/generateAudio', () => ({
   persistAudioGenerationResult: mocks.persistAudioGenerationResult,
 }));
 vi.mock('../../src/services/fileService', () => ({
-  downloadUrlAndSave: vi.fn(),
-  saveDataUrlToProjectData: vi.fn(),
+  downloadUrlAndSave: mocks.downloadUrlAndSave,
+  isTauriEnv: mocks.isTauriEnv,
+  saveBinaryToProjectData: mocks.saveBinaryToProjectData,
+  saveDataUrlToProjectData: mocks.saveDataUrlToProjectData,
+}));
+vi.mock('../../src/services/fs/generatedAssetTags', () => ({
+  tagGeneratedProjectAssetSafely: mocks.tagGeneratedProjectAssetSafely,
 }));
 
-import { runMediaGeneration } from '../../src/services/ai/generationRuntime';
+import {
+  MEDIA_PERSIST_FAILED_MESSAGE,
+  retryMediaArtifactPersist,
+  runMediaGeneration,
+} from '../../src/services/ai/generationRuntime';
+import type { MediaGenerationResult } from '../../src/types/media';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -59,6 +74,12 @@ beforeEach(() => {
   mocks.persistAudioGenerationResult.mockResolvedValue({
     mediaUrl: 'https://cdn.example/audio.mp3',
     outputUrl: 'https://cdn.example/audio.mp3',
+    persistence: 'saved',
+  });
+  mocks.isTauriEnv.mockReturnValue(true);
+  mocks.downloadUrlAndSave.mockResolvedValue({
+    filePath: '/projects/project-1/对话图片.png',
+    assetUrl: 'asset://对话图片.png',
   });
 });
 
@@ -165,5 +186,128 @@ describe('media generation project settings', () => {
       model: 'openai/audio-model',
       provider: 'openai',
     }, undefined);
+  });
+});
+
+describe('media artifact persistence', () => {
+  it('marks the artifact saved and points url at the local asset', async () => {
+    const result = await runMediaGeneration({
+      kind: 'image',
+      prompt: '一只猫',
+      modelRef: 'openai/image-model',
+      deliveryMode: 'chat',
+    }, 'project-1');
+
+    expect(result.persistence).toBe('saved');
+    expect(result.persistError).toBeUndefined();
+    expect(result.url).toBe('asset://对话图片.png');
+    expect(result.sourceUrl).toBe('https://cdn.example/image.png');
+    expect(result.filePath).toBe('/projects/project-1/对话图片.png');
+  });
+
+  it('reports failed persistence instead of silently returning the temporary url', async () => {
+    mocks.downloadUrlAndSave.mockResolvedValue(null);
+
+    const result = await runMediaGeneration({
+      kind: 'video',
+      prompt: '一段风景',
+      modelRef: 'openai/video-model',
+      deliveryMode: 'chat',
+    }, 'project-1');
+
+    expect(result.persistence).toBe('failed');
+    expect(result.persistError).toBe(MEDIA_PERSIST_FAILED_MESSAGE);
+    expect(result.url).toBe('https://cdn.example/video.mp4');
+    expect(result.filePath).toBeUndefined();
+  });
+
+  it('surfaces the download error message when saving throws', async () => {
+    mocks.downloadUrlAndSave.mockRejectedValue(new Error('磁盘空间不足'));
+
+    const result = await runMediaGeneration({
+      kind: 'image',
+      prompt: '一只猫',
+      modelRef: 'openai/image-model',
+      deliveryMode: 'chat',
+    }, 'project-1');
+
+    expect(result.persistence).toBe('failed');
+    expect(result.persistError).toBe('磁盘空间不足');
+  });
+
+  it('skips persistence without a project instead of reporting a failure', async () => {
+    const result = await runMediaGeneration({
+      kind: 'image',
+      prompt: '一只猫',
+      modelRef: 'openai/image-model',
+      deliveryMode: 'chat',
+    }, null);
+
+    expect(mocks.downloadUrlAndSave).not.toHaveBeenCalled();
+    expect(result.persistence).toBe('skipped');
+    expect(result.url).toBe('https://cdn.example/image.png');
+  });
+
+  it('carries the audio persistence state through from the audio persister', async () => {
+    mocks.persistAudioGenerationResult.mockResolvedValue({
+      mediaUrl: 'blob:local/audio',
+      outputUrl: 'blob:local/audio',
+      persistence: 'failed',
+      persistError: '写盘失败',
+    });
+
+    const result = await runMediaGeneration({
+      kind: 'audio',
+      prompt: '旁白',
+      modelRef: 'openai/audio-model',
+      deliveryMode: 'chat',
+    }, 'project-1');
+
+    expect(result.persistence).toBe('failed');
+    expect(result.persistError).toBe('写盘失败');
+    expect(result.sourceUrl).toBe('blob:local/audio');
+  });
+});
+
+describe('retryMediaArtifactPersist', () => {
+  const unsaved: MediaGenerationResult = {
+    id: 'media-1',
+    kind: 'image',
+    deliveryMode: 'chat',
+    url: 'https://cdn.example/image.png',
+    sourceUrl: 'https://cdn.example/image.png',
+    persistence: 'failed',
+    persistError: MEDIA_PERSIST_FAILED_MESSAGE,
+    prompt: '一只猫',
+    modelId: 'openai/image-model',
+    provider: 'openai',
+    createdAt: 1,
+  };
+
+  it('re-downloads from the source url and returns a saved artifact', async () => {
+    const result = await retryMediaArtifactPersist(unsaved, 'project-1');
+
+    expect(mocks.downloadUrlAndSave).toHaveBeenCalledWith(
+      'https://cdn.example/image.png',
+      'project-1',
+      'ai-image',
+      '对话图片-media-1',
+    );
+    expect(result.persistence).toBe('saved');
+    expect(result.persistError).toBeUndefined();
+    expect(result.url).toBe('asset://对话图片.png');
+    expect(result.filePath).toBe('/projects/project-1/对话图片.png');
+  });
+
+  it('throws with the underlying reason when the retry also fails', async () => {
+    mocks.downloadUrlAndSave.mockRejectedValue(new Error('签名地址已过期'));
+
+    await expect(retryMediaArtifactPersist(unsaved, 'project-1')).rejects.toThrow('签名地址已过期');
+  });
+
+  it('refuses to retry outside the desktop app', async () => {
+    mocks.isTauriEnv.mockReturnValue(false);
+
+    await expect(retryMediaArtifactPersist(unsaved, 'project-1')).rejects.toThrow('浏览器模式');
   });
 });

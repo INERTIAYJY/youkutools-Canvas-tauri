@@ -22,6 +22,7 @@ interface ChatMessagesProps extends ChatReferenceHandlers {
   onNewConversation: () => void;
   onShowList: () => void;
   onAddMediaToCanvas?: (messageId: string) => void;
+  onRetryMediaSave?: (messageId: string) => Promise<void>;
   agentControls?: AgentTaskControls;
   /** 点击示例提示 → 填入输入框 */
   onExampleClick?: (text: string) => void;
@@ -63,6 +64,7 @@ export default function ChatMessages({
   onNewConversation,
   onShowList,
   onAddMediaToCanvas,
+  onRetryMediaSave,
   agentControls,
   onExampleClick,
   onEditMessage,
@@ -89,6 +91,7 @@ export default function ChatMessages({
         message={message}
         agentTask={message.agentTaskId ? agentTaskById.get(message.agentTaskId) : undefined}
         onAddToCanvas={onAddMediaToCanvas}
+        onRetryMediaSave={onRetryMediaSave}
         onEditMessage={onEditMessage}
         regeneratePrompt={regeneratePrompt}
         onRegenerate={onRegenerateMessage}
@@ -103,6 +106,7 @@ export default function ChatMessages({
       agentTaskById,
       messages,
       onAddMediaToCanvas,
+      onRetryMediaSave,
       onEditMessage,
       onModelActivate,
       onNodeActivate,

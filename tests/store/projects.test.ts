@@ -9,6 +9,7 @@ const fileMocks = vi.hoisted(() => ({
   ensureProjectDataDir: vi.fn(async () => 'project-dir'),
   loadProjectData: vi.fn(),
   loadProjectsList: vi.fn(),
+  registerProjectFolder: vi.fn(),
   registerProjectFolders: vi.fn(),
   saveProject: vi.fn(async (record: { id: string }) => record.id),
   buildProjectFolderName: vi.fn((name: string, projectId: string) => (
@@ -67,7 +68,8 @@ beforeEach(() => {
   fileMocks.loadProjectsList.mockReset();
   fileMocks.deleteProjectData.mockClear();
   fileMocks.deleteProjectDataDir.mockClear();
-  fileMocks.saveProject.mockClear();
+  fileMocks.saveProject.mockReset();
+  fileMocks.saveProject.mockImplementation(async (record: { id: string }) => record.id);
   fileMocks.renameProjectDataDir.mockClear();
   fileMocks.revertProjectDataDirRename.mockClear();
   pollMocks.resumePendingTasks.mockClear();
@@ -93,6 +95,95 @@ function stubInitializationActions() {
     repairInterruptedAgentTasksForProject: vi.fn(async () => []),
   });
 }
+
+describe('project creation', () => {
+  it('saves the current project and persists the new project before switching', async () => {
+    let resolveNewProjectSave: ((projectId: string) => void) | undefined;
+    let markNewProjectSaveStarted: (() => void) | undefined;
+    const newProjectSaveStarted = new Promise<void>((resolve) => {
+      markNewProjectSaveStarted = resolve;
+    });
+    fileMocks.saveProject.mockImplementation(async (record: { id: string }) => {
+      if (record.id === 'project-old') return record.id;
+      markNewProjectSaveStarted?.();
+      return new Promise<string>((resolve) => {
+        resolveNewProjectSave = resolve;
+      });
+    });
+    useAppStore.setState({
+      projects: [{ id: 'project-old', name: 'Old project', createdAt: 1, updatedAt: 1 }],
+      currentProjectId: 'project-old',
+      projectName: 'Old project',
+      nodes: [{
+        id: 'unsaved-node',
+        type: 'ai-text',
+        position: { x: 0, y: 0 },
+        data: { label: 'Unsaved node', type: 'ai-text' },
+      }],
+      edges: [],
+      groups: [],
+    });
+
+    const creating = useAppStore.getState().createProject('New project');
+    await newProjectSaveStarted;
+
+    expect(fileMocks.saveProject).toHaveBeenCalledTimes(2);
+    expect(fileMocks.saveProject.mock.calls[0]?.[0]).toMatchObject({
+      id: 'project-old',
+      nodes: [{ id: 'unsaved-node' }],
+    });
+    expect(fileMocks.saveProject.mock.calls[1]?.[0]).toMatchObject({
+      name: 'New project',
+      nodes: [],
+      edges: [],
+      groups: [],
+    });
+    expect(useAppStore.getState().currentProjectId).toBe('project-old');
+
+    const newProjectId = fileMocks.saveProject.mock.calls[1]?.[0].id;
+    resolveNewProjectSave?.(newProjectId);
+    await expect(creating).resolves.toBe(newProjectId);
+
+    expect(fileMocks.saveProject.mock.invocationCallOrder[0]).toBeLessThan(
+      fileMocks.saveProject.mock.invocationCallOrder[1],
+    );
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: newProjectId,
+      projectName: 'New project',
+      nodes: [],
+      edges: [],
+      groups: [],
+    });
+  });
+
+  it('keeps the current canvas when saving it before creation fails', async () => {
+    const showToast = vi.fn();
+    fileMocks.saveProject.mockRejectedValueOnce(new Error('disk full'));
+    useAppStore.setState({
+      projects: [{ id: 'project-old', name: 'Old project', createdAt: 1, updatedAt: 1 }],
+      currentProjectId: 'project-old',
+      projectName: 'Old project',
+      nodes: [{
+        id: 'unsaved-node',
+        type: 'ai-text',
+        position: { x: 0, y: 0 },
+        data: { label: 'Unsaved node', type: 'ai-text' },
+      }],
+      showToast,
+    });
+
+    await expect(useAppStore.getState().createProject('New project')).resolves.toBeUndefined();
+
+    expect(fileMocks.saveProject).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: 'project-old',
+      projectName: 'Old project',
+    });
+    expect(useAppStore.getState().projects.map((project) => project.id)).toEqual(['project-old']);
+    expect(useAppStore.getState().nodes.map((node) => node.id)).toEqual(['unsaved-node']);
+    expect(showToast).toHaveBeenCalledWith('当前项目保存失败，已取消新建项目', 'error');
+  });
+});
 
 describe('project switching', () => {
   it('saves the current project before loading and isolates target project state', async () => {

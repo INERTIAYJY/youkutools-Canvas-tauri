@@ -13,6 +13,7 @@ import {
 } from '../../../components/nodes/shared/defaultModels';
 import {
   extractModelMention,
+  MEDIA_PERSIST_FAILED_MESSAGE,
   runMediaGeneration,
 } from '../../ai/generationRuntime';
 import {
@@ -223,15 +224,25 @@ export function registerMediaAgentTools(): Array<() => void> {
               ? MEDIA_PLACEHOLDER_STALE_ERROR
               : undefined,
           });
+          // 落盘失败时产物只有临时地址，必须让用户和模型都看到，而不是报告纯成功
+          const unsaved = result.persistence === 'failed';
+          if (unsaved) {
+            currentStore.showToast(
+              `媒体已生成，但未保存到项目：${result.persistError || MEDIA_PERSIST_FAILED_MESSAGE}`,
+              'error',
+            );
+          }
           return {
             status: 'success',
-            summary: '媒体内容已生成',
+            summary: unsaved ? '媒体内容已生成，但未能保存到项目目录' : '媒体内容已生成',
             modelContent: JSON.stringify({
               artifactId: result.id,
               kind: result.kind,
               audioPurpose: result.audioPurpose,
               deliveryMode: result.deliveryMode,
               canvasNodeId: targetNodeId,
+              persistence: result.persistence,
+              persistError: result.persistError,
             }),
           };
         } catch (error) {

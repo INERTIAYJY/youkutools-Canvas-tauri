@@ -1,6 +1,6 @@
 .character-library-panel {
-  width: min(1380px, calc(100vw - 116px));
-  height: min(840px, calc(100vh - 52px));
+  width: min(1200px, calc(100vw - 152px));
+  height: min(760px, calc(100vh - 80px));
   min-width: 720px;
   color: var(--theme-text);
   background: color-mix(in srgb, var(--glass-panel-bg) 94%, var(--theme-surface));

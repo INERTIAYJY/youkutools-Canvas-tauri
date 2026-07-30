@@ -3,11 +3,17 @@
  * ChatPanel 不再直接选择 Provider 或调用具体图片、视频服务。
  */
 import { useAppStore } from '../../store/useAppStore';
-import { downloadUrlAndSave, saveDataUrlToProjectData } from '../fileService';
+import {
+  downloadUrlAndSave,
+  isTauriEnv,
+  saveBinaryToProjectData,
+  saveDataUrlToProjectData,
+} from '../fileService';
 import type {
   MediaGenerationIntent,
   MediaGenerationResult,
   MediaKind,
+  MediaPersistenceStatus,
   ResolvedMediaModel,
 } from '../../types/media';
 import { generateImage } from './generateImage';
@@ -25,6 +31,20 @@ const MEDIA_NODE_TYPES: Record<MediaKind, NodeType> = {
   video: 'ai-video',
   audio: 'ai-audio',
 };
+
+const MEDIA_LABELS: Record<MediaKind, string> = {
+  image: '图片',
+  video: '视频',
+  audio: '音频',
+};
+
+const MEDIA_FALLBACK_EXTENSIONS: Record<MediaKind, string> = {
+  image: 'png',
+  video: 'mp4',
+  audio: 'mp3',
+};
+
+export const MEDIA_PERSIST_FAILED_MESSAGE = '产物未能写入项目目录，当前是临时地址，重启后可能失效';
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
@@ -84,22 +104,54 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
 
 async function saveGeneratedMedia(
   url: string,
-  projectId: string | null | undefined,
+  projectId: string,
   kind: MediaKind,
   artifactId: string,
 ) {
-  if (!projectId) return null;
+  const baseName = `对话${MEDIA_LABELS[kind]}-${artifactId}`;
+  const fileName = `${baseName}.${MEDIA_FALLBACK_EXTENSIONS[kind]}`;
   if (url.startsWith('data:')) {
-    const extension = kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3';
-    const label = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
-    return saveDataUrlToProjectData(url, projectId, `对话${label}-${artifactId}.${extension}`);
+    return saveDataUrlToProjectData(url, projectId, fileName);
   }
-  return downloadUrlAndSave(
-    url,
-    projectId,
-    kind === 'image' ? 'ai-image' : kind === 'video' ? 'ai-video' : 'ai-audio',
-    `对话${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频'}-${artifactId}`,
-  );
+  // blob: 进不了原生下载通道，先在前端取回字节再落盘
+  if (url.startsWith('blob:')) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`读取临时媒体数据失败：HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return saveBinaryToProjectData(bytes, projectId, fileName);
+  }
+  return downloadUrlAndSave(url, projectId, MEDIA_NODE_TYPES[kind], baseName);
+}
+
+interface MediaPersistOutcome {
+  status: MediaPersistenceStatus;
+  filePath?: string;
+  assetUrl?: string;
+  error?: string;
+}
+
+/**
+ * 落盘生成产物，并如实返回结果。
+ * 失败不再被吞掉：调用方据此把「生成成功」和「已保存到项目」分开呈现，
+ * 否则签名 URL 过期或 blob 失效后，用户手里就只剩一个打不开的产物。
+ */
+async function persistGeneratedMedia(
+  url: string,
+  projectId: string | null | undefined,
+  kind: MediaKind,
+  artifactId: string,
+): Promise<MediaPersistOutcome> {
+  if (!projectId || !isTauriEnv()) return { status: 'skipped' };
+  try {
+    const saved = await saveGeneratedMedia(url, projectId, kind, artifactId);
+    if (!saved?.filePath) return { status: 'failed', error: MEDIA_PERSIST_FAILED_MESSAGE };
+    return { status: 'saved', filePath: saved.filePath, assetUrl: saved.assetUrl };
+  } catch (error) {
+    return {
+      status: 'failed',
+      error: error instanceof Error ? error.message : MEDIA_PERSIST_FAILED_MESSAGE,
+    };
+  }
 }
 
 async function tagSavedGeneratedMedia(
@@ -157,16 +209,18 @@ export async function runMediaGeneration(
       aspectRatio: projectSettings?.generation?.imageAspectRatio || '1:1',
     }, signal);
     throwIfAborted(signal);
-    const saved = await saveGeneratedMedia(result.url, projectId, intent.kind, id).catch(() => null);
-    await tagSavedGeneratedMedia(saved?.filePath, projectId, effectivePrompt);
+    const persisted = await persistGeneratedMedia(result.url, projectId, intent.kind, id);
+    await tagSavedGeneratedMedia(persisted.filePath, projectId, effectivePrompt);
     throwIfAborted(signal);
     return {
       id,
       kind: intent.kind,
       deliveryMode: intent.deliveryMode,
-      url: saved?.assetUrl || result.url,
+      url: persisted.assetUrl || result.url,
       sourceUrl: result.url,
-      filePath: saved?.filePath,
+      filePath: persisted.filePath,
+      persistence: persisted.status,
+      persistError: persisted.error,
       width: result.width,
       height: result.height,
       prompt,
@@ -186,16 +240,18 @@ export async function runMediaGeneration(
       seedanceDuration: projectSettings?.generation?.videoDuration,
     }, signal);
     throwIfAborted(signal);
-    const saved = await saveGeneratedMedia(result.url, projectId, intent.kind, id).catch(() => null);
-    await tagSavedGeneratedMedia(saved?.filePath, projectId, effectivePrompt);
+    const persisted = await persistGeneratedMedia(result.url, projectId, intent.kind, id);
+    await tagSavedGeneratedMedia(persisted.filePath, projectId, effectivePrompt);
     throwIfAborted(signal);
     return {
       id,
       kind: intent.kind,
       deliveryMode: intent.deliveryMode,
-      url: saved?.assetUrl || result.url,
+      url: persisted.assetUrl || result.url,
       sourceUrl: result.url,
-      filePath: saved?.filePath,
+      filePath: persisted.filePath,
+      persistence: persisted.status,
+      persistError: persisted.error,
       prompt,
       modelId: model.configId,
       provider: model.provider,
@@ -223,10 +279,46 @@ export async function runMediaGeneration(
     url: persisted.mediaUrl,
     sourceUrl: persisted.sourceUrl || persisted.outputUrl,
     filePath: persisted.filePath,
+    persistence: persisted.persistence,
+    persistError: persisted.persistError,
     prompt,
     modelId: model.configId,
     provider: model.provider,
     audioPurpose: intent.audioPurpose,
     createdAt: Date.now(),
+  };
+}
+
+/**
+ * 重新把已生成的产物写入项目目录（用于落盘失败后的重试下载）。
+ * 成功时返回指向本地文件的新产物，失败时抛出可直接展示的原因。
+ */
+export async function retryMediaArtifactPersist(
+  artifact: MediaGenerationResult,
+  projectId?: string | null,
+): Promise<MediaGenerationResult> {
+  if (!isTauriEnv()) throw new Error('浏览器模式不支持把产物保存到项目目录');
+  const targetProjectId = projectId ?? useAppStore.getState().currentProjectId;
+  if (!targetProjectId) throw new Error('当前没有打开的项目，无法保存产物');
+
+  const sourceUrl = artifact.sourceUrl || artifact.url;
+  if (!sourceUrl) throw new Error('产物已没有可用的下载地址，请重新生成');
+
+  const persisted = await persistGeneratedMedia(
+    sourceUrl,
+    targetProjectId,
+    artifact.kind,
+    artifact.id,
+  );
+  if (persisted.status !== 'saved') {
+    throw new Error(persisted.error || MEDIA_PERSIST_FAILED_MESSAGE);
+  }
+  await tagSavedGeneratedMedia(persisted.filePath, targetProjectId, artifact.prompt);
+  return {
+    ...artifact,
+    url: persisted.assetUrl || artifact.url,
+    filePath: persisted.filePath,
+    persistence: 'saved',
+    persistError: undefined,
   };
 }

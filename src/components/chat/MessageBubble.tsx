@@ -17,6 +17,8 @@ interface MessageBubbleProps extends ChatReferenceHandlers {
   message: ChatMessage;
   agentTask?: AgentTask;
   onAddToCanvas?: (messageId: string) => void;
+  /** 产物落盘失败时重试保存；未传入则不展示重试入口。 */
+  onRetryMediaSave?: (messageId: string) => Promise<void>;
   onEditMessage?: (content: string) => void;
   regeneratePrompt?: string;
   onRegenerate?: (content: string) => void;
@@ -33,6 +35,7 @@ function MessageBubble({
   message,
   agentTask,
   onAddToCanvas,
+  onRetryMediaSave,
   onEditMessage,
   regeneratePrompt,
   onRegenerate,
@@ -42,6 +45,7 @@ function MessageBubble({
   agentControls,
 }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
+  const [savingMedia, setSavingMedia] = useState(false);
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
@@ -61,6 +65,8 @@ function MessageBubble({
   const hasVideo = showMediaInChat && mediaResult?.kind === 'video';
   const hasAudio = showMediaInChat && mediaResult?.kind === 'audio';
   const isGenerating = message.mediaStatus === 'queued' || message.mediaStatus === 'generating';
+  // 生成成功 ≠ 已保存到项目：落盘失败时 url 只是临时地址，重启后会失效
+  const mediaUnsaved = !isGenerating && mediaResult?.persistence === 'failed';
   const showTimeline = !!agentTask
     && !!agentControls
     && (agentTask.steps.length > 0 || agentTask.status !== 'completed');
@@ -75,6 +81,16 @@ function MessageBubble({
     && !!regeneratePrompt
     && !!onRegenerate
     && ['done', 'partial', 'interrupted', 'error', 'canceled'].includes(message.status);
+
+  const retryMediaSave = async () => {
+    if (!onRetryMediaSave || savingMedia) return;
+    setSavingMedia(true);
+    try {
+      await onRetryMediaSave(message.id);
+    } finally {
+      setSavingMedia(false);
+    }
+  };
 
   const copyMessage = async () => {
     try {
@@ -205,6 +221,30 @@ function MessageBubble({
               <p className="mt-1.5 text-[11px] leading-[17px] text-canvas-text-muted">
                 {mediaResult.prompt}
               </p>
+            )}
+          </div>
+        )}
+        {mediaUnsaved && (
+          <div className="chat-message-media-unsaved mt-2 flex flex-wrap items-start gap-1.5 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[11px] text-amber-300">
+            <Icon icon="mdi:content-save-alert-outline" width="13" height="13" className="mt-0.5 shrink-0" />
+            <span className="min-w-0 flex-1">
+              已生成但未保存到项目：{mediaResult?.persistError || '写入项目目录失败'}
+            </span>
+            {onRetryMediaSave && (
+              <button
+                type="button"
+                onClick={() => void retryMediaSave()}
+                disabled={savingMedia}
+                className="flex min-h-6 shrink-0 items-center gap-1 rounded border border-amber-400/40 px-1.5 text-[11px] text-amber-200
+                           hover:bg-amber-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50 disabled:opacity-60"
+              >
+                <Icon
+                  icon={savingMedia ? 'mdi:loading' : 'mdi:download-outline'}
+                  width="12"
+                  className={savingMedia ? 'animate-spin motion-reduce:animate-none' : undefined}
+                />
+                {savingMedia ? '保存中' : '重试保存'}
+              </button>
             )}
           </div>
         )}

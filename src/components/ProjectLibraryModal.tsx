@@ -142,12 +142,12 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
     closeLibrary();
   };
 
-  const submitNewProject = (event: FormEvent<HTMLFormElement>) => {
+  const submitNewProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = newProjectName.trim();
     if (!name) return;
-    createProject(name);
-    closeLibrary();
+    const projectId = await createProject(name);
+    if (projectId) closeLibrary();
   };
 
   const beginRenameProject = (project: CanvasProject) => {

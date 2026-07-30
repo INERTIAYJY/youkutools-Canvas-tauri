@@ -42,6 +42,7 @@ import {
   cancelScheduledAgentExecution,
 } from '../../services/chat/agentScheduler';
 import { rewindAgentTaskCanvas } from '../../services/chat/agentRewindService';
+import { retryMediaArtifactPersist } from '../../services/ai/generationRuntime';
 import { estimateConversationUsage } from '../../services/chat/contextManager';
 import {
   getAgentModeToast,
@@ -369,6 +370,32 @@ export default function ChatPanel({
       const errorMessage = error instanceof Error ? error.message : '添加节点失败';
       store.updateMessage(messageId, { canvasStatus: 'failed', canvasError: errorMessage });
       store.showToast(errorMessage, 'error');
+    }
+  }, [detached]);
+
+  /** 落盘失败的产物重新下载保存，成功后同步刷新已派生的画布节点。 */
+  const handleRetryMediaSave = useCallback(async (messageId: string) => {
+    if (detached) return;
+    const store = useAppStore.getState();
+    const message = store.messages.find((item) => item.id === messageId);
+    if (!message?.mediaResult) return;
+
+    try {
+      const artifact = await retryMediaArtifactPersist(
+        message.mediaResult,
+        store.currentProjectId,
+      );
+      const currentStore = useAppStore.getState();
+      currentStore.updateMessage(messageId, { mediaResult: artifact });
+      if (message.canvasNodeId) {
+        currentStore.settleMediaPlaceholder(message.canvasNodeId, artifact);
+      }
+      currentStore.showToast('产物已保存到项目');
+    } catch (error) {
+      useAppStore.getState().showToast(
+        error instanceof Error ? error.message : '保存失败',
+        'error',
+      );
     }
   }, [detached]);
 
@@ -711,6 +738,7 @@ export default function ChatPanel({
                     onShowList={handleShowList}
                     onExampleClick={handleExampleClick}
                     onAddMediaToCanvas={detached ? undefined : handleAddMediaToCanvas}
+                    onRetryMediaSave={detached ? undefined : handleRetryMediaSave}
                     onEditMessage={handleEditMessage}
                     onRegenerateMessage={handleRegenerateMessage}
                     onNodeActivate={handleNodeActivate}

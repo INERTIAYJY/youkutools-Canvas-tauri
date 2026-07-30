@@ -2,7 +2,7 @@
  * 对话提交与恢复的统一控制层，按会话模式分派普通回复、Agent 任务和显式媒体生成。
  * 组件只调用本模块，不直接拼接运行时、调度器或审批流程。
  */
-import { runMediaGeneration } from '../ai/generationRuntime';
+import { MEDIA_PERSIST_FAILED_MESSAGE, runMediaGeneration } from '../ai/generationRuntime';
 import {
   buildAssistantSystemPrompt,
   resolveAssistantModel,
@@ -514,6 +514,11 @@ async function triggerMediaGeneration(
     targetNodeId = store.createMediaPlaceholder(intent);
     placeholderLifecycle = registerMediaPlaceholderLifecycle(targetNodeId);
   }
+  const mediaLabel = intent.kind === 'image'
+    ? '图片'
+    : intent.kind === 'video'
+      ? '视频'
+      : '音频';
   store.updateMessage(messageId, {
     mediaStatus: 'queued',
     mediaError: undefined,
@@ -535,6 +540,13 @@ async function triggerMediaGeneration(
       canvasNodeId: targetNodeId,
       canvasError: targetNodeId && !nodeCreated ? MEDIA_PLACEHOLDER_STALE_ERROR : undefined,
     });
+    // 生成成功不代表已可靠保存，落盘失败必须让用户知道并能重试
+    if (result.persistence === 'failed') {
+      store.showToast(
+        `${mediaLabel}已生成，但未保存到项目：${result.persistError || MEDIA_PERSIST_FAILED_MESSAGE}`,
+        'error',
+      );
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知错误';
     if (placeholderLifecycle) failMediaPlaceholderLifecycle(placeholderLifecycle, message);
@@ -546,11 +558,6 @@ async function triggerMediaGeneration(
       canvasNodeId: targetNodeId,
       canvasError: targetNodeId ? message : undefined,
     });
-    const mediaLabel = intent.kind === 'image'
-      ? '图片'
-      : intent.kind === 'video'
-        ? '视频'
-        : '音频';
     store.showToast(`${mediaLabel}生成失败: ${message}`, 'error');
   }
 }

@@ -27,6 +27,14 @@ export type CanvasMaterializationStatus =
   | 'created'
   | 'failed';
 
+/**
+ * 产物落盘状态，与「生成成功」严格区分：
+ * - saved：已写入项目数据目录，url 指向本地文件；
+ * - skipped：无项目或非桌面端，本就不该落盘；
+ * - failed：生成已完成但没能保存，url 仍是签名地址或 blob 等临时地址，重启后可能失效。
+ */
+export type MediaPersistenceStatus = 'saved' | 'skipped' | 'failed';
+
 export interface MediaGenerationResult {
   id: string;
   kind: MediaKind;
@@ -35,6 +43,10 @@ export interface MediaGenerationResult {
   url: string;
   sourceUrl: string;
   filePath?: string;
+  /** 落盘状态；failed 时 url 是临时地址，需要提示用户重试保存。 */
+  persistence: MediaPersistenceStatus;
+  /** persistence 为 failed 时的原因。 */
+  persistError?: string;
   prompt: string;
   modelId: string;
   provider: string;

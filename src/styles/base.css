@@ -232,7 +232,7 @@
   --glass-bg: rgba(255, 255, 255, 0.95);
   --glass-bg-light: rgba(255, 255, 255, 0.55);
   --glass-bg-node: rgba(255, 255, 255, 0.88);
-  --glass-panel-bg: rgba(255, 255, 255, 0.67);
+  --glass-panel-bg: rgba(255, 255, 255, 0.84);
   --glass-ring: rgba(0, 0, 0, 0.10);
   --glass-ring-strong: rgba(0, 0, 0, 0.06);
   --minimap-mask: color-mix(in srgb, var(--theme-text) 14%, transparent);

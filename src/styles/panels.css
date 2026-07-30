@@ -658,7 +658,7 @@
   font-weight: 500;
   color: var(--theme-text-secondary);
   background: var(--white-alpha-04);
-  border: 1px solid var(--border-subtle);
+  border: none;
   border-radius: 8px;
   cursor: pointer;
   transition: var(--transition-control);
@@ -1023,6 +1023,56 @@
 }
 .assets-project-select:hover { background: var(--theme-surface); }
 .assets-project-select:focus { border-color: var(--border-focus); }
+
+/* 资产面板顶部工具栏保持紧凑，不影响独立资源搜索窗口的同名控件。 */
+.assets-panel .assets-toolbar {
+  gap: 6px;
+  padding: 2px 8px 0;
+}
+.assets-panel .assets-project-select {
+  width: clamp(140px, 14vw, 168px);
+  height: 30px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+.assets-panel .assets-search {
+  width: clamp(160px, 20vw, 240px);
+  height: 30px;
+  flex: 0 1 240px;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 7px;
+}
+.assets-panel .assets-search > svg {
+  width: 13px;
+  height: 13px;
+}
+.assets-panel .assets-search input {
+  font-size: 12px;
+}
+.assets-panel .assets-column-stepper {
+  grid-template-columns: 16px 20px 18px 20px;
+  height: 30px;
+  padding: 3px;
+  border-radius: 7px;
+}
+.assets-panel .assets-column-stepper-icon {
+  width: 12px;
+  height: 12px;
+  margin-left: 2px;
+}
+.assets-panel .assets-column-stepper button {
+  width: 20px;
+  height: 20px;
+}
+.assets-panel .assets-column-stepper button svg {
+  width: 12px;
+  height: 12px;
+}
+.assets-panel .assets-column-stepper output {
+  font-size: 11px;
+}
 
 /* 添加按钮 + 菜单 */
 .assets-add-wrap { position: relative; flex-shrink: 0; }

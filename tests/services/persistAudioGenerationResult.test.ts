@@ -1,0 +1,122 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  downloadUrlAndSave: vi.fn(),
+  saveBinaryToProjectData: vi.fn(),
+  isTauriEnv: vi.fn(() => true),
+}));
+
+vi.mock('../../src/services/fileService', () => ({
+  downloadUrlAndSave: mocks.downloadUrlAndSave,
+  saveBinaryToProjectData: mocks.saveBinaryToProjectData,
+  isTauriEnv: mocks.isTauriEnv,
+}));
+vi.mock('../../src/services/nodeReferenceService', () => ({ resolveNodeReferences: (v: string) => v }));
+vi.mock('../../src/services/comfyWorkflowService', () => ({ executeComfyUIAudioGenerate: vi.fn() }));
+vi.mock('../../src/services/ai/helpers', () => ({
+  resolveGeneralModel: vi.fn(),
+  resolveGeneralModelConnection: vi.fn(),
+}));
+vi.mock('../../src/services/ai/connectedReferenceMedia', () => ({
+  collectConnectedReferenceMedia: () => ({ audioUrls: [] }),
+}));
+vi.mock('../../src/services/ai/apimartGen', () => ({ executeGeneralAsyncTask: vi.fn() }));
+vi.mock('../../src/services/ai/modelProtocolRuntime', () => ({ runConfiguredModelProtocol: vi.fn() }));
+vi.mock('../../src/services/ai/mediaProviderRegistry', () => ({
+  mediaProviderRegistry: { getAudioAdapter: () => undefined },
+}));
+
+import {
+  AUDIO_PERSIST_FAILED_MESSAGE,
+  persistAudioGenerationResult,
+} from '../../src/services/ai/generateAudio';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.isTauriEnv.mockReturnValue(true);
+  mocks.downloadUrlAndSave.mockResolvedValue({
+    filePath: '/projects/p1/生成音频.mp3',
+    assetUrl: 'asset://生成音频.mp3',
+  });
+  mocks.saveBinaryToProjectData.mockResolvedValue({
+    filePath: '/projects/p1/生成音频.wav',
+    assetUrl: 'asset://生成音频.wav',
+  });
+});
+
+describe('persistAudioGenerationResult', () => {
+  it('reports saved when the remote audio lands in the project directory', async () => {
+    const persisted = await persistAudioGenerationResult(
+      { url: 'https://cdn.example/audio.mp3' },
+      'p1',
+      '生成音频',
+    );
+
+    expect(persisted.persistence).toBe('saved');
+    expect(persisted.persistError).toBeUndefined();
+    expect(persisted.mediaUrl).toBe('asset://生成音频.mp3');
+    expect(persisted.filePath).toBe('/projects/p1/生成音频.mp3');
+  });
+
+  it('reports failed instead of passing the temporary url off as persisted', async () => {
+    mocks.downloadUrlAndSave.mockResolvedValue(null);
+
+    const persisted = await persistAudioGenerationResult(
+      { url: 'https://cdn.example/audio.mp3' },
+      'p1',
+      '生成音频',
+    );
+
+    expect(persisted.persistence).toBe('failed');
+    expect(persisted.persistError).toBe(AUDIO_PERSIST_FAILED_MESSAGE);
+    expect(persisted.mediaUrl).toBe('https://cdn.example/audio.mp3');
+    expect(persisted.filePath).toBeUndefined();
+  });
+
+  it('surfaces the thrown reason from the save call', async () => {
+    mocks.saveBinaryToProjectData.mockRejectedValue(new Error('磁盘只读'));
+
+    const persisted = await persistAudioGenerationResult(
+      { url: 'blob:local/audio', bytes: new Uint8Array([1, 2]), format: 'wav' },
+      'p1',
+      '生成音频',
+    );
+
+    expect(persisted.persistence).toBe('failed');
+    expect(persisted.persistError).toBe('磁盘只读');
+  });
+
+  it('keeps the blob url alive when the save failed so a retry can still read it', async () => {
+    mocks.saveBinaryToProjectData.mockResolvedValue(null);
+    const revoke = vi.fn();
+    vi.stubGlobal('URL', { ...URL, revokeObjectURL: revoke });
+
+    const persisted = await persistAudioGenerationResult(
+      { url: 'blob:local/audio', bytes: new Uint8Array([1, 2]), format: 'wav' },
+      'p1',
+      '生成音频',
+    );
+
+    expect(revoke).not.toHaveBeenCalled();
+    expect(persisted.mediaUrl).toBe('blob:local/audio');
+    vi.unstubAllGlobals();
+  });
+
+  it('marks persistence skipped without a project or outside the desktop app', async () => {
+    const withoutProject = await persistAudioGenerationResult(
+      { url: 'https://cdn.example/audio.mp3' },
+      null,
+      '生成音频',
+    );
+    expect(withoutProject.persistence).toBe('skipped');
+
+    mocks.isTauriEnv.mockReturnValue(false);
+    const inBrowser = await persistAudioGenerationResult(
+      { url: 'https://cdn.example/audio.mp3' },
+      'p1',
+      '生成音频',
+    );
+    expect(inBrowser.persistence).toBe('skipped');
+    expect(mocks.downloadUrlAndSave).not.toHaveBeenCalled();
+  });
+});

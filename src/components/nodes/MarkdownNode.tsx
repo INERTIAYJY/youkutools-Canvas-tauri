@@ -24,7 +24,9 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
   const showToast = useAppStore((s) => s.showToast);
 
   // ── Edit / Preview toggle ──
-  const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
+  const [viewMode, setViewMode] = useState<'edit' | 'preview'>(() => (
+    data.output ? 'preview' : 'edit'
+  ));
 
   // ── Fullscreen ──
   const [isFullscreen, setIsFullscreen] = useState(false);

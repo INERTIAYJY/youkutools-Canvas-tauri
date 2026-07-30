@@ -101,9 +101,13 @@ export async function generateVideo(
   // 解析 @{nodeId:label} 引用为对应节点的实际输出内容
   const prompt = resolveNodeReferences(rawPrompt);
 
-  // ComfyUI 工作流执行路径
+  // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点（唇形同步等）
   if (params.workflowId) {
-    return executeComfyUIVideoGenerate({ ...params, prompt }, signal);
+    return executeComfyUIVideoGenerate(
+      { ...params, prompt },
+      signal,
+      collectConnectedReferenceMedia(params.nodeId).audioUrls,
+    );
   }
 
   const registeredAdapter = mediaProviderRegistry.getVideoAdapter(provider);

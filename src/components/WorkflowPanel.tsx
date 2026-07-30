@@ -48,7 +48,7 @@ function pickJsonFile(): Promise<{ name: string; content: string } | null> {
 const IO_TYPE_RULES: { patterns: RegExp[]; type: WorkflowIONodeType }[] = [
   { type: 'image',  patterns: [/^LoadImage/i] },
   { type: 'video',  patterns: [/^LoadVideo/i, /^VHS_LoadVideo/i, /^VHS_LoadVideoPath/i] },
-  { type: 'audio',  patterns: [/^LoadAudio/i] },
+  { type: 'audio',  patterns: [/^LoadAudio/i, /^VHS_LoadAudio/i, /^RecordAudio/i] },
   { type: 'prompt', patterns: [/CLIPTextEncode/i, /TextEncode/i, /StringLiteral/i, /PrimitiveString/i, /^ShowText|pysssss/i] },
 ];
 

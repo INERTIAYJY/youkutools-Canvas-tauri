@@ -141,42 +141,83 @@ function injectPromptsIntoWorkflow(
   }
 }
 
-/** 将图片上传到 ComfyUI 服务器，返回 filename/subfolder/type */
-async function uploadImageToComfyUI(
+type ComfyMediaKind = 'image' | 'audio';
+
+/** data URL 的 mime 子类型与 ComfyUI 能解码的音频容器扩展名不一致，落盘前按此表还原 */
+const COMFY_AUDIO_MIME_EXTENSIONS: Record<string, string> = {
+  mpeg: 'mp3',
+  mp4: 'm4a',
+  'x-m4a': 'm4a',
+  'x-wav': 'wav',
+  wave: 'wav',
+};
+
+const COMFY_MEDIA_FALLBACK_EXTENSION: Record<ComfyMediaKind, string> = {
+  image: 'png',
+  audio: 'mp3',
+};
+
+function normalizeComfyMediaExtension(
+  kind: ComfyMediaKind,
+  mimeSubtype: string | undefined,
+  urlExtension: string | undefined,
+): string {
+  if (mimeSubtype) {
+    if (kind === 'audio') return COMFY_AUDIO_MIME_EXTENSIONS[mimeSubtype] ?? mimeSubtype;
+    return mimeSubtype;
+  }
+  return urlExtension || COMFY_MEDIA_FALLBACK_EXTENSION[kind];
+}
+
+/**
+ * 将图片或音频上传到 ComfyUI 服务器，返回 filename/subfolder/type。
+ * ComfyUI 只有 /upload/image 与 /upload/mask 两个上传路由，前者不校验扩展名或 MIME，
+ * 默认写入 input 目录，音频同样走它（LoadAudio 只认 input 目录里的文件）。
+ */
+async function uploadMediaToComfyUI(
   baseUrl: string,
-  imageUrl: string,
+  mediaUrl: string,
+  kind: ComfyMediaKind,
   signal?: AbortSignal,
 ): Promise<{ name: string; subfolder?: string; type?: string }> {
-  // 1. 获取图片 Blob（支持 data URL 和远程 URL）
+  const label = kind === 'audio' ? '音频' : '图片';
+  // 1. 获取 Blob（支持 data URL 和远程 URL）
   let blob: Blob;
   let ext: string;
 
-  if (imageUrl.startsWith('data:')) {
+  if (mediaUrl.startsWith('data:')) {
     // data URL → 直接解析
-    const match = imageUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+    const match = mediaUrl.match(/^data:([\w.+-]+)\/([\w.+-]+);base64,(.+)$/);
     if (!match) throw new Error('不支持的 data URL 格式');
-    const mimeType = match[1];
-    const base64 = match[2];
+    const mimeType = `${match[1]}/${match[2]}`;
+    const base64 = match[3];
     const byteChars = atob(base64);
     const byteArr = new Uint8Array(byteChars.length);
     for (let i = 0; i < byteChars.length; i++) {
       byteArr[i] = byteChars.charCodeAt(i);
     }
     blob = new Blob([byteArr], { type: mimeType });
-    ext = mimeType.split('/')[1] || 'png';
+    ext = normalizeComfyMediaExtension(kind, match[2].toLowerCase(), undefined);
   } else {
     // 远程 URL → fetch 获取
-    const response = await fetch(imageUrl, { signal });
+    const response = await fetch(mediaUrl, { signal });
     if (!response.ok) {
-      throw new Error(`下载图片失败 (${response.status})`);
+      throw new Error(`下载${label}失败 (${response.status})`);
     }
     blob = await response.blob();
     // 从 Content-Type 或 URL 推断扩展名
-    const contentType = response.headers.get('Content-Type') || '';
-    ext = contentType.split('/')[1] || imageUrl.split('.').pop()?.split('?')[0] || 'png';
+    const mimeSubtype = (response.headers.get('Content-Type') || '')
+      .split(';')[0]
+      .split('/')[1]
+      ?.toLowerCase();
+    ext = normalizeComfyMediaExtension(
+      kind,
+      mimeSubtype || undefined,
+      mediaUrl.split(/[?#]/)[0].split('.').pop()?.toLowerCase(),
+    );
   }
 
-  // 2. 上传到 ComfyUI /upload/image
+  // 2. 上传到 ComfyUI /upload/image（表单字段名固定为 image，音频亦然）
   const formData = new FormData();
   formData.append('image', blob, `upload_${Date.now()}.${ext}`);
   // 覆盖同名文件，避免重复堆积
@@ -190,7 +231,7 @@ async function uploadImageToComfyUI(
 
   if (!uploadRes.ok) {
     const errorBody = await uploadRes.text().catch(() => '');
-    throw new Error(`ComfyUI 图片上传失败 (${uploadRes.status})${errorBody ? ': ' + errorBody.slice(0, 200) : ''}`);
+    throw new Error(`ComfyUI ${label}上传失败 (${uploadRes.status})${errorBody ? ': ' + errorBody.slice(0, 200) : ''}`);
   }
 
   const uploadResult = (await uploadRes.json()) as { name: string; subfolder?: string; type?: string };
@@ -230,7 +271,7 @@ async function injectImagesIntoWorkflow(
     if (imageUrl.startsWith('@{')) continue;
 
     // 上传图片到 ComfyUI
-    const uploadResult = await uploadImageToComfyUI(baseUrl, imageUrl, signal);
+    const uploadResult = await uploadMediaToComfyUI(baseUrl, imageUrl, 'image', signal);
 
     // 写入工作流 JSON：LoadImage 节点的 inputs.image 为上传后的文件名
     const jsonNode = workflowObj[ioNodeId];
@@ -242,6 +283,54 @@ async function injectImagesIntoWorkflow(
     // 标准 ComfyUI LoadImage 节点还需要 upload 字段
     if (inputs.upload !== undefined) {
       inputs.upload = 'image';
+    }
+  }
+}
+
+/**
+ * 将音频注入到 ComfyUI workflow JSON 的 audio 类型 IO 节点中。
+ * ComfyUI 内置 LoadAudio 的输入名为 audio，取值是 input 目录下的文件名
+ * （VideoHelperSuite 的 VHS_LoadAudioUpload 同名），所以上传后写文件名即可。
+ * 未显式赋值的 audio IO 节点按顺序用连线音频兜底 —— 角色库绑定的声音正是这样进来的。
+ */
+async function injectAudioIntoWorkflow(
+  workflowObj: Record<string, Record<string, unknown>>,
+  workflowInputs: Record<string, string> | undefined,
+  ioNodes: WorkflowIONode[],
+  baseUrl: string,
+  referenceAudioUrls: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const audioIoNodeIds = ioNodes
+    .filter((io) => io.type === 'audio')
+    .map((io) => io.nodeId);
+  if (audioIoNodeIds.length === 0) return;
+
+  const fallbackUrls = [...referenceAudioUrls];
+  for (const ioNodeId of audioIoNodeIds) {
+    const rawValue = workflowInputs?.[ioNodeId];
+    const resolvedValue = rawValue !== undefined ? resolveNodeReferences(rawValue).trim() : '';
+    // 显式赋值优先；解析后仍是 @{...} 占位符视为未赋值
+    const explicitUrl = resolvedValue && !resolvedValue.startsWith('@{') ? resolvedValue : '';
+    const audioUrl = explicitUrl || fallbackUrls.shift() || '';
+    if (!audioUrl) continue;
+
+    const jsonNode = workflowObj[ioNodeId];
+    const inputs = jsonNode?.inputs as Record<string, unknown> | undefined;
+    if (!inputs) continue;
+
+    // VHS 的路径变体（VHS_LoadAudio）读的是 ComfyUI 主机上的绝对路径，
+    // 上传到 input 目录得到的文件名对它无效，宁可跳过也不写入错误的路径。
+    if (inputs.audio === undefined && inputs.audio_file !== undefined) {
+      console.warn('[comfyWorkflowService] 该音频节点按主机路径取音频，已跳过注入', ioNodeId);
+      continue;
+    }
+
+    const uploadResult = await uploadMediaToComfyUI(baseUrl, audioUrl, 'audio', signal);
+    // 内置 LoadAudio 与 VHS_LoadAudioUpload 的输入名都是 audio，取值为 input 目录下的文件名
+    inputs.audio = uploadResult.name;
+    if (inputs.upload !== undefined) {
+      inputs.upload = 'audio';
     }
   }
 }
@@ -318,6 +407,8 @@ async function submitComfyUIWorkflow(
   workflowInputs: Record<string, string> | undefined,
   prompt: string,
   signal?: AbortSignal,
+  /** 连入生成节点的音频，用于兜底填充未显式赋值的 audio IO 节点 */
+  referenceAudioUrls: string[] = [],
 ): Promise<{ baseUrl: string; promptId: string; workflowObj: Record<string, Record<string, unknown>> }> {
   const baseUrl = getComfyUIConfig();
 
@@ -345,6 +436,16 @@ async function submitComfyUIWorkflow(
 
   // 注入图片到 image 类型 IO 节点（上传 → 替换文件名）
   await injectImagesIntoWorkflow(workflowObj, workflowInputs, ioNodes, baseUrl, signal);
+
+  // 注入音频到 audio 类型 IO 节点（上传 → 替换文件名）
+  await injectAudioIntoWorkflow(
+    workflowObj,
+    workflowInputs,
+    ioNodes,
+    baseUrl,
+    referenceAudioUrls,
+    signal,
+  );
 
   // 返回 workflowObj 让调用方注入尺寸/视频参数后再提交
   return { baseUrl, promptId: '', workflowObj };
@@ -560,6 +661,8 @@ async function pollComfyUIHistoryForVideo(
 export async function executeComfyUIVideoGenerate(
   params: AIVideoGenParams,
   externalSignal?: AbortSignal,
+  /** 连入音频节点的产物，兜底填充工作流的 audio IO 节点 */
+  referenceAudioUrls: string[] = [],
 ): Promise<{ url: string }> {
   const {
     workflowId, workflowInputs, prompt,
@@ -591,7 +694,7 @@ export async function executeComfyUIVideoGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal);
+    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls);
 
     // 注入视频参数（仅对 @提及的节点）
     injectVideoParamsIntoWorkflow(
@@ -641,6 +744,8 @@ async function pollComfyUIHistoryForAudio(
 export async function executeComfyUIAudioGenerate(
   params: AIAudioGenParams,
   externalSignal?: AbortSignal,
+  /** 连入音频节点的产物，兜底填充工作流的 audio IO 节点 */
+  referenceAudioUrls: string[] = [],
 ): Promise<{ url: string }> {
   const { workflowId, workflowInputs, prompt } = params;
   const comfyUrl = useAppStore.getState().config.comfyUIUrl?.trim() || '';
@@ -667,7 +772,7 @@ export async function executeComfyUIAudioGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal);
+    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls);
 
     // 提交工作流
     const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal);

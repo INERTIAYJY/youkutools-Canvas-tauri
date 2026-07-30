@@ -1,0 +1,165 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  corsSafeFetch: vi.fn(),
+  storeState: {
+    config: { comfyUIUrl: 'http://comfy.test:8188' },
+    currentProjectId: 'p1',
+    workflows: [] as Array<Record<string, unknown>>,
+  },
+}));
+
+vi.mock('../../src/services/ai/httpTransport', () => ({
+  corsSafeFetch: mocks.corsSafeFetch,
+}));
+vi.mock('../../src/store/useAppStore', () => ({
+  useAppStore: { getState: () => mocks.storeState },
+}));
+vi.mock('../../src/services/pollManager', () => ({
+  savePendingTask: vi.fn(),
+  updatePendingTask: vi.fn(),
+  removePendingTask: vi.fn(),
+  registerNodePolling: vi.fn(() => undefined),
+  cleanupNodePolling: vi.fn(),
+}));
+vi.mock('../../src/services/nodeReferenceService', () => ({
+  resolveNodeReferences: (value: string) => value,
+}));
+
+import { executeComfyUIAudioGenerate } from '../../src/services/comfyWorkflowService';
+
+/** 只含一个内置 LoadAudio 与一个 SaveAudio 的 API 格式工作流 */
+function workflowJson(audioInputs: Record<string, unknown> = { audio: 'placeholder.mp3' }) {
+  return JSON.stringify({
+    '1': { class_type: 'LoadAudio', inputs: audioInputs, _meta: { title: '参考音色' } },
+    '2': { class_type: 'SaveAudio', inputs: { audio: ['1', 0] } },
+  });
+}
+
+function jsonResponse(body: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+function registerWorkflow(fileContent: string, ioNodes: Array<{ nodeId: string; title: string; type: string }>) {
+  mocks.storeState.workflows = [{
+    id: 'wf-1',
+    name: '音色克隆',
+    category: 'ai-audio',
+    fileName: 'clone.json',
+    fileContent,
+    ioNodes,
+    createdAt: 1,
+  }];
+}
+
+/** 依次应答：/upload/image → /prompt → /history/:id */
+function stubComfyEndpoints() {
+  mocks.corsSafeFetch.mockImplementation(async (url: string) => {
+    if (url.endsWith('/upload/image')) {
+      return jsonResponse({ name: 'upload_123.mp3', subfolder: '', type: 'input' });
+    }
+    if (url.endsWith('/prompt')) return jsonResponse({ prompt_id: 'prompt-1' });
+    if (url.includes('/history/')) {
+      return jsonResponse({
+        'prompt-1': {
+          status: { completed: true },
+          outputs: { '2': { audios: [{ filename: 'out.flac', subfolder: '', type: 'output' }] } },
+        },
+      });
+    }
+    throw new Error(`未预期的请求：${url}`);
+  });
+}
+
+function submittedWorkflow(): Record<string, { inputs: Record<string, unknown> }> {
+  const call = mocks.corsSafeFetch.mock.calls.find(([url]) => String(url).endsWith('/prompt'));
+  return JSON.parse(String((call?.[1] as RequestInit).body)).prompt;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.storeState.config.comfyUIUrl = 'http://comfy.test:8188';
+  stubComfyEndpoints();
+});
+
+describe('ComfyUI audio IO injection', () => {
+  it('uploads connected audio and writes the filename into the LoadAudio node', async () => {
+    registerWorkflow(workflowJson(), [{ nodeId: '1', title: '参考音色', type: 'audio' }]);
+
+    const result = await executeComfyUIAudioGenerate(
+      { prompt: '你终于来了。', model: 'wf', provider: 'comfyui', workflowId: 'wf-1' },
+      undefined,
+      ['data:audio/mpeg;base64,QUJD'],
+    );
+
+    expect(result).toEqual({ url: expect.stringContaining('out.flac') });
+    // 音频走 ComfyUI 唯一的通用上传路由，落到 input 目录
+    expect(mocks.corsSafeFetch).toHaveBeenCalledWith(
+      'http://comfy.test:8188/upload/image',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(submittedWorkflow()['1'].inputs.audio).toBe('upload_123.mp3');
+  });
+
+  it('prefers an explicitly assigned audio input over the connected fallback', async () => {
+    registerWorkflow(workflowJson(), [{ nodeId: '1', title: '参考音色', type: 'audio' }]);
+
+    await executeComfyUIAudioGenerate(
+      {
+        prompt: '台词',
+        model: 'wf',
+        provider: 'comfyui',
+        workflowId: 'wf-1',
+        workflowInputs: { '1': 'data:audio/wav;base64,QUJD' },
+      },
+      undefined,
+      ['data:audio/mpeg;base64,RkFMTEJBQ0s='],
+    );
+
+    const uploadCalls = mocks.corsSafeFetch.mock.calls.filter(
+      ([url]) => String(url).endsWith('/upload/image'),
+    );
+    // 显式赋值只上传一次，兜底音频不再重复注入
+    expect(uploadCalls).toHaveLength(1);
+    // 上传的是显式赋值的 wav，而不是兜底的 mp3
+    const uploaded = (uploadCalls[0][1] as RequestInit).body as FormData;
+    expect((uploaded.get('image') as File).name).toMatch(/\.wav$/);
+    expect(submittedWorkflow()['1'].inputs.audio).toBe('upload_123.mp3');
+  });
+
+  it('skips path-based audio nodes instead of writing an input-dir filename', async () => {
+    registerWorkflow(
+      workflowJson({ audio_file: '/host/path/voice.wav' }),
+      [{ nodeId: '1', title: 'VHS 路径音频', type: 'audio' }],
+    );
+
+    await executeComfyUIAudioGenerate(
+      { prompt: '台词', model: 'wf', provider: 'comfyui', workflowId: 'wf-1' },
+      undefined,
+      ['data:audio/mpeg;base64,QUJD'],
+    );
+
+    expect(mocks.corsSafeFetch).not.toHaveBeenCalledWith(
+      'http://comfy.test:8188/upload/image',
+      expect.anything(),
+    );
+    expect(submittedWorkflow()['1'].inputs).toEqual({ audio_file: '/host/path/voice.wav' });
+  });
+
+  it('leaves workflows without an audio IO node untouched', async () => {
+    registerWorkflow(workflowJson(), []);
+
+    await executeComfyUIAudioGenerate(
+      { prompt: '台词', model: 'wf', provider: 'comfyui', workflowId: 'wf-1' },
+      undefined,
+      ['data:audio/mpeg;base64,QUJD'],
+    );
+
+    expect(submittedWorkflow()['1'].inputs.audio).toBe('placeholder.mp3');
+  });
+});

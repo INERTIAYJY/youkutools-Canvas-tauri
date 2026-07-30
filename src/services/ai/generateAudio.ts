@@ -67,9 +67,9 @@ export async function generateAudio(
   // 连线的音频节点作为音色参考（角色库绑定的声音正是通过这条线进来的）
   const referenceAudioUrls = collectConnectedReferenceMedia(params.nodeId).audioUrls;
 
-  // ComfyUI 工作流执行路径
+  // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点
   if (params.workflowId) {
-    return executeComfyUIAudioGenerate({ ...params, prompt }, signal);
+    return executeComfyUIAudioGenerate({ ...params, prompt }, signal, referenceAudioUrls);
   }
 
   const registeredAdapter = mediaProviderRegistry.getAudioAdapter(provider);

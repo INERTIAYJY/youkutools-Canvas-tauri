@@ -30,10 +30,13 @@ import AnimationNode from './nodes/AnimationNode';
 import MarkdownNode from './nodes/MarkdownNode';
 import StoryboardNode from './nodes/StoryboardNode';
 import GroupNode from './nodes/GroupNode';
+import CanvasNoteNode from './noteNodes/CanvasNoteNode';
 import ConnectionMenu from './canvas/ConnectionMenu';
 import CanvasContextMenu from './canvas/CanvasContextMenu';
 import NodeContextMenu from './canvas/NodeContextMenu';
 import CanvasToolbar from './canvas/CanvasToolbar';
+import CanvasDrawingToolbar from './canvas/CanvasDrawingToolbar';
+import CanvasNoteStylePanel from './canvas/CanvasNoteStylePanel';
 import RoundedMiniMapMask from './canvas/RoundedMiniMapMask';
 import MultiSelectToolbar from './canvas/MultiSelectToolbar';
 import CanvasEmptyState from './canvas/CanvasEmptyState';
@@ -45,6 +48,7 @@ import { useNodeContextMenu } from '../hooks/useNodeContextMenu';
 import { useAppStore } from '../store/useAppStore';
 import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
+import { useCanvasDrawing } from '../hooks/useCanvasDrawing';
 import type { BaseNodeData } from '../types';
 import type { Node as RFNode, NodeTypes, Connection, Edge, OnMove } from '@xyflow/react';
 import { useNodeSnap, ResizeSnapContext, type SnapLine } from '../hooks/useNodeSnap';
@@ -86,6 +90,7 @@ const nodeTypes: NodeTypes = {
   'source-audio': AudioNode,
   comment: TextNode,
   group: GroupNode,
+  'canvas-note': CanvasNoteNode,
 };
 
 const edgeTypes: EdgeTypes = {
@@ -159,6 +164,7 @@ const minimapNodeColor = (node: RFNode) => {
     case 'ai-panorama': return 'color-mix(in srgb, var(--node-panorama) 50%, transparent)';
     case 'ai-markdown': return 'color-mix(in srgb, var(--node-markdown-light) 50%, transparent)';
     case 'ai-director': return 'color-mix(in srgb, #a78bfa 50%, transparent)';
+    case 'canvas-note': return 'color-mix(in srgb, var(--brand-light) 55%, transparent)';
     case 'group': return '#4b556380';
     default: return '#6b728080';
   }
@@ -341,9 +347,11 @@ function CanvasInner() {
   const clearGroupedSelection = useAppStore((s) => s.clearGroupedSelection);
   const settleNodeGroupingOnDragStop = useAppStore((s) => s.settleNodeGroupingOnDragStop);
   const duplicateNode = useAppStore((s) => s.duplicateNode);
+  const commitToHistory = useAppStore((s) => s.commitToHistory);
   const minimapVisible = useAppStore((s) => s.minimapVisible);
   const closeNodeDialog = useAppStore((s) => s.closeNodeDialog);
   const interactionMode = useAppStore((s) => s.config.interactionMode ?? 'default');
+  const canvasNoteToolbarVisible = useAppStore((s) => s.config.canvasNoteToolbarVisible !== false);
   const interaction = interactionMode === 'classic' ? CLASSIC_INTERACTION : DEFAULT_INTERACTION;
   // 右键 effect 用 ref 读取模式，避免把 interactionMode 加进 effect 依赖而导致监听器重挂
   const interactionModeRef = useRef(interactionMode);
@@ -428,6 +436,43 @@ function CanvasInner() {
     onDrop,
     onDoubleClick,
   } = useNodeCreation();
+
+  const {
+    activeTool: activeDrawingTool,
+    chooseTool: chooseDrawingTool,
+    selectedNoteNode,
+    panelNote,
+    pendingImage,
+    draftNode,
+    applyNotePatch,
+    beginNoteChange,
+    endNoteChange,
+    duplicateSelectedNote,
+    deleteSelectedNote,
+    moveSelectedNoteLayer,
+    requestCrop,
+    handlePointerDownCapture: handleDrawingPointerDown,
+    handlePointerMoveCapture: handleDrawingPointerMove,
+    handlePointerUpCapture: handleDrawingPointerUp,
+  } = useCanvasDrawing();
+
+  useEffect(() => {
+    if (!canvasNoteToolbarVisible && activeDrawingTool !== 'select') {
+      chooseDrawingTool('select');
+    }
+  }, [activeDrawingTool, canvasNoteToolbarVisible, chooseDrawingTool]);
+
+  const drawingActive = activeDrawingTool !== 'select';
+  const drawingInteraction = useMemo(() => drawingActive
+    ? {
+        ...interaction,
+        panOnDrag: false,
+        selectionOnDrag: false,
+        nodesDraggable: false,
+        elementsSelectable: false,
+      }
+    : interaction,
+  [drawingActive, interaction]);
 
   // ── UI toggles (persisted to localStorage) ──
   const [showGrid, setShowGrid] = useState(() => localStorage.getItem('canvas-showGrid') !== 'false');
@@ -771,8 +816,9 @@ function CanvasInner() {
         }, INLINE_EDIT_DOUBLE_CLICK_DELAY_MS);
         return;
       }
-      // Group / Markdown / source nodes have no AI dialog
+      // Non-generative canvas elements have no AI dialog.
       if (node.type === 'group') return;
+      if (node.type === 'canvas-note') return;
       if (node.data?.type === 'ai-markdown') return;
       if (node.data?.role === 'source') return;
       if (node.data?.type === 'ai-text' && node.data?.output) return;
@@ -825,12 +871,13 @@ function CanvasInner() {
   const handleNodeDragStart = useCallback(
     (evt: React.MouseEvent, node: RFNode<BaseNodeData>) => {
       setCanvasInteraction('node', true);
+      if (node.type === 'canvas-note') commitToHistory();
       if ((evt.ctrlKey || evt.metaKey) && node.type !== 'group') {
         duplicateNode(node.id);
       }
       onNodeDragStart(evt, node);
     },
-    [duplicateNode, onNodeDragStart, setCanvasInteraction],
+    [commitToHistory, duplicateNode, onNodeDragStart, setCanvasInteraction],
   );
 
   // 仅在线型切换时重建，避免每帧新对象触发 React Flow 内部更新
@@ -846,6 +893,10 @@ function CanvasInner() {
   const renderableGraph = useMemo(
     () => filterCharacterLibraryCanvasElements(nodes, edges),
     [edges, nodes],
+  );
+  const renderedCanvasNodes = useMemo(
+    () => draftNode ? [...renderableGraph.nodes, draftNode] : renderableGraph.nodes,
+    [draftNode, renderableGraph.nodes],
   );
 
   // 仅派生渲染状态，不把隐藏和节点选中效果写回可持久化的边数据。
@@ -1014,9 +1065,15 @@ function CanvasInner() {
 
   return (
     <ResizeSnapContext.Provider value={resizeSnapApi}>
-    <div ref={canvasRootRef} className="absolute inset-0">
+    <div
+      ref={canvasRootRef}
+      className={`absolute inset-0 canvas-drawing-root is-tool-${activeDrawingTool}`}
+      onPointerDownCapture={handleDrawingPointerDown}
+      onPointerMoveCapture={handleDrawingPointerMove}
+      onPointerUpCapture={handleDrawingPointerUp}
+    >
       <ReactFlow
-        nodes={renderableGraph.nodes}
+        nodes={renderedCanvasNodes}
         edges={renderedEdges}
         onConnect={onConnect}
         onConnectEnd={handleConnectEnd}
@@ -1040,7 +1097,7 @@ function CanvasInner() {
         maxZoom={5}
         defaultEdgeOptions={defaultEdgeOptions}
         proOptions={PRO_OPTIONS}
-        {...interaction}
+        {...drawingInteraction}
         onContextMenu={(e) => e.preventDefault()}
         onMove={handleCanvasViewportMove}
         onMoveStart={handleCanvasViewportMoveStart}
@@ -1083,7 +1140,7 @@ function CanvasInner() {
               maskStrokeColor="var(--brand)"
               maskStrokeWidth={2}
               style={MINIMAP_STYLE}
-              className="!bottom-12 !right-1"
+              className="!bottom-12 !right-1 max-[900px]:!bottom-28"
             />
             <RoundedMiniMapMask />
           </>
@@ -1099,6 +1156,34 @@ function CanvasInner() {
         <Panel position="top-right" className="canvas-history-slot">
           <HistoryTimelinePanel />
         </Panel>
+
+        {canvasNoteToolbarVisible && (
+          <Panel position="bottom-left" className="canvas-drawing-toolbar-slot canvas-drawing-ui">
+            <CanvasDrawingToolbar
+              activeTool={activeDrawingTool}
+              imageReady={Boolean(pendingImage)}
+              onSelectTool={chooseDrawingTool}
+            />
+          </Panel>
+        )}
+
+        {panelNote && (
+          <Panel position="top-left" className="canvas-note-style-panel-slot canvas-drawing-ui">
+            <CanvasNoteStylePanel
+              key={selectedNoteNode?.id ?? activeDrawingTool}
+              note={panelNote}
+              selected={Boolean(selectedNoteNode)}
+              onPatch={(patch) => { applyNotePatch(patch); }}
+              onTransientPatch={(patch) => { applyNotePatch(patch, true); }}
+              onBeginChange={beginNoteChange}
+              onEndChange={endNoteChange}
+              onDuplicate={() => { duplicateSelectedNote(); }}
+              onDelete={() => { deleteSelectedNote(); }}
+              onMoveLayer={(direction) => { moveSelectedNoteLayer(direction); }}
+              onCrop={requestCrop}
+            />
+          </Panel>
+        )}
 
         {/* Toolbar */}
         <Panel position="bottom-right" className="flex items-center gap-2">

@@ -14,6 +14,9 @@ import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
 import type {
   BaseNodeData,
+  CanvasNoteData,
+  CanvasNoteLayerDirection,
+  CanvasNotePatch,
   CharacterLibraryNodeLink,
   NodeGroup,
   StoryboardCellOverride,
@@ -68,6 +71,14 @@ function prepareDuplicateNodeData(
   }
 
   return duplicate;
+}
+
+function mergeCanvasNotePatch(note: CanvasNoteData, patch: CanvasNotePatch): CanvasNoteData {
+  return {
+    ...note,
+    ...patch,
+    style: patch.style ? { ...note.style, ...patch.style } : note.style,
+  };
 }
 
 function pruneDeletedNodesAndEmptyGroups(
@@ -165,6 +176,10 @@ export interface NodeSlice {
   ) => string;
   /** 在原位复制一个节点，并让拖出的副本继承入口边——用于 Ctrl 拖拽复制。 */
   duplicateNode: (nodeId: string) => void;
+  duplicateCanvasNote: (nodeId: string) => string | null;
+  updateCanvasNote: (nodeId: string, patch: CanvasNotePatch) => boolean;
+  updateCanvasNoteTransient: (nodeId: string, patch: CanvasNotePatch) => boolean;
+  moveCanvasNoteLayer: (nodeId: string, direction: CanvasNoteLayerDirection) => boolean;
   updateNodeData: (nodeId: string, data: Partial<BaseNodeData>) => void;
   /** 高频手势内更新节点数据，不创建历史快照；调用方负责提交手势开始和结束状态。 */
   updateNodeDataTransient: (nodeId: string, data: Partial<BaseNodeData>) => void;
@@ -581,6 +596,81 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         .map((edge) => ({ ...edge, id: `edge-${generateId()}` }));
       return { nodes, edges: [...remappedEdges, ...inheritedIncomingEdges] };
     });
+  },
+
+  duplicateCanvasNote: (nodeId) => {
+    const state = get();
+    const source = state.nodes.find((node) => node.id === nodeId && node.type === 'canvas-note');
+    if (!source?.data.note) return null;
+    state.commitToHistory();
+    const cloneId = `node-${generateId()}`;
+    const clone = {
+      ...source,
+      id: cloneId,
+      position: { x: source.position.x + 24, y: source.position.y + 24 },
+      selected: true,
+      dragging: false,
+      data: {
+        ...structuredClone(source.data),
+        displayId: getNextDisplayId(state.nodes),
+      },
+    } as Node<BaseNodeData>;
+    set((current) => ({
+      nodes: [
+        ...current.nodes.map((node) => node.selected ? { ...node, selected: false } : node),
+        clone,
+      ],
+      selectedNodeIds: [cloneId],
+    }));
+    return cloneId;
+  },
+
+  updateCanvasNote: (nodeId, patch) => {
+    const node = get().nodes.find((candidate) => candidate.id === nodeId && candidate.type === 'canvas-note');
+    if (!node?.data.note) return false;
+    get().commitToHistory();
+    return get().updateCanvasNoteTransient(nodeId, patch);
+  },
+
+  updateCanvasNoteTransient: (nodeId, patch) => {
+    let changed = false;
+    set((state) => ({
+      nodes: state.nodes.map((node) => {
+        if (node.id !== nodeId || node.type !== 'canvas-note' || !node.data.note) return node;
+        changed = true;
+        const note = mergeCanvasNotePatch(node.data.note, patch);
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            note,
+            nodeWidth: note.width,
+            nodeHeight: note.height,
+          },
+        } as Node<BaseNodeData>;
+      }),
+    }));
+    return changed;
+  },
+
+  moveCanvasNoteLayer: (nodeId, direction) => {
+    const state = get();
+    const index = state.nodes.findIndex((node) => node.id === nodeId && node.type === 'canvas-note');
+    if (index < 0) return false;
+    let target = index;
+    if (direction === 'back') target = 0;
+    if (direction === 'backward') target = Math.max(0, index - 1);
+    if (direction === 'forward') target = Math.min(state.nodes.length - 1, index + 1);
+    if (direction === 'front') target = state.nodes.length - 1;
+    if (target === index) return false;
+    state.commitToHistory();
+    set((current) => {
+      const nodes = [...current.nodes];
+      const [note] = nodes.splice(index, 1);
+      nodes.splice(target, 0, note);
+      return { nodes };
+    });
+    return true;
   },
 
   deleteNode: (nodeId) => {

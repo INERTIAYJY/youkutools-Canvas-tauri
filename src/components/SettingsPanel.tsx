@@ -134,6 +134,7 @@ export default function SettingsPanel() {
   const interactionMode = config.interactionMode ?? 'default';
   const nodeToolbarMode = config.nodeToolbarMode ?? 'icons';
   const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
+  const canvasNoteToolbarVisible = config.canvasNoteToolbarVisible !== false; // 默认开启
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
@@ -922,6 +923,45 @@ export default function SettingsPanel() {
                     })}
                   </div>
                 </section>
+
+                {/* 画布笔记工具栏是否显示 */}
+                <div>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">画布笔记工具栏</h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateConfig({ canvasNoteToolbarVisible: !canvasNoteToolbarVisible });
+                      saveConfig();
+                    }}
+                    aria-pressed={canvasNoteToolbarVisible}
+                    className={`sidebar-pref-card${canvasNoteToolbarVisible ? ' is-floating' : ''}`}
+                  >
+                    <div className="sidebar-pref-window flex items-end justify-center pb-2" aria-hidden="true">
+                      <div
+                        className={`flex items-center gap-1 rounded-md border border-canvas-border bg-canvas-bg p-1 transition-opacity duration-200 ${
+                          canvasNoteToolbarVisible ? 'opacity-100' : 'opacity-30'
+                        }`}
+                      >
+                        <span className="h-3 w-3 rounded-[3px] bg-indigo-400/60" />
+                        <span className="h-3 w-3 rounded-[3px] border border-canvas-text-muted" />
+                        <span className="h-3 w-3 rounded-full border border-canvas-text-muted" />
+                      </div>
+                    </div>
+
+                    <div className="sidebar-pref-text">
+                      <div className="sidebar-pref-title">显示笔记工具栏</div>
+                      <div className="sidebar-pref-desc">
+                        {canvasNoteToolbarVisible
+                          ? '在画布左下角显示绘图与笔记工具'
+                          : '隐藏工具栏，已有笔记仍可编辑'}
+                      </div>
+                    </div>
+
+                    <div className="sidebar-pref-switch" aria-hidden="true">
+                      <span />
+                    </div>
+                  </button>
+                </div>
 
                 {/* 节点标题（node-label）是否显示 */}
                 <div>

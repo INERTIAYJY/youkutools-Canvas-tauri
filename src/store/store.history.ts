@@ -25,6 +25,7 @@ const STRUCTURAL_NODE_DATA_KEYS = [
   'storyboardOverrides',
   'characterLibraryLinks',
   'hiddenByCharacterLibrary',
+  'note',
 ] as const satisfies readonly (keyof BaseNodeData)[];
 
 function createSnapshot(
@@ -96,6 +97,10 @@ function getStructuralSnapshot(entry: HistoryEntry): unknown {
       extent: node.extent,
       expandParent: node.expandParent,
       data: getStructuralNodeData(node.data),
+      ...(node.type === 'canvas-note' ? {
+        position: node.position,
+        style: node.style,
+      } : {}),
     })),
     edges: entry.edges.map((edge) => ({
       id: edge.id,
@@ -118,6 +123,18 @@ function restoreStructuralNode(
   current: Node<BaseNodeData> | undefined,
 ): Node<BaseNodeData> {
   if (!current) return createSnapshot([target], [], []).nodes[0];
+
+  if (target.type === 'canvas-note') {
+    return {
+      ...target,
+      selected: current.selected,
+      dragging: false,
+      measured: current.measured,
+      data: { ...current.data, ...target.data },
+      position: { ...target.position },
+      style: target.style ? { ...target.style } : target.style,
+    };
+  }
 
   const data = { ...current.data };
   for (const key of STRUCTURAL_NODE_DATA_KEYS) {

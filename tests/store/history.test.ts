@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Edge, Node } from '@xyflow/react';
 import type { BaseNodeData, NodeGroup } from '../../src/types';
+import { createCanvasNoteData } from '../../src/types';
 
 const fileMocks = vi.hoisted(() => ({
   deleteNodeFile: vi.fn(async () => undefined),
@@ -62,6 +63,22 @@ function groupNode(id: string): Node<BaseNodeData> {
       color: '#6366f1',
     } as unknown as BaseNodeData,
     style: { width: 400, height: 300 },
+  };
+}
+
+function canvasNoteNode(id: string): Node<BaseNodeData> {
+  const note = createCanvasNoteData('rectangle', { width: 160, height: 100 });
+  return {
+    id,
+    type: 'canvas-note',
+    position: { x: 10, y: 20 },
+    data: {
+      label: '矩形笔记',
+      type: 'canvas-note',
+      note,
+      nodeWidth: note.width,
+      nodeHeight: note.height,
+    },
   };
 }
 
@@ -316,6 +333,56 @@ describe('batch canvas history', () => {
       label: 'Current',
       storyboardExtracted: [false],
     });
+  });
+
+  it('undoes canvas note geometry and style without changing AI node history semantics', async () => {
+    const note = canvasNoteNode('note-a');
+    useAppStore.setState({ nodes: [note], history: [], historyIndex: -1 });
+
+    expect(useAppStore.getState().updateCanvasNote('note-a', {
+      width: 240,
+      height: 140,
+      style: { strokeColor: '#ef4444', opacity: 60 },
+    })).toBe(true);
+    useAppStore.getState().updateNodePositionTransient('note-a', { x: 80, y: 90 });
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      position: { x: 10, y: 20 },
+      data: {
+        note: {
+          width: 160,
+          height: 100,
+          style: { strokeColor: 'var(--theme-text)', opacity: 100 },
+        },
+      },
+    });
+
+    await expect(useAppStore.getState().redo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      position: { x: 80, y: 90 },
+      data: {
+        note: {
+          width: 240,
+          height: 140,
+          style: { strokeColor: '#ef4444', opacity: 60 },
+        },
+      },
+    });
+  });
+
+  it('moves canvas notes through the shared layer order with one undo step', async () => {
+    useAppStore.setState({
+      nodes: [node('ai-a'), canvasNoteNode('note-a'), node('ai-b')],
+      history: [],
+      historyIndex: -1,
+    });
+
+    expect(useAppStore.getState().moveCanvasNoteLayer('note-a', 'front')).toBe(true);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['ai-a', 'ai-b', 'note-a']);
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['ai-a', 'note-a', 'ai-b']);
   });
 
   it('undoes and redoes character-library node hiding with its association', async () => {

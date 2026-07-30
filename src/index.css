@@ -28,6 +28,7 @@
 @import './styles/toolbar-editor.css';
 @import './styles/separators.css';
 @import './styles/character-library.css';
+@import './styles/canvas-drawing.css';
 
 /* Global overlay scrollbars are managed by OverlayScrollbarLayer. */
 * {

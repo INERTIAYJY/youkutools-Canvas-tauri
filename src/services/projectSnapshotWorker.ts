@@ -11,6 +11,7 @@ export interface ProjectSnapshotRect {
 export interface ProjectSnapshotNode extends ProjectSnapshotRect {
   kind: string;
   label: string;
+  noteKind?: string;
 }
 
 export interface ProjectSnapshotEdge {
@@ -88,6 +89,88 @@ function getMediaDrawRect(media: ProjectSnapshotMedia): ProjectSnapshotRect {
   };
 }
 
+function drawCanvasNote(
+  context: OffscreenCanvasRenderingContext2D,
+  node: ProjectSnapshotNode,
+): void {
+  const inset = 2;
+  const centerX = node.x + node.width / 2;
+  const centerY = node.y + node.height / 2;
+  context.save();
+  context.globalAlpha = 0.9;
+  context.strokeStyle = '#818cf8';
+  context.fillStyle = 'rgba(129, 140, 248, 0.08)';
+  context.lineWidth = 2;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.beginPath();
+  switch (node.noteKind) {
+    case 'rectangle':
+      context.roundRect(
+        node.x + inset,
+        node.y + inset,
+        Math.max(1, node.width - inset * 2),
+        Math.max(1, node.height - inset * 2),
+        8,
+      );
+      context.fill();
+      context.stroke();
+      break;
+    case 'diamond':
+      context.moveTo(centerX, node.y + inset);
+      context.lineTo(node.x + node.width - inset, centerY);
+      context.lineTo(centerX, node.y + node.height - inset);
+      context.lineTo(node.x + inset, centerY);
+      context.closePath();
+      context.fill();
+      context.stroke();
+      break;
+    case 'ellipse':
+      context.ellipse(centerX, centerY, Math.max(1, node.width / 2 - inset), Math.max(1, node.height / 2 - inset), 0, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+      break;
+    case 'arrow':
+    case 'line':
+      context.moveTo(node.x + inset, node.y + inset);
+      context.lineTo(node.x + node.width - inset, node.y + node.height - inset);
+      context.stroke();
+      if (node.noteKind === 'arrow') {
+        context.beginPath();
+        context.moveTo(node.x + node.width - 12, node.y + node.height - 3);
+        context.lineTo(node.x + node.width - inset, node.y + node.height - inset);
+        context.lineTo(node.x + node.width - 3, node.y + node.height - 12);
+        context.stroke();
+      }
+      break;
+    case 'freehand':
+      context.moveTo(node.x + inset, centerY);
+      context.bezierCurveTo(
+        node.x + node.width * 0.25,
+        node.y + inset,
+        node.x + node.width * 0.75,
+        node.y + node.height - inset,
+        node.x + node.width - inset,
+        centerY,
+      );
+      context.stroke();
+      break;
+    case 'text':
+      context.fillStyle = '#e8e8ed';
+      context.font = '500 13px sans-serif';
+      context.textBaseline = 'top';
+      context.fillText(node.label || '文本', node.x + 4, node.y + 4, Math.max(0, node.width - 8));
+      break;
+    case 'image':
+      roundedRect(context, node, 6);
+      context.stroke();
+      break;
+    default:
+      break;
+  }
+  context.restore();
+}
+
 async function encodeSnapshot(canvas: OffscreenCanvas): Promise<ArrayBuffer> {
   let fallback: ArrayBuffer | null = null;
   for (const quality of WEBP_QUALITIES) {
@@ -123,6 +206,10 @@ async function renderSnapshot(request: ProjectSnapshotWorkerRequest): Promise<Ar
   }
 
   for (const node of request.nodes) {
+    if (node.noteKind) {
+      drawCanvasNote(context, node);
+      continue;
+    }
     roundedRect(context, node, 8);
     context.fillStyle = '#1a1a26';
     context.fill();
@@ -145,7 +232,7 @@ async function renderSnapshot(request: ProjectSnapshotWorkerRequest): Promise<Ar
   context.font = '600 11px sans-serif';
   context.textBaseline = 'bottom';
   for (const node of request.nodes) {
-    if (!node.label) continue;
+    if (!node.label || node.noteKind) continue;
     context.fillStyle = '#e8e8ed';
     const maxWidth = Math.max(0, node.width - 8);
     context.fillText(node.label, node.x + 4, node.y - 3, maxWidth);

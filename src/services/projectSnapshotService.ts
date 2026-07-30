@@ -31,6 +31,8 @@ const EXCLUDED_CLASS_NAMES = new Set([
   'react-flow__nodesselection-rect',
   'react-flow__resize-control',
   'gooey-btn-wrapper',
+  'node-resize-handles',
+  'canvas-note-point-handles',
 ]);
 
 // html-to-image 会直接读取这些元素的当前帧；本地媒体或跨域内容可能污染 Canvas，
@@ -169,10 +171,13 @@ function collectSnapshotNodes(canvasRoot: HTMLElement, rootRect: DOMRect): Proje
     if (!rect) return [];
     const labelElement = node.querySelector<HTMLElement>('.node-label-text');
     const labelRoot = node.querySelector<HTMLElement>('.node-label');
+    const noteRoot = node.querySelector<HTMLElement>('[data-note-kind]');
+    const noteText = noteRoot?.querySelector<HTMLElement>('.canvas-note-text');
     return [{
       ...rect,
-      kind: labelRoot?.dataset.labelKind ?? 'default',
-      label: labelElement?.textContent?.trim().slice(0, 48) ?? '',
+      kind: noteRoot ? 'note' : labelRoot?.dataset.labelKind ?? 'default',
+      label: (noteText ?? labelElement)?.textContent?.trim().slice(0, 48) ?? '',
+      noteKind: noteRoot?.dataset.noteKind,
     }];
   });
 }

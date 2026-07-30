@@ -30,6 +30,8 @@ describe('projectSnapshotService', () => {
     expect(shouldIncludeProjectSnapshotNode(fakeElement(['react-flow__minimap']))).toBe(false);
     expect(shouldIncludeProjectSnapshotNode(fakeElement(['react-flow__panel']))).toBe(false);
     expect(shouldIncludeProjectSnapshotNode(fakeElement(['gooey-btn-wrapper']))).toBe(false);
+    expect(shouldIncludeProjectSnapshotNode(fakeElement(['node-resize-handles']))).toBe(false);
+    expect(shouldIncludeProjectSnapshotNode(fakeElement(['canvas-note-point-handles']))).toBe(false);
   });
 
   it('skips media surfaces that can taint the snapshot canvas', () => {

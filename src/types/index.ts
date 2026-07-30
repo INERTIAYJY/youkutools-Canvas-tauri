@@ -4,6 +4,28 @@
 import type { AudioOutputFormat, AudioTtsVoice, ModelExecutionProfile } from './aiTypes';
 import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
+import type { CanvasNoteData } from './canvasNote';
+
+export type {
+  CanvasDrawingTool,
+  CanvasNoteArrowhead,
+  CanvasNoteCrop,
+  CanvasNoteData,
+  CanvasNoteFontFamily,
+  CanvasNoteFontSize,
+  CanvasNoteKind,
+  CanvasNoteLayerDirection,
+  CanvasNoteLineType,
+  CanvasNotePatch,
+  CanvasNotePoint,
+  CanvasNoteRoughness,
+  CanvasNoteRoundness,
+  CanvasNoteStrokeStyle,
+  CanvasNoteStrokeWidth,
+  CanvasNoteStyle,
+  CanvasNoteTextAlign,
+} from './canvasNote';
+export { createCanvasNoteData, DEFAULT_CANVAS_NOTE_STYLE, isCanvasNoteKind } from './canvasNote';
 
 export type {
   AnnotationPoint,
@@ -34,6 +56,7 @@ export type NodeType =
   | 'source-video'
   | 'source-audio'
   | 'source-text'
+  | 'canvas-note'
   | 'comment';
 
 // 内置图像预设可请求的生成后处理流程
@@ -155,6 +178,8 @@ export interface BaseNodeData {
   directorStatus?: 'idle' | 'open' | 'ready';
   directorCaptureUrls?: string[];        // 从导演台同步的截图 URL 列表
   directorCaptureFilePaths?: string[];   // 对应本地路径
+  /** 轻量笔记/绘图元素。与 AI 生成节点数据语义隔离。 */
+  note?: CanvasNoteData;
   [key: string]: unknown;
 }
 
@@ -337,6 +362,7 @@ export interface AppConfig {
   interactionMode?: InteractionMode; // 画布交互模式，默认 'default'
   nodeToolbarMode?: NodeToolbarMode; // 节点顶部工具栏显示方式，默认 'icons'
   nodeLabelVisible?: boolean; // 是否显示节点顶部标题标签，默认 true
+  canvasNoteToolbarVisible?: boolean; // 是否显示画布笔记工具栏，默认 true
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）
@@ -516,6 +542,7 @@ export const NODE_TYPE_CONFIG: Record<string, NodeTypeVisualConfig> = {
   'ai-markdown': { icon: 'mdi:language-markdown-outline', color: 'text-purple-400',  bg: 'bg-purple-500/15',  label: 'Markdown' },
   'ai-storyboard': { icon: 'mdi:grid',                    color: 'text-pink-400',    bg: 'bg-pink-500/15',    label: '宫格分镜' },
   'ai-director':   { icon: 'mdi:video-3d',                color: 'text-violet-400',  bg: 'bg-violet-500/15',  label: '3D 导演台' },
+  'canvas-note':   { icon: 'mdi:draw',                    color: 'text-sky-400',     bg: 'bg-sky-500/15',     label: '画布笔记' },
 };
 
 /** 获取节点类型视觉配置，未匹配时返回灰色兜底 */

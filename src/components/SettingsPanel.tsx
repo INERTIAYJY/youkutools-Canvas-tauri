@@ -1,20 +1,11 @@
 /**
  * SettingsPanel 设置面板 — 模态弹窗，管理常规、文件与应用、API Key、快捷键、ComfyUI 等设置
  */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { Icon } from '@iconify/react';
 import '../styles/settings.css';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
-import {
-  getAppExecutableDir,
-  getBaseDir,
-  getDefaultBaseDir,
-  getProjectDataDir,
-  openDirectoryInFileManager,
-  PROJECT_DISK_CHANGED_EVENT,
-} from '../services/fileService';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import ModalOverlay from './shared/ModalOverlay';
 import AnimatedButton from './shared/AnimatedButton';
 import PopupCloseButton from './shared/PopupCloseButton';
@@ -22,6 +13,10 @@ import ApiKeySettings from './settings/ApiKeySettings';
 import StorageHealthCenter from './settings/StorageHealthCenter';
 import DirectorDeskStorageManager from './settings/DirectorDeskStorageManager';
 import McpControlSettings from './settings/McpControlSettings';
+import SettingsNavigation from './settings/SettingsNavigation';
+import ShortcutSettings from './settings/ShortcutSettings';
+import ComfyUISettings from './settings/ComfyUISettings';
+import FileAppSettings from './settings/FileAppSettings';
 import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
 import type {
@@ -33,7 +28,6 @@ import type {
 import type { BackgroundDetection } from '../services/backgroundService';
 
 import type { SettingsTab } from '../store/store.ui';
-import { invoke } from '@tauri-apps/api/core';
 
 const INTERACTION_MODE_OPTIONS: {
   id: InteractionMode;
@@ -100,35 +94,7 @@ const STARTUP_VIEW_OPTIONS: {
   },
 ];
 
-/** 是否运行在 macOS（用于快捷键修饰键显示） */
-const IS_MAC =  typeof navigator !== 'undefined'  && /Macintosh|Mac OS X/.test(navigator.userAgent);
-
-/** 按当前系统生成键盘快捷键列表（修饰键 Win/Mac 自适应） */
-function getShortcutList(): { action: string; key: string }[] {
-  const mod = IS_MAC ? '⌘' : 'Ctrl';        // 应用绑定 ctrlKey||metaKey，Mac 上为 ⌘
-  const ctrl = IS_MAC ? '⌃' : 'Ctrl';       // 字面 Control 键
-  const alt = IS_MAC ? '⌥' : 'Alt';
-  const shift = IS_MAC ? '⇧' : 'Shift';
-  const del = IS_MAC ? '⌫ Delete' : 'Delete / Backspace';
-  return [
-    { action: '保存画布', key: `${mod} + S` },
-    { action: '撤销', key: `${mod} + Z` },
-    { action: '重做', key: `${mod} + Y  /  ${mod} + ${shift} + Z` },
-    { action: '复制节点', key: `${mod} + C` },
-    { action: '粘贴节点', key: `${mod} + V` },
-    { action: '删除节点', key: del },
-    { action: '分组 / 取消分组', key: `${mod} + G` },
-    { action: '创建生成节点（文本 / 图像 / 视频 / 音频 / 全景 / 动画）', key: '1–6' },
-    { action: '创建源节点（文本 / 图像 / 视频 / 音频 / Markdown）', key: `${alt} + 1–5` },
-    { action: '弹出对话框', key: `选中节点+Space` },
-    { action: '锁定比例缩放', key: `缩放时按住 ${shift}` },
-    { action: '关闭菜单 / 设置', key: 'Escape' },
-    { action: '画布复位', key: 'F' },
-    { action: '小地图', key: 'M' },
-    { action: '资源搜索窗口', key: `${alt} + Space  /  ${ctrl} + ${shift} + Space` },
-    { action: '显示/隐藏吉祥物', key: `${mod} + ${shift} + M` },
-  ];
-}
+const IS_MAC = typeof navigator !== 'undefined' && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
 /** 格式化字节为可读大小 */
 function formatBytes(bytes: number): string {
@@ -138,7 +104,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function SettingsPanel() {
-  const { settingsOpen, setSettingsOpen, settingsInitialTab, setSettingsInitialTab, config, updateConfig, saveConfig, currentProjectId, workflows, setWorkflowPanelOpen, showToast } =
+  const { settingsOpen, setSettingsOpen, settingsInitialTab, setSettingsInitialTab, config, updateConfig, saveConfig, showToast } =
     useAppStore(
       useShallow((s) => ({
         settingsOpen: s.settingsOpen,
@@ -148,9 +114,6 @@ export default function SettingsPanel() {
         config: s.config,
         updateConfig: s.updateConfig,
         saveConfig: s.saveConfig,
-        currentProjectId: s.currentProjectId,
-        workflows: s.workflows,
-        setWorkflowPanelOpen: s.setWorkflowPanelOpen,
         showToast: s.showToast,
       })),
     );
@@ -164,13 +127,6 @@ export default function SettingsPanel() {
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
-  const [projectDir, setProjectDir] = useState<string | null>(null);
-  const [defaultBaseDir, setDefaultBaseDir] = useState<string | null>(null);
-  const [appExecutableDir, setAppExecutableDir] = useState<string | null>(null);
-  const [dirLoading, setDirLoading] = useState(false);
-  const [comfyUiLaunching, setComfyUiLaunching] = useState(false);
-  // ComfyUI 服务状态：启动按钮下方的即时反馈（starting → ready / failed）
-  const [comfyStatus, setComfyStatus] = useState<'idle' | 'starting' | 'ready' | 'failed'>('idle');
   const [bgUploading, setBgUploading] = useState(false);
   const [bgDetection, setBgDetection] = useState<BackgroundDetection | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -181,170 +137,6 @@ export default function SettingsPanel() {
   const selectTab = (tab: SettingsTab) => {
     setSelectedTab(tab);
     setSettingsInitialTab(null);
-  };
-
-  // 加载应用、默认存储和当前项目目录
-  useEffect(() => {
-    if (!settingsOpen || activeTab !== 'files') return;
-    let cancelled = false;
-    const refreshDirectories = () => {
-      setDirLoading(true);
-      Promise.all([
-        currentProjectId ? getProjectDataDir(currentProjectId) : Promise.resolve(null),
-        getDefaultBaseDir(),
-        getAppExecutableDir(),
-      ])
-        .then(([nextProjectDir, nextDefaultBaseDir, nextAppExecutableDir]) => {
-          if (cancelled) return;
-          setProjectDir(nextProjectDir);
-          setDefaultBaseDir(nextDefaultBaseDir);
-          setAppExecutableDir(nextAppExecutableDir);
-        })
-        .catch(() => {
-          if (cancelled) return;
-          setProjectDir(null);
-          setDefaultBaseDir(null);
-          setAppExecutableDir(null);
-        })
-        .finally(() => {
-          if (!cancelled) setDirLoading(false);
-        });
-    };
-    refreshDirectories();
-    window.addEventListener(PROJECT_DISK_CHANGED_EVENT, refreshDirectories);
-    return () => {
-      cancelled = true;
-      window.removeEventListener(PROJECT_DISK_CHANGED_EVENT, refreshDirectories);
-    };
-  }, [settingsOpen, activeTab, currentProjectId]);
-
-  /** 在系统文件管理器中打开文件保存根目录 */
-  const handleOpenProjectDir = async () => {
-    try {
-      const dir = baseDataDir || await getBaseDir();
-      if (!dir) return;
-      await openDirectoryInFileManager(dir);
-    } catch (err) {
-      console.warn('无法打开文件夹:', err);
-    }
-  };
-
-  /** 选择文件保存根目录 */
-  const handleChooseBaseDir = async () => {
-    try {
-      const selected = await openDialog({ directory: true, title: '选择文件保存根目录' });
-      if (selected && typeof selected === 'string') {
-        updateConfig({ baseDataDir: selected });
-        await saveConfig();
-      }
-    } catch {
-      // 浏览器环境忽略
-    }
-  };
-
-  /** 选择 ComfyUI 安装目录 */
-  const handleChooseComfyUIPath = async () => {
-    try {
-      const selected = await openDialog({ directory: true, title: '选择 ComfyUI 安装目录' });
-      if (selected && typeof selected === 'string') {
-        updateConfig({ comfyUIPath: selected });
-        await saveConfig();
-      }
-    } catch {
-      // 浏览器环境忽略
-    }
-  };
-
-  /** 选择 Photoshop.exe 路径 */
-  const handleChoosePhotoshopPath = async () => {
-    try {
-      const selected = await openDialog({
-        multiple: false,
-        title: '选择 Photoshop.exe',
-        filters: [{ name: 'Photoshop', extensions: ['exe', 'app'] }],
-      });
-      if (selected && typeof selected === 'string') {
-        updateConfig({ photoshopPath: selected });
-        await saveConfig();
-      }
-    } catch {
-      // 浏览器环境忽略
-    }
-  };
-
-  /** 选择剪映专业版可执行文件路径 */
-  const handleChooseJianyingPath = async () => {
-    try {
-      const selected = await openDialog({
-        multiple: false,
-        title: '选择剪映专业版',
-        filters: [{ name: '剪映专业版', extensions: ['exe', 'app'] }],
-      });
-      if (selected && typeof selected === 'string') {
-        updateConfig({ jianyingPath: selected });
-        await saveConfig();
-      }
-    } catch {
-      // 浏览器环境忽略
-    }
-  };
-
-  /** 选择 Adobe Premiere Pro 可执行文件路径 */
-  const handleChoosePremierePath = async () => {
-    try {
-      const selected = await openDialog({
-        multiple: false,
-        title: '选择 Adobe Premiere Pro',
-        filters: [{ name: 'Adobe Premiere Pro', extensions: ['exe', 'app'] }],
-      });
-      if (selected && typeof selected === 'string') {
-        updateConfig({ premierePath: selected });
-        await saveConfig();
-      }
-    } catch {
-      // 浏览器环境忽略
-    }
-  };
-
-  /** 启动 ComfyUI：拉起进程后轮询服务端口，直到 API 真正就绪才算启动成功 */
-  const handleLaunchComfyUI = async () => {
-    const comfyPath = config.comfyUIPath?.trim();
-    if (!comfyPath) {
-      showToast('请先设置 ComfyUI 安装目录', 'error');
-      return;
-    }
-    setComfyUiLaunching(true);
-    setComfyStatus('starting');
-    try {
-      await invoke<string>('launch_comfyui', { comfyPath });
-
-      // 进程已拉起，但 ComfyUI 导入依赖需要数十秒 —— 轮询 API 直到就绪
-      // no-cors 探测：能连通即视为就绪，不依赖服务端 CORS 配置
-      const base = (config.comfyUIUrl?.trim() || 'http://127.0.0.1:8188').replace(/\/+$/, '');
-      const deadline = Date.now() + 300_000;
-      let ready = false;
-      while (Date.now() < deadline) {
-        try {
-          await fetch(`${base}/system_stats`, { mode: 'no-cors' });
-          ready = true;
-          break;
-        } catch {
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-      }
-      if (ready) {
-        setComfyStatus('ready');
-        showToast('ComfyUI 服务已就绪', 'success');
-      } else {
-        setComfyStatus('failed');
-        showToast('ComfyUI 进程已启动，但等待服务就绪超时，请查看终端窗口日志', 'error');
-      }
-    } catch (err) {
-      setComfyStatus('failed');
-      showToast(typeof err === 'string' ? err : '启动 ComfyUI 失败', 'error');
-    } finally {
-      setComfyUiLaunching(false);
-    }
   };
 
   /** 处理背景图片文件选择：无损压缩 → 自动识别深色/浅色 */
@@ -414,17 +206,6 @@ export default function SettingsPanel() {
     showToast('已恢复默认背景');
   };
 
-  const baseDataDir = config.baseDataDir;
-  const comfyUIPath = config.comfyUIPath;
-  const photoshopPath = config.photoshopPath;
-  const jianyingPath = config.jianyingPath;
-  const premierePath = config.premierePath;
-
-  const handleOpenWorkflowPanel = () => {
-    setSettingsOpen(false);
-    setWorkflowPanelOpen(true);
-  };
-
   return (
     <ModalOverlay
       isOpen={settingsOpen}
@@ -443,76 +224,7 @@ export default function SettingsPanel() {
         </div>
 
         <div className="flex flex-1 min-h-0">
-          {/* Sidebar Nav */}
-          <nav className="w-44 border-r border-canvas-border p-3 space-y-0.5 shrink-0">
-            {[
-              { id: 'general', label: '常规' },
-              { id: 'files', label: '文件与应用' },
-              { id: 'api', label: 'API Key' },
-              { id: 'storage', label: '存储健康' },
-              { id: 'comfyui', label: 'ComfyUI' },
-              { id: 'shortcuts', label: '快捷键' },
-              { id: 'mcp', label: 'MCP 控制' },
-            ].map(({ id, label }) => (
-              <AnimatedButton
-                key={id}
-                onClick={() => selectTab(id as SettingsTab)}
-                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left transition-colors ${
-                  activeTab === id ? 'bg-indigo-500/15 text-indigo-400' : 'text-canvas-text-secondary hover:bg-canvas-hover'
-                }`}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  {id === 'storage' && (
-                    <>
-                      <ellipse cx="12" cy="5" rx="9" ry="3" />
-                      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-                      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-                    </>
-                  )}
-                  {id === 'api' && (
-                    <>
-                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                      <line x1="16" y1="13" x2="8" y2="13" />
-                      <line x1="16" y1="17" x2="8" y2="17" />
-                    </>
-                  )}
-                  {id === 'files' && (
-                    <>
-                      <path d="M3 7a2 2 0 012-2h4l2 3h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
-                      <path d="M8 13h8" />
-                    </>
-                  )}
-                  {id === 'comfyui' && (
-                    <>
-                      <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />
-                    </>
-                  )}
-                  {id === 'general' && (
-                    <>
-                      <rect x="3" y="3" width="7" height="7" rx="1" />
-                      <rect x="14" y="3" width="7" height="7" rx="1" />
-                      <rect x="14" y="14" width="7" height="7" rx="1" />
-                      <rect x="3" y="14" width="7" height="7" rx="1" />
-                    </>
-                  )}
-                  {id === 'shortcuts' && (
-                    <>
-                      <rect x="2" y="4" width="20" height="16" rx="2" ry="2" />
-                      <line x1="6" y1="8" x2="6.01" y2="8" /><line x1="10" y1="8" x2="10.01" y2="8" />
-                      <line x1="14" y1="8" x2="14.01" y2="8" /><line x1="18" y1="8" x2="18.01" y2="8" />
-                      <line x1="8" y1="12" x2="8.01" y2="12" /><line x1="12" y1="12" x2="12.01" y2="12" />
-                      <line x1="16" y1="12" x2="16.01" y2="12" /><line x1="7" y1="16" x2="17" y2="16" />
-                    </>
-                  )}
-                  {id === 'mcp' && (
-                    <Icon icon="lucide:plug-zap" width="14" height="14" />
-                  )}
-                </svg>
-                {label}
-              </AnimatedButton>
-            ))}
-          </nav>
+          <SettingsNavigation activeTab={activeTab} onSelect={selectTab} />
 
           {/* Content */}
           <div className="settings-content flex-1 overflow-y-auto overflow-x-hidden p-3">
@@ -520,132 +232,7 @@ export default function SettingsPanel() {
               <ApiKeySettings onClose={() => setSettingsOpen(false)} />
             )}
 
-            {activeTab === 'comfyui' && (
-              <div className="space-y-4">
-                {/* ComfyUI 安装目录 */}
-                <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">ComfyUI 安装目录</h3>
-                  <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
-                    <div className="text-xs text-canvas-text-muted mb-1.5">ComfyUI 根目录路径</div>
-                    {comfyUIPath ? (
-                      <div className="flex items-center gap-2 mb-3">
-                        <div className="flex-1 min-w-0 text-[11px] text-canvas-text-secondary break-all font-mono leading-relaxed bg-canvas-surface rounded-md px-3 py-1.5 border border-canvas-border select-all">
-                          {comfyUIPath}
-                        </div>
-                        <AnimatedButton type="button" className="settings-save-btn shrink-0 text-xs" onClick={handleChooseComfyUIPath}>
-                          更换
-                        </AnimatedButton>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2 mb-3">
-                        <div className="flex-1 text-xs text-canvas-text-muted bg-canvas-surface rounded-md px-3 py-1.5 border border-canvas-border italic">
-                          未设置
-                        </div>
-                        <AnimatedButton type="button" className="settings-save-btn shrink-0 text-xs" onClick={handleChooseComfyUIPath}>
-                          选择文件夹
-                        </AnimatedButton>
-                      </div>
-                    )}
-                    <p className="text-[11px] text-canvas-text-muted leading-relaxed mb-3">
-                      选择 ComfyUI 的安装根目录，支持 GitHub 源码版 / 秋叶整合包 / 官方便携版 / Comfy Desktop（选安装基目录，如 F:\ComfyUI）。将以 API 模式直接启动，跳过启动器检测
-                    </p>
-
-                    {/* 启动按钮 */}
-                    <div className="pt-2 border-t border-canvas-border">
-                      <AnimatedButton
-                        type="button"
-                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 transition-colors text-sm font-medium"
-                        onClick={handleLaunchComfyUI}
-                        disabled={comfyUiLaunching}
-                      >
-                        {comfyUiLaunching ? (
-                          <>
-                            <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
-                            </svg>
-                            正在启动，等待服务就绪…
-                          </>
-                        ) : (
-                          <>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <polygon points="5 3 19 12 5 21 5 3" />
-                            </svg>
-                            启动 ComfyUI
-                          </>
-                        )}
-                      </AnimatedButton>
-                      {/* 启动状态反馈 */}
-                      {comfyStatus === 'starting' && (
-                        <p className="text-[11px] text-canvas-text-secondary mt-2 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-                          正在等待 ComfyUI 服务就绪，首次启动可能需要几分钟时间…
-                        </p>
-                      )}
-                      {comfyStatus === 'ready' && (
-                        <p className="text-[11px] text-emerald-400 mt-2 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
-                          ComfyUI 服务已就绪（{(config.comfyUIUrl?.trim() || 'http://127.0.0.1:8188')}），可以开始使用
-                        </p>
-                      )}
-                      {comfyStatus === 'failed' && (
-                        <p className="text-[11px] text-red-400 mt-2 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
-                          服务未就绪，请查看弹出的终端窗口中的日志
-                        </p>
-                      )}
-                      {comfyStatus === 'idle' && (
-                        <p className="text-[11px] text-canvas-text-muted mt-2">
-                          启动后 ComfyUI 会在新窗口中运行，服务启动后即可在下方配置地址
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* ComfyUI 服务地址 */}
-                <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">ComfyUI 服务地址</h3>
-                  <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
-                    <div className="text-xs text-canvas-text-muted mb-1.5">后端地址</div>
-                    <input
-                      type="text"
-                      className="w-full text-sm bg-canvas-surface border border-canvas-border rounded-md px-3 py-2 text-canvas-text placeholder-canvas-text-muted focus:outline-none focus:border-indigo-500 transition-colors"
-                      placeholder="http://127.0.0.1:8188"
-                      defaultValue={config.comfyUIUrl || ''}
-                      onBlur={async (e) => {
-                        updateConfig({ comfyUIUrl: e.target.value });
-                        await saveConfig();
-                      }}
-                    />
-                    <p className="text-[11px] text-canvas-text-muted mt-2">
-                      ComfyUI 后端服务的地址，用于执行导入的工作流。默认端口为 8188
-                    </p>
-                  </div>
-                </div>
-
-                {/* ComfyUI 工作流 */}
-                <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">ComfyUI 工作流</h3>
-                  <div className="bg-canvas-card border border-canvas-border rounded-lg p-2 flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-lg bg-purple-500/15 text-purple-400 flex items-center justify-center shrink-0">
-                      <Icon icon="lucide:workflow" width="18" height="18" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-medium text-canvas-text">工作流管理</div>
-                      <div className="text-[11px] text-canvas-text-muted mt-0.5">已导入 {workflows.length} 个工作流</div>
-                    </div>
-                    <AnimatedButton
-                      type="button"
-                      className="settings-save-btn shrink-0 text-xs flex items-center gap-1.5"
-                      onClick={handleOpenWorkflowPanel}
-                    >
-                      管理工作流
-                      <Icon icon="lucide:chevron-right" width="14" height="14" />
-                    </AnimatedButton>
-                  </div>
-                </div>
-              </div>
-            )}
+            {activeTab === 'comfyui' && <ComfyUISettings />}
 
             {activeTab === 'general' && (
               <div className="space-y-4">
@@ -1155,166 +742,9 @@ export default function SettingsPanel() {
               </div>
             )}
 
-            {activeTab === 'files' && (
-              <div className="space-y-4">
-                {/* 文件保存位置 */}
-                <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">文件保存位置</h3>
-                  <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
-                    {/* 保存根目录选择 */}
-                    <div className="mb-3">
-                      <div className="text-xs text-canvas-text-muted mb-1.5">保存根目录</div>
-                      {baseDataDir ? (
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 min-w-0 text-[11px] text-canvas-text-secondary break-all font-mono leading-relaxed bg-canvas-surface rounded-md px-3 py-1.5 border border-canvas-border select-all">
-                            {baseDataDir}
-                          </div>
-                          <AnimatedButton type="button" className="settings-save-btn shrink-0 text-xs" onClick={handleChooseBaseDir}>
-                            更换
-                          </AnimatedButton>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 text-xs text-canvas-text-muted bg-canvas-surface rounded-md px-3 py-1.5 border border-canvas-border italic">
-                            未设置（使用系统默认目录）
-                          </div>
-                          <AnimatedButton type="button" className="settings-save-btn shrink-0 text-xs" onClick={handleChooseBaseDir}>
-                            选择文件夹
-                          </AnimatedButton>
-                        </div>
-                      )}
-                    </div>
+            {activeTab === 'files' && <FileAppSettings active />}
 
-                    {/* 路径结构提示 */}
-                    <div className="text-[11px] text-canvas-text-muted leading-relaxed mb-3">
-                      文件保存为：<span className="text-canvas-text-secondary font-mono">{baseDataDir || '系统目录'}/{'{项目ID}'}/...</span>
-                    </div>
-
-                    {/* 应用与默认存储目录 */}
-                    <div className="space-y-2 py-2 border-y border-canvas-border">
-                      <div className="min-w-0">
-                        <div className="text-xs text-canvas-text-muted mb-0.5">应用所在目录</div>
-                        <div className={`text-[11px] break-all leading-relaxed select-all ${
-                          appExecutableDir ? 'text-canvas-text-secondary font-mono' : 'text-canvas-text-muted italic'
-                        }`}>
-                          {dirLoading ? '加载中…' : appExecutableDir || '仅在 Tauri 桌面环境中可用'}
-                        </div>
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs text-canvas-text-muted mb-0.5">默认存储目录</div>
-                        <div className={`text-[11px] break-all leading-relaxed select-all ${
-                          defaultBaseDir ? 'text-canvas-text-secondary font-mono' : 'text-canvas-text-muted italic'
-                        }`}>
-                          {dirLoading ? '加载中…' : defaultBaseDir || '仅在 Tauri 桌面环境中可用'}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 当前项目目录 + 打开按钮 */}
-                    <div className="pt-2">
-                      {dirLoading ? (
-                        <div className="text-xs text-canvas-text-muted">加载中…</div>
-                      ) : projectDir ? (
-                        <div className="space-y-2">
-                          <div className="flex items-start gap-2 min-w-0">
-                            <svg className="shrink-0 mt-0.5" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                            </svg>
-                            <div className="min-w-0 flex-1">
-                              <div className="text-xs text-canvas-text-muted mb-0.5">当前项目目录</div>
-                              <div className="text-[11px] text-canvas-text-secondary break-all font-mono leading-relaxed select-all">
-                                {projectDir}
-                              </div>
-                            </div>
-                          </div>
-                          <AnimatedButton
-                            type="button"
-                            className="settings-save-btn"
-                            onClick={handleOpenProjectDir}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                              <polyline points="15 3 21 3 21 9" />
-                              <line x1="10" y1="14" x2="21" y2="3" />
-                            </svg>
-                            打开文件夹
-                          </AnimatedButton>
-                        </div>
-                      ) : (
-                        <div className="text-xs text-canvas-text-muted">仅在 Tauri 桌面环境中可用</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 外部编辑器路径 */}
-                <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">外部编辑器</h3>
-                  <div className="bg-canvas-card border border-canvas-border rounded-lg p-2 divide-y divide-canvas-border">
-                    {[
-                      {
-                        id: 'photoshop',
-                        label: 'Photoshop',
-                        path: photoshopPath,
-                        description: '用于图片节点的「在 PS 中打开」',
-                        onChoose: handleChoosePhotoshopPath,
-                      },
-                      {
-                        id: 'jianying',
-                        label: '剪映专业版',
-                        path: jianyingPath,
-                        description: '用于视频节点的「在剪映中打开」',
-                        onChoose: handleChooseJianyingPath,
-                      },
-                      {
-                        id: 'premiere',
-                        label: 'Adobe Premiere Pro',
-                        path: premierePath,
-                        description: '用于视频节点的「在 PR 中打开」',
-                        onChoose: handleChoosePremierePath,
-                      },
-                    ].map((editor) => (
-                      <div key={editor.id} className="py-2 first:pt-0 last:pb-0">
-                        <div className="text-xs text-canvas-text-muted mb-1.5">{editor.label}</div>
-                        <div className="flex items-center gap-2">
-                          <div className={`flex-1 min-w-0 text-[11px] break-all leading-relaxed rounded-md px-3 py-1.5 border border-canvas-border ${
-                            editor.path
-                              ? 'text-canvas-text-secondary font-mono bg-canvas-surface select-all'
-                              : 'text-canvas-text-muted bg-canvas-surface italic'
-                          }`}>
-                            {editor.path || '未设置（自动检测）'}
-                          </div>
-                          <AnimatedButton
-                            type="button"
-                            className="settings-save-btn shrink-0 text-xs"
-                            onClick={editor.onChoose}
-                          >
-                            {editor.path ? '更换' : '选择文件'}
-                          </AnimatedButton>
-                        </div>
-                        <p className="text-[11px] text-canvas-text-muted leading-relaxed mt-1.5">
-                          {editor.description}；手动路径优先，未设置时自动检测常见安装位置
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'shortcuts' && (
-              <div className="space-y-1">
-                <p className="text-sm text-canvas-text-muted mb-4">键盘快捷键配置</p>
-                {getShortcutList().map(({ action, key }) => (
-                  <div key={action} className="flex items-center justify-between py-2 px-2.5 rounded-lg hover:bg-canvas-hover">
-                    <span className="text-sm text-canvas-text">{action}</span>
-                    <kbd className="px-2 py-0.5 bg-canvas-card border border-canvas-border rounded text-[11px] text-canvas-text-secondary font-mono">
-                      {key}
-                    </kbd>
-                  </div>
-                ))}
-              </div>
-            )}
+            {activeTab === 'shortcuts' && <ShortcutSettings />}
 
             {activeTab === 'storage' && (
               <>

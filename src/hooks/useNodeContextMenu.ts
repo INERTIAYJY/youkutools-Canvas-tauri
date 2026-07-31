@@ -160,7 +160,23 @@ export function useNodeContextMenu() {
   const currentNode = nodes.find((n) => n.id === menu.nodeId);
   const nodeType = (currentNode?.type) as NodeType | undefined;
   const nodeData = currentNode?.data as BaseNodeData | undefined;
+  const isNodeLocked = currentNode?.draggable === false;
   const showAddToCharacter = isEligibleCharacterReferenceNode(currentNode);
+
+  const handleToggleLock = useCallback(() => {
+    if (!menu.nodeId) return;
+    const store = useAppStore.getState();
+    const node = store.nodes.find((candidate) => candidate.id === menu.nodeId);
+    if (!node) return;
+
+    const nextLocked = node.draggable !== false;
+    store.commitToHistory();
+    store.setNodes(store.nodes.map((candidate) => candidate.id === menu.nodeId
+      ? { ...candidate, draggable: nextLocked ? false : undefined }
+      : candidate));
+    closeMenu();
+    store.showToast(nextLocked ? '节点已锁定' : '节点已解锁');
+  }, [closeMenu, menu.nodeId]);
 
   const handleAddToCharacter = useCallback(() => {
     if (!menu.nodeId) return;
@@ -356,6 +372,8 @@ export function useNodeContextMenu() {
     handleCopyText,
     handleCutText,
     handleDuplicate,
+    handleToggleLock,
+    isNodeLocked,
     handleUngroup,
     handleDelete,
     handleShowInFolder,

@@ -522,6 +522,8 @@ function CanvasInner() {
     handleCopyText,
     handleCutText,
     handleDuplicate,
+    handleToggleLock,
+    isNodeLocked,
     handleUngroup,
     handleDelete,
     handleShowInFolder,
@@ -922,14 +924,24 @@ function CanvasInner() {
   // ── Node change handler ──
   const handleNodesChange = useCallback(
     (changes: NodeChange<RFNode<BaseNodeData>>[]) => {
+      const lockedNodeIds = new Set(
+        useAppStore.getState().nodes
+          .filter((node) => node.draggable === false)
+          .map((node) => node.id),
+      );
+      const unlockedChanges = changes.filter(
+        (change) => change.type !== 'position' || !lockedNodeIds.has(change.id),
+      );
+      if (unlockedChanges.length === 0) return;
+
       // 把吸附后的位置直接注入 React Flow 的变更管线
       // （成为唯一真相源，避免二次 setNodes 覆盖导致的漂移/橡皮筋）。
       // 注意：松手那一帧 dragging=false 也要吸附，否则会弹回原始落点（位移）。
       // applySnap 在非拖拽期（dragCtx 为空）是无副作用直通，故无需判断 dragging。
-      const draggingPosChanges = changes.filter(
+      const draggingPosChanges = unlockedChanges.filter(
         (c) => c.type === 'position' && c.position,
       );
-      let snapped = changes;
+      let snapped = unlockedChanges;
       if (draggingPosChanges.length > 0) {
         const dc = draggingPosChanges[0];
         if (dc.type === 'position' && dc.position) {
@@ -1250,6 +1262,8 @@ function CanvasInner() {
         onCopyText={handleCopyText}
         onCutText={handleCutText}
         onDuplicate={handleDuplicate}
+        onToggleLock={handleToggleLock}
+        isLocked={isNodeLocked}
         onAddToCharacter={showAddToCharacter ? handleAddToCharacter : undefined}
         onUngroup={isGroupNode ? handleUngroup : undefined}
         onDelete={handleDelete}

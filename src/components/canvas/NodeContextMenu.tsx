@@ -9,6 +9,7 @@ const MENU_ITEMS = [
   { label: '复制', shortcut: 'Ctrl C', action: 'copy' as const },
   { label: '剪切', shortcut: 'Ctrl X', action: 'cut' as const },
   { label: '创建副本', shortcut: 'Ctrl D', action: 'duplicate' as const },
+  { label: '锁定', shortcut: '', action: 'toggleLock' as const, dynamicLockLabel: true },
   { label: '解除分组', shortcut: '', action: 'ungroup' as const, groupOnly: true },
   { label: '添加到角色库…', shortcut: '', action: 'addToCharacter' as const, conditional: true },
   { label: '复制媒体', shortcut: '', action: 'copyMedia' as const, conditional: true, dynamicLabel: true },
@@ -21,7 +22,7 @@ const MENU_ITEMS = [
 ];
 
 const MENU_W = 176;
-const MENU_H = 390; // 图像节点最多 10 items + 1 sep
+const MENU_H = 422; // 图像节点最多 11 items + 1 sep
 const TEXT_SELECTION_MENU_EXTRA_H = 78; // 2 text-selection items + separator
 
 interface NodeContextMenuProps {
@@ -34,6 +35,8 @@ interface NodeContextMenuProps {
   onCopyText?: () => void;
   onCutText?: () => void;
   onDuplicate: () => void;
+  onToggleLock: () => void;
+  isLocked: boolean;
   onAddToCharacter?: () => void;
   onUngroup?: () => void;
   onDelete: () => void;
@@ -55,6 +58,8 @@ export function NodeContextMenu({
   onCopyText,
   onCutText,
   onDuplicate,
+  onToggleLock,
+  isLocked,
   onAddToCharacter,
   onUngroup,
   onDelete,
@@ -79,6 +84,7 @@ export function NodeContextMenu({
     copy: onCopy,
     cut: onCut,
     duplicate: onDuplicate,
+    toggleLock: onToggleLock,
     addToCharacter: onAddToCharacter || (() => {}),
     delete: onDelete,
     showInFolder: onShowInFolder || (() => {}),
@@ -127,7 +133,13 @@ export function NodeContextMenu({
             className={`menu-row menu-row-split${item.danger ? ' menu-row-danger' : ''}`}
             onClick={item.action === 'ungroup' ? onUngroup : actionMap[item.action]}
           >
-            <span>{item.dynamicLabel && item.action === 'copyMedia' ? (copyMediaLabel || item.label) : item.label}</span>
+            <span>
+              {item.dynamicLockLabel && item.action === 'toggleLock'
+                ? (isLocked ? '解锁' : '锁定')
+                : item.dynamicLabel && item.action === 'copyMedia'
+                  ? (copyMediaLabel || item.label)
+                  : item.label}
+            </span>
             <span className="menu-kbd">{item.shortcut}</span>
           </div>
         </div>

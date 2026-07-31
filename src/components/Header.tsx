@@ -10,8 +10,13 @@ const isMacOS = typeof navigator !== 'undefined'
   && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
 export default function Header() {
-  const { projectName, setProjectName } = useAppStore(
-    useShallow((s) => ({ projectName: s.projectName, setProjectName: s.setProjectName })),
+  const { projectName, setProjectName, createProject, isCreatingProject } = useAppStore(
+    useShallow((s) => ({
+      projectName: s.projectName,
+      setProjectName: s.setProjectName,
+      createProject: s.createProject,
+      isCreatingProject: s.isCreatingProject,
+    })),
   );
   const macTauriPlacement = isTauri && isMacOS;
 
@@ -94,19 +99,27 @@ export default function Header() {
       {/* Actions */}
       <motion.button
         type="button"
-        aria-label="新建画布"
-        onClick={() => useAppStore.getState().createProject()}
+        aria-label={isCreatingProject ? '正在新建画布' : '新建画布'}
+        onClick={() => void createProject()}
+        disabled={isCreatingProject}
         className="w-7 h-7 rounded-lg hover:bg-canvas-hover flex items-center justify-center
-                   text-canvas-text-secondary hover:text-canvas-text"
-        data-tooltip="新建画布"
-        whileHover={{ scale: 1.1 }}
-        whileTap={{ scale: 0.92 }}
+                   text-canvas-text-secondary hover:text-canvas-text disabled:cursor-not-allowed disabled:opacity-50"
+        data-tooltip={isCreatingProject ? '正在新建画布' : '新建画布'}
+        whileHover={isCreatingProject ? undefined : { scale: 1.1 }}
+        whileTap={isCreatingProject ? undefined : { scale: 0.92 }}
         transition={{ type: 'spring', stiffness: 400, damping: 17 }}
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
-          <line x1="12" y1="5" x2="12" y2="19" />
-          <line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
+        {isCreatingProject ? (
+          <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.2" opacity="0.25" />
+            <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        )}
       </motion.button>
     </header>
   );

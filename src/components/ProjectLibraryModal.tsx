@@ -62,7 +62,7 @@ function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
 export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryModalProps) {
   const {
     projects, currentProjectId, createProject, renameProject, switchProject, deleteProject,
-    exportProject, importProject,
+    exportProject, importProject, isCreatingProject,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -73,6 +73,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
       deleteProject: state.deleteProject,
       exportProject: state.exportProject,
       importProject: state.importProject,
+      isCreatingProject: state.isCreatingProject,
     })),
   );
   const [query, setQuery] = useState('');
@@ -132,6 +133,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   };
 
   const requestClose = () => {
+    if (isCreatingProject) return;
     if (deleteTarget) {
       setDeleteTarget(null);
       return;
@@ -152,7 +154,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   const submitNewProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = newProjectName.trim();
-    if (!name) return;
+    if (!name || isCreatingProject) return;
     const projectId = await createProject(name);
     if (projectId) closeLibrary();
   };
@@ -482,7 +484,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                       value={newProjectName}
                       onChange={(event) => setNewProjectName(event.target.value)}
                       placeholder="输入项目名称"
-                      className="h-9 w-full rounded-md border border-canvas-border bg-canvas-card px-3 text-center text-sm text-canvas-text outline-none placeholder:text-canvas-text-muted focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15"
+                      disabled={isCreatingProject}
+                      className="h-9 w-full rounded-md border border-canvas-border bg-canvas-card px-3 text-center text-sm text-canvas-text outline-none placeholder:text-canvas-text-muted focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                     />
                   </label>
                 </div>
@@ -493,16 +496,20 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                       setIsCreating(false);
                       setNewProjectName('');
                     }}
-                    className="h-8 rounded-md px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border"
+                    disabled={isCreatingProject}
+                    className="h-8 rounded-md px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     取消
                   </button>
                   <button
                     type="submit"
-                    disabled={!newProjectName.trim()}
-                    className="h-8 rounded-md bg-indigo-500 px-3 text-xs font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={!newProjectName.trim() || isCreatingProject}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-indigo-500 px-3 text-xs font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    创建
+                    {isCreatingProject ? (
+                      <Icon icon="mdi:loading" width="15" height="15" className="animate-spin" aria-hidden="true" />
+                    ) : null}
+                    {isCreatingProject ? '创建中' : '创建'}
                   </button>
                 </div>
               </form>

@@ -127,6 +127,13 @@ function getCanvasViewportTransform(): string {
   return viewport?.style.transform ?? '';
 }
 
+function waitForLoadingPaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
+
 function isCanvasSnapshotFresh(state: AppState, projectId: string): boolean {
   return lastCapturedCanvasState?.projectId === projectId
     && lastCapturedCanvasState.nodes === state.nodes
@@ -205,6 +212,7 @@ export interface ProjectSlice {
   currentProjectId: string | null;
   projectName: string;
   projectLoadStatus: ProjectLoadStatus;
+  isCreatingProject: boolean;
   _autoSaveFailedNotified?: boolean;
   setProjectName: (name: string) => void;
   renameProject: (id: string, name: string) => Promise<boolean>;
@@ -275,6 +283,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   currentProjectId: 'default',
   projectName: '新项目',
   projectLoadStatus: 'loading',
+  isCreatingProject: false,
 
   setProjectName: (name) => {
     const state = get();
@@ -499,88 +508,96 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   },
 
   createProject: async (name) => {
-    const createSequence = ++projectSwitchSequence;
-    const isLatestCreate = () => createSequence === projectSwitchSequence;
-    const previousProjectId = get().currentProjectId;
-
-    if (previousProjectId) {
-      const snapshotRecord = createCurrentProjectSaveRecord(get());
-      void get().captureCurrentProjectSnapshot({
-        allowProjectChange: true,
-        persistRecord: snapshotRecord,
-      });
-      const savedProjectId = await get().saveCurrentProject();
+    if (get().isCreatingProject) return undefined;
+    set({ isCreatingProject: true });
+    try {
+      const createSequence = ++projectSwitchSequence;
+      const isLatestCreate = () => createSequence === projectSwitchSequence;
+      await waitForLoadingPaint();
       if (!isLatestCreate()) return undefined;
-      if (savedProjectId !== previousProjectId) {
-        get().showToast('当前项目保存失败，已取消新建项目', 'error');
+      const previousProjectId = get().currentProjectId;
+
+      if (previousProjectId) {
+        const snapshotRecord = createCurrentProjectSaveRecord(get());
+        void get().captureCurrentProjectSnapshot({
+          allowProjectChange: true,
+          persistRecord: snapshotRecord,
+        });
+        const savedProjectId = await get().saveCurrentProject();
+        if (!isLatestCreate()) return undefined;
+        if (savedProjectId !== previousProjectId) {
+          get().showToast('当前项目保存失败，已取消新建项目', 'error');
+          return undefined;
+        }
+      }
+
+      const id = generateProjectId();
+      let defaultName: string;
+      if (name) {
+        defaultName = name;
+      } else {
+        const existing = get().projects
+          .filter((p) => p.id !== 'default')
+          .map((p) => {
+            const m = p.name.match(/^项目\s+(\d+)$/);
+            return m ? parseInt(m[1], 10) : 0;
+          });
+        const nextNum = existing.length > 0 ? Math.max(...existing) + 1 : 1;
+        defaultName = `项目 ${nextNum}`;
+      }
+      const dataFolder = fileService.buildProjectFolderName(defaultName, id);
+      const project: CanvasProject = {
+        id,
+        name: defaultName,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        dataFolder,
+      };
+      const emptyDramaAssets = { version: 2 as const, characters: [], scenes: [], props: [] };
+      try {
+        await enqueueProjectSave({
+          ...project,
+          nodes: [],
+          edges: [],
+          groups: [],
+          dramaAssets: emptyDramaAssets,
+        });
+      } catch (error) {
+        console.warn('[创建项目] 保存失败:', error);
+        if (isLatestCreate()) {
+          get().showToast('新项目创建失败，已保留当前项目', 'error');
+        }
         return undefined;
       }
-    }
 
-    const id = generateProjectId();
-    let defaultName: string;
-    if (name) {
-      defaultName = name;
-    } else {
-      const existing = get().projects
-        .filter((p) => p.id !== 'default')
-        .map((p) => {
-          const m = p.name.match(/^项目\s+(\d+)$/);
-          return m ? parseInt(m[1], 10) : 0;
-        });
-      const nextNum = existing.length > 0 ? Math.max(...existing) + 1 : 1;
-      defaultName = `项目 ${nextNum}`;
-    }
-    const dataFolder = fileService.buildProjectFolderName(defaultName, id);
-    const project: CanvasProject = {
-      id,
-      name: defaultName,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      dataFolder,
-    };
-    const emptyDramaAssets = { version: 2 as const, characters: [], scenes: [], props: [] };
-    try {
-      await enqueueProjectSave({
-        ...project,
+      fileService.registerProjectFolder(id, dataFolder);
+      if (!isLatestCreate()) {
+        set((state) => ({
+          projects: state.projects.some((item) => item.id === id)
+            ? state.projects
+            : [...state.projects, project],
+        }));
+        fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
+        return id;
+      }
+
+      set((state) => ({
+        projects: [...state.projects, project],
+        currentProjectId: project.id,
+        projectName: project.name,
+        projectLoadStatus: 'ready',
         nodes: [],
         edges: [],
         groups: [],
         dramaAssets: emptyDramaAssets,
-      });
-    } catch (error) {
-      console.warn('[创建项目] 保存失败:', error);
-      if (isLatestCreate()) {
-        get().showToast('新项目创建失败，已保留当前项目', 'error');
-      }
-      return undefined;
-    }
-
-    fileService.registerProjectFolder(id, dataFolder);
-    if (!isLatestCreate()) {
-      set((state) => ({
-        projects: state.projects.some((item) => item.id === id)
-          ? state.projects
-          : [...state.projects, project],
       }));
       fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
+      rememberActiveProject(id);
+      setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
       return id;
+    } finally {
+      set({ isCreatingProject: false });
     }
-
-    set((state) => ({
-      projects: [...state.projects, project],
-      currentProjectId: project.id,
-      projectName: project.name,
-      projectLoadStatus: 'ready',
-      nodes: [],
-      edges: [],
-      groups: [],
-      dramaAssets: emptyDramaAssets,
-    }));
-    fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
-    rememberActiveProject(id);
-    setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
-    return id;
   },
 
   exportProject: async (id) => {

@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
  */
 const EDITOR_SOURCES = [
   'src/components/nodes/shared/MentionEditor.tsx',
+  'src/components/nodes/shared/mentionEditorDom.ts',
   'src/components/chat/ChatComposerEditor.tsx',
   'src/components/nodes/shared/PresetManager.tsx',
 ];
@@ -42,7 +43,7 @@ describe('rich text chip rendering stays injection-free', () => {
   });
 
   it('renders the workflow chip id through a text node, not markup', () => {
-    const source = readSource('src/components/nodes/shared/MentionEditor.tsx');
+    const source = readSource('src/components/nodes/shared/mentionEditorDom.ts');
     const chipBuilder = source.slice(
       source.indexOf('function buildWorkflowChipEl('),
       source.indexOf('function renderPromptToNodes('),

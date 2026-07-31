@@ -3,78 +3,41 @@
  */
 import { useState, useCallback, useRef, useEffect, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
-import type { WorkflowIONodeType, StoryboardCellOverride, BaseNodeData, NodeType } from '../../../types';
+import type { WorkflowIONodeType } from '../../../types';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, type AppState } from '../../../store/useAppStore';
+import { useAppStore } from '../../../store/useAppStore';
 import { Icon } from '@iconify/react';
-import { listGlobalFiles, listExternalFolderFiles, getFileCategory, type AssetFileEntry } from '../../../services/fileService';
+import { listGlobalFiles, listExternalFolderFiles, type AssetFileEntry } from '../../../services/fileService';
 import { getAllAssetMeta } from '../../../services/indexedDbService';
 import { springSmooth, fadeFast } from '../../../utils/motion';
 import { AnimatePresence, motion } from 'framer-motion';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import PopupCloseButton from '../../shared/PopupCloseButton';
 import {
   DRAMA_MENTION_MERGE_ALL,
   buildDramaMentionId,
-  parseDramaMentionId,
 } from '../../../types/dramaAssets';
 import type { CharacterReferenceImage } from '../../../types/dramaAssets';
 import { CHARACTER_REFERENCE_KIND_LABELS } from '../../character/characterReferencePresentation';
-
-const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-/** 本地文件路径 → asset URL（Tauri 端，不会失效）；非 Tauri 返回 undefined */
-function localAssetUrl(filePath?: string): string | undefined {
-  if (!filePath || !IS_TAURI) return undefined;
-  try { return convertFileSrc(filePath); } catch { return undefined; }
-}
-/** 节点缩略图来源：图片节点优先本地文件（线上地址可能失效），其余用海报帧 thumbnailUrl */
-function bestNodeThumb(data: { imageUrl?: unknown; thumbnailUrl?: unknown; filePath?: unknown }): string | undefined {
-  if (data.imageUrl) {
-    return localAssetUrl(data.filePath as string | undefined)
-      || (data.thumbnailUrl as string | undefined)
-      || (data.imageUrl as string | undefined);
-  }
-  return data.thumbnailUrl as string | undefined;
-}
-
-type NodeMeta = {
-  type: string;
-  displayId: number | undefined;
-  thumbnailUrl?: string;
-};
-
-const nodeMetaCache = new WeakMap<AppState['nodes'], Map<string, NodeMeta>>();
-
-function getNodeMetaMap(nodes: AppState['nodes']) {
-  const cached = nodeMetaCache.get(nodes);
-  if (cached) return cached;
-
-  const map = new Map<string, NodeMeta>();
-  for (const node of nodes) {
-    map.set(node.id, {
-      type: (node.data.type as string) || '',
-      displayId: node.data.displayId as number | undefined,
-      thumbnailUrl: bestNodeThumb(node.data),
-    });
-    if (node.data.type === 'ai-storyboard') {
-      const cols = Math.max(1, (node.data.storyboardCols as number) || 3);
-      const rows = Math.max(1, (node.data.storyboardRows as number) || 3);
-      const overrides = (node.data.storyboardOverrides as (StoryboardCellOverride | null)[] | undefined) ?? [];
-      const imageUrl = node.data.imageUrl as string | undefined;
-      for (let index = 0; index < rows * cols; index += 1) {
-        const thumbnailUrl = overrides[index]?.url || imageUrl;
-        if (!thumbnailUrl) continue;
-        map.set(`${node.id}/cell/${index}`, {
-          type: 'ai-image',
-          displayId: undefined,
-          thumbnailUrl,
-        });
-      }
-    }
-  }
-  nodeMetaCache.set(nodes, map);
-  return map;
-}
+import {
+  bestNodeThumb,
+  buildAssetChipEl,
+  buildChipEl,
+  buildDramaChipEl,
+  buildWorkflowChipEl,
+  ensureCaretSlotBeforeChip,
+  getNodeMetaMap,
+  isBrEl,
+  isChipEl,
+  normalizeChipSlots,
+  renderPromptToNodes,
+  serializeDOM,
+  ZWSP,
+} from './mentionEditorDom';
+import {
+  resolveCanvasMentionNodes,
+  resolveDramaMentionItems,
+  resolveWorkflowMentionNodes,
+} from './mentionEditorSources';
 
 // ── Props ──
 export interface MentionEditorProps {
@@ -94,425 +57,6 @@ export interface MentionEditorProps {
 // ── 暴露给上层的命令式接口（在当前光标处插入节点引用芯片）──
 export interface MentionEditorHandle {
   insertMentionAtCursor: (id: string, label: string) => void;
-}
-
-// ── Chip color config per node type ──
-const CHIP_STYLE: Record<string, string> = {
-  'ai-text': 'chip-text',
-  'ai-image': 'chip-image',
-  'ai-video': 'chip-video',
-  'ai-audio': 'chip-audio',
-  'ai-markdown': 'chip-markdown',
-  'ai-storyboard': 'chip-image',
-};
-
-// ── Workflow IO node chip color/icon per IONodeType ──
-const WF_IO_STYLE: Record<string, string> = {
-  prompt: 'chip-workflow-prompt',
-  image: 'chip-workflow-image',
-  video: 'chip-workflow-video',
-  audio: 'chip-workflow-audio',
-};
-const WF_IO_ICON: Record<string, string> = {
-  prompt: 'T',
-  image: 'I',
-  video: 'V',
-  audio: 'A',
-};
-
-// ═══════════════════════════════════════════════
-// DOM ↔ String helpers
-// ═══════════════════════════════════════════════
-
-/** 零宽空格 —— 作为不可编辑芯片（contenteditable=false）前的光标落点占位符。 */
-const ZWSP = '\u200B';
-
-/** 是否为不可编辑的引用芯片（节点 / 文件资产 / 短剧资产 / 工作流 IO）。 */
-function isChipEl(node: Node | null | undefined): node is HTMLElement {
-  if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
-  const el = node as HTMLElement;
-  return (
-    el.hasAttribute('data-ref-id') ||
-    el.hasAttribute('data-asset-path') ||
-    el.hasAttribute('data-drama-id') ||
-    el.hasAttribute('data-wf-id') ||
-    el.hasAttribute('data-skill-id')
-  );
-}
-
-function isBrEl(node: Node | null | undefined): boolean {
-  return !!node && node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).tagName === 'BR';
-}
-
-/** 行首芯片（前面是 <br> 或位于最开头）前补零宽空格，让光标能落到芯片前面（命令式插入用）。 */
-function ensureCaretSlotBeforeChip(chip: Node): void {
-  const prev = chip.previousSibling;
-  if (!prev || isBrEl(prev)) {
-    chip.parentNode?.insertBefore(document.createTextNode(ZWSP), chip);
-  } else if (prev.nodeType === Node.TEXT_NODE && !prev.textContent) {
-    // 空文本节点（如换行 insertNode 分裂的残留）不是有效落点 → 填成 ZWSP
-    prev.textContent = ZWSP;
-  }
-}
-
-/** 扫描所有芯片，给「行首芯片」补零宽空格落点。幂等（已有文本/ZWSP 前缀则跳过）。
- *  用于编辑/导航/聚焦时修复任何来源（粘贴、删字后行首化等）的无落点芯片。ZWSP 在序列化时被剥除。 */
-function normalizeChipSlots(root: HTMLElement): void {
-  const chips = root.querySelectorAll('[data-ref-id],[data-asset-path],[data-drama-id],[data-wf-id],[data-skill-id]');
-  for (const chip of Array.from(chips)) ensureCaretSlotBeforeChip(chip);
-}
-
-/** Serialize contenteditable DOM back to @{id:label} / @wf{id|title|type} marker string (pipe-separated to avoid ambiguity with `:` in node IDs). */
-function serializeDOM(root: HTMLElement): string {
-  let result = '';
-  const walk = (node: Node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      result += node.textContent || '';
-    } else if (node.nodeType === Node.ELEMENT_NODE) {
-      const el = node as HTMLElement;
-      if (el.hasAttribute('data-ref-id')) {
-        const id = el.getAttribute('data-ref-id') || '';
-        const label = el.getAttribute('data-ref-label') || '';
-        result += `@{${id}:${label}}`;
-      } else if (el.hasAttribute('data-drama-id')) {
-        const id = el.getAttribute('data-drama-id') || '';
-        const label = el.getAttribute('data-drama-label') || '';
-        result += `@drama{${id}:${label}}`;
-      } else if (el.hasAttribute('data-asset-path')) {
-        result += `@asset{${encodeURIComponent(el.getAttribute('data-asset-path') || '')}}`;
-      } else if (el.hasAttribute('data-skill-id')) {
-        const id = el.getAttribute('data-skill-id') || '';
-        const name = el.getAttribute('data-skill-name') || '';
-        result += `@skill{${id}|${encodeURIComponent(name)}}`;
-      } else if (el.hasAttribute('data-wf-id')) {
-        const id = el.getAttribute('data-wf-id') || '';
-        const title = el.getAttribute('data-wf-title') || '';
-        const type = el.getAttribute('data-wf-type') || 'prompt';
-        result += `@wf{${id}|${title}|${type}}(`;
-        const valueEl = el.querySelector('.prompt-chip-wf-value');
-        if (valueEl) {
-          for (const child of Array.from(valueEl.childNodes)) walk(child);
-        }
-        result += ')';
-      } else if (el.tagName === 'BR') {
-        result += '\n';
-      } else {
-        for (const child of Array.from(node.childNodes)) walk(child);
-      }
-    }
-  };
-  for (const child of Array.from(root.childNodes)) walk(child);
-  // 去掉芯片前的零宽空格占位符，再剥掉尾部换行
-  return result.split(ZWSP).join('').replace(/\n+$/, '');
-}
-
-/** Build a chip <span contenteditable="false"> for a canvas node reference. */
-function buildChipEl(
-  nodeId: string,
-  label: string,
-  metaMap: Map<string, { type: string; displayId: number | undefined; thumbnailUrl?: string }>,
-): HTMLSpanElement {
-  const meta = metaMap.get(nodeId);
-  const nodeType = meta?.type || 'ai-text';
-  const displayId = meta?.displayId;
-  const thumbnailUrl = meta?.thumbnailUrl;
-  const chipClass = CHIP_STYLE[nodeType] || CHIP_STYLE['ai-text'];
-  const isMedia = nodeType === 'ai-image' || nodeType === 'ai-video' || nodeType === 'ai-storyboard';
-
-  const span = document.createElement('span');
-  span.className = `prompt-chip prompt-chip-node ${chipClass}`;
-  span.contentEditable = 'false';
-  span.setAttribute('data-ref-id', nodeId);
-  span.setAttribute('data-ref-label', label);
-  span.title = displayId != null ? `${label} (#${displayId})` : label;
-
-  const iconSpan = document.createElement('span');
-  iconSpan.className = 'prompt-chip-icon';
-  iconSpan.setAttribute('aria-hidden', 'true');
-  if (isMedia && thumbnailUrl) {
-    iconSpan.classList.add('has-thumbnail');
-    const img = document.createElement('img');
-    img.src = thumbnailUrl;
-    img.className = 'prompt-chip-thumb';
-    img.alt = '';
-    iconSpan.appendChild(img);
-  } else {
-    iconSpan.textContent = '@';
-  }
-  span.appendChild(iconSpan);
-
-  if (displayId != null) {
-    const idSpan = document.createElement('span');
-    idSpan.className = 'prompt-chip-id';
-    idSpan.textContent = `#${displayId}`;
-    span.appendChild(idSpan);
-  }
-  return span;
-}
-
-/** Build a chip for a referenced permanent asset file (@asset{encodedPath}). */
-function buildAssetChipEl(path: string, assetUrl?: string): HTMLSpanElement {
-  const name = path.split(/[\\/]/).pop() || 'asset';
-  const isImage = getFileCategory(name) === 'image';
-
-  const span = document.createElement('span');
-  span.className = 'prompt-chip chip-asset';
-  span.contentEditable = 'false';
-  span.setAttribute('data-asset-path', path);
-
-  const iconSpan = document.createElement('span');
-  iconSpan.className = 'prompt-chip-icon';
-  if (isImage && assetUrl) {
-    const img = document.createElement('img');
-    img.src = assetUrl;
-    img.className = 'prompt-chip-thumb';
-    img.alt = '';
-    iconSpan.appendChild(img);
-  } else {
-    iconSpan.textContent = isImage ? '🖼' : '📄';
-  }
-  span.appendChild(iconSpan);
-
-  const nameSpan = document.createElement('span');
-  nameSpan.className = 'prompt-chip-id';
-  nameSpan.textContent = name.length > 18 ? `${name.slice(0, 16)}…` : name;
-  span.appendChild(nameSpan);
-  return span;
-}
-
-/** Build a chip for a short-drama library asset (@drama{id:name}). */
-function buildDramaChipEl(dramaId: string, name: string, kind: string, thumbUrl?: string): HTMLSpanElement {
-  const span = document.createElement('span');
-  span.className = 'prompt-chip chip-image';
-  span.contentEditable = 'false';
-  span.setAttribute('data-drama-id', dramaId);
-  span.setAttribute('data-drama-label', name);
-  span.setAttribute('data-drama-kind', kind);
-
-  const iconSpan = document.createElement('span');
-  iconSpan.className = 'prompt-chip-icon';
-  if (thumbUrl) {
-    const img = document.createElement('img');
-    img.src = thumbUrl;
-    img.className = 'prompt-chip-thumb';
-    img.alt = '';
-    iconSpan.appendChild(img);
-  } else {
-    iconSpan.textContent = kind === 'character' ? '人' : kind === 'scene' ? '场' : '道';
-  }
-  span.appendChild(iconSpan);
-
-  const nameSpan = document.createElement('span');
-  nameSpan.className = 'prompt-chip-id';
-  nameSpan.textContent = name.length > 16 ? `${name.slice(0, 14)}…` : name;
-  span.appendChild(nameSpan);
-  return span;
-}
-
-/** Build a chip for a Skill reference (@skill{id|encodedName}). */
-function buildSkillChipEl(skillId: string, skillName: string): HTMLSpanElement {
-  const span = document.createElement('span');
-  span.className = 'prompt-chip chip-skill';
-  span.contentEditable = 'false';
-  span.setAttribute('data-skill-id', skillId);
-  span.setAttribute('data-skill-name', skillName);
-  span.title = skillName;
-
-  const iconSpan = document.createElement('span');
-  iconSpan.className = 'prompt-chip-icon prompt-chip-skill-icon';
-  iconSpan.setAttribute('aria-hidden', 'true');
-  iconSpan.textContent = '✦';
-  span.appendChild(iconSpan);
-
-  const nameSpan = document.createElement('span');
-  nameSpan.className = 'prompt-chip-skill-name';
-  nameSpan.textContent = skillName.length > 20 ? `${skillName.slice(0, 18)}...` : skillName;
-  span.appendChild(nameSpan);
-  return span;
-}
-
-const WF_CHIP_ICON_PATH = 'M3.5 1.5h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2c0-1.1.9-2 2-2m7 7h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2c0-1.1.9-2 2-2m-6-1V10q0 1.5 1.5 1.5h2.5';
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-/** 工作流芯片的连线图标，用 DOM API 构造，避免任何 HTML 字符串拼接。 */
-function buildWorkflowChipIconEl(): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('width', '14');
-  svg.setAttribute('height', '14');
-  svg.setAttribute('viewBox', '0 0 16 16');
-  const path = document.createElementNS(SVG_NS, 'path');
-  path.setAttribute('fill', 'none');
-  path.setAttribute('stroke', '#f5a97f');
-  path.setAttribute('stroke-linecap', 'round');
-  path.setAttribute('stroke-linejoin', 'round');
-  path.setAttribute('d', WF_CHIP_ICON_PATH);
-  svg.appendChild(path);
-  return svg;
-}
-
-function buildChipTextEl(className: string, text: string): HTMLSpanElement {
-  const el = document.createElement('span');
-  el.className = className;
-  el.textContent = text;
-  return el;
-}
-
-/** Build a workflow IO chip — label prefix (⚡ T#id :) + editable value area. */
-function buildWorkflowChipEl(
-  ioNodeId: string,
-  ioNodeTitle: string,
-  ioNodeType: WorkflowIONodeType,
-): HTMLSpanElement {
-  const chipClass = WF_IO_STYLE[ioNodeType] || WF_IO_STYLE.prompt;
-  const icon = WF_IO_ICON[ioNodeType] || '?';
-
-  const span = document.createElement('span');
-  span.className = `prompt-chip prompt-chip-wf ${chipClass}`;
-  span.contentEditable = 'false';
-  span.setAttribute('data-wf-id', ioNodeId);
-  span.setAttribute('data-wf-title', ioNodeTitle);
-  span.setAttribute('data-wf-type', ioNodeType);
-
-  const prefix = document.createElement('span');
-  prefix.className = 'prompt-chip-wf-prefix';
-  prefix.contentEditable = 'false';
-  // ioNodeId 来自提示词文本（项目数据 / Agent 写入），一律走 textContent；
-  // 此处绝不能用 HTML 字符串拼接，否则可闭合标签注入事件属性执行脚本。
-  prefix.appendChild(buildWorkflowChipIconEl());
-  prefix.appendChild(buildChipTextEl('prompt-chip-icon', icon));
-  prefix.appendChild(buildChipTextEl('prompt-chip-wf-id', `#${ioNodeId}`));
-  prefix.appendChild(buildChipTextEl('prompt-chip-wf-colon', ':'));
-  span.appendChild(prefix);
-
-  const valueArea = document.createElement('span');
-  valueArea.className = 'prompt-chip-wf-value';
-  valueArea.contentEditable = 'true';
-  valueArea.appendChild(document.createElement('br'));
-  span.appendChild(valueArea);
-
-  return span;
-}
-
-/** Render a prompt string → array of DOM nodes. */
-function renderPromptToNodes(
-  text: string,
-  metaMap: Map<string, { type: string; displayId: number | undefined; thumbnailUrl?: string }>,
-): Node[] {
-  // groups: 1=@asset  2,3=@drama  4,5=@node  6,7,8=@wf  9,10=@skill
-  const regex = /@asset\{([^}]+)\}|@drama\{([^:]+):([^}]+)\}|@\{([^:]+):([^}]+)\}|@wf\{([^|]+)\|([^|]+)\|([^|}]+)\}|@skill\{([^|}]+)\|([^}]+)\}/g;
-  const nodes: Node[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  // 行首芯片（前面是 <br>、另一个芯片，或位于最开头）需要一个零宽空格文本节点，
-  // 否则光标无法落到芯片前面（contenteditable=false 元素旁缺少可定位的文本节点）。
-  const pushChip = (chip: Node) => {
-    const last = nodes[nodes.length - 1];
-    if (!last || isBrEl(last) || isChipEl(last)) {
-      nodes.push(document.createTextNode(ZWSP));
-    }
-    nodes.push(chip);
-  };
-
-  while ((match = regex.exec(text)) !== null) {
-    pushTextWithBreaks(nodes, text.slice(lastIndex, match.index));
-    if (match[1] !== undefined) {
-      // Asset reference
-      let path = match[1];
-      try { path = decodeURIComponent(match[1]); } catch { /* keep raw */ }
-      pushChip(buildAssetChipEl(path));
-      lastIndex = regex.lastIndex;
-    } else if (match[2] !== undefined) {
-      // Drama library asset
-      const dramaId = match[2];
-      const dramaName = match[3];
-      let kind = 'character';
-      let thumb: string | undefined;
-      try {
-        const lib = useAppStore.getState().dramaAssets;
-        const { assetId, referenceImageId } = parseDramaMentionId(dramaId);
-        const found =
-          lib.characters.find((a) => a.id === assetId)
-          || lib.scenes.find((a) => a.id === assetId)
-          || lib.props.find((a) => a.id === assetId);
-        if (found) {
-          kind = found.kind;
-          const picked = referenceImageId && found.kind === 'character'
-            ? found.referenceImages?.find((image) => image.id === referenceImageId)
-            : undefined;
-          if (picked) {
-            thumb = picked.imageUrl;
-          } else if (found.imageNodeId) {
-            const n = useAppStore.getState().nodes.find((x) => x.id === found.imageNodeId);
-            thumb =
-              bestNodeThumb(n?.data ?? {})
-              || found.imageUrl;
-          } else {
-            thumb = found.imageUrl;
-          }
-        }
-      } catch { /* ignore */ }
-      pushChip(buildDramaChipEl(dramaId, dramaName, kind, thumb));
-      lastIndex = regex.lastIndex;
-    } else if (match[4] !== undefined) {
-      pushChip(buildChipEl(match[4], match[5], metaMap));
-      lastIndex = regex.lastIndex;
-    } else if (match[6] !== undefined) {
-      const id = match[6];
-      const title = match[7];
-      const type = match[8] as WorkflowIONodeType;
-      const matchEnd = regex.lastIndex;
-
-      // Value area is wrapped in (...) — find matching closing paren with depth tracking.
-      // Canvas chips inside the value area are detected via recursive renderPromptToNodes.
-      const chip = buildWorkflowChipEl(id, title, type);
-      if (text[matchEnd] === '(') {
-        let depth = 1;
-        let i = matchEnd + 1;
-        while (i < text.length && depth > 0) {
-          if (text[i] === '(') depth++;
-          else if (text[i] === ')') depth--;
-          i++;
-        }
-        const valueText = text.slice(matchEnd + 1, i - 1);
-        if (valueText) {
-          const valueArea = chip.querySelector('.prompt-chip-wf-value');
-          if (valueArea) {
-            // Remove the initial <br> placeholder before appending real content
-            valueArea.innerHTML = '';
-            const nestedNodes = renderPromptToNodes(valueText, metaMap);
-            for (const n of nestedNodes) {
-              valueArea.appendChild(n);
-            }
-          }
-        }
-        pushChip(chip);
-        lastIndex = i;
-        regex.lastIndex = i;
-      } else {
-        pushChip(chip);
-        lastIndex = matchEnd;
-        regex.lastIndex = matchEnd;
-      }
-    } else if (match[9] !== undefined) {
-      const id = match[9];
-      let name = match[10];
-      try { name = decodeURIComponent(match[10]); } catch { /* keep raw */ }
-      pushChip(buildSkillChipEl(id, name));
-      lastIndex = regex.lastIndex;
-    }
-  }
-  pushTextWithBreaks(nodes, text.slice(lastIndex));
-  return nodes;
-}
-
-function pushTextWithBreaks(nodes: Node[], text: string) {
-  if (!text) return;
-  const lines = text.split('\n');
-  lines.forEach((line, i) => {
-    if (i > 0) nodes.push(document.createElement('br'));
-    if (line) nodes.push(document.createTextNode(line));
-  });
 }
 
 // ═══════════════════════════════════════════════
@@ -680,117 +224,13 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
     onChange(serializeDOM(el));
   }, [onChange]);
 
-  // ── Mention data sources ──
-  const getCanvasMentionNodes = useCallback(() => {
-    if (!nodeId) return [];
-    const me = nodes.find((n) => n.id === nodeId);
-
-    // 直接入边的源
-    const rawSourceIds = new Set(edges.filter((e) => e.target === nodeId).map((e) => e.source));
-    // 共享输入：本节点若在某分组内，加入该分组的入边源（组内节点共享组的输入）
-    if (me?.parentId) {
-      edges.filter((e) => e.target === me.parentId).forEach((e) => rawSourceIds.add(e.source));
-    }
-
-    // 全部输出：作为源的分组节点展开为其全部子节点；分组节点本身不作为候选
-    const sourceNodeIds = new Set<string>();
-    for (const sid of rawSourceIds) {
-      const sn = nodes.find((n) => n.id === sid);
-      if (sn?.type === 'group') {
-        nodes.filter((n) => n.parentId === sid).forEach((c) => sourceNodeIds.add(c.id));
-      } else {
-        sourceNodeIds.add(sid);
-      }
-    }
-
-    const list = nodes
-      .filter((n) => n.id !== nodeId && n.type !== 'group' && sourceNodeIds.has(n.id))
-      .map((n) => ({
-        id: n.id,
-        label: (n.data.label as string) || '节点',
-        type: n.data.type,
-        displayId: n.data.displayId as number | undefined,
-        hasOutput: !!n.data.output,
-        outputType: n.data.imageUrl ? 'image' : n.data.videoUrl ? 'video' : n.data.audioUrl ? 'audio' : 'text',
-        // 图片节点优先本地文件（线上地址可能失效）；视频用海报帧；不用 videoUrl
-        thumbnailUrl: bestNodeThumb(n.data),
-        isSelf: false as boolean,
-      }));
-
-    // 展开宫格分镜节点：为每个非空格子生成独立 @mention 条目（虚拟 ID = nodeId/cell/idx）
-    const expanded: typeof list = [];
-    for (const item of list) {
-      expanded.push(item);
-      if (item.type === 'ai-storyboard') {
-        const sbNode = nodes.find((n) => n.id === item.id);
-        if (sbNode) {
-          const sbData = sbNode.data as BaseNodeData;
-          const cols = Math.max(1, (sbData.storyboardCols as number) || 3);
-          const rows = Math.max(1, (sbData.storyboardRows as number) || 3);
-          const extracted = (sbData.storyboardExtracted as boolean[] | undefined) ?? [];
-          const overrides = (sbData.storyboardOverrides as (StoryboardCellOverride | null)[] | undefined) ?? [];
-          const imageUrl = sbData.imageUrl as string | undefined;
-          for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-              const idx = r * cols + c;
-              if (extracted[idx] && !overrides[idx]) continue; // 已提取的空格跳过
-              expanded.push({
-                id: `${item.id}/cell/${idx}`,
-                label: `${item.label} · 第${r + 1}行${c + 1}列`,
-                type: 'ai-image' as NodeType,
-                displayId: undefined,
-                hasOutput: true,
-                outputType: 'image' as const,
-                thumbnailUrl: overrides[idx]?.url || imageUrl,
-                isSelf: false,
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // 自身引用：当前节点有输出内容时可在 @菜单中 @自身
-    if (me && me.type !== 'group') {
-      const selfOutput = me.data.output as string | undefined;
-      const selfImageUrl = me.data.imageUrl as string | undefined;
-      const selfVideoUrl = me.data.videoUrl as string | undefined;
-      const selfAudioUrl = me.data.audioUrl as string | undefined;
-      const hasSelfContent = (selfOutput && selfOutput.trim()) || selfImageUrl || selfVideoUrl || selfAudioUrl;
-      if (hasSelfContent) {
-        expanded.unshift({
-          id: me.id,
-          label: (me.data.label as string) || '节点',
-          type: me.data.type,
-          displayId: me.data.displayId as number | undefined,
-          hasOutput: true,
-          outputType: selfImageUrl ? 'image' : selfVideoUrl ? 'video' : selfAudioUrl ? 'audio' : 'text',
-          thumbnailUrl: bestNodeThumb(me.data),
-          isSelf: true,
-        });
-      }
-    }
-
-    return expanded;
-  }, [nodeId, nodes, edges]);
-
-  const getWorkflowMentionNodes = useCallback(() => {
-    if (!selectedWorkflowId || workflowIONodes.length === 0) return [];
-    return workflowIONodes.map((io) => ({
-      id: `wf:${io.nodeId}`,
-      label: io.title,
-      _ioNodeId: io.nodeId,
-      _ioType: io.type,
-    }));
-  }, [selectedWorkflowId, workflowIONodes]);
-
   const canvasMentionNodes = useMemo(
-    () => (showMention ? getCanvasMentionNodes() : []),
-    [getCanvasMentionNodes, showMention],
+    () => (showMention ? resolveCanvasMentionNodes(nodeId, nodes, edges) : []),
+    [edges, nodeId, nodes, showMention],
   );
   const workflowMentionNodes = useMemo(
-    () => (showMention ? getWorkflowMentionNodes() : []),
-    [getWorkflowMentionNodes, showMention],
+    () => (showMention ? resolveWorkflowMentionNodes(selectedWorkflowId, workflowIONodes) : []),
+    [selectedWorkflowId, showMention, workflowIONodes],
   );
 
   const filteredCanvasMentions = mentionQuery
@@ -802,14 +242,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
 
   const dramaMentionItems = useMemo(() => {
     if (!showMention) return [];
-    const items = [
-      ...dramaAssets.characters.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl, referenceImages: a.referenceImages })),
-      ...dramaAssets.scenes.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl, referenceImages: undefined })),
-      ...dramaAssets.props.map((a) => ({ id: a.id, name: a.name, kind: a.kind as string, imageNodeId: a.imageNodeId, imageUrl: a.imageUrl, referenceImages: undefined })),
-    ];
-    if (!mentionQuery) return items.slice(0, 20);
-    const q = mentionQuery.toLowerCase();
-    return items.filter((a) => a.name.toLowerCase().includes(q)).slice(0, 20);
+    return resolveDramaMentionItems(dramaAssets, mentionQuery);
   }, [showMention, dramaAssets, mentionQuery]);
 
   // 展开了参考图二级菜单的角色 id（多图角色才有）

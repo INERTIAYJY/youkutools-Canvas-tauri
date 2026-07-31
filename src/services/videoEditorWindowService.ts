@@ -25,6 +25,9 @@ export type VideoEditorExportResult = {
   filePath?: string;
   fileName: string;
   duration: number;
+  /** 输出尺寸，供新建节点按比例布局 */
+  width?: number;
+  height?: number;
 };
 
 type Subscriber = (message: VideoEditorProtocolMessage) => void;

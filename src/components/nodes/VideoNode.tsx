@@ -195,32 +195,57 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴视频');
 
-  // 独立编辑器窗口导出完成后回写本节点
+  // 独立编辑器窗口导出完成后，在源节点旁新建一个视频节点承载结果
   useEffect(() => {
-    const store = useAppStore.getState();
-    const projectId = store.currentProjectId;
+    const projectId = useAppStore.getState().currentProjectId;
     if (!projectId) return;
 
     const instanceId = buildVideoEditorProjectId(projectId, id);
     return subscribeVideoEditorWindow(instanceId, (message) => {
       if (message.type !== 'storyai:video-editor-exported') return;
-      const payload = message.payload as Partial<VideoEditorExportResult> | undefined;
-      const videoUrl = typeof payload?.videoUrl === 'string' ? payload.videoUrl : '';
+      const payload = (message.payload ?? {}) as Partial<VideoEditorExportResult>;
+      const videoUrl = typeof payload.videoUrl === 'string' ? payload.videoUrl : '';
       if (!videoUrl) return;
 
-      updateNodeData(id, {
-        videoUrl,
-        filePath: typeof payload?.filePath === 'string' ? payload.filePath : undefined,
-        fileName: typeof payload?.fileName === 'string' ? payload.fileName : undefined,
-        videoDuration: typeof payload?.duration === 'number' ? payload.duration : undefined,
-        // 旧缩略图对应裁剪前的画面，清掉让节点按新视频重新生成
-        thumbnailUrl: undefined,
-        status: 'success',
-        error: undefined,
-      });
-      useAppStore.getState().showToast('剪辑结果已写入节点');
+      // 导出是跨窗口的异步结果：期间可能已切换项目或删掉源节点，
+      // 用派生守卫挡掉过期回写，避免落到别的画布上
+      const store = useAppStore.getState();
+      const derivation = registerCanvasDerivation(store, id);
+      if (!derivation) return;
+      if (!isCanvasDerivationFresh(derivation, useAppStore.getState())) {
+        cancelCanvasDerivation(derivation);
+        return;
+      }
+
+      const sourceNode = store.nodes.find((node) => node.id === id);
+      const position = sourceNode?.position ?? { x: 0, y: 0 };
+      const outputWidth = typeof payload.width === 'number' ? payload.width : 0;
+      const outputHeight = typeof payload.height === 'number' ? payload.height : 0;
+      const dimensions = computeVideoNodeDimensions(outputWidth, outputHeight);
+
+      store.addNode({
+        id: `node-${generateId()}`,
+        type: 'ai-video',
+        position: { x: position.x + nodeWidth + 40, y: position.y },
+        data: {
+          label: `${displayLabel} 剪辑`,
+          type: 'ai-video',
+          role: 'source',
+          status: 'success',
+          videoUrl,
+          filePath: typeof payload.filePath === 'string' ? payload.filePath : undefined,
+          fileName: typeof payload.fileName === 'string' ? payload.fileName : undefined,
+          videoDuration: typeof payload.duration === 'number' ? payload.duration : undefined,
+          videoWidth: outputWidth || undefined,
+          videoHeight: outputHeight || undefined,
+          ...dimensions,
+        },
+      } as Parameters<typeof store.addNode>[0]);
+
+      completeCanvasDerivation(derivation);
+      useAppStore.getState().showToast('剪辑结果已生成新节点');
     });
-  }, [id, updateNodeData]);
+  }, [displayLabel, id, nodeWidth]);
 
   const handleCopyFile = useCallback(async () => {
     const store = useAppStore.getState();

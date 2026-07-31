@@ -1,6 +1,6 @@
 # 内置视频编辑器 Implementation Plan
 
-**Goal:** 视频节点右键「编辑视频」在独立窗口打开内置剪辑模块，工程数据持久化，导出结果回写节点。
+**Goal:** 视频节点右键「编辑视频」在独立窗口打开内置剪辑模块，工程数据持久化，导出结果在画布上新建节点。
 
 **Architecture:** 复用 `index.html?view=` 单入口多窗口路由（同 `assets` / `chat`），编辑器与主窗口同源、共享 IndexedDB，因此工程由主窗口开窗前写入、编辑器按 ID 取回，不需要额外素材交接通道；仅导出结果经 Tauri 事件回传。媒体能力由 mediabunny (MPL-2.0) 提供，预览用 WebView 原生 `<video>`。
 
@@ -41,7 +41,7 @@ mediabunny 不用 wasm、不用 SharedArrayBuffer，因此**不需要** COOP/COE
 - Modify: `src/services/indexedDb/schema.ts`（DB_VERSION 17 → 18，新增 `videoEditorProjects`）
 - Modify: `src/RootView.tsx`、`src/index.css`
 - Modify: `src/hooks/useNodeContextMenu.ts`、`src/components/canvas/NodeContextMenu.tsx`、`src/components/Canvas.tsx`
-- Modify: `src/components/nodes/VideoNode.tsx`（订阅导出回写）
+- Modify: `src/components/nodes/VideoNode.tsx`（订阅导出结果并新建节点）
 - Modify: `src-tauri/capabilities/default.json`（窗口列表加 `video-editor`）
 
 ### 关键设计
@@ -186,6 +186,13 @@ mediabunny 不用 wasm、不用 SharedArrayBuffer，因此**不需要** COOP/COE
 
 AAC 分组各自独立可解，所以 `copy` 模式下不需要编码器也能保住音轨 ——
 macOS 上大多数「裁剪 + 拼接 + 转场」的场景都落在这一档。
+
+### 导出结果落到新节点
+
+导出不覆盖源素材，而是在源节点右侧新建一个视频节点承载结果 ——
+剪辑是破坏性操作，覆盖原节点会让原始素材在画布上无从找回。
+沿用 `registerCanvasDerivation` 守卫：导出是跨窗口的异步结果，
+期间可能已切换项目或删掉源节点，守卫挡掉过期回写避免落到别的画布上。
 
 ### 已知限制
 

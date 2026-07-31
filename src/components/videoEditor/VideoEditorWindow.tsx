@@ -564,11 +564,14 @@ export default function VideoEditorWindow() {
         return result;
       });
 
-      await withStage('回写节点', () => postVideoEditorExported(session.instanceId, {
+      await withStage('输出到画布', () => postVideoEditorExported(session.instanceId, {
         videoUrl: saved.assetUrl,
         filePath: saved.filePath,
         fileName,
         duration: timelineDuration,
+        // 合成路径按画布尺寸出片，直通路径保持源尺寸
+        width: compositing ? canvasSize.width : (firstSized?.width ?? 0),
+        height: compositing ? canvasSize.height : (firstSized?.height ?? 0),
       }));
 
       setNotice(notes.join('；'));
@@ -585,8 +588,8 @@ export default function VideoEditorWindow() {
       setExportStage(null);
     }
   }, [
-    canvasSize, clips, compositing, exportFrameRate, mixedSources,
-    record, session, timelineDuration, tracks,
+    canvasSize, clips, compositing, exportFrameRate, firstSized?.height, firstSized?.width,
+    mixedSources, record, session, timelineDuration, tracks,
   ]);
 
   const closeWindow = useCallback(async () => {
@@ -631,7 +634,7 @@ export default function VideoEditorWindow() {
               disabled={phase !== 'ready' || clips.length === 0}
             >
               <Icon icon="lucide:upload" width={13} height={13} />
-              导出并回写节点
+              导出为新节点
             </button>
           )}
           <button

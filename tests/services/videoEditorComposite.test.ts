@@ -1,0 +1,230 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  DEFAULT_TRANSFORM,
+  evaluateTransitionAlpha,
+  evaluateVolume,
+  getActiveClips,
+  getClipEnd,
+  needsCompositing,
+  type VideoEditorClip,
+  type VideoEditorTrack,
+} from '../../src/types/videoEditor';
+import { computeDrawRect } from '../../src/services/videoCompositor';
+import {
+  createTrack,
+  moveTrack,
+  placeClipAt,
+  removeTrack,
+  removeVolumePoint,
+  setVolumePoint,
+} from '../../src/components/videoEditor/timelineOps';
+
+function clip(overrides: Partial<VideoEditorClip> & { id: string }): VideoEditorClip {
+  return {
+    kind: 'video',
+    fileName: `${overrides.id}.mp4`,
+    timelineStart: 0,
+    sourceIn: 0,
+    sourceOut: 5,
+    ...overrides,
+  };
+}
+
+function videoTrack(clips: VideoEditorClip[]): VideoEditorTrack {
+  return { id: 'v1', kind: 'video', name: '视频轨 1', clips };
+}
+
+describe('needsCompositing', () => {
+  it('stays on the lossless path for a plain single-track timeline', () => {
+    expect(needsCompositing([videoTrack([clip({ id: 'a' }), clip({ id: 'b' })])])).toBe(false);
+  });
+
+  it('switches to compositing once a second video track exists', () => {
+    expect(needsCompositing([
+      videoTrack([clip({ id: 'a' })]),
+      { id: 'v2', kind: 'video', name: '叠加轨 1', overlay: true, clips: [] },
+    ])).toBe(true);
+  });
+
+  it('switches to compositing for transforms, transitions and images', () => {
+    expect(needsCompositing([videoTrack([
+      clip({ id: 'a', transform: { ...DEFAULT_TRANSFORM, scale: 0.4 } }),
+    ])])).toBe(true);
+
+    expect(needsCompositing([videoTrack([
+      clip({ id: 'a', transitionIn: { kind: 'dissolve', duration: 0.5 } }),
+    ])])).toBe(true);
+
+    expect(needsCompositing([videoTrack([clip({ id: 'a', kind: 'image' })])])).toBe(true);
+  });
+
+  it('ignores a no-op transform and a none transition', () => {
+    expect(needsCompositing([videoTrack([
+      clip({ id: 'a', transform: { ...DEFAULT_TRANSFORM } }),
+      clip({ id: 'b', transitionIn: { kind: 'none', duration: 0 } }),
+    ])])).toBe(false);
+  });
+
+  it('ignores hidden tracks', () => {
+    expect(needsCompositing([
+      videoTrack([clip({ id: 'a' })]),
+      { id: 'v2', kind: 'video', name: '叠加轨', hidden: true, clips: [clip({ id: 'b' })] },
+    ])).toBe(false);
+  });
+});
+
+describe('getActiveClips / getClipEnd', () => {
+  const track = videoTrack([
+    clip({ id: 'a', timelineStart: 0, sourceOut: 4 }),
+    clip({ id: 'b', timelineStart: 2, sourceOut: 4 }),
+  ]);
+
+  it('returns every clip covering the instant, so overlays stack', () => {
+    expect(getActiveClips(track, 3).map((entry) => entry.id)).toEqual(['a', 'b']);
+    expect(getActiveClips(track, 1).map((entry) => entry.id)).toEqual(['a']);
+  });
+
+  it('treats the clip end as exclusive', () => {
+    expect(getClipEnd(track.clips[0])).toBe(4);
+    expect(getActiveClips(track, 4).map((entry) => entry.id)).toEqual(['b']);
+  });
+});
+
+describe('evaluateTransitionAlpha', () => {
+  const dissolving = clip({ id: 'a', transitionIn: { kind: 'dissolve', duration: 1 } });
+
+  it('ramps from 0 to 1 across the transition', () => {
+    expect(evaluateTransitionAlpha(dissolving, 0)).toBe(0);
+    expect(evaluateTransitionAlpha(dissolving, 0.5)).toBeCloseTo(0.5);
+    expect(evaluateTransitionAlpha(dissolving, 1)).toBe(1);
+  });
+
+  it('is fully opaque past the transition and for hard cuts', () => {
+    expect(evaluateTransitionAlpha(dissolving, 3)).toBe(1);
+    expect(evaluateTransitionAlpha(clip({ id: 'b' }), 0)).toBe(1);
+    expect(evaluateTransitionAlpha(
+      clip({ id: 'c', transitionIn: { kind: 'none', duration: 1 } }),
+      0,
+    )).toBe(1);
+  });
+});
+
+describe('evaluateVolume', () => {
+  it('falls back to the constant clip gain', () => {
+    expect(evaluateVolume(clip({ id: 'a' }), 1)).toBe(1);
+    expect(evaluateVolume(clip({ id: 'a', volume: 0.5 }), 1)).toBe(0.5);
+  });
+
+  it('interpolates linearly between envelope points', () => {
+    const faded = clip({
+      id: 'a',
+      volumePoints: [{ t: 0, gain: 0 }, { t: 2, gain: 1 }],
+    });
+    expect(evaluateVolume(faded, 0)).toBe(0);
+    expect(evaluateVolume(faded, 1)).toBeCloseTo(0.5);
+    expect(evaluateVolume(faded, 2)).toBe(1);
+  });
+
+  it('holds the edge values outside the envelope range', () => {
+    const faded = clip({ id: 'a', volumePoints: [{ t: 1, gain: 0.25 }, { t: 2, gain: 1 }] });
+    expect(evaluateVolume(faded, 0)).toBe(0.25);
+    expect(evaluateVolume(faded, 9)).toBe(1);
+  });
+
+  it('multiplies the envelope by the clip gain', () => {
+    const faded = clip({ id: 'a', volume: 0.5, volumePoints: [{ t: 0, gain: 1 }] });
+    expect(evaluateVolume(faded, 0)).toBe(0.5);
+  });
+});
+
+describe('computeDrawRect', () => {
+  const canvas = { width: 1920, height: 1080 };
+
+  it('fills the canvas at scale 1 while preserving aspect ratio', () => {
+    const rect = computeDrawRect({ width: 1920, height: 1080 }, canvas, DEFAULT_TRANSFORM);
+    expect(rect).toEqual({ x: 0, y: 0, width: 1920, height: 1080 });
+  });
+
+  it('letterboxes a mismatched aspect ratio instead of stretching it', () => {
+    const rect = computeDrawRect({ width: 1080, height: 1080 }, canvas, DEFAULT_TRANSFORM);
+    expect(rect.width).toBe(1080);
+    expect(rect.height).toBe(1080);
+    expect(rect.x).toBe(420);
+  });
+
+  it('places a picture-in-picture layer by its centre', () => {
+    const rect = computeDrawRect({ width: 1920, height: 1080 }, canvas, {
+      ...DEFAULT_TRANSFORM,
+      x: 0.8,
+      y: 0.8,
+      scale: 0.25,
+    });
+    expect(rect.width).toBe(480);
+    expect(rect.x + rect.width / 2).toBeCloseTo(1536);
+    expect(rect.y + rect.height / 2).toBeCloseTo(864);
+  });
+});
+
+describe('轨道管理', () => {
+  const base: VideoEditorTrack[] = [videoTrack([clip({ id: 'a' })])];
+
+  it('marks the second and later video tracks as overlays', () => {
+    expect(createTrack('video', base).overlay).toBe(true);
+    expect(createTrack('video', []).overlay).toBe(false);
+    expect(createTrack('audio', base).kind).toBe('audio');
+  });
+
+  it('refuses to delete the main video track', () => {
+    expect(removeTrack(base, 'v1')).toBe(base);
+  });
+
+  it('deletes overlay and audio tracks', () => {
+    const withOverlay = [...base, createTrack('video', base)];
+    expect(removeTrack(withOverlay, withOverlay[1].id)).toHaveLength(1);
+  });
+
+  it('never reorders a track below the main video track', () => {
+    const overlay = createTrack('video', base);
+    const tracks = [...base, overlay];
+    expect(moveTrack(tracks, overlay.id, -1)).toBe(tracks);
+    expect(moveTrack(tracks, overlay.id, 1)).toBe(tracks);
+  });
+
+  it('swaps two overlay tracks', () => {
+    const first = { ...createTrack('video', base), id: 'o1' };
+    const second = { ...createTrack('video', base), id: 'o2' };
+    const tracks = [...base, first, second];
+    expect(moveTrack(tracks, first.id, 1).map((track) => track.id)).toEqual(['v1', 'o2', 'o1']);
+  });
+});
+
+describe('placeClipAt', () => {
+  it('moves an overlay clip freely without packing', () => {
+    const clips = [clip({ id: 'a', timelineStart: 0 })];
+    expect(placeClipAt(clips, 'a', 4.5)[0].timelineStart).toBe(4.5);
+  });
+
+  it('never lets a clip start before zero', () => {
+    expect(placeClipAt([clip({ id: 'a' })], 'a', -3)[0].timelineStart).toBe(0);
+  });
+});
+
+describe('音量包络编辑', () => {
+  it('adds points in time order', () => {
+    let target = setVolumePoint(clip({ id: 'a' }), 2, 0.5);
+    target = setVolumePoint(target, 0, 1);
+    expect(target.volumePoints).toEqual([{ t: 0, gain: 1 }, { t: 2, gain: 0.5 }]);
+  });
+
+  it('replaces a point at the same time instead of duplicating it', () => {
+    let target = setVolumePoint(clip({ id: 'a' }), 1, 0.2);
+    target = setVolumePoint(target, 1, 0.9);
+    expect(target.volumePoints).toEqual([{ t: 1, gain: 0.9 }]);
+  });
+
+  it('drops the envelope entirely once the last point is removed', () => {
+    const target = setVolumePoint(clip({ id: 'a' }), 1, 0.2);
+    expect(removeVolumePoint(target, 1).volumePoints).toBeUndefined();
+  });
+});

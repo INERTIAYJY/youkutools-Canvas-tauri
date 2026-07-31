@@ -15,6 +15,7 @@ const MENU_ITEMS = [
   { label: '添加到角色库…', shortcut: '', action: 'addToCharacter' as const, conditional: true },
   { label: '复制媒体', shortcut: '', action: 'copyMedia' as const, conditional: true, dynamicLabel: true },
   { label: '在 PS 中打开', shortcut: '', action: 'openInPS' as const, conditional: true },
+  { label: '编辑视频', shortcut: '', action: 'editVideo' as const, conditional: true, dynamicLabel: true },
   { label: '在剪映中打开', shortcut: '', action: 'openInJianying' as const, conditional: true },
   { label: '在 PR 中打开', shortcut: '', action: 'openInPremiere' as const, conditional: true },
   { label: '打开文件所在位置', shortcut: '', action: 'showInFolder' as const, conditional: true },
@@ -23,7 +24,7 @@ const MENU_ITEMS = [
 ];
 
 const MENU_W = 176;
-const MENU_H = 456; // 图像节点最多 12 items + 1 sep
+const MENU_H = 494; // 视频节点最多 13 items + 1 sep
 const TEXT_SELECTION_MENU_EXTRA_H = 78; // 2 text-selection items + separator
 
 interface NodeContextMenuProps {
@@ -46,6 +47,8 @@ interface NodeContextMenuProps {
   onShowInFolder?: () => void;
   onSaveAs?: () => void;
   onOpenInPS?: () => void;
+  onEditVideo?: () => void;
+  editVideoLabel?: string;
   onOpenInJianying?: () => void;
   onOpenInPremiere?: () => void;
   onCopyMedia?: () => void;
@@ -71,6 +74,8 @@ export function NodeContextMenu({
   onShowInFolder,
   onSaveAs,
   onOpenInPS,
+  onEditVideo,
+  editVideoLabel,
   onOpenInJianying,
   onOpenInPremiere,
   onCopyMedia,
@@ -96,6 +101,7 @@ export function NodeContextMenu({
     showInFolder: onShowInFolder || (() => {}),
     saveAs: onSaveAs || (() => {}),
     openInPS: onOpenInPS || (() => {}),
+    editVideo: onEditVideo || (() => {}),
     openInJianying: onOpenInJianying || (() => {}),
     openInPremiere: onOpenInPremiere || (() => {}),
     copyMedia: onCopyMedia || (() => {}),
@@ -106,6 +112,7 @@ export function NodeContextMenu({
     if (item.conditional && item.action === 'showInFolder' && !onShowInFolder) return false;
     if (item.conditional && item.action === 'saveAs' && !onSaveAs) return false;
     if (item.conditional && item.action === 'openInPS' && !onOpenInPS) return false;
+    if (item.conditional && item.action === 'editVideo' && !onEditVideo) return false;
     if (item.conditional && item.action === 'openInJianying' && !onOpenInJianying) return false;
     if (item.conditional && item.action === 'openInPremiere' && !onOpenInPremiere) return false;
     if (item.conditional && item.action === 'copyMedia' && !onCopyMedia) return false;
@@ -147,6 +154,8 @@ export function NodeContextMenu({
                   ? (copyMediaLabel || item.label)
                   : item.dynamicLabel && item.action === 'convertImage'
                     ? (imageConversionLabel || item.label)
+                    : item.dynamicLabel && item.action === 'editVideo'
+                      ? (editVideoLabel || item.label)
                   : item.label}
             </span>
             <span className="menu-kbd">{item.shortcut}</span>

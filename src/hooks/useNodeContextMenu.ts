@@ -1,7 +1,7 @@
 /**
  * useNodeContextMenu 节点右键菜单 Hook — 管理节点上右键弹出操作菜单的显示/隐藏，处理复制、剪切、创建副本、删除
  */
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { getActiveTextSelection, type ActiveTextSelection } from '../utils/textSelection';
 import {
@@ -12,6 +12,7 @@ import {
   saveNodeOutputToFile,
 } from '../services/fileService';
 import { copyImage as copyImageToClipboard, copyFile as copyFileToClipboard } from '../services/clipboardService';
+import { hasVideoSource, isEditableMediaNode, openVideoEditorForNodes } from '../services/videoEditorService';
 import type { BaseNodeData, NodeType } from '../types';
 import type { Node as RFNode } from '@xyflow/react';
 import { isEligibleCharacterReferenceNode } from '../store/store.dramaAssets';
@@ -25,6 +26,7 @@ export interface NodeContextMenuState {
 
 export function useNodeContextMenu() {
   const nodes = useAppStore((s) => s.nodes);
+  const selectedNodeIds = useAppStore((s) => s.selectedNodeIds);
   const copySelectedNodes = useAppStore((s) => s.copySelectedNodes);
   const pasteNodes = useAppStore((s) => s.pasteNodes);
   const deleteNode = useAppStore((s) => s.deleteNode);
@@ -73,8 +75,11 @@ export function useNodeContextMenu() {
       e.preventDefault();
       e.stopPropagation();
       const textSelection = getActiveTextSelection();
-      // Select only this node so copy/cut works on it
-      setSelectedNodeIds([node.id]);
+      // 右键落在已有多选内时保留整个选择（同主流应用），
+      // 否则收敛到该节点，让复制/剪切仍作用在它身上
+      const currentSelection = useAppStore.getState().selectedNodeIds;
+      const keepSelection = currentSelection.length > 1 && currentSelection.includes(node.id);
+      if (!keepSelection) setSelectedNodeIds([node.id]);
       setMenu({
         visible: true,
         position: { x: e.clientX, y: e.clientY },
@@ -294,6 +299,43 @@ export function useNodeContextMenu() {
     }
   }, [menu.nodeId, nodes, closeMenu]);
 
+  // ── 内置视频编辑器（独立窗口）──
+  // 右键点在多选内时，把整批可用素材（视频 + 图片）一起送进时间轴
+  const editVideoNodes = useMemo(() => {
+    if (!menu.nodeId) return [];
+    const clicked = nodes.find((candidate) => candidate.id === menu.nodeId);
+    if (!clicked) return [];
+    const batch = selectedNodeIds.length > 1 && selectedNodeIds.includes(menu.nodeId)
+      // 按当前选择顺序取节点，保证时间轴排布与用户的选择次序一致
+      ? selectedNodeIds
+        .map((id) => nodes.find((candidate) => candidate.id === id))
+        .filter((candidate): candidate is RFNode<BaseNodeData> => !!candidate)
+      : [clicked];
+    return batch
+      .map((node) => ({ id: node.id, type: node.type, data: node.data }))
+      .filter(isEditableMediaNode);
+  }, [menu.nodeId, nodes, selectedNodeIds]);
+
+  const showEditVideo = editVideoNodes.length > 0 && hasVideoSource(editVideoNodes);
+  const editVideoLabel = editVideoNodes.length > 1
+    ? `编辑视频（${editVideoNodes.length} 个素材）`
+    : '编辑视频';
+
+  const handleEditVideo = useCallback(async () => {
+    const store = useAppStore.getState();
+    try {
+      await openVideoEditorForNodes({
+        projectId: store.currentProjectId ?? '',
+        nodes: editVideoNodes,
+        theme: store.config.theme === 'light' ? 'light' : 'dark',
+      });
+    } catch (err: unknown) {
+      store.showToast(err instanceof Error ? err.message : '打开视频编辑器失败', 'error');
+    } finally {
+      closeMenu();
+    }
+  }, [closeMenu, editVideoNodes]);
+
   const handleOpenInJianying = useCallback(
     () => handleOpenInVideoEditor('jianying'),
     [handleOpenInVideoEditor],
@@ -404,6 +446,9 @@ export function useNodeContextMenu() {
     showSaveAs,
     handleOpenInPS,
     showOpenInPS,
+    handleEditVideo,
+    showEditVideo,
+    editVideoLabel,
     handleOpenInJianying,
     handleOpenInPremiere,
     showOpenInVideoEditor,

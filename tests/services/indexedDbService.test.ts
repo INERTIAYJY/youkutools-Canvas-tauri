@@ -20,6 +20,7 @@ const EXPECTED_STORES = [
   'styles',
   'subAgentProfiles',
   'toolbarLayouts',
+  'videoEditorProjects',
   'workflows',
 ];
 
@@ -54,7 +55,7 @@ describe('indexedDbService schema', () => {
     });
 
     const db = await openDatabase(DB_NAME);
-    expect(db.version).toBe(17);
+    expect(db.version).toBe(18);
     expect([...db.objectStoreNames]).toEqual(EXPECTED_STORES);
 
     const taskStore = db.transaction('agentTasks', 'readonly').objectStore('agentTasks');
@@ -110,7 +111,7 @@ describe('indexedDbService schema', () => {
       }),
     ]);
     const upgradedDb = await openDatabase(DB_NAME);
-    expect(upgradedDb.version).toBe(17);
+    expect(upgradedDb.version).toBe(18);
     expect([...upgradedDb.objectStoreNames]).toEqual(EXPECTED_STORES);
     upgradedDb.close();
   });

@@ -536,6 +536,9 @@ function CanvasInner() {
     showSaveAs,
     handleOpenInPS,
     showOpenInPS,
+    handleEditVideo,
+    showEditVideo,
+    editVideoLabel,
     handleOpenInJianying,
     handleOpenInPremiere,
     showOpenInVideoEditor,
@@ -1216,6 +1219,8 @@ function CanvasInner() {
         onShowInFolder={showInFolder ? handleShowInFolder : undefined}
         onSaveAs={showSaveAs ? handleSaveAs : undefined}
         onOpenInPS={showOpenInPS ? handleOpenInPS : undefined}
+        onEditVideo={showEditVideo ? handleEditVideo : undefined}
+        editVideoLabel={editVideoLabel}
         onOpenInJianying={showOpenInVideoEditor ? handleOpenInJianying : undefined}
         onOpenInPremiere={showOpenInVideoEditor ? handleOpenInPremiere : undefined}
         onCopyMedia={showCopyMedia ? handleCopyMedia : undefined}

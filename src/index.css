@@ -29,6 +29,7 @@
 @import './styles/separators.css';
 @import './styles/character-library.css';
 @import './styles/canvas-drawing.css';
+@import './styles/video-editor.css';
 
 /* Global overlay scrollbars are managed by OverlayScrollbarLayer. */
 * {

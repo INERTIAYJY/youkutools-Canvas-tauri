@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for AI Canvas",
-  "windows": ["main", "asset-search", "chat-assistant"],
+  "windows": ["main", "asset-search", "chat-assistant", "video-editor"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

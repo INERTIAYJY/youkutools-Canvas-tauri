@@ -8,6 +8,27 @@ interface UseCanvasSecondaryClickMenuOptions {
   openCanvasMenu: (event: React.MouseEvent) => void;
 }
 
+/**
+ * 在已选中的节点里按屏幕坐标回查命中项。
+ *
+ * 多选场景下选择框覆盖在节点之上，`elementFromPoint` 只会返回覆盖层，
+ * 因此改用几何命中测试；点在选择框空白处时退回第一个选中节点，
+ * 让右键菜单仍然作用在这批选择上。
+ */
+function findSelectedNodeAtPoint(clientX: number, clientY: number): string | null {
+  const selected = Array.from(
+    document.querySelectorAll<HTMLElement>('.react-flow__node.selected'),
+  );
+  if (selected.length === 0) return null;
+
+  const hit = selected.find((candidate) => {
+    const rect = candidate.getBoundingClientRect();
+    return clientX >= rect.left && clientX <= rect.right
+      && clientY >= rect.top && clientY <= rect.bottom;
+  });
+  return (hit ?? selected[0]).getAttribute('data-id');
+}
+
 /** 统一 Windows 右键拖拽与 macOS 次级点击的菜单触发时机。 */
 export function useCanvasSecondaryClickMenu({
   interactionModeRef,
@@ -54,6 +75,21 @@ export function useCanvasSecondaryClickMenu({
           clientY: event.clientY,
           target: element,
         } as unknown as React.MouseEvent, { id } as RFNode<BaseNodeData>);
+        return;
+      }
+
+      // 多选时 React Flow 会在节点上盖一层选择框，elementFromPoint 只能拿到那层，
+      // 退回画布菜单之前先按坐标回查是否落在某个已选中的节点上
+      const selectedHit = findSelectedNodeAtPoint(event.clientX, event.clientY);
+      if (selectedHit) {
+        shouldPreventNativeMenu.current = true;
+        openNodeMenu({
+          preventDefault() {},
+          stopPropagation() {},
+          clientX: event.clientX,
+          clientY: event.clientY,
+          target: element,
+        } as unknown as React.MouseEvent, { id: selectedHit } as RFNode<BaseNodeData>);
         return;
       }
 

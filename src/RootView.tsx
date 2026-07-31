@@ -8,23 +8,33 @@ import OverlayScrollbarLayer from './components/shared/OverlayScrollbarLayer';
 const App = lazy(() => import('./App'));
 const AssetSearchWindow = lazy(() => import('./components/AssetSearchWindow'));
 const ChatWindow = lazy(() => import('./components/chat/ChatWindow'));
+// 懒加载：视频编辑器引入 mediabunny（体积大户），只有编辑器窗口才加载
+const VideoEditorWindow = lazy(() => import('./components/videoEditor/VideoEditorWindow'));
 
 interface RootViewProps {
   view: string | null;
 }
 
+const VIEW_LABELS: Record<string, string> = {
+  assets: '资产搜索窗口',
+  chat: '独立聊天窗口',
+  'video-editor': '视频编辑器窗口',
+};
+
 export default function RootView({ view }: RootViewProps) {
-  const viewLabel = view === 'assets'
-    ? '资产搜索窗口'
-    : view === 'chat'
-      ? '独立聊天窗口'
-      : 'AI Canvas';
+  const viewLabel = (view && VIEW_LABELS[view]) || 'AI Canvas';
 
   return (
     <>
       <LazyLoadBoundary label={viewLabel} variant="root">
         <Suspense fallback={<LazyLoadFallback label={viewLabel} variant="root" />}>
-          {view === 'assets' ? <AssetSearchWindow /> : view === 'chat' ? <ChatWindow /> : <App />}
+          {view === 'assets'
+            ? <AssetSearchWindow />
+            : view === 'chat'
+              ? <ChatWindow />
+              : view === 'video-editor'
+                ? <VideoEditorWindow />
+                : <App />}
         </Suspense>
       </LazyLoadBoundary>
       <OverlayScrollbarLayer />

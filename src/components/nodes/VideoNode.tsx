@@ -1,7 +1,7 @@
 ﻿/**
  * VideoNode 视频节点 — 在画布上渲染视频内容，支持上传本地视频、播放控制、连接其他节点
  */
-import { memo, useCallback, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { BaseNodeData } from '../../types';
 import NodeLabel from './shared/NodeLabel';
@@ -23,6 +23,11 @@ import {
   isCanvasDerivationFresh,
   registerCanvasDerivation,
 } from '../../services/canvasDerivationGuard';
+import { buildVideoEditorProjectId } from '../../services/indexedDbService';
+import {
+  subscribeVideoEditorWindow,
+  type VideoEditorExportResult,
+} from '../../services/videoEditorWindowService';
 
 const DEFAULT_VIDEO_NODE_WIDTH = 280;
 const DEFAULT_VIDEO_NODE_HEIGHT = 158;
@@ -189,6 +194,33 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const handleCloseFullscreen = useCallback(() => setIsFullscreen(false), []);
 
   const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴视频');
+
+  // 独立编辑器窗口导出完成后回写本节点
+  useEffect(() => {
+    const store = useAppStore.getState();
+    const projectId = store.currentProjectId;
+    if (!projectId) return;
+
+    const instanceId = buildVideoEditorProjectId(projectId, id);
+    return subscribeVideoEditorWindow(instanceId, (message) => {
+      if (message.type !== 'storyai:video-editor-exported') return;
+      const payload = message.payload as Partial<VideoEditorExportResult> | undefined;
+      const videoUrl = typeof payload?.videoUrl === 'string' ? payload.videoUrl : '';
+      if (!videoUrl) return;
+
+      updateNodeData(id, {
+        videoUrl,
+        filePath: typeof payload?.filePath === 'string' ? payload.filePath : undefined,
+        fileName: typeof payload?.fileName === 'string' ? payload.fileName : undefined,
+        videoDuration: typeof payload?.duration === 'number' ? payload.duration : undefined,
+        // 旧缩略图对应裁剪前的画面，清掉让节点按新视频重新生成
+        thumbnailUrl: undefined,
+        status: 'success',
+        error: undefined,
+      });
+      useAppStore.getState().showToast('剪辑结果已写入节点');
+    });
+  }, [id, updateNodeData]);
 
   const handleCopyFile = useCallback(async () => {
     const store = useAppStore.getState();

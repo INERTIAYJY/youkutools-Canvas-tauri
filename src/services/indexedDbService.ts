@@ -33,6 +33,7 @@ interface ProjectRecord {
 }
 
 export * from './indexedDb/catalogRepository';
+export * from './indexedDb/videoEditorRepository';
 
 /** 保存整个项目（含 nodes/edges）到 IndexedDB */
 export async function saveProjectToDb(record: ProjectRecord): Promise<void> {

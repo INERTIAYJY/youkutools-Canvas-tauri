@@ -57,6 +57,7 @@ interface VideoEditorTimelineProps {
   onRemoveTrack: (trackId: string) => void;
   onMoveTrack: (trackId: string, direction: -1 | 1) => void;
   onBeginInteraction: () => void;
+  onEndInteraction: () => void;
   canSplit: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -122,6 +123,7 @@ function VideoEditorTimeline({
   onRemoveTrack,
   onMoveTrack,
   onBeginInteraction,
+  onEndInteraction,
   canSplit,
   canUndo,
   canRedo,
@@ -143,9 +145,17 @@ function VideoEditorTimeline({
   } | null>(null);
   const [clipMenu, setClipMenu] = useState<ClipContextMenuState | null>(null);
 
-  const videoTrack = tracks.find((track) => track.kind === 'video');
-  const clips = useMemo(() => videoTrack?.clips ?? [], [videoTrack]);
   const selectedSet = useMemo(() => new Set(selectedClipIds), [selectedClipIds]);
+  const videoClipCount = useMemo(
+    () => tracks.filter((track) => track.kind === 'video').reduce((sum, track) => sum + track.clips.length, 0),
+    [tracks],
+  );
+  const selectedVideoClipCount = useMemo(
+    () => tracks.filter((track) => track.kind === 'video')
+      .flatMap((track) => track.clips)
+      .filter((clip) => selectedSet.has(clip.id)).length,
+    [selectedSet, tracks],
+  );
 
   // 在所有视频轨中查找片段
   const allVideoClips = useMemo(() => {
@@ -296,10 +306,13 @@ function VideoEditorTimeline({
       target.releasePointerCapture(upEvent.pointerId);
       target.removeEventListener('pointermove', onMove);
       target.removeEventListener('pointerup', onUp);
+      target.removeEventListener('pointercancel', onUp);
+      onEndInteraction();
     };
     target.addEventListener('pointermove', onMove);
     target.addEventListener('pointerup', onUp);
-  }, [applySnap, onBeginInteraction, onTrimClip, timeFromClientX]);
+    target.addEventListener('pointercancel', onUp);
+  }, [applySnap, onBeginInteraction, onEndInteraction, onTrimClip, timeFromClientX]);
 
   const startClipDrag = useCallback((clip: VideoEditorClip, sourceTrackId: string, event: React.PointerEvent) => {
     event.stopPropagation();
@@ -392,10 +405,20 @@ function VideoEditorTimeline({
       }
     };
 
-    const onUp = (upEvent: PointerEvent) => {
-      target.releasePointerCapture(upEvent.pointerId);
+    const cleanup = (pointerId: number) => {
+      if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
       target.removeEventListener('pointermove', onMove);
       target.removeEventListener('pointerup', onUp);
+      target.removeEventListener('pointercancel', onCancel);
+    };
+
+    const onCancel = (cancelEvent: PointerEvent) => {
+      cleanup(cancelEvent.pointerId);
+      setDragging(null);
+    };
+
+    const onUp = (upEvent: PointerEvent) => {
+      cleanup(upEvent.pointerId);
 
       if (moved) {
         const targetTrackId = resolveTargetTrack(upEvent.clientY);
@@ -428,6 +451,7 @@ function VideoEditorTimeline({
           const index = dropIndexAt(sourceClips, time, clip.id);
           onMoveClip(clip.id, index);
         }
+        onEndInteraction();
       } else if (additive) {
         onSelectClips(
           selectedSet.has(clip.id)
@@ -442,17 +466,20 @@ function VideoEditorTimeline({
 
     target.addEventListener('pointermove', onMove);
     target.addEventListener('pointerup', onUp);
+    target.addEventListener('pointercancel', onCancel);
   }, [
-    applySnap, duration, onBeginInteraction, onCreateTrackAndMove, onMoveClip,
+    applySnap, duration, onBeginInteraction, onCreateTrackAndMove, onEndInteraction, onMoveClip,
     onMoveClipInOverlay, onMoveClipToTrack, onSelectClips, pixelsPerSecond,
     selectedClipIds, selectedSet, tracks,
   ]);
 
   const toggleTrackFlag = useCallback((trackId: string, flag: 'muted' | 'locked' | 'hidden') => {
+    onBeginInteraction();
     onTracksChange(tracks.map((track) => (
       track.id === trackId ? { ...track, [flag]: !track[flag] } : track
     )));
-  }, [onTracksChange, tracks]);
+    onEndInteraction();
+  }, [onBeginInteraction, onEndInteraction, onTracksChange, tracks]);
 
   const zoomBy = useCallback((factor: number) => {
     setAutoFit(false);
@@ -496,7 +523,7 @@ function VideoEditorTimeline({
           <button
             type="button" className="video-editor-timeline-btn danger"
             onClick={onDeleteSelected}
-            disabled={selectedClipIds.length === 0 || clips.length <= selectedClipIds.length}
+            disabled={selectedClipIds.length === 0 || videoClipCount <= selectedVideoClipCount}
             data-tooltip="删除选中片段 Del"
           >
             <Icon icon="lucide:trash-2" width={13} height={13} />
@@ -762,7 +789,7 @@ function VideoEditorTimeline({
           <button
             type="button" className="danger"
             onClick={() => { onDeleteSelected(); setClipMenu(null); }}
-            disabled={clips.length <= selectedClipIds.length}
+            disabled={videoClipCount <= selectedVideoClipCount}
           >
             删除<span>Del</span>
           </button>

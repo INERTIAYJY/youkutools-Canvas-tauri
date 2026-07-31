@@ -34,6 +34,8 @@ function renderPreview(overlayClip: VideoEditorClip): string {
       canvasSize={{ width: 1280, height: 720 }}
       onPlayheadChange={vi.fn()}
       onSelectClips={vi.fn()}
+      onBeginInteraction={vi.fn()}
+      onEndInteraction={vi.fn()}
       onTransformChange={vi.fn()}
     />,
   );

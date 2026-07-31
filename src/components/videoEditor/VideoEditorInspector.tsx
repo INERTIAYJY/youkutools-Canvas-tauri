@@ -27,6 +27,8 @@ interface VideoEditorInspectorProps {
   onFrameRateChange: (fps: number) => void;
   outputScale: number;
   onOutputScaleChange: (scale: number) => void;
+  onBeginInteraction: () => void;
+  onEndInteraction: () => void;
   onTransformChange: (patch: Partial<VideoEditorTransform>) => void;
   onTransitionChange: (kind: VideoEditorTransitionKind, duration: number) => void;
   onVolumeChange: (volume: number) => void;
@@ -47,6 +49,8 @@ function VideoEditorInspector({
   onFrameRateChange,
   outputScale,
   onOutputScaleChange,
+  onBeginInteraction,
+  onEndInteraction,
   onTransformChange,
   onTransitionChange,
   onVolumeChange,
@@ -54,6 +58,14 @@ function VideoEditorInspector({
   const kept = clip ? getClipDuration(clip) : 0;
   const transform = clip?.transform ?? DEFAULT_TRANSFORM;
   const transition = clip?.transitionIn ?? { kind: 'none' as const, duration: 0.5 };
+  const continuousEditHandlers = {
+    onPointerDown: onBeginInteraction,
+    onPointerUp: onEndInteraction,
+    onPointerCancel: onEndInteraction,
+    onKeyDown: onBeginInteraction,
+    onKeyUp: onEndInteraction,
+    onBlur: onEndInteraction,
+  };
 
   return (
     <aside className="video-editor-inspector">
@@ -125,6 +137,7 @@ function VideoEditorInspector({
               min={min} max={max} step={step}
               value={transform[key]}
               disabled={!clip}
+              {...continuousEditHandlers}
               onChange={(event) => onTransformChange({ [key]: Number(event.target.value) })}
             />
             <em>{key === 'rotation' ? `${transform[key]}°` : transform[key].toFixed(2)}</em>
@@ -140,6 +153,7 @@ function VideoEditorInspector({
           <select
             value={transition.kind}
             disabled={!clip}
+            {...continuousEditHandlers}
             onChange={(event) => onTransitionChange(
               event.target.value as VideoEditorTransitionKind,
               transition.duration,
@@ -156,6 +170,7 @@ function VideoEditorInspector({
             type="range" min={0.1} max={3} step={0.1}
             value={transition.duration}
             disabled={!clip || transition.kind === 'none'}
+            {...continuousEditHandlers}
             onChange={(event) => onTransitionChange(transition.kind, Number(event.target.value))}
           />
           <em>{transition.duration.toFixed(1)}s</em>
@@ -170,6 +185,7 @@ function VideoEditorInspector({
             type="range" min={0} max={2} step={0.05}
             value={clip?.volume ?? 1}
             disabled={!clip}
+            {...continuousEditHandlers}
             onChange={(event) => onVolumeChange(Number(event.target.value))}
           />
           <em>{((clip?.volume ?? 1) * 100).toFixed(0)}%</em>

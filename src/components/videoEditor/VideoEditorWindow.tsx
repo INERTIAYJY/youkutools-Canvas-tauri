@@ -61,11 +61,12 @@ import { resolveClipUrl, useVideoEditorSources } from './useVideoEditorSources';
 import { useTimelineHistory } from './useTimelineHistory';
 import {
   createTrack,
-  duplicateClip,
+  duplicateClipInTracks,
   moveClipTo,
   moveTrack,
-  removeClips,
+  removeClipsFromTracks,
   removeTrack,
+  updateClipInTracks,
 } from './timelineOps';
 
 type EditorPhase = 'loading' | 'ready' | 'error';
@@ -176,7 +177,7 @@ export default function VideoEditorWindow() {
   const clips = useMemo(() => videoTrack?.clips ?? [], [videoTrack]);
   // 素材面板要显示所有视频轨的片段（主轨 + 叠加轨），否则导入多轨会看上去消失
   const allClips = useMemo(
-    () => tracks.filter((track) => track.kind === 'video' && !track.hidden).flatMap((track) => track.clips),
+    () => tracks.filter((track) => track.kind === 'video').flatMap((track) => track.clips),
     [tracks],
   );
 
@@ -191,14 +192,13 @@ export default function VideoEditorWindow() {
     });
   }, []);
 
-  const updateVideoClips = useCallback((
-    mutate: (clips: VideoEditorTrack['clips']) => VideoEditorTrack['clips'],
+  const updateTracks = useCallback((
+    mutate: (tracks: VideoEditorTrack[]) => VideoEditorTrack[],
   ) => {
     setRecord((previous) => {
       if (!previous) return previous;
-      const nextTracks = previous.tracks.map((track) => (
-        track.kind === 'video' ? { ...track, clips: relayoutSequential(mutate(track.clips)) } : track
-      ));
+      const nextTracks = mutate(previous.tracks);
+      if (nextTracks === previous.tracks) return previous;
       const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
       void saveVideoEditorProject(next).catch((reason) => {
         console.error('[videoEditor] 工程保存失败:', reason);
@@ -314,12 +314,23 @@ export default function VideoEditorWindow() {
 
   // ── 撤销重做：改动前落一个轨道快照 ──
   const history = useTimelineHistory();
+  const historyBegin = history.begin;
+  const historyEnd = history.end;
+  const historyCommit = history.commit;
   const tracksRef = useRef(tracks);
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
 
   const beginInteraction = useCallback(() => {
-    history.commit(tracksRef.current);
-  }, [history]);
+    historyBegin(tracksRef.current);
+  }, [historyBegin]);
+
+  const endInteraction = useCallback(() => {
+    historyEnd();
+  }, [historyEnd]);
+
+  const commitChange = useCallback(() => {
+    historyCommit(tracksRef.current);
+  }, [historyCommit]);
 
   const handleUndo = useCallback(() => {
     const restored = history.undo(tracksRef.current);
@@ -331,14 +342,13 @@ export default function VideoEditorWindow() {
     if (restored) persistTracks(restored);
   }, [history, persistTracks]);
 
-  // 连续拖拽只在按下时记一次快照，避免历史被中间态灌满
-  const trimSessionRef = useRef<string | null>(null);
   const handleTrimClip = useCallback((clipId: string, sourceIn: number, sourceOut: number) => {
-    if (trimSessionRef.current !== clipId) trimSessionRef.current = clipId;
-    updateVideoClips((current) => current.map((clip) => (
-      clip.id === clipId ? { ...clip, sourceIn, sourceOut } : clip
-    )));
-  }, [updateVideoClips]);
+    updateTracks((current) => updateClipInTracks(current, clipId, (clip) => ({
+      ...clip,
+      sourceIn,
+      sourceOut,
+    })));
+  }, [updateTracks]);
 
   const handleSplit = useCallback(() => {
     if (!videoTrack) return;
@@ -348,80 +358,65 @@ export default function VideoEditorWindow() {
       return;
     }
     setNotice(null);
-    beginInteraction();
-    updateVideoClips(() => split);
-  }, [beginInteraction, playhead, updateVideoClips, videoTrack]);
+    commitChange();
+    updateTracks((current) => current.map((track) => (
+      track.id === videoTrack.id ? { ...track, clips: split } : track
+    )));
+  }, [commitChange, playhead, updateTracks, videoTrack]);
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedClipIds.length === 0) return;
-    if (clips.length <= selectedClipIds.length) {
+    const selected = new Set(selectedClipIds);
+    const remainingVideoCount = allClips.filter((clip) => !selected.has(clip.id)).length;
+    if (remainingVideoCount === 0) {
       setNotice('至少要保留一个片段');
       return;
     }
-    beginInteraction();
-    updateVideoClips((current) => removeClips(current, selectedClipIds));
+    commitChange();
+    updateTracks((current) => removeClipsFromTracks(current, selectedClipIds));
     setSelectedClipIds([]);
-  }, [beginInteraction, clips.length, selectedClipIds, updateVideoClips]);
+  }, [allClips, commitChange, selectedClipIds, updateTracks]);
 
   const handleDuplicateClip = useCallback((clipId: string) => {
-    beginInteraction();
-    updateVideoClips((current) => duplicateClip(current, clipId));
-  }, [beginInteraction, updateVideoClips]);
+    commitChange();
+    updateTracks((current) => duplicateClipInTracks(current, clipId));
+  }, [commitChange, updateTracks]);
 
   /** 改选中片段的某个属性；这些改动都会让导出切到合成路径 */
   const patchSelectedClip = useCallback((patch: (clip: VideoEditorClip) => VideoEditorClip) => {
     const targetId = selectedClipIds[0] ?? activeClip?.id;
     if (!targetId) return;
-    beginInteraction();
-    setRecord((previous) => {
-      if (!previous) return previous;
-      const nextTracks = previous.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) => (clip.id === targetId ? patch(clip) : clip)),
-      }));
-      const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
-      void saveVideoEditorProject(next).catch((reason) => {
-        console.error('[videoEditor] 工程保存失败:', reason);
-      });
-      return next;
-    });
-  }, [activeClip?.id, beginInteraction, selectedClipIds]);
+    updateTracks((current) => updateClipInTracks(current, targetId, patch));
+  }, [activeClip?.id, selectedClipIds, updateTracks]);
 
   /** 按 ID 修改片段属性，用于画面上直接拖拽叠加层 */
   const patchClipById = useCallback((clipId: string, patch: (clip: VideoEditorClip) => VideoEditorClip) => {
-    beginInteraction();
-    setRecord((previous) => {
-      if (!previous) return previous;
-      const nextTracks = previous.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) => (clip.id === clipId ? patch(clip) : clip)),
-      }));
-      const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
-      void saveVideoEditorProject(next).catch((reason) => {
-        console.error('[videoEditor] 工程保存失败:', reason);
-      });
-      return next;
-    });
-  }, [beginInteraction]);
+    updateTracks((current) => updateClipInTracks(current, clipId, patch));
+  }, [updateTracks]);
 
   const handleAddTrack = useCallback((kind: 'video' | 'audio') => {
-    beginInteraction();
+    commitChange();
     persistTracks([...tracksRef.current, createTrack(kind, tracksRef.current)]);
-  }, [beginInteraction, persistTracks]);
+  }, [commitChange, persistTracks]);
 
   const handleRemoveTrack = useCallback((trackId: string) => {
-    beginInteraction();
+    commitChange();
     persistTracks(removeTrack(tracksRef.current, trackId));
-  }, [beginInteraction, persistTracks]);
+  }, [commitChange, persistTracks]);
 
   const handleMoveTrack = useCallback((trackId: string, direction: -1 | 1) => {
-    beginInteraction();
+    commitChange();
     persistTracks(moveTrack(tracksRef.current, trackId, direction));
-  }, [beginInteraction, persistTracks]);
+  }, [commitChange, persistTracks]);
 
   const handleMoveClip = useCallback((clipId: string, targetIndex: number) => {
-    updateVideoClips((current) => moveClipTo(current, clipId, targetIndex));
-  }, [updateVideoClips]);
+    if (!videoTrack) return;
+    updateTracks((current) => current.map((track) => (
+      track.id === videoTrack.id
+        ? { ...track, clips: moveClipTo(track.clips, clipId, targetIndex) }
+        : track
+    )));
+  }, [updateTracks, videoTrack]);
 
   /** 跨轨道移动片段 */
   const handleMoveClipToTrack = useCallback((
@@ -569,7 +564,7 @@ export default function VideoEditorWindow() {
       }
       if (modifier && (event.key === 'a' || event.key === 'A')) {
         event.preventDefault();
-        setSelectedClipIds(clips.map((clip) => clip.id));
+        setSelectedClipIds(tracks.flatMap((track) => track.clips.map((clip) => clip.id)));
         return;
       }
       if (modifier) return;
@@ -599,8 +594,9 @@ export default function VideoEditorWindow() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [
-    clips, handleDeleteSelected, handleDuplicateClip, handleRedo, handleSplit,
+    handleDeleteSelected, handleDuplicateClip, handleRedo, handleSplit,
     handleUndo, phase, selectedClipIds, timelineDuration,
+    tracks,
   ]);
 
   const handleExport = useCallback(async () => {
@@ -857,6 +853,8 @@ export default function VideoEditorWindow() {
               canvasSize={canvasSize}
               onPlayheadChange={setPlayhead}
               onSelectClips={setSelectedClipIds}
+              onBeginInteraction={beginInteraction}
+              onEndInteraction={endInteraction}
               onTransformChange={(clipId, patch) => patchClipById(clipId, (clip) => ({
                 ...clip,
                 transform: { ...DEFAULT_TRANSFORM, ...clip.transform, ...patch },
@@ -874,6 +872,8 @@ export default function VideoEditorWindow() {
               onFrameRateChange={setExportFrameRate}
               outputScale={outputScale}
               onOutputScaleChange={setOutputScale}
+              onBeginInteraction={beginInteraction}
+              onEndInteraction={endInteraction}
               onTransformChange={(patch) => patchSelectedClip((clip) => ({
                 ...clip,
                 transform: { ...DEFAULT_TRANSFORM, ...clip.transform, ...patch },
@@ -908,6 +908,7 @@ export default function VideoEditorWindow() {
             onRemoveTrack={handleRemoveTrack}
             onMoveTrack={handleMoveTrack}
             onBeginInteraction={beginInteraction}
+            onEndInteraction={endInteraction}
             canSplit={canSplit}
             canUndo={history.canUndo}
             canRedo={history.canRedo}

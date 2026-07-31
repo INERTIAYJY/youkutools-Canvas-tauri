@@ -53,6 +53,62 @@ export function duplicateClip(
   return relayoutSequential(next);
 }
 
+/**
+ * 按片段 ID 更新其所属轨道。
+ * 主视频轨保持磁吸顺排；叠加轨和音频轨保留自由时间位置。
+ */
+export function updateClipInTracks(
+  tracks: VideoEditorTrack[],
+  clipId: string,
+  update: (clip: VideoEditorClip) => VideoEditorClip,
+): VideoEditorTrack[] {
+  const trackIndex = tracks.findIndex((track) => track.clips.some((clip) => clip.id === clipId));
+  if (trackIndex < 0) return tracks;
+
+  const track = tracks[trackIndex];
+  const nextClips = track.clips.map((clip) => (clip.id === clipId ? update(clip) : clip));
+  const nextTrack = {
+    ...track,
+    clips: track.kind === 'video' && !track.overlay
+      ? relayoutSequential(nextClips)
+      : nextClips,
+  };
+  const next = [...tracks];
+  next[trackIndex] = nextTrack;
+  return next;
+}
+
+/** 在片段所属轨道复制；自由轨把副本放在源片段结束处。 */
+export function duplicateClipInTracks(
+  tracks: VideoEditorTrack[],
+  clipId: string,
+): VideoEditorTrack[] {
+  const trackIndex = tracks.findIndex((track) => track.clips.some((clip) => clip.id === clipId));
+  if (trackIndex < 0) return tracks;
+
+  const track = tracks[trackIndex];
+  const clipIndex = track.clips.findIndex((clip) => clip.id === clipId);
+  if (clipIndex < 0) return tracks;
+
+  if (track.kind === 'video' && !track.overlay) {
+    const next = [...tracks];
+    next[trackIndex] = { ...track, clips: duplicateClip(track.clips, clipId) };
+    return next;
+  }
+
+  const source = track.clips[clipIndex];
+  const copy: VideoEditorClip = {
+    ...source,
+    id: `${source.id}-copy${Date.now().toString(36)}`,
+    timelineStart: source.timelineStart + getClipDuration(source),
+  };
+  const nextClips = [...track.clips];
+  nextClips.splice(clipIndex + 1, 0, copy);
+  const next = [...tracks];
+  next[trackIndex] = { ...track, clips: nextClips };
+  return next;
+}
+
 /** 删除若干片段并压实；至少保留一个片段 */
 export function removeClips(
   clips: VideoEditorClip[],
@@ -62,6 +118,34 @@ export function removeClips(
   const kept = clips.filter((clip) => !ids.has(clip.id));
   if (kept.length === 0) return clips;
   return relayoutSequential(kept);
+}
+
+/**
+ * 跨轨删除选中片段。工程必须至少保留一个视频/图片片段；
+ * 主轨删除后压实，叠加轨和音频轨保持剩余片段的时间位置。
+ */
+export function removeClipsFromTracks(
+  tracks: VideoEditorTrack[],
+  clipIds: Set<string> | string[],
+): VideoEditorTrack[] {
+  const ids = clipIds instanceof Set ? clipIds : new Set(clipIds);
+  const remainingVideoClips = tracks
+    .filter((track) => track.kind === 'video')
+    .flatMap((track) => track.clips)
+    .filter((clip) => !ids.has(clip.id));
+  if (remainingVideoClips.length === 0) return tracks;
+
+  let changed = false;
+  const next = tracks.map((track) => {
+    const kept = track.clips.filter((clip) => !ids.has(clip.id));
+    if (kept.length === track.clips.length) return track;
+    changed = true;
+    return {
+      ...track,
+      clips: track.kind === 'video' && !track.overlay ? relayoutSequential(kept) : kept,
+    };
+  });
+  return changed ? next : tracks;
 }
 
 /** 片段的所有边界时刻，用作吸附候选 */

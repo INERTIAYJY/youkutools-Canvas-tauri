@@ -33,6 +33,8 @@ interface VideoEditorPreviewProps {
   canvasSize: { width: number; height: number };
   onPlayheadChange: (time: number) => void;
   onSelectClips: (clipIds: string[]) => void;
+  onBeginInteraction: () => void;
+  onEndInteraction: () => void;
   /** 修改叠加层片段的 transform */
   onTransformChange: (clipId: string, patch: Partial<VideoEditorTransform>) => void;
 }
@@ -121,6 +123,8 @@ function VideoEditorPreview({
   canvasSize,
   onPlayheadChange,
   onSelectClips,
+  onBeginInteraction,
+  onEndInteraction,
   onTransformChange,
 }: VideoEditorPreviewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -240,6 +244,7 @@ function VideoEditorPreview({
     const frame = canvasFrameRef.current;
     if (!frame) return;
     const frameRect = frame.getBoundingClientRect();
+    onBeginInteraction();
     setDragOverlay({
       clipId: overlayClip.id,
       mode,
@@ -250,7 +255,7 @@ function VideoEditorPreview({
       frameRect,
     });
     onSelectClips([overlayClip.id]);
-  }, [onSelectClips]);
+  }, [onBeginInteraction, onSelectClips]);
 
   useEffect(() => {
     if (!dragOverlay) return;
@@ -283,14 +288,19 @@ function VideoEditorPreview({
         }
       }
     };
-    const onUp = () => setDragOverlay(null);
+    const finish = () => {
+      setDragOverlay(null);
+      onEndInteraction();
+    };
     document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointerup', finish);
+    document.addEventListener('pointercancel', finish);
     return () => {
       document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointerup', finish);
+      document.removeEventListener('pointercancel', finish);
     };
-  }, [dragOverlay, onTransformChange]);
+  }, [dragOverlay, onEndInteraction, onTransformChange]);
 
   // ── 进度条 ──
   const startScrub = useCallback((event: React.PointerEvent) => {

@@ -9,10 +9,18 @@ import {
   MAX_PIXELS_PER_SECOND,
   MIN_PIXELS_PER_SECOND,
   moveClipTo,
+  duplicateClipInTracks,
   removeClips,
+  removeClipsFromTracks,
   snapTime,
+  updateClipInTracks,
 } from '../../src/components/videoEditor/timelineOps';
-import { getClipDuration, relayoutSequential, type VideoEditorClip } from '../../src/types/videoEditor';
+import {
+  getClipDuration,
+  relayoutSequential,
+  type VideoEditorClip,
+  type VideoEditorTrack,
+} from '../../src/types/videoEditor';
 
 function clip(id: string, duration: number): VideoEditorClip {
   return {
@@ -26,6 +34,70 @@ function clip(id: string, duration: number): VideoEditorClip {
 }
 
 const threeClips = () => relayoutSequential([clip('a', 4), clip('b', 6), clip('c', 2)]);
+
+function multitrack(): VideoEditorTrack[] {
+  return [
+    { id: 'main', kind: 'video', name: '主轨', clips: relayoutSequential([clip('a', 4), clip('b', 6)]) },
+    {
+      id: 'overlay',
+      kind: 'video',
+      name: '叠加轨',
+      overlay: true,
+      clips: [{ ...clip('overlay-a', 3), timelineStart: 7 }],
+    },
+  ];
+}
+
+describe('track-aware clip operations', () => {
+  it('trims only the owning overlay track without moving its timeline position', () => {
+    const tracks = multitrack();
+    const updated = updateClipInTracks(tracks, 'overlay-a', (entry) => ({
+      ...entry,
+      sourceIn: 1,
+      sourceOut: 2.5,
+    }));
+
+    expect(updated[0]).toBe(tracks[0]);
+    expect(updated[1].clips[0]).toMatchObject({
+      id: 'overlay-a',
+      timelineStart: 7,
+      sourceIn: 1,
+      sourceOut: 2.5,
+    });
+  });
+
+  it('re-packs the main track when a trim changes a main clip duration', () => {
+    const updated = updateClipInTracks(multitrack(), 'a', (entry) => ({
+      ...entry,
+      sourceOut: 2,
+    }));
+
+    expect(updated[0].clips.map((entry) => entry.timelineStart)).toEqual([0, 2]);
+    expect(updated[1].clips[0].timelineStart).toBe(7);
+  });
+
+  it('removes selected clips across tracks while preserving overlay positions', () => {
+    const updated = removeClipsFromTracks(multitrack(), ['b', 'overlay-a']);
+
+    expect(updated[0].clips.map((entry) => entry.id)).toEqual(['a']);
+    expect(updated[1].clips).toEqual([]);
+  });
+
+  it('refuses to remove the last clip in the whole project', () => {
+    const tracks = multitrack();
+    expect(removeClipsFromTracks(tracks, ['a', 'b', 'overlay-a'])).toBe(tracks);
+  });
+
+  it('duplicates only the owning overlay clip after its source time range', () => {
+    const tracks = multitrack();
+    const updated = duplicateClipInTracks(tracks, 'overlay-a');
+
+    expect(updated[0]).toBe(tracks[0]);
+    expect(updated[1].clips).toHaveLength(2);
+    expect(updated[1].clips[1]).toMatchObject({ timelineStart: 10, sourceIn: 0, sourceOut: 3 });
+    expect(updated[1].clips[1].id).not.toBe('overlay-a');
+  });
+});
 
 describe('moveClipTo', () => {
   it('reorders and re-packs the timeline', () => {

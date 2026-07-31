@@ -83,6 +83,14 @@
   /* Disabled foreground / 禁用态前景色 ── */
   --text-disabled: #444455;
 
+  /* Video Editor Track Colors / 视频编辑器轨道颜色 ── */
+  --track-color-1: #6366f1;
+  --track-color-2: #22c55e;
+  --track-color-3: #f59e0b;
+  --track-color-4: #3b82f6;
+  --track-color-5: #ec4899;
+  --track-color-6: #14b8a6;
+
   /* Media well — 图片/图标衬底（透明图会露出这一层，所以要跟随主题；
      压在图片之上的徽标、遮罩不用这个，它们两个主题下都该是深色）── */
   --media-well: rgba(0, 0, 0, 0.35);

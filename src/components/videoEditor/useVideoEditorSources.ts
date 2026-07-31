@@ -40,6 +40,8 @@ export function useVideoEditorSources(
   onProbed?: (url: string, probe: VideoEditorSourceProbe) => void,
 ) {
   const [sources, setSources] = useState<Record<string, SourceState>>({});
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
   const [loading, setLoading] = useState(false);
   // 回调每次渲染都是新身份，用 ref 持有以免重跑整轮探测
   const onProbedRef = useRef(onProbed);
@@ -59,12 +61,7 @@ export function useVideoEditorSources(
       for (const url of pending) {
         if (!active) return;
         // 已解析过的素材直接跳过，分割产生的同源片段不重复探测
-        let alreadyKnown = false;
-        setSources((previous) => {
-          alreadyKnown = !!previous[url];
-          return previous;
-        });
-        if (alreadyKnown) continue;
+        if (Object.prototype.hasOwnProperty.call(sourcesRef.current, url)) continue;
 
         const clip = clips.find((candidate) => resolveClipUrl(candidate) === url);
         if (clip?.kind === 'image') {

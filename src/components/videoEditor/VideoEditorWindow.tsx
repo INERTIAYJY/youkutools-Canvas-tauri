@@ -174,6 +174,11 @@ export default function VideoEditorWindow() {
   const tracks = useMemo(() => record?.tracks ?? [], [record]);
   const videoTrack = getVideoTrack(tracks);
   const clips = useMemo(() => videoTrack?.clips ?? [], [videoTrack]);
+  // 素材面板要显示所有视频轨的片段（主轨 + 叠加轨），否则导入多轨会看上去消失
+  const allClips = useMemo(
+    () => tracks.filter((track) => track.kind === 'video' && !track.hidden).flatMap((track) => track.clips),
+    [tracks],
+  );
 
   const persistTracks = useCallback((nextTracks: VideoEditorTrack[]) => {
     setRecord((previous) => {
@@ -202,23 +207,45 @@ export default function VideoEditorWindow() {
     });
   }, []);
 
-  // 节点上没带 videoDuration 的片段出点初始为 0，探测到真实时长后回填
+  // 节点上没带 videoDuration 的片段出点初始为 0，探测到真实时长后回填。
+  // 叠加轨必须保持自由时间位置，不能借用主轨的顺排更新函数。
   const handleSourceProbed = useCallback((url: string, probe: { duration: number }) => {
     if (probe.duration <= 0) return;
-    updateVideoClips((current) => current.map((clip) => (
-      clip.sourceOut <= 0 && resolveClipUrl(clip) === url
-        ? { ...clip, sourceOut: probe.duration }
-        : clip
-    )));
-  }, [updateVideoClips]);
+    setRecord((previous) => {
+      if (!previous) return previous;
+      let changed = false;
+      const nextTracks = previous.tracks.map((track) => {
+        if (track.kind !== 'video') return track;
+        let trackChanged = false;
+        const nextClips = track.clips.map((clip) => {
+          if (clip.sourceOut > 0 || resolveClipUrl(clip) !== url) return clip;
+          changed = true;
+          trackChanged = true;
+          return { ...clip, sourceOut: probe.duration };
+        });
+        if (!trackChanged) return track;
+        return {
+          ...track,
+          clips: track.overlay ? nextClips : relayoutSequential(nextClips),
+        };
+      });
+      if (!changed) return previous;
+      const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
+      void saveVideoEditorProject(next).catch((reason) => {
+        console.error('[videoEditor] 工程保存失败:', reason);
+      });
+      return next;
+    });
+  }, []);
 
-  const { getSource } = useVideoEditorSources(clips, handleSourceProbed);
+  const { getSource } = useVideoEditorSources(allClips, handleSourceProbed);
 
   const timelineDuration = computeTimelineDuration(tracks);
   const activeClip = findClipAtTime(clips, playhead)?.clip ?? clips[0] ?? null;
   const activeClipUrl = activeClip ? resolveClipUrl(activeClip) : '';
-  const selectedClip = clips.find((clip) => clip.id === selectedClipIds[0]) ?? null;
-  const activeProbe = activeClip ? (getSource(activeClip)?.probe ?? null) : null;
+  const selectedClip = allClips.find((clip) => clip.id === selectedClipIds[0]) ?? null;
+  const inspectorClip = selectedClip ?? activeClip;
+  const activeProbe = inspectorClip ? (getSource(inspectorClip)?.probe ?? null) : null;
 
   // 合成画布尺寸取主轨首个可解码片段的分辨率，退回 1080p。
   // 计算极轻，直接派生即可，不值得为它维护一份 memo 依赖
@@ -360,6 +387,23 @@ export default function VideoEditorWindow() {
     });
   }, [activeClip?.id, beginInteraction, selectedClipIds]);
 
+  /** 按 ID 修改片段属性，用于画面上直接拖拽叠加层 */
+  const patchClipById = useCallback((clipId: string, patch: (clip: VideoEditorClip) => VideoEditorClip) => {
+    beginInteraction();
+    setRecord((previous) => {
+      if (!previous) return previous;
+      const nextTracks = previous.tracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => (clip.id === clipId ? patch(clip) : clip)),
+      }));
+      const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
+      void saveVideoEditorProject(next).catch((reason) => {
+        console.error('[videoEditor] 工程保存失败:', reason);
+      });
+      return next;
+    });
+  }, [beginInteraction]);
+
   const handleAddTrack = useCallback((kind: 'video' | 'audio') => {
     beginInteraction();
     persistTracks([...tracksRef.current, createTrack(kind, tracksRef.current)]);
@@ -378,6 +422,125 @@ export default function VideoEditorWindow() {
   const handleMoveClip = useCallback((clipId: string, targetIndex: number) => {
     updateVideoClips((current) => moveClipTo(current, clipId, targetIndex));
   }, [updateVideoClips]);
+
+  /** 跨轨道移动片段 */
+  const handleMoveClipToTrack = useCallback((
+    clipId: string,
+    sourceTrackId: string,
+    targetTrackId: string,
+    position: number,
+  ) => {
+    setRecord((previous) => {
+      if (!previous) return previous;
+      const sourceTrack = previous.tracks.find((t) => t.id === sourceTrackId);
+      const targetTrack = previous.tracks.find((t) => t.id === targetTrackId);
+      if (!sourceTrack || !targetTrack) return previous;
+
+      const clipIndex = sourceTrack.clips.findIndex((c) => c.id === clipId);
+      if (clipIndex < 0) return previous;
+      const clip = sourceTrack.clips[clipIndex];
+
+      const nextTracks = previous.tracks.map((track) => {
+        if (track.id === sourceTrackId) {
+          // 从源轨道移除，主轨做磁吸压实
+          const nextClips = track.clips.filter((c) => c.id !== clipId);
+          return {
+            ...track,
+            clips: track.overlay ? nextClips : relayoutSequential(nextClips),
+          };
+        }
+        if (track.id === targetTrackId) {
+          if (track.overlay) {
+            // 叠加轨：自由放置，position 是时间轴时间
+            return {
+              ...track,
+              clips: [...track.clips, { ...clip, timelineStart: Math.max(0, position) }],
+            };
+          }
+          // 主轨：position 是插入序号，做磁吸重排
+          const nextClips = [...track.clips];
+          nextClips.splice(Math.min(position, nextClips.length), 0, clip);
+          return { ...track, clips: relayoutSequential(nextClips) };
+        }
+        return track;
+      });
+
+      const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
+      void saveVideoEditorProject(next).catch((reason) => {
+        console.error('[videoEditor] 工程保存失败:', reason);
+      });
+      return next;
+    });
+  }, []);
+
+  /** 叠加轨内移动：更新时间轴位置 */
+  const handleMoveClipInOverlay = useCallback((
+    clipId: string,
+    trackId: string,
+    timelineStart: number,
+  ) => {
+    setRecord((previous) => {
+      if (!previous) return previous;
+      const nextTracks = previous.tracks.map((track) => {
+        if (track.id !== trackId) return track;
+        return {
+          ...track,
+          clips: track.clips.map((clip) => (
+            clip.id === clipId ? { ...clip, timelineStart: Math.max(0, timelineStart) } : clip
+          )),
+        };
+      });
+      const next = { ...previous, tracks: nextTracks, updatedAt: Date.now() };
+      void saveVideoEditorProject(next).catch((reason) => {
+        console.error('[videoEditor] 工程保存失败:', reason);
+      });
+      return next;
+    });
+  }, []);
+
+  /** 拖到空白区域时创建新叠加轨并把片段移过去 */
+  const handleCreateTrackAndMove = useCallback((
+    clipId: string,
+    sourceTrackId: string,
+    timelineStart: number,
+  ) => {
+    setRecord((previous) => {
+      if (!previous) return previous;
+      const sourceTrack = previous.tracks.find((t) => t.id === sourceTrackId);
+      if (!sourceTrack) return previous;
+
+      const clipIndex = sourceTrack.clips.findIndex((c) => c.id === clipId);
+      if (clipIndex < 0) return previous;
+      const clip = sourceTrack.clips[clipIndex];
+
+      // 创建新的叠加轨
+      const newTrack = createTrack('video', previous.tracks);
+
+      const nextTracks = previous.tracks.map((track) => {
+        if (track.id === sourceTrackId) {
+          const nextClips = track.clips.filter((c) => c.id !== clipId);
+          return {
+            ...track,
+            clips: track.overlay ? nextClips : relayoutSequential(nextClips),
+          };
+        }
+        return track;
+      });
+
+      // 把片段放入新轨道
+      newTrack.clips = [{ ...clip, timelineStart: Math.max(0, timelineStart) }];
+
+      const next = {
+        ...previous,
+        tracks: [...nextTracks, newTrack],
+        updatedAt: Date.now(),
+      };
+      void saveVideoEditorProject(next).catch((reason) => {
+        console.error('[videoEditor] 工程保存失败:', reason);
+      });
+      return next;
+    });
+  }, []);
 
   const canSplit = !!videoTrack && !!findClipAtTime(clips, playhead);
 
@@ -606,12 +769,12 @@ export default function VideoEditorWindow() {
     <div className="video-editor-root">
       <header className="video-editor-header" data-tauri-drag-region>
         <h1 className="video-editor-title">{record?.name || '视频编辑器'}</h1>
-        {activeProbe && (
-          <span className="video-editor-meta">
-            {activeProbe.width}×{activeProbe.height} · {clips.length} 个片段 ·{' '}
-            {timelineDuration.toFixed(2)}s
-          </span>
-        )}
+          {activeProbe && (
+            <span className="video-editor-meta">
+              {activeProbe.width}×{activeProbe.height} · {allClips.length} 个片段 ·{' '}
+              {timelineDuration.toFixed(2)}s
+            </span>
+          )}
         <div className="video-editor-winctrls">
           {exporting ? (
             <>
@@ -631,7 +794,7 @@ export default function VideoEditorWindow() {
               type="button"
               className="video-editor-btn primary"
               onClick={() => { void handleExport(); }}
-              disabled={phase !== 'ready' || clips.length === 0}
+              disabled={phase !== 'ready' || allClips.length === 0}
             >
               <Icon icon="lucide:upload" width={13} height={13} />
               导出为新节点
@@ -679,7 +842,7 @@ export default function VideoEditorWindow() {
           {notice && <div className="video-editor-notice">{notice}</div>}
           <div className="video-editor-body">
             <VideoEditorMediaPanel
-              clips={clips}
+              clips={allClips}
               getSource={getSource}
               selectedClipId={selectedClipIds[0] ?? null}
               onSelectClip={(clipId) => setSelectedClipIds([clipId])}
@@ -689,12 +852,20 @@ export default function VideoEditorWindow() {
               clipUrl={activeClipUrl}
               playhead={playhead}
               timelineDuration={timelineDuration}
+              tracks={tracks}
+              selectedClipIds={selectedClipIds}
+              canvasSize={canvasSize}
               onPlayheadChange={setPlayhead}
+              onSelectClips={setSelectedClipIds}
+              onTransformChange={(clipId, patch) => patchClipById(clipId, (clip) => ({
+                ...clip,
+                transform: { ...DEFAULT_TRANSFORM, ...clip.transform, ...patch },
+              }))}
             />
             <VideoEditorInspector
               clip={selectedClip ?? activeClip}
               probe={activeProbe}
-              clipCount={clips.length}
+              clipCount={allClips.length}
               timelineDuration={timelineDuration}
               canvasSize={canvasSize}
               compositing={compositing}
@@ -726,6 +897,9 @@ export default function VideoEditorWindow() {
             onSelectClips={setSelectedClipIds}
             onTrimClip={handleTrimClip}
             onMoveClip={handleMoveClip}
+            onMoveClipToTrack={handleMoveClipToTrack}
+            onMoveClipInOverlay={handleMoveClipInOverlay}
+            onCreateTrackAndMove={handleCreateTrackAndMove}
             onSplit={handleSplit}
             onDeleteSelected={handleDeleteSelected}
             onDuplicateClip={handleDuplicateClip}

@@ -208,7 +208,7 @@ describe('critical canvas node interactions', () => {
     const saveResult = deferred<{ assetUrl: string; filePath: string }>();
 
     // 强制打开裁切编辑器：按 ImageNode 里 useState 的声明顺序数，isCrop 是第 7 个（下标 6）。
-    // 在它之前增删 useState 会让本用例找不到 CropEditorMock，届时按声明顺序重新数一次。
+    // 在它之前增删 useState 会让本用例找不到裁切编辑器，届时按声明顺序重新数一次。
     const IS_CROP_STATE_INDEX = 6;
     await installReactHookDriver((initialValue, index) => (
       index === IS_CROP_STATE_INDEX ? true : initialValue
@@ -238,7 +238,13 @@ describe('critical canvas node interactions', () => {
       props: { id: string; data: Record<string, unknown>; selected: boolean },
     ) => unknown;
     const tree = ImageNode({ id: 'image-source', data: store.nodes[0].data, selected: true });
-    const cropEditor = findElement(tree, (element) => componentName(element) === 'CropEditorMock');
+    // CropEditor 已改为 lazy 加载，而本文件的 react stub 把所有 lazy 统一换成
+    // LazyComponentMock，按组件名找不到它。几个编辑器都是条件渲染，本用例只打开了
+    // 裁切，按裁切编辑器特有的 onStart + onSave 回调定位比按组件名更稳。
+    const cropEditor = findElement(tree, (element) => (
+      typeof element.props.onStart === 'function'
+      && typeof element.props.onSave === 'function'
+    ));
 
     (cropEditor.props.onStart as () => void)();
     expect(store.nodes.map((node) => node.id)).toContain('node-generated');

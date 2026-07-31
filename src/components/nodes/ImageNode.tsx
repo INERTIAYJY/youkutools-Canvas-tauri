@@ -13,7 +13,6 @@ import type { BaseNodeData, ImageAnnotationLayer as ImageAnnotationLayerData } f
 import NodeLabel from './shared/NodeLabel';
 import GooeyBtn from './shared/GooeyBtn';
 import ImageNodeToolbar from './shared/image/ImageNodeToolbar';
-import CropEditor from './shared/image/CropEditor';
 import ResizeHandle from './shared/ResizeHandle';
 import FullscreenOverlay from '../shared/FullscreenOverlay';
 import ZoomableImage from '../shared/ZoomableImage';
@@ -47,6 +46,7 @@ import { useImageNodeOnnxActions } from './shared/image/useImageNodeOnnxActions'
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
 const ExpandEditor = lazy(() => import('./shared/image/ExpandEditor'));
+const CropEditor = lazy(() => import('./shared/image/CropEditor'));
 const ImageComposerEditor = lazy(() => import('./shared/image/composer/ImageComposerEditor'));
 const CameraStudioPanel = lazy(() => import('./shared/image/CameraStudioPanel'));
 

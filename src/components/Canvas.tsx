@@ -45,6 +45,7 @@ import SelectedNodeFlowEdge from './canvas/SelectedNodeFlowEdge';
 import { useConnectionDropMenu } from '../hooks/useConnectionDropMenu';
 import { useCanvasContextMenu } from '../hooks/useCanvasContextMenu';
 import { useNodeContextMenu } from '../hooks/useNodeContextMenu';
+import { useCanvasSecondaryClickMenu } from '../hooks/useCanvasSecondaryClickMenu';
 import { useAppStore } from '../store/useAppStore';
 import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
@@ -569,80 +570,11 @@ function CanvasInner() {
     hideSubmenu,
   } = useCanvasContextMenu();
 
-  // ── 右键菜单：统一在「指针抬起且未拖拽」时弹出 ──
-  // Windows：右键拖拽平移后松开才触发 contextmenu；macOS：双指（次级点击）按下瞬间即触发。
-  // 两端时机不一致，故不依赖原生 contextmenu 开菜单，改为自行追踪右键 pointer：
-  // 按下记录起点 → 抬起时若位移超阈值视为平移（不弹），否则按落点判定节点/画布空白再弹。
-  // 同时通过 shouldPreventNativeMenu 标志，在全局 contextmenu 事件中阻止浏览器原生右键菜单，
-  // 解决窗口底部等 ReactFlow 覆盖不到的区域两个菜单同时出现的问题。
-  const shouldPreventNativeMenu = useRef(false);
-  useEffect(() => {
-    const drag = { x: 0, y: 0, moved: false, down: false };
-    const onDown = (e: PointerEvent) => {
-      if (e.button !== 2) return;
-      drag.x = e.clientX;
-      drag.y = e.clientY;
-      drag.moved = false;
-      drag.down = true;
-    };
-    const onMove = (e: PointerEvent) => {
-      if (!drag.down) return;
-      const dx = e.clientX - drag.x;
-      const dy = e.clientY - drag.y;
-      if (dx * dx + dy * dy > 25) drag.moved = true; // 位移 > 5px 视为拖拽平移
-    };
-    const onCancel = () => { drag.down = false; };
-    const onUp = (e: PointerEvent) => {
-      if (e.button !== 2 || !drag.down) return;
-      drag.down = false;
-      if (drag.moved && interactionModeRef.current === 'default') return; // 默认交互：右键拖拽平移 → 不弹菜单；传统交互：右键不平移，始终弹菜单
-
-      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-      if (!el) return;
-
-      const nodeEl = el.closest('.react-flow__node');
-      if (nodeEl) {
-        const id = nodeEl.getAttribute('data-id');
-        if (!id) return;
-        shouldPreventNativeMenu.current = true; // 弹出自定义菜单 → 阻止原生菜单
-        const syn = {
-          preventDefault() {}, stopPropagation() {},
-          clientX: e.clientX, clientY: e.clientY, target: el,
-        } as unknown as React.MouseEvent;
-        openNodeCtxMenu(syn, { id } as RFNode<BaseNodeData>);
-        return;
-      }
-
-      const paneEl = el.closest('.react-flow__pane');
-      if (paneEl) {
-        shouldPreventNativeMenu.current = true; // 弹出自定义菜单 → 阻止原生菜单
-        const syn = {
-          preventDefault() {},
-          clientX: e.clientX, clientY: e.clientY, target: paneEl,
-        } as unknown as React.MouseEvent;
-        openCtxMenu(syn);
-      }
-    };
-    // 全局 contextmenu 监听：若自定义菜单将要弹出，则阻止浏览器原生右键菜单
-    const onContextMenu = (e: MouseEvent) => {
-      if (shouldPreventNativeMenu.current) {
-        e.preventDefault();
-        shouldPreventNativeMenu.current = false;
-      }
-    };
-    document.addEventListener('pointerdown', onDown, true);
-    document.addEventListener('pointermove', onMove, true);
-    document.addEventListener('pointerup', onUp, true);
-    document.addEventListener('pointercancel', onCancel, true);
-    document.addEventListener('contextmenu', onContextMenu, true);
-    return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      document.removeEventListener('pointermove', onMove, true);
-      document.removeEventListener('pointerup', onUp, true);
-      document.removeEventListener('pointercancel', onCancel, true);
-      document.removeEventListener('contextmenu', onContextMenu, true);
-    };
-  }, [openCtxMenu, openNodeCtxMenu]);
+  useCanvasSecondaryClickMenu({
+    interactionModeRef,
+    openNodeMenu: openNodeCtxMenu,
+    openCanvasMenu: openCtxMenu,
+  });
 
   // ── External clipboard paste (native paste event → DataTransfer) ──
   useEffect(() => {

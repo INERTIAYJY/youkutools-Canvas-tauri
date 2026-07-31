@@ -27,7 +27,6 @@ import { saveDataUrlToProjectData, buildNodeFileName } from '../../services/file
 import { copyImage as copyImageToClipboard } from '../../services/clipboardService';
 import { blobToDataUrl } from '../../store/store.utils';
 import { generateOutpaintImage } from '../../services/apimartService';
-import { imageUpscale, subjectMatting, checkModelExists, downloadModel } from '../../services/onnxService';
 import { executeGeneration } from '../../services/generationService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { createPresetNode } from './shared/toolbar/presetAction';
@@ -43,7 +42,7 @@ import {
   registerCanvasDerivation,
   type CanvasDerivationGuard,
 } from '../../services/canvasDerivationGuard';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { useImageNodeOnnxActions } from './shared/image/useImageNodeOnnxActions';
 
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
@@ -720,102 +719,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     setFullscreenOrigin(undefined);
   }, []);
 
-  /* ════════════════════════════════════════════
-     Upscale — ONNX + DirectML 超分
-     ════════════════════════════════════════════ */
-  const [isUpscaling, setIsUpscaling] = useState(false);
-  const [upscaleProgress, setUpscaleProgress] = useState(0);
-  const [downloadPrompt, setDownloadPrompt] = useState(false);
-  const [isDownloadingModel, setIsDownloadingModel] = useState(false);
-  const modelName = 'realesrgan-x4.onnx';
-
-  /** 执行实际的超分推理 */
-  const doUpscale = useCallback(async (filePath: string) => {
-    setIsUpscaling(true);
-    setUpscaleProgress(0);
-    updateNodeDataTransient(id, { status: 'loading', output: 'ONNX 超分处理中...' });
-
-    // 监听后端分块进度，仅响应本次任务（taskId 隔离多节点并发超分）
-    const taskId = `upscale-${id}-${Date.now()}`;
-    const { listen } = await import('@tauri-apps/api/event');
-    const unlisten = await listen<{ taskId: string; percent: number }>(
-      'image-upscale-progress',
-      (e) => {
-        if (e.payload.taskId === taskId) setUpscaleProgress(e.payload.percent);
-      },
-    );
-
-    try {
-      const ext = filePath.split('.').pop() || 'png';
-      const baseName = filePath.replace(/\.[^.]+$/, '');
-      const outputPath = `${baseName}_upscaled.${ext}`;
-
-      const result = await imageUpscale(filePath, outputPath, modelName, taskId);
-
-      const assetUrl = convertFileSrc(result.output_path);
-
-      const store = useAppStore.getState();
-      const currentNodes = store.nodes;
-      const currentPos = currentNodes.find((n) => n.id === id)?.position || { x: 0, y: 0 };
-
-      const dims = await computeImageNodeDimensions(assetUrl);
-      const newNode: Node<BaseNodeData> = {
-        id: `node-${generateId()}`,
-        type: 'ai-image',
-        position: { x: currentPos.x + nodeWidth + 40, y: currentPos.y },
-        data: {
-          label: `${(data.label as string) || '图像'} 高清`,
-          type: 'ai-image',
-          role: 'source',
-          imageUrl: assetUrl,
-          filePath: result.output_path,
-          status: 'success',
-          imageWidth: dims.imageWidth,
-          imageHeight: dims.imageHeight,
-          nodeWidth: dims.nodeWidth,
-          nodeHeight: dims.nodeHeight,
-        } as BaseNodeData,
-      };
-      store.addNode(newNode);
-      store.commitToHistory();
-
-      updateNodeDataTransient(id, { status: 'success' });
-      store.showToast(`超分完成 ${result.input_size} → ${result.output_size}`);
-    } catch (err: unknown) {
-      // Tauri 2 invoke reject 抛出的是字符串或 { message } 对象，非标准 Error
-      const message =
-        typeof err === 'string' ? err
-        : err instanceof Error ? err.message
-        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
-        : 'ONNX 超分失败';
-      updateNodeDataTransient(id, { status: 'error', error: message });
-      useAppStore.getState().showToast(message, 'error');
-    } finally {
-      unlisten();
-      setIsUpscaling(false);
-      setUpscaleProgress(0);
-    }
-  }, [id, data.label, nodeWidth, modelName, updateNodeDataTransient]);
-
-  /** 检查模型可用性 → 若缺失则弹出下载确认 */
-  const handleUpscale = useCallback(async () => {
-    const filePath = data.filePath as string | undefined;
-    if (!filePath) {
-      useAppStore.getState().showToast('该图片没有本地文件，无法超分', 'error');
-      return;
-    }
-
-    // 检查模型是否存在
-    const modelExists = await checkModelExists(modelName);
-    if (!modelExists) {
-      setDownloadPrompt(true);
-      return;
-    }
-
-    // 模型已就绪 → 直接执行超分
-    await doUpscale(filePath);
-  }, [data.filePath, doUpscale, modelName]);
-
   /** 重绘 — 打开 PromptPanel 对话框 */
   const handleRepaint = useCallback(() => {
     const el = document.querySelector(`.react-flow__node[data-id="${id}"]`);
@@ -839,143 +742,26 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     store.showToast(ok ? '已复制图像到剪贴板' : '复制失败', ok ? undefined : 'error');
   }, [data.imageUrl, data.thumbnailUrl]);
 
-  /** 确认下载模型 */
-  const handleDownloadConfirm = useCallback(async () => {
-    setDownloadPrompt(false);
-    setIsDownloadingModel(true);
-    try {
-      await downloadModel(modelName);
-      useAppStore.getState().showToast('模型下载完成，开始超分...', 'success');
-    } catch (err: unknown) {
-      // Tauri 2 invoke reject 抛出的是字符串或 { message } 对象，非标准 Error
-      const message =
-        typeof err === 'string' ? err
-        : err instanceof Error ? err.message
-        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
-        : '模型下载失败';
-      useAppStore.getState().showToast(message, 'error');
-      setIsDownloadingModel(false);
-      return;
-    }
-    setIsDownloadingModel(false);
-
-    // 下载完成 → 继续执行超分
-    const filePath = data.filePath as string;
-    await doUpscale(filePath);
-  }, [data.filePath, doUpscale, modelName]);
-
-  /** 取消下载 */
-  const handleDownloadCancel = useCallback(() => {
-    setDownloadPrompt(false);
-    setIsDownloadingModel(false);
-  }, []);
-
-
-  /* ════════════════════════════════════════════
-     Subject Matting — ONNX RMBG-1.4 主体识别
-     ════════════════════════════════════════════ */
-  const mattingModelName = 'rmbg-1.4.onnx';
-  const [isMattingRunning, setIsMattingRunning] = useState(false);
-  const [mattingDownloadPrompt, setMattingDownloadPrompt] = useState(false);
-  const [isDownloadingMattingModel, setIsDownloadingMattingModel] = useState(false);
-
-  const doSubjectMatting = useCallback(async (filePath: string) => {
-    setIsMattingRunning(true);
-    updateNodeDataTransient(id, { status: 'loading', output: 'AI 识别主体中...' });
-
-    const taskId = `matting-${id}-${Date.now()}`;
-
-    try {
-      // 主体图含透明通道(RGBA)，JPEG 不支持，强制 PNG
-      const baseName = filePath.replace(/\.[^.]+$/, '');
-      const outputPath = `${baseName}_subject.png`;
-
-      const result = await subjectMatting(filePath, outputPath, mattingModelName, taskId);
-
-      const assetUrl = convertFileSrc(result.subject_path);
-
-      const store = useAppStore.getState();
-      const currentNodes = store.nodes;
-      const currentPos = currentNodes.find((n) => n.id === id)?.position || { x: 0, y: 0 };
-
-      const dims = await computeImageNodeDimensions(assetUrl);
-      const newNode: Node<BaseNodeData> = {
-        id: `node-${generateId()}`,
-        type: 'ai-image',
-        position: { x: currentPos.x + nodeWidth + 40, y: currentPos.y },
-        data: {
-          label: `${(data.label as string) || '图像'} 主体`,
-          type: 'ai-image',
-          role: 'source',
-          imageUrl: assetUrl,
-          filePath: result.subject_path,
-          status: 'success',
-          imageWidth: dims.imageWidth,
-          imageHeight: dims.imageHeight,
-          nodeWidth: dims.nodeWidth,
-          nodeHeight: dims.nodeHeight,
-        } as BaseNodeData,
-      };
-      store.addNode(newNode);
-      store.commitToHistory();
-
-      updateNodeDataTransient(id, { status: 'success' });
-      store.showToast(`主体识别完成，已创建新节点 (${result.input_size})`);
-    } catch (err: unknown) {
-      const message =
-        typeof err === 'string' ? err
-        : err instanceof Error ? err.message
-        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
-        : '主体识别失败';
-      updateNodeDataTransient(id, { status: 'error', error: message });
-      useAppStore.getState().showToast(message, 'error');
-    } finally {
-      setIsMattingRunning(false);
-    }
-  }, [id, data.label, nodeWidth, mattingModelName, updateNodeDataTransient]);
-
-  const handleSubjectMatting = useCallback(async () => {
-    const filePath = data.filePath as string | undefined;
-    if (!filePath) {
-      useAppStore.getState().showToast('该图片没有本地文件，无法识别主体', 'error');
-      return;
-    }
-
-    const modelExists = await checkModelExists(mattingModelName);
-    if (!modelExists) {
-      setMattingDownloadPrompt(true);
-      return;
-    }
-
-    await doSubjectMatting(filePath);
-  }, [data.filePath, doSubjectMatting, mattingModelName]);
-
-  const handleMattingDownloadConfirm = useCallback(async () => {
-    setMattingDownloadPrompt(false);
-    setIsDownloadingMattingModel(true);
-    try {
-      await downloadModel(mattingModelName);
-      useAppStore.getState().showToast('模型下载完成，开始识别主体...', 'success');
-    } catch (err: unknown) {
-      const message =
-        typeof err === 'string' ? err
-        : err instanceof Error ? err.message
-        : (err && typeof err === 'object' && 'message' in err) ? String((err as Record<string, unknown>).message)
-        : '模型下载失败';
-      useAppStore.getState().showToast(message, 'error');
-      setIsDownloadingMattingModel(false);
-      return;
-    }
-    setIsDownloadingMattingModel(false);
-
-    const filePath = data.filePath as string;
-    await doSubjectMatting(filePath);
-  }, [data.filePath, doSubjectMatting, mattingModelName]);
-
-  const handleMattingDownloadCancel = useCallback(() => {
-    setMattingDownloadPrompt(false);
-    setIsDownloadingMattingModel(false);
-  }, []);
+  const {
+    isUpscaling,
+    upscaleProgress,
+    downloadPrompt,
+    isDownloadingModel,
+    handleUpscale,
+    handleDownloadConfirm,
+    handleDownloadCancel,
+    isMattingRunning,
+    mattingDownloadPrompt,
+    isDownloadingMattingModel,
+    handleSubjectMatting,
+    handleMattingDownloadConfirm,
+    handleMattingDownloadCancel,
+  } = useImageNodeOnnxActions({
+    id,
+    data,
+    nodeWidth,
+    updateNodeDataTransient,
+  });
 
 
   const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴图像');

@@ -12,7 +12,8 @@ import { useAppStore } from '../store/useAppStore';
 import { downloadUrlAndSave } from './fileService';
 import { applyImageBatchResults } from './imageBatchService';
 import { mapImageDimensions } from './aiDimensions';
-import { splitCommaSeparatedUrls } from './ai/helpers';
+import { parseMultiPathResponse, splitCommaSeparatedUrls } from './ai/helpers';
+import { buildComfyFileUrl, type ComfyOutputs } from './comfyOutputs';
 import { pollResolvedModelProtocol } from './ai/modelProtocol';
 import {
   extractFlowMusicLyrics,
@@ -645,29 +646,6 @@ async function resumeDreamina(task: PendingTask): Promise<void> {
 
 /* ── ComfyUI ── */
 
-interface ComfyOutputFile {
-  filename: string;
-  subfolder?: string;
-  type?: string;
-}
-interface ComfyOutputNode {
-  images?: ComfyOutputFile[];
-  videos?: ComfyOutputFile[];
-  gifs?: ComfyOutputFile[];
-  audios?: ComfyOutputFile[];
-}
-type ComfyOutputs = Record<string, ComfyOutputNode>;
-
-function buildComfyFileUrl(baseUrl: string, file: ComfyOutputFile): string {
-  const subfolder = file.subfolder
-    ? `&subfolder=${encodeURIComponent(file.subfolder)}`
-    : '';
-  const type = file.type
-    ? `&type=${encodeURIComponent(file.type)}`
-    : '&type=output';
-  return `${baseUrl}/view?filename=${encodeURIComponent(file.filename)}${subfolder}${type}`;
-}
-
 async function resumeComfyUI(task: PendingTask): Promise<void> {
   const { nodeId, taskId, baseUrl, nodeType } = task;
   if (!baseUrl) {
@@ -735,26 +713,6 @@ async function resumeComfyUI(task: PendingTask): Promise<void> {
 }
 
 /* ── 通用异步 ── */
-
-function parseMultiPathResponse(
-  json: Record<string, unknown>,
-  primaryField: string,
-  fallbackFields: string[] = ['images'],
-): string | undefined {
-  const primary = json[primaryField] as Array<{ url?: string | string[] }> | undefined;
-  if (primary?.[0]?.url) {
-    const u = primary[0].url;
-    return Array.isArray(u) ? u[0] : u;
-  }
-  for (const field of fallbackFields) {
-    const arr = json[field] as Array<{ url?: string | string[] }> | undefined;
-    if (arr?.[0]?.url) {
-      const u = arr[0].url;
-      return Array.isArray(u) ? u[0] : u;
-    }
-  }
-  return undefined;
-}
 
 async function resumeGeneral(task: PendingTask): Promise<void> {
   const { nodeId, taskId, nodeType } = task;

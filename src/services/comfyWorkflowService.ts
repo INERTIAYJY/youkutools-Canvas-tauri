@@ -11,6 +11,7 @@ import { resolveNodeReferences } from './nodeReferenceService';
 import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
 import { corsSafeFetch } from './ai/httpTransport';
+import { buildComfyFileUrl, type ComfyOutputs } from './comfyOutputs';
 
 // ── 跨域安全的 fetch 包装 ──
 
@@ -480,22 +481,6 @@ async function promptComfyUIWorkflow(
   return promptResult.prompt_id;
 }
 
-/* ── ComfyUI 输出文件类型 ── */
-interface ComfyOutputFile {
-  filename: string;
-  subfolder?: string;
-  type?: string;
-}
-
-interface ComfyOutputNode {
-  images?: ComfyOutputFile[];
-  videos?: ComfyOutputFile[];
-  gifs?: ComfyOutputFile[];
-  audios?: ComfyOutputFile[];
-}
-
-type ComfyOutputs = Record<string, ComfyOutputNode>;
-
 interface ComfyHistoryEntry {
   outputs?: ComfyOutputs;
   status?: {
@@ -518,13 +503,6 @@ function readComfyFailureMessage(entry: ComfyHistoryEntry): string | null {
     return 'ComfyUI 执行失败';
   }
   return null;
-}
-
-/** 构造 ComfyUI 文件访问 URL */
-function buildComfyFileUrl(baseUrl: string, file: ComfyOutputFile): string {
-  const subfolder = file.subfolder ? `&subfolder=${encodeURIComponent(file.subfolder)}` : '';
-  const type = file.type ? `&type=${encodeURIComponent(file.type)}` : '&type=output';
-  return `${baseUrl}/view?filename=${encodeURIComponent(file.filename)}${subfolder}${type}`;
 }
 
 /**

@@ -252,6 +252,12 @@
   user-select: none;
 }
 
+/* React Flow 节点外壳不参与命中后，只让笔记的实际可见区域接收交互。 */
+.canvas-note-node--text,
+.canvas-note-node--image {
+  pointer-events: auto;
+}
+
 .canvas-note-node::after {
   position: absolute;
   z-index: 4;

@@ -464,16 +464,16 @@ function CanvasInner() {
   }, [activeDrawingTool, canvasNoteToolbarVisible, chooseDrawingTool]);
 
   const drawingActive = activeDrawingTool !== 'select';
-  const drawingInteraction = useMemo(() => drawingActive
-    ? {
-        ...interaction,
-        panOnDrag: false,
-        selectionOnDrag: false,
-        nodesDraggable: false,
-        elementsSelectable: false,
-      }
-    : interaction,
-  [drawingActive, interaction]);
+  const drawingInteraction = useMemo(() => ({
+    ...interaction,
+    ...(drawingActive ? {
+      panOnDrag: false,
+      selectionOnDrag: false,
+    } : {}),
+    // React Flow 会忽略变回 undefined 的受控属性，因此结束绘图时必须显式恢复。
+    nodesDraggable: !drawingActive,
+    elementsSelectable: !drawingActive,
+  }), [drawingActive, interaction]);
 
   // ── UI toggles (persisted to localStorage) ──
   const [showGrid, setShowGrid] = useState(() => localStorage.getItem('canvas-showGrid') !== 'false');
@@ -831,10 +831,19 @@ function CanvasInner() {
     () => filterCharacterLibraryCanvasElements(nodes, edges),
     [edges, nodes],
   );
-  const renderedCanvasNodes = useMemo(
-    () => draftNode ? [...renderableGraph.nodes, draftNode] : renderableGraph.nodes,
-    [draftNode, renderableGraph.nodes],
-  );
+  const renderedCanvasNodes = useMemo(() => {
+    const graphNodes = draftNode ? [...renderableGraph.nodes, draftNode] : renderableGraph.nodes;
+    return graphNodes.map((node) => node.type === 'canvas-note'
+      ? {
+          ...node,
+          style: {
+            ...node.style,
+            // 笔记的透明外接矩形不能遮挡下方节点；可见内容在 canvas-drawing.css 中恢复命中。
+            pointerEvents: 'none' as const,
+          },
+        }
+      : node);
+  }, [draftNode, renderableGraph.nodes]);
 
   // 仅派生渲染状态，不把隐藏和节点选中效果写回可持久化的边数据。
   const renderedEdges = useMemo(() => {

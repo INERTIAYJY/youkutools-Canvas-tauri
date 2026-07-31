@@ -524,6 +524,9 @@ function CanvasInner() {
     handleDuplicate,
     handleToggleLock,
     isNodeLocked,
+    handleConvertImage,
+    showImageConversion,
+    imageConversionLabel,
     handleUngroup,
     handleDelete,
     handleShowInFolder,
@@ -1264,6 +1267,8 @@ function CanvasInner() {
         onDuplicate={handleDuplicate}
         onToggleLock={handleToggleLock}
         isLocked={isNodeLocked}
+        onConvertImage={showImageConversion ? handleConvertImage : undefined}
+        imageConversionLabel={imageConversionLabel}
         onAddToCharacter={showAddToCharacter ? handleAddToCharacter : undefined}
         onUngroup={isGroupNode ? handleUngroup : undefined}
         onDelete={handleDelete}

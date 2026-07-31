@@ -385,6 +385,75 @@ describe('batch canvas history', () => {
     expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['ai-a', 'note-a', 'ai-b']);
   });
 
+  it('converts image nodes and image notes in place with undo support', async () => {
+    useAppStore.setState({
+      nodes: [{
+        ...node('image-a', {
+          type: 'ai-image',
+          role: 'source',
+          imageUrl: 'asset://image-a.png',
+          filePath: '/project/image-a.png',
+          nodeWidth: 360,
+          nodeHeight: 240,
+        }),
+        type: 'ai-image',
+        position: { x: 30, y: 40 },
+        draggable: false,
+      }],
+      history: [],
+      historyIndex: -1,
+    });
+
+    expect(useAppStore.getState().convertImageNodeKind('image-a')).toBe('to-note');
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      id: 'image-a',
+      type: 'canvas-note',
+      position: { x: 30, y: 40 },
+      draggable: false,
+      data: {
+        type: 'canvas-note',
+        imageUrl: 'asset://image-a.png',
+        filePath: '/project/image-a.png',
+        note: { kind: 'image', width: 360, height: 240 },
+      },
+    });
+
+    expect(useAppStore.getState().convertImageNodeKind('image-a')).toBe('to-node');
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      type: 'ai-image',
+      data: {
+        type: 'ai-image',
+        role: 'source',
+        imageUrl: 'asset://image-a.png',
+        nodeWidth: 360,
+        nodeHeight: 240,
+      },
+    });
+    expect(useAppStore.getState().nodes[0].data.note).toBeUndefined();
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      type: 'canvas-note',
+      data: { note: { kind: 'image', width: 360, height: 240 } },
+    });
+  });
+
+  it('does not convert a connected image node or create history', () => {
+    useAppStore.setState({
+      nodes: [
+        { ...node('image-a', { type: 'ai-image', imageUrl: 'asset://image-a.png' }), type: 'ai-image' },
+        node('target'),
+      ],
+      edges: [{ id: 'edge-a', source: 'image-a', target: 'target' }],
+      history: [],
+      historyIndex: -1,
+    });
+
+    expect(useAppStore.getState().convertImageNodeKind('image-a')).toBe('connected');
+    expect(useAppStore.getState().nodes[0].type).toBe('ai-image');
+    expect(useAppStore.getState().history).toEqual([]);
+  });
+
   it('undoes and redoes character-library node hiding with its association', async () => {
     useAppStore.setState({
       nodes: [node('character-image', { type: 'ai-image', imageUrl: 'asset://character.png' })],

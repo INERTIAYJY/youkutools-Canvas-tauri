@@ -21,6 +21,7 @@ import type {
   NodeGroup,
   StoryboardCellOverride,
 } from '../types';
+import { createCanvasNoteData } from '../types';
 import type { MediaGenerationIntent, MediaGenerationResult } from '../types/media';
 import { generateId, getNextDisplayId } from './store.utils';
 import { BATCH_NODE_LIMIT } from './store.chat';
@@ -177,6 +178,7 @@ export interface NodeSlice {
   /** 在原位复制一个节点，并让拖出的副本继承入口边——用于 Ctrl 拖拽复制。 */
   duplicateNode: (nodeId: string) => void;
   duplicateCanvasNote: (nodeId: string) => string | null;
+  convertImageNodeKind: (nodeId: string) => 'to-note' | 'to-node' | 'connected' | null;
   updateCanvasNote: (nodeId: string, patch: CanvasNotePatch) => boolean;
   updateCanvasNoteTransient: (nodeId: string, patch: CanvasNotePatch) => boolean;
   moveCanvasNoteLayer: (nodeId: string, direction: CanvasNoteLayerDirection) => boolean;
@@ -623,6 +625,62 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       selectedNodeIds: [cloneId],
     }));
     return cloneId;
+  },
+
+  convertImageNodeKind: (nodeId) => {
+    const state = get();
+    const source = state.nodes.find((node) => node.id === nodeId);
+    if (!source) return null;
+
+    const isImageNode = source.type === 'ai-image' || source.type === 'source-image';
+    const isImageNote = source.type === 'canvas-note' && source.data.note?.kind === 'image';
+    const imageUrl = source.data.imageUrl || source.data.thumbnailUrl;
+    if ((!isImageNode && !isImageNote) || !imageUrl) return null;
+
+    if (isImageNode && state.edges.some((edge) => edge.source === nodeId || edge.target === nodeId)) {
+      return 'connected';
+    }
+
+    state.commitToHistory();
+    set((current) => ({
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+
+        if (isImageNode) {
+          const width = node.data.nodeWidth ?? node.data.imageWidth ?? 320;
+          const height = node.data.nodeHeight ?? node.data.imageHeight ?? 220;
+          const note = createCanvasNoteData('image', { width, height });
+          return {
+            ...node,
+            type: 'canvas-note',
+            data: {
+              ...node.data,
+              type: 'canvas-note',
+              imageUrl,
+              note,
+              nodeWidth: width,
+              nodeHeight: height,
+            },
+          } as Node<BaseNodeData>;
+        }
+
+        const { note, ...data } = node.data;
+        return {
+          ...node,
+          type: 'ai-image',
+          data: {
+            ...data,
+            type: 'ai-image',
+            role: data.role === 'generator' ? 'generator' : 'source',
+            status: data.status ?? 'success',
+            imageUrl,
+            nodeWidth: note?.width ?? data.nodeWidth,
+            nodeHeight: note?.height ?? data.nodeHeight,
+          },
+        } as Node<BaseNodeData>;
+      }),
+    }));
+    return isImageNode ? 'to-note' : 'to-node';
   },
 
   updateCanvasNote: (nodeId, patch) => {

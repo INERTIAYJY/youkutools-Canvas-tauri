@@ -31,6 +31,7 @@ export function useNodeContextMenu() {
   const ungroupSelectedNodes = useAppStore((s) => s.ungroupSelectedNodes);
   const setSelectedNodeIds = useAppStore((s) => s.setSelectedNodeIds);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
+  const convertImageNodeKind = useAppStore((s) => s.convertImageNodeKind);
 
   const [menu, setMenu] = useState<NodeContextMenuState>({
     visible: false,
@@ -162,6 +163,24 @@ export function useNodeContextMenu() {
   const nodeData = currentNode?.data as BaseNodeData | undefined;
   const isNodeLocked = currentNode?.draggable === false;
   const showAddToCharacter = isEligibleCharacterReferenceNode(currentNode);
+  const isImageNote = nodeType === 'canvas-note' && nodeData?.note?.kind === 'image';
+  const isImageNode = nodeType === 'ai-image' || nodeType === 'source-image';
+  const showImageConversion = (isImageNote || isImageNode)
+    && !!(nodeData?.imageUrl || nodeData?.thumbnailUrl);
+  const imageConversionLabel = isImageNote ? '转换为图片节点' : '转换为图片笔记';
+
+  const handleConvertImage = useCallback(() => {
+    if (!menu.nodeId) return;
+    const result = convertImageNodeKind(menu.nodeId);
+    closeMenu();
+    const store = useAppStore.getState();
+    if (result === 'connected') {
+      store.showToast('该图片节点存在连线，请先断开连线', 'error');
+      return;
+    }
+    if (result === 'to-note') store.showToast('已转换为图片笔记');
+    if (result === 'to-node') store.showToast('已转换为图片节点');
+  }, [closeMenu, convertImageNodeKind, menu.nodeId]);
 
   const handleToggleLock = useCallback(() => {
     if (!menu.nodeId) return;
@@ -374,6 +393,9 @@ export function useNodeContextMenu() {
     handleDuplicate,
     handleToggleLock,
     isNodeLocked,
+    handleConvertImage,
+    showImageConversion,
+    imageConversionLabel,
     handleUngroup,
     handleDelete,
     handleShowInFolder,

@@ -10,6 +10,7 @@ const MENU_ITEMS = [
   { label: '剪切', shortcut: 'Ctrl X', action: 'cut' as const },
   { label: '创建副本', shortcut: 'Ctrl D', action: 'duplicate' as const },
   { label: '锁定', shortcut: '', action: 'toggleLock' as const, dynamicLockLabel: true },
+  { label: '转换图片', shortcut: '', action: 'convertImage' as const, conditional: true, dynamicLabel: true },
   { label: '解除分组', shortcut: '', action: 'ungroup' as const, groupOnly: true },
   { label: '添加到角色库…', shortcut: '', action: 'addToCharacter' as const, conditional: true },
   { label: '复制媒体', shortcut: '', action: 'copyMedia' as const, conditional: true, dynamicLabel: true },
@@ -22,7 +23,7 @@ const MENU_ITEMS = [
 ];
 
 const MENU_W = 176;
-const MENU_H = 422; // 图像节点最多 11 items + 1 sep
+const MENU_H = 456; // 图像节点最多 12 items + 1 sep
 const TEXT_SELECTION_MENU_EXTRA_H = 78; // 2 text-selection items + separator
 
 interface NodeContextMenuProps {
@@ -37,6 +38,8 @@ interface NodeContextMenuProps {
   onDuplicate: () => void;
   onToggleLock: () => void;
   isLocked: boolean;
+  onConvertImage?: () => void;
+  imageConversionLabel?: string;
   onAddToCharacter?: () => void;
   onUngroup?: () => void;
   onDelete: () => void;
@@ -60,6 +63,8 @@ export function NodeContextMenu({
   onDuplicate,
   onToggleLock,
   isLocked,
+  onConvertImage,
+  imageConversionLabel,
   onAddToCharacter,
   onUngroup,
   onDelete,
@@ -85,6 +90,7 @@ export function NodeContextMenu({
     cut: onCut,
     duplicate: onDuplicate,
     toggleLock: onToggleLock,
+    convertImage: onConvertImage || (() => {}),
     addToCharacter: onAddToCharacter || (() => {}),
     delete: onDelete,
     showInFolder: onShowInFolder || (() => {}),
@@ -104,6 +110,7 @@ export function NodeContextMenu({
     if (item.conditional && item.action === 'openInPremiere' && !onOpenInPremiere) return false;
     if (item.conditional && item.action === 'copyMedia' && !onCopyMedia) return false;
     if (item.conditional && item.action === 'addToCharacter' && !onAddToCharacter) return false;
+    if (item.conditional && item.action === 'convertImage' && !onConvertImage) return false;
     return true;
   });
 
@@ -138,6 +145,8 @@ export function NodeContextMenu({
                 ? (isLocked ? '解锁' : '锁定')
                 : item.dynamicLabel && item.action === 'copyMedia'
                   ? (copyMediaLabel || item.label)
+                  : item.dynamicLabel && item.action === 'convertImage'
+                    ? (imageConversionLabel || item.label)
                   : item.label}
             </span>
             <span className="menu-kbd">{item.shortcut}</span>

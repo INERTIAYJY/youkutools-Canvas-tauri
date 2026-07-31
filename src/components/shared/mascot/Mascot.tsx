@@ -4,6 +4,10 @@
  * 一个带短绒毛的柔和圆球，会自然眨眼，眼睛跟随鼠标方向，
  * 鼠标悬浮在球体上时整体高亮。
  *
+ * 待机时有小动作：光标静止一会儿后自主张望、偶尔歪头、偶尔二连眨或眨单眼，
+ * 呼吸浮动上叠了一层轻微的挤压拉伸。
+ * 状态切换时给一次肢体反应：成功蹦一下，失败摇头，思考时轻微歪头。
+ *
  * 请求模型时（loading=true）球体本体逐面炸裂、飞散成粒子云；
  * 完成后再平滑还原为圆球。
  *
@@ -15,6 +19,13 @@
 import { useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { createLoadingText, type LoadingText } from './loadingText';
+import {
+  REACTION_DURATIONS,
+  getReactionPose,
+  getSquashWidth,
+  pickNextGazeIndex,
+  type MascotReactionKind,
+} from './mascotMotion';
 import {
   Scene,
   PerspectiveCamera,
@@ -83,6 +94,33 @@ const THINKING_GAZE_POINTS = [
   [-0.16, 0.34],
   [0.04, 0.1],
 ] as const;
+
+/* ── 待机小动作 ── */
+// 光标静止这么久之后，视线从「跟随」切成「自主张望」。比思考态放得更宽，
+// 免得用户只是停下来看画布就被吉祥物移开视线。
+const IDLE_GAZE_DELAY_MS = 2600;
+const IDLE_GAZE_MIN_INTERVAL = 1.8;
+const IDLE_GAZE_MAX_INTERVAL = 3.4;
+const IDLE_GAZE_LERP = 0.06;
+// 待机张望比思考时看得更远，视线幅度也更大
+const IDLE_GAZE_POINTS = [
+  [-0.62, 0.12],
+  [0.58, 0.2],
+  [0.3, -0.3],
+  [-0.4, -0.22],
+  [0.1, 0.42],
+  [-0.12, -0.36],
+] as const;
+const IDLE_TILT_MIN_INTERVAL = 6;
+const IDLE_TILT_MAX_INTERVAL = 11;
+const IDLE_TILT_HOLD = 1.3; // 单次歪头保持时长（秒）
+const IDLE_TILT_ANGLE = 0.09;
+const THINKING_TILT_ANGLE = 0.05;
+const HEAD_ROLL_LERP = 0.05;
+const BREATH_SQUASH = 0.012;
+const DOUBLE_BLINK_CHANCE = 0.18;
+const DOUBLE_BLINK_GAP = 0.22; // 二连眨的两下之间的间隔（秒）
+const WINK_CHANCE = 0.12;
 
 type MascotTheme = 'dark' | 'light';
 export type MascotStatus = 'idle' | 'thinking' | 'success' | 'error';
@@ -486,12 +524,14 @@ export default function Mascot({
      * look 为相对吉祥物中心的方向 [-1,1]，以半个窗口尺寸为参考归一化。 */
     const look = new Vector2(0, 0); // 全局视线方向（目标）
     const localPointer = new Vector2(0, 0); // 画布内 NDC，仅用于悬浮检测
-    const thinkingLook = new Vector2(0, 0);
-    const thinkingLookTarget = new Vector2(0, 0);
+    // 自主张望：思考态与待机态共用一套落点调度，只是落点集合与节奏不同
+    const wanderLook = new Vector2(0, 0);
+    const wanderLookTarget = new Vector2(0, 0);
     let hovering = false;
     let lastPointerMoveAt = 0;
-    let nextThinkingGazeAt = 0;
-    let thinkingGazeIndex = -1;
+    let nextWanderAt = 0;
+    let wanderIndex = -1;
+    let wanderEngaged = false;
     let previousVisualStatus = statusRef.current;
 
     const raycaster = new Raycaster();
@@ -541,10 +581,37 @@ export default function Mascot({
     let blink = 1; // 1 = 睁开, 0 = 闭合
     let nextBlinkAt = BLINK_MIN;
     let blinkStart = -1;
+    let blinkEye = -1; // -1 = 双眼，0/1 = 只眨这一只（眨单眼）
+    let pendingBlinks = 0; // 待补的连眨次数
+    let blinkIsFollowUp = false;
+
+    const startBlink = (now: number) => {
+      blinkStart = now;
+      // 连眨的第二下必须双眼，单眨眼连着来会显得抽搐
+      blinkEye = !blinkIsFollowUp && Math.random() < WINK_CHANCE
+        ? (Math.random() < 0.5 ? 0 : 1)
+        : -1;
+    };
 
     const scheduleBlink = (now: number) => {
+      if (pendingBlinks > 0) {
+        pendingBlinks -= 1;
+        blinkIsFollowUp = true;
+        nextBlinkAt = now + DOUBLE_BLINK_GAP;
+        return;
+      }
+      blinkIsFollowUp = false;
+      pendingBlinks = Math.random() < DOUBLE_BLINK_CHANCE ? 1 : 0;
       nextBlinkAt = now + BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN);
     };
+
+    /* ── 歪头与状态转场反应 ── */
+    let headRoll = 0;
+    let idleTiltTarget = 0;
+    let idleTiltUntil = 0;
+    let nextIdleTiltAt = MathUtils.randFloat(IDLE_TILT_MIN_INTERVAL, IDLE_TILT_MAX_INTERVAL);
+    let reactionKind: MascotReactionKind | null = null;
+    let reactionStart = 0;
 
     /* ── LOADING 形态状态 ── */
     let loadText: LoadingText | null = null;
@@ -587,6 +654,8 @@ export default function Mascot({
         || isHovering
         || dragMotionActive
         || blinkStart >= 0
+        // 蹦跳/摇头比状态转场的 320ms 活跃窗口更长，不补这条后半段会掉回 30fps
+        || reactionKind !== null
         || loadObj.val > 0.002
         || now - lastPointerMoveAt < POINTER_ACTIVITY_MS
         || now - statusChangedAtRef.current < STATUS_TRANSITION_ACTIVE_MS
@@ -601,6 +670,8 @@ export default function Mascot({
       if (!motionEnabled) {
         dragForce.set(0, 0);
         dragForceVelocity.set(0, 0);
+        // 减弱动态中途开启时，正在进行的蹦跳/摇头要立即收掉，否则位移和旋转会卡住不回正
+        reactionKind = null;
       } else {
         const deltaSeconds = Math.min(elapsed / 1000, 1 / 30);
         const targetX = reportedDragForce?.active ? reportedDragForce.x : 0;
@@ -627,31 +698,45 @@ export default function Mascot({
       furUniforms.uDragForce.value.copy(dragForce);
 
       if (visualStatus !== previousVisualStatus) {
-        if (visualStatus === 'thinking') {
-          thinkingLook.set(0, 0);
-          thinkingLookTarget.set(0, 0);
-          thinkingGazeIndex = -1;
-          nextThinkingGazeAt = t;
+        wanderLook.set(0, 0);
+        wanderLookTarget.set(0, 0);
+        wanderIndex = -1;
+        nextWanderAt = t;
+        // 光靠眼型和颜色读不出成败，给一次一次性的肢体反应。
+        if (motionEnabled && visualStatus === 'success') {
+          reactionKind = 'hop';
+          reactionStart = t;
+        } else if (motionEnabled && visualStatus === 'error') {
+          reactionKind = 'shake';
+          reactionStart = t;
         }
         previousVisualStatus = visualStatus;
       }
 
-      if (motionEnabled && visualStatus === 'thinking') {
-        if (t >= nextThinkingGazeAt) {
-          let nextIndex = Math.floor(Math.random() * THINKING_GAZE_POINTS.length);
-          if (nextIndex === thinkingGazeIndex) {
-            nextIndex = (nextIndex + 1) % THINKING_GAZE_POINTS.length;
-          }
-          thinkingGazeIndex = nextIndex;
-          const [gazeX, gazeY] = THINKING_GAZE_POINTS[nextIndex];
-          thinkingLookTarget.set(gazeX, gazeY);
-          nextThinkingGazeAt = t + MathUtils.randFloat(
-            THINKING_GAZE_MIN_INTERVAL,
-            THINKING_GAZE_MAX_INTERVAL,
-          );
+      // 思考态与待机态都会在光标静止后自主张望，待机态等得更久、看得更远、节奏更慢。
+      const isThinking = visualStatus === 'thinking';
+      const canWander = motionEnabled && (visualStatus === 'idle' || isThinking);
+      const wanderDelay = isThinking ? THINKING_POINTER_PRIORITY_MS : IDLE_GAZE_DELAY_MS;
+      const wanderActive = canWander && now - lastPointerMoveAt >= wanderDelay;
+      if (wanderActive && !wanderEngaged) nextWanderAt = t; // 刚接管视线就换个新落点
+      wanderEngaged = wanderActive;
+      if (wanderActive) {
+        const gazePoints = isThinking ? THINKING_GAZE_POINTS : IDLE_GAZE_POINTS;
+        if (t >= nextWanderAt) {
+          wanderIndex = pickNextGazeIndex(wanderIndex, gazePoints.length, Math.random());
+          const [gazeX, gazeY] = gazePoints[wanderIndex];
+          wanderLookTarget.set(gazeX, gazeY);
+          nextWanderAt = t + (isThinking
+            ? MathUtils.randFloat(THINKING_GAZE_MIN_INTERVAL, THINKING_GAZE_MAX_INTERVAL)
+            : MathUtils.randFloat(IDLE_GAZE_MIN_INTERVAL, IDLE_GAZE_MAX_INTERVAL));
         }
-        thinkingLook.lerp(thinkingLookTarget, THINKING_GAZE_LERP);
+        wanderLook.lerp(wanderLookTarget, isThinking ? THINKING_GAZE_LERP : IDLE_GAZE_LERP);
       }
+
+      const reactionPose = reactionKind
+        ? getReactionPose(reactionKind, (t - reactionStart) / REACTION_DURATIONS[reactionKind])
+        : null;
+      if (reactionKind && t - reactionStart >= REACTION_DURATIONS[reactionKind]) reactionKind = null;
 
       const nextTheme = themeRef.current;
       if (nextTheme !== appliedTheme) {
@@ -670,11 +755,9 @@ export default function Mascot({
         rimLight.intensity = palette.rimLightIntensity;
       }
 
-      // 思考态在鼠标静止后进行低频微扫视；鼠标刚移动时仍优先跟随用户。
-      const allowGaze = visualStatus === 'idle' || visualStatus === 'thinking';
-      const useThinkingGaze = visualStatus === 'thinking'
-        && now - lastPointerMoveAt >= THINKING_POINTER_PRIORITY_MS;
-      const gazeTarget = useThinkingGaze ? thinkingLook : look;
+      // 鼠标刚移动时仍优先跟随用户，静止够久才交给自主张望。
+      const allowGaze = visualStatus === 'idle' || isThinking;
+      const gazeTarget = wanderActive ? wanderLook : look;
       const px = motionEnabled && allowGaze ? gazeTarget.x : 0;
       const py = motionEnabled && allowGaze ? gazeTarget.y : 0;
       const headPx = motionEnabled && visualStatus === 'idle' ? look.x : 0;
@@ -704,8 +787,27 @@ export default function Mascot({
         head.rotation.x = 0;
       }
 
-      // 轻微呼吸浮动
-      head.position.y = motionEnabled ? Math.sin(t * 1.1) * 0.04 : 0;
+      // 歪头：待机时每隔几秒歪一下再回正，思考时固定保持一个小角度。
+      let headRollTarget = 0;
+      if (motionEnabled && isThinking) {
+        headRollTarget = THINKING_TILT_ANGLE;
+      } else if (motionEnabled && visualStatus === 'idle') {
+        if (t >= nextIdleTiltAt) {
+          idleTiltTarget = (Math.random() < 0.5 ? -1 : 1)
+            * MathUtils.randFloat(IDLE_TILT_ANGLE * 0.5, IDLE_TILT_ANGLE);
+          idleTiltUntil = t + IDLE_TILT_HOLD;
+          nextIdleTiltAt = idleTiltUntil
+            + MathUtils.randFloat(IDLE_TILT_MIN_INTERVAL, IDLE_TILT_MAX_INTERVAL);
+        }
+        headRollTarget = t < idleTiltUntil ? idleTiltTarget : 0;
+      }
+      headRoll = motionEnabled ? MathUtils.lerp(headRoll, headRollTarget, HEAD_ROLL_LERP) : 0;
+      head.rotation.z = headRoll;
+
+      // 轻微呼吸浮动，叠加状态反应的竖直位移
+      head.position.y = motionEnabled
+        ? Math.sin(t * 1.1) * 0.04 + (reactionPose?.lift ?? 0)
+        : 0;
 
       // 状态表情期间暂停随机眨眼，避免与眼神姿态互相覆盖。
       const canBlink = motionEnabled && visualStatus === 'idle';
@@ -714,7 +816,7 @@ export default function Mascot({
         blinkStart = -1;
         nextBlinkAt = t + BLINK_MIN;
       } else if (blinkStart < 0 && t >= nextBlinkAt) {
-        blinkStart = t;
+        startBlink(t);
       }
       if (canBlink && blinkStart >= 0) {
         const k = (t - blinkStart) / BLINK_DURATION; // 0→1→2
@@ -729,7 +831,9 @@ export default function Mascot({
       const poseLerp = motionEnabled ? 0.18 : 1;
       for (let index = 0; index < eyes.length; index += 1) {
         const eye = eyes[index];
-        const targetScaleY = Math.max(blink * eyePose.scaleY[index], 0.06);
+        // 眨单眼时另一只保持睁开
+        const eyeBlink = blinkEye < 0 || blinkEye === index ? blink : 1;
+        const targetScaleY = Math.max(eyeBlink * eyePose.scaleY[index], 0.06);
         eye.scale.y = MathUtils.lerp(eye.scale.y, targetScaleY, poseLerp);
         eye.rotation.z = MathUtils.lerp(eye.rotation.z, eyePose.rotationZ[index], poseLerp);
         eye.position.y = MathUtils.lerp(eye.position.y, 0.04 + eyePose.offsetY[index], poseLerp);
@@ -810,14 +914,19 @@ export default function Mascot({
       const spinAngle = MathUtils.smoothstep(p, 0, SPIN_END) * SPIN_TURNS;
       const fade = MathUtils.smoothstep(p, FADE_START, 1);
 
-      // 头部：跟随偏航 + 过渡自转（自转靠眼睛体现，故转的是头部而非粒子球）
-      head.rotation.y = headYaw + spinAngle;
+      // 头部：跟随偏航 + 过渡自转（自转靠眼睛体现，故转的是头部而非粒子球）+ 摇头
+      head.rotation.y = headYaw + spinAngle + (reactionPose?.yaw ?? 0);
       sphereMat.opacity = activePalette.opacity * (1 - fade);
       furUniforms.uOpacity.value = 1 - fade;
       eyeMat.opacity = 1 - fade;
       shadowMat.opacity = activePalette.shadowOpacity * (1 - fade);
       head.visible = fade < 0.995;
-      head.scale.setScalar(hoverScale * (1 - fade * 0.5));
+      // 呼吸的挤压拉伸叠上蹦跳的挤压，横向按等体积换算，免得看起来像整体缩放。
+      const breathSquash = motionEnabled ? 1 + Math.sin(t * 1.1) * BREATH_SQUASH : 1;
+      const squashY = breathSquash * (reactionPose?.squashY ?? 1);
+      const squashWidth = getSquashWidth(squashY);
+      const baseScale = hoverScale * (1 - fade * 0.5);
+      head.scale.set(baseScale * squashWidth, baseScale * squashY, baseScale * squashWidth);
 
       // 粒子网格：随 fade（自转完成后才登场）淡入，由时间线驱动炸裂进度
       if (loadText) {

@@ -22,8 +22,11 @@ interface VideoEditorInspectorProps {
   timelineDuration: number;
   canvasSize: { width: number; height: number };
   compositing: boolean;
+  mixedSources: boolean;
   frameRate: number;
   onFrameRateChange: (fps: number) => void;
+  outputScale: number;
+  onOutputScaleChange: (scale: number) => void;
   onTransformChange: (patch: Partial<VideoEditorTransform>) => void;
   onTransitionChange: (kind: VideoEditorTransitionKind, duration: number) => void;
   onVolumeChange: (volume: number) => void;
@@ -39,8 +42,11 @@ function VideoEditorInspector({
   timelineDuration,
   canvasSize,
   compositing,
+  mixedSources,
   frameRate,
   onFrameRateChange,
+  outputScale,
+  onOutputScaleChange,
   onTransformChange,
   onTransitionChange,
   onVolumeChange,
@@ -176,9 +182,26 @@ function VideoEditorInspector({
           <span>方式</span>
           <span>{compositing ? '合成（重编码）' : '无损直通'}</span>
         </div>
+        {mixedSources && (
+          <div className="video-editor-inspect-hint">
+            素材分辨率或编码不一致，无法直通拼接，将归一到同一画布导出。
+          </div>
+        )}
         <div className="video-editor-inspect-row">
           <span>画布</span><span>{canvasSize.width}×{canvasSize.height}</span>
         </div>
+        <label className="video-editor-inspect-slider">
+          <span>分辨率</span>
+          <select
+            value={outputScale}
+            disabled={!compositing}
+            onChange={(event) => onOutputScaleChange(Number(event.target.value))}
+          >
+            <option value={1}>原始</option>
+            <option value={0.5}>50%</option>
+            <option value={0.25}>25%</option>
+          </select>
+        </label>
         <label className="video-editor-inspect-slider">
           <span>帧率</span>
           <select

@@ -6,6 +6,7 @@ import {
   evaluateVolume,
   getActiveClips,
   getClipEnd,
+  hasMixedSources,
   needsCompositing,
   type VideoEditorClip,
   type VideoEditorTrack,
@@ -226,5 +227,31 @@ describe('音量包络编辑', () => {
   it('drops the envelope entirely once the last point is removed', () => {
     const target = setVolumePoint(clip({ id: 'a' }), 1, 0.2);
     expect(removeVolumePoint(target, 1).volumePoints).toBeUndefined();
+  });
+});
+
+describe('hasMixedSources', () => {
+  const uhd = { codec: 'avc', width: 3840, height: 2160 };
+  const fhd = { codec: 'avc', width: 1920, height: 1080 };
+
+  it('flags a resolution mismatch, which blocks direct concatenation', () => {
+    // 正是实测撞到的场景：avc 1920×1080 与 avc 3840×2160 混在一条时间轴
+    expect(hasMixedSources([uhd, fhd])).toBe(true);
+  });
+
+  it('flags a codec mismatch at the same resolution', () => {
+    expect(hasMixedSources([fhd, { ...fhd, codec: 'hevc' }])).toBe(true);
+  });
+
+  it('accepts identical sources', () => {
+    expect(hasMixedSources([fhd, { ...fhd }, { ...fhd }])).toBe(false);
+  });
+
+  it('stays neutral while probes are still missing', () => {
+    expect(hasMixedSources([])).toBe(false);
+    expect(hasMixedSources([fhd])).toBe(false);
+    expect(hasMixedSources([fhd, null, undefined])).toBe(false);
+    // 未探测完的片段不该让判断提前倒向合成
+    expect(hasMixedSources([fhd, { codec: 'avc', width: 0, height: 0 }])).toBe(false);
   });
 });

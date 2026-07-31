@@ -43,6 +43,7 @@ import {
   DEFAULT_TRANSFORM,
   findClipAtTime,
   getVideoTrack,
+  hasMixedSources,
   needsCompositing,
   relayoutSequential,
   splitClipsAt,
@@ -166,6 +167,8 @@ export default function VideoEditorWindow() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStage, setExportStage] = useState<string | null>(null);
   const [exportFrameRate, setExportFrameRate] = useState(30);
+  // 输出分辨率相对源尺寸的倍率；4K 编码不通时可降到 1080p/720p
+  const [outputScale, setOutputScale] = useState(1);
   const exportAbortRef = useRef<AbortController | null>(null);
 
   const tracks = useMemo(() => record?.tracks ?? [], [record]);
@@ -225,9 +228,22 @@ export default function VideoEditorWindow() {
   const canvasWidth = firstSized?.width || 1920;
   const canvasHeight = firstSized?.height || 1080;
   const canvasSize: VideoEditorCanvasSize = useMemo(
-    () => ({ width: canvasWidth, height: canvasHeight }),
-    [canvasHeight, canvasWidth],
+    () => (outputScale === 1
+      ? { width: canvasWidth, height: canvasHeight }
+      // 编码器对尺寸有偶数要求，缩放后向下取偶
+      : {
+        width: Math.max(2, Math.round((canvasWidth * outputScale) / 2) * 2),
+        height: Math.max(2, Math.round((canvasHeight * outputScale) / 2) * 2),
+      }),
+    [canvasHeight, canvasWidth, outputScale],
   );
+
+  // 素材编码/分辨率不一致时无法直通拼接，必须走合成归一到同一张画布
+  const mixedSources = hasMixedSources(clips.map((clip) => {
+    const probe = getSource(clip)?.probe;
+    return probe && { codec: probe.videoCodec, width: probe.width, height: probe.height };
+  }));
+  const compositing = needsCompositing(tracks) || mixedSources;
 
   // ── 载入：配置 → 工程 ──
   useEffect(() => {
@@ -452,11 +468,11 @@ export default function VideoEditorWindow() {
       });
       const inputFor = (clip: VideoEditorClip) => inputsByUrl.get(resolveClipUrl(clip));
 
-      const composite = needsCompositing(tracks);
       let bytes: Uint8Array;
       const notes: string[] = [];
 
-      if (composite) {
+      /** 逐帧渲染 + 重编码；直通做不到时也走这里 */
+      const runComposite = async () => {
         // 合成路径：逐帧渲染 + 重编码，支持叠加、画中画、转场与混音
         const renderSources = new Map<string, ClipRenderSource>();
         await withStage('准备合成', async () => {
@@ -479,7 +495,7 @@ export default function VideoEditorWindow() {
           }
         });
 
-        bytes = await withStage('合成导出', () => exportComposite({
+        return withStage('合成导出', () => exportComposite({
           tracks,
           duration: timelineDuration,
           canvas: canvasSize,
@@ -490,7 +506,12 @@ export default function VideoEditorWindow() {
           onStage: setExportStage,
           signal: controller.signal,
         }));
+      };
+
+      if (compositing) {
+        bytes = await runComposite();
         notes.push(`已合成导出 ${allClips.length} 个片段 · ${canvasSize.width}×${canvasSize.height} · ${exportFrameRate}fps`);
+        if (mixedSources) notes.push('素材分辨率或编码不一致，已归一到同一画布');
         notes.push('合成路径经过一次重编码');
       } else {
         // 简单时间轴走无损直通，避免无谓的画质损失
@@ -500,19 +521,29 @@ export default function VideoEditorWindow() {
           end: clip.sourceOut,
           label: clip.fileName,
         }));
-        const result = await withStage('无损裁剪导出', () => exportLosslessConcat({
-          segments,
-          onProgress: setExportProgress,
-          signal: controller.signal,
-        }));
-        bytes = result.bytes;
+        try {
+          const result = await withStage('无损裁剪导出', () => exportLosslessConcat({
+            segments,
+            onProgress: setExportProgress,
+            signal: controller.signal,
+          }));
+          bytes = result.bytes;
 
-        const drift = clips[0].sourceIn - result.actualStart;
-        notes.push(`已无损导出 ${clips.length} 个片段，共 ${timelineDuration.toFixed(2)}s`);
-        if (drift > 0.05) {
-          notes.push(`首段按关键帧对齐，实际入点 ${result.actualStart.toFixed(2)}s（比设定早 ${drift.toFixed(2)}s）`);
+          const drift = clips[0].sourceIn - result.actualStart;
+          notes.push(`已无损导出 ${clips.length} 个片段，共 ${timelineDuration.toFixed(2)}s`);
+          if (drift > 0.05) {
+            notes.push(`首段按关键帧对齐，实际入点 ${result.actualStart.toFixed(2)}s（比设定早 ${drift.toFixed(2)}s）`);
+          }
+          if (clips.length > 1) notes.push('多片段无损拼接不保留音轨；需要音轨请启用任一合成能力');
+        } catch (reason) {
+          if (reason instanceof VideoExportCanceledError) throw reason;
+          // 直通做不到（例如素材参数不一致）不该把死路甩给用户，自动改走合成
+          console.warn('[videoEditor] 无损直通不可用，改走合成:', reason);
+          setExportProgress(0);
+          bytes = await runComposite();
+          notes.push(`无损直通不可用，已改用合成导出 · ${canvasSize.width}×${canvasSize.height} · ${exportFrameRate}fps`);
+          notes.push(reason instanceof Error ? reason.message : String(reason));
         }
-        if (clips.length > 1) notes.push('多片段无损拼接不保留音轨；需要音轨请启用任一合成能力');
       }
 
       const fileName = buildNodeFileName(record.name, 'mp4', 'edited');
@@ -542,7 +573,10 @@ export default function VideoEditorWindow() {
       setExportProgress(0);
       setExportStage(null);
     }
-  }, [canvasSize, clips, exportFrameRate, record, session, timelineDuration, tracks]);
+  }, [
+    canvasSize, clips, compositing, exportFrameRate, mixedSources,
+    record, session, timelineDuration, tracks,
+  ]);
 
   const closeWindow = useCallback(async () => {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -649,9 +683,12 @@ export default function VideoEditorWindow() {
               clipCount={clips.length}
               timelineDuration={timelineDuration}
               canvasSize={canvasSize}
-              compositing={needsCompositing(tracks)}
+              compositing={compositing}
+              mixedSources={mixedSources}
               frameRate={exportFrameRate}
               onFrameRateChange={setExportFrameRate}
+              outputScale={outputScale}
+              onOutputScaleChange={setOutputScale}
               onTransformChange={(patch) => patchSelectedClip((clip) => ({
                 ...clip,
                 transform: { ...DEFAULT_TRANSFORM, ...clip.transform, ...patch },

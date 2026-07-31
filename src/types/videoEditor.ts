@@ -244,6 +244,33 @@ export function evaluateTransitionAlpha(clip: VideoEditorClip, timeInClip: numbe
   return Math.max(0, Math.min(1, timeInClip / transition.duration));
 }
 
+/** 片段素材的关键参数，用于判断能否直通拼接 */
+export interface ClipSourceProfile {
+  codec: string | null;
+  width: number;
+  height: number;
+}
+
+/**
+ * 素材是否异构。
+ *
+ * 直通拼接要求所有片段共用同一套解码参数，编码或分辨率不一致就必须走合成
+ * 归一到同一张画布。传入的 profile 为空（尚未探测完）时不作数。
+ */
+export function hasMixedSources(profiles: (ClipSourceProfile | null | undefined)[]): boolean {
+  const known = profiles.filter((profile): profile is ClipSourceProfile => (
+    !!profile && profile.width > 0 && profile.height > 0
+  ));
+  if (known.length < 2) return false;
+
+  const [first] = known;
+  return known.some((profile) => (
+    profile.codec !== first.codec
+    || profile.width !== first.width
+    || profile.height !== first.height
+  ));
+}
+
 /** 时间轴是否需要走合成渲染（而非无损直通） */
 export function needsCompositing(tracks: VideoEditorTrack[]): boolean {
   const visible = tracks.filter((track) => !track.hidden);

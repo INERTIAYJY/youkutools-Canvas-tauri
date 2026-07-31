@@ -142,7 +142,13 @@ export default function App() {
   const initFromDb = useAppStore((s) => s.initFromDb);
   const migrateHistoryAndLoad = useAppStore((s) => s.migrateHistoryAndLoad);
   useEffect(() => {
-    initFromDb().then(() => migrateHistoryAndLoad());
+    void initFromDb().then(() => {
+      const store = useAppStore.getState();
+      if (store.config.startupView === 'project-library') {
+        store.setProjectLibraryOpen(true);
+      }
+      return migrateHistoryAndLoad();
+    });
   }, [initFromDb, migrateHistoryAndLoad]);
 
   // Flush undo-trash dirs on app close

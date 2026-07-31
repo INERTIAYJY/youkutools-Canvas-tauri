@@ -16,6 +16,7 @@ export interface UISlice {
   nodeMenuPosition: { x: number; y: number };
   nodePickerOpen: boolean;
   avatarMenuOpen: boolean;
+  projectLibraryOpen: boolean;
   activeNodeId: string | null;
   dialogPosition: { x: number; y: number } | null;
   assetsPanelOpen: boolean;
@@ -53,6 +54,7 @@ export interface UISlice {
   closeNodePicker: () => void;
   toggleAvatarMenu: () => void;
   closeAvatarMenu: () => void;
+  setProjectLibraryOpen: (open: boolean) => void;
   openNodeDialog: (nodeId: string, position?: { x: number; y: number }) => void;
   closeNodeDialog: () => void;
   setAssetsPanelOpen: (open: boolean) => void;
@@ -73,6 +75,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   nodeMenuPosition: { x: 0, y: 0 },
   nodePickerOpen: false,
   avatarMenuOpen: false,
+  projectLibraryOpen: false,
   activeNodeId: null,
   dialogPosition: null,
   assetsPanelOpen: false,
@@ -113,6 +116,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   closeNodePicker: () => set({ nodePickerOpen: false }),
   toggleAvatarMenu: () => set((s) => ({ avatarMenuOpen: !s.avatarMenuOpen, nodePickerOpen: false })),
   closeAvatarMenu: () => set({ avatarMenuOpen: false }),
+  setProjectLibraryOpen: (open) => set({ projectLibraryOpen: open }),
   openNodeDialog: (nodeId, position) => set({ activeNodeId: nodeId, dialogPosition: position ?? null }),
   closeNodeDialog: () => set({ activeNodeId: null, dialogPosition: null, pendingPresetAction: null }),
   setAssetsPanelOpen: (open) => set(open

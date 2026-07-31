@@ -30,6 +30,7 @@ const defaultConfig: AppConfig = {
   interactionMode: 'default',
   nodeToolbarMode: 'icons',
   nodeLabelVisible: true,
+  startupView: 'last-project',
 };
 
 const MODEL_PREF_KEY = 'canvas-model-prefs';

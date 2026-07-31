@@ -24,7 +24,12 @@ import DirectorDeskStorageManager from './settings/DirectorDeskStorageManager';
 import McpControlSettings from './settings/McpControlSettings';
 import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
-import type { CanvasBackground as CanvasBg, InteractionMode, NodeToolbarMode } from '../types';
+import type {
+  CanvasBackground as CanvasBg,
+  InteractionMode,
+  NodeToolbarMode,
+  StartupView,
+} from '../types';
 import type { BackgroundDetection } from '../services/backgroundService';
 
 import type { SettingsTab } from '../store/store.ui';
@@ -73,6 +78,26 @@ const NODE_TOOLBAR_MODE_OPTIONS: {
 }[] = [
   { id: 'icons', label: '极简图标', icon: 'lucide:circle-dot' },
   { id: 'icons-and-text', label: '图标 + 文本', icon: 'lucide:panel-top' },
+];
+
+const STARTUP_VIEW_OPTIONS: {
+  id: StartupView;
+  label: string;
+  description: string;
+  icon: string;
+}[] = [
+  {
+    id: 'last-project',
+    label: '上次画布',
+    description: '恢复关闭软件时正在编辑的项目',
+    icon: 'lucide:history',
+  },
+  {
+    id: 'project-library',
+    label: '项目列表',
+    description: '启动后先选择要打开的项目',
+    icon: 'lucide:layout-grid',
+  },
 ];
 
 /** 是否运行在 macOS（用于快捷键修饰键显示） */
@@ -135,6 +160,7 @@ export default function SettingsPanel() {
   const nodeToolbarMode = config.nodeToolbarMode ?? 'icons';
   const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
   const canvasNoteToolbarVisible = config.canvasNoteToolbarVisible !== false; // 默认开启
+  const startupView = config.startupView ?? 'last-project';
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
@@ -623,6 +649,52 @@ export default function SettingsPanel() {
 
             {activeTab === 'general' && (
               <div className="space-y-4">
+                <section>
+                  <h3 className="mb-2 text-sm font-medium text-canvas-text">启动时打开</h3>
+                  <div
+                    className="grid grid-cols-2 gap-2"
+                    role="radiogroup"
+                    aria-label="软件启动时打开"
+                  >
+                    {STARTUP_VIEW_OPTIONS.map((option) => {
+                      const active = startupView === option.id;
+                      return (
+                        <AnimatedButton
+                          key={option.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={async () => {
+                            if (active) return;
+                            updateConfig({ startupView: option.id });
+                            await saveConfig();
+                          }}
+                          className={`flex items-start gap-3 rounded-lg border p-3 text-left transition-colors ${
+                            active
+                              ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
+                              : 'border-canvas-border bg-canvas-card text-canvas-text-secondary hover:border-canvas-hover'
+                          }`}
+                        >
+                          <span
+                            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+                              active ? 'bg-indigo-500/15' : 'bg-canvas-surface'
+                            }`}
+                            aria-hidden="true"
+                          >
+                            <Icon icon={option.icon} width="16" height="16" />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-xs font-medium text-canvas-text">{option.label}</span>
+                            <span className="mt-1 block text-[11px] leading-4 text-canvas-text-muted">
+                              {option.description}
+                            </span>
+                          </span>
+                        </AnimatedButton>
+                      );
+                    })}
+                  </div>
+                </section>
+
                 {/* 画布背景主题 */}
                 <div>
                   <h3 className="text-sm font-medium text-canvas-text mb-2">画布背景</h3>

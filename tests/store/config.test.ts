@@ -71,6 +71,31 @@ describe('config hydration guard', () => {
     }));
   });
 
+  it('defaults to the last project and preserves the project library startup preference', async () => {
+    expect(useAppStore.getState().config.startupView).toBe('last-project');
+    fileMocks.loadConfig.mockResolvedValue({
+      providers: {},
+      theme: 'dark',
+      startupView: 'project-library',
+    });
+
+    await useAppStore.getState().loadConfig();
+    await useAppStore.getState().saveConfig({ silent: true });
+
+    expect(useAppStore.getState().config.startupView).toBe('project-library');
+    expect(fileMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      startupView: 'project-library',
+    }));
+  });
+
+  it('shares project library visibility through the UI store', () => {
+    expect(useAppStore.getState().projectLibraryOpen).toBe(false);
+
+    useAppStore.getState().setProjectLibraryOpen(true);
+
+    expect(useAppStore.getState().projectLibraryOpen).toBe(true);
+  });
+
   it('silently persists the selected assistant model without a success toast', async () => {
     fileMocks.loadConfig.mockResolvedValue({ providers: {}, theme: 'dark' });
     await useAppStore.getState().loadConfig();

@@ -347,6 +347,9 @@ export type InteractionMode = 'default' | 'classic';
 /** 节点顶部工具栏显示方式 */
 export type NodeToolbarMode = 'icons' | 'icons-and-text';
 
+/** 软件启动后优先展示的视图。 */
+export type StartupView = 'last-project' | 'project-library';
+
 /** 吉祥物在可拖动视口中的相对位置，x/y 均为 0-1。 */
 export interface MascotPosition {
   x: number;
@@ -364,6 +367,7 @@ export interface AppConfig {
   nodeLabelVisible?: boolean; // 是否显示节点顶部标题标签，默认 true
   canvasNoteToolbarVisible?: boolean; // 是否显示画布笔记工具栏，默认 true
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
+  startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'last-project'
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）
   customBackgroundOpacity?: number; // 自定义背景透明度 0-1，默认 0.3

@@ -1162,10 +1162,15 @@ function AvatarMenu() {
    Logo / Project switcher menu
    ============================================ */
 function LogoMenu() {
-  const [open, setOpen] = useState(false);
+  const { projectLibraryOpen, setProjectLibraryOpen } = useAppStore(
+    useShallow((state) => ({
+      projectLibraryOpen: state.projectLibraryOpen,
+      setProjectLibraryOpen: state.setProjectLibraryOpen,
+    })),
+  );
 
   const openProjectLibrary = () => {
-    setOpen(true);
+    setProjectLibraryOpen(true);
     window.setTimeout(async () => {
       const store = useAppStore.getState();
       const capturedProjectId = await store.captureCurrentProjectSnapshot();
@@ -1179,10 +1184,10 @@ function LogoMenu() {
     <>
       <button
         type="button"
-        className={`sidebar-btn-v3 sidebar-canvas-btn ${open ? 'active' : ''}`}
+        className={`sidebar-btn-v3 sidebar-canvas-btn ${projectLibraryOpen ? 'active' : ''}`}
         data-tooltip="画布 / 项目"
         aria-haspopup="dialog"
-        aria-expanded={open}
+        aria-expanded={projectLibraryOpen}
         onClick={openProjectLibrary}
       >
         <svg className="ico-normal" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -1196,7 +1201,10 @@ function LogoMenu() {
       </button>
 
       {createPortal(
-        <ProjectLibraryModal isOpen={open} onClose={() => setOpen(false)} />,
+        <ProjectLibraryModal
+          isOpen={projectLibraryOpen}
+          onClose={() => setProjectLibraryOpen(false)}
+        />,
         document.body,
       )}
     </>

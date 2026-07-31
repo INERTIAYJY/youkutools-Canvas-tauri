@@ -6,6 +6,8 @@ import {
   dropIndexAt,
   duplicateClip,
   fitZoom,
+  isClipLocked,
+  isTrackLocked,
   MAX_PIXELS_PER_SECOND,
   MIN_PIXELS_PER_SECOND,
   moveClipTo,
@@ -49,6 +51,18 @@ function multitrack(): VideoEditorTrack[] {
 }
 
 describe('track-aware clip operations', () => {
+  it('resolves locked state by either track id or clip id', () => {
+    const tracks = multitrack().map((track) => (
+      track.id === 'overlay' ? { ...track, locked: true } : track
+    ));
+
+    expect(isTrackLocked(tracks, 'overlay')).toBe(true);
+    expect(isTrackLocked(tracks, 'main')).toBe(false);
+    expect(isClipLocked(tracks, 'overlay-a')).toBe(true);
+    expect(isClipLocked(tracks, 'a')).toBe(false);
+    expect(isClipLocked(tracks, 'missing')).toBe(false);
+  });
+
   it('trims only the owning overlay track without moving its timeline position', () => {
     const tracks = multitrack();
     const updated = updateClipInTracks(tracks, 'overlay-a', (entry) => ({

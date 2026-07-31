@@ -18,6 +18,16 @@ export const MAX_PIXELS_PER_SECOND = 400;
 /** 吸附判定的像素容差 */
 export const SNAP_TOLERANCE_PX = 6;
 
+/** 轨道是否锁定；未知轨道按未锁定处理。 */
+export function isTrackLocked(tracks: VideoEditorTrack[], trackId: string): boolean {
+  return tracks.find((track) => track.id === trackId)?.locked === true;
+}
+
+/** 片段所属轨道是否锁定；未知片段按未锁定处理。 */
+export function isClipLocked(tracks: VideoEditorTrack[], clipId: string): boolean {
+  return tracks.find((track) => track.clips.some((clip) => clip.id === clipId))?.locked === true;
+}
+
 /** 把片段移动到目标序号（磁吸重排） */
 export function moveClipTo(
   clips: VideoEditorClip[],

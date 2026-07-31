@@ -308,6 +308,9 @@
   display: block;
   z-index: 1;
 }
+.video-editor-video.track-hidden {
+  opacity: 0;
+}
 .video-editor-stage-empty {
   position: absolute;
   inset: 0;
@@ -386,6 +389,9 @@
 .video-editor-overlay.selected {
   border-color: var(--accent, #6366f1);
   box-shadow: 0 0 0 1px var(--accent, #6366f1);
+}
+.video-editor-overlay.locked {
+  cursor: default;
 }
 .video-editor-overlay-img {
   position: absolute;
@@ -698,6 +704,19 @@
   font-size: 12px;
   color: var(--theme-text-muted);
 }
+.video-editor-track-label.is-locked {
+  color: var(--warning-light);
+  background: var(--warning-bg);
+  box-shadow: inset 2px 0 0 var(--warning);
+}
+.video-editor-track-label.is-hidden .video-editor-track-icon,
+.video-editor-track-label.is-hidden .video-editor-track-name {
+  opacity: 0.45;
+}
+.video-editor-track-label.is-hidden,
+.video-editor-track-label.is-muted {
+  color: var(--theme-text-muted);
+}
 .video-editor-track-icon { font-size: 13px; }
 .video-editor-track-name {
   flex: 1;
@@ -723,6 +742,20 @@
   border-color: transparent;
   color: #fff;
 }
+.video-editor-track-flag.is-lock.active {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning-light);
+}
+.video-editor-track-flag.is-visibility.active {
+  border-color: var(--theme-border);
+  background: var(--white-alpha-08);
+  color: var(--theme-text-muted);
+}
+.video-editor-track-flag:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 
 .video-editor-track-lane {
   position: relative;
@@ -738,7 +771,31 @@
 .video-editor-track-lane:hover {
   background: rgba(255, 255, 255, 0.05);
 }
-.video-editor-track-lane.locked { opacity: 0.55; cursor: not-allowed; }
+.video-editor-track-lane.locked {
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0,
+      transparent 7px,
+      color-mix(in srgb, var(--warning) 7%, transparent) 7px,
+      color-mix(in srgb, var(--warning) 7%, transparent) 8px
+    ),
+    rgba(255, 255, 255, 0.03);
+  box-shadow: inset 2px 0 0 var(--warning);
+  cursor: not-allowed;
+}
+.video-editor-track-lane.is-hidden {
+  border: 1px dashed color-mix(in srgb, var(--theme-text-muted) 45%, transparent);
+  background: color-mix(in srgb, var(--theme-bg) 72%, transparent);
+}
+.video-editor-track-lane.is-muted .video-editor-clip {
+  filter: saturate(0.45);
+}
+.video-editor-track-lane.is-hidden .video-editor-clip {
+  opacity: 0.25;
+  filter: grayscale(1) saturate(0);
+}
 
 /* 片段块 */
 .video-editor-clip {
@@ -1071,6 +1128,20 @@
 }
 [data-theme='light'] .video-editor-track-lane:hover {
   background: rgba(0, 0, 0, 0.04);
+}
+[data-theme='light'] .video-editor-track-lane.locked {
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0,
+      transparent 7px,
+      color-mix(in srgb, var(--warning) 10%, transparent) 7px,
+      color-mix(in srgb, var(--warning) 10%, transparent) 8px
+    ),
+    var(--warning-bg);
+}
+[data-theme='light'] .video-editor-track-lane.is-hidden {
+  background: color-mix(in srgb, var(--theme-bg) 84%, transparent);
 }
 
 [data-theme='light'] .video-editor-ruler {

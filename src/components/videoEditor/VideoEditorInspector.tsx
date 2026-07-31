@@ -17,6 +17,7 @@ import {
 
 interface VideoEditorInspectorProps {
   clip: VideoEditorClip | null;
+  locked: boolean;
   probe: VideoEditorSourceProbe | null;
   clipCount: number;
   timelineDuration: number;
@@ -39,6 +40,7 @@ const PENDING_SECTIONS = ['滤镜', '文字与贴纸'];
 
 function VideoEditorInspector({
   clip,
+  locked,
   probe,
   clipCount,
   timelineDuration,
@@ -82,7 +84,10 @@ function VideoEditorInspector({
       </div>
 
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">片段</div>
+        <div className="video-editor-inspect-title">
+          片段
+          {locked && <span className="video-editor-inspect-badge">已锁定</span>}
+        </div>
         <div className="video-editor-inspect-row">
           <span>名称</span>
           <span className="video-editor-inspect-ellipsis" title={clip?.fileName}>
@@ -136,7 +141,7 @@ function VideoEditorInspector({
               type="range"
               min={min} max={max} step={step}
               value={transform[key]}
-              disabled={!clip}
+              disabled={!clip || locked}
               {...continuousEditHandlers}
               onChange={(event) => onTransformChange({ [key]: Number(event.target.value) })}
             />
@@ -152,7 +157,7 @@ function VideoEditorInspector({
           <span>类型</span>
           <select
             value={transition.kind}
-            disabled={!clip}
+            disabled={!clip || locked}
             {...continuousEditHandlers}
             onChange={(event) => onTransitionChange(
               event.target.value as VideoEditorTransitionKind,
@@ -169,7 +174,7 @@ function VideoEditorInspector({
           <input
             type="range" min={0.1} max={3} step={0.1}
             value={transition.duration}
-            disabled={!clip || transition.kind === 'none'}
+            disabled={!clip || locked || transition.kind === 'none'}
             {...continuousEditHandlers}
             onChange={(event) => onTransitionChange(transition.kind, Number(event.target.value))}
           />
@@ -184,7 +189,7 @@ function VideoEditorInspector({
           <input
             type="range" min={0} max={2} step={0.05}
             value={clip?.volume ?? 1}
-            disabled={!clip}
+            disabled={!clip || locked}
             {...continuousEditHandlers}
             onChange={(event) => onVolumeChange(Number(event.target.value))}
           />

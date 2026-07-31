@@ -14,6 +14,7 @@ import {
   getActiveClips,
   getClipDuration,
   getOverlayTracks,
+  getVideoTrack,
   type VideoEditorClip,
   type VideoEditorTrack,
   type VideoEditorTransform,
@@ -53,13 +54,15 @@ interface OverlayMediaProps {
   clip: VideoEditorClip;
   playhead: number;
   playing: boolean;
+  muted: boolean;
+  volume: number;
 }
 
 /**
  * 叠加视频拥有独立媒体元素，但时间由主轨播放头统一驱动。
  * 静音可避免多轨预览时重复出声，也允许 WebView 自动跟播。
  */
-function OverlayMedia({ clip, playhead, playing }: OverlayMediaProps) {
+function OverlayMedia({ clip, playhead, playing, muted, volume }: OverlayMediaProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = resolveClipUrl(clip);
@@ -84,6 +87,10 @@ function OverlayMedia({ clip, playhead, playing }: OverlayMediaProps) {
     }
   }, [clip.kind, failed, playing, url]);
 
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.volume = Math.max(0, Math.min(1, volume));
+  }, [volume]);
+
   if (!url || failed) {
     return <div className="video-editor-stage-empty">素材无法预览</div>;
   }
@@ -106,11 +113,48 @@ function OverlayMedia({ clip, playhead, playing }: OverlayMediaProps) {
       src={url}
       className="video-editor-overlay-img"
       preload="auto"
-      muted
+      muted={muted}
       playsInline
       onError={() => setFailedUrl(url)}
     />
   );
+}
+
+interface AudioPreviewProps {
+  clip: VideoEditorClip;
+  playhead: number;
+  playing: boolean;
+  muted: boolean;
+  volume: number;
+}
+
+/** 音频轨走带：由统一播放头定位，播放状态与主走带保持一致。 */
+function AudioPreview({ clip, playhead, playing, muted, volume }: AudioPreviewProps) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const url = resolveClipUrl(clip);
+  const sourceTime = clip.sourceIn + (playhead - clip.timelineStart);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (Math.abs(audio.currentTime - sourceTime) > 0.05) {
+      audio.currentTime = Math.max(0, sourceTime);
+    }
+  }, [sourceTime, url]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (playing) void audio.play().catch(() => {});
+    else audio.pause();
+  }, [playing, url]);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = Math.max(0, Math.min(1, volume));
+  }, [volume]);
+
+  if (!url) return null;
+  return <audio ref={audioRef} src={url} preload="auto" muted={muted} />;
 }
 
 function VideoEditorPreview({
@@ -146,6 +190,10 @@ function VideoEditorPreview({
 
   const clipEnd = clip ? clip.timelineStart + getClipDuration(clip) : 0;
   const sourceTime = clip ? clip.sourceIn + (playhead - clip.timelineStart) : 0;
+  const mainTrack = useMemo(() => getVideoTrack(tracks), [tracks]);
+  const mainTrackHidden = mainTrack?.hidden === true;
+  const mainTrackMuted = mainTrack?.muted === true || mainTrackHidden;
+  const mainVolume = (mainTrack?.volume ?? 1) * (clip?.volume ?? 1);
 
   // 外部拖动播放头 → 同步到 video
   useEffect(() => {
@@ -208,6 +256,10 @@ function VideoEditorPreview({
     if (!playing && !video.paused) video.pause();
   }, [clip?.kind, clipUrl, playing]);
 
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.volume = Math.max(0, Math.min(1, mainVolume));
+  }, [mainVolume]);
+
   const step = useCallback((direction: 1 | -1) => {
     setPlaying(false);
     videoRef.current?.pause();
@@ -229,6 +281,16 @@ function VideoEditorPreview({
     }
     return result;
   }, [overlayTracks, playhead]);
+  const activeAudio = useMemo(() => {
+    const result: { clip: VideoEditorClip; track: VideoEditorTrack }[] = [];
+    for (const track of tracks) {
+      if (track.kind !== 'audio' || track.hidden) continue;
+      for (const activeClip of getActiveClips(track, playhead)) {
+        result.push({ clip: activeClip, track });
+      }
+    }
+    return result;
+  }, [playhead, tracks]);
 
   const startOverlayInteraction = useCallback((
     overlayClip: VideoEditorClip,
@@ -349,26 +411,36 @@ function VideoEditorPreview({
           {!clip || !clipUrl ? (
             <div className="video-editor-stage-empty">无可预览的素材</div>
           ) : clip.kind === 'image' ? (
-            <img src={clipUrl} className="video-editor-video" alt="" draggable={false} />
+            <img
+              src={clipUrl}
+              className={`video-editor-video ${mainTrackHidden ? 'track-hidden' : ''}`}
+              alt=""
+              draggable={false}
+            />
           ) : (
             <video
               ref={videoRef}
               src={clipUrl}
-              className="video-editor-video"
+              className={`video-editor-video ${mainTrackHidden ? 'track-hidden' : ''}`}
               onTimeUpdate={handleTimeUpdate}
               onPause={() => { if (!playing) setPlaying(false); }}
               preload="auto"
+              muted={mainTrackMuted}
             />
+          )}
+          {mainTrackHidden && (
+            <div className="video-editor-stage-empty">主视频轨已隐藏</div>
           )}
 
           {/* 叠加层片段：绝对定位在画布之上，可直接拖拽编辑 */}
-          {activeOverlays.map(({ clip: overlayClip }) => {
+          {activeOverlays.map(({ clip: overlayClip, track }) => {
             const transform = overlayClip.transform ?? DEFAULT_TRANSFORM;
             const isSelected = selectedClipIds.includes(overlayClip.id);
+            const locked = track.locked === true;
             return (
               <div
                 key={overlayClip.id}
-                className={`video-editor-overlay ${isSelected ? 'selected' : ''}`}
+                className={`video-editor-overlay ${isSelected ? 'selected' : ''} ${locked ? 'locked' : ''}`.trim()}
                 style={{
                   left: `${transform.x * 100}%`,
                   top: `${transform.y * 100}%`,
@@ -377,10 +449,21 @@ function VideoEditorPreview({
                   transform: `translate(-50%, -50%) rotate(${transform.rotation}deg)`,
                   opacity: transform.opacity,
                 }}
-                onPointerDown={(event) => startOverlayInteraction(overlayClip, 'move', event)}
+                onPointerDown={locked
+                  ? (event) => {
+                    event.stopPropagation();
+                    onSelectClips([overlayClip.id]);
+                  }
+                  : (event) => startOverlayInteraction(overlayClip, 'move', event)}
               >
-                <OverlayMedia clip={overlayClip} playhead={playhead} playing={playing} />
-                {isSelected && (
+                <OverlayMedia
+                  clip={overlayClip}
+                  playhead={playhead}
+                  playing={playing}
+                  muted={track.muted === true}
+                  volume={(track.volume ?? 1) * (overlayClip.volume ?? 1)}
+                />
+                {isSelected && !locked && (
                   <>
                     {(['nw', 'ne', 'sw', 'se'] as HandlePos[]).map((pos) => (
                       <div
@@ -394,6 +477,17 @@ function VideoEditorPreview({
               </div>
             );
           })}
+
+          {activeAudio.map(({ clip: audioClip, track }) => (
+            <AudioPreview
+              key={`${track.id}:${audioClip.id}`}
+              clip={audioClip}
+              playhead={playhead}
+              playing={playing}
+              muted={track.muted === true}
+              volume={(track.volume ?? 1) * (audioClip.volume ?? 1)}
+            />
+          ))}
 
           {/* 点击空白区域取消选中 */}
           <div

@@ -150,12 +150,16 @@ function VideoEditorTimeline({
     () => tracks.filter((track) => track.kind === 'video').reduce((sum, track) => sum + track.clips.length, 0),
     [tracks],
   );
-  const selectedVideoClipCount = useMemo(
-    () => tracks.filter((track) => track.kind === 'video')
-      .flatMap((track) => track.clips)
-      .filter((clip) => selectedSet.has(clip.id)).length,
+  const unlockedSelected = useMemo(
+    () => tracks.flatMap((track) => track.clips
+      .filter((clip) => selectedSet.has(clip.id) && !track.locked)
+      .map((clip) => ({ clip, track }))),
     [selectedSet, tracks],
   );
+  const unlockedSelectedVideoCount = unlockedSelected
+    .filter(({ track }) => track.kind === 'video').length;
+  const canDeleteSelected = unlockedSelected.length > 0
+    && videoClipCount - unlockedSelectedVideoCount > 0;
 
   // 在所有视频轨中查找片段
   const allVideoClips = useMemo(() => {
@@ -173,6 +177,9 @@ function VideoEditorTimeline({
     const found = allVideoClips.find(({ clip }) => clip.id === selectedClipIds[0]);
     return found?.clip ?? null;
   }, [allVideoClips, selectedClipIds]);
+  const clipMenuLocked = clipMenu
+    ? tracks.some((track) => track.locked && track.clips.some((clip) => clip.id === clipMenu.clipId))
+    : false;
 
   const laneWidth = Math.max(0, duration * pixelsPerSecond);
 
@@ -523,7 +530,7 @@ function VideoEditorTimeline({
           <button
             type="button" className="video-editor-timeline-btn danger"
             onClick={onDeleteSelected}
-            disabled={selectedClipIds.length === 0 || videoClipCount <= selectedVideoClipCount}
+            disabled={!canDeleteSelected}
             data-tooltip="删除选中片段 Del"
           >
             <Icon icon="lucide:trash-2" width={13} height={13} />
@@ -607,7 +614,12 @@ function VideoEditorTimeline({
           {tracks.map((track, trackIndex) => (
             <div
               key={track.id}
-              className="video-editor-track-label"
+              className={[
+                'video-editor-track-label',
+                track.locked ? 'is-locked' : '',
+                track.hidden ? 'is-hidden' : '',
+                track.muted ? 'is-muted' : '',
+              ].filter(Boolean).join(' ')}
               style={{
                 borderLeft: track.kind === 'video' && !track.overlay
                   ? `3px solid ${trackAccent(trackIndex)}` : undefined,
@@ -617,13 +629,13 @@ function VideoEditorTimeline({
               <span className="video-editor-track-name">{track.name}</span>
               <button
                 type="button"
-                className={`video-editor-track-flag ${track.muted ? 'active' : ''}`}
+                className={`video-editor-track-flag is-mute ${track.muted ? 'active' : ''}`}
                 onClick={() => toggleTrackFlag(track.id, 'muted')}
                 data-tooltip={track.muted ? '取消静音' : '静音'}
               >M</button>
               <button
                 type="button"
-                className={`video-editor-track-flag ${track.locked ? 'active' : ''}`}
+                className={`video-editor-track-flag is-lock ${track.locked ? 'active' : ''}`}
                 onClick={() => toggleTrackFlag(track.id, 'locked')}
                 data-tooltip={track.locked ? '解锁轨道' : '锁定轨道'}
               >
@@ -631,7 +643,7 @@ function VideoEditorTimeline({
               </button>
               <button
                 type="button"
-                className={`video-editor-track-flag ${track.hidden ? 'active' : ''}`}
+                className={`video-editor-track-flag is-visibility ${track.hidden ? 'active' : ''}`}
                 onClick={() => toggleTrackFlag(track.id, 'hidden')}
                 data-tooltip={track.hidden ? '显示轨道' : '隐藏轨道'}
               >
@@ -641,12 +653,14 @@ function VideoEditorTimeline({
                 <>
                   <button
                     type="button" className="video-editor-track-flag"
+                    disabled={track.locked}
                     onClick={() => onMoveTrack(track.id, 1)} data-tooltip="上移一层"
                   >
                     <Icon icon="lucide:chevron-up" width={10} height={10} />
                   </button>
                   <button
                     type="button" className="video-editor-track-flag danger"
+                    disabled={track.locked}
                     onClick={() => onRemoveTrack(track.id)} data-tooltip="删除轨道"
                   >
                     <Icon icon="lucide:x" width={10} height={10} />
@@ -670,7 +684,12 @@ function VideoEditorTimeline({
               <div
                 key={track.id}
                 data-track-id={track.id}
-                className={`video-editor-track-lane ${track.locked ? 'locked' : ''}`}
+                className={[
+                  'video-editor-track-lane',
+                  track.locked ? 'locked' : '',
+                  track.hidden ? 'is-hidden' : '',
+                  track.muted ? 'is-muted' : '',
+                ].filter(Boolean).join(' ')}
                 onPointerDown={(event) => {
                   if (track.kind !== 'video') return;
                   onSelectClips([]);
@@ -749,6 +768,7 @@ function VideoEditorTimeline({
                       width: Math.max(2, getClipDuration(clip) * pixelsPerSecond),
                     }}
                     onPointerDown={(event) => {
+                      if (track.locked) return;
                       event.stopPropagation();
                       onSelectClips([clip.id]);
                     }}
@@ -783,13 +803,17 @@ function VideoEditorTimeline({
           <button type="button" onClick={() => { onSplit(); setClipMenu(null); }} disabled={!canSplit}>
             在播放头分割<span>S</span>
           </button>
-          <button type="button" onClick={() => { onDuplicateClip(clipMenu.clipId); setClipMenu(null); }}>
+          <button
+            type="button"
+            onClick={() => { onDuplicateClip(clipMenu.clipId); setClipMenu(null); }}
+            disabled={clipMenuLocked}
+          >
             复制片段<span>Ctrl D</span>
           </button>
           <button
             type="button" className="danger"
             onClick={() => { onDeleteSelected(); setClipMenu(null); }}
-            disabled={videoClipCount <= selectedVideoClipCount}
+            disabled={!canDeleteSelected}
           >
             删除<span>Del</span>
           </button>

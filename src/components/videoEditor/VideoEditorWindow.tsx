@@ -62,6 +62,8 @@ import { useTimelineHistory } from './useTimelineHistory';
 import {
   createTrack,
   duplicateClipInTracks,
+  isClipLocked,
+  isTrackLocked,
   moveClipTo,
   moveTrack,
   removeClipsFromTracks,
@@ -180,6 +182,7 @@ export default function VideoEditorWindow() {
     () => tracks.filter((track) => track.kind === 'video').flatMap((track) => track.clips),
     [tracks],
   );
+  const allTimelineClips = useMemo(() => tracks.flatMap((track) => track.clips), [tracks]);
 
   const persistTracks = useCallback((nextTracks: VideoEditorTrack[]) => {
     setRecord((previous) => {
@@ -243,8 +246,9 @@ export default function VideoEditorWindow() {
   const timelineDuration = computeTimelineDuration(tracks);
   const activeClip = findClipAtTime(clips, playhead)?.clip ?? clips[0] ?? null;
   const activeClipUrl = activeClip ? resolveClipUrl(activeClip) : '';
-  const selectedClip = allClips.find((clip) => clip.id === selectedClipIds[0]) ?? null;
+  const selectedClip = allTimelineClips.find((clip) => clip.id === selectedClipIds[0]) ?? null;
   const inspectorClip = selectedClip ?? activeClip;
+  const inspectorLocked = inspectorClip ? isClipLocked(tracks, inspectorClip.id) : false;
   const activeProbe = inspectorClip ? (getSource(inspectorClip)?.probe ?? null) : null;
 
   // 合成画布尺寸取主轨首个可解码片段的分辨率，退回 1080p。
@@ -343,6 +347,7 @@ export default function VideoEditorWindow() {
   }, [history, persistTracks]);
 
   const handleTrimClip = useCallback((clipId: string, sourceIn: number, sourceOut: number) => {
+    if (isClipLocked(tracksRef.current, clipId)) return;
     updateTracks((current) => updateClipInTracks(current, clipId, (clip) => ({
       ...clip,
       sourceIn,
@@ -352,6 +357,10 @@ export default function VideoEditorWindow() {
 
   const handleSplit = useCallback(() => {
     if (!videoTrack) return;
+    if (videoTrack.locked) {
+      setNotice('轨道已锁定，无法分割片段');
+      return;
+    }
     const split = splitClipsAt(videoTrack.clips, playhead);
     if (!split) {
       setNotice('当前播放头不在可分割的位置');
@@ -366,18 +375,29 @@ export default function VideoEditorWindow() {
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedClipIds.length === 0) return;
-    const selected = new Set(selectedClipIds);
-    const remainingVideoCount = allClips.filter((clip) => !selected.has(clip.id)).length;
+    const deletableIds = selectedClipIds.filter((clipId) => !isClipLocked(tracksRef.current, clipId));
+    if (deletableIds.length === 0) {
+      setNotice('选中片段所在轨道已锁定');
+      return;
+    }
+    const deletable = new Set(deletableIds);
+    const remainingVideoCount = allClips.filter((clip) => !deletable.has(clip.id)).length;
     if (remainingVideoCount === 0) {
       setNotice('至少要保留一个片段');
       return;
     }
+    setNotice(null);
     commitChange();
-    updateTracks((current) => removeClipsFromTracks(current, selectedClipIds));
-    setSelectedClipIds([]);
+    updateTracks((current) => removeClipsFromTracks(current, deletableIds));
+    setSelectedClipIds((current) => current.filter((clipId) => !deletable.has(clipId)));
   }, [allClips, commitChange, selectedClipIds, updateTracks]);
 
   const handleDuplicateClip = useCallback((clipId: string) => {
+    if (isClipLocked(tracksRef.current, clipId)) {
+      setNotice('轨道已锁定，无法复制片段');
+      return;
+    }
+    setNotice(null);
     commitChange();
     updateTracks((current) => duplicateClipInTracks(current, clipId));
   }, [commitChange, updateTracks]);
@@ -386,11 +406,13 @@ export default function VideoEditorWindow() {
   const patchSelectedClip = useCallback((patch: (clip: VideoEditorClip) => VideoEditorClip) => {
     const targetId = selectedClipIds[0] ?? activeClip?.id;
     if (!targetId) return;
+    if (isClipLocked(tracksRef.current, targetId)) return;
     updateTracks((current) => updateClipInTracks(current, targetId, patch));
   }, [activeClip?.id, selectedClipIds, updateTracks]);
 
   /** 按 ID 修改片段属性，用于画面上直接拖拽叠加层 */
   const patchClipById = useCallback((clipId: string, patch: (clip: VideoEditorClip) => VideoEditorClip) => {
+    if (isClipLocked(tracksRef.current, clipId)) return;
     updateTracks((current) => updateClipInTracks(current, clipId, patch));
   }, [updateTracks]);
 
@@ -400,17 +422,28 @@ export default function VideoEditorWindow() {
   }, [commitChange, persistTracks]);
 
   const handleRemoveTrack = useCallback((trackId: string) => {
+    if (isTrackLocked(tracksRef.current, trackId)) {
+      setNotice('请先解锁轨道再删除');
+      return;
+    }
+    setNotice(null);
     commitChange();
     persistTracks(removeTrack(tracksRef.current, trackId));
   }, [commitChange, persistTracks]);
 
   const handleMoveTrack = useCallback((trackId: string, direction: -1 | 1) => {
+    if (isTrackLocked(tracksRef.current, trackId)) {
+      setNotice('请先解锁轨道再调整层级');
+      return;
+    }
+    setNotice(null);
     commitChange();
     persistTracks(moveTrack(tracksRef.current, trackId, direction));
   }, [commitChange, persistTracks]);
 
   const handleMoveClip = useCallback((clipId: string, targetIndex: number) => {
     if (!videoTrack) return;
+    if (videoTrack.locked || isClipLocked(tracksRef.current, clipId)) return;
     updateTracks((current) => current.map((track) => (
       track.id === videoTrack.id
         ? { ...track, clips: moveClipTo(track.clips, clipId, targetIndex) }
@@ -430,6 +463,7 @@ export default function VideoEditorWindow() {
       const sourceTrack = previous.tracks.find((t) => t.id === sourceTrackId);
       const targetTrack = previous.tracks.find((t) => t.id === targetTrackId);
       if (!sourceTrack || !targetTrack) return previous;
+      if (sourceTrack.locked || targetTrack.locked) return previous;
 
       const clipIndex = sourceTrack.clips.findIndex((c) => c.id === clipId);
       if (clipIndex < 0) return previous;
@@ -476,6 +510,7 @@ export default function VideoEditorWindow() {
   ) => {
     setRecord((previous) => {
       if (!previous) return previous;
+      if (isTrackLocked(previous.tracks, trackId)) return previous;
       const nextTracks = previous.tracks.map((track) => {
         if (track.id !== trackId) return track;
         return {
@@ -503,6 +538,7 @@ export default function VideoEditorWindow() {
       if (!previous) return previous;
       const sourceTrack = previous.tracks.find((t) => t.id === sourceTrackId);
       if (!sourceTrack) return previous;
+      if (sourceTrack.locked) return previous;
 
       const clipIndex = sourceTrack.clips.findIndex((c) => c.id === clipId);
       if (clipIndex < 0) return previous;
@@ -537,7 +573,7 @@ export default function VideoEditorWindow() {
     });
   }, []);
 
-  const canSplit = !!videoTrack && !!findClipAtTime(clips, playhead);
+  const canSplit = !!videoTrack && !videoTrack.locked && !!findClipAtTime(clips, playhead);
 
   // 快捷键：空格播放、S 分割、Del 删除、Ctrl+D 复制、Ctrl+Z/Y 撤销重做、←→ 逐帧
   useEffect(() => {
@@ -862,6 +898,7 @@ export default function VideoEditorWindow() {
             />
             <VideoEditorInspector
               clip={selectedClip ?? activeClip}
+              locked={inspectorLocked}
               probe={activeProbe}
               clipCount={allClips.length}
               timelineDuration={timelineDuration}

@@ -12,7 +12,6 @@ import type {
   ModelExecutionProfile,
   ModelExecutionProtocol,
   ModelProtocolAuthConfig,
-  ModelProtocolBodyEncoding,
   ModelProtocolPollTemplate,
   ModelProtocolPollRetryConfig,
   ModelProtocolPresetId,
@@ -21,6 +20,17 @@ import type {
   ProtocolJsonValue,
   ResolvedModelProtocolPoll,
 } from '../../types/aiTypes';
+import {
+  redactModelProtocolMultipartPreview,
+  serializeModelProtocolBody,
+} from './modelProtocolBody';
+import {
+  previewNormalizedModelProtocolResponse,
+  readModelProtocolFirstScalar,
+  readModelProtocolPathValues,
+  readModelProtocolUrls,
+  type ModelProtocolResponsePreviewEntry,
+} from './modelProtocolResponse';
 
 const TEMPLATE_RE = /{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-]+)*)\s*}}/g;
 const FULL_TEMPLATE_RE = /^{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-]+)*)\s*}}$/;
@@ -134,13 +144,7 @@ export interface ModelProtocolRequestPreview {
   body?: ProtocolJsonValue;
 }
 
-export interface ModelProtocolResponsePreviewEntry {
-  id: string;
-  label: string;
-  path: string;
-  matchCount: number;
-  values: string[];
-}
+export type { ModelProtocolResponsePreviewEntry } from './modelProtocolResponse';
 
 const OPENAI_CHAT_PROTOCOL: NormalizedModelExecutionProtocol = {
   version: 2,
@@ -657,98 +661,18 @@ export function parseModelExecutionProtocol(value: unknown): NormalizedModelExec
   return normalized as unknown as NormalizedModelExecutionProtocol;
 }
 
-function readPathValues(value: unknown, path: string): unknown[] {
-  let current = [value];
-  for (const segment of path.split('.')) {
-    if (!segment || BLOCKED_PATH_SEGMENTS.has(segment)) return [];
-    const next: unknown[] = [];
-    for (const item of current) {
-      if (segment === '*' && Array.isArray(item)) {
-        next.push(...item);
-      } else if (Array.isArray(item) && /^\d+$/.test(segment)) {
-        const indexed = item[Number(segment)];
-        if (indexed !== undefined) next.push(indexed);
-      } else if (isRecord(item) && Object.hasOwn(item, segment)) {
-        next.push(item[segment]);
-      }
-    }
-    current = next;
-  }
-  return current;
-}
-
-function readFirstScalar(value: unknown, path: string): string | number | boolean | null | undefined {
-  const match = readPathValues(value, path).find((item) =>
-    item === null || ['string', 'number', 'boolean'].includes(typeof item),
-  );
-  return match as string | number | boolean | null | undefined;
-}
-
-function readUrls(value: unknown, path: string): string[] {
-  return readPathValues(value, path)
-    .flatMap((item) => Array.isArray(item) ? item : [item])
-    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
-}
-
-function formatResponsePreviewValue(value: unknown, redactBase64: boolean): string {
-  if (redactBase64 && typeof value === 'string') {
-    const base64Value = value.includes(',') && /^data:/i.test(value)
-      ? value.slice(value.indexOf(',') + 1)
-      : value;
-    return `[Base64 ${base64Value.replace(/\s/g, '').length} 字符]`;
-  }
-  const serialized = typeof value === 'string'
-    ? value
-    : value === undefined ? '' : JSON.stringify(value);
-  return serialized.length > 240 ? `${serialized.slice(0, 240)}...` : serialized;
-}
-
 export function previewModelProtocolResponse(
   protocolValue: ModelExecutionProtocol,
   payload: ProtocolJsonValue,
 ): ModelProtocolResponsePreviewEntry[] {
-  const protocol = parseModelExecutionProtocol(protocolValue);
-  const entries: ModelProtocolResponsePreviewEntry[] = [];
-  const addEntry = (
-    id: string,
-    label: string,
-    path: string | undefined,
-    redactBase64 = false,
-  ) => {
-    if (!path) return;
-    const matches = readPathValues(payload, path)
-      .flatMap((value) => Array.isArray(value) ? value : [value]);
-    entries.push({
-      id,
-      label,
-      path,
-      matchCount: matches.length,
-      values: matches.map((value) => formatResponsePreviewValue(value, redactBase64)),
-    });
-  };
-
-  if (protocol.mode === 'sync') {
-    if (protocol.response.type !== 'json') return [];
-    addEntry('result-url', 'URL 结果', protocol.response.result?.urlPath);
-    addEntry('result-text', '文本结果', protocol.response.result?.textPath);
-    addEntry('result-base64', 'Base64 结果', protocol.response.result?.base64Path, true);
-    addEntry('submit-error', '错误信息', protocol.response.errorPath);
-    return entries;
-  }
-
-  addEntry('task-id', '任务 ID（提交响应）', protocol.response.taskIdPath);
-  addEntry('submit-error', '提交错误', protocol.response.errorPath);
-  addEntry('status', '任务状态（轮询响应）', protocol.poll?.response.statusPath);
-  addEntry('poll-result-url', 'URL 结果', protocol.poll?.response.result.urlPath);
-  addEntry('poll-result-text', '文本结果', protocol.poll?.response.result.textPath);
-  addEntry('poll-result-base64', 'Base64 结果', protocol.poll?.response.result.base64Path, true);
-  addEntry('poll-error', '任务错误', protocol.poll?.response.errorPath);
-  addEntry('progress', '任务进度', protocol.poll?.response.progressPath);
-  return entries;
+  return previewNormalizedModelProtocolResponse(
+    parseModelExecutionProtocol(protocolValue),
+    payload,
+  );
 }
 
 function resolveContextPath(context: Record<string, unknown>, path: string): unknown {
-  return readPathValues(context, path)[0];
+  return readModelProtocolPathValues(context, path)[0];
 }
 
 function renderTemplateString(
@@ -857,17 +781,6 @@ function renderRequestHeaders(
   return headers;
 }
 
-function findHeaderName(headers: Record<string, string>, target: string): string | undefined {
-  return Object.keys(headers).find((name) => name.toLowerCase() === target.toLowerCase());
-}
-
-function setContentType(headers: Record<string, string>, value: string, force = false): void {
-  const existingName = findHeaderName(headers, 'content-type');
-  if (existingName && !force) return;
-  if (existingName) delete headers[existingName];
-  headers['Content-Type'] = value;
-}
-
 function renderRequestBody(
   request: ModelProtocolRequestTemplate,
   context: Record<string, unknown>,
@@ -875,143 +788,6 @@ function renderRequestBody(
   if (request.body === undefined) return undefined;
   const rendered = renderTemplate(request.body, context);
   return rendered === OMIT_TEMPLATE_VALUE ? undefined : rendered;
-}
-
-function appendUrlEncodedValue(params: URLSearchParams, name: string, value: ProtocolJsonValue): void {
-  if (Array.isArray(value)) {
-    value.forEach((item) => appendUrlEncodedValue(params, name, item));
-    return;
-  }
-  if (value && typeof value === 'object') {
-    params.append(name, JSON.stringify(value));
-    return;
-  }
-  params.append(name, value === null ? '' : String(value));
-}
-
-interface ParsedDataUrl {
-  mimeType: string;
-  bytes: Uint8Array;
-}
-
-function parseBase64DataUrl(value: string): ParsedDataUrl {
-  const match = /^data:([^;,]+);base64,([\s\S]*)$/i.exec(value);
-  if (!match || !MIME_TYPE_RE.test(match[1])) {
-    throw new Error('multipart 文件只支持 data URL');
-  }
-  try {
-    const binary = atob(match[2].replace(/\s/g, ''));
-    return {
-      mimeType: match[1],
-      bytes: Uint8Array.from(binary, (character) => character.charCodeAt(0)),
-    };
-  } catch {
-    throw new Error('multipart 文件 data URL 的 Base64 内容无效');
-  }
-}
-
-function sanitizeMultipartToken(value: string, fallback: string): string {
-  const sanitized = value.trim().replace(/[\r\n"]/g, '_');
-  return sanitized || fallback;
-}
-
-function createMultipartBoundary(): string {
-  const randomPart = globalThis.crypto?.randomUUID?.().replace(/-/g, '')
-    ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
-  return `----ai-canvas-${randomPart}`;
-}
-
-function concatBytes(chunks: Uint8Array[]): ArrayBuffer {
-  const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
-  const combined = new Uint8Array(length);
-  let offset = 0;
-  chunks.forEach((chunk) => {
-    combined.set(chunk, offset);
-    offset += chunk.byteLength;
-  });
-  return combined.buffer;
-}
-
-function serializeMultipartBody(body: Record<string, ProtocolJsonValue>, boundary: string): ArrayBuffer {
-  const encoder = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const appendText = (value: string) => chunks.push(encoder.encode(value));
-  const appendPart = (name: string, value: ProtocolJsonValue) => {
-    const safeName = sanitizeMultipartToken(name, 'field');
-    if (value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, '$file')) {
-      const fileSource = value.$file;
-      if (typeof fileSource !== 'string') throw new Error(`multipart 文件字段 ${name} 的 $file 必须是字符串`);
-      const parsed = parseBase64DataUrl(fileSource);
-      const configuredMime = value.contentType;
-      if (configuredMime !== undefined && (typeof configuredMime !== 'string' || !MIME_TYPE_RE.test(configuredMime))) {
-        throw new Error(`multipart 文件字段 ${name} 的 contentType 无效`);
-      }
-      const filename = sanitizeMultipartToken(
-        typeof value.filename === 'string' ? value.filename : 'upload.bin',
-        'upload.bin',
-      );
-      appendText(`--${boundary}\r\n`);
-      appendText(`Content-Disposition: form-data; name="${safeName}"; filename="${filename}"\r\n`);
-      appendText(`Content-Type: ${configuredMime ?? parsed.mimeType}\r\n\r\n`);
-      chunks.push(parsed.bytes);
-      appendText('\r\n');
-      return;
-    }
-    const serialized = value && typeof value === 'object'
-      ? JSON.stringify(value)
-      : value === null ? '' : String(value);
-    appendText(`--${boundary}\r\n`);
-    appendText(`Content-Disposition: form-data; name="${safeName}"\r\n\r\n`);
-    appendText(`${serialized}\r\n`);
-  };
-
-  for (const [name, value] of Object.entries(body)) {
-    if (Array.isArray(value)) value.forEach((item) => appendPart(name, item));
-    else appendPart(name, value);
-  }
-  appendText(`--${boundary}--\r\n`);
-  return concatBytes(chunks);
-}
-
-function serializeRequestBody(
-  body: ProtocolJsonValue,
-  encoding: ModelProtocolBodyEncoding | undefined,
-  headers: Record<string, string>,
-): BodyInit {
-  const resolvedEncoding = encoding ?? 'json';
-  if (resolvedEncoding === 'json') {
-    setContentType(headers, 'application/json');
-    return JSON.stringify(body);
-  }
-  if (!isRecord(body)) {
-    throw new Error(`${resolvedEncoding} 请求体必须是 JSON 对象`);
-  }
-  if (resolvedEncoding === 'form-urlencoded') {
-    const params = new URLSearchParams();
-    Object.entries(body).forEach(([name, value]) => appendUrlEncodedValue(params, name, value));
-    setContentType(headers, 'application/x-www-form-urlencoded;charset=UTF-8');
-    return params.toString();
-  }
-  const boundary = createMultipartBoundary();
-  setContentType(headers, `multipart/form-data; boundary=${boundary}`, true);
-  return serializeMultipartBody(body, boundary);
-}
-
-function redactMultipartPreview(value: ProtocolJsonValue): ProtocolJsonValue {
-  if (Array.isArray(value)) return value.map(redactMultipartPreview);
-  if (value && typeof value === 'object') {
-    if (Object.hasOwn(value, '$file') && typeof value.$file === 'string') {
-      const parsed = parseBase64DataUrl(value.$file);
-      return {
-        ...value,
-        $file: `[data URL ${parsed.mimeType}, ${parsed.bytes.byteLength} bytes]`,
-      };
-    }
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactMultipartPreview(item)]),
-    );
-  }
-  return value;
 }
 
 function buildRequestInit(
@@ -1028,7 +804,7 @@ function buildRequestInit(
     headers,
     body: request.method === 'GET' || body === undefined
       ? undefined
-      : serializeRequestBody(body, request.bodyEncoding, headers),
+      : serializeModelProtocolBody(body, request.bodyEncoding, headers),
     signal,
   };
 }
@@ -1060,7 +836,7 @@ export function previewModelProtocolRequest(
   const body = built.renderedBody === undefined
     ? undefined
     : built.protocol.submit.bodyEncoding === 'multipart'
-      ? redactMultipartPreview(built.renderedBody)
+      ? redactModelProtocolMultipartPreview(built.renderedBody)
       : built.renderedBody;
   return {
     method: built.init.method || built.protocol.submit.method,
@@ -1109,7 +885,7 @@ async function readJsonResponse(
       payload = null;
     }
     const configuredMessage = errorPath && (isRecord(payload) || Array.isArray(payload))
-      ? readFirstScalar(payload, errorPath)
+      ? readModelProtocolFirstScalar(payload, errorPath)
       : undefined;
     const message = configuredMessage !== undefined && configuredMessage !== null
       ? String(configuredMessage)
@@ -1175,7 +951,7 @@ function resolvePoll(
   const headers = renderRequestHeaders(poll, { type: 'none' }, '', context);
   const body = renderRequestBody(poll, context);
   if (poll.method !== 'GET' && body !== undefined) {
-    serializeRequestBody(body, poll.bodyEncoding, headers);
+    serializeModelProtocolBody(body, poll.bodyEncoding, headers);
   }
   const response = poll.response;
   const result = response.result;
@@ -1230,13 +1006,13 @@ export async function submitModelProtocol(
     }
     const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath);
     const resultConfig = responseConfig.result!;
-    const urls = resultConfig.urlPath ? readUrls(payload, resultConfig.urlPath) : [];
+    const urls = resultConfig.urlPath ? readModelProtocolUrls(payload, resultConfig.urlPath) : [];
     const base64Urls = resultConfig.base64Path
-      ? readUrls(payload, resultConfig.base64Path).map((value) =>
+      ? readModelProtocolUrls(payload, resultConfig.base64Path).map((value) =>
           normalizeBase64Result(value, resultConfig.mimeType!))
       : [];
     const textValue = resultConfig.textPath
-      ? readFirstScalar(payload, resultConfig.textPath)
+      ? readModelProtocolFirstScalar(payload, resultConfig.textPath)
       : undefined;
     const text = textValue === undefined || textValue === null ? undefined : String(textValue);
     const mediaUrls = [...urls, ...base64Urls];
@@ -1248,7 +1024,7 @@ export async function submitModelProtocol(
   }
 
   const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath);
-  const taskIdValue = readFirstScalar(payload, responseConfig.taskIdPath!);
+  const taskIdValue = readModelProtocolFirstScalar(payload, responseConfig.taskIdPath!);
   if (taskIdValue === undefined || taskIdValue === null || taskIdValue === '') {
     throw new Error(`模型提交响应中未找到任务 ID：${responseConfig.taskIdPath}`);
   }
@@ -1355,7 +1131,7 @@ function buildResolvedRequestInit(
   }
   const body = poll.method === 'GET' || poll.body === undefined
     ? undefined
-    : serializeRequestBody(poll.body, poll.bodyEncoding, headers);
+    : serializeModelProtocolBody(poll.body, poll.bodyEncoding, headers);
   return {
     method: poll.method,
     headers,
@@ -1427,15 +1203,15 @@ export async function pollResolvedModelProtocol(
       }
     },
     isComplete: (payload) => {
-      const status = normalizeStatus(readFirstScalar(payload, poll.statusPath));
+      const status = normalizeStatus(readModelProtocolFirstScalar(payload, poll.statusPath));
       if (!successValues.has(status)) return null;
-      const urls = poll.resultUrlPath ? readUrls(payload, poll.resultUrlPath) : [];
+      const urls = poll.resultUrlPath ? readModelProtocolUrls(payload, poll.resultUrlPath) : [];
       const base64Urls = poll.resultBase64Path
-        ? readUrls(payload, poll.resultBase64Path).map((value) =>
+        ? readModelProtocolUrls(payload, poll.resultBase64Path).map((value) =>
             normalizeBase64Result(value, poll.resultMimeType!))
         : [];
       const textValue = poll.resultTextPath
-        ? readFirstScalar(payload, poll.resultTextPath)
+        ? readModelProtocolFirstScalar(payload, poll.resultTextPath)
         : undefined;
       const text = textValue === undefined || textValue === null ? undefined : String(textValue);
       const mediaUrls = [...urls, ...base64Urls];
@@ -1446,9 +1222,9 @@ export async function pollResolvedModelProtocol(
       };
     },
     isFailed: (payload) => {
-      const status = normalizeStatus(readFirstScalar(payload, poll.statusPath));
+      const status = normalizeStatus(readModelProtocolFirstScalar(payload, poll.statusPath));
       if (!failureValues.has(status)) return null;
-      const detail = poll.errorPath ? readFirstScalar(payload, poll.errorPath) : undefined;
+      const detail = poll.errorPath ? readModelProtocolFirstScalar(payload, poll.errorPath) : undefined;
       return `模型任务失败：${detail || status}`;
     },
     interval: poll.intervalMs,

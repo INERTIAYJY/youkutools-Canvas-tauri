@@ -179,6 +179,8 @@ describe('critical canvas node interactions', () => {
       onCopy: vi.fn(),
       onCut: vi.fn(),
       onDuplicate: vi.fn(),
+      onToggleLock: vi.fn(),
+      isLocked: false,
       onDelete: vi.fn(),
     };
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_TRANSFORM,
@@ -12,6 +12,7 @@ import {
   type VideoEditorTrack,
 } from '../../src/types/videoEditor';
 import { computeDrawRect } from '../../src/services/videoCompositor';
+import { resolveCompositeAudioMode } from '../../src/services/videoEditorMediaService';
 import {
   createTrack,
   moveTrack,
@@ -253,5 +254,88 @@ describe('hasMixedSources', () => {
     expect(hasMixedSources([fhd, null, undefined])).toBe(false);
     // 未探测完的片段不该让判断提前倒向合成
     expect(hasMixedSources([fhd, { codec: 'avc', width: 0, height: 0 }])).toBe(false);
+  });
+});
+
+describe('resolveCompositeAudioMode', () => {
+  const audioClip = (over: Partial<VideoEditorClip> & { id: string }) => clip(over);
+  const withAudio = (clips: VideoEditorClip[]): VideoEditorTrack[] => [videoTrack(clips)];
+
+  const fakeInput = (codec = 'aac', sampleRate = 48000, channels = 2) => ({
+    getPrimaryAudioTrack: async () => ({
+      getCodec: async () => codec,
+      getDecoderConfig: async () => ({ codec, sampleRate, numberOfChannels: channels }),
+    }),
+  }) as unknown as Parameters<typeof resolveCompositeAudioMode>[1] extends
+    (clip: VideoEditorClip) => infer R ? NonNullable<R> : never;
+
+  const resolver = (input = fakeInput()) => () => input;
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('mixes when the browser has an AudioEncoder', async () => {
+    vi.stubGlobal('AudioEncoder', class {});
+    const result = await resolveCompositeAudioMode(
+      withAudio([audioClip({ id: 'a' })]),
+      resolver(),
+    );
+    expect(result.mode).toBe('encode');
+  });
+
+  it('falls back to packet copy when AudioEncoder is missing', async () => {
+    // WebKit 至今没有 AudioEncoder，这是 macOS 上的实际情形
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      withAudio([
+        audioClip({ id: 'a', timelineStart: 0, sourceOut: 4 }),
+        audioClip({ id: 'b', timelineStart: 4, sourceOut: 4 }),
+      ]),
+      resolver(),
+    );
+    expect(result.mode).toBe('copy');
+  });
+
+  it('cannot copy when clips overlap, because that would need mixing', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      withAudio([
+        audioClip({ id: 'a', timelineStart: 0, sourceOut: 4 }),
+        audioClip({ id: 'b', timelineStart: 2, sourceOut: 4 }),
+      ]),
+      resolver(),
+    );
+    expect(result.mode).toBe('none');
+    expect(result.reason).toContain('重叠');
+  });
+
+  it('cannot copy when a volume change is requested', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    expect((await resolveCompositeAudioMode(
+      withAudio([audioClip({ id: 'a', volume: 0.5 })]),
+      resolver(),
+    )).mode).toBe('none');
+
+    expect((await resolveCompositeAudioMode(
+      withAudio([audioClip({ id: 'a', volumePoints: [{ t: 0, gain: 0 }] })]),
+      resolver(),
+    )).mode).toBe('none');
+  });
+
+  it('reports no audio for an empty or fully muted timeline', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    expect((await resolveCompositeAudioMode([videoTrack([])], resolver())).mode).toBe('none');
+    expect((await resolveCompositeAudioMode(
+      [{ ...videoTrack([audioClip({ id: 'a' })]), muted: true }],
+      resolver(),
+    )).mode).toBe('none');
+  });
+
+  it('skips image clips, which carry no audio', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      withAudio([audioClip({ id: 'a', kind: 'image' })]),
+      resolver(),
+    );
+    expect(result.mode).toBe('none');
   });
 });

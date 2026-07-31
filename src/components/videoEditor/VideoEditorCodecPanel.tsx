@@ -32,6 +32,8 @@ function VideoEditorCodecPanel() {
     const lines = [
       `VideoEncoder: ${report.hasVideoEncoder}`,
       `VideoDecoder: ${report.hasVideoDecoder}`,
+      `AudioEncoder: ${report.hasAudioEncoder}`,
+      `AudioDecoder: ${report.hasAudioDecoder}`,
       ...report.results.map((entry) => (
         `${entry.label} (${entry.codec}) 声明=${entry.declared} 实测=${entry.actual}`
         + (entry.detail ? ` — ${entry.detail}` : '')
@@ -75,6 +77,19 @@ function VideoEditorCodecPanel() {
             <span>VideoDecoder</span>
             <span>{report.hasVideoDecoder ? '存在' : '缺失'}</span>
           </div>
+          <div className="video-editor-inspect-row">
+            <span>AudioEncoder</span>
+            <span>{report.hasAudioEncoder ? '存在' : '缺失'}</span>
+          </div>
+          <div className="video-editor-inspect-row">
+            <span>AudioDecoder</span>
+            <span>{report.hasAudioDecoder ? '存在' : '缺失'}</span>
+          </div>
+          {!report.hasAudioEncoder && (
+            <div className="video-editor-inspect-hint">
+              本机没有 AudioEncoder，合成导出无法混流；满足条件时会改用音频分组直通。
+            </div>
+          )}
           {report.results.map((entry) => (
             <div key={entry.label} className="video-editor-probe-row" title={entry.detail}>
               <Icon

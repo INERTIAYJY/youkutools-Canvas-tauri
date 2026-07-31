@@ -471,6 +471,8 @@ export default function VideoEditorWindow() {
       let bytes: Uint8Array;
       const notes: string[] = [];
 
+      let audioNote: string | null = null;
+
       /** 逐帧渲染 + 重编码；直通做不到时也走这里 */
       const runComposite = async () => {
         // 合成路径：逐帧渲染 + 重编码，支持叠加、画中画、转场与混音
@@ -504,6 +506,13 @@ export default function VideoEditorWindow() {
           resolveAudio: inputFor,
           onProgress: setExportProgress,
           onStage: setExportStage,
+          onAudioMode: (mode, reason) => {
+            audioNote = mode === 'encode'
+              ? '音频已重新混流'
+              : mode === 'copy'
+                ? '音频以原始分组直通保留（本机无 AudioEncoder，故未做混流）'
+                : `未输出音轨：${reason ?? '无可用音频'}`;
+          },
           signal: controller.signal,
         }));
       };
@@ -512,7 +521,8 @@ export default function VideoEditorWindow() {
         bytes = await runComposite();
         notes.push(`已合成导出 ${allClips.length} 个片段 · ${canvasSize.width}×${canvasSize.height} · ${exportFrameRate}fps`);
         if (mixedSources) notes.push('素材分辨率或编码不一致，已归一到同一画布');
-        notes.push('合成路径经过一次重编码');
+        notes.push('画面经过一次重编码');
+        if (audioNote) notes.push(audioNote);
       } else {
         // 简单时间轴走无损直通，避免无谓的画质损失
         const segments: ConcatSegment[] = clips.map((clip) => ({
@@ -542,6 +552,7 @@ export default function VideoEditorWindow() {
           setExportProgress(0);
           bytes = await runComposite();
           notes.push(`无损直通不可用，已改用合成导出 · ${canvasSize.width}×${canvasSize.height} · ${exportFrameRate}fps`);
+          if (audioNote) notes.push(audioNote);
           notes.push(reason instanceof Error ? reason.message : String(reason));
         }
       }

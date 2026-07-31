@@ -21,6 +21,9 @@ export interface CodecProbeResult {
 export interface CodecProbeReport {
   hasVideoEncoder: boolean;
   hasVideoDecoder: boolean;
+  /** WebKit 至今未实现 AudioEncoder，直接决定合成导出能否混流 */
+  hasAudioEncoder: boolean;
+  hasAudioDecoder: boolean;
   results: CodecProbeResult[];
 }
 
@@ -97,13 +100,14 @@ async function probeOne(
 export async function probeVideoCodecs(): Promise<CodecProbeReport> {
   const hasVideoEncoder = typeof VideoEncoder !== 'undefined';
   const hasVideoDecoder = typeof VideoDecoder !== 'undefined';
-  if (!hasVideoEncoder) {
-    return { hasVideoEncoder, hasVideoDecoder, results: [] };
-  }
+  const hasAudioEncoder = typeof AudioEncoder !== 'undefined';
+  const hasAudioDecoder = typeof AudioDecoder !== 'undefined';
+  const base = { hasVideoEncoder, hasVideoDecoder, hasAudioEncoder, hasAudioDecoder };
+  if (!hasVideoEncoder) return { ...base, results: [] };
 
   const results: CodecProbeResult[] = [];
   for (const probe of PROBES) {
     results.push(await probeOne(probe));
   }
-  return { hasVideoEncoder, hasVideoDecoder, results };
+  return { ...base, results };
 }

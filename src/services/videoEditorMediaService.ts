@@ -23,10 +23,11 @@ import {
   QUALITY_HIGH,
   QUALITY_MEDIUM,
 } from 'mediabunny';
-import type {
-  VideoEditorCanvasSize,
-  VideoEditorSourceProbe,
-  VideoEditorTrack,
+import {
+  getClipEnd,
+  type VideoEditorCanvasSize,
+  type VideoEditorSourceProbe,
+  type VideoEditorTrack,
 } from '../types/videoEditor';
 import { renderFrameAt, type ClipSourceResolver } from './videoCompositor';
 import { mixTimelineAudio, toAudioBuffers, type ClipAudioResolver } from './videoAudioMixer';
@@ -343,6 +344,118 @@ export async function exportLosslessTrim(options: {
   }
 }
 
+/** 合成导出时音轨的处理方式 */
+export type CompositeAudioMode = 'encode' | 'copy' | 'none';
+
+/**
+ * 判断合成导出能否直通搬运音频分组。
+ *
+ * WebKit 没有实现 `AudioEncoder`，混音这条路在 macOS 上走不通。
+ * 但 AAC 这类音频分组各自独立可解，只要满足下面几条就能原样搬运：
+ * 不需要混音（片段在时间上不重叠）、不改音量、且各段解码参数一致。
+ */
+export async function resolveCompositeAudioMode(
+  tracks: VideoEditorTrack[],
+  resolve: ClipAudioResolver,
+): Promise<{ mode: CompositeAudioMode; reason?: string }> {
+  const audible = tracks.filter((track) => !track.hidden && !track.muted);
+  const clips = audible.flatMap((track) => (
+    (track.volume ?? 1) === 1
+      ? track.clips.filter((clip) => clip.kind !== 'image')
+      : track.clips.map((clip) => ({ ...clip, volume: -1 }))
+  ));
+  if (clips.length === 0) return { mode: 'none', reason: '时间轴没有音频素材' };
+
+  if (typeof AudioEncoder !== 'undefined') return { mode: 'encode' };
+
+  // 以下都是「无编码器时能否直通」的判据
+  const volumeChanged = clips.some((clip) => (
+    (clip.volume ?? 1) !== 1 || (clip.volumePoints?.length ?? 0) > 0
+  ));
+  if (volumeChanged) {
+    return { mode: 'none', reason: '本机缺少 AudioEncoder，无法应用音量调整' };
+  }
+
+  const sorted = [...clips].sort((a, b) => a.timelineStart - b.timelineStart);
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (sorted[index].timelineStart < getClipEnd(sorted[index - 1]) - 1e-3) {
+      return { mode: 'none', reason: '本机缺少 AudioEncoder，无法混合重叠的音频' };
+    }
+  }
+
+  // 各段解码参数必须一致，否则搬运出来的音轨播不了
+  let reference: string | null = null;
+  for (const clip of sorted) {
+    const input = resolve(clip);
+    if (!input) continue;
+    const track = await input.getPrimaryAudioTrack();
+    if (!track) continue;
+    const config = await track.getDecoderConfig();
+    const signature = config
+      ? `${config.codec}|${config.sampleRate}|${config.numberOfChannels}`
+      : 'unknown';
+    reference ??= signature;
+    if (signature !== reference) {
+      return { mode: 'none', reason: '本机缺少 AudioEncoder，且各段音频参数不一致' };
+    }
+  }
+  if (!reference) return { mode: 'none', reason: '时间轴没有可用的音频轨' };
+
+  return { mode: 'copy' };
+}
+
+/** 把各片段的已编码音频分组按时间轴位置搬进输出，不经过编码器 */
+async function copyAudioPackets(options: {
+  output: Output;
+  tracks: VideoEditorTrack[];
+  resolve: ClipAudioResolver;
+  signal?: AbortSignal;
+  onProgress?: (progress: number) => void;
+}): Promise<void> {
+  const { output, tracks, resolve, signal, onProgress } = options;
+
+  const clips = tracks
+    .filter((track) => !track.hidden && !track.muted)
+    .flatMap((track) => track.clips.filter((clip) => clip.kind !== 'image'))
+    .sort((a, b) => a.timelineStart - b.timelineStart);
+
+  const first = clips.map(resolve).find(Boolean);
+  const firstTrack = first ? await first.getPrimaryAudioTrack() : null;
+  const codec = firstTrack ? await firstTrack.getCodec() : null;
+  if (!codec) return;
+
+  const source = new EncodedAudioPacketSource(codec);
+  output.addAudioTrack(source);
+  await output.start();
+
+  let firstPacket = true;
+  for (const [index, clip] of clips.entries()) {
+    if (signal?.aborted) throw new VideoExportCanceledError();
+    const input = resolve(clip);
+    const audioTrack = input ? await input.getPrimaryAudioTrack() : null;
+    if (!audioTrack) continue;
+
+    const sink = new EncodedPacketSink(audioTrack);
+    const decoderConfig = await audioTrack.getDecoderConfig();
+    const startPacket = (await sink.getPacket(clip.sourceIn)) ?? undefined;
+
+    for await (const packet of sink.packets(startPacket)) {
+      if (signal?.aborted) throw new VideoExportCanceledError();
+      if (packet.timestamp >= clip.sourceOut) break;
+      // 素材时间平移到片段在时间轴上的位置
+      const shifted = clip.timelineStart + (packet.timestamp - clip.sourceIn);
+      if (shifted < 0) continue;
+      await source.add(
+        packet.clone({ timestamp: shifted }),
+        firstPacket && decoderConfig ? { decoderConfig } : undefined,
+      );
+      firstPacket = false;
+    }
+    onProgress?.((index + 1) / clips.length);
+  }
+  source.close();
+}
+
 /**
  * 合成导出 —— 多轨叠加 / 画中画 / 转场 / 混音都走这条路。
  *
@@ -359,11 +472,13 @@ export async function exportComposite(options: {
   resolveAudio: ClipAudioResolver;
   onProgress?: (progress: number) => void;
   onStage?: (stage: string) => void;
+  /** 音频最终按什么方式处理，供调用方如实告知用户 */
+  onAudioMode?: (mode: CompositeAudioMode, reason?: string) => void;
   signal?: AbortSignal;
 }): Promise<Uint8Array> {
   const {
     tracks, duration, canvas, frameRate,
-    resolveVideo, resolveAudio, onProgress, onStage, signal,
+    resolveVideo, resolveAudio, onProgress, onStage, onAudioMode, signal,
   } = options;
   if (duration <= 0) throw new Error('时间轴为空，没有可导出的内容');
 
@@ -382,24 +497,47 @@ export async function exportComposite(options: {
   });
   output.addVideoTrack(videoSource);
 
-  // 音频先混好再决定要不要加轨：没有可用音频就别给输出留空轨
-  onStage?.('混合音频');
-  const mixed = await mixTimelineAudio({
+  // 先定音频走哪条路：本机没有 AudioEncoder 时退到分组直通，
+  // 直通也不满足条件就干脆不出音轨，而不是让整个导出崩掉
+  const { mode: audioMode, reason: audioReason } = await resolveCompositeAudioMode(
     tracks,
-    duration,
-    resolve: resolveAudio,
-    signal,
-    onProgress: (value) => onProgress?.(value * 0.2),
-  });
+    resolveAudio,
+  );
+  onAudioMode?.(audioMode, audioReason);
 
-  const audioSource = mixed
-    ? new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_MEDIUM })
-    : null;
-  if (audioSource) output.addAudioTrack(audioSource);
+  let mixed: Awaited<ReturnType<typeof mixTimelineAudio>> = null;
+  let audioSource: AudioBufferSource | null = null;
 
-  await output.start();
+  if (audioMode === 'encode') {
+    onStage?.('混合音频');
+    mixed = await mixTimelineAudio({
+      tracks,
+      duration,
+      resolve: resolveAudio,
+      signal,
+      onProgress: (value) => onProgress?.(value * 0.2),
+    });
+    if (mixed) {
+      audioSource = new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_MEDIUM });
+      output.addAudioTrack(audioSource);
+    }
+  }
+
+  // 分组直通模式由 copyAudioPackets 自己 addAudioTrack 并 start
+  if (audioMode !== 'copy') await output.start();
 
   try {
+    if (audioMode === 'copy') {
+      onStage?.('搬运音频');
+      await copyAudioPackets({
+        output,
+        tracks,
+        resolve: resolveAudio,
+        signal,
+        onProgress: (value) => onProgress?.(value * 0.2),
+      });
+    }
+
     onStage?.('渲染画面');
     const frameCount = Math.max(1, Math.round(duration * frameRate));
     const frameDuration = 1 / frameRate;

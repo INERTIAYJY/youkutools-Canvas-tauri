@@ -118,8 +118,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const isSingleSelection = useAppStore((s) => s.selectedNodeIds.length <= 1);
   const isSource = data.role === 'source';
-  // 粘贴 / 拖入的图片只显示图片本身：卡片底透明，露出画布
-  const isFrameless = data.sourceOrigin === 'paste' || data.sourceOrigin === 'drop';
   const nodeWidth = (data.nodeWidth as number) || 280;
   const nodeHeight = (data.nodeHeight as number) || 158;
 
@@ -993,7 +991,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           onRename={handleRename}
         />
         <div
-          className={`node image-node ${isFrameless ? 'frameless' : ''} ${selected ? 'selected' : ''} ${data.status === 'loading' || isUploading ? 'loading' : ''} ${justCompleted ? 'just-completed' : ''}`}
+          className={`node image-node ${selected ? 'selected' : ''} ${data.status === 'loading' || isUploading ? 'loading' : ''} ${justCompleted ? 'just-completed' : ''}`}
           style={{ height: nodeHeight }}
         >
           <div className="node-preview compact">

@@ -217,7 +217,7 @@ export function useNodeCreation() {
       const dt = e.dataTransfer;
       if (!dt || dt.files.length === 0) return;
       const pos = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      await useAppStore.getState().pasteExternalFromDataTransfer(dt, pos, 20, '已拖入', 'drop');
+      await useAppStore.getState().pasteExternalFromDataTransfer(dt, pos, 20, '已拖入');
     },
     [rf],
   );
@@ -303,7 +303,7 @@ export function useNodeCreation() {
                     id: nodeId,
                     type: 'ai-image',
                     position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                    data: { label: fileName, type: 'ai-image', role: 'source', sourceOrigin: 'drop', status: 'loading', nodeWidth: 280, nodeHeight: 158 },
+                    data: { label: fileName, type: 'ai-image', role: 'source', status: 'loading', nodeWidth: 280, nodeHeight: 158 },
                   } as Parameters<typeof store.addNode>[0]);
                   count++;
                   void (async () => {
@@ -393,7 +393,7 @@ export function useNodeCreation() {
                   id: `node-${generateId()}`,
                   type: 'ai-image',
                   position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                  data: { label: fileName, type: 'ai-image', role: 'source', sourceOrigin: 'drop', imageUrl: dataUrl, status: 'success', fileName, ...dims },
+                  data: { label: fileName, type: 'ai-image', role: 'source', imageUrl: dataUrl, status: 'success', fileName, ...dims },
                 } as Parameters<typeof store.addNode>[0]);
               } else if (cat === 'video') {
                 store.addNode({

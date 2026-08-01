@@ -13,7 +13,7 @@ site/
 ├── assets/
 │   ├── icon.svg        # 复制自 public/icons.svg
 │   ├── favicon.svg     # 复制自 public/favicon.svg
-│   └── screenshot.jpg  # 复制自 public/screenshot.jpg
+│   └── screenshot.png  # 复制自 public/screenshot.png
 ├── demo/
 │   ├── demo.js               # 浏览器试用：加载应用 + 播种演示画布
 │   ├── canvas.json           # 演示画布的 nodes / edges
@@ -64,5 +64,5 @@ python3 -m http.server 4321 --directory site
 
 - 页面文案以 `README.md` 与 `.release-notes.md` 的既有描述为准，不要写入未实现的能力。
 - 版本号出现在 hero 徽章与下载区，发版时同步更新。
-- 应用截图更新后，重新从 `public/screenshot.jpg` 复制到 `site/assets/`。
+- 应用截图更新后，重新从 `public/screenshot.png` 复制到 `site/assets/`。
 - 保持零外部依赖：不要引入 CDN 字体、脚本或分析代码。

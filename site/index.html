@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>AI Canvas — 本地优先的 AI 多模态创作画布</title>
+<meta name="description" content="AI Canvas 是基于 Tauri 2 + React 19 的本地优先桌面应用，把文本、图像、视频、音频、分镜、全景与 3D 导演台组织成可连接的画布节点，并配备可审批的对话式 Agent。" />
+<meta name="theme-color" content="#08080c" />
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="AI Canvas — 本地优先的 AI 多模态创作画布" />
+<meta property="og:description" content="把文本、图像、视频、音频、分镜、全景与 3D 导演台组织成一张可连接的画布。数据留在本地，Agent 每一步都可审批。" />
+<meta property="og:image" content="assets/screenshot.jpg" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="bg-layer" aria-hidden="true">
+  <div class="bg-grid"></div>
+  <div class="glow glow-1"></div>
+  <div class="glow glow-2"></div>
+  <div class="glow glow-3"></div>
+  <div class="bg-noise"></div>
+</div>
+
+<a class="skip-link" href="#main">跳到主要内容</a>
+
+<header class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top" aria-label="AI Canvas 首页">
+      <img src="assets/icon.svg" alt="" width="30" height="30" />
+      <span>AI Canvas</span>
+    </a>
+
+    <nav class="nav-links" aria-label="主导航">
+      <a href="#canvas">画布</a>
+      <a href="#agent">对话 Agent</a>
+      <a href="#nodes">节点</a>
+      <a href="#local">本地优先</a>
+      <a href="#download">下载</a>
+    </nav>
+
+    <div class="nav-actions">
+      <a class="btn btn-ghost nav-gh" href="https://github.com/Tenney95/AI-Canvas-tauri" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38l-.01-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.89.87 2.35.67.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <a class="btn btn-primary" href="#download">下载</a>
+    </div>
+
+    <button class="nav-toggle" id="navToggle" aria-label="打开菜单" aria-expanded="false" aria-controls="mobileMenu">
+      <span></span><span></span>
+    </button>
+  </div>
+
+  <div class="mobile-menu" id="mobileMenu" hidden>
+    <a href="#canvas">画布</a>
+    <a href="#agent">对话 Agent</a>
+    <a href="#nodes">节点</a>
+    <a href="#local">本地优先</a>
+    <a href="#download">下载</a>
+    <a href="https://github.com/Tenney95/AI-Canvas-tauri" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main id="main">
+<span id="top"></span>
+
+<!-- ───────────────────────── HERO ───────────────────────── -->
+<section class="hero">
+  <div class="wrap">
+    <a class="pill reveal" href="https://github.com/Tenney95/AI-Canvas-tauri/releases/latest" target="_blank" rel="noopener">
+      <span class="pill-tag">v0.7.1</span>
+      <span>视频剪辑工作流<span class="pill-more"> · 文字贴图</span> · 本地导出</span>
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="m6 3.5 4.5 4.5L6 12.5"/></svg>
+    </a>
+
+    <h1 class="hero-title reveal">
+      把整条创作链路<br />
+      <span class="grad">画在一张画布上</span>
+    </h1>
+
+    <p class="hero-sub reveal">
+      文本、图像、视频、音频、逐帧动画、分镜、360° 全景与 3D 导演台，
+      在同一张无限画布上连接成可复用的生成链路。
+      素材与密钥留在你自己的电脑上。
+    </p>
+
+    <div class="hero-cta reveal">
+      <a class="btn btn-primary btn-lg" href="https://github.com/Tenney95/AI-Canvas-tauri/releases/latest" target="_blank" rel="noopener" id="heroDownload">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M8 1.5v9m0 0L4.5 7M8 10.5 11.5 7M2 13.5h12"/></svg>
+        <span id="heroDownloadLabel">下载 AI Canvas</span>
+      </a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/Tenney95/AI-Canvas-tauri" target="_blank" rel="noopener">查看源码</a>
+    </div>
+
+    <p class="hero-meta reveal"><span>支持 macOS · Windows · Linux</span><i class="meta-sep">|</i><span>免费下载，源码可读</span></p>
+  </div>
+
+  <div class="shot-wrap reveal" id="shotWrap">
+    <div class="shot-glow" aria-hidden="true"></div>
+    <figure class="shot">
+      <div class="shot-bar">
+        <span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span>
+        <span class="shot-title">AI Canvas — 项目 2</span>
+      </div>
+      <img src="assets/screenshot.jpg" alt="AI Canvas 应用界面：深色无限画布上排布着文本、角色图像、视频与 Markdown 节点，并以连线组成生成链路" width="2130" height="1350" />
+    </figure>
+  </div>
+
+  <div class="stack-strip reveal" aria-label="技术栈">
+    <span>Tauri 2</span><i></i>
+    <span>React 19</span><i></i>
+    <span>React Flow 12</span><i></i>
+    <span>TypeScript 6</span><i></i>
+    <span>Rust</span><i></i>
+    <span>Three.js</span><i></i>
+    <span>MCP</span>
+  </div>
+</section>
+
+<!-- ───────────────────────── STATS ───────────────────────── -->
+<section class="stats wrap">
+  <div class="stat reveal"><b data-count="12">12</b><span>类画布节点</span></div>
+  <div class="stat reveal"><b data-count="3">3</b><span>档 Agent 执行模式</span></div>
+  <div class="stat reveal"><b data-count="5">5</b><span>种生成后端</span></div>
+  <div class="stat reveal"><b>0</b><span>条 API Key 落库</span></div>
+</section>
+
+<!-- ───────────────────────── CANVAS ───────────────────────── -->
+<section id="canvas" class="section wrap">
+  <div class="sec-head">
+    <p class="eyebrow reveal">画布</p>
+    <h2 class="reveal">节点之间有连线，<br class="br-m" />创作才有上下文</h2>
+    <p class="lede reveal">
+      基于 React Flow 12 的无限画布：多选、吸附、对齐、分布、分组、复制粘贴与完整撤销重做。
+      有依赖的节点按拓扑顺序执行，无依赖的并发跑完。
+    </p>
+  </div>
+
+  <div class="bento">
+    <article class="card card-wide reveal">
+      <div class="card-body">
+        <h3>选中即批量生成</h3>
+        <p>框选一批节点直接执行。存在连线依赖时按拓扑顺序推进，互不相干的节点并发跑，结果原地回填。</p>
+      </div>
+      <div class="card-visual">
+        <div class="flowmap" aria-hidden="true">
+          <svg viewBox="0 0 420 190" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#4196FF"/><stop offset="100%" stop-color="#A259FF"/>
+              </linearGradient>
+            </defs>
+            <path class="wire" d="M96 52 C150 52 150 40 196 40" />
+            <path class="wire" d="M96 62 C150 62 150 95 196 95" />
+            <path class="wire" d="M96 72 C150 72 150 150 196 150" />
+            <path class="wire" d="M292 40 C330 40 330 95 344 95" />
+            <path class="wire" d="M292 95 C320 95 320 95 344 95" />
+            <path class="wire" d="M292 150 C330 150 330 100 344 100" />
+            <g class="nd"><rect x="20" y="44" width="76" height="36" rx="9"/><text x="58" y="67">提示词</text></g>
+            <g class="nd n-img"><rect x="196" y="22" width="96" height="36" rx="9"/><text x="244" y="45">图像</text></g>
+            <g class="nd n-vid"><rect x="196" y="77" width="96" height="36" rx="9"/><text x="244" y="100">视频</text></g>
+            <g class="nd n-aud"><rect x="196" y="132" width="96" height="36" rx="9"/><text x="244" y="155">音频</text></g>
+            <g class="nd n-out"><rect x="344" y="77" width="60" height="36" rx="9"/><text x="374" y="100">分镜</text></g>
+          </svg>
+        </div>
+      </div>
+    </article>
+
+    <article class="card reveal">
+      <div class="card-body">
+        <div class="ico ico-a">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 13.5 8 9l4.5 4.5L16 11l5 4.5"/></svg>
+        </div>
+        <h3>画布笔记与绘图</h3>
+        <p>矩形、菱形、椭圆、箭头、直线、自由绘制、文本与图片笔记，可调线条、填充、粗糙度与层级——和普通节点共用同一套选择、吸附、分组与历史语义。</p>
+      </div>
+    </article>
+
+    <article class="card reveal">
+      <div class="card-body">
+        <div class="ico ico-b">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 4v5h5"/></svg>
+        </div>
+        <h3>可回看的操作记录</h3>
+        <p>结构变更进入历史快照，多节点写入按批次提交。右上角浮层可回看整条时间线，随时撤销重做。</p>
+      </div>
+    </article>
+
+    <article class="card reveal">
+      <div class="card-body">
+        <div class="ico ico-c">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
+        </div>
+        <h3>高级预设编排</h3>
+        <p>把一串生成步骤存成预设，运行时逐步派生节点、连线与模型任务，重复的流程只配一次。</p>
+      </div>
+    </article>
+
+    <article class="card reveal">
+      <div class="card-body">
+        <div class="ico ico-a">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        </div>
+        <h3>拖进来就能用</h3>
+        <p>系统剪贴板、文件拖放与资产面板都能把素材带进画布。资产库支持项目索引、外部文件夹登记、独立搜索窗口与缩略图拖回。</p>
+      </div>
+      <div class="card-visual">
+        <div class="chips" aria-hidden="true">
+          <span class="chip">粘贴</span>
+          <span class="chip">拖放</span>
+          <span class="chip">资产库</span>
+          <span class="chip">搜索窗口</span>
+          <span class="chip">文件夹同步</span>
+        </div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<!-- ───────────────────────── AGENT ───────────────────────── -->
+<section id="agent" class="section wrap">
+  <div class="sec-head">
+    <p class="eyebrow reveal">对话 Agent</p>
+    <h2 class="reveal">一个会用你画布的助手，<br class="br-m" />而不是一个会乱动的助手</h2>
+    <p class="lede reveal">
+      助手可以查询和修改画布、生成媒体、派出只读子智能体、读取你授权的文件并沉淀项目记忆。
+      每一类操作的权限边界，由本地 Policy Engine 固定，提示词改不动。
+    </p>
+  </div>
+
+  <div class="modes">
+    <article class="mode reveal">
+      <span class="mode-key">Plan</span>
+      <h3>规划模式</h3>
+      <p>只允许只读工具。先把方案说清楚，再决定要不要动手。</p>
+      <ul class="ticks">
+        <li class="ok">查询画布</li>
+        <li class="ok">读取资料</li>
+        <li class="no">写入画布</li>
+      </ul>
+    </article>
+
+    <article class="mode mode-hl reveal">
+      <span class="mode-key">B</span>
+      <h3>协作模式</h3>
+      <p>读取与查询自动执行；新增、更新、连接、分组或删除节点前，先弹审批卡片。</p>
+      <ul class="ticks">
+        <li class="ok">自动读取</li>
+        <li class="ask">写入需确认</li>
+        <li class="ok">逐步可控</li>
+      </ul>
+    </article>
+
+    <article class="mode reveal">
+      <span class="mode-key">C</span>
+      <h3>自主模式</h3>
+      <p>画布写操作可自动执行，但仍必须校验项目与 canvas revision，并写入撤销历史。</p>
+      <ul class="ticks">
+        <li class="ok">自动写画布</li>
+        <li class="ok">强制版本校验</li>
+        <li class="ok">可撤销</li>
+      </ul>
+    </article>
+  </div>
+
+  <div class="note-band reveal">
+    <div class="note-band-ico" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5.5v6c0 4.6 3.2 8.9 8 10.5 4.8-1.6 8-5.9 8-10.5v-6L12 2Z"/><path d="m9 12 2 2 4-4"/></svg>
+    </div>
+    <p><b>三种模式共用一条硬边界。</b>文件写入、永久删除、媒体生成、项目记忆写入与厂商配置写入，在任何模式下都必须由你确认——包括模式 C。</p>
+  </div>
+
+  <div class="split">
+    <div class="split-text reveal">
+      <h3>只读子智能体</h3>
+      <p>在助手里自定义领域角色，说明书可以来自 Skill，也可以直接写提示词。主任务按需并行派出子智能体，材料范围由你勾选，产出脱敏后回传主线程。</p>
+      <ul class="dots">
+        <li>隔离上下文与工具子集</li>
+        <li>任务组预算约束</li>
+        <li>内置只读「专家复核」角色</li>
+      </ul>
+    </div>
+    <div class="split-visual reveal">
+      <div class="timeline" aria-hidden="true">
+        <div class="tl-row"><span class="tl-dot"></span><span class="tl-tag tl-plan">规划</span><span class="tl-txt">拆解 3 个子任务</span></div>
+        <div class="tl-row"><span class="tl-dot"></span><span class="tl-tag tl-tool">工具</span><span class="tl-txt">query_canvas · 读取 24 个节点</span></div>
+        <div class="tl-row"><span class="tl-dot"></span><span class="tl-tag tl-sub">子智能体</span><span class="tl-txt">分镜复核 · 素材复用检查</span></div>
+        <div class="tl-row tl-wait"><span class="tl-dot"></span><span class="tl-tag tl-ask">审批</span><span class="tl-txt">生成 6 张图 · 等待确认</span></div>
+        <div class="tl-row"><span class="tl-dot"></span><span class="tl-tag tl-done">回答</span><span class="tl-txt">已交付到画布与对话</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="split split-rev">
+    <div class="split-text reveal">
+      <h3>任务不会因为你切走就断</h3>
+      <p>切换会话后任务继续运行，任务中心汇总跨会话进度；时间线支持暂停、继续、停止、插话与重新规划。应用重启后，未完成任务恢复为暂停状态，绝不静默续跑。</p>
+      <ul class="dots">
+        <li>上下文占用可视，超预算自动压缩</li>
+        <li>项目记忆只能由 Agent 提议、你确认后保存</li>
+        <li>付费媒体请求逐次确认</li>
+      </ul>
+    </div>
+    <div class="split-visual reveal">
+      <div class="mcp-card">
+        <div class="mcp-head"><span class="live"></span> 本地 MCP 控制桥</div>
+        <p>手动开启的会话级 stdio 适配器，让 Codex 等 MCP 客户端复用应用内已有的能力边界，而不是绕过它。</p>
+        <ul class="mono-list">
+          <li><span>监听</span> 127.0.0.1 随机端口</li>
+          <li><span>令牌</span> 每次会话一次性 256 位</li>
+          <li><span>审批</span> 仍在 AI Canvas 内完成</li>
+          <li><span>默认</span> 关闭 · 退出即失效</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── NODES ───────────────────────── -->
+<section id="nodes" class="section wrap">
+  <div class="sec-head">
+    <p class="eyebrow reveal">节点</p>
+    <h2 class="reveal">十二类节点，一套连线语义</h2>
+    <p class="lede reveal">图片、视频、音频三类参考媒体共用同一套连线与提示词引用规则，由统一的媒体 Provider 注册表分发到各家厂商适配器。</p>
+  </div>
+
+  <div class="grid-nodes">
+    <article class="ncard reveal"><span class="nico" data-c="1">T</span><h4>文本</h4><p>流式生成、多轮内容、提示词预设、Skill、风格与 <code>@</code> 节点引用。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="2">◧</span><h4>图像</h4><p>文生图、图生图、批量结果与生成历史；裁剪、扩图、标注、抠图、多图合成、机位工作台与宫格编辑。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="3">▶</span><h4>视频</h4><p>文生视频、图生视频、视频到视频，可配分辨率、帧率、时长、比例、参考音频与有声视频。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="4">♪</span><h4>音频</h4><p>音乐与语音生成、参考音色、上传、播放与结果管理。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="5">⛶</span><h4>逐帧动画</h4><p>动作与帧数配置、Sprite Sheet 生成与预览。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="6">▦</span><h4>分镜</h4><p>自定义宫格、单格覆盖、素材拖入与画格提取。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="7">◯</span><h4>360° 全景</h4><p>预览全景图像，并把当前视角截图生成新的图片节点。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="8">◈</span><h4>3D 导演台</h4><p>独立窗口内完成场景摆位、机位预演与画面捕获，结果回写节点后可继续图生视频。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="9">M</span><h4>Markdown</h4><p>长文本、设定集与工作笔记直接留在画布上。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="10">⌘</span><h4>源文件</h4><p>把本地素材登记进画布，作为生成链路的输入。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="11">✎</span><h4>画布笔记</h4><p>形状、箭头、自由绘制、文本与图片笔记。</p></article>
+    <article class="ncard reveal"><span class="nico" data-c="12">▤</span><h4>分组</h4><p>把一组节点收进分组一起移动、折叠与管理。</p></article>
+  </div>
+</section>
+
+<!-- ───────────────────────── STUDIO ───────────────────────── -->
+<section class="section wrap">
+  <div class="sec-head">
+    <p class="eyebrow reveal">角色库与短剧</p>
+    <h2 class="reveal">从角色卡到成片，<br class="br-m" />都在同一个项目里</h2>
+    <p class="lede reveal">人物、场景与道具一次建好反复用；剪辑也不必再导出到别的软件。</p>
+  </div>
+
+  <div class="duo">
+    <article class="dcard reveal">
+      <h3>跨项目角色库</h3>
+      <p>全局角色库保存角色卡、多张参考图与头像裁切；项目角色可以直接从画布节点捕获。角色可绑定多段声音、设主声音、记录标签与台词，并一键创建音频节点或配音生成节点。</p>
+      <div class="avatars" aria-hidden="true">
+        <span class="av a1"></span><span class="av a2"></span><span class="av a3"></span><span class="av a4"></span><span class="av more">+12</span>
+      </div>
+    </article>
+    <article class="dcard reveal">
+      <h3>短剧资产面板</h3>
+      <p>人物、场景与道具集中管理，写提示词时用 <code>@</code> 直接引用。声音节点作为音色参考连进生成链路，角色台词自动预填到生成节点。</p>
+      <div class="tagcloud" aria-hidden="true">
+        <span>@主角</span><span>@雪山</span><span>@客栈夜</span><span>@长刀</span><span>@旁白音色</span><span>@开场分镜</span>
+      </div>
+    </article>
+    <article class="dcard reveal">
+      <h3>视频剪辑工作流</h3>
+      <p>时间轴支持滚轮缩放、横向平移、框选、吸附指示与三档轨道高度。文字与贴图可读取本机字体并按真实字体预览，主视频与叠加层在预览画布中直接移动、缩放和旋转。</p>
+      <div class="track" aria-hidden="true">
+        <div class="tr"><span class="tr-lb">V1</span><span class="clip c-v" style="width:52%"></span><span class="clip c-v" style="width:30%"></span></div>
+        <div class="tr"><span class="tr-lb">T1</span><span class="clip c-t" style="width:22%;margin-left:12%"></span><span class="clip c-t" style="width:18%"></span></div>
+        <div class="tr"><span class="tr-lb">A1</span><span class="clip c-a" style="width:78%"></span></div>
+        <div class="playhead"></div>
+      </div>
+      <p class="dcard-foot">导出到本地 MP4，或作为新节点回到画布。</p>
+    </article>
+  </div>
+</section>
+
+<!-- ───────────────────────── LOCAL FIRST ───────────────────────── -->
+<section id="local" class="section wrap">
+  <div class="sec-head">
+    <p class="eyebrow reveal">本地优先</p>
+    <h2 class="reveal">素材在你的硬盘上，<br class="br-m" />密钥连前端都拿不到</h2>
+    <p class="lede reveal">项目数据目录保存媒体文件，IndexedDB 持久化项目、配置、会话、任务、资产索引、角色与项目记忆。没有账号，没有强制云同步。</p>
+  </div>
+
+  <div class="grid-3">
+    <article class="card card-flat reveal">
+      <div class="ico ico-a">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+      </div>
+      <h3>凭据隔离</h3>
+      <p>API Key 由 Rust 独占的本地凭据文件保管，不写入 IndexedDB、消息或 Agent 操作日志。Renderer 只能按条目名逐条索取。</p>
+    </article>
+
+    <article class="card card-flat reveal">
+      <div class="ico ico-b">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="3"/></svg>
+      </div>
+      <h3>会话级文件授权</h3>
+      <p>文件授权只在当前运行时内保存并绑定到具体会话。模型只收到 <code>grantId</code>、显示名和受限内容，拿不到授权路径。</p>
+    </article>
+
+    <article class="card card-flat reveal">
+      <div class="ico ico-c">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2"/><path d="M14 12h8m0 0-3-3m3 3-3 3"/></svg>
+      </div>
+      <h3>项目整体迁移</h3>
+      <p>项目记录、对话、项目记忆与本地素材可打包成单个 <code>.aicanvas</code> 归档，并以全新项目 ID 导入到另一台机器。</p>
+    </article>
+
+    <article class="card card-flat reveal">
+      <div class="ico ico-a">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6m0 0 3-3m-3 3L9 6"/><path d="M4 13h4l2 3h4l2-3h4"/><path d="M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></svg>
+      </div>
+      <h3>多种生成后端</h3>
+      <p>云端模型、自定义模型执行协议、ComfyUI 工作流、Dreamina 登录态调用，以及本地 ONNX 推理（超分、抠图、角色方向图）。</p>
+    </article>
+
+    <article class="card card-flat reveal">
+      <div class="ico ico-b">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6l-9-4Z"/></svg>
+      </div>
+      <h3>可校验的按需运行时</h3>
+      <p>3D 导演台首次使用时下载固定版本资源，经 SHA-256、版本、协议、路径、文件数与体积校验后才安装，之后可离线打开。</p>
+    </article>
+
+    <article class="card card-flat reveal">
+      <div class="ico ico-c">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+      </div>
+      <h3>桌面原生体验</h3>
+      <p>自定义标题栏、深色与低饱和马卡龙浅色主题、多种画布背景、全局快捷键、文件定位、指定应用打开与桌面自动更新。</p>
+    </article>
+  </div>
+</section>
+
+<!-- ───────────────────────── DOWNLOAD ───────────────────────── -->
+<section id="download" class="section wrap">
+  <div class="dl-panel reveal">
+    <div class="dl-glow" aria-hidden="true"></div>
+    <img class="dl-icon" src="assets/icon.svg" alt="" width="72" height="72" />
+    <h2>开始使用 AI Canvas</h2>
+    <p class="lede">当前版本 v0.7.1，从 GitHub Releases 下载对应平台的安装包。</p>
+
+    <div class="dl-grid">
+      <a class="dl-card" data-os="mac" href="https://github.com/Tenney95/AI-Canvas-tauri/releases/latest" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M16.4 12.8c0-2.4 2-3.6 2.1-3.6-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.6.9-.8 0-1.9-.9-3.1-.8-1.6 0-3 .9-3.8 2.4-1.7 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 3 2.3 1.2 0 1.7-.8 3.1-.8s1.9.8 3.1.7c1.3 0 2.1-1.1 2.9-2.3.9-1.3 1.3-2.6 1.3-2.7-.1 0-2.6-1-2.7-3.5ZM14 5.6c.7-.8 1.1-1.9 1-3-1 0-2.2.6-2.9 1.5-.6.7-1.2 1.9-1 3 1.1.1 2.2-.6 2.9-1.5Z"/></svg>
+        <b>macOS</b>
+        <span>Apple Silicon<br /><code>.dmg</code></span>
+      </a>
+      <a class="dl-card" data-os="mac-intel" href="https://github.com/Tenney95/AI-Canvas-tauri/releases/latest" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M16.4 12.8c0-2.4 2-3.6 2.1-3.6-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.6.9-.8 0-1.9-.9-3.1-.8-1.6 0-3 .9-3.8 2.4-1.7 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 3 2.3 1.2 0 1.7-.8 3.1-.8s1.9.8 3.1.7c1.3 0 2.1-1.1 2.9-2.3.9-1.3 1.3-2.6 1.3-2.7-.1 0-2.6-1-2.7-3.5ZM14 5.6c.7-.8 1.1-1.9 1-3-1 0-2.2.6-2.9 1.5-.6.7-1.2 1.9-1 3 1.1.1 2.2-.6 2.9-1.5Z"/></svg>
+        <b>macOS</b>
+        <span>Intel<br /><code>x64.dmg</code></span>
+      </a>
+      <a class="dl-card" data-os="win" href="https://github.com/Tenney95/AI-Canvas-tauri/releases/latest" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M3 5.8 10.2 4.8v6.7H3V5.8Zm0 12.4 7.2 1v-6.6H3v5.6Zm8.3 1.2L21 20.6v-9.1h-9.7v7.9Zm0-15.1v7.9H21V3.4l-9.7 1Z"/></svg>
+        <b>Windows</b>
+        <span>x64<br /><code>.exe</code> / <code>.msi</code></span>
+      </a>
+      <a class="dl-card" data-os="linux" href="https://github.com/Tenney95/AI-Canvas-tauri/releases/latest" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M12 2c2.4 0 3.6 1.8 3.6 4.3 0 1.6.3 2.5 1.1 3.7 1 1.6 2.3 3.3 2.3 5.6 0 1.4-.5 2.5-1.4 3.2.2.8-.2 1.6-1 2-1.3.7-3 .3-3.6-.5h-2c-.6.8-2.3 1.2-3.6.5-.8-.4-1.2-1.2-1-2-.9-.7-1.4-1.8-1.4-3.2 0-2.3 1.3-4 2.3-5.6.8-1.2 1.1-2.1 1.1-3.7C8.4 3.8 9.6 2 12 2Zm-1.6 4.5c-.4 0-.7.4-.7 1s.3 1 .7 1 .7-.4.7-1-.3-1-.7-1Zm3.2 0c-.4 0-.7.4-.7 1s.3 1 .7 1 .7-.4.7-1-.3-1-.7-1ZM12 9.4c-.9 0-1.7.4-2.2.9.5.6 1.3 1 2.2 1s1.7-.4 2.2-1c-.5-.5-1.3-.9-2.2-.9Z"/></svg>
+        <b>Linux</b>
+        <span>x86_64<br /><code>.AppImage</code> / <code>.deb</code> / <code>.rpm</code></span>
+      </a>
+    </div>
+
+    <p class="dl-note">
+      Intel Mac 版本不包含本地 ONNX Runtime，本地 ONNX 图像处理不可用；视频剪辑与 AI 模型功能不受影响。
+      视频剪辑窗口、本机字体读取与本地文件导出仅在桌面版可用。
+    </p>
+
+    <div class="dl-links">
+      <a href="https://github.com/Tenney95/AI-Canvas-tauri/releases" target="_blank" rel="noopener">全部版本 ↗</a>
+      <a href="https://github.com/Tenney95/AI-Canvas-tauri#快速开始" target="_blank" rel="noopener">从源码构建 ↗</a>
+      <a href="https://github.com/Tenney95/AI-Canvas-tauri/issues" target="_blank" rel="noopener">反馈问题 ↗</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <div class="foot-brand">
+      <img src="assets/icon.svg" alt="" width="28" height="28" />
+      <div>
+        <b>AI Canvas</b>
+        <p>本地优先的 AI 多模态创作画布</p>
+      </div>
+    </div>
+
+    <div class="foot-cols">
+      <div>
+        <h5>产品</h5>
+        <a href="#canvas">画布</a>
+        <a href="#agent">对话 Agent</a>
+        <a href="#nodes">节点</a>
+        <a href="#download">下载</a>
+      </div>
+      <div>
+        <h5>文档</h5>
+        <a href="https://github.com/Tenney95/AI-Canvas-tauri#readme" target="_blank" rel="noopener">README</a>
+        <a href="https://github.com/Tenney95/AI-Canvas-tauri/tree/master/doc" target="_blank" rel="noopener">架构与开发</a>
+        <a href="https://github.com/Tenney95/AI-Canvas-tauri/tree/master/doc/adr" target="_blank" rel="noopener">ADR</a>
+      </div>
+      <div>
+        <h5>社区</h5>
+        <a href="https://github.com/Tenney95/AI-Canvas-tauri" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/Tenney95/AI-Canvas-tauri/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="https://github.com/Tenney95/AI-Canvas-tauri/releases" target="_blank" rel="noopener">Releases</a>
+        <span class="foot-plain">QQ 群 873354155</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap foot-bottom">
+    <p>© <span id="year">2026</span> AI Canvas · 采用 Source-Available License，非 OSI 开源许可</p>
+    <p class="foot-credit">Built with Tauri 2 · React 19 · Rust</p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

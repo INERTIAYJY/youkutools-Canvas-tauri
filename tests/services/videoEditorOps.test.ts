@@ -14,6 +14,7 @@ import {
   duplicateClipInTracks,
   removeClips,
   removeClipsFromTracks,
+  rectsIntersect,
   snapTime,
   updateClipInTracks,
 } from '../../src/components/videoEditor/timelineOps';
@@ -213,6 +214,21 @@ describe('clampZoom / fitZoom', () => {
   it('falls back to a usable default for a degenerate timeline', () => {
     expect(fitZoom(0, 500)).toBe(40);
     expect(fitZoom(10, 0)).toBe(40);
+  });
+});
+
+describe('rectsIntersect', () => {
+  it('selects overlapping and edge-touching timeline clips', () => {
+    const selection = { left: 10, top: 10, right: 50, bottom: 50 };
+    expect(rectsIntersect(selection, { left: 40, top: 40, right: 80, bottom: 80 })).toBe(true);
+    expect(rectsIntersect(selection, { left: 50, top: 20, right: 70, bottom: 30 })).toBe(true);
+  });
+
+  it('ignores clips outside the marquee', () => {
+    expect(rectsIntersect(
+      { left: 10, top: 10, right: 50, bottom: 50 },
+      { left: 51, top: 20, right: 70, bottom: 30 },
+    )).toBe(false);
   });
 });
 

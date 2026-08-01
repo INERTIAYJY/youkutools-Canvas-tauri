@@ -5,6 +5,7 @@
  * 可编辑分组留到二期，分组骨架先按最终布局占位。
  */
 import { memo, useState, type CSSProperties } from 'react';
+import { Icon } from '@iconify/react';
 import VideoEditorCodecPanel from './VideoEditorCodecPanel';
 import VideoEditorTextStickerPanel from './VideoEditorTextStickerPanel';
 import {
@@ -47,6 +48,7 @@ interface VideoEditorInspectorProps {
 
 const PENDING_SECTIONS = ['滤镜'];
 type InspectorTab = 'properties' | 'text' | 'sticker';
+type PropertyTab = 'clip' | 'transform' | 'audio' | 'export';
 
 function rangeProgress(value: number, min: number, max: number): CSSProperties {
   const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
@@ -82,6 +84,7 @@ function VideoEditorInspector({
   onUploadSticker,
 }: VideoEditorInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>('properties');
+  const [propertyTab, setPropertyTab] = useState<PropertyTab>('clip');
   const kept = clip ? getClipDuration(clip) : 0;
   const transform = clip?.transform ?? DEFAULT_TRANSFORM;
   const transition = clip?.transitionIn ?? { kind: 'none' as const, duration: 0.5 };
@@ -97,10 +100,10 @@ function VideoEditorInspector({
   const panelHead = (
     <div className="video-editor-panel-head video-editor-inspector-tabs" role="tablist" aria-label="视频编辑工具">
       {([
-        ['properties', '属性'],
-        ['text', '文字'],
-        ['sticker', '贴图'],
-      ] as const).map(([tab, label]) => (
+        ['properties', 'lucide:sliders-horizontal', '属性'],
+        ['text', 'lucide:type', '文字'],
+        ['sticker', 'lucide:sticker', '贴图'],
+      ] as const).map(([tab, icon, label]) => (
         <button
           type="button"
           key={tab}
@@ -109,6 +112,7 @@ function VideoEditorInspector({
           className={activeTab === tab ? 'active' : ''}
           onClick={() => setActiveTab(tab)}
         >
+          <Icon icon={icon} width={13} height={13} />
           {label}
         </button>
       ))}
@@ -136,10 +140,38 @@ function VideoEditorInspector({
     );
   }
 
+  const propertyTabs = ([
+    ['clip', 'lucide:film', '片段'],
+    ['transform', 'lucide:move-3d', '画面'],
+    ['audio', 'lucide:audio-lines', '音频'],
+    ['export', 'lucide:settings-2', '工程'],
+  ] as const).filter(([tab]) => tab !== 'audio' || clip?.kind === 'video' || !!probe?.audioCodec);
+  const resolvedPropertyTab = propertyTabs.some(([tab]) => tab === propertyTab)
+    ? propertyTab
+    : 'clip';
+
   return (
     <aside className="video-editor-inspector">
       {panelHead}
 
+      <div className="video-editor-property-tabs" role="tablist" aria-label="属性分类">
+        {propertyTabs.map(([tab, icon, label]) => (
+          <button
+            type="button"
+            key={tab}
+            role="tab"
+            aria-selected={resolvedPropertyTab === tab}
+            className={resolvedPropertyTab === tab ? 'active' : ''}
+            onClick={() => setPropertyTab(tab)}
+          >
+            <Icon icon={icon} width={14} height={14} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+
+      {resolvedPropertyTab === 'clip' && (
+        <>
       <div className="video-editor-inspect-group">
         <div className="video-editor-inspect-title">时间轴</div>
         <div className="video-editor-inspect-row">
@@ -192,10 +224,14 @@ function VideoEditorInspector({
           <span>音频编码</span><span>{probe?.audioCodec ?? '—'}</span>
         </div>
       </div>
+        </>
+      )}
 
       {/* 画中画 / 贴纸层的摆放 */}
+      {resolvedPropertyTab === 'transform' && (
+        <>
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">变换（叠加层）</div>
+        <div className="video-editor-inspect-title">画面变换</div>
         {([
           ['水平位置', 'x', 0, 1, 0.01],
           ['垂直位置', 'y', 0, 1, 0.01],
@@ -251,7 +287,17 @@ function VideoEditorInspector({
           <em>{transition.duration.toFixed(1)}s</em>
         </label>
       </div>
+        {PENDING_SECTIONS.map((section) => (
+          <div key={section} className="video-editor-inspect-group pending">
+            <div className="video-editor-inspect-title">
+              {section}<span className="video-editor-inspect-badge">规划中</span>
+            </div>
+          </div>
+        ))}
+        </>
+      )}
 
+      {resolvedPropertyTab === 'audio' && (
       <div className="video-editor-inspect-group">
         <div className="video-editor-inspect-title">音量</div>
         <label className="video-editor-inspect-slider">
@@ -267,7 +313,10 @@ function VideoEditorInspector({
           <em>{((clip?.volume ?? 1) * 100).toFixed(0)}%</em>
         </label>
       </div>
+      )}
 
+      {resolvedPropertyTab === 'export' && (
+        <>
       <div className="video-editor-inspect-group">
         <div className="video-editor-inspect-title">导出</div>
         <div className="video-editor-inspect-row">
@@ -309,14 +358,8 @@ function VideoEditorInspector({
       </div>
 
       <VideoEditorCodecPanel />
-
-      {PENDING_SECTIONS.map((section) => (
-        <div key={section} className="video-editor-inspect-group pending">
-          <div className="video-editor-inspect-title">
-            {section}<span className="video-editor-inspect-badge">二期</span>
-          </div>
-        </div>
-      ))}
+        </>
+      )}
     </aside>
   );
 }

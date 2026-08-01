@@ -820,7 +820,7 @@ export default function VideoEditorWindow() {
     if (phase !== 'ready') return;
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+      if (target?.closest('input, textarea, select, button, [contenteditable="true"]')) return;
       const modifier = event.metaKey || event.ctrlKey;
 
       if (modifier && (event.key === 'z' || event.key === 'Z')) {

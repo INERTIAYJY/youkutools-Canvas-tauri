@@ -28,6 +28,7 @@ import {
   fitZoom,
   MAX_PIXELS_PER_SECOND,
   MIN_PIXELS_PER_SECOND,
+  rectsIntersect,
   snapTime,
 } from './timelineOps';
 import type { SourceState } from './useVideoEditorSources';
@@ -78,6 +79,13 @@ interface VideoEditorTimelineProps {
 const MIN_CLIP_DURATION = 0.1;
 /** 认定为「拖动」而非「点击」的像素阈值 */
 const DRAG_THRESHOLD_PX = 4;
+const MEDIA_CLIP_MIME = 'application/x-video-editor-clip-id';
+type TrackDensity = 'compact' | 'normal' | 'large';
+const TRACK_DENSITY: Record<TrackDensity, { height: number; textHeight: number; label: string }> = {
+  compact: { height: 48, textHeight: 26, label: '紧凑' },
+  normal: { height: 64, textHeight: 30, label: '标准' },
+  large: { height: 84, textHeight: 38, label: '宽大' },
+};
 
 const TRACK_KIND_ICON: Record<string, string> = {
   video: '🎬',
@@ -148,8 +156,17 @@ function VideoEditorTimeline({
   onRedo,
 }: VideoEditorTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(40);
   const [autoFit, setAutoFit] = useState(true);
+  const [trackDensity, setTrackDensity] = useState<TrackDensity>('normal');
+  const [snapIndicatorTime, setSnapIndicatorTime] = useState<number | null>(null);
+  const [selectionBox, setSelectionBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
   // 拖拽状态：记录源轨道、目标轨道和在目标轨中的位置
   const [dragging, setDragging] = useState<{
     clipId: string;
@@ -243,7 +260,10 @@ function VideoEditorTimeline({
   }, [duration, pixelsPerSecond]);
 
   const applySnap = useCallback((time: number, exceptClipId?: string): number => {
-    if (!snapEnabled) return time;
+    if (!snapEnabled) {
+      setSnapIndicatorTime(null);
+      return time;
+    }
     // 收集所有视频轨片段边沿作为吸附候选
     const allEdges: number[] = [0];
     for (const track of tracks) {
@@ -255,7 +275,9 @@ function VideoEditorTimeline({
       }
     }
     allEdges.push(playhead);
-    return snapTime(time, [...new Set(allEdges)].sort((a, b) => a - b), pixelsPerSecond);
+    const snapped = snapTime(time, [...new Set(allEdges)].sort((a, b) => a - b), pixelsPerSecond);
+    setSnapIndicatorTime(snapped === time ? null : snapped);
+    return snapped;
   }, [pixelsPerSecond, playhead, snapEnabled, tracks]);
 
   // Ctrl/⌘ + 滚轮缩放，以光标处的时间为锚点
@@ -263,17 +285,25 @@ function VideoEditorTimeline({
     const element = scrollRef.current;
     if (!element) return;
     const onWheel = (event: WheelEvent) => {
-      if (!event.ctrlKey && !event.metaKey) return;
-      event.preventDefault();
-      const rect = element.getBoundingClientRect();
-      const anchorTime = (event.clientX - rect.left + element.scrollLeft) / pixelsPerSecond;
-      const next = clampZoom(pixelsPerSecond * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
-      setAutoFit(false);
-      setPixelsPerSecond(next);
-      // 保持光标下的时间点不动
-      requestAnimationFrame(() => {
-        element.scrollLeft = anchorTime * next - (event.clientX - rect.left);
-      });
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const rect = element.getBoundingClientRect();
+        const anchorTime = (event.clientX - rect.left + element.scrollLeft) / pixelsPerSecond;
+        const normalizedDelta = Math.sign(event.deltaY) * Math.min(Math.abs(event.deltaY), 30);
+        const next = clampZoom(pixelsPerSecond * Math.exp(-normalizedDelta / 180));
+        setAutoFit(false);
+        setPixelsPerSecond(next);
+        // 保持光标下的时间点不动
+        requestAnimationFrame(() => {
+          element.scrollLeft = anchorTime * next - (event.clientX - rect.left);
+        });
+        return;
+      }
+      if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        event.preventDefault();
+        const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+        element.scrollLeft += Math.sign(delta) * Math.min(Math.abs(delta), 80);
+      }
     };
     element.addEventListener('wheel', onWheel, { passive: false });
     return () => element.removeEventListener('wheel', onWheel);
@@ -288,6 +318,7 @@ function VideoEditorTimeline({
   }, [clipMenu]);
 
   const startScrub = useCallback((event: React.PointerEvent) => {
+    event.stopPropagation();
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
     onPlayheadChange(applySnap(timeFromClientX(event.clientX)));
@@ -299,10 +330,75 @@ function VideoEditorTimeline({
       target.releasePointerCapture(upEvent.pointerId);
       target.removeEventListener('pointermove', onMove);
       target.removeEventListener('pointerup', onUp);
+      target.removeEventListener('pointercancel', onUp);
+      setSnapIndicatorTime(null);
     };
     target.addEventListener('pointermove', onMove);
     target.addEventListener('pointerup', onUp);
+    target.addEventListener('pointercancel', onUp);
   }, [applySnap, onPlayheadChange, timeFromClientX]);
+
+  const startBoxSelection = useCallback((event: React.PointerEvent) => {
+    if (event.button !== 0) return;
+    const targetElement = event.target as HTMLElement;
+    if (targetElement.closest('.video-editor-clip, .video-editor-ruler')) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    event.preventDefault();
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture(event.pointerId);
+    const canvasRect = canvas.getBoundingClientRect();
+    const originClientX = event.clientX;
+    const originClientY = event.clientY;
+    const originX = originClientX - canvasRect.left;
+    const originY = originClientY - canvasRect.top;
+    const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+    const baseSelection = additive ? selectedClipIds : [];
+    let moved = false;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (!moved
+        && Math.abs(moveEvent.clientX - originClientX) < DRAG_THRESHOLD_PX
+        && Math.abs(moveEvent.clientY - originClientY) < DRAG_THRESHOLD_PX) return;
+      moved = true;
+      const currentX = moveEvent.clientX - canvasRect.left;
+      const currentY = moveEvent.clientY - canvasRect.top;
+      const clientSelection = {
+        left: Math.min(originClientX, moveEvent.clientX),
+        top: Math.min(originClientY, moveEvent.clientY),
+        right: Math.max(originClientX, moveEvent.clientX),
+        bottom: Math.max(originClientY, moveEvent.clientY),
+      };
+      setSelectionBox({
+        left: Math.min(originX, currentX),
+        top: Math.min(originY, currentY),
+        width: Math.abs(currentX - originX),
+        height: Math.abs(currentY - originY),
+      });
+      const hitIds = [...canvas.querySelectorAll<HTMLElement>('[data-clip-id]')]
+        .filter((element) => rectsIntersect(clientSelection, element.getBoundingClientRect()))
+        .map((element) => element.dataset.clipId)
+        .filter((id): id is string => !!id);
+      onSelectClips([...new Set([...baseSelection, ...hitIds])]);
+    };
+
+    const finish = (upEvent: PointerEvent) => {
+      if (target.hasPointerCapture(upEvent.pointerId)) target.releasePointerCapture(upEvent.pointerId);
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', finish);
+      target.removeEventListener('pointercancel', finish);
+      setSelectionBox(null);
+      if (!moved) {
+        onSelectClips([]);
+        onPlayheadChange(applySnap(timeFromClientX(upEvent.clientX)));
+        setSnapIndicatorTime(null);
+      }
+    };
+
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', finish);
+    target.addEventListener('pointercancel', finish);
+  }, [applySnap, onPlayheadChange, onSelectClips, selectedClipIds, timeFromClientX]);
 
   const startTrim = useCallback((
     clip: VideoEditorClip,
@@ -336,6 +432,7 @@ function VideoEditorTimeline({
       target.removeEventListener('pointermove', onMove);
       target.removeEventListener('pointerup', onUp);
       target.removeEventListener('pointercancel', onUp);
+      setSnapIndicatorTime(null);
       onEndInteraction();
     };
     target.addEventListener('pointermove', onMove);
@@ -444,6 +541,7 @@ function VideoEditorTimeline({
     const onCancel = (cancelEvent: PointerEvent) => {
       cleanup(cancelEvent.pointerId);
       setDragging(null);
+      setSnapIndicatorTime(null);
     };
 
     const onUp = (upEvent: PointerEvent) => {
@@ -491,6 +589,7 @@ function VideoEditorTimeline({
         onSelectClips([clip.id]);
       }
       setDragging(null);
+      setSnapIndicatorTime(null);
     };
 
     target.addEventListener('pointermove', onMove);
@@ -515,8 +614,54 @@ function VideoEditorTimeline({
     setPixelsPerSecond((current) => clampZoom(current * factor));
   }, []);
 
+  const cycleTrackDensity = useCallback(() => {
+    setTrackDensity((current) => (
+      current === 'compact' ? 'normal' : current === 'normal' ? 'large' : 'compact'
+    ));
+  }, []);
+
+  const handleMediaDrop = useCallback((track: VideoEditorTrack, event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (track.locked || track.kind !== 'video') return;
+    const clipId = event.dataTransfer.getData(MEDIA_CLIP_MIME);
+    if (!clipId) return;
+    const sourceTrack = tracks.find((candidate) => candidate.clips.some((clip) => clip.id === clipId));
+    if (!sourceTrack || sourceTrack.locked) return;
+    const scroll = scrollRef.current;
+    if (!scroll || pixelsPerSecond <= 0) return;
+    const rect = scroll.getBoundingClientRect();
+    const rawTime = Math.max(0, Math.min(duration, (
+      event.clientX - rect.left + scroll.scrollLeft
+    ) / pixelsPerSecond));
+    onBeginInteraction();
+    if (track.overlay) {
+      const targetTime = applySnap(rawTime, clipId);
+      if (sourceTrack.id === track.id) onMoveClipInOverlay(clipId, track.id, targetTime);
+      else onMoveClipToTrack(clipId, sourceTrack.id, track.id, targetTime);
+    } else {
+      const targetIndex = dropIndexAt(track.clips, rawTime, clipId);
+      if (sourceTrack.id === track.id) onMoveClip(clipId, targetIndex);
+      else onMoveClipToTrack(clipId, sourceTrack.id, track.id, targetIndex);
+    }
+    onSelectClips([clipId]);
+    onEndInteraction();
+    setSnapIndicatorTime(null);
+  }, [
+    applySnap, duration, onBeginInteraction, onEndInteraction, onMoveClip,
+    onMoveClipInOverlay, onMoveClipToTrack, onSelectClips, pixelsPerSecond, tracks,
+  ]);
+
+  const density = TRACK_DENSITY[trackDensity];
+
   return (
-    <section className="video-editor-timeline">
+    <section
+      className="video-editor-timeline"
+      style={{
+        '--video-editor-track-h': `${density.height}px`,
+        '--video-editor-text-track-h': `${density.textHeight}px`,
+      } as CSSProperties}
+    >
       <div className="video-editor-timeline-head">
         <div className="video-editor-timeline-actions">
           <span className="video-editor-timeline-title">
@@ -610,6 +755,15 @@ function VideoEditorTimeline({
         </div>
 
         <div className="video-editor-zoom">
+          <button
+            type="button"
+            className="video-editor-timeline-btn"
+            onClick={cycleTrackDensity}
+            data-tooltip={`轨道高度：${density.label}`}
+            aria-label={`轨道高度：${density.label}`}
+          >
+            <Icon icon="lucide:rows-3" width={13} height={13} />
+          </button>
           <button
             type="button" className="video-editor-timeline-btn"
             onClick={() => zoomBy(1 / 1.4)} data-tooltip="缩小"
@@ -725,7 +879,12 @@ function VideoEditorTimeline({
         </div>
 
         <div className="video-editor-scroll" ref={scrollRef}>
-          <div className="video-editor-canvas" style={{ width: laneWidth }}>
+          <div
+            ref={canvasRef}
+            className="video-editor-canvas"
+            style={{ width: laneWidth }}
+            onPointerDown={startBoxSelection}
+          >
             <VideoEditorRuler
               duration={duration}
               playhead={playhead}
@@ -746,11 +905,14 @@ function VideoEditorTimeline({
                   track.hidden ? 'is-hidden' : '',
                   track.muted ? 'is-muted' : '',
                 ].filter(Boolean).join(' ')}
-                onPointerDown={(event) => {
-                  if (track.kind !== 'video') return;
-                  onSelectClips([]);
-                  startScrub(event);
+                onDragOver={(event) => {
+                  if (track.kind === 'video' && !track.locked
+                    && event.dataTransfer.types.includes(MEDIA_CLIP_MIME)) {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                  }
                 }}
+                onDrop={(event) => handleMediaDrop(track, event)}
               >
                 {track.kind === 'video' ? track.clips.map((clip) => {
                   const isSelected = selectedSet.has(clip.id);
@@ -759,6 +921,7 @@ function VideoEditorTimeline({
                   return (
                     <div
                       key={clip.id}
+                      data-clip-id={clip.id}
                       className={[
                         'video-editor-clip',
                         clip.kind,
@@ -822,6 +985,7 @@ function VideoEditorTimeline({
                 }) : track.kind === 'audio' ? track.clips.map((clip) => (
                   <div
                     key={clip.id}
+                    data-clip-id={clip.id}
                     className={`video-editor-clip audio ${selectedSet.has(clip.id) ? 'selected' : ''}`}
                     style={{
                       left: clip.timelineStart * pixelsPerSecond,
@@ -851,6 +1015,15 @@ function VideoEditorTimeline({
               className="video-editor-playhead"
               style={{ left: playhead * pixelsPerSecond }}
             />
+            {snapIndicatorTime !== null && (
+              <div
+                className="video-editor-timeline-snap-indicator"
+                style={{ left: snapIndicatorTime * pixelsPerSecond }}
+              />
+            )}
+            {selectionBox && (
+              <div className="video-editor-timeline-selection-box" style={selectionBox} />
+            )}
           </div>
         </div>
       </div>

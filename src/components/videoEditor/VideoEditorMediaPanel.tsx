@@ -10,6 +10,8 @@ import { getClipDuration, type VideoEditorClip } from '../../types/videoEditor';
 import type { VideoEditorProjectImageSource } from '../../types/videoEditor';
 import type { SourceState } from './useVideoEditorSources';
 
+type MediaFilter = 'all' | 'video' | 'image';
+
 interface VideoEditorMediaPanelProps {
   clips: VideoEditorClip[];
   getSource: (clip: VideoEditorClip) => SourceState | undefined;
@@ -37,6 +39,8 @@ function VideoEditorMediaPanel({
 }: VideoEditorMediaPanelProps) {
   const [addMenu, setAddMenu] = useState<'closed' | 'root' | 'library' | 'canvas'>('closed');
   const [query, setQuery] = useState('');
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
+  const [mediaQuery, setMediaQuery] = useState('');
   const addMenuRef = useRef<HTMLDivElement>(null);
   const filteredAssets = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -70,6 +74,13 @@ function VideoEditorMediaPanel({
     return clip.kind === 'video' && source?.probe && !source.probe.decodable;
   });
   const failed = clips.filter((clip) => getSource(clip)?.error);
+  const visibleClips = useMemo(() => {
+    const normalized = mediaQuery.trim().toLocaleLowerCase();
+    return clips.filter((clip) => (
+      (mediaFilter === 'all' || clip.kind === mediaFilter)
+      && (!normalized || clip.fileName.toLocaleLowerCase().includes(normalized))
+    ));
+  }, [clips, mediaFilter, mediaQuery]);
 
   return (
     <aside className="video-editor-media">
@@ -172,19 +183,61 @@ function VideoEditorMediaPanel({
           )}
         </div>
       </div>
+      <div className="video-editor-media-tools">
+        <div className="video-editor-media-filters" role="tablist" aria-label="素材类型">
+          {([
+            ['all', '全部'],
+            ['video', '视频'],
+            ['image', '图片'],
+          ] as const).map(([filter, label]) => (
+            <button
+              type="button"
+              key={filter}
+              role="tab"
+              aria-selected={mediaFilter === filter}
+              className={mediaFilter === filter ? 'active' : ''}
+              onClick={() => setMediaFilter(filter)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <label className="video-editor-media-list-search">
+          <Icon icon="lucide:search" width={13} height={13} />
+          <input
+            value={mediaQuery}
+            placeholder="搜索工程素材"
+            onChange={(event) => setMediaQuery(event.target.value)}
+          />
+          {mediaQuery && (
+            <button type="button" onClick={() => setMediaQuery('')} aria-label="清空搜索">
+              <Icon icon="lucide:x" width={12} height={12} />
+            </button>
+          )}
+        </label>
+      </div>
       <div className="video-editor-media-list">
-        {clips.length === 0 && (
-          <div className="video-editor-panel-empty">工程内暂无素材</div>
+        {visibleClips.length === 0 && (
+          <div className="video-editor-panel-empty">
+            {clips.length === 0 ? '工程内暂无素材' : '没有匹配的素材'}
+          </div>
         )}
-        {clips.map((clip, index) => {
+        {visibleClips.map((clip) => {
+          const sourceIndex = clips.findIndex((candidate) => candidate.id === clip.id);
           const source = getSource(clip);
           const poster = clip.kind === 'image' ? clip.sourceUrl : source?.thumbnails[0];
           return (
             <button
               key={clip.id}
               type="button"
+              draggable
               className={`video-editor-media-item ${clip.id === selectedClipId ? 'selected' : ''}`}
               onClick={() => onSelectClip(clip.id)}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('application/x-video-editor-clip-id', clip.id);
+                event.dataTransfer.setData('text/plain', clip.id);
+              }}
             >
               <div className="video-editor-media-thumb">
                 {poster
@@ -193,7 +246,7 @@ function VideoEditorMediaPanel({
               </div>
               <div className="video-editor-media-info">
                 <span className="video-editor-media-name" title={clip.fileName}>
-                  {index + 1}. {clip.fileName}
+                  {sourceIndex + 1}. {clip.fileName}
                 </span>
                 <span className="video-editor-media-sub">
                   {clip.kind === 'image' ? '图片' : '视频'} · {getClipDuration(clip).toFixed(1)}s
@@ -203,6 +256,13 @@ function VideoEditorMediaPanel({
           );
         })}
       </div>
+
+      {visibleClips.length > 0 && (
+        <div className="video-editor-media-drag-hint">
+          <Icon icon="lucide:mouse-pointer-2" width={12} height={12} />
+          拖动素材到时间轴可调整位置与层级
+        </div>
+      )}
 
       {undecodable.length > 0 && (
         <div className="video-editor-panel-warning">

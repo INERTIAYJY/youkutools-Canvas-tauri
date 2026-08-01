@@ -44,6 +44,30 @@ function renderPreview(overlayClip: VideoEditorClip, trackPatch: Partial<VideoEd
 }
 
 describe('VideoEditorPreview overlays', () => {
+  it('exposes direct move, proportional scale, and rotation controls for the selected main clip', () => {
+    const mainClip = clip({});
+    const html = renderTracks([
+      { id: 'main', kind: 'video', name: '主轨', clips: [mainClip] },
+    ], mainClip);
+
+    expect(html).toContain('video-editor-main-selection selected');
+    expect(html).toContain('aria-label="等比缩放"');
+    expect(html).toContain('aria-label="旋转"');
+  });
+
+  it('renders OpenCut-style preview controls for editable timecode, zoom, and fullscreen', () => {
+    const mainClip = clip({});
+    const html = renderTracks([
+      { id: 'main', kind: 'video', name: '主轨', clips: [mainClip] },
+    ], mainClip);
+
+    expect(html).toContain('aria-label="编辑当前时间码"');
+    expect(html).toContain('aria-label="预览缩放"');
+    expect(html).toContain('<option value="fit" selected="">适应</option>');
+    expect(html).toContain('aria-label="全屏预览"');
+    expect(html).toContain('aria-label="查看快捷键"');
+  });
+
   it('renders an active overlay video as a native video element', () => {
     const html = renderPreview(clip({
       id: 'clip-overlay-video',
@@ -104,7 +128,8 @@ describe('VideoEditorPreview overlays', () => {
 
     expect(html).toMatch(/<video[^>]*src="https:\/\/example\.test\/overlay\.mp4"[^>]*muted/);
     expect(html).toContain('video-editor-overlay selected locked');
-    expect(html).not.toContain('video-editor-overlay-handle');
+    expect(html.match(/video-editor-overlay-handle/g)).toHaveLength(4);
+    expect(html.match(/video-editor-rotation-handle/g)).toHaveLength(1);
   });
 
   it('renders active audio-track clips as synchronized audio elements', () => {

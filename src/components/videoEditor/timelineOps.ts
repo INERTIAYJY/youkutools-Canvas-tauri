@@ -18,6 +18,21 @@ export const MAX_PIXELS_PER_SECOND = 400;
 /** 吸附判定的像素容差 */
 export const SNAP_TOLERANCE_PX = 6;
 
+export interface SelectionRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** 框选矩形与片段矩形是否相交；边缘接触也视为选中。 */
+export function rectsIntersect(a: SelectionRect, b: SelectionRect): boolean {
+  return a.left <= b.right
+    && a.right >= b.left
+    && a.top <= b.bottom
+    && a.bottom >= b.top;
+}
+
 /** 轨道是否锁定；未知轨道按未锁定处理。 */
 export function isTrackLocked(tracks: VideoEditorTrack[], trackId: string): boolean {
   return tracks.find((track) => track.id === trackId)?.locked === true;

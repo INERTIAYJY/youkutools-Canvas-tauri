@@ -51,8 +51,20 @@ function formatTime(seconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${rest.toFixed(2).padStart(5, '0')}`;
 }
 
+function parseTimecode(value: string): number | null {
+  const parts = value.trim().split(':').map(Number);
+  if (parts.length < 1 || parts.length > 3 || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+    return null;
+  }
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0];
+}
+
 /** 缩放手柄的位置 */
 type HandlePos = 'nw' | 'ne' | 'sw' | 'se';
+type TransformMode = 'move' | 'scale' | 'rotate';
+type PreviewZoom = 'fit' | 25 | 50 | 100;
 
 interface OverlayMediaProps {
   clip: VideoEditorClip;
@@ -195,24 +207,30 @@ function VideoEditorPreview({
   onEndInteraction,
   onTransformChange,
 }: VideoEditorPreviewProps) {
+  const previewRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasFrameRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
+  const [previewZoom, setPreviewZoom] = useState<PreviewZoom>('fit');
+  const [fullscreen, setFullscreen] = useState(false);
+  const [editingTimecode, setEditingTimecode] = useState(false);
+  const [timecodeDraft, setTimecodeDraft] = useState(() => formatTime(playhead));
   const [canvasDisplayScale, setCanvasDisplayScale] = useState(1);
   const [stageContentSize, setStageContentSize] = useState({ width: 0, height: 0 });
   // 由播放推动的时间更新不该再写回 video.currentTime，否则会打断播放
   const drivenByPlayback = useRef(false);
-  // 叠加层拖拽状态
-  const [dragOverlay, setDragOverlay] = useState<{
+  // 画面内直接变换状态：主轨和叠加层共用同一套拖拽手势。
+  const [dragTransform, setDragTransform] = useState<{
     clipId: string;
-    mode: 'move' | 'scale';
+    mode: TransformMode;
     handle?: HandlePos;
     startClientX: number;
     startClientY: number;
     startTransform: VideoEditorTransform;
     frameRect: DOMRect;
   } | null>(null);
+  const [snapGuides, setSnapGuides] = useState({ x: false, y: false });
 
   const clipEnd = clip ? clip.timelineStart + getClipDuration(clip) : 0;
   const sourceTime = clip ? clip.sourceIn + (playhead - clip.timelineStart) : 0;
@@ -220,6 +238,29 @@ function VideoEditorPreview({
   const mainTrackHidden = mainTrack?.hidden === true;
   const mainTrackMuted = mainTrack?.muted === true || mainTrackHidden;
   const mainVolume = (mainTrack?.volume ?? 1) * (clip?.volume ?? 1);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullscreen(document.fullscreenElement === previewRef.current);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  const commitTimecode = useCallback(() => {
+    const parsed = parseTimecode(timecodeDraft);
+    if (parsed !== null) onPlayheadChange(Math.min(timelineDuration, parsed));
+    else setTimecodeDraft(formatTime(playhead));
+    setEditingTimecode(false);
+  }, [onPlayheadChange, playhead, timecodeDraft, timelineDuration]);
+
+  const toggleFullscreen = useCallback(() => {
+    const preview = previewRef.current;
+    if (!preview) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+      return;
+    }
+    void preview.requestFullscreen().catch(() => {});
+  }, []);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -305,20 +346,37 @@ function VideoEditorPreview({
     }
   }, [clip?.kind, onPlayheadChange, playhead, playing, timelineDuration]);
 
-  // 剪辑软件的播放控制是高频动作：在非输入区域按空格即可播放/暂停。
+  const pausePlayback = useCallback(() => {
+    videoRef.current?.pause();
+    setPlaying(false);
+  }, []);
+
+  // 剪辑软件的播放控制是高频动作：在非输入区域支持 Space 与 J/K/L 走带。
   // 键盘操作保持即时，不附加额外动画或延迟。
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== 'Space' || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, button, [contenteditable="true"]')) return;
-      event.preventDefault();
-      togglePlay();
+      if (event.code === 'Space') {
+        event.preventDefault();
+        togglePlay();
+      } else if (event.key === 'k' || event.key === 'K') {
+        event.preventDefault();
+        pausePlayback();
+      } else if (event.key === 'l' || event.key === 'L') {
+        event.preventDefault();
+        if (!playing) togglePlay();
+      } else if (event.key === 'j' || event.key === 'J') {
+        event.preventDefault();
+        pausePlayback();
+        onPlayheadChange(Math.max(0, playhead - 1));
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay]);
+  }, [onPlayheadChange, pausePlayback, playhead, playing, togglePlay]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -337,7 +395,7 @@ function VideoEditorPreview({
     onPlayheadChange(Math.min(timelineDuration, Math.max(0, playhead + direction / 30)));
   }, [onPlayheadChange, playhead, timelineDuration]);
 
-  // ── 叠加层拖拽 ──
+  // ── 画面内直接拖拽、等比缩放和旋转 ──
   const overlayTracks = useMemo(
     () => getOverlayTracks(tracks).filter((track) => track.kind === 'video'),
     [tracks],
@@ -363,9 +421,9 @@ function VideoEditorPreview({
     return result;
   }, [playhead, tracks]);
 
-  const startOverlayInteraction = useCallback((
-    overlayClip: VideoEditorClip,
-    mode: 'move' | 'scale',
+  const startTransformInteraction = useCallback((
+    targetClip: VideoEditorClip,
+    mode: TransformMode,
     event: React.PointerEvent,
     handle?: HandlePos,
   ) => {
@@ -378,51 +436,73 @@ function VideoEditorPreview({
     if (!frame) return;
     const frameRect = frame.getBoundingClientRect();
     onBeginInteraction();
-    setDragOverlay({
-      clipId: overlayClip.id,
+    setSnapGuides({ x: false, y: false });
+    setDragTransform({
+      clipId: targetClip.id,
       mode,
       handle,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startTransform: overlayClip.transform ?? DEFAULT_TRANSFORM,
+      startTransform: targetClip.transform ?? DEFAULT_TRANSFORM,
       frameRect,
     });
-    onSelectClips([overlayClip.id]);
+    onSelectClips([targetClip.id]);
   }, [onBeginInteraction, onSelectClips]);
 
   useEffect(() => {
-    if (!dragOverlay) return;
+    if (!dragTransform) return;
     const onMove = (moveEvent: PointerEvent) => {
-      const dx = moveEvent.clientX - dragOverlay.startClientX;
-      const dy = moveEvent.clientY - dragOverlay.startClientY;
-      const { width: frameW, height: frameH } = dragOverlay.frameRect;
+      const dx = moveEvent.clientX - dragTransform.startClientX;
+      const dy = moveEvent.clientY - dragTransform.startClientY;
+      const { width: frameW, height: frameH } = dragTransform.frameRect;
+      if (frameW <= 0 || frameH <= 0) return;
 
-      if (dragOverlay.mode === 'move') {
+      if (dragTransform.mode === 'move') {
         const dxN = dx / frameW;
         const dyN = dy / frameH;
-        onTransformChange(dragOverlay.clipId, {
-          x: Math.max(0, Math.min(1, dragOverlay.startTransform.x + dxN)),
-          y: Math.max(0, Math.min(1, dragOverlay.startTransform.y + dyN)),
+        const rawX = Math.max(0, Math.min(1, dragTransform.startTransform.x + dxN));
+        const rawY = Math.max(0, Math.min(1, dragTransform.startTransform.y + dyN));
+        const snapX = Math.abs(rawX - 0.5) <= 6 / frameW;
+        const snapY = Math.abs(rawY - 0.5) <= 6 / frameH;
+        setSnapGuides({ x: snapX, y: snapY });
+        onTransformChange(dragTransform.clipId, {
+          x: snapX ? 0.5 : rawX,
+          y: snapY ? 0.5 : rawY,
         });
-      } else if (dragOverlay.mode === 'scale' && dragOverlay.handle) {
-        const centerX = dragOverlay.startTransform.x * frameW;
-        const centerY = dragOverlay.startTransform.y * frameH;
-        const startDistX = dragOverlay.startClientX - centerX;
-        const startDistY = dragOverlay.startClientY - centerY;
-        const startDist = Math.sqrt(startDistX * startDistX + startDistY * startDistY);
-        const newDist = Math.sqrt(
-          (moveEvent.clientX - centerX) ** 2 + (moveEvent.clientY - centerY) ** 2,
-        );
-        if (startDist > 4) {
-          const ratio = newDist / startDist;
-          onTransformChange(dragOverlay.clipId, {
-            scale: Math.max(0.05, Math.min(5, dragOverlay.startTransform.scale * ratio)),
-          });
+      } else {
+        setSnapGuides({ x: false, y: false });
+        const centerX = dragTransform.frameRect.left + dragTransform.startTransform.x * frameW;
+        const centerY = dragTransform.frameRect.top + dragTransform.startTransform.y * frameH;
+        if (dragTransform.mode === 'scale' && dragTransform.handle) {
+          const startDistX = dragTransform.startClientX - centerX;
+          const startDistY = dragTransform.startClientY - centerY;
+          const startDist = Math.sqrt(startDistX * startDistX + startDistY * startDistY);
+          const newDist = Math.sqrt(
+            (moveEvent.clientX - centerX) ** 2 + (moveEvent.clientY - centerY) ** 2,
+          );
+          if (startDist > 4) {
+            const ratio = newDist / startDist;
+            onTransformChange(dragTransform.clipId, {
+              scale: Math.max(0.05, Math.min(5, dragTransform.startTransform.scale * ratio)),
+            });
+          }
+          return;
         }
+        const startAngle = Math.atan2(
+          dragTransform.startClientY - centerY,
+          dragTransform.startClientX - centerX,
+        );
+        const currentAngle = Math.atan2(moveEvent.clientY - centerY, moveEvent.clientX - centerX);
+        const angleDelta = ((currentAngle - startAngle) * 180) / Math.PI;
+        const rawRotation = ((dragTransform.startTransform.rotation + angleDelta + 180) % 360 + 360) % 360 - 180;
+        const snapAngle = [-180, -90, 0, 90, 180]
+          .find((angle) => Math.abs(rawRotation - angle) <= 3);
+        onTransformChange(dragTransform.clipId, { rotation: snapAngle ?? rawRotation });
       }
     };
     const finish = () => {
-      setDragOverlay(null);
+      setDragTransform(null);
+      setSnapGuides({ x: false, y: false });
       onEndInteraction();
     };
     document.addEventListener('pointermove', onMove);
@@ -433,7 +513,7 @@ function VideoEditorPreview({
       document.removeEventListener('pointerup', finish);
       document.removeEventListener('pointercancel', finish);
     };
-  }, [dragOverlay, onEndInteraction, onTransformChange]);
+  }, [dragTransform, onEndInteraction, onTransformChange]);
 
   // ── 进度条 ──
   const startScrub = useCallback((event: React.PointerEvent) => {
@@ -468,6 +548,13 @@ function VideoEditorPreview({
     : '16 / 9';
 
   const canvasFrameStyle = useMemo<CSSProperties>(() => {
+    if (previewZoom !== 'fit') {
+      return {
+        aspectRatio: canvasAspect,
+        width: `${canvasSize.width * (previewZoom / 100)}px`,
+        height: `${canvasSize.height * (previewZoom / 100)}px`,
+      };
+    }
     if (
       canvasSize.width <= 0
       || canvasSize.height <= 0
@@ -485,7 +572,7 @@ function VideoEditorPreview({
       width: `${canvasSize.width * fit}px`,
       height: `${canvasSize.height * fit}px`,
     };
-  }, [canvasAspect, canvasSize.height, canvasSize.width, stageContentSize]);
+  }, [canvasAspect, canvasSize.height, canvasSize.width, previewZoom, stageContentSize]);
 
   // 主轨与导出都通过 computeDrawRect 计算 contain、位置和缩放，避免预览/成片偏差。
   const mainMediaStyle = useMemo<CSSProperties>(() => {
@@ -503,16 +590,22 @@ function VideoEditorPreview({
       transform: `rotate(${transform.rotation}deg)`,
     };
   }, [canvasSize, clip?.transform, mainTrackHidden, sourceSize]);
+  const mainSelectionStyle = useMemo<CSSProperties>(() => ({
+    ...mainMediaStyle,
+    opacity: 1,
+  }), [mainMediaStyle]);
+  const mainSelected = !!clip && selectedClipIds.includes(clip.id);
+  const mainLocked = mainTrack?.locked === true;
 
   return (
-    <section className="video-editor-preview">
+    <section ref={previewRef} className="video-editor-preview">
       <div
         ref={stageRef}
         className={`video-editor-stage ${playing ? 'playing' : ''}`}
       >
         <div
           ref={canvasFrameRef}
-          className="video-editor-canvas-frame"
+          className={`video-editor-canvas-frame ${previewZoom === 'fit' ? 'fit' : 'zoomed'}`}
           style={canvasFrameStyle}
           aria-label={stageInfo ? `输出画布 ${stageInfo}` : '输出画布'}
         >
@@ -541,6 +634,47 @@ function VideoEditorPreview({
           )}
           {mainTrackHidden && (
             <div className="video-editor-stage-empty">主视频轨已隐藏</div>
+          )}
+
+          {clip && clipUrl && !mainTrackHidden && (
+            <div
+              className={[
+                'video-editor-main-selection',
+                mainSelected ? 'selected' : '',
+                mainLocked ? 'locked' : '',
+              ].filter(Boolean).join(' ')}
+              style={mainSelectionStyle}
+              aria-label={`画面内调整 ${clip.fileName}`}
+              onPointerDown={mainLocked
+                ? (event) => {
+                  event.stopPropagation();
+                  onSelectClips([clip.id]);
+                }
+                : (event) => startTransformInteraction(clip, 'move', event)}
+            >
+              {mainSelected && !mainLocked && (
+                <>
+                  {(['nw', 'ne', 'sw', 'se'] as HandlePos[]).map((pos) => (
+                    <button
+                      type="button"
+                      key={pos}
+                      className={`video-editor-overlay-handle ${pos}`}
+                      aria-label="等比缩放"
+                      onPointerDown={(event) => startTransformInteraction(clip, 'scale', event, pos)}
+                    />
+                  ))}
+                  <span className="video-editor-rotation-stem" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="video-editor-rotation-handle"
+                    aria-label="旋转"
+                    onPointerDown={(event) => startTransformInteraction(clip, 'rotate', event)}
+                  >
+                    <Icon icon="lucide:rotate-cw" width={11} height={11} />
+                  </button>
+                </>
+              )}
+            </div>
           )}
 
           {/* 叠加层片段：绝对定位在画布之上，可直接拖拽编辑 */}
@@ -576,7 +710,7 @@ function VideoEditorPreview({
                     event.stopPropagation();
                     onSelectClips([overlayClip.id]);
                   }
-                  : (event) => startOverlayInteraction(overlayClip, 'move', event)}
+                  : (event) => startTransformInteraction(overlayClip, 'move', event)}
               >
                 <OverlayMedia
                   clip={overlayClip}
@@ -589,17 +723,31 @@ function VideoEditorPreview({
                 {isSelected && !locked && (
                   <>
                     {(['nw', 'ne', 'sw', 'se'] as HandlePos[]).map((pos) => (
-                      <div
+                      <button
+                        type="button"
                         key={pos}
                         className={`video-editor-overlay-handle ${pos}`}
-                        onPointerDown={(event) => startOverlayInteraction(overlayClip, 'scale', event, pos)}
+                        aria-label="等比缩放"
+                        onPointerDown={(event) => startTransformInteraction(overlayClip, 'scale', event, pos)}
                       />
                     ))}
+                    <span className="video-editor-rotation-stem" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="video-editor-rotation-handle"
+                      aria-label="旋转"
+                      onPointerDown={(event) => startTransformInteraction(overlayClip, 'rotate', event)}
+                    >
+                      <Icon icon="lucide:rotate-cw" width={11} height={11} />
+                    </button>
                   </>
                 )}
               </div>
             );
           })}
+
+          {snapGuides.x && <span className="video-editor-snap-guide vertical" aria-hidden="true" />}
+          {snapGuides.y && <span className="video-editor-snap-guide horizontal" aria-hidden="true" />}
 
           {activeAudio.map(({ clip: audioClip, track }) => (
             <AudioPreview
@@ -631,6 +779,7 @@ function VideoEditorPreview({
           {activeOverlays.length > 0 && (
             <span className="dim">· {activeOverlays.length} 个叠加层</span>
           )}
+          <span className="dim">· {previewZoom === 'fit' ? '适应窗口' : `${previewZoom}%`}</span>
         </div>
       )}
 
@@ -643,28 +792,101 @@ function VideoEditorPreview({
       </div>
 
       <div className="video-editor-transport">
-        <button type="button" className="video-editor-transport-btn" onClick={() => step(-1)} aria-label="上一帧">
-          <Icon icon="lucide:chevron-first" width={16} height={16} />
-        </button>
-        <button
-          type="button"
-          className="video-editor-transport-btn primary"
-          onClick={togglePlay}
-          aria-label={playing ? '暂停' : '播放'}
-          aria-keyshortcuts="Space"
-          data-tooltip={playing ? '暂停 Space' : '播放 Space'}
-        >
-          <Icon icon={playing ? 'lucide:pause' : 'lucide:play'} width={16} height={16} />
-        </button>
-        <button type="button" className="video-editor-transport-btn" onClick={() => step(1)} aria-label="下一帧">
-          <Icon icon="lucide:chevron-last" width={16} height={16} />
-        </button>
-        <span className="video-editor-timecode">
-          {formatTime(playhead)} <span className="dim">/ {formatTime(timelineDuration)}</span>
-        </span>
-        <span className="video-editor-shortcut-hint" aria-hidden="true">
-          <kbd>Space</kbd> 播放
-        </span>
+        <div className="video-editor-transport-time">
+          {editingTimecode ? (
+            <input
+              autoFocus
+              className="video-editor-timecode-input"
+              value={timecodeDraft}
+              aria-label="当前时间码"
+              onChange={(event) => setTimecodeDraft(event.target.value)}
+              onBlur={commitTimecode}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+                if (event.key === 'Escape') {
+                  setTimecodeDraft(formatTime(playhead));
+                  setEditingTimecode(false);
+                }
+              }}
+            />
+          ) : (
+            <button
+              type="button"
+              className="video-editor-timecode-edit"
+              aria-label="编辑当前时间码"
+              onClick={() => {
+                setTimecodeDraft(formatTime(playhead));
+                setEditingTimecode(true);
+              }}
+            >
+              {formatTime(playhead)}
+            </button>
+          )}
+          <span className="video-editor-timecode-separator">/</span>
+          <span className="video-editor-timecode-total">{formatTime(timelineDuration)}</span>
+        </div>
+
+        <div className="video-editor-transport-playback">
+          <button type="button" className="video-editor-transport-btn" onClick={() => step(-1)} aria-label="上一帧">
+            <Icon icon="lucide:chevron-first" width={16} height={16} />
+          </button>
+          <button
+            type="button"
+            className="video-editor-transport-btn primary"
+            onClick={togglePlay}
+            aria-label={playing ? '暂停' : '播放'}
+            aria-keyshortcuts="Space"
+            data-tooltip={playing ? '暂停 Space' : '播放 Space'}
+          >
+            <Icon icon={playing ? 'lucide:pause' : 'lucide:play'} width={16} height={16} />
+          </button>
+          <button type="button" className="video-editor-transport-btn" onClick={() => step(1)} aria-label="下一帧">
+            <Icon icon="lucide:chevron-last" width={16} height={16} />
+          </button>
+          <span className="video-editor-shortcut-hint" aria-hidden="true">
+            <kbd>Space</kbd>
+          </span>
+        </div>
+
+        <div className="video-editor-transport-view">
+          <label className="video-editor-preview-zoom">
+            <Icon icon="lucide:search" width={13} height={13} />
+            <select
+              value={previewZoom}
+              aria-label="预览缩放"
+              onChange={(event) => {
+                const value = event.target.value;
+                setPreviewZoom(value === 'fit' ? 'fit' : Number(value) as PreviewZoom);
+              }}
+            >
+              <option value="fit">适应</option>
+              <option value="25">25%</option>
+              <option value="50">50%</option>
+              <option value="100">100%</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="video-editor-transport-btn"
+            aria-label={fullscreen ? '退出全屏' : '全屏预览'}
+            onClick={toggleFullscreen}
+          >
+            <Icon icon={fullscreen ? 'lucide:minimize-2' : 'lucide:maximize-2'} width={16} height={16} />
+          </button>
+          <details className="video-editor-shortcuts">
+            <summary aria-label="查看快捷键" data-tooltip="快捷键">
+              <Icon icon="lucide:keyboard" width={16} height={16} />
+            </summary>
+            <div className="video-editor-shortcuts-popover">
+              <strong>快捷键</strong>
+              <span><em>播放 / 暂停</em><kbd>Space</kbd></span>
+              <span><em>后退 1 秒 / 暂停 / 播放</em><kbd>J K L</kbd></span>
+              <span><em>逐帧 / 跳转 1 秒</em><kbd>← → / Shift</kbd></span>
+              <span><em>分割 / 复制 / 删除</em><kbd>S / ⌘D / Del</kbd></span>
+              <span><em>撤销 / 重做</em><kbd>⌘Z / ⇧⌘Z</kbd></span>
+            </div>
+          </details>
+        </div>
       </div>
     </section>
   );

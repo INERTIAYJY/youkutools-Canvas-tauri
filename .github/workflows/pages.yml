@@ -47,11 +47,11 @@ jobs:
       - name: Build web app for the in-page demo
         run: npx vite build --base=./ --outDir site/app --emptyOutDir
 
-      # enablement 让 workflow 自己创建 Pages 站点，省掉手动去仓库设置里开
+      # 首次部署前需要在 Settings > Pages 把 Source 选成 GitHub Actions。
+      # 这一步不能自动化：configure-pages 的 enablement 参数明确要求提供
+      # GITHUB_TOKEN 以外的令牌（PAT 需 repo scope），不值得为此长期存一个 PAT。
       - name: Configure Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v3

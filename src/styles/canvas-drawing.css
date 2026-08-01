@@ -298,6 +298,28 @@
   cursor: move;
 }
 
+/* 曲率手柄：实心填充以区别于端点手柄 */
+.canvas-note-point-handles circle.is-curve-handle {
+  fill: var(--brand);
+  stroke: var(--theme-surface);
+  stroke-width: 2;
+  cursor: grab;
+}
+
+.canvas-note-point-handles circle.is-curve-handle:active {
+  cursor: grabbing;
+}
+
+.canvas-note-curve-guide {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.45;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .canvas-note-text,
 .canvas-note-textarea {
   box-sizing: border-box;

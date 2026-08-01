@@ -1,9 +1,19 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useState } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type {
+  CSSProperties,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 import { useStore, type ReactFlowState } from '@xyflow/react';
 import type { BaseNodeData } from '../../types';
 import { useAppStore } from '../../store/useAppStore';
-import { scaleCanvasNotePoints } from '../../utils/canvasNoteGeometry';
+import {
+  clearCanvasNoteCurveControl,
+  getCanvasNoteCurveHandle,
+  hasCanvasNoteCurveControl,
+  scaleCanvasNotePoints,
+  setCanvasNoteCurveHandle,
+} from '../../utils/canvasNoteGeometry';
 import { buildNodeFileName, saveDataUrlToProjectData } from '../../services/fileService';
 import ResizeHandle from '../nodes/shared/ResizeHandle';
 import CanvasNoteShape from './CanvasNoteShape';
@@ -80,6 +90,44 @@ function CanvasNoteNode({ id, data, selected = false }: CanvasNoteNodeProps) {
     document.addEventListener('pointerup', handleUp);
   }, [commitToHistory, id, note, updateCanvasNoteTransient, zoom]);
 
+  // 曲线手柄落在曲线中点上，拖动时反推控制点，让线条跟着指针走。
+  const handleCurvePointerDown = useCallback((event: ReactPointerEvent<SVGCircleElement>) => {
+    const points = note?.points;
+    if (!points || points.length < 2) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const start = { x: event.clientX, y: event.clientY };
+    const original = points.map((point) => ({ ...point }));
+    const originHandle = getCanvasNoteCurveHandle(original);
+    commitToHistory();
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      const scale = Math.max(zoom, 0.01);
+      updateCanvasNoteTransient(id, {
+        points: setCanvasNoteCurveHandle(original, {
+          x: originHandle.x + (moveEvent.clientX - start.x) / scale,
+          y: originHandle.y + (moveEvent.clientY - start.y) / scale,
+        }),
+      });
+    };
+    const handleUp = () => {
+      document.removeEventListener('pointermove', handleMove);
+      document.removeEventListener('pointerup', handleUp);
+      commitToHistory();
+    };
+    document.addEventListener('pointermove', handleMove);
+    document.addEventListener('pointerup', handleUp);
+  }, [commitToHistory, id, note?.points, updateCanvasNoteTransient, zoom]);
+
+  // 双击手柄恢复默认弧度。
+  const handleCurveReset = useCallback((event: ReactMouseEvent<SVGCircleElement>) => {
+    const points = note?.points;
+    if (!points || !hasCanvasNoteCurveControl(points)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    updateCanvasNote(id, { points: clearCanvasNoteCurveControl(points) });
+  }, [id, note?.points, updateCanvasNote]);
+
   const handleCropSave = useCallback(async (
     croppedDataUrl: string,
     metadata?: { width: number; height: number },
@@ -130,6 +178,17 @@ function CanvasNoteNode({ id, data, selected = false }: CanvasNoteNodeProps) {
     image: '图片笔记',
   }[note.kind];
 
+  const linePoints = note.points && note.points.length >= 2 ? note.points : null;
+  const curveHandle = linePoints && note.style.lineType === 'curved'
+    ? {
+      handle: getCanvasNoteCurveHandle(linePoints),
+      chordMiddle: {
+        x: (linePoints[0].x + linePoints[linePoints.length - 1].x) / 2,
+        y: (linePoints[0].y + linePoints[linePoints.length - 1].y) / 2,
+      },
+    }
+    : null;
+
   return (
     <>
       <div
@@ -153,6 +212,27 @@ function CanvasNoteNode({ id, data, selected = false }: CanvasNoteNodeProps) {
             viewBox={`0 0 ${Math.max(1, note.width)} ${Math.max(1, note.height)}`}
             aria-label="拖动线条端点"
           >
+            {curveHandle && (
+              <g>
+                <line
+                  className="canvas-note-curve-guide"
+                  x1={curveHandle.chordMiddle.x}
+                  y1={curveHandle.chordMiddle.y}
+                  x2={curveHandle.handle.x}
+                  y2={curveHandle.handle.y}
+                />
+                <circle
+                  className="is-curve-handle"
+                  cx={curveHandle.handle.x}
+                  cy={curveHandle.handle.y}
+                  r={5}
+                  onPointerDown={handleCurvePointerDown}
+                  onDoubleClick={handleCurveReset}
+                >
+                  <title>拖动调节曲率，双击恢复默认</title>
+                </circle>
+              </g>
+            )}
             {[0, note.points.length - 1].map((pointIndex) => (
               <circle
                 key={pointIndex}

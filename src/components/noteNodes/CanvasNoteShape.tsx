@@ -4,6 +4,7 @@ import {
   createArrowheadPath,
   createLinearCanvasNotePath,
   createSmoothCanvasNotePath,
+  getCanvasNoteArrowAnchors,
   getCanvasNoteDashArray,
 } from '../../utils/canvasNoteGeometry';
 
@@ -31,10 +32,7 @@ function CanvasNoteShape({ note }: CanvasNoteShapeProps) {
       : createLinearCanvasNotePath(points, style.lineType),
     [kind, points, style.lineType],
   );
-  const end = points[points.length - 1];
-  const beforeEnd = points[Math.max(0, points.length - 2)];
-  const start = points[0];
-  const afterStart = points[Math.min(1, points.length - 1)];
+  const { start, startFrom, end, endFrom } = getCanvasNoteArrowAnchors(points, style.lineType);
   const arrowSize = Math.max(8, style.strokeWidth * 4.5);
 
   const common = {
@@ -78,10 +76,10 @@ function CanvasNoteShape({ note }: CanvasNoteShapeProps) {
     >
       {Array.from({ length: roughLayers }, (_, layer) => renderShape(layer))}
       {isLinear && style.startArrowhead === 'arrow' && (
-        <path d={createArrowheadPath(afterStart, start, arrowSize)} {...common} fill="none" />
+        <path d={createArrowheadPath(startFrom, start, arrowSize)} {...common} fill="none" />
       )}
       {isLinear && style.endArrowhead === 'arrow' && (
-        <path d={createArrowheadPath(beforeEnd, end, arrowSize)} {...common} fill="none" />
+        <path d={createArrowheadPath(endFrom, end, arrowSize)} {...common} fill="none" />
       )}
     </svg>
   );

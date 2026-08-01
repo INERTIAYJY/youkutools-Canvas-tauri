@@ -90,6 +90,66 @@ export function createSmoothCanvasNotePath(points: readonly CanvasNotePoint[]): 
   return commands.join(' ');
 }
 
+/** 未手动调节曲率时的默认控制点：沿法线方向轻微外凸。 */
+export function getDefaultCurveControl(
+  start: CanvasNotePoint,
+  end: CanvasNotePoint,
+): CanvasNotePoint {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const bend = Math.min(36, length * 0.18);
+  return {
+    x: (start.x + end.x) / 2 - (dy / length) * bend,
+    y: (start.y + end.y) / 2 + (dx / length) * bend,
+  };
+}
+
+/** 线条是否已存在用户自定义的曲率控制点（存放在首尾点之间）。 */
+export function hasCanvasNoteCurveControl(points: readonly CanvasNotePoint[]): boolean {
+  return points.length >= 3;
+}
+
+/** 取二次贝塞尔的控制点：优先使用用户拖出的控制点，否则回退到默认弧度。 */
+export function getCanvasNoteCurveControl(points: readonly CanvasNotePoint[]): CanvasNotePoint {
+  const start = points[0];
+  const end = points[points.length - 1];
+  if (hasCanvasNoteCurveControl(points)) return points[1];
+  return getDefaultCurveControl(start, end);
+}
+
+/** 曲线中点（t = 0.5），手柄就画在这里，拖动时曲线会跟着手指走。 */
+export function getCanvasNoteCurveHandle(points: readonly CanvasNotePoint[]): CanvasNotePoint {
+  const start = points[0];
+  const end = points[points.length - 1];
+  const control = getCanvasNoteCurveControl(points);
+  return {
+    x: (start.x + 2 * control.x + end.x) / 4,
+    y: (start.y + 2 * control.y + end.y) / 4,
+  };
+}
+
+/** 把手柄拖到 handle 处：反推控制点，使曲线中点恰好落在 handle。 */
+export function setCanvasNoteCurveHandle(
+  points: readonly CanvasNotePoint[],
+  handle: CanvasNotePoint,
+): CanvasNotePoint[] {
+  const start = points[0];
+  const end = points[points.length - 1];
+  const control = {
+    x: 2 * handle.x - (start.x + end.x) / 2,
+    y: 2 * handle.y - (start.y + end.y) / 2,
+  };
+  return [{ ...start }, control, { ...end }];
+}
+
+/** 清除自定义曲率，回到默认弧度。 */
+export function clearCanvasNoteCurveControl(
+  points: readonly CanvasNotePoint[],
+): CanvasNotePoint[] {
+  return [{ ...points[0] }, { ...points[points.length - 1] }];
+}
+
 export function createLinearCanvasNotePath(
   points: readonly CanvasNotePoint[],
   lineType: CanvasNoteLineType,
@@ -102,15 +162,37 @@ export function createLinearCanvasNotePath(
     return `M ${start.x} ${start.y} L ${middleX} ${start.y} L ${middleX} ${end.y} L ${end.x} ${end.y}`;
   }
   if (lineType === 'curved') {
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const length = Math.hypot(dx, dy) || 1;
-    const bend = Math.min(36, length * 0.18);
-    const controlX = (start.x + end.x) / 2 - (dy / length) * bend;
-    const controlY = (start.y + end.y) / 2 + (dx / length) * bend;
-    return `M ${start.x} ${start.y} Q ${controlX} ${controlY} ${end.x} ${end.y}`;
+    const control = getCanvasNoteCurveControl(points);
+    return `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`;
   }
   return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
+}
+
+/**
+ * 箭头方向锚点：箭翼要贴着线条真实的切线方向，
+ * 因此曲线取控制点、折线取拐点、直线取对端。
+ */
+export function getCanvasNoteArrowAnchors(
+  points: readonly CanvasNotePoint[],
+  lineType: CanvasNoteLineType,
+): { start: CanvasNotePoint; startFrom: CanvasNotePoint; end: CanvasNotePoint; endFrom: CanvasNotePoint } {
+  const start = points[0];
+  const end = points[points.length - 1];
+  const samePoint = (a: CanvasNotePoint, b: CanvasNotePoint) => a.x === b.x && a.y === b.y;
+  let startFrom = end;
+  let endFrom = start;
+  if (lineType === 'curved') {
+    const control = getCanvasNoteCurveControl(points);
+    startFrom = control;
+    endFrom = control;
+  } else if (lineType === 'elbow') {
+    const middleX = start.x + (end.x - start.x) / 2;
+    startFrom = { x: middleX, y: start.y };
+    endFrom = { x: middleX, y: end.y };
+  }
+  if (samePoint(startFrom, start)) startFrom = end;
+  if (samePoint(endFrom, end)) endFrom = start;
+  return { start, startFrom, end, endFrom };
 }
 
 export function createArrowheadPath(

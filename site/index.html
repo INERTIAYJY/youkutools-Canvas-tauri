@@ -181,21 +181,32 @@
 
     <article class="card reveal">
       <div class="card-body">
-        <div class="ico ico-b">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 4v5h5"/></svg>
-        </div>
         <h3>可回看的操作记录</h3>
         <p>结构变更进入历史快照，多节点写入按批次提交。右上角浮层可回看整条时间线，随时撤销重做。</p>
+      </div>
+      <div class="card-visual">
+        <div class="scrub" aria-hidden="true">
+          <span class="sn done"></span><span class="sl"></span>
+          <span class="sn done"></span><span class="sl"></span>
+          <span class="sn now"></span><span class="sl dim"></span>
+          <span class="sn"></span><span class="sl dim"></span>
+          <span class="sn"></span>
+        </div>
+        <div class="scrub-legend" aria-hidden="true"><span>批次 12 · 新增 6 个节点</span><span class="undo">⌘Z</span></div>
       </div>
     </article>
 
     <article class="card reveal">
       <div class="card-body">
-        <div class="ico ico-c">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
-        </div>
         <h3>高级预设编排</h3>
         <p>把一串生成步骤存成预设，运行时逐步派生节点、连线与模型任务，重复的流程只配一次。</p>
+      </div>
+      <div class="card-visual">
+        <ol class="steps" aria-hidden="true">
+          <li><span>1</span>写分镜提示词</li>
+          <li><span>2</span>逐格生成图像</li>
+          <li><span>3</span>图生视频并连线</li>
+        </ol>
       </div>
     </article>
 
@@ -231,46 +242,66 @@
     </p>
   </div>
 
-  <div class="modes">
-    <article class="mode reveal">
-      <span class="mode-key">Plan</span>
-      <h3>规划模式</h3>
-      <p>只允许只读工具。先把方案说清楚，再决定要不要动手。</p>
-      <ul class="ticks">
-        <li class="ok">查询画布</li>
-        <li class="ok">读取资料</li>
-        <li class="no">写入画布</li>
-      </ul>
-    </article>
+  <div class="matrix reveal" role="table" aria-label="Agent 权限矩阵">
+    <div class="mx-row mx-head" role="row">
+      <div class="mx-cell mx-corner" role="columnheader">工具 effect</div>
+      <div class="mx-cell mx-mode" role="columnheader"><b>Plan</b><span>规划</span></div>
+      <div class="mx-cell mx-mode is-hl" role="columnheader"><b>B</b><span>协作</span></div>
+      <div class="mx-cell mx-mode" role="columnheader"><b>C</b><span>自主</span></div>
+    </div>
 
-    <article class="mode mode-hl reveal">
-      <span class="mode-key">B</span>
-      <h3>协作模式</h3>
-      <p>读取与查询自动执行；新增、更新、连接、分组或删除节点前，先弹审批卡片。</p>
-      <ul class="ticks">
-        <li class="ok">自动读取</li>
-        <li class="ask">写入需确认</li>
-        <li class="ok">逐步可控</li>
-      </ul>
-    </article>
+    <div class="mx-row" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>只读查询</b><code>read</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-auto">自动</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-auto">自动</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-auto">自动</span></div>
+    </div>
 
-    <article class="mode reveal">
-      <span class="mode-key">C</span>
-      <h3>自主模式</h3>
-      <p>画布写操作可自动执行，但仍必须校验项目与 canvas revision，并写入撤销历史。</p>
-      <ul class="ticks">
-        <li class="ok">自动写画布</li>
-        <li class="ok">强制版本校验</li>
-        <li class="ok">可撤销</li>
-      </ul>
-    </article>
+    <div class="mx-row mx-pivot" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>画布写入</b><code>canvas_write</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-deny">禁止</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-auto">自动</span></div>
+    </div>
+
+    <div class="mx-row" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>媒体生成</b><code>media_generation</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-deny">禁止</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+    </div>
+
+    <div class="mx-row" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>文件写入</b><code>file_write</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-deny">禁止</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+    </div>
+
+    <div class="mx-row" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>永久删除</b><code>permanent_delete</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-deny">禁止</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+    </div>
+
+    <div class="mx-row" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>项目记忆</b><code>memory_write</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-deny">禁止</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+    </div>
+
+    <div class="mx-row" role="row">
+      <div class="mx-cell mx-label" role="rowheader"><b>厂商配置</b><code>config_write</code></div>
+      <div class="mx-cell" role="cell"><span class="v v-deny">禁止</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+      <div class="mx-cell" role="cell"><span class="v v-ask">需确认</span></div>
+    </div>
   </div>
 
-  <div class="note-band reveal">
-    <div class="note-band-ico" aria-hidden="true">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5.5v6c0 4.6 3.2 8.9 8 10.5 4.8-1.6 8-5.9 8-10.5v-6L12 2Z"/><path d="m9 12 2 2 4-4"/></svg>
-    </div>
-    <p><b>三种模式共用一条硬边界。</b>文件写入、永久删除、媒体生成、项目记忆写入与厂商配置写入，在任何模式下都必须由你确认——包括模式 C。</p>
+  <div class="mx-foot reveal">
+    <p><b>注意最后五行。</b>无论哪种模式，付费媒体生成、文件写入、永久删除、项目记忆和厂商配置都停在「需确认」——模式 C 也一样。能被模式放开的只有画布写入这一行，而且它必须校验 canvas revision 并写入撤销历史。</p>
   </div>
 
   <div class="split">
@@ -327,19 +358,21 @@
     <p class="lede reveal">图片、视频、音频三类参考媒体共用同一套连线与提示词引用规则，由统一的媒体 Provider 注册表分发到各家厂商适配器。</p>
   </div>
 
-  <div class="grid-nodes">
-    <article class="ncard reveal"><span class="nico" data-c="1">T</span><h4>文本</h4><p>流式生成、多轮内容、提示词预设、Skill、风格与 <code>@</code> 节点引用。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="2">◧</span><h4>图像</h4><p>文生图、图生图、批量结果与生成历史；裁剪、扩图、标注、抠图、多图合成、机位工作台与宫格编辑。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="3">▶</span><h4>视频</h4><p>文生视频、图生视频、视频到视频，可配分辨率、帧率、时长、比例、参考音频与有声视频。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="4">♪</span><h4>音频</h4><p>音乐与语音生成、参考音色、上传、播放与结果管理。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="5">⛶</span><h4>逐帧动画</h4><p>动作与帧数配置、Sprite Sheet 生成与预览。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="6">▦</span><h4>分镜</h4><p>自定义宫格、单格覆盖、素材拖入与画格提取。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="7">◯</span><h4>360° 全景</h4><p>预览全景图像，并把当前视角截图生成新的图片节点。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="8">◈</span><h4>3D 导演台</h4><p>独立窗口内完成场景摆位、机位预演与画面捕获，结果回写节点后可继续图生视频。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="9">M</span><h4>Markdown</h4><p>长文本、设定集与工作笔记直接留在画布上。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="10">⌘</span><h4>源文件</h4><p>把本地素材登记进画布，作为生成链路的输入。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="11">✎</span><h4>画布笔记</h4><p>形状、箭头、自由绘制、文本与图片笔记。</p></article>
-    <article class="ncard reveal"><span class="nico" data-c="12">▤</span><h4>分组</h4><p>把一组节点收进分组一起移动、折叠与管理。</p></article>
+  <div class="node-canvas reveal">
+    <div class="grid-nodes">
+      <article class="ncard" data-c="1"><header class="nbar"><span class="nbar-dot"></span>文本<code>ai-text</code></header><p>流式生成、多轮内容、提示词预设、Skill、风格与 <code class="inl">@</code> 节点引用。</p></article>
+      <article class="ncard" data-c="2"><header class="nbar"><span class="nbar-dot"></span>图像<code>ai-image</code></header><p>文生图、图生图、批量结果与生成历史；裁剪、扩图、标注、抠图、多图合成、机位工作台与宫格编辑。</p></article>
+      <article class="ncard" data-c="3"><header class="nbar"><span class="nbar-dot"></span>视频<code>ai-video</code></header><p>文生视频、图生视频、视频到视频，可配分辨率、帧率、时长、比例、参考音频与有声视频。</p></article>
+      <article class="ncard" data-c="4"><header class="nbar"><span class="nbar-dot"></span>音频<code>ai-audio</code></header><p>音乐与语音生成、参考音色、上传、播放与结果管理。</p></article>
+      <article class="ncard" data-c="1"><header class="nbar"><span class="nbar-dot"></span>逐帧动画<code>ai-animation</code></header><p>动作与帧数配置、Sprite Sheet 生成与预览。</p></article>
+      <article class="ncard" data-c="2"><header class="nbar"><span class="nbar-dot"></span>分镜<code>ai-storyboard</code></header><p>自定义宫格、单格覆盖、素材拖入与画格提取。</p></article>
+      <article class="ncard" data-c="3"><header class="nbar"><span class="nbar-dot"></span>360° 全景<code>ai-panorama</code></header><p>预览全景图像，并把当前视角截图生成新的图片节点。</p></article>
+      <article class="ncard" data-c="4"><header class="nbar"><span class="nbar-dot"></span>3D 导演台<code>ai-director</code></header><p>独立窗口内完成场景摆位、机位预演与画面捕获，结果回写节点后可继续图生视频。</p></article>
+      <article class="ncard" data-c="1"><header class="nbar"><span class="nbar-dot"></span>Markdown<code>ai-markdown</code></header><p>长文本、设定集与工作笔记直接留在画布上。</p></article>
+      <article class="ncard" data-c="2"><header class="nbar"><span class="nbar-dot"></span>源文件<code>source-*</code></header><p>把本地素材登记进画布，作为生成链路的输入。</p></article>
+      <article class="ncard" data-c="3"><header class="nbar"><span class="nbar-dot"></span>画布笔记<code>canvas-note</code></header><p>形状、箭头、自由绘制、文本与图片笔记。</p></article>
+      <article class="ncard" data-c="4"><header class="nbar"><span class="nbar-dot"></span>分组<code>group</code></header><p>把一组节点收进分组一起移动、折叠与管理。</p></article>
+    </div>
   </div>
 </section>
 
@@ -388,52 +421,53 @@
     <p class="lede reveal">项目数据目录保存媒体文件，IndexedDB 持久化项目、配置、会话、任务、资产索引、角色与项目记忆。没有账号，没有强制云同步。</p>
   </div>
 
-  <div class="grid-3">
-    <article class="card card-flat reveal">
-      <div class="ico ico-a">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+  <div class="boundary reveal">
+    <div class="bd-layer">
+      <div class="bd-head"><span class="bd-tag bd-tag-r">Renderer</span><h3>React 前端</h3></div>
+      <p>画布、节点、对话与所有界面。它是最容易被提示词、模型输出、网页和文件内容影响的一层，因此拿到的东西最少。</p>
+      <div class="bd-has">
+        <span class="has">画布数据</span><span class="has">grantId</span><span class="has">显示名</span><span class="has">受限内容片段</span>
       </div>
-      <h3>凭据隔离</h3>
-      <p>API Key 由 Rust 独占的本地凭据文件保管，不写入 IndexedDB、消息或 Agent 操作日志。Renderer 只能按条目名逐条索取。</p>
-    </article>
+    </div>
 
-    <article class="card card-flat reveal">
-      <div class="ico ico-b">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="3"/></svg>
+    <div class="bd-gate">
+      <div class="bd-gate-line"><span>Tauri command · <code>path_policy.rs</code> 校验调用方窗口与真实路径</span></div>
+      <div class="bd-blocked">
+        <span class="blk">✕ API Key 明文</span>
+        <span class="blk">✕ 文件授权路径</span>
+        <span class="blk">✕ 任意路径读写</span>
       </div>
-      <h3>会话级文件授权</h3>
-      <p>文件授权只在当前运行时内保存并绑定到具体会话。模型只收到 <code>grantId</code>、显示名和受限内容，拿不到授权路径。</p>
-    </article>
+    </div>
 
-    <article class="card card-flat reveal">
-      <div class="ico ico-c">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2"/><path d="M14 12h8m0 0-3-3m3 3-3 3"/></svg>
+    <div class="bd-layer bd-rust">
+      <div class="bd-head"><span class="bd-tag bd-tag-u">Rust</span><h3>本地进程</h3></div>
+      <p>凭据文件由 Rust 独占，三条访问路径都拒绝 Renderer 直读；Renderer 只能按条目名逐条索取，取到的值不回传界面状态。</p>
+      <div class="bd-has">
+        <span class="has">凭据存储</span><span class="has">路径策略</span><span class="has">下载校验</span><span class="has">MCP 令牌</span>
       </div>
-      <h3>项目整体迁移</h3>
-      <p>项目记录、对话、项目记忆与本地素材可打包成单个 <code>.aicanvas</code> 归档，并以全新项目 ID 导入到另一台机器。</p>
-    </article>
+    </div>
 
-    <article class="card card-flat reveal">
-      <div class="ico ico-a">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6m0 0 3-3m-3 3L9 6"/><path d="M4 13h4l2 3h4l2-3h4"/><path d="M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></svg>
-      </div>
-      <h3>多种生成后端</h3>
+    <div class="bd-gate">
+      <div class="bd-gate-line"><span>项目数据目录 · IndexedDB v17</span></div>
+    </div>
+
+    <div class="bd-layer bd-disk">
+      <div class="bd-head"><span class="bd-tag bd-tag-d">你的磁盘</span><h3>没有账号，没有强制云同步</h3></div>
+      <p>媒体文件落在项目数据目录；项目、配置、会话、Agent 任务、资产索引、角色与项目记忆存在 IndexedDB。整个项目可打包成单个 <code>.aicanvas</code> 归档换台机器继续做。</p>
+    </div>
+  </div>
+
+  <div class="grid-3 grid-3-tight">
+    <article class="mini reveal">
+      <h4>多种生成后端</h4>
       <p>云端模型、自定义模型执行协议、ComfyUI 工作流、Dreamina 登录态调用，以及本地 ONNX 推理（超分、抠图、角色方向图）。</p>
     </article>
-
-    <article class="card card-flat reveal">
-      <div class="ico ico-b">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6l-9-4Z"/></svg>
-      </div>
-      <h3>可校验的按需运行时</h3>
+    <article class="mini reveal">
+      <h4>可校验的按需运行时</h4>
       <p>3D 导演台首次使用时下载固定版本资源，经 SHA-256、版本、协议、路径、文件数与体积校验后才安装，之后可离线打开。</p>
     </article>
-
-    <article class="card card-flat reveal">
-      <div class="ico ico-c">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
-      </div>
-      <h3>桌面原生体验</h3>
+    <article class="mini reveal">
+      <h4>桌面原生体验</h4>
       <p>自定义标题栏、深色与低饱和马卡龙浅色主题、多种画布背景、全局快捷键、文件定位、指定应用打开与桌面自动更新。</p>
     </article>
   </div>

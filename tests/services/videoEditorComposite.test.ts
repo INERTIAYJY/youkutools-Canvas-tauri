@@ -62,7 +62,14 @@ describe('needsCompositing', () => {
     expect(needsCompositing([videoTrack([clip({
       id: 'text',
       kind: 'text',
-      textStyle: { content: '标题', fontSize: 64, color: '#fff', fontWeight: 600, align: 'center' },
+      textStyle: {
+        content: '标题',
+        fontFamily: 'sans-serif',
+        fontSize: 64,
+        color: '#fff',
+        fontWeight: 600,
+        align: 'center',
+      },
     })])])).toBe(true);
   });
 
@@ -196,7 +203,14 @@ describe('文字片段合成', () => {
       id: 'title',
       kind: 'text',
       sourceOut: 3,
-      textStyle: { content: '第一行\n第二行', fontSize: 60, color: '#ffffff', fontWeight: 700, align: 'center' },
+      textStyle: {
+        content: '第一行\n第二行',
+        fontFamily: 'sans-serif',
+        fontSize: 60,
+        color: '#ffffff',
+        fontWeight: 700,
+        align: 'center',
+      },
     });
 
     await renderFrameAt(

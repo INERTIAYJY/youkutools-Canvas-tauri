@@ -98,6 +98,7 @@ describe('VideoEditorPreview overlays', () => {
       fileName: '片头标题',
       textStyle: {
         content: '片头标题',
+        fontFamily: 'sans-serif',
         fontSize: 72,
         color: '#ffdd88',
         fontWeight: 700,

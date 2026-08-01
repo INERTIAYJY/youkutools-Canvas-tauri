@@ -64,6 +64,17 @@ export type ImagePostProcess = 'character-8-direction-grid';
 
 export type AnimationAction = 'idle' | 'walk' | 'run' | 'jump' | 'attack' | 'hit';
 export type AnimationPreviewMode = 'playing' | 'sheet';
+export type CameraLens = '15mm' | '24mm' | '35mm' | '50mm' | '85mm' | '200mm' | 'macro' | 'fisheye';
+export type CameraShutterEffect = 'freeze' | 'natural' | 'motion' | 'light-trails';
+export type CameraAperture = 'f/1.4' | 'f/2' | 'f/2.8' | 'f/4' | 'f/5.6' | 'f/8' | 'f/11' | 'f/16';
+export type CameraExposureTime = '1/2000s' | '1/1000s' | '1/500s' | '1/250s' | '1/125s' | '1/60s' | '1/30s' | '1/8s' | '1/2s' | '1s' | '5s';
+
+export interface CameraGenerationSettings {
+  lens?: CameraLens;
+  shutterEffect?: CameraShutterEffect;
+  aperture?: CameraAperture;
+  exposureTime?: CameraExposureTime;
+}
 
 export const ANIMATION_ACTION_LABELS: Record<AnimationAction, string> = {
   idle: '待机',
@@ -142,6 +153,7 @@ export interface BaseNodeData {
   aspectRatio?: string;       // 图片比例：'1:1' | '16:9' | ...
   batchCount?: number;        // 单次批量生成图片数量，默认 1
   batchGroupId?: string;      // 同一次批量生成的结果分组 ID
+  cameraSettings?: CameraGenerationSettings; // 生图/生视频摄影参数；字段缺省时由模型自动决定
   videoResolution?: number;   // 视频分辨率：832 | 1024 | 1280 | 1440
   videoFps?: number;          // 视频帧率：16 | 24 | 30
   videoFrames?: number;       // 视频生成帧数（时长）

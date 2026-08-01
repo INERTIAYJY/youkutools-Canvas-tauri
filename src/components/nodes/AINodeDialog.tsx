@@ -5,7 +5,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
-import type { AnimationAction, BaseNodeData, ImagePostProcess, ModelOption } from '../../types';
+import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption } from '../../types';
 import { ANIMATION_FRAME_GRIDS } from '../../types';
 import { MAX_IMAGE_BATCH_COUNT, type AudioOutputFormat, type AudioTtsVoice } from '../../types/aiTypes';
 import { generateText, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from '../../services/aiService';
@@ -30,6 +30,7 @@ import {
   buildAnimationSpritePrompt,
   resolveAnimationSheetAspectRatio,
 } from '../../services/ai/animationPrompt';
+import { buildGenerationCameraPrompt } from './shared/image/cameraStudio';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
 
@@ -367,12 +368,16 @@ function AINodeDialog() {
     const projectSettings = store.projects.find(
       (project) => project.id === currentProjectId,
     )?.settings;
-    const effectivePrompt = resolveProjectGenerationPrompt({
+    const projectPrompt = resolveProjectGenerationPrompt({
       prompt: rawPrompt,
       data: latestData,
       settings: projectSettings,
       customStyles: store.customStyles,
     });
+    const cameraPrompt = buildGenerationCameraPrompt(latestData.cameraSettings);
+    const effectivePrompt = cameraPrompt && (nodeType === 'ai-image' || nodeType === 'ai-video')
+      ? `${projectPrompt}\n\nCamera settings: ${cameraPrompt}.`
+      : projectPrompt;
     const nodeModel = latestData?.model;
     const nodeProvider = latestData?.provider;
     const nodeLabel = latestData?.label ?? '';
@@ -471,7 +476,7 @@ function AINodeDialog() {
           filePath: saved?.filePath,
           params: isAnimation
             ? { imageSize, aspectRatio, animationAction, animationFrames, grid: ANIMATION_FRAME_GRIDS[animationFrames] }
-            : { imageSize, aspectRatio },
+            : { imageSize, aspectRatio, cameraSettings: latestData.cameraSettings },
         });
         if (postProcess === 'character-8-direction-grid') {
           if (!saved?.filePath) {
@@ -632,7 +637,7 @@ function AINodeDialog() {
           status: 'success',
           mediaUrl: result.url,
           filePath: saved?.filePath,
-          params: { videoResolution, videoFps, videoFrames, seedanceResolution, seedanceRatio, seedanceDuration, generateAudio },
+          params: { videoResolution, videoFps, videoFrames, seedanceResolution, seedanceRatio, seedanceDuration, generateAudio, cameraSettings: latestData.cameraSettings },
         });
         showToast('视频生成完成');
       } else if (nodeType === 'ai-audio') {
@@ -811,6 +816,11 @@ function AINodeDialog() {
     [activeNodeId, updateNodeData],
   );
 
+  const onChangeCameraSettings = useCallback(
+    (value: CameraGenerationSettings | undefined) => updateNodeData(activeNodeId!, { cameraSettings: value }),
+    [activeNodeId, updateNodeData],
+  );
+
   const onChangeVideoResolution = useCallback(
     (value: number) => updateNodeData(activeNodeId!, { videoResolution: value }),
     [activeNodeId, updateNodeData]
@@ -972,6 +982,8 @@ function AINodeDialog() {
           onChangeAspectRatio={onChangeAspectRatio}
           batchCount={(data.batchCount as number) || 1}
           onChangeBatchCount={onChangeBatchCount}
+          cameraSettings={data.cameraSettings}
+          onChangeCameraSettings={onChangeCameraSettings}
           videoResolution={(data.videoResolution as number) || 832}
           videoFps={(data.videoFps as number) || 24}
           videoFrames={(data.videoFrames as number) || 77}

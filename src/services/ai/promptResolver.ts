@@ -3,7 +3,7 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import { readFileToDataUrl, getFileCategory } from '../fileService';
-import { resolveNodeImageUrl, mergeImageWithOverlays } from './imageUtils';
+import { imageUrlReachable, resolveNodeImageUrl, mergeImageWithOverlays } from './imageUtils';
 import { cropImageCell, cropImageByRanges } from '../../components/nodes/shared/image/imageUtils';
 import { parseDramaMentionId } from '../../types/dramaAssets';
 import {
@@ -637,6 +637,16 @@ async function resolvePromptReferences(
         console.error('[aiService] Failed to merge overlays:', err);
       }
       const hasOverlays = Boolean(entry.mattingMask || entry.annotation || entry.annotationLayer);
+      const sourceUrl = !hasOverlays && entry.sourceUrl?.trim()
+        ? entry.sourceUrl.trim()
+        : undefined;
+      const reachableSourceUrl = sourceUrl && (
+        sourceUrl === entry.url
+          ? url === sourceUrl
+          : await imageUrlReachable(sourceUrl)
+      )
+        ? sourceUrl
+        : undefined;
       return {
         kind: 'image',
         url: resolvedUrl,
@@ -644,7 +654,7 @@ async function resolvePromptReferences(
         role: 'reference',
         sourceNodeId: entry.sourceNodeId,
         filePath: entry.filePath,
-        sourceUrl: hasOverlays ? undefined : entry.sourceUrl,
+        sourceUrl: reachableSourceUrl,
       } satisfies MediaReference;
     }),
   );

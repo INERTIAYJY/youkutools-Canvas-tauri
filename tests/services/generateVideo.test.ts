@@ -1,5 +1,5 @@
 import type { Node } from '@xyflow/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildGeneralVideoProtocolVariables,
   generateVideo,
@@ -26,6 +26,10 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   comfyMocks.executeVideo.mockReset();
   comfyMocks.executeVideo.mockResolvedValue({ url: 'https://cdn.example/result.mp4' });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('video prompt media references', () => {
@@ -79,6 +83,48 @@ describe('video prompt media references', () => {
     await expect(resolvePromptWithImageRefs('@{audio-1:参考声音}')).resolves.toEqual({
       prompt: 'https://cdn.example/reference.wav',
       imageUrls: [],
+    });
+  });
+
+  it('falls back to the persisted local image when a generated source URL has expired', async () => {
+    class UnreachableImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      set src(_value: string) {
+        queueMicrotask(() => this.onerror?.());
+      }
+    }
+    vi.stubGlobal('Image', UnreachableImage);
+
+    const imageNode: Node<BaseNodeData> = {
+      id: 'generated-image',
+      type: 'ai-image',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '生成首帧',
+        type: 'ai-image',
+        imageUrl: 'asset://localhost/generated.png',
+        sourceUrl: 'https://expired.example/generated.png',
+        filePath: '/project/data/generated.png',
+      },
+    };
+    useAppStore.setState({ nodes: [imageNode] });
+
+    await expect(resolvePromptWithMediaRefs('@{generated-image:生成首帧}')).resolves.toEqual({
+      prompt: '图片1',
+      references: [{
+        kind: 'image',
+        url: 'asset://localhost/generated.png',
+        origin: 'prompt',
+        role: 'reference',
+        sourceNodeId: 'generated-image',
+        filePath: '/project/data/generated.png',
+        sourceUrl: undefined,
+      }],
+      imageUrls: ['asset://localhost/generated.png'],
+      videoUrls: [],
+      audioUrls: [],
     });
   });
 

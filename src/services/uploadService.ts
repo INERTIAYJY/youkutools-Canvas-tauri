@@ -8,7 +8,7 @@
  *
  * 缓存策略：
  *  - 内存缓存：同一进程内即时复用
- *  - localStorage 持久化缓存：跨进程/Session 复用，3 小时过期后自动重传
+ *  - localStorage 持久化缓存：跨进程/Session 复用，2.5 小时过期后自动重传
  */
 import { useAppStore } from '../store/useAppStore';
 import { APIMART_BASE_URL } from '../constants/api';
@@ -20,8 +20,8 @@ const DEFAULT_UPLOAD_BASE = APIMART_BASE_URL;
 /** uguu.se 免费图床上传地址 */
 const UGUU_UPLOAD_URL = 'https://uguu.se/upload';
 
-/** 上传缓存 TTL：3 小时 */
-const UPLOAD_TTL_MS = 3 * 60 * 60 * 1000;
+/** 上传缓存 TTL：2.5 小时，给图床地址失效预留半小时安全窗口 */
+const UPLOAD_TTL_MS = 150 * 60 * 1000;
 
 /** localStorage key */
 const CACHE_STORAGE_KEY = 'canvas-upload-cache-v2';
@@ -310,7 +310,7 @@ export async function uploadToRemote(url: string, provider = ''): Promise<string
       ? await uploadToApimart(url)
       : await uploadToUguu(url);
 
-    // 写入双层缓存（3 小时有效期）
+    // 写入双层缓存（2.5 小时有效期）
     setCachedUrl(url, publicUrl);
     return publicUrl;
   } catch (err) {

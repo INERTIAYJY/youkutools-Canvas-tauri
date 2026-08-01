@@ -15,6 +15,8 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 ![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6)
 ![License](https://img.shields.io/badge/license-source--available-f59e0b)
 
+官网：<https://tenney95.github.io/AI-Canvas-tauri/>（首屏可直接在浏览器里试用，含一份演示画布）
+
 ## 界面预览
 
 ![AI Canvas Tauri Screenshot](public/screenshot.jpg)

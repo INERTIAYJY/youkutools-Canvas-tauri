@@ -295,7 +295,8 @@ describe('resolveCompositeAudioMode', () => {
     expect(result.mode).toBe('copy');
   });
 
-  it('cannot copy when clips overlap, because that would need mixing', async () => {
+  it('mixes into PCM instead of copying when clips overlap', async () => {
+    // 重叠必须混音，直通不可行；但 PCM 不需要 AudioEncoder，音频照样保得住
     vi.stubGlobal('AudioEncoder', undefined);
     const result = await resolveCompositeAudioMode(
       withAudio([
@@ -304,21 +305,21 @@ describe('resolveCompositeAudioMode', () => {
       ]),
       resolver(),
     );
-    expect(result.mode).toBe('none');
+    expect(result.mode).toBe('pcm');
     expect(result.reason).toContain('重叠');
   });
 
-  it('cannot copy when a volume change is requested', async () => {
+  it('mixes into PCM instead of copying when a volume change is requested', async () => {
     vi.stubGlobal('AudioEncoder', undefined);
     expect((await resolveCompositeAudioMode(
       withAudio([audioClip({ id: 'a', volume: 0.5 })]),
       resolver(),
-    )).mode).toBe('none');
+    )).mode).toBe('pcm');
 
     expect((await resolveCompositeAudioMode(
       withAudio([audioClip({ id: 'a', volumePoints: [{ t: 0, gain: 0 }] })]),
       resolver(),
-    )).mode).toBe('none');
+    )).mode).toBe('pcm');
   });
 
   it('reports no audio for an empty or fully muted timeline', async () => {
@@ -356,5 +357,67 @@ describe('音轨保留策略', () => {
   it('rejects a sample rate or channel mismatch', () => {
     expect(signature('mp4a.40.2', 44100, 2)).not.toBe(signature('mp4a.40.2', 48000, 2));
     expect(signature('mp4a.40.2', 48000, 1)).not.toBe(signature('mp4a.40.2', 48000, 2));
+  });
+});
+
+describe('resolveCompositeAudioMode 的 PCM 兜底', () => {
+  const resolver = () => ({
+    getPrimaryAudioTrack: async () => ({
+      getCodec: async () => 'aac',
+      getDecoderConfig: async () => ({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2 }),
+    }),
+  }) as never;
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('mixes into PCM when a volume change rules out packet copy', async () => {
+    // 没有 AudioEncoder 也不该丢音频：PCM 走 mediabunny 自带的软件编码器
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      [{ id: 'v1', kind: 'video', name: 'v', clips: [clip({ id: 'a', volume: 0.5 })] }],
+      resolver,
+    );
+    expect(result.mode).toBe('pcm');
+    expect(result.reason).toContain('音量');
+  });
+
+  it('mixes into PCM when clips overlap', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      [{
+        id: 'v1', kind: 'video', name: 'v',
+        clips: [
+          clip({ id: 'a', timelineStart: 0, sourceOut: 4 }),
+          clip({ id: 'b', timelineStart: 2, sourceOut: 4 }),
+        ],
+      }],
+      resolver,
+    );
+    expect(result.mode).toBe('pcm');
+    expect(result.reason).toContain('重叠');
+  });
+
+  it('still prefers lossless packet copy when nothing needs mixing', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      [{
+        id: 'v1', kind: 'video', name: 'v',
+        clips: [
+          clip({ id: 'a', timelineStart: 0, sourceOut: 4 }),
+          clip({ id: 'b', timelineStart: 4, sourceOut: 4 }),
+        ],
+      }],
+      resolver,
+    );
+    expect(result.mode).toBe('copy');
+  });
+
+  it('only reports none when there is genuinely no audio', async () => {
+    vi.stubGlobal('AudioEncoder', undefined);
+    const result = await resolveCompositeAudioMode(
+      [{ id: 'v1', kind: 'video', name: 'v', clips: [clip({ id: 'a' })] }],
+      (() => ({ getPrimaryAudioTrack: async () => null })) as never,
+    );
+    expect(result.mode).toBe('none');
   });
 });

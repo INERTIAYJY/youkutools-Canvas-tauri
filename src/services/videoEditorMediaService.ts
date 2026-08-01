@@ -356,7 +356,17 @@ export async function exportLosslessTrim(options: {
 }
 
 /** 合成导出时音轨的处理方式 */
-export type CompositeAudioMode = 'encode' | 'copy' | 'none';
+export type CompositeAudioMode = 'encode' | 'copy' | 'pcm' | 'none';
+
+/**
+ * 无 AudioEncoder 时用于混流输出的编码。
+ *
+ * mediabunny 对 PCM 走自带的软件编码器（`initPcmEncoder`），完全不碰
+ * WebCodecs 的 `AudioEncoder`；MP4 也能容纳 pcm-s16（ISO/IEC 23003-5）。
+ * 因此即便本机没有音频编码器，混流、音量包络、重叠音频依然可用，
+ * 代价只是音轨不压缩（48kHz 立体声约 1.5 Mbps）。
+ */
+const PCM_FALLBACK_CODEC = 'pcm-s16' as const;
 
 /**
  * 判断合成导出能否直通搬运音频分组。
@@ -379,23 +389,19 @@ export async function resolveCompositeAudioMode(
 
   if (typeof AudioEncoder !== 'undefined') return { mode: 'encode' };
 
-  // 以下都是「无编码器时能否直通」的判据
+  // 无编码器时优先直通搬运：不重编码、体积小。
+  // 条件是无需混音（不改音量、片段不重叠）且各段解码参数一致。
   const volumeChanged = clips.some((clip) => (
     (clip.volume ?? 1) !== 1 || (clip.volumePoints?.length ?? 0) > 0
   ));
-  if (volumeChanged) {
-    return { mode: 'none', reason: '本机缺少 AudioEncoder，无法应用音量调整' };
-  }
 
   const sorted = [...clips].sort((a, b) => a.timelineStart - b.timelineStart);
-  for (let index = 1; index < sorted.length; index += 1) {
-    if (sorted[index].timelineStart < getClipEnd(sorted[index - 1]) - 1e-3) {
-      return { mode: 'none', reason: '本机缺少 AudioEncoder，无法混合重叠的音频' };
-    }
-  }
+  const overlapping = sorted.some((clip, index) => (
+    index > 0 && clip.timelineStart < getClipEnd(sorted[index - 1]) - 1e-3
+  ));
 
-  // 各段解码参数必须一致，否则搬运出来的音轨播不了
   let reference: string | null = null;
+  let uniform = true;
   for (const clip of sorted) {
     const input = resolve(clip);
     if (!input) continue;
@@ -406,13 +412,20 @@ export async function resolveCompositeAudioMode(
       ? `${config.codec}|${config.sampleRate}|${config.numberOfChannels}`
       : 'unknown';
     reference ??= signature;
-    if (signature !== reference) {
-      return { mode: 'none', reason: '本机缺少 AudioEncoder，且各段音频参数不一致' };
-    }
+    if (signature !== reference) uniform = false;
   }
   if (!reference) return { mode: 'none', reason: '时间轴没有可用的音频轨' };
 
-  return { mode: 'copy' };
+  if (!volumeChanged && !overlapping && uniform) return { mode: 'copy' };
+
+  // 直通不满足条件也不必放弃音频：PCM 编码走 mediabunny 自带的软件实现，
+  // 不需要 AudioEncoder，混流与音量包络照常生效
+  const reasons = [
+    volumeChanged ? '需要应用音量调整' : '',
+    overlapping ? '存在重叠音频需混合' : '',
+    uniform ? '' : '各段音频参数不一致',
+  ].filter(Boolean).join('、');
+  return { mode: 'pcm', reason: `${reasons}，本机无 AudioEncoder，改用未压缩 PCM 音轨` };
 }
 
 /** 把各片段的已编码音频分组按时间轴位置搬进输出，不经过编码器 */
@@ -519,7 +532,7 @@ export async function exportComposite(options: {
   let mixed: Awaited<ReturnType<typeof mixTimelineAudio>> = null;
   let audioSource: AudioBufferSource | null = null;
 
-  if (audioMode === 'encode') {
+  if (audioMode === 'encode' || audioMode === 'pcm') {
     onStage?.('混合音频');
     mixed = await mixTimelineAudio({
       tracks,
@@ -529,7 +542,9 @@ export async function exportComposite(options: {
       onProgress: (value) => onProgress?.(value * 0.2),
     });
     if (mixed) {
-      audioSource = new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_MEDIUM });
+      audioSource = audioMode === 'pcm'
+        ? new AudioBufferSource({ codec: PCM_FALLBACK_CODEC })
+        : new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_MEDIUM });
       output.addAudioTrack(audioSource);
     }
   }

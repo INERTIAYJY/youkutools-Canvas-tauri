@@ -703,10 +703,12 @@ export default function VideoEditorWindow() {
           onStage: setExportStage,
           onAudioMode: (mode, reason) => {
             audioNote = mode === 'encode'
-              ? '音频已重新混流'
+              ? '音频已重新混流（AAC）'
               : mode === 'copy'
-                ? '音频以原始分组直通保留（本机无 AudioEncoder，故未做混流）'
-                : `未输出音轨：${reason ?? '无可用音频'}`;
+                ? '音频以原始分组直通保留，未重编码'
+                : mode === 'pcm'
+                  ? `音频已混流为未压缩 PCM 音轨：${reason ?? ''}`
+                  : `未输出音轨：${reason ?? '无可用音频'}`;
           },
           signal: controller.signal,
         }));

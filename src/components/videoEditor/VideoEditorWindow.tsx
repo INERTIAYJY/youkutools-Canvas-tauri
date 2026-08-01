@@ -18,6 +18,7 @@ import {
   registerProjectFolders,
   setBaseDataDir,
   syncAuthorizedDirectories,
+  saveBinaryToLocalFile,
   saveBinaryToProjectData,
   buildNodeFileName,
   uploadSourceFileToProject,
@@ -81,6 +82,7 @@ import {
 } from './timelineOps';
 
 type EditorPhase = 'loading' | 'ready' | 'error';
+type ExportDestination = 'canvas' | 'local';
 
 function collectProjectImages(nodes: unknown): VideoEditorProjectImageSource[] {
   if (!Array.isArray(nodes)) return [];
@@ -864,7 +866,7 @@ export default function VideoEditorWindow() {
     tracks,
   ]);
 
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(async (destination: ExportDestination) => {
     if (!session || !record) return;
     const allClips = tracks.flatMap((track) => (track.hidden ? [] : track.clips));
     if (allClips.length === 0) return;
@@ -987,21 +989,31 @@ export default function VideoEditorWindow() {
       }
 
       const fileName = buildNodeFileName(record.name, 'mp4', 'edited');
-      const saved = await withStage('写入项目目录', async () => {
-        const result = await saveBinaryToProjectData(bytes, record.projectId, fileName);
-        if (!result) throw new Error('项目数据目录不可写');
-        return result;
-      });
+      if (destination === 'local') {
+        const savedPath = await withStage('保存到本地', () => saveBinaryToLocalFile(bytes, fileName));
+        if (!savedPath) {
+          setNotice('已取消保存到本地');
+          return;
+        }
+        notes.push(`已保存到本地：${fileName}`);
+      } else {
+        const saved = await withStage('写入项目目录', async () => {
+          const result = await saveBinaryToProjectData(bytes, record.projectId, fileName);
+          if (!result) throw new Error('项目数据目录不可写');
+          return result;
+        });
 
-      await withStage('输出到画布', () => postVideoEditorExported(session.instanceId, {
-        videoUrl: saved.assetUrl,
-        filePath: saved.filePath,
-        fileName,
-        duration: timelineDuration,
-        // 合成路径按画布尺寸出片，直通路径保持源尺寸
-        width: compositing ? canvasSize.width : (firstSized?.width ?? 0),
-        height: compositing ? canvasSize.height : (firstSized?.height ?? 0),
-      }));
+        await withStage('输出到画布', () => postVideoEditorExported(session.instanceId, {
+          videoUrl: saved.assetUrl,
+          filePath: saved.filePath,
+          fileName,
+          duration: timelineDuration,
+          // 合成路径按画布尺寸出片，直通路径保持源尺寸
+          width: compositing ? canvasSize.width : (firstSized?.width ?? 0),
+          height: compositing ? canvasSize.height : (firstSized?.height ?? 0),
+        }));
+        notes.push('已创建画布视频节点');
+      }
 
       setNotice(notes.join('；'));
     } catch (reason) {
@@ -1056,15 +1068,26 @@ export default function VideoEditorWindow() {
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              className="video-editor-btn primary"
-              onClick={() => { void handleExport(); }}
-              disabled={phase !== 'ready' || allClips.length === 0}
-            >
-              <Icon icon="lucide:upload" width={13} height={13} />
-              导出为新节点
-            </button>
+            <>
+              <button
+                type="button"
+                className="video-editor-btn"
+                onClick={() => { void handleExport('local'); }}
+                disabled={phase !== 'ready' || allClips.length === 0}
+              >
+                <Icon icon="lucide:download" width={13} height={13} />
+                导出到本地
+              </button>
+              <button
+                type="button"
+                className="video-editor-btn primary"
+                onClick={() => { void handleExport('canvas'); }}
+                disabled={phase !== 'ready' || allClips.length === 0}
+              >
+                <Icon icon="lucide:upload" width={13} height={13} />
+                导出为新节点
+              </button>
+            </>
           )}
           <button
             type="button"

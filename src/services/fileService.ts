@@ -433,6 +433,24 @@ export async function saveBinaryToProjectData(
   return { filePath: destPath, assetUrl };
 }
 
+/**
+ * 把已生成的二进制结果另存到用户选择的本地位置。
+ * 路径只来自系统保存对话框，文件写入仍统一收口在 fileService。
+ */
+export async function saveBinaryToLocalFile(
+  data: Uint8Array,
+  fileName: string,
+  filters: { name: string; extensions: string[] }[] = [
+    { name: '视频文件', extensions: ['mp4'] },
+  ],
+): Promise<string | null> {
+  if (!isTauriEnv()) return null;
+  const destPath = await save({ defaultPath: fileName, filters });
+  if (!destPath) return null;
+  await writeFile(destPath, data);
+  return destPath;
+}
+
 /** 从 URL 中提取文件名 */
 function extractFileNameFromUrl(url: string, fallbackPrefix: string): string {
   // ComfyUI: /view?filename=xxx.png&...

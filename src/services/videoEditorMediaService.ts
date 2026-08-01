@@ -236,6 +236,10 @@ export type LosslessTrimResult = {
   bytes: Uint8Array;
   /** 实际生效的入点（最近的前置关键帧位置） */
   actualStart: number;
+  /** 音轨是否保留；各段音频参数不一致时会被丢弃 */
+  audioKept: boolean;
+  /** 音轨被丢弃的原因，供如实告知用户 */
+  audioDropReason?: string;
 };
 
 /**
@@ -337,7 +341,14 @@ export async function exportLosslessTrim(options: {
 
     const buffer = (output.target as BufferTarget).buffer;
     if (!buffer) throw new Error('导出未产生有效数据');
-    return { bytes: new Uint8Array(buffer), actualStart };
+    return {
+      bytes: new Uint8Array(buffer),
+      actualStart,
+      audioKept: keepAudio,
+      audioDropReason: keepAudio
+        ? undefined
+        : (audioTrack ? `MP4 不接受源音频编码 ${audioCodec ?? '未知'}` : '素材没有音轨'),
+    };
   } catch (error) {
     await output.cancel().catch(() => {});
     throw error;
@@ -627,6 +638,32 @@ export async function exportLosslessConcat(options: {
 
   const videoSource = new EncodedVideoPacketSource(first.codec);
   output.addVideoTrack(videoSource, { rotation: first.track.rotation });
+
+  // 音轨同样按分组直通搬运，前提是各段解码参数一致 ——
+  // 不一致就只出画面，而不是让整个导出失败
+  const audioTracks = await Promise.all(segments.map(async (segment) => {
+    const track = await segment.input.getPrimaryAudioTrack();
+    if (!track) return null;
+    const config = await track.getDecoderConfig();
+    return {
+      track,
+      codec: await track.getCodec(),
+      signature: config
+        ? `${config.codec}|${config.sampleRate}|${config.numberOfChannels}`
+        : null,
+    };
+  }));
+
+  const firstAudio = audioTracks[0];
+  const audioUniform = !!firstAudio?.codec
+    && !!firstAudio.signature
+    && output.format.getSupportedAudioCodecs().includes(firstAudio.codec)
+    && audioTracks.every((entry) => entry?.signature === firstAudio.signature);
+  const audioSource = audioUniform && firstAudio.codec
+    ? new EncodedAudioPacketSource(firstAudio.codec)
+    : null;
+  if (audioSource) output.addAudioTrack(audioSource);
+
   await output.start();
 
   try {
@@ -636,6 +673,7 @@ export async function exportLosslessConcat(options: {
     );
     let timelineCursor = 0;
     let firstPacket = true;
+    let firstAudioPacket = true;
     let actualStart = 0;
 
     for (const [index, entry] of tracks.entries()) {
@@ -663,16 +701,49 @@ export async function exportLosslessConcat(options: {
           onProgress?.(Math.min(1, done / totalSpan));
         }
       }
+
+      // 音频与画面共用同一个 segmentBase，保证两条轨在拼接点上对齐
+      const audioEntry = audioTracks[index];
+      if (audioSource && audioEntry) {
+        const audioSink = new EncodedPacketSink(audioEntry.track);
+        const audioStart = (await audioSink.getPacket(segmentBase)) ?? undefined;
+        const audioDecoderConfig = await audioEntry.track.getDecoderConfig();
+
+        for await (const packet of audioSink.packets(audioStart)) {
+          if (signal?.aborted) throw new VideoExportCanceledError();
+          if (packet.timestamp >= entry.segment.end) break;
+          const shifted = timelineCursor + (packet.timestamp - segmentBase);
+          if (shifted < 0) continue;
+          await audioSource.add(
+            packet.clone({ timestamp: shifted }),
+            firstAudioPacket && audioDecoderConfig
+              ? { decoderConfig: audioDecoderConfig }
+              : undefined,
+          );
+          firstAudioPacket = false;
+        }
+      }
+
       timelineCursor += Math.max(0, entry.segment.end - segmentBase);
     }
 
     videoSource.close();
+    audioSource?.close();
     await output.finalize();
     onProgress?.(1);
 
     const buffer = (output.target as BufferTarget).buffer;
     if (!buffer) throw new Error('导出未产生有效数据');
-    return { bytes: new Uint8Array(buffer), actualStart };
+    return {
+      bytes: new Uint8Array(buffer),
+      actualStart,
+      audioKept: !!audioSource,
+      audioDropReason: audioSource
+        ? undefined
+        : (firstAudio
+          ? '各段音频编码或采样参数不一致，无法直通拼接音轨'
+          : '素材没有音轨'),
+    };
   } catch (error) {
     await output.cancel().catch(() => {});
     throw error;

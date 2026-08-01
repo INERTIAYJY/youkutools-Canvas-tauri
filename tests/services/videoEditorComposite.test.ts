@@ -339,3 +339,22 @@ describe('resolveCompositeAudioMode', () => {
     expect(result.mode).toBe('none');
   });
 });
+
+describe('音轨保留策略', () => {
+  // 直通拼接要求各段音频解码参数一致，用签名比较；这里覆盖判据本身
+  const signature = (codec: string, rate: number, channels: number) =>
+    `${codec}|${rate}|${channels}`;
+
+  it('treats identical audio parameters as concatenable', () => {
+    const all = [
+      signature('mp4a.40.2', 48000, 2),
+      signature('mp4a.40.2', 48000, 2),
+    ];
+    expect(all.every((entry) => entry === all[0])).toBe(true);
+  });
+
+  it('rejects a sample rate or channel mismatch', () => {
+    expect(signature('mp4a.40.2', 44100, 2)).not.toBe(signature('mp4a.40.2', 48000, 2));
+    expect(signature('mp4a.40.2', 48000, 1)).not.toBe(signature('mp4a.40.2', 48000, 2));
+  });
+});

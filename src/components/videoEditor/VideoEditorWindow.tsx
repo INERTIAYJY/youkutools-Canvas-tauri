@@ -739,7 +739,9 @@ export default function VideoEditorWindow() {
           if (drift > 0.05) {
             notes.push(`首段按关键帧对齐，实际入点 ${result.actualStart.toFixed(2)}s（比设定早 ${drift.toFixed(2)}s）`);
           }
-          if (clips.length > 1) notes.push('多片段无损拼接不保留音轨；需要音轨请启用任一合成能力');
+          notes.push(result.audioKept
+            ? '音轨已按原始分组直通保留'
+            : `未输出音轨：${result.audioDropReason ?? '未知原因'}`);
         } catch (reason) {
           if (reason instanceof VideoExportCanceledError) throw reason;
           // 直通做不到（例如素材参数不一致）不该把死路甩给用户，自动改走合成

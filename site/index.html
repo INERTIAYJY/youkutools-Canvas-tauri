@@ -100,12 +100,32 @@
 
   <div class="shot-wrap reveal" id="shotWrap">
     <div class="shot-glow" aria-hidden="true"></div>
-    <figure class="shot">
+    <figure class="shot" id="shot">
       <div class="shot-bar">
         <span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span>
         <span class="shot-title">AI Canvas — 项目 2</span>
+        <button class="shot-exit" id="demoExit" hidden>返回截图</button>
       </div>
-      <img src="assets/screenshot.jpg" alt="AI Canvas 应用界面：深色无限画布上排布着文本、角色图像、视频与 Markdown 节点，并以连线组成生成链路" width="2130" height="1350" />
+
+      <div class="shot-stage">
+        <img src="assets/screenshot.jpg" alt="AI Canvas 应用界面：深色无限画布上排布着文本、角色图像、视频与 Markdown 节点，并以连线组成生成链路" width="2130" height="1350" />
+
+        <button class="try-btn" id="tryBtn">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 13 8-13 8V4Z"/></svg>
+          <span>在浏览器里试用</span>
+          <em>加载真实应用，含一份演示画布</em>
+        </button>
+
+        <div class="try-loading" hidden>
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="try-loading-text">正在加载应用…</span>
+        </div>
+      </div>
+
+      <p class="demo-note" id="demoNote" hidden>
+        <b>这是浏览器降级模式。</b>节点、连线、画布笔记和编辑器都能真实操作，但生成类功能需要桌面版并配置模型；
+        本机文件、凭据存储和 3D 导演台在浏览器里不可用。演示数据存在你自己的浏览器里。
+      </p>
     </figure>
   </div>
 
@@ -448,7 +468,7 @@
     </div>
 
     <div class="bd-gate">
-      <div class="bd-gate-line"><span>项目数据目录 · IndexedDB v17</span></div>
+      <div class="bd-gate-line"><span>项目数据目录 · IndexedDB</span></div>
     </div>
 
     <div class="bd-layer bd-disk">
@@ -560,5 +580,6 @@
 </footer>
 
 <script src="script.js"></script>
+<script src="demo/demo.js"></script>
 </body>
 </html>

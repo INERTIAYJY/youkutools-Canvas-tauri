@@ -1,0 +1,183 @@
+{
+  "name": "演示项目 · 短剧开场",
+  "nodes": [
+    {
+      "id": "demo-setting",
+      "type": "ai-text",
+      "position": { "x": -560, "y": -40 },
+      "data": {
+        "label": "世界观设定",
+        "type": "ai-text",
+        "role": "generator",
+        "status": "success",
+        "displayId": 1,
+        "nodeWidth": 320,
+        "nodeHeight": 300,
+        "prompt": "写一段冷峻的东方奇幻开场设定，交代关城、雪峰和三个主要人物。",
+        "output": "关城建在雪峰的裂口上，风从北面灌进来，一年有八个月听不见别的声音。\n\n守关的人只剩三个：一位记得旧律法的老者，一名从不解甲的卫兵，和一个每年冬至才出现一次的使者。\n\n他们谁也不信谁，但都在等同一件事——雪线退到第七道石阶以下。"
+      }
+    },
+    {
+      "id": "demo-note-brief",
+      "type": "ai-markdown",
+      "position": { "x": -560, "y": 320 },
+      "data": {
+        "label": "拍摄要点.md",
+        "type": "ai-markdown",
+        "role": "source",
+        "status": "success",
+        "displayId": 2,
+        "fileName": "拍摄要点.md",
+        "nodeWidth": 320,
+        "nodeHeight": 240,
+        "output": "## 开场三镜\n\n1. 雪峰远景，冷色，无人\n2. 关城夜，暖光只有一盏\n3. 三人各自入画，不同景别\n\n> 色调统一压到低饱和，人物立绘用同一套参考图，避免跨镜脸崩。"
+      }
+    },
+    {
+      "id": "demo-char-elder",
+      "type": "ai-image",
+      "position": { "x": -80, "y": -200 },
+      "data": {
+        "label": "老者立绘",
+        "type": "ai-image",
+        "role": "generator",
+        "status": "success",
+        "displayId": 3,
+        "prompt": "东方奇幻老者全身立绘，粗布长袍，冷色调，电影感布光",
+        "imageUrl": "../demo/char-elder.svg",
+        "imageWidth": 520,
+        "imageHeight": 720,
+        "nodeWidth": 260,
+        "nodeHeight": 360,
+        "aspectRatio": "3:4"
+      }
+    },
+    {
+      "id": "demo-char-guard",
+      "type": "ai-image",
+      "position": { "x": 220, "y": -200 },
+      "data": {
+        "label": "卫兵立绘",
+        "type": "ai-image",
+        "role": "generator",
+        "status": "success",
+        "displayId": 4,
+        "prompt": "戍边卫兵全身立绘，重甲覆雪，冷蓝光，电影感布光",
+        "imageUrl": "../demo/char-guard.svg",
+        "imageWidth": 520,
+        "imageHeight": 720,
+        "nodeWidth": 260,
+        "nodeHeight": 360,
+        "aspectRatio": "3:4"
+      }
+    },
+    {
+      "id": "demo-char-envoy",
+      "type": "ai-image",
+      "position": { "x": 520, "y": -200 },
+      "data": {
+        "label": "使者立绘",
+        "type": "ai-image",
+        "role": "generator",
+        "status": "success",
+        "displayId": 5,
+        "prompt": "神秘使者全身立绘，赤色织物，暗部保留细节，电影感布光",
+        "imageUrl": "../demo/char-envoy.svg",
+        "imageWidth": 520,
+        "imageHeight": 720,
+        "nodeWidth": 260,
+        "nodeHeight": 360,
+        "aspectRatio": "3:4"
+      }
+    },
+    {
+      "id": "demo-scene-peak",
+      "type": "ai-image",
+      "position": { "x": -80, "y": 240 },
+      "data": {
+        "label": "雪峰远景",
+        "type": "ai-image",
+        "role": "generator",
+        "status": "success",
+        "displayId": 6,
+        "prompt": "雪峰远景空镜，低饱和冷色，晨雾，超宽画幅",
+        "imageUrl": "../demo/scene-peak.svg",
+        "imageWidth": 960,
+        "imageHeight": 540,
+        "nodeWidth": 320,
+        "nodeHeight": 180,
+        "aspectRatio": "16:9"
+      }
+    },
+    {
+      "id": "demo-scene-gate",
+      "type": "ai-image",
+      "position": { "x": 300, "y": 240 },
+      "data": {
+        "label": "关城夜景",
+        "type": "ai-image",
+        "role": "generator",
+        "status": "success",
+        "displayId": 7,
+        "prompt": "关城夜景，只有一盏暖光，风雪，低饱和",
+        "imageUrl": "../demo/scene-gate.svg",
+        "imageWidth": 960,
+        "imageHeight": 540,
+        "nodeWidth": 320,
+        "nodeHeight": 180,
+        "aspectRatio": "16:9"
+      }
+    },
+    {
+      "id": "demo-storyboard",
+      "type": "ai-storyboard",
+      "position": { "x": 860, "y": 60 },
+      "data": {
+        "label": "开场分镜",
+        "type": "ai-storyboard",
+        "role": "generator",
+        "status": "success",
+        "displayId": 8,
+        "prompt": "把三个人物和两个场景排成九宫格开场分镜",
+        "imageUrl": "../demo/storyboard-3x3.svg",
+        "imageWidth": 720,
+        "imageHeight": 720,
+        "nodeWidth": 300,
+        "nodeHeight": 300,
+        "storyboardRows": 3,
+        "storyboardCols": 3
+      }
+    },
+    {
+      "id": "demo-video",
+      "type": "ai-video",
+      "position": { "x": 860, "y": 440 },
+      "data": {
+        "label": "开场运镜",
+        "type": "ai-video",
+        "role": "generator",
+        "status": "idle",
+        "displayId": 9,
+        "prompt": "由雪峰远景缓慢推向关城，风雪渐强，5 秒",
+        "nodeWidth": 300,
+        "nodeHeight": 200,
+        "videoResolution": 1280,
+        "videoFps": 24,
+        "seedanceDuration": 5,
+        "seedanceRatio": "16:9"
+      }
+    }
+  ],
+  "edges": [
+    { "id": "demo-e1", "source": "demo-setting", "target": "demo-char-elder" },
+    { "id": "demo-e2", "source": "demo-setting", "target": "demo-char-guard" },
+    { "id": "demo-e3", "source": "demo-setting", "target": "demo-char-envoy" },
+    { "id": "demo-e4", "source": "demo-note-brief", "target": "demo-scene-peak" },
+    { "id": "demo-e5", "source": "demo-note-brief", "target": "demo-scene-gate" },
+    { "id": "demo-e6", "source": "demo-char-elder", "target": "demo-storyboard" },
+    { "id": "demo-e7", "source": "demo-char-guard", "target": "demo-storyboard" },
+    { "id": "demo-e8", "source": "demo-char-envoy", "target": "demo-storyboard" },
+    { "id": "demo-e9", "source": "demo-scene-peak", "target": "demo-video" },
+    { "id": "demo-e10", "source": "demo-scene-gate", "target": "demo-video" }
+  ]
+}

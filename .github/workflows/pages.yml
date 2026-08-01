@@ -6,6 +6,10 @@ on:
       - master
     paths:
       - 'site/**'
+      - 'src/**'
+      - 'index.html'
+      - 'package-lock.json'
+      - 'vite.config.ts'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -29,6 +33,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # base 用相对路径，站点挂在仓库子路径还是自定义域名都不用改
+      - name: Build web app for the in-page demo
+        run: npx vite build --base=./ --outDir site/app --emptyOutDir
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

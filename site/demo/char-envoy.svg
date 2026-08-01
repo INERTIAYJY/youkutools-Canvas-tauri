@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="720" viewBox="0 0 520 720">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0%" stop-color="#3b2230"/>
+      <stop offset="100%" stop-color="#140c12"/>
+    </linearGradient>
+    <radialGradient id="v" cx="0.5" cy="0.42" r="0.75">
+      <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0.55)"/>
+    </radialGradient>
+  </defs>
+  <rect width="520" height="720" fill="url(#g)"/>
+  <ellipse cx="260" cy="274" rx="57.2" ry="67.60000000000001" fill="rgba(0,0,0,0.5)"/>
+       <path d="M166.4 490 q93.6 -158.4 187.2 0 Z" fill="rgba(0,0,0,0.5)"/>
+       <circle cx="260" cy="274" r="72.80000000000001" fill="none" stroke="#ff5d70" stroke-opacity="0.45" stroke-width="1.5"/>
+  <rect width="520" height="720" fill="url(#v)"/>
+  <rect x="0.5" y="0.5" width="519" height="719" fill="none" stroke="rgba(255,255,255,0.14)"/>
+  <text x="14" y="706" font-family="ui-monospace, Menlo, monospace" font-size="12"
+        fill="rgba(255,255,255,0.62)" letter-spacing="0.06em">角色 · 使者 / 占位图</text>
+</svg>

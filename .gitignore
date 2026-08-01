@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# 官网内嵌的 Web 构建产物，由 Pages workflow 生成，不入库
+site/app
+
 .agents/*
 .codebuddy/
 .codegraph/

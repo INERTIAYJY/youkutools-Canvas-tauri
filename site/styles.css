@@ -30,6 +30,9 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* 组件上的 display 会盖掉 UA 的 [hidden]{display:none}，这里统一兜底 */
+[hidden] { display: none !important; }
+
 html {
   scroll-behavior: smooth;
   scroll-padding-top: 96px;
@@ -263,7 +266,72 @@ img { max-width: 100%; display: block; }
 .dot { width: 10px; height: 10px; border-radius: 50%; }
 .d1 { background: #ff5f57; } .d2 { background: #febc2e; } .d3 { background: #28c840; }
 .shot-title { margin-left: 12px; font-size: 12.5px; color: var(--fg-faint); }
-.shot img { width: 100%; height: auto; }
+.shot img { width: 100%; height: auto; display: block; }
+
+/* ---------- 浏览器试用 ---------- */
+.shot-stage { position: relative; }
+.shot-exit {
+  margin-left: auto; padding: 4px 12px;
+  border-radius: 999px; border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06); color: var(--fg-dim);
+  font-family: inherit; font-size: 12px; cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.shot-exit:hover { background: rgba(255, 255, 255, 0.12); color: var(--fg); }
+
+.try-btn {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 20px 34px 18px;
+  border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(12, 12, 18, 0.72);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  color: var(--fg); font-family: inherit; cursor: pointer;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  transition: transform 0.25s var(--ease), border-color 0.25s, background 0.25s;
+}
+.try-btn svg { color: var(--purple); }
+.try-btn span { font-size: 16px; font-weight: 700; letter-spacing: -0.015em; }
+.try-btn em { font-style: normal; font-size: 12.5px; color: var(--fg-faint); }
+.try-btn:hover {
+  transform: translate(-50%, -50%) scale(1.03);
+  border-color: rgba(162, 89, 255, 0.55);
+  background: rgba(20, 16, 30, 0.82);
+}
+.try-btn::after {
+  content: ""; position: absolute; inset: -2px; border-radius: 22px; z-index: -1;
+  background: linear-gradient(135deg, var(--blue), var(--purple), var(--red));
+  opacity: 0; filter: blur(14px); transition: opacity 0.3s;
+}
+.try-btn:hover::after { opacity: 0.55; }
+
+.try-loading {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  background: rgba(8, 8, 13, 0.82); backdrop-filter: blur(6px);
+  font-size: 14px; color: var(--fg-dim);
+}
+.spinner {
+  width: 17px; height: 17px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.16); border-top-color: var(--purple);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 演示态：画框换成固定高度的应用视口，并取消首屏那点倾斜 */
+.shot.is-demo { transform: none; }
+.shot.is-demo .shot-stage { height: min(72vh, 760px); }
+.shot.is-demo .shot-stage > img { display: none; }
+.demo-frame { width: 100%; height: 100%; border: 0; display: block; background: #0b0b12; }
+
+.demo-note {
+  padding: 13px 20px;
+  border-top: 1px solid var(--line);
+  background: rgba(251, 191, 36, 0.05);
+  font-size: 12.8px; color: var(--fg-faint); line-height: 1.7; text-align: left;
+}
+.demo-note b { color: #fbbf24; font-weight: 650; }
 
 .stack-strip {
   display: flex; align-items: center; justify-content: center;
@@ -789,6 +857,8 @@ img { max-width: 100%; display: block; }
   .hero { padding-top: 130px; }
   .shot-wrap { margin-top: 54px; }
   .shot { transform: none; }
+  /* 桌面级画布嵌在手机里体验很差，窄屏只给截图 */
+  .try-btn { display: none; }
 
   .stats { grid-template-columns: repeat(2, 1fr); margin-top: 84px; }
   .section { padding-top: 96px; }

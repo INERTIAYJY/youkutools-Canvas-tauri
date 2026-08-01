@@ -64,7 +64,6 @@ interface VideoEditorTimelineProps {
   onDuplicateClip: (clipId: string) => void;
   onTracksChange: (tracks: VideoEditorTrack[]) => void;
   onAddTrack: (kind: 'video' | 'audio') => void;
-  onRemoveTrack: (trackId: string) => void;
   onMoveTrack: (trackId: string, direction: -1 | 1) => void;
   onBeginInteraction: () => void;
   onEndInteraction: () => void;
@@ -113,16 +112,37 @@ function isCompactTextTrack(track: VideoEditorTrack): boolean {
     && track.clips.every((clip) => clip.kind === 'text');
 }
 
-/** 取片段区间内的缩略图：整条缩略图带按素材总时长均分 */
-function clipThumbnails(clip: VideoEditorClip, source: SourceState | undefined): string[] {
+const TIMELINE_THUMBNAIL_WIDTH = 64;
+const MAX_TIMELINE_THUMBNAILS = 360;
+
+/**
+ * 按当前时间轴像素宽度铺帧。源帧不足时重复邻近帧，而不是把少量低分辨率图片
+ * 横向拉满整段，这对竖屏素材尤其重要。
+ */
+function clipThumbnails(
+  clip: VideoEditorClip,
+  source: SourceState | undefined,
+  pixelsPerSecond: number,
+): string[] {
   if (clip.kind === 'text') return [];
   if (!source) return [];
-  if (clip.kind === 'image') return source.thumbnails;
+  const clipDuration = getClipDuration(clip);
+  const tileCount = Math.max(1, Math.min(
+    MAX_TIMELINE_THUMBNAILS,
+    Math.ceil((clipDuration * pixelsPerSecond) / TIMELINE_THUMBNAIL_WIDTH),
+  ));
+  if (source.thumbnails.length === 0) return [];
+  if (clip.kind === 'image') return Array(tileCount).fill(source.thumbnails[0]);
   const total = source.probe?.duration ?? 0;
-  if (total <= 0 || source.thumbnails.length === 0) return [];
-  const from = Math.floor((clip.sourceIn / total) * source.thumbnails.length);
-  const to = Math.ceil((clip.sourceOut / total) * source.thumbnails.length);
-  return source.thumbnails.slice(Math.max(0, from), Math.max(from + 1, to));
+  if (total <= 0) return [];
+  return Array.from({ length: tileCount }, (_, index) => {
+    const time = clip.sourceIn + ((index + 0.5) / tileCount) * clipDuration;
+    const sourceIndex = Math.min(
+      source.thumbnails.length - 1,
+      Math.max(0, Math.floor((time / total) * source.thumbnails.length)),
+    );
+    return source.thumbnails[sourceIndex];
+  });
 }
 
 function VideoEditorTimeline({
@@ -145,7 +165,6 @@ function VideoEditorTimeline({
   onDuplicateClip,
   onTracksChange,
   onAddTrack,
-  onRemoveTrack,
   onMoveTrack,
   onBeginInteraction,
   onEndInteraction,
@@ -856,22 +875,13 @@ function VideoEditorTimeline({
                 <Icon icon={track.hidden ? 'lucide:eye-off' : 'lucide:eye'} width={10} height={10} />
               </button>
               {track.overlay || track.kind === 'audio' ? (
-                <>
-                  <button
-                    type="button" className="video-editor-track-flag"
-                    disabled={track.locked}
-                    onClick={() => onMoveTrack(track.id, 1)} data-tooltip="上移一层"
-                  >
-                    <Icon icon="lucide:chevron-up" width={10} height={10} />
-                  </button>
-                  <button
-                    type="button" className="video-editor-track-flag danger"
-                    disabled={track.locked}
-                    onClick={() => onRemoveTrack(track.id)} data-tooltip="删除轨道"
-                  >
-                    <Icon icon="lucide:x" width={10} height={10} />
-                  </button>
-                </>
+                <button
+                  type="button" className="video-editor-track-flag"
+                  disabled={track.locked}
+                  onClick={() => onMoveTrack(track.id, 1)} data-tooltip="上移一层"
+                >
+                  <Icon icon="lucide:chevron-up" width={10} height={10} />
+                </button>
               ) : null}
             </div>
             );
@@ -945,7 +955,7 @@ function VideoEditorTimeline({
                       }}
                     >
                       <div className="video-editor-clip-thumbs">
-                        {clipThumbnails(clip, getSource(clip)).map((thumbnail, thumbIndex) => (
+                        {clipThumbnails(clip, getSource(clip), pixelsPerSecond).map((thumbnail, thumbIndex) => (
                           thumbnail
                             ? <img key={thumbIndex} src={thumbnail} alt="" draggable={false} />
                             : <span key={thumbIndex} className="video-editor-thumb-blank" />

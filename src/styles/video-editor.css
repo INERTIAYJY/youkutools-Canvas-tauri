@@ -1560,12 +1560,13 @@
   position: absolute;
   inset: 0;
   display: flex;
+  overflow: hidden;
   pointer-events: none;
 }
 .video-editor-clip-thumbs img,
 .video-editor-thumb-blank {
-  flex: 1;
-  min-width: 0;
+  flex: 0 0 64px;
+  width: 64px;
   height: 100%;
   object-fit: cover;
 }

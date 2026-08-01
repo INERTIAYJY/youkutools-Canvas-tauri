@@ -77,7 +77,6 @@ import {
   moveClipTo,
   moveTrack,
   removeClipsFromTracks,
-  removeTrack,
   updateClipInTracks,
 } from './timelineOps';
 
@@ -661,16 +660,6 @@ export default function VideoEditorWindow() {
     persistTracks([...tracksRef.current, createTrack(kind, tracksRef.current)]);
   }, [commitChange, persistTracks]);
 
-  const handleRemoveTrack = useCallback((trackId: string) => {
-    if (isTrackLocked(tracksRef.current, trackId)) {
-      setNotice('请先解锁轨道再删除');
-      return;
-    }
-    setNotice(null);
-    commitChange();
-    persistTracks(removeTrack(tracksRef.current, trackId));
-  }, [commitChange, persistTracks]);
-
   const handleMoveTrack = useCallback((trackId: string, direction: -1 | 1) => {
     if (isTrackLocked(tracksRef.current, trackId)) {
       setNotice('请先解锁轨道再调整层级');
@@ -1205,7 +1194,6 @@ export default function VideoEditorWindow() {
             onDuplicateClip={handleDuplicateClip}
             onTracksChange={persistTracks}
             onAddTrack={handleAddTrack}
-            onRemoveTrack={handleRemoveTrack}
             onMoveTrack={handleMoveTrack}
             onBeginInteraction={beginInteraction}
             onEndInteraction={endInteraction}

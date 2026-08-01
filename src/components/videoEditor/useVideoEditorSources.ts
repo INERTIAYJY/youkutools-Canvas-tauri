@@ -14,8 +14,9 @@ import {
 import { extractWaveform } from '../../services/videoAudioMixer';
 import type { VideoEditorClip, VideoEditorSourceProbe } from '../../types/videoEditor';
 
-const THUMBNAIL_COUNT = 24;
-const THUMBNAIL_HEIGHT = 56;
+// 时间轴放大时仍需保持清晰；抽帧只做一次，同源片段会复用缓存。
+const THUMBNAIL_COUNT = 48;
+const THUMBNAIL_HEIGHT = 96;
 const WAVEFORM_BUCKETS = 240;
 
 export interface SourceState {

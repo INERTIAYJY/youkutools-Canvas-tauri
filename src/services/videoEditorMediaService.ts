@@ -180,7 +180,7 @@ export async function extractThumbnails(
     const canvas = wrapped.canvas;
     thumbnails.push(
       canvas instanceof HTMLCanvasElement
-        ? canvas.toDataURL('image/jpeg', 0.6)
+        ? canvas.toDataURL('image/jpeg', 0.82)
         : '',
     );
   }

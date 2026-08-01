@@ -4,13 +4,16 @@
  * 一期只读展示选中片段与源素材信息；Transform / Appearance / Effects 等
  * 可编辑分组留到二期，分组骨架先按最终布局占位。
  */
-import { memo } from 'react';
+import { memo, useState, type CSSProperties } from 'react';
 import VideoEditorCodecPanel from './VideoEditorCodecPanel';
+import VideoEditorTextStickerPanel from './VideoEditorTextStickerPanel';
 import {
   DEFAULT_TRANSFORM,
   getClipDuration,
   type VideoEditorClip,
+  type VideoEditorProjectImageSource,
   type VideoEditorSourceProbe,
+  type VideoEditorTextStyle,
   type VideoEditorTransform,
   type VideoEditorTransitionKind,
 } from '../../types/videoEditor';
@@ -33,10 +36,24 @@ interface VideoEditorInspectorProps {
   onTransformChange: (patch: Partial<VideoEditorTransform>) => void;
   onTransitionChange: (kind: VideoEditorTransitionKind, duration: number) => void;
   onVolumeChange: (volume: number) => void;
+  selectedIsOverlay: boolean;
+  projectImages: VideoEditorProjectImageSource[];
+  uploadingSticker: boolean;
+  onAddText: () => void;
+  onPatchText: (patch: Partial<VideoEditorTextStyle>) => void;
+  onAddSticker: (source: VideoEditorProjectImageSource) => void;
+  onUploadSticker: () => void;
 }
 
-/** 二期开放的可编辑分组，先占位以固定布局 */
-const PENDING_SECTIONS = ['滤镜', '文字与贴纸'];
+const PENDING_SECTIONS = ['滤镜'];
+type InspectorTab = 'properties' | 'text' | 'sticker';
+
+function rangeProgress(value: number, min: number, max: number): CSSProperties {
+  const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  return {
+    '--range-progress': `${Math.max(0, Math.min(100, progress))}%`,
+  } as CSSProperties;
+}
 
 function VideoEditorInspector({
   clip,
@@ -56,7 +73,15 @@ function VideoEditorInspector({
   onTransformChange,
   onTransitionChange,
   onVolumeChange,
+  selectedIsOverlay,
+  projectImages,
+  uploadingSticker,
+  onAddText,
+  onPatchText,
+  onAddSticker,
+  onUploadSticker,
 }: VideoEditorInspectorProps) {
+  const [activeTab, setActiveTab] = useState<InspectorTab>('properties');
   const kept = clip ? getClipDuration(clip) : 0;
   const transform = clip?.transform ?? DEFAULT_TRANSFORM;
   const transition = clip?.transitionIn ?? { kind: 'none' as const, duration: 0.5 };
@@ -69,9 +94,51 @@ function VideoEditorInspector({
     onBlur: onEndInteraction,
   };
 
+  const panelHead = (
+    <div className="video-editor-panel-head video-editor-inspector-tabs" role="tablist" aria-label="视频编辑工具">
+      {([
+        ['properties', '属性'],
+        ['text', '文字'],
+        ['sticker', '贴图'],
+      ] as const).map(([tab, label]) => (
+        <button
+          type="button"
+          key={tab}
+          role="tab"
+          aria-selected={activeTab === tab}
+          className={activeTab === tab ? 'active' : ''}
+          onClick={() => setActiveTab(tab)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (activeTab !== 'properties') {
+    return (
+      <aside className="video-editor-inspector">
+        {panelHead}
+        <VideoEditorTextStickerPanel
+          mode={activeTab}
+          selectedClip={clip}
+          selectedIsOverlay={selectedIsOverlay}
+          projectImages={projectImages}
+          uploading={uploadingSticker}
+          onAddText={onAddText}
+          onPatchText={onPatchText}
+          onAddSticker={onAddSticker}
+          onUploadSticker={onUploadSticker}
+          onBeginInteraction={onBeginInteraction}
+          onEndInteraction={onEndInteraction}
+        />
+      </aside>
+    );
+  }
+
   return (
     <aside className="video-editor-inspector">
-      <div className="video-editor-panel-head">属性</div>
+      {panelHead}
 
       <div className="video-editor-inspect-group">
         <div className="video-editor-inspect-title">时间轴</div>
@@ -95,7 +162,8 @@ function VideoEditorInspector({
           </span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>类型</span><span>{clip ? (clip.kind === 'image' ? '图片' : '视频') : '—'}</span>
+          <span>类型</span>
+          <span>{clip ? (clip.kind === 'image' ? '图片' : clip.kind === 'text' ? '文字' : '视频') : '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
           <span>入点</span><span>{clip ? `${clip.sourceIn.toFixed(2)}s` : '—'}</span>
@@ -141,6 +209,7 @@ function VideoEditorInspector({
               type="range"
               min={min} max={max} step={step}
               value={transform[key]}
+              style={rangeProgress(transform[key], min, max)}
               disabled={!clip || locked}
               {...continuousEditHandlers}
               onChange={(event) => onTransformChange({ [key]: Number(event.target.value) })}
@@ -174,6 +243,7 @@ function VideoEditorInspector({
           <input
             type="range" min={0.1} max={3} step={0.1}
             value={transition.duration}
+            style={rangeProgress(transition.duration, 0.1, 3)}
             disabled={!clip || locked || transition.kind === 'none'}
             {...continuousEditHandlers}
             onChange={(event) => onTransitionChange(transition.kind, Number(event.target.value))}
@@ -189,6 +259,7 @@ function VideoEditorInspector({
           <input
             type="range" min={0} max={2} step={0.05}
             value={clip?.volume ?? 1}
+            style={rangeProgress(clip?.volume ?? 1, 0, 2)}
             disabled={!clip || locked}
             {...continuousEditHandlers}
             onChange={(event) => onVolumeChange(Number(event.target.value))}

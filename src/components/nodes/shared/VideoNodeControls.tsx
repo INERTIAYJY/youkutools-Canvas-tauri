@@ -7,6 +7,7 @@ import { Icon } from '@iconify/react';
 interface VideoNodeControlsProps {
   videoRef: RefObject<HTMLVideoElement | null>;
   source?: string;
+  onInteract?: () => void;
 }
 
 function formatMediaTime(value: number): string {
@@ -21,7 +22,7 @@ function formatMediaTime(value: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-function VideoNodeControls({ videoRef, source }: VideoNodeControlsProps) {
+function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -101,7 +102,10 @@ function VideoNodeControls({ videoRef, source }: VideoNodeControlsProps) {
       className="video-node-controls nodrag nopan nowheel"
       role="group"
       aria-label="视频播放控制"
-      onPointerDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        onInteract?.();
+      }}
       onClick={(event) => event.stopPropagation()}
       onDoubleClick={(event) => event.stopPropagation()}
     >

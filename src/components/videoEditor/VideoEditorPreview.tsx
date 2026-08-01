@@ -7,9 +7,11 @@
  * 播放头是「时间轴坐标」，这里负责换算到当前片段的素材坐标，
  * 播到片段末尾就把播放头推进到下一段，由父组件切换活动片段。
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
+import { computeDrawRect } from '../../services/videoCompositor';
 import {
+  DEFAULT_TEXT_STYLE,
   DEFAULT_TRANSFORM,
   getActiveClips,
   getClipDuration,
@@ -32,6 +34,8 @@ interface VideoEditorPreviewProps {
   selectedClipIds: string[];
   /** 画布尺寸，用于计算叠加层归一化坐标到像素的映射 */
   canvasSize: { width: number; height: number };
+  /** 当前主素材的原始尺寸；与导出合成共用 contain + transform 计算 */
+  sourceSize?: { width: number; height: number } | null;
   onPlayheadChange: (time: number) => void;
   onSelectClips: (clipIds: string[]) => void;
   onBeginInteraction: () => void;
@@ -56,13 +60,14 @@ interface OverlayMediaProps {
   playing: boolean;
   muted: boolean;
   volume: number;
+  canvasDisplayScale: number;
 }
 
 /**
  * 叠加视频拥有独立媒体元素，但时间由主轨播放头统一驱动。
  * 静音可避免多轨预览时重复出声，也允许 WebView 自动跟播。
  */
-function OverlayMedia({ clip, playhead, playing, muted, volume }: OverlayMediaProps) {
+function OverlayMedia({ clip, playhead, playing, muted, volume, canvasDisplayScale }: OverlayMediaProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = resolveClipUrl(clip);
@@ -90,6 +95,24 @@ function OverlayMedia({ clip, playhead, playing, muted, volume }: OverlayMediaPr
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = Math.max(0, Math.min(1, volume));
   }, [volume]);
+
+  if (clip.kind === 'text') {
+    const textStyle = { ...DEFAULT_TEXT_STYLE, ...clip.textStyle };
+    return (
+      <div
+        className="video-editor-overlay-text"
+        style={{
+          color: textStyle.color,
+          fontFamily: textStyle.fontFamily,
+          fontSize: `${Math.max(8, textStyle.fontSize * canvasDisplayScale)}px`,
+          fontWeight: textStyle.fontWeight,
+          textAlign: textStyle.align,
+        }}
+      >
+        {textStyle.content || DEFAULT_TEXT_STYLE.content}
+      </div>
+    );
+  }
 
   if (!url || failed) {
     return <div className="video-editor-stage-empty">素材无法预览</div>;
@@ -165,6 +188,7 @@ function VideoEditorPreview({
   tracks,
   selectedClipIds,
   canvasSize,
+  sourceSize,
   onPlayheadChange,
   onSelectClips,
   onBeginInteraction,
@@ -175,6 +199,8 @@ function VideoEditorPreview({
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasFrameRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
+  const [canvasDisplayScale, setCanvasDisplayScale] = useState(1);
+  const [stageContentSize, setStageContentSize] = useState({ width: 0, height: 0 });
   // 由播放推动的时间更新不该再写回 video.currentTime，否则会打断播放
   const drivenByPlayback = useRef(false);
   // 叠加层拖拽状态
@@ -194,6 +220,36 @@ function VideoEditorPreview({
   const mainTrackHidden = mainTrack?.hidden === true;
   const mainTrackMuted = mainTrack?.muted === true || mainTrackHidden;
   const mainVolume = (mainTrack?.volume ?? 1) * (clip?.volume ?? 1);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const update = () => {
+      const styles = window.getComputedStyle(stage);
+      const horizontalPadding = (Number.parseFloat(styles.paddingLeft) || 0)
+        + (Number.parseFloat(styles.paddingRight) || 0);
+      const verticalPadding = (Number.parseFloat(styles.paddingTop) || 0)
+        + (Number.parseFloat(styles.paddingBottom) || 0);
+      setStageContentSize({
+        width: Math.max(0, stage.clientWidth - horizontalPadding),
+        height: Math.max(0, stage.clientHeight - verticalPadding),
+      });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const frame = canvasFrameRef.current;
+    if (!frame || canvasSize.width <= 0) return;
+    const update = () => setCanvasDisplayScale(frame.clientWidth / canvasSize.width);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [canvasSize.width]);
 
   // 外部拖动播放头 → 同步到 video
   useEffect(() => {
@@ -248,6 +304,21 @@ function VideoEditorPreview({
       void video?.play().catch(() => setPlaying(false));
     }
   }, [clip?.kind, onPlayheadChange, playhead, playing, timelineDuration]);
+
+  // 剪辑软件的播放控制是高频动作：在非输入区域按空格即可播放/暂停。
+  // 键盘操作保持即时，不附加额外动画或延迟。
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+      event.preventDefault();
+      togglePlay();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [togglePlay]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -396,6 +467,43 @@ function VideoEditorPreview({
     ? `${canvasSize.width} / ${canvasSize.height}`
     : '16 / 9';
 
+  const canvasFrameStyle = useMemo<CSSProperties>(() => {
+    if (
+      canvasSize.width <= 0
+      || canvasSize.height <= 0
+      || stageContentSize.width <= 0
+      || stageContentSize.height <= 0
+    ) {
+      return { aspectRatio: canvasAspect };
+    }
+    const fit = Math.min(
+      stageContentSize.width / canvasSize.width,
+      stageContentSize.height / canvasSize.height,
+    );
+    return {
+      aspectRatio: canvasAspect,
+      width: `${canvasSize.width * fit}px`,
+      height: `${canvasSize.height * fit}px`,
+    };
+  }, [canvasAspect, canvasSize.height, canvasSize.width, stageContentSize]);
+
+  // 主轨与导出都通过 computeDrawRect 计算 contain、位置和缩放，避免预览/成片偏差。
+  const mainMediaStyle = useMemo<CSSProperties>(() => {
+    const transform = clip?.transform ?? DEFAULT_TRANSFORM;
+    const resolvedSourceSize = sourceSize && sourceSize.width > 0 && sourceSize.height > 0
+      ? sourceSize
+      : canvasSize;
+    const rect = computeDrawRect(resolvedSourceSize, canvasSize, transform);
+    return {
+      left: `${(rect.x / Math.max(1, canvasSize.width)) * 100}%`,
+      top: `${(rect.y / Math.max(1, canvasSize.height)) * 100}%`,
+      width: `${(rect.width / Math.max(1, canvasSize.width)) * 100}%`,
+      height: `${(rect.height / Math.max(1, canvasSize.height)) * 100}%`,
+      opacity: mainTrackHidden ? 0 : transform.opacity,
+      transform: `rotate(${transform.rotation}deg)`,
+    };
+  }, [canvasSize, clip?.transform, mainTrackHidden, sourceSize]);
+
   return (
     <section className="video-editor-preview">
       <div
@@ -405,7 +513,8 @@ function VideoEditorPreview({
         <div
           ref={canvasFrameRef}
           className="video-editor-canvas-frame"
-          style={{ aspectRatio: canvasAspect }}
+          style={canvasFrameStyle}
+          aria-label={stageInfo ? `输出画布 ${stageInfo}` : '输出画布'}
         >
           {/* 主轨画面：背景 + video/img 居中 */}
           {!clip || !clipUrl ? (
@@ -414,6 +523,7 @@ function VideoEditorPreview({
             <img
               src={clipUrl}
               className={`video-editor-video ${mainTrackHidden ? 'track-hidden' : ''}`}
+              style={mainMediaStyle}
               alt=""
               draggable={false}
             />
@@ -422,6 +532,7 @@ function VideoEditorPreview({
               ref={videoRef}
               src={clipUrl}
               className={`video-editor-video ${mainTrackHidden ? 'track-hidden' : ''}`}
+              style={mainMediaStyle}
               onTimeUpdate={handleTimeUpdate}
               onPause={() => { if (!playing) setPlaying(false); }}
               preload="auto"
@@ -437,11 +548,22 @@ function VideoEditorPreview({
             const transform = overlayClip.transform ?? DEFAULT_TRANSFORM;
             const isSelected = selectedClipIds.includes(overlayClip.id);
             const locked = track.locked === true;
+            const isText = overlayClip.kind === 'text';
             return (
               <div
                 key={overlayClip.id}
-                className={`video-editor-overlay ${isSelected ? 'selected' : ''} ${locked ? 'locked' : ''}`.trim()}
-                style={{
+                className={[
+                  'video-editor-overlay',
+                  isText ? 'text' : '',
+                  isSelected ? 'selected' : '',
+                  locked ? 'locked' : '',
+                ].filter(Boolean).join(' ')}
+                style={isText ? {
+                  left: `${transform.x * 100}%`,
+                  top: `${transform.y * 100}%`,
+                  transform: `translate(-50%, -50%) rotate(${transform.rotation}deg) scale(${transform.scale})`,
+                  opacity: transform.opacity,
+                } : {
                   left: `${transform.x * 100}%`,
                   top: `${transform.y * 100}%`,
                   width: `${transform.scale * 100}%`,
@@ -462,6 +584,7 @@ function VideoEditorPreview({
                   playing={playing}
                   muted={track.muted === true}
                   volume={(track.volume ?? 1) * (overlayClip.volume ?? 1)}
+                  canvasDisplayScale={canvasDisplayScale}
                 />
                 {isSelected && !locked && (
                   <>
@@ -503,6 +626,7 @@ function VideoEditorPreview({
 
       {stageInfo && (
         <div className="video-editor-stage-info">
+          <span className="video-editor-canvas-size-label">输出画布</span>
           <span>{stageInfo}</span>
           {activeOverlays.length > 0 && (
             <span className="dim">· {activeOverlays.length} 个叠加层</span>
@@ -527,6 +651,8 @@ function VideoEditorPreview({
           className="video-editor-transport-btn primary"
           onClick={togglePlay}
           aria-label={playing ? '暂停' : '播放'}
+          aria-keyshortcuts="Space"
+          data-tooltip={playing ? '暂停 Space' : '播放 Space'}
         >
           <Icon icon={playing ? 'lucide:pause' : 'lucide:play'} width={16} height={16} />
         </button>
@@ -535,6 +661,9 @@ function VideoEditorPreview({
         </button>
         <span className="video-editor-timecode">
           {formatTime(playhead)} <span className="dim">/ {formatTime(timelineDuration)}</span>
+        </span>
+        <span className="video-editor-shortcut-hint" aria-hidden="true">
+          <kbd>Space</kbd> 播放
         </span>
       </div>
     </section>

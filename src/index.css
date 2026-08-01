@@ -30,6 +30,7 @@
 @import './styles/character-library.css';
 @import './styles/canvas-drawing.css';
 @import './styles/video-editor.css';
+@import './styles/range-controls.css';
 
 /* Global overlay scrollbars are managed by OverlayScrollbarLayer. */
 * {

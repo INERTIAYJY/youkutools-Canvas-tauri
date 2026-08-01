@@ -71,6 +71,40 @@ function captureVideoFrame(video: HTMLVideoElement): { dataUrl: string; width: n
   };
 }
 
+/** 节点封面只保留预览尺寸，避免把 4K 原帧常驻在组件内存。 */
+function captureVideoPoster(video: HTMLVideoElement): { dataUrl: string; blank: boolean } {
+  const maxDimension = 640;
+  const scale = Math.min(1, maxDimension / Math.max(video.videoWidth, video.videoHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('无法创建视频封面画布');
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  let visiblePixels = 0;
+  const pixelCount = Math.max(1, pixels.length / 4);
+  // 跳采样即可识别尚未提交的纯黑帧，避免扫描整张高分辨率画布。
+  const stride = Math.max(4, Math.floor(pixelCount / 4096) * 4);
+  for (let index = 0; index < pixels.length; index += stride) {
+    if (pixels[index] + pixels[index + 1] + pixels[index + 2] > 36) visiblePixels += 1;
+  }
+  const sampledPixels = Math.ceil(pixels.length / stride);
+  return {
+    dataUrl: canvas.toDataURL('image/jpeg', 0.82),
+    blank: visiblePixels / Math.max(1, sampledPixels) < 0.01,
+  };
+}
+
+/** `seeked` 在 WebKit 中可能早于合成帧提交，必须等视频帧回调后再读取画布。 */
+function afterVideoFramePresented(video: HTMLVideoElement, callback: () => void): void {
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    video.requestVideoFrameCallback(() => callback());
+    return;
+  }
+  window.setTimeout(callback, 120);
+}
+
 function isTaintedCanvasError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.message.includes('Tainted canvases') || error.message.includes('may not be exported');
@@ -134,6 +168,9 @@ function captureFrameFromVideoUrl(url: string, currentTime: number): Promise<{ d
 function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
   const justCompleted = useCompletionFlash(data.status);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const previewAttemptedSourceRef = useRef<string | null>(null);
+  const [generatedCover, setGeneratedCover] = useState<{ source: string; dataUrl: string } | null>(null);
+  const [dismissedCoverSource, setDismissedCoverSource] = useState<string | null>(null);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
@@ -154,18 +191,69 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     const video = event.currentTarget;
     const videoWidth = video.videoWidth;
     const videoHeight = video.videoHeight;
-    if (videoWidth <= 0 || videoHeight <= 0) return;
+    if (videoWidth > 0 && videoHeight > 0) {
+      const mediaDimensionsChanged = data.videoWidth !== videoWidth || data.videoHeight !== videoHeight;
+      const nodeDimensionsMissing = data.nodeWidth == null || data.nodeHeight == null;
+      if (mediaDimensionsChanged || nodeDimensionsMissing) {
+        updateNodeDataTransient(id, {
+          videoWidth,
+          videoHeight,
+          ...computeVideoNodeDimensions(videoWidth, videoHeight),
+        });
+      }
+    }
 
-    const mediaDimensionsChanged = data.videoWidth !== videoWidth || data.videoHeight !== videoHeight;
-    const nodeDimensionsMissing = data.nodeWidth == null || data.nodeHeight == null;
-    if (!mediaDimensionsChanged && !nodeDimensionsMissing) return;
+    const source = data.videoUrl;
+    if (!source || previewAttemptedSourceRef.current === source) return;
+    previewAttemptedSourceRef.current = source;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const end = Math.max(0, duration - 0.05);
+    const candidateTimes = duration > 0
+      ? [...new Set([0.08, 0.25, 0.5, 0.75].map((ratio) => Math.min(end, Math.max(0.1, duration * ratio))))]
+      : [0];
 
-    updateNodeDataTransient(id, {
-      videoWidth,
-      videoHeight,
-      ...computeVideoNodeDimensions(videoWidth, videoHeight),
-    });
-  }, [data.nodeHeight, data.nodeWidth, data.videoHeight, data.videoWidth, id, updateNodeDataTransient]);
+    const tryCandidate = (index: number) => {
+      const targetTime = candidateTimes[index];
+      const capturePresentedFrame = () => afterVideoFramePresented(video, () => {
+        if (previewAttemptedSourceRef.current !== source) return;
+        try {
+          const poster = captureVideoPoster(video);
+          if (poster.blank && index < candidateTimes.length - 1) {
+            tryCandidate(index + 1);
+            return;
+          }
+          if (!poster.blank) {
+            setGeneratedCover({ source, dataUrl: poster.dataUrl });
+            video.currentTime = 0;
+          }
+        } catch {
+          // 远程跨域视频不能导出画布；保留已 seek 的可见帧作为降级。
+        }
+      });
+
+      if (Math.abs(video.currentTime - targetTime) < 0.01
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        capturePresentedFrame();
+        return;
+      }
+      video.addEventListener('seeked', capturePresentedFrame, { once: true });
+      video.currentTime = targetTime;
+    };
+
+    tryCandidate(0);
+  }, [
+    data.nodeHeight,
+    data.nodeWidth,
+    data.videoHeight,
+    data.videoUrl,
+    data.videoWidth,
+    id,
+    updateNodeDataTransient,
+  ]);
+
+  const dismissInitialCover = useCallback(() => {
+    if (data.videoUrl) setDismissedCoverSource(data.videoUrl);
+  }, [data.videoUrl]);
 
   // ── Upload handler for source nodes ──
   const { isUploading, handleUpload: doUpload } = useSourceFileUpload('.mp4,.webm,.avi,.mov,.mkv');
@@ -194,6 +282,11 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const handleCloseFullscreen = useCallback(() => setIsFullscreen(false), []);
 
   const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴视频');
+  const generatedCoverUrl = generatedCover && generatedCover.source === data.videoUrl
+    ? generatedCover.dataUrl
+    : null;
+  const initialCoverUrl = generatedCoverUrl || (typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : null);
+  const showInitialCover = !!initialCoverUrl && dismissedCoverSource !== data.videoUrl;
 
   // 独立编辑器窗口导出完成后，在源节点旁新建一个视频节点承载结果
   useEffect(() => {
@@ -401,6 +494,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               playsInline
               preload="metadata"
               onLoadedMetadata={handleLoadedMetadata}
+              onPlay={dismissInitialCover}
               onDoubleClick={(e) => { e.stopPropagation(); handleOpenFullscreen(); }}
               data-source-url={data.sourceUrl}
             />
@@ -448,7 +542,16 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               </div>
             )
           )}
-          {data.videoUrl && <VideoNodeControls videoRef={videoRef} source={data.videoUrl} />}
+          {data.videoUrl && showInitialCover && (
+            <img src={initialCoverUrl} alt="" className="video-node-initial-cover" draggable={false} />
+          )}
+          {data.videoUrl && (
+            <VideoNodeControls
+              videoRef={videoRef}
+              source={data.videoUrl}
+              onInteract={dismissInitialCover}
+            />
+          )}
         </div>
         {data.error && <NodeError nodeId={id} message={data.error} />}
         <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-video" >

@@ -11,7 +11,7 @@ import {
   type VideoEditorClip,
   type VideoEditorTrack,
 } from '../../src/types/videoEditor';
-import { computeDrawRect } from '../../src/services/videoCompositor';
+import { computeDrawRect, renderFrameAt } from '../../src/services/videoCompositor';
 import { resolveCompositeAudioMode } from '../../src/services/videoEditorMediaService';
 import {
   createTrack,
@@ -59,6 +59,11 @@ describe('needsCompositing', () => {
     ])])).toBe(true);
 
     expect(needsCompositing([videoTrack([clip({ id: 'a', kind: 'image' })])])).toBe(true);
+    expect(needsCompositing([videoTrack([clip({
+      id: 'text',
+      kind: 'text',
+      textStyle: { content: '标题', fontSize: 64, color: '#fff', fontWeight: 600, align: 'center' },
+    })])])).toBe(true);
   });
 
   it('ignores a no-op transform and a none transition', () => {
@@ -165,6 +170,46 @@ describe('computeDrawRect', () => {
     expect(rect.width).toBe(480);
     expect(rect.x + rect.width / 2).toBeCloseTo(1536);
     expect(rect.y + rect.height / 2).toBeCloseTo(864);
+  });
+});
+
+describe('文字片段合成', () => {
+  it('draws active text directly onto the export canvas without a media source', async () => {
+    const fillText = vi.fn();
+    const context = {
+      clearRect: vi.fn(),
+      fillRect: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      translate: vi.fn(),
+      rotate: vi.fn(),
+      fillText,
+      globalAlpha: 1,
+      fillStyle: '',
+      font: '',
+      textAlign: 'center',
+      textBaseline: 'middle',
+      shadowColor: '',
+      shadowBlur: 0,
+    } as unknown as CanvasRenderingContext2D;
+    const textClip = clip({
+      id: 'title',
+      kind: 'text',
+      sourceOut: 3,
+      textStyle: { content: '第一行\n第二行', fontSize: 60, color: '#ffffff', fontWeight: 700, align: 'center' },
+    });
+
+    await renderFrameAt(
+      context,
+      { width: 1920, height: 1080 },
+      [{ id: 'text-track', kind: 'video', name: '文字与贴图', overlay: true, clips: [textClip] }],
+      1,
+      () => undefined,
+    );
+
+    expect(fillText).toHaveBeenCalledTimes(2);
+    expect(fillText).toHaveBeenNthCalledWith(1, '第一行', 0, expect.any(Number));
+    expect(fillText).toHaveBeenNthCalledWith(2, '第二行', 0, expect.any(Number));
   });
 });
 

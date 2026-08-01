@@ -66,6 +66,27 @@ describe('VideoEditorPreview overlays', () => {
     expect(html).toContain('<img src="https://example.test/overlay.png"');
   });
 
+  it('renders an active text clip without requiring a media URL', () => {
+    const html = renderPreview(clip({
+      id: 'clip-overlay-text',
+      kind: 'text',
+      sourceUrl: undefined,
+      fileName: '片头标题',
+      textStyle: {
+        content: '片头标题',
+        fontSize: 72,
+        color: '#ffdd88',
+        fontWeight: 700,
+        align: 'center',
+      },
+    }));
+
+    expect(html).toContain('video-editor-overlay text selected');
+    expect(html).toContain('video-editor-overlay-text');
+    expect(html).toContain('片头标题');
+    expect(html).not.toContain('素材无法预览');
+  });
+
   it('mutes the main media when its track is muted and hides its picture when hidden', () => {
     const mainClip = clip({});
     const html = renderTracks([

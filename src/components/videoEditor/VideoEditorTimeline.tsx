@@ -6,7 +6,16 @@
  * 片段可在轨道间拖拽：主轨 ←→ 叠加轨自由移动。
  * 音频轨与字幕轨占位，二期启用。
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { Icon } from '@iconify/react';
 import {
   getClipDuration,
@@ -89,8 +98,16 @@ function trackAccent(index: number): string {
   return TRACK_COLORS[index % TRACK_COLORS.length];
 }
 
+function isCompactTextTrack(track: VideoEditorTrack): boolean {
+  return track.kind === 'video'
+    && track.overlay === true
+    && track.clips.length > 0
+    && track.clips.every((clip) => clip.kind === 'text');
+}
+
 /** 取片段区间内的缩略图：整条缩略图带按素材总时长均分 */
 function clipThumbnails(clip: VideoEditorClip, source: SourceState | undefined): string[] {
+  if (clip.kind === 'text') return [];
   if (!source) return [];
   if (clip.kind === 'image') return source.thumbnails;
   const total = source.probe?.duration ?? 0;
@@ -146,6 +163,11 @@ function VideoEditorTimeline({
   const [clipMenu, setClipMenu] = useState<ClipContextMenuState | null>(null);
 
   const selectedSet = useMemo(() => new Set(selectedClipIds), [selectedClipIds]);
+  // 视频工程按底层→顶层合成；时间轴把视觉层反向展示，音频仍放在主视频下方。
+  const displayTracks = useMemo(() => [
+    ...tracks.filter((track) => track.kind === 'video').reverse(),
+    ...tracks.filter((track) => track.kind !== 'video'),
+  ], [tracks]);
   const videoClipCount = useMemo(
     () => tracks.filter((track) => track.kind === 'video').reduce((sum, track) => sum + track.clips.length, 0),
     [tracks],
@@ -496,82 +518,96 @@ function VideoEditorTimeline({
   return (
     <section className="video-editor-timeline">
       <div className="video-editor-timeline-head">
-        <span className="video-editor-timeline-title">时间轴</span>
-
-        <div className="video-editor-toolgroup">
-          <button
-            type="button" className="video-editor-timeline-btn"
-            onClick={onUndo} disabled={!canUndo} data-tooltip="撤销 Ctrl+Z"
-          >
-            <Icon icon="lucide:undo-2" width={13} height={13} />
-          </button>
-          <button
-            type="button" className="video-editor-timeline-btn"
-            onClick={onRedo} disabled={!canRedo} data-tooltip="重做 Ctrl+Shift+Z"
-          >
-            <Icon icon="lucide:redo-2" width={13} height={13} />
-          </button>
-        </div>
-
-        <div className="video-editor-toolgroup">
-          <button
-            type="button" className="video-editor-timeline-btn"
-            onClick={onSplit} disabled={!canSplit} data-tooltip="在播放头处分割 S"
-          >
-            <Icon icon="lucide:scissors" width={13} height={13} />分割
-          </button>
-          <button
-            type="button" className="video-editor-timeline-btn"
-            onClick={() => soleSelected && onDuplicateClip(soleSelected.id)}
-            disabled={!soleSelected} data-tooltip="复制片段 Ctrl+D"
-          >
-            <Icon icon="lucide:copy" width={13} height={13} />
-          </button>
-          <button
-            type="button" className="video-editor-timeline-btn danger"
-            onClick={onDeleteSelected}
-            disabled={!canDeleteSelected}
-            data-tooltip="删除选中片段 Del"
-          >
-            <Icon icon="lucide:trash-2" width={13} height={13} />
-          </button>
-        </div>
-
-        <button
-          type="button"
-          className={`video-editor-timeline-btn ${snapEnabled ? 'active' : ''}`}
-          onClick={onToggleSnap}
-          data-tooltip="边界吸附"
-        >
-          <Icon icon="lucide:magnet" width={13} height={13} />
-        </button>
-
-        <div className="video-editor-toolgroup">
-          <button
-            type="button" className="video-editor-timeline-btn"
-            onClick={() => onAddTrack('video')} data-tooltip="新增叠加轨（画中画 / 贴纸）"
-          >
-            <Icon icon="lucide:layers" width={13} height={13} />叠加轨
-          </button>
-          <button
-            type="button" className="video-editor-timeline-btn"
-            onClick={() => onAddTrack('audio')} data-tooltip="新增音频轨"
-          >
-            <Icon icon="lucide:audio-lines" width={13} height={13} />音频轨
-          </button>
-        </div>
-
-        {soleSelected && (
-          <span className="video-editor-timeline-range">
-            {soleSelected.fileName} · {soleSelected.sourceIn.toFixed(2)}–
-            {soleSelected.sourceOut.toFixed(2)}s · 时长 {getClipDuration(soleSelected).toFixed(2)}s
+        <div className="video-editor-timeline-actions">
+          <span className="video-editor-timeline-title">
+            <Icon icon="lucide:panel-bottom" width={13} height={13} />
+            时间轴
           </span>
-        )}
-        {selectedClipIds.length > 1 && (
-          <span className="video-editor-timeline-range">
-            已选中 {selectedClipIds.length} 个片段
-          </span>
-        )}
+
+          <div className="video-editor-toolgroup compact" aria-label="历史操作">
+            <button
+              type="button" className="video-editor-timeline-btn icon-only"
+              onClick={onUndo} disabled={!canUndo} data-tooltip="撤销 Ctrl+Z"
+              aria-label="撤销"
+            >
+              <Icon icon="lucide:undo-2" width={13} height={13} />
+            </button>
+            <button
+              type="button" className="video-editor-timeline-btn icon-only"
+              onClick={onRedo} disabled={!canRedo} data-tooltip="重做 Ctrl+Shift+Z"
+              aria-label="重做"
+            >
+              <Icon icon="lucide:redo-2" width={13} height={13} />
+            </button>
+          </div>
+
+          <div className="video-editor-toolgroup" aria-label="片段操作">
+            <button
+              type="button" className="video-editor-timeline-btn emphasis"
+              onClick={onSplit} disabled={!canSplit} data-tooltip="在播放头处分割 S"
+            >
+              <Icon icon="lucide:scissors" width={13} height={13} />分割
+              <kbd>S</kbd>
+            </button>
+            <button
+              type="button" className="video-editor-timeline-btn icon-only"
+              onClick={() => soleSelected && onDuplicateClip(soleSelected.id)}
+              disabled={!soleSelected} data-tooltip="复制片段 Ctrl+D"
+              aria-label="复制片段"
+            >
+              <Icon icon="lucide:copy" width={13} height={13} />
+            </button>
+            <button
+              type="button" className="video-editor-timeline-btn danger icon-only"
+              onClick={onDeleteSelected}
+              disabled={!canDeleteSelected}
+              data-tooltip="删除选中片段 Del"
+              aria-label="删除选中片段"
+            >
+              <Icon icon="lucide:trash-2" width={13} height={13} />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className={`video-editor-timeline-btn ${snapEnabled ? 'active' : ''}`}
+            onClick={onToggleSnap}
+            data-tooltip="边界吸附"
+            aria-pressed={snapEnabled}
+          >
+            <Icon icon="lucide:magnet" width={13} height={13} />吸附
+          </button>
+
+          <div className="video-editor-toolgroup" aria-label="添加轨道">
+            <button
+              type="button" className="video-editor-timeline-btn"
+              onClick={() => onAddTrack('video')} data-tooltip="新增叠加轨（画中画 / 贴纸）"
+            >
+              <Icon icon="lucide:layers" width={13} height={13} />叠加轨
+            </button>
+            <button
+              type="button" className="video-editor-timeline-btn"
+              onClick={() => onAddTrack('audio')} data-tooltip="新增音频轨"
+            >
+              <Icon icon="lucide:audio-lines" width={13} height={13} />音频轨
+            </button>
+          </div>
+        </div>
+
+        <div className="video-editor-timeline-selection" aria-live="polite">
+          {soleSelected ? (
+            <>
+              <Icon icon="lucide:film" width={12} height={12} />
+              <span className="video-editor-timeline-range">
+                {soleSelected.fileName} · {getClipDuration(soleSelected).toFixed(2)}s
+              </span>
+            </>
+          ) : selectedClipIds.length > 1 ? (
+            <span className="video-editor-timeline-range">已选中 {selectedClipIds.length} 个片段</span>
+          ) : (
+            <span className="video-editor-timeline-range dim">选择片段后可编辑</span>
+          )}
+        </div>
 
         <div className="video-editor-zoom">
           <button
@@ -585,11 +621,18 @@ function VideoEditorTimeline({
             min={MIN_PIXELS_PER_SECOND}
             max={MAX_PIXELS_PER_SECOND}
             value={pixelsPerSecond}
+            style={{
+              '--range-progress': `${(
+                (pixelsPerSecond - MIN_PIXELS_PER_SECOND)
+                / (MAX_PIXELS_PER_SECOND - MIN_PIXELS_PER_SECOND)
+              ) * 100}%`,
+            } as CSSProperties}
             onChange={(event) => {
               setAutoFit(false);
               setPixelsPerSecond(Number(event.target.value));
             }}
             aria-label="时间轴缩放"
+            aria-valuetext={`${Math.round(pixelsPerSecond)} 像素每秒`}
           />
           <button
             type="button" className="video-editor-timeline-btn"
@@ -602,6 +645,7 @@ function VideoEditorTimeline({
             className={`video-editor-timeline-btn ${autoFit ? 'active' : ''}`}
             onClick={() => setAutoFit(true)}
             data-tooltip="适应窗口"
+            aria-pressed={autoFit}
           >
             <Icon icon="lucide:move-horizontal" width={13} height={13} />
           </button>
@@ -611,11 +655,15 @@ function VideoEditorTimeline({
       <div className={`video-editor-timeline-body ${dragging ? 'dragging' : ''}`}>
         <div className="video-editor-track-labels">
           <div className="video-editor-ruler-spacer" />
-          {tracks.map((track, trackIndex) => (
+          {displayTracks.map((track) => {
+            const trackIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+            const compactText = isCompactTextTrack(track);
+            return (
             <div
               key={track.id}
               className={[
                 'video-editor-track-label',
+                compactText ? 'compact-text' : '',
                 track.locked ? 'is-locked' : '',
                 track.hidden ? 'is-hidden' : '',
                 track.muted ? 'is-muted' : '',
@@ -625,7 +673,11 @@ function VideoEditorTimeline({
                   ? `3px solid ${trackAccent(trackIndex)}` : undefined,
               }}
             >
-              <span className="video-editor-track-icon">{TRACK_KIND_ICON[track.kind] ?? '🎞'}</span>
+              <span className="video-editor-track-icon">
+                {compactText
+                  ? <Icon icon="lucide:type" width={13} height={13} />
+                  : TRACK_KIND_ICON[track.kind] ?? '🎞'}
+              </span>
               <span className="video-editor-track-name">{track.name}</span>
               <button
                 type="button"
@@ -668,7 +720,8 @@ function VideoEditorTimeline({
                 </>
               ) : null}
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="video-editor-scroll" ref={scrollRef}>
@@ -680,12 +733,15 @@ function VideoEditorTimeline({
               onScrub={startScrub}
             />
 
-            {tracks.map((track) => (
+            {displayTracks.map((track) => {
+              const compactText = isCompactTextTrack(track);
+              return (
               <div
                 key={track.id}
                 data-track-id={track.id}
                 className={[
                   'video-editor-track-lane',
+                  compactText ? 'compact-text' : '',
                   track.locked ? 'locked' : '',
                   track.hidden ? 'is-hidden' : '',
                   track.muted ? 'is-muted' : '',
@@ -733,7 +789,11 @@ function VideoEditorTimeline({
                         ))}
                       </div>
                       {/* 片段名称叠加在缩略图上 */}
-                      <span className="video-editor-clip-name">{clip.fileName}</span>
+                      <span className="video-editor-clip-name">
+                        {clip.kind === 'text' && <Icon icon="lucide:type" width={10} height={10} />}
+                        {clip.kind === 'image' && <Icon icon="lucide:image" width={10} height={10} />}
+                        {clip.fileName}
+                      </span>
                       {/* hover 信息浮层：时长 */}
                       <span className="video-editor-clip-hover">
                         {duration.toFixed(1)}s
@@ -784,7 +844,8 @@ function VideoEditorTimeline({
                   <div className="video-editor-drop-indicator" style={{ left: dropIndicatorPx }} />
                 )}
               </div>
-            ))}
+              );
+            })}
 
             <div
               className="video-editor-playhead"

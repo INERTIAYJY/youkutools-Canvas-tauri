@@ -7,6 +7,7 @@
  */
 import { VideoSampleSink, type Input, type VideoSample } from 'mediabunny';
 import {
+  DEFAULT_TEXT_STYLE,
   DEFAULT_TRANSFORM,
   evaluateTransitionAlpha,
   getActiveClips,
@@ -85,6 +86,34 @@ function drawOne(
   context.restore();
 }
 
+/** 文字片段直接在输出画布绘制，避免先生成临时位图造成清晰度损失。 */
+function drawTextClip(
+  context: CanvasRenderingContext2D,
+  canvas: VideoEditorCanvasSize,
+  clip: VideoEditorClip,
+  alpha: number,
+) {
+  const transform = clip.transform ?? DEFAULT_TRANSFORM;
+  const textStyle = { ...DEFAULT_TEXT_STYLE, ...clip.textStyle };
+  const lines = (textStyle.content.trim() || DEFAULT_TEXT_STYLE.content).split(/\r?\n/);
+  const fontSize = Math.max(8, textStyle.fontSize * transform.scale);
+  const lineHeight = fontSize * 1.2;
+
+  context.save();
+  context.translate(transform.x * canvas.width, transform.y * canvas.height);
+  context.rotate((transform.rotation * Math.PI) / 180);
+  context.globalAlpha = Math.max(0, Math.min(1, transform.opacity * alpha));
+  context.fillStyle = textStyle.color;
+  context.font = `${textStyle.fontWeight} ${fontSize}px ${textStyle.fontFamily}`;
+  context.textAlign = textStyle.align;
+  context.textBaseline = 'middle';
+  context.shadowColor = 'rgba(0, 0, 0, 0.45)';
+  context.shadowBlur = Math.max(2, fontSize * 0.08);
+  const firstLineY = -((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, index) => context.fillText(line, 0, firstLineY + index * lineHeight));
+  context.restore();
+}
+
 /**
  * 渲染某一时刻的一帧。
  *
@@ -108,9 +137,6 @@ export async function renderFrameAt(
       if (track.hidden || track.kind !== 'video') continue;
 
       for (const clip of getActiveClips(track, time)) {
-        const source = resolve(clip);
-        if (!source) continue;
-
         const timeInClip = time - clip.timelineStart;
         const transform = clip.transform ?? DEFAULT_TRANSFORM;
         const alpha = evaluateTransitionAlpha(clip, timeInClip);
@@ -123,6 +149,14 @@ export async function renderFrameAt(
           context.fillRect(0, 0, canvas.width, canvas.height);
           context.restore();
         }
+
+        if (clip.kind === 'text') {
+          drawTextClip(context, canvas, clip, alpha);
+          continue;
+        }
+
+        const source = resolve(clip);
+        if (!source) continue;
 
         if (source.bitmap) {
           drawOne(context, source.bitmap, source, canvas, transform, alpha);

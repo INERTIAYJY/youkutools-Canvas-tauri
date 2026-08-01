@@ -753,6 +753,18 @@
   border-radius: inherit;
 }
 
+.video-node-initial-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: contain;
+  background: var(--theme-bg);
+  pointer-events: none;
+}
+
 /* Video controls stay inside the media frame so the node keeps the source ratio. */
 .video-node-controls {
   --video-progress: 0%;

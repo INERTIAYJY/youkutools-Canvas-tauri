@@ -550,6 +550,14 @@
    区间由 --range-from / --range-to 传入（见 composerUi.tsx 的 rangeFill）。 */
 .composer-side input[type='range'],
 .composer-menu-custom input[type='range'] {
+  --range-track-background:
+    linear-gradient(
+      to right,
+      transparent 0 var(--range-from, 0%),
+      var(--brand) var(--range-from, 0%) var(--range-to, 0%),
+      transparent var(--range-to, 0%) 100%
+    ),
+    color-mix(in srgb, var(--theme-text) 14%, transparent);
   -webkit-appearance: none;
   appearance: none;
   flex: 1;

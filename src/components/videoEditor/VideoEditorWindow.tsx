@@ -10,12 +10,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import {
   loadConfig,
+  loadProjectData,
   loadProjectsList,
+  listExternalFolderFiles,
+  listGlobalFiles,
+  listProjectFiles,
   registerProjectFolders,
   setBaseDataDir,
   syncAuthorizedDirectories,
   saveBinaryToProjectData,
   buildNodeFileName,
+  uploadSourceFileToProject,
+  type AssetFileEntry,
 } from '../../services/fileService';
 import {
   buildVideoEditorProjectId,
@@ -40,6 +46,8 @@ import {
 } from '../../services/videoEditorWindowService';
 import {
   computeTimelineDuration,
+  DEFAULT_IMAGE_CLIP_DURATION,
+  DEFAULT_TEXT_STYLE,
   DEFAULT_TRANSFORM,
   findClipAtTime,
   getVideoTrack,
@@ -50,6 +58,8 @@ import {
   type VideoEditorCanvasSize,
   type VideoEditorClip,
   type VideoEditorProjectRecord,
+  type VideoEditorProjectImageSource,
+  type VideoEditorTextStyle,
   type VideoEditorTrack,
 } from '../../types/videoEditor';
 import type { AppConfig } from '../../types';
@@ -72,6 +82,57 @@ import {
 } from './timelineOps';
 
 type EditorPhase = 'loading' | 'ready' | 'error';
+
+function collectProjectImages(nodes: unknown): VideoEditorProjectImageSource[] {
+  if (!Array.isArray(nodes)) return [];
+  const images: VideoEditorProjectImageSource[] = [];
+  for (const candidate of nodes) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const node = candidate as Record<string, unknown>;
+    const data = node.data;
+    if (!data || typeof data !== 'object') continue;
+    const nodeData = data as Record<string, unknown>;
+    if (nodeData.type !== 'ai-image') continue;
+    const sourceUrl = [nodeData.imageUrl, nodeData.thumbnailUrl, nodeData.output]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (!sourceUrl) continue;
+    images.push({
+      nodeId: typeof node.id === 'string' ? node.id : `image-${images.length + 1}`,
+      label: typeof nodeData.label === 'string' && nodeData.label.trim()
+        ? nodeData.label.trim()
+        : `图片 ${images.length + 1}`,
+      sourceUrl,
+      filePath: typeof nodeData.filePath === 'string' ? nodeData.filePath : undefined,
+      assetId: typeof nodeData.assetId === 'string' ? nodeData.assetId : undefined,
+    });
+  }
+  return images;
+}
+
+function appendToEditorOverlayTrack(
+  tracks: VideoEditorTrack[],
+  clip: VideoEditorClip,
+): VideoEditorTrack[] {
+  const trackName = clip.kind === 'text' ? '文字' : '贴图';
+  const existingIndex = tracks.findIndex((track) => (
+    track.kind === 'video'
+    && track.overlay
+    && (
+      track.name === trackName
+      || (track.name === '文字与贴图'
+        && track.clips.every((existingClip) => existingClip.kind === clip.kind))
+    )
+  ));
+  if (existingIndex >= 0) {
+    return tracks.map((track, index) => (
+      index === existingIndex ? { ...track, clips: [...track.clips, clip] } : track
+    ));
+  }
+  const overlay = createTrack('video', tracks);
+  overlay.name = trackName;
+  overlay.clips = [clip];
+  return [...tracks, overlay];
+}
 
 /** 独立窗口开不了 devtools，错误详情必须能在界面上直接看到并复制 */
 interface EditorFailure {
@@ -162,6 +223,10 @@ export default function VideoEditorWindow() {
     session ? null : { stage: '启动', message: '缺少必要的会话参数，无法打开编辑器', detail: '' },
   );
   const [record, setRecord] = useState<VideoEditorProjectRecord | null>(null);
+  const [projectImages, setProjectImages] = useState<VideoEditorProjectImageSource[]>([]);
+  const [libraryAssets, setLibraryAssets] = useState<AssetFileEntry[]>([]);
+  const [addingMedia, setAddingMedia] = useState(false);
+  const [uploadingSticker, setUploadingSticker] = useState(false);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [playhead, setPlayhead] = useState(0);
@@ -182,6 +247,7 @@ export default function VideoEditorWindow() {
     () => tracks.filter((track) => track.kind === 'video').flatMap((track) => track.clips),
     [tracks],
   );
+  const sourceClips = useMemo(() => allClips.filter((clip) => clip.kind !== 'text'), [allClips]);
   const allTimelineClips = useMemo(() => tracks.flatMap((track) => track.clips), [tracks]);
 
   const persistTracks = useCallback((nextTracks: VideoEditorTrack[]) => {
@@ -241,11 +307,12 @@ export default function VideoEditorWindow() {
     });
   }, []);
 
-  const { getSource } = useVideoEditorSources(allClips, handleSourceProbed);
+  const { getSource } = useVideoEditorSources(sourceClips, handleSourceProbed);
 
   const timelineDuration = computeTimelineDuration(tracks);
   const activeClip = findClipAtTime(clips, playhead)?.clip ?? clips[0] ?? null;
   const activeClipUrl = activeClip ? resolveClipUrl(activeClip) : '';
+  const activeSourceProbe = activeClip ? (getSource(activeClip)?.probe ?? null) : null;
   const selectedClip = allTimelineClips.find((clip) => clip.id === selectedClipIds[0]) ?? null;
   const inspectorClip = selectedClip ?? activeClip;
   const inspectorLocked = inspectorClip ? isClipLocked(tracks, inspectorClip.id) : false;
@@ -295,6 +362,22 @@ export default function VideoEditorWindow() {
         const projects = await loadProjectsList();
         registerProjectFolders(projects as { id: string; dataFolder?: string }[]);
         if (!active) return;
+
+        const [projectData, projectFiles, globalFiles, folderFiles] = await Promise.all([
+          loadProjectData(session.projectId),
+          listProjectFiles(session.projectId),
+          listGlobalFiles(),
+          listExternalFolderFiles(config?.assetFolders ?? []),
+        ]);
+        if (!active) return;
+        setProjectImages(collectProjectImages(projectData?.nodes));
+        const seenAssetPaths = new Set<string>();
+        setLibraryAssets([...projectFiles, ...globalFiles, ...folderFiles].filter((asset) => {
+          if (asset.category !== 'image' && asset.category !== 'video') return false;
+          if (!asset.path || seenAssetPaths.has(asset.path)) return false;
+          seenAssetPaths.add(asset.path);
+          return true;
+        }));
 
         // 工程由主窗口在开窗前写入共享库，这里只按 ID 取回
         const projectRecordId = buildVideoEditorProjectId(session.projectId, session.nodeId);
@@ -381,7 +464,8 @@ export default function VideoEditorWindow() {
       return;
     }
     const deletable = new Set(deletableIds);
-    const remainingVideoCount = allClips.filter((clip) => !deletable.has(clip.id)).length;
+    const remainingVideoCount = allClips
+      .filter((clip) => clip.kind !== 'text' && !deletable.has(clip.id)).length;
     if (remainingVideoCount === 0) {
       setNotice('至少要保留一个片段');
       return;
@@ -415,6 +499,162 @@ export default function VideoEditorWindow() {
     if (isClipLocked(tracksRef.current, clipId)) return;
     updateTracks((current) => updateClipInTracks(current, clipId, patch));
   }, [updateTracks]);
+
+  const createOverlayTiming = useCallback(() => {
+    const total = Math.max(0.1, timelineDuration);
+    const start = Math.min(Math.max(0, playhead), Math.max(0, total - 0.1));
+    return {
+      timelineStart: start,
+      sourceIn: 0,
+      sourceOut: Math.max(0.1, Math.min(DEFAULT_IMAGE_CLIP_DURATION, total - start)),
+    };
+  }, [playhead, timelineDuration]);
+
+  const handleAddText = useCallback(() => {
+    const id = `text-${Date.now().toString(36)}`;
+    const clip: VideoEditorClip = {
+      id,
+      kind: 'text',
+      fileName: DEFAULT_TEXT_STYLE.content,
+      ...createOverlayTiming(),
+      transform: { ...DEFAULT_TRANSFORM },
+      textStyle: { ...DEFAULT_TEXT_STYLE },
+    };
+    commitChange();
+    updateTracks((current) => appendToEditorOverlayTrack(current, clip));
+    setSelectedClipIds([id]);
+  }, [commitChange, createOverlayTiming, updateTracks]);
+
+  const handleAddSticker = useCallback((source: VideoEditorProjectImageSource) => {
+    const id = `sticker-${Date.now().toString(36)}`;
+    const clip: VideoEditorClip = {
+      id,
+      kind: 'image',
+      fileName: source.label,
+      nodeId: source.nodeId,
+      sourceUrl: source.sourceUrl,
+      filePath: source.filePath,
+      assetId: source.assetId,
+      ...createOverlayTiming(),
+      transform: { ...DEFAULT_TRANSFORM, scale: 0.32 },
+    };
+    commitChange();
+    updateTracks((current) => appendToEditorOverlayTrack(current, clip));
+    setSelectedClipIds([id]);
+  }, [commitChange, createOverlayTiming, updateTracks]);
+
+  const handleUploadSticker = useCallback(async () => {
+    if (!record || uploadingSticker) return;
+    setUploadingSticker(true);
+    setNotice(null);
+    try {
+      const uploaded = await uploadSourceFileToProject('.png,.jpg,.jpeg,.webp,.gif', record.projectId);
+      if (!uploaded) return;
+      const source: VideoEditorProjectImageSource = {
+        nodeId: `local-${Date.now().toString(36)}`,
+        label: uploaded.fileName,
+        sourceUrl: uploaded.dataUrl,
+        filePath: uploaded.filePath,
+      };
+      setProjectImages((current) => [source, ...current]);
+      handleAddSticker(source);
+    } catch (reason) {
+      setNotice(reason instanceof Error ? `贴图导入失败：${reason.message}` : '贴图导入失败');
+    } finally {
+      setUploadingSticker(false);
+    }
+  }, [handleAddSticker, record, uploadingSticker]);
+
+  const handleAddVideoSource = useCallback((source: {
+    fileName: string;
+    filePath?: string;
+    sourceUrl?: string;
+    assetId?: string;
+  }) => {
+    const id = `media-${Date.now().toString(36)}`;
+    const clip: VideoEditorClip = {
+      id,
+      kind: 'video',
+      fileName: source.fileName,
+      filePath: source.filePath,
+      sourceUrl: source.sourceUrl,
+      assetId: source.assetId,
+      timelineStart: 0,
+      sourceIn: 0,
+      sourceOut: 0,
+    };
+    commitChange();
+    updateTracks((current) => {
+      const mainTrack = getVideoTrack(current);
+      if (!mainTrack) return current;
+      return current.map((track) => (
+        track.id === mainTrack.id
+          ? { ...track, clips: relayoutSequential([...track.clips, clip]) }
+          : track
+      ));
+    });
+    setSelectedClipIds([id]);
+  }, [commitChange, updateTracks]);
+
+  const handleAddLibraryAsset = useCallback((asset: AssetFileEntry) => {
+    setNotice(null);
+    if (asset.category === 'image') {
+      handleAddSticker({
+        nodeId: `asset-${asset.assetId ?? Date.now().toString(36)}`,
+        label: asset.name,
+        sourceUrl: asset.assetUrl ?? '',
+        filePath: asset.path,
+        assetId: asset.assetId,
+      });
+      return;
+    }
+    handleAddVideoSource({
+      fileName: asset.name,
+      filePath: asset.path,
+      sourceUrl: asset.assetUrl,
+      assetId: asset.assetId,
+    });
+  }, [handleAddSticker, handleAddVideoSource]);
+
+  const handleAddLocalMedia = useCallback(async () => {
+    if (!record || addingMedia) return;
+    setAddingMedia(true);
+    setNotice(null);
+    try {
+      const uploaded = await uploadSourceFileToProject(
+        '.mp4,.mov,.m4v,.webm,.avi,.mkv,.png,.jpg,.jpeg,.webp,.gif',
+        record.projectId,
+      );
+      if (!uploaded) return;
+      const isImage = /\.(?:png|jpe?g|webp|gif)$/i.test(uploaded.fileName);
+      if (isImage) {
+        handleAddSticker({
+          nodeId: `local-${Date.now().toString(36)}`,
+          label: uploaded.fileName,
+          sourceUrl: uploaded.dataUrl,
+          filePath: uploaded.filePath,
+        });
+      } else {
+        handleAddVideoSource({
+          fileName: uploaded.fileName,
+          filePath: uploaded.filePath,
+          sourceUrl: uploaded.dataUrl,
+        });
+      }
+    } catch (reason) {
+      setNotice(reason instanceof Error ? `素材导入失败：${reason.message}` : '素材导入失败');
+    } finally {
+      setAddingMedia(false);
+    }
+  }, [addingMedia, handleAddSticker, handleAddVideoSource, record]);
+
+  const handlePatchText = useCallback((patch: Partial<VideoEditorTextStyle>) => {
+    patchSelectedClip((clip) => {
+      if (clip.kind !== 'text') return clip;
+      const nextStyle = { ...DEFAULT_TEXT_STYLE, ...clip.textStyle, ...patch };
+      return { ...clip, fileName: nextStyle.content.trim() || '文字', textStyle: nextStyle };
+    });
+  }, [patchSelectedClip]);
 
   const handleAddTrack = useCallback((kind: 'video' | 'audio') => {
     commitChange();
@@ -654,6 +894,7 @@ export default function VideoEditorWindow() {
       const inputsByUrl = new Map<string, Input>();
       await withStage('打开素材', async () => {
         for (const clip of allClips) {
+          if (clip.kind === 'text' || clip.kind === 'image') continue;
           const url = resolveClipUrl(clip);
           if (!url || inputsByUrl.has(url)) continue;
           const input = await createVideoInput(url);
@@ -878,10 +1119,16 @@ export default function VideoEditorWindow() {
           {notice && <div className="video-editor-notice">{notice}</div>}
           <div className="video-editor-body">
             <VideoEditorMediaPanel
-              clips={allClips}
+              clips={sourceClips}
               getSource={getSource}
               selectedClipId={selectedClipIds[0] ?? null}
+              libraryAssets={libraryAssets}
+              projectImages={projectImages}
+              addingMedia={addingMedia}
               onSelectClip={(clipId) => setSelectedClipIds([clipId])}
+              onAddLocal={() => { void handleAddLocalMedia(); }}
+              onAddLibraryAsset={handleAddLibraryAsset}
+              onAddCanvasImage={handleAddSticker}
             />
             <VideoEditorPreview
               clip={activeClip}
@@ -891,6 +1138,9 @@ export default function VideoEditorWindow() {
               tracks={tracks}
               selectedClipIds={selectedClipIds}
               canvasSize={canvasSize}
+              sourceSize={activeSourceProbe
+                ? { width: activeSourceProbe.width, height: activeSourceProbe.height }
+                : null}
               onPlayheadChange={setPlayhead}
               onSelectClips={setSelectedClipIds}
               onBeginInteraction={beginInteraction}
@@ -924,6 +1174,15 @@ export default function VideoEditorWindow() {
                 transitionIn: { kind, duration },
               }))}
               onVolumeChange={(volume) => patchSelectedClip((clip) => ({ ...clip, volume }))}
+              selectedIsOverlay={!!selectedClip && tracks.some((track) => (
+                track.overlay && track.clips.some((clip) => clip.id === selectedClip.id)
+              ))}
+              projectImages={projectImages}
+              uploadingSticker={uploadingSticker}
+              onAddText={handleAddText}
+              onPatchText={handlePatchText}
+              onAddSticker={handleAddSticker}
+              onUploadSticker={() => { void handleUploadSticker(); }}
             />
           </div>
           <VideoEditorTimeline

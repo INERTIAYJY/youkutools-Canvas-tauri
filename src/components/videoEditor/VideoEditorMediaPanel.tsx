@@ -1,26 +1,70 @@
 /**
  * VideoEditorMediaPanel — 左侧素材列表
  *
- * 列出时间轴上的全部片段，点选即选中对应片段；二期接项目资产面板的拖入。
+ * 列出时间轴上的全部片段，并可从素材库、本机或画布图片节点继续添加。
  */
-import { memo } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
+import type { AssetFileEntry } from '../../services/fileService';
 import { getClipDuration, type VideoEditorClip } from '../../types/videoEditor';
+import type { VideoEditorProjectImageSource } from '../../types/videoEditor';
 import type { SourceState } from './useVideoEditorSources';
 
 interface VideoEditorMediaPanelProps {
   clips: VideoEditorClip[];
   getSource: (clip: VideoEditorClip) => SourceState | undefined;
   selectedClipId: string | null;
+  libraryAssets: AssetFileEntry[];
+  projectImages: VideoEditorProjectImageSource[];
+  addingMedia: boolean;
   onSelectClip: (clipId: string) => void;
+  onAddLocal: () => void;
+  onAddLibraryAsset: (asset: AssetFileEntry) => void;
+  onAddCanvasImage: (image: VideoEditorProjectImageSource) => void;
 }
 
 function VideoEditorMediaPanel({
   clips,
   getSource,
   selectedClipId,
+  libraryAssets,
+  projectImages,
+  addingMedia,
   onSelectClip,
+  onAddLocal,
+  onAddLibraryAsset,
+  onAddCanvasImage,
 }: VideoEditorMediaPanelProps) {
+  const [addMenu, setAddMenu] = useState<'closed' | 'root' | 'library' | 'canvas'>('closed');
+  const [query, setQuery] = useState('');
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const filteredAssets = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return libraryAssets;
+    return libraryAssets.filter((asset) => asset.name.toLocaleLowerCase().includes(normalized));
+  }, [libraryAssets, query]);
+  const filteredImages = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return projectImages;
+    return projectImages.filter((image) => image.label.toLocaleLowerCase().includes(normalized));
+  }, [projectImages, query]);
+
+  useEffect(() => {
+    if (addMenu === 'closed') return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!addMenuRef.current?.contains(event.target as Node)) setAddMenu('closed');
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAddMenu('closed');
+    };
+    document.addEventListener('pointerdown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [addMenu]);
+
   const undecodable = clips.filter((clip) => {
     const source = getSource(clip);
     return clip.kind === 'video' && source?.probe && !source.probe.decodable;
@@ -29,7 +73,105 @@ function VideoEditorMediaPanel({
 
   return (
     <aside className="video-editor-media">
-      <div className="video-editor-panel-head">素材 · {clips.length}</div>
+      <div className="video-editor-panel-head video-editor-media-head">
+        <span>素材 · {clips.length}</span>
+        <div ref={addMenuRef} className="video-editor-media-add-wrap">
+          <button
+            type="button"
+            className="video-editor-media-add"
+            aria-label={addingMedia ? '正在添加素材' : '添加素材'}
+            aria-expanded={addMenu !== 'closed'}
+            disabled={addingMedia}
+            onClick={() => {
+              setQuery('');
+              setAddMenu((current) => current === 'closed' ? 'root' : 'closed');
+            }}
+          >
+            <Icon icon={addingMedia ? 'lucide:loader-circle' : 'lucide:plus'} width={15} height={15} />
+          </button>
+
+          {addMenu !== 'closed' && (
+            <div className="video-editor-media-add-menu">
+              {addMenu === 'root' ? (
+                <div className="video-editor-media-add-sources">
+                  <button type="button" onClick={() => setAddMenu('library')}>
+                    <Icon icon="lucide:library" width={16} height={16} />
+                    <span><strong>素材库</strong><em>{libraryAssets.length} 个可用素材</em></span>
+                    <Icon icon="lucide:chevron-right" width={14} height={14} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={addingMedia}
+                    onClick={() => {
+                      onAddLocal();
+                      setAddMenu('closed');
+                    }}
+                  >
+                    <Icon icon={addingMedia ? 'lucide:loader-circle' : 'lucide:hard-drive-upload'} width={16} height={16} />
+                    <span><strong>{addingMedia ? '正在导入…' : '本机文件'}</strong><em>视频或图片</em></span>
+                  </button>
+                  <button type="button" onClick={() => setAddMenu('canvas')}>
+                    <Icon icon="lucide:workflow" width={16} height={16} />
+                    <span><strong>画布图片节点</strong><em>{projectImages.length} 张图片</em></span>
+                    <Icon icon="lucide:chevron-right" width={14} height={14} />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="video-editor-media-picker-head">
+                    <button type="button" onClick={() => { setQuery(''); setAddMenu('root'); }} aria-label="返回">
+                      <Icon icon="lucide:arrow-left" width={14} height={14} />
+                    </button>
+                    <strong>{addMenu === 'library' ? '素材库' : '画布图片节点'}</strong>
+                  </div>
+                  <label className="video-editor-media-search">
+                    <Icon icon="lucide:search" width={13} height={13} />
+                    <input
+                      autoFocus
+                      value={query}
+                      placeholder="搜索素材"
+                      onChange={(event) => setQuery(event.target.value)}
+                    />
+                  </label>
+                  <div className="video-editor-media-picker-list">
+                    {addMenu === 'library' ? filteredAssets.map((asset) => (
+                      <button
+                        type="button"
+                        key={asset.assetId ?? asset.path}
+                        onClick={() => { onAddLibraryAsset(asset); setAddMenu('closed'); }}
+                      >
+                        <span className="video-editor-media-picker-thumb">
+                          {asset.category === 'image' && asset.assetUrl
+                            ? <img src={asset.assetUrl} alt="" loading="lazy" />
+                            : <Icon icon={asset.category === 'image' ? 'lucide:image' : 'lucide:film'} width={16} height={16} />}
+                        </span>
+                        <span><strong>{asset.name}</strong><em>{asset.category === 'image' ? '图片' : '视频'}</em></span>
+                        <Icon icon="lucide:plus" width={14} height={14} />
+                      </button>
+                    )) : filteredImages.map((image) => (
+                      <button
+                        type="button"
+                        key={image.nodeId}
+                        onClick={() => { onAddCanvasImage(image); setAddMenu('closed'); }}
+                      >
+                        <span className="video-editor-media-picker-thumb">
+                          <img src={image.sourceUrl} alt="" loading="lazy" />
+                        </span>
+                        <span><strong>{image.label}</strong><em>画布图片</em></span>
+                        <Icon icon="lucide:plus" width={14} height={14} />
+                      </button>
+                    ))}
+                    {((addMenu === 'library' && filteredAssets.length === 0)
+                      || (addMenu === 'canvas' && filteredImages.length === 0)) && (
+                      <div className="video-editor-media-picker-empty">没有可用素材</div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
       <div className="video-editor-media-list">
         {clips.length === 0 && (
           <div className="video-editor-panel-empty">工程内暂无素材</div>

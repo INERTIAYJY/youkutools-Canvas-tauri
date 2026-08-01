@@ -10,11 +10,41 @@ export const VIDEO_EDITOR_SCHEMA_VERSION = 1;
 
 export type VideoEditorTrackKind = 'video' | 'audio' | 'caption';
 
-/** 片段素材类型：图片没有时长，按固定停留时间参与排布 */
-export type VideoEditorClipKind = 'video' | 'image';
+/** 片段素材类型：图片与文字按显式停留时长参与排布 */
+export type VideoEditorClipKind = 'video' | 'image' | 'text';
 
 /** 图片片段的默认停留时长（秒） */
 export const DEFAULT_IMAGE_CLIP_DURATION = 3;
+
+export type VideoEditorTextAlign = 'left' | 'center' | 'right';
+
+export interface VideoEditorTextStyle {
+  content: string;
+  /** CSS font-family；本机字体使用带引号的真实 family 名称。 */
+  fontFamily: string;
+  fontSize: number;
+  color: string;
+  fontWeight: 400 | 600 | 700;
+  align: VideoEditorTextAlign;
+}
+
+export const DEFAULT_TEXT_STYLE: VideoEditorTextStyle = {
+  content: '输入文字',
+  fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+  fontSize: 64,
+  color: '#ffffff',
+  fontWeight: 600,
+  align: 'center',
+};
+
+/** 独立剪辑窗口可选择的当前项目图片节点快照。 */
+export interface VideoEditorProjectImageSource {
+  nodeId: string;
+  label: string;
+  sourceUrl: string;
+  filePath?: string;
+  assetId?: string;
+}
 
 /** 转场类型；`none` 表示硬切 */
 export type VideoEditorTransitionKind = 'none' | 'dissolve' | 'fade';
@@ -64,6 +94,8 @@ export interface VideoEditorClip {
   volume?: number;
   /** 音量包络；为空则用 volume 恒定增益 */
   volumePoints?: VideoEditorVolumePoint[];
+  /** 文字片段内容与排版；仅 kind=text 时使用 */
+  textStyle?: VideoEditorTextStyle;
   /** 素材在项目 data 目录下的路径；离开本机后用 assetId 重新定位 */
   filePath?: string;
   /** 稳定资产身份，filePath 仅表示当前位置 */
@@ -279,6 +311,7 @@ export function needsCompositing(tracks: VideoEditorTrack[]): boolean {
 
   return visible.some((track) => track.clips.some((clip) => (
     clip.kind === 'image'
+    || clip.kind === 'text'
     || (!!clip.transitionIn && clip.transitionIn.kind !== 'none' && clip.transitionIn.duration > 0)
     || (!!clip.transform && (
       clip.transform.x !== DEFAULT_TRANSFORM.x

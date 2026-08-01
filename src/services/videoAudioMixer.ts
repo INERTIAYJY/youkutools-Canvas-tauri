@@ -119,7 +119,7 @@ export async function mixTimelineAudio(options: {
   for (const track of tracks) {
     if (track.hidden || track.muted) continue;
     for (const clip of track.clips) {
-      if (clip.kind === 'image') continue;
+      if (clip.kind === 'image' || clip.kind === 'text') continue;
       const input = resolve(clip);
       if (input) jobs.push({ clip, input, trackVolume: track.volume ?? 1 });
     }

@@ -1,5 +1,7 @@
 # AI Canvas 官网
 
+线上地址：<https://tenney95.github.io/AI-Canvas-tauri/>
+
 `site/` 是 AI Canvas 的产品官网，纯静态页面，不参与主应用构建，也不引入任何构建步骤或外部 CDN 资源。
 
 ```text

@@ -204,6 +204,8 @@ export const createHistorySlice: StateCreator<AppState, [], [], HistorySlice> = 
   undo: () => enqueueHistoryTransition(async () => {
     // 删除会在退场动画结束后落状态。先等待，确保捕获到真实的删除后状态，避免回调覆盖撤销结果。
     await waitForPendingNodeExits();
+    // 文件暂存不等动画，必须单独等：还原跑在暂存前面的话，文件会在节点复活之后才进 .trash
+    await fileService.waitForPendingNodeFileDeletions();
 
     const { historyIndex, history, nodes, edges, groups } = get();
     if (historyIndex < 0 || history.length === 0) return false;
@@ -233,13 +235,20 @@ export const createHistorySlice: StateCreator<AppState, [], [], HistorySlice> = 
 
     // Restore files BEFORE updating state so React renders with files already on disk.
     const currentNodeIds = new Set(nodes.map((node) => node.id));
-    const restorePromises = entry.nodes.flatMap((node) => {
+    const revivedPaths = entry.nodes.flatMap((node) => {
       const filePath = node.data.filePath;
-      return filePath && !currentNodeIds.has(node.id)
-        ? [fileService.restoreFromUndoTrash(filePath)]
-        : [];
+      return filePath && !currentNodeIds.has(node.id) ? [filePath] : [];
     });
-    if (restorePromises.length > 0) await Promise.allSettled(restorePromises);
+    if (revivedPaths.length > 0) {
+      await Promise.allSettled(revivedPaths.map((filePath) => fileService.restoreFromUndoTrash(filePath)));
+      // 节点复活但文件没回来时，界面上只会表现为"打不开"，必须明说，别让用户以为撤销成功了
+      void Promise.all(revivedPaths.map((filePath) => fileService.isFileMissing(filePath)))
+        .then((missing) => {
+          const lost = missing.filter(Boolean).length;
+          if (lost > 0) get().showToast(`已撤销，但 ${lost} 个媒体文件未能还原`, 'error');
+        })
+        .catch(() => {});
+    }
 
     const latest = get();
     const latestSnapshot = createSnapshot(latest.nodes, latest.edges, latest.groups);

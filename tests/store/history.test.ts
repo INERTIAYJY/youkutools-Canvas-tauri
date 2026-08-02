@@ -9,6 +9,9 @@ const fileMocks = vi.hoisted(() => ({
   restoreFromUndoTrash: vi.fn(async () => undefined),
   // 重做前会先确认文件属于当前项目，默认放行以保持既有断言
   isProjectOwnedFile: vi.fn(async () => true),
+  // 撤销前要等文件暂存落定，默认立即完成
+  waitForPendingNodeFileDeletions: vi.fn(async () => undefined),
+  isFileMissing: vi.fn(async () => false),
 }));
 const nodeExitMocks = vi.hoisted(() => {
   const pending = new Set<Promise<void>>();
@@ -239,6 +242,33 @@ describe('batch canvas history', () => {
 
     expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['node-a']);
     expect(useAppStore.getState()).toMatchObject({ historyIndex: -1 });
+  });
+
+  it('waits for the file staging to settle before restoring media', async () => {
+    let finishStaging!: () => void;
+    const staging = new Promise<undefined>((resolve) => { finishStaging = () => resolve(undefined); });
+    fileMocks.waitForPendingNodeFileDeletions.mockReturnValueOnce(staging);
+    useAppStore.setState({
+      currentProjectId: 'project-1',
+      nodes: [node('node-a', { filePath: 'project/clip.mp4' })],
+      history: [],
+      historyIndex: -1,
+    });
+
+    useAppStore.getState().deleteNode('node-a');
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().nodes).toEqual([]);
+    });
+
+    const undoResult = useAppStore.getState().undo();
+    // 放掉足够多的微任务，让 undo 跑到「文件还原」那一步为止
+    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+    // 暂存还没落定，此时还原会扑空——文件随后才被搬走，节点复活也是死的
+    expect(fileMocks.restoreFromUndoTrash).not.toHaveBeenCalled();
+
+    finishStaging();
+    await expect(undoResult).resolves.toBe(true);
+    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/clip.mp4');
   });
 
   it('does not create undo steps for position, size, or ordinary data changes', async () => {

@@ -31,6 +31,7 @@ import {
   isProjectOwnedFile,
   moveToUndoTrash,
   restoreFromUndoTrash,
+  waitForPendingNodeFileDeletions,
 } from '../../src/services/fs/trash';
 
 describe('undo trash media moves', () => {
@@ -67,16 +68,34 @@ describe('undo trash media moves', () => {
     expect(coreMocks.notifyProjectDiskChanged).toHaveBeenCalledTimes(2);
   });
 
-  it('falls back to the system trash when the atomic rename fails', async () => {
+  it('暂存失败时把文件留在原地，不退回撤销不回来的系统回收站', async () => {
     const originalPath = 'D:/project/media/locked-video.mp4';
     fsMocks.rename.mockRejectedValueOnce(new Error('file is locked'));
 
     await moveToUndoTrash(originalPath);
 
-    expect(coreMocks.invoke).toHaveBeenCalledWith('move_to_trash', { path: originalPath });
+    expect(coreMocks.invoke).not.toHaveBeenCalled();
+    expect(fsMocks.remove).not.toHaveBeenCalled();
     expect(fsMocks.readFile).not.toHaveBeenCalled();
     expect(fsMocks.writeFile).not.toHaveBeenCalled();
     await expect(restoreFromUndoTrash(originalPath)).resolves.toBe(false);
+  });
+
+  it('等待接口能挡住"还原跑在暂存前面"的竞争', async () => {
+    const originalPath = 'D:/project/media/slow-video.mp4';
+    let finishRename: (() => void) | null = null;
+    fsMocks.rename.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishRename = () => resolve();
+    }));
+
+    // 删除是即发即忘的：调用方不 await，撤销靠 waitForPendingNodeFileDeletions 兜底
+    void deleteNodeFile({ filePath: 'D:/project/media/slow-video.mp4' });
+    await vi.waitFor(() => expect(finishRename).not.toBeNull());
+    finishRename!();
+    await waitForPendingNodeFileDeletions();
+
+    // 暂存已经落定，此时的还原才能真正把文件搬回来
+    await expect(restoreFromUndoTrash(originalPath)).resolves.toBe(true);
   });
 });
 

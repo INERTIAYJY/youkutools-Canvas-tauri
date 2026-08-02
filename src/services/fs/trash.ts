@@ -24,6 +24,9 @@ export async function moveToTrash(filePath: string): Promise<void> {
 /** Map: originalFilePath → trashFilePath */
 const undoTrashMap = new Map<string, string>();
 
+/** 进行中的节点文件删除，撤销前要等它们结束 */
+const pendingNodeFileDeletions = new Set<Promise<void>>();
+
 /** Compute the .trash directory for a given file path (same parent dir) */
 function getUndoTrashDir(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/');
@@ -48,9 +51,19 @@ export async function moveToUndoTrash(filePath: string): Promise<void> {
     notifyProjectDiskChanged();
     console.log('[fileService] Staged in undo-trash:', filePath, '→', trashPath);
   } catch (err) {
-    console.warn('[fileService] Failed to stage in undo-trash:', filePath, err);
-    // Fallback: use system trash
-    await moveToTrash(filePath).catch(() => {});
+    // 绝不退回系统回收站：那条路径撤销不回来，节点复活后就成了指向空文件的死节点。
+    // 暂存失败时宁可把文件留在原地当孤儿文件，交给存储体检去回收。
+    console.warn('[fileService] Failed to stage in undo-trash, file left in place:', filePath, err);
+  }
+}
+
+/** 文件是否已不在原路径上（仅 Tauri 端有意义），用于撤销后确认媒体是否真的回来了 */
+export async function isFileMissing(filePath: string): Promise<boolean> {
+  if (!isTauriEnv()) return false;
+  try {
+    return !(await exists(filePath));
+  } catch {
+    return false;
   }
 }
 
@@ -157,16 +170,29 @@ export async function isProjectOwnedFile(
 /** 尝试删除节点关联的本地文件（如果有 filePath，移入 undo-trash 暂存，撤销时可还原）。
  *  keepPaths：仍被存活节点引用的 filePath 集合 —— 命中则跳过，避免复制节点删除时连累原节点文件。
  *  projectId：当前项目 —— 文件不在该项目目录内时一律不删，避免误删其他项目的素材。 */
-export async function deleteNodeFile(
+export function deleteNodeFile(
   nodeData: { filePath?: string },
   keepPaths?: Set<string>,
   projectId?: string | null,
 ): Promise<void> {
-  const fp = nodeData.filePath;
-  if (!fp || typeof fp !== 'string' || keepPaths?.has(fp)) return;
-  if (projectId !== undefined && !(await isProjectOwnedFile(fp, projectId))) {
-    console.warn('[fileService] 跳过删除非本项目文件:', fp);
-    return;
+  const operation = (async () => {
+    const fp = nodeData.filePath;
+    if (!fp || typeof fp !== 'string' || keepPaths?.has(fp)) return;
+    if (projectId !== undefined && !(await isProjectOwnedFile(fp, projectId))) {
+      console.warn('[fileService] 跳过删除非本项目文件:', fp);
+      return;
+    }
+    await moveToUndoTrash(fp);
+  })();
+  // 删除是即发即忘的（节点退场动画不等文件系统），撤销必须能等它落定，
+  // 否则还原会跑在暂存前面：节点回来了，文件随后才被搬进 .trash，成了死节点
+  pendingNodeFileDeletions.add(operation);
+  return operation.finally(() => pendingNodeFileDeletions.delete(operation));
+}
+
+/** 等待所有进行中的节点文件删除完成（撤销前调用，避免与暂存竞争） */
+export async function waitForPendingNodeFileDeletions(): Promise<void> {
+  while (pendingNodeFileDeletions.size > 0) {
+    await Promise.allSettled([...pendingNodeFileDeletions]);
   }
-  await moveToUndoTrash(fp);
 }

@@ -9,7 +9,7 @@ import NodeError from './shared/NodeError';
 import GooeyBtn from './shared/GooeyBtn';
 import ResizeHandle from './shared/ResizeHandle';
 import VideoNodeControls from './shared/VideoNodeControls';
-import VideoNodeToolbar from './shared/VideoNodeToolbar';
+import VideoNodeToolbar, { type CaptureFramePosition } from './shared/VideoNodeToolbar';
 import FullscreenOverlay from '../shared/FullscreenOverlay';
 import { useNodeRename } from './shared/useNodeRename';
 import { useSourceFileUpload } from './shared/useSourceFileUpload';
@@ -27,6 +27,7 @@ import { buildVideoEditorProjectId } from '../../services/indexedDbService';
 import {
   subscribeVideoEditorWindow,
   type VideoEditorExportResult,
+  type VideoEditorFrameExportResult,
 } from '../../services/videoEditorWindowService';
 
 const DEFAULT_VIDEO_NODE_WIDTH = 280;
@@ -103,6 +104,57 @@ function afterVideoFramePresented(video: HTMLVideoElement, callback: () => void)
     return;
   }
   window.setTimeout(callback, 120);
+}
+
+/** 尾帧要略微退回，正好停在 duration 上多数解码器给不出画面 */
+const LAST_FRAME_BACKOFF = 0.05;
+
+const CAPTURE_FRAME_LABELS: Record<CaptureFramePosition, string> = {
+  first: '首帧',
+  current: '当前帧',
+  last: '尾帧',
+};
+
+function resolveCaptureTime(video: HTMLVideoElement, position: CaptureFramePosition): number {
+  if (position === 'current') return video.currentTime;
+  if (position === 'first') return 0;
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  return duration > 0 ? Math.max(0, duration - LAST_FRAME_BACKOFF) : video.currentTime;
+}
+
+/** 把节点里的预览视频临时定位到目标时刻取一帧，取完复位回原位置 */
+function captureFrameAtTime(
+  video: HTMLVideoElement,
+  targetTime: number,
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  if (Math.abs(video.currentTime - targetTime) < 0.01) {
+    return Promise.resolve(captureVideoFrame(video));
+  }
+
+  const restoreTime = video.currentTime;
+  return new Promise((resolve, reject) => {
+    let timer = 0;
+    const onSeeked = () => {
+      // seeked 早于合成帧提交，直接读画布会拿到上一帧
+      afterVideoFramePresented(video, () => {
+        window.clearTimeout(timer);
+        try {
+          resolve(captureVideoFrame(video));
+        } catch (error) {
+          reject(error);
+        } finally {
+          video.currentTime = restoreTime;
+        }
+      });
+    };
+    timer = window.setTimeout(() => {
+      video.removeEventListener('seeked', onSeeked);
+      video.currentTime = restoreTime;
+      reject(new Error('视频定位超时'));
+    }, 8000);
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.currentTime = targetTime;
+  });
 }
 
 function isTaintedCanvasError(error: unknown): boolean {
@@ -295,6 +347,62 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
     const instanceId = buildVideoEditorProjectId(projectId, id);
     return subscribeVideoEditorWindow(instanceId, (message) => {
+      if (message.type === 'storyai:video-editor-frame-exported') {
+        const framePayload = (message.payload ?? {}) as Partial<VideoEditorFrameExportResult>;
+        const imageUrl = typeof framePayload.imageUrl === 'string' ? framePayload.imageUrl : '';
+        if (!imageUrl) return;
+
+        const frameStore = useAppStore.getState();
+        const frameDerivation = registerCanvasDerivation(frameStore, id);
+        if (!frameDerivation) return;
+
+        void (async () => {
+          try {
+            const dims = await computeImageNodeDimensions(imageUrl);
+            // 取帧要等图片解码，期间可能已切项目或删节点，落盘前再验一次
+            if (!isCanvasDerivationFresh(frameDerivation, useAppStore.getState())) {
+              cancelCanvasDerivation(frameDerivation);
+              return;
+            }
+
+            const liveStore = useAppStore.getState();
+            const frameSource = liveStore.nodes.find((node) => node.id === id);
+            const framePosition = frameSource?.position ?? { x: 0, y: 0 };
+            const time = typeof framePayload.time === 'number' ? framePayload.time : 0;
+
+            liveStore.addNode({
+              id: `node-${generateId()}`,
+              type: 'ai-image',
+              // 放在剪辑结果节点下方，避免和"导出为新节点"的产物叠在一起
+              position: {
+                x: framePosition.x + nodeWidth + 40,
+                y: framePosition.y + nodeHeight + 40,
+              },
+              data: {
+                label: `${displayLabel} ${time.toFixed(2)}s 帧`,
+                type: 'ai-image',
+                role: 'source',
+                status: 'success',
+                imageUrl,
+                filePath: typeof framePayload.filePath === 'string' ? framePayload.filePath : undefined,
+                fileName: typeof framePayload.fileName === 'string' ? framePayload.fileName : undefined,
+                imageWidth: typeof framePayload.width === 'number' ? framePayload.width : undefined,
+                imageHeight: typeof framePayload.height === 'number' ? framePayload.height : undefined,
+                ...dims,
+              },
+            } as Parameters<typeof liveStore.addNode>[0]);
+
+            completeCanvasDerivation(frameDerivation);
+            useAppStore.getState().showToast('当前帧已生成图片节点');
+          } catch (error) {
+            cancelCanvasDerivation(frameDerivation);
+            console.error('[videoEditor] 当前帧回写失败:', error);
+            useAppStore.getState().showToast('当前帧生成节点失败', 'error');
+          }
+        })();
+        return;
+      }
+
       if (message.type !== 'storyai:video-editor-exported') return;
       const payload = (message.payload ?? {}) as Partial<VideoEditorExportResult>;
       const videoUrl = typeof payload.videoUrl === 'string' ? payload.videoUrl : '';
@@ -338,7 +446,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       completeCanvasDerivation(derivation);
       useAppStore.getState().showToast('剪辑结果已生成新节点');
     });
-  }, [displayLabel, id, nodeWidth]);
+  }, [displayLabel, id, nodeHeight, nodeWidth]);
 
   const handleCopyFile = useCallback(async () => {
     const store = useAppStore.getState();
@@ -351,9 +459,10 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     store.showToast(ok ? '已复制视频到剪贴板' : '复制失败', ok ? undefined : 'error');
   }, [data.filePath]);
 
-  const handleCaptureFrame = useCallback(async () => {
+  const handleCaptureFrame = useCallback(async (position: CaptureFramePosition = 'current') => {
     const store = useAppStore.getState();
     const video = videoRef.current;
+    const frameLabel = CAPTURE_FRAME_LABELS[position];
 
     if (!video || !data.videoUrl) {
       store.showToast('没有可截取的视频', 'error');
@@ -370,7 +479,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       store.showToast('视频节点已失效，请重试', 'error');
       return;
     }
-    const captureTime = video.currentTime;
+    const captureTime = resolveCaptureTime(video, position);
     const ensureFresh = () => {
       const fresh = isCanvasDerivationFresh(derivation, useAppStore.getState());
       if (!fresh) cancelCanvasDerivation(derivation);
@@ -384,7 +493,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       let liveStore = useAppStore.getState();
       const currentNode = liveStore.nodes.find((node) => node.id === id);
       const currentPosition = currentNode?.position ?? { x: 0, y: 0 };
-      const frameFileName = buildNodeFileName(`${displayLabel} 当前帧`, 'png', `video-frame-${Date.now()}`);
+      const frameFileName = buildNodeFileName(`${displayLabel} ${frameLabel}`, 'png', `video-frame-${Date.now()}`);
       const savedFrame = derivation.projectId !== 'default'
         ? await saveDataUrlToProjectData(frame.dataUrl, derivation.projectId, frameFileName)
         : null;
@@ -401,7 +510,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           y: currentPosition.y,
         },
         data: {
-          label: `${displayLabel} 当前帧`,
+          label: `${displayLabel} ${frameLabel}`,
           type: 'ai-image',
           role: 'source',
           status: 'success',
@@ -418,14 +527,14 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     };
 
     try {
-      const created = await createFrameNode(captureVideoFrame(video));
-      if (created) useAppStore.getState().showToast('已截取当前帧为图像节点', 'success');
+      const created = await createFrameNode(await captureFrameAtTime(video, captureTime));
+      if (created) useAppStore.getState().showToast(`已截取${frameLabel}为图像节点`, 'success');
     } catch (error) {
       if (!isTaintedCanvasError(error)) {
         cancelCanvasDerivation(derivation);
-        const message = error instanceof Error ? error.message : '截取当前帧失败';
+        const message = error instanceof Error ? error.message : `截取${frameLabel}失败`;
         if (useAppStore.getState().currentProjectId === derivation.projectId) {
-          useAppStore.getState().showToast(`截取当前帧失败：${message}`, 'error');
+          useAppStore.getState().showToast(`截取${frameLabel}失败：${message}`, 'error');
         }
         return;
       }
@@ -433,7 +542,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       const remoteUrl = typeof data.sourceUrl === 'string' ? data.sourceUrl : data.videoUrl;
       if (!remoteUrl?.startsWith('http') || derivation.projectId === 'default') {
         cancelCanvasDerivation(derivation);
-        useAppStore.getState().showToast('该视频来源禁止导出当前帧，请先上传为本地视频后再截帧', 'error');
+        useAppStore.getState().showToast(`该视频来源禁止导出${frameLabel}，请先上传为本地视频后再截帧`, 'error');
         return;
       }
       if (!ensureFresh()) return;
@@ -443,7 +552,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       if (!ensureFresh()) return;
       if (!saved?.assetUrl) {
         cancelCanvasDerivation(derivation);
-        useAppStore.getState().showToast('远程视频本地化失败，无法截取当前帧', 'error');
+        useAppStore.getState().showToast(`远程视频本地化失败，无法截取${frameLabel}`, 'error');
         return;
       }
 
@@ -455,12 +564,12 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         } as Partial<BaseNodeData>);
 
         const created = await createFrameNode(await captureFrameFromVideoUrl(saved.assetUrl, captureTime));
-        if (created) useAppStore.getState().showToast('已截取当前帧为图像节点', 'success');
+        if (created) useAppStore.getState().showToast(`已截取${frameLabel}为图像节点`, 'success');
       } catch (fallbackError) {
         cancelCanvasDerivation(derivation);
         const message = fallbackError instanceof Error ? fallbackError.message : '本地资源截帧失败';
         if (useAppStore.getState().currentProjectId === derivation.projectId) {
-          useAppStore.getState().showToast(`截取当前帧失败：${message}`, 'error');
+          useAppStore.getState().showToast(`截取${frameLabel}失败：${message}`, 'error');
         }
       }
     }

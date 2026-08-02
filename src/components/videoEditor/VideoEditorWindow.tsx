@@ -38,11 +38,13 @@ import {
 } from '../../services/videoEditorMediaService';
 import {
   createClipRenderSource,
+  renderFrameAt,
   type ClipRenderSource,
 } from '../../services/videoCompositor';
 import type { Input } from 'mediabunny';
 import {
   postVideoEditorExported,
+  postVideoEditorFrameExported,
   postVideoEditorReady,
 } from '../../services/videoEditorWindowService';
 import {
@@ -236,6 +238,7 @@ export default function VideoEditorWindow() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStage, setExportStage] = useState<string | null>(null);
   const [exportFrameRate, setExportFrameRate] = useState(30);
+  const [exportingFrame, setExportingFrame] = useState(false);
   // 输出分辨率相对源尺寸的倍率；4K 编码不通时可降到 1080p/720p
   const [outputScale, setOutputScale] = useState(1);
   const exportAbortRef = useRef<AbortController | null>(null);
@@ -1033,6 +1036,87 @@ export default function VideoEditorWindow() {
     mixedSources, record, session, timelineDuration, tracks,
   ]);
 
+  /** 把播放头所在的一帧按合成路径渲染出来，回传主窗口建图片节点 */
+  const handleExportFrame = useCallback(async () => {
+    if (!session || !record || exporting || exportingFrame) return;
+    const frameClips = tracks.flatMap((track) => (track.hidden ? [] : track.clips));
+    if (frameClips.length === 0) return;
+
+    setExportingFrame(true);
+    setFailure(null);
+    setNotice(null);
+
+    const opened: Input[] = [];
+    try {
+      // 只准备这一帧用得到的素材：解码整条时间轴没有意义
+      const renderSources = new Map<string, ClipRenderSource>();
+      await withStage('准备当前帧', async () => {
+        for (const clip of frameClips) {
+          if (clip.kind === 'text') continue;
+          const url = resolveClipUrl(clip);
+          if (!url || renderSources.has(url)) continue;
+          if (clip.kind === 'image') {
+            const response = await fetch(url);
+            const bitmap = await createImageBitmap(await response.blob());
+            renderSources.set(url, { bitmap, width: bitmap.width, height: bitmap.height });
+            continue;
+          }
+          const input = await createVideoInput(url);
+          opened.push(input);
+          const source = await createClipRenderSource(input);
+          if (source) renderSources.set(url, source);
+        }
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasSize.width;
+      canvas.height = canvasSize.height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('画布上下文不可用');
+
+      await withStage('渲染当前帧', () => renderFrameAt(
+        context,
+        canvasSize,
+        tracks,
+        playhead,
+        (clip) => renderSources.get(resolveClipUrl(clip)),
+      ));
+
+      const bytes = await withStage('编码当前帧', async () => {
+        const blob = await new Promise<Blob | null>((resolve) => {
+          canvas.toBlob((result) => resolve(result), 'image/png');
+        });
+        if (!blob) throw new Error('当前帧编码失败');
+        return new Uint8Array(await blob.arrayBuffer());
+      });
+
+      // 同一工程会反复导帧，文件名带上时刻才不至于全靠去重后缀区分
+      const stamp = `${Math.round(playhead * 1000)}ms`;
+      const fileName = buildNodeFileName(`${record.name} 帧${stamp}`, 'png', `frame-${stamp}`);
+      const saved = await withStage('写入项目目录', async () => {
+        const result = await saveBinaryToProjectData(bytes, record.projectId, fileName);
+        if (!result) throw new Error('项目数据目录不可写');
+        return result;
+      });
+
+      await withStage('输出到画布', () => postVideoEditorFrameExported(session.instanceId, {
+        imageUrl: saved.assetUrl,
+        filePath: saved.filePath,
+        fileName,
+        time: playhead,
+        width: canvasSize.width,
+        height: canvasSize.height,
+      }));
+      setNotice(`已导出 ${playhead.toFixed(2)}s 的画面为图片节点 · ${canvasSize.width}×${canvasSize.height}`);
+    } catch (reason) {
+      setFailure(describeFailure('导出当前帧', reason));
+      console.error('[videoEditor] 导出当前帧失败:', reason);
+    } finally {
+      opened.forEach((input) => input.dispose());
+      setExportingFrame(false);
+    }
+  }, [canvasSize, exporting, exportingFrame, playhead, record, session, tracks]);
+
   const closeWindow = useCallback(async () => {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
     await getCurrentWindow().close();
@@ -1072,8 +1156,18 @@ export default function VideoEditorWindow() {
               <button
                 type="button"
                 className="video-editor-btn"
+                onClick={() => { void handleExportFrame(); }}
+                disabled={phase !== 'ready' || allClips.length === 0 || exportingFrame}
+                title="把播放头所在的画面导出为画布图片节点"
+              >
+                <Icon icon="lucide:image-down" width={13} height={13} />
+                {exportingFrame ? '导出当前帧…' : '导出当前帧'}
+              </button>
+              <button
+                type="button"
+                className="video-editor-btn"
                 onClick={() => { void handleExport('local'); }}
-                disabled={phase !== 'ready' || allClips.length === 0}
+                disabled={phase !== 'ready' || allClips.length === 0 || exportingFrame}
               >
                 <Icon icon="lucide:download" width={13} height={13} />
                 导出到本地
@@ -1082,7 +1176,7 @@ export default function VideoEditorWindow() {
                 type="button"
                 className="video-editor-btn primary"
                 onClick={() => { void handleExport('canvas'); }}
-                disabled={phase !== 'ready' || allClips.length === 0}
+                disabled={phase !== 'ready' || allClips.length === 0 || exportingFrame}
               >
                 <Icon icon="lucide:upload" width={13} height={13} />
                 导出为新节点

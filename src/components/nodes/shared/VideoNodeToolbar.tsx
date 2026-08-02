@@ -1,7 +1,7 @@
 ﻿/**
  * VideoNodeToolbar 视频节点浮动工具栏 + 编辑态支持
  */
-import { memo, useCallback } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { NodeType, BaseNodeData } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
@@ -19,9 +19,18 @@ import { requestPresetSequence } from '../../../services/presetSequenceService';
 import { useAppStore } from '../../../store/useAppStore';
 import type { Node } from '@xyflow/react';
 
+/** 截帧位置：首帧 / 播放头当前帧 / 尾帧 */
+export type CaptureFramePosition = 'first' | 'current' | 'last';
+
+const CAPTURE_FRAME_OPTIONS: { position: CaptureFramePosition; label: string; icon: string }[] = [
+  { position: 'first', label: '导出首帧', icon: 'mdi:page-first' },
+  { position: 'current', label: '导出当前帧', icon: 'mdi:camera-outline' },
+  { position: 'last', label: '导出尾帧', icon: 'mdi:page-last' },
+];
+
 interface VideoNodeToolbarProps {
   nodeId: string;
-  onCaptureFrame: () => void;
+  onCaptureFrame: (position: CaptureFramePosition) => void;
   onFullscreen: () => void;
   onCopyFile: () => void;
 }
@@ -32,6 +41,46 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
   const edit = useToolbarEdit({ nodeType });
   const userPresets = useAppStore((s) => s.userPresets);
   const addNodeWithEdge = useAppStore((s) => s.addNodeWithEdge);
+
+  // ── 截帧子菜单：与图像节点的宫格菜单同一套结构与样式 ──
+  const [frameMenuOpen, setFrameMenuOpen] = useState(false);
+  const [frameMenuBelow, setFrameMenuBelow] = useState(false);
+  const frameWrapRef = useRef<HTMLDivElement>(null);
+  const frameMenuRef = useRef<HTMLDivElement>(null);
+
+  const toggleFrameMenu = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFrameMenuOpen((open) => !open);
+  }, []);
+
+  // 工具栏贴在节点顶部，上方放不下时翻到按钮下面
+  useEffect(() => {
+    if (!frameMenuOpen) return;
+    const raf = requestAnimationFrame(() => {
+      const anchor = frameWrapRef.current;
+      const menu = frameMenuRef.current;
+      if (!anchor || !menu) return;
+      setFrameMenuBelow(anchor.getBoundingClientRect().top - menu.offsetHeight - 12 < 0);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [frameMenuOpen]);
+
+  useEffect(() => {
+    if (!frameMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (frameWrapRef.current && !frameWrapRef.current.contains(e.target as unknown as globalThis.Node)) {
+        setFrameMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [frameMenuOpen]);
+
+  const pickFrame = useCallback((position: CaptureFramePosition) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFrameMenuOpen(false);
+    onCaptureFrame(position);
+  }, [onCaptureFrame]);
 
   const handlePresetClick = useCallback(
     (key: string) => (e: React.MouseEvent) => {
@@ -53,7 +102,7 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
 
   const actionMap: Record<string, (e: React.MouseEvent) => void> = {
     copyFile: (e) => { e.stopPropagation(); onCopyFile(); },
-    captureFrame: (e) => { e.stopPropagation(); onCaptureFrame(); },
+    captureFrame: toggleFrameMenu,
     fullscreen: (e) => { e.stopPropagation(); onFullscreen(); },
   };
   const hiddenDefaultButtons = getHiddenDefaultToolbarButtons(registry, edit.activeButtonKeys);
@@ -69,10 +118,45 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
     const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
     const clickHandler = handler ?? handlePresetClick(key);
 
+    if (key === 'captureFrame') {
+      return (
+        <div key={key} className="multigrid-wrap" ref={frameWrapRef}>
+          <AnimatedButton
+            className="ftb-btn icon-only act-captureFrame"
+            data-tooltip={resolvedDef.label}
+            aria-label={resolvedDef.label}
+            onClick={clickHandler}
+          >
+            <Icon icon={resolvedDef.icon} width={14} height={14} />
+          </AnimatedButton>
+          {frameMenuOpen && (
+            <div
+              ref={frameMenuRef}
+              className={`multigrid-menu nodrag${frameMenuBelow ? ' multigrid-menu--below' : ''}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="multigrid-menu-title">截取哪一帧</div>
+              {CAPTURE_FRAME_OPTIONS.map((option) => (
+                <button
+                  key={option.position}
+                  type="button"
+                  className="multigrid-menu-item"
+                  onClick={pickFrame(option.position)}
+                >
+                  <Icon icon={option.icon} width={15} height={15} />
+                  <span>{option.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     return (
       <AnimatedButton
         key={key}
-        className={`ftb-btn icon-only${isPreset ? ' act-preset' : ''} rounded-[6px]`}
+        className={`ftb-btn icon-only ${isPreset ? 'act-preset' : `act-${key}`}`}
         data-tooltip={resolvedDef.label}
         aria-label={resolvedDef.label}
         onClick={clickHandler}
@@ -87,23 +171,25 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
   }
 
   return (
-    <div className="node-floating-toolbar text-toolbar nodrag" {...edit.longPressHandlers}>
-      {edit.layout.zones.map((zone, zi) => (
-        <div key={zone.id} className="img-toolbar-zone nodrag">
-          {zone.buttonKeys.map((key) => (
-            key === TOOLBAR_MORE_KEY
-              ? (
-                <ToolbarMoreMenu
-                  key={key}
-                  items={hiddenDefaultButtons}
-                  renderItem={renderActionButton}
-                />
-              )
-              : renderActionButton(key)
-          ))}
-          {zi < edit.layout.zones.length - 1 && <div className="ftb-divider img-toolbar-main-divider" />}
-        </div>
-      ))}
+    <div className="node-floating-toolbar img-toolbar nodrag" {...edit.longPressHandlers}>
+      <div className="img-toolbar-main nodrag">
+        {edit.layout.zones.map((zone, zi) => (
+          <div key={zone.id} className="img-toolbar-zone nodrag">
+            {zone.buttonKeys.map((key) => (
+              key === TOOLBAR_MORE_KEY
+                ? (
+                  <ToolbarMoreMenu
+                    key={key}
+                    items={hiddenDefaultButtons}
+                    renderItem={renderActionButton}
+                  />
+                )
+                : renderActionButton(key)
+            ))}
+            {zi < edit.layout.zones.length - 1 && <div className="ftb-divider img-toolbar-main-divider" />}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

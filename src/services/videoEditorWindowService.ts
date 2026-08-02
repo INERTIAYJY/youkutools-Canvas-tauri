@@ -30,12 +30,24 @@ export type VideoEditorExportResult = {
   height?: number;
 };
 
+/** 编辑器导出当前帧后回传给节点的结果 */
+export type VideoEditorFrameExportResult = {
+  imageUrl: string;
+  filePath?: string;
+  fileName: string;
+  /** 帧所在的时间轴时刻（秒），用于命名新节点 */
+  time: number;
+  width: number;
+  height: number;
+};
+
 type Subscriber = (message: VideoEditorProtocolMessage) => void;
 
 const ALLOWED_VIDEO_EDITOR_MESSAGE_TYPES = new Set([
   'storyai:video-editor-ready',
   'storyai:video-editor-close',
   'storyai:video-editor-exported',
+  'storyai:video-editor-frame-exported',
 ]);
 
 const subscribers = new Map<string, Set<Subscriber>>();
@@ -206,6 +218,21 @@ export async function postVideoEditorExported(
     instanceId,
     message: {
       type: 'storyai:video-editor-exported',
+      payload: { ...result },
+    },
+  } satisfies VideoEditorWindowEnvelope);
+}
+
+/** 编辑器窗口内调用：把当前帧回传主窗口，由节点侧建图片节点 */
+export async function postVideoEditorFrameExported(
+  instanceId: string,
+  result: VideoEditorFrameExportResult,
+): Promise<void> {
+  const { emitTo } = await import('@tauri-apps/api/event');
+  await emitTo('main', VIDEO_EDITOR_MESSAGE_EVENT, {
+    instanceId,
+    message: {
+      type: 'storyai:video-editor-frame-exported',
       payload: { ...result },
     },
   } satisfies VideoEditorWindowEnvelope);

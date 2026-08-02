@@ -49,6 +49,7 @@ import {
   openVideoEditorWindow,
   parseVideoEditorWindowEnvelope,
   postVideoEditorExported,
+  postVideoEditorFrameExported,
   subscribeVideoEditorWindow,
 } from '../../src/services/videoEditorWindowService';
 
@@ -106,6 +107,22 @@ describe('videoEditorWindowService', () => {
       })).toEqual({
         instanceId: 'proj::node',
         message: { type: 'storyai:video-editor-ready' },
+      });
+    });
+
+    it('accepts the current-frame export message', () => {
+      expect(parseVideoEditorWindowEnvelope({
+        instanceId: 'proj::node',
+        message: {
+          type: 'storyai:video-editor-frame-exported',
+          payload: { imageUrl: 'asset://frame.png', fileName: 'frame.png', time: 1.5 },
+        },
+      })).toEqual({
+        instanceId: 'proj::node',
+        message: {
+          type: 'storyai:video-editor-frame-exported',
+          payload: { imageUrl: 'asset://frame.png', fileName: 'frame.png', time: 1.5 },
+        },
       });
     });
 
@@ -240,6 +257,34 @@ describe('videoEditorWindowService', () => {
         message: expect.objectContaining({
           type: 'storyai:video-editor-exported',
           payload: expect.objectContaining({ videoUrl: 'asset://out.mp4', duration: 4.5 }),
+        }),
+      }),
+    );
+  });
+
+  it('posts the exported current frame back to the main window', async () => {
+    await postVideoEditorFrameExported('proj-1::node-7', {
+      imageUrl: 'asset://frame.png',
+      filePath: '/data/frame.png',
+      fileName: 'frame.png',
+      time: 2.25,
+      width: 1920,
+      height: 1080,
+    });
+
+    expect(tauriMocks.emitTo).toHaveBeenCalledWith(
+      'main',
+      VIDEO_EDITOR_MESSAGE_EVENT,
+      expect.objectContaining({
+        instanceId: 'proj-1::node-7',
+        message: expect.objectContaining({
+          type: 'storyai:video-editor-frame-exported',
+          payload: expect.objectContaining({
+            imageUrl: 'asset://frame.png',
+            time: 2.25,
+            width: 1920,
+            height: 1080,
+          }),
         }),
       }),
     );

@@ -28,7 +28,7 @@ export const TEXT_BUTTONS: ToolbarButtonDef[] = [
 /** 视频节点按钮 */
 export const VIDEO_BUTTONS: ToolbarButtonDef[] = [
   { key: 'copyFile',      label: '复制视频',    icon: 'mdi:content-copy',             defaultZone: '常用' },
-  { key: 'captureFrame',   label: '截取当前帧',  icon: 'mdi:camera-outline',            defaultZone: '常用' },
+  { key: 'captureFrame',   label: '截取帧',      icon: 'mdi:camera-outline',            defaultZone: '常用' },
   { key: 'fullscreen',     label: '全屏预览',    icon: 'mdi:fullscreen',                defaultZone: '常用' },
   createMoreButton('常用'),
 ];

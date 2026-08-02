@@ -12,6 +12,7 @@
 import { useContext, useEffect, useRef } from 'react';
 import { ResizeSnapContext, type ResizeDirection } from '../../../hooks/useNodeSnap';
 import { useShiftProportional, useProportionalLock, computeResize } from '../../../hooks/useShiftProportional';
+import { useNodeLocked } from '../../../hooks/useNodeLocked';
 import { useAppStore } from '../../../store/useAppStore';
 
 /** 8 个把手方向：x/y 为 -1 表示该轴的左/上边在动，1 表示右/下边在动，0 表示该轴不变 */
@@ -55,6 +56,8 @@ export default function ResizeHandle({
   const snap = useContext(ResizeSnapContext);
   const shiftHeld = useShiftProportional();
   const { lockRef, reset: resetProportional, lock: lockProportional } = useProportionalLock();
+  // 节点被锁定时不渲染把手：锁定既禁止拖拽移动，也禁止缩放改变大小
+  const isNodeLocked = useNodeLocked(nodeId);
 
   // 最新值 refs（供原生事件闭包读取，避免闭包过期）
   const latestRef = useRef({ currentWidth, currentHeight, minWidth, minHeight, lockAspectRatio, onResizeStart, onResizeEnd, onResize, nodeId, snap });
@@ -182,7 +185,9 @@ export default function ResizeHandle({
     // capture:true — 在原生捕获阶段拦截，早于 React 事件代理的冒泡阶段
     root.addEventListener('pointerdown', onNativePointerDown, true);
     return () => root.removeEventListener('pointerdown', onNativePointerDown, true);
-  }, [shiftHeld, lockRef, resetProportional, lockProportional]);
+  }, [shiftHeld, lockRef, resetProportional, lockProportional, isNodeLocked]);
+
+  if (isNodeLocked) return null;
 
   return (
     <div className="node-resize-handles" ref={rootRef}>

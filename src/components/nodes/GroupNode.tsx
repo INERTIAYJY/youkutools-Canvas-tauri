@@ -10,6 +10,7 @@ import { NodeResizer, Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import { Icon } from '@iconify/react';
 import { useAppStore, type AppState } from '../../store/useAppStore';
+import { useNodeLocked } from '../../hooks/useNodeLocked';
 import AnimatedButton from '../shared/AnimatedButton';
 import { batchExecuteNodes, type BatchContext } from '../../utils/batchExecute';
 
@@ -39,6 +40,8 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
   const renameGroup = useAppStore((s) => s.renameGroup);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const childCount = useAppStore((s) => getGroupChildCount(s.nodes, id));
+  // 锁定的分组同样禁止缩放
+  const isNodeLocked = useNodeLocked(id);
   const editingRef = useRef(false);
   const [batchRunning, setBatchRunning] = useState(false);
 
@@ -79,6 +82,7 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
   return (
     <>
       <NodeResizer
+        isVisible={!isNodeLocked}
         minWidth={200}
         minHeight={120}
         onResizeStart={commitToHistory}

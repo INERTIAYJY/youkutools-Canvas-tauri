@@ -43,9 +43,14 @@ import {
 } from '../../services/videoCompositor';
 import type { Input } from 'mediabunny';
 import {
+  postVideoEditorAiTransitionRequest,
   postVideoEditorExported,
   postVideoEditorFrameExported,
+  postVideoEditorModelsRequest,
   postVideoEditorReady,
+  subscribeVideoEditorHost,
+  type VideoEditorAiTransitionResult,
+  type VideoEditorModelOption,
 } from '../../services/videoEditorWindowService';
 import {
   computeTimelineDuration,
@@ -69,7 +74,7 @@ import type { AppConfig } from '../../types';
 import VideoEditorTimeline from './VideoEditorTimeline';
 import VideoEditorPreview from './VideoEditorPreview';
 import VideoEditorMediaPanel from './VideoEditorMediaPanel';
-import VideoEditorInspector from './VideoEditorInspector';
+import VideoEditorInspector, { type VideoEditorInspectorTab } from './VideoEditorInspector';
 import { resolveClipUrl, useVideoEditorSources } from './useVideoEditorSources';
 import { useTimelineHistory } from './useTimelineHistory';
 import {
@@ -85,6 +90,9 @@ import {
 
 type EditorPhase = 'loading' | 'ready' | 'error';
 type ExportDestination = 'canvas' | 'local';
+
+/** 取边界帧时往片段内部让开的时间量：正好落在边界上会取到相邻片段 */
+const BOUNDARY_FRAME_EPSILON = 0.02;
 
 function collectProjectImages(nodes: unknown): VideoEditorProjectImageSource[] {
   if (!Array.isArray(nodes)) return [];
@@ -242,6 +250,14 @@ export default function VideoEditorWindow() {
   // 输出分辨率相对源尺寸的倍率；4K 编码不通时可降到 1080p/720p
   const [outputScale, setOutputScale] = useState(1);
   const exportAbortRef = useRef<AbortController | null>(null);
+  // AI 转场：模型目录由主窗口下发，生成也在主窗口跑，这里只保留请求状态
+  const [aiModels, setAiModels] = useState<VideoEditorModelOption[]>([]);
+  const [aiTransitionStatus, setAiTransitionStatus] = useState<string | null>(null);
+  const [aiTransitionError, setAiTransitionError] = useState<string | null>(null);
+  const [aiTransitionBusy, setAiTransitionBusy] = useState(false);
+  const aiTransitionRef = useRef<{ requestId: string; beforeClipId: string } | null>(null);
+  // 检查器标签受控：时间轴上点接缝要能直接把右侧切到「转场」
+  const [inspectorTab, setInspectorTab] = useState<VideoEditorInspectorTab>('properties');
 
   const tracks = useMemo(() => record?.tracks ?? [], [record]);
   const videoTrack = getVideoTrack(tracks);
@@ -321,6 +337,11 @@ export default function VideoEditorWindow() {
   const inspectorClip = selectedClip ?? activeClip;
   const inspectorLocked = inspectorClip ? isClipLocked(tracks, inspectorClip.id) : false;
   const activeProbe = inspectorClip ? (getSource(inspectorClip)?.probe ?? null) : null;
+  // AI 转场插在选中片段与它前一段之间：主轨首段和叠加层都没有「前一段」
+  const inspectorMainIndex = inspectorClip
+    ? clips.findIndex((clip) => clip.id === inspectorClip.id)
+    : -1;
+  const canGenerateAiTransition = inspectorMainIndex > 0 && !videoTrack?.locked;
 
   // 合成画布尺寸取主轨首个可解码片段的分辨率，退回 1080p。
   // 计算极轻，直接派生即可，不值得为它维护一份 memo 依赖
@@ -1036,21 +1057,25 @@ export default function VideoEditorWindow() {
     mixedSources, record, session, timelineDuration, tracks,
   ]);
 
-  /** 把播放头所在的一帧按合成路径渲染出来，回传主窗口建图片节点 */
-  const handleExportFrame = useCallback(async () => {
-    if (!session || !record || exporting || exportingFrame) return;
-    const frameClips = tracks.flatMap((track) => (track.hidden ? [] : track.clips));
-    if (frameClips.length === 0) return;
-
-    setExportingFrame(true);
-    setFailure(null);
-    setNotice(null);
+  /**
+   * 把时间轴某一时刻按合成路径渲染成 PNG 字节。
+   * 「导出当前帧」和 AI 转场取首/尾帧共用同一条渲染路径，保证所见即所得。
+   */
+  const renderTimelineFramePng = useCallback(async (
+    time: number,
+    stageLabel: string,
+    /** 覆盖用的轨道快照；取转场首尾帧时用它屏蔽掉已有转场的淡入淡出 */
+    tracksOverride?: VideoEditorTrack[],
+  ): Promise<Uint8Array> => {
+    const frameTracks = tracksOverride ?? tracksRef.current;
+    const frameClips = frameTracks.flatMap((track) => (track.hidden ? [] : track.clips));
+    if (frameClips.length === 0) throw new Error('时间轴上没有可渲染的片段');
 
     const opened: Input[] = [];
     try {
       // 只准备这一帧用得到的素材：解码整条时间轴没有意义
       const renderSources = new Map<string, ClipRenderSource>();
-      await withStage('准备当前帧', async () => {
+      await withStage(`准备${stageLabel}`, async () => {
         for (const clip of frameClips) {
           if (clip.kind === 'text') continue;
           const url = resolveClipUrl(clip);
@@ -1074,21 +1099,37 @@ export default function VideoEditorWindow() {
       const context = canvas.getContext('2d');
       if (!context) throw new Error('画布上下文不可用');
 
-      await withStage('渲染当前帧', () => renderFrameAt(
+      await withStage(`渲染${stageLabel}`, () => renderFrameAt(
         context,
         canvasSize,
-        tracks,
-        playhead,
+        frameTracks,
+        time,
         (clip) => renderSources.get(resolveClipUrl(clip)),
       ));
 
-      const bytes = await withStage('编码当前帧', async () => {
+      return await withStage(`编码${stageLabel}`, async () => {
         const blob = await new Promise<Blob | null>((resolve) => {
           canvas.toBlob((result) => resolve(result), 'image/png');
         });
-        if (!blob) throw new Error('当前帧编码失败');
+        if (!blob) throw new Error(`${stageLabel}编码失败`);
         return new Uint8Array(await blob.arrayBuffer());
       });
+    } finally {
+      opened.forEach((input) => input.dispose());
+    }
+  }, [canvasSize]);
+
+  /** 把播放头所在的一帧按合成路径渲染出来，回传主窗口建图片节点 */
+  const handleExportFrame = useCallback(async () => {
+    if (!session || !record || exporting || exportingFrame) return;
+    if (allTimelineClips.length === 0) return;
+
+    setExportingFrame(true);
+    setFailure(null);
+    setNotice(null);
+
+    try {
+      const bytes = await renderTimelineFramePng(playhead, '当前帧');
 
       // 同一工程会反复导帧，文件名带上时刻才不至于全靠去重后缀区分
       const stamp = `${Math.round(playhead * 1000)}ms`;
@@ -1112,10 +1153,208 @@ export default function VideoEditorWindow() {
       setFailure(describeFailure('导出当前帧', reason));
       console.error('[videoEditor] 导出当前帧失败:', reason);
     } finally {
-      opened.forEach((input) => input.dispose());
       setExportingFrame(false);
     }
-  }, [canvasSize, exporting, exportingFrame, playhead, record, session, tracks]);
+  }, [
+    allTimelineClips.length, canvasSize, exporting, exportingFrame, playhead,
+    record, renderTimelineFramePng, session,
+  ]);
+
+  /** 主窗口回传的 AI 转场落到主轨上：插在触发它的片段之前 */
+  const insertAiTransitionClip = useCallback((beforeClipId: string, media: {
+    videoUrl: string;
+    filePath?: string;
+    fileName: string;
+    duration?: number;
+  }): boolean => {
+    const mainTrack = getVideoTrack(tracksRef.current);
+    if (!mainTrack || mainTrack.locked) return false;
+    if (!mainTrack.clips.some((clip) => clip.id === beforeClipId)) return false;
+
+    const clip: VideoEditorClip = {
+      id: `ai-transition-${Date.now().toString(36)}`,
+      kind: 'video',
+      fileName: media.fileName,
+      filePath: media.filePath,
+      sourceUrl: media.videoUrl,
+      timelineStart: 0,
+      sourceIn: 0,
+      // 时长未知时留 0，探测到真实时长后由 handleSourceProbed 回填
+      sourceOut: media.duration && media.duration > 0 ? media.duration : 0,
+    };
+
+    commitChange();
+    updateTracks((current) => current.map((track) => {
+      if (track.id !== mainTrack.id) return track;
+      const index = track.clips.findIndex((candidate) => candidate.id === beforeClipId);
+      if (index < 0) return track;
+      const nextClips = [...track.clips];
+      nextClips.splice(index, 0, clip);
+      return { ...track, clips: relayoutSequential(nextClips) };
+    }));
+    setSelectedClipIds([clip.id]);
+    return true;
+  }, [commitChange, updateTracks]);
+
+  // 主窗口下发的模型目录与转场结果
+  useEffect(() => {
+    if (!session) return;
+
+    const unsubscribe = subscribeVideoEditorHost(session.instanceId, (message) => {
+      if (message.type === 'storyai:video-editor-models') {
+        const models = message.payload?.models;
+        setAiModels(Array.isArray(models) ? (models as VideoEditorModelOption[]) : []);
+        return;
+      }
+      if (message.type !== 'storyai:video-editor-ai-transition-result') return;
+
+      const payload = (message.payload ?? {}) as Partial<VideoEditorAiTransitionResult>;
+      const pending = aiTransitionRef.current;
+      if (!pending || payload.requestId !== pending.requestId) return;
+      aiTransitionRef.current = null;
+      setAiTransitionBusy(false);
+      setAiTransitionStatus(null);
+
+      if (payload.error || !payload.videoUrl) {
+        setAiTransitionError(payload.error || 'AI 转场生成失败');
+        return;
+      }
+      const inserted = insertAiTransitionClip(pending.beforeClipId, {
+        videoUrl: payload.videoUrl,
+        filePath: typeof payload.filePath === 'string' ? payload.filePath : undefined,
+        fileName: payload.fileName || 'AI 转场',
+        duration: typeof payload.duration === 'number' ? payload.duration : undefined,
+      });
+      setAiTransitionError(inserted ? null : '转场已生成，但原片段已不在主轨上，未能插入');
+      if (inserted) setNotice('AI 转场已插入主轨');
+    });
+
+    void postVideoEditorModelsRequest(session.instanceId).catch((reason) => {
+      console.error('[videoEditor] 请求视频模型列表失败:', reason);
+    });
+    return unsubscribe;
+  }, [insertAiTransitionClip, session]);
+
+  /**
+   * 时间轴接缝上的按钮：没有转场先补一个默认交叠淡入，已有的直接跳去编辑。
+   * 两种情况都选中该片段并切到「转场」标签，点完就能接着调。
+   */
+  const handleEditTransition = useCallback((clipId: string) => {
+    const clip = tracksRef.current.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === clipId);
+    if (!clip) return;
+    const existing = clip.transitionIn;
+    if (!existing || existing.kind === 'none' || existing.duration <= 0) {
+      commitChange();
+      updateTracks((current) => updateClipInTracks(current, clipId, (target) => ({
+        ...target,
+        transitionIn: { kind: 'dissolve', duration: 0.5 },
+      })));
+    }
+    setSelectedClipIds([clipId]);
+    setInspectorTab('transition');
+  }, [commitChange, updateTracks]);
+
+  const handleRefreshAiModels = useCallback(() => {
+    if (!session) return;
+    void postVideoEditorModelsRequest(session.instanceId).catch((reason) => {
+      setAiTransitionError(reason instanceof Error ? reason.message : String(reason));
+    });
+  }, [session]);
+
+  /**
+   * 按「前一段尾帧 → 本段首帧 + 提示词」生成一段过渡视频。
+   *
+   * 帧在本窗口渲染并落盘，模型调用交给主窗口；结果回来后插到两段之间。
+   */
+  const handleGenerateAiTransition = useCallback(async (options: {
+    prompt: string;
+    model: string;
+    provider: string;
+    duration: number;
+  }) => {
+    if (!session || !record || aiTransitionBusy) return;
+
+    const mainTrack = getVideoTrack(tracksRef.current);
+    const targetId = selectedClipIds[0] ?? activeClip?.id;
+    const index = mainTrack ? mainTrack.clips.findIndex((clip) => clip.id === targetId) : -1;
+    if (!mainTrack || index < 0) {
+      setAiTransitionError('请先在主轨上选中一个片段');
+      return;
+    }
+    if (index === 0) {
+      setAiTransitionError('首个片段之前没有画面可衔接，请选中第二段及之后的片段');
+      return;
+    }
+    if (mainTrack.locked) {
+      setAiTransitionError('主轨已锁定，无法插入转场');
+      return;
+    }
+
+    const target = mainTrack.clips[index];
+    setAiTransitionBusy(true);
+    setAiTransitionError(null);
+    setFailure(null);
+    setAiTransitionStatus('正在取首尾帧…');
+
+    try {
+      // 已有的预设转场会让边界附近的画面处在淡入中，取到的参考帧就是半透明的。
+      // 采样时先摘掉转场，拿到两段各自的干净画面。
+      const cleanTracks = tracksRef.current.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => (
+          clip.transitionIn ? { ...clip, transitionIn: undefined } : clip
+        )),
+      }));
+
+      // 主轨磁吸相接：边界前一点是前一段的尾帧，后一点是本段的首帧
+      const boundary = target.timelineStart;
+      const firstFrame = await renderTimelineFramePng(
+        Math.max(0, boundary - BOUNDARY_FRAME_EPSILON),
+        '转场首帧',
+        cleanTracks,
+      );
+      const lastFrame = await renderTimelineFramePng(
+        boundary + BOUNDARY_FRAME_EPSILON,
+        '转场尾帧',
+        cleanTracks,
+      );
+
+      const stamp = Date.now().toString(36);
+      setAiTransitionStatus('正在暂存首尾帧…');
+      const savedFirst = await saveBinaryToProjectData(
+        firstFrame, record.projectId, `AI转场首帧-${stamp}.png`,
+      );
+      const savedLast = await saveBinaryToProjectData(
+        lastFrame, record.projectId, `AI转场尾帧-${stamp}.png`,
+      );
+      if (!savedFirst || !savedLast) throw new Error('项目数据目录不可写，无法暂存首尾帧');
+
+      const requestId = `ait-${stamp}-${Math.random().toString(36).slice(2, 8)}`;
+      aiTransitionRef.current = { requestId, beforeClipId: target.id };
+      setAiTransitionStatus('已提交主窗口，正在生成转场…');
+      await postVideoEditorAiTransitionRequest(session.instanceId, {
+        requestId,
+        prompt: options.prompt,
+        model: options.model,
+        provider: options.provider,
+        duration: options.duration,
+        firstFrameUrl: savedFirst.assetUrl,
+        firstFrameFilePath: savedFirst.filePath,
+        lastFrameUrl: savedLast.assetUrl,
+        lastFrameFilePath: savedLast.filePath,
+      });
+    } catch (reason) {
+      aiTransitionRef.current = null;
+      setAiTransitionBusy(false);
+      setAiTransitionStatus(null);
+      setAiTransitionError(reason instanceof Error ? reason.message : String(reason));
+      console.error('[videoEditor] AI 转场提交失败:', reason);
+    }
+  }, [
+    activeClip?.id, aiTransitionBusy, record, renderTimelineFramePng,
+    selectedClipIds, session,
+  ]);
 
   const closeWindow = useCallback(async () => {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -1231,10 +1470,12 @@ export default function VideoEditorWindow() {
               libraryAssets={libraryAssets}
               projectImages={projectImages}
               addingMedia={addingMedia}
+              uploadingSticker={uploadingSticker}
               onSelectClip={(clipId) => setSelectedClipIds([clipId])}
               onAddLocal={() => { void handleAddLocalMedia(); }}
               onAddLibraryAsset={handleAddLibraryAsset}
               onAddCanvasImage={handleAddSticker}
+              onUploadSticker={() => { void handleUploadSticker(); }}
             />
             <VideoEditorPreview
               clip={activeClip}
@@ -1280,15 +1521,17 @@ export default function VideoEditorWindow() {
                 transitionIn: { kind, duration },
               }))}
               onVolumeChange={(volume) => patchSelectedClip((clip) => ({ ...clip, volume }))}
-              selectedIsOverlay={!!selectedClip && tracks.some((track) => (
-                track.overlay && track.clips.some((clip) => clip.id === selectedClip.id)
-              ))}
-              projectImages={projectImages}
-              uploadingSticker={uploadingSticker}
               onAddText={handleAddText}
               onPatchText={handlePatchText}
-              onAddSticker={handleAddSticker}
-              onUploadSticker={() => { void handleUploadSticker(); }}
+              activeTab={inspectorTab}
+              onActiveTabChange={setInspectorTab}
+              aiModels={aiModels}
+              aiTransitionBusy={aiTransitionBusy}
+              aiTransitionStatus={aiTransitionStatus}
+              aiTransitionError={aiTransitionError}
+              canGenerateAiTransition={canGenerateAiTransition}
+              onRefreshAiModels={handleRefreshAiModels}
+              onGenerateAiTransition={(options) => { void handleGenerateAiTransition(options); }}
             />
           </div>
           <VideoEditorTimeline
@@ -1309,6 +1552,7 @@ export default function VideoEditorWindow() {
             onSplit={handleSplit}
             onDeleteSelected={handleDeleteSelected}
             onDuplicateClip={handleDuplicateClip}
+            onEditTransition={handleEditTransition}
             onTracksChange={persistTracks}
             onAddTrack={handleAddTrack}
             onMoveTrack={handleMoveTrack}

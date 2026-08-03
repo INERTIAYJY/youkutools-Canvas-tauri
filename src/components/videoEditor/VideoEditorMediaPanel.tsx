@@ -2,6 +2,7 @@
  * VideoEditorMediaPanel — 左侧素材列表
  *
  * 列出时间轴上的全部片段，并可从素材库、本机或画布图片节点继续添加。
+ * 「图片」分类同时承载贴图来源：项目图片节点与本地贴图都从这里入轨。
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
@@ -19,10 +20,12 @@ interface VideoEditorMediaPanelProps {
   libraryAssets: AssetFileEntry[];
   projectImages: VideoEditorProjectImageSource[];
   addingMedia: boolean;
+  uploadingSticker: boolean;
   onSelectClip: (clipId: string) => void;
   onAddLocal: () => void;
   onAddLibraryAsset: (asset: AssetFileEntry) => void;
   onAddCanvasImage: (image: VideoEditorProjectImageSource) => void;
+  onUploadSticker: () => void;
 }
 
 function VideoEditorMediaPanel({
@@ -32,10 +35,12 @@ function VideoEditorMediaPanel({
   libraryAssets,
   projectImages,
   addingMedia,
+  uploadingSticker,
   onSelectClip,
   onAddLocal,
   onAddLibraryAsset,
   onAddCanvasImage,
+  onUploadSticker,
 }: VideoEditorMediaPanelProps) {
   const [addMenu, setAddMenu] = useState<'closed' | 'root' | 'library' | 'canvas'>('closed');
   const [query, setQuery] = useState('');
@@ -81,6 +86,12 @@ function VideoEditorMediaPanel({
       && (!normalized || clip.fileName.toLocaleLowerCase().includes(normalized))
     ));
   }, [clips, mediaFilter, mediaQuery]);
+  // 贴图来源并入「图片」分类：与工程素材共用同一个搜索框
+  const stickerImages = useMemo(() => {
+    const normalized = mediaQuery.trim().toLocaleLowerCase();
+    if (!normalized) return projectImages;
+    return projectImages.filter((image) => image.label.toLocaleLowerCase().includes(normalized));
+  }, [mediaQuery, projectImages]);
 
   return (
     <aside className="video-editor-media">
@@ -217,6 +228,53 @@ function VideoEditorMediaPanel({
         </label>
       </div>
       <div className="video-editor-media-list">
+        {mediaFilter === 'image' && (
+          <div className="video-editor-media-stickers">
+            <button
+              type="button"
+              className="video-editor-layer-add"
+              disabled={uploadingSticker}
+              onClick={onUploadSticker}
+            >
+              <Icon icon={uploadingSticker ? 'lucide:loader-circle' : 'lucide:upload'} width={15} height={15} />
+              {uploadingSticker ? '正在导入…' : '上传本地贴图'}
+            </button>
+
+            <div className="video-editor-layer-section-head">
+              <span>项目图片节点</span>
+              <em>{stickerImages.length}</em>
+            </div>
+            {stickerImages.length > 0 ? (
+              <div className="video-editor-project-image-grid">
+                {stickerImages.map((image) => (
+                  <button
+                    type="button"
+                    key={image.nodeId}
+                    title={image.label}
+                    onClick={() => onAddCanvasImage(image)}
+                  >
+                    <img src={image.sourceUrl} alt="" loading="lazy" draggable={false} />
+                    <span>{image.label}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="video-editor-layer-empty compact">
+                <Icon icon="lucide:image-off" width={18} height={18} />
+                <span>{projectImages.length === 0 ? '当前项目还没有可用的图片节点' : '没有匹配的图片节点'}</span>
+              </div>
+            )}
+
+            <p className="video-editor-layer-hint">
+              点击即可作为贴图加入叠加轨；位置、缩放与不透明度在右侧「属性 → 画面」中调整。
+            </p>
+
+            <div className="video-editor-layer-section-head">
+              <span>工程内图片片段</span>
+              <em>{visibleClips.length}</em>
+            </div>
+          </div>
+        )}
         {visibleClips.length === 0 && (
           <div className="video-editor-panel-empty">
             {clips.length === 0 ? '工程内暂无素材' : '没有匹配的素材'}

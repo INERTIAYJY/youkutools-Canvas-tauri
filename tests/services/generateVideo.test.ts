@@ -11,8 +11,10 @@ import {
   getMediaReferenceUrls,
   mergeMediaReferences,
 } from '../../src/services/ai/connectedReferenceMedia';
+import { mediaProviderRegistry } from '../../src/services/ai/mediaProviderRegistry';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { BaseNodeData } from '../../src/types';
+import type { VideoGenerationReferenceInput } from '../../src/types/aiTypes';
 
 const comfyMocks = vi.hoisted(() => ({
   executeVideo: vi.fn(),
@@ -241,6 +243,65 @@ describe('video prompt media references', () => {
     expect(merged).toHaveLength(2);
     expect(merged[0]).toMatchObject({ origin: 'prompt', sourceNodeId: 'prompt-audio' });
     expect(merged[1].kind).toBe('video');
+  });
+});
+
+describe('caller-supplied reference media', () => {
+  // 剪辑窗口的 AI 转场没有画布节点可连线，只能直接把首/尾帧交给生成入口
+  it('puts explicit references ahead of prompt references and keeps the frame roles', async () => {
+    const imageNode: Node<BaseNodeData> = {
+      id: 'image-1',
+      type: 'ai-image',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '概念图',
+        type: 'ai-image',
+        imageUrl: 'https://cdn.example/concept.png',
+      },
+    };
+    useAppStore.setState({ nodes: [imageNode] });
+
+    let captured: VideoGenerationReferenceInput | null = null;
+    const unregister = mediaProviderRegistry.register({
+      providerId: 'test-transition-provider',
+      capabilities: ['video'],
+      async generateVideo({ resolveReferenceInput }) {
+        captured = await resolveReferenceInput();
+        return { url: 'https://cdn.example/transition.mp4' };
+      },
+    });
+
+    try {
+      await generateVideo({
+        prompt: '穿过火光过渡 @{image-1:概念图}',
+        model: 'test/transition',
+        provider: 'test-transition-provider',
+        referenceMedia: [
+          { kind: 'image', url: 'asset://tail.png', origin: 'connection', role: 'reference' },
+          { kind: 'image', url: 'asset://head.png', origin: 'connection', role: 'reference' },
+        ],
+      });
+    } finally {
+      unregister();
+    }
+
+    const referenceInput = captured as VideoGenerationReferenceInput | null;
+    expect(referenceInput?.operation).toBe('image-to-video');
+    expect(referenceInput?.imageUrls).toEqual([
+      'asset://tail.png',
+      'asset://head.png',
+      'https://cdn.example/concept.png',
+    ]);
+    // 首帧固定是调用方给的第一张；尾帧是整串的最后一张
+    expect(referenceInput?.references?.[0]).toMatchObject({
+      url: 'asset://tail.png',
+      role: 'first_frame',
+    });
+    expect(referenceInput?.references?.[1]).toMatchObject({
+      url: 'asset://head.png',
+      role: 'reference',
+    });
+    expect(referenceInput?.references?.at(-1)).toMatchObject({ role: 'last_frame' });
   });
 });
 

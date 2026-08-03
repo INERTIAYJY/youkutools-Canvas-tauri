@@ -90,11 +90,16 @@ async function resolveGeneralProtocolMediaUrls(
 async function resolveVideoReferenceInput(
   rawPrompt: string,
   nodeId: string | undefined,
+  /** 调用方直接给定的参考媒体；排在最前，保证首/尾帧角色按调用方的顺序分配 */
+  explicitReferences: readonly MediaReference[] = [],
 ): Promise<VideoGenerationReferenceInput> {
   const promptInput = await resolvePromptWithMediaRefs(rawPrompt);
   const connected = collectConnectedReferenceMedia(nodeId);
   const references = assignVideoReferenceRoles(
-    mergeMediaReferences(promptInput.references, connected.references),
+    mergeMediaReferences(
+      explicitReferences,
+      mergeMediaReferences(promptInput.references, connected.references),
+    ),
   );
   const imageUrls = getMediaReferenceUrls(references, 'image');
   const videoUrls = getMediaReferenceUrls(references, 'video');
@@ -200,7 +205,7 @@ export async function generateVideo(
       params,
       prompt,
       resolveReferenceInput: async () => {
-        const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+        const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
         if (provider === 'apimart') {
           assertRemoteVideoAudioReferences(referenceInput, 'APIMart');
         }
@@ -212,7 +217,7 @@ export async function generateVideo(
 
   // 即梦视频：无参考图 → text2video；有参考图 → image2video
   if (provider === 'dreamina') {
-    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
     assertVideoOperationSupported(referenceInput, '即梦视频模型');
     const dreaminaPrompt = referenceInput.prompt;
     if (!dreaminaPrompt.trim()) throw new Error('提示词不能为空');
@@ -240,7 +245,7 @@ export async function generateVideo(
       throw new Error('未配置 火山方舟 的服务地址\n请在「设置 → API Key」中添加');
     }
     const modelName = extractModelName(model, provider);
-    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
     assertVideoOperationSupported(referenceInput, '火山方舟当前视频接口');
     const resolvedPrompt = referenceInput.prompt;
     const mergedImageUrls = referenceInput.imageUrls;
@@ -266,7 +271,7 @@ export async function generateVideo(
     const connection = resolveGeneralModelConnection(model);
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
-    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
     if (gm.executionProfile) {
       const [remoteImageUrls, videoUrls, audioUrls] = await Promise.all([
         resolveImageUrlArray(referenceInput.imageUrls, connection.providerConfigId),

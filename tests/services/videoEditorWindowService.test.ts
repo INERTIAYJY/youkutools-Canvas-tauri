@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const tauriMocks = vi.hoisted(() => ({
   emitTo: vi.fn(async () => undefined),
   eventHandler: null as null | ((event: { payload: unknown }) => void),
+  hostHandler: null as null | ((event: { payload: unknown }) => void),
   existingWindow: null as MockWindow | null,
   created: [] as MockWindow[],
   destroyHandlers: [] as (() => void)[],
@@ -34,7 +35,12 @@ class MockWindow {
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: MockWindow }));
 vi.mock('@tauri-apps/api/event', () => ({
   emitTo: tauriMocks.emitTo,
-  listen: vi.fn(async (_event: string, handler: (event: { payload: unknown }) => void) => {
+  // 两条通道各自注册一个监听器，按事件名分开保存才能验证互不串台
+  listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
+    if (event === 'video-editor:host-message') {
+      tauriMocks.hostHandler = handler;
+      return () => { tauriMocks.hostHandler = null; };
+    }
     tauriMocks.eventHandler = handler;
     return () => { tauriMocks.eventHandler = null; };
   }),
@@ -47,9 +53,13 @@ import {
   __resetVideoEditorWindowServiceForTests,
   buildVideoEditorWindowUrl,
   openVideoEditorWindow,
+  parseVideoEditorHostEnvelope,
   parseVideoEditorWindowEnvelope,
+  postVideoEditorAiTransitionResult,
   postVideoEditorExported,
   postVideoEditorFrameExported,
+  postVideoEditorModels,
+  subscribeVideoEditorHost,
   subscribeVideoEditorWindow,
 } from '../../src/services/videoEditorWindowService';
 
@@ -65,6 +75,7 @@ describe('videoEditorWindowService', () => {
     __resetVideoEditorWindowServiceForTests();
     tauriMocks.emitTo.mockClear();
     tauriMocks.eventHandler = null;
+    tauriMocks.hostHandler = null;
     tauriMocks.existingWindow = null;
     tauriMocks.created.length = 0;
     tauriMocks.destroyHandlers.length = 0;
@@ -147,6 +158,51 @@ describe('videoEditorWindowService', () => {
         message: { type: 'storyai:video-editor-exported', payload: 'nope' },
       })).toBeNull();
     });
+
+    it('accepts the AI transition request but not the host-only reply', () => {
+      expect(parseVideoEditorWindowEnvelope({
+        instanceId: 'proj::node',
+        message: {
+          type: 'storyai:video-editor-ai-transition-request',
+          payload: { requestId: 'ait-1', prompt: '推近穿过火光' },
+        },
+      })).not.toBeNull();
+      expect(parseVideoEditorWindowEnvelope({
+        instanceId: 'proj::node',
+        message: { type: 'storyai:video-editor-ai-transition-result' },
+      })).toBeNull();
+    });
+  });
+
+  describe('parseVideoEditorHostEnvelope', () => {
+    it('accepts the messages the main window pushes down', () => {
+      expect(parseVideoEditorHostEnvelope({
+        instanceId: 'proj::node',
+        message: { type: 'storyai:video-editor-models', payload: { models: [] } },
+      })).toEqual({
+        instanceId: 'proj::node',
+        message: { type: 'storyai:video-editor-models', payload: { models: [] } },
+      });
+      expect(parseVideoEditorHostEnvelope({
+        instanceId: 'proj::node',
+        message: {
+          type: 'storyai:video-editor-ai-transition-result',
+          payload: { requestId: 'ait-1', videoUrl: 'asset://t.mp4' },
+        },
+      })).not.toBeNull();
+    });
+
+    // 两条通道的白名单必须互斥，否则编辑器能自导自演一条「主窗口下发」的消息
+    it('rejects editor-to-main message types', () => {
+      expect(parseVideoEditorHostEnvelope({
+        instanceId: 'proj::node',
+        message: { type: 'storyai:video-editor-exported' },
+      })).toBeNull();
+      expect(parseVideoEditorHostEnvelope({
+        instanceId: 'proj::node',
+        message: { type: 'storyai:video-editor-ai-transition-request' },
+      })).toBeNull();
+    });
   });
 
   it('creates one window carrying the editor route', async () => {
@@ -210,6 +266,59 @@ describe('videoEditorWindowService', () => {
       type: 'storyai:video-editor-exported',
     }));
     expect(forNode9).not.toHaveBeenCalled();
+  });
+
+  it('delivers host messages only to the matching editor subscriber', async () => {
+    const forNode7 = vi.fn();
+    const forNode9 = vi.fn();
+    subscribeVideoEditorHost('proj-1::node-7', forNode7);
+    subscribeVideoEditorHost('proj-1::node-9', forNode9);
+    await flushListener();
+
+    tauriMocks.hostHandler?.({
+      payload: {
+        instanceId: 'proj-1::node-7',
+        message: {
+          type: 'storyai:video-editor-ai-transition-result',
+          payload: { requestId: 'ait-1', videoUrl: 'asset://t.mp4' },
+        },
+      },
+    });
+
+    expect(forNode7).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'storyai:video-editor-ai-transition-result',
+    }));
+    expect(forNode9).not.toHaveBeenCalled();
+  });
+
+  it('posts the model list and the AI transition result down to the editor window', async () => {
+    await postVideoEditorModels('proj-1::node-7', [
+      { value: 'volcengine/seedance', label: 'Seedance', provider: 'volcengine', groupName: '火山方舟' },
+    ]);
+    await postVideoEditorAiTransitionResult('proj-1::node-7', {
+      requestId: 'ait-1',
+      videoUrl: 'asset://t.mp4',
+    });
+
+    expect(tauriMocks.emitTo).toHaveBeenCalledWith(
+      VIDEO_EDITOR_WINDOW_LABEL,
+      VIDEO_EDITOR_HOST_EVENT,
+      expect.objectContaining({
+        instanceId: 'proj-1::node-7',
+        message: expect.objectContaining({ type: 'storyai:video-editor-models' }),
+      }),
+    );
+    expect(tauriMocks.emitTo).toHaveBeenCalledWith(
+      VIDEO_EDITOR_WINDOW_LABEL,
+      VIDEO_EDITOR_HOST_EVENT,
+      expect.objectContaining({
+        instanceId: 'proj-1::node-7',
+        message: expect.objectContaining({
+          type: 'storyai:video-editor-ai-transition-result',
+          payload: { requestId: 'ait-1', videoUrl: 'asset://t.mp4' },
+        }),
+      }),
+    );
   });
 
   it('ignores envelopes whose message type is not allowed', async () => {

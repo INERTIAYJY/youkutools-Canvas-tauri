@@ -7,12 +7,13 @@
 import { memo, useState, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
 import VideoEditorCodecPanel from './VideoEditorCodecPanel';
-import VideoEditorTextStickerPanel from './VideoEditorTextStickerPanel';
+import VideoEditorTextPanel from './VideoEditorTextPanel';
+import VideoEditorTransitionPanel from './VideoEditorTransitionPanel';
+import type { VideoEditorModelOption } from '../../services/videoEditorWindowService';
 import {
   DEFAULT_TRANSFORM,
   getClipDuration,
   type VideoEditorClip,
-  type VideoEditorProjectImageSource,
   type VideoEditorSourceProbe,
   type VideoEditorTextStyle,
   type VideoEditorTransform,
@@ -37,17 +38,28 @@ interface VideoEditorInspectorProps {
   onTransformChange: (patch: Partial<VideoEditorTransform>) => void;
   onTransitionChange: (kind: VideoEditorTransitionKind, duration: number) => void;
   onVolumeChange: (volume: number) => void;
-  selectedIsOverlay: boolean;
-  projectImages: VideoEditorProjectImageSource[];
-  uploadingSticker: boolean;
   onAddText: () => void;
   onPatchText: (patch: Partial<VideoEditorTextStyle>) => void;
-  onAddSticker: (source: VideoEditorProjectImageSource) => void;
-  onUploadSticker: () => void;
+  /** 受控标签：时间轴点接缝时要能直接切到「转场」 */
+  activeTab: VideoEditorInspectorTab;
+  onActiveTabChange: (tab: VideoEditorInspectorTab) => void;
+  // ── AI 转场：模型目录与生成都在主窗口，这里只透传状态与回调 ──
+  aiModels: VideoEditorModelOption[];
+  aiTransitionBusy: boolean;
+  aiTransitionStatus: string | null;
+  aiTransitionError: string | null;
+  canGenerateAiTransition: boolean;
+  onRefreshAiModels: () => void;
+  onGenerateAiTransition: (options: {
+    prompt: string;
+    model: string;
+    provider: string;
+    duration: number;
+  }) => void;
 }
 
 const PENDING_SECTIONS = ['滤镜'];
-type InspectorTab = 'properties' | 'text' | 'sticker';
+export type VideoEditorInspectorTab = 'properties' | 'text' | 'transition';
 type PropertyTab = 'clip' | 'transform' | 'audio' | 'export';
 
 function rangeProgress(value: number, min: number, max: number): CSSProperties {
@@ -75,19 +87,21 @@ function VideoEditorInspector({
   onTransformChange,
   onTransitionChange,
   onVolumeChange,
-  selectedIsOverlay,
-  projectImages,
-  uploadingSticker,
   onAddText,
   onPatchText,
-  onAddSticker,
-  onUploadSticker,
+  activeTab,
+  onActiveTabChange,
+  aiModels,
+  aiTransitionBusy,
+  aiTransitionStatus,
+  aiTransitionError,
+  canGenerateAiTransition,
+  onRefreshAiModels,
+  onGenerateAiTransition,
 }: VideoEditorInspectorProps) {
-  const [activeTab, setActiveTab] = useState<InspectorTab>('properties');
   const [propertyTab, setPropertyTab] = useState<PropertyTab>('clip');
   const kept = clip ? getClipDuration(clip) : 0;
   const transform = clip?.transform ?? DEFAULT_TRANSFORM;
-  const transition = clip?.transitionIn ?? { kind: 'none' as const, duration: 0.5 };
   const continuousEditHandlers = {
     onPointerDown: onBeginInteraction,
     onPointerUp: onEndInteraction,
@@ -102,7 +116,7 @@ function VideoEditorInspector({
       {([
         ['properties', 'lucide:sliders-horizontal', '属性'],
         ['text', 'lucide:type', '文字'],
-        ['sticker', 'lucide:sticker', '贴图'],
+        ['transition', 'lucide:blend', '转场'],
       ] as const).map(([tab, icon, label]) => (
         <button
           type="button"
@@ -110,7 +124,7 @@ function VideoEditorInspector({
           role="tab"
           aria-selected={activeTab === tab}
           className={activeTab === tab ? 'active' : ''}
-          onClick={() => setActiveTab(tab)}
+          onClick={() => onActiveTabChange(tab)}
         >
           <Icon icon={icon} width={13} height={13} />
           {label}
@@ -119,22 +133,38 @@ function VideoEditorInspector({
     </div>
   );
 
-  if (activeTab !== 'properties') {
+  if (activeTab === 'text') {
     return (
       <aside className="video-editor-inspector">
         {panelHead}
-        <VideoEditorTextStickerPanel
-          mode={activeTab}
+        <VideoEditorTextPanel
           selectedClip={clip}
-          selectedIsOverlay={selectedIsOverlay}
-          projectImages={projectImages}
-          uploading={uploadingSticker}
           onAddText={onAddText}
           onPatchText={onPatchText}
-          onAddSticker={onAddSticker}
-          onUploadSticker={onUploadSticker}
           onBeginInteraction={onBeginInteraction}
           onEndInteraction={onEndInteraction}
+        />
+      </aside>
+    );
+  }
+
+  if (activeTab === 'transition') {
+    return (
+      <aside className="video-editor-inspector">
+        {panelHead}
+        <VideoEditorTransitionPanel
+          clip={clip}
+          locked={locked}
+          onTransitionChange={onTransitionChange}
+          onBeginInteraction={onBeginInteraction}
+          onEndInteraction={onEndInteraction}
+          aiModels={aiModels}
+          aiTransitionBusy={aiTransitionBusy}
+          aiTransitionStatus={aiTransitionStatus}
+          aiTransitionError={aiTransitionError}
+          canGenerateAiTransition={canGenerateAiTransition}
+          onRefreshAiModels={onRefreshAiModels}
+          onGenerateAiTransition={onGenerateAiTransition}
         />
       </aside>
     );
@@ -255,38 +285,6 @@ function VideoEditorInspector({
         ))}
       </div>
 
-      {/* 与前一个片段之间的转场 */}
-      <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">转场（与前一段）</div>
-        <label className="video-editor-inspect-slider">
-          <span>类型</span>
-          <select
-            value={transition.kind}
-            disabled={!clip || locked}
-            {...continuousEditHandlers}
-            onChange={(event) => onTransitionChange(
-              event.target.value as VideoEditorTransitionKind,
-              transition.duration,
-            )}
-          >
-            <option value="none">硬切</option>
-            <option value="dissolve">交叠淡入</option>
-            <option value="fade">黑场淡入</option>
-          </select>
-        </label>
-        <label className="video-editor-inspect-slider">
-          <span>时长</span>
-          <input
-            type="range" min={0.1} max={3} step={0.1}
-            value={transition.duration}
-            style={rangeProgress(transition.duration, 0.1, 3)}
-            disabled={!clip || locked || transition.kind === 'none'}
-            {...continuousEditHandlers}
-            onChange={(event) => onTransitionChange(transition.kind, Number(event.target.value))}
-          />
-          <em>{transition.duration.toFixed(1)}s</em>
-        </label>
-      </div>
         {PENDING_SECTIONS.map((section) => (
           <div key={section} className="video-editor-inspect-group pending">
             <div className="video-editor-inspect-title">

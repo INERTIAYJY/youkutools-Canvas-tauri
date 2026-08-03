@@ -269,6 +269,11 @@ export interface AIVideoGenParams {
   workflowInputs?: Record<string, string>; // IO 节点赋值映射
   /** 关联的节点 ID（用于中断恢复） */
   nodeId?: string;
+  /**
+   * 调用方直接给定的参考媒体，排在提示词引用与连线引用之前。
+   * 供画布之外的入口使用，例如剪辑窗口按首/尾帧生成 AI 转场。
+   */
+  referenceMedia?: MediaReference[];
 }
 
 export interface AIAudioGenParams {

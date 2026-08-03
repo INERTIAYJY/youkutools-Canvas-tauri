@@ -25,10 +25,17 @@ import {
 } from '../../services/canvasDerivationGuard';
 import { buildVideoEditorProjectId } from '../../services/indexedDbService';
 import {
+  postVideoEditorAiTransitionResult,
+  postVideoEditorModels,
   subscribeVideoEditorWindow,
+  type VideoEditorAiTransitionRequest,
   type VideoEditorExportResult,
   type VideoEditorFrameExportResult,
 } from '../../services/videoEditorWindowService';
+import {
+  listVideoEditorVideoModels,
+  runVideoEditorAiTransition,
+} from '../../services/videoEditorAiTransitionService';
 
 const DEFAULT_VIDEO_NODE_WIDTH = 280;
 const DEFAULT_VIDEO_NODE_HEIGHT = 158;
@@ -347,6 +354,35 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
     const instanceId = buildVideoEditorProjectId(projectId, id);
     return subscribeVideoEditorWindow(instanceId, (message) => {
+      // 编辑器没有 Store 也没有 API Key：模型目录与转场生成都由主窗口代跑
+      if (message.type === 'storyai:video-editor-models-request') {
+        void postVideoEditorModels(instanceId, listVideoEditorVideoModels())
+          .catch((error) => console.error('[videoEditor] 下发视频模型列表失败:', error));
+        return;
+      }
+
+      if (message.type === 'storyai:video-editor-ai-transition-request') {
+        const request = (message.payload ?? {}) as Partial<VideoEditorAiTransitionRequest>;
+        const requestId = typeof request.requestId === 'string' ? request.requestId : '';
+        if (!requestId) return;
+        void (async () => {
+          try {
+            const outcome = await runVideoEditorAiTransition(
+              request as VideoEditorAiTransitionRequest,
+              projectId,
+            );
+            await postVideoEditorAiTransitionResult(instanceId, { requestId, ...outcome });
+          } catch (error) {
+            console.error('[videoEditor] AI 转场生成失败:', error);
+            await postVideoEditorAiTransitionResult(instanceId, {
+              requestId,
+              error: error instanceof Error ? error.message : String(error),
+            }).catch(() => {});
+          }
+        })();
+        return;
+      }
+
       if (message.type === 'storyai:video-editor-frame-exported') {
         const framePayload = (message.payload ?? {}) as Partial<VideoEditorFrameExportResult>;
         const imageUrl = typeof framePayload.imageUrl === 'string' ? framePayload.imageUrl : '';

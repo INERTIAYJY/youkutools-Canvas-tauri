@@ -7,6 +7,7 @@
  * 音频轨与字幕轨占位，二期启用。
  */
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -62,6 +63,8 @@ interface VideoEditorTimelineProps {
   onSplit: () => void;
   onDeleteSelected: () => void;
   onDuplicateClip: (clipId: string) => void;
+  /** 点击两段之间的接缝：没有转场就加一个默认转场，已有则直接跳去编辑 */
+  onEditTransition: (clipId: string) => void;
   onTracksChange: (tracks: VideoEditorTrack[]) => void;
   onAddTrack: (kind: 'video' | 'audio') => void;
   onMoveTrack: (trackId: string, direction: -1 | 1) => void;
@@ -73,6 +76,12 @@ interface VideoEditorTimelineProps {
   onUndo: () => void;
   onRedo: () => void;
 }
+
+const TRANSITION_LABELS: Record<string, string> = {
+  dissolve: '交叠淡入',
+  fade: '黑场淡入',
+  none: '硬切',
+};
 
 /** 裁剪时片段最短保留时长，避免拖成零长 */
 const MIN_CLIP_DURATION = 0.1;
@@ -163,6 +172,7 @@ function VideoEditorTimeline({
   onSplit,
   onDeleteSelected,
   onDuplicateClip,
+  onEditTransition,
   onTracksChange,
   onAddTrack,
   onMoveTrack,
@@ -924,13 +934,19 @@ function VideoEditorTimeline({
                 }}
                 onDrop={(event) => handleMediaDrop(track, event)}
               >
-                {track.kind === 'video' ? track.clips.map((clip) => {
+                {track.kind === 'video' ? track.clips.map((clip, clipIndex) => {
                   const isSelected = selectedSet.has(clip.id);
                   const isDragging = dragging?.clipId === clip.id;
                   const duration = getClipDuration(clip);
+                  const transition = clip.transitionIn;
+                  const hasTransition = !!transition
+                    && transition.kind !== 'none'
+                    && transition.duration > 0;
+                  // 接缝只出现在磁吸主轨上：叠加轨可以留空，没有「前一段」可言
+                  const showSeam = !track.overlay && !track.locked && clipIndex > 0 && !dragging;
                   return (
+                    <Fragment key={clip.id}>
                     <div
-                      key={clip.id}
                       data-clip-id={clip.id}
                       className={[
                         'video-editor-clip',
@@ -961,6 +977,14 @@ function VideoEditorTimeline({
                             : <span key={thumbIndex} className="video-editor-thumb-blank" />
                         ))}
                       </div>
+                      {/* 转场覆盖区：从片段开头起算，宽度就是转场时长 */}
+                      {hasTransition && (
+                        <span
+                          className={`video-editor-clip-transition ${transition.kind}`}
+                          style={{ width: Math.max(4, transition.duration * pixelsPerSecond) }}
+                          aria-hidden="true"
+                        />
+                      )}
                       {/* 片段名称叠加在缩略图上 */}
                       <span className="video-editor-clip-name">
                         {clip.kind === 'text' && <Icon icon="lucide:type" width={10} height={10} />}
@@ -991,6 +1015,30 @@ function VideoEditorTimeline({
                         </>
                       )}
                     </div>
+
+                    {showSeam && (
+                      <button
+                        type="button"
+                        className={`video-editor-seam ${hasTransition ? 'has-transition' : ''}`}
+                        style={{ left: clip.timelineStart * pixelsPerSecond }}
+                        aria-label={hasTransition ? `编辑转场：${clip.fileName}` : `在这里添加转场：${clip.fileName}`}
+                        data-tooltip={hasTransition
+                          ? `${TRANSITION_LABELS[transition.kind]} ${transition.duration.toFixed(1)}s`
+                          : '添加转场'}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onEditTransition(clip.id);
+                        }}
+                      >
+                        <Icon
+                          icon={hasTransition ? 'lucide:blend' : 'lucide:plus'}
+                          width={11}
+                          height={11}
+                        />
+                      </button>
+                    )}
+                    </Fragment>
                   );
                 }) : track.kind === 'audio' ? track.clips.map((clip) => (
                   <div

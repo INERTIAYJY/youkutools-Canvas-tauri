@@ -292,14 +292,37 @@ function VideoEditorPreview({
     return () => observer.disconnect();
   }, [canvasSize.width]);
 
+  // 换片段会重设 <video src>，元数据就绪前的定位与播放都会被随后的 load 打断，
+  // 所以把目标位置存下来，等 loadedmetadata / canplay 再补上。
+  const pendingSeekRef = useRef(0);
+  useEffect(() => { pendingSeekRef.current = Math.max(0, sourceTime); }, [sourceTime]);
+
   // 外部拖动播放头 → 同步到 video
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !clip || clip.kind !== 'video' || drivenByPlayback.current) return;
+    // readyState 为 0 表示新素材还在加载：此时写 currentTime 会被 load 丢掉
+    if (video.readyState === 0) return;
     if (Math.abs(video.currentTime - sourceTime) > 0.05) {
       video.currentTime = sourceTime;
     }
   }, [clip, sourceTime]);
+
+  /**
+   * 新素材可播时补上定位并续播。
+   *
+   * 缺了这一步，播到两段交界处切换 src 时，之前那次 play() 会被新的 load 打断，
+   * 走带状态还是「播放中」，画面却停在交界处不动。
+   */
+  const handleMediaReady = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const target = pendingSeekRef.current;
+    if (Math.abs(video.currentTime - target) > 0.05) {
+      video.currentTime = target;
+    }
+    if (playing && video.paused) void video.play().catch(() => {});
+  }, [playing]);
 
   const playheadRef = useRef(playhead);
   useEffect(() => { playheadRef.current = playhead; }, [playhead]);
@@ -627,6 +650,8 @@ function VideoEditorPreview({
               className={`video-editor-video ${mainTrackHidden ? 'track-hidden' : ''}`}
               style={mainMediaStyle}
               onTimeUpdate={handleTimeUpdate}
+              onLoadedMetadata={handleMediaReady}
+              onCanPlay={handleMediaReady}
               onPause={() => { if (!playing) setPlaying(false); }}
               preload="auto"
               muted={mainTrackMuted}

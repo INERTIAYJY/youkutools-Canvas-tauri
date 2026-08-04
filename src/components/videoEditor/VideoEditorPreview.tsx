@@ -13,10 +13,13 @@ import { computeDrawRect } from '../../services/videoCompositor';
 import {
   DEFAULT_TEXT_STYLE,
   DEFAULT_TRANSFORM,
+  evaluateTransitionAlpha,
   getActiveClips,
   getClipDuration,
+  getClipEnd,
   getOverlayTracks,
   getVideoTrack,
+  type VideoEditorCanvasSize,
   type VideoEditorClip,
   type VideoEditorTrack,
   type VideoEditorTransform,
@@ -151,6 +154,85 @@ function OverlayMedia({ clip, playhead, playing, muted, volume, canvasDisplaySca
       muted={muted}
       playsInline
       onError={() => setFailedUrl(url)}
+    />
+  );
+}
+
+/** 主轨画面在画布上的摆放；与导出共用 computeDrawRect，避免预览/成片偏差 */
+function mediaRectStyle(
+  source: { width: number; height: number } | null | undefined,
+  canvas: VideoEditorCanvasSize,
+  transform: VideoEditorTransform,
+  opacity: number,
+): CSSProperties {
+  const resolved = source && source.width > 0 && source.height > 0 ? source : canvas;
+  const rect = computeDrawRect(resolved, canvas, transform);
+  return {
+    left: `${(rect.x / Math.max(1, canvas.width)) * 100}%`,
+    top: `${(rect.y / Math.max(1, canvas.height)) * 100}%`,
+    width: `${(rect.width / Math.max(1, canvas.width)) * 100}%`,
+    height: `${(rect.height / Math.max(1, canvas.height)) * 100}%`,
+    opacity,
+    transform: `rotate(${transform.rotation}deg)`,
+  };
+}
+
+interface TransitionUnderlayProps {
+  clip: VideoEditorClip;
+  /** 素材坐标：交叠淡入取的是前一段出点之后的画面 */
+  sourceTime: number;
+  playing: boolean;
+  style: CSSProperties;
+}
+
+/**
+ * 交叠淡入期间垫在底下的前一段画面。
+ *
+ * 这一段在时间轴上已经结束，取的是它出点之后的素材，没法复用主轨那个
+ * <video>，只能单开一个元素。转场窗口最长 3s，多解一路的代价可以接受。
+ */
+function TransitionUnderlay({ clip, sourceTime, playing, style }: TransitionUnderlayProps) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const url = resolveClipUrl(clip);
+  const target = Math.max(0, sourceTime);
+
+  // 转场期间底画面与播放头同速前进，靠原生播放跟随即可，只在漂移时纠偏
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || video.readyState === 0) return;
+    if (Math.abs(video.currentTime - target) > 0.08) video.currentTime = target;
+  }, [target]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (playing) void video.play().catch(() => {});
+    else video.pause();
+  }, [playing, url]);
+
+  const applyReadyState = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = target;
+    if (playing) void video.play().catch(() => {});
+  };
+
+  if (!url || clip.kind === 'text') return null;
+  if (clip.kind === 'image') {
+    return (
+      <img src={url} alt="" draggable={false} className="video-editor-video underlay" style={style} />
+    );
+  }
+  return (
+    <video
+      ref={videoRef}
+      src={url}
+      className="video-editor-video underlay"
+      style={style}
+      preload="auto"
+      muted
+      playsInline
+      onLoadedMetadata={applyReadyState}
     />
   );
 }
@@ -597,26 +679,41 @@ function VideoEditorPreview({
     };
   }, [canvasAspect, canvasSize.height, canvasSize.width, previewZoom, stageContentSize]);
 
+  // 转场用与合成端同一个函数求不透明度，避免预览和成片两套算法漂移
+  const transitionAlpha = clip ? evaluateTransitionAlpha(clip, playhead - clip.timelineStart) : 1;
+
+  /**
+   * 交叠淡入垫在底下的前一段；规则与 videoCompositor 一致：
+   * 只认时间轴上首尾严丝合缝相接的那一段。
+   */
+  const dissolveUnderlay = useMemo(() => {
+    if (!clip || mainTrackHidden || transitionAlpha >= 1) return null;
+    if (clip.transitionIn?.kind !== 'dissolve') return null;
+    const index = mainTrack?.clips.indexOf(clip) ?? -1;
+    if (index <= 0) return null;
+    const previous = mainTrack!.clips[index - 1];
+    if (Math.abs(getClipEnd(previous) - clip.timelineStart) > 0.001) return null;
+    return previous;
+  }, [clip, mainTrack, mainTrackHidden, transitionAlpha]);
+
   // 主轨与导出都通过 computeDrawRect 计算 contain、位置和缩放，避免预览/成片偏差。
-  const mainMediaStyle = useMemo<CSSProperties>(() => {
-    const transform = clip?.transform ?? DEFAULT_TRANSFORM;
-    const resolvedSourceSize = sourceSize && sourceSize.width > 0 && sourceSize.height > 0
-      ? sourceSize
-      : canvasSize;
-    const rect = computeDrawRect(resolvedSourceSize, canvasSize, transform);
-    return {
-      left: `${(rect.x / Math.max(1, canvasSize.width)) * 100}%`,
-      top: `${(rect.y / Math.max(1, canvasSize.height)) * 100}%`,
-      width: `${(rect.width / Math.max(1, canvasSize.width)) * 100}%`,
-      height: `${(rect.height / Math.max(1, canvasSize.height)) * 100}%`,
-      opacity: mainTrackHidden ? 0 : transform.opacity,
-      transform: `rotate(${transform.rotation}deg)`,
-    };
-  }, [canvasSize, clip?.transform, mainTrackHidden, sourceSize]);
+  const mainMediaStyle = useMemo<CSSProperties>(() => mediaRectStyle(
+    sourceSize,
+    canvasSize,
+    clip?.transform ?? DEFAULT_TRANSFORM,
+    mainTrackHidden ? 0 : (clip?.transform ?? DEFAULT_TRANSFORM).opacity * transitionAlpha,
+  ), [canvasSize, clip?.transform, mainTrackHidden, sourceSize, transitionAlpha]);
   const mainSelectionStyle = useMemo<CSSProperties>(() => ({
     ...mainMediaStyle,
     opacity: 1,
   }), [mainMediaStyle]);
+  // 底画面尺寸未知（探测数据只跟着当前片段走），退回画布尺寸按 contain 铺满
+  const underlayStyle = useMemo<CSSProperties>(() => mediaRectStyle(
+    null,
+    canvasSize,
+    dissolveUnderlay?.transform ?? DEFAULT_TRANSFORM,
+    (dissolveUnderlay?.transform ?? DEFAULT_TRANSFORM).opacity,
+  ), [canvasSize, dissolveUnderlay?.transform]);
   const mainSelected = !!clip && selectedClipIds.includes(clip.id);
   const mainLocked = mainTrack?.locked === true;
 
@@ -632,6 +729,17 @@ function VideoEditorPreview({
           style={canvasFrameStyle}
           aria-label={stageInfo ? `输出画布 ${stageInfo}` : '输出画布'}
         >
+          {/* 交叠淡入的底画面：必须排在主轨画面之前，靠 z-index 压在下层 */}
+          {dissolveUnderlay && clip && (
+            <TransitionUnderlay
+              key={dissolveUnderlay.id}
+              clip={dissolveUnderlay}
+              sourceTime={dissolveUnderlay.sourceOut + (playhead - clip.timelineStart)}
+              playing={playing}
+              style={underlayStyle}
+            />
+          )}
+
           {/* 主轨画面：背景 + video/img 居中 */}
           {!clip || !clipUrl ? (
             <div className="video-editor-stage-empty">无可预览的素材</div>

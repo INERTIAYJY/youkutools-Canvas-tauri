@@ -147,3 +147,57 @@ describe('VideoEditorPreview overlays', () => {
     expect(html).toContain('<audio src="https://example.test/audio.mp4"');
   });
 });
+
+describe('VideoEditorPreview transitions', () => {
+  /** 两段首尾相接的主轨，后一段带 1s 转场；playhead 落在转场正中间 */
+  function renderAtTransition(kind: 'dissolve' | 'fade', playhead = 4.5): string {
+    const outgoing = clip({ id: 'a', sourceUrl: 'https://example.test/a.mp4', sourceOut: 4 });
+    const incoming = clip({
+      id: 'b',
+      sourceUrl: 'https://example.test/b.mp4',
+      timelineStart: 4,
+      sourceOut: 4,
+      transitionIn: { kind, duration: 1 },
+    });
+    return renderToStaticMarkup(
+      <VideoEditorPreview
+        clip={incoming}
+        clipUrl={incoming.sourceUrl ?? ''}
+        playhead={playhead}
+        timelineDuration={8}
+        tracks={[{ id: 'main', kind: 'video', name: '主轨', clips: [outgoing, incoming] }]}
+        selectedClipIds={[]}
+        canvasSize={{ width: 1280, height: 720 }}
+        onPlayheadChange={vi.fn()}
+        onSelectClips={vi.fn()}
+        onBeginInteraction={vi.fn()}
+        onEndInteraction={vi.fn()}
+        onTransformChange={vi.fn()}
+      />,
+    );
+  }
+
+  it('fades the incoming clip so the transition is visible while editing', () => {
+    // 转场过半 → 不透明度约 0.5，而不是恒定的 1
+    expect(renderAtTransition('fade')).toContain('opacity:0.5');
+  });
+
+  it('lays the outgoing clip underneath for a cross dissolve', () => {
+    const html = renderAtTransition('dissolve');
+    expect(html).toContain('video-editor-video underlay');
+    expect(html).toContain('https://example.test/a.mp4');
+  });
+
+  it('keeps a black-fade transition free of an underlay', () => {
+    const html = renderAtTransition('fade');
+    expect(html).not.toContain('underlay');
+    expect(html).not.toContain('https://example.test/a.mp4');
+  });
+
+  it('drops the underlay once the transition window has passed', () => {
+    // 5.5s 已越过 1s 转场窗口
+    const html = renderAtTransition('dissolve', 5.5);
+    expect(html).not.toContain('underlay');
+    expect(html).toContain('opacity:1');
+  });
+});

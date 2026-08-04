@@ -662,6 +662,11 @@
 .video-editor-video.track-hidden {
   opacity: 0;
 }
+/* 交叠淡入的底画面压在主轨画面之下、黑底之上 */
+.video-editor-video.underlay {
+  z-index: 0;
+  pointer-events: none;
+}
 .video-editor-stage-empty {
   position: absolute;
   inset: 0;

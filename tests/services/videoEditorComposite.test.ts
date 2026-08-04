@@ -227,6 +227,131 @@ describe('文字片段合成', () => {
   });
 });
 
+describe('交叠淡入', () => {
+  /** 记录每次 drawImage 时的图源与不透明度 */
+  function recordingContext() {
+    const draws: { image: unknown; alpha: number }[] = [];
+    const context = {
+      clearRect: vi.fn(),
+      fillRect: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      translate: vi.fn(),
+      rotate: vi.fn(),
+      drawImage: vi.fn(function drawImage(this: { globalAlpha: number }, image: unknown) {
+        draws.push({ image, alpha: context.globalAlpha });
+      }),
+      globalAlpha: 1,
+      fillStyle: '',
+    } as unknown as CanvasRenderingContext2D & { globalAlpha: number };
+    return { context, draws };
+  }
+
+  /** 两段首尾相接的图片片段，后一段带 1s 交叠淡入 */
+  function dissolvingTrack(): { track: VideoEditorTrack; bitmaps: Record<string, object> } {
+    const bitmaps = { a: { tag: 'a' }, b: { tag: 'b' } };
+    const track = videoTrack([
+      clip({ id: 'a', kind: 'image', sourceOut: 4 }),
+      clip({
+        id: 'b',
+        kind: 'image',
+        timelineStart: 4,
+        sourceOut: 4,
+        transitionIn: { kind: 'dissolve', duration: 1 },
+      }),
+    ]);
+    return { track, bitmaps };
+  }
+
+  const resolveBitmaps = (bitmaps: Record<string, object>) => (target: VideoEditorClip) => (
+    bitmaps[target.id as keyof typeof bitmaps]
+      ? { bitmap: bitmaps[target.id] as unknown as ImageBitmap, width: 1920, height: 1080 }
+      : undefined
+  );
+
+  it('keeps drawing the outgoing clip underneath while the next one fades in', async () => {
+    const { context, draws } = recordingContext();
+    const { track, bitmaps } = dissolvingTrack();
+
+    // 4.5s：转场进行到一半
+    await renderFrameAt(context, { width: 1920, height: 1080 }, [track], 4.5, resolveBitmaps(bitmaps));
+
+    expect(draws).toHaveLength(2);
+    // 前一段铺满在下，后一段半透明压上去 —— 这才是「交叠」
+    expect(draws[0]).toEqual({ image: bitmaps.a, alpha: 1 });
+    expect(draws[1].image).toBe(bitmaps.b);
+    expect(draws[1].alpha).toBeCloseTo(0.5);
+  });
+
+  it('leaves the first clip of a track without an underlay', async () => {
+    const { context, draws } = recordingContext();
+    const bitmaps = { a: { tag: 'a' } };
+    const track = videoTrack([
+      clip({ id: 'a', kind: 'image', sourceOut: 4, transitionIn: { kind: 'dissolve', duration: 1 } }),
+    ]);
+
+    await renderFrameAt(context, { width: 1920, height: 1080 }, [track], 0.5, resolveBitmaps(bitmaps));
+
+    expect(draws).toHaveLength(1);
+    expect(draws[0].image).toBe(bitmaps.a);
+  });
+
+  it('ignores a preceding clip that is not butted up against this one', async () => {
+    const { context, draws } = recordingContext();
+    const bitmaps = { a: { tag: 'a' }, b: { tag: 'b' } };
+    const overlay: VideoEditorTrack = {
+      id: 'o1',
+      kind: 'video',
+      name: '叠加轨 1',
+      overlay: true,
+      clips: [
+        clip({ id: 'a', kind: 'image', sourceOut: 2 }),
+        // 和前一段之间隔着 3 秒空白，不构成交叠关系
+        clip({
+          id: 'b',
+          kind: 'image',
+          timelineStart: 5,
+          sourceOut: 2,
+          transitionIn: { kind: 'dissolve', duration: 1 },
+        }),
+      ],
+    };
+
+    await renderFrameAt(context, { width: 1920, height: 1080 }, [overlay], 5.5, resolveBitmaps(bitmaps));
+
+    expect(draws).toHaveLength(1);
+    expect(draws[0].image).toBe(bitmaps.b);
+  });
+
+  it('samples the outgoing clip past its out point rather than repeating its last kept frame', async () => {
+    const requested: number[] = [];
+    const { context } = recordingContext();
+    const track = videoTrack([
+      clip({ id: 'a', sourceIn: 1, sourceOut: 5 }),
+      clip({
+        id: 'b',
+        timelineStart: 4,
+        sourceOut: 4,
+        transitionIn: { kind: 'dissolve', duration: 1 },
+      }),
+    ]);
+
+    await renderFrameAt(context, { width: 1920, height: 1080 }, [track], 4.25, (target) => ({
+      width: 1920,
+      height: 1080,
+      sink: {
+        getSample: async (time: number) => {
+          if (target.id === 'a') requested.push(time);
+          return null;
+        },
+      } as never,
+    }));
+
+    // 出点 5s 之后再走 0.25s：底画面必须继续往前放，而不是卡在出点那一帧
+    expect(requested).toEqual([5.25]);
+  });
+});
+
 describe('轨道管理', () => {
   const base: VideoEditorTrack[] = [videoTrack([clip({ id: 'a' })])];
 

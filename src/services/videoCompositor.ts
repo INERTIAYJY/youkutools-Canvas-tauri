@@ -11,6 +11,7 @@ import {
   DEFAULT_TRANSFORM,
   evaluateTransitionAlpha,
   getActiveClips,
+  getClipEnd,
   type VideoEditorCanvasSize,
   type VideoEditorClip,
   type VideoEditorTrack,
@@ -115,6 +116,65 @@ function drawTextClip(
 }
 
 /**
+ * 画一个片段在指定素材时刻的画面。
+ *
+ * sourceTime 是素材坐标而非时间轴坐标：交叠淡入要把已经结束的前一段
+ * 按它出点之后的素材继续画出来，那个时刻落在片段的取用区间之外。
+ */
+async function drawClipAt(
+  context: CanvasRenderingContext2D,
+  canvas: VideoEditorCanvasSize,
+  clip: VideoEditorClip,
+  sourceTime: number,
+  alpha: number,
+  resolve: ClipSourceResolver,
+  samplesToClose: VideoSample[],
+): Promise<void> {
+  if (clip.kind === 'text') {
+    drawTextClip(context, canvas, clip, alpha);
+    return;
+  }
+
+  const source = resolve(clip);
+  if (!source) return;
+  const transform = clip.transform ?? DEFAULT_TRANSFORM;
+
+  if (source.bitmap) {
+    drawOne(context, source.bitmap, source, canvas, transform, alpha);
+    return;
+  }
+  if (!source.sink) return;
+
+  const sample = await source.sink.getSample(Math.max(0, sourceTime));
+  if (!sample) return;
+  samplesToClose.push(sample);
+  drawOne(
+    context,
+    sample.toCanvasImageSource() as CanvasImageSource,
+    source,
+    canvas,
+    transform,
+    alpha,
+  );
+}
+
+/**
+ * 找出可以作为交叠淡入底画面的前一段。
+ *
+ * 只认首尾严丝合缝相接的那一段：叠加轨允许留空和自由摆放，
+ * 隔着一段距离的「上一个片段」不构成交叠关系。
+ */
+function findDissolveUnderlay(
+  track: VideoEditorTrack,
+  clip: VideoEditorClip,
+): VideoEditorClip | undefined {
+  const index = track.clips.indexOf(clip);
+  if (index <= 0) return undefined;
+  const previous = track.clips[index - 1];
+  return Math.abs(getClipEnd(previous) - clip.timelineStart) < 0.001 ? previous : undefined;
+}
+
+/**
  * 渲染某一时刻的一帧。
  *
  * 轨道按数组顺序自下而上叠加；隐藏轨跳过。
@@ -138,8 +198,25 @@ export async function renderFrameAt(
 
       for (const clip of getActiveClips(track, time)) {
         const timeInClip = time - clip.timelineStart;
-        const transform = clip.transform ?? DEFAULT_TRANSFORM;
         const alpha = evaluateTransitionAlpha(clip, timeInClip);
+
+        if (alpha < 1 && clip.transitionIn?.kind === 'dissolve') {
+          // 片段在时间轴上首尾相接，转场窗口内前一段其实已经结束了。
+          // 不把它出点之后的素材继续画出来当底，交叠淡入就退化成从黑底淡入，
+          // 和 fade 一模一样。素材没有余量时自然回落到黑底。
+          const underlay = findDissolveUnderlay(track, clip);
+          if (underlay) {
+            await drawClipAt(
+              context,
+              canvas,
+              underlay,
+              underlay.sourceOut + timeInClip,
+              1,
+              resolve,
+              samplesToClose,
+            );
+          }
+        }
 
         if (clip.transitionIn?.kind === 'fade' && alpha < 1) {
           // 从黑场淡入：底色已是黑，直接用 alpha 控制即可
@@ -150,30 +227,14 @@ export async function renderFrameAt(
           context.restore();
         }
 
-        if (clip.kind === 'text') {
-          drawTextClip(context, canvas, clip, alpha);
-          continue;
-        }
-
-        const source = resolve(clip);
-        if (!source) continue;
-
-        if (source.bitmap) {
-          drawOne(context, source.bitmap, source, canvas, transform, alpha);
-          continue;
-        }
-        if (!source.sink) continue;
-
-        const sample = await source.sink.getSample(clip.sourceIn + timeInClip);
-        if (!sample) continue;
-        samplesToClose.push(sample);
-        drawOne(
+        await drawClipAt(
           context,
-          sample.toCanvasImageSource() as CanvasImageSource,
-          source,
           canvas,
-          transform,
+          clip,
+          clip.sourceIn + timeInClip,
           alpha,
+          resolve,
+          samplesToClose,
         );
       }
     }

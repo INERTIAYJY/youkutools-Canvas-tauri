@@ -1165,7 +1165,6 @@ export default function VideoEditorWindow() {
     videoUrl: string;
     filePath?: string;
     fileName: string;
-    duration?: number;
   }): boolean => {
     const mainTrack = getVideoTrack(tracksRef.current);
     if (!mainTrack || mainTrack.locked) return false;
@@ -1179,8 +1178,9 @@ export default function VideoEditorWindow() {
       sourceUrl: media.videoUrl,
       timelineStart: 0,
       sourceIn: 0,
-      // 时长未知时留 0，探测到真实时长后由 handleSourceProbed 回填
-      sourceOut: media.duration && media.duration > 0 ? media.duration : 0,
+      // 请求时长只是给模型的期望值，成片长度未必一致（有的模型直接忽略它）。
+      // 留 0 交给 handleSourceProbed 用探测到的真实时长回填，避免片段被错误裁切。
+      sourceOut: 0,
     };
 
     commitChange();
@@ -1223,7 +1223,6 @@ export default function VideoEditorWindow() {
         videoUrl: payload.videoUrl,
         filePath: typeof payload.filePath === 'string' ? payload.filePath : undefined,
         fileName: payload.fileName || 'AI 转场',
-        duration: typeof payload.duration === 'number' ? payload.duration : undefined,
       });
       setAiTransitionError(inserted ? null : '转场已生成，但原片段已不在主轨上，未能插入');
       if (inserted) setNotice('AI 转场已插入主轨');

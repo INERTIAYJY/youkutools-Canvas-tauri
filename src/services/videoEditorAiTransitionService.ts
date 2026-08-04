@@ -32,7 +32,6 @@ export interface VideoEditorAiTransitionOutcome {
   videoUrl: string;
   filePath?: string;
   fileName: string;
-  duration?: number;
 }
 
 /** 首/尾帧转成生成入口认识的参考媒体；顺序即角色顺序 */
@@ -98,6 +97,5 @@ export async function runVideoEditorAiTransition(
     videoUrl: saved.assetUrl || result.url,
     filePath: saved.filePath,
     fileName: `${baseName}.mp4`,
-    duration: request.duration,
   };
 }

@@ -69,13 +69,17 @@ export type VideoEditorAiTransitionRequest = {
   lastFrameFilePath?: string;
 };
 
-/** AI 转场结果；error 非空表示失败，编辑器直接展示 */
+/**
+ * AI 转场结果；error 非空表示失败，编辑器直接展示。
+ *
+ * 刻意不带时长：请求里的 duration 只是给模型的期望值，成片长度未必一致，
+ * 片段时长一律由编辑器探测素材后回填。
+ */
 export type VideoEditorAiTransitionResult = {
   requestId: string;
   videoUrl?: string;
   filePath?: string;
   fileName?: string;
-  duration?: number;
   error?: string;
 };
 

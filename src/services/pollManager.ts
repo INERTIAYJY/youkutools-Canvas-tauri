@@ -13,7 +13,7 @@ import { downloadUrlAndSave } from './fileService';
 import { applyImageBatchResults } from './imageBatchService';
 import { mapImageDimensions } from './aiDimensions';
 import { parseMultiPathResponse, splitCommaSeparatedUrls } from './ai/helpers';
-import { buildComfyFileUrl, type ComfyOutputs } from './comfyOutputs';
+import { resolveComfyOutputUrl, type ComfyOutputKind, type ComfyOutputs } from './comfyOutputs';
 import { pollResolvedModelProtocol } from './ai/modelProtocol';
 import {
   extractFlowMusicLyrics,
@@ -661,31 +661,11 @@ async function resumeComfyUI(task: PendingTask): Promise<void> {
 
   const signal = registerNodePolling(nodeId);
 
-  const extract = (
-    nodeType === 'ai-video'
-      ? (outputs: ComfyOutputs) => {
-          for (const o of Object.values(outputs)) {
-            if (o.videos?.length) return { url: buildComfyFileUrl(baseUrl, o.videos[0]) };
-            if (o.gifs?.length) return { url: buildComfyFileUrl(baseUrl, o.gifs[0]) };
-            if (o.images?.length) return { url: buildComfyFileUrl(baseUrl, o.images[0]) };
-          }
-          return null;
-        }
-      : nodeType === 'ai-audio'
-        ? (outputs: ComfyOutputs) => {
-            for (const o of Object.values(outputs)) {
-              if (o.audios?.length) return { url: buildComfyFileUrl(baseUrl, o.audios[0]) };
-              if (o.videos?.length) return { url: buildComfyFileUrl(baseUrl, o.videos[0]) };
-            }
-            return null;
-          }
-        : (outputs: ComfyOutputs) => {
-            for (const o of Object.values(outputs)) {
-              if (o.images?.length) return { url: buildComfyFileUrl(baseUrl, o.images[0]) };
-            }
-            return null;
-          }
-  );
+  const kinds: ComfyOutputKind[] =
+    nodeType === 'ai-video' ? ['video', 'image']
+      : nodeType === 'ai-audio' ? ['audio', 'video', 'image']
+        : ['image'];
+  const extract = (outputs: ComfyOutputs) => resolveComfyOutputUrl(baseUrl, outputs, kinds);
 
   try {
     const { url } = await pollTask<ComfyOutputs | undefined, { url: string }>({

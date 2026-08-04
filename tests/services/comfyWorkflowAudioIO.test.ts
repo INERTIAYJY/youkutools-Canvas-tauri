@@ -68,7 +68,8 @@ function stubComfyEndpoints() {
       return jsonResponse({
         'prompt-1': {
           status: { completed: true },
-          outputs: { '2': { audios: [{ filename: 'out.flac', subfolder: '', type: 'output' }] } },
+          // 内置 SaveAudio 输出的是单数 audio 键
+          outputs: { '2': { audio: [{ filename: 'out.flac', subfolder: '', type: 'output' }] } },
         },
       });
     }

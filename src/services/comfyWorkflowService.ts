@@ -11,7 +11,7 @@ import { resolveNodeReferences } from './nodeReferenceService';
 import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
 import { corsSafeFetch } from './ai/httpTransport';
-import { buildComfyFileUrl, type ComfyOutputs } from './comfyOutputs';
+import { resolveComfyOutputUrl, type ComfyOutputs } from './comfyOutputs';
 
 // ── 跨域安全的 fetch 包装 ──
 
@@ -549,12 +549,8 @@ async function pollComfyUIHistory(
   signal?: AbortSignal,
 ): Promise<{ url: string; width: number; height: number }> {
   return pollComfyHistory(baseUrl, promptId, 'ComfyUI 图片生成超时（1 小时）', (outputs) => {
-    for (const nodeOutput of Object.values(outputs)) {
-      if (nodeOutput.images?.length) {
-        return { url: buildComfyFileUrl(baseUrl, nodeOutput.images[0]), width: dimensions.width, height: dimensions.height };
-      }
-    }
-    return null;
+    const found = resolveComfyOutputUrl(baseUrl, outputs, ['image']);
+    return found ? { url: found.url, width: dimensions.width, height: dimensions.height } : null;
   }, signal);
 }
 
@@ -625,14 +621,10 @@ async function pollComfyUIHistoryForVideo(
   promptId: string,
   signal?: AbortSignal,
 ): Promise<{ url: string }> {
-  return pollComfyHistory(baseUrl, promptId, 'ComfyUI 视频生成超时（1 小时）', (outputs) => {
-    for (const nodeOutput of Object.values(outputs)) {
-      if (nodeOutput.videos?.length) return { url: buildComfyFileUrl(baseUrl, nodeOutput.videos[0]) };
-      if (nodeOutput.gifs?.length) return { url: buildComfyFileUrl(baseUrl, nodeOutput.gifs[0]) };
-      if (nodeOutput.images?.length) return { url: buildComfyFileUrl(baseUrl, nodeOutput.images[0]) };
-    }
-    return null;
-  }, signal);
+  return pollComfyHistory(baseUrl, promptId, 'ComfyUI 视频生成超时（1 小时）', (outputs) => (
+    // 视频节点常把成片挂在 images 下（SaveWEBM / SaveVideo），所以图片也算命中
+    resolveComfyOutputUrl(baseUrl, outputs, ['video', 'image'])
+  ), signal);
 }
 
 /** 通过 ComfyUI 工作流执行视频生成 */
@@ -708,14 +700,9 @@ async function pollComfyUIHistoryForAudio(
   promptId: string,
   signal?: AbortSignal,
 ): Promise<{ url: string }> {
-  return pollComfyHistory(baseUrl, promptId, 'ComfyUI 音频生成超时（1 小时）', (outputs) => {
-    for (const nodeOutput of Object.values(outputs)) {
-      if (nodeOutput.audios?.length) return { url: buildComfyFileUrl(baseUrl, nodeOutput.audios[0]) };
-      if (nodeOutput.videos?.length) return { url: buildComfyFileUrl(baseUrl, nodeOutput.videos[0]) };
-      if (nodeOutput.images?.length) return { url: buildComfyFileUrl(baseUrl, nodeOutput.images[0]) };
-    }
-    return null;
-  }, signal);
+  return pollComfyHistory(baseUrl, promptId, 'ComfyUI 音频生成超时（1 小时）', (outputs) => (
+    resolveComfyOutputUrl(baseUrl, outputs, ['audio', 'video', 'image'])
+  ), signal);
 }
 
 /** 通过 ComfyUI 工作流执行音频生成 */

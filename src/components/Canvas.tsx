@@ -31,6 +31,7 @@ import MarkdownNode from './nodes/MarkdownNode';
 import StoryboardNode from './nodes/StoryboardNode';
 import GroupNode from './nodes/GroupNode';
 import CanvasNoteNode from './noteNodes/CanvasNoteNode';
+import NodeRenderBoundary from './nodes/shared/NodeRenderBoundary';
 import ConnectionMenu from './canvas/ConnectionMenu';
 import CanvasContextMenu from './canvas/CanvasContextMenu';
 import NodeContextMenu from './canvas/NodeContextMenu';
@@ -51,7 +52,7 @@ import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
 import { useCanvasDrawing } from '../hooks/useCanvasDrawing';
 import type { BaseNodeData } from '../types';
-import type { Node as RFNode, NodeTypes, Connection, Edge, OnMove } from '@xyflow/react';
+import type { Node as RFNode, NodeProps, NodeTypes, Connection, Edge, OnMove } from '@xyflow/react';
 import { useNodeSnap, ResizeSnapContext, type SnapLine } from '../hooks/useNodeSnap';
 import { setCanvasPointerPosition } from '../services/canvasPointerService';
 import {
@@ -75,7 +76,24 @@ function DirectorDeskNode(props: { id: string; data: BaseNodeData; selected?: bo
 const CharacterAssetDialog = lazy(() => import('./CharacterAssetDialog'));
 
 // ── Node types mapping ──
-const nodeTypes: NodeTypes = {
+/**
+ * 给每个节点组件包一层错误边界：单个节点渲染抛错（脏数据、导入文件、旧版迁移残留）
+ * 只降级成一张占位卡，画布其余部分继续可用。
+ * 只在模块顶层调用一次 —— React Flow 要求 nodeTypes 与其中的组件身份保持稳定。
+ */
+function withNodeRenderBoundaries(types: NodeTypes): NodeTypes {
+  return Object.fromEntries(Object.entries(types).map(([typeName, NodeComponent]) => {
+    const Bounded = (props: NodeProps) => (
+      <NodeRenderBoundary nodeId={props.id} typeName={typeName} data={props.data}>
+        <NodeComponent {...props} />
+      </NodeRenderBoundary>
+    );
+    Bounded.displayName = `NodeBoundary(${typeName})`;
+    return [typeName, Bounded] as const;
+  }));
+}
+
+const nodeTypes: NodeTypes = withNodeRenderBoundaries({
   'ai-text': TextNode,
   'ai-image': ImageNode,
   'ai-video': VideoNode,
@@ -92,7 +110,7 @@ const nodeTypes: NodeTypes = {
   comment: TextNode,
   group: GroupNode,
   'canvas-note': CanvasNoteNode,
-};
+});
 
 const edgeTypes: EdgeTypes = {
   'selected-node-flow': SelectedNodeFlowEdge,

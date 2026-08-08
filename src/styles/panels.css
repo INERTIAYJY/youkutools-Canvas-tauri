@@ -384,6 +384,10 @@
   color: var(--danger-light);
   background: var(--danger-bg);
 }
+.wf-item-edit:hover {
+  color: var(--node-text-light);
+  background: var(--node-text-bg);
+}
 
 /* ── IO node badges for workflow upload & list ── */
 .wf-ionodes-preview {

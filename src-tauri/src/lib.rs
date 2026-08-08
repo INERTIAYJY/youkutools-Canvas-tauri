@@ -993,6 +993,7 @@ pub fn run() {
             toggle_devtools,
             sync_authorized_directories,
             comfyui::launch_comfyui,
+            comfyui::open_comfyui_window,
             onnx::get_models_dir,
             onnx::check_model_exists,
             onnx::image_upscale,

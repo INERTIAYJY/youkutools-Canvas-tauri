@@ -17,8 +17,10 @@ export interface WorkflowRecord {
   category: string;
   fileName: string;
   fileContent: string;
+  editableContent?: string;
   ioNodes?: { nodeId: string; title: string; type: string }[];
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface ConfigRecord {

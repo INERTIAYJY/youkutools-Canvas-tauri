@@ -26,6 +26,7 @@ import UpdateBubble from './components/shared/mascot/UpdateBubble';
 import LazyLoadBoundary, { LazyLoadFallback } from './components/shared/LazyLoadBoundary';
 import { useMascotStatus } from './hooks/useMascotStatus';
 import { useMascotDrag } from './hooks/useMascotDrag';
+import { initComfyUIWindowBridge } from './services/comfyUIWindowService';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -175,6 +176,22 @@ export default function App() {
       } catch { /* non-Tauri env */ }
     })();
     return () => { unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let dispose: (() => void) | undefined;
+    let cancelled = false;
+    void initComfyUIWindowBridge()
+      .then((cleanup) => {
+        if (cancelled) cleanup();
+        else dispose = cleanup;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
   }, []);
 
   useEffect(() => {

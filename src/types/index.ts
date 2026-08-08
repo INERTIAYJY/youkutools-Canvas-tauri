@@ -497,8 +497,10 @@ export interface WorkflowDefinition {
   category: WorkflowCategory; // 归属分类
   fileName: string;           // 原始文件名
   fileContent: string;        // JSON 字符串
+  editableContent?: string;   // ComfyUI UI 工作流 JSON，用于保留节点布局后再次编辑
   ioNodes?: WorkflowIONode[]; // 识别出的输入/输出节点
   createdAt: number;
+  updatedAt?: number;
 }
 
 /** 工作流分类的显示配置 */

@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, generateId } from '../store/useAppStore';
 import type { WorkflowDefinition, WorkflowCategory, WorkflowIONode, WorkflowIONodeType } from '../types';
+import { extractComfyUIIONodes, openComfyUIWorkflowEditor } from '../services/comfyUIWindowService';
 import PopupCloseButton from './shared/PopupCloseButton';
 
 const CATEGORIES: { value: WorkflowCategory; label: string }[] = [
@@ -44,14 +45,6 @@ function pickJsonFile(): Promise<{ name: string; content: string } | null> {
   });
 }
 
-/** ComfyUI class_type 匹配规则 → 输入/输出节点类型 */
-const IO_TYPE_RULES: { patterns: RegExp[]; type: WorkflowIONodeType }[] = [
-  { type: 'image',  patterns: [/^LoadImage/i] },
-  { type: 'video',  patterns: [/^LoadVideo/i, /^VHS_LoadVideo/i, /^VHS_LoadVideoPath/i] },
-  { type: 'audio',  patterns: [/^LoadAudio/i, /^VHS_LoadAudio/i, /^RecordAudio/i] },
-  { type: 'prompt', patterns: [/CLIPTextEncode/i, /TextEncode/i, /StringLiteral/i, /PrimitiveString/i, /^ShowText|pysssss/i] },
-];
-
 /** 输入/输出节点类型 → 显示图标 */
 const IONODE_ICONS: Record<WorkflowIONodeType, string> = {
   prompt: '📝',
@@ -59,46 +52,6 @@ const IONODE_ICONS: Record<WorkflowIONodeType, string> = {
   video: '🎬',
   audio: '🎵',
 };
-
-/** 解析 ComfyUI workflow JSON，提取输入/输出节点 */
-function extractIONodes(jsonStr: string): WorkflowIONode[] {
-  let parsed: Record<string, unknown>;
-  try { parsed = JSON.parse(jsonStr); } catch { return []; }
-  if (!parsed || typeof parsed !== 'object') return [];
-
-  const results: WorkflowIONode[] = [];
-
-  for (const [nodeId, raw] of Object.entries(parsed)) {
-    if (!raw || typeof raw !== 'object') continue;
-    const data = raw as Record<string, unknown>;
-    const classType = String(data.class_type || '');
-    const title = String((data._meta as Record<string, unknown> | undefined)?.title || classType || '');
-
-    // Match by class_type patterns
-    for (const rule of IO_TYPE_RULES) {
-      if (rule.patterns.some((re) => re.test(classType))) {
-        results.push({ nodeId, title, type: rule.type });
-        break;
-      }
-    }
-
-    // Also detect text/prompt nodes by input field names containing "text"/"prompt" with string value
-    const inputs = data.inputs as Record<string, unknown> | undefined;
-    if (inputs) {
-      const alreadyMatched = results.some((r) => r.nodeId === nodeId);
-      if (!alreadyMatched) {
-        for (const [key, value] of Object.entries(inputs)) {
-          if ((/text|prompt|writing/i).test(key) && typeof value === 'string' && value.trim()) {
-            results.push({ nodeId, title: title || classType || key, type: 'prompt' });
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  return results;
-}
 
 /* ============================================
    Framer-motion animation variants
@@ -141,6 +94,8 @@ export default function WorkflowPanel() {
     setWorkflowPanelOpen,
     addWorkflow,
     deleteWorkflow,
+    comfyUIUrl,
+    showToast,
   } = useAppStore(
     useShallow((s) => ({
       workflows: s.workflows,
@@ -148,6 +103,8 @@ export default function WorkflowPanel() {
       setWorkflowPanelOpen: s.setWorkflowPanelOpen,
       addWorkflow: s.addWorkflow,
       deleteWorkflow: s.deleteWorkflow,
+      comfyUIUrl: s.config.comfyUIUrl,
+      showToast: s.showToast,
     })),
   );
 
@@ -204,7 +161,7 @@ export default function WorkflowPanel() {
       setFileName(result.name);
       setFileContent(result.content);
       // Extract IO nodes
-      const extracted = extractIONodes(result.content);
+      const extracted = extractComfyUIIONodes(result.content);
       setIoNodes(extracted);
       // Auto-fill name from filename
       if (!name) {
@@ -251,6 +208,19 @@ export default function WorkflowPanel() {
     },
     [deleteWorkflow]
   );
+
+  const handleEdit = useCallback(async (workflow: WorkflowDefinition, event: React.MouseEvent) => {
+    event.stopPropagation();
+    try {
+      await openComfyUIWorkflowEditor(
+        comfyUIUrl?.trim() || 'http://127.0.0.1:8188',
+        workflow,
+      );
+      setWorkflowPanelOpen(false);
+    } catch (error) {
+      showToast(typeof error === 'string' ? error : '无法在 ComfyUI 中打开工作流', 'error');
+    }
+  }, [comfyUIUrl, setWorkflowPanelOpen, showToast]);
 
   // Filter workflows by category for the preview list
   const workflowsByCategory = CATEGORIES.map((cat) => ({
@@ -483,20 +453,36 @@ export default function WorkflowPanel() {
                             </div>
                           )}
                         </div>
-                        <motion.button
-                          type="button"
-                          className="wf-item-del"
-                          onClick={(e) => handleDelete(wf.id, e)}
-                          data-tooltip="删除工作流"
-                          data-tooltip-pos="left"
-                          whileHover={{ scale: 1.1 }}
-                          whileTap={{ scale: 0.9 }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                        </motion.button>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <motion.button
+                            type="button"
+                            className="wf-item-del wf-item-edit"
+                            onClick={(event) => void handleEdit(wf, event)}
+                            data-tooltip="在 ComfyUI 中编辑"
+                            data-tooltip-pos="left"
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M12 20h9" />
+                              <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                            </svg>
+                          </motion.button>
+                          <motion.button
+                            type="button"
+                            className="wf-item-del"
+                            onClick={(e) => handleDelete(wf.id, e)}
+                            data-tooltip="删除工作流"
+                            data-tooltip-pos="left"
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </motion.button>
+                        </div>
                       </motion.div>
                     ))}
                   </motion.div>

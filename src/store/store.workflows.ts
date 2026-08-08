@@ -11,6 +11,7 @@ export interface WorkflowSlice {
   workflowPanelOpen: boolean;
   setWorkflowPanelOpen: (open: boolean) => void;
   addWorkflow: (wf: WorkflowDefinition) => void;
+  updateWorkflow: (id: string, updates: Partial<Omit<WorkflowDefinition, 'id' | 'createdAt'>>) => Promise<void>;
   deleteWorkflow: (id: string) => Promise<void>;
   loadWorkflows: () => Promise<void>;
 }
@@ -29,9 +30,24 @@ export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> 
       category: wf.category,
       fileName: wf.fileName,
       fileContent: wf.fileContent,
+      editableContent: wf.editableContent,
       ioNodes: wf.ioNodes,
       createdAt: wf.createdAt,
+      updatedAt: wf.updatedAt,
     }).catch((e) => console.warn('[保存工作流] 持久化失败:', e));
+  },
+
+  updateWorkflow: async (id, updates) => {
+    let updatedWorkflow: WorkflowDefinition | undefined;
+    set((state) => ({
+      workflows: state.workflows.map((workflow) => {
+        if (workflow.id !== id) return workflow;
+        updatedWorkflow = { ...workflow, ...updates, id: workflow.id, createdAt: workflow.createdAt };
+        return updatedWorkflow;
+      }),
+    }));
+    if (!updatedWorkflow) throw new Error('要更新的工作流不存在');
+    await fileService.saveWorkflow(updatedWorkflow);
   },
 
   deleteWorkflow: async (id) => {
@@ -50,8 +66,10 @@ export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> 
         category: r.category as WorkflowDefinition['category'],
         fileName: r.fileName,
         fileContent: r.fileContent,
+        editableContent: r.editableContent,
         ioNodes: r.ioNodes as WorkflowDefinition['ioNodes'],
         createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
       }));
       set({ workflows: mapped });
     }

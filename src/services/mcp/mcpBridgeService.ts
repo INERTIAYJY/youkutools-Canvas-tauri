@@ -8,8 +8,12 @@ import type {
 } from '../../types/mcp';
 import { invoke } from '@tauri-apps/api/core';
 
-export async function startMcpBridge(token: string): Promise<McpBridgeSessionInfo> {
-  return invoke<McpBridgeSessionInfo>('mcp_bridge_start', { token });
+/** port 省略时由系统分配随机回环端口。 */
+export async function startMcpBridge(
+  token: string,
+  port?: number,
+): Promise<McpBridgeSessionInfo> {
+  return invoke<McpBridgeSessionInfo>('mcp_bridge_start', { token, port: port ?? null });
 }
 
 export async function stopMcpBridge(): Promise<void> {

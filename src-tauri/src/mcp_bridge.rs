@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,9 +18,12 @@ const PROTOCOL_VERSION: u8 = 1;
 const MAX_FRAME_BYTES: u64 = 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// 固定端口后同时接多个客户端（Claude Desktop、Cursor…）是常态，仍留上限防跑飞。
+const MAX_CLIENTS: usize = 4;
 const READ_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static CONNECTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,10 +177,11 @@ fn handle_connection(
     info: McpBridgeSessionInfo,
     token: String,
     active: Arc<AtomicBool>,
-    client_connected: Arc<AtomicBool>,
+    connections: Arc<AtomicUsize>,
     pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>>,
 ) {
-    let _connection_guard = ClientConnectionGuard(client_connected);
+    let _connection_guard = ClientConnectionGuard(connections);
+    let connection_seq = CONNECTION_SEQUENCE.fetch_add(1, Ordering::AcqRel);
     let Ok(read_stream) = stream.try_clone() else {
         return;
     };
@@ -232,7 +236,18 @@ fn handle_connection(
             }
         };
 
-        let request_id = format!("{}:{}", info.session_id, request.id);
+        let request_id = scope_request_id(&info.session_id, connection_seq, &request.id);
+        // 取消请求指向的也是同一连接内的请求键，前端直接按键取消即可。
+        let mut params = request.params;
+        if request.method == "requests/cancel" {
+            let target = params
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(|target| scope_request_id(&info.session_id, connection_seq, target));
+            if let (Some(target), Some(map)) = (target, params.as_object_mut()) {
+                map.insert("requestId".to_string(), Value::String(target));
+            }
+        }
         let (sender, receiver) = mpsc::sync_channel(1);
         let inserted = pending
             .lock()
@@ -253,7 +268,7 @@ fn handle_connection(
                 session_id: info.session_id.clone(),
                 request_id: request_id.clone(),
                 method: request.method,
-                params: request.params,
+                params,
             },
         );
         if emitted.is_err() {
@@ -304,12 +319,26 @@ fn handle_connection(
     }
 }
 
-struct ClientConnectionGuard(Arc<AtomicBool>);
+struct ClientConnectionGuard(Arc<AtomicUsize>);
 
 impl Drop for ClientConnectionGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// 请求键要带连接号：多个客户端各自生成 ID，重名会被误判成重复请求。
+fn scope_request_id(session_id: &str, connection: u64, request_id: &str) -> String {
+    format!("{session_id}:{connection:x}:{request_id}")
+}
+
+/// 占一个客户端名额；超上限时立刻退回，由调用方拒绝该连接。
+fn try_acquire_client_slot(connections: &AtomicUsize) -> bool {
+    if connections.fetch_add(1, Ordering::AcqRel) < MAX_CLIENTS {
+        return true;
+    }
+    connections.fetch_sub(1, Ordering::AcqRel);
+    false
 }
 
 fn stop_session(session: BridgeSession) {
@@ -325,19 +354,54 @@ fn stop_session(session: BridgeSession) {
     }
 }
 
+/// 绑定回环监听：端口 0 表示随机。
+///
+/// 固定端口重启时旧 accept 线程最多还要 ACCEPT_RETRY_DELAY 才会退出并释放监听，
+/// 所以固定端口失败后重试几次，避免「刚停就开」必然报端口占用。
+fn bind_loopback(port: u16) -> Result<TcpListener, String> {
+    let mut last_error = None;
+    for _ in 0..10 {
+        match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+            Ok(listener) => return Ok(listener),
+            Err(error) => {
+                last_error = Some(error);
+                if port == 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    let error = last_error.expect("bind 失败必然带错误");
+    Err(if port == 0 {
+        format!("无法启动 MCP loopback bridge: {error}")
+    } else {
+        format!("无法绑定 MCP 固定端口 {port}: {error}")
+    })
+}
+
 #[tauri::command]
 pub fn mcp_bridge_start(
     app: AppHandle,
     state: State<'_, McpBridgeState>,
     token: String,
+    port: Option<u16>,
 ) -> Result<McpBridgeSessionInfo, String> {
     validate_token(&token)?;
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .map_err(|error| format!("无法启动 MCP loopback bridge: {error}"))?;
+    // 固定端口要先放掉旧会话，否则新监听必然撞上自己上一次的端口。
+    let previous = state
+        .session
+        .lock()
+        .map_err(|_| "MCP bridge 会话锁不可用".to_string())?
+        .take();
+    if let Some(previous) = previous {
+        stop_session(previous);
+    }
+    let listener = bind_loopback(port.unwrap_or(0))?;
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("无法配置 MCP loopback bridge: {error}"))?;
-    let port = listener
+    let bound_port = listener
         .local_addr()
         .map_err(|error| format!("无法读取 MCP loopback 端口: {error}"))?
         .port();
@@ -348,20 +412,17 @@ pub fn mcp_bridge_start(
     let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
     let info = McpBridgeSessionInfo {
         session_id: format!("mcp-{epoch_ms:x}-{sequence:x}"),
-        port,
+        port: bound_port,
         adapter_path: resolve_adapter_path(&app),
     };
     let active = Arc::new(AtomicBool::new(true));
-    let client_connected = Arc::new(AtomicBool::new(false));
+    let connections = Arc::new(AtomicUsize::new(0));
     let pending = Arc::new(Mutex::new(HashMap::new()));
 
     let mut current = state
         .session
         .lock()
         .map_err(|_| "MCP bridge 会话锁不可用".to_string())?;
-    if let Some(previous) = current.take() {
-        stop_session(previous);
-    }
     *current = Some(BridgeSession {
         info: info.clone(),
         active: Arc::clone(&active),
@@ -376,17 +437,14 @@ pub fn mcp_bridge_start(
             while active.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        if client_connected
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_err()
-                        {
+                        if !try_acquire_client_slot(&connections) {
                             let mut stream = stream;
                             let _ = write_response(
                                 &mut stream,
                                 &response_error(
                                     "connect",
-                                    "MCP_CLIENT_ALREADY_CONNECTED",
-                                    "当前 MCP 会话已有适配器连接",
+                                    "MCP_CLIENT_LIMIT_REACHED",
+                                    format!("当前 MCP 会话已连接 {MAX_CLIENTS} 个适配器"),
                                 ),
                             );
                             continue;
@@ -395,7 +453,7 @@ pub fn mcp_bridge_start(
                         let connection_info = thread_info.clone();
                         let connection_token = token.clone();
                         let connection_active = Arc::clone(&active);
-                        let connection_connected = Arc::clone(&client_connected);
+                        let connection_connected = Arc::clone(&connections);
                         let connection_pending = Arc::clone(&pending);
                         let _ = thread::Builder::new()
                             .name("ai-canvas-mcp-client".to_string())
@@ -588,6 +646,45 @@ mod tests {
         let response = receiver.recv_timeout(Duration::from_millis(50)).unwrap();
         assert!(!response.ok);
         assert_eq!(response.error.as_deref(), Some("AI Canvas MCP 会话已停止"));
+    }
+
+    #[test]
+    fn client_slots_are_capped_and_released() {
+        let connections = Arc::new(AtomicUsize::new(0));
+        for _ in 0..MAX_CLIENTS {
+            assert!(try_acquire_client_slot(&connections));
+        }
+        assert!(!try_acquire_client_slot(&connections));
+        // 被拒的连接不能占用名额，否则一次超限就永久少一个位置
+        assert_eq!(connections.load(Ordering::Acquire), MAX_CLIENTS);
+
+        // 连接结束时 guard 归还名额
+        drop(ClientConnectionGuard(Arc::clone(&connections)));
+        assert!(try_acquire_client_slot(&connections));
+    }
+
+    #[test]
+    fn request_ids_are_scoped_per_connection() {
+        // 两个客户端各自生成的 ID 可能撞车，键必须靠连接号分开
+        assert_ne!(
+            scope_request_id("session", 0, "mcp-1"),
+            scope_request_id("session", 1, "mcp-1"),
+        );
+        assert_eq!(scope_request_id("session", 10, "mcp-1"), "session:a:mcp-1");
+    }
+
+    #[test]
+    fn binds_fixed_port_and_reports_conflict_clearly() {
+        let random = bind_loopback(0).unwrap();
+        let port = random.local_addr().unwrap().port();
+
+        let error = bind_loopback(port).unwrap_err();
+        assert!(error.contains(&format!("固定端口 {port}")), "{error}");
+
+        // 释放后同一固定端口必须能重新绑定，对应「停止后按固定端口重开」
+        drop(random);
+        let rebound = bind_loopback(port).unwrap();
+        assert_eq!(rebound.local_addr().unwrap().port(), port);
     }
 
     #[test]

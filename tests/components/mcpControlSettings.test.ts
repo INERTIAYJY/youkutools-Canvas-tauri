@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildMcpServerCommand,
+  buildMcpClientConfig,
   generateMcpSessionToken,
+  normalizeMcpPort,
 } from '../../src/services/mcp/mcpSessionConfig';
 
 describe('MCP control settings helpers', () => {
@@ -13,15 +14,38 @@ describe('MCP control settings helpers', () => {
     expect(second).not.toBe(first);
   });
 
-  it('builds a quoted stdio adapter command only when the adapter exists', () => {
-    expect(buildMcpServerCommand({
+  it('builds a client config with the token in env, only when the adapter exists', () => {
+    const token = 'ab'.repeat(32);
+    const config = buildMcpClientConfig({
       sessionId: 'session-1',
       port: 43123,
       adapterPath: 'D:\\AI Canvas\\scripts\\ai-canvas-mcp.mjs',
-    }, 'ab'.repeat(32))).toBe(
-      `node "D:\\AI Canvas\\scripts\\ai-canvas-mcp.mjs" --port 43123 --token ${'ab'.repeat(32)}`,
-    );
-    expect(buildMcpServerCommand({ sessionId: 'session-1', port: 43123 }, 'ab'.repeat(32)))
-      .toBeNull();
+    }, token);
+
+    expect(JSON.parse(config ?? '')).toEqual({
+      mcpServers: {
+        'ai-canvas': {
+          command: 'node',
+          args: ['D:\\AI Canvas\\scripts\\ai-canvas-mcp.mjs', '--port', '43123'],
+          env: { AI_CANVAS_MCP_TOKEN: token },
+        },
+      },
+    });
+    // 令牌不能出现在命令行参数里：argv 对本机所有进程可见
+    expect(JSON.parse(config ?? '').mcpServers['ai-canvas'].args.join(' ')).not.toContain(token);
+
+    expect(buildMcpClientConfig({ sessionId: 'session-1', port: 43123 }, token)).toBeNull();
+  });
+
+  it('accepts only user-assignable ports as the fixed port', () => {
+    expect(normalizeMcpPort('43123')).toBe(43123);
+    expect(normalizeMcpPort(1024)).toBe(1024);
+    expect(normalizeMcpPort(65535)).toBe(65535);
+    // 非法输入一律回落到随机端口，而不是把 0 / 特权端口传给 bridge
+    expect(normalizeMcpPort(80)).toBeUndefined();
+    expect(normalizeMcpPort(70000)).toBeUndefined();
+    expect(normalizeMcpPort('abc')).toBeUndefined();
+    expect(normalizeMcpPort('')).toBeUndefined();
+    expect(normalizeMcpPort(undefined)).toBeUndefined();
   });
 });

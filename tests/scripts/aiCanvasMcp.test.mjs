@@ -25,6 +25,16 @@ describe('AI Canvas MCP stdio adapter', () => {
     expect(() => parseCliArgs(['--port', '43123', '--token', 'short'])).toThrow('令牌');
   });
 
+  it('takes the token from the environment so it stays out of argv', () => {
+    expect(parseCliArgs(['--port', '43123'], { AI_CANVAS_MCP_TOKEN: TOKEN }))
+      .toEqual({ port: 43123, token: TOKEN });
+    // 已经复制出去的旧命令仍然可用，且显式参数优先
+    expect(parseCliArgs(['--port', '43123', '--token', TOKEN], {
+      AI_CANVAS_MCP_TOKEN: 'cd'.repeat(32),
+    }).token).toBe(TOKEN);
+    expect(() => parseCliArgs(['--port', '43123'], {})).toThrow('令牌');
+  });
+
   it('correlates authenticated loopback responses without retrying', async () => {
     let observedRequest;
     const server = net.createServer((socket) => {

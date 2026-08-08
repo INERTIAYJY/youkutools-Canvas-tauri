@@ -15,9 +15,13 @@ const PROTOCOL_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_FRAME_BYTES = 1024 * 1024;
 
-export function parseCliArgs(args) {
+/**
+ * 令牌优先取环境变量：命令行参数会出现在本机进程列表里，固定令牌长期有效时暴露面太大。
+ * 仍接受 --token，兼容已经复制出去的旧命令。
+ */
+export function parseCliArgs(args, env = process.env) {
   let port;
-  let token;
+  let token = env.AI_CANVAS_MCP_TOKEN;
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === '--port') port = Number(args[index + 1]);
     if (args[index] === '--token') token = args[index + 1];
@@ -26,7 +30,7 @@ export function parseCliArgs(args) {
     throw new Error('必须通过 --port 提供有效的 AI Canvas MCP 会话端口');
   }
   if (typeof token !== 'string' || !/^[a-f0-9]{64}$/i.test(token)) {
-    throw new Error('必须通过 --token 提供 256 位十六进制会话令牌');
+    throw new Error('必须通过 AI_CANVAS_MCP_TOKEN 环境变量提供 256 位十六进制会话令牌');
   }
   return { port, token: token.toLowerCase() };
 }
@@ -235,7 +239,8 @@ export function createMcpServer(client) {
 async function main() {
   const options = parseCliArgs(process.argv.slice(2));
   const client = new LoopbackClient(options);
-  await client.connect();
+  // 不预连接：客户端通常开机就拉起本进程，那时 AI Canvas 往往还没启动。
+  // request() 自带惰性连接与断线重连，连不上只让当次调用报错，不会让整个 MCP 服务失败退出。
   const server = createMcpServer(client);
   const transport = new StdioServerTransport();
   const close = () => client.close();

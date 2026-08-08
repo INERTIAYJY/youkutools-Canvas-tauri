@@ -220,6 +220,14 @@ async function callMcpTool(
           const currentStore = useAppStore.getState();
           currentStore.setActiveConversation(current.conversation.id);
           currentStore.openChat();
+          // 自动开启时主窗口常在后台或最小化，不拉到前台用户看不到审批，请求只能干等到超时。
+          void import('@tauri-apps/api/window')
+            .then(async ({ getCurrentWindow }) => {
+              const window = getCurrentWindow();
+              await window.unminimize();
+              await window.setFocus();
+            })
+            .catch(() => {});
         },
       });
       return executionResult.summary.status === 'success' ? 'completed' : 'failed';
@@ -247,11 +255,11 @@ async function callMcpTool(
 }
 
 function cancelMcpRequest(request: McpBridgeRequestEvent): { cancelled: boolean } {
+  // bridge 已把目标 ID 换成同一连接内的请求键，这里按键直接取消。
   const target = typeof request.params.requestId === 'string'
     ? request.params.requestId
     : '';
-  const fullRequestId = `${request.sessionId}:${target}`;
-  const taskId = activeRequestTasks.get(fullRequestId) ?? activeRequestTasks.get(target);
+  const taskId = activeRequestTasks.get(target);
   if (!taskId) return { cancelled: false };
   try {
     stopAgentTask(taskId);

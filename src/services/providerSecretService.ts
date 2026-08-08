@@ -109,6 +109,18 @@ async function readSecret(ref: string): Promise<string | null> {
   }
 }
 
+/**
+ * 通用凭据读写：条目名不带 `secret:` 前缀，供 provider 之外的凭据（如 MCP 固定令牌）复用。
+ * 写入失败返回 false，调用方需要自行降级（凭据仅本次会话有效）。
+ */
+export async function writeAppSecret(key: string, value: string): Promise<boolean> {
+  return writeSecret(`${SECRET_REF_PREFIX}${key}`, value);
+}
+
+export async function readAppSecret(key: string): Promise<string | null> {
+  return readSecret(`${SECRET_REF_PREFIX}${key}`);
+}
+
 /** 删除某个连接的凭据（连接被移除时调用，避免凭据存储留下孤立条目）。 */
 export async function deleteProviderSecret(connectionId: string): Promise<void> {
   const key = refToKey(providerSecretRef(connectionId));

@@ -112,6 +112,7 @@ export default function App() {
   const [updateBubbleVisible, setUpdateBubbleVisible] = useState(false);
   const [updating, setUpdating] = useState(false);
   const configHydrated = useAppStore((state) => state.configHydrated);
+  const mcpAutoStart = useAppStore((state) => state.config.mcpAutoStart === true);
 
   // 开屏动画结束后后台静默检查更新
   useEffect(() => {
@@ -210,6 +211,29 @@ export default function App() {
       dispose?.();
     };
   }, []);
+
+  // 配置为默认开启时自动拉起 MCP 会话（用固定令牌与固定端口，客户端配置不必每次改）
+  useEffect(() => {
+    if (!isTauri || !configHydrated || !mcpAutoStart) return;
+    let cancelled = false;
+    void (async () => {
+      const [{ getMcpBridgeStatus }, { startConfiguredMcpBridge }] = await Promise.all([
+        import('./services/mcp/mcpBridgeService'),
+        import('./services/mcp/mcpSessionConfig'),
+      ]);
+      if (cancelled || await getMcpBridgeStatus()) return;
+      await startConfiguredMcpBridge();
+    })().catch((startError) => {
+      // 端口被占用等失败必须说出来，否则用户只看到「已关闭」而不知道为什么
+      useAppStore.getState().showToast(
+        `MCP 自动开启失败：${startError instanceof Error ? startError.message : String(startError)}`,
+        'error',
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [configHydrated, mcpAutoStart]);
 
   // ── 更新相关操作 ──
   const handleUpdateNow = async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { findComfyOutputFile, resolveComfyOutputUrl } from '../../src/services/comfyOutputs';
+import { findComfyOutputFile, resolveComfyOutputUrl, type ComfyOutputFile } from '../../src/services/comfyOutputs';
 
 const file = (filename: string) => ({ filename, subfolder: '', type: 'output' });
 
@@ -35,7 +35,7 @@ describe('findComfyOutputFile', () => {
   });
 
   it('ignores entries without a filename', () => {
-    expect(findComfyOutputFile({ '9': { audio: [{ subfolder: '' }] } }, ['audio'])).toBeNull();
+    expect(findComfyOutputFile({ '9': { audio: [{ subfolder: '' } as ComfyOutputFile] } }, ['audio'])).toBeNull();
   });
 });
 

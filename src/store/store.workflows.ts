@@ -32,6 +32,7 @@ export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> 
       fileContent: wf.fileContent,
       editableContent: wf.editableContent,
       ioNodes: wf.ioNodes,
+      defaultNodes: wf.defaultNodes,
       createdAt: wf.createdAt,
       updatedAt: wf.updatedAt,
     }).catch((e) => console.warn('[保存工作流] 持久化失败:', e));
@@ -68,6 +69,7 @@ export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> 
         fileContent: r.fileContent,
         editableContent: r.editableContent,
         ioNodes: r.ioNodes as WorkflowDefinition['ioNodes'],
+        defaultNodes: r.defaultNodes as WorkflowDefinition['defaultNodes'],
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
       }));

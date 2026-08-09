@@ -17,7 +17,7 @@ import type {
   VideoGenerationReferenceInput,
 } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
-import { collectPromptNodeMediaUrls, resolvePromptWithMediaRefs } from './promptResolver';
+import { resolvePromptWithMediaRefs } from './promptResolver';
 import {
   collectConnectedReferenceMedia,
   getMediaReferenceUrl,
@@ -263,17 +263,24 @@ export async function generateVideo(
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点（唇形同步等）
   if (params.workflowId) {
-    const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
-    const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
-    const references = mergeMediaReferences(mentionedMedia.references, connectedMedia.references);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
+    const references = referenceInput.references ?? [];
     const videoUrls = getMediaReferenceUrls(references, 'video', 'local');
-    if (videoUrls.length > 0) {
-      throw new Error('ComfyUI 视频工作流暂未接入视频 IO，请移除视频引用或改用支持视频到视频的模型');
+    const workflow = useAppStore.getState().workflows.find((item) => item.id === params.workflowId);
+    // 视频引用只有落到某个 video IO 节点才有意义：要么被 @ 了，要么工作流指定了默认视频节点
+    const hasVideoTarget = Boolean(workflow?.defaultNodes?.video)
+      || (workflow?.ioNodes ?? []).some((io) => io.type === 'video' && params.workflowInputs?.[io.nodeId]);
+    if (videoUrls.length > 0 && !hasVideoTarget) {
+      throw new Error('该 ComfyUI 工作流没有可接收视频的 IO 节点，请在工作流管理里指定默认视频节点或移除视频引用');
     }
     return executeComfyUIVideoGenerate(
       { ...params, prompt },
       signal,
       getMediaReferenceUrls(references, 'audio', 'local'),
+      {
+        imageUrls: getMediaReferenceUrls(references, 'image', 'local'),
+        videoUrls,
+      },
     );
   }
 

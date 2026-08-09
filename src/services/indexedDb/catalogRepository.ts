@@ -19,6 +19,7 @@ export interface WorkflowRecord {
   fileContent: string;
   editableContent?: string;
   ioNodes?: { nodeId: string; title: string; type: string }[];
+  defaultNodes?: Record<string, string>;
   createdAt: number;
   updatedAt?: number;
 }

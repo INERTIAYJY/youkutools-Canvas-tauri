@@ -411,6 +411,22 @@
   font-size: 11px;
   white-space: nowrap;
 }
+/* 列表里的徽章是按钮：点一下把该节点设为对应类型的默认注入目标 */
+button.wf-ionode-badge {
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+button.wf-ionode-badge:hover {
+  border-color: currentColor;
+}
+button.wf-ionode-badge.is-default {
+  border-color: currentColor;
+  box-shadow: 0 0 0 1px currentColor inset;
+  font-weight: 600;
+}
 .wf-ionode-badge code {
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 10px;

@@ -140,17 +140,17 @@ export async function generateImagesBatch(
   const usesImageDataUrls = !params.workflowId
     && generalModel?.imageReferenceRequestMode === 'generation-json-image-data-urls';
 
+  // ComfyUI 工作流执行路径：参考图由 ComfyUI 自己的 /upload 收，不必先过图床
+  if (params.workflowId) {
+    if (requestedCount > 1) throw new Error('工作流暂不支持批量生成，请将数量设为 1');
+    return singleResult(await executeComfyUIGenerate({ ...params, prompt }, signal, allImageUrls));
+  }
+
   // 参考图传输格式由通用模型配置决定；其他 Provider 保持上传图床的既有行为。
   allImageUrls = usesImageDataUrls
     ? await resolveImageDataUrlArray(allImageUrls, signal)
     : await resolveImageUrlArray(allImageUrls, provider);
   if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-
-  // ComfyUI 工作流执行路径
-  if (params.workflowId) {
-    if (requestedCount > 1) throw new Error('工作流暂不支持批量生成，请将数量设为 1');
-    return singleResult(await executeComfyUIGenerate({ ...params, prompt }, signal));
-  }
 
   if (!prompt.trim()) throw new Error('提示词不能为空');
 

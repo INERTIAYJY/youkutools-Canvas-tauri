@@ -491,11 +491,39 @@
       .actionbar-container [data-testid="queue-overlay-toggle"] {
         padding-inline: 10px;
       }
+      /* 扩展按钮（Manager / rgthree / Image Feed）内部布局各写各的，逐条改字号图标会互相打架，整体缩放最省事 */
+      /* .75 与下面的 32px 相乘得整数 24px，避免圆角在半像素上被切掉 */
+      .actionbar-container [data-testid="legacy-topbar-container"] {
+        zoom: .75;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] > div,
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button-group,
+      .actionbar-container [data-testid="legacy-topbar-container"] .rgthree-comfybar-top-button-group {
+        align-items: center;
+        gap: 4px;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] > div {
+        margin-inline: 4px;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button,
+      .actionbar-container [data-testid="legacy-topbar-container"] .rgthree-comfybar-top-button {
+        box-sizing: border-box;
+        min-height: 32px;
+        height: 32px;
+        padding-block: 0;
+        line-height: 1;
+        overflow: hidden;
+        border-radius: 9px;
+      }
+      /* Manager 只留图标 */
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button[title="ComfyUI Manager"] span {
+        display: none;
+      }
       .actionbar-container .ai-canvas-save-action {
         min-height: 31px;
         height: 31px;
         padding-inline: 10px;
-        border-radius: 9px;
+        border-radius: 6px;
         color: white;
         background-color: var(--ai-canvas-brand);
         box-shadow:

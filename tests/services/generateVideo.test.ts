@@ -161,6 +161,7 @@ describe('video prompt media references', () => {
       }),
       undefined,
       ['https://cdn.example/dialogue.mp3'],
+      { imageUrls: [], videoUrls: [] },
     );
   });
 
@@ -183,6 +184,7 @@ describe('video prompt media references', () => {
       }),
       undefined,
       [],
+      { imageUrls: [], videoUrls: [] },
     );
   });
 

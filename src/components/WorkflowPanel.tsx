@@ -53,6 +53,14 @@ const IONODE_ICONS: Record<WorkflowIONodeType, string> = {
   audio: '🎵',
 };
 
+/** 输入/输出节点类型 → 中文名，用于默认节点提示 */
+const IONODE_LABELS: Record<WorkflowIONodeType, string> = {
+  prompt: '文本',
+  image: '图片',
+  video: '视频',
+  audio: '音频',
+};
+
 /* ============================================
    Framer-motion animation variants
    ============================================ */
@@ -94,6 +102,7 @@ export default function WorkflowPanel() {
     setWorkflowPanelOpen,
     addWorkflow,
     deleteWorkflow,
+    updateWorkflow,
     comfyUIUrl,
     showToast,
   } = useAppStore(
@@ -103,6 +112,7 @@ export default function WorkflowPanel() {
       setWorkflowPanelOpen: s.setWorkflowPanelOpen,
       addWorkflow: s.addWorkflow,
       deleteWorkflow: s.deleteWorkflow,
+      updateWorkflow: s.updateWorkflow,
       comfyUIUrl: s.config.comfyUIUrl,
       showToast: s.showToast,
     })),
@@ -207,6 +217,28 @@ export default function WorkflowPanel() {
       deleteWorkflow(id);
     },
     [deleteWorkflow]
+  );
+
+  // 默认 IO 节点：用户没 @ 该类型节点时，提示词框里的同类内容自动注入这里
+  const handleToggleDefaultNode = useCallback(
+    (workflow: WorkflowDefinition, ioNode: WorkflowIONode) => {
+      const defaultNodes = { ...workflow.defaultNodes };
+      const isDefault = defaultNodes[ioNode.type] === ioNode.nodeId;
+      if (isDefault) {
+        delete defaultNodes[ioNode.type];
+      } else {
+        defaultNodes[ioNode.type] = ioNode.nodeId;
+      }
+      updateWorkflow(workflow.id, { defaultNodes })
+        .then(() => showToast(
+          isDefault
+            ? `已取消默认${IONODE_LABELS[ioNode.type]}节点`
+            : `“${ioNode.title}”已设为默认${IONODE_LABELS[ioNode.type]}节点`,
+          'success',
+        ))
+        .catch(() => showToast('保存默认节点失败', 'error'));
+    },
+    [updateWorkflow, showToast],
   );
 
   const handleEdit = useCallback(async (workflow: WorkflowDefinition, event: React.MouseEvent) => {
@@ -444,12 +476,23 @@ export default function WorkflowPanel() {
                           </span>
                           {wf.ioNodes && wf.ioNodes.length > 0 && (
                             <div className="wf-item-ionodes">
-                              {wf.ioNodes.map((n, i) => (
-                                <span key={i} className={`wf-ionode-badge wf-ionode-${n.type}`}>
-                                  {IONODE_ICONS[n.type]} {n.title}
-                                  <code>#{n.nodeId}</code>
-                                </span>
-                              ))}
+                              {wf.ioNodes.map((n, i) => {
+                                const isDefault = wf.defaultNodes?.[n.type] === n.nodeId;
+                                return (
+                                  <button
+                                    key={i}
+                                    type="button"
+                                    className={`wf-ionode-badge wf-ionode-${n.type}${isDefault ? ' is-default' : ''}`}
+                                    onClick={() => handleToggleDefaultNode(wf, n)}
+                                    title={isDefault
+                                      ? `已是默认${IONODE_LABELS[n.type]}节点，点击取消`
+                                      : `设为默认${IONODE_LABELS[n.type]}节点：提示词框里的${IONODE_LABELS[n.type]}内容在没 @ 时自动注入这里`}
+                                  >
+                                    {isDefault ? '★' : IONODE_ICONS[n.type]} {n.title}
+                                    <code>#{n.nodeId}</code>
+                                  </button>
+                                );
+                              })}
                             </div>
                           )}
                         </div>

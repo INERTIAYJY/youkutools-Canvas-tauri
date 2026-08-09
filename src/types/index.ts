@@ -502,6 +502,8 @@ export interface WorkflowDefinition {
   fileContent: string;        // JSON 字符串
   editableContent?: string;   // ComfyUI UI 工作流 JSON，用于保留节点布局后再次编辑
   ioNodes?: WorkflowIONode[]; // 识别出的输入/输出节点
+  /** 各类型的默认 IO 节点（type → nodeId）；用户没 @ 该类型节点时，提示词框里的同类内容自动注入这里 */
+  defaultNodes?: Partial<Record<WorkflowIONodeType, string>>;
   createdAt: number;
   updatedAt?: number;
 }

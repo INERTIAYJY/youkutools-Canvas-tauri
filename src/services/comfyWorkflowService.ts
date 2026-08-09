@@ -4,7 +4,7 @@
  * Handles workflow JSON mutation, image upload, submission, and result polling.
  */
 import { useAppStore } from '../store/useAppStore';
-import type { WorkflowIONode } from '../types';
+import type { WorkflowIONode, WorkflowIONodeType } from '../types';
 import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
 import { mapImageDimensions, mapVideoDimensions } from './aiDimensions';
 import { resolveNodeReferences } from './nodeReferenceService';
@@ -96,13 +96,42 @@ function getComfyUIConfig() {
   return comfyUrl.replace(/\/+$/, '');
 }
 
+/** 往指定节点的第一个可用输入键写值；节点或输入键不存在时静默跳过 */
+function writeNodeInput(
+  workflowObj: Record<string, Record<string, unknown>>,
+  nodeId: string,
+  keys: string[],
+  value: string,
+): boolean {
+  const inputs = workflowObj[nodeId]?.inputs as Record<string, unknown> | undefined;
+  if (!inputs) return false;
+  const key = keys.find((candidate) => typeof inputs[candidate] === 'string');
+  if (!key) return false;
+  inputs[key] = value;
+  return true;
+}
+
+/** 默认节点按类型接受的输入键：写第一个已存在且是字符串的键 */
+const DEFAULT_NODE_INPUT_KEYS: Record<WorkflowIONodeType, string[]> = {
+  prompt: ['text', 'prompt', 'string', 'value'],
+  image: ['image'],
+  video: ['video'],
+  audio: ['audio'],
+};
+
 /** 将提示词注入到 ComfyUI workflow JSON 的 prompt 类型 IO 节点中 */
 function injectPromptsIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   workflowInputs: Record<string, string> | undefined,
   fallbackPrompt: string,
   ioNodeIds: string[],
+  /** 用户没 @ 任何 prompt 节点时，提示词写入这个节点，跳过下面的占位符猜测 */
+  defaultPromptNodeId?: string,
 ): void {
+  if (defaultPromptNodeId) {
+    writeNodeInput(workflowObj, defaultPromptNodeId, DEFAULT_NODE_INPUT_KEYS.prompt, fallbackPrompt);
+    return;
+  }
   if (!workflowInputs || Object.keys(workflowInputs).length === 0) {
     // 没有 explicit IO 赋值时，遍历所有文本节点做兜底替换
     for (const [, nodeData] of Object.entries(workflowObj)) {
@@ -142,7 +171,7 @@ function injectPromptsIntoWorkflow(
   }
 }
 
-type ComfyMediaKind = 'image' | 'audio';
+type ComfyMediaKind = 'image' | 'audio' | 'video';
 
 /** data URL 的 mime 子类型与 ComfyUI 能解码的音频容器扩展名不一致，落盘前按此表还原 */
 const COMFY_AUDIO_MIME_EXTENSIONS: Record<string, string> = {
@@ -156,6 +185,13 @@ const COMFY_AUDIO_MIME_EXTENSIONS: Record<string, string> = {
 const COMFY_MEDIA_FALLBACK_EXTENSION: Record<ComfyMediaKind, string> = {
   image: 'png',
   audio: 'mp3',
+  video: 'mp4',
+};
+
+const COMFY_MEDIA_LABEL: Record<ComfyMediaKind, string> = {
+  image: '图片',
+  audio: '音频',
+  video: '视频',
 };
 
 function normalizeComfyMediaExtension(
@@ -181,7 +217,7 @@ async function uploadMediaToComfyUI(
   kind: ComfyMediaKind,
   signal?: AbortSignal,
 ): Promise<{ name: string; subfolder?: string; type?: string }> {
-  const label = kind === 'audio' ? '音频' : '图片';
+  const label = COMFY_MEDIA_LABEL[kind];
   // 1. 获取 Blob（支持 data URL 和远程 URL）
   let blob: Blob;
   let ext: string;
@@ -301,10 +337,15 @@ async function injectAudioIntoWorkflow(
   baseUrl: string,
   referenceAudioUrls: string[],
   signal?: AbortSignal,
+  /** 指定了默认音频节点且用户没 @ 音频节点时，只填这一个 */
+  defaultAudioNodeId?: string,
 ): Promise<void> {
-  const audioIoNodeIds = ioNodes
+  const allAudioIoNodeIds = ioNodes
     .filter((io) => io.type === 'audio')
     .map((io) => io.nodeId);
+  const audioIoNodeIds = defaultAudioNodeId && allAudioIoNodeIds.includes(defaultAudioNodeId)
+    ? [defaultAudioNodeId]
+    : allAudioIoNodeIds;
   if (audioIoNodeIds.length === 0) return;
 
   const fallbackUrls = [...referenceAudioUrls];
@@ -333,6 +374,34 @@ async function injectAudioIntoWorkflow(
     if (inputs.upload !== undefined) {
       inputs.upload = 'audio';
     }
+  }
+}
+
+/**
+ * 用户没 @ 该类型 IO 节点时，把提示词框里的同类媒体注入工作流指定的默认节点。
+ * 一个默认节点只收一份内容，多余的引用忽略。
+ */
+async function injectDefaultMediaIntoWorkflow(
+  workflowObj: Record<string, Record<string, unknown>>,
+  defaultNodeId: string,
+  kind: 'image' | 'video',
+  mediaUrls: string[],
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const mediaUrl = mediaUrls.find((url) => url && url.trim() && !url.trim().startsWith('@{'))?.trim();
+  if (!mediaUrl) return;
+  const inputs = workflowObj[defaultNodeId]?.inputs as Record<string, unknown> | undefined;
+  if (!inputs) return;
+  // VHS 的路径变体读的是 ComfyUI 主机上的绝对路径，上传到 input 目录得到的文件名对它无效
+  if (typeof inputs[kind] !== 'string') {
+    console.warn('[comfyWorkflowService] 默认节点不接受 input 目录文件名，已跳过注入', defaultNodeId);
+    return;
+  }
+  const uploadResult = await uploadMediaToComfyUI(baseUrl, mediaUrl, kind, signal);
+  inputs[kind] = uploadResult.name;
+  if (inputs.upload !== undefined) {
+    inputs.upload = kind;
   }
 }
 
@@ -410,6 +479,8 @@ async function submitComfyUIWorkflow(
   signal?: AbortSignal,
   /** 连入生成节点的音频，用于兜底填充未显式赋值的 audio IO 节点 */
   referenceAudioUrls: string[] = [],
+  /** 提示词框里引用的图片/视频，用于填充工作流指定的默认 IO 节点 */
+  promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
 ): Promise<{ baseUrl: string; promptId: string; workflowObj: Record<string, Record<string, unknown>> }> {
   const baseUrl = getComfyUIConfig();
 
@@ -432,11 +503,29 @@ async function submitComfyUIWorkflow(
   const ioNodes = wf.ioNodes || [];
   const ioNodeIds = ioNodes.map((io) => io.nodeId);
 
-  // 注入提示词到 prompt 类型 IO 节点
-  injectPromptsIntoWorkflow(workflowObj, workflowInputs, prompt, ioNodeIds);
+  // 某类型只要被 @ 过，该类型就完全按用户的赋值走，默认节点不再介入
+  const mentionedTypes = new Set(
+    Object.keys(workflowInputs || {})
+      .map((nodeId) => ioNodes.find((io) => io.nodeId === nodeId)?.type)
+      .filter((type): type is WorkflowIONodeType => !!type),
+  );
+  const defaultNodeFor = (type: WorkflowIONodeType) => (
+    mentionedTypes.has(type) ? undefined : wf.defaultNodes?.[type]
+  );
+
+  // 注入提示词到 prompt 类型 IO 节点（没 @ 时优先写默认节点）
+  injectPromptsIntoWorkflow(workflowObj, workflowInputs, prompt, ioNodeIds, defaultNodeFor('prompt'));
 
   // 注入图片到 image 类型 IO 节点（上传 → 替换文件名）
   await injectImagesIntoWorkflow(workflowObj, workflowInputs, ioNodes, baseUrl, signal);
+
+  // 没 @ 图片/视频节点时，把提示词框里引用的同类媒体送进默认节点
+  for (const kind of ['image', 'video'] as const) {
+    const defaultNodeId = defaultNodeFor(kind);
+    if (!defaultNodeId) continue;
+    const urls = kind === 'image' ? promptMedia.imageUrls : promptMedia.videoUrls;
+    await injectDefaultMediaIntoWorkflow(workflowObj, defaultNodeId, kind, urls || [], baseUrl, signal);
+  }
 
   // 注入音频到 audio 类型 IO 节点（上传 → 替换文件名）
   await injectAudioIntoWorkflow(
@@ -446,6 +535,7 @@ async function submitComfyUIWorkflow(
     baseUrl,
     referenceAudioUrls,
     signal,
+    defaultNodeFor('audio'),
   );
 
   // 返回 workflowObj 让调用方注入尺寸/视频参数后再提交
@@ -558,6 +648,8 @@ async function pollComfyUIHistory(
 export async function executeComfyUIGenerate(
   params: AIImageGenParams,
   externalSignal?: AbortSignal,
+  /** 提示词框里引用的图片，用于填充工作流指定的默认 image 节点 */
+  referenceImageUrls: string[] = [],
 ): Promise<{ url: string; width: number; height: number }> {
   const { workflowId, workflowInputs, prompt, imageSize = '2K', aspectRatio = '1:1' } = params;
   const comfyUrl = useAppStore.getState().config.comfyUIUrl?.trim() || '';
@@ -584,7 +676,14 @@ export async function executeComfyUIGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal);
+    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(
+      workflowId!,
+      workflowInputs,
+      prompt,
+      signal,
+      [],
+      { imageUrls: referenceImageUrls },
+    );
 
     // 注入画布选择的尺寸（仅对 @提及的节点）
     injectDimensionsIntoWorkflow(
@@ -633,6 +732,8 @@ export async function executeComfyUIVideoGenerate(
   externalSignal?: AbortSignal,
   /** 连入音频节点的产物，兜底填充工作流的 audio IO 节点 */
   referenceAudioUrls: string[] = [],
+  /** 提示词框里引用的图片/视频，用于填充工作流指定的默认 IO 节点 */
+  promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
 ): Promise<{ url: string }> {
   const {
     workflowId, workflowInputs, prompt,
@@ -664,7 +765,14 @@ export async function executeComfyUIVideoGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls);
+    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(
+      workflowId!,
+      workflowInputs,
+      prompt,
+      signal,
+      referenceAudioUrls,
+      promptMedia,
+    );
 
     // 注入视频参数（仅对 @提及的节点）
     injectVideoParamsIntoWorkflow(

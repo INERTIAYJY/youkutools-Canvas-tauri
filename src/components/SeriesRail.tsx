@@ -1,6 +1,7 @@
 /**
- * SeriesRail 剧集栏 — 贴在窗口右缘的一条竖线，悬浮展开原著、剧本与分集列表。
- * 分集各自是一张画布，点一下就切过去；原著与剧本挂在剧集项目上，整部剧共用。
+ * SeriesRail 剧集栏 — 贴在窗口右缘的常驻按钮，悬浮展开后即使移走鼠标也保持显示；
+ * 收起只能通过面板右上角的关闭按钮。分集各自是一张画布，点一下就切过去；
+ * 原著与剧本挂在剧集项目上，整部剧共用。
  */
 import { useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
@@ -118,6 +119,8 @@ export default function SeriesRail() {
   })));
 
   const [busy, setBusy] = useState<string | null>(null);
+  // 浮起即勾上 pinned：触条常驻、点 X 才收；未浮起时是隐藏态
+  const [pinned, setPinned] = useState(false);
   // 打开编辑器时就把草稿装好，弹窗内部不用再和外部值同步
   const [editor, setEditor] = useState<{ kind: 'script' | 'outline'; draft: string } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -181,27 +184,29 @@ export default function SeriesRail() {
   return (
     <>
       <div
-        className="group/series pointer-events-auto fixed right-0 top-1/2 z-[150] flex h-[min(70vh,560px)]
+        className="group/series pointer-events-none fixed right-0 top-1/2 z-[150] flex h-[min(70vh,560px)]
                    w-6 -translate-y-1/2 items-center justify-end"
       >
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute right-1.5 h-20 w-[3px] rounded-full
-                     bg-canvas-text-muted/35 transition-opacity duration-150
-                     group-hover/series:opacity-0 group-focus-within/series:opacity-0"
+          onMouseEnter={() => setPinned(true)}
+          className={`pointer-events-auto absolute right-2 h-20 w-[3px] cursor-pointer rounded-full
+                     bg-canvas-text-muted transition-opacity duration-150
+                     ${pinned ? 'opacity-0' : 'opacity-40 hover:opacity-70'}`}
         />
         <aside
           aria-label="剧集"
-          className="glass-bevel glass-bevel--panel absolute right-2 top-1/2 flex max-h-full
-                     w-[min(288px,calc(100vw-32px))] -translate-y-1/2 translate-x-[calc(100%+1.5rem)]
-                     flex-col overflow-hidden rounded-lg border border-[var(--glass-ring)]
-                     bg-[var(--glass-bg)] text-canvas-text opacity-0 shadow-2xl shadow-black/40
-                     backdrop-blur-2xl transition-[transform,opacity] duration-200 ease-out
-                     will-change-transform motion-reduce:transition-opacity
-                     pointer-events-none group-hover/series:pointer-events-auto
-                     group-hover/series:translate-x-0 group-hover/series:opacity-100
-                     group-focus-within/series:pointer-events-auto
-                     group-focus-within/series:translate-x-0 group-focus-within/series:opacity-100"
+          aria-hidden={!pinned}
+          className={`glass-bevel glass-bevel--panel absolute right-2 top-1/2 flex max-h-full
+                     w-[min(360px,calc(100vw-32px))] -translate-y-1/2 flex-col overflow-hidden
+                     rounded-lg border border-[var(--glass-ring)] bg-[var(--glass-bg)]
+                     text-canvas-text shadow-2xl shadow-black/40 backdrop-blur-2xl
+                     transition-[transform,opacity] duration-200 ease-out will-change-transform
+                     motion-reduce:transition-opacity ${
+                       pinned
+                         ? 'pointer-events-auto translate-x-0 opacity-100'
+                         : 'pointer-events-none translate-x-[calc(100%+1.5rem)] opacity-0'
+                     }`}
         >
           <header className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-3 py-2.5">
             <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-indigo-500/15 text-indigo-400">
@@ -213,65 +218,69 @@ export default function SeriesRail() {
                 {episodes.length > 0 ? `共 ${episodes.length} 集` : '还没有分集'}
               </p>
             </div>
+            <PopupCloseButton ariaLabel="收起剧集栏" onClick={() => setPinned(false)} />
           </header>
 
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
-            <section className="grid gap-2 px-3 py-3">
-              <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
-                <Icon icon="lucide:book-open" className="h-3.5 w-3.5" />
-                原著
-              </div>
-              <div className="flex items-center gap-2 rounded-lg border border-canvas-border bg-canvas-card px-2.5 py-2">
-                <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
-                  {originalWork?.fileName ?? '未添加（txt / md）'}
-                </span>
-                <button
-                  type="button"
-                  disabled={!ready || busy !== null}
-                  onClick={() => { void handleUploadOriginal(); }}
-                  data-tooltip={originalWork ? '更换原著文件' : '添加原著文件'}
-                  aria-label={originalWork ? '更换原著文件' : '添加原著文件'}
-                  className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-canvas-text-muted
-                             transition-colors hover:bg-canvas-hover hover:text-canvas-text
-                             disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Icon icon={originalWork ? 'lucide:refresh-cw' : 'lucide:upload'} className="h-3.5 w-3.5" />
-                </button>
-                {originalWork ? (
+            <section className="grid gap-2 border-b border-border-subtle px-3 py-3">
+              <div className="flex items-start gap-2">
+                <div className="grid min-w-0 flex-1 gap-1.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
+                    <Icon icon="lucide:book-open" className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">原著</span>
+                  </div>
+                  <div className="flex h-8 items-center gap-1 rounded-lg border border-canvas-border bg-canvas-card px-2 leading-none">
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
+                      {originalWork?.fileName ?? '未添加（txt / md）'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={!ready || busy !== null}
+                      onClick={() => { void handleUploadOriginal(); }}
+                      data-tooltip={originalWork ? '更换原著文件' : '添加原著文件'}
+                      aria-label={originalWork ? '更换原著文件' : '添加原著文件'}
+                      className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-canvas-text-muted
+                                 transition-colors hover:bg-canvas-hover hover:text-canvas-text
+                                 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Icon icon={originalWork ? 'lucide:refresh-cw' : 'lucide:upload'} className="h-3.5 w-3.5" />
+                    </button>
+                    {originalWork ? (
+                      <button
+                        type="button"
+                        disabled={busy !== null}
+                        onClick={() => { void handleRemoveOriginal(); }}
+                        data-tooltip="移除引用（不删文件）"
+                        aria-label="移除原著引用"
+                        className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-canvas-text-muted
+                                   transition-colors hover:bg-red-500/15 hover:text-red-400
+                                   disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Icon icon="lucide:x" className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="grid min-w-0 flex-1 gap-1.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
+                    <Icon icon="lucide:scroll-text" className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">剧本</span>
+                  </div>
                   <button
                     type="button"
-                    disabled={busy !== null}
-                    onClick={() => { void handleRemoveOriginal(); }}
-                    data-tooltip="移除引用（不删文件）"
-                    aria-label="移除原著引用"
-                    className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-canvas-text-muted
-                               transition-colors hover:bg-red-500/15 hover:text-red-400
+                    disabled={!ready}
+                    onClick={() => setEditor({ kind: 'script', draft: script })}
+                    className="flex h-8 items-center gap-1 rounded-lg border border-canvas-border bg-canvas-card
+                               px-2 text-left leading-none transition-colors hover:bg-canvas-hover
                                disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    <Icon icon="lucide:x" className="h-3.5 w-3.5" />
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
+                      {script ? `${script.length} 字` : '未填写，点击编辑'}
+                    </span>
+                    <Icon icon="lucide:pencil" className="h-3.5 w-3.5 shrink-0 text-canvas-text-muted" />
                   </button>
-                ) : null}
+                </div>
               </div>
-            </section>
-
-            <section className="grid gap-2 border-t border-border-subtle px-3 py-3">
-              <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
-                <Icon icon="lucide:scroll-text" className="h-3.5 w-3.5" />
-                剧本
-              </div>
-              <button
-                type="button"
-                disabled={!ready}
-                onClick={() => setEditor({ kind: 'script', draft: script })}
-                className="flex items-center gap-2 rounded-lg border border-canvas-border bg-canvas-card
-                           px-2.5 py-2 text-left transition-colors hover:bg-canvas-hover
-                           disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
-                  {script ? `${script.length} 字` : '未填写，点击编辑'}
-                </span>
-                <Icon icon="lucide:pencil" className="h-3.5 w-3.5 shrink-0 text-canvas-text-muted" />
-              </button>
             </section>
 
             <section className="grid gap-1.5 border-t border-border-subtle px-3 py-3">

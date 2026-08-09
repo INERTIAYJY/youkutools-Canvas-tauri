@@ -2,12 +2,41 @@
  * Store utilities — pure functions: ID generation, image dimension calculation
  */
 import type { Node } from '@xyflow/react';
-import type { BaseNodeData } from '../types';
+import type { BaseNodeData, CanvasProject } from '../types';
 
 export const generateId = () => Math.random().toString(36).substring(2, 11);
 
 export function generateProjectId(): string {
   return crypto.randomUUID();
+}
+
+/**
+ * 剧集共享数据（角色库、素材目录、项目记忆）的归属项目 id。
+ * 分集各有各的画布，但这些内容整部剧共用一份，统一挂在剧集项目上；
+ * 普通项目和剧集项目本身归自己。
+ */
+export function seriesOwnerId(
+  projects: Pick<CanvasProject, 'id' | 'parentId'>[],
+  projectId: string,
+): string {
+  return projects.find((item) => item.id === projectId)?.parentId ?? projectId;
+}
+
+/** 某个剧集项目下的分集，按集号升序。 */
+export function listEpisodes(projects: CanvasProject[], seriesId: string): CanvasProject[] {
+  return projects
+    .filter((item) => item.parentId === seriesId)
+    .sort((a, b) => (a.episodeNo ?? 0) - (b.episodeNo ?? 0));
+}
+
+/** 项目标签与项目库只列顶层项目：普通项目和剧集项目，不列分集。 */
+export function listTopLevelProjects(projects: CanvasProject[]): CanvasProject[] {
+  return projects.filter((item) => !item.parentId);
+}
+
+/** 剧集项目自身没有画布，打开它等于打开它的第一集。 */
+export function resolveOpenTargetId(projects: CanvasProject[], projectId: string): string {
+  return listEpisodes(projects, projectId)[0]?.id ?? projectId;
 }
 
 export function computeImageNodeDimensions(dataUrl: string): Promise<{ nodeWidth: number; nodeHeight: number }> {

@@ -226,6 +226,32 @@ export interface CanvasProject {
   revisionScope?: 'project' | 'global';
   /** 项目级创作基线；旧项目缺失时沿用应用与节点默认值。 */
   settings?: ProjectSettings;
+  /**
+   * 分集项目所属的剧集项目 id。有值 = 这是一集，画布独立、角色库与素材目录跟随父项目；
+   * 无值 = 普通单画布项目，或已拥有分集的剧集项目本身。
+   */
+  parentId?: string;
+  /** 分集序号，从 1 开始；仅分集项目有。 */
+  episodeNo?: number;
+  /** 本集大纲或剧本片段；仅分集项目有。 */
+  episodeOutline?: string;
+  /** 剧集级原著与剧本；仅剧集项目有。 */
+  series?: ProjectSeriesInfo;
+}
+
+/** 原著文件引用：正文存在项目数据目录里，记录只留定位信息。 */
+export interface ProjectOriginalWork {
+  fileName: string;
+  /** 相对项目数据目录的路径 */
+  relativePath: string;
+  addedAt: number;
+}
+
+/** 剧集项目的原著与剧本，全部分集共享。 */
+export interface ProjectSeriesInfo {
+  originalWork?: ProjectOriginalWork;
+  /** 全剧剧本正文 */
+  script?: string;
 }
 
 export type ProjectModelKind = 'text' | 'image' | 'video' | 'audio';

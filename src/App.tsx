@@ -7,6 +7,7 @@ import { motion, useReducedMotion } from 'framer-motion';
 import Header from './components/Header';
 import Titlebar from './components/Titlebar';
 import SessionProjectTabs from './components/SessionProjectTabs';
+import SeriesRail from './components/SeriesRail';
 import Sidebar from './components/Sidebar';
 import Canvas from './components/Canvas';
 import NodeMenu from './components/NodeMenu';
@@ -402,6 +403,9 @@ export default function App() {
       </div>
       {/* Sidebar — outside the overflow-hidden container so it's not clipped */}
       <Sidebar />
+
+      {/* 剧集栏贴窗口右缘，和侧栏一样必须放在裁剪容器外面 */}
+      <SeriesRail />
 
       {/* 吉祥物 — 可拖动浮层，默认隐藏，Ctrl+Shift+M 切换 */}
       {mascotVisible && (

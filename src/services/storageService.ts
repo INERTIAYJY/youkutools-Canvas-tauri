@@ -268,8 +268,14 @@ export interface ProjectSaveData {
   /** 本地媒体文件夹名（形如「项目名-短ID」），创建时确定后保持稳定 */
   dataFolder?: string;
   settings?: ProjectSettings;
-  /** 短剧资产库（人物/场景/道具简介） */
+  /** 短剧资产库（人物/场景/道具简介）；分集记录不存，统一挂在剧集项目上 */
   dramaAssets?: import('../types/dramaAssets').DramaAssetLibrary;
+  /** 所属剧集项目 id；有值表示这条记录是一集 */
+  parentId?: string;
+  episodeNo?: number;
+  episodeOutline?: string;
+  /** 剧集级原著与剧本；仅剧集项目有 */
+  series?: import('../types').ProjectSeriesInfo;
 }
 
 /** 保存项目到 IndexedDB */

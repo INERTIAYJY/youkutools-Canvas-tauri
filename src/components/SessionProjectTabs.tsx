@@ -7,6 +7,8 @@ import { Icon } from '@iconify/react';
 import { motion, useReducedMotion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
+import { seriesOwnerId } from '../store/store.utils';
+import type { CanvasProject } from '../types';
 import ProjectSettingsPopover from './ProjectSettingsPopover';
 
 const MAX_SESSION_PROJECTS = 5;
@@ -41,8 +43,12 @@ export default function SessionProjectTabs() {
       switchProject: state.switchProject,
     })),
   );
+  // 标签按顶层项目算：打开的是某一集时，高亮的仍然是它所属的剧集。
+  const activeProjectId = currentProjectId
+    ? seriesOwnerId(projects, currentProjectId)
+    : null;
   const [openedProjectIds, setOpenedProjectIds] = useState<string[]>(
-    () => loadSessionProjectIds(currentProjectId),
+    () => loadSessionProjectIds(activeProjectId),
   );
   const [switchingProjectId, setSwitchingProjectId] = useState<string | null>(null);
   const [settingsProjectId, setSettingsProjectId] = useState<string | null>(null);
@@ -56,10 +62,11 @@ export default function SessionProjectTabs() {
   useEffect(() => useAppStore.subscribe((state, previousState) => {
     const nextProjectId = state.currentProjectId;
     if (!nextProjectId || nextProjectId === previousState.currentProjectId) return;
+    const nextTabId = seriesOwnerId(state.projects, nextProjectId);
     setOpenedProjectIds((ids) => {
       const nextIds = [
-        nextProjectId,
-        ...ids.filter((id) => id !== nextProjectId),
+        nextTabId,
+        ...ids.filter((id) => id !== nextTabId),
       ].slice(0, MAX_SESSION_PROJECTS);
       saveSessionProjectIds(nextIds);
       return nextIds;
@@ -68,26 +75,35 @@ export default function SessionProjectTabs() {
 
   const openedProjects = useMemo(() => {
     const projectById = new Map(projects.map((project) => [project.id, project]));
-    const orderedIds = currentProjectId
-      ? [currentProjectId, ...openedProjectIds.filter((id) => id !== currentProjectId)]
+    const orderedIds = activeProjectId
+      ? [activeProjectId, ...openedProjectIds.filter((id) => id !== activeProjectId)]
       : openedProjectIds;
-    return orderedIds.slice(0, MAX_SESSION_PROJECTS).flatMap((id) => {
-      const project = projectById.get(id);
-      return project ? [project] : [];
-    });
-  }, [currentProjectId, openedProjectIds, projects]);
+    // 记录里可能留着分集 id（项目转成剧集之前记下的），统一归到顶层项目再去重。
+    const seen = new Set<string>();
+    const opened: CanvasProject[] = [];
+    for (const id of orderedIds) {
+      const topLevelId = seriesOwnerId(projects, id);
+      const project = projectById.get(topLevelId);
+      if (!project || seen.has(topLevelId)) continue;
+      seen.add(topLevelId);
+      opened.push(project);
+      if (opened.length >= MAX_SESSION_PROJECTS) break;
+    }
+    return opened;
+  }, [activeProjectId, openedProjectIds, projects]);
+  // 设置面板改的是当前画布的创作基线，所以始终跟着当前分集走，而不是剧集。
   const currentProject = projects.find((project) => project.id === currentProjectId) ?? null;
-  const settingsOpen = !!currentProjectId && settingsProjectId === currentProjectId;
+  const settingsOpen = !!activeProjectId && settingsProjectId === activeProjectId;
   const closeSettings = useCallback(() => setSettingsProjectId(null), []);
 
   useEffect(() => {
     tabListRef.current
       ?.querySelector<HTMLElement>('[aria-selected="true"]')
       ?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-  }, [currentProjectId]);
+  }, [activeProjectId]);
 
   const handleSwitch = async (projectId: string) => {
-    if (projectId === currentProjectId || switchingProjectId) return;
+    if (projectId === activeProjectId || switchingProjectId) return;
     closeSettings();
     setSwitchingProjectId(projectId);
     try {
@@ -131,7 +147,7 @@ export default function SessionProjectTabs() {
                      [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {openedProjects.map((project) => {
-            const isActive = project.id === currentProjectId;
+            const isActive = project.id === activeProjectId;
             const isSwitching = project.id === switchingProjectId;
 
             return (
@@ -204,7 +220,7 @@ export default function SessionProjectTabs() {
                     whileTap={{ scale: 0.94 }}
                     transition={layoutTransition}
                     onClick={() => setSettingsProjectId((openProjectId) => (
-                      openProjectId === currentProjectId ? null : currentProjectId
+                      openProjectId === activeProjectId ? null : activeProjectId
                     ))}
                     className={`relative z-10 grid h-8 w-8 shrink-0 place-items-center rounded-r-xl border-l
                                 border-[var(--separator-color)] transition-colors disabled:cursor-wait ${

@@ -11,6 +11,7 @@
  * 只影响发送给模型的上下文，不修改、不删除原始消息历史。
  */
 import { useAppStore } from '../../store/useAppStore';
+import { seriesOwnerId } from '../../store/store.utils';
 import { resolveTextModelContextSpec, type TextModelContextSpec } from '../../components/nodes/shared/defaultModels';
 import { loadMessages } from './chatHistoryService';
 import { compressConversationContext } from './contextCompressionService';
@@ -201,9 +202,11 @@ export function selectProjectMemoriesForContext(
 
 /** 构建项目记忆系统消息；无启用记忆时返回空字符串。 */
 function buildMemoryBlock(projectId: string, query: string): string {
+  const state = useAppStore.getState();
   const memories = selectProjectMemoriesForContext(
-    useAppStore.getState().projectMemories,
-    projectId,
+    state.projectMemories,
+    // 记忆整部剧共用，挂在剧集项目上
+    seriesOwnerId(state.projects, projectId),
     query,
   );
   if (memories.length === 0) return '';

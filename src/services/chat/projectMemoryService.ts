@@ -39,6 +39,18 @@ export async function loadProjectMemories(projectId: string): Promise<ProjectMem
   return records.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+/**
+ * 把记忆整体改挂到另一个项目：普通项目转成剧集时，记忆跟着剧集走，
+ * 否则转换后原有记忆会因为归属 id 变化而查不到。
+ */
+export async function reassignProjectMemories(
+  fromProjectId: string,
+  toProjectId: string,
+): Promise<void> {
+  const records = await getProjectMemories(fromProjectId);
+  await Promise.all(records.map((memory) => putProjectMemory({ ...memory, projectId: toProjectId })));
+}
+
 export async function removeProjectMemory(id: string): Promise<void> {
   await dbDeleteProjectMemory(id);
 }

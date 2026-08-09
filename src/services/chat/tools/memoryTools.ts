@@ -2,6 +2,7 @@
  * 注册项目记忆建议工具；候选内容经裁剪后仍须用户确认才能写入长期记忆。
  */
 import { useAppStore } from '../../../store/useAppStore';
+import { seriesOwnerId } from '../../../store/store.utils';
 import { registerAgentTool } from '../toolRegistry';
 import {
   PROJECT_MEMORY_CONTENT_LIMIT,
@@ -58,7 +59,8 @@ export function registerMemoryAgentTools(): Array<() => void> {
         }
         const task = store.agentTasks.find((item) => item.id === context.taskId);
         const memory = store.createProjectMemory({
-          projectId: context.projectId,
+          // 记忆整部剧共用，写在剧集项目上，换集也读得到
+          projectId: seriesOwnerId(store.projects, context.projectId),
           kind: input.kind,
           content: input.content,
           source: {

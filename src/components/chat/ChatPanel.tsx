@@ -20,6 +20,7 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../store/useAppStore';
+import { seriesOwnerId } from '../../store/store.utils';
 import ConversationList from './ConversationList';
 import ChatHeader from './ChatHeader';
 import ChatMessages from './ChatMessages';
@@ -205,8 +206,12 @@ export default function ChatPanel({
   const [showMemoryPanel, setShowMemoryPanel] = useState(false);
   const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
   const [showTaskCenter, setShowTaskCenter] = useState(false);
-  const currentProjectMemories = effectiveProjectId
-    ? projectMemories.filter((memory) => memory.projectId === effectiveProjectId)
+  // 记忆挂在剧集项目上，分集画布要按归属项目取
+  const memoryOwnerId = useAppStore((s) => (
+    effectiveProjectId ? seriesOwnerId(s.projects, effectiveProjectId) : null
+  ));
+  const currentProjectMemories = memoryOwnerId
+    ? projectMemories.filter((memory) => memory.projectId === memoryOwnerId)
     : [];
   const [, setFileGrantVersion] = useState(0);
   useEffect(() => subscribeFileGrants(

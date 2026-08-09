@@ -6,6 +6,7 @@ import { Icon } from '@iconify/react';
 import { motion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
+import { listTopLevelProjects, seriesOwnerId } from '../store/store.utils';
 import type { CanvasProject } from '../types';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
@@ -90,23 +91,27 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   const searchInputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
 
+  // 项目库只列顶层项目；分集在画布右侧的分集栏里管理。
+  const topLevelProjects = useMemo(() => listTopLevelProjects(projects), [projects]);
+  const activeProjectId = currentProjectId ? seriesOwnerId(projects, currentProjectId) : null;
+
   const deletableProjectCount = useMemo(
-    () => projects.filter((project) => project.id !== 'default').length,
-    [projects],
+    () => topLevelProjects.filter((project) => project.id !== 'default').length,
+    [topLevelProjects],
   );
 
   const visibleProjects = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN');
-    return projects
+    return topLevelProjects
       .filter((project) => project.name.toLocaleLowerCase('zh-CN').includes(normalizedQuery))
       .sort((left, right) => {
-        if (left.id === currentProjectId) return -1;
-        if (right.id === currentProjectId) return 1;
+        if (left.id === activeProjectId) return -1;
+        if (right.id === activeProjectId) return 1;
         if (sort === 'name') return projectNameCollator.compare(left.name, right.name);
         if (sort === 'created') return right.createdAt - left.createdAt;
         return right.updatedAt - left.updatedAt;
       });
-  }, [currentProjectId, projects, query, sort]);
+  }, [activeProjectId, topLevelProjects, query, sort]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -147,7 +152,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   };
 
   const openProject = (projectId: string) => {
-    if (projectId !== currentProjectId) switchProject(projectId);
+    if (projectId !== activeProjectId) switchProject(projectId);
     closeLibrary();
   };
 
@@ -254,7 +259,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
             <div className="min-w-0">
               <div className="flex items-baseline gap-2">
                 <h2 className="text-sm font-semibold text-canvas-text">项目</h2>
-                <span className="text-[11px] tabular-nums text-canvas-text-muted">{projects.length}</span>
+                <span className="text-[11px] tabular-nums text-canvas-text-muted">{topLevelProjects.length}</span>
               </div>
             </div>
             <PopupCloseButton ariaLabel="关闭项目库" onClick={requestClose} />
@@ -344,7 +349,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
         >
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
             {visibleProjects.map((project) => {
-              const isCurrent = project.id === currentProjectId;
+              const isCurrent = project.id === activeProjectId;
               const isEditingName = renameTargetId === project.id;
               return (
                 <div

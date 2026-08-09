@@ -92,6 +92,19 @@ export function extractComfyUIIONodes(jsonStr: string): WorkflowIONode[] {
   return results;
 }
 
+/** 只保留仍指向现存 IO 节点的默认设置 */
+function pruneDefaultNodes(
+  defaultNodes: WorkflowDefinition['defaultNodes'],
+  ioNodes: WorkflowIONode[],
+): WorkflowDefinition['defaultNodes'] {
+  if (!defaultNodes) return undefined;
+  const kept: WorkflowDefinition['defaultNodes'] = {};
+  for (const [type, nodeId] of Object.entries(defaultNodes) as [WorkflowIONodeType, string][]) {
+    if (ioNodes.some((io) => io.nodeId === nodeId && io.type === type)) kept[type] = nodeId;
+  }
+  return kept;
+}
+
 function validateSavePayload(payload: unknown): ComfyUIWorkflowSavePayload {
   if (!isRecord(payload)) throw new Error('ComfyUI 返回的工作流数据无效');
   const name = typeof payload.name === 'string' ? payload.name.trim() : '';
@@ -156,13 +169,16 @@ export async function initComfyUIWindowBridge(): Promise<() => void> {
         : undefined;
       const now = Date.now();
       if (existing) {
+        const ioNodes = extractComfyUIIONodes(saved.fileContent);
         await store.updateWorkflow(existing.id, {
           name: saved.name,
           category: saved.category,
           fileName: saved.fileName,
           fileContent: saved.fileContent,
           editableContent: saved.editableContent,
-          ioNodes: extractComfyUIIONodes(saved.fileContent),
+          ioNodes,
+          // 在 ComfyUI 里改结构后节点可能已不存在，指向空节点的默认设置要丢掉
+          defaultNodes: pruneDefaultNodes(existing.defaultNodes, ioNodes),
           updatedAt: now,
         });
         store.showToast(`“${saved.name}”已从 ComfyUI 更新`, 'success');

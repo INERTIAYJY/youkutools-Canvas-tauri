@@ -248,11 +248,11 @@ export default function WorkflowPanel() {
         comfyUIUrl?.trim() || 'http://127.0.0.1:8188',
         workflow,
       );
-      setWorkflowPanelOpen(false);
+      // 面板保持打开：ComfyUI 那边保存回来后这里会实时刷新，方便接着改默认节点
     } catch (error) {
       showToast(typeof error === 'string' ? error : '无法在 ComfyUI 中打开工作流', 'error');
     }
-  }, [comfyUIUrl, setWorkflowPanelOpen, showToast]);
+  }, [comfyUIUrl, showToast]);
 
   // Filter workflows by category for the preview list
   const workflowsByCategory = CATEGORIES.map((cat) => ({

@@ -530,6 +530,7 @@ async function resolvePromptReferences(
       || nodeType === 'ai-storyboard'
       || nodeType === 'ai-director'
       || nodeType === 'ai-panorama'
+      || nodeType === 'ai-animation'
     ) {
       const imageUrl = (
         (node.data.imageUrl as string | undefined)

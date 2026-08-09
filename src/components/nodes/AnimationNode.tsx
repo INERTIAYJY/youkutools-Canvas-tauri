@@ -4,10 +4,15 @@
 import { memo, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { Icon } from '@iconify/react';
 import { Handle, Position } from '@xyflow/react';
+import type { Node } from '@xyflow/react';
 import type { AnimationPreviewMode, BaseNodeData } from '../../types';
 import { ANIMATION_ACTION_LABELS, ANIMATION_FRAME_GRIDS } from '../../types';
 import { useAppStore } from '../../store/useAppStore';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
+import { buildAnimationReskinPrompt } from '../../services/ai/animationPrompt';
+import { collectConnectedReferenceMedia } from '../../services/ai/connectedReferenceMedia';
+import { batchExecuteNodes } from '../../utils/batchExecute';
+import { createPresetNode } from './shared/toolbar/presetAction';
 import NodeLabel from './shared/NodeLabel';
 import NodeError from './shared/NodeError';
 import GooeyBtn from './shared/GooeyBtn';
@@ -63,6 +68,7 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
   const displaySrc = (data.imageUrl || data.thumbnailUrl) as string | undefined;
   const grid = ANIMATION_FRAME_GRIDS[frameCount];
   const [frameIndex, setFrameIndex] = useState(0);
+  const [reskinning, setReskinning] = useState(false);
   const pageVisible = usePageVisible();
   const { displayLabel, handleRename } = useNodeRename(id, data, '生成动画');
 
@@ -81,6 +87,63 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
   const handleResize = useCallback((width: number) => {
     updateNodeDataTransient(id, { nodeWidth: width, nodeHeight: width + 38 });
   }, [id, updateNodeDataTransient]);
+
+  // 一键换皮：本节点的 Sprite Sheet 当姿势母版，连入的角色图当新外观，出一张同动作新 sheet
+  const handleReskin = useCallback(async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    const store = useAppStore.getState();
+    const sourceNode = store.nodes.find((n) => n.id === id) as Node<BaseNodeData> | undefined;
+    if (!sourceNode) return;
+
+    const skinRefs = collectConnectedReferenceMedia(id).references
+      .filter((ref) => ref.kind === 'image' && ref.sourceNodeId);
+    if (skinRefs.length === 0) {
+      store.showToast('请先把新角色的图片节点连到该动画节点', 'error');
+      return;
+    }
+
+    const mentionOf = (nodeId: string, fallback: string) => {
+      const target = store.nodes.find((n) => n.id === nodeId);
+      const label = (target?.data.label || target?.data.fileName || fallback).replace(/[{}:]/g, '');
+      return `@{${nodeId}:${label}}`;
+    };
+    const sourceLabel = (sourceNode.data.label || '生成动画').replace(/[{}:]/g, '');
+    const { node, edge } = createPresetNode(sourceNode, {
+      label: `${sourceLabel} 换皮`,
+      icon: 'mdi:hanger',
+      filledPrompt: '',
+      shouldTrigger: true,
+    });
+    const reskinNode: Node<BaseNodeData> = {
+      ...node,
+      data: {
+        ...node.data,
+        // createPresetNode 只拼了源节点引用，换皮提示词整体重写
+        prompt: buildAnimationReskinPrompt(
+          mentionOf(id, '生成动画'),
+          skinRefs.map((ref) => mentionOf(ref.sourceNodeId!, '角色图')),
+        ),
+        animationAction: action,
+        animationFrames: frameCount,
+        animationPreviewMode: previewMode,
+        nodeWidth,
+        nodeHeight,
+      },
+    };
+    store.addNodeWithEdge(reskinNode, edge);
+
+    setReskinning(true);
+    const live = useAppStore.getState();
+    const { ok, fail } = await batchExecuteNodes([reskinNode.id], live.nodes, live.edges, {
+      commitToHistory: live.commitToHistory,
+      updateNodeDataTransient: live.updateNodeDataTransient,
+      recordOutputHistory: live.recordOutputHistory,
+      currentProjectId: live.currentProjectId,
+    });
+    setReskinning(false);
+    if (ok) live.showToast('换皮完成');
+    else live.showToast(fail ? '换皮失败' : '请先为该节点选择模型', 'error');
+  }, [action, frameCount, id, nodeHeight, nodeWidth, previewMode]);
 
   const visibleFrameIndex = frameIndex % frameCount;
   const column = visibleFrameIndex % grid.cols;
@@ -166,6 +229,20 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
             <Icon icon="mdi:motion-play-outline" width="14" height="14" />
             {ANIMATION_ACTION_LABELS[action]}
           </span>
+          {displaySrc && (
+            <button
+              type="button"
+              className="animation-reskin-btn"
+              data-tooltip="一键换皮：用连入的角色图替换外观，保留骨骼与动作"
+              disabled={reskinning}
+              onClick={handleReskin}
+            >
+              {reskinning
+                ? <span className="spinner-sm" />
+                : <Icon icon="mdi:hanger" width="13" height="13" />}
+              换皮
+            </button>
+          )}
         </div>
 
         {data.error && <NodeError nodeId={id} message={data.error} />}

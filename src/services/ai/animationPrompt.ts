@@ -50,6 +50,22 @@ export function resolveAnimationSheetAspectRatio(
     : ANIMATION_SHEET_RATIOS[frameCount];
 }
 
+/**
+ * 换皮提示词：已生成的 Sprite Sheet 当姿势母版，只换角色外观。
+ * 返回的是「角色描述」段，仍需交给 buildAnimationSpritePrompt 包上宫格与一致性约束。
+ */
+export function buildAnimationReskinPrompt(
+  sheetMention: string,
+  skinMentions: readonly string[],
+) {
+  return [
+    `【换皮】${sheetMention} 是原动作 Sprite Sheet 宫格图，只提供姿势与骨骼；${skinMentions.join('、')} 是新角色形象图，只提供外观。`,
+    '【姿势对齐】逐格严格复制原宫格同一位置格子的姿势、朝向、关节角度、重心高度、脚底基线和画面站位，格数与排布完全一致；不得重新编排动作、增删帧、调换顺序或镜像。',
+    '【外观替换】把角色的造型、配色、服装、发型、材质和附属物整体换成新角色形象；新角色的披风、武器、尾巴等附属物挂在对应肢体锚点上，跟随同一姿势连续运动。',
+    '【比例适配】新角色头身比与原角色不同时按新角色自身比例重绘，但角色总高度、脚底基线和在单元格中的占比与原宫格保持一致。',
+  ].join('\n');
+}
+
 export function buildAnimationSpritePrompt(
   characterPrompt: string,
   action: AnimationAction,

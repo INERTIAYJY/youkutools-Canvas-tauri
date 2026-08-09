@@ -212,6 +212,33 @@
   border-color: var(--brand-alpha-25);
 }
 
+.animation-reskin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 25px;
+  padding: 0 9px;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  background: var(--theme-surface);
+  color: var(--theme-text-secondary);
+  font-family: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.animation-reskin-btn:hover:not(:disabled),
+.animation-reskin-btn:focus-visible {
+  border-color: var(--brand-alpha-25);
+  color: var(--theme-text);
+}
+
+.animation-reskin-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animation-pose-btn {
     transition-duration: 1ms;

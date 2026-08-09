@@ -119,17 +119,9 @@ export async function executeGeneration(
       });
 
       if (postProcess === 'character-8-direction-grid' && saved?.filePath) {
-        const { checkModelExists, createCharacterDirectionGrid, downloadModel } = await import('./onnxService');
+        const { createCharacterDirectionGrid } = await import('./onnxService');
         try {
-          const mattingModelName = 'rmbg-1.4.onnx';
-          if (!(await checkModelExists(mattingModelName))) {
-            store.showToast('首次使用正在下载主体识别模型（约 176MB）');
-            await downloadModel(mattingModelName);
-          }
-          if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
-          const gridResult = await createCharacterDirectionGrid(
-            saved.filePath, mattingModelName, `direction-grid-${nodeId}-${Date.now()}`,
-          );
+          const gridResult = await createCharacterDirectionGrid(saved.filePath);
           if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
 
           const sourceNode = useAppStore.getState().nodes.find((item) => item.id === nodeId);

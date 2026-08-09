@@ -198,17 +198,11 @@ export async function subjectMatting(
 }
 
 /**
- * 对 2×3 角色视图执行主体识别，并生成 3×3 的 8 向透明宫格。
+ * 把 2×3 角色视图直接切图，拼成 3×3 的 8 向宫格（纯图像处理，不跑模型）。
  */
 export async function createCharacterDirectionGrid(
   inputPath: string,
-  modelName: string,
-  taskId: string,
 ): Promise<CharacterDirectionGridResult> {
-  const json: string = await invoke('character_direction_grid', {
-    inputPath,
-    modelName,
-    taskId,
-  });
+  const json: string = await invoke('character_direction_grid', { inputPath });
   return JSON.parse(json) as CharacterDirectionGridResult;
 }

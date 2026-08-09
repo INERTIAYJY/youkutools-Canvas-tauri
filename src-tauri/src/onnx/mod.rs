@@ -11,11 +11,11 @@
 //! - `gpu`   — DXGI 适配器枚举 + DirectML 探针
 //! - `config` — GPU 配置缓存（ep / device_id / device_name）
 
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-pub mod worker;
+mod config;
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 mod gpu;
-mod config;
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+pub mod worker;
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub mod worker {
@@ -78,8 +78,7 @@ pub fn models_dir() -> Result<PathBuf, String> {
     }
 
     let app_data = app_data_models_dir()?;
-    std::fs::create_dir_all(&app_data)
-        .map_err(|e| format!("创建 AppData 模型目录失败: {e}"))?;
+    std::fs::create_dir_all(&app_data).map_err(|e| format!("创建 AppData 模型目录失败: {e}"))?;
     Ok(app_data)
 }
 
@@ -176,8 +175,7 @@ pub async fn download_onnx_model(
 ) -> Result<String, String> {
     validate_model_name(&model_name)?;
     let models = models_dir()?;
-    std::fs::create_dir_all(&models)
-        .map_err(|e| format!("创建模型目录失败: {e}"))?;
+    std::fs::create_dir_all(&models).map_err(|e| format!("创建模型目录失败: {e}"))?;
 
     let dest = models.join(&model_name);
 
@@ -191,8 +189,9 @@ pub async fn download_onnx_model(
                 });
                 return Ok(j.to_string());
             }
-            Err(_) => std::fs::remove_file(&dest)
-                .map_err(|e| format!("清理无效模型缓存失败: {e}"))?,
+            Err(_) => {
+                std::fs::remove_file(&dest).map_err(|e| format!("清理无效模型缓存失败: {e}"))?
+            }
         }
     }
 
@@ -315,15 +314,18 @@ impl WorkerSession {
 
     fn read_one_skip_ready(&self) -> Result<Value, String> {
         loop {
-            let v = self.rx.recv_timeout(self.timeout).map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => format!(
-                    "ONNX worker 无响应（{} 秒超时），进程可能已崩溃",
-                    self.timeout.as_secs()
-                ),
-                mpsc::RecvTimeoutError::Disconnected => {
-                    "ONNX worker 输出通道已关闭，进程可能已退出".to_string()
-                }
-            })?;
+            let v = self
+                .rx
+                .recv_timeout(self.timeout)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => format!(
+                        "ONNX worker 无响应（{} 秒超时），进程可能已崩溃",
+                        self.timeout.as_secs()
+                    ),
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "ONNX worker 输出通道已关闭，进程可能已退出".to_string()
+                    }
+                })?;
 
             if v.get("type").and_then(|t| t.as_str()) == Some("ready") {
                 continue;
@@ -332,10 +334,7 @@ impl WorkerSession {
         }
     }
 
-    fn read_until_done(
-        &self,
-        mut on_progress: impl FnMut(u32, u32),
-    ) -> Result<Value, String> {
+    fn read_until_done(&self, mut on_progress: impl FnMut(u32, u32)) -> Result<Value, String> {
         loop {
             let v = self.read_one_skip_ready()?;
             let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -435,10 +434,7 @@ async fn probe_gpu(model_path: &Path) -> Result<OnnxGpuConfig, String> {
         }
     };
 
-    let resp_type = resp
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let resp_type = resp.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match resp_type {
         "ok" => {
@@ -457,10 +453,7 @@ async fn probe_gpu(model_path: &Path) -> Result<OnnxGpuConfig, String> {
                     .get("device_name")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let vram_mb = result
-                    .get("vram_mb")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let vram_mb = result.get("vram_mb").and_then(|v| v.as_u64()).unwrap_or(0);
 
                 eprintln!(
                     "[onnxrt] GPU 探针成功: {} (device_id={:?}, VRAM={} MB)",
@@ -587,8 +580,8 @@ async fn run_in_worker(
     let request_type_for_worker = request_type.to_string();
 
     let resp = tauri::async_runtime::spawn_blocking(move || {
-        let session = WorkerSession::start(&request, timeout_secs)
-            .map_err(|error| (false, error))?;
+        let session =
+            WorkerSession::start(&request, timeout_secs).map_err(|error| (false, error))?;
         session
             .read_until_done(move |done, total| {
                 let percent = if total > 0 { done * 100 / total } else { 0 };
@@ -615,7 +608,10 @@ async fn run_in_worker(
             match t {
                 "ok" => Ok(v),
                 "error" => {
-                    let err = v.get("error").and_then(|s| s.as_str()).unwrap_or("Worker 返回未知错误");
+                    let err = v
+                        .get("error")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("Worker 返回未知错误");
                     Err((true, format!("{request_type} 推理失败: {err}")))
                 }
                 _ => Err((false, format!("Worker 返回意外响应类型: {t}"))),
@@ -674,13 +670,27 @@ pub async fn image_upscale(
     });
 
     match run_in_worker(
-        &app, &config, "upscale", &model_path, &extra, &task_id,
-        Some("image-upscale-progress"), 300,
-    ).await {
+        &app,
+        &config,
+        "upscale",
+        &model_path,
+        &extra,
+        &task_id,
+        Some("image-upscale-progress"),
+        300,
+    )
+    .await
+    {
         Ok(v) => {
             let result = v.get("result").ok_or("超分响应缺少 result 字段")?;
-            let input_size = result.get("input_size").and_then(|s| s.as_str()).unwrap_or("?x?");
-            let output_size = result.get("output_size").and_then(|s| s.as_str()).unwrap_or("?x?");
+            let input_size = result
+                .get("input_size")
+                .and_then(|s| s.as_str())
+                .unwrap_or("?x?");
+            let output_size = result
+                .get("output_size")
+                .and_then(|s| s.as_str())
+                .unwrap_or("?x?");
             let j = json!({
                 "output_path": output_path,
                 "input_size": input_size,
@@ -697,9 +707,17 @@ pub async fn image_upscale(
                 let _ = config.save();
 
                 match run_in_worker(
-                    &app, &config, "upscale", &model_path, &extra, &task_id,
-                    Some("image-upscale-progress"), 300,
-                ).await {
+                    &app,
+                    &config,
+                    "upscale",
+                    &model_path,
+                    &extra,
+                    &task_id,
+                    Some("image-upscale-progress"),
+                    300,
+                )
+                .await
+                {
                     Ok(v) => {
                         let result = v.get("result").ok_or("超分响应缺少 result 字段")?;
                         let j = json!({
@@ -769,14 +787,27 @@ pub async fn subject_matting(
     });
 
     match run_in_worker(
-        &app, &config, "matting", &model_path, &extra, &task_id,
+        &app,
+        &config,
+        "matting",
+        &model_path,
+        &extra,
+        &task_id,
         None, // matting 无需进度（单次推理，很快）
         120,
-    ).await {
+    )
+    .await
+    {
         Ok(v) => {
             let result = v.get("result").ok_or("主体识别响应缺少 result 字段")?;
-            let subject_path = result.get("subject_path").and_then(|s| s.as_str()).unwrap_or(&output_path);
-            let input_size = result.get("input_size").and_then(|s| s.as_str()).unwrap_or("?x?");
+            let subject_path = result
+                .get("subject_path")
+                .and_then(|s| s.as_str())
+                .unwrap_or(&output_path);
+            let input_size = result
+                .get("input_size")
+                .and_then(|s| s.as_str())
+                .unwrap_or("?x?");
             let j = json!({
                 "subject_path": subject_path,
                 "input_size": input_size,
@@ -792,12 +823,23 @@ pub async fn subject_matting(
                 let _ = config.save();
 
                 match run_in_worker(
-                    &app, &config, "matting", &model_path, &extra, &task_id,
-                    None, 120,
-                ).await {
+                    &app,
+                    &config,
+                    "matting",
+                    &model_path,
+                    &extra,
+                    &task_id,
+                    None,
+                    120,
+                )
+                .await
+                {
                     Ok(v) => {
                         let result = v.get("result").ok_or("主体识别响应缺少 result 字段")?;
-                        let subject_path = result.get("subject_path").and_then(|s| s.as_str()).unwrap_or(&output_path);
+                        let subject_path = result
+                            .get("subject_path")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or(&output_path);
                         let j = json!({
                             "subject_path": subject_path,
                             "input_size": result.get("input_size").and_then(|s| s.as_str()).unwrap_or("?x?"),
@@ -911,6 +953,91 @@ fn unique_sibling_png(input: &Path, suffix: &str) -> Result<PathBuf, String> {
     Err("无法为 8 向图生成不冲突的输出文件名".to_string())
 }
 
+/// 键控底色：必须与 8 向图提示词里钉死的纯色背景一致（影视标准绿 #00B140）。
+/// 角色本身是绿色系时改用蓝幕：这里换 [0x00, 0x00, 0xFF]、SPILL_CHANNEL 换 2，
+/// 提示词里的色号同步换掉。品红这类双主通道的底色这套去反光不适用。
+const CHROMA_KEY_COLOR: [u8; 3] = [0x00, 0xB1, 0x40];
+/// 键控色的主通道下标，用于压掉溅在角色轮廓上的底色反光；#00B140 的主通道是 G。
+const CHROMA_KEY_SPILL_CHANNEL: usize = 1;
+/// 到键控色的 RGB 距离：≤SOLID 判定为纯背景，≥EDGE 判定为角色，中间线性羽化边缘。
+/// 模型出图有色偏、背景有布光渐变、再过一道压缩，所以不能按精确色值匹配。
+const CHROMA_KEY_SOLID_DISTANCE: f32 = 60.0;
+const CHROMA_KEY_EDGE_DISTANCE: f32 = 110.0;
+
+fn chroma_key_distance(pixel: &image::Rgba<u8>) -> f32 {
+    let dr = f32::from(pixel[0]) - f32::from(CHROMA_KEY_COLOR[0]);
+    let dg = f32::from(pixel[1]) - f32::from(CHROMA_KEY_COLOR[1]);
+    let db = f32::from(pixel[2]) - f32::from(CHROMA_KEY_COLOR[2]);
+    (dr * dr + dg * dg + db * db).sqrt()
+}
+
+/// 从四边 flood fill 抠掉键控底色。
+/// 只吃与边框连通的那片背景，角色身上的同色图案是孤岛，不会被一起抠掉。
+/// 源图不是键控底（老图、照片）时边框种子为空，整格原样保留。
+fn key_out_chroma_background(cell: &mut image::RgbaImage) {
+    let (width, height) = cell.dimensions();
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let distances: Vec<f32> = cell.pixels().map(chroma_key_distance).collect();
+    let mut keyed = vec![false; distances.len()];
+    let mut stack: Vec<usize> = Vec::new();
+
+    for y in 0..height {
+        for x in 0..width {
+            if x != 0 && y != 0 && x != width - 1 && y != height - 1 {
+                continue;
+            }
+            let index = (y * width + x) as usize;
+            if !keyed[index] && distances[index] < CHROMA_KEY_EDGE_DISTANCE {
+                keyed[index] = true;
+                stack.push(index);
+            }
+        }
+    }
+
+    while let Some(index) = stack.pop() {
+        let x = index as u32 % width;
+        let y = index as u32 / width;
+        // 减到 0 以下会绕成 u32::MAX，正好被下面的越界判断拦掉
+        for (neighbour_x, neighbour_y) in [
+            (x.wrapping_sub(1), y),
+            (x + 1, y),
+            (x, y.wrapping_sub(1)),
+            (x, y + 1),
+        ] {
+            if neighbour_x >= width || neighbour_y >= height {
+                continue;
+            }
+            let neighbour = (neighbour_y * width + neighbour_x) as usize;
+            if keyed[neighbour] || distances[neighbour] >= CHROMA_KEY_EDGE_DISTANCE {
+                continue;
+            }
+            keyed[neighbour] = true;
+            stack.push(neighbour);
+        }
+    }
+
+    let feather = (CHROMA_KEY_EDGE_DISTANCE - CHROMA_KEY_SOLID_DISTANCE).max(1.0);
+    for (index, pixel) in cell.pixels_mut().enumerate() {
+        if !keyed[index] {
+            continue;
+        }
+        let distance = distances[index];
+        if distance <= CHROMA_KEY_SOLID_DISTANCE {
+            pixel[3] = 0;
+            continue;
+        }
+        // 半透明的过渡像素：按色距羽化，并把底色反光压回另外两个通道的量级
+        let ratio = ((distance - CHROMA_KEY_SOLID_DISTANCE) / feather).clamp(0.0, 1.0);
+        pixel[3] = (f32::from(pixel[3]) * ratio).round() as u8;
+        let other_a = pixel[(CHROMA_KEY_SPILL_CHANNEL + 1) % 3];
+        let other_b = pixel[(CHROMA_KEY_SPILL_CHANNEL + 2) % 3];
+        pixel[CHROMA_KEY_SPILL_CHANNEL] = pixel[CHROMA_KEY_SPILL_CHANNEL].min(other_a.max(other_b));
+    }
+}
+
 fn alpha_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
     let mut min_x = image.width();
     let mut min_y = image.height();
@@ -950,7 +1077,7 @@ fn normalize_direction_cell(
         return Err(format!("源图第 {} 块尺寸过小", source_index + 1));
     }
 
-    let cell = image::imageops::crop_imm(
+    let mut cell = image::imageops::crop_imm(
         subject,
         x0 + inset,
         y0 + inset,
@@ -958,8 +1085,9 @@ fn normalize_direction_cell(
         cell_height - inset * 2,
     )
     .to_image();
-    let (trim_x, trim_y, trim_width, trim_height) =
-        alpha_bounds(&cell).ok_or_else(|| format!("源图第 {} 块未识别到主体", source_index + 1))?;
+    key_out_chroma_background(&mut cell);
+    let (trim_x, trim_y, trim_width, trim_height) = alpha_bounds(&cell)
+        .ok_or_else(|| format!("源图第 {} 块抠底后没剩下主体", source_index + 1))?;
     let trimmed =
         image::imageops::crop_imm(&cell, trim_x, trim_y, trim_width, trim_height).to_image();
 
@@ -1007,26 +1135,25 @@ fn compose_character_direction_grid_image(
     Ok(grid)
 }
 
-fn compose_character_direction_grid(subject_path: &Path, output_path: &Path) -> Result<(), String> {
-    let subject = image::open(subject_path)
-        .map_err(|error| format!("读取主体识别结果失败: {error}"))?
+fn compose_character_direction_grid(source_path: &Path, output_path: &Path) -> Result<(), String> {
+    let subject = image::open(source_path)
+        .map_err(|error| format!("读取 8 向图源图片失败: {error}"))?
         .to_rgba8();
     let grid = compose_character_direction_grid_image(&subject)?;
     grid.save(output_path)
         .map_err(|error| format!("保存角色 8 向宫格失败: {error}"))
 }
 
-/// 对 2×3 角色视图执行主体识别，生成由 9 个 512×512 单元组成的透明宫格图。
+/// 把 2×3 角色视图直接切图，生成由 9 个 512×512 单元组成的宫格图。
+/// 源图带透明通道时按主体裁掉留白，不带则整格铺满。
 #[tauri::command]
 pub async fn character_direction_grid(
     app: tauri::AppHandle,
     webview: tauri::Webview,
     input_path: String,
-    model_name: String,
-    task_id: String,
 ) -> Result<String, String> {
     crate::path_policy::ensure_trusted_caller(&webview)?;
-    // 中间产物与宫格图都写在输入文件旁边，因此只需校验输入路径
+    // 宫格图写在输入文件旁边，因此只需校验输入路径
     let input = crate::path_policy::authorize_path(
         &app,
         &input_path,
@@ -1036,28 +1163,8 @@ pub async fn character_direction_grid(
         return Err(format!("输入文件不存在: {input_path}"));
     }
 
-    let subject_path = unique_sibling_png(&input, "8dir_subject_temp")?;
     let output_path = unique_sibling_png(&input, "8dir_grid")?;
-    let subject_path_string = subject_path.to_string_lossy().into_owned();
-    let matting_task_id = format!("{task_id}-matting");
-
-    if let Err(error) = subject_matting(
-        app,
-        webview,
-        input_path,
-        subject_path_string,
-        model_name,
-        matting_task_id,
-    )
-    .await
-    {
-        let _ = std::fs::remove_file(&subject_path);
-        return Err(error);
-    }
-
-    let compose_result = compose_character_direction_grid(&subject_path, &output_path);
-    let _ = std::fs::remove_file(&subject_path);
-    compose_result?;
+    compose_character_direction_grid(&input, &output_path)?;
 
     Ok(json!({
         "grid_path": output_path.to_string_lossy(),
@@ -1224,6 +1331,90 @@ mod direction_grid_tests {
             let col = target_index % 3;
             let pixel = grid.get_pixel(col as u32 * 512 + 256, row as u32 * 512 + 256);
             assert_eq!(pixel.0, colors[source_index]);
+        }
+    }
+
+    /// 不做主体识别后源图整张不透明，仍应按 2×3 切图落到正确的 9 个格子
+    #[test]
+    fn composition_slices_opaque_source_without_matting() {
+        let mut subject = image::RgbaImage::new(200, 300);
+        // 都远离键控色，避免被抠底逻辑碰到，这里只验证切格
+        let colors = [
+            [220, 20, 20, 255],
+            [120, 20, 220, 255],
+            [20, 20, 220, 255],
+            [220, 220, 20, 255],
+            [220, 20, 220, 255],
+            [20, 220, 220, 255],
+        ];
+
+        for (x, y, pixel) in subject.enumerate_pixels_mut() {
+            let source_index = (y / 100 * 2 + x / 100) as usize;
+            *pixel = image::Rgba(colors[source_index]);
+        }
+
+        let grid = compose_character_direction_grid_image(&subject).expect("应成功合成宫格");
+        assert_eq!(grid.dimensions(), (1536, 1536));
+        // 单元格 512、主体最长边 448，四角留白仍是透明的
+        assert_eq!(grid.get_pixel(0, 0)[3], 0);
+
+        let expected_sources = [5usize, 3, 5, 1, 0, 1, 4, 2, 4];
+        for (target_index, source_index) in expected_sources.into_iter().enumerate() {
+            let row = target_index / 3;
+            let col = target_index % 3;
+            let pixel = grid.get_pixel(col as u32 * 512 + 256, row as u32 * 512 + 256);
+            assert_eq!(pixel.0, colors[source_index]);
+        }
+    }
+
+    /// 键控底色被抠掉、主体被裁到边界；角色身上同为键控色的图案不连通边框，必须活下来
+    #[test]
+    fn chroma_key_removes_background_but_keeps_key_colored_island() {
+        let key = [
+            CHROMA_KEY_COLOR[0],
+            CHROMA_KEY_COLOR[1],
+            CHROMA_KEY_COLOR[2],
+            255,
+        ];
+        let colors = [
+            [220, 20, 20, 255],
+            [120, 20, 220, 255],
+            [20, 20, 220, 255],
+            [220, 220, 20, 255],
+            [220, 20, 220, 255],
+            [20, 220, 220, 255],
+        ];
+
+        let mut subject = image::RgbaImage::from_pixel(200, 300, image::Rgba(key));
+        for (source_index, subject_color) in colors.into_iter().enumerate() {
+            let cell_x = (source_index as u32 % 2) * 100;
+            let cell_y = (source_index as u32 / 2) * 100;
+            // 30×30 主体，正中挖一块 10×10 的键控色图案（角色身上的绿）
+            for y in 35..65u32 {
+                for x in 35..65u32 {
+                    let inside_island = (45..55).contains(&x) && (45..55).contains(&y);
+                    let color = if inside_island { key } else { subject_color };
+                    subject.put_pixel(cell_x + x, cell_y + y, image::Rgba(color));
+                }
+            }
+        }
+
+        let grid = compose_character_direction_grid_image(&subject).expect("应成功合成宫格");
+        let expected_sources = [5usize, 3, 5, 1, 0, 1, 4, 2, 4];
+        for (target_index, source_index) in expected_sources.into_iter().enumerate() {
+            let center_x = (target_index as u32 % 3) * 512 + 256;
+            let center_y = (target_index as u32 / 3) * 512 + 256;
+
+            // 主体中心那块键控色图案没被抠掉
+            assert_eq!(grid.get_pixel(center_x, center_y).0, key);
+            // 背景抠干净后主体被裁到 30×30 再放大，中心 +150 仍落在主体上
+            // （取图案与主体边缘的中点，避开 Lanczos 放大在两侧边界的过渡带）
+            assert_eq!(
+                grid.get_pixel(center_x + 150, center_y).0,
+                colors[source_index]
+            );
+            // 抠掉的背景不该跟着主体一起放大进格子
+            assert_eq!(grid.get_pixel(center_x + 240, center_y)[3], 0);
         }
     }
 }

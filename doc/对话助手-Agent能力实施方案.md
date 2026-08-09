@@ -2070,6 +2070,30 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - [x] 用户可自建只读领域子智能体并被主任务并行派出，子智能体无写权限，产出必须由主任务经用户确认后落地。
 - [x] 只读专家任务无工具、无嵌套、无画布副作用，并在任务中心显示父子关系。
 
+### 12.1 平台补充：匿名同源 SPA 文档渲染
+
+目标：在不开放登录态、跨域依赖、表单、写请求、下载或通用浏览器控制的前提下，为 `web_extract` 增加公开 HTTPS API 文档的 JavaScript 渲染回退。
+
+- [x] 静态 GET 继续作为首选路径；只有正文不足且 HTML 同时包含 SPA 根节点与启动脚本标记时才进入一次渲染回退。
+- [x] Tauri 原生端使用唯一标签的隐藏隐私 WebView，不继承或持久化主应用登录态。
+- [x] 初始 URL 复用既有 HTTPS、标准端口、敏感查询参数和 DNS/IP 公网校验；顶层导航仅允许初始页面同源。
+- [x] 渲染器拒绝弹窗和下载，通过固定 CSP、初始化脚本阻止跨域依赖、表单、非 GET `fetch`/XHR、WebSocket、EventSource、Service Worker 和 `sendBeacon`。
+- [x] 页面正文稳定后通过 `eval_with_callback` 返回移除脚本、样式、表单和媒体地址的渲染 HTML，UTF-8 安全裁剪到 1 MB，并在成功、失败或超时后关闭 WebView。
+- [x] 渲染结果继续复用既有正文/链接提取、任务级 URL grant、来源编号、上下文裁剪和正文不落库边界。
+- [x] 工具说明明确不支持登录页和跨域依赖，渲染失败不得重复读取同一 URL 或猜测内容。
+
+实际检查：
+
+- `npx vitest run tests/services/webPageService.test.ts tests/services/chat/webTools.test.ts`：16 项通过。
+- `cargo test assistant_web::tests --lib`：9 项通过。
+- `npm run typecheck`、`npm run test:typecheck`、阶段 TypeScript 文件定向 ESLint、`cargo check --lib`：通过。
+- 全量 `npx vitest run`：128 个文件、995 项测试通过。
+- `npx vite build --outDir <系统临时目录>`：生产构建通过；仅有既有大 chunk 警告。
+- 全仓 `npm run lint`：被既有 ESLint 10 / parser 兼容错误 `scopeManager.addGlobals is not a function` 阻断；未修改依赖，阶段文件定向 ESLint 已通过。
+- Tauri 开发版可以启动；当前自动化环境无法打开可控制的应用 DevTools 来直接调用新增 command，因此派谱 Seedance 页面正文的真实端到端读取仍需在应用内手测。编译、纯函数安全边界和前端回退判定已有自动测试覆盖。
+
+本阶段未新增依赖，未修改 `tauri.conf.json`、capability、数据库或持久化结构。回滚时移除 `assistant_web_render` command、前端 SPA 判定与一次回退调用即可，无数据迁移。
+
 ## 13. 变更日志
 
 | 日期 | 阶段 | 变更 |
@@ -2112,3 +2136,4 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 | 2026-07-27 | P5-F 补充 | Agent 每次执行都在历史与当前 user 消息之间固定当前任务边界，防止旧请求和旧 assistant 承诺在完成新任务后被再次执行。 |
 | 2026-07-29 | 8.19 | 完成用户可配置的只读领域子智能体：角色由 Skill 或内联提示词定义并可在设置页自建，内置剧本分析师与分镜师两个典范；新增 `agent_run_sub_agent` 只读工具，复用 round executor 既有的 read 并发实现并行分工，材料限定为用户 @ 引用的节点正文与项目短剧资产，产出由主任务走既有审批流落地画布。 |
 | 2026-07-28 | 8.18 | 完成对话助手 Skill 渐进披露：脱敏限长的 Skill 索引注入系统提示词，新增 `skill_load` 与 `skill_read_file` 两个只读工具按需加载正文和文件夹型附属资料，补齐任务级加载预算与手动展开截断；模型主动加载不改变任务工具权限，路径严格限制在各 Skill 自己的目录子树内。 |
+| 2026-08-09 | 平台补充 | 为 `web_extract` 增加匿名同源 HTTPS SPA 文档渲染回退：隐藏隐私 WebView、同源导航、只读网络限制、渲染体积/超时和可靠清理；不支持登录态或跨域依赖，不新增依赖或安全权限。 |

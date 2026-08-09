@@ -966,6 +966,7 @@ pub fn run() {
             cancel_proxy_fetch,
             assistant_web::assistant_web_search,
             assistant_web::assistant_web_extract,
+            assistant_web::assistant_web_render,
             provider_docs::provider_docs_read,
             project_archive::pack_project_archive,
             project_archive::unpack_project_archive,

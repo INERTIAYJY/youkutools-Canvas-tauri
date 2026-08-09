@@ -4,10 +4,16 @@
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::webview::{NewWindowResponse, PageLoadEvent};
+use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use url::{Host, Url};
 
 const TAVILY_SEARCH_URL: &str = "https://api.tavily.com/search";
@@ -18,6 +24,71 @@ const CLOUDFLARE_DOH_URL: &str = "https://cloudflare-dns.com/dns-query";
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
 const MAX_REDIRECTS: usize = 5;
 const MAX_URL_CHARS: usize = 2_048;
+const RENDER_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+const RENDER_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+const RENDER_SETTLE_INTERVAL: Duration = Duration::from_millis(500);
+const RENDER_SETTLE_SAMPLES: usize = 12;
+const RENDER_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
+const RENDER_INIT_SCRIPT: &str = r#"
+(() => {
+  const blocked = () => Promise.reject(new TypeError('Blocked by AI Canvas read-only renderer'));
+  const isSameOriginGet = (input, init = {}) => {
+    try {
+      const request = input instanceof Request ? input : null;
+      const method = String(init.method || request?.method || 'GET').toUpperCase();
+      const rawUrl = request?.url || String(input);
+      return method === 'GET' && new URL(rawUrl, window.location.href).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    const nativeFetch = window.fetch.bind(window);
+    Object.defineProperty(window, 'fetch', {
+      configurable: false,
+      writable: false,
+      value: (input, init = {}) => isSameOriginGet(input, init)
+        ? nativeFetch(input, { ...init, method: 'GET', credentials: 'omit' })
+        : blocked(),
+    });
+  } catch {}
+
+  try {
+    const nativeOpen = XMLHttpRequest.prototype.open;
+    const nativeSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      const allowed = String(method).toUpperCase() === 'GET'
+        && new URL(String(url), window.location.href).origin === window.location.origin;
+      Object.defineProperty(this, '__aiCanvasReadAllowed', { value: allowed });
+      return nativeOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function(body) {
+      if (!this.__aiCanvasReadAllowed || body != null) {
+        this.abort();
+        throw new TypeError('Blocked by AI Canvas read-only renderer');
+      }
+      this.withCredentials = false;
+      return nativeSend.call(this, null);
+    };
+  } catch {}
+
+  for (const key of ['WebSocket', 'EventSource']) {
+    try {
+      Object.defineProperty(window, key, {
+        configurable: false,
+        writable: false,
+        value: function() { throw new TypeError('Blocked by AI Canvas read-only renderer'); },
+      });
+    } catch {}
+  }
+  try { navigator.sendBeacon = () => false; } catch {}
+  try { navigator.serviceWorker.register = blocked; } catch {}
+  window.addEventListener('submit', (event) => event.preventDefault(), true);
+})();
+"#;
+
+static RENDER_WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -111,6 +182,14 @@ pub struct AssistantWebReadResponse {
     content_type: String,
     body: String,
     fetched_at: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderedPagePayload {
+    url: String,
+    html: String,
+    error: Option<String>,
 }
 
 fn now_millis() -> u64 {
@@ -241,6 +320,25 @@ fn validate_url_shape(raw_url: &str) -> Result<Url, String> {
         return Err("网页读取只允许标准 HTTP/HTTPS 端口".to_string());
     }
     Ok(url)
+}
+
+fn same_origin(expected: &Url, candidate: &Url) -> bool {
+    expected.scheme() == candidate.scheme()
+        && expected.host_str().map(str::to_ascii_lowercase)
+            == candidate.host_str().map(str::to_ascii_lowercase)
+        && expected.port_or_known_default() == candidate.port_or_known_default()
+}
+
+fn truncate_utf8_bytes(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,6 +558,180 @@ fn read_public_page(raw_url: String) -> Result<AssistantWebReadResponse, String>
     Err("网页读取失败".to_string())
 }
 
+async fn evaluate_webview_json<T: DeserializeOwned>(
+    webview: &WebviewWindow,
+    script: &str,
+) -> Result<T, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let callback_sender = Arc::clone(&sender);
+    webview
+        .eval_with_callback(script, move |value| {
+            if let Ok(mut sender) = callback_sender.lock() {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(value);
+                }
+            }
+        })
+        .map_err(|error| format!("执行网页渲染脚本失败: {error}"))?;
+    let raw = tokio::time::timeout(RENDER_EVAL_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "读取网页渲染结果超时".to_string())?
+        .map_err(|_| "网页渲染结果通道已关闭".to_string())?;
+    serde_json::from_str(&raw).map_err(|error| format!("解析网页渲染结果失败: {error}"))
+}
+
+async fn collect_rendered_page(webview: &WebviewWindow) -> Result<RenderedPagePayload, String> {
+    let mut previous_length = None;
+    let mut stable_samples = 0usize;
+
+    for sample_index in 0..RENDER_SETTLE_SAMPLES {
+        tokio::time::sleep(RENDER_SETTLE_INTERVAL).await;
+        let text_length = evaluate_webview_json::<usize>(
+            webview,
+            "document.body ? document.body.innerText.length : 0",
+        )
+        .await?;
+        if previous_length == Some(text_length) {
+            stable_samples += 1;
+        } else {
+            previous_length = Some(text_length);
+            stable_samples = 0;
+        }
+        if sample_index >= 3 && stable_samples >= 2 {
+            break;
+        }
+    }
+
+    evaluate_webview_json(
+        webview,
+        r#"(() => {
+          try {
+            if (!document.documentElement) {
+              return { url: location.href, html: '', error: '页面没有可读取的文档节点' };
+            }
+            const clone = document.documentElement.cloneNode(true);
+            clone.querySelectorAll('script, style, noscript, iframe, object, embed, form')
+              .forEach((node) => node.remove());
+            clone.querySelectorAll('*').forEach((node) => {
+              for (const attribute of [...node.attributes]) {
+                const name = attribute.name.toLowerCase();
+                if (name.startsWith('on') || ['src', 'srcset', 'poster', 'style', 'value'].includes(name)) {
+                  node.removeAttribute(attribute.name);
+                }
+              }
+            });
+            return {
+              url: location.href,
+              html: `<!doctype html>${clone.outerHTML}`.slice(0, 1000000),
+              error: null,
+            };
+          } catch (error) {
+            return { url: location.href, html: '', error: String(error) };
+          }
+        })()"#,
+    )
+    .await
+}
+
+async fn render_public_page(
+    app: AppHandle,
+    raw_url: String,
+) -> Result<AssistantWebReadResponse, String> {
+    let initial_url = tauri::async_runtime::spawn_blocking(move || {
+        let mut url = validate_url_shape(&raw_url)?;
+        if url.scheme() != "https" {
+            return Err("动态网页渲染只允许公开 HTTPS 页面".to_string());
+        }
+        url.set_fragment(None);
+        resolve_connection_route(&url)?;
+        Ok::<Url, String>(url)
+    })
+    .await
+    .map_err(|error| format!("网页渲染地址校验失败: {error}"))??;
+
+    let sequence = RENDER_WINDOW_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let label = format!("assistant-web-render-{}-{sequence}", now_millis());
+    let navigation_origin = initial_url.clone();
+    let resource_origin = initial_url.clone();
+    let load_origin = initial_url.clone();
+    let (load_sender, load_receiver) = tokio::sync::oneshot::channel::<()>();
+    let load_sender = Arc::new(Mutex::new(Some(load_sender)));
+    let page_load_sender = Arc::clone(&load_sender);
+
+    let webview = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(initial_url.clone()))
+        .title("AI Canvas 受控网页渲染")
+        .inner_size(960.0, 720.0)
+        .visible(false)
+        .skip_taskbar(true)
+        .decorations(false)
+        .incognito(true)
+        .initialization_script(RENDER_INIT_SCRIPT)
+        .on_navigation(move |candidate| same_origin(&navigation_origin, candidate))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .on_download(|_, _| false)
+        .on_web_resource_request(move |request, response| {
+            let Ok(request_url) = Url::parse(&request.uri().to_string()) else {
+                return;
+            };
+            if !same_origin(&resource_origin, &request_url) {
+                return;
+            }
+            let is_html = response
+                .headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"));
+            if is_html {
+                response.headers_mut().insert(
+                    tauri::http::header::CONTENT_SECURITY_POLICY,
+                    tauri::http::HeaderValue::from_static(RENDER_CSP),
+                );
+            }
+        })
+        .on_page_load(move |_, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished)
+                && same_origin(&load_origin, payload.url())
+            {
+                if let Ok(mut sender) = page_load_sender.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(());
+                    }
+                }
+            }
+        })
+        .build()
+        .map_err(|error| format!("创建受控网页渲染器失败: {error}"))?;
+
+    let result = async {
+        tokio::time::timeout(RENDER_LOAD_TIMEOUT, load_receiver)
+            .await
+            .map_err(|_| "动态网页加载超时".to_string())?
+            .map_err(|_| "动态网页加载监听已关闭".to_string())?;
+        let rendered = collect_rendered_page(&webview).await?;
+        if let Some(error) = rendered.error.filter(|value| !value.trim().is_empty()) {
+            return Err(format!("动态网页渲染失败: {error}"));
+        }
+        let final_url = validate_url_shape(&rendered.url)?;
+        if !same_origin(&initial_url, &final_url) {
+            return Err("动态网页渲染发生了跨域跳转".to_string());
+        }
+        if rendered.html.trim().is_empty() {
+            return Err("动态网页渲染后没有可读取的正文".to_string());
+        }
+        Ok(AssistantWebReadResponse {
+            url: final_url.to_string(),
+            content_type: "text/html; charset=utf-8".to_string(),
+            body: truncate_utf8_bytes(rendered.html, MAX_RESPONSE_BYTES),
+            fetched_at: now_millis(),
+        })
+    }
+    .await;
+
+    let _ = webview.close();
+    result
+}
+
 #[tauri::command]
 pub async fn assistant_web_search(
     request: AssistantWebSearchRequest,
@@ -527,6 +799,14 @@ pub async fn assistant_web_extract(url: String) -> Result<AssistantWebReadRespon
         .map_err(|error| format!("网页读取任务执行失败: {error}"))?
 }
 
+#[tauri::command]
+pub async fn assistant_web_render(
+    app: AppHandle,
+    url: String,
+) -> Result<AssistantWebReadResponse, String> {
+    render_public_page(app, url).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +849,35 @@ mod tests {
         let credential = public.join("/next?token=secret").unwrap();
         assert!(validate_url_shape(private.as_str()).is_err());
         assert!(validate_url_shape(credential.as_str()).is_err());
+    }
+
+    #[test]
+    fn browser_rendering_requires_same_https_origin() {
+        let expected = Url::parse("https://docs.example.com/reference").unwrap();
+        assert!(same_origin(
+            &expected,
+            &Url::parse("https://docs.example.com/other?q=1").unwrap()
+        ));
+        assert!(!same_origin(
+            &expected,
+            &Url::parse("http://docs.example.com/reference").unwrap()
+        ));
+        assert!(!same_origin(
+            &expected,
+            &Url::parse("https://cdn.example.com/app.js").unwrap()
+        ));
+        assert!(!same_origin(
+            &expected,
+            &Url::parse("https://docs.example.com:8443/reference").unwrap()
+        ));
+    }
+
+    #[test]
+    fn rendered_html_is_truncated_on_a_utf8_boundary() {
+        let value = "接口文档".repeat(300_000);
+        let truncated = truncate_utf8_bytes(value, MAX_RESPONSE_BYTES);
+        assert!(truncated.len() <= MAX_RESPONSE_BYTES);
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
     }
 
     #[test]

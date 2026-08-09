@@ -108,6 +108,8 @@ describe('web agent tools', () => {
     const withKey = getAvailableAgentTools(context).map((tool) => tool.id);
     expect(withKey).toContain('web_search');
     expect(withKey).toContain('web_extract');
+    expect(getAgentTool('web_extract')?.description).toContain('隔离环境中渲染');
+    expect(getAgentTool('web_extract')?.description).toContain('不支持跨域依赖');
   });
 
   it('uses the built-in controlled search when no provider key is configured', async () => {

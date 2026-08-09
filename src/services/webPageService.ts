@@ -12,6 +12,10 @@ interface NativeWebReadResponse {
   fetchedAt: number;
 }
 
+const MIN_STATIC_PAGE_TEXT = 800;
+const SPA_ROOT_PATTERN = /<(?:div|main|section)\b[^>]*(?:\bid=["'](?:root|app|__next|__nuxt|svelte)["']|\bdata-reactroot\b)[^>]*>/i;
+const SPA_BOOTSTRAP_PATTERN = /<script\b[^>]*(?:\btype=["']module["']|\bsrc=["'][^"']+(?:\.m?js|\/_next\/|\/_nuxt\/)[^"']*["'])[^>]*>/i;
+
 export interface WebPageResult {
   source: WebSource;
   text: string;
@@ -148,6 +152,16 @@ function extractReadableText(
   };
 }
 
+export function shouldRenderDynamicHtml(
+  body: string,
+  contentType: string,
+  extractedText: string,
+): boolean {
+  if (!contentType.includes('html')) return false;
+  if (extractedText.trim().length >= MIN_STATIC_PAGE_TEXT) return false;
+  return SPA_ROOT_PATTERN.test(body) && SPA_BOOTSTRAP_PATTERN.test(body);
+}
+
 export function truncateWebContent(content: string, limit = 15_000): {
   text: string;
   truncated: boolean;
@@ -174,17 +188,29 @@ export async function readWebPage(
     throw new Error('受控网页读取仅在 Tauri 桌面环境可用');
   }
   if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-  const response = await invoke<NativeWebReadResponse>('assistant_web_extract', { url: normalized });
+  let response = await invoke<NativeWebReadResponse>('assistant_web_extract', { url: normalized });
   if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-  const finalUrl = normalizePublicWebUrl(response.url);
+  let finalUrl = normalizePublicWebUrl(response.url);
   if (!finalUrl) throw new Error('网页最终地址未通过安全校验');
   const linkLimit = Math.max(1, Math.min(Math.floor(options.linkLimit ?? 30), 200));
-  const extracted = extractReadableText(
+  let extracted = extractReadableText(
     response.body,
     response.contentType,
     finalUrl,
     linkLimit,
   );
+  if (shouldRenderDynamicHtml(response.body, response.contentType, extracted.text)) {
+    response = await invoke<NativeWebReadResponse>('assistant_web_render', { url: finalUrl });
+    if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    finalUrl = normalizePublicWebUrl(response.url);
+    if (!finalUrl) throw new Error('网页渲染后的最终地址未通过安全校验');
+    extracted = extractReadableText(
+      response.body,
+      response.contentType,
+      finalUrl,
+      linkLimit,
+    );
+  }
   if (!extracted.text) throw new Error('网页没有可读取的正文');
   const budgeted = truncateWebContent(extracted.text, options.charLimit);
   const parsed = new URL(finalUrl);

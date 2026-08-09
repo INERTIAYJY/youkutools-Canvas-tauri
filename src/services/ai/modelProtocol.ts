@@ -147,6 +147,11 @@ export interface ModelProtocolRequestPreview {
 
 export type { ModelProtocolResponsePreviewEntry } from './modelProtocolResponse';
 
+/** 判断序列化协议中是否引用了指定的受信模板变量。 */
+export function modelProtocolUsesVariable(source: string, ...variables: string[]): boolean {
+  return variables.some((variable) => new RegExp(`\\{\\{\\s*${variable}\\s*\\}\\}`).test(source));
+}
+
 const OPENAI_CHAT_PROTOCOL: NormalizedModelExecutionProtocol = {
   version: 2,
   mode: 'sync',

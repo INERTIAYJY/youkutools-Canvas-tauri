@@ -3,7 +3,13 @@ import {
   applyProjectDefaultsToNodeData,
   normalizeProjectSettings,
 } from '../../src/services/projectSettingsService';
-import { mapVideoDimensions, VIDEO_ASPECT_RATIOS } from '../../src/services/aiDimensions';
+import {
+  mapVideoDimensions,
+  resolveVideoDurationSeconds,
+  VIDEO_ASPECT_RATIOS,
+  videoDurationFromFrames,
+  videoFramesFromDuration,
+} from '../../src/services/aiDimensions';
 import type { BaseNodeData, ProjectSettings } from '../../src/types';
 
 function videoNode(partial: Partial<BaseNodeData> = {}): BaseNodeData {
@@ -89,5 +95,23 @@ describe('视频比例 → 像素尺寸换算', () => {
   it('比例选项同时覆盖横屏与竖屏', () => {
     expect(VIDEO_ASPECT_RATIOS).toContain('16:9');
     expect(VIDEO_ASPECT_RATIOS).toContain('9:16');
+  });
+});
+
+describe('视频秒数 ↔ 帧数换算', () => {
+  it('按秒数和 FPS 生成包含首帧的总帧数', () => {
+    expect(videoFramesFromDuration(5, 24)).toBe(121);
+    expect(videoFramesFromDuration(6, 30)).toBe(181);
+  });
+
+  it('旧节点只有总帧数时反算为最接近的整数秒', () => {
+    expect(videoDurationFromFrames(77, 24)).toBe(3);
+    expect(resolveVideoDurationSeconds(undefined, 121, 24)).toBe(5);
+  });
+
+  it('限制通用 UI 的时长范围并修复非法输入', () => {
+    expect(videoFramesFromDuration(1, 24)).toBe(49);
+    expect(videoFramesFromDuration(99, 24)).toBe(361);
+    expect(resolveVideoDurationSeconds(undefined, undefined, undefined)).toBe(5);
   });
 });

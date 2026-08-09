@@ -18,6 +18,7 @@ import {
 } from './projectSettingsService';
 import { postProcessDramaExtractOutput } from './dramaAssetExtract';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { resolveVideoDurationSeconds, videoFramesFromDuration } from './aiDimensions';
 
 export interface GenerationResult {
   success: boolean;
@@ -167,10 +168,14 @@ export async function executeGeneration(
     } else if (nodeType === 'ai-video') {
       const videoResolution = (data.videoResolution as number) || 832;
       const videoFps = (data.videoFps as number) || 24;
-      const videoFrames = (data.videoFrames as number) || 77;
+      const seedanceDuration = resolveVideoDurationSeconds(
+        data.seedanceDuration as number | undefined,
+        data.videoFrames as number | undefined,
+        videoFps,
+      );
+      const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
       const seedanceResolution = (data.seedanceResolution as string) || '720p';
       const seedanceRatio = (data.seedanceRatio as string) || '16:9';
-      const seedanceDuration = (data.seedanceDuration as number) || 5;
       const genAudio = data.generateAudio as boolean | undefined;
       const result = await generateVideo({
         prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,

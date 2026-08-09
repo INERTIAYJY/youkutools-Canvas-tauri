@@ -31,6 +31,10 @@ import {
   resolveAnimationSheetAspectRatio,
 } from '../../services/ai/animationPrompt';
 import { buildGenerationCameraPrompt } from './shared/image/cameraStudio';
+import {
+  resolveVideoDurationSeconds,
+  videoFramesFromDuration,
+} from '../../services/aiDimensions';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
 
@@ -489,10 +493,14 @@ function AINodeDialog() {
       } else if (nodeType === 'ai-video') {
         const videoResolution = (latestData.videoResolution as number) || 832;
         const videoFps = (latestData.videoFps as number) || 24;
-        const videoFrames = (latestData.videoFrames as number) || 77;
+        const seedanceDuration = resolveVideoDurationSeconds(
+          latestData.seedanceDuration as number | undefined,
+          latestData.videoFrames as number | undefined,
+          videoFps,
+        );
+        const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
         const seedanceResolution = (latestData.seedanceResolution as string) || '720p';
         const seedanceRatio = (latestData.seedanceRatio as string) || '16:9';
-        const seedanceDuration = (latestData.seedanceDuration as number) || 5;
         const generateAudio = latestData.generateAudio as boolean | undefined;
         const result = await generateVideo({
           prompt: effectivePrompt,
@@ -729,11 +737,6 @@ function AINodeDialog() {
     [activeNodeId, updateNodeData]
   );
 
-  const onChangeVideoFrames = useCallback(
-    (value: number) => updateNodeData(activeNodeId!, { videoFrames: value }),
-    [activeNodeId, updateNodeData]
-  );
-
   const onChangeSeedanceResolution = useCallback(
     (value: string) => updateNodeData(activeNodeId!, { seedanceResolution: value }),
     [activeNodeId, updateNodeData]
@@ -887,10 +890,9 @@ function AINodeDialog() {
           videoFrames={(data.videoFrames as number) || 77}
           onChangeVideoResolution={onChangeVideoResolution}
           onChangeVideoFps={onChangeVideoFps}
-          onChangeVideoFrames={onChangeVideoFrames}
           seedanceResolution={(data.seedanceResolution as string) || '720p'}
           seedanceRatio={(data.seedanceRatio as string) || '16:9'}
-          seedanceDuration={(data.seedanceDuration as number) || 5}
+          seedanceDuration={data.seedanceDuration as number | undefined}
           generateAudio={data.generateAudio as boolean | undefined}
           onChangeSeedanceResolution={onChangeSeedanceResolution}
           onChangeSeedanceRatio={onChangeSeedanceRatio}

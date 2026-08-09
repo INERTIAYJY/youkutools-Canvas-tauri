@@ -163,6 +163,28 @@ describe('video prompt media references', () => {
     );
   });
 
+  it('converts user-facing seconds to workflow frames before ComfyUI execution', async () => {
+    await generateVideo({
+      model: 'comfyui/video',
+      provider: 'comfyui',
+      prompt: '生成视频',
+      workflowId: 'video-workflow',
+      videoFps: 30,
+      seedanceDuration: 8,
+      videoFrames: 77,
+    });
+
+    expect(comfyMocks.executeVideo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        videoFps: 30,
+        seedanceDuration: 8,
+        videoFrames: 241,
+      }),
+      undefined,
+      [],
+    );
+  });
+
   it('collects all three connected media kinds and keeps local and remote transports distinct', () => {
     const imageNode: Node<BaseNodeData> = {
       id: 'image-1',
@@ -343,8 +365,8 @@ describe('general video protocol variables', () => {
       width: 1280,
       height: 720,
       aspectRatio: '16:9',
-      frames: 129,
-      frames8n1: 129,
+      frames: 181,
+      frames8n1: 185,
       fps: 30,
       duration: 6,
       resolution: '720p',

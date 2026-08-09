@@ -1,6 +1,57 @@
 /** 视频画面比例选项；'adaptive' 由模型自行决定，不参与像素换算。 */
 export const VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
 
+export const VIDEO_DURATION_MIN_SECONDS = 2;
+export const VIDEO_DURATION_MAX_SECONDS = 15;
+export const DEFAULT_VIDEO_DURATION_SECONDS = 5;
+export const DEFAULT_VIDEO_FPS = 24;
+
+/** 统一视频帧率，避免非法值进入秒数/帧数换算。 */
+export function normalizeVideoFps(fps: number | undefined): number {
+  return Number.isFinite(fps) && Number(fps) > 0
+    ? Math.max(1, Math.round(Number(fps)))
+    : DEFAULT_VIDEO_FPS;
+}
+
+/** 将用户可理解的秒数限制到通用视频设置支持的范围。 */
+export function normalizeVideoDurationSeconds(durationSeconds: number | undefined): number {
+  const duration = Number.isFinite(durationSeconds)
+    ? Math.round(Number(durationSeconds))
+    : DEFAULT_VIDEO_DURATION_SECONDS;
+  return Math.min(VIDEO_DURATION_MAX_SECONDS, Math.max(VIDEO_DURATION_MIN_SECONDS, duration));
+}
+
+/** 按多数视频工作流的首帧语义，将秒数换算为总帧数。 */
+export function videoFramesFromDuration(
+  durationSeconds: number | undefined,
+  fps: number | undefined,
+): number {
+  return normalizeVideoDurationSeconds(durationSeconds) * normalizeVideoFps(fps) + 1;
+}
+
+/** 将旧节点保存的总帧数反算为最接近的整数秒。 */
+export function videoDurationFromFrames(
+  frameCount: number | undefined,
+  fps: number | undefined,
+): number {
+  if (!Number.isFinite(frameCount) || Number(frameCount) <= 0) {
+    return DEFAULT_VIDEO_DURATION_SECONDS;
+  }
+  const duration = (Math.round(Number(frameCount)) - 1) / normalizeVideoFps(fps);
+  return normalizeVideoDurationSeconds(duration);
+}
+
+/** 优先使用新秒数字段；旧节点缺失该字段时由总帧数兼容反算。 */
+export function resolveVideoDurationSeconds(
+  durationSeconds: number | undefined,
+  frameCount: number | undefined,
+  fps: number | undefined,
+): number {
+  return Number.isFinite(durationSeconds)
+    ? normalizeVideoDurationSeconds(durationSeconds)
+    : videoDurationFromFrames(frameCount, fps);
+}
+
 /** 视频尺寸按 8 对齐：ComfyUI latent 与多数视频模型都要求边长是 8 的倍数。 */
 function alignTo8(value: number): number {
   return Math.max(64, Math.round(value / 8) * 8);

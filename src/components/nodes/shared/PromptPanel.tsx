@@ -328,7 +328,6 @@ interface PromptPanelProps {
   videoFrames?: number;
   onChangeVideoResolution?: (value: number) => void;
   onChangeVideoFps?: (value: number) => void;
-  onChangeVideoFrames?: (value: number) => void;
   // ── Seedance 参数 ──
   seedanceResolution?: string;
   seedanceRatio?: string;
@@ -394,7 +393,6 @@ export default function PromptPanel({
   videoFrames,
   onChangeVideoResolution,
   onChangeVideoFps,
-  onChangeVideoFrames,
   seedanceResolution,
   seedanceRatio,
   seedanceDuration,
@@ -709,7 +707,6 @@ export default function PromptPanel({
             videoFrames={videoFrames}
             onChangeResolution={onChangeVideoResolution || (() => {})}
             onChangeFps={onChangeVideoFps || (() => {})}
-            onChangeFrames={onChangeVideoFrames || (() => {})}
             seedanceResolution={seedanceResolution}
             seedanceRatio={seedanceRatio}
             seedanceDuration={seedanceDuration}

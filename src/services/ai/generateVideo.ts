@@ -26,7 +26,12 @@ import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { normalizeFrames8n1, type ModelProtocolVariables } from './modelProtocol';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
-import { mapVideoDimensions } from '../aiDimensions';
+import {
+  mapVideoDimensions,
+  normalizeVideoFps,
+  resolveVideoDurationSeconds,
+  videoFramesFromDuration,
+} from '../aiDimensions';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from '../pollManager';
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
@@ -127,12 +132,12 @@ export function buildGeneralVideoProtocolVariables(
   params: AIVideoGenParams,
   referenceInput: VideoGenerationReferenceInput,
 ): ModelProtocolVariables {
-  const frames = params.videoFrames ?? 121;
   const videoResolution = params.videoResolution ?? 1152;
   const aspectRatio = params.seedanceRatio ?? '16:9';
   const { width, height } = mapVideoDimensions(videoResolution, aspectRatio);
-  const fps = params.videoFps ?? 24;
-  const duration = params.seedanceDuration ?? 5;
+  const fps = normalizeVideoFps(params.videoFps);
+  const duration = resolveVideoDurationSeconds(params.seedanceDuration, params.videoFrames, fps);
+  const frames = videoFramesFromDuration(duration, fps);
   const seedanceResolution = params.seedanceResolution ?? '720p';
   const firstImage = referenceInput.imageUrls[0];
   const lastImage = referenceInput.imageUrls.length > 1
@@ -178,6 +183,18 @@ export async function generateVideo(
   params: AIVideoGenParams,
   signal?: AbortSignal,
 ): Promise<{ url: string }> {
+  const videoFps = normalizeVideoFps(params.videoFps);
+  const seedanceDuration = resolveVideoDurationSeconds(
+    params.seedanceDuration,
+    params.videoFrames,
+    videoFps,
+  );
+  params = {
+    ...params,
+    videoFps,
+    seedanceDuration,
+    videoFrames: videoFramesFromDuration(seedanceDuration, videoFps),
+  };
   const { prompt: rawPrompt, model, provider } = params;
 
   // 解析 @{nodeId:label} 引用为对应节点的实际输出内容

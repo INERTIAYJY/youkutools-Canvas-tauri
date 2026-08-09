@@ -1,12 +1,18 @@
 ﻿/**
  * VideoParamSelector 视频参数选择器
  * - Seedance 模型 → Seedance 参数（分辨率、宽高比、时长、有声视频）
- * - 其他 provider → ComfyUI / RunningHub 参数（像素分辨率、帧率、帧数）
+ * - 其他 provider → 通用视频参数（像素分辨率、帧率、时长）
  */
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
-import { VIDEO_ASPECT_RATIOS } from '../../../services/aiDimensions';
+import {
+  resolveVideoDurationSeconds,
+  VIDEO_ASPECT_RATIOS,
+  VIDEO_DURATION_MAX_SECONDS,
+  VIDEO_DURATION_MIN_SECONDS,
+} from '../../../services/aiDimensions';
+import { modelProtocolUsesVariable } from '../../../services/ai/modelProtocol';
 import { useAppStore } from '../../../store/useAppStore';
 
 interface VideoParamSelectorProps {
@@ -18,7 +24,6 @@ interface VideoParamSelectorProps {
   videoFrames?: number;
   onChangeResolution?: (value: number) => void;
   onChangeFps?: (value: number) => void;
-  onChangeFrames?: (value: number) => void;
   // ── Seedance ──
   seedanceResolution?: string;
   seedanceRatio?: string;
@@ -57,24 +62,18 @@ const COMBO_FPS_OPTIONS = [
   { value: 30, label: '30帧' },
 ];
 
-function protocolUsesVariable(source: string, ...variables: string[]): boolean {
-  return variables.some((variable) => new RegExp(`{{\\s*${variable}\\s*}}`).test(source));
-}
-
 export default function VideoParamSelector({
   provider, selectedModel,
   videoResolution = 832, videoFps = 24, videoFrames = 77,
-  onChangeResolution, onChangeFps, onChangeFrames,
+  onChangeResolution, onChangeFps,
   seedanceResolution = '720p', seedanceRatio = '16:9',
-  seedanceDuration = 5, generateAudio,
+  seedanceDuration, generateAudio,
   onChangeSeedanceResolution, onChangeSeedanceRatio,
   onChangeSeedanceDuration, onChangeGenerateAudio,
   showSeedanceRatio = true, showGenerateAudio = true, onContinuousEditEnd,
 }: VideoParamSelectorProps) {
   const [open, setOpen] = useState(false);
-  const [editingFrames, setEditingFrames] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  const framesInputRef = useRef<HTMLInputElement>(null);
   const generalModels = useAppStore((state) => state.config.generalModels);
 
   const customProtocolSource = useMemo(() => {
@@ -90,14 +89,14 @@ export default function VideoParamSelector({
     ? getApimartSeedanceCapability(selectedModel)
     : undefined;
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
-  const customUsesDuration = protocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
-  const customUsesResolution = protocolUsesVariable(
+  const customUsesDuration = modelProtocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
+  const customUsesResolution = modelProtocolUsesVariable(
     customProtocolSource,
     'resolution',
     'seedanceResolution',
   );
-  const customUsesRatio = protocolUsesVariable(customProtocolSource, 'aspectRatio', 'seedanceRatio');
-  const customUsesAudio = protocolUsesVariable(customProtocolSource, 'generateAudio');
+  const customUsesRatio = modelProtocolUsesVariable(customProtocolSource, 'aspectRatio', 'seedanceRatio');
+  const customUsesAudio = modelProtocolUsesVariable(customProtocolSource, 'generateAudio');
   const usesDurationControls = isNativeSeedance
     || customUsesDuration
     || customUsesResolution
@@ -118,21 +117,26 @@ export default function VideoParamSelector({
     : isNativeSeedance
       ? SEEDANCE_RATIOS
       : genericRatios;
-  const minDuration = apimartCapability?.minDuration ?? 2;
-  const maxDuration = apimartCapability?.maxDuration ?? 15;
-  const displayedDuration = Math.min(maxDuration, Math.max(minDuration, seedanceDuration));
+  const minDuration = apimartCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
+  const maxDuration = apimartCapability?.maxDuration ?? VIDEO_DURATION_MAX_SECONDS;
+  const resolvedDuration = resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps);
+  const displayedDuration = Math.min(maxDuration, Math.max(minDuration, resolvedDuration));
   const displayedResolution = seedanceResolutions.some((item) => item.value === seedanceResolution)
     ? seedanceResolution
     : apimartCapability?.defaultResolution ?? seedanceResolution;
   const displayedRatio = seedanceRatios.some((item) => item.value === seedanceRatio)
     ? seedanceRatio
     : apimartCapability?.defaultRatio ?? seedanceRatio;
-  const durationTicks = Array.from(new Set([minDuration, 5, 8, 10, 12, maxDuration]))
-    .filter((value) => value >= minDuration && value <= maxDuration)
-    .sort((a, b) => a - b);
+  const durationLabelValues = new Set([minDuration, 5, 8, 10, 12, maxDuration]);
+  // 每一秒都保留一个等宽刻度槽，只隐藏中间文字；位置因此和原生 range 的步进严格一致。
+  const durationTicks = Array.from(
+    { length: Math.max(1, maxDuration - minDuration + 1) },
+    (_, index) => minDuration + index,
+  );
   const showResolutionControl = isNativeSeedance || customUsesResolution;
   const showRatioControl = showSeedanceRatio && (isNativeSeedance || customUsesRatio);
-  const showDurationControl = isNativeSeedance || customUsesDuration;
+  // 所有视频模型都以秒数呈现；协议若需要帧数，由生成入口统一换算。
+  const showDurationControl = true;
   const supportsAudio = isVolcengine || Boolean(apimartCapability?.audioField) || customUsesAudio;
   const displayedGenerateAudio = generateAudio ?? apimartCapability?.defaultAudio ?? false;
 
@@ -178,21 +182,6 @@ export default function VideoParamSelector({
     return () => window.removeEventListener('keydown', handler);
   }, [open]);
 
-  // ── ComfyUI 帧数编辑 ──
-  const handleFramesBlur = useCallback(() => {
-    if (editingFrames === null) return;
-    const val = parseInt(editingFrames, 10);
-    if (!isNaN(val) && val >= 0 && val <= 999999) onChangeFrames?.(val);
-    setEditingFrames(null);
-  }, [editingFrames, onChangeFrames]);
-
-  const handleFramesKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') handleFramesBlur();
-    },
-    [handleFramesBlur],
-  );
-
   // ── 触发按钮文案 ──
   const durationLabelParts = [
     showResolutionControl ? displayedResolution : '',
@@ -205,8 +194,8 @@ export default function VideoParamSelector({
   const triggerLabel = usesDurationControls
     ? durationTriggerLabel
     : showGenericRatio
-      ? `${genericRatio} · ${videoResolution} · 帧数${videoFrames}`
-      : `帧数${videoFrames} · 帧率${videoFps} · 分辨率${videoResolution}`;
+      ? `${genericRatio} · ${videoResolution} · 时长${displayedDuration}s`
+      : `时长${displayedDuration}s · 帧率${videoFps} · 分辨率${videoResolution}`;
 
   return (
     <div className="ui-schema-renderer" data-ui-schema-placement="videoParams" ref={ref}>
@@ -296,7 +285,7 @@ export default function VideoParamSelector({
                       <div className="rh-duration-labels">
                         {durationTicks.map((v) => (
                           <span key={v} className={`rh-duration-tick ${displayedDuration >= v ? 'active' : ''}`} onClick={() => onChangeSeedanceDuration?.(v)}>
-                            {v}s
+                            {durationLabelValues.has(v) ? `${v}s` : ''}
                           </span>
                         ))}
                       </div>
@@ -373,7 +362,7 @@ export default function VideoParamSelector({
                   </div>
                 </div>
 
-                {/* 帧率 & 帧数 */}
+                {/* 帧率 & 时长 */}
                 <div className="rh-v5-meta-panel">
                   <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label">
@@ -388,7 +377,13 @@ export default function VideoParamSelector({
                           className={`img-rp-quality-item rh-v5-fps-btn ui-schema-option ${videoFps === opt.value ? 'active' : ''}`}
                           data-value={opt.value}
                           data-ui-schema-value={opt.value}
-                          onClick={() => onChangeFps?.(opt.value)}
+                          onClick={() => {
+                            // 旧节点只有帧数时，先固定反算出的秒数，避免切换 FPS 改变用户看到的时长。
+                            if (!Number.isFinite(seedanceDuration)) {
+                              onChangeSeedanceDuration?.(displayedDuration);
+                            }
+                            onChangeFps?.(opt.value);
+                          }}
                         >
                           {opt.label}
                         </AnimatedButton>
@@ -396,36 +391,38 @@ export default function VideoParamSelector({
                     </div>
                   </div>
 
-                  <div className="rh-vram-adv-row ui-schema-rh-video-stepper" data-ui-schema-field="rhVideoFrames" data-ui-schema-type="stepper">
+                  <div className="rh-vram-adv-row" data-ui-schema-field="videoDuration" data-ui-schema-type="slider">
                     <div className="rh-vram-adv-label">
-                      <span>生成时长（帧数）</span>
-                      <span className="rh-tip" data-tooltip="帧数决定生成片段的长度：数值越大视频越长、耗时越高。填 0 表示按源视频全长处理。">!</span>
-                      <div className="rh-stepper rh-v5-frames-stepper">
-                        <div className="rh-v5-source-framecount" aria-label="源视频总帧数">—</div>
-                        {editingFrames !== null ? (
-                          <input
-                            ref={framesInputRef}
-                            type="number"
-                            className="rh-stepper-value rh-stepper-input"
-                            min={0} max={999999} step={1}
-                            value={editingFrames}
-                            onChange={(e) => setEditingFrames(e.target.value)}
-                            onBlur={handleFramesBlur}
-                            onKeyDown={handleFramesKeyDown}
-                            autoFocus
-                          />
-                        ) : (
-                          <div
-                            className="rh-stepper-value" role="spinbutton"
-                            aria-label="生成帧数" aria-valuenow={videoFrames} tabIndex={0}
-                            onClick={() => {
-                              setEditingFrames(String(videoFrames));
-                              setTimeout(() => framesInputRef.current?.focus(), 0);
-                            }}
+                      <span>生成时长（秒）</span>
+                      <span className="rh-tip" data-tooltip={`整数秒，范围 ${minDuration}-${maxDuration}。提交时会根据帧率自动换算为模型需要的总帧数。`}>!</span>
+                    </div>
+                    <div className="rh-duration-slider">
+                      <div className="rh-duration-track">
+                        <div
+                          className="rh-duration-fill"
+                          style={{ width: `${((displayedDuration - minDuration) / (maxDuration - minDuration)) * 100}%` }}
+                        />
+                        <input
+                          type="range"
+                          className="rh-duration-input"
+                          min={minDuration}
+                          max={maxDuration}
+                          step={1}
+                          value={displayedDuration}
+                          onChange={(e) => onChangeSeedanceDuration?.(Number(e.target.value))}
+                          onBlur={onContinuousEditEnd}
+                        />
+                      </div>
+                      <div className="rh-duration-labels">
+                        {durationTicks.map((value) => (
+                          <span
+                            key={value}
+                            className={`rh-duration-tick ${displayedDuration >= value ? 'active' : ''}`}
+                            onClick={() => onChangeSeedanceDuration?.(value)}
                           >
-                            {videoFrames}
-                          </div>
-                        )}
+                            {durationLabelValues.has(value) ? `${value}s` : ''}
+                          </span>
+                        ))}
                       </div>
                     </div>
                   </div>

@@ -538,7 +538,7 @@ describe('critical canvas node interactions', () => {
       provider: 'latest-provider',
       videoResolution: 1280,
       videoFps: 30,
-      videoFrames: 121,
+      videoFrames: 301,
       seedanceResolution: '1080p',
       seedanceRatio: '9:16',
       seedanceDuration: 10,

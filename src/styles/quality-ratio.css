@@ -238,6 +238,114 @@
   padding: 4px 8px;
   font-size: 11px;
 }
+/* ── 参考帧 / 参考角色：按需添加的参考图 ── */
+.rh-video-ref-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rh-video-ref-add {
+  font-size: 11px;
+  color: var(--brand);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.rh-video-ref-add:hover {
+  color: var(--brand-hover);
+}
+.rh-video-ref-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--theme-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.rh-video-ref-remove {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--theme-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.rh-video-ref-remove:hover {
+  color: var(--theme-text);
+  background: var(--theme-hover);
+}
+.rh-video-ref-picker {
+  margin-top: 6px;
+  max-height: 176px;
+  overflow-y: auto;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  padding: 4px;
+}
+.rh-video-ref-picker-label {
+  padding: 4px 6px 2px;
+  font-size: 10px;
+  color: var(--theme-text-muted);
+}
+.rh-video-ref-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.rh-video-ref-option:hover {
+  background: var(--theme-hover);
+}
+.rh-video-ref-empty {
+  padding: 8px 6px;
+  font-size: 11px;
+  color: var(--theme-text-muted);
+}
+
+/* ── 参考帧指派：缩略图 + 首/中/尾分段 ── */
+.rh-video-frame-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.rh-video-frame-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rh-video-frame-thumb {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--theme-border);
+}
+.rh-video-frame-seg {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  flex: 1;
+  min-width: 0;
+}
+.rh-video-frame-seg .img-rp-quality-item {
+  flex: none;
+  padding: 4px 8px;
+  font-size: 11px;
+}
 .rh-v5-meta-panel {
   display: flex;
   flex-direction: column;

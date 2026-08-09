@@ -30,7 +30,7 @@ import PresetManager from './PresetManager';
 import SkillManager from './SkillManager';
 import { expandSkillReferences } from '../../../services/skillPromptService';
 import { MAX_IMAGE_BATCH_COUNT } from '../../../types/aiTypes';
-import type { AudioOutputFormat, AudioTtsVoice } from '../../../types/aiTypes';
+import type { AudioOutputFormat, AudioTtsVoice, VideoReferenceItem } from '../../../types/aiTypes';
 import type { AudioGenerationPurpose } from '../../../types/media';
 
 const ANIMATION_ACTIONS: AnimationAction[] = ['idle', 'walk', 'run', 'jump', 'attack', 'hit'];
@@ -333,6 +333,8 @@ interface PromptPanelProps {
   seedanceRatio?: string;
   seedanceDuration?: number;
   generateAudio?: boolean;
+  videoReferences?: VideoReferenceItem[];
+  onChangeVideoReferences?: (value: VideoReferenceItem[]) => void;
   onChangeSeedanceResolution?: (value: string) => void;
   onChangeSeedanceRatio?: (value: string) => void;
   onChangeSeedanceDuration?: (value: number) => void;
@@ -397,6 +399,8 @@ export default function PromptPanel({
   seedanceRatio,
   seedanceDuration,
   generateAudio,
+  videoReferences,
+  onChangeVideoReferences,
   onChangeSeedanceResolution,
   onChangeSeedanceRatio,
   onChangeSeedanceDuration,
@@ -702,6 +706,9 @@ export default function PromptPanel({
           <VideoParamSelector
             provider={selectedProvider}
             selectedModel={selectedModel}
+            nodeId={nodeId}
+            videoReferences={videoReferences}
+            onChangeVideoReferences={onChangeVideoReferences}
             videoResolution={videoResolution}
             videoFps={videoFps}
             videoFrames={videoFrames}

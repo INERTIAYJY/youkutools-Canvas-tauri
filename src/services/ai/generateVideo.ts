@@ -7,9 +7,12 @@ import { readFileToDataUrl } from '../fileService';
 import { resolveNodeReferences } from '../nodeReferenceService';
 import { generateDreaminaVideo } from '../dreaminaService';
 import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
+import type { BaseNodeData } from '../../types';
 import type {
   AIVideoGenParams,
   MediaReference,
+  MediaReferenceRole,
+  VideoReferenceItem,
   VideoGenerationOperation,
   VideoGenerationReferenceInput,
 } from '../../types/aiTypes';
@@ -45,7 +48,63 @@ export function resolveVideoGenerationOperation(
   return 'text-to-video';
 }
 
+/** 视频节点上手动挑选的参考帧 / 参考角色；没挑就返回空数组，沿用连线顺序。 */
+export function resolveVideoNodeReferences(nodeId: string | undefined): VideoReferenceItem[] {
+  if (!nodeId) return [];
+  const node = useAppStore.getState().nodes.find((item) => item.id === nodeId);
+  return (node?.data as BaseNodeData | undefined)?.videoReferences ?? [];
+}
+
+function toMediaReferences(items: readonly VideoReferenceItem[]): MediaReference[] {
+  return items.map((item) => ({
+    kind: 'image' as const,
+    url: item.url,
+    origin: 'connection' as const,
+    role: item.role,
+    sourceNodeId: item.sourceNodeId,
+  }));
+}
+
+function hasManualFrameRoles(items: readonly { role: string }[]): boolean {
+  return items.some((item) => item.role === 'first_frame' || item.role === 'last_frame');
+}
+
+/** 提示词点名了参考角色时附上「图N = 角色名」，否则模型不知道该照着哪张参考图画谁。 */
+export function annotateCharacterReferences(
+  prompt: string,
+  items: readonly VideoReferenceItem[],
+  imageUrls: readonly string[],
+): string {
+  const notes = items.flatMap((item) => {
+    if (item.kind !== 'character' || !item.label) return [];
+    const name = mentionedCharacterName(prompt, item.label);
+    const index = imageUrls.indexOf(item.url);
+    return name && index >= 0 ? [`图${index + 1} 是${name}`] : [];
+  });
+  return notes.length > 0 ? `${prompt}\n\n（角色参考：${notes.join('，')}）` : prompt;
+}
+
+/** 角色库里常带前缀（如「女主·林夏」），提示词多半只写其中一段 */
+function mentionedCharacterName(prompt: string, label: string): string | undefined {
+  if (prompt.includes(label)) return label;
+  return label
+    .split(/[·・：:|/\\\s-]+/)
+    .filter((part) => part.length >= 2)
+    .find((part) => prompt.includes(part));
+}
+
 function assignVideoReferenceRoles(references: readonly MediaReference[]): MediaReference[] {
+  // 手动挑过参考帧：保留指派，其余降为普通参考图，并按 首帧 → 中间 → 尾帧 重排
+  // （APIMart / 即梦 / 通用协议都只看图片顺序判断首尾帧）
+  if (hasManualFrameRoles(references)) {
+    const rank = (role: MediaReferenceRole) => (role === 'first_frame' ? 0 : role === 'last_frame' ? 2 : 1);
+    return references
+      .map((reference) => ({
+        ...reference,
+        role: reference.kind === 'audio' ? ('reference_audio' as const) : reference.role,
+      }))
+      .sort((a, b) => rank(a.role) - rank(b.role));
+  }
   const imageIndexes = references.flatMap((reference, index) => (
     reference.kind === 'image' ? [index] : []
   ));
@@ -100,16 +159,18 @@ async function resolveVideoReferenceInput(
 ): Promise<VideoGenerationReferenceInput> {
   const promptInput = await resolvePromptWithMediaRefs(rawPrompt);
   const connected = collectConnectedReferenceMedia(nodeId);
+  const nodeItems = resolveVideoNodeReferences(nodeId);
   const references = assignVideoReferenceRoles(
     mergeMediaReferences(
-      explicitReferences,
+      // 节点上手动挑的参考帧/参考角色排在连线与提示词引用之前，重复的图按它们的角色去重
+      mergeMediaReferences(explicitReferences, toMediaReferences(nodeItems)),
       mergeMediaReferences(promptInput.references, connected.references),
     ),
   );
   const imageUrls = getMediaReferenceUrls(references, 'image');
   const videoUrls = getMediaReferenceUrls(references, 'video');
   return {
-    prompt: promptInput.prompt,
+    prompt: annotateCharacterReferences(promptInput.prompt, nodeItems, imageUrls),
     imageUrls,
     videoUrls,
     audioUrls: getMediaReferenceUrls(references, 'audio'),
@@ -270,12 +331,21 @@ export async function generateVideo(
       throw new Error('提示词不能为空');
     }
     const remoteImageUrls = await resolveImageUrlArray(mergedImageUrls, 'volcengine');
+    // 只有手动挑过首/尾帧才写 role：不写时 Seedance 按参考图模式处理，保持既有行为
+    const frameRoles = hasManualFrameRoles(resolveVideoNodeReferences(params.nodeId))
+      ? mergedImageUrls.map((url) => {
+        const role = (referenceInput.references ?? [])
+          .find((reference) => reference.kind === 'image' && getMediaReferenceUrl(reference) === url)?.role;
+        return role === 'first_frame' || role === 'last_frame' ? role : undefined;
+      })
+      : [];
     return generateVolcengineVideo(
       apiKey,
       baseUrl,
       modelName,
       resolvedPrompt,
       remoteImageUrls,
+      frameRoles,
       params,
       signal,
     );
@@ -335,6 +405,8 @@ async function generateVolcengineVideo(
   modelName: string,
   prompt: string,
   imageUrls: string[],
+  /** 与 imageUrls 一一对应的首/尾帧指派，缺省表示不写 role */
+  imageFrameRoles: Array<'first_frame' | 'last_frame' | undefined>,
   params: AIVideoGenParams,
   externalSignal?: AbortSignal,
 ): Promise<{ url: string }> {
@@ -367,12 +439,14 @@ async function generateVolcengineVideo(
     if (prompt.trim()) {
       content.push({ type: 'text', text: prompt.trim() });
     }
-    for (const url of imageUrls) {
+    imageUrls.forEach((url, index) => {
+      const role = imageFrameRoles[index];
       content.push({
         type: 'image_url',
         image_url: { url },
+        ...(role ? { role } : {}),
       });
-    }
+    });
 
     // 构建请求体 — 直接使用 Seedance 原生参数
     const ratio = params.seedanceRatio || '16:9';

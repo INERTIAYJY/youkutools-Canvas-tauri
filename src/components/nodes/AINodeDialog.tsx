@@ -8,7 +8,7 @@ import { generateId, useAppStore } from '../../store/useAppStore';
 import { derivedNodePlacement } from '../../store/store.utils';
 import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption } from '../../types';
 import { ANIMATION_FRAME_GRIDS } from '../../types';
-import { MAX_IMAGE_BATCH_COUNT, type AudioOutputFormat, type AudioTtsVoice } from '../../types/aiTypes';
+import { MAX_IMAGE_BATCH_COUNT, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
 import { generateText, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from '../../services/aiService';
 import { persistAudioGenerationResult } from '../../services/ai/generateAudio';
 import { downloadUrlAndSave } from '../../services/fileService';
@@ -757,6 +757,11 @@ function AINodeDialog() {
     [activeNodeId, updateNodeData]
   );
 
+  const onChangeVideoReferences = useCallback(
+    (value: VideoReferenceItem[]) => updateNodeData(activeNodeId!, { videoReferences: value }),
+    [activeNodeId, updateNodeData]
+  );
+
   const onChangeAudioVoice = useCallback(
     (value: AudioTtsVoice) => updateNodeData(activeNodeId!, { audioVoice: value }),
     [activeNodeId, updateNodeData],
@@ -894,6 +899,8 @@ function AINodeDialog() {
           seedanceRatio={(data.seedanceRatio as string) || '16:9'}
           seedanceDuration={data.seedanceDuration as number | undefined}
           generateAudio={data.generateAudio as boolean | undefined}
+          videoReferences={data.videoReferences}
+          onChangeVideoReferences={onChangeVideoReferences}
           onChangeSeedanceResolution={onChangeSeedanceResolution}
           onChangeSeedanceRatio={onChangeSeedanceRatio}
           onChangeSeedanceDuration={onChangeSeedanceDuration}

@@ -4,7 +4,12 @@
  * - 其他 provider → 通用视频参数（像素分辨率、帧率、时长）
  */
 import { useState, useRef, useEffect, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import AnimatedButton from '../../shared/AnimatedButton';
+import type { BaseNodeData } from '../../../types';
+import type { VideoReferenceItem } from '../../../types/aiTypes';
+import type { DramaCharacter } from '../../../types/dramaAssets';
+import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
 import {
   resolveVideoDurationSeconds,
@@ -18,6 +23,9 @@ import { useAppStore } from '../../../store/useAppStore';
 interface VideoParamSelectorProps {
   provider?: string;
   selectedModel?: string;
+  nodeId?: string;
+  videoReferences?: VideoReferenceItem[];
+  onChangeVideoReferences?: (value: VideoReferenceItem[]) => void;
   // ── ComfyUI / RunningHub ──
   videoResolution?: number;
   videoFps?: number;
@@ -55,6 +63,12 @@ const SEEDANCE_RATIOS = [
   { value: 'adaptive', label: '自适应' },
 ];
 
+const FRAME_ROLE_OPTIONS: Array<{ value: VideoReferenceItem['role']; label: string }> = [
+  { value: 'first_frame', label: '首帧' },
+  { value: 'reference', label: '中间帧' },
+  { value: 'last_frame', label: '尾帧' },
+];
+
 const COMBO_RESOLUTIONS = [832, 1024, 1280, 1440];
 const COMBO_FPS_OPTIONS = [
   { value: 16, label: '16帧' },
@@ -64,6 +78,7 @@ const COMBO_FPS_OPTIONS = [
 
 export default function VideoParamSelector({
   provider, selectedModel,
+  nodeId, videoReferences, onChangeVideoReferences,
   videoResolution = 832, videoFps = 24, videoFrames = 77,
   onChangeResolution, onChangeFps,
   seedanceResolution = '720p', seedanceRatio = '16:9',
@@ -73,8 +88,72 @@ export default function VideoParamSelector({
   showSeedanceRatio = true, showGenerateAudio = true, onContinuousEditEnd,
 }: VideoParamSelectorProps) {
   const [open, setOpen] = useState(false);
+  // 正在展开的来源选择器：frame = 加参考帧，character = 加参考角色
+  const [pickerFor, setPickerFor] = useState<VideoReferenceItem['kind'] | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const generalModels = useAppStore((state) => state.config.generalModels);
+  const projectCharacters = useAppStore((state) => state.dramaAssets.characters);
+  const globalCharacters = useAppStore((state) => state.globalCharacters);
+  const loadGlobalCharacters = useAppStore((state) => state.loadGlobalCharacters);
+  // 连线进来的图片节点：参考帧与参考角色都能从这里挑
+  const connectedImageNodes = useAppStore(useShallow((state) => {
+    if (!nodeId) return [];
+    const sourceIds = new Set(state.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.source));
+    return state.nodes.filter((node) => sourceIds.has(node.id) && Boolean((node.data as BaseNodeData).imageUrl));
+  }));
+  const canvasNodes = useAppStore((state) => state.nodes);
+
+  const references = videoReferences ?? [];
+  const frameReferences = references.filter((item) => item.kind === 'frame');
+  const characterReferences = references.filter((item) => item.kind === 'character');
+
+  const characterOptions = useMemo(() => {
+    const merged = [...projectCharacters, ...globalCharacters.filter(
+      (character) => !projectCharacters.some((item) => item.id === character.id),
+    )];
+    return merged.flatMap((character: DramaCharacter) => {
+      const resolved = resolveDramaAssetImageRef(character, canvasNodes);
+      return resolved ? [{ id: `character:${character.id}`, label: character.name, url: resolved.imageUrl }] : [];
+    });
+  }, [canvasNodes, globalCharacters, projectCharacters]);
+
+  const addReference = (kind: VideoReferenceItem['kind'], option: { id: string; label: string; url: string }) => {
+    setPickerFor(null);
+    if (references.some((item) => item.id === option.id && item.kind === kind)) return;
+    // 参考帧默认补上还空着的那一端，参考角色一律当普通参考图提交
+    const role: VideoReferenceItem['role'] = kind === 'character'
+      ? 'reference'
+      : frameReferences.some((item) => item.role === 'first_frame') ? 'last_frame' : 'first_frame';
+    onChangeVideoReferences?.([...references, {
+      id: option.id,
+      kind,
+      role,
+      url: option.url,
+      label: option.label,
+      sourceNodeId: option.id.startsWith('character:') ? undefined : option.id,
+    }]);
+  };
+
+  const setFrameRole = (itemId: string, role: VideoReferenceItem['role']) => {
+    onChangeVideoReferences?.(references.map((item) => {
+      if (item.id === itemId) return { ...item, role };
+      // 首帧、尾帧各自唯一
+      if (item.kind === 'frame' && role !== 'reference' && item.role === role) {
+        return { ...item, role: 'reference' as const };
+      }
+      return item;
+    }));
+  };
+
+  // 关弹窗时一并收起来源选择器，下次打开从干净状态开始
+  const closePopup = () => {
+    setOpen(false);
+    setPickerFor(null);
+  };
+
+  const removeReference = (itemId: string) => {
+    onChangeVideoReferences?.(references.filter((item) => item.id !== itemId));
+  };
 
   const customProtocolSource = useMemo(() => {
     if (provider !== 'general' || !selectedModel) return '';
@@ -164,10 +243,15 @@ export default function VideoParamSelector({
     seedanceResolution,
   ]);
 
+  // 角色库是懒加载的，打开来源选择器时补一次全局角色
+  useEffect(() => {
+    if (pickerFor === 'character' && globalCharacters.length === 0) void loadGlobalCharacters();
+  }, [globalCharacters.length, loadGlobalCharacters, pickerFor]);
+
   // Close popup on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) closePopup();
     };
     if (open) document.addEventListener('mousedown', handler, true);
     return () => document.removeEventListener('mousedown', handler, true);
@@ -176,7 +260,7 @@ export default function VideoParamSelector({
   // Close popup on Escape
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') closePopup();
     };
     if (open) window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -203,7 +287,7 @@ export default function VideoParamSelector({
         <AnimatedButton
           type="button"
           className="img-pill-btn ui-schema-menu-trigger"
-          onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+          onClick={(e) => { e.stopPropagation(); if (open) closePopup(); else setOpen(true); }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polygon points="23 7 16 12 23 17 23 7" />
@@ -214,6 +298,106 @@ export default function VideoParamSelector({
 
         {open && (
           <div className="img-ratio-popup ui-schema-popup ui-schema-video-params-popup" style={{ display: 'block' }}>
+            {onChangeVideoReferences && (
+              <div className="img-rp-quality-area mb-2">
+                <div className="img-rp-section-label rh-video-ref-head">
+                  <span>
+                    参考帧
+                    <span className="rh-tip" data-tooltip="可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。">!</span>
+                  </span>
+                  <button type="button" className="rh-video-ref-add" onClick={() => setPickerFor(pickerFor === 'frame' ? null : 'frame')}>
+                    {pickerFor === 'frame' ? '取消' : '＋ 添加'}
+                  </button>
+                </div>
+                {frameReferences.length > 0 && (
+                  <div className="rh-video-frame-list">
+                    {frameReferences.map((item) => (
+                      <div key={item.id} className="rh-video-frame-row">
+                        <img className="rh-video-frame-thumb" src={item.url} alt={item.label || '参考帧'} title={item.label} loading="lazy" />
+                        <div className="img-rp-quality-segmented rh-video-frame-seg">
+                          {FRAME_ROLE_OPTIONS.map((option) => (
+                            <AnimatedButton
+                              key={option.value}
+                              type="button"
+                              className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${item.role === option.value ? 'active' : ''}`}
+                              onClick={() => setFrameRole(item.id, option.value)}
+                            >
+                              {option.label}
+                            </AnimatedButton>
+                          ))}
+                        </div>
+                        <button type="button" className="rh-video-ref-remove" aria-label={`移除 ${item.label || '参考帧'}`} onClick={() => removeReference(item.id)}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="img-rp-section-label rh-video-ref-head mt-2">
+                  <span>
+                    参考角色
+                    <span className="rh-tip" data-tooltip="可选：从角色库或连线节点挑选角色形象，作为参考图一起提交。提示词里写到该角色名字时，会自动告诉模型这个名字对应哪张参考图。">!</span>
+                  </span>
+                  <button type="button" className="rh-video-ref-add" onClick={() => setPickerFor(pickerFor === 'character' ? null : 'character')}>
+                    {pickerFor === 'character' ? '取消' : '＋ 添加'}
+                  </button>
+                </div>
+                {characterReferences.length > 0 && (
+                  <div className="rh-video-frame-list">
+                    {characterReferences.map((item) => (
+                      <div key={item.id} className="rh-video-frame-row">
+                        <img className="rh-video-frame-thumb" src={item.url} alt={item.label || '参考角色'} title={item.label} loading="lazy" />
+                        <span className="rh-video-ref-name">{item.label || '参考角色'}</span>
+                        <button type="button" className="rh-video-ref-remove" aria-label={`移除 ${item.label || '参考角色'}`} onClick={() => removeReference(item.id)}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {pickerFor && (() => {
+                  // 参考帧只从连线节点挑；角色库只出现在参考角色里
+                  const pickerCharacters = pickerFor === 'character' ? characterOptions : [];
+                  return (
+                  <div className="rh-video-ref-picker">
+                    {connectedImageNodes.length > 0 && <div className="rh-video-ref-picker-label">连线节点</div>}
+                    {connectedImageNodes.map((node) => {
+                      const data = node.data as BaseNodeData;
+                      return (
+                        <button
+                          key={node.id}
+                          type="button"
+                          className="rh-video-ref-option"
+                          onClick={() => addReference(pickerFor, { id: node.id, label: data.label || '参考图', url: data.imageUrl as string })}
+                        >
+                          <img className="rh-video-frame-thumb" src={data.imageUrl} alt="" loading="lazy" />
+                          <span className="rh-video-ref-name">{data.label || '参考图'}</span>
+                        </button>
+                      );
+                    })}
+                    {pickerCharacters.length > 0 && <div className="rh-video-ref-picker-label">角色库</div>}
+                    {pickerCharacters.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        className="rh-video-ref-option"
+                        onClick={() => addReference(pickerFor, option)}
+                      >
+                        <img className="rh-video-frame-thumb" src={option.url} alt="" loading="lazy" />
+                        <span className="rh-video-ref-name">{option.label}</span>
+                      </button>
+                    ))}
+                    {connectedImageNodes.length === 0 && pickerCharacters.length === 0 && (
+                      <div className="rh-video-ref-empty">
+                        {pickerFor === 'frame'
+                          ? '还没有可选的图片：先给视频节点连一个图片节点'
+                          : '还没有可选的角色：先连一个图片节点，或在角色库里添加角色'}
+                      </div>
+                    )}
+                  </div>
+                  );
+                })()}
+              </div>
+            )}
+
             {usesDurationControls ? (
               <>
                 {/* Seedance 分辨率 */}

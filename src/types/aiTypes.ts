@@ -235,6 +235,18 @@ export type MediaReferenceRole =
   | 'last_frame'
   | 'reference_audio';
 
+/** 视频节点上手动挑选的参考图：参考帧（首/中/尾）或参考角色，来源可以是连线节点或角色库。 */
+export interface VideoReferenceItem {
+  /** 连线节点用节点 ID，角色库用 `character:<角色 ID>` */
+  id: string;
+  url: string;
+  label?: string;
+  /** frame = 参考帧；character = 参考角色（按普通参考图提交） */
+  kind: 'frame' | 'character';
+  role: 'first_frame' | 'last_frame' | 'reference';
+  sourceNodeId?: string;
+}
+
 /**
  * 画布生成入口统一使用的参考媒体描述。
  * url 用于本地展示或本地工作流；远端模型优先使用仍然可访问的 sourceUrl。

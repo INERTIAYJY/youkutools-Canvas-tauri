@@ -1,6 +1,7 @@
 import type { Node } from '@xyflow/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  annotateCharacterReferences,
   buildGeneralVideoProtocolVariables,
   generateVideo,
   resolveVideoGenerationOperation,
@@ -14,7 +15,7 @@ import {
 import { mediaProviderRegistry } from '../../src/services/ai/mediaProviderRegistry';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { BaseNodeData } from '../../src/types';
-import type { VideoGenerationReferenceInput } from '../../src/types/aiTypes';
+import type { VideoGenerationReferenceInput, VideoReferenceItem } from '../../src/types/aiTypes';
 
 const comfyMocks = vi.hoisted(() => ({
   executeVideo: vi.fn(),
@@ -265,6 +266,173 @@ describe('video prompt media references', () => {
     expect(merged).toHaveLength(2);
     expect(merged[0]).toMatchObject({ origin: 'prompt', sourceNodeId: 'prompt-audio' });
     expect(merged[1].kind).toBe('video');
+  });
+});
+
+describe('manual frame and character references', () => {
+  it('reorders references by the node 首帧/尾帧 picks and keeps 参考角色 as plain references', async () => {
+    const imageNode = (id: string, url: string): Node<BaseNodeData> => ({
+      id,
+      type: 'ai-image',
+      position: { x: 0, y: 0 },
+      data: { label: id, type: 'ai-image', imageUrl: url },
+    });
+    const videoNode: Node<BaseNodeData> = {
+      id: 'video-1',
+      type: 'ai-video',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '镜头',
+        type: 'ai-video',
+        videoReferences: [
+          { id: 'image-c', kind: 'frame', role: 'first_frame', url: 'https://cdn.example/c.png', sourceNodeId: 'image-c' },
+          { id: 'image-a', kind: 'frame', role: 'last_frame', url: 'https://cdn.example/a.png', sourceNodeId: 'image-a' },
+          { id: 'character:hero', kind: 'character', role: 'reference', url: 'https://cdn.example/hero.png', label: '主角' },
+        ],
+      },
+    };
+    useAppStore.setState({
+      nodes: [
+        imageNode('image-a', 'https://cdn.example/a.png'),
+        imageNode('image-b', 'https://cdn.example/b.png'),
+        imageNode('image-c', 'https://cdn.example/c.png'),
+        videoNode,
+      ],
+      edges: ['image-a', 'image-b', 'image-c'].map((source) => ({
+        id: `e-${source}`,
+        source,
+        target: 'video-1',
+      })),
+    });
+
+    let captured: VideoGenerationReferenceInput | null = null;
+    const unregister = mediaProviderRegistry.register({
+      providerId: 'test-frame-role-provider',
+      capabilities: ['video'],
+      async generateVideo({ resolveReferenceInput }) {
+        captured = await resolveReferenceInput();
+        return { url: 'https://cdn.example/result.mp4' };
+      },
+    });
+
+    try {
+      await generateVideo({
+        prompt: '推进镜头',
+        model: 'test/frame-roles',
+        provider: 'test-frame-role-provider',
+        nodeId: 'video-1',
+      });
+    } finally {
+      unregister();
+    }
+
+    const referenceInput = captured as VideoGenerationReferenceInput | null;
+    // 首帧 → 参考角色/中间图 → 尾帧；连线里没被挑中的图仍按原顺序留在中间
+    expect(referenceInput?.imageUrls).toEqual([
+      'https://cdn.example/c.png',
+      'https://cdn.example/hero.png',
+      'https://cdn.example/b.png',
+      'https://cdn.example/a.png',
+    ]);
+    expect(referenceInput?.references?.map((reference) => reference.role)).toEqual([
+      'first_frame',
+      'reference',
+      'reference',
+      'last_frame',
+    ]);
+  });
+
+  it('tells the model which reference image the mentioned character name refers to', async () => {
+    const videoNode: Node<BaseNodeData> = {
+      id: 'video-1',
+      type: 'ai-video',
+      position: { x: 0, y: 0 },
+      data: {
+        label: '镜头',
+        type: 'ai-video',
+        videoReferences: [
+          { id: 'img-a', kind: 'frame', role: 'first_frame', url: 'https://cdn.example/room.png' },
+          { id: 'character:hero', kind: 'character', role: 'reference', url: 'https://cdn.example/hero.png', label: '女主·林夏' },
+          { id: 'character:extra', kind: 'character', role: 'reference', url: 'https://cdn.example/extra.png', label: '路人甲' },
+        ],
+      },
+    };
+    useAppStore.setState({ nodes: [videoNode] });
+
+    let captured: VideoGenerationReferenceInput | null = null;
+    const unregister = mediaProviderRegistry.register({
+      providerId: 'test-character-provider',
+      capabilities: ['video'],
+      async generateVideo({ resolveReferenceInput }) {
+        captured = await resolveReferenceInput();
+        return { url: 'https://cdn.example/result.mp4' };
+      },
+    });
+
+    try {
+      await generateVideo({
+        prompt: '林夏推开门走进房间',
+        model: 'test/character',
+        provider: 'test-character-provider',
+        nodeId: 'video-1',
+      });
+    } finally {
+      unregister();
+    }
+
+    // 只标注被点名的角色，图号按最终提交顺序
+    expect((captured as VideoGenerationReferenceInput | null)?.prompt)
+      .toBe('林夏推开门走进房间\n\n（角色参考：图2 是林夏）');
+  });
+
+  it('leaves the prompt untouched when no character name is mentioned', () => {
+    const items: VideoReferenceItem[] = [
+      { id: 'character:hero', kind: 'character', role: 'reference', url: 'https://cdn.example/hero.png', label: '林夏' },
+    ];
+    expect(annotateCharacterReferences('推开门走进房间', items, ['https://cdn.example/hero.png']))
+      .toBe('推开门走进房间');
+  });
+
+  it('leaves the connection order alone when nothing was picked', async () => {
+    const imageNode = (id: string, url: string): Node<BaseNodeData> => ({
+      id,
+      type: 'ai-image',
+      position: { x: 0, y: 0 },
+      data: { label: id, type: 'ai-image', imageUrl: url },
+    });
+    useAppStore.setState({
+      nodes: [
+        imageNode('image-a', 'https://cdn.example/a.png'),
+        imageNode('image-b', 'https://cdn.example/b.png'),
+        { id: 'video-1', type: 'ai-video', position: { x: 0, y: 0 }, data: { label: '镜头', type: 'ai-video' } },
+      ],
+      edges: ['image-a', 'image-b'].map((source) => ({ id: `e-${source}`, source, target: 'video-1' })),
+    });
+
+    let captured: VideoGenerationReferenceInput | null = null;
+    const unregister = mediaProviderRegistry.register({
+      providerId: 'test-frame-default-provider',
+      capabilities: ['video'],
+      async generateVideo({ resolveReferenceInput }) {
+        captured = await resolveReferenceInput();
+        return { url: 'https://cdn.example/result.mp4' };
+      },
+    });
+
+    try {
+      await generateVideo({
+        prompt: '推进镜头',
+        model: 'test/frame-default',
+        provider: 'test-frame-default-provider',
+        nodeId: 'video-1',
+      });
+    } finally {
+      unregister();
+    }
+
+    const referenceInput = captured as VideoGenerationReferenceInput | null;
+    expect(referenceInput?.imageUrls).toEqual(['https://cdn.example/a.png', 'https://cdn.example/b.png']);
+    expect(referenceInput?.references?.map((reference) => reference.role)).toEqual(['first_frame', 'last_frame']);
   });
 });
 

@@ -15,6 +15,7 @@ import { useNodeRename } from './shared/useNodeRename';
 import { useSourceFileUpload } from './shared/useSourceFileUpload';
 import { computeImageNodeDimensions, generateId, useAppStore } from '../../store/useAppStore';
 import { derivedNodePlacement } from '../../store/store.utils';
+import { afterVideoFramePresented, seekVideoTo } from '../../utils/videoSeek';
 import { downloadUrlAndSave, saveDataUrlToProjectData, buildNodeFileName } from '../../services/fileService';
 import { copyFile as copyFileToClipboard } from '../../services/clipboardService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
@@ -105,15 +106,6 @@ function captureVideoPoster(video: HTMLVideoElement): { dataUrl: string; blank: 
   };
 }
 
-/** `seeked` 在 WebKit 中可能早于合成帧提交，必须等视频帧回调后再读取画布。 */
-function afterVideoFramePresented(video: HTMLVideoElement, callback: () => void): void {
-  if (typeof video.requestVideoFrameCallback === 'function') {
-    video.requestVideoFrameCallback(() => callback());
-    return;
-  }
-  window.setTimeout(callback, 120);
-}
-
 /** 尾帧要略微退回，正好停在 duration 上多数解码器给不出画面 */
 const LAST_FRAME_BACKOFF = 0.05;
 
@@ -130,39 +122,16 @@ function resolveCaptureTime(video: HTMLVideoElement, position: CaptureFramePosit
   return duration > 0 ? Math.max(0, duration - LAST_FRAME_BACKOFF) : video.currentTime;
 }
 
-/** 把节点里的预览视频临时定位到目标时刻取一帧，取完复位回原位置 */
-function captureFrameAtTime(
+/**
+ * 把节点里的预览视频定位到目标时刻取一帧。
+ * 不负责复位——连着取多帧时中间来回跳会让 seek 互相打架，由调用方取完一次性复位。
+ */
+async function captureFrameAtTime(
   video: HTMLVideoElement,
   targetTime: number,
 ): Promise<{ dataUrl: string; width: number; height: number }> {
-  if (Math.abs(video.currentTime - targetTime) < 0.01) {
-    return Promise.resolve(captureVideoFrame(video));
-  }
-
-  const restoreTime = video.currentTime;
-  return new Promise((resolve, reject) => {
-    let timer = 0;
-    const onSeeked = () => {
-      // seeked 早于合成帧提交，直接读画布会拿到上一帧
-      afterVideoFramePresented(video, () => {
-        window.clearTimeout(timer);
-        try {
-          resolve(captureVideoFrame(video));
-        } catch (error) {
-          reject(error);
-        } finally {
-          video.currentTime = restoreTime;
-        }
-      });
-    };
-    timer = window.setTimeout(() => {
-      video.removeEventListener('seeked', onSeeked);
-      video.currentTime = restoreTime;
-      reject(new Error('视频定位超时'));
-    }, 8000);
-    video.addEventListener('seeked', onSeeked, { once: true });
-    video.currentTime = targetTime;
-  });
+  await seekVideoTo(video, targetTime);
+  return captureVideoFrame(video);
 }
 
 function isTaintedCanvasError(error: unknown): boolean {
@@ -565,10 +534,14 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       return true;
     };
 
+    const restoreTime = video.currentTime;
     try {
-      const created = await createFrameNode(await captureFrameAtTime(video, captureTime));
+      const frame = await captureFrameAtTime(video, captureTime);
+      video.currentTime = restoreTime;
+      const created = await createFrameNode(frame);
       if (created) useAppStore.getState().showToast(`已截取${frameLabel}为图像节点`, 'success');
     } catch (error) {
+      video.currentTime = restoreTime;
       if (!isTaintedCanvasError(error)) {
         cancelCanvasDerivation(derivation);
         const message = error instanceof Error ? error.message : `截取${frameLabel}失败`;
@@ -633,6 +606,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       : [video.currentTime];
 
     setIsReversingPrompt(true);
+    const restoreTime = video.currentTime;
     try {
       const frames: string[] = [];
       for (const time of times) {
@@ -649,6 +623,8 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         : error instanceof Error ? error.message : '读取视频帧失败';
       useAppStore.getState().showToast(message, 'error');
     } finally {
+      // 三帧一次性取完再复位，中间来回跳会让 seek 互相打架
+      video.currentTime = restoreTime;
       setIsReversingPrompt(false);
     }
   }, [data.videoUrl, id]);

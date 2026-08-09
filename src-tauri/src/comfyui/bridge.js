@@ -523,7 +523,7 @@
         min-height: 31px;
         height: 31px;
         padding-inline: 10px;
-        border-radius: 6px;
+        border-radius: 9px;
         color: white;
         background-color: var(--ai-canvas-brand);
         box-shadow:
@@ -637,6 +637,193 @@
       .ai-canvas-comfy-macos .p-scrollpanel.p-component.no-drag.overflow-hidden {
         min-width: 0;
         margin-left: 84px;
+      }
+      /* ===== ComfyUI side-toolbar → 悬浮左侧，视觉同步本项目 sidebar-floating =====
+         真实 DOM：div.side-toolbar-container > nav.side-tool-bar-container
+         本项目 sidebar-floating 的核心视觉（src/styles/sidebar.css）：
+         - position:absolute; left:12px; top:20%（竖向偏上居中）
+         - 玻璃态：floating-surface-bg padding-box + glass-bevel-border border-box
+         - backdrop-filter: blur(24px); border:1px transparent; border-radius:14px
+         - box-shadow: glass-shadow-floating（多层投影 + 内高光）
+         - 子按钮 36×36、9px 圆角、hover 微缩放
+         ComfyUI 页面无法引用本项目的 CSS 变量，下面用 color-mix 复刻等价视觉。 */
+      .side-toolbar-container {
+        /* 同步 sidebar-floating 的悬浮位置：左侧 12px、顶部 20% 起始（不居中偏移） */
+        position: fixed !important;
+        top: 20% !important;
+        bottom: auto !important;
+        left: 12px !important;
+        right: auto !important;
+        transform: none;
+        z-index: 30;
+        /* 纵向排列、紧凑间距 */
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        padding: 5px;
+        /* 玻璃态背景：半透明表面色 padding-box + 渐变描边 border-box */
+        background:
+          linear-gradient(
+            var(--ai-canvas-floating-surface),
+            var(--ai-canvas-floating-surface)
+          ) padding-box,
+          linear-gradient(
+            160deg,
+            rgba(255, 255, 255, 0.18) 0%,
+            rgba(255, 255, 255, 0.09) 36%,
+            rgba(255, 255, 255, 0.04) 100%
+          ) border-box;
+        backdrop-filter: blur(24px) saturate(130%);
+        -webkit-backdrop-filter: blur(24px) saturate(130%);
+        border: 1px solid transparent;
+        border-radius: 14px;
+        /* 同步 glass-shadow-floating：多层投影 + 内高光内描边 */
+        box-shadow:
+          0 1px 2px rgb(0 0 0 / .42),
+          0 12px 32px rgb(0 0 0 / .38),
+          inset 0 1px 0 rgb(255 255 255 / .10),
+          inset 0 0 0 1px rgb(255 255 255 / .025);
+      }
+      /* macOS 顶部有交通灯控件，左移一点避免重叠 */
+      .ai-canvas-comfy-macos .side-toolbar-container {
+        left: 84px !important;
+      }
+      /* 内部 nav 去掉原生贴边背景/边框/阴影，避免双层叠加；并修正悬浮态下的布局塌缩 */
+      .side-toolbar-container .side-tool-bar-container {
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        width: auto !important;
+        height: auto !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 2px;
+        padding: 0;
+      }
+      /* nav 内层包裹 div 同步为竖向 flex，去掉 h-full 撑满 */
+      .side-toolbar-container .side-tool-bar-container > div {
+        height: auto !important;
+        gap: 2px;
+      }
+      /* 按钮组间距紧凑、背景透明，避免原生背景干扰悬浮玻璃态 */
+      .side-toolbar-container .sidebar-item-group {
+        gap: 2px;
+        background: transparent !important;
+      }
+      /* 底部按钮组在悬浮态下不再用 mt-auto 钉底，跟随顶部组顺序排列 */
+      .side-toolbar-container .sidebar-item-group.mt-auto {
+        margin-top: 0 !important;
+      }
+      /* 去掉原生右侧分隔线（border-r）*/
+      .side-toolbar-container .side-tool-bar-container.border-r {
+        border-right: none !important;
+      }
+      /* 悬浮态下隐藏原生的贴边阴影/背景，避免双层叠加 */
+      .side-toolbar-container::before,
+      .side-toolbar-container::after {
+        content: none;
+      }
+      /* 同步 sidebar-floating 的按钮规格：36×36、9px 圆角、hover 微缩放 */
+      .side-toolbar-container .side-bar-button {
+        width: 36px !important;
+        height: 36px !important;
+        min-height: 36px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border: none !important;
+        background: transparent !important;
+        color: rgba(136, 136, 160, 0.7) !important;
+        border-radius: 9px !important;
+        cursor: pointer;
+        padding: 0 !important;
+        gap: 0 !important;
+        font-size: 0;
+        transition: color 120ms ease, background 120ms ease, transform 120ms ease;
+      }
+      .side-toolbar-container .side-bar-button:hover {
+        color: var(--p-text-color, #e8e8ed) !important;
+        background: rgba(255, 255, 255, 0.06) !important;
+        transform: scale(1.04);
+      }
+      /* 按钮内部 content 容器去掉 gap 和多余布局，居中即可 */
+      .side-toolbar-container .side-bar-button-content {
+        gap: 0;
+        flex: none;
+      }
+      /* 图标容器去掉相对定位残留 */
+      .side-toolbar-container .sidebar-icon-wrapper {
+        position: static;
+      }
+      /* 图标尺寸对齐本项目：18px（sidebar-floating 按钮内约 18-20px）*/
+      .side-toolbar-container .side-bar-button-icon,
+      .side-toolbar-container .comfyui-logo {
+        font-size: 18px;
+        width: 18px;
+        height: 18px;
+      }
+      /* 顶部 ComfyUI 菜单按钮也同步规格：严格 36×36
+         原生样式会把 width/height 写成 var(--comfy-menu-bg)，需要 !important 强制覆盖 */
+      .side-toolbar-container .comfy-menu-button-wrapper {
+        box-sizing: border-box;
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        min-height: 36px !important;
+        max-width: 36px !important;
+        max-height: 36px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border-radius: 9px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 120ms ease, transform 120ms ease;
+      }
+      .side-toolbar-container .comfy-menu-button-wrapper > div {
+        width: 18px !important;
+        height: 18px !important;
+      }
+      .side-toolbar-container .comfy-menu-button-wrapper:hover {
+        background: rgba(255, 255, 255, 0.06);
+        transform: scale(1.04);
+      }
+      /* 隐藏 comfy-menu-button-wrapper 内叠加的向下箭头图标（lucide--chevron-down）*/
+      .side-toolbar-container .comfy-menu-button-wrapper [class*="lucide--chevron-down"] {
+        display: none !important;
+      }
+      /* 帮助中心按钮上方加分割线，同步本项目 sidebar-sep-v3（22×1、8% 白、2px 上下边距）*/
+      .side-toolbar-container .comfy-help-center-btn {
+        position: relative;
+        margin-top: 6px;
+      }
+      .side-toolbar-container .comfy-help-center-btn::before {
+        content: "";
+        position: absolute;
+        top: -4px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 22px;
+        height: 1px;
+        background: rgba(255, 255, 255, 0.08);
+        pointer-events: none;
+      }
+      /* ===== comfyui-body-top 移到页面最底部 =====
+         ComfyUI 默认把 .comfyui-body-top 放在视口顶部，这里改用固定定位钉到底部，
+         并用 order 兜底（父级若为 flex 则排到末尾）。 */
+      .comfyui-body-top {
+        position: fixed !important;
+        top: auto !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        z-index: 20;
+      }
+      /* 父级若是 flex 布局，同时用 order 排到末尾 */
+      .comfyui-body-top {
+        order: 9999;
       }
     `;
     document.head.appendChild(style);

@@ -238,6 +238,60 @@ describe('config hydration guard', () => {
     expect(model).not.toHaveProperty('anthropicUrl');
   });
 
+  it('syncs and clears xAI manifest models through the unified model runtime', () => {
+    useAppStore.getState().saveProviderConfig('xai', {
+      name: 'xAI / Grok 官方',
+      apiKey: 'xai-secret',
+      baseUrl: 'https://api.x.ai/v1',
+      catalogId: 'xai',
+      selectedModels: [{
+        id: 'grok-imagine-video',
+        name: 'Grok Imagine Video（文生视频）',
+        category: 'video',
+        provider: 'xai',
+        executionProfile: {
+          preset: 'custom',
+          protocol: {
+            version: 2,
+            mode: 'async',
+            submit: { method: 'POST', path: '/videos/generations' },
+            response: { type: 'json', taskIdPath: 'request_id' },
+            poll: {
+              method: 'GET',
+              path: '/videos/{{submit.request_id}}',
+              response: {
+                statusPath: 'status',
+                successValues: ['done'],
+                failureValues: ['failed', 'expired'],
+                result: { urlPath: 'video.url' },
+              },
+            },
+          },
+        },
+      }],
+    });
+
+    expect(useAppStore.getState().config.generalModels).toEqual([
+      expect.objectContaining({
+        modelId: 'grok-imagine-video',
+        category: 'video',
+        providerConfigId: 'xai',
+        executionProfile: expect.objectContaining({ preset: 'custom' }),
+      }),
+    ]);
+    expect(useAppStore.getState().config.generalModels?.[0]).not.toHaveProperty('apiKey');
+
+    useAppStore.getState().saveProviderConfig('xai', {
+      name: 'xAI / Grok 官方',
+      apiKey: 'xai-secret',
+      baseUrl: 'https://api.x.ai/v1',
+      catalogId: 'xai',
+      selectedModels: [],
+    });
+
+    expect(useAppStore.getState().config.generalModels).toEqual([]);
+  });
+
   it('clears every model reference owned by a removed provider', async () => {
     localStorage.setItem('canvas-model-prefs', JSON.stringify({
       'ai-text': 'general/provider-text',

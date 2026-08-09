@@ -7,6 +7,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';
 import {
   getProviderDefinition,
+  getProviderDefinitions,
   getWebSearchProviderDefinitions,
   resolveWebSearchProviderId,
 } from '../../services/ai/providerCatalogService';
@@ -93,6 +94,10 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
 
   const fallbackModels = useMemo(() => {
     const catalog: Record<string, ProviderModelSelection[]> = {};
+    for (const definition of getProviderDefinitions()) {
+      if (!definition.models) continue;
+      catalog[definition.id] = definition.models.map((model) => ({ ...model }));
+    }
     for (const group of defaultModelGroups) {
       const providerId = group.id === 'runninghub' ? 'runninghub-model' : group.id;
       if (!getProviderDefinition(providerId)) continue;
@@ -137,6 +142,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     }
     const order = [
       'apimart',
+      'xai',
       'volcengine',
       'runninghub-model',
       'grsai',

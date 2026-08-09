@@ -37,7 +37,7 @@ const ZoomControl = memo(function ZoomControl() {
         aria-valuetext={`${zoomPercent}%`}
         className="canvas-zoom-slider"
       />
-      <span className="text-xs text-canvas-text-secondary w-10 text-right tabular-nums">{zoomPercent}%</span>
+      <span className="text-xs text-canvas-text-secondary w-10 tabular-nums">{zoomPercent}%</span>
     </>
   );
 });
@@ -49,7 +49,7 @@ function CanvasToolbar({
   onToggleLine,
 }: CanvasToolbarProps) {
   return (
-    <div className="footer-toolbar flex items-center gap-2 border border-canvas-border backdrop-blur-xl rounded-xl px-3 py-1.5 shadow-lg">
+    <div className="footer-toolbar flex items-center gap-2 border border-canvas-border backdrop-blur-xl rounded-xl shadow-lg">
       <AnimatedButton
         type="button"
         aria-label={showGrid ? '隐藏背景网格' : '显示背景网格'}

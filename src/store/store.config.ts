@@ -78,12 +78,16 @@ function createGeneralModelId(providerConfigId: string, modelId: string): string
   return `provider-${safeProviderId}-${(hash >>> 0).toString(36)}`;
 }
 
-function syncCustomProviderModels(
+const GENERAL_MODEL_CATALOG_IDS = new Set(['custom-openai', 'xai']);
+
+function syncProviderModels(
   generalModels: GeneralModelConfig[],
   providerConfigId: string,
   config: ApiProviderConfig,
 ): GeneralModelConfig[] {
-  if (config.catalogId !== 'custom-openai' || config.selectedModels === undefined) return generalModels;
+  if (!GENERAL_MODEL_CATALOG_IDS.has(config.catalogId ?? '') || config.selectedModels === undefined) {
+    return generalModels;
+  }
 
   const linkedModels = new Map(
     generalModels
@@ -372,7 +376,7 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
       config: {
         ...state.config,
         providers: { ...state.config.providers, [providerName]: cfg },
-        generalModels: syncCustomProviderModels(
+        generalModels: syncProviderModels(
           state.config.generalModels ?? [],
           providerName,
           cfg,

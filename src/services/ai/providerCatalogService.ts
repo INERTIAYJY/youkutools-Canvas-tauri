@@ -22,6 +22,7 @@ import type {
   WebSearchProviderId,
 } from '../../types';
 import { corsSafeFetch } from './httpTransport';
+import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
 
 export type ProviderAuthType = 'api-key' | 'oauth';
 export type ProviderCredentialKey = 'apiKey' | 'baseUrl' | 'anthropicUrl';
@@ -45,6 +46,8 @@ export interface ProviderDefinition {
   modelsPath?: string;
   allowCustomBaseUrl?: boolean;
   credentials: ProviderCredentialField[];
+  /** 内置厂商随应用发布的模型及声明式执行协议。 */
+  models?: readonly ProviderModelSelection[];
   /** web-search connections provide Agent capabilities and do not expose models. */
   kind?: 'model' | 'web-search';
 }
@@ -91,6 +94,19 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       API_KEY_FIELD,
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: APIMART_BASE_URL },
     ],
+  },
+  {
+    id: 'xai',
+    name: 'xAI / Grok 官方',
+    description: 'Grok 官方文本、图片与视频模型',
+    badgeText: 'xAI',
+    authType: 'api-key',
+    catalogAdapter: 'local-manifest',
+    defaultBaseUrl: XAI_BASE_URL,
+    credentials: [
+      { ...API_KEY_FIELD, placeholder: 'xai-...' },
+    ],
+    models: XAI_MODEL_MANIFEST,
   },
   {
     id: 'volcengine',

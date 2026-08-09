@@ -1047,6 +1047,7 @@ select option:disabled {
 
 .app-header,
 .footer-toolbar {
+  padding: 4px;
   border-color: transparent;
   background:
     linear-gradient(var(--floating-surface-bg), var(--floating-surface-bg)) padding-box,

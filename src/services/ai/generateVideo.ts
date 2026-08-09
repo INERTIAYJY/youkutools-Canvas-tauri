@@ -223,7 +223,7 @@ export function buildGeneralVideoProtocolVariables(
     seedanceResolution,
     seedanceRatio: aspectRatio,
     seedanceDuration: duration,
-    generateAudio: params.generateAudio ?? false,
+    generateAudio: params.generateAudio ?? true,
     videoOperation: referenceInput.operation,
     imageUrls: referenceInput.imageUrls,
     firstImage,

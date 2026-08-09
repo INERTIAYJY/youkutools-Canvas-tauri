@@ -176,11 +176,15 @@ export default function VideoParamSelector({
   );
   const customUsesRatio = modelProtocolUsesVariable(customProtocolSource, 'aspectRatio', 'seedanceRatio');
   const customUsesAudio = modelProtocolUsesVariable(customProtocolSource, 'generateAudio');
+  // 本地工作流（ComfyUI / RunningHub）才按像素分辨率 + 帧率走；
+  // 其余接口模型即使添加时没声明分辨率/宽高比变量，也用这套 Seedance 风格的设置
+  const isWorkflowProvider = provider === 'comfyui' || provider === 'runninghub' || !provider;
   const usesDurationControls = isNativeSeedance
     || customUsesDuration
     || customUsesResolution
     || customUsesRatio
-    || customUsesAudio;
+    || customUsesAudio
+    || !isWorkflowProvider;
   // 非 Seedance（ComfyUI / RunningHub / 自建模型）：比例换算成 width/height 后注入请求
   const genericRatios = VIDEO_ASPECT_RATIOS.map((value) => ({ value, label: value }));
   const showGenericRatio = showSeedanceRatio;
@@ -193,7 +197,7 @@ export default function VideoParamSelector({
     : SEEDANCE_RESOLUTIONS;
   const seedanceRatios = apimartCapability
     ? apimartCapability.ratios.map((value) => ({ value, label: value }))
-    : isNativeSeedance
+    : isNativeSeedance || !isWorkflowProvider
       ? SEEDANCE_RATIOS
       : genericRatios;
   const minDuration = apimartCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
@@ -212,12 +216,18 @@ export default function VideoParamSelector({
     { length: Math.max(1, maxDuration - minDuration + 1) },
     (_, index) => minDuration + index,
   );
-  const showResolutionControl = isNativeSeedance || customUsesResolution;
-  const showRatioControl = showSeedanceRatio && (isNativeSeedance || customUsesRatio);
+  const showResolutionControl = isNativeSeedance || customUsesResolution || !isWorkflowProvider;
+  const showRatioControl = showSeedanceRatio && (isNativeSeedance || customUsesRatio || !isWorkflowProvider);
   // 所有视频模型都以秒数呈现；协议若需要帧数，由生成入口统一换算。
   const showDurationControl = true;
-  const supportsAudio = isVolcengine || Boolean(apimartCapability?.audioField) || customUsesAudio;
-  const displayedGenerateAudio = generateAudio ?? apimartCapability?.defaultAudio ?? false;
+  const supportsAudio = isVolcengine
+    || Boolean(apimartCapability?.audioField)
+    || customUsesAudio
+    || !isWorkflowProvider;
+  // 自建接口模型默认出有声视频；火山方舟老模型（Seedance 1.0）不支持音频，保持默认关闭
+  const displayedGenerateAudio = generateAudio
+    ?? apimartCapability?.defaultAudio
+    ?? (isNativeSeedance ? false : true);
 
   useEffect(() => {
     if (!apimartCapability) return;

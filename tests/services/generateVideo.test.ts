@@ -573,7 +573,8 @@ describe('general video protocol variables', () => {
       videoFrames: 121,
       videoFps: 24,
       firstImage: 'https://cdn.example/only.png',
-      generateAudio: false,
+      // 自建接口模型默认出有声视频
+      generateAudio: true,
       videoOperation: 'image-to-video',
     });
     expect(variables.lastImage).toBeUndefined();

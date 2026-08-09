@@ -292,6 +292,51 @@ describe('config hydration guard', () => {
     expect(useAppStore.getState().config.generalModels).toEqual([]);
   });
 
+  it('syncs Google media manifests without copying its API key', () => {
+    useAppStore.getState().saveProviderConfig('google', {
+      name: 'Google Gemini 官方',
+      apiKey: 'google-secret',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      catalogId: 'google',
+      selectedModels: [{
+        id: 'gemini-3.1-flash-tts-preview',
+        name: 'Gemini 3.1 Flash TTS（Kore / WAV）',
+        category: 'audio',
+        provider: 'google',
+        executionProfile: {
+          preset: 'custom',
+          protocol: {
+            version: 2,
+            mode: 'sync',
+            submit: { method: 'POST', path: '/v1beta/interactions', pathMode: 'origin' },
+            response: {
+              type: 'json',
+              result: {
+                base64Path: 'steps.*.content.*.data',
+                mimeType: 'audio/wav',
+                base64Transform: {
+                  type: 'pcm-s16le-to-wav',
+                  sampleRate: 24000,
+                  channels: 1,
+                },
+              },
+            },
+          },
+        },
+      }],
+    });
+
+    expect(useAppStore.getState().config.generalModels).toEqual([
+      expect.objectContaining({
+        modelId: 'gemini-3.1-flash-tts-preview',
+        category: 'audio',
+        providerConfigId: 'google',
+        executionProfile: expect.objectContaining({ preset: 'custom' }),
+      }),
+    ]);
+    expect(useAppStore.getState().config.generalModels?.[0]).not.toHaveProperty('apiKey');
+  });
+
   it('clears every model reference owned by a removed provider', async () => {
     localStorage.setItem('canvas-model-prefs', JSON.stringify({
       'ai-text': 'general/provider-text',

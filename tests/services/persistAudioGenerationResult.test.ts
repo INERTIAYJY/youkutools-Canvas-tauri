@@ -4,6 +4,9 @@ const mocks = vi.hoisted(() => ({
   downloadUrlAndSave: vi.fn(),
   saveBinaryToProjectData: vi.fn(),
   isTauriEnv: vi.fn(() => true),
+  resolveGeneralModel: vi.fn(),
+  resolveGeneralModelConnection: vi.fn(),
+  runConfiguredModelProtocol: vi.fn(),
 }));
 
 vi.mock('../../src/services/fileService', () => ({
@@ -14,20 +17,29 @@ vi.mock('../../src/services/fileService', () => ({
 vi.mock('../../src/services/nodeReferenceService', () => ({ resolveNodeReferences: (v: string) => v }));
 vi.mock('../../src/services/comfyWorkflowService', () => ({ executeComfyUIAudioGenerate: vi.fn() }));
 vi.mock('../../src/services/ai/helpers', () => ({
-  resolveGeneralModel: vi.fn(),
-  resolveGeneralModelConnection: vi.fn(),
+  resolveGeneralModel: mocks.resolveGeneralModel,
+  resolveGeneralModelConnection: mocks.resolveGeneralModelConnection,
 }));
 vi.mock('../../src/services/ai/connectedReferenceMedia', () => ({
-  collectConnectedReferenceMedia: () => ({ audioUrls: [] }),
+  collectConnectedReferenceMedia: () => ({ references: [] }),
+  getMediaReferenceUrl: vi.fn(),
+  getMediaReferenceUrls: () => [],
+  mergeMediaReferences: () => [],
+}));
+vi.mock('../../src/services/ai/promptResolver', () => ({
+  collectPromptNodeMediaUrls: () => ({ references: [] }),
 }));
 vi.mock('../../src/services/ai/apimartGen', () => ({ executeGeneralAsyncTask: vi.fn() }));
-vi.mock('../../src/services/ai/modelProtocolRuntime', () => ({ runConfiguredModelProtocol: vi.fn() }));
+vi.mock('../../src/services/ai/modelProtocolRuntime', () => ({
+  runConfiguredModelProtocol: mocks.runConfiguredModelProtocol,
+}));
 vi.mock('../../src/services/ai/mediaProviderRegistry', () => ({
   mediaProviderRegistry: { getAudioAdapter: () => undefined },
 }));
 
 import {
   AUDIO_PERSIST_FAILED_MESSAGE,
+  generateAudio,
   persistAudioGenerationResult,
 } from '../../src/services/ai/generateAudio';
 
@@ -42,9 +54,37 @@ beforeEach(() => {
     filePath: '/projects/p1/生成音频.wav',
     assetUrl: 'asset://生成音频.wav',
   });
+  mocks.resolveGeneralModel.mockReturnValue({
+    id: 'google-tts',
+    name: 'Google TTS',
+    modelId: 'gemini-3.1-flash-tts-preview',
+    category: 'audio',
+    providerConfigId: 'google',
+    executionProfile: { preset: 'custom', protocol: {} },
+  });
+  mocks.resolveGeneralModelConnection.mockReturnValue({
+    providerConfigId: 'google',
+    apiKey: 'secret',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+  });
 });
 
 describe('persistAudioGenerationResult', () => {
+  it('normalizes protocol WAV data URLs to runtime bytes for reliable persistence', async () => {
+    mocks.runConfiguredModelProtocol.mockResolvedValue([
+      'data:audio/wav;base64,UklGRgAAAAA=',
+    ]);
+
+    const result = await generateAudio({
+      prompt: '你好',
+      model: 'general/google-tts',
+      provider: 'general',
+    });
+
+    expect(result.format).toBe('wav');
+    expect([...result.bytes ?? []]).toEqual([82, 73, 70, 70, 0, 0, 0, 0]);
+  });
+
   it('reports saved when the remote audio lands in the project directory', async () => {
     const persisted = await persistAudioGenerationResult(
       { url: 'https://cdn.example/audio.mp3' },

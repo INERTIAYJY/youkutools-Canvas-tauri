@@ -23,6 +23,10 @@ import type {
 } from '../../types';
 import { corsSafeFetch } from './httpTransport';
 import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
+import {
+  GOOGLE_GEMINI_BASE_URL,
+  GOOGLE_MODEL_MANIFEST,
+} from './providers/googleModelManifest';
 
 export type ProviderAuthType = 'api-key' | 'oauth';
 export type ProviderCredentialKey = 'apiKey' | 'baseUrl' | 'anthropicUrl';
@@ -107,6 +111,19 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       { ...API_KEY_FIELD, placeholder: 'xai-...' },
     ],
     models: XAI_MODEL_MANIFEST,
+  },
+  {
+    id: 'google',
+    name: 'Google Gemini 官方',
+    description: 'Gemini 文本、Nano Banana 图片、Omni/Veo 视频与 TTS',
+    badgeText: 'G',
+    authType: 'api-key',
+    catalogAdapter: 'local-manifest',
+    defaultBaseUrl: GOOGLE_GEMINI_BASE_URL,
+    credentials: [
+      { ...API_KEY_FIELD, placeholder: 'Google AI Studio API Key' },
+    ],
+    models: GOOGLE_MODEL_MANIFEST,
   },
   {
     id: 'volcengine',

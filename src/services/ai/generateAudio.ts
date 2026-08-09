@@ -30,6 +30,20 @@ export interface PersistedAudioGenerationResult {
 
 export const AUDIO_PERSIST_FAILED_MESSAGE = '音频未能写入项目目录，当前是临时地址';
 
+function normalizeProtocolAudioResult(url: string): AudioGenerationResult {
+  const match = /^data:(audio\/[^;,]+);base64,([a-z\d+/=\s]+)$/i.exec(url);
+  if (!match) return { url };
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(match[2].replace(/\s/g, ''));
+    bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    throw new Error('音频模型返回的 Base64 数据无效');
+  }
+  const format = match[1].toLowerCase() === 'audio/wav' ? 'wav' : undefined;
+  return { url, bytes, ...(format ? { format } : {}) };
+}
+
 async function resolveGeneralAudioReferenceUrls(
   references: readonly MediaReference[],
 ): Promise<string[]> {
@@ -158,7 +172,7 @@ export async function generateAudio(
       });
       const url = urls[0];
       if (!url) throw new Error('音频生成完成但未返回结果');
-      return { url };
+      return normalizeProtocolAudioResult(url);
     }
     return executeGeneralAsyncTask(
       connection.apiKey,

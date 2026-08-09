@@ -24,7 +24,7 @@ export default function Header() {
     <header
       data-tauri-drag-region
       className={`app-header absolute top-3 z-40 flex items-center gap-1 px-2 py-2
-                  bg-canvas-surface/60 backdrop-blur-xl border border-canvas-border rounded-2xl
+                  bg-canvas-surface/60 backdrop-blur-xl border border-canvas-border rounded-[14px]
                   shadow-lg shadow-black/30 select-none ${
                     macTauriPlacement ? 'right-3' : 'left-3'
                   }`}

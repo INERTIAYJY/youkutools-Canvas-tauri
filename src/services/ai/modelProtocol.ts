@@ -16,6 +16,7 @@ import type {
   ModelProtocolPollRetryConfig,
   ModelProtocolPresetId,
   ModelProtocolRequestTemplate,
+  ModelProtocolResultConfig,
   NormalizedModelExecutionProtocol,
   ProtocolJsonValue,
   ResolvedModelProtocolPoll,
@@ -547,6 +548,32 @@ function validateResultConfig(
   ) {
     errors.push(label.startsWith('轮询') ? '轮询结果 MIME 类型无效' : '结果 MIME 类型无效');
   }
+  if (value.fetchUrl !== undefined && typeof value.fetchUrl !== 'boolean') {
+    errors.push(`${label}同源结果下载开关必须是布尔值`);
+  }
+  if (value.fetchUrl === true && value.urlPath === undefined) {
+    errors.push(`${label}启用同源结果下载时必须配置 URL 路径`);
+  }
+  if (value.base64Transform !== undefined) {
+    if (!isRecord(value.base64Transform) || value.base64Transform.type !== 'pcm-s16le-to-wav') {
+      errors.push(`${label}Base64 转换只支持 pcm-s16le-to-wav`);
+    } else {
+      const sampleRate = value.base64Transform.sampleRate;
+      const channels = value.base64Transform.channels ?? 1;
+      if (!Number.isInteger(sampleRate) || Number(sampleRate) < 8000 || Number(sampleRate) > 384000) {
+        errors.push(`${label}PCM 采样率必须是 8000 到 384000 的整数`);
+      }
+      if (!Number.isInteger(channels) || Number(channels) < 1 || Number(channels) > 8) {
+        errors.push(`${label}PCM 声道数必须是 1 到 8 的整数`);
+      }
+      if (value.base64Path === undefined) {
+        errors.push(`${label}配置 PCM 转换时必须提供 Base64 路径`);
+      }
+      if (value.mimeType !== 'audio/wav') {
+        errors.push(`${label}PCM 转 WAV 的 MIME 类型必须是 audio/wav`);
+      }
+    }
+  }
 }
 
 export function validateModelExecutionProtocol(value: unknown): string[] {
@@ -928,15 +955,108 @@ function encodeBytesBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function normalizeBase64Result(value: string, mimeType: string): string {
-  if (/^data:[^;,]+;base64,/i.test(value)) return value;
-  const normalized = value.replace(/\s/g, '');
+function decodeBase64Bytes(value: string): Uint8Array {
+  const encoded = /^data:[^;,]+;base64,/i.test(value)
+    ? value.slice(value.indexOf(',') + 1)
+    : value;
+  const normalized = encoded.replace(/\s/g, '');
   try {
-    atob(normalized);
+    const binary = atob(normalized);
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
   } catch {
     throw new Error('模型响应中的 Base64 结果无效');
   }
-  return `data:${mimeType};base64,${normalized}`;
+}
+
+function pcmS16LeToWav(pcm: Uint8Array, sampleRate: number, channels: number): Uint8Array {
+  const bytesPerSample = 2;
+  const blockAlign = channels * bytesPerSample;
+  if (pcm.byteLength % blockAlign !== 0) {
+    throw new Error('模型响应中的 PCM 数据长度与声道配置不匹配');
+  }
+  const wav = new Uint8Array(44 + pcm.byteLength);
+  const view = new DataView(wav.buffer);
+  const writeAscii = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      wav[offset + index] = value.charCodeAt(index);
+    }
+  };
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + pcm.byteLength, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, pcm.byteLength, true);
+  wav.set(pcm, 44);
+  return wav;
+}
+
+function normalizeBase64Result(
+  value: string,
+  mimeType: string,
+  transform?: ModelProtocolResultConfig['base64Transform'],
+): string {
+  if (transform?.type === 'pcm-s16le-to-wav') {
+    const wav = pcmS16LeToWav(
+      decodeBase64Bytes(value),
+      transform.sampleRate,
+      transform.channels ?? 1,
+    );
+    return `data:audio/wav;base64,${encodeBytesBase64(wav)}`;
+  }
+  if (/^data:[^;,]+;base64,/i.test(value)) return value;
+  return `data:${mimeType};base64,${encodeBytesBase64(decodeBase64Bytes(value))}`;
+}
+
+function buildResultAuthenticationHeaders(
+  auth: ModelProtocolAuthConfig | undefined,
+  apiKey: string,
+): Record<string, string> {
+  if (!apiKey) return {};
+  const resolvedAuth = resolveAuthentication(auth);
+  if (resolvedAuth.type === 'bearer') {
+    return { Authorization: `${resolvedAuth.prefix ?? 'Bearer '}${apiKey}` };
+  }
+  if (resolvedAuth.type === 'header') {
+    return { [resolvedAuth.name!]: `${resolvedAuth.prefix ?? ''}${apiKey}` };
+  }
+  return {};
+}
+
+async function fetchSameOriginResultUrls(
+  urls: readonly string[],
+  baseUrl: string,
+  auth: ModelProtocolAuthConfig | undefined,
+  apiKey: string,
+  fallbackMimeType?: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const allowedOrigin = new URL(baseUrl).origin;
+  return Promise.all(urls.map(async (rawUrl) => {
+    const url = new URL(rawUrl);
+    if (url.origin !== allowedOrigin) {
+      throw new Error('模型结果下载地址与厂商连接地址不同源');
+    }
+    const response = await corsSafeFetch(
+      applyQueryAuthentication(url.toString(), auth, apiKey),
+      { method: 'GET', headers: buildResultAuthenticationHeaders(auth, apiKey), signal },
+    );
+    await ensureSuccessfulRawResponse(response, '模型结果下载失败');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength === 0) throw new Error('模型结果下载内容为空');
+    const responseMimeType = response.headers.get('Content-Type')?.split(';')[0]?.trim();
+    const mimeType = responseMimeType && MIME_TYPE_RE.test(responseMimeType)
+      ? responseMimeType
+      : fallbackMimeType ?? 'application/octet-stream';
+    return `data:${mimeType};base64,${encodeBytesBase64(bytes)}`;
+  }));
 }
 
 function resolvePoll(
@@ -969,6 +1089,10 @@ function resolvePoll(
     resultTextPath: result.textPath,
     resultBase64Path: result.base64Path,
     resultMimeType: result.mimeType,
+    resultBase64Transform: result.base64Transform
+      ? structuredClone(result.base64Transform)
+      : undefined,
+    resultFetchUrl: result.fetchUrl,
     errorPath: response.errorPath,
     progressPath: response.progressPath,
     intervalMs: poll.intervalMs ?? 3000,
@@ -1006,10 +1130,20 @@ export async function submitModelProtocol(
     }
     const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath);
     const resultConfig = responseConfig.result!;
-    const urls = resultConfig.urlPath ? readModelProtocolUrls(payload, resultConfig.urlPath) : [];
+    let urls = resultConfig.urlPath ? readModelProtocolUrls(payload, resultConfig.urlPath) : [];
+    if (resultConfig.fetchUrl) {
+      urls = await fetchSameOriginResultUrls(
+        urls,
+        options.baseUrl,
+        protocol.auth,
+        options.apiKey,
+        resultConfig.mimeType,
+        options.signal,
+      );
+    }
     const base64Urls = resultConfig.base64Path
       ? readModelProtocolUrls(payload, resultConfig.base64Path).map((value) =>
-          normalizeBase64Result(value, resultConfig.mimeType!))
+          normalizeBase64Result(value, resultConfig.mimeType!, resultConfig.base64Transform))
       : [];
     const textValue = resultConfig.textPath
       ? readModelProtocolFirstScalar(payload, resultConfig.textPath)
@@ -1159,7 +1293,7 @@ export async function pollResolvedModelProtocol(
   const pollStartedAt = Date.now();
   let consecutiveErrors = 0;
   let pendingExtraDelayMs = 0;
-  return pollTask<ProtocolJsonValue, ExecuteModelProtocolResult>({
+  const result = await pollTask<ProtocolJsonValue, ExecuteModelProtocolResult>({
     fetchState: async () => {
       if (pendingExtraDelayMs > 0) {
         const maxDurationMs = poll.maxDurationMs ?? Infinity;
@@ -1208,7 +1342,7 @@ export async function pollResolvedModelProtocol(
       const urls = poll.resultUrlPath ? readModelProtocolUrls(payload, poll.resultUrlPath) : [];
       const base64Urls = poll.resultBase64Path
         ? readModelProtocolUrls(payload, poll.resultBase64Path).map((value) =>
-            normalizeBase64Result(value, poll.resultMimeType!))
+            normalizeBase64Result(value, poll.resultMimeType!, poll.resultBase64Transform))
         : [];
       const textValue = poll.resultTextPath
         ? readModelProtocolFirstScalar(payload, poll.resultTextPath)
@@ -1233,6 +1367,21 @@ export async function pollResolvedModelProtocol(
     timeoutMsg: '模型任务轮询超时',
     signal,
   });
+  if (result.urls && poll.resultFetchUrl) {
+    if (!allowedBaseUrl) throw new Error('同源结果下载缺少厂商连接地址');
+    return {
+      ...result,
+      urls: await fetchSameOriginResultUrls(
+        result.urls,
+        allowedBaseUrl,
+        poll.auth,
+        apiKey,
+        poll.resultMimeType,
+        signal,
+      ),
+    };
+  }
+  return result;
 }
 
 export async function executeModelProtocol(

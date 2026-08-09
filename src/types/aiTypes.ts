@@ -78,6 +78,14 @@ export interface ModelProtocolResultConfig {
   textPath?: string;
   base64Path?: string;
   mimeType?: string;
+  /** 对 Base64 原始媒体执行受控容器封装。 */
+  base64Transform?: {
+    type: 'pcm-s16le-to-wav';
+    sampleRate: number;
+    channels?: number;
+  };
+  /** 使用当前协议鉴权下载同源 URL，并将结果归一化为 data URL。 */
+  fetchUrl?: boolean;
 }
 
 export interface ModelProtocolResponseConfig {
@@ -188,6 +196,8 @@ export interface ResolvedModelProtocolPoll {
   resultTextPath?: string;
   resultBase64Path?: string;
   resultMimeType?: string;
+  resultBase64Transform?: ModelProtocolResultConfig['base64Transform'];
+  resultFetchUrl?: boolean;
   errorPath?: string;
   progressPath?: string;
   intervalMs: number;

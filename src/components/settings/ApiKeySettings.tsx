@@ -143,6 +143,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     const order = [
       'apimart',
       'xai',
+      'google',
       'volcengine',
       'runninghub-model',
       'grsai',

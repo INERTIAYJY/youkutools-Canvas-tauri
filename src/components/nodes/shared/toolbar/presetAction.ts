@@ -6,6 +6,7 @@ import { CATEGORY_TO_NODE_TYPES } from '../../../../types';
 import type { Node, Edge } from '@xyflow/react';
 import { getSlashCommands, fillTemplate } from '../slashCommands';
 import { generateId, useAppStore } from '../../../../store/useAppStore';
+import { derivedNodePlacement } from '../../../../store/store.utils';
 import { defaultModelGroups } from '../defaultModels';
 
 /** 从 localStorage 读取模型偏好（与 ModelSelector 逻辑一致） */
@@ -18,7 +19,7 @@ function loadModelPrefs(): Record<string, string> {
 }
 
 /** 获取有效模型：节点 data → localStorage → config generalModels → undefined */
-function resolveEffectiveModel(nodeType: string, nodeData?: BaseNodeData): { model: string; provider: string } | null {
+export function resolveEffectiveModel(nodeType: string, nodeData?: BaseNodeData): { model: string; provider: string } | null {
   // 1) 节点数据
   if (nodeData?.model && nodeData?.provider) {
     return { model: nodeData.model, provider: nodeData.provider };
@@ -38,7 +39,8 @@ function resolveEffectiveModel(nodeType: string, nodeData?: BaseNodeData): { mod
   const matched = generalModels.find((gm) =>
     CATEGORY_TO_NODE_TYPES[gm.category as GeneralModelCategory]?.includes(nodeType as NodeType),
   );
-  if (matched) return { model: matched.modelId, provider: matched.category };
+  // 通用模型统一用 general/<id> 引用，provider 固定 general；给 modelId + category 会解析不到连接
+  if (matched) return { model: `general/${matched.id}`, provider: 'general' };
   return null;
 }
 
@@ -176,7 +178,7 @@ function computeDimensionsFromAspectRatio(
  * - 返回 { node, edge }，调用方用 addNodeWithEdge 一次性加入
  */
 export function createPresetNode(
-  sourceNode: { id: string; position: { x: number; y: number }; data: BaseNodeData },
+  sourceNode: { id: string; position: { x: number; y: number }; parentId?: string; data: BaseNodeData },
   resolved: ResolvedPreset,
 ): { node: Node<BaseNodeData>; edge: Edge } {
   const nodeType = sourceNode.data.type;
@@ -209,10 +211,7 @@ export function createPresetNode(
   const node: Node<BaseNodeData> = {
     id: newNodeId,
     type: nodeType,
-    position: {
-      x: sourceNode.position.x + (sourceNode.data.nodeWidth as number || 280) + 60,
-      y: sourceNode.position.y,
-    },
+    ...derivedNodePlacement(sourceNode, 60),
     data: newData,
   };
 

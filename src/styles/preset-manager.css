@@ -1222,3 +1222,82 @@
     justify-content: flex-end;
   }
 }
+
+/* ── 反推提示词弹窗 ── */
+
+.reverse-prompt-modal {
+  width: min(640px, calc(100vw - 40px));
+  max-height: min(84vh, 720px);
+  pointer-events: auto;
+}
+
+.reverse-prompt-thumbs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.reverse-prompt-thumbs img {
+  height: 84px;
+  flex: 0 0 auto;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.reverse-prompt-model {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.reverse-prompt-hint {
+  color: var(--theme-text-muted);
+  font-size: 10px;
+}
+
+.reverse-prompt-loading,
+.reverse-prompt-error {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.reverse-prompt-error {
+  border-color: var(--danger);
+  color: var(--danger-pale);
+  text-align: left;
+}
+
+.reverse-prompt-error > span {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.reverse-prompt-result {
+  min-height: 148px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+/* 三个按钮统一高度和字号，主按钮不做成比旁边高一截的大块 */
+.reverse-prompt-actions .preset-modal-btn-primary,
+.reverse-prompt-actions .preset-modal-btn-secondary {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1;
+}

@@ -1185,6 +1185,29 @@ const TEXT_MODEL_CONTEXT_CATALOG: Array<[RegExp, number]> = [
 /** 未识别模型的保守默认窗口。 */
 export const DEFAULT_TEXT_CONTEXT_WINDOW = 32_000;
 
+/** 已知能读图的文本模型 ID 关键字；顺序无关。 */
+const VISION_TEXT_MODEL_PATTERNS: RegExp[] = [
+  /gpt-5|gpt-4o|gpt-4\.1|gpt-4-turbo|gpt-4-vision/i,
+  /\bo[34]\b/i,
+  /claude/i,
+  /gemini/i,
+  /grok-[2-9]|grok.*vision/i,
+  /qwen.*(vl|omni)/i,
+  /glm-4[.-]?\d*v|glm-4v/i,
+  /internvl|llava|minicpm-v|pixtral|molmo|idefics/i,
+  /step-1o|step-1v/i,
+  /doubao.*(vision|seed)/i,
+  /kimi.*(vl|latest)|moonshot-v1-\d+k-vision/i,
+];
+
+/**
+ * 判断文本模型是否能吃图片输入。
+ * 只按模型 ID 关键字匹配，命中不了不代表真的不支持——仅用于优先挑选，不做拦截。
+ */
+export function isVisionCapableTextModel(modelId: string): boolean {
+  return VISION_TEXT_MODEL_PATTERNS.some((pattern) => pattern.test(modelId));
+}
+
 function suggestedOutputBudget(contextWindow: number): number {
   return Math.min(8_192, Math.max(1_024, Math.floor(contextWindow / 8)));
 }

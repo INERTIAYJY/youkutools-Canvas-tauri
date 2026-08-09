@@ -96,7 +96,7 @@ describe('toolbar layout migration', () => {
           name: 'Primary',
           buttonKeys: [
             'matting', 'expand', 'multiGrid', 'cameraStudio', 'repaint', 'upscale',
-            'subjectMatting', 'annotate', 'crop', 'compose', 'more', 'upload',
+            'subjectMatting', 'annotate', 'crop', 'compose', 'more', 'upload', 'reversePrompt',
           ],
         },
         {

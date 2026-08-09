@@ -607,6 +607,13 @@ export interface PresetRunRequest {
   sourceNodeId: string;
 }
 
+/** 反推提示词弹窗的输入：图片节点给自身图，视频节点给抽好的关键帧 */
+export interface ReversePromptRequest {
+  sourceNodeId: string;
+  kind: 'image' | 'video';
+  imageUrls: string[];
+}
+
 // ── 用户自定义画风 ──
 export interface CustomStyle {
   id: string;

@@ -1,0 +1,155 @@
+/**
+ * ai/reversePrompt — 反推提示词：把已有图片/视频喂给文本模型，倒推出能复现它的生成提示词。
+ * 视频没有通用的多模态入口，改喂按时间顺序抽的关键帧。
+ * 反推与落节点分开：弹窗里先出结果，用户确认后才写进画布。
+ */
+import type { Edge, Node } from '@xyflow/react';
+import type { BaseNodeData } from '../../types';
+import { generateId, useAppStore } from '../../store/useAppStore';
+import { derivedNodePlacement } from '../../store/store.utils';
+import { textNodeHeight } from '../../utils/num';
+import { resolveEffectiveModel } from '../../components/nodes/shared/toolbar/presetAction';
+import {
+  getConfiguredModelGroups,
+  isVisionCapableTextModel,
+} from '../../components/nodes/shared/defaultModels';
+import { generateText } from './generateText';
+
+export type ReversePromptKind = 'image' | 'video';
+
+const SHARED_RULES = [
+  '只写画面里真实可见的内容，不要臆测背景故事，不要评价好坏。',
+  '直接输出提示词正文，一整段，不要标题、不要分点、不要任何前后缀说明。',
+];
+
+const INSTRUCTIONS: Record<ReversePromptKind, string> = {
+  image: [
+    '你是 AI 绘画提示词专家。仔细观察这张图，反推出一段能重新生成它的提示词。',
+    '需要覆盖：主体与外观、姿态与构图、镜头与视角、光线与氛围、色彩与材质、画风与媒介（写实摄影／2D 插画／3D 渲染／像素等）。',
+    ...SHARED_RULES,
+  ].join('\n'),
+  video: [
+    '你是 AI 视频提示词专家。下面几张图是同一段视频按时间顺序抽的关键帧（首帧、中间帧、尾帧）。反推出一段能重新生成这段视频的提示词。',
+    '先写画面：主体与外观、场景、光线、色彩、画风；再写运动：主体动作如何变化、镜头如何运动（推拉摇移／跟随／固定）、节奏快慢。',
+    '运动只写帧与帧之间能看出来的变化，不要编造没有依据的情节。',
+    ...SHARED_RULES,
+  ].join('\n'),
+};
+
+export const REVERSE_PROMPT_SOURCE_LABELS: Record<ReversePromptKind, string> = {
+  image: '图片',
+  video: '视频',
+};
+
+/**
+ * 反推要读图，文本节点选的模型未必能读。
+ * 顺序：节点偏好模型（能读图就直接用）→ 已配置的内置模型 → 通用模型 → 退回偏好模型。
+ */
+export function resolveVisionTextModel(): { model: string; provider: string } | null {
+  const preferred = resolveEffectiveModel('ai-text');
+  if (preferred && isVisionCapableTextModel(preferred.model)) return preferred;
+
+  const config = useAppStore.getState().config;
+  const builtin = getConfiguredModelGroups(config, 'ai-text')
+    .flatMap((group) => group.models)
+    .find((model) => isVisionCapableTextModel(model.value));
+  if (builtin) return { model: builtin.value, provider: builtin.provider };
+
+  const general = (config?.generalModels || []).find((model) => (
+    model.category === 'text' && isVisionCapableTextModel(model.modelId)
+  ));
+  if (general) return { model: `general/${general.id}`, provider: 'general' };
+
+  return preferred;
+}
+
+/** 接口把图片部分整个拒了，多半是模型不认多模态输入 */
+export function isImageInputRejected(message: string): boolean {
+  return /image_url|unknown variant|multimodal|vision|image input/i.test(message);
+}
+
+export interface ReversePromptOptions {
+  kind: ReversePromptKind;
+  imageUrls: string[];
+  model: string;
+  provider: string;
+  /** 用户在弹窗里补充的额外要求 */
+  extraPrompt?: string;
+}
+
+/** 跑一次反推，只返回文本；出错抛给调用方在弹窗里显示 */
+export async function reversePrompt(options: ReversePromptOptions): Promise<string> {
+  if (options.imageUrls.length === 0) {
+    throw new Error(`没有可反推的${REVERSE_PROMPT_SOURCE_LABELS[options.kind]}`);
+  }
+  const extra = options.extraPrompt?.trim();
+  const prompt = extra
+    ? `${INSTRUCTIONS[options.kind]}\n【额外要求】${extra}`
+    : INSTRUCTIONS[options.kind];
+
+  try {
+    const result = await generateText({
+      prompt,
+      model: options.model,
+      provider: options.provider,
+      imageUrls: options.imageUrls,
+    });
+    return result.trim();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '提示词反推失败';
+    throw new Error(
+      isImageInputRejected(message)
+        ? `模型 ${options.model} 不接受图片输入，请换一个能读图的文本模型（如 GPT-4o / Claude / Gemini / Qwen-VL）。原始报错：${message}`
+        : message,
+      { cause: error },
+    );
+  }
+}
+
+/** 把反推结果挂成源节点右侧的文本节点，返回新节点 id */
+export function addReversePromptTextNode(
+  sourceNodeId: string,
+  kind: ReversePromptKind,
+  text: string,
+): string | null {
+  const store = useAppStore.getState();
+  const sourceNode = store.nodes.find((node) => node.id === sourceNodeId) as Node<BaseNodeData> | undefined;
+  if (!sourceNode) {
+    store.showToast('源节点已不存在', 'error');
+    return null;
+  }
+
+  const estimatedLines = text.split(/\r?\n/).reduce(
+    (count, line) => count + Math.max(1, Math.ceil(line.length / 36)),
+    0,
+  );
+  const sourceLabel = sourceNode.data.label?.trim()
+    || sourceNode.data.fileName?.trim()
+    || REVERSE_PROMPT_SOURCE_LABELS[kind];
+  const newNodeId = `node-${generateId()}`;
+  const promptNode: Node<BaseNodeData> = {
+    id: newNodeId,
+    type: 'ai-text',
+    ...derivedNodePlacement(sourceNode),
+    data: {
+      label: `${sourceLabel} 反推提示词`,
+      type: 'ai-text',
+      role: 'source',
+      output: text,
+      status: 'success',
+      nodeWidth: 280,
+      nodeHeight: textNodeHeight(estimatedLines),
+    },
+  };
+  const edge: Edge = {
+    id: generateId(),
+    source: sourceNodeId,
+    target: newNodeId,
+    sourceHandle: 'right',
+    targetHandle: 'left',
+  };
+
+  store.addNodeWithEdge(promptNode, edge);
+  store.showToast('已添加为文本节点');
+  return newNodeId;
+}

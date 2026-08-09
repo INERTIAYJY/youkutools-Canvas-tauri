@@ -29,6 +29,7 @@ export const TEXT_BUTTONS: ToolbarButtonDef[] = [
 export const VIDEO_BUTTONS: ToolbarButtonDef[] = [
   { key: 'copyFile',      label: '复制视频',    icon: 'mdi:content-copy',             defaultZone: '常用' },
   { key: 'captureFrame',   label: '截取帧',      icon: 'mdi:camera-outline',            defaultZone: '常用' },
+  { key: 'reversePrompt',  label: '反推提示词',  icon: 'mdi:text-search',               defaultZone: '常用' },
   { key: 'fullscreen',     label: '全屏预览',    icon: 'mdi:fullscreen',                defaultZone: '常用' },
   createMoreButton('常用'),
 ];
@@ -56,6 +57,7 @@ export const IMAGE_BUTTONS: ToolbarButtonDef[] = [
   { key: 'compose',        label: '多图编辑',    icon: 'mdi:layers-triple-outline',      defaultZone: 'Primary' },
   createMoreButton('Primary'),
   { key: 'upload',         label: '上传图片',    icon: 'mdi:upload',                     defaultZone: 'Primary' },
+  { key: 'reversePrompt',  label: '反推提示词',  icon: 'mdi:text-search',                defaultZone: 'Primary' },
   { key: 'copyFile',       label: '复制图像',    icon: 'mdi:content-copy',               defaultZone: 'Secondary' },
   { key: 'history',        label: '生成历史',    icon: 'mdi:history',                  defaultZone: 'Secondary' },
   { key: 'fullscreen',     label: '全屏显示',    icon: 'mdi:fullscreen',                defaultZone: 'Secondary' },

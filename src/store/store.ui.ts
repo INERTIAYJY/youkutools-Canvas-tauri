@@ -1,8 +1,9 @@
-﻿/**
+/**
  * UI slice — panel visibility, menu positioning, dialog state
  */
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
+import type { ReversePromptRequest } from '../types';
 
 export type SettingsTab = 'general' | 'files' | 'api' | 'shortcuts' | 'comfyui' | 'storage' | 'mcp';
 
@@ -42,6 +43,8 @@ export interface UISlice {
       aspectRatio?: string;
     };
   } | null;
+  /** 反推提示词弹窗的当前请求；null 表示弹窗关闭 */
+  reversePromptRequest: ReversePromptRequest | null;
   setSettingsOpen: (open: boolean, tab?: SettingsTab) => void;
   setSettingsInitialTab: (tab: SettingsTab | null) => void;
   /** 打开设置的 API Key 页，并可选自动打开某连接的编辑框（填写密钥） */
@@ -65,6 +68,7 @@ export interface UISlice {
   clearDirectorDeskRuntimeRequest: () => void;
   setHoveredMentionNodeId: (id: string | null) => void;
   setPendingPresetAction: (action: UISlice['pendingPresetAction']) => void;
+  setReversePromptRequest: (request: ReversePromptRequest | null) => void;
 }
 
 export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => ({
@@ -85,6 +89,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   directorDeskRuntimeRequest: null,
   hoveredMentionNodeId: null,
   pendingPresetAction: null,
+  reversePromptRequest: null,
 
   setSettingsOpen: (open, tab) => set(open
     ? {
@@ -158,4 +163,5 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   clearDirectorDeskRuntimeRequest: () => set({ directorDeskRuntimeRequest: null }),
   setHoveredMentionNodeId: (id) => set({ hoveredMentionNodeId: id }),
   setPendingPresetAction: (action) => set({ pendingPresetAction: action }),
+  setReversePromptRequest: (request) => set({ reversePromptRequest: request }),
 });

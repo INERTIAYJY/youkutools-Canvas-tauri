@@ -33,9 +33,13 @@ interface VideoNodeToolbarProps {
   onCaptureFrame: (position: CaptureFramePosition) => void;
   onFullscreen: () => void;
   onCopyFile: () => void;
+  onReversePrompt: () => void;
+  isReversingPrompt?: boolean;
 }
 
-function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: VideoNodeToolbarProps) {
+function VideoNodeToolbar({
+  nodeId, onCaptureFrame, onFullscreen, onCopyFile, onReversePrompt, isReversingPrompt,
+}: VideoNodeToolbarProps) {
   const nodeType = 'ai-video';
   const registry = getButtonRegistry(nodeType);
   const edit = useToolbarEdit({ nodeType });
@@ -103,6 +107,7 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
   const actionMap: Record<string, (e: React.MouseEvent) => void> = {
     copyFile: (e) => { e.stopPropagation(); onCopyFile(); },
     captureFrame: toggleFrameMenu,
+    reversePrompt: (e) => { e.stopPropagation(); if (!isReversingPrompt) onReversePrompt(); },
     fullscreen: (e) => { e.stopPropagation(); onFullscreen(); },
   };
   const hiddenDefaultButtons = getHiddenDefaultToolbarButtons(registry, edit.activeButtonKeys);
@@ -153,12 +158,14 @@ function VideoNodeToolbar({ nodeId, onCaptureFrame, onFullscreen, onCopyFile }: 
       );
     }
 
+    const isReversing = key === 'reversePrompt' && isReversingPrompt;
     return (
       <AnimatedButton
         key={key}
         className={`ftb-btn icon-only ${isPreset ? 'act-preset' : `act-${key}`}`}
-        data-tooltip={resolvedDef.label}
+        data-tooltip={isReversing ? '反推中...' : resolvedDef.label}
         aria-label={resolvedDef.label}
+        disabled={isReversing}
         onClick={clickHandler}
       >
         <Icon icon={resolvedDef.icon} width={14} height={14} />

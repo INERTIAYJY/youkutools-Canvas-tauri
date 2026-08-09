@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ImageNode 图像节点 — 在画布上渲染图像内容，支持上传/粘贴图片、遮罩编辑、工具栏、全屏预览
  */
 import { memo, lazy, Suspense, useCallback, useRef, useState } from 'react';
@@ -742,6 +742,16 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     store.showToast(ok ? '已复制图像到剪贴板' : '复制失败', ok ? undefined : 'error');
   }, [data.imageUrl, data.thumbnailUrl]);
 
+  const handleReversePrompt = useCallback(() => {
+    const store = useAppStore.getState();
+    const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
+    if (!imageUrl) {
+      store.showToast('没有可反推的图片', 'error');
+      return;
+    }
+    store.setReversePromptRequest({ sourceNodeId: id, kind: 'image', imageUrls: [imageUrl] });
+  }, [data.imageUrl, data.thumbnailUrl, id]);
+
   const {
     isUpscaling,
     upscaleProgress,
@@ -945,6 +955,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               onUpscale={handleUpscale}
               onRepaint={handleRepaint}
               onCopyFile={handleCopyImage}
+              onReversePrompt={handleReversePrompt}
               isUpscaling={isUpscaling}
               isSubjectMattingRunning={isMattingRunning}
             />

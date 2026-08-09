@@ -66,8 +66,16 @@ export async function generateText(params: AIGenerateParams): Promise<string> {
     throw new Error('提示词不能为空');
   }
 
+  // 调用方直接给的图片（截帧、节点自身产物等）接在 @ 引用之后
+  const contentWithImages = params.imageUrls?.length
+    ? [
+        ...(typeof content === 'string' ? [{ type: 'text', text: content }] : content),
+        ...params.imageUrls.map((url) => ({ type: 'image_url', image_url: { url } })),
+      ]
+    : content;
+
   // 将本地图片 URL 上传到远端图床，转为公网 URL（apimart 走 apimart 图床，其他走 uguu.se）
-  const resolvedContent = await resolveContentImageUrls(content, provider);
+  const resolvedContent = await resolveContentImageUrls(contentWithImages, provider);
 
   const messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [];
   messages.push({ role: 'user', content: resolvedContent });

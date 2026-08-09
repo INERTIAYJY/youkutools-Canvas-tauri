@@ -7,6 +7,8 @@ export interface AIGenerateParams {
   provider: string;   // provider id (e.g. 'ppio')
   /** 关联的节点 ID（用于中断恢复） */
   nodeId?: string;
+  /** 追加到消息末尾的图片（本地/data URL 会自动上传），供不来自 @ 引用的视觉输入使用 */
+  imageUrls?: string[];
 }
 
 export interface AIImageGenParams extends AIGenerateParams {

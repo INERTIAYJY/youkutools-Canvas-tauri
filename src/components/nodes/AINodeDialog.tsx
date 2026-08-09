@@ -5,6 +5,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
+import { derivedNodePlacement } from '../../store/store.utils';
 import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption } from '../../types';
 import { ANIMATION_FRAME_GRIDS } from '../../types';
 import { MAX_IMAGE_BATCH_COUNT, type AudioOutputFormat, type AudioTtsVoice } from '../../types/aiTypes';
@@ -409,14 +410,10 @@ function AINodeDialog() {
               const store2 = useAppStore.getState();
               const sourceNode = store2.nodes.find((item) => item.id === submittingNodeId);
               if (!sourceNode) return;
-              const sourceWidth = (sourceNode.data.nodeWidth as number) || 280;
               store2.addNode({
                 id: `node-${generateId()}`,
                 type: 'ai-storyboard',
-                position: {
-                  x: sourceNode.position.x + sourceWidth + 60,
-                  y: sourceNode.position.y,
-                },
+                ...derivedNodePlacement(sourceNode, 60),
                 data: {
                   label: `${nodeLabel} 8向宫格`,
                   type: 'ai-storyboard',

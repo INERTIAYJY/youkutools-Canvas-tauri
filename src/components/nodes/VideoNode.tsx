@@ -1,4 +1,4 @@
-﻿/**
+/**
  * VideoNode 视频节点 — 在画布上渲染视频内容，支持上传本地视频、播放控制、连接其他节点
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
@@ -14,6 +14,7 @@ import FullscreenOverlay from '../shared/FullscreenOverlay';
 import { useNodeRename } from './shared/useNodeRename';
 import { useSourceFileUpload } from './shared/useSourceFileUpload';
 import { computeImageNodeDimensions, generateId, useAppStore } from '../../store/useAppStore';
+import { derivedNodePlacement } from '../../store/store.utils';
 import { downloadUrlAndSave, saveDataUrlToProjectData, buildNodeFileName } from '../../services/fileService';
 import { copyFile as copyFileToClipboard } from '../../services/clipboardService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
@@ -333,6 +334,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
      Fullscreen State — 双击 / 工具栏按钮打开全屏预览
      ════════════════════════════════════════════ */
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isReversingPrompt, setIsReversingPrompt] = useState(false);
   const fullscreenVideoRef = useRef<HTMLVideoElement | null>(null);
   const handleOpenFullscreen = useCallback(() => {
     if (!data.videoUrl && !data.thumbnailUrl) return;
@@ -541,10 +543,11 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       liveStore.addNode({
         id: `node-${generateId()}`,
         type: 'ai-image',
-        position: {
-          x: currentPosition.x + nodeWidth + 40,
-          y: currentPosition.y,
-        },
+        ...derivedNodePlacement({
+          position: currentPosition,
+          parentId: currentNode?.parentId,
+          data: currentNode?.data ?? ({ nodeWidth } as BaseNodeData),
+        }),
         data: {
           label: `${displayLabel} ${frameLabel}`,
           type: 'ai-image',
@@ -611,6 +614,45 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     }
   }, [data.sourceUrl, data.videoUrl, displayLabel, id, nodeWidth]);
 
+  // 反推提示词：抽首/中/尾三帧当序列喂给文本模型，让它把画面和运动一起还原
+  const handleReversePrompt = useCallback(async () => {
+    const store = useAppStore.getState();
+    const video = videoRef.current;
+    if (!video || !data.videoUrl) {
+      store.showToast('没有可反推的视频', 'error');
+      return;
+    }
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0) {
+      store.showToast('视频尚未加载到可读取的帧', 'error');
+      return;
+    }
+
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const times = duration > 0
+      ? [0, duration / 2, Math.max(0, duration - LAST_FRAME_BACKOFF)]
+      : [video.currentTime];
+
+    setIsReversingPrompt(true);
+    try {
+      const frames: string[] = [];
+      for (const time of times) {
+        frames.push((await captureFrameAtTime(video, time)).dataUrl);
+      }
+      useAppStore.getState().setReversePromptRequest({
+        sourceNodeId: id,
+        kind: 'video',
+        imageUrls: frames,
+      });
+    } catch (error) {
+      const message = isTaintedCanvasError(error)
+        ? '远程视频受跨域限制，请先把视频本地化后再反推'
+        : error instanceof Error ? error.message : '读取视频帧失败';
+      useAppStore.getState().showToast(message, 'error');
+    } finally {
+      setIsReversingPrompt(false);
+    }
+  }, [data.videoUrl, id]);
+
   return (
     <div className="node-wrapper relative" style={{ width: nodeWidth }}>
       <NodeLabel
@@ -622,7 +664,14 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       />
       {data.videoUrl && (
         <div className={`node-toolbar-shell ${selected && isSingleSelection ? 'is-visible' : ''}`}>
-          <VideoNodeToolbar nodeId={id} onCaptureFrame={handleCaptureFrame} onFullscreen={handleOpenFullscreen} onCopyFile={handleCopyFile} />
+          <VideoNodeToolbar
+            nodeId={id}
+            onCaptureFrame={handleCaptureFrame}
+            onFullscreen={handleOpenFullscreen}
+            onCopyFile={handleCopyFile}
+            onReversePrompt={handleReversePrompt}
+            isReversingPrompt={isReversingPrompt}
+          />
         </div>
       )}
       <div

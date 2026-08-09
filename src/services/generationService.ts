@@ -9,7 +9,7 @@ import { generateText, generateImage, generateImagesBatch, generateVideo, genera
 import { persistAudioGenerationResult } from './ai/generateAudio';
 import { downloadUrlAndSave } from './fileService';
 import { applyImageBatchResults } from './imageBatchService';
-import { generateId } from '../store/store.utils';
+import { derivedNodePlacement, generateId } from '../store/store.utils';
 import { useAppStore } from '../store/useAppStore';
 import {
   getProjectModelKind,
@@ -129,7 +129,7 @@ export async function executeGeneration(
             store.addNode({
               id: `node-${generateId()}`,
               type: 'ai-storyboard',
-              position: { x: sourceNode.position.x + ((sourceNode.data.nodeWidth as number) || 280) + 60, y: sourceNode.position.y },
+              ...derivedNodePlacement(sourceNode, 60),
               data: { label: `${data.label} 8向宫格`, type: 'ai-storyboard', role: 'source', status: 'success', imageUrl: convertFileSrc(gridResult.grid_path), filePath: gridResult.grid_path, imageWidth: gridResult.grid_size, imageHeight: gridResult.grid_size, storyboardRows: 3, storyboardCols: 3, nodeWidth: 360, nodeHeight: 360 },
             });
           }

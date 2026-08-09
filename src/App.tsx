@@ -41,6 +41,7 @@ const CharacterLibraryPanel = lazy(() => import('./components/CharacterLibraryPa
 const OutputHistoryPanel = lazy(() => import('./components/OutputHistoryPanel'));
 const ChatPanel = lazy(() => import('./components/chat/ChatPanel'));
 const PresetRunnerDialog = lazy(() => import('./components/nodes/shared/PresetRunnerDialog'));
+const ReversePromptDialog = lazy(() => import('./components/nodes/shared/ReversePromptDialog'));
 const DirectorDeskRuntimeManager = lazy(() => import('./components/director/DirectorDeskRuntimeManager'));
 
 let cachedMascotNodes: AppState['nodes'] | undefined;
@@ -91,6 +92,7 @@ export default function App() {
       history: state.historyPanelOpen,
       chat: state.chatOpen || state.chatPanelDetached,
       presetRunner: state.presetRunRequest !== null,
+      reversePrompt: state.reversePromptRequest !== null,
     })),
   );
   const mountSettings = useFeatureMount(featureVisibility.settings);
@@ -101,6 +103,7 @@ export default function App() {
   const mountHistory = useFeatureMount(featureVisibility.history);
   const mountChat = useFeatureMount(featureVisibility.chat);
   const mountPresetRunner = useFeatureMount(featureVisibility.presetRunner);
+  const mountReversePrompt = useFeatureMount(featureVisibility.reversePrompt);
 
   // 开屏动画状态
   const [splashDone, setSplashDone] = useState(false);
@@ -388,6 +391,11 @@ export default function App() {
         <LazyLoadBoundary label="快捷指令运行器">
           <Suspense fallback={null}>
             {mountPresetRunner && <PresetRunnerDialog />}
+          </Suspense>
+        </LazyLoadBoundary>
+        <LazyLoadBoundary label="反推提示词">
+          <Suspense fallback={null}>
+            {mountReversePrompt && <ReversePromptDialog />}
           </Suspense>
         </LazyLoadBoundary>
         <Toast />

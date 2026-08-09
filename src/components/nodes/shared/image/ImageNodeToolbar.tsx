@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ImageNodeToolbar 图像节点浮动工具栏 + 编辑态支持
  */
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -37,6 +37,7 @@ interface ImageNodeToolbarProps {
   onUpscale?: () => void;
   onRepaint?: () => void;
   onCopyFile?: () => void;
+  onReversePrompt?: () => void;
   isUpscaling?: boolean;
   isSubjectMattingRunning?: boolean;
 }
@@ -47,7 +48,8 @@ function ImageNodeToolbar({
   nodeId: _nodeId,
   onUpload, onMatting, onSubjectMatting, onCameraStudio, onExpand,
   onMultiGrid, onCustomGrid, onCompose, onFullscreen, onCrop,
-  onAnnotate, onUpscale, onRepaint, onCopyFile, isUpscaling, isSubjectMattingRunning,
+  onAnnotate, onUpscale, onRepaint, onCopyFile, onReversePrompt,
+  isUpscaling, isSubjectMattingRunning,
 }: ImageNodeToolbarProps) {
   const nodeType = 'ai-image';
   const registry = getButtonRegistry(nodeType);
@@ -114,6 +116,7 @@ function ImageNodeToolbar({
     compose:        (e) => { e.stopPropagation(); onCompose?.(); },
     upload:         (e) => { e.stopPropagation(); onUpload?.(); },
     copyFile:       (e) => { e.stopPropagation(); onCopyFile?.(); },
+    reversePrompt:  (e) => { e.stopPropagation(); onReversePrompt?.(); },
     history:        (e) => { e.stopPropagation(); setHistoryOpen(true); },
     fullscreen:     (e) => { e.stopPropagation(); onFullscreen?.(); },
   }), [
@@ -128,6 +131,7 @@ function ImageNodeToolbar({
     onFullscreen,
     onMatting,
     onRepaint,
+    onReversePrompt,
     onSubjectMatting,
     onUpload,
     onUpscale,

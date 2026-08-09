@@ -1,11 +1,13 @@
 /**
  * Toast 全局消息提示 — 顶部居中弹出式通知，支持成功、信息和错误状态，自动消失
  */
+import { useCallback, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
+import { copyText } from '../services/clipboardService';
 import PopupCloseButton from './shared/PopupCloseButton';
 import { springSmooth, fadeFast } from '../utils/motion';
 
@@ -13,6 +15,13 @@ export default function Toast() {
   const { toast, dismissToast } = useAppStore(
     useShallow((s) => ({ toast: s.toast, dismissToast: s.dismissToast })),
   );
+  // 记住被复制的是哪条消息，换消息后对勾自然失效，不用额外重置
+  const [copiedMessage, setCopiedMessage] = useState('');
+  const copied = copiedMessage !== '' && copiedMessage === toast.message;
+
+  const handleCopy = useCallback(async () => {
+    if (await copyText(toast.message)) setCopiedMessage(toast.message);
+  }, [toast.message]);
 
   return createPortal(
     <AnimatePresence>
@@ -52,6 +61,19 @@ export default function Toast() {
             <span className="min-w-0 break-words text-[13px] font-medium leading-5 text-canvas-text">
               {toast.message}
             </span>
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label={copied ? '已复制消息' : '复制消息'}
+              data-tooltip={copied ? '已复制' : '复制消息'}
+              className="chat-panel-close-btn ml-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg
+                         text-canvas-text-muted transition-[color,background-color,box-shadow,transform] duration-150
+                         hover:bg-canvas-hover hover:text-canvas-text active:scale-95
+                         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50
+                         motion-reduce:transform-none"
+            >
+              <Icon icon={copied ? 'mdi:check' : 'mdi:content-copy'} width={15} height={15} aria-hidden="true" />
+            </button>
             <PopupCloseButton
               onClick={dismissToast}
               ariaLabel="关闭通知"

@@ -199,3 +199,14 @@ describe('buildAssistantSystemPrompt 的 Skill 索引', () => {
     expect(buildAssistantSystemPrompt()).not.toContain('可用 Skill');
   });
 });
+
+describe('buildAssistantSystemPrompt 的厂商配置审批时序', () => {
+  it('要求草稿生成后立即发起本地审批，不等待用户再发一条确认消息', () => {
+    const prompt = buildAssistantSystemPrompt({ agentTools: true });
+
+    expect(prompt).toContain('必须在同一 Agent 任务中立即调用 provider_config_apply');
+    expect(prompt).toContain('本地 Policy 自动暂停并展示 API 配置审批卡');
+    expect(prompt).toContain('不要先用普通文本要求用户回复“确认/添加”');
+    expect(prompt).not.toContain('只有用户确认后才能调用 provider_config_apply');
+  });
+});

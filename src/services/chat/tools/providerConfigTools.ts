@@ -237,7 +237,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
         'docs、developer 等文档站地址不能作为 baseUrl；必须使用用户实际调用模型的 API 网关地址。',
         '当文档示例使用 loading、example 等占位主机时，通过 baseUrl 提供文档或用户明确声明的实际接口地址。',
         '所有模型必须属于同一个 HTTPS Base URL。不得传入 API Key、Token、Authorization 值或其他真实凭据。',
-        '该工具只生成任务级临时草稿，不写入设置；成功后使用返回的 draftId 调用 provider_config_apply。',
+        '该工具只生成任务级临时草稿，不写入设置；成功后必须在同一任务中立即使用返回的 draftId 调用 provider_config_apply，由本地审批卡等待用户确认。',
       ].join(''),
       inputSchema: {
         type: 'object',
@@ -285,7 +285,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
             modelContent: [
               `draftId: ${draft.id}`,
               draft.summary,
-              '草稿尚未写入设置。确认内容无误后，调用 provider_config_apply 并只传入 draftId。',
+              '草稿尚未写入设置。请立即调用 provider_config_apply 并只传入 draftId；本地 Policy 会展示审批卡等待用户确认。不要用普通文本要求用户回复“确认”或“添加”。',
             ].join('\n'),
           };
         } catch (error) {
@@ -298,7 +298,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
       title: '保存 API 厂商配置',
       description: [
         '把 provider_config_preview 生成的任务级草稿保存到 API Key 设置。',
-        '输入只允许 draftId；该操作始终需要用户确认。',
+        '输入只允许 draftId；应在预览成功后立即调用，该操作会由本地 Policy 自动请求用户确认。',
         '不会写入 API Key：新连接的密钥保持空白，更新已有连接时保留原密钥。',
       ].join(''),
       inputSchema: {

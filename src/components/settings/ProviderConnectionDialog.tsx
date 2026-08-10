@@ -526,7 +526,19 @@ export default function ProviderConnectionDialog({
           <span className="provider-dialog-kicker">{editing ? '编辑连接' : '新建连接'}</span>
           <h3>{isWebSearchProvider ? '联网搜索' : definition ? definition.name : '选择 API 厂商'}</h3>
         </div>
-        <PopupCloseButton onClick={closeDialog} />
+        <div className="flex items-center gap-2">
+          {definition?.id === 'custom-openai' && (
+            <AnimatedButton
+              type="button"
+              className="provider-secondary-btn h-7"
+              onClick={() => void handleAssistantAdd()}
+            >
+              <Icon icon="mdi:message-processing-outline" width="14" />
+              调用助手添加
+            </AnimatedButton>
+          )}
+          <PopupCloseButton onClick={closeDialog} />
+        </div>
       </header>
 
       {!definition ? (
@@ -726,14 +738,6 @@ export default function ProviderConnectionDialog({
                           撤销导入
                         </AnimatedButton>
                       ) : null}
-                      <AnimatedButton
-                        type="button"
-                        className="provider-secondary-btn h-7"
-                        onClick={() => void handleAssistantAdd()}
-                      >
-                        <Icon icon="mdi:message-processing-outline" width="14" />
-                        助手添加全部模型
-                      </AnimatedButton>
                       <AnimatedButton
                         type="button"
                         className="provider-secondary-btn h-7"

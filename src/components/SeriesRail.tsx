@@ -319,7 +319,7 @@ export default function SeriesRail() {
                 return (
                   <div
                     key={episode.id}
-                    className={`group/episode flex items-center gap-1 rounded-lg px-1.5 py-1.5 transition-colors ${
+                    className={`group/episode flex items-center gap-1 rounded-lg px-1.5 h-7 transition-colors ${
                       isCurrent ? 'bg-[var(--white-alpha-06)]' : 'hover:bg-canvas-hover'
                     }`}
                   >
@@ -340,7 +340,7 @@ export default function SeriesRail() {
                           if (event.key === 'Escape') setRenamingId(null);
                         }}
                         aria-label="分集名称"
-                        className="min-w-0 flex-1 rounded-md bg-canvas-bg/60 px-1.5 py-0.5 text-[11px]
+                        className="min-w-0 flex-1 h-full rounded-md bg-canvas-bg/60 px-1.5 text-[11px] leading-none
                                    text-canvas-text outline-none ring-1 ring-inset ring-indigo-400/50"
                       />
                     ) : (
@@ -354,7 +354,7 @@ export default function SeriesRail() {
                         }}
                         aria-current={isCurrent}
                         data-tooltip={`${episode.name}（双击改名）`}
-                        className={`min-w-0 flex-1 truncate px-1 text-left text-[11px] transition-colors ${
+                        className={`min-w-0 flex-1 truncate px-1 text-left text-[11px] leading-none transition-colors ${
                           isCurrent ? 'text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text-secondary'
                         }`}
                       >

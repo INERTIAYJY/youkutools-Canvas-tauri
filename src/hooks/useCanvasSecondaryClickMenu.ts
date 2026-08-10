@@ -12,21 +12,19 @@ interface UseCanvasSecondaryClickMenuOptions {
  * 在已选中的节点里按屏幕坐标回查命中项。
  *
  * 多选场景下选择框覆盖在节点之上，`elementFromPoint` 只会返回覆盖层，
- * 因此改用几何命中测试；点在选择框空白处时退回第一个选中节点，
- * 让右键菜单仍然作用在这批选择上。
+ * 因此改用几何命中测试；只有真正落在某个节点矩形内才算命中，
+ * 点在选择框空白处一律返回 null，交给画布菜单。
  */
 function findSelectedNodeAtPoint(clientX: number, clientY: number): string | null {
   const selected = Array.from(
     document.querySelectorAll<HTMLElement>('.react-flow__node.selected'),
   );
-  if (selected.length === 0) return null;
-
   const hit = selected.find((candidate) => {
     const rect = candidate.getBoundingClientRect();
     return clientX >= rect.left && clientX <= rect.right
       && clientY >= rect.top && clientY <= rect.bottom;
   });
-  return (hit ?? selected[0]).getAttribute('data-id');
+  return hit?.getAttribute('data-id') ?? null;
 }
 
 /** 统一 Windows 右键拖拽与 macOS 次级点击的菜单触发时机。 */

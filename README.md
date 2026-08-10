@@ -6,9 +6,9 @@
 
 > 基于 **Tauri 2 + React 19 + React Flow 12** 的本地优先 AI 多模态画布与对话 Agent 桌面应用。
 
-AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown、分镜、360° 全景和手绘笔记组织成可连接的画布节点。你可以在同一个项目中编排生成链路、管理角色库与本地素材、执行 ComfyUI 工作流，也可以通过对话助手查询或修改画布、生成媒体、派出只读子智能体、读取授权文件并沉淀项目记忆。
+AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown、分镜、360° 全景和手绘笔记组织成可连接的画布节点。你可以在同一个项目中编排生成链路、管理角色库与本地素材、执行 ComfyUI 工作流，也可以通过对话助手查询或修改画布、生成媒体、派出只读子智能体、读取授权文件并沉淀项目记忆。项目还能拆成剧集与分集，一部短剧的每一集各占一张画布，角色库与素材整部剧共用。
 
-![Version](https://img.shields.io/badge/version-0.7.4-6366f1)
+![Version](https://img.shields.io/badge/version-0.8.0-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
 ![React Flow](https://img.shields.io/badge/React_Flow-12-ff0072)
@@ -37,6 +37,7 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 | 角色库与短剧资产 | 全局与项目级角色卡、多参考图、声音绑定与配音出口，以及短剧人物、场景和道具资产。 |
 | 本地 MCP 控制桥 | 手动开启的会话级 stdio MCP 适配器，让外部客户端复用同一套工具、Policy、审批和任务时间线。 |
 | 本地优先与安全 | 媒体保存在项目数据目录，结构化数据由 IndexedDB 持久化；API Key 由 Rust 凭据存储隔离保管。 |
+| 剧集与分集 | 项目可拆成剧集与分集，每集独占一张画布，共用角色库、项目记忆与素材目录；助手可读完剧本后批量建集。 |
 | 项目与资产 | 支持多项目、资产库、可恢复删除和 `.aicanvas` 项目整体导入导出。 |
 | 按需 3D 导演台 | 首次创建导演台节点时下载固定且经过校验的运行资源，并在 Tauri 独立窗口中完成场景摆位、机位预演和截图回传。 |
 

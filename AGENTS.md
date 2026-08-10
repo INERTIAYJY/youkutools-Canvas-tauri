@@ -61,6 +61,7 @@ AI-Canvas-tauri/
 │   │   ├── Header.tsx / Sidebar.tsx / NodeMenu.tsx / Titlebar.tsx
 │   │   ├── SettingsPanel.tsx / AssetsPanel.tsx / WorkflowPanel.tsx
 │   │   ├── ProjectLibraryModal.tsx / SessionProjectTabs.tsx / ProjectSettingsPopover.tsx
+│   │   ├── SeriesRail.tsx / ProjectAssetsOverlay.tsx / ProjectSwitchOverlay.tsx
 │   │   ├── CharacterLibraryPanel.tsx / CharacterAssetDialog.tsx / DramaAssetsPanel.tsx
 │   │   ├── canvas/            # 画布菜单、工具栏、绘图工具栏、多选、分布、操作记录
 │   │   ├── noteNodes/         # 画布笔记的形状、文本与图片渲染
@@ -75,7 +76,7 @@ AI-Canvas-tauri/
 │   │   ├── ai/                # 文本、图像、视频、音频、模型协议与流式调用
 │   │   │   └── providers/     # 厂商适配器
 │   │   ├── chat/              # Agent Runtime、Registry、Policy、子智能体、上下文、记忆、历史
-│   │   │   └── tools/         # 画布、媒体、预设、联网、文件、Skill、厂商配置、短剧资产、记忆工具
+│   │   │   └── tools/         # 画布、媒体、预设、联网、文件、Skill、厂商配置、短剧资产、剧集分集、记忆工具
 │   │   ├── mcp/               # MCP 控制服务、bridge 客户端与会话配置
 │   │   ├── fs/                # 文件基础设施、资产索引、回收站、资产库、存储健康
 │   │   ├── fileService.ts     # 文件能力统一前端入口
@@ -239,6 +240,8 @@ AI-Canvas-tauri/
 - 已持久化项目、工作流、配置、预设、历史、资产索引、风格、Skill、对话、消息、AgentTask、项目记忆、工具栏布局、元数据、全局角色和子智能体配置
 - 新 object store 或索引必须提升 `DB_VERSION`，并保持旧数据可升级读取
 - 删除会话时同步清理消息和 AgentTask；删除项目时同步清理项目域数据
+- 分集是带 `parentId` 的项目记录，不新建 Store；素材目录、角色库和项目记忆按 `seriesOwnerId` 统一挂在剧集记录上，分集不得各存一份副本
+- 删除单独一集不清理共享素材目录，只有整部剧（或普通项目）被删时才删目录
 - 不持久化完整网页正文、本地文件正文、文件 grant 路径、API Key、MCP 令牌或运行时控制器
 
 ## 任务类型判断

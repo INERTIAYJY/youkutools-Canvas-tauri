@@ -29,6 +29,7 @@ import AudioNode from './nodes/AudioNode';
 import AnimationNode from './nodes/AnimationNode';
 import MarkdownNode from './nodes/MarkdownNode';
 import StoryboardNode from './nodes/StoryboardNode';
+import ShotlistNode from './nodes/ShotlistNode';
 import GroupNode from './nodes/GroupNode';
 import CanvasNoteNode from './noteNodes/CanvasNoteNode';
 import NodeRenderBoundary from './nodes/shared/NodeRenderBoundary';
@@ -102,6 +103,7 @@ const nodeTypes: NodeTypes = withNodeRenderBoundaries({
   'ai-panorama': PanoramaNode,
   'ai-markdown': MarkdownNode,
   'ai-storyboard': StoryboardNode,
+  'ai-shotlist': ShotlistNode,
   'ai-director': DirectorDeskNode,
   'source-text': TextNode,
   'source-image': ImageNode,
@@ -183,11 +185,15 @@ const minimapNodeColor = (node: RFNode) => {
     case 'ai-panorama': return 'color-mix(in srgb, var(--node-panorama) 50%, transparent)';
     case 'ai-markdown': return 'color-mix(in srgb, var(--node-markdown-light) 50%, transparent)';
     case 'ai-director': return 'color-mix(in srgb, #a78bfa 50%, transparent)';
+    case 'ai-shotlist': return 'color-mix(in srgb, #fbbf24 50%, transparent)';
     case 'canvas-note': return 'color-mix(in srgb, var(--brand-light) 55%, transparent)';
     case 'group': return '#4b556380';
     default: return '#6b728080';
   }
 };
+
+/** 可以拖进分镜表画面格的节点类型 */
+const SHOTLIST_FRAME_SOURCE_TYPES = ['ai-image', 'source-image', 'ai-video', 'source-video'];
 
 // ── Snap lines overlay ──
 type SpacingSnapLine = Extract<SnapLine, { kind: 'spacing' }>;
@@ -957,6 +963,7 @@ function CanvasInner() {
     canDrop: boolean;
   } | null>(null);
   const ghostNodeId = useRef<string | null>(null);
+  const shotlistDropTarget = useRef<HTMLElement | null>(null);
 
   const clearGhostNodeHidden = useCallback(() => {
     if (ghostNodeId.current) {
@@ -968,6 +975,32 @@ function CanvasInner() {
   const clearSbDropTarget = useCallback(() => {
     sbDropTarget.current?.classList.remove('sb-cell--drop-target');
     sbDropTarget.current = null;
+  }, []);
+
+  const clearShotlistDropTarget = useCallback(() => {
+    shotlistDropTarget.current?.classList.remove('shot-frame--drop-target');
+    shotlistDropTarget.current = null;
+  }, []);
+
+  /**
+   * 命中分镜表的画面格。
+   * 与宫格不同，已绑定的格子也接受放置——直接换绑，比先解绑再拖一次顺手。
+   */
+  const findShotlistDropHit = useCallback((
+    node: RFNode,
+    clientX: number,
+    clientY: number,
+  ): HTMLElement | null => {
+    if (!SHOTLIST_FRAME_SOURCE_TYPES.includes(node.type ?? '')) return null;
+    const stack = document.elementsFromPoint(clientX, clientY);
+    for (const el of stack) {
+      const shotlist = el.closest<HTMLElement>('.shotlist-node');
+      if (!shotlist) continue;
+      if (shotlist.closest(`.react-flow__node[data-id="${node.id}"]`)) continue;
+      const cell = el.closest<HTMLElement>('[data-shot-frame-row]');
+      return cell?.closest('.shotlist-node') === shotlist ? cell : null;
+    }
+    return null;
   }, []);
 
   // 按鼠标位置命中宫格节点与真实空格，兼容缩放和非均匀自定义宫格。
@@ -1013,8 +1046,18 @@ function CanvasInner() {
         setDropGhost(null);
         clearGhostNodeHidden();
       }
+
+      // 分镜表画面格：只做高亮，不隐藏被拖的节点——绑定后它仍要留在画布上
+      const frameCell = findShotlistDropHit(node, e.clientX, e.clientY);
+      if (frameCell !== shotlistDropTarget.current) {
+        clearShotlistDropTarget();
+        if (frameCell) {
+          frameCell.classList.add('shot-frame--drop-target');
+          shotlistDropTarget.current = frameCell;
+        }
+      }
     },
-    [findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden],
+    [findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, findShotlistDropHit, clearShotlistDropTarget],
   );
 
   // ── Auto group/ungroup on drag stop ──
@@ -1022,9 +1065,20 @@ function CanvasInner() {
     (event: React.MouseEvent, node: RFNode) => {
       setCanvasInteraction('node', false);
       const cell = findStoryboardDropHit(node, event.clientX, event.clientY)?.emptyCell ?? null;
+      const frameCell = findShotlistDropHit(node, event.clientX, event.clientY);
       clearSbDropTarget();
+      clearShotlistDropTarget();
       setDropGhost(null);
       clearGhostNodeHidden();
+      if (frameCell) {
+        const shotlistId = frameCell.closest('.react-flow__node')?.getAttribute('data-id');
+        const rowId = frameCell.dataset.shotFrameRow;
+        if (shotlistId && shotlistId !== node.id && rowId) {
+          useAppStore.getState().bindShotlistFrame(shotlistId, rowId, node.id);
+          onNodeDragStop();
+          return;
+        }
+      }
       if (cell) {
         const sbId = cell.closest('.react-flow__node')?.getAttribute('data-id');
         const idx = Number(cell.dataset.sbCellIdx);
@@ -1037,7 +1091,7 @@ function CanvasInner() {
       settleNodeGroupingOnDragStop(node as RFNode<BaseNodeData>);
       onNodeDragStop();
     },
-    [onNodeDragStop, settleNodeGroupingOnDragStop, findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, setCanvasInteraction],
+    [onNodeDragStop, settleNodeGroupingOnDragStop, findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, setCanvasInteraction, findShotlistDropHit, clearShotlistDropTarget],
   );
 
   return (

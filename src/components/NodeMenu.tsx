@@ -11,7 +11,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, computeImageNodeDimensions } from '../store/useAppStore';
 import { generateId } from '../store/store.utils';
 import type { NodeType } from '../types';
-import { NODE_TYPE_CONFIG } from '../types';
+import { NODE_TYPE_CONFIG, SHOTLIST_DEFAULT_COLUMNS, createShotRow } from '../types';
 import { calcFixedPosition } from '../utils/popupPosition';
 import { uploadSourceFileToProject } from '../services/fileService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
@@ -49,6 +49,11 @@ const menuItems: { type: NodeType; label: string; icon: JSX.Element; badge?: str
     badge: 'Sprite',
   },
   {
+    type: 'ai-shotlist',
+    label: '分镜表',
+    icon: <Icon icon={NODE_TYPE_CONFIG['ai-shotlist'].icon} width="18" height="18" />,
+  },
+  {
     type: 'ai-director',
     label: '3D导演台',
     icon: <Icon icon={NODE_TYPE_CONFIG['ai-director'].icon} width="18" height="18" />,
@@ -57,7 +62,7 @@ const menuItems: { type: NodeType; label: string; icon: JSX.Element; badge?: str
 ];
 
 const NODE_MENU_W = 240;
-const NODE_MENU_H = 390; // items + header + footer
+const NODE_MENU_H = 434; // items + header + footer
 
 export default function NodeMenu() {
   const { nodeMenuVisible, nodeMenuPosition, hideNodeMenu, addNode, currentProjectId, showToast } = useAppStore(
@@ -88,6 +93,7 @@ export default function NodeMenu() {
     const isImage = type === 'ai-image';
     const isAnimation = type === 'ai-animation';
     const isDirector = type === 'ai-director';
+    const isShotlist = type === 'ai-shotlist';
     const pos = getCanvasPointerPosition();
     const newNode: Record<string, unknown> = {
       id: `node-${generateId()}`,
@@ -98,8 +104,8 @@ export default function NodeMenu() {
         type,
         prompt: '',
         status: 'idle' as const,
-        nodeWidth: isAnimation || isDirector ? 320 : 280,
-        nodeHeight: isDirector ? 240 : isImage ? 158 : isAnimation ? 358 : 160,
+        nodeWidth: isShotlist ? 720 : isAnimation || isDirector ? 320 : 280,
+        nodeHeight: isShotlist ? 380 : isDirector ? 240 : isImage ? 158 : isAnimation ? 358 : 160,
         ...(isImage ? { aspectRatio: '16:9', imageSize: '2K' } : {}),
         ...(isAnimation ? {
           prompt: '2D俯视角游戏角色，保持角色造型、朝向、比例和光照一致',
@@ -113,6 +119,12 @@ export default function NodeMenu() {
           role: 'source',
           directorStatus: 'idle',
           directorCaptureUrls: [],
+        } : {}),
+        // 开局给三行，空表让人不知道从哪下手
+        ...(isShotlist ? {
+          role: 'source',
+          shotlistColumns: SHOTLIST_DEFAULT_COLUMNS,
+          shotlistRows: [1, 2, 3].map((no) => createShotRow(`shot-${generateId()}`, no)),
         } : {}),
       },
     };

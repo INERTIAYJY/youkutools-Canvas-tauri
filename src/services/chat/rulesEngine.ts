@@ -139,6 +139,7 @@ const TYPE_MAP: Record<string, NodeType> = {
   '视频': 'ai-video',
   '音频': 'ai-audio',
   '宫格': 'ai-storyboard',
+  '分镜表': 'ai-shotlist',
 };
 
 const COMMAND_IDS = new Set<CommandId>([
@@ -148,7 +149,7 @@ const COMMAND_IDS = new Set<CommandId>([
 
 const NODE_TYPES = new Set<NodeType>([
   'ai-text', 'ai-image', 'ai-video', 'ai-audio', 'ai-panorama',
-  'ai-markdown', 'ai-storyboard', 'source-image', 'source-video',
+  'ai-markdown', 'ai-storyboard', 'ai-shotlist', 'source-image', 'source-video',
   'source-audio', 'source-text', 'comment',
 ]);
 

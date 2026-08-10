@@ -4,9 +4,17 @@
  * 工程先落 IndexedDB 再开窗，编辑器按工程 ID 自行取回；
  * 两个窗口同源共享同一个库，因此不需要额外的素材交接通道。
  */
-import type { BaseNodeData, NodeType } from '../types';
+import type { BaseNodeData, NodeType, ShotRow } from '../types';
+import {
+  SHOTLIST_TRANSITION_DURATION,
+  buildShotPlaceholderText,
+  isShotRowBlank,
+  resolveShotDuration,
+  resolveShotTransitionKind,
+} from '../types/shotlist';
 import {
   DEFAULT_IMAGE_CLIP_DURATION,
+  DEFAULT_TEXT_STYLE,
   VIDEO_EDITOR_SCHEMA_VERSION,
   relayoutSequential,
   type VideoEditorClip,
@@ -153,6 +161,107 @@ export async function openVideoEditorForNodes(params: {
   }
 
   await openVideoEditorWindow({ instanceId: id, projectId, nodeId: anchor.id, theme });
+}
+
+// ── 分镜表 → 时间轴 ──
+
+/** 未填画面的行在时间轴上显示成占位文字，字号比默认标题小一档 */
+const SHOT_PLACEHOLDER_FONT_SIZE = 40;
+
+/**
+ * 按分镜表的一行构造时间轴片段。
+ *
+ * 与 buildClip 的区别有两处，也正是分镜表必须走独立入口的原因：
+ * 时长取自表里的「时长」栏而非图片固定停留时长，且没绑画面的行也要出片段。
+ */
+function buildShotClip(row: ShotRow, index: number): VideoEditorClip {
+  const duration = resolveShotDuration(row);
+  const transitionKind = resolveShotTransitionKind(row.transition);
+  // 首个片段之前没有可叠的画面，转场无从谈起
+  const transitionIn = index > 0 && transitionKind !== 'none'
+    ? { kind: transitionKind, duration: Math.min(SHOTLIST_TRANSITION_DURATION, duration) }
+    : undefined;
+  const base = {
+    id: `clip-${index + 1}-${row.id}`,
+    transitionIn,
+    timelineStart: 0,
+    sourceIn: 0,
+    sourceOut: duration,
+  };
+  const frame = row.frame;
+
+  if (!frame) {
+    return {
+      ...base,
+      kind: 'text',
+      fileName: `镜 ${row.shotNo || index + 1}`,
+      textStyle: {
+        ...DEFAULT_TEXT_STYLE,
+        content: buildShotPlaceholderText(row),
+        fontSize: SHOT_PLACEHOLDER_FONT_SIZE,
+      },
+    };
+  }
+
+  return {
+    ...base,
+    kind: frame.kind,
+    filePath: frame.filePath,
+    assetId: frame.assetId,
+    sourceUrl: frame.url,
+    fileName: `镜 ${row.shotNo || index + 1}`,
+    nodeId: frame.nodeId,
+  };
+}
+
+/** 分镜表节点是否已经推送过时间轴；调用方据此在覆盖前征求确认 */
+export async function hasShotlistTimeline(projectId: string, nodeId: string): Promise<boolean> {
+  if (!projectId) return false;
+  return !!(await getVideoEditorProject(buildVideoEditorProjectId(projectId, nodeId)));
+}
+
+/**
+ * 把整张分镜表推送成时间轴并打开剪辑窗口。
+ *
+ * 语义上分镜表是时间轴的源：每次推送都按当前表重建轨道，
+ * 而不像 openVideoEditorForNodes 那样增量追加——表改了却只追加会两边对不上。
+ * 因此覆盖既有工程前必须由调用方确认。
+ */
+export async function openVideoEditorForShotlist(params: {
+  projectId: string;
+  nodeId: string;
+  label: string;
+  rows: ShotRow[];
+  theme?: 'dark' | 'light';
+}): Promise<void> {
+  const { projectId, nodeId, label, rows, theme } = params;
+  if (!projectId) throw new Error('请先打开一个项目再推送分镜表');
+
+  // 全空的行既没画面也没文字，推过去只会是一段空白，直接跳过
+  const usable = rows.filter((row) => !isShotRowBlank(row));
+  if (usable.length === 0) throw new Error('分镜表还没有可推送的镜头');
+
+  const id = buildVideoEditorProjectId(projectId, nodeId);
+  const existing = await getVideoEditorProject(id);
+  const now = Date.now();
+  const clips = relayoutSequential(usable.map(buildShotClip));
+  const sourceNodeIds = [...new Set(usable
+    .map((row) => row.frame?.nodeId)
+    .filter((value): value is string => !!value))];
+
+  await saveVideoEditorProject({
+    id,
+    schemaVersion: VIDEO_EDITOR_SCHEMA_VERSION,
+    projectId,
+    nodeId,
+    nodeIds: sourceNodeIds,
+    name: label || '分镜表',
+    tracks: [{ id: 'video-1', kind: 'video', name: '视频轨 1', clips }],
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  } satisfies VideoEditorProjectRecord);
+
+  await openVideoEditorWindow({ instanceId: id, projectId, nodeId, theme });
 }
 
 /** 单节点入口，保留给只右键一个视频节点的场景 */

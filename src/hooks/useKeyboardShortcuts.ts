@@ -12,6 +12,8 @@ import { cancelNodePolling } from '../services/pollManager';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
 import type { Node as RFNode } from '@xyflow/react';
 import type { BaseNodeData, NodeType } from '../types';
+import { SHOTLIST_DEFAULT_COLUMNS, createShotRow } from '../types';
+import { generateId } from '../store/store.utils';
 import { invoke } from '@tauri-apps/api/core';
 
 interface NodeShortcutDefinition {
@@ -35,6 +37,7 @@ const SOURCE_NODE_SHORTCUTS: NodeShortcutDefinition[] = [
   { type: 'ai-video', label: '视频' },
   { type: 'ai-audio', label: '音频' },
   { type: 'ai-markdown', label: 'Markdown' },
+  { type: 'ai-shotlist', label: '分镜表' },
 ];
 
 function loadDefaultModel(nodeType: NodeType): { model: string; provider: string } | null {
@@ -63,9 +66,10 @@ function createNodeFromNumberShortcut(shortcutIndex: number, isSource: boolean) 
   const isPanorama = type === 'ai-panorama';
   const isAnimation = type === 'ai-animation';
   const isDirector = type === 'ai-director';
+  const isShotlist = type === 'ai-shotlist';
   const nodeRole = isSource || isDirector ? 'source' : 'generator';
-  const nodeWidth = isAnimation || isDirector ? 320 : isAudio ? 260 : isPanorama ? 300 : 280;
-  const nodeHeight = isDirector ? 240 : isAnimation ? 358 : isAudio ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
+  const nodeWidth = isShotlist ? 720 : isAnimation || isDirector ? 320 : isAudio ? 260 : isPanorama ? 300 : 280;
+  const nodeHeight = isShotlist ? 380 : isDirector ? 240 : isAnimation ? 358 : isAudio ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
   const defaultModel = nodeRole === 'source' ? null : loadDefaultModel(type);
   const state = useAppStore.getState();
   const position = getCanvasPointerPosition();
@@ -95,6 +99,11 @@ function createNodeFromNumberShortcut(shortcutIndex: number, isSource: boolean) 
       ...(isDirector ? {
         directorStatus: 'idle' as const,
         directorCaptureUrls: [] as string[],
+      } : {}),
+      // 开局给三行，空表让人不知道从哪下手
+      ...(isShotlist ? {
+        shotlistColumns: SHOTLIST_DEFAULT_COLUMNS,
+        shotlistRows: [1, 2, 3].map((no) => createShotRow(`shot-${generateId()}`, no)),
       } : {}),
       ...(defaultModel ?? {}),
     },

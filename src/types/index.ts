@@ -5,6 +5,7 @@ import type { AudioOutputFormat, AudioTtsVoice, ModelExecutionProfile, VideoRefe
 import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
 import type { CanvasNoteData } from './canvasNote';
+import type { ShotlistColumnKey, ShotRow } from './shotlist';
 
 export type {
   CanvasDrawingTool,
@@ -26,6 +27,27 @@ export type {
   CanvasNoteTextAlign,
 } from './canvasNote';
 export { createCanvasNoteData, DEFAULT_CANVAS_NOTE_STYLE, isCanvasNoteKind } from './canvasNote';
+
+export type { ShotFrameBinding, ShotlistColumnKey, ShotRow } from './shotlist';
+export {
+  buildShotPlaceholderText,
+  computeShotlistDuration,
+  createShotRow,
+  DEFAULT_SHOT_DURATION,
+  isShotRowBlank,
+  isShotRowTextOnly,
+  resolveShotDuration,
+  resolveShotTransitionKind,
+  SHOT_CAMERA_OPTIONS,
+  SHOT_SIZE_OPTIONS,
+  SHOT_TRANSITION_OPTIONS,
+  SHOTLIST_COLUMN_LABELS,
+  SHOTLIST_COLUMN_ORDER,
+  SHOTLIST_DEFAULT_COLUMNS,
+  SHOTLIST_OPTIONAL_COLUMNS,
+  SHOTLIST_PINNED_COLUMNS,
+  SHOTLIST_TRANSITION_DURATION,
+} from './shotlist';
 
 export type {
   AnnotationPoint,
@@ -51,6 +73,7 @@ export type NodeType =
   | 'ai-panorama'
   | 'ai-markdown'
   | 'ai-storyboard'
+  | 'ai-shotlist'
   | 'ai-director'
   | 'source-image'
   | 'source-video'
@@ -184,6 +207,9 @@ export interface BaseNodeData {
   storyboardColPositions?: number[];    // 自定义竖线位置百分比（有序，不含 0/100），非均匀裁切时使用
   storyboardExtracted?: boolean[];      // 各格是否已被拖出提取（行优先），已提取的格显示空占位
   storyboardOverrides?: (StoryboardCellOverride | null)[]; // 各格被拖入的图片（覆盖源图裁片显示）
+  // ── 分镜表（ai-shotlist）──
+  shotlistRows?: ShotRow[];                 // 逐行镜头
+  shotlistColumns?: ShotlistColumnKey[];    // 当前显示的列（常驻列恒在其中）
   // ── 3D 导演台（ai-director）──
   directorInstanceId?: string;           // 导演台 localStorage 隔离实例 ID
   directorStatus?: 'idle' | 'open' | 'ready';
@@ -588,6 +614,7 @@ export const NODE_TYPE_CONFIG: Record<string, NodeTypeVisualConfig> = {
   'ai-panorama': { icon: 'mdi:panorama',                  color: 'text-cyan-400',    bg: 'bg-cyan-500/15',    label: '生成360全景' },
   'ai-markdown': { icon: 'mdi:language-markdown-outline', color: 'text-purple-400',  bg: 'bg-purple-500/15',  label: 'Markdown' },
   'ai-storyboard': { icon: 'mdi:grid',                    color: 'text-pink-400',    bg: 'bg-pink-500/15',    label: '宫格分镜' },
+  'ai-shotlist':   { icon: 'mdi:table-large',             color: 'text-amber-400',   bg: 'bg-amber-500/15',   label: '分镜表' },
   'ai-director':   { icon: 'mdi:video-3d',                color: 'text-violet-400',  bg: 'bg-violet-500/15',  label: '3D 导演台' },
   'canvas-note':   { icon: 'mdi:draw',                    color: 'text-sky-400',     bg: 'bg-sky-500/15',     label: '画布笔记' },
 };

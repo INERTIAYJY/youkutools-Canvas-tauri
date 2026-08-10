@@ -19,6 +19,7 @@ import type {
   CanvasNotePatch,
   CharacterLibraryNodeLink,
   NodeGroup,
+  ShotRow,
   StoryboardCellOverride,
 } from '../types';
 import { createCanvasNoteData } from '../types';
@@ -210,6 +211,8 @@ export interface NodeSlice {
   settleNodeGroupingOnDragStop: (node: Node<BaseNodeData>) => void;
   /** 把一个图像节点拖入宫格分镜的某格：该格显示此图，源节点被消耗移除 */
   fillStoryboardCell: (storyboardId: string, cellIdx: number, sourceNodeId: string) => void;
+  /** 把一个图像/视频节点拖入分镜表的画面格：建立引用，源节点留在画布上 */
+  bindShotlistFrame: (shotlistId: string, rowId: string, sourceNodeId: string) => void;
 }
 
 export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, get) => ({
@@ -829,6 +832,47 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         idsToDelete,
       ));
     });
+  },
+
+  bindShotlistFrame: (shotlistId, rowId, sourceNodeId) => {
+    const { nodes } = get();
+    const shotlist = nodes.find((n) => n.id === shotlistId && n.type === 'ai-shotlist');
+    const src = nodes.find((n) => n.id === sourceNodeId);
+    if (!shotlist || !src) return;
+
+    const isVideo = src.type === 'ai-video' || src.type === 'source-video';
+    const isImage = src.type === 'ai-image' || src.type === 'source-image';
+    if (!isVideo && !isImage) return;
+
+    const url = (isVideo
+      ? src.data.videoUrl
+      : (src.data.imageUrl || src.data.thumbnailUrl)) as string | undefined;
+    if (!url && !src.data.filePath) return;
+
+    const rows = Array.isArray(shotlist.data.shotlistRows)
+      ? (shotlist.data.shotlistRows as ShotRow[])
+      : [];
+    if (!rows.some((row) => row.id === rowId)) return;
+
+    get().commitToHistory();
+    // 快照仅供源节点日后被删除时兜底显示；渲染与推送都以画布上的实时节点为准
+    const nextRows = rows.map((row) => (row.id === rowId
+      ? {
+        ...row,
+        frame: {
+          nodeId: sourceNodeId,
+          kind: isVideo ? ('video' as const) : ('image' as const),
+          url,
+          filePath: src.data.filePath as string | undefined,
+          assetId: src.data.assetId as string | undefined,
+          sourceDuration: typeof src.data.videoDuration === 'number' ? src.data.videoDuration : undefined,
+        },
+      }
+      : row));
+    // 源节点保持在画布上：分镜表持有的是引用，不是所有权
+    get().updateNodeDataTransient(shotlistId, { shotlistRows: nextRows } as Partial<BaseNodeData>);
+    get().commitToHistory();
+    get().showToast('已放入分镜表');
   },
 
   fillStoryboardCell: (storyboardId, cellIdx, sourceNodeId) => {

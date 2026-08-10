@@ -6,6 +6,7 @@ import { useReactFlow } from '@xyflow/react';
 import type { Node as RFNode } from '@xyflow/react';
 import { useAppStore, generateId } from '../store/useAppStore';
 import type { BaseNodeData, NodeType } from '../types';
+import { SHOTLIST_DEFAULT_COLUMNS, createShotRow } from '../types';
 import * as fileService from '../services/fileService';
 import { copyFiles as copyFilesToClipboard } from '../services/clipboardService';
 import { cancelNodePolling } from '../services/pollManager';
@@ -94,9 +95,10 @@ export function useCanvasContextMenu() {
       const isPanorama = type === 'ai-panorama';
       const isAnimation = type === 'ai-animation';
       const isDirector = type === 'ai-director';
+      const isShotlist = type === 'ai-shotlist';
       const isSource = role === 'source';
-      const newWidth = isAnimation || isDirector ? 320 : type === 'ai-audio' ? 260 : isPanorama ? 300 : 280;
-      const newHeight = isDirector ? 240 : isAnimation ? 358 : type === 'ai-audio' ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
+      const newWidth = isShotlist ? 720 : isAnimation || isDirector ? 320 : type === 'ai-audio' ? 260 : isPanorama ? 300 : 280;
+      const newHeight = isShotlist ? 380 : isDirector ? 240 : isAnimation ? 358 : type === 'ai-audio' ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
       const defaultModel = !isSource ? loadDefaultModel(type) : null;
       const newNode: RFNode<BaseNodeData> = {
         id: `node-${generateId()}`,
@@ -122,6 +124,11 @@ export function useCanvasContextMenu() {
           ...(isDirector ? {
             directorStatus: 'idle' as const,
             directorCaptureUrls: [] as string[],
+          } : {}),
+          // 开局给三行，空表让人不知道从哪下手
+          ...(isShotlist ? {
+            shotlistColumns: SHOTLIST_DEFAULT_COLUMNS,
+            shotlistRows: [1, 2, 3].map((no) => createShotRow(`shot-${generateId()}`, no)),
           } : {}),
           ...(defaultModel ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
         },

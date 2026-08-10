@@ -22,6 +22,7 @@ const NODE_TYPES: NodeType[] = [
   'ai-panorama',
   'ai-markdown',
   'ai-storyboard',
+  'ai-shotlist',
   'ai-director',
   'source-image',
   'source-video',

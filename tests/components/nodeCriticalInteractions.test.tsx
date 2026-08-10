@@ -395,6 +395,61 @@ describe('critical canvas node interactions', () => {
     expect(store.nodes[0].data.storyboardExtracted).toEqual([false]);
   });
 
+  it('ShotlistNode keeps a drag surface even though every cell is a nodrag input', async () => {
+    // 表体的输入框必须带 nodrag 才能编辑文字，于是整张表都拖不动节点。
+    // 工具带和表头是仅剩的抓手，谁给它们加上 nodrag，这个节点就彻底钉死在画布上了。
+    const shotlist: TestNode = {
+      id: 'shotlist',
+      type: 'ai-shotlist',
+      position: { x: 0, y: 0 },
+      data: {
+        type: 'ai-shotlist',
+        label: '第一场',
+        shotlistRows: [{ id: 'row-1', shotNo: '1', content: '警察松动警戒线', duration: 3 }],
+      },
+    };
+    const store = createStore([shotlist], () => 1);
+
+    await installReactHookDriver();
+    installStoreMock(store);
+    installCommonNodeMocks();
+    vi.doMock('@xyflow/react', () => ({
+      Handle: function HandleMock() { return null; },
+      Position: { Left: 'left', Right: 'right' },
+      useReactFlow: () => ({ setCenter: vi.fn(), getNode: vi.fn() }),
+    }));
+    vi.doMock('../../src/services/videoEditorService', () => ({
+      hasShotlistTimeline: vi.fn().mockResolvedValue(false),
+      openVideoEditorForShotlist: vi.fn(),
+    }));
+
+    const ShotlistNode = (await import('../../src/components/nodes/ShotlistNode')).default as unknown as (
+      props: { id: string; data: Record<string, unknown>; selected: boolean },
+    ) => unknown;
+    const tree = ShotlistNode({ id: 'shotlist', data: shotlist.data, selected: false });
+
+    const toolbar = findElement(tree, (element) => (
+      typeof element.props.className === 'string'
+      && element.props.className.includes('shotlist-toolbar')
+      && !element.props.className.includes('actions')
+    ));
+    expect(toolbar.props.className).not.toContain('nodrag');
+
+    // 按钮区反过来必须挡住拖拽，否则点「推送时间轴」会变成拽着节点跑
+    const actions = findElement(tree, (element) => (
+      typeof element.props.className === 'string'
+      && element.props.className.includes('shotlist-toolbar-actions')
+    ));
+    expect(actions.props.className).toContain('nodrag');
+
+    // 单元格输入必须保留 nodrag，否则选中文字就变成拖节点
+    const input = findElement(tree, (element) => (
+      typeof element.props.className === 'string'
+      && element.props.className.includes('shot-input')
+    ));
+    expect(input.props.className).toContain('nodrag');
+  });
+
   it('GroupNode batches only direct children, keeps empty groups renderable, and records resize history', async () => {
     const group: TestNode = {
       id: 'group-a',

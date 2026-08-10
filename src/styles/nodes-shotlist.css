@@ -1,0 +1,316 @@
+/* ============================================
+   Shotlist Node — 分镜表（一行一镜；画面格引用画布节点，整表可推时间轴）
+   ============================================ */
+
+.shotlist-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ── 顶部工具条 ── */
+/* 表体被输入框占满，拖不动节点，因此这条工具带兼作拖拽手柄 */
+.shotlist-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  flex-shrink: 0;
+  cursor: grab;
+}
+
+.shotlist-toolbar:active {
+  cursor: grabbing;
+}
+
+.shotlist-stat {
+  font-size: 11px;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.6));
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.shotlist-toolbar-actions {
+  position: relative;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 按钮区自己接管指针，其余部分留给拖拽 */
+.shotlist-toolbar-actions {
+  cursor: default;
+}
+
+.shotlist-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  background: transparent;
+  color: var(--theme-text, rgba(255, 255, 255, 0.85));
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.shotlist-btn:hover {
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
+.shotlist-btn--primary {
+  border-color: rgba(251, 191, 36, 0.45);
+  color: #fbbf24;
+}
+
+/* ── 列显隐菜单 ── */
+.shotlist-column-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 118px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  background: var(--theme-surface, #14141c);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  max-height: 210px;
+  overflow-y: auto;
+}
+
+.shotlist-column-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  border-radius: 5px;
+  color: var(--theme-text, rgba(255, 255, 255, 0.85));
+  cursor: pointer;
+}
+
+.shotlist-column-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── 表体 ── */
+.shotlist-scroll {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.shotlist-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  table-layout: fixed;
+}
+
+.shotlist-table th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 5px 6px;
+  text-align: left;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.6));
+  background: var(--theme-surface, #14141c);
+  border-bottom: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  /* 表头没有输入控件，和工具带一样可以直接拖动节点 */
+  cursor: grab;
+  user-select: none;
+}
+
+.shotlist-table thead:active th {
+  cursor: grabbing;
+}
+
+.shotlist-table td {
+  padding: 3px 5px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--theme-border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.shot-row--dragging {
+  opacity: 0.45;
+}
+
+/* 列宽：内容与台词吃掉剩余空间，其余按内容定宽 */
+.shot-col-grip,
+.shot-col-actions { width: 22px; }
+.shot-col-shotNo { width: 48px; }
+.shot-col-frame { width: 84px; }
+.shot-col-shotSize,
+.shot-col-camera,
+.shot-col-transition { width: 68px; }
+.shot-col-duration { width: 56px; }
+.shot-col-audio,
+.shot-col-note { width: 96px; }
+
+.shot-grip,
+.shot-row-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.45));
+  cursor: grab;
+}
+
+.shot-row-delete { cursor: pointer; }
+.shot-row-delete:hover { color: #f87171; }
+.shot-grip:active { cursor: grabbing; }
+
+/* ── 单元格输入 ── */
+.shot-input {
+  width: 100%;
+  padding: 3px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--theme-text, rgba(255, 255, 255, 0.9));
+  outline: none;
+  resize: none;
+}
+
+.shot-input:hover {
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.12));
+}
+
+.shot-input:focus {
+  border-color: rgba(251, 191, 36, 0.55);
+  background: rgba(251, 191, 36, 0.06);
+}
+
+.shot-input--no,
+.shot-input--duration {
+  font-variant-numeric: tabular-nums;
+}
+
+.shot-input--text {
+  min-height: 34px;
+  font-family: inherit;
+}
+
+/* ── 画面格 ── */
+.shot-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--theme-bg, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shot-frame--empty {
+  flex-direction: column;
+  gap: 1px;
+  border-style: dashed;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.4));
+}
+
+/* 源节点已不在画布上：显示的是绑定时的快照 */
+.shot-frame--dangling {
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
+.shot-frame--dangling .shot-frame-img {
+  opacity: 0.55;
+}
+
+/* 拖着素材节点悬停在格子上 */
+.shot-frame--drop-target {
+  border-color: #fbbf24;
+  border-style: solid;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.3);
+}
+
+.shot-frame-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  cursor: pointer;
+  user-select: none;
+}
+
+.shot-frame-hint {
+  font-size: 9px;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.4));
+}
+
+.shot-frame-badge {
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  color: rgba(255, 255, 255, 0.9);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7));
+  pointer-events: none;
+}
+
+.shot-frame-unbind {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+}
+
+.shot-frame:hover .shot-frame-unbind {
+  display: flex;
+}
+
+/* ── 空表与加行 ── */
+.shotlist-empty {
+  padding: 18px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.45));
+}
+
+.shotlist-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  padding: 5px;
+  flex-shrink: 0;
+  font-size: 11px;
+  border: none;
+  border-top: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  background: transparent;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.6));
+  cursor: pointer;
+}
+
+.shotlist-add:hover {
+  background: rgba(251, 191, 36, 0.08);
+  color: #fbbf24;
+}

@@ -28,6 +28,7 @@ const NODE_ITEMS: MergedNodeItem[] = [
   { label: '视频', type: 'ai-video', role: 'source', shortcut: 'Alt 3' },
   { label: '音频', type: 'ai-audio', role: 'source', shortcut: 'Alt 4' },
   { label: 'Markdown', type: 'ai-markdown', role: 'source', shortcut: 'Alt 5' },
+  { label: '分镜表', type: 'ai-shotlist', role: 'source', shortcut: 'Alt 6' },
 ];
 
 /** 菜单项行高估算（含 padding） */
@@ -39,8 +40,8 @@ const MENU_PADDING = 10;
  *  以选中态最大项数估算高度，避免溢出。 */
 const L1_ITEM_COUNT = 8;
 const L1_SEP_COUNT = 3;
-/** 子菜单项数（7 个内容节点 + 1 条分割线 + 5 个源节点 = 12 个 .menu-row + 1 个 .menu-sep） */
-const SUB_ITEM_COUNT = 12;
+/** 子菜单项数（7 个内容节点 + 1 条分割线 + 6 个源节点 = 13 个 .menu-row + 1 个 .menu-sep） */
+const SUB_ITEM_COUNT = 13;
 const SUB_SEP_COUNT = 1;
 
 /** 估算菜单高度 */

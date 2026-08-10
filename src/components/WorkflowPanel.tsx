@@ -473,6 +473,20 @@ export default function WorkflowPanel() {
                           <span className="wf-item-name">{wf.name}</span>
                           <span className="wf-item-meta">
                             {wf.fileName} · {new Date(wf.createdAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
+                            {/* 从 ComfyUI 存回来的分类是猜的，猜错了在这里改 */}
+                            <select
+                              className="wf-item-cat"
+                              value={wf.category}
+                              title="修改分类"
+                              onChange={(e) => {
+                                updateWorkflow(wf.id, { category: e.target.value as WorkflowCategory })
+                                  .catch(() => showToast('修改分类失败', 'error'));
+                              }}
+                            >
+                              {CATEGORIES.map((cat) => (
+                                <option key={cat.value} value={cat.value}>{cat.label}</option>
+                              ))}
+                            </select>
                           </span>
                           {wf.ioNodes && wf.ioNodes.length > 0 && (
                             <div className="wf-item-ionodes">

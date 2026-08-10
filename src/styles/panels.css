@@ -411,6 +411,20 @@
   font-size: 11px;
   white-space: nowrap;
 }
+.wf-item-cat {
+  margin-left: 6px;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.wf-item-cat:hover {
+  border-color: currentColor;
+}
+
 /* 列表里的徽章是按钮：点一下把该节点设为对应类型的默认注入目标 */
 button.wf-ionode-badge {
   border: 1px solid transparent;

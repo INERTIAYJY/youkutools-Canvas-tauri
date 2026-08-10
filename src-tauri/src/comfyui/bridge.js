@@ -47,11 +47,22 @@
   };
 
   const inferCategory = (output) => {
-    const classTypes = Object.values(output || {})
-      .map((node) => String(node?.class_type || ''))
+    const entries = Object.entries(output || {});
+    // 被别人当输入引用过的都是中间节点，剩下的才是产出节点；分类只看产出，
+    // 否则图生视频里的一个音频/提示词增强节点就能把整条工作流带偏
+    const referenced = new Set();
+    for (const [, node] of entries) {
+      for (const value of Object.values(node?.inputs || {})) {
+        if (Array.isArray(value) && typeof value[0] === 'string') referenced.add(value[0]);
+      }
+    }
+    const terminal = entries.filter(([nodeId]) => !referenced.has(nodeId));
+    const classTypes = (terminal.length > 0 ? terminal : entries)
+      .map(([, node]) => String(node?.class_type || ''))
       .join(' ');
-    if (/audio|sound|saveaudio/i.test(classTypes)) return 'ai-audio';
+    // 视频优先：有声视频的产出节点同时带 audio 字样，但它仍然是视频工作流
     if (/video|vhs|animated|webm|mp4/i.test(classTypes)) return 'ai-video';
+    if (/audio|sound/i.test(classTypes)) return 'ai-audio';
     if (/image|latent|sampler|vae|save|preview/i.test(classTypes)) return 'ai-image';
     return 'ai-text';
   };

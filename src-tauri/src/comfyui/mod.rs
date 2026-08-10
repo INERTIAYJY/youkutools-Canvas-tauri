@@ -580,6 +580,9 @@ pub async fn open_comfyui_window(
             .center()
             .resizable(true)
             .decorations(!use_local_bridge)
+            // Tauri 默认的原生拖放处理会吞掉 HTML5 drag 事件，ComfyUI 就收不到拖进来的
+            // 工作流 JSON / 图片；关掉它交还给页面自己处理
+            .disable_drag_drop_handler()
             .visible(true);
     if use_local_bridge {
         let navigation_app = app.clone();

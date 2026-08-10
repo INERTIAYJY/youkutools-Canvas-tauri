@@ -62,6 +62,27 @@ export function toLegacyReferenceMedia(references: readonly MediaReference[]): C
   };
 }
 
+/**
+ * 参考素材的提醒阈值。真正的上限各家 Provider 不同（视频模型通常也就首尾两帧），
+ * 这里只在明显超量时提醒一句，不做截断——留哪些该由用户决定，静默丢素材更难查。
+ */
+export const REFERENCE_SOFT_LIMIT = 10;
+
+/** 引用素材明显超量时提醒一次；@ 一整张分镜表很容易一次带进十几张画面 */
+export function warnIfTooManyReferences(counts: { image?: number; video?: number; audio?: number }): void {
+  const total = (counts.image ?? 0) + (counts.video ?? 0) + (counts.audio ?? 0);
+  if (total <= REFERENCE_SOFT_LIMIT) return;
+  const detail = [
+    counts.image ? `图 ${counts.image}` : '',
+    counts.video ? `视频 ${counts.video}` : '',
+    counts.audio ? `音频 ${counts.audio}` : '',
+  ].filter(Boolean).join(' · ');
+  useAppStore.getState().showToast(
+    `本次带了 ${total} 项参考素材（${detail}），多数模型只认前 ${REFERENCE_SOFT_LIMIT} 项以内，多出来的会被忽略或直接报错`,
+    'info',
+  );
+}
+
 export function pushUniqueUrl(urls: string[], seen: Set<string>, value: unknown): void {
   if (typeof value !== 'string') return;
   const url = value.trim();

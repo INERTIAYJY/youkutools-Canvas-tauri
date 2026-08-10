@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SHOT_DURATION,
+  buildShotFramePrompt,
   buildShotPlaceholderText,
+  collectShotFrameCandidates,
   computeShotlistDuration,
+  formatShotRowBrief,
   createShotRow,
   isShotRowBlank,
   isShotRowTextOnly,
@@ -94,5 +97,49 @@ describe('无画面行的占位文字', () => {
 
   it('全空也要给个能看的名字', () => {
     expect(buildShotPlaceholderText({ id: 'x', shotNo: '' })).toBe('未命名镜头');
+  });
+});
+
+describe('画面格的候选与生成提示词', () => {
+  const nodes = [
+    { id: 'img', type: 'ai-image', data: { label: '警戒线', imageUrl: 'a.png' } },
+    { id: 'vid', type: 'source-video', data: { label: '街景', videoUrl: 'b.mp4' } },
+    { id: 'txt', type: 'ai-text', data: { label: '剧本' } },
+    { id: 'loose', type: 'ai-image', data: { label: '没连线', imageUrl: 'c.png' } },
+  ];
+  const edges = [
+    { source: 'img', target: 'table' },
+    { source: 'vid', target: 'table' },
+    { source: 'txt', target: 'table' },
+    { source: 'loose', target: 'other' },
+  ];
+
+  it('只收连进本表的图像/视频节点', () => {
+    expect(collectShotFrameCandidates(nodes, edges, 'table')).toEqual([
+      { nodeId: 'img', label: '警戒线', kind: 'image', url: 'a.png' },
+      { nodeId: 'vid', label: '街景', kind: 'video', url: 'b.mp4' },
+    ]);
+  });
+
+  it('视频优先用封面帧当缩略图', () => {
+    const withThumb = [{ id: 'vid', type: 'ai-video', data: { label: '街景', thumbnailUrl: 't.png', videoUrl: 'b.mp4' } }];
+    expect(collectShotFrameCandidates(withThumb, [{ source: 'vid', target: 'table' }], 'table')[0].url)
+      .toBe('t.png');
+  });
+
+  it('生成提示词用景别、运镜修饰内容，空字段不留空档', () => {
+    expect(buildShotFramePrompt(row({ shotSize: '特写', camera: '', content: '手铐扣紧' })))
+      .toBe('特写，手铐扣紧');
+    expect(buildShotFramePrompt(row({ shotSize: '', camera: '', content: '' }))).toBe('');
+  });
+});
+
+describe('单行摘要文字', () => {
+  it('空字段不留空档，时长跟着推送口径回落', () => {
+    expect(formatShotRowBrief(row({ shotNo: '1', shotSize: '', camera: '推', content: '手铐扣紧', dialogue: '' })))
+      .toBe('1 · 推 · 手铐扣紧 · 3″');
+    expect(formatShotRowBrief(row({
+      shotNo: '2', shotSize: '特写', camera: '', content: '', dialogue: '安警官是自己人', duration: 0.5,
+    }))).toBe('2 · 特写 · 安警官是自己人 · 0.5″');
   });
 });

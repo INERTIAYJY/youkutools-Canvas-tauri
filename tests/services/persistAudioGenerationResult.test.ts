@@ -25,6 +25,7 @@ vi.mock('../../src/services/ai/connectedReferenceMedia', () => ({
   getMediaReferenceUrl: vi.fn(),
   getMediaReferenceUrls: () => [],
   mergeMediaReferences: () => [],
+  warnIfTooManyReferences: vi.fn(),
 }));
 vi.mock('../../src/services/ai/promptResolver', () => ({
   collectPromptNodeMediaUrls: () => ({ references: [] }),

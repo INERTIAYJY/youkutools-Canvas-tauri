@@ -12,6 +12,7 @@ import {
   getMediaReferenceUrl,
   getMediaReferenceUrls,
   mergeMediaReferences,
+  warnIfTooManyReferences,
 } from './connectedReferenceMedia';
 import { collectPromptNodeMediaUrls } from './promptResolver';
 import { executeGeneralAsyncTask } from './apimartGen';
@@ -124,6 +125,7 @@ export async function generateAudio(
   const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
   const references = mergeMediaReferences(mentionedMedia.references, connectedMedia.references);
   const referenceAudioUrls = getMediaReferenceUrls(references, 'audio');
+  warnIfTooManyReferences({ audio: referenceAudioUrls.length });
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点
   if (params.workflowId) {

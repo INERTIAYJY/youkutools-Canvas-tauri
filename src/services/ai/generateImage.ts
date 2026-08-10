@@ -21,6 +21,7 @@ import type { AIImageGenParams, BatchImageResult, ImageGenerationResult } from '
 import { MAX_IMAGE_BATCH_COUNT } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { resolvePromptWithImageRefs } from './promptResolver';
+import { warnIfTooManyReferences } from './connectedReferenceMedia';
 import { resolveImageDataUrlArray, resolveImageUrlArray } from './imageUtils';
 import { generateImageStandardBatch } from './providers/standardImage';
 import { generateVolcengineImagesBatch } from './providers/volcengineImage';
@@ -125,6 +126,7 @@ export async function generateImagesBatch(
     allImageUrls.length,
     styleAsFirst,
   );
+  warnIfTooManyReferences({ image: allImageUrls.length });
 
   // Dreamina：CLI 端本地化图片，不走图床上传
   if (provider === 'dreamina') {

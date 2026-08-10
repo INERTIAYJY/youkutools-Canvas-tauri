@@ -23,6 +23,7 @@ import {
   getMediaReferenceUrl,
   getMediaReferenceUrls,
   mergeMediaReferences,
+  warnIfTooManyReferences,
 } from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { pollTask } from '../pollTask';
@@ -169,11 +170,17 @@ async function resolveVideoReferenceInput(
   );
   const imageUrls = getMediaReferenceUrls(references, 'image');
   const videoUrls = getMediaReferenceUrls(references, 'video');
+  const audioUrls = getMediaReferenceUrls(references, 'audio');
+  warnIfTooManyReferences({
+    image: imageUrls.length,
+    video: videoUrls.length,
+    audio: audioUrls.length,
+  });
   return {
     prompt: annotateCharacterReferences(promptInput.prompt, nodeItems, imageUrls),
     imageUrls,
     videoUrls,
-    audioUrls: getMediaReferenceUrls(references, 'audio'),
+    audioUrls,
     operation: resolveVideoGenerationOperation(imageUrls, videoUrls),
     references,
   };

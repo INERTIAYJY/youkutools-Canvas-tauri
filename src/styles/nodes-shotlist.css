@@ -233,6 +233,30 @@
   color: var(--theme-text-muted, rgba(255, 255, 255, 0.4));
 }
 
+/* 空格子本身就是「挑画面」按钮 */
+button.shot-frame {
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.shot-frame:hover {
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.shot-frame-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(251, 191, 36, 0.25);
+  border-top-color: #fbbf24;
+  border-radius: 50%;
+  animation: shot-frame-spin 0.7s linear infinite;
+}
+
+@keyframes shot-frame-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* 源节点已不在画布上：显示的是绑定时的快照 */
 .shot-frame--dangling {
   border-color: rgba(248, 113, 113, 0.5);
@@ -272,7 +296,8 @@
   pointer-events: none;
 }
 
-.shot-frame-unbind {
+.shot-frame-unbind,
+.shot-frame-pick {
   position: absolute;
   top: 2px;
   right: 2px;
@@ -288,8 +313,96 @@
   cursor: pointer;
 }
 
-.shot-frame:hover .shot-frame-unbind {
+.shot-frame-pick {
+  right: auto;
+  left: 2px;
+}
+
+.shot-frame:hover .shot-frame-unbind,
+.shot-frame:hover .shot-frame-pick {
   display: flex;
+}
+
+/* ── 画面挑选浮层（Portal 到 body，固定定位）── */
+.shot-picker {
+  position: fixed;
+  z-index: 9999;
+  width: 236px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  background: var(--theme-surface, #14141c);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.shot-picker-title {
+  margin-bottom: 5px;
+  font-size: 10px;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.shot-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.shot-picker-item {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  background: var(--theme-bg, rgba(0, 0, 0, 0.25));
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shot-picker-item:hover {
+  border-color: #fbbf24;
+}
+
+.shot-picker-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shot-picker-empty {
+  margin-bottom: 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--theme-text-muted, rgba(255, 255, 255, 0.4));
+}
+
+.shot-picker-input {
+  width: 100%;
+  padding: 5px 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.4;
+  border-radius: 6px;
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+  background: transparent;
+  color: var(--theme-text, rgba(255, 255, 255, 0.9));
+  outline: none;
+  resize: none;
+}
+
+.shot-picker-input:focus {
+  border-color: rgba(251, 191, 36, 0.55);
+}
+
+.shot-picker-go {
+  width: 100%;
+  justify-content: center;
 }
 
 /* ── 空表与加行 ── */

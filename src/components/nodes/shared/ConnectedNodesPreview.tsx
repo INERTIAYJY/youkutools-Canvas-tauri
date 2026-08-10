@@ -26,7 +26,7 @@ interface ConnectedNodesPreviewProps {
 }
 
 const OUTPUT_TYPE_ICON: Record<string, string> = {
-  image: '🖼', video: '🎬', audio: '🎵', text: 'T',
+  image: '🖼', video: '🎬', audio: '🎵', text: 'T', shotlist: '▦',
 };
 
 /** 单格 Sprite 信息：用于 hover 弹出的宫格网格渲染 */
@@ -81,12 +81,17 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
       .filter((n) => n.id !== nodeId && n.type !== 'group' && sourceIds.has(n.id))
       .map((n) => {
         const data = n.data as BaseNodeData;
+        // 分镜表没有 output/媒体，落到 text 分支就只剩一个「T」，和文本节点分不开
+        const isShotlist = data.type === 'ai-shotlist';
+        const shotCount = isShotlist ? ((data.shotlistRows as unknown[] | undefined)?.length ?? 0) : 0;
         const isDirector = data.type === 'ai-director' || n.type === 'ai-director';
         const directorThumb = isDirector
           ? ((data.imageUrl as string | undefined)
             || (Array.isArray(data.directorCaptureUrls) ? (data.directorCaptureUrls as string[])[0] : undefined))
           : undefined;
-        const outputType = (data.imageUrl || directorThumb)
+        const outputType = isShotlist
+          ? 'shotlist'
+          : (data.imageUrl || directorThumb)
           ? 'image' : data.videoUrl ? 'video' : data.audioUrl ? 'audio' : 'text';
         const thumbnailUrl = outputType === 'image'
           ? (localAssetUrl(data.filePath as string | undefined) || (data.thumbnailUrl as string) || data.imageUrl || directorThumb || undefined)
@@ -148,7 +153,8 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
           outputType,
           thumbnailUrl,
           textSnippet,
-          hasOutput: !!data.output,
+          shotCount,
+          hasOutput: isShotlist ? shotCount > 0 : !!data.output,
           nodeType: data.type,
           status: data.status,
           sbCells,
@@ -195,12 +201,13 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
           const x = getDockX(idx);
           const isHovered = effectiveHover === idx;
           const isStoryboard = node.nodeType === 'ai-storyboard';
+          const isShotlist = node.nodeType === 'ai-shotlist';
 
           return (
           <motion.button
             key={node.id}
             type="button"
-            className={`connected-node-thumb ${!node.hasOutput ? 'thumb-idle' : ''} thumb-${node.outputType}${isStoryboard ? ' thumb-storyboard' : ''}`}
+            className={`connected-node-thumb ${!node.hasOutput ? 'thumb-idle' : ''} thumb-${node.outputType}${isStoryboard ? ' thumb-storyboard' : ''}${isShotlist ? ' thumb-shotlist' : ''}`}
             data-tooltip={`${node.label}${node.displayId != null ? ` #${node.displayId}` : ''} — 点击引用`}
             onClick={() => handleClick(node.id, node.label)}
             onHoverStart={() => onHoverStart(idx)}
@@ -233,6 +240,11 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
             {/* 宫格分镜角标 */}
             {isStoryboard && node.sbCells && (
               <span className="thumb-sb-badge">{node.sbCells.length}</span>
+            )}
+
+            {/* 分镜表角标：镜头数 */}
+            {isShotlist && node.shotCount > 0 && (
+              <span className="thumb-shot-badge">{node.shotCount}</span>
             )}
 
             {node.status === 'loading' && (
@@ -327,6 +339,11 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
         }
         .connected-node-thumb[data-tooltip]:hover { overflow: visible; }
         .connected-node-thumb.thumb-storyboard { border-color: rgba(244,114,182,0.45); }
+        /* 分镜表：沿用节点自身的琥珀色，和文本节点区分开 */
+        .connected-node-thumb.thumb-shotlist {
+          border-color: rgba(251,191,36,0.5);
+          background: rgba(251,191,36,0.08);
+        }
         .thumb-img {
           width: 100%; height: 100%; object-fit: cover; border-radius: 6px;
         }
@@ -344,6 +361,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
         .thumb-icon-video { color: var(--node-video-light); }
         .thumb-icon-audio { color: var(--node-audio-light); }
         .thumb-icon-text  { color: var(--brand-hover); }
+        .thumb-icon-shotlist { color: #fbbf24; opacity: 0.9; font-size: 16px; }
         .thumb-text {
           font-size: 4px; line-height: 1.2; color: var(--theme-text-secondary);
           padding: 1px; display: -webkit-box;
@@ -367,6 +385,15 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
           min-width: 16px; height: 16px; padding: 0 4px;
           font-size: 10px; font-weight: 600; line-height: 16px;
           color: #fff; background: #db2777; border-radius: 6px 0 6px 0;
+          z-index: 2;
+        }
+
+        /* ── 分镜表角标 ── */
+        .thumb-shot-badge {
+          position: absolute; bottom: -1px; right: -1px;
+          min-width: 16px; height: 16px; padding: 0 4px;
+          font-size: 10px; font-weight: 600; line-height: 16px;
+          color: #1c1300; background: #fbbf24; border-radius: 6px 0 6px 0;
           z-index: 2;
         }
 

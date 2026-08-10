@@ -113,6 +113,59 @@ export interface ShotRow {
   note?: string;
 }
 
+/** 可以放进画面格的节点类型 */
+export const SHOTLIST_FRAME_SOURCE_TYPES = ['ai-image', 'source-image', 'ai-video', 'source-video'];
+
+/** 画面格能读到的最小节点形状（避免 types 层依赖 react-flow） */
+interface FrameSourceNodeLike {
+  id: string;
+  type?: string;
+  data: Record<string, unknown>;
+}
+
+/** 一个可选画面：连到这张表、且已经出图/出片的节点 */
+export interface ShotFrameCandidate {
+  nodeId: string;
+  label: string;
+  kind: 'image' | 'video';
+  url?: string;
+}
+
+/** 节点当前可用作画面的素材；视频优先取封面帧 */
+export function readShotFrameSource(node: FrameSourceNodeLike): { kind: 'image' | 'video'; url?: string } {
+  const isVideo = node.type === 'ai-video' || node.type === 'source-video';
+  const url = (isVideo
+    ? (node.data.thumbnailUrl || node.data.videoUrl)
+    : (node.data.imageUrl || node.data.thumbnailUrl)) as string | undefined;
+  return { kind: isVideo ? 'video' : 'image', url };
+}
+
+/**
+ * 连线进这张表的图像/视频节点，供画面格直接挑选。
+ * 还没出图的节点也列出来（url 为空显示占位），否则用户会以为连线没生效。
+ */
+export function collectShotFrameCandidates(
+  nodes: FrameSourceNodeLike[],
+  edges: { source: string; target: string }[],
+  shotlistId: string,
+): ShotFrameCandidate[] {
+  const sourceIds = new Set(edges.filter((edge) => edge.target === shotlistId).map((edge) => edge.source));
+  return nodes
+    .filter((node) => sourceIds.has(node.id) && SHOTLIST_FRAME_SOURCE_TYPES.includes(node.type ?? ''))
+    .map((node) => ({
+      nodeId: node.id,
+      label: (node.data.label as string) || (node.data.fileName as string) || node.id,
+      ...readShotFrameSource(node),
+    }));
+}
+
+/** 这一行默认拿去生成画面的提示词：景别/运镜当修饰，内容当主体 */
+export function buildShotFramePrompt(row: ShotRow): string {
+  return [row.shotSize?.trim(), row.camera?.trim(), row.content?.trim()]
+    .filter(Boolean)
+    .join('，');
+}
+
 /** 该行是否连一个字都没有 —— 推时间线时整行跳过 */
 export function isShotRowBlank(row: ShotRow): boolean {
   if (row.frame) return false;
@@ -134,6 +187,17 @@ export function buildShotPlaceholderText(row: ShotRow): string {
   const body = row.content?.trim() || row.dialogue?.trim() || '';
   if (head && body) return `${head}\n${body}`;
   return head || body || '未命名镜头';
+}
+
+/**
+ * 单行拼成一句话：`镜号 · 景别 · 运镜 · 内容 / 台词 · N″`。
+ * @ 引用整张表时逐行拼给模型，空字段直接略过，不留下「· ·」这种空档。
+ */
+export function formatShotRowBrief(row: ShotRow): string {
+  const body = [row.content?.trim(), row.dialogue?.trim()].filter(Boolean).join(' / ');
+  const head = [row.shotNo?.trim(), row.shotSize?.trim(), row.camera?.trim(), body].filter(Boolean).join(' · ');
+  const duration = Number(resolveShotDuration(row).toFixed(1));
+  return head ? `${head} · ${duration}″` : `${duration}″`;
 }
 
 /** 转场文案 → 编辑器转场类型；无法识别的写法按硬切处理 */

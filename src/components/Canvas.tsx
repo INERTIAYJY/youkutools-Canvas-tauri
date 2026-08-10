@@ -53,6 +53,7 @@ import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
 import { useCanvasDrawing } from '../hooks/useCanvasDrawing';
 import type { BaseNodeData } from '../types';
+import { SHOTLIST_FRAME_SOURCE_TYPES } from '../types';
 import type { Node as RFNode, NodeProps, NodeTypes, Connection, Edge, OnMove } from '@xyflow/react';
 import { useNodeSnap, ResizeSnapContext, type SnapLine } from '../hooks/useNodeSnap';
 import { setCanvasPointerPosition } from '../services/canvasPointerService';
@@ -191,9 +192,6 @@ const minimapNodeColor = (node: RFNode) => {
     default: return '#6b728080';
   }
 };
-
-/** 可以拖进分镜表画面格的节点类型 */
-const SHOTLIST_FRAME_SOURCE_TYPES = ['ai-image', 'source-image', 'ai-video', 'source-video'];
 
 // ── Snap lines overlay ──
 type SpacingSnapLine = Extract<SnapLine, { kind: 'spacing' }>;

@@ -13,7 +13,8 @@ import {
   resolveDramaAssetImageRef,
 } from '../dramaAssetPrompt';
 import type { DramaAsset } from '../../types/dramaAssets';
-import type { BaseNodeData, ImageAnnotationLayer, StoryboardCellOverride } from '../../types';
+import { formatShotRowBrief, isShotRowBlank, readShotFrameSource } from '../../types';
+import type { BaseNodeData, ImageAnnotationLayer, ShotRow, StoryboardCellOverride } from '../../types';
 import type { MediaReference } from '../../types/aiTypes';
 import { mergeMediaReferences, toLegacyReferenceMedia } from './connectedReferenceMedia';
 
@@ -105,6 +106,43 @@ async function resolveStoryboardCellImage(
     console.error('[promptResolver] 分镜格裁切失败:', err);
     return imageUrl; // fallback to whole image
   }
+}
+
+/**
+ * 分镜表引用：整表逐行拼成文字，每行绑定的画面顺带当参考图带上。
+ *
+ * 画面读的是画布上那个源节点的实时素材，源节点没了才用绑定时的快照兜底；
+ * 视频画面取封面帧——参考图位置塞不进一整段视频。
+ * addImage 由调用方给，负责去重和分配「图片N」的序号，行尾写上对应序号，
+ * 模型才能把哪张图配哪一镜对上。
+ */
+export function resolveShotlistMention(
+  shotlistData: BaseNodeData,
+  nodes: Array<{ id: string; type?: string; data: BaseNodeData }>,
+  addImage: (key: string, entry: PromptImageEntry) => number,
+): string {
+  const rows = (shotlistData.shotlistRows as ShotRow[] | undefined) ?? [];
+  const lines: string[] = [];
+  for (const row of rows) {
+    if (isShotRowBlank(row)) continue;
+    let line = formatShotRowBrief(row);
+    const frame = row.frame;
+    if (frame) {
+      const source = nodes.find((node) => node.id === frame.nodeId);
+      const url = (source ? readShotFrameSource(source).url : undefined) ?? frame.url;
+      if (url?.trim()) {
+        const idx = addImage(`node:${frame.nodeId}`, {
+          url,
+          filePath: (source?.data.filePath as string | undefined) ?? frame.filePath,
+          sourceNodeId: frame.nodeId,
+          sourceUrl: source?.data.sourceUrl as string | undefined,
+        });
+        line += `（图片${idx}）`;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.join('\n');
 }
 
 /** 解析 prompt 中的 @{nodeId:label} 引用，返回适合 /chat/completions 的 content 字段
@@ -230,6 +268,19 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
       parts.push(match[0]);
     } else {
       const nodeType = (node.data.type as string) || '';
+      if (nodeType === 'ai-shotlist') {
+        parts.push(resolveShotlistMention(node.data as BaseNodeData, nodes, (key, entry) => {
+          let idx = imageKeyToIndex.get(key);
+          if (idx === undefined) {
+            idx = imageEntries.length + 1;
+            imageKeyToIndex.set(key, idx);
+            imageEntries.push(entry);
+          }
+          return idx;
+        }));
+        lastIndex = chipRegex.lastIndex;
+        continue;
+      }
       if (
         nodeType === 'ai-image'
         || nodeType === 'source-image'
@@ -436,6 +487,17 @@ async function resolvePromptReferences(
   const videoKeyToIndex = new Map<string, number>();
   const audioKeyToIndex = new Map<string, number>();
 
+  /** 登记一张参考图并返回它的「图片N」序号；同一张图重复引用只占一个位置 */
+  const addImage = (key: string, entry: PromptImageEntry): number => {
+    let idx = imageKeyToIndex.get(key);
+    if (idx === undefined) {
+      idx = imageEntries.length + 1;
+      imageKeyToIndex.set(key, idx);
+      imageEntries.push(entry);
+    }
+    return idx;
+  };
+
   const prompt = rawPrompt.replace(
     chipRegex,
     (
@@ -523,6 +585,10 @@ async function resolvePromptReferences(
     if (!node) return '';
 
     const nodeType = (node.data.type as string) || '';
+
+    if (nodeType === 'ai-shotlist') {
+      return resolveShotlistMention(node.data as BaseNodeData, nodes, addImage);
+    }
 
     if (
       nodeType === 'ai-image'

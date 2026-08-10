@@ -7,11 +7,16 @@
  *
  * 画面格持有的是引用而非所有权：渲染与推送都读画布上那个节点的实时数据，
  * 源节点重新生成后画面自动跟着变；节点不在了才回落到绑定时的快照。
+ *
+ * 画面有三种来源：把素材节点拖进格子、从连线进来的节点里挑、直接叫 AI 生成
+ * （生成出的图仍然是画布上一个正常的图像节点，表里只存引用）。
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
-import type { BaseNodeData, ShotlistColumnKey, ShotRow } from '../../types';
+import type { Node } from '@xyflow/react';
+import type { BaseNodeData, ShotFrameCandidate, ShotlistColumnKey, ShotRow } from '../../types';
 import {
   SHOT_CAMERA_OPTIONS,
   SHOT_SIZE_OPTIONS,
@@ -21,15 +26,20 @@ import {
   SHOTLIST_DEFAULT_COLUMNS,
   SHOTLIST_OPTIONAL_COLUMNS,
   SHOTLIST_PINNED_COLUMNS,
+  buildShotFramePrompt,
+  collectShotFrameCandidates,
   computeShotlistDuration,
   createShotRow,
+  readShotFrameSource,
 } from '../../types';
 import NodeLabel from './shared/NodeLabel';
 import GooeyBtn from './shared/GooeyBtn';
 import ResizeHandle from './shared/ResizeHandle';
 import NodeError from './shared/NodeError';
 import { useNodeRename } from './shared/useNodeRename';
+import { resolveEffectiveModel } from './shared/toolbar/presetAction';
 import { useAppStore, generateId } from '../../store/useAppStore';
+import { executeGeneration } from '../../services/generationService';
 import { hasShotlistTimeline, openVideoEditorForShotlist } from '../../services/videoEditorService';
 
 /** 画面格实时解析出的素材 */
@@ -87,11 +97,8 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
       if (!frame) return [];
       const source = s.nodes.find((candidate) => candidate.id === frame.nodeId);
       if (!source) return [[row.id, { url: frame.url, kind: frame.kind, dangling: true }]];
-      const isVideo = source.type === 'ai-video' || source.type === 'source-video';
-      const url = (isVideo
-        ? (source.data.thumbnailUrl || source.data.videoUrl)
-        : (source.data.imageUrl || source.data.thumbnailUrl)) as string | undefined;
-      return [[row.id, { url: url ?? frame.url, kind: isVideo ? 'video' : 'image', dangling: false }]];
+      const resolved = readShotFrameSource(source);
+      return [[row.id, { url: resolved.url ?? frame.url, kind: resolved.kind, dangling: false }]];
     }),
   ));
 
@@ -102,9 +109,22 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
 
   const totalDuration = useMemo(() => computeShotlistDuration(rows), [rows]);
 
+  const { displayLabel, handleRename } = useNodeRename(id, data, '分镜表');
+
   const [columnMenuRequested, setColumnMenuRequested] = useState(false);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
   const columnMenuRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 画面挑选浮层。候选在打开那一刻从 store 快照取，不做订阅——
+   * 否则这张表要跟着画布上任何节点的拖动一起重渲染。
+   */
+  const [picker, setPicker] = useState<
+    { rowId: string; left: number; top: number; candidates: ShotFrameCandidate[] } | null
+  >(null);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [busyRows, setBusyRows] = useState<string[]>([]);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   const writeRows = useCallback(
     (next: ShotRow[]) => updateNodeDataTransient(id, { shotlistRows: next } as Partial<BaseNodeData>),
@@ -185,6 +205,80 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     [getNode, setCenter, setSelectedNodeIds],
   );
 
+  const openPicker = useCallback((rowId: string, anchor: HTMLElement) => {
+    const { nodes, edges } = useAppStore.getState();
+    const rect = anchor.getBoundingClientRect();
+    const row = rows.find((item) => item.id === rowId);
+    setAiPrompt(row ? buildShotFramePrompt(row) : '');
+    setPicker({
+      rowId,
+      // 浮层固定宽 236，靠右/靠下时往回收，避免顶出视口
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 244)),
+      top: Math.min(rect.bottom + 6, window.innerHeight - 260),
+      candidates: collectShotFrameCandidates(nodes, edges, id),
+    });
+  }, [id, rows]);
+
+  const chooseCandidate = useCallback((rowId: string, nodeId: string) => {
+    useAppStore.getState().bindShotlistFrame(id, rowId, nodeId);
+    setPicker(null);
+  }, [id]);
+
+  /**
+   * 叫 AI 补这一格：在画布上新建一个图像节点并连回本表，生成成功后再绑定。
+   * 画面始终是画布上的真节点，用户可以照常改提示词重跑，表里跟着变。
+   */
+  const generateFrame = useCallback(async (rowId: string) => {
+    const store = useAppStore.getState();
+    const row = rows.find((item) => item.id === rowId);
+    const prompt = (aiPrompt.trim() || (row ? buildShotFramePrompt(row) : '')).trim();
+    if (!prompt) {
+      store.showToast('先填「内容」栏或写一句提示词', 'error');
+      return;
+    }
+    const self = store.nodes.find((node) => node.id === id);
+    if (!self) return;
+
+    setPicker(null);
+    const newNodeId = `node-${generateId()}`;
+    const rowIndex = Math.max(0, rows.findIndex((item) => item.id === rowId));
+    const model = resolveEffectiveModel('ai-image');
+    const node: Node<BaseNodeData> = {
+      id: newNodeId,
+      type: 'ai-image',
+      parentId: self.parentId,
+      // 画面是表的输入，放在表左侧，按行错开避免叠成一摞
+      position: { x: self.position.x - 320, y: self.position.y + rowIndex * 180 },
+      data: {
+        type: 'ai-image',
+        label: `${displayLabel} 镜${row?.shotNo ?? rowIndex + 1}`,
+        role: 'generator',
+        status: 'idle',
+        prompt,
+        imageSize: '2K',
+        aspectRatio: '16:9',
+        nodeWidth: 280,
+        nodeHeight: 158,
+        ...(model ? { model: model.model, provider: model.provider } : {}),
+      },
+    };
+    store.addNodeWithEdge(node, {
+      id: generateId(),
+      source: newNodeId,
+      target: id,
+      sourceHandle: 'right',
+      targetHandle: 'left',
+    });
+
+    setBusyRows((prev) => [...prev, rowId]);
+    try {
+      const result = await executeGeneration(newNodeId, prompt, undefined, node.data);
+      if (result.success) useAppStore.getState().bindShotlistFrame(id, rowId, newNodeId);
+    } finally {
+      setBusyRows((prev) => prev.filter((item) => item !== rowId));
+    }
+  }, [aiPrompt, displayLabel, id, rows]);
+
   const pushToTimeline = useCallback(async () => {
     const store = useAppStore.getState();
     const projectId = store.currentProjectId ?? '';
@@ -226,17 +320,35 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [columnMenuOpen]);
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, '分镜表');
+  // 点击外部关闭画面挑选浮层
+  useEffect(() => {
+    if (!picker) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Element)) setPicker(null);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [picker]);
 
   const renderCell = (row: ShotRow, column: ShotlistColumnKey) => {
     if (column === 'frame') {
       const frame = resolvedFrames.get(row.id);
+      const busy = busyRows.includes(row.id);
       if (!row.frame) {
         return (
-          <div className="shot-frame shot-frame--empty" data-shot-frame-row={row.id}>
-            <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
-            <span className="shot-frame-hint">拖入画面</span>
-          </div>
+          <button
+            type="button"
+            className="shot-frame shot-frame--empty nodrag"
+            data-shot-frame-row={row.id}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => openPicker(row.id, e.currentTarget)}
+            title="挑选连线进来的画面，或让 AI 生成"
+          >
+            {busy
+              ? <span className="shot-frame-spinner" aria-hidden="true" />
+              : <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />}
+            <span className="shot-frame-hint">{busy ? '生成中' : '选择画面'}</span>
+          </button>
         );
       }
       return (
@@ -244,6 +356,16 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
           className={`shot-frame${frame?.dangling ? ' shot-frame--dangling' : ''}`}
           data-shot-frame-row={row.id}
         >
+          <button
+            type="button"
+            className="shot-frame-pick nodrag"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => openPicker(row.id, e.currentTarget)}
+            title="换一个画面"
+            aria-label="换一个画面"
+          >
+            <Icon icon="mdi:image-sync-outline" width={11} height={11} />
+          </button>
           {frame?.url ? (
             <img
               className="shot-frame-img"
@@ -461,6 +583,57 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
           <GooeyBtn className="gooey-btn-right" hue={40} />
         </Handle>
       </div>
+
+      {/* 画面挑选浮层 —— 表体是滚动容器，只能 Portal 出去才不被裁掉 */}
+      {picker && createPortal(
+        <div
+          ref={pickerRef}
+          className="shot-picker nodrag nowheel"
+          style={{ left: picker.left, top: picker.top }}
+        >
+          <div className="shot-picker-title">连线进来的画面</div>
+          {picker.candidates.length > 0 ? (
+            <div className="shot-picker-grid">
+              {picker.candidates.map((candidate) => (
+                <button
+                  key={candidate.nodeId}
+                  type="button"
+                  className="shot-picker-item"
+                  title={candidate.label}
+                  onClick={() => chooseCandidate(picker.rowId, candidate.nodeId)}
+                >
+                  {candidate.url
+                    ? <img src={candidate.url} alt="" className="shot-picker-img" />
+                    : <span className="shot-frame-hint">未出图</span>}
+                  {candidate.kind === 'video' && (
+                    <Icon className="shot-frame-badge" icon="mdi:play-circle" width={12} height={12} />
+                  )}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="shot-picker-empty">把图像/视频节点连到这张表，这里就能直接挑</div>
+          )}
+
+          <div className="shot-picker-title">AI 生成画面</div>
+          <textarea
+            className="shot-picker-input"
+            rows={3}
+            value={aiPrompt}
+            placeholder="默认用「内容」栏，可在这里改写"
+            onChange={(e) => setAiPrompt(e.target.value)}
+          />
+          <button
+            type="button"
+            className="shotlist-btn shotlist-btn--primary shot-picker-go"
+            onClick={() => void generateFrame(picker.rowId)}
+          >
+            <Icon icon="mdi:auto-fix" width={13} height={13} />
+            生成并绑定
+          </button>
+        </div>,
+        document.body,
+      )}
 
       <ResizeHandle
         nodeId={id}

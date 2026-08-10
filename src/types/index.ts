@@ -28,14 +28,18 @@ export type {
 } from './canvasNote';
 export { createCanvasNoteData, DEFAULT_CANVAS_NOTE_STYLE, isCanvasNoteKind } from './canvasNote';
 
-export type { ShotFrameBinding, ShotlistColumnKey, ShotRow } from './shotlist';
+export type { ShotFrameBinding, ShotFrameCandidate, ShotlistColumnKey, ShotRow } from './shotlist';
 export {
+  buildShotFramePrompt,
   buildShotPlaceholderText,
+  collectShotFrameCandidates,
+  formatShotRowBrief,
   computeShotlistDuration,
   createShotRow,
   DEFAULT_SHOT_DURATION,
   isShotRowBlank,
   isShotRowTextOnly,
+  readShotFrameSource,
   resolveShotDuration,
   resolveShotTransitionKind,
   SHOT_CAMERA_OPTIONS,
@@ -44,6 +48,7 @@ export {
   SHOTLIST_COLUMN_LABELS,
   SHOTLIST_COLUMN_ORDER,
   SHOTLIST_DEFAULT_COLUMNS,
+  SHOTLIST_FRAME_SOURCE_TYPES,
   SHOTLIST_OPTIONAL_COLUMNS,
   SHOTLIST_PINNED_COLUMNS,
   SHOTLIST_TRANSITION_DURATION,

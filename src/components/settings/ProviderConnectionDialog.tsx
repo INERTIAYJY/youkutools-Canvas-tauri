@@ -48,14 +48,25 @@ const PROVIDER_LINKS: Record<string, string> = {
   exa: 'https://dashboard.exa.ai/api-keys',
 };
 
-const PROVIDER_ASSISTANT_PROMPT = [
-  '请根据厂商 API 文档帮我添加自定义接口模型配置。',
-  '',
-  '请提取并核对模型 ID、显示名称、模型类型、实际 API Base URL、请求格式、响应格式，以及异步接口的轮询方式。先生成不含 API Key 的配置草稿供我确认，确认前不要写入设置。',
-  '',
-  '文档链接或文档文本：',
-  '【请在这里粘贴公开 HTTPS 文档链接，或直接粘贴接口文档文本】',
-].join('\n');
+function buildRelayAssistantPrompt(connectionName: string, baseUrl: string): string {
+  return [
+    '请把这个「中转站 / 聚合 API」里能识别到的全部模型都添加为自定义接口配置。',
+    '',
+    `目标连接名称：${connectionName || '（未填，可自定义）'}`,
+    baseUrl
+      ? `接口地址（Base URL）：${baseUrl} —— 所有模型都用这个真实接口地址，不要拿文档站域名当 Base URL。`
+      : '接口地址（Base URL）：未填，请从文档 / 中转站地址里确定真实的 API 接口地址（不是文档站域名）。',
+    '',
+    '请这样操作：',
+    '1. 用 provider_docs_read 逐页详细阅读该中转站的文档、模型清单 / 定价页与 API 参考，沿同站链接尽量把所有模型找全。',
+    '2. 逐个核对模型 ID、显示名称、类型（文本 / 图片 / 视频 / 音频）、请求与响应示例，以及异步接口的轮询方式。',
+    '3. 用 provider_config_preview 生成草稿并用 provider_config_apply 保存；尽量涵盖识别到的全部模型（同一 Base URL，单次最多 16 个，超出就分多次保存）。',
+    '4. 不要写入 API Key，把其余内容都填好即可；保存后我会自己补填 API Key。',
+    '',
+    '中转站文档 / 模型列表链接：',
+    '【请在这里粘贴该中转站的文档或模型列表页面 HTTPS 链接】',
+  ].join('\n');
+}
 
 type CatalogStatus = 'idle' | 'loading' | 'ready' | 'warning' | 'error';
 
@@ -293,7 +304,7 @@ export default function ProviderConnectionDialog({
   const handleAssistantAdd = async () => {
     const store = useAppStore.getState();
     if (store.chatPanelDetached) await emitCloseChatWindow();
-    store.openChatWithDraft(PROVIDER_ASSISTANT_PROMPT);
+    store.openChatWithDraft(buildRelayAssistantPrompt(connectionName.trim(), baseUrl.trim()));
   };
 
   const handleTestWebSearchConnection = async () => {
@@ -721,7 +732,7 @@ export default function ProviderConnectionDialog({
                         onClick={() => void handleAssistantAdd()}
                       >
                         <Icon icon="mdi:message-processing-outline" width="14" />
-                        调用助手添加
+                        助手添加全部模型
                       </AnimatedButton>
                       <AnimatedButton
                         type="button"

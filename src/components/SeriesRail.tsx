@@ -195,6 +195,7 @@ export default function SeriesRail() {
         <button
           type="button"
           aria-label="展开剧集栏（双击打开项目资产）"
+          data-tooltip="单击：展开剧集栏｜双击：打开项目资产"
           onClick={() => {
             // 清除之前的定时器（如果有）
             if (singleClickTimer.current) clearTimeout(singleClickTimer.current);

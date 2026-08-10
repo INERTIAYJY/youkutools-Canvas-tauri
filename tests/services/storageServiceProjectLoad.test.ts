@@ -195,6 +195,51 @@ describe('project loading tolerates asset recovery failures', () => {
     expect(persistedClip).not.toHaveProperty('filePath');
   });
 
+  it('skips the directory scan and re-identification while every asset stays in place', async () => {
+    const projectId = `project-fast-${Date.now()}`;
+    await saveProjectToDb({
+      id: projectId,
+      name: 'Unchanged project',
+      createdAt: 1,
+      updatedAt: 2,
+      nodes: [{
+        id: 'image-node',
+        type: 'ai-image',
+        position: { x: 0, y: 0 },
+        data: { type: 'ai-image', assetId: 'asset-saved', relativePath: 'saved.png', imageUrl: 'asset://stale' },
+      }],
+      edges: [],
+    });
+
+    const loaded = await loadProjectData(projectId);
+
+    expect(mocks.walkDirectoryFiles).not.toHaveBeenCalled();
+    expect(mocks.identifyAsset).not.toHaveBeenCalled();
+    expect((loaded?.nodes as Array<{ data: { filePath?: string } }>)[0].data.filePath)
+      .toBe('/project/data/saved.png');
+  });
+
+  it('reuses the recorded asset identity when saving an unmoved file', async () => {
+    const projectId = `project-fast-save-${Date.now()}`;
+
+    await saveProject({
+      id: projectId,
+      name: 'Unmoved save',
+      createdAt: 1,
+      updatedAt: 2,
+      nodes: [{
+        id: 'image-node',
+        data: { assetId: 'asset-saved', relativePath: 'saved.png', filePath: '/project/data/saved.png' },
+      }],
+      edges: [],
+    });
+
+    const record = await getProjectById(projectId) as { nodes: Array<{ data: Record<string, unknown> }> };
+
+    expect(mocks.identifyAsset).not.toHaveBeenCalled();
+    expect(record.nodes[0].data).toEqual({ assetId: 'asset-saved', relativePath: 'saved.png' });
+  });
+
   it('persists the last successfully opened project in metadata', async () => {
     const projectId = `project-active-${Date.now()}`;
 

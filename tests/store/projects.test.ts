@@ -228,7 +228,7 @@ describe('project switching', () => {
       loadProjectMemoriesForProject,
     });
 
-    await useAppStore.getState().switchProject('project-new');
+    await useAppStore.getState().switchProject('project-new', { captureSnapshot: true });
 
     expect(snapshotMocks.captureCurrentCanvasSnapshot).toHaveBeenCalledTimes(1);
     expect(saveCurrentProject).toHaveBeenCalledTimes(1);
@@ -330,8 +330,8 @@ describe('project switching', () => {
       groups: [],
     });
 
-    await useAppStore.getState().switchProject('project-3');
-    await useAppStore.getState().switchProject('project-2');
+    await useAppStore.getState().switchProject('project-3', { captureSnapshot: true });
+    await useAppStore.getState().switchProject('project-2', { captureSnapshot: true });
 
     expect(useAppStore.getState().projects).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -427,7 +427,7 @@ describe('project switching', () => {
       groups: [],
     });
 
-    await useAppStore.getState().switchProject('project-3');
+    await useAppStore.getState().switchProject('project-3', { captureSnapshot: true });
 
     expect(useAppStore.getState().currentProjectId).toBe('project-3');
     expect(useAppStore.getState().projects.find((item) => item.id === 'project-2')?.snapshot).toBeUndefined();
@@ -515,6 +515,43 @@ describe('project switching', () => {
 
     expect(useAppStore.getState().currentProjectId).toBe('project-c');
     expect(useAppStore.getState().nodes.map((node) => node.id)).toEqual(['node-c']);
+  });
+
+  it('flags the switching project while loading and clears it once the latest switch settles', async () => {
+    const pendingLoads = new Map<string, (value: unknown) => void>();
+    fileMocks.loadProjectData.mockImplementation((projectId: string) => new Promise((resolve) => {
+      pendingLoads.set(projectId, resolve);
+    }));
+    const canvas = (id: string) => ({ id, name: id, createdAt: 1, updatedAt: 1, nodes: [], edges: [], groups: [] });
+    useAppStore.setState({
+      projects: [
+        { id: 'project-a', name: 'Project A', createdAt: 1, updatedAt: 1 },
+        { id: 'project-b', name: 'Project B', createdAt: 2, updatedAt: 2 },
+        { id: 'project-c', name: 'Project C', createdAt: 3, updatedAt: 3 },
+      ],
+      currentProjectId: 'project-a',
+      projectName: 'Project A',
+      saveCurrentProject: vi.fn(async () => 'project-a'),
+    });
+
+    const switchToB = useAppStore.getState().switchProject('project-b');
+    await vi.waitFor(() => expect(pendingLoads.has('project-b')).toBe(true));
+    expect(useAppStore.getState().switchingProjectName).toBe('Project B');
+    // 项目库以外的切换不重拍缩略图
+    expect(snapshotMocks.captureCurrentCanvasSnapshot).not.toHaveBeenCalled();
+
+    const switchToC = useAppStore.getState().switchProject('project-c');
+    await vi.waitFor(() => expect(pendingLoads.has('project-c')).toBe(true));
+    expect(useAppStore.getState().switchingProjectName).toBe('Project C');
+
+    pendingLoads.get('project-c')?.(canvas('project-c'));
+    await switchToC;
+    expect(useAppStore.getState().switchingProjectName).toBeNull();
+
+    // 被接管的那次切换收尾时不能再动遮罩
+    pendingLoads.get('project-b')?.(canvas('project-b'));
+    await switchToB;
+    expect(useAppStore.getState().switchingProjectName).toBeNull();
   });
 
   it('keeps the current project ready when the latest concurrent switch fails', async () => {

@@ -18,6 +18,13 @@ export default function Header() {
       isCreatingProject: s.isCreatingProject,
     })),
   );
+  // 当前画布是一集时，名字前面挂上剧集名：「项目 4-第 1 集」。可编辑的仍然只有集名。
+  const seriesName = useAppStore((s) => {
+    const current = s.projects.find((project) => project.id === s.currentProjectId);
+    return current?.parentId
+      ? s.projects.find((project) => project.id === current.parentId)?.name ?? ''
+      : '';
+  });
   const macTauriPlacement = isTauri && isMacOS;
 
   return (
@@ -72,6 +79,14 @@ export default function Header() {
       <div className="w-px h-4 bg-[var(--separator-color)] mx-0.5" />
 
       {/* Project Name */}
+      {seriesName && (
+        <>
+          <span className="max-w-[110px] truncate pl-2 text-[11px] text-canvas-text-secondary/70">
+            {seriesName}
+          </span>
+          <span className="text-[11px] text-canvas-text-muted">-</span>
+        </>
+      )}
       <div
         contentEditable
         suppressContentEditableWarning
@@ -86,9 +101,9 @@ export default function Header() {
             (e.target as HTMLElement).blur();
           }
         }}
-        className="text-[11px] text-canvas-text-secondary/80 px-2 py-0.5 rounded-md
+        className={`text-[11px] text-canvas-text-secondary/80 ${seriesName ? 'pl-1 pr-2' : 'px-2'} py-0.5 rounded-md
                    hover:bg-canvas-hover outline-none cursor-text min-w-[50px] max-w-[140px] truncate
-                   focus:text-canvas-text/90 transition-colors"
+                   focus:text-canvas-text/90 transition-colors`}
       >
         {projectName}
       </div>

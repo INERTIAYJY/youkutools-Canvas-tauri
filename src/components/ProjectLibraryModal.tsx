@@ -6,7 +6,7 @@ import { Icon } from '@iconify/react';
 import { motion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
-import { listTopLevelProjects, seriesOwnerId } from '../store/store.utils';
+import { listTopLevelProjects, resolveOpenTargetId, seriesOwnerId } from '../store/store.utils';
 import type { CanvasProject } from '../types';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
@@ -152,7 +152,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   };
 
   const openProject = (projectId: string) => {
-    if (projectId !== activeProjectId) switchProject(projectId);
+    // 只有从项目库切走才重拍缩略图 —— 这里是唯一会看到缩略图的地方
+    if (projectId !== activeProjectId) switchProject(projectId, { captureSnapshot: true });
     closeLibrary();
   };
 
@@ -369,7 +370,11 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                     disabled={isEditingName || isRenaming}
                     className="block w-full border-b border-canvas-border text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
                   >
-                    <ProjectSnapshotPreview snapshot={project.snapshot} />
+                    {/* 剧集自己没有画布，缩略图取点开后会看到的那一集 */}
+                    <ProjectSnapshotPreview
+                      snapshot={project.snapshot
+                        ?? projects.find((item) => item.id === resolveOpenTargetId(projects, project.id))?.snapshot}
+                    />
                   </button>
 
                   {isEditingName ? (

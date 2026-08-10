@@ -12,6 +12,7 @@ import Sidebar from './components/Sidebar';
 import Canvas from './components/Canvas';
 import NodeMenu from './components/NodeMenu';
 import Toast from './components/Toast';
+import ProjectSwitchOverlay from './components/ProjectSwitchOverlay';
 import SplashScreen from './components/SplashScreen';
 import CanvasBackground from './components/backgrounds/CanvasBackground';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -347,6 +348,7 @@ export default function App() {
         <div className="app-canvas-viewport absolute inset-0">
           <CanvasBackground />
           <Canvas />
+          <ProjectSwitchOverlay />
         </div>
         {/* Top drag region */}
         <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-10" />

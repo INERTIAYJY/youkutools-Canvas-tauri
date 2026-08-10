@@ -291,6 +291,8 @@ export interface ProjectSlice {
   projectName: string;
   projectLoadStatus: ProjectLoadStatus;
   isCreatingProject: boolean;
+  /** 正在切换到的画布名；非 null 时显示切换遮罩 */
+  switchingProjectName: string | null;
   _autoSaveFailedNotified?: boolean;
   setProjectName: (name: string) => void;
   renameProject: (id: string, name: string) => Promise<boolean>;
@@ -312,7 +314,8 @@ export interface ProjectSlice {
   exportProject: (id: string) => Promise<boolean>;
   importProject: () => Promise<string | undefined>;
   deleteProject: (id: string) => Promise<void>;
-  switchProject: (id: string) => void;
+  /** captureSnapshot：切走前给当前画布重拍缩略图，只有项目库弹窗需要（拍一张要跑一轮位图合成） */
+  switchProject: (id: string, options?: { captureSnapshot?: boolean }) => void;
   saveCurrentProject: () => Promise<string | undefined>;
   saveCurrentProjectSilent: () => Promise<string | undefined>;
   loadProject: () => Promise<void>;
@@ -494,6 +497,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   projectName: '新项目',
   projectLoadStatus: 'loading',
   isCreatingProject: false,
+  switchingProjectName: null,
 
   setProjectName: (name) => {
     const state = get();
@@ -1121,7 +1125,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     });
   },
 
-  switchProject: async (requestedId) => {
+  switchProject: async (requestedId, options) => {
     if (!get().projects.some((project) => project.id === requestedId)) return;
     // 剧集项目自身没有画布，点它等于打开它的分集。
     // ponytail: 固定开第一集；要「回到上次打开的那集」再往剧集记录里存一个 lastEpisodeId。
@@ -1135,65 +1139,73 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     if (currentProjectId && currentProjectId !== id) {
       cancelProjectCanvasDerivations(currentProjectId);
     }
-    if (get().projectLoadStatus === 'ready') {
-      const snapshotRecord = createCurrentProjectSaveRecord(get());
-      void get().captureCurrentProjectSnapshot({
-        allowProjectChange: true,
-        persistRecord: snapshotRecord,
-      });
-      await get().saveCurrentProject();
-    }
-    if (!isLatestSwitch()) return;
-    // Clean up undo-trash dirs from the old project before switching
-    await fileService.flushUndoTrashDirs();
-    if (!isLatestSwitch()) return;
-
-    const project = get().projects.find((p) => p.id === id);
-    if (!project) return;
-
-    fileService.ensureProjectDataDir(id).catch((e) => console.warn('[切换项目] 数据目录初始化失败:', e));
-
-    const data = await fileService.loadProjectData(id);
-    if (!isLatestSwitch()) return;
-    const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
-    if (!isLatestSwitch()) return;
-    if (!hasProjectCanvasData(data)) {
-      get().showToast('项目加载失败，已保留当前画布并阻止覆盖保存', 'error');
-      return;
-    }
-
-    // 角色库归剧集项目所有；同一部剧内换集时内存里的那份就是对的，不用再读盘。
-    const ownerId = project.parentId ?? id;
-    let dramaAssets = get().dramaAssets;
-    if (ownerId !== previousOwnerId) {
-      const ownerData = ownerId === id ? data : await fileService.loadProjectData(ownerId);
+    // 遮罩由 switchingProjectName 驱动；后来的切换会接管它，所以只有最新一次负责收尾。
+    set({ switchingProjectName: get().projects.find((p) => p.id === id)?.name ?? '' });
+    try {
+      if (get().projectLoadStatus === 'ready') {
+        if (options?.captureSnapshot) {
+          const snapshotRecord = createCurrentProjectSaveRecord(get());
+          void get().captureCurrentProjectSnapshot({
+            allowProjectChange: true,
+            persistRecord: snapshotRecord,
+          });
+        }
+        await get().saveCurrentProject();
+      }
       if (!isLatestSwitch()) return;
-      dramaAssets = ownerData?.dramaAssets ?? emptyDramaAssetLibrary();
+      // Clean up undo-trash dirs from the old project before switching
+      await fileService.flushUndoTrashDirs();
+      if (!isLatestSwitch()) return;
+
+      const project = get().projects.find((p) => p.id === id);
+      if (!project) return;
+
+      fileService.ensureProjectDataDir(id).catch((e) => console.warn('[切换项目] 数据目录初始化失败:', e));
+
+      const data = await fileService.loadProjectData(id);
+      if (!isLatestSwitch()) return;
+      const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
+      if (!isLatestSwitch()) return;
+      if (!hasProjectCanvasData(data)) {
+        get().showToast('项目加载失败，已保留当前画布并阻止覆盖保存', 'error');
+        return;
+      }
+
+      // 角色库归剧集项目所有；同一部剧内换集时内存里的那份就是对的，不用再读盘。
+      const ownerId = project.parentId ?? id;
+      let dramaAssets = get().dramaAssets;
+      if (ownerId !== previousOwnerId) {
+        const ownerData = ownerId === id ? data : await fileService.loadProjectData(ownerId);
+        if (!isLatestSwitch()) return;
+        dramaAssets = ownerData?.dramaAssets ?? emptyDramaAssetLibrary();
+      }
+
+      set({
+        currentProjectId: id,
+        projectName: project.name,
+        projectLoadStatus: 'ready',
+        nodes: data.nodes as Node<BaseNodeData>[],
+        edges: data.edges as Edge[],
+        groups: getProjectGroups(data),
+        history: [],
+        historyIndex: -1,
+        dramaAssets,
+      });
+      rememberActiveProject(id);
+      // 恢复当前项目的待续轮询任务
+      resumePendingTasks(id).catch((e) => console.warn('[切换项目] 恢复待续任务失败:', e));
+      // 加载聊天会话
+      get().loadConversationsForProject(id).catch((e) => console.warn('[切换项目] 加载会话失败:', e));
+      get().repairInterruptedForProject(id).catch((e) => console.warn('[切换项目] 修复中断消息失败:', e));
+      // 项目切换只加载任务，不把应用运行期间的后台任务误判为中断。
+      get().loadAgentTasksForProject(id).catch((e) => console.warn('[切换项目] 加载 Agent 任务失败:', e));
+      // 项目记忆整部剧共用，按剧集项目加载。
+      get().loadProjectMemoriesForProject(ownerId).catch((e) => console.warn('[切换项目] 加载项目记忆失败:', e));
+
+      setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
+    } finally {
+      if (isLatestSwitch()) set({ switchingProjectName: null });
     }
-
-    set({
-      currentProjectId: id,
-      projectName: project.name,
-      projectLoadStatus: 'ready',
-      nodes: data.nodes as Node<BaseNodeData>[],
-      edges: data.edges as Edge[],
-      groups: getProjectGroups(data),
-      history: [],
-      historyIndex: -1,
-      dramaAssets,
-    });
-    rememberActiveProject(id);
-    // 恢复当前项目的待续轮询任务
-    resumePendingTasks(id).catch((e) => console.warn('[切换项目] 恢复待续任务失败:', e));
-    // 加载聊天会话
-    get().loadConversationsForProject(id).catch((e) => console.warn('[切换项目] 加载会话失败:', e));
-    get().repairInterruptedForProject(id).catch((e) => console.warn('[切换项目] 修复中断消息失败:', e));
-    // 项目切换只加载任务，不把应用运行期间的后台任务误判为中断。
-    get().loadAgentTasksForProject(id).catch((e) => console.warn('[切换项目] 加载 Agent 任务失败:', e));
-    // 项目记忆整部剧共用，按剧集项目加载。
-    get().loadProjectMemoriesForProject(ownerId).catch((e) => console.warn('[切换项目] 加载项目记忆失败:', e));
-
-    setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
   },
 
   saveCurrentProject: async () => {

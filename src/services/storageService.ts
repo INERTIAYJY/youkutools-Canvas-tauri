@@ -68,6 +68,15 @@ async function serializeAssetReference<T extends AssetReferenceLike>(
   const normalizedDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
   if (!normalizedPath.toLowerCase().startsWith(`${normalizedDir.toLowerCase()}/`)) return data;
 
+  // ponytail: 文件仍停在记录的相对路径上时直接沿用旧身份，省掉每次自动保存对每个节点的
+  // stat + 索引读写；代价是索引里的 size/mtime 不会被保存刷新（加载扫描和资产库列举会刷）。
+  if (data.assetId && data.relativePath
+    && normalizedPath.slice(normalizedDir.length + 1) === data.relativePath.replace(/\\/g, '/')) {
+    const reused: T = { ...data };
+    delete (reused as AssetReferenceLike).filePath;
+    return reused;
+  }
+
   // 文件可能已被外部删除/移动：identifyAsset 会 stat 失败抛错，
   // 不拦住的话整个项目保存都会失败（下次加载再按 assetId 重新识别）
   const identity = await identifyAsset(normalizedPath, {
@@ -112,12 +121,15 @@ async function restoreAssetReference<T extends AssetReferenceLike>(
   }
   if (!filePath) return data;
 
-  const identity = await identifyAsset(filePath, {
-    assetId: data.assetId,
-    rootPath: projectDir,
-    projectId,
-    source: 'project',
-  }).catch(() => null);
+  // ponytail: 文件就在记录的相对路径上 → 身份没变，跳过 stat 与索引读写（同 serializeAssetReference）
+  const identity = data.assetId && data.relativePath && filePath === joinPath(projectDir, data.relativePath)
+    ? { assetId: data.assetId, relativePath: data.relativePath }
+    : await identifyAsset(filePath, {
+      assetId: data.assetId,
+      rootPath: projectDir,
+      projectId,
+      source: 'project',
+    }).catch(() => null);
   if (!identity) {
     console.warn('[项目加载] 单个资产索引恢复失败，已保留节点', {
       projectId,
@@ -194,13 +206,20 @@ async function refreshProjectAssetIndex(projectId: string, projectDir: string): 
   }
 }
 
+/** 节点记录了资产身份却没解析出磁盘文件 —— 文件多半被外部改名/移动了。 */
+function hasUnresolvedAsset(node: PersistedNodeLike): boolean {
+  const overrides = Array.isArray(node.data?.storyboardOverrides) ? node.data.storyboardOverrides : [];
+  return [node.data as AssetReferenceLike | undefined, ...overrides].some((reference) => (
+    Boolean(reference && !reference.filePath && (reference.assetId || reference.relativePath))
+  ));
+}
+
 async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<unknown> {
   if (!Array.isArray(nodes)) return nodes;
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return nodes;
-  // 先刷新项目目录索引（含分组子文件夹），使外部重命名/移动后的文件能在按 assetId 恢复节点前被重新识别。
-  await refreshProjectAssetIndex(projectId, projectDir);
-  return Promise.all((nodes as PersistedNodeLike[]).map(async (node) => {
+
+  const restoreNode = async (node: PersistedNodeLike) => {
     if (!node.data) return node;
     let data = await restoreAssetReferenceSafely(node.data, projectId, projectDir);
     if (Array.isArray(data.storyboardOverrides)) {
@@ -210,7 +229,14 @@ async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<u
       data = { ...data, storyboardOverrides };
     }
     return { ...node, data };
-  }));
+  };
+
+  const restored = await Promise.all((nodes as PersistedNodeLike[]).map(restoreNode));
+  // ponytail: 节点全都就位就不扫目录了 —— 只有解析失败（外部重命名/移动）才刷新索引再试一轮，
+  // 省掉每次切画布对整个项目目录的两轮 stat + 索引写。
+  if (!restored.some(hasUnresolvedAsset)) return restored;
+  await refreshProjectAssetIndex(projectId, projectDir);
+  return Promise.all((nodes as PersistedNodeLike[]).map(restoreNode));
 }
 
 /** 角色库参考图与角色声音与画布节点共用本地文件，落库时同样只保留 assetId + relativePath */

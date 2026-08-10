@@ -3,7 +3,7 @@
  * 收起只能通过面板右上角的关闭按钮。分集各自是一张画布，点一下就切过去；
  * 原著与剧本挂在剧集项目上，整部剧共用。
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
@@ -11,6 +11,7 @@ import { listEpisodes, seriesOwnerId } from '../store/store.utils';
 import { getProjectDataDir, uploadSourceFileToProject } from '../services/fileService';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
+import ProjectAssetsOverlay from './ProjectAssetsOverlay';
 
 const SPLIT_PROMPT = '先用 series_read 读完当前剧集的剧本（没有剧本就读原著），'
   + '按剧情节奏把它拆成若干集，每集给出标题和一段大纲，'
@@ -121,6 +122,10 @@ export default function SeriesRail() {
   const [busy, setBusy] = useState<string | null>(null);
   // 浮起即勾上 pinned：触条常驻、点 X 才收；未浮起时是隐藏态
   const [pinned, setPinned] = useState(false);
+  // 资产浮层：双击竖线打开，关闭按钮收起
+  const [assetsOpen, setAssetsOpen] = useState(false);
+  // 区分单击 / 双击：单击延迟执行，双击时取消
+  const singleClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 打开编辑器时就把草稿装好，弹窗内部不用再和外部值同步
   const [editor, setEditor] = useState<{ kind: 'script' | 'outline'; draft: string } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -187,19 +192,36 @@ export default function SeriesRail() {
         className="group/series pointer-events-none fixed right-0 top-1/2 z-[150] flex h-[min(70vh,560px)]
                    w-6 -translate-y-1/2 items-center justify-end"
       >
-        <span
-          aria-hidden="true"
-          onMouseEnter={() => setPinned(true)}
-          className={`pointer-events-auto absolute right-2 h-20 w-[3px] cursor-pointer rounded-full
-                     bg-canvas-text-muted transition-opacity duration-150
-                     ${pinned ? 'opacity-0' : 'opacity-40 hover:opacity-70'}`}
+        <button
+          type="button"
+          aria-label="展开剧集栏（双击打开项目资产）"
+          onClick={() => {
+            // 清除之前的定时器（如果有）
+            if (singleClickTimer.current) clearTimeout(singleClickTimer.current);
+            // 延迟 200ms 执行单击逻辑；如果在此期间触发双击，定时器会被清除
+            singleClickTimer.current = setTimeout(() => {
+              singleClickTimer.current = null;
+              setPinned(true);
+            }, 200);
+          }}
+          onDoubleClick={() => {
+            // 双击：取消单击的延迟，直接打开资产浮层
+            if (singleClickTimer.current) {
+              clearTimeout(singleClickTimer.current);
+              singleClickTimer.current = null;
+            }
+            setAssetsOpen(true);
+          }}
+          className={`pointer-events-auto absolute right-2.5 h-20 w-[3px] rounded-full
+                     bg-canvas-text-muted transition-all duration-150
+                     ${pinned ? 'opacity-0 scale-100' : 'opacity-40 hover:opacity-70 hover:scale-[1.2]'}`}
         />
         <aside
           aria-label="剧集"
           aria-hidden={!pinned}
-          className={`glass-bevel glass-bevel--panel absolute right-2 top-1/2 flex max-h-full
+          className={`glass-bevel glass-bevel--panel absolute right-2.5 top-1/2 flex max-h-full
                      w-[min(360px,calc(100vw-32px))] -translate-y-1/2 flex-col overflow-hidden
-                     rounded-lg border border-[var(--glass-ring)] bg-[var(--glass-bg)]
+                     rounded-[14px] border border-[var(--glass-ring)] bg-[var(--glass-bg)]
                      text-canvas-text shadow-2xl shadow-black/40 backdrop-blur-2xl
                      transition-[transform,opacity] duration-200 ease-out will-change-transform
                      motion-reduce:transition-opacity ${
@@ -208,7 +230,7 @@ export default function SeriesRail() {
                          : 'pointer-events-none translate-x-[calc(100%+1.5rem)] opacity-0'
                      }`}
         >
-          <header className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-3 py-2.5">
+          <header className="flex shrink-0 items-center gap-2 border-b border-border-subtle p-2">
             <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-indigo-500/15 text-indigo-400">
               <Icon icon="lucide:clapperboard" className="h-3.5 w-3.5" />
             </span>
@@ -222,7 +244,7 @@ export default function SeriesRail() {
           </header>
 
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
-            <section className="grid gap-2 border-b border-border-subtle px-3 py-3">
+            <section className="grid gap-2 border-b border-border-subtle p-2">
               <div className="flex items-start gap-2">
                 <div className="grid min-w-0 flex-1 gap-1.5">
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
@@ -283,7 +305,7 @@ export default function SeriesRail() {
               </div>
             </section>
 
-            <section className="grid gap-1.5 border-t border-border-subtle px-3 py-3">
+            <section className="grid gap-1.5 border-t border-border-subtle p-2">
               <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
                 <Icon icon="lucide:list-video" className="h-3.5 w-3.5" />
                 分集
@@ -422,7 +444,7 @@ export default function SeriesRail() {
             </section>
 
             {currentEpisode?.parentId ? (
-              <section className="grid gap-2 border-t border-border-subtle px-3 py-3">
+              <section className="grid gap-2 border-t border-border-subtle p-2">
                 <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
                   <Icon icon="lucide:notebook-pen" className="h-3.5 w-3.5" />
                   本集大纲
@@ -469,6 +491,12 @@ export default function SeriesRail() {
             : Promise.resolve(false)
         )}
       />
+      {assetsOpen && (
+        <ProjectAssetsOverlay
+          isOpen={assetsOpen}
+          onClose={() => setAssetsOpen(false)}
+        />
+      )}
     </>
   );
 }

@@ -75,7 +75,6 @@ export default function ChatMessages({
 }: ChatMessagesProps) {
   const reduceMotion = useReducedMotion();
   const messagesRef = useRef<HTMLDivElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const previousMessagesRef = useRef<ChatMessage[]>([]);
   const [isNearBottom, setIsNearBottom] = useState(true);
@@ -124,14 +123,24 @@ export default function ChatMessages({
     if (nextIsNearBottom) setUnreadCount(0);
   }, []);
 
+  const jumpToLatest = useCallback(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    const previousScrollBehavior = container.style.scrollBehavior;
+    container.style.scrollBehavior = 'auto';
+    container.scrollTop = container.scrollHeight;
+    container.style.scrollBehavior = previousScrollBehavior;
+  }, []);
+
   useEffect(() => {
     const previousMessages = previousMessagesRef.current;
     previousMessagesRef.current = messages;
 
     if (isNearBottomRef.current) {
       setUnreadCount(0);
+      jumpToLatest();
       const frameId = requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ block: 'end' });
+        jumpToLatest();
       });
       return () => cancelAnimationFrame(frameId);
     }
@@ -152,7 +161,7 @@ export default function ChatMessages({
         : Math.max(1, count));
     }
     return undefined;
-  }, [messages]);
+  }, [jumpToLatest, messages]);
 
   const scrollToLatest = useCallback(() => {
     const container = messagesRef.current;
@@ -214,7 +223,7 @@ export default function ChatMessages({
 
         {messageRows}
 
-        <div ref={messagesEndRef} />
+        <div />
       </div>
 
       {!isNearBottom && (

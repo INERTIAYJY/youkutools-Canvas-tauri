@@ -32,6 +32,8 @@ import {
   createShotRow,
   readShotFrameSource,
 } from '../../types';
+import MentionEditor from './shared/MentionEditor';
+import { isInsideMentionPortal } from './shared/mentionPortals';
 import NodeLabel from './shared/NodeLabel';
 import GooeyBtn from './shared/GooeyBtn';
 import ResizeHandle from './shared/ResizeHandle';
@@ -212,9 +214,10 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     setAiPrompt(row ? buildShotFramePrompt(row) : '');
     setPicker({
       rowId,
-      // 浮层固定宽 236，靠右/靠下时往回收，避免顶出视口
-      left: Math.max(8, Math.min(rect.left, window.innerWidth - 244)),
-      top: Math.min(rect.bottom + 6, window.innerHeight - 260),
+      // 浮层固定宽 360，靠右/靠下时往回收，避免顶出视口
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)),
+      // @ 候选面板向上弹，底部要给它留出余量
+      top: Math.min(rect.bottom + 6, Math.max(8, window.innerHeight - 380)),
       candidates: collectShotFrameCandidates(nodes, edges, id),
     });
   }, [id, rows]);
@@ -324,7 +327,12 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
   useEffect(() => {
     if (!picker) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Element)) setPicker(null);
+      const target = e.target as Element | null;
+      if (!pickerRef.current || !target) return;
+      if (pickerRef.current.contains(target)) return;
+      // 资源库弹窗 Portal 到 body，按包含关系判定会被当成"点了外面"，刚点开就被关掉
+      if (isInsideMentionPortal(target)) return;
+      setPicker(null);
     };
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
@@ -616,12 +624,19 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
           )}
 
           <div className="shot-picker-title">AI 生成画面</div>
-          <textarea
-            className="shot-picker-input"
-            rows={3}
+          {/*
+            走 MentionEditor 而不是裸 textarea：@ 能引用连进本表的节点、角色和资源库文件。
+            存下来的 @{id:label} 记号由 generateImage 里的 resolvePromptWithImageRefs 解析，
+            所以参考图会真的进到生图请求里，不是只当文字拼进提示词。
+          */}
+          <MentionEditor
             value={aiPrompt}
-            placeholder="默认用「内容」栏，可在这里改写"
-            onChange={(e) => setAiPrompt(e.target.value)}
+            onChange={setAiPrompt}
+            onSubmit={() => void generateFrame(picker.rowId)}
+            canSubmit={!busyRows.includes(picker.rowId)}
+            nodeId={id}
+            className="shot-picker-input"
+            placeholder="默认用「内容」栏，@ 可引用角色、资源库和连线节点"
           />
           <button
             type="button"

@@ -27,6 +27,7 @@ const KIND_META: Record<AgentApprovalKind, { label: string; icon: string }> = {
   media_generation: { label: '生成媒体', icon: 'mdi:image-plus-outline' },
   memory_write: { label: '保存记忆', icon: 'mdi:brain' },
   config_write: { label: 'API 配置', icon: 'mdi:api' },
+  asset_write: { label: '资产库写入', icon: 'mdi:account-box-multiple-outline' },
 };
 
 const MEDIA_KIND_LABELS = {

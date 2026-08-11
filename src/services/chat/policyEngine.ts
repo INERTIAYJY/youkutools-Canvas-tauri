@@ -87,5 +87,11 @@ export function evaluateAgentToolPolicy(
         reason: 'API 厂商配置必须由用户确认后保存',
         approvalKind: 'config_write',
       };
+    case 'asset_write':
+      return {
+        outcome: 'require_approval',
+        reason: '写入资产库与角色库必须由用户确认',
+        approvalKind: 'asset_write',
+      };
   }
 }

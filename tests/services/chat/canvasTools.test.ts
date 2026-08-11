@@ -1,0 +1,204 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Node } from '@xyflow/react';
+import { useAppStore } from '../../../src/store/useAppStore';
+import { registerCanvasAgentTools } from '../../../src/services/chat/tools/canvasTools';
+import {
+  clearAgentToolRegistryForTests,
+  getAgentTool,
+  type AgentToolContext,
+} from '../../../src/services/chat/toolRegistry';
+import type { BaseNodeData } from '../../../src/types';
+
+const executeGeneration = vi.hoisted(() => vi.fn(async () => ({ success: true })));
+vi.mock('../../../src/services/generationService', () => ({ executeGeneration }));
+
+function node(
+  id: string,
+  overrides: Partial<BaseNodeData> = {},
+  position = { x: 100, y: 100 },
+): Node<BaseNodeData> {
+  return {
+    id,
+    type: overrides.type ?? 'ai-image',
+    position,
+    data: {
+      label: id,
+      type: overrides.type ?? 'ai-image',
+      status: 'idle',
+      ...overrides,
+    } as BaseNodeData,
+  };
+}
+
+function context(): AgentToolContext {
+  return {
+    taskId: 'task-1',
+    projectId: 'p1',
+    conversationId: 'c1',
+    mode: 'autonomous',
+    signal: new AbortController().signal,
+  } as AgentToolContext;
+}
+
+beforeEach(() => {
+  clearAgentToolRegistryForTests();
+  executeGeneration.mockClear();
+  useAppStore.setState(useAppStore.getInitialState(), true);
+  useAppStore.setState({
+    currentProjectId: 'p1',
+    nodes: [
+      node('n1', { displayId: 1, prompt: '一只猫', imageUrl: 'asset://localhost/D:/data/cat.png' }),
+      node('n2', { displayId: 2, type: 'source-text', output: '剧本正文' }, { x: 500, y: 220 }),
+    ],
+    edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+  });
+  registerCanvasAgentTools();
+});
+
+describe('canvas agent tools', () => {
+  it('returns structured node detail without leaking local media paths', async () => {
+    const result = await getAgentTool('canvas_query')!.execute(context(), { detail: true });
+    const payload = JSON.parse(result.modelContent);
+
+    expect(result.status).toBe('success');
+    expect(payload.nodes).toHaveLength(2);
+    expect(payload.nodes[0]).toMatchObject({
+      id: 'n1',
+      displayId: 1,
+      position: { x: 100, y: 100 },
+      outputKind: 'image',
+      prompt: { text: '一只猫', truncated: false },
+    });
+    // 媒体节点只报类型，绝对路径和 URL 都不能出现在回传内容里
+    expect(result.modelContent).not.toContain('asset://');
+    expect(result.modelContent).not.toContain('D:/data');
+    expect(payload.nodes[1].outputText).toEqual({ text: '剧本正文', truncated: false });
+    expect(payload.edges).toEqual([{ id: 'e1', source: 'n1', target: 'n2' }]);
+  });
+
+  it('shifts nodes with dx/dy and resizes them in one call', async () => {
+    const result = await getAgentTool('canvas_update_nodes')!.execute(context(), {
+      nodeIds: ['n1', 'n2'],
+      dx: 40,
+      dy: -20,
+      width: 400,
+    });
+
+    expect(result.status).toBe('success');
+    const nodes = useAppStore.getState().nodes;
+    expect(nodes.map((item) => item.position)).toEqual([
+      { x: 140, y: 80 },
+      { x: 540, y: 200 },
+    ]);
+    expect(nodes[0].data.nodeWidth).toBe(400);
+  });
+
+  it('rejects absolute moves that target more than one node', async () => {
+    const result = await getAgentTool('canvas_update_nodes')!.execute(context(), {
+      nodeIds: ['n1', 'n2'],
+      x: 10,
+      y: 10,
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('dx/dy');
+    expect(useAppStore.getState().nodes[0].position).toEqual({ x: 100, y: 100 });
+  });
+
+  it('rewrites text node content but refuses media nodes', async () => {
+    const definition = getAgentTool('canvas_update_nodes')!;
+
+    // n1 是图片节点，output 存的是本地路径，不能被 content 覆盖
+    const guarded = await definition.execute(context(), { nodeIds: ['n1'], content: '新正文' });
+    expect(guarded.status).toBe('error');
+    expect(useAppStore.getState().nodes[0].data.imageUrl).toContain('cat.png');
+
+    const result = await definition.execute(context(), { nodeIds: ['n2'], content: '新正文' });
+    expect(result.status).toBe('success');
+    expect(useAppStore.getState().nodes[1].data.output).toBe('新正文');
+  });
+
+  it('refuses model refs that are not configured', async () => {
+    const result = await getAgentTool('canvas_update_nodes')!.execute(context(), {
+      nodeIds: ['n1'],
+      model: 'made-up/model',
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('未配置');
+    expect(useAppStore.getState().nodes[0].data.model).toBeUndefined();
+  });
+
+  it('refuses connections whose target is a source-only node', async () => {
+    const definition = getAgentTool('canvas_connect_nodes')!;
+
+    // n2 是 source-text，没有输入端；写反方向必须被挡下而不是画一条永远读不到的线
+    const reversed = await definition.execute(context(), { sourceId: 'n1', targetId: 'n2' });
+    expect(reversed.status).toBe('error');
+    expect(reversed.summary).toContain('素材节点');
+    expect(useAppStore.getState().edges).toHaveLength(1);
+
+    const forward = await definition.execute(context(), { sourceId: 'n2', targetId: 'n1' });
+    expect(forward.status).toBe('success');
+    const created = useAppStore.getState().edges.at(-1);
+    expect(created).toMatchObject({
+      source: 'n2',
+      target: 'n1',
+      sourceHandle: 'right',
+      targetHandle: 'left',
+    });
+  });
+
+  it('removes only the edges matching the given endpoints', async () => {
+    useAppStore.setState({
+      edges: [
+        { id: 'e1', source: 'n1', target: 'n2' },
+        { id: 'e2', source: 'n2', target: 'n1' },
+      ],
+    });
+    const definition = getAgentTool('canvas_disconnect_nodes')!;
+
+    // 两端都不给会清空整张图的连线，必须先被拒绝
+    const guarded = await definition.execute(context(), {});
+    expect(guarded.status).toBe('error');
+    expect(useAppStore.getState().edges).toHaveLength(2);
+
+    const result = await definition.execute(context(), { sourceId: 'n1' });
+    expect(result.status).toBe('success');
+    expect(useAppStore.getState().edges.map((edge) => edge.id)).toEqual(['e2']);
+  });
+
+  it('runs matched nodes serially and skips ones already generating', async () => {
+    useAppStore.setState({
+      nodes: [
+        node('n1', { displayId: 1, status: 'loading' }),
+        node('n2', { displayId: 2 }),
+      ],
+    });
+    const definition = getAgentTool('canvas_run_nodes')!;
+
+    expect(definition.effect).toBe('media_generation');
+    const result = await definition.execute(context(), { nodeIds: ['n1', 'n2'] });
+    const payload = JSON.parse(result.modelContent);
+
+    expect(executeGeneration).toHaveBeenCalledTimes(1);
+    expect(executeGeneration).toHaveBeenCalledWith('n2');
+    expect(payload.results).toEqual([
+      { nodeId: 'n1', status: 'skipped', message: '节点正在生成中' },
+      { nodeId: 'n2', status: 'success', message: undefined },
+    ]);
+  });
+
+  it('caps how many nodes one run call may generate', async () => {
+    useAppStore.setState({
+      nodes: Array.from({ length: 6 }, (_, index) => node(`n${index}`, { displayId: index + 1 })),
+    });
+
+    const result = await getAgentTool('canvas_run_nodes')!.execute(context(), {
+      nodeType: 'ai-image',
+    });
+
+    expect(result.status).toBe('error');
+    expect(executeGeneration).not.toHaveBeenCalled();
+  });
+});

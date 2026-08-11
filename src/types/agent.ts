@@ -47,7 +47,8 @@ export type AgentApprovalKind =
   | 'permanent_delete'
   | 'media_generation'
   | 'memory_write'
-  | 'config_write';
+  | 'config_write'
+  | 'asset_write';
 
 export type AgentApprovalStatus =
   | 'pending'

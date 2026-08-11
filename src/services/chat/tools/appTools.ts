@@ -9,7 +9,8 @@ import {
 } from '../../../components/nodes/shared/defaultModels';
 import { registerAgentTool } from '../toolRegistry';
 
-function listConfiguredModels(store: ReturnType<typeof useAppStore.getState>) {
+/** 已配置且当前可见的模型；category 与 getProjectModelKind 的取值一致。 */
+export function listConfiguredModels(store: ReturnType<typeof useAppStore.getState>) {
   const textModels = getConfiguredModelGroups(store.config, 'ai-text')
     .flatMap((group) => group.models.map((model) => ({
       id: model.value,

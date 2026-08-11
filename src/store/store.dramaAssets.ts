@@ -101,6 +101,8 @@ export interface DramaAssetsSlice {
     parsed: DramaExtractParseResult,
     meta?: { sourceNodeId?: string; modelId?: string },
   ) => void;
+  /** 按 id 新增或整体覆盖一个资产；角色建议走 saveCharacterCard 以便归一化参考图。 */
+  upsertDramaAsset: (asset: DramaAsset) => void;
   confirmDramaAsset: (kind: DramaAssetKind, id: string, confirmed?: boolean) => void;
   deleteDramaAsset: (kind: DramaAssetKind, id: string) => void;
   updateDramaAssetFields: (
@@ -376,6 +378,20 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     if (total > 0) {
       get().setDramaAssetsPanelOpen(true);
     }
+  },
+
+  upsertDramaAsset: (asset) => {
+    const lib = get().dramaAssets;
+    set({
+      dramaAssets: mapKindList(lib, asset.kind, (list) => (
+        list.some((item) => item.id === asset.id)
+          ? list.map((item) => item.id === asset.id
+            ? { ...item, ...asset, updatedAt: Date.now() } as DramaAsset
+            : item)
+          : [...list, asset]
+      )),
+    });
+    silentSave(get);
   },
 
   confirmDramaAsset: (kind, id, confirmed = true) => {
@@ -1087,7 +1103,13 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
     state.addNode(newNode);
     // 连线即引用：生成音频时这条线上的声音会作为音色参考
-    state.onConnect({ source: voiceNodeId, target: nodeId, sourceHandle: null, targetHandle: null });
+    // 句柄留空时 React Flow 会挑到两端各自的第一个（左）句柄，画出「左连左」的错线
+    state.onConnect({
+      source: voiceNodeId,
+      target: nodeId,
+      sourceHandle: 'right',
+      targetHandle: 'left',
+    });
     return nodeId;
   },
 });

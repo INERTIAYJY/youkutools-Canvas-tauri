@@ -230,7 +230,7 @@ export function useKeyboardShortcuts() {
       }
 
       // Ctrl+Shift+Z: Redo
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Z' && e.shiftKey) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
         useAppStore.getState().redo();

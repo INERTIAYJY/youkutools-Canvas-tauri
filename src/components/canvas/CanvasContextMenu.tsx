@@ -13,6 +13,21 @@ interface MergedNodeItem {
   shortcut: string;
 }
 
+const IS_MAC_OS = typeof navigator !== 'undefined'
+  && /Macintosh|Mac OS X/.test(navigator.userAgent);
+const MENU_SHORTCUTS = {
+  copy: IS_MAC_OS ? '⌘ C' : 'Ctrl C',
+  paste: IS_MAC_OS ? '⌘ V' : 'Ctrl V',
+  undo: IS_MAC_OS ? '⌘ Z' : 'Ctrl Z',
+  redo: IS_MAC_OS ? '⇧⌘ Z' : 'Ctrl Y',
+  delete: IS_MAC_OS ? '⌫' : 'Del',
+};
+
+function nodeShortcutLabel(item: MergedNodeItem): string {
+  if (item.role === 'source') return `${IS_MAC_OS ? '⌥' : 'Alt'} ${item.shortcut}`;
+  return item.shortcut;
+}
+
 const NODE_ITEMS: MergedNodeItem[] = [
   // ── 生成节点 ──
   { label: '生成文本', type: 'ai-text', role: 'generator', shortcut: '1' },
@@ -23,12 +38,12 @@ const NODE_ITEMS: MergedNodeItem[] = [
   { label: '生成动画', type: 'ai-animation', role: 'generator', shortcut: '6' },
   { label: '3D 导演台', type: 'ai-director', role: 'source', shortcut: '7' },
   // ── 源节点 ──
-  { label: '文本', type: 'ai-text', role: 'source', shortcut: 'Alt 1' },
-  { label: '图像', type: 'ai-image', role: 'source', shortcut: 'Alt 2' },
-  { label: '视频', type: 'ai-video', role: 'source', shortcut: 'Alt 3' },
-  { label: '音频', type: 'ai-audio', role: 'source', shortcut: 'Alt 4' },
-  { label: 'Markdown', type: 'ai-markdown', role: 'source', shortcut: 'Alt 5' },
-  { label: '分镜表', type: 'ai-shotlist', role: 'source', shortcut: 'Alt 6' },
+  { label: '文本', type: 'ai-text', role: 'source', shortcut: '1' },
+  { label: '图像', type: 'ai-image', role: 'source', shortcut: '2' },
+  { label: '视频', type: 'ai-video', role: 'source', shortcut: '3' },
+  { label: '音频', type: 'ai-audio', role: 'source', shortcut: '4' },
+  { label: 'Markdown', type: 'ai-markdown', role: 'source', shortcut: '5' },
+  { label: '分镜表', type: 'ai-shotlist', role: 'source', shortcut: '6' },
 ];
 
 /** 菜单项行高估算（含 padding） */
@@ -164,12 +179,12 @@ function CanvasContextMenu({
         {hasSelection && (
           <div className="menu-row menu-row-split" onClick={onCopyNodes}>
             <span>复制</span>
-            <span className="menu-kbd">Ctrl C</span>
+            <span className="menu-kbd">{MENU_SHORTCUTS.copy}</span>
           </div>
         )}
         <div className="menu-row menu-row-split" onClick={onPaste}>
           <span>粘贴</span>
-          <span className="menu-kbd">Ctrl V</span>
+          <span className="menu-kbd">{MENU_SHORTCUTS.paste}</span>
         </div>
         {hasSelection && (
           <div className="menu-row menu-row-split" onClick={onCopyFiles}>
@@ -178,11 +193,11 @@ function CanvasContextMenu({
         )}
         <div className="menu-row menu-row-split" onClick={onUndo}>
           <span>撤销</span>
-          <span className="menu-kbd">Ctrl Z</span>
+          <span className="menu-kbd">{MENU_SHORTCUTS.undo}</span>
         </div>
         <div className="menu-row menu-row-split" onClick={onRedo}>
           <span>重做</span>
-          <span className="menu-kbd">Ctrl Y</span>
+          <span className="menu-kbd">{MENU_SHORTCUTS.redo}</span>
         </div>
         <div className="menu-sep" />
         <div className="menu-row" onClick={onOpenProjectDir}>
@@ -193,7 +208,7 @@ function CanvasContextMenu({
             <div className="menu-sep" />
             <div className="menu-row menu-row-split menu-row-danger" onClick={onDelete}>
               <span>删除</span>
-              <span className="menu-kbd">Del</span>
+              <span className="menu-kbd">{MENU_SHORTCUTS.delete}</span>
             </div>
           </>
         )}
@@ -217,7 +232,7 @@ function CanvasContextMenu({
                 onClick={() => onAddNode(item.type, item.label, item.role)}
               >
                 <span>{item.label}</span>
-                <span className="menu-kbd">{item.shortcut}</span>
+                <span className="menu-kbd">{nodeShortcutLabel(item)}</span>
               </div>
             </div>
           ))}

@@ -20,7 +20,7 @@ site/app
 .codegraph/
 .codebuddy/skills/*
 .codebuddy/commands/*
-.workbuddy
+.workbuddy/*
 .codegraph/*
 .claude/*
 doc/测试报告.md

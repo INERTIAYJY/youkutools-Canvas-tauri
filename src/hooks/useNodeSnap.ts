@@ -497,6 +497,7 @@ export function useNodeSnap() {
     (_evt: React.MouseEvent | MouseEvent, node: Node<BaseNodeData>) => {
       dragStartPositions.current.set(node.id, { ...node.position });
       const state = useAppStore.getState();
+      state.commitToHistory();
       const selectedIds = new Set(state.selectedNodeIds);
       const draggedNodes = selectedIds.has(node.id)
         ? state.nodes.filter((candidate) => selectedIds.has(candidate.id))
@@ -687,7 +688,6 @@ export function useNodeSnap() {
   const onNodeDragStop = useCallback(() => {
     dragStartPositions.current.clear();
     setSnapLines([]);
-    useAppStore.getState().commitToHistory();
     // 延迟清理：松手时 React Flow 还会发一帧 dragging=false 的 position 变更，
     // 需要它仍能命中吸附缓存，否则节点会弹回未吸附的原始落点。
     queueMicrotask(() => {

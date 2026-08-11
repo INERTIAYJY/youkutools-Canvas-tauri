@@ -9,7 +9,13 @@ import { getNodeTypeConfig } from '../types';
 import type { BaseNodeData, NodeGroup } from '../types';
 
 export interface HistorySnapshotLike {
-  nodes: { id: string; type?: string; position: { x: number; y: number }; data: BaseNodeData }[];
+  nodes: {
+    id: string;
+    type?: string;
+    position: { x: number; y: number };
+    data: BaseNodeData;
+    style?: { width?: string | number; height?: string | number };
+  }[];
   edges: { id: string }[];
   groups: NodeGroup[];
 }
@@ -121,10 +127,12 @@ export function describeCanvasChange(
     const previous = beforeNodes.get(node.id);
     if (!previous) return false;
     return previous.data?.nodeWidth !== node.data?.nodeWidth
-      || previous.data?.nodeHeight !== node.data?.nodeHeight;
+      || previous.data?.nodeHeight !== node.data?.nodeHeight
+      || previous.style?.width !== node.style?.width
+      || previous.style?.height !== node.style?.height;
   });
   if (resized.length > 0) {
-    return { title: `调整 ${countLabel(resized)} 尺寸`, icon: 'mdi:resize' };
+    return { title: '调整节点大小', icon: 'mdi:resize' };
   }
 
   const moved = after.nodes.filter((node) => {
@@ -133,7 +141,7 @@ export function describeCanvasChange(
     return previous.position.x !== node.position.x || previous.position.y !== node.position.y;
   });
   if (moved.length > 0) {
-    return { title: `移动 ${countLabel(moved)}`, icon: 'mdi:cursor-move' };
+    return { title: '移动节点位置', icon: 'mdi:cursor-move' };
   }
 
   return { title: '画布修改', icon: 'mdi:circle-small' };

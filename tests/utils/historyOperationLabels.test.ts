@@ -84,14 +84,24 @@ describe('从快照差异推断操作名', () => {
     const before = snapshot({ nodes: [node('n1', 'ai-image', { x: 0, y: 0 })] });
     const after = snapshot({ nodes: [node('n1', 'ai-image', { x: 40, y: 10 })] });
 
-    expect(describeCanvasChange(before, after).title).toBe('移动 生成图像');
+    expect(describeCanvasChange(before, after).title).toBe('移动节点位置');
   });
 
   it('只有尺寸变化时报告调整尺寸，且不算作内容编辑', () => {
     const before = snapshot({ nodes: [node('n1', 'ai-image', { x: 0, y: 0 }, { nodeWidth: 280 })] });
     const after = snapshot({ nodes: [node('n1', 'ai-image', { x: 0, y: 0 }, { nodeWidth: 360 })] });
 
-    expect(describeCanvasChange(before, after).title).toBe('调整 生成图像 尺寸');
+    expect(describeCanvasChange(before, after).title).toBe('调整节点大小');
+  });
+
+  it('识别 React Flow 样式尺寸变化', () => {
+    const beforeNode = { ...node('group', 'group'), style: { width: 320, height: 200 } };
+    const afterNode = { ...node('group', 'group'), style: { width: 480, height: 300 } };
+
+    expect(describeCanvasChange(
+      snapshot({ nodes: [beforeNode] }),
+      snapshot({ nodes: [afterNode] }),
+    ).title).toBe('调整节点大小');
   });
 
   it('完全相同的快照退回通用描述', () => {

@@ -27,6 +27,10 @@ const STRUCTURAL_NODE_DATA_KEYS = [
   'hiddenByCharacterLibrary',
   'note',
 ] as const satisfies readonly (keyof BaseNodeData)[];
+const LAYOUT_NODE_DATA_KEYS = [
+  'nodeWidth',
+  'nodeHeight',
+] as const satisfies readonly (keyof BaseNodeData)[];
 
 function createSnapshot(
   nodes: Node<BaseNodeData>[],
@@ -88,7 +92,33 @@ function getStructuralNodeData(data: BaseNodeData): Partial<BaseNodeData> {
   return structuralData;
 }
 
-function getStructuralSnapshot(entry: HistoryEntry): unknown {
+function getNodeDataFields(
+  data: BaseNodeData,
+  keys: readonly (keyof BaseNodeData)[],
+): Partial<BaseNodeData> {
+  const fields: Partial<BaseNodeData> = {};
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
+      fields[key] = data[key] as never;
+    }
+  }
+  return fields;
+}
+
+function getNodeStyleDimensions(
+  node: Node<BaseNodeData>,
+): Pick<NonNullable<Node<BaseNodeData>['style']>, 'width' | 'height'> {
+  const dimensions: Pick<NonNullable<Node<BaseNodeData>['style']>, 'width' | 'height'> = {};
+  if (Object.prototype.hasOwnProperty.call(node.style ?? {}, 'width')) {
+    dimensions.width = node.style?.width;
+  }
+  if (Object.prototype.hasOwnProperty.call(node.style ?? {}, 'height')) {
+    dimensions.height = node.style?.height;
+  }
+  return dimensions;
+}
+
+function getStructuralSnapshot(entry: HistoryEntry, includeLayout = true): unknown {
   return {
     nodes: entry.nodes.map((node) => ({
       id: node.id,
@@ -97,9 +127,10 @@ function getStructuralSnapshot(entry: HistoryEntry): unknown {
       extent: node.extent,
       expandParent: node.expandParent,
       data: getStructuralNodeData(node.data),
-      ...(node.type === 'canvas-note' ? {
+      ...(includeLayout || node.type === 'canvas-note' ? {
         position: node.position,
-        style: node.style,
+        layoutData: getNodeDataFields(node.data, LAYOUT_NODE_DATA_KEYS),
+        styleDimensions: getNodeStyleDimensions(node),
       } : {}),
     })),
     edges: entry.edges.map((edge) => ({
@@ -118,9 +149,32 @@ function isSameStructure(left: HistoryEntry, right: HistoryEntry): boolean {
   return isDeepEqual(getStructuralSnapshot(left), getStructuralSnapshot(right));
 }
 
+function isSameStructureIgnoringLayout(left: HistoryEntry, right: HistoryEntry): boolean {
+  return isDeepEqual(
+    getStructuralSnapshot(left, false),
+    getStructuralSnapshot(right, false),
+  );
+}
+
+function restoreNodeStyleDimensions(
+  target: Node<BaseNodeData>,
+  current: Node<BaseNodeData>,
+): Node<BaseNodeData>['style'] {
+  const style = { ...(current.style ?? {}) };
+  for (const key of ['width', 'height'] as const) {
+    if (Object.prototype.hasOwnProperty.call(target.style ?? {}, key)) {
+      style[key] = target.style?.[key];
+    } else {
+      delete style[key];
+    }
+  }
+  return Object.keys(style).length > 0 ? style : undefined;
+}
+
 function restoreStructuralNode(
   target: Node<BaseNodeData>,
   current: Node<BaseNodeData> | undefined,
+  restoreLayout: boolean,
 ): Node<BaseNodeData> {
   if (!current) return createSnapshot([target], [], []).nodes[0];
 
@@ -144,6 +198,15 @@ function restoreStructuralNode(
       delete data[key];
     }
   }
+  if (restoreLayout) {
+    for (const key of LAYOUT_NODE_DATA_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(target.data, key)) {
+        data[key] = target.data[key] as never;
+      } else {
+        delete data[key];
+      }
+    }
+  }
   const parentChanged = current.parentId !== target.parentId;
   return {
     ...current,
@@ -151,7 +214,8 @@ function restoreStructuralNode(
     parentId: target.parentId,
     extent: target.extent,
     expandParent: target.expandParent,
-    position: parentChanged ? { ...target.position } : { ...current.position },
+    position: restoreLayout || parentChanged ? { ...target.position } : { ...current.position },
+    style: restoreLayout ? restoreNodeStyleDimensions(target, current) : current.style,
     data,
   };
 }
@@ -162,8 +226,13 @@ function restoreStructuralSnapshot(
 ): HistoryEntry {
   const currentNodes = new Map(current.nodes.map((node) => [node.id, node]));
   const currentEdges = new Map(current.edges.map((edge) => [edge.id, edge]));
+  const restoreLayout = isSameStructureIgnoringLayout(target, current);
   return {
-    nodes: target.nodes.map((node) => restoreStructuralNode(node, currentNodes.get(node.id))),
+    nodes: target.nodes.map((node) => restoreStructuralNode(
+      node,
+      currentNodes.get(node.id),
+      restoreLayout,
+    )),
     edges: target.edges.map((edge) => {
       const currentEdge = currentEdges.get(edge.id);
       return currentEdge

@@ -271,23 +271,79 @@ describe('batch canvas history', () => {
     expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/clip.mp4');
   });
 
-  it('does not create undo steps for position, size, or ordinary data changes', async () => {
-    useAppStore.setState({ nodes: [node('node-a', { label: 'A', nodeWidth: 280, nodeHeight: 160 })], history: [], historyIndex: -1 });
+  it('undoes and redoes a node move from the gesture start position', async () => {
+    useAppStore.setState({
+      nodes: [node('node-a', { label: 'A', nodeWidth: 280, nodeHeight: 160 })],
+      history: [],
+      historyIndex: -1,
+    });
     useAppStore.getState().commitToHistory();
     useAppStore.setState({
       nodes: [{
         ...useAppStore.getState().nodes[0],
         position: { x: 120, y: 80 },
-        data: { ...useAppStore.getState().nodes[0].data, label: 'B', nodeWidth: 420, nodeHeight: 260 },
+        data: { ...useAppStore.getState().nodes[0].data, label: 'Current' },
+      }],
+    });
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      position: { x: 0, y: 0 },
+      data: { label: 'Current' },
+    });
+
+    await expect(useAppStore.getState().redo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({
+      position: { x: 120, y: 80 },
+      data: { label: 'Current' },
+    });
+  });
+
+  it('undoes and redoes a node resize from the gesture start size', async () => {
+    useAppStore.setState({
+      nodes: [node('node-a', { nodeWidth: 280, nodeHeight: 160 })],
+      history: [],
+      historyIndex: -1,
+    });
+    useAppStore.getState().commitToHistory();
+    useAppStore.setState({
+      nodes: [{
+        ...useAppStore.getState().nodes[0],
+        data: {
+          ...useAppStore.getState().nodes[0].data,
+          nodeWidth: 420,
+          nodeHeight: 260,
+        },
       }],
     });
     useAppStore.getState().commitToHistory();
 
-    await expect(useAppStore.getState().undo()).resolves.toBe(false);
-    expect(useAppStore.getState().nodes[0]).toMatchObject({
-      position: { x: 120, y: 80 },
-      data: { label: 'B', nodeWidth: 420, nodeHeight: 260 },
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0].data).toMatchObject({
+      nodeWidth: 280,
+      nodeHeight: 160,
     });
+
+    await expect(useAppStore.getState().redo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0].data).toMatchObject({
+      nodeWidth: 420,
+      nodeHeight: 260,
+    });
+  });
+
+  it('undoes and redoes React Flow style dimensions', async () => {
+    useAppStore.setState({ nodes: [groupNode('group-a')], history: [], historyIndex: -1 });
+    useAppStore.getState().commitToHistory();
+    useAppStore.setState({
+      nodes: [{ ...useAppStore.getState().nodes[0], style: { width: 520, height: 360 } }],
+    });
+    useAppStore.getState().commitToHistory();
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0].style).toMatchObject({ width: 400, height: 300 });
+
+    await expect(useAppStore.getState().redo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes[0].style).toMatchObject({ width: 520, height: 360 });
   });
 
   it('undoes node creation without reverting existing node layout or data', async () => {

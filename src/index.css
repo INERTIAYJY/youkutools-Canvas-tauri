@@ -22,6 +22,7 @@
 @import './styles/panels.css';
 @import './styles/quality-ratio.css';
 @import './styles/canvas-context.css';
+@import './styles/canvas-radial-menu.css';
 @import './styles/tooltip.css';
 @import './styles/crop.css';
 @import './styles/composer.css';

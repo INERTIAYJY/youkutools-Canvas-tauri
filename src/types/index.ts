@@ -426,6 +426,26 @@ export interface MascotPosition {
   y: number;
 }
 
+/** 画布空白处长按圆环可触发的快捷动作。 */
+export type CanvasQuickActionKind =
+  | 'comfyui'
+  | 'workflows'
+  | 'assets'
+  | 'settings'
+  | 'projects'
+  | 'fit-view'
+  | 'custom-url'
+  | 'disabled';
+
+export interface CanvasQuickAction {
+  id: string;
+  kind: CanvasQuickActionKind;
+  /** 自定义网页或需要覆盖默认文案时使用。 */
+  label?: string;
+  /** 仅 custom-url 动作使用，执行前仍会校验 http/https 协议。 */
+  url?: string;
+}
+
 export interface AppConfig {
   providers: Record<string, ApiProviderConfig>;
   /** 当前用于 Agent 联网搜索的厂商；旧配置未设置时优先沿用 Tavily。 */
@@ -437,6 +457,7 @@ export interface AppConfig {
   nodeLabelVisible?: boolean; // 是否显示节点顶部标题标签，默认 true
   canvasNoteToolbarVisible?: boolean; // 是否显示画布笔记工具栏，默认 true
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
+  canvasQuickActions?: CanvasQuickAction[]; // 画布空白处长按圆环，最多 6 个槽位
   startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'last-project'
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）

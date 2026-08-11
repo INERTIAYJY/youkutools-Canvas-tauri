@@ -44,10 +44,12 @@ import MultiSelectToolbar from './canvas/MultiSelectToolbar';
 import CanvasEmptyState from './canvas/CanvasEmptyState';
 import HistoryTimelinePanel from './canvas/HistoryTimelinePanel';
 import SelectedNodeFlowEdge from './canvas/SelectedNodeFlowEdge';
+import CanvasRadialMenu, { CanvasLongPressIndicator } from './canvas/CanvasRadialMenu';
 import { useConnectionDropMenu } from '../hooks/useConnectionDropMenu';
 import { useCanvasContextMenu } from '../hooks/useCanvasContextMenu';
 import { useNodeContextMenu } from '../hooks/useNodeContextMenu';
 import { useCanvasSecondaryClickMenu } from '../hooks/useCanvasSecondaryClickMenu';
+import { useCanvasLongPressRadialMenu } from '../hooks/useCanvasLongPressRadialMenu';
 import { useAppStore } from '../store/useAppStore';
 import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
@@ -486,6 +488,11 @@ function CanvasInner() {
   }, [activeDrawingTool, canvasNoteToolbarVisible, chooseDrawingTool]);
 
   const drawingActive = activeDrawingTool !== 'select';
+  const {
+    position: radialMenuPosition,
+    holdPosition: radialMenuHoldPosition,
+    close: closeRadialMenu,
+  } = useCanvasLongPressRadialMenu(canvasRootRef, !drawingActive);
   const drawingInteraction = useMemo(() => ({
     ...interaction,
     ...(drawingActive ? {
@@ -1236,6 +1243,13 @@ function CanvasInner() {
         )}
 
       </ReactFlow>
+
+      {radialMenuHoldPosition && (
+        <CanvasLongPressIndicator position={radialMenuHoldPosition} />
+      )}
+      {radialMenuPosition && (
+        <CanvasRadialMenu position={radialMenuPosition} onClose={closeRadialMenu} />
+      )}
 
       {/* Connection drop menu */}
       <ConnectionMenu

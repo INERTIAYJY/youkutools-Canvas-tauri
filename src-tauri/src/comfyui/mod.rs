@@ -14,8 +14,11 @@
 //! 从 tauri://localhost 直连 ComfyUI 必需）。GPU 无需参数——CUDA 可用时默认启用，
 //! 三种发行版的 Python 环境都自带 CUDA 版 torch（兜底 bat 亦优先 run_nvidia_gpu.bat）。
 use serde::{Deserialize, Serialize};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
@@ -33,6 +36,7 @@ const COMFYUI_WINDOW_LABEL: &str = "comfyui";
 const COMFYUI_BRIDGE_SCRIPT: &str = include_str!("bridge.js");
 const MAX_WORKFLOW_JSON_LENGTH: usize = 16 * 1024 * 1024;
 const COMFYUI_ACTION_PATH: &str = "/__ai_canvas_comfy_action__";
+const COMFYUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(700);
 const TAKE_SAVE_PAYLOAD_SCRIPT: &str = r#"(() => {
   const payload = window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__ ?? null;
   delete window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__;
@@ -80,6 +84,36 @@ fn parse_comfyui_url(comfy_url: &str) -> Result<Url, String> {
 
 fn is_local_comfyui_url(url: &Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+}
+
+fn comfyui_socket_endpoint(url: &Url) -> Result<(String, u16), String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "ComfyUI 服务地址缺少主机名".to_string())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "ComfyUI 服务地址缺少端口".to_string())?;
+    Ok((host.to_string(), port))
+}
+
+async fn ensure_local_comfyui_reachable(url: &Url) -> Result<(), String> {
+    let (host, port) = comfyui_socket_endpoint(url)?;
+    let display_endpoint = format!("{host}:{port}");
+    tauri::async_runtime::spawn_blocking(move || {
+        let addresses = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| format!("无法解析 ComfyUI 服务地址：{display_endpoint}"))?;
+        for address in addresses {
+            if TcpStream::connect_timeout(&address, COMFYUI_CONNECT_TIMEOUT).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "无法连接 ComfyUI 服务（{display_endpoint}），请先启动 ComfyUI 后再打开"
+        ))
+    })
+    .await
+    .map_err(|error| format!("检查 ComfyUI 服务状态失败: {error}"))?
 }
 
 fn build_editor_script(
@@ -517,7 +551,9 @@ pub async fn launch_comfyui(webview: tauri::Webview, comfy_path: String) -> Resu
 /// 把下载结果告诉 ComfyUI 页面。wry 默认把下载标记为已处理，WebView2 既不弹「另存为」
 /// 也不显示下载提示，不回个话用户就以为导出没生效。
 fn notify_comfyui_download(webview: &tauri::Webview, path: Option<&Path>, success: bool) {
-    let path_text = path.map(|item| item.display().to_string()).unwrap_or_default();
+    let path_text = path
+        .map(|item| item.display().to_string())
+        .unwrap_or_default();
     let encoded = serde_json::to_string(&path_text).unwrap_or_else(|_| "\"\"".to_string());
     let _ = webview.eval(&format!(
         "window.__AI_CANVAS_COMFY__?.notifyDownload?.({success}, {encoded});"
@@ -540,6 +576,14 @@ pub async fn open_comfyui_window(
     crate::path_policy::ensure_trusted_caller(&webview)?;
     let url = parse_comfyui_url(&comfy_url)?;
     let use_local_bridge = is_local_comfyui_url(&url);
+    if use_local_bridge {
+        if let Err(error) = ensure_local_comfyui_reachable(&url).await {
+            if let Some(window) = app.get_webview_window(COMFYUI_WINDOW_LABEL) {
+                let _ = window.close();
+            }
+            return Err(error);
+        }
+    }
     let editor_script = build_editor_script(
         workflow_id.as_deref(),
         workflow_name.as_deref(),
@@ -582,6 +626,7 @@ pub async fn open_comfyui_window(
     }
 
     let action_origin = url.clone();
+    let page_origin = url.clone();
     let mut builder =
         WebviewWindowBuilder::new(&app, COMFYUI_WINDOW_LABEL, WebviewUrl::External(url))
             .title("ComfyUI")
@@ -589,7 +634,8 @@ pub async fn open_comfyui_window(
             .min_inner_size(900.0, 600.0)
             .center()
             .resizable(true)
-            .decorations(!use_local_bridge)
+            // 本地页面加载完成前保留原生标题栏；连接异常时窗口仍有系统关闭按钮。
+            .decorations(true)
             // Tauri 默认的原生拖放处理会吞掉 HTML5 drag 事件，ComfyUI 就收不到拖进来的
             // 工作流 JSON / 图片；关掉它交还给页面自己处理
             .disable_drag_drop_handler()
@@ -614,6 +660,23 @@ pub async fn open_comfyui_window(
             });
             false
         });
+        builder = builder.on_page_load(move |window, payload| {
+            let loaded_url = payload.url();
+            let is_same_origin = loaded_url.scheme() == page_origin.scheme()
+                && loaded_url.host_str() == page_origin.host_str()
+                && loaded_url.port_or_known_default() == page_origin.port_or_known_default();
+            if matches!(payload.event(), PageLoadEvent::Finished) && is_same_origin {
+                let callback_window = window.clone();
+                let _ = window.eval_with_callback(
+                    "Boolean(window.__AI_CANVAS_COMFY__)",
+                    move |bridge_ready| {
+                        if bridge_ready.trim() == "true" {
+                            let _ = callback_window.set_decorations(false);
+                        }
+                    },
+                );
+            }
+        });
     }
     if !initialization_script.is_empty() {
         builder = builder.initialization_script(&initialization_script);
@@ -628,9 +691,11 @@ pub async fn open_comfyui_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_editor_script, is_local_comfyui_url, parse_comfyui_url, parse_comfyui_window_action,
+        build_editor_script, comfyui_socket_endpoint, ensure_local_comfyui_reachable,
+        is_local_comfyui_url, parse_comfyui_url, parse_comfyui_window_action,
         parse_workflow_save_payload, ComfyUIWindowAction,
     };
+    use std::net::TcpListener;
 
     #[test]
     fn accepts_http_and_https_comfyui_urls() {
@@ -656,6 +721,31 @@ mod tests {
         assert!(!is_local_comfyui_url(
             &parse_comfyui_url("https://comfy.example.com").unwrap()
         ));
+    }
+
+    #[test]
+    fn resolves_comfyui_socket_ports() {
+        assert_eq!(
+            comfyui_socket_endpoint(&parse_comfyui_url("http://127.0.0.1:8188").unwrap()).unwrap(),
+            ("127.0.0.1".to_string(), 8188)
+        );
+        assert_eq!(
+            comfyui_socket_endpoint(&parse_comfyui_url("https://localhost").unwrap()).unwrap(),
+            ("localhost".to_string(), 443)
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_when_local_comfyui_is_not_listening() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("应能占用本地临时端口");
+        let port = listener.local_addr().unwrap().port();
+        let url = parse_comfyui_url(&format!("http://127.0.0.1:{port}")).unwrap();
+
+        assert!(ensure_local_comfyui_reachable(&url).await.is_ok());
+        drop(listener);
+
+        let error = ensure_local_comfyui_reachable(&url).await.unwrap_err();
+        assert!(error.contains("请先启动 ComfyUI"));
     }
 
     #[test]

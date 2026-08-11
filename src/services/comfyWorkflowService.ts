@@ -6,7 +6,7 @@
 import { useAppStore } from '../store/useAppStore';
 import type { WorkflowIONode, WorkflowIONodeType } from '../types';
 import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
-import { mapImageDimensions, mapVideoDimensions } from './aiDimensions';
+import { mapImageDimensions, mapVideoDimensions, resolveVideoDurationSeconds } from './aiDimensions';
 import { resolveNodeReferences } from './nodeReferenceService';
 import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
@@ -84,6 +84,49 @@ async function comfyFetch(url: string, options: RequestInit = {}): Promise<Respo
     body = bytes.buffer;
   }
   return corsSafeFetch(resolvedUrl, { ...options, headers, body });
+}
+
+/** ComfyUI 已注册的节点类型；同一次会话里短暂缓存，装完插件重开也能很快看到变化 */
+let nodeClassCache: { baseUrl: string; classes: Set<string>; fetchedAt: number } | null = null;
+const NODE_CLASS_CACHE_TTL = 30_000;
+
+async function fetchComfyNodeClasses(baseUrl: string): Promise<Set<string> | null> {
+  if (
+    nodeClassCache
+    && nodeClassCache.baseUrl === baseUrl
+    && Date.now() - nodeClassCache.fetchedAt < NODE_CLASS_CACHE_TTL
+  ) {
+    return nodeClassCache.classes;
+  }
+  const response = await comfyFetch(`${baseUrl}/object_info`);
+  if (!response.ok) return null;
+  const classes = new Set(Object.keys((await response.json()) as Record<string, unknown>));
+  nodeClassCache = { baseUrl, classes, fetchedAt: Date.now() };
+  return classes;
+}
+
+/**
+ * 列出工作流里 ComfyUI 没注册的节点类型（多半是没装或没启用对应插件）。
+ * 问不到节点清单时返回空数组：宁可放行让 ComfyUI 自己报错，也不要拦住能用的工作流。
+ */
+export async function findMissingNodeClasses(
+  baseUrl: string,
+  workflowJson: string,
+): Promise<string[]> {
+  let workflowObj: Record<string, { class_type?: unknown }>;
+  try {
+    workflowObj = JSON.parse(workflowJson);
+    const classes = await fetchComfyNodeClasses(baseUrl.replace(/\/+$/, ''));
+    if (!classes) return [];
+    const used = new Set(
+      Object.values(workflowObj)
+        .map((node) => node?.class_type)
+        .filter((classType): classType is string => typeof classType === 'string'),
+    );
+    return [...used].filter((classType) => !classes.has(classType));
+  } catch {
+    return [];
+  }
 }
 
 /** 从 Store 获取 ComfyUI 配置并校验 */
@@ -377,46 +420,144 @@ async function injectAudioIntoWorkflow(
   }
 }
 
+/** 媒体加载节点接受 input 目录文件名的输入键：核心 LoadVideo 用的是 file */
+const MEDIA_LOADER_INPUT_KEYS: Record<'image' | 'video', string[]> = {
+  image: ['image'],
+  video: ['video', 'file'],
+};
+
+function mediaLoaderInputKey(
+  inputs: Record<string, unknown>,
+  kind: 'image' | 'video',
+): string | undefined {
+  return MEDIA_LOADER_INPUT_KEYS[kind].find((key) => typeof inputs[key] === 'string');
+}
+
 /**
- * 用户没 @ 该类型 IO 节点时，把提示词框里的同类媒体注入工作流指定的默认节点。
- * 一个默认节点只收一份内容，多余的引用忽略。
+ * 摘掉没喂到内容的可选参考位。
+ * ComfyUI 的 autogrow 输入形如 "ref_images.ref_image_1"，带点号的键都是可选槽；
+ * 顺着链路找下去，只要终点全是这种槽就能整条摘掉，否则一律保留（少一张图报错也好过删错节点）。
+ */
+function pruneOptionalMediaNode(
+  workflowObj: Record<string, Record<string, unknown>>,
+  startNodeId: string,
+): void {
+  const chain = new Set([startNodeId]);
+  const optionalRefs: Array<[Record<string, unknown>, string]> = [];
+  const queue = [startNodeId];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    let consumed = false;
+    for (const [nodeId, nodeData] of Object.entries(workflowObj)) {
+      const inputs = nodeData?.inputs as Record<string, unknown> | undefined;
+      if (!inputs) continue;
+      for (const [key, value] of Object.entries(inputs)) {
+        if (!Array.isArray(value) || value[0] !== current) continue;
+        consumed = true;
+        if (key.includes('.')) {
+          optionalRefs.push([inputs, key]);
+        } else if (!chain.has(nodeId)) {
+          // 必填输入：只有把消费者一起摘掉才合法，继续往下判断
+          chain.add(nodeId);
+          queue.push(nodeId);
+        }
+      }
+    }
+    // 没有任何下游的节点是出图/存盘之类的终点，摘掉等于毁掉工作流
+    if (!consumed) return;
+  }
+
+  for (const [inputs, key] of optionalRefs) delete inputs[key];
+  for (const nodeId of chain) delete workflowObj[nodeId];
+}
+
+/**
+ * 用户没 @ 该类型 IO 节点时，把提示词框里的同类媒体依次注入该类型的所有加载节点
+ * （默认节点排第一位）。没轮到内容的可选参考位会被摘掉，避免残留的示例文件名让工作流报错。
  */
 async function injectDefaultMediaIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
+  ioNodes: WorkflowIONode[],
   defaultNodeId: string,
   kind: 'image' | 'video',
   mediaUrls: string[],
+  /** 用户这次带了参考媒体：以他给的为准，没轮到的可选参考位清掉 */
+  pruneUnfilled: boolean,
   baseUrl: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const mediaUrl = mediaUrls.find((url) => url && url.trim() && !url.trim().startsWith('@{'))?.trim();
-  if (!mediaUrl) return;
-  const inputs = workflowObj[defaultNodeId]?.inputs as Record<string, unknown> | undefined;
-  if (!inputs) return;
-  // VHS 的路径变体读的是 ComfyUI 主机上的绝对路径，上传到 input 目录得到的文件名对它无效
-  if (typeof inputs[kind] !== 'string') {
-    console.warn('[comfyWorkflowService] 默认节点不接受 input 目录文件名，已跳过注入', defaultNodeId);
-    return;
-  }
-  const uploadResult = await uploadMediaToComfyUI(baseUrl, mediaUrl, kind, signal);
-  inputs[kind] = uploadResult.name;
-  if (inputs.upload !== undefined) {
-    inputs.upload = kind;
+  const targets = [
+    defaultNodeId,
+    ...ioNodes
+      .filter((io) => io.type === kind && io.nodeId !== defaultNodeId)
+      .map((io) => io.nodeId),
+  ].filter((nodeId) => workflowObj[nodeId]?.inputs);
+  const urls = mediaUrls
+    .map((url) => url?.trim())
+    .filter((url): url is string => Boolean(url) && !url.startsWith('@{'));
+  // 一份媒体都没带时保持工作流原样，用户在 ComfyUI 里配好的输入照旧生效
+  if (urls.length === 0 && !pruneUnfilled) return;
+
+  for (const [index, nodeId] of targets.entries()) {
+    const inputs = workflowObj[nodeId].inputs as Record<string, unknown>;
+    const inputKey = mediaLoaderInputKey(inputs, kind);
+    // VHS 的路径变体读的是 ComfyUI 主机上的绝对路径，上传到 input 目录得到的文件名对它无效
+    if (!inputKey) {
+      console.warn('[comfyWorkflowService] 该节点不接受 input 目录文件名，已跳过注入', nodeId);
+      continue;
+    }
+    if (index >= urls.length) {
+      pruneOptionalMediaNode(workflowObj, nodeId);
+      continue;
+    }
+    const uploadResult = await uploadMediaToComfyUI(baseUrl, urls[index], kind, signal);
+    inputs[inputKey] = uploadResult.name;
+    if (inputs.upload !== undefined) {
+      inputs.upload = kind;
+    }
   }
 }
 
-/** 将画布选择的尺寸/比例注入到被 @ 提及的节点中；若未指定任何节点则全量注入 */
+/**
+ * ResolutionSelector 这类节点没有 width/height 数字输入，靠「比例 + 总像素」算尺寸。
+ * aspect_ratio 是 combo，写不认识的值会被服务端判非法，所以只写查得到的档位。
+ */
+const RESOLUTION_SELECTOR_RATIOS: Record<string, string> = {
+  '1:1': '1:1 (Square)',
+  '2:3': '2:3 (Portrait Photo)',
+  '3:2': '3:2 (Photo)',
+  '3:4': '3:4 (Portrait Standard)',
+  '4:3': '4:3 (Standard)',
+  '9:16': '9:16 (Portrait Widescreen)',
+  '16:9': '16:9 (Widescreen)',
+  '21:9': '21:9 (Ultrawide)',
+};
+
+function writeResolutionSelector(
+  inputs: Record<string, unknown>,
+  dims: { width: number; height: number },
+  aspectRatio: string | undefined,
+): void {
+  if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels !== 'number') return;
+  const label = aspectRatio ? RESOLUTION_SELECTOR_RATIOS[aspectRatio] : undefined;
+  if (label) inputs.aspect_ratio = label;
+  const megapixels = Math.round((dims.width * dims.height) / 10_000) / 100;
+  inputs.megapixels = Math.min(16, Math.max(0.1, megapixels));
+}
+
+/**
+ * 将画布选择的尺寸/比例注入工作流。
+ * 注入所有带 width/height 的节点：被 @ 的都是提示词/图片 IO 节点，按它们过滤等于什么都不注入。
+ */
 function injectDimensionsIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   imageSize: string,
   aspectRatio: string,
-  mentionedNodeIds?: string[],
 ): void {
   const dims = mapImageDimensions(imageSize, aspectRatio);
-  for (const [nodeId, nodeData] of Object.entries(workflowObj)) {
+  for (const [, nodeData] of Object.entries(workflowObj)) {
     if (!nodeData || typeof nodeData !== 'object') continue;
-    // 有指定节点时，只修改被 @ 的节点
-    if (mentionedNodeIds && mentionedNodeIds.length > 0 && !mentionedNodeIds.includes(nodeId)) continue;
     const inputs = nodeData.inputs as Record<string, unknown> | undefined;
     if (!inputs) continue;
     // 匹配包含 width 和 height 的节点（EmptyLatentImage、EmptySD3LatentImage 等）
@@ -424,37 +565,62 @@ function injectDimensionsIntoWorkflow(
       inputs.width = dims.width;
       inputs.height = dims.height;
     }
+    writeResolutionSelector(inputs, dims, aspectRatio);
   }
 }
 
-/** 将视频参数注入到被 @ 提及的节点中；若未指定任何节点则全量注入 */
+/** 秒数节点：工作流自己按秒算帧数（PrimitiveFloat + 数学表达式），比直接写帧数更可靠 */
+function writeDurationSeconds(
+  nodeData: Record<string, unknown>,
+  inputs: Record<string, unknown>,
+  durationSeconds: number,
+): boolean {
+  if (!/^Primitive(Float|Int)$/i.test(String(nodeData.class_type ?? ''))) return false;
+  const title = String((nodeData._meta as Record<string, unknown> | undefined)?.title ?? '');
+  if (!/duration|时长|秒/i.test(title) || typeof inputs.value !== 'number') return false;
+  inputs.value = durationSeconds;
+  return true;
+}
+
+/**
+ * 将视频参数注入工作流。
+ * 同样不按 @ 过滤：分辨率、帧率、帧数都在 latent / 合成节点上，用户不会去 @ 它们。
+ */
 function injectVideoParamsIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   videoResolution: number,
   videoRatio: string | undefined,
   videoFps: number,
   videoFrames: number,
-  mentionedNodeIds?: string[],
+  durationSeconds: number,
 ): void {
   const dims = mapVideoDimensions(videoResolution, videoRatio);
-  for (const [nodeId, nodeData] of Object.entries(workflowObj)) {
+
+  // 先找秒数节点：工作流自带秒→帧换算时，帧率是它算式里的常量，再去改帧率只会让时长对不上
+  let hasDurationNode = false;
+  for (const nodeData of Object.values(workflowObj)) {
+    const inputs = nodeData?.inputs as Record<string, unknown> | undefined;
+    if (inputs && writeDurationSeconds(nodeData, inputs, durationSeconds)) hasDurationNode = true;
+  }
+
+  for (const [, nodeData] of Object.entries(workflowObj)) {
     if (!nodeData || typeof nodeData !== 'object') continue;
-    // 有指定节点时，只修改被 @ 的节点
-    if (mentionedNodeIds && mentionedNodeIds.length > 0 && !mentionedNodeIds.includes(nodeId)) continue;
     const inputs = nodeData.inputs as Record<string, unknown> | undefined;
     if (!inputs) continue;
 
     // 注入 width/height 到 latent 或 image 节点（按所选比例换算，与图片工作流一致）
-    if (inputs.width !== undefined && typeof inputs.width === 'number' && inputs.height !== undefined && typeof inputs.height === 'number') {
+    const isSizedNode = typeof inputs.width === 'number' && typeof inputs.height === 'number';
+    if (isSizedNode) {
       inputs.width = dims.width;
       inputs.height = dims.height;
     }
+    writeResolutionSelector(inputs, dims, videoRatio);
 
     // 注入帧率到视频相关节点
-    if (inputs.frame_rate !== undefined) {
+    if (!hasDurationNode && inputs.frame_rate !== undefined) {
       inputs.frame_rate = videoFps;
     }
-    if (inputs.fps !== undefined && typeof inputs.fps === 'number') {
+    if (!hasDurationNode && inputs.fps !== undefined && typeof inputs.fps === 'number') {
       inputs.fps = videoFps;
     }
 
@@ -465,7 +631,9 @@ function injectVideoParamsIntoWorkflow(
     if (inputs.frames !== undefined && typeof inputs.frames === 'number') {
       inputs.frames = videoFrames;
     }
-    if (inputs.length !== undefined && inputs.frame_count !== undefined && typeof inputs.length === 'number') {
+    // Wan / Hunyuan / Mochi 的 latent 节点用 length 表示总帧数；
+    // 只认带 width/height 的节点，避免误伤其他节点上同名的 length 参数
+    if (typeof inputs.length === 'number' && isSizedNode) {
       inputs.length = videoFrames;
     }
   }
@@ -520,11 +688,14 @@ async function submitComfyUIWorkflow(
   await injectImagesIntoWorkflow(workflowObj, workflowInputs, ioNodes, baseUrl, signal);
 
   // 没 @ 图片/视频节点时，把提示词框里引用的同类媒体送进默认节点
+  const hasPromptMedia = Boolean(promptMedia.imageUrls?.length || promptMedia.videoUrls?.length);
   for (const kind of ['image', 'video'] as const) {
     const defaultNodeId = defaultNodeFor(kind);
     if (!defaultNodeId) continue;
     const urls = kind === 'image' ? promptMedia.imageUrls : promptMedia.videoUrls;
-    await injectDefaultMediaIntoWorkflow(workflowObj, defaultNodeId, kind, urls || [], baseUrl, signal);
+    await injectDefaultMediaIntoWorkflow(
+      workflowObj, ioNodes, defaultNodeId, kind, urls || [], hasPromptMedia, baseUrl, signal,
+    );
   }
 
   // 注入音频到 audio 类型 IO 节点（上传 → 替换文件名）
@@ -685,13 +856,8 @@ export async function executeComfyUIGenerate(
       { imageUrls: referenceImageUrls },
     );
 
-    // 注入画布选择的尺寸（仅对 @提及的节点）
-    injectDimensionsIntoWorkflow(
-      workflowObj,
-      imageSize,
-      aspectRatio,
-      workflowInputs ? Object.keys(workflowInputs) : undefined,
-    );
+    // 注入画布选择的尺寸
+    injectDimensionsIntoWorkflow(workflowObj, imageSize, aspectRatio);
 
     // 提交工作流
     const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal);
@@ -737,7 +903,7 @@ export async function executeComfyUIVideoGenerate(
 ): Promise<{ url: string }> {
   const {
     workflowId, workflowInputs, prompt,
-    videoResolution = 832, videoFps = 24, videoFrames = 77,
+    videoResolution = 832, videoFps = 24, videoFrames = 77, seedanceDuration,
     // 画面比例决定注入工作流的 width/height；未设置时按 16:9
     seedanceRatio = '16:9',
   } = params;
@@ -774,14 +940,14 @@ export async function executeComfyUIVideoGenerate(
       promptMedia,
     );
 
-    // 注入视频参数（仅对 @提及的节点）
+    // 注入视频参数
     injectVideoParamsIntoWorkflow(
       workflowObj,
       videoResolution,
       seedanceRatio,
       videoFps,
       videoFrames,
-      workflowInputs ? Object.keys(workflowInputs) : undefined,
+      resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps),
     );
 
     // 提交工作流

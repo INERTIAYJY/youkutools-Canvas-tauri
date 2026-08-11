@@ -20,6 +20,7 @@ import { generateImage } from './generateImage';
 import { generateVideo } from './generateVideo';
 import { generateAudio, persistAudioGenerationResult } from './generateAudio';
 import { findMediaModelOption } from '../../components/nodes/shared/defaultModels';
+import { videoLongSideFromLabel } from '../aiDimensions';
 import { resolveProjectGenerationPrompt } from '../projectSettingsService';
 import type { BaseNodeData, NodeType } from '../../types';
 import { tagGeneratedProjectAssetSafely } from '../fs/generatedAssetTags';
@@ -65,7 +66,12 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
     throw new Error(`请先通过 @ 选择${label}模型`);
   }
 
-  const option = findMediaModelOption(modelRef, config.generalModels ?? [], config);
+  const option = findMediaModelOption(
+    modelRef,
+    config.generalModels ?? [],
+    config,
+    useAppStore.getState().workflows,
+  );
   if (!option) throw new Error('未找到 @ 引用的媒体模型');
   if (option.mediaKind !== kind) {
     const label = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
@@ -85,6 +91,18 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
       requestModel: `general/${generalModel.id}`,
       provider: 'general',
       audioPurpose: option.audioPurpose,
+    };
+  }
+
+  if (option.workflowId) {
+    if (!config.comfyUIUrl?.trim()) {
+      throw new Error('未配置 ComfyUI 服务地址\n请在「设置 → ComfyUI」中配置');
+    }
+    return {
+      configId: option.value,
+      requestModel: 'comfyui/workflow',
+      provider: 'comfyui',
+      workflowId: option.workflowId,
     };
   }
 
@@ -207,6 +225,7 @@ export async function runMediaGeneration(
       provider: model.provider,
       imageSize: projectSettings?.generation?.imageSize || '2K',
       aspectRatio: projectSettings?.generation?.imageAspectRatio || '1:1',
+      workflowId: model.workflowId,
     }, signal);
     throwIfAborted(signal);
     const persisted = await persistGeneratedMedia(result.url, projectId, intent.kind, id);
@@ -238,6 +257,9 @@ export async function runMediaGeneration(
       seedanceRatio: projectSettings?.generation?.videoAspectRatio,
       seedanceResolution: projectSettings?.generation?.videoResolution,
       seedanceDuration: projectSettings?.generation?.videoDuration,
+      // 工作流只认数字长边，档位换算后再传
+      videoResolution: videoLongSideFromLabel(projectSettings?.generation?.videoResolution),
+      workflowId: model.workflowId,
     }, signal);
     throwIfAborted(signal);
     const persisted = await persistGeneratedMedia(result.url, projectId, intent.kind, id);
@@ -263,6 +285,7 @@ export async function runMediaGeneration(
     prompt: effectivePrompt,
     model: model.requestModel,
     provider: model.provider,
+    workflowId: model.workflowId,
   }, signal);
   throwIfAborted(signal);
   const persisted = await persistAudioGenerationResult(

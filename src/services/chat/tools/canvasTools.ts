@@ -292,6 +292,12 @@ function resolveModelPatch(
       error: `模型“${option.name}”是${option.category}模型，与 ${mismatched.length} 个目标节点的类型不匹配`,
     };
   }
+  // ComfyUI 工作流靠 workflowId 走本地执行路径，只写 model 会在生成时找不到工作流
+  if (option.provider === 'comfyui') {
+    return {
+      patch: { model: 'comfyui/workflow', provider: 'comfyui', workflowId: option.id.slice('comfyui/'.length) },
+    };
+  }
   return {
     patch: {
       model: option.id,

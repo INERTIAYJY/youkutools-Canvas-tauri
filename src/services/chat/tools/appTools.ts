@@ -34,6 +34,7 @@ export function listConfiguredModels(store: ReturnType<typeof useAppStore.getSta
   const mediaModels = getMediaModelOptions(
     store.config.generalModels ?? [],
     store.config,
+    store.workflows,
   ).map((model) => ({
     id: model.value,
     name: model.label,

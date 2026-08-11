@@ -27,3 +27,30 @@ export const springBouncy: Transition = { type: 'spring', visualDuration: 0.45, 
 /* ── 纯渐变过渡（无物理感的淡入淡出）────────────────────────────── */
 export const fadeFast: Transition = { duration: 0.18, ease: EASE_OUT_EXPO };
 export const fadeNormal: Transition = { duration: 0.24, ease: EASE_OUT_EXPO };
+
+/**
+ * 面板进出场动画。不变量：initial 里出现的属性，animate 必须都写回去，
+ * 否则属性会永远停在初始值（漏写 opacity 就是面板看不见却能点）。
+ */
+export function panelMotion(reduceMotion: boolean, quickMotion: boolean, draggable: boolean) {
+  if (reduceMotion) return { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 } };
+  if (quickMotion) {
+    return {
+      initial: { transform: 'translate3d(0, 6px, 0) scale(0.99)' },
+      animate: { transform: 'translate3d(0, 0, 0) scale(1)' },
+      exit: { transform: 'translate3d(0, 4px, 0) scale(0.995)' },
+    };
+  }
+  if (draggable) {
+    return {
+      initial: { opacity: 0, scale: 0.94 },
+      animate: { opacity: 1, scale: 1 },
+      exit: { opacity: 0, scale: 0.96 },
+    };
+  }
+  return {
+    initial: { opacity: 0, scale: 0.94, y: 14 },
+    animate: { opacity: 1, scale: 1, y: 0 },
+    exit: { opacity: 0, scale: 0.96, y: 10 },
+  };
+}

@@ -5,6 +5,10 @@ import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
 import type { WorkflowDefinition } from '../types';
 import * as fileService from '../services/fileService';
+import {
+  pendingBuiltInWorkflows,
+  withBuiltInEditableContent,
+} from '../services/builtinWorkflows';
 
 export interface WorkflowSlice {
   workflows: WorkflowDefinition[];
@@ -60,20 +64,31 @@ export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> 
 
   loadWorkflows: async () => {
     const records = await fileService.loadWorkflows();
-    if (records.length > 0) {
-      const mapped: WorkflowDefinition[] = records.map((r) => ({
-        id: r.id,
-        name: r.name,
-        category: r.category as WorkflowDefinition['category'],
-        fileName: r.fileName,
-        fileContent: r.fileContent,
-        editableContent: r.editableContent,
-        ioNodes: r.ioNodes as WorkflowDefinition['ioNodes'],
-        defaultNodes: r.defaultNodes as WorkflowDefinition['defaultNodes'],
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-      }));
-      set({ workflows: mapped });
+    const mapped: WorkflowDefinition[] = records.map((r) => ({
+      id: r.id,
+      name: r.name,
+      category: r.category as WorkflowDefinition['category'],
+      fileName: r.fileName,
+      fileContent: r.fileContent,
+      editableContent: r.editableContent,
+      ioNodes: r.ioNodes as WorkflowDefinition['ioNodes'],
+      defaultNodes: r.defaultNodes as WorkflowDefinition['defaultNodes'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+    // 早先播种的内置工作流缺可编辑图，补上后 ComfyUI 才能正常打开
+    const patched = mapped.map((workflow) => {
+      const upgraded = withBuiltInEditableContent(workflow);
+      if (upgraded) {
+        fileService.saveWorkflow(upgraded).catch((e) => console.warn('[内置工作流] 补可编辑图失败:', e));
+      }
+      return upgraded ?? workflow;
+    });
+    // 首次启动把内置工作流落盘，之后它们和用户导入的工作流没有区别
+    const seeded = pendingBuiltInWorkflows(patched);
+    for (const workflow of seeded) {
+      fileService.saveWorkflow(workflow).catch((e) => console.warn('[内置工作流] 持久化失败:', e));
     }
+    if (patched.length > 0 || seeded.length > 0) set({ workflows: [...seeded, ...patched] });
   },
 });

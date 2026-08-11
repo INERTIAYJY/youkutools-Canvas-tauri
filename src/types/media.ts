@@ -61,4 +61,6 @@ export interface ResolvedMediaModel {
   requestModel: string;
   provider: string;
   audioPurpose?: AudioGenerationPurpose;
+  /** 选中的是 ComfyUI 工作流时带上，生成入口据此走本地工作流 */
+  workflowId?: string;
 }

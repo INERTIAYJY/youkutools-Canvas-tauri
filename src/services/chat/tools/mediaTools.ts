@@ -87,11 +87,16 @@ export function registerMediaAgentTools(): Array<() => void> {
             input.modelRef,
             store.config.generalModels ?? [],
             store.config,
+            store.workflows,
           );
           if (!option || option.mediaKind !== input.kind) {
             return { allowed: false, reason: '所选模型与本次媒体类型不兼容' };
           }
-          if (option.provider === 'general') {
+          if (option.workflowId) {
+            if (!store.config.comfyUIUrl?.trim()) {
+              return { allowed: false, reason: '请先在设置里配置 ComfyUI 服务地址' };
+            }
+          } else if (option.provider === 'general') {
             const generalModel = (store.config.generalModels ?? []).find(
               (model) => `general/${model.id}` === option.value,
             );

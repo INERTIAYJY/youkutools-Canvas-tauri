@@ -257,7 +257,10 @@ export default function WorkflowPanel() {
       );
       // 面板保持打开：ComfyUI 那边保存回来后这里会实时刷新，方便接着改默认节点
     } catch (error) {
-      showToast(typeof error === 'string' ? error : '无法在 ComfyUI 中打开工作流', 'error');
+      const message = typeof error === 'string'
+        ? error
+        : error instanceof Error ? error.message : '无法在 ComfyUI 中打开工作流';
+      showToast(message, 'error');
     }
   }, [comfyUIUrl, showToast]);
 

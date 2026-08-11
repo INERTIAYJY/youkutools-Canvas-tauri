@@ -6,6 +6,7 @@ import type {
   WorkflowIONodeType,
 } from '../types';
 import { generateId, useAppStore } from '../store/useAppStore';
+import { findMissingNodeClasses } from './comfyWorkflowService';
 
 const COMFYUI_SAVE_EVENT = 'comfyui-workflow-save';
 const MAX_WORKFLOW_JSON_LENGTH = 16 * 1024 * 1024;
@@ -79,7 +80,9 @@ export function extractComfyUIIONodes(jsonStr: string): WorkflowIONode[] {
     }
 
     const inputs = isRecord(raw.inputs) ? raw.inputs : undefined;
-    if (inputs && !results.some((item) => item.nodeId === nodeId)) {
+    // 展示类节点的 text 是给人看的输出，不是提示词入口
+    const isDisplayOnly = /showAnything|PreviewAny|DisplayText/i.test(classType);
+    if (inputs && !isDisplayOnly && !results.some((item) => item.nodeId === nodeId)) {
       for (const [key, value] of Object.entries(inputs)) {
         if (/text|prompt|writing/i.test(key) && typeof value === 'string' && value.trim()) {
           results.push({ nodeId, title: title || classType || key, type: 'prompt' });
@@ -146,6 +149,14 @@ export async function openComfyUIWorkflowEditor(
   comfyUrl: string,
   workflow: WorkflowDefinition,
 ): Promise<void> {
+  // 缺节点时 ComfyUI 会中止加载但照样开一个同名标签页，画布上还留着上一个工作流，
+  // 看起来就像「打开了别的工作流」。宁可提前说清楚缺什么。
+  const missing = await findMissingNodeClasses(comfyUrl, workflow.fileContent);
+  if (missing.length > 0) {
+    throw new Error(
+      `ComfyUI 缺少这些节点，无法打开该工作流：${missing.join('、')}；请先安装或启用对应插件`,
+    );
+  }
   await invoke<void>('open_comfyui_window', {
     comfyUrl,
     workflowId: workflow.id,

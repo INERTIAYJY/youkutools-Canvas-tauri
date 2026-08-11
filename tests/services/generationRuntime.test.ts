@@ -163,6 +163,9 @@ describe('media generation project settings', () => {
       provider: 'openai',
       seedanceResolution: '1080p',
       seedanceDuration: 10,
+      // 本地工作流只认数字长边，1080p 换算成 1920
+      videoResolution: 1920,
+      workflowId: undefined,
     }, undefined);
   });
 

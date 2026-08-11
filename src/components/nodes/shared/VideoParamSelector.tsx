@@ -69,7 +69,10 @@ const FRAME_ROLE_OPTIONS: Array<{ value: VideoReferenceItem['role']; label: stri
   { value: 'last_frame', label: '尾帧' },
 ];
 
-const COMBO_RESOLUTIONS = [832, 1024, 1280, 1440];
+// 本地出草稿常用 480/640；更高或更特殊的长边走下面的自定义输入
+const COMBO_RESOLUTIONS = [480, 640, 832, 1280];
+const MIN_CUSTOM_RESOLUTION = 128;
+const MAX_CUSTOM_RESOLUTION = 4096;
 const COMBO_FPS_OPTIONS = [
   { value: 16, label: '16帧' },
   { value: 24, label: '24帧' },
@@ -538,9 +541,9 @@ export default function VideoParamSelector({
                 <div className="img-rp-quality-area mb-2" data-ui-schema-field="rhVideoResolution" data-ui-schema-type="segmented" data-ui-schema-value-type="number" data-ui-schema-default="832">
                   <div className="img-rp-section-label">
                     分辨率（长边）
-                    <span className="rh-tip" data-tooltip="画面长边像素，短边由上方比例换算。分辨率越高细节越清晰、边缘更稳定，显存占用与生成耗时也明显增加。">!</span>
+                    <span className="rh-tip" data-tooltip="画面长边像素，短边由上方比例换算。分辨率越高细节越清晰、边缘更稳定，显存占用与生成耗时也明显增加。最后一格可以填预设以外的值，例如 384。">!</span>
                   </div>
-                  <div className="img-rp-quality-segmented rh-video-resolution-seg">
+                  <div className="img-rp-quality-segmented rh-video-resolution-seg rh-res-seg-with-custom">
                     {COMBO_RESOLUTIONS.map((res) => (
                       <AnimatedButton
                         key={res}
@@ -553,6 +556,31 @@ export default function VideoParamSelector({
                         {res}
                       </AnimatedButton>
                     ))}
+                    <input
+                      type="number"
+                      className="rh-res-custom-input"
+                      aria-label="自定义长边像素"
+                      placeholder="自定义"
+                      min={MIN_CUSTOM_RESOLUTION}
+                      max={MAX_CUSTOM_RESOLUTION}
+                      step={8}
+                      // 选中预设时留空只显示占位符，填了值才算自定义
+                      value={COMBO_RESOLUTIONS.includes(videoResolution) ? '' : videoResolution}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value) && value > 0) onChangeResolution?.(value);
+                      }}
+                      onBlur={(event) => {
+                        const value = Number(event.target.value);
+                        if (event.target.value.trim() && Number.isFinite(value)) {
+                          onChangeResolution?.(Math.min(
+                            MAX_CUSTOM_RESOLUTION,
+                            Math.max(MIN_CUSTOM_RESOLUTION, value),
+                          ));
+                        }
+                        onContinuousEditEnd?.();
+                      }}
+                    />
                   </div>
                 </div>
 

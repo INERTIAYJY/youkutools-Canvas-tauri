@@ -9,6 +9,8 @@ import type {
   ModelOption,
   NodeType,
   ProviderModelSelection,
+  WorkflowCategory,
+  WorkflowDefinition,
 } from '../../../types';
 import { CATEGORY_TO_NODE_TYPES } from '../../../types';
 
@@ -20,7 +22,15 @@ export interface MediaModelOption extends ModelOption {
   mediaKind: MediaModelKind;
   groupId: string;
   groupName: string;
+  /** ComfyUI 工作流才有；生成入口据此走本地工作流而不是接口模型 */
+  workflowId?: string;
 }
+
+const WORKFLOW_MEDIA_KIND: Partial<Record<WorkflowCategory, MediaModelKind>> = {
+  'ai-image': 'image',
+  'ai-video': 'video',
+  'ai-audio': 'audio',
+};
 
 export const defaultModelGroups: ModelGroup[] = [
   // ========================================
@@ -1075,10 +1085,11 @@ export function getConfiguredModelGroups(
   });
 }
 
-/** 节点与对话共用的图片/视频/音频模型目录，不包含工作流。 */
+/** 节点与对话共用的图片/视频/音频模型目录；传入 workflows 时把 ComfyUI 工作流一并列为可选模型。 */
 export function getMediaModelOptions(
   generalModels: GeneralModelConfig[] = [],
   config?: ProviderModelVisibilityConfig,
+  workflows: WorkflowDefinition[] = [],
 ): MediaModelOption[] {
   const mediaTargets: Array<{ mediaKind: MediaModelKind; nodeType: NodeType }> = [
     { mediaKind: 'image', nodeType: 'ai-image' },
@@ -1136,8 +1147,27 @@ export function getMediaModelOptions(
       };
     });
 
+  // ComfyUI 工作流也是一种「媒体模型」：不进目录，对话和 Agent 就看不到本地生成能力
+  const workflowModels: MediaModelOption[] = workflows.flatMap((workflow) => {
+    const mediaKind = WORKFLOW_MEDIA_KIND[workflow.category];
+    if (!mediaKind) return [];
+    return [{
+      value: `comfyui/${workflow.id}`,
+      provider: 'comfyui',
+      label: workflow.name,
+      description: 'ComfyUI 工作流',
+      iconType: 'badge',
+      badgeText: 'CF',
+      nodeTypes: [workflow.category],
+      mediaKind,
+      groupId: 'comfyui',
+      groupName: 'ComfyUI 工作流',
+      workflowId: workflow.id,
+    }];
+  });
+
   const unique = new Map<string, MediaModelOption>();
-  for (const model of [...builtIn, ...custom]) {
+  for (const model of [...builtIn, ...custom, ...workflowModels]) {
     unique.set(`${model.mediaKind}:${model.value}`, model);
   }
   return [...unique.values()];
@@ -1147,9 +1177,10 @@ export function findMediaModelOption(
   modelRef: string,
   generalModels: GeneralModelConfig[] = [],
   config?: ProviderModelVisibilityConfig,
+  workflows: WorkflowDefinition[] = [],
 ): MediaModelOption | undefined {
   const normalized = modelRef.startsWith('general/') ? modelRef : `general/${modelRef}`;
-  return getMediaModelOptions(generalModels, config).find(
+  return getMediaModelOptions(generalModels, config, workflows).find(
     (model) => model.value === modelRef || model.value === normalized,
   );
 }

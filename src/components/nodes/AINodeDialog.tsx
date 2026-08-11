@@ -728,8 +728,9 @@ function AINodeDialog() {
   );
 
   const onChangeVideoResolution = useCallback(
-    (value: number) => updateNodeData(activeNodeId!, { videoResolution: value }),
-    [activeNodeId, updateNodeData]
+    // 自定义长边是逐字输入的，走连续编辑，别把每个键都记成一步撤销
+    (value: number) => updateContinuousNodeData({ videoResolution: value }),
+    [updateContinuousNodeData]
   );
 
   const onChangeVideoFps = useCallback(

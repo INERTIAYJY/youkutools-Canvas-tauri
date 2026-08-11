@@ -103,6 +103,7 @@ export default function ChatPanel({
     generalModels,
     providers,
     dreaminaLoggedIn,
+    workflows,
     updateConfig,
     saveConfig,
     projectMemories,
@@ -130,6 +131,7 @@ export default function ChatPanel({
       generalModels: s.config.generalModels ?? [],
       providers: s.config.providers,
       dreaminaLoggedIn: !!s.config.dreaminaAuth?.loggedIn,
+      workflows: s.workflows,
       updateConfig: s.updateConfig,
       saveConfig: s.saveConfig,
       projectMemories: s.projectMemories,
@@ -159,6 +161,8 @@ export default function ChatPanel({
       const options = getMediaModelOptions(
         effectiveGeneralModels,
         detached ? undefined : mediaCatalogConfig,
+        // 独立窗口拿不到工作流正文，ComfyUI 工作流只在主窗口列出
+        detached ? [] : workflows,
       );
       if (!detached) return options;
       const availability = detachedSnapshot?.mediaModelAvailability;
@@ -173,6 +177,7 @@ export default function ChatPanel({
       detachedSnapshot?.mediaModelAvailability,
       effectiveGeneralModels,
       mediaCatalogConfig,
+      workflows,
     ],
   );
   const localMediaModelAvailability = useMemo(

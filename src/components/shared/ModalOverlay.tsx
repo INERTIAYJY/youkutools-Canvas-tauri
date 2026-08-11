@@ -9,7 +9,7 @@ import {
   useMotionValue,
   useReducedMotion,
 } from 'framer-motion';
-import { fadeFast, fadeNormal, springSmooth } from '../../utils/motion';
+import { fadeFast, fadeNormal, panelMotion, springSmooth } from '../../utils/motion';
 
 export default function ModalOverlay({
   isOpen,
@@ -175,25 +175,7 @@ export default function ModalOverlay({
             tabIndex={-1}
             className={`relative glass-panel border rounded-2xl shadow-2xl overflow-hidden overscroll-contain flex flex-col ${className}`}
             style={draggable ? { x: dragX, y: dragY } : undefined}
-            initial={reduceMotion
-              ? { opacity: 0 }
-              : quickMotion
-                ? { transform: 'translate3d(0, 6px, 0) scale(0.99)' }
-              : draggable
-                ? { opacity: 0, scale: 0.94 }
-                : { opacity: 0, scale: 0.94, y: 14 }}
-            animate={quickMotion
-              ? { transform: 'translate3d(0, 0, 0) scale(1)' }
-              : draggable
-                ? { opacity: 1, scale: 1 }
-                : { opacity: 1, scale: 1, y: 0 }}
-            exit={reduceMotion
-              ? { opacity: 0 }
-              : quickMotion
-                ? { transform: 'translate3d(0, 4px, 0) scale(0.995)' }
-              : draggable
-                ? { opacity: 0, scale: 0.96 }
-                : { opacity: 0, scale: 0.96, y: 10 }}
+            {...panelMotion(Boolean(reduceMotion), quickMotion, draggable)}
             transition={reduceMotion || quickMotion ? fadeFast : springSmooth}
             drag={draggable}
             dragControls={dragControls}

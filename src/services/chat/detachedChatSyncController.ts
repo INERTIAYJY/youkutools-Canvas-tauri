@@ -83,6 +83,8 @@ export function getMediaModelAvailability(
   dreaminaLoggedIn: boolean,
 ): Record<string, boolean> {
   return Object.fromEntries(options.map((option) => {
+    // ponytail: 工作流没有 API Key 可查，服务地址缺失由生成入口报错，这里只管「可选」
+    if (option.workflowId) return [option.value, true];
     if (option.provider === 'general') {
       const generalModel = generalModels.find(
         (model) => `general/${model.id}` === option.value,

@@ -238,6 +238,39 @@
   padding: 4px 8px;
   font-size: 11px;
 }
+/* 预设 + 自定义输入同排：最后一格是输入框 */
+.rh-res-seg-with-custom {
+  grid-template-columns: repeat(5, 1fr);
+}
+.rh-res-custom-input {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px dashed var(--theme-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--theme-text);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: center;
+  outline: none;
+  transition: var(--transition-colors);
+}
+.rh-res-custom-input:hover {
+  border-color: var(--theme-text-muted);
+}
+.rh-res-custom-input:focus {
+  border-style: solid;
+  border-color: var(--brand);
+}
+.rh-res-custom-input::placeholder {
+  color: var(--theme-text-muted);
+}
+/* 一格只有 60px 宽，加减按钮挤掉数字 */
+.rh-res-custom-input::-webkit-inner-spin-button,
+.rh-res-custom-input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
 /* ── 参考帧 / 参考角色：按需添加的参考图 ── */
 .rh-video-ref-head {
   display: flex;

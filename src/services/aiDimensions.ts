@@ -52,6 +52,14 @@ export function resolveVideoDurationSeconds(
     : videoDurationFromFrames(frameCount, fps);
 }
 
+/** 把 480p/720p 这类档位换算成长边像素，供只认数字长边的本地工作流使用。 */
+export function videoLongSideFromLabel(label: string | undefined): number | undefined {
+  const longSideByLabel: Record<string, number> = {
+    '480p': 854, '720p': 1280, '1080p': 1920, '4k': 3840,
+  };
+  return label ? longSideByLabel[label.toLowerCase()] : undefined;
+}
+
 /** 视频尺寸按 8 对齐：ComfyUI latent 与多数视频模型都要求边长是 8 的倍数。 */
 function alignTo8(value: number): number {
   return Math.max(64, Math.round(value / 8) * 8);

@@ -514,6 +514,16 @@ pub async fn launch_comfyui(webview: tauri::Webview, comfy_path: String) -> Resu
     }
 }
 
+/// 把下载结果告诉 ComfyUI 页面。wry 默认把下载标记为已处理，WebView2 既不弹「另存为」
+/// 也不显示下载提示，不回个话用户就以为导出没生效。
+fn notify_comfyui_download(webview: &tauri::Webview, path: Option<&Path>, success: bool) {
+    let path_text = path.map(|item| item.display().to_string()).unwrap_or_default();
+    let encoded = serde_json::to_string(&path_text).unwrap_or_else(|_| "\"\"".to_string());
+    let _ = webview.eval(&format!(
+        "window.__AI_CANVAS_COMFY__?.notifyDownload?.({success}, {encoded});"
+    ));
+}
+
 /// Tauri command: 在应用内的独立 Webview 窗口中打开 ComfyUI 页面。
 #[tauri::command]
 pub async fn open_comfyui_window(
@@ -583,6 +593,14 @@ pub async fn open_comfyui_window(
             // Tauri 默认的原生拖放处理会吞掉 HTML5 drag 事件，ComfyUI 就收不到拖进来的
             // 工作流 JSON / 图片；关掉它交还给页面自己处理
             .disable_drag_drop_handler()
+            // wry 默认注册的下载处理器会把下载标记为已处理，WebView2 自带的「另存为」
+            // 和下载提示都不会出现，导出的工作流悄悄落到「下载」目录里。这里补上反馈。
+            .on_download(|webview, event| {
+                if let tauri::webview::DownloadEvent::Finished { path, success, .. } = event {
+                    notify_comfyui_download(&webview, path.as_deref(), success);
+                }
+                true
+            })
             .visible(true);
     if use_local_bridge {
         let navigation_app = app.clone();

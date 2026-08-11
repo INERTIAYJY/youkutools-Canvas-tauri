@@ -12,6 +12,7 @@ import { NODE_TYPE_CONFIG } from '../types';
 import AnimatedButton from './shared/AnimatedButton';
 import PopupCloseButton from './shared/PopupCloseButton';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { isTauriEnv, saveAgentTextOutput } from '../services/fileService';
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 type FilterType = 'all' | 'ai-text' | 'ai-image' | 'ai-video' | 'ai-audio';
@@ -259,11 +260,19 @@ export default function OutputHistoryPanel() {
         error: e.error,
       }));
       const json = JSON.stringify(data, null, 2);
+      const fileName = `ai-output-history-${new Date().toISOString().slice(0, 10)}.json`;
+      // Tauri 里 <a download> 不会弹保存对话框，文件悄悄落到「下载」目录，得走原生对话框
+      if (isTauriEnv()) {
+        const saved = await saveAgentTextOutput(json, fileName, '导出历史记录');
+        if (!saved) return; // 用户取消
+        showToast(`已导出历史记录到 ${saved.fileName}`);
+        return;
+      }
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `ai-output-history-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = fileName;
       a.click();
       URL.revokeObjectURL(url);
       showToast('已导出历史记录');

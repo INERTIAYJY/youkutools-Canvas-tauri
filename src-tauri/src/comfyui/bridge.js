@@ -27,9 +27,21 @@
 
   const getComfyApp = () => window.app;
 
+  // 宿主动作（拖窗口 / 最小化 / 保存…）靠一次导航传递，宿主会在 on_navigation 里拦下，
+  // 页面并不会真的跳走；但浏览器仍会先跑 beforeunload，工作流有改动时 ComfyUI 就弹
+  // 「是否离开网站」。这段时间内把该事件掐掉，真正的关闭由 Tauri 处理，不经过它。
+  const HOST_ACTION_UNLOAD_GRACE_MS = 2000;
+  let hostActionAt = 0;
+  window.addEventListener('beforeunload', (event) => {
+    if (Date.now() - hostActionAt > HOST_ACTION_UNLOAD_GRACE_MS) return;
+    // 本脚本在文档最开始注入，注册顺序早于 ComfyUI 自己的监听，掐断后它没机会设 returnValue
+    event.stopImmediatePropagation();
+  }, true);
+
   const requestHostAction = (action) => {
     const url = new URL('/__ai_canvas_comfy_action__', window.location.origin);
     url.searchParams.set('action', action);
+    hostActionAt = Date.now();
     window.location.assign(url.href);
   };
 
@@ -959,6 +971,13 @@
     consumePending,
     loadWorkflow,
     saveToAICanvas,
+    // 宿主下载完成后回调，告知文件落在哪 —— WebView2 自带的下载提示被 wry 关掉了
+    notifyDownload: (success, path) => showToast(
+      getComfyApp(),
+      success ? 'success' : 'error',
+      success ? '已下载' : '下载失败',
+      success ? `已保存到 ${path}` : '',
+    ),
   };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {

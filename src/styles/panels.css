@@ -74,7 +74,10 @@
   width: 480px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 64px);
-  overflow-y: auto;
+  /* 头部与导入表单固定，只让已导入列表滚动 */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background:
     linear-gradient(var(--glass-panel-bg), var(--glass-panel-bg)) padding-box,
     var(--glass-bevel-border) border-box;
@@ -121,6 +124,34 @@
 /* Panel section */
 .wf-panel-section {
   padding: 6px 10px 11px;
+  flex: none;
+}
+/* 已导入列表：panel 内唯一的滚动区 */
+.wf-panel-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.wf-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.wf-list-header .wf-section-title {
+  margin-bottom: 0;
+}
+.wf-filter-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.wf-filter-chip {
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 6px;
 }
 .wf-section-title {
   display: flex;
@@ -153,17 +184,17 @@
 
 /* Form fields */
 .wf-field {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 .wf-label {
   display: block;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--theme-text-secondary);
-  margin-bottom: 5px;
+  margin-bottom: 3px;
 }
 .wf-input {
   width: 100%;
-  padding: 7px 10px;
+  padding: 5px 8px;
   background: var(--white-alpha-04);
   border: 1px solid var(--white-alpha-08);
   border-radius: 7px;
@@ -187,8 +218,8 @@
   flex-wrap: wrap;
 }
 .wf-cat-chip {
-  padding: 4px 10px;
-  font-size: 12px;
+  padding: 3px 9px;
+  font-size: 11px;
   border: 1px solid var(--white-alpha-08);
   background: var(--white-alpha-03);
   color: var(--theme-text-secondary);
@@ -211,7 +242,7 @@
 .wf-file-area {
   border: 1px dashed var(--separator-color);
   border-radius: 8px;
-  padding: 11px;
+  padding: 7px;
   cursor: pointer;
   transition: border-color var(--transition-base), background var(--transition-base);
 }
@@ -221,11 +252,11 @@
 }
 .wf-file-placeholder {
   display: flex;
-  flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   color: var(--theme-text-muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 .wf-file-selected {
   display: flex;
@@ -254,9 +285,9 @@
 .wf-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  font-size: 13px;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
   cursor: pointer;

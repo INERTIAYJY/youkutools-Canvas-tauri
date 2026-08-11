@@ -45,6 +45,12 @@ function pickJsonFile(): Promise<{ name: string; content: string } | null> {
   });
 }
 
+/** 已导入列表的分类筛选项 */
+const LIST_FILTERS: { value: WorkflowCategory | 'all'; label: string }[] = [
+  { value: 'all', label: '全部' },
+  ...CATEGORIES,
+];
+
 /** 输入/输出节点类型 → 显示图标 */
 const IONODE_ICONS: Record<WorkflowIONodeType, string> = {
   prompt: '📝',
@@ -123,6 +129,7 @@ export default function WorkflowPanel() {
   const [fileName, setFileName] = useState('');
   const [fileContent, setFileContent] = useState('');
   const [ioNodes, setIoNodes] = useState<WorkflowIONode[]>([]);
+  const [listFilter, setListFilter] = useState<WorkflowCategory | 'all'>('all');
   const [uploadError, setUploadError] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
@@ -255,10 +262,13 @@ export default function WorkflowPanel() {
   }, [comfyUIUrl, showToast]);
 
   // Filter workflows by category for the preview list
-  const workflowsByCategory = CATEGORIES.map((cat) => ({
-    ...cat,
-    items: workflows.filter((w) => w.category === cat.value),
-  })).filter((g) => g.items.length > 0);
+  const workflowsByCategory = CATEGORIES
+    .filter((cat) => listFilter === 'all' || cat.value === listFilter)
+    .map((cat) => ({
+      ...cat,
+      items: workflows.filter((w) => w.category === cat.value),
+    }))
+    .filter((g) => g.items.length > 0);
 
   return (
     <AnimatePresence>
@@ -354,7 +364,7 @@ export default function WorkflowPanel() {
                 </div>
               ) : (
                 <div className="wf-file-placeholder">
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="17 8 12 3 7 8" />
                     <line x1="12" y1="3" x2="12" y2="15" />
@@ -387,7 +397,7 @@ export default function WorkflowPanel() {
           <div className="wf-actions-row">
             <motion.button
               type="button"
-              className="wf-btn wf-btn-primary"
+              className="wf-btn wf-btn-primary ml-auto"
               onClick={handleSubmit}
               disabled={!fileContent}
               whileHover={fileContent ? { scale: 1.03 } : {}}
@@ -425,16 +435,40 @@ export default function WorkflowPanel() {
         </div>
 
         {/* Existing workflows list */}
-        <div className="wf-panel-section">
-          <span className="wf-section-title">
-            已导入工作流
-            <span className="wf-count">{workflows.length}</span>
-          </span>
+        <div className="wf-panel-section wf-panel-list">
+          <div className="wf-list-header">
+            <span className="wf-section-title">
+              已导入工作流
+              <span className="wf-count">{workflows.length}</span>
+            </span>
+            <div className="wf-filter-row">
+              {LIST_FILTERS.map((cat) => (
+                <button
+                  key={cat.value}
+                  type="button"
+                  className={`wf-cat-chip wf-filter-chip ${listFilter === cat.value ? 'active' : ''}`}
+                  onClick={() => setListFilter(cat.value)}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="wf-section-rule" />
 
           <AnimatePresence mode="popLayout">
-            {workflows.length === 0 ? (
+            {workflows.length > 0 && workflowsByCategory.length === 0 ? (
               <motion.div
+                key="filtered-empty"
+                className="wf-empty"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                <span>该分类下暂无工作流</span>
+              </motion.div>
+            ) : workflows.length === 0 ? (
+              <motion.div
+                key="empty"
                 className="wf-empty"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -448,7 +482,7 @@ export default function WorkflowPanel() {
                 <span>暂无工作流，请导入 ComfyUI 工作流文件</span>
               </motion.div>
             ) : (
-              <motion.div className="wf-list">
+              <motion.div key="list" className="wf-list">
                 {workflowsByCategory.map((group, gi) => (
                   <motion.div
                     key={group.value}

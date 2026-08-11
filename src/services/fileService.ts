@@ -663,12 +663,13 @@ export async function readAgentAuthorizedTextFile(
 export async function saveAgentTextOutput(
   content: string,
   suggestedName: string,
+  title = '保存 Agent 输出',
 ): Promise<{ fileName: string } | null> {
   if (!isTauriEnv()) throw new Error('本地文件写入仅在 Tauri 桌面环境可用');
   const safeName = sanitizeFileName(suggestedName || 'agent-output.txt');
   const destPath = await save({
     defaultPath: safeName,
-    title: '保存 Agent 输出',
+    title,
     filters: [{ name: '文本文件', extensions: ['txt', 'md', 'json', 'csv'] }],
   });
   if (!destPath) return null;

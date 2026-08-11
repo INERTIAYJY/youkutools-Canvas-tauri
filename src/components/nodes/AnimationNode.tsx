@@ -11,6 +11,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { buildAnimationReskinPrompt } from '../../services/ai/animationPrompt';
 import { collectConnectedReferenceMedia } from '../../services/ai/connectedReferenceMedia';
+import { exportSpriteFrames } from '../../services/spriteExportService';
 import { batchExecuteNodes } from '../../utils/batchExecute';
 import { createPresetNode } from './shared/toolbar/presetAction';
 import NodeLabel from './shared/NodeLabel';
@@ -67,18 +68,72 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
   const previewMode = data.animationPreviewMode ?? 'playing';
   const displaySrc = (data.imageUrl || data.thumbnailUrl) as string | undefined;
   const grid = ANIMATION_FRAME_GRIDS[frameCount];
+  const fps = data.animationFps ?? 8;
+  const loop = data.animationLoop ?? true;
   const [frameIndex, setFrameIndex] = useState(0);
+  const [paused, setPaused] = useState(false);
   const [reskinning, setReskinning] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const pageVisible = usePageVisible();
   const { displayLabel, handleRename } = useNodeRename(id, data, '生成动画');
+  const visibleFrameIndex = frameIndex % frameCount;
+
+  // 单次播放走到末帧即停：由此推出「停住」，定时器随之拆掉，不需要额外的 setState
+  const endedOnce = !loop && visibleFrameIndex === frameCount - 1;
+  const stopped = paused || endedOnce;
 
   useEffect(() => {
-    if (!pageVisible || !displaySrc || previewMode !== 'playing') return;
+    if (!pageVisible || !displaySrc || previewMode !== 'playing' || stopped) return;
     const timer = window.setInterval(() => {
       setFrameIndex((current) => (current + 1) % frameCount);
-    }, 125);
+    }, 1000 / fps);
     return () => window.clearInterval(timer);
-  }, [displaySrc, frameCount, pageVisible, previewMode]);
+  }, [displaySrc, fps, frameCount, pageVisible, previewMode, stopped]);
+
+  const handleTogglePlay = useCallback(() => {
+    // 单次播放停在末帧后再点播放，从头放一遍
+    if (endedOnce) {
+      setFrameIndex(0);
+      setPaused(false);
+      return;
+    }
+    setPaused((current) => !current);
+  }, [endedOnce]);
+
+  const handleStepFrame = useCallback((delta: number) => {
+    setPaused(true);
+    setFrameIndex((current) => (current % frameCount + delta + frameCount) % frameCount);
+  }, [frameCount]);
+
+  const handleExport = useCallback(async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    const store = useAppStore.getState();
+    const filePath = data.filePath as string | undefined;
+    if (!filePath) {
+      store.showToast('该节点没有本地文件，无法切帧导出', 'error');
+      return;
+    }
+    setExporting(true);
+    try {
+      const result = await exportSpriteFrames({
+        inputPath: filePath,
+        defaultName: `${displayLabel}_${action}_${frameCount}f`,
+        cols: grid.cols,
+        rows: grid.rows,
+        frameCount,
+        fps,
+      });
+      if (result) {
+        store.showToast(result.files.length > 1
+          ? `已导出 ${result.files.length} 张序列帧（${result.frame_width}×${result.frame_height}）`
+          : `GIF 已导出（${result.frame_width}×${result.frame_height} · ${fps}fps）`);
+      }
+    } catch (error) {
+      store.showToast(error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      setExporting(false);
+    }
+  }, [action, data.filePath, displayLabel, fps, frameCount, grid.cols, grid.rows]);
 
   const handlePreviewModeChange = useCallback((mode: AnimationPreviewMode) => {
     updateNodeDataTransient(id, { animationPreviewMode: mode });
@@ -145,7 +200,6 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
     else live.showToast(fail ? '换皮失败' : '请先为该节点选择模型', 'error');
   }, [action, frameCount, id, nodeHeight, nodeWidth, previewMode]);
 
-  const visibleFrameIndex = frameIndex % frameCount;
   const column = visibleFrameIndex % grid.cols;
   const row = Math.floor(visibleFrameIndex / grid.cols);
   const generatedSheetAspect = data.imageWidth && data.imageHeight
@@ -222,6 +276,67 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
               <Icon icon="mdi:grid" width="13" height="13" />
             </button>
           </div>
+
+          {displaySrc && previewMode === 'playing' && (
+            <div className="animation-transport nodrag nopan" aria-label="播放控制">
+              <button
+                type="button"
+                data-tooltip={stopped ? '播放' : '暂停'}
+                aria-label={stopped ? '播放' : '暂停'}
+                onClick={(event) => { event.stopPropagation(); handleTogglePlay(); }}
+              >
+                <Icon icon={stopped ? 'mdi:play' : 'mdi:pause'} width="13" height="13" />
+              </button>
+              <button
+                type="button"
+                data-tooltip="上一帧"
+                aria-label="上一帧"
+                onClick={(event) => { event.stopPropagation(); handleStepFrame(-1); }}
+              >
+                <Icon icon="mdi:skip-previous" width="13" height="13" />
+              </button>
+              <span className="animation-transport-counter">{visibleFrameIndex + 1}/{frameCount}</span>
+              <button
+                type="button"
+                data-tooltip="下一帧"
+                aria-label="下一帧"
+                onClick={(event) => { event.stopPropagation(); handleStepFrame(1); }}
+              >
+                <Icon icon="mdi:skip-next" width="13" height="13" />
+              </button>
+              <input
+                type="range"
+                className="animation-fps-range"
+                min={1}
+                max={24}
+                step={1}
+                value={fps}
+                data-tooltip={`${fps} fps`}
+                aria-label="播放帧率"
+                onChange={(event) => {
+                  updateNodeDataTransient(id, { animationFps: Number(event.target.value) });
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              />
+              <span className="animation-transport-counter">{fps}</span>
+              <button
+                type="button"
+                className={loop ? 'active' : ''}
+                data-tooltip={loop ? '循环播放' : '单次播放'}
+                aria-label={loop ? '循环播放' : '单次播放'}
+                aria-pressed={loop}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  updateNodeDataTransient(id, { animationLoop: !loop });
+                  if (loop) return;
+                  setFrameIndex(0);
+                  setPaused(false);
+                }}
+              >
+                <Icon icon={loop ? 'mdi:repeat' : 'mdi:repeat-once'} width="13" height="13" />
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="animation-param-bar nodrag nopan">
@@ -230,18 +345,32 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
             {ANIMATION_ACTION_LABELS[action]}
           </span>
           {displaySrc && (
-            <button
-              type="button"
-              className="animation-reskin-btn"
-              data-tooltip="一键换皮：用连入的角色图替换外观，保留骨骼与动作"
-              disabled={reskinning}
-              onClick={handleReskin}
-            >
-              {reskinning
-                ? <span className="spinner-sm" />
-                : <Icon icon="mdi:hanger" width="13" height="13" />}
-              换皮
-            </button>
+            <span className="animation-param-actions">
+              <button
+                type="button"
+                className="animation-param-btn"
+                data-tooltip="切帧导出：选 .gif 出动图，选 .png 出序列帧"
+                disabled={exporting}
+                onClick={handleExport}
+              >
+                {exporting
+                  ? <span className="spinner-sm" />
+                  : <Icon icon="mdi:tray-arrow-down" width="13" height="13" />}
+                导出
+              </button>
+              <button
+                type="button"
+                className="animation-param-btn"
+                data-tooltip="一键换皮：用连入的角色图替换外观，保留骨骼与动作"
+                disabled={reskinning}
+                onClick={handleReskin}
+              >
+                {reskinning
+                  ? <span className="spinner-sm" />
+                  : <Icon icon="mdi:hanger" width="13" height="13" />}
+                换皮
+              </button>
+            </span>
           )}
         </div>
 

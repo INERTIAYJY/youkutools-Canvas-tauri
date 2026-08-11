@@ -28,6 +28,7 @@ mod path_policy;
 mod project_archive;
 mod provider_docs;
 mod secret_store;
+mod sprite_export;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
 static CHAT_WINDOW_LOCK_OFFSET: Mutex<(i32, i32)> = Mutex::new((0, 0));
@@ -1000,6 +1001,7 @@ pub fn run() {
             onnx::image_upscale,
             onnx::subject_matting,
             onnx::character_direction_grid,
+            sprite_export::export_sprite_frames,
             onnx::download_onnx_model,
             onnx::get_onnx_gpu_status,
             mcp_bridge::mcp_bridge_start,

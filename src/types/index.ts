@@ -188,6 +188,8 @@ export interface BaseNodeData {
   animationAction?: AnimationAction; // 角色逐帧动画动作
   animationFrames?: 6 | 8 | 10 | 12 | 16 | 20; // Sprite Sheet 总帧数
   animationPreviewMode?: AnimationPreviewMode; // 动图预览 / 静态排布
+  animationFps?: number;      // 预览播放帧率（1-24），默认 8
+  animationLoop?: boolean;    // 预览循环播放，false 时播到末帧停住，默认 true
   seedanceResolution?: string;// Seedance 分辨率：'480p' | '720p' | '1080p' | '4k'
   seedanceRatio?: string;     // Seedance 宽高比：'16:9' | '4:3' | '1:1' | '3:4' | '9:16' | '21:9' | 'adaptive'
   seedanceDuration?: number;  // Seedance 时长（整数秒）：2-15

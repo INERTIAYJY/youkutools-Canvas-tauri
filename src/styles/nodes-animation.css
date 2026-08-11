@@ -212,7 +212,13 @@
   border-color: var(--brand-alpha-25);
 }
 
-.animation-reskin-btn {
+.animation-param-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.animation-param-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -228,19 +234,88 @@
   flex-shrink: 0;
 }
 
-.animation-reskin-btn:hover:not(:disabled),
-.animation-reskin-btn:focus-visible {
+.animation-param-btn:hover:not(:disabled),
+.animation-param-btn:focus-visible {
   border-color: var(--brand-alpha-25);
   color: var(--theme-text);
 }
 
-.animation-reskin-btn:disabled {
+.animation-param-btn:disabled {
   opacity: 0.55;
   cursor: default;
 }
 
+/* 播放控制条：悬停预览区才浮出，平时不挡角色 */
+.animation-transport {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  left: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 3px 5px;
+  border: 1px solid var(--glass-ring);
+  border-radius: 7px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur-sm));
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.animation-preview:hover .animation-transport,
+.animation-transport:focus-within {
+  opacity: 1;
+}
+
+.animation-transport button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--theme-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.animation-transport button:hover {
+  color: var(--theme-text);
+  background: var(--theme-hover);
+}
+
+.animation-transport button.active {
+  color: var(--theme-text);
+  background: var(--brand-alpha-20);
+}
+
+.animation-transport-counter {
+  color: var(--theme-text-secondary);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.animation-fps-range {
+  width: 100%;
+  min-width: 34px;
+  height: 20px;
+  margin: 0 2px;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animation-pose-btn {
+    transition-duration: 1ms;
+  }
+
+  .animation-transport {
     transition-duration: 1ms;
   }
 }

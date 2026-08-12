@@ -2001,6 +2001,35 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 差异与编码：`git diff --check` 通过；20 个改动文本文件严格 UTF-8 解码和常见乱码扫描通过。
 - 回滚按“详情 UI → 工具展示快照 → 媒体显式参数”倒序进行；可选字段由旧读取逻辑自然忽略，无数据迁移。
 
+### 8.21 显式 Skill 任务级确定性注入
+
+#### 目标与边界
+
+- 用户在本轮明确选择的 `@skill` 在 AgentTask 创建时直接捕获并注入，不要求模型再次调用 `skill_load`。
+- Skill 正文、名称、版本和 `allowed-tools` 固定为任务级不可变快照；排队、审批等待、继续和应用重启后保持一致。
+- 正文先移除 frontmatter，再应用单个 12,000 字符、合计 24,000 字符预算；每个任务最多 4 个显式 Skill，超出时明确拒绝启动而不是静默漏载。
+- Skill 快照作为不可信说明资料注入，不能修改任务目标、Agent 模式、Policy、确认策略或工具权限；工具声明仍只能缩小 Registry。
+- 旧任务没有 `skillBindings` 时保留既有实时展开兼容路径；不提升 IndexedDB schema，不新增依赖、网络、文件或 Tauri 权限。
+
+#### 完成状态
+
+- [x] 新增 `AgentSkillBinding` 持久化类型，并在任务创建和读取时复制嵌套工具数组。
+- [x] `skillPromptService` 支持显式引用捕获、正文预算、标签清洗、不可变展开和绑定工具上限计算。
+- [x] 对话控制器创建任务时一次性固定 Skill；任务执行与恢复优先读取快照，不再依赖全局 Skill 当前内容。
+- [x] 第 5 个显式 Skill 会得到可见错误，不创建不完整或权限含糊的任务。
+- [x] 任务时间线显示“已注入 Skill”和名称，但不展示 Skill 正文。
+- [x] 主动发现的 `skill_load` / `skill_read_file` 保持原有渐进披露行为，与显式绑定互不替代。
+
+#### 验证与回滚
+
+- 定向测试：Skill 捕获与展开、任务持久化、对话控制器和时间线组件共 4 个文件、25 项通过。
+- 全量测试：`npm test` 共 155 个文件、1208 项通过。
+- 类型与 Lint：`npm run typecheck` 通过；本阶段 10 个 TypeScript/TSX 文件定向 ESLint 通过。
+- `npm run test:typecheck` 仍被既有 `tests/services/chat/comfyTools.test.ts` 夹具缺少 `timestamp` / `status` 阻断；全量 `npm run check` 仍在 lint 阶段被既有 ESLint 10 / parser 错误 `scopeManager.addGlobals is not a function` 阻断。
+- 生产构建：`npx vite build --outDir <系统临时目录>` 通过；仅保留既有大 chunk 和外部输出目录提示。
+- 差异与编码：`git diff --check` 通过；本阶段 13 个文本文件严格 UTF-8 解码和常见乱码扫描通过。
+- 回滚时先恢复对话执行链到 `expandSkillReferences()`，再移除时间线标识和可选 `skillBindings` 字段；旧数据库可自然忽略字段，无迁移或数据清理。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -2128,6 +2157,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-12 | 8.21 | 用户显式引用的 Skill 在 AgentTask 创建时固定为受预算约束的不可变快照，恢复时确定性注入，并在时间线显示已注入名称。 |
 | 2026-08-12 | 8.20 | Agent 工具调用增加脱敏结构化参数与结果快照、媒体参考预览、节点创建详情和更新前后差异；视频比例、分辨率、时长在审批前解析并锁定。 |
 | 2026-07-16 | P3-0 | 完成 Agent 产品边界、B/C 模式、工具权限、上下文、记忆、后台执行、重试和时间线方案确认；创建阶段实施文档。 |
 | 2026-07-16 | P3-A | 完成会话级 B/C 模式、AgentTask v12 持久化、任务状态机、后台消息保留、独立窗口同步和会话状态徽标。 |

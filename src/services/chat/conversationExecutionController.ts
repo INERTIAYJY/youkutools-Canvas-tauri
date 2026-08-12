@@ -29,8 +29,12 @@ import {
 import { getAvailableAgentTools } from './toolRegistry';
 import { ensureAgentToolsRegistered } from './tools';
 import {
+  captureExplicitSkillBindings,
+  expandSkillBindings,
   expandSkillReferences,
-  resolveSkillToolAllowlist,
+  resolveReferencedSkills,
+  resolveSkillBindingToolAllowlist,
+  SKILL_CONTENT_LIMITS,
 } from '../skillPromptService';
 import { useAppStore } from '../../store/useAppStore';
 import type { ChatMessage } from '../../types/chat';
@@ -240,13 +244,19 @@ function startAgentMessageExecution({
 
   try {
     ensureAgentToolsRegistered();
+    const referencedSkills = resolveReferencedSkills(text, store.userSkills);
+    if (referencedSkills.length > SKILL_CONTENT_LIMITS.maxExplicitBindings) {
+      throw new Error(`单个任务最多注入 ${SKILL_CONTENT_LIMITS.maxExplicitBindings} 个 Skill`);
+    }
+    const skillBindings = captureExplicitSkillBindings(text, store.userSkills);
     const task = store.createAgentTask({
       projectId,
       conversationId,
       userMessageId,
       mode,
       goal: text,
-      toolAllowlist: resolveSkillToolAllowlist(text, store.userSkills),
+      toolAllowlist: resolveSkillBindingToolAllowlist(skillBindings),
+      skillBindings,
     });
     taskId = task.id;
     store.updateMessage(assistantMessageId, { agentTaskId: task.id });
@@ -372,7 +382,9 @@ function driveAgentTask(
         return runAgentLoop({
           taskId,
           systemPrompt: buildAssistantSystemPrompt({ agentTools: true }),
-          userMessage: expandSkillReferences(text, store.userSkills),
+          userMessage: task.skillBindings === undefined
+            ? expandSkillReferences(text, store.userSkills)
+            : expandSkillBindings(text, task.skillBindings),
           excludeMessageIds: [userMessageId, assistantMessageId],
           signal,
           callbacks: {

@@ -105,6 +105,69 @@ describe('conversation execution controller', () => {
     }));
   });
 
+  it('captures explicit Skill content and tool restrictions when the task is created', () => {
+    useAppStore.setState({
+      userSkills: [{
+        id: 'skill-1',
+        name: 'Canvas audit',
+        description: 'Audit the canvas',
+        fileName: 'SKILL.md',
+        content: '---\nname: Canvas audit\n---\n\n# Fixed audit rules',
+        sourceType: 'file',
+        manifest: {
+          version: '2.0.0',
+          allowedTools: ['canvas_get_state'],
+        },
+        createdAt: 1,
+      }],
+    });
+
+    submitConversationMessage({
+      content: '检查当前项目 @skill{skill-1|Canvas audit}',
+      conversationId: 'conversation-1',
+    });
+
+    const task = useAppStore.getState().agentTasks[0];
+    expect(task.skillBindings).toEqual([{
+      skillId: 'skill-1',
+      name: 'Canvas audit',
+      version: '2.0.0',
+      content: '# Fixed audit rules',
+      allowedTools: ['canvas_get_state'],
+    }]);
+    expect(task.toolAllowlist).toEqual(['canvas_get_state']);
+  });
+
+  it('rejects more explicit Skills than can be represented by the task snapshot', () => {
+    useAppStore.setState({
+      userSkills: Array.from({ length: 5 }, (_, index) => ({
+        id: `skill-${index + 1}`,
+        name: `Skill ${index + 1}`,
+        description: 'Test skill',
+        fileName: 'SKILL.md',
+        content: `# Skill ${index + 1}`,
+        sourceType: 'file' as const,
+        createdAt: index + 1,
+      })),
+    });
+    const refs = useAppStore.getState().userSkills
+      .map((item) => `@skill{${item.id}|${item.name}}`)
+      .join(' ');
+
+    const result = submitConversationMessage({
+      content: `检查画布 ${refs}`,
+      conversationId: 'conversation-1',
+    });
+
+    expect(result).toMatchObject({ status: 'started', taskId: undefined });
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+    expect(useAppStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      status: 'error',
+      content: '处理失败: 单个任务最多注入 4 个 Skill',
+    });
+  });
+
   it('records an interjection without creating another assistant task', () => {
     schedulerMocks.activeTaskId = 'task-active';
 

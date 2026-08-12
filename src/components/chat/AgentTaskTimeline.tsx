@@ -237,6 +237,16 @@ export default function AgentTaskTimeline({
         </p>
       )}
 
+      {!!task.skillBindings?.length && (
+        <div className="mt-1 flex min-w-0 items-start gap-1.5 pl-5 text-[10px] leading-4 text-canvas-text-muted">
+          <Icon icon="mdi:book-check-outline" width="13" className="mt-0.5 shrink-0 text-indigo-300/80" />
+          <span className="shrink-0">已注入 Skill</span>
+          <span className="min-w-0 truncate text-canvas-text-secondary">
+            {task.skillBindings.map((binding) => binding.name).join('、')}
+          </span>
+        </div>
+      )}
+
       {expanded && metrics && (metrics.inputTokens > 0 || metrics.outputTokens > 0 || metrics.policyDenied > 0 || metrics.retryCount > 0) && (
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-5 text-[10px] tabular-nums text-canvas-text-muted">
           {totalTokens > 0 && <span>{totalTokens.toLocaleString()} token</span>}

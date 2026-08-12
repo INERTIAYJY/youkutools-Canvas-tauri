@@ -272,6 +272,19 @@ export interface AgentReplanRequest {
   reason: AgentReplanReason;
 }
 
+/**
+ * 用户显式引用 Skill 在任务创建时形成的不可变快照。
+ * 任务恢复时只读取该快照，避免全局 Skill 的后续编辑或删除改变既有任务语义。
+ */
+export interface AgentSkillBinding {
+  skillId: string;
+  name: string;
+  version?: string;
+  content: string;
+  /** 存在时只能缩小任务可见工具集合；空数组表示该 Skill 不允许任何工具。 */
+  allowedTools?: string[];
+}
+
 export interface AgentTask {
   id: string;
   projectId: string;
@@ -291,6 +304,8 @@ export interface AgentTask {
   budget: AgentTaskBudget;
   /** 任务创建时由用户显式引用的 Skill 计算，只能缩小 Registry 可见集合。 */
   toolAllowlist?: string[];
+  /** 任务创建时固定的显式 Skill 内容；undefined 仅用于兼容旧任务。 */
+  skillBindings?: AgentSkillBinding[];
   /** 只读专家任务的父任务；存在时嵌套深度固定为 1。 */
   parentTaskId?: string;
   expertRole?: AgentExpertRole;

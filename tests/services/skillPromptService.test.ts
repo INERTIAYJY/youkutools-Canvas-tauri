@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  captureExplicitSkillBindings,
+  expandSkillBindings,
   expandSkillReferences,
+  resolveSkillBindingToolAllowlist,
   SKILL_CONTENT_LIMITS,
   truncateSkillContent,
 } from '../../src/services/skillPromptService';
@@ -101,5 +104,97 @@ describe('expandSkillReferences budget', () => {
       [skill({ content: '规则：\n{{ 文章内容 }}\n输出摘要。' })],
     );
     expect(expanded).toBe('规则：\n总结这段话\n输出摘要。');
+  });
+});
+
+describe('explicit Skill task bindings', () => {
+  it('captures a sanitized immutable snapshot with manifest restrictions', () => {
+    const skills = [skill({
+      content: '---\nname: ignored\n---\n\n# Bound instructions',
+      manifest: {
+        version: '1.2.3',
+        allowedTools: ['canvas_get_state', 'canvas_get_state', 'canvas_list_nodes'],
+      },
+    })];
+
+    const bindings = captureExplicitSkillBindings(
+      '检查画布 @skill{skill-1|Canvas audit}',
+      skills,
+    );
+
+    expect(bindings).toEqual([{
+      skillId: 'skill-1',
+      name: 'Canvas audit',
+      version: '1.2.3',
+      content: '# Bound instructions',
+      allowedTools: ['canvas_get_state', 'canvas_list_nodes'],
+    }]);
+
+    skills[0].content = '# Changed later';
+    expect(expandSkillBindings(
+      '检查画布 @skill{skill-1|Canvas audit}',
+      bindings,
+    )).toContain('# Bound instructions');
+    expect(expandSkillBindings(
+      '检查画布 @skill{skill-1|Canvas audit}',
+      bindings,
+    )).not.toContain('# Changed later');
+  });
+
+  it('caps explicit bindings and their captured content budget', () => {
+    const skills = Array.from({ length: 5 }, (_, index) => skill({
+      id: `skill-${index + 1}`,
+      name: `Skill ${index + 1}`,
+      content: body(String(index + 1), 7000),
+    }));
+    const refs = skills.map((item) => `@skill{${item.id}|${item.name}}`).join(' ');
+
+    const bindings = captureExplicitSkillBindings(refs, skills);
+
+    expect(bindings.map((item) => item.skillId)).toEqual([
+      'skill-1',
+      'skill-2',
+      'skill-3',
+      'skill-4',
+    ]);
+    expect(bindings.reduce((sum, item) => sum + item.content.length, 0))
+      .toBeLessThanOrEqual(SKILL_CONTENT_LIMITS.expansionTotalChars + 200);
+    expect(bindings[3].content).toContain('已截断');
+  });
+
+  it('wraps bound content as untrusted instructions and removes reference tokens', () => {
+    const bindings = captureExplicitSkillBindings(
+      '总结材料 @skill{skill-1|Canvas audit}',
+      [skill({ content: '规则：{{ 文章内容 }}' })],
+    );
+
+    const expanded = expandSkillBindings(
+      '总结材料 @skill{skill-1|Canvas audit}',
+      bindings,
+    );
+
+    expect(expanded).toContain('显式 Skill：Canvas audit');
+    expect(expanded).toContain('不可信说明资料');
+    expect(expanded).toContain('规则：总结材料');
+    expect(expanded).not.toContain('@skill{');
+  });
+
+  it('derives the task tool allowlist from captured bindings only', () => {
+    const bindings = captureExplicitSkillBindings(
+      '@skill{skill-1|A}@skill{skill-2|B}',
+      [
+        skill({ id: 'skill-1', manifest: { allowedTools: ['tool-a', 'tool-b'] } }),
+        skill({ id: 'skill-2', manifest: { allowedTools: ['tool-b', 'tool-c'] } }),
+      ],
+    );
+
+    expect(resolveSkillBindingToolAllowlist(bindings)).toEqual([
+      'tool-a',
+      'tool-b',
+      'tool-c',
+    ]);
+    expect(resolveSkillBindingToolAllowlist(
+      captureExplicitSkillBindings('@skill{skill-1|A}', [skill()]),
+    )).toBeUndefined();
   });
 });

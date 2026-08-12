@@ -101,4 +101,30 @@ describe('repairInterruptedAgentTasks', () => {
       },
     });
   });
+
+  it('persists explicit Skill bindings while keeping legacy tasks distinguishable', async () => {
+    const service = await import('../../../src/services/chat/agentTaskService');
+    const bound = {
+      ...createInterruptedTask(),
+      id: 'task-bound-skill',
+      skillBindings: [{
+        skillId: 'skill-1',
+        name: 'Canvas audit',
+        version: '1.0.0',
+        content: '# Fixed instructions',
+        allowedTools: ['canvas_get_state'],
+      }],
+    };
+    await service.saveAgentTask(bound);
+    await service.saveAgentTask({ ...createInterruptedTask(), id: 'task-legacy' });
+
+    expect(await service.loadAgentTask(bound.id)).toMatchObject({
+      skillBindings: [{
+        skillId: 'skill-1',
+        content: '# Fixed instructions',
+        allowedTools: ['canvas_get_state'],
+      }],
+    });
+    expect((await service.loadAgentTask('task-legacy'))?.skillBindings).toBeUndefined();
+  });
 });

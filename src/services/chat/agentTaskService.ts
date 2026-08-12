@@ -31,6 +31,12 @@ function normalizeTask(task: AgentTask): AgentTask {
       ...DEFAULT_AGENT_TASK_BUDGET,
       ...task.budget,
     },
+    skillBindings: Array.isArray(task.skillBindings)
+      ? task.skillBindings.map((binding) => ({
+        ...binding,
+        allowedTools: binding.allowedTools ? [...binding.allowedTools] : undefined,
+      }))
+      : undefined,
     events: task.events ?? [],
     metrics: {
       ...DEFAULT_AGENT_TASK_METRICS,

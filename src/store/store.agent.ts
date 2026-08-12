@@ -11,6 +11,7 @@ import {
   DEFAULT_AGENT_TASK_METRICS,
   type AgentMode,
   type AgentExpertRole,
+  type AgentSkillBinding,
   type AgentTask,
   type AgentTaskBudget,
 } from '../types/agent';
@@ -25,6 +26,7 @@ export interface CreateAgentTaskInput {
   goal: string;
   budget?: Partial<AgentTaskBudget>;
   toolAllowlist?: string[];
+  skillBindings?: AgentSkillBinding[];
   parentTaskId?: string;
   expertRole?: AgentExpertRole;
   expertDepth?: 1;
@@ -78,6 +80,10 @@ export const createAgentSlice: StateCreator<AppState, [], [], AgentSlice> = (set
       toolAllowlist: input.toolAllowlist
         ? [...new Set(input.toolAllowlist)]
         : undefined,
+      skillBindings: input.skillBindings?.map((binding) => ({
+        ...binding,
+        allowedTools: binding.allowedTools ? [...binding.allowedTools] : undefined,
+      })),
       parentTaskId: input.parentTaskId,
       expertRole: input.expertRole,
       expertDepth: input.expertDepth,

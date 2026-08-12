@@ -1,7 +1,7 @@
 /**
  * Agent 工具的注册、可用性过滤与本地 schema 校验中心；实际权限仍由 Policy Engine 决定。
  */
-import type { AgentMode } from '../../types/agent';
+import type { AgentMode, AgentToolDisplaySnapshot } from '../../types/agent';
 import type { ProposedToolCall, ToolResultSummary, WebSource } from '../../types/chat';
 import {
   validateAgentToolInput,
@@ -39,6 +39,8 @@ export interface AgentToolExecutionResult {
   truncated?: boolean;
   errorCode?: string;
   sources?: WebSource[];
+  /** 面向用户的脱敏结果详情；不得包含本地路径、密钥或完整媒体 URL。 */
+  display?: AgentToolDisplaySnapshot;
 }
 
 export interface AgentToolDefinition<TInput = unknown> {
@@ -53,6 +55,16 @@ export interface AgentToolDefinition<TInput = unknown> {
     input: TInput,
   ) => { allowed: boolean; reason?: string };
   summarizeInput?: (input: TInput) => string;
+  /** 构建审批和时间线使用的脱敏参数详情；异常时执行器会退化为摘要。 */
+  buildInputDisplay?: (
+    input: TInput,
+    context: Omit<AgentToolContext, 'signal'>,
+  ) => AgentToolDisplaySnapshot;
+  /** 在策略与审批前把项目默认值解析进输入，形成执行期间不可变的有效参数。 */
+  resolveInput?: (
+    input: TInput,
+    context: Omit<AgentToolContext, 'signal'>,
+  ) => TInput;
   execute: (context: AgentToolContext, input: TInput) => Promise<AgentToolExecutionResult>;
 }
 
@@ -162,7 +174,38 @@ export function prepareAgentToolCall(
     };
   }
 
-  return { ok: true, prepared: { definition, input: call.input } };
+  let resolvedInput: unknown;
+  try {
+    resolvedInput = definition.resolveInput
+      ? definition.resolveInput(call.input, context)
+      : call.input;
+  } catch (error) {
+    return {
+      ok: false,
+      result: {
+        callId: call.callId,
+        toolId: call.toolId,
+        status: 'error',
+        summary: `工具参数解析失败: ${error instanceof Error ? error.message : '未知错误'}`,
+        truncated: false,
+      },
+    };
+  }
+  const resolvedValidation = validateAgentToolInput(definition.inputSchema, resolvedInput);
+  if (!resolvedValidation.valid) {
+    return {
+      ok: false,
+      result: {
+        callId: call.callId,
+        toolId: call.toolId,
+        status: 'error',
+        summary: `工具有效参数无效: ${resolvedValidation.errors.join('；')}`,
+        truncated: false,
+      },
+    };
+  }
+
+  return { ok: true, prepared: { definition, input: resolvedInput } };
 }
 
 export function clearAgentToolRegistryForTests(): void {

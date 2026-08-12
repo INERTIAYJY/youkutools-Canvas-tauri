@@ -105,6 +105,54 @@ describe('shared Agent tool execution for MCP', () => {
     });
   });
 
+  it('persists sanitized structured input and result displays', async () => {
+    registerAgentTool<{ query: string }>({
+      id: 'mcp_display_test',
+      title: 'Display test',
+      description: 'Display test',
+      effect: 'read',
+      inputSchema: {
+        type: 'object',
+        required: ['query'],
+        additionalProperties: false,
+        properties: { query: { type: 'string', minLength: 1 } },
+      },
+      buildInputDisplay: (input) => ({
+        fields: [{ label: '查询', value: input.query }],
+      }),
+      execute: async () => ({
+        status: 'success',
+        summary: 'read complete',
+        modelContent: 'read complete',
+        display: { fields: [{ label: '命中', value: 3 }] },
+      }),
+    });
+
+    const task = await runAgentTask('mcp-task-1', async (signal) => {
+      await executeRegisteredAgentToolCall({
+        taskId: 'mcp-task-1',
+        call: {
+          callId: 'call-display',
+          toolId: 'mcp_display_test',
+          input: { query: 'C:\\Users\\tester\\secret.txt token-abcdefghijkl' },
+        },
+        signal,
+        transitionTask: transitionAgentTask,
+        waitForApproval: waitForAgentApproval,
+      });
+      return 'completed';
+    });
+
+    expect(task.steps[0].toolCall).toMatchObject({
+      inputDisplay: {
+        fields: [{ label: '查询', value: '[本地路径]' }],
+      },
+      resultDisplay: {
+        fields: [{ label: '命中', value: 3 }],
+      },
+    });
+  });
+
   it('waits for the existing application approval before a protected tool', async () => {
     const execute = vi.fn(async () => ({
       status: 'success' as const,

@@ -169,6 +169,36 @@ describe('media generation project settings', () => {
     }, undefined);
   });
 
+  it('uses the video parameters locked in the intent ahead of changed project defaults', async () => {
+    mocks.storeState.projects = [{
+      id: 'project-1',
+      settings: {
+        generation: {
+          videoAspectRatio: '16:9',
+          videoResolution: '1080p',
+          videoDuration: 10,
+        },
+      },
+    }];
+
+    await runMediaGeneration({
+      kind: 'video',
+      prompt: '竖屏人物镜头',
+      modelRef: 'openai/video-model',
+      deliveryMode: 'chat',
+      aspectRatio: '9:16',
+      resolution: '720p',
+      duration: 6,
+    }, 'project-1');
+
+    expect(mocks.generateVideo).toHaveBeenCalledWith(expect.objectContaining({
+      seedanceRatio: '9:16',
+      seedanceResolution: '720p',
+      seedanceDuration: 6,
+      videoResolution: 1280,
+    }), undefined);
+  });
+
   it('applies the audio prompt suffix', async () => {
     mocks.storeState.projects = [{
       id: 'project-1',

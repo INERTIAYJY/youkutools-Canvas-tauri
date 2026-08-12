@@ -162,14 +162,56 @@ export const DEFAULT_AGENT_TASK_BUDGET: AgentTaskBudget & AgentTaskLifetimeBudge
   maxResumes: 8,
 };
 
+export type AgentToolDisplayValue = string | number | boolean;
+
+export interface AgentToolDisplayField {
+  label: string;
+  value: AgentToolDisplayValue;
+  source?: 'user' | 'project_default' | 'model_default' | 'resolved';
+}
+
+export interface AgentToolDisplayReference {
+  kind: 'node' | 'asset';
+  id: string;
+  label: string;
+  mediaKind?: 'image' | 'video' | 'audio';
+}
+
+export interface AgentToolDisplayEntity {
+  id?: string;
+  title: string;
+  subtitle?: string;
+  fields?: AgentToolDisplayField[];
+  preview?: string;
+}
+
+export interface AgentToolDisplayChange {
+  targetId: string;
+  targetLabel?: string;
+  field: string;
+  before?: AgentToolDisplayValue;
+  after?: AgentToolDisplayValue;
+}
+
+/** 面向用户的脱敏工具快照；禁止保存原始任意 JSON、密钥、路径或媒体 URL。 */
+export interface AgentToolDisplaySnapshot {
+  fields?: AgentToolDisplayField[];
+  references?: AgentToolDisplayReference[];
+  entities?: AgentToolDisplayEntity[];
+  changes?: AgentToolDisplayChange[];
+  note?: string;
+}
+
 export interface AgentToolCallSnapshot {
   callId: string;
   toolId: string;
   inputSummary?: string;
+  inputDisplay?: AgentToolDisplaySnapshot;
   retryCount: number;
   startedAt?: number;
   finishedAt?: number;
   resultSummary?: string;
+  resultDisplay?: AgentToolDisplaySnapshot;
   errorCode?: string;
   effect?: AgentApprovalKind | 'read';
   inputFingerprint?: string;

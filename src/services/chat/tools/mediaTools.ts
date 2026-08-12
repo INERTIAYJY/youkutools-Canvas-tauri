@@ -17,6 +17,11 @@ import {
   runMediaGeneration,
 } from '../../ai/generationRuntime';
 import {
+  PROJECT_VIDEO_ASPECT_RATIOS,
+  PROJECT_VIDEO_RESOLUTIONS,
+} from '../../projectSettingsService';
+import type { AgentToolDisplaySnapshot } from '../../../types/agent';
+import {
   registerAgentTool,
   type AgentToolExecutionResult,
 } from '../toolRegistry';
@@ -34,6 +39,96 @@ interface GenerateMediaInput {
   modelRef?: string;
   deliveryMode: MediaDeliveryMode;
   audioPurpose?: AudioGenerationPurpose;
+  aspectRatio?: string;
+  resolution?: string;
+  duration?: number;
+}
+
+const MEDIA_PROMPT_DISPLAY_LIMIT = 1_000;
+
+function resolveMediaToolInput(
+  input: GenerateMediaInput,
+  context: { projectId: string },
+): GenerateMediaInput {
+  if (input.kind !== 'video') return input;
+  const settings = useAppStore.getState().projects.find(
+    (project) => project.id === context.projectId,
+  )?.settings?.generation;
+  return {
+    ...input,
+    aspectRatio: input.aspectRatio ?? settings?.videoAspectRatio,
+    resolution: input.resolution ?? settings?.videoResolution,
+    duration: input.duration ?? settings?.videoDuration,
+  };
+}
+
+function nodeMediaKind(nodeId: string): MediaKind | undefined {
+  const node = useAppStore.getState().nodes.find((item) => item.id === nodeId);
+  if (!node) return undefined;
+  if (node.data.imageUrl || node.type === 'source-image' || node.type === 'ai-image') return 'image';
+  if (node.data.videoUrl || node.type === 'source-video' || node.type === 'ai-video') return 'video';
+  if (node.data.audioUrl || node.type === 'source-audio' || node.type === 'ai-audio') return 'audio';
+  return undefined;
+}
+
+function buildMediaInputDisplay(input: GenerateMediaInput): AgentToolDisplaySnapshot {
+  const nodeReferences = [...input.prompt.matchAll(/@\{([^:}]+):([^}]+)\}/g)]
+    .map((match) => {
+      const nodeId = match[1].split('/cell/')[0];
+      const node = useAppStore.getState().nodes.find((item) => item.id === nodeId);
+      return {
+        kind: 'node' as const,
+        id: nodeId,
+        label: node?.data.label || match[2],
+        mediaKind: nodeMediaKind(nodeId),
+      };
+    });
+  const assetReferences = [...input.prompt.matchAll(/@asset\{[^}]+\}/g)]
+    .map((_, index) => ({
+      kind: 'asset' as const,
+      id: `asset-${index + 1}`,
+      label: `用户素材 ${index + 1}`,
+      mediaKind: 'image' as const,
+    }));
+  const fields: NonNullable<AgentToolDisplaySnapshot['fields']> = [
+    {
+      label: '媒体类型',
+      value: input.kind === 'image' ? '图片' : input.kind === 'video' ? '视频' : '音频',
+    },
+    { label: '模型', value: input.modelRef || '确认时选择' },
+    {
+      label: '输出位置',
+      value: input.deliveryMode === 'chat'
+        ? '对话'
+        : input.deliveryMode === 'canvas'
+          ? '画布'
+          : '对话和画布',
+    },
+    { label: '提示词', value: input.prompt.trim().slice(0, MEDIA_PROMPT_DISPLAY_LIMIT) },
+  ];
+  if (input.kind === 'video') {
+    fields.push(
+      {
+        label: '画面比例',
+        value: input.aspectRatio || '模型默认',
+        source: input.aspectRatio ? 'resolved' : 'model_default',
+      },
+      {
+        label: '分辨率',
+        value: input.resolution || '模型默认',
+        source: input.resolution ? 'resolved' : 'model_default',
+      },
+      {
+        label: '时长',
+        value: input.duration ? `${input.duration} 秒` : '模型默认',
+        source: input.duration ? 'resolved' : 'model_default',
+      },
+    );
+  }
+  return {
+    fields,
+    references: [...nodeReferences, ...assetReferences],
+  };
 }
 
 function getAssistantMessageId(taskId: string): string | undefined {
@@ -52,6 +147,7 @@ export function registerMediaAgentTools(): Array<() => void> {
         '未提供 @model 时省略 modelRef，运行时会在审批卡中让用户选择兼容模型。',
         '图片 prompt 可以原样包含用户提供的 @{nodeId:label} 或 @asset{path} 引用，',
         '运行时会自动解析为参考图输入；无需先读取节点原 prompt，也不要要求用户重新描述图片。',
+        '视频可显式传入 aspectRatio、resolution 和 duration；省略时在审批前锁定项目默认值。',
         '每次调用都会向用户确认。deliveryMode 控制结果显示在对话、画布或两者。',
       ].join(''),
       inputSchema: {
@@ -69,9 +165,26 @@ export function registerMediaAgentTools(): Array<() => void> {
           modelRef: { type: 'string', minLength: 1, maxLength: 240 },
           deliveryMode: { type: 'string', enum: ['chat', 'canvas', 'both'] },
           audioPurpose: { type: 'string', enum: ['music', 'speech'] },
+          aspectRatio: {
+            type: 'string',
+            enum: [...PROJECT_VIDEO_ASPECT_RATIOS],
+            description: '视频画面比例；用户明确指定时传入。',
+          },
+          resolution: {
+            type: 'string',
+            enum: [...PROJECT_VIDEO_RESOLUTIONS],
+            description: '视频分辨率档位；用户明确指定时传入。',
+          },
+          duration: {
+            type: 'integer',
+            minimum: 2,
+            maximum: 15,
+            description: '视频时长，单位秒；用户明确指定时传入。',
+          },
         },
       },
       effect: 'media_generation',
+      resolveInput: resolveMediaToolInput,
       authorize: (context, input) => {
         const store = useAppStore.getState();
         const task = store.agentTasks.find((item) => item.id === context.taskId);
@@ -129,6 +242,12 @@ export function registerMediaAgentTools(): Array<() => void> {
             reason: '音频生成必须说明用途是音乐还是语音',
           };
         }
+        if (
+          input.kind !== 'video'
+          && (input.aspectRatio !== undefined || input.resolution !== undefined || input.duration !== undefined)
+        ) {
+          return { allowed: false, reason: '比例、分辨率和时长参数只适用于视频生成' };
+        }
         return { allowed: true };
       },
       summarizeInput: (input) => {
@@ -148,6 +267,7 @@ export function registerMediaAgentTools(): Array<() => void> {
               : '对话和画布'
         }`;
       },
+      buildInputDisplay: buildMediaInputDisplay,
       execute: async (context, input): Promise<AgentToolExecutionResult> => {
         const store = useAppStore.getState();
         if (!input.modelRef) {
@@ -187,6 +307,9 @@ export function registerMediaAgentTools(): Array<() => void> {
           modelRef: input.modelRef,
           deliveryMode: input.deliveryMode,
           audioPurpose: input.audioPurpose,
+          aspectRatio: input.aspectRatio,
+          resolution: input.resolution,
+          duration: input.duration,
         };
         const needsCanvas = input.deliveryMode === 'canvas' || input.deliveryMode === 'both';
         let targetNodeId: string | undefined;
@@ -249,6 +372,17 @@ export function registerMediaAgentTools(): Array<() => void> {
               persistence: result.persistence,
               persistError: result.persistError,
             }),
+            display: {
+              fields: [
+                { label: '产物 ID', value: result.id },
+                { label: '媒体类型', value: result.kind },
+                { label: '模型', value: result.modelId },
+                { label: '保存状态', value: result.persistence },
+                ...(targetNodeId
+                  ? [{ label: '画布节点', value: targetNodeId }]
+                  : []),
+              ],
+            },
           };
         } catch (error) {
           const stopped = context.signal.aborted

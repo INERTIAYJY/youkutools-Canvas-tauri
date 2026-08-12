@@ -14,6 +14,8 @@ import type {
   AgentTask,
   AgentTaskBudget,
   AgentTaskStatus,
+  AgentToolDisplaySnapshot,
+  AgentToolDisplayValue,
 } from '../../types/agent';
 import type {
   AssistantStreamEvent,
@@ -153,6 +155,77 @@ export function sanitizePersistentSummary(value: string): string {
     .slice(0, 1_000);
 }
 
+function sanitizeDisplayValue(value: AgentToolDisplayValue): AgentToolDisplayValue {
+  return typeof value === 'string' ? sanitizePersistentSummary(value) : value;
+}
+
+/** 对工具提供的展示快照做统一脱敏和数量收敛。 */
+export function sanitizeToolDisplay(
+  display: AgentToolDisplaySnapshot | undefined,
+): AgentToolDisplaySnapshot | undefined {
+  if (!display) return undefined;
+  const sanitized: AgentToolDisplaySnapshot = {
+    fields: display.fields?.slice(0, 24).map((field) => ({
+      label: sanitizePersistentSummary(field.label).slice(0, 80),
+      value: sanitizeDisplayValue(field.value),
+      source: field.source,
+    })),
+    references: display.references?.slice(0, 20).map((reference) => ({
+      kind: reference.kind,
+      id: sanitizePersistentSummary(reference.id).slice(0, 160),
+      label: sanitizePersistentSummary(reference.label).slice(0, 160),
+      mediaKind: reference.mediaKind,
+    })),
+    entities: display.entities?.slice(0, 20).map((entity) => ({
+      id: entity.id ? sanitizePersistentSummary(entity.id).slice(0, 160) : undefined,
+      title: sanitizePersistentSummary(entity.title).slice(0, 160),
+      subtitle: entity.subtitle
+        ? sanitizePersistentSummary(entity.subtitle).slice(0, 240)
+        : undefined,
+      preview: entity.preview
+        ? sanitizePersistentSummary(entity.preview).slice(0, 1_000)
+        : undefined,
+      fields: entity.fields?.slice(0, 16).map((field) => ({
+        label: sanitizePersistentSummary(field.label).slice(0, 80),
+        value: sanitizeDisplayValue(field.value),
+        source: field.source,
+      })),
+    })),
+    changes: display.changes?.slice(0, 80).map((change) => ({
+      targetId: sanitizePersistentSummary(change.targetId).slice(0, 160),
+      targetLabel: change.targetLabel
+        ? sanitizePersistentSummary(change.targetLabel).slice(0, 160)
+        : undefined,
+      field: sanitizePersistentSummary(change.field).slice(0, 80),
+      before: change.before === undefined ? undefined : sanitizeDisplayValue(change.before),
+      after: change.after === undefined ? undefined : sanitizeDisplayValue(change.after),
+    })),
+    note: display.note ? sanitizePersistentSummary(display.note) : undefined,
+  };
+  if (!sanitized.fields?.length) delete sanitized.fields;
+  if (!sanitized.references?.length) delete sanitized.references;
+  if (!sanitized.entities?.length) delete sanitized.entities;
+  if (!sanitized.changes?.length) delete sanitized.changes;
+  if (!sanitized.note) delete sanitized.note;
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+export function buildToolInputDisplay(
+  prepared: PreparedAgentToolCall,
+  context: Omit<AgentToolContext, 'signal'>,
+): AgentToolDisplaySnapshot | undefined {
+  if (!prepared.definition.buildInputDisplay) return undefined;
+  try {
+    return sanitizeToolDisplay(prepared.definition.buildInputDisplay(
+      prepared.input,
+      context,
+    ));
+  } catch (error) {
+    console.warn('[AgentToolDisplay] 参数详情构建失败:', error);
+    return undefined;
+  }
+}
+
 /**
  * 一个工具调用允许的自动重试次数。
  * 只有只读工具在瞬时错误时重试；付费媒体、画布写入、文件写入和永久删除永不自动重试。
@@ -286,6 +359,7 @@ export async function executePreparedToolCall(
           retryCount,
           finishedAt: Date.now(),
           resultSummary: persistentSummary,
+          resultDisplay: sanitizeToolDisplay(result.display),
           errorCode: result.errorCode,
           canvasCheckpoint,
         },
@@ -726,6 +800,7 @@ export async function executeAgentRound({
               )
             : '参数已通过本地 schema 校验',
         ).slice(0, 500),
+        inputDisplay: buildToolInputDisplay(prepared, roundContext),
         retryCount: 0,
         startedAt: now,
         effect: prepared.definition.effect,
@@ -822,6 +897,7 @@ export async function executeAgentRound({
                         ? prepared.definition.summarizeInput(prepared.input)
                         : item.toolCall.inputSummary || '参数已通过本地 schema 校验',
                     ).slice(0, 500),
+                    inputDisplay: buildToolInputDisplay(prepared, roundContext),
                   }
                 : item.toolCall,
               approval: item.approval

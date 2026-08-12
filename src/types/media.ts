@@ -13,6 +13,10 @@ export interface MediaGenerationIntent {
   deliveryMode: MediaDeliveryMode;
   /** 音频生成时用于区分音乐与语音，底层仍复用音频节点执行能力。 */
   audioPurpose?: AudioGenerationPurpose;
+  /** 审批前锁定的视频有效参数；缺省表示沿用模型默认。 */
+  aspectRatio?: string;
+  resolution?: string;
+  duration?: number;
 }
 
 export type MediaGenerationStatus =

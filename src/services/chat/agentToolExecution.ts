@@ -143,6 +143,7 @@ export async function executeRegisteredAgentToolCall({
           ? prepared.definition.summarizeInput(prepared.input)
           : '参数已通过本地 schema 校验',
       ).slice(0, 500),
+      inputDisplay: round.buildToolInputDisplay(prepared, context),
       retryCount: 0,
       startedAt: now,
       effect: prepared.definition.effect,
@@ -229,6 +230,7 @@ export async function executeRegisteredAgentToolCall({
                       ? prepared.definition.summarizeInput(prepared.input)
                       : item.toolCall.inputSummary || '参数已通过本地 schema 校验',
                   ).slice(0, 500),
+                  inputDisplay: round.buildToolInputDisplay(prepared, context),
                 }
               : item.toolCall,
             approval: item.approval

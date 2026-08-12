@@ -5,6 +5,11 @@ import type { Node } from '@xyflow/react';
 import { getLastCanvasPointerPosition } from '../../canvasPointerService';
 import { useAppStore } from '../../../store/useAppStore';
 import type { BaseNodeData, NodeType } from '../../../types';
+import type {
+  AgentToolDisplayChange,
+  AgentToolDisplaySnapshot,
+  AgentToolDisplayValue,
+} from '../../../types/agent';
 import { MAX_IMAGE_BATCH_COUNT } from '../../../types/aiTypes';
 import type { CommandId, CommandPlan } from '../../../types/chat';
 import { executeGeneration } from '../../generationService';
@@ -60,6 +65,7 @@ const DETAIL_NODE_LIMIT = 50;
 const MAX_RUN_NODES = 5;
 const MIN_NODE_SIZE = 120;
 const MAX_NODE_SIZE = 4000;
+const DISPLAY_PREVIEW_LIMIT = 1_000;
 
 interface NodeTargetInput {
   nodeIds?: string[];
@@ -129,6 +135,114 @@ interface ConnectNodesInput {
 interface DisconnectNodesInput {
   sourceId?: string;
   targetId?: string;
+}
+
+interface NodeAuditSnapshot {
+  label: string;
+  prompt?: string;
+  content?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  model?: string;
+  aspectRatio?: string;
+  imageSize?: string;
+  batchCount?: number;
+}
+
+function displayPreview(value: string | undefined): string | undefined {
+  const text = value?.trim();
+  if (!text) return undefined;
+  return text.slice(0, DISPLAY_PREVIEW_LIMIT);
+}
+
+function createNodesInputDisplay(input: CreateNodesInput): AgentToolDisplaySnapshot {
+  return {
+    entities: input.nodes.map((nodeInput) => ({
+      title: nodeInput.label.trim(),
+      fields: [
+        { label: '类型', value: nodeInput.type },
+        {
+          label: '位置',
+          value: nodeInput.x !== undefined && nodeInput.y !== undefined
+            ? `(${Math.round(nodeInput.x)}, ${Math.round(nodeInput.y)})`
+            : '自动排列',
+          source: nodeInput.x !== undefined && nodeInput.y !== undefined
+            ? 'user'
+            : 'resolved',
+        },
+      ],
+      preview: displayPreview(nodeInput.prompt),
+    })),
+  };
+}
+
+function captureNodeAudit(node: Node<BaseNodeData>): NodeAuditSnapshot {
+  const data = node.data;
+  return {
+    label: data.label,
+    prompt: displayPreview(data.prompt),
+    content: TEXT_OUTPUT_NODE_TYPES.has(data.type) ? displayPreview(data.output) : undefined,
+    x: Math.round(node.position.x),
+    y: Math.round(node.position.y),
+    width: Math.round(Number(data.nodeWidth) || node.measured?.width || DEFAULT_NODE_WIDTH),
+    height: Math.round(Number(data.nodeHeight) || node.measured?.height || DEFAULT_NODE_HEIGHT),
+    model: typeof data.model === 'string' ? data.model : undefined,
+    aspectRatio: typeof data.aspectRatio === 'string' ? data.aspectRatio : undefined,
+    imageSize: typeof data.imageSize === 'string' ? data.imageSize : undefined,
+    batchCount: typeof data.batchCount === 'number' ? data.batchCount : undefined,
+  };
+}
+
+const UPDATE_DISPLAY_FIELDS: Array<{
+  inputKey: keyof UpdateNodesInput;
+  auditKey: keyof NodeAuditSnapshot;
+  label: string;
+}> = [
+  { inputKey: 'label', auditKey: 'label', label: '名称' },
+  { inputKey: 'prompt', auditKey: 'prompt', label: '提示词' },
+  { inputKey: 'content', auditKey: 'content', label: '正文' },
+  { inputKey: 'x', auditKey: 'x', label: '位置 X' },
+  { inputKey: 'y', auditKey: 'y', label: '位置 Y' },
+  { inputKey: 'dx', auditKey: 'x', label: '位置 X' },
+  { inputKey: 'dy', auditKey: 'y', label: '位置 Y' },
+  { inputKey: 'width', auditKey: 'width', label: '宽度' },
+  { inputKey: 'height', auditKey: 'height', label: '高度' },
+  { inputKey: 'model', auditKey: 'model', label: '模型' },
+  { inputKey: 'aspectRatio', auditKey: 'aspectRatio', label: '画面比例' },
+  { inputKey: 'imageSize', auditKey: 'imageSize', label: '图片尺寸' },
+  { inputKey: 'batchCount', auditKey: 'batchCount', label: '批量数量' },
+];
+
+function buildUpdateChanges(
+  input: UpdateNodesInput,
+  targets: Node<BaseNodeData>[],
+  before: Map<string, NodeAuditSnapshot>,
+): AgentToolDisplayChange[] {
+  const afterById = new Map(targets.map((target) => [target.id, captureNodeAudit(target)]));
+  const changes: AgentToolDisplayChange[] = [];
+  for (const target of targets) {
+    const previous = before.get(target.id);
+    const next = afterById.get(target.id);
+    if (!previous || !next) continue;
+    const seen = new Set<keyof NodeAuditSnapshot>();
+    for (const field of UPDATE_DISPLAY_FIELDS) {
+      if (input[field.inputKey] === undefined || seen.has(field.auditKey)) continue;
+      seen.add(field.auditKey);
+      const beforeValue = previous[field.auditKey] as AgentToolDisplayValue | undefined;
+      const afterValue = next[field.auditKey] as AgentToolDisplayValue | undefined;
+      if (beforeValue === afterValue) continue;
+      changes.push({
+        targetId: target.id,
+        targetLabel: next.label,
+        field: field.label,
+        before: beforeValue,
+        after: afterValue,
+      });
+    }
+  }
+  return changes;
 }
 
 const targetProperties = {
@@ -623,6 +737,7 @@ export function registerCanvasAgentTools(): Array<() => void> {
       effect: 'canvas_write',
       authorize: authorizeCurrentProject,
       summarizeInput: (input) => `新建 ${input.nodes.length} 个画布节点`,
+      buildInputDisplay: createNodesInputDisplay,
       execute: async (context, input) => {
         assertCanvasRevision(context);
         const positions = resolveCreateNodePositions(context, input.nodes);
@@ -650,6 +765,21 @@ export function registerCanvasAgentTools(): Array<() => void> {
             })),
             revision: useAppStore.getState().getCurrentRevision(),
           }),
+          display: {
+            entities: nodes.map((node) => ({
+              id: node.id,
+              title: node.data.label,
+              fields: [
+                { label: '类型', value: node.type ?? node.data.type },
+                {
+                  label: '位置',
+                  value: `(${Math.round(node.position.x)}, ${Math.round(node.position.y)})`,
+                  source: 'resolved',
+                },
+              ],
+              preview: displayPreview(node.data.prompt),
+            })),
+          },
         };
       },
     }),
@@ -711,6 +841,9 @@ export function registerCanvasAgentTools(): Array<() => void> {
         };
         const targets = useAppStore.getState().nodes
           .filter((node) => targetIds.includes(node.id));
+        const beforeAudit = new Map(
+          targets.map((node) => [node.id, captureNodeAudit(node)]),
+        );
         if (input.content !== undefined) {
           // 媒体节点的 output 存的是本地路径或 URL，改写会直接破坏节点
           const nonText = targets.filter((node) => !TEXT_OUTPUT_NODE_TYPES.has(node.data.type));
@@ -747,6 +880,8 @@ export function registerCanvasAgentTools(): Array<() => void> {
           }
         }
         useAppStore.getState().incrementRevision();
+        const updatedTargets = useAppStore.getState().nodes
+          .filter((node) => targetIds.includes(node.id));
         return {
           status: 'success',
           summary: `已更新 ${targetIds.length} 个节点`,
@@ -754,6 +889,9 @@ export function registerCanvasAgentTools(): Array<() => void> {
             affectedNodeIds: targetIds,
             revision: useAppStore.getState().getCurrentRevision(),
           }),
+          display: {
+            changes: buildUpdateChanges(input, updatedTargets, beforeAudit),
+          },
         };
       },
     }),

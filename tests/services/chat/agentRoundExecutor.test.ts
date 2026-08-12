@@ -21,6 +21,10 @@ vi.mock('../../../src/services/chat/contextManager', () => ({
 
 import { executeAgentRound } from '../../../src/services/chat/agentRoundExecutor';
 import { transitionAgentTask } from '../../../src/services/chat/agentRuntime';
+import {
+  clearAgentToolRegistryForTests,
+  registerAgentTool,
+} from '../../../src/services/chat/toolRegistry';
 import { useAppStore } from '../../../src/store/useAppStore';
 
 function createTask(): AgentTask {
@@ -47,6 +51,7 @@ function createTask(): AgentTask {
 }
 
 beforeEach(() => {
+  clearAgentToolRegistryForTests();
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-1',
@@ -97,6 +102,57 @@ describe('agent round executor', () => {
       status: 'planning',
       modelRounds: 1,
       metrics: { inputTokens: 7, outputTokens: 3 },
+    });
+  });
+
+  it('persists the same structured displays for model-proposed tools', async () => {
+    registerAgentTool<{ nodeId: string }>({
+      id: 'round_display_test',
+      title: 'Round display',
+      description: 'Round display',
+      effect: 'read',
+      inputSchema: {
+        type: 'object',
+        required: ['nodeId'],
+        additionalProperties: false,
+        properties: { nodeId: { type: 'string', minLength: 1 } },
+      },
+      buildInputDisplay: (input) => ({
+        fields: [{ label: '节点', value: input.nodeId }],
+      }),
+      execute: async () => ({
+        status: 'success',
+        summary: 'done',
+        modelContent: 'done',
+        display: { fields: [{ label: '状态', value: '完成' }] },
+      }),
+    });
+    streamAssistantReplyMock.mockImplementation(async ({ onEvent }) => {
+      onEvent({
+        type: 'tool.call.final',
+        call: {
+          callId: 'call-round-display',
+          toolId: 'round_display_test',
+          input: { nodeId: 'node-1' },
+        },
+      });
+    });
+
+    const result = await executeAgentRound({
+      taskId: 'task-round',
+      signal: new AbortController().signal,
+      messages: [{ role: 'user', content: 'update canvas' }],
+      fullText: '',
+      totalToolResultChars: 0,
+      callbacks: {},
+      transitionTask: transitionAgentTask,
+      waitForApproval: vi.fn(),
+    });
+
+    expect(result.outcome).toBe('continue');
+    expect(useAppStore.getState().agentTasks[0].steps[0].toolCall).toMatchObject({
+      inputDisplay: { fields: [{ label: '节点', value: 'node-1' }] },
+      resultDisplay: { fields: [{ label: '状态', value: '完成' }] },
     });
   });
 });

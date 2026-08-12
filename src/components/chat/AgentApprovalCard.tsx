@@ -12,6 +12,7 @@ import type {
   AgentStep,
 } from '../../types/agent';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
+import AgentToolDetails from './AgentToolDetails';
 
 interface AgentApprovalCardProps {
   step: AgentStep;
@@ -91,6 +92,7 @@ export default function AgentApprovalCard({
           <p className="mt-1 break-words text-xs leading-[18px] text-canvas-text-secondary">
             {step.toolCall?.inputSummary || approval.summary}
           </p>
+          <AgentToolDetails input={step.toolCall?.inputDisplay} defaultExpanded />
         </div>
       </div>
       {approval.kind === 'config_write' && (

@@ -6,6 +6,7 @@
  */
 import { Icon } from '@iconify/react';
 import type { AgentStep, AgentStepStatus } from '../../types/agent';
+import AgentToolDetails from './AgentToolDetails';
 
 interface AgentStepCardProps {
   step: AgentStep;
@@ -66,6 +67,10 @@ export default function AgentStepCard({ step }: AgentStepCardProps) {
             {detail}
           </p>
         )}
+        <AgentToolDetails
+          input={step.toolCall?.inputDisplay}
+          result={step.toolCall?.resultDisplay}
+        />
       </div>
     </div>
   );

@@ -56,6 +56,41 @@ beforeEach(() => {
 });
 
 describe('canvas agent tools', () => {
+  it('describes requested and actual details for created nodes', async () => {
+    const definition = getAgentTool('canvas_create_nodes')!;
+    const input = {
+      nodes: [{
+        type: 'ai-video',
+        label: '开场镜头',
+        prompt: '夜晚城市航拍',
+        x: 320,
+        y: 180,
+      }],
+    };
+
+    expect(definition.buildInputDisplay?.(input, context())).toMatchObject({
+      entities: [{
+        title: '开场镜头',
+        fields: [
+          { label: '类型', value: 'ai-video' },
+          { label: '位置', value: '(320, 180)', source: 'user' },
+        ],
+        preview: '夜晚城市航拍',
+      }],
+    });
+
+    const result = await definition.execute(context(), input);
+    expect(result.display).toMatchObject({
+      entities: [{
+        title: '开场镜头',
+        fields: [
+          { label: '类型', value: 'ai-video' },
+          { label: '位置', value: '(320, 180)', source: 'resolved' },
+        ],
+      }],
+    });
+  });
+
   it('returns structured node detail without leaking local media paths', async () => {
     const result = await getAgentTool('canvas_query')!.execute(context(), { detail: true });
     const payload = JSON.parse(result.modelContent);
@@ -91,6 +126,41 @@ describe('canvas agent tools', () => {
       { x: 540, y: 200 },
     ]);
     expect(nodes[0].data.nodeWidth).toBe(400);
+    expect(result.display?.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetId: 'n1',
+        field: '位置 X',
+        before: 100,
+        after: 140,
+      }),
+      expect.objectContaining({
+        targetId: 'n1',
+        field: '宽度',
+        before: 280,
+        after: 400,
+      }),
+      expect.objectContaining({
+        targetId: 'n2',
+        field: '位置 Y',
+        before: 220,
+        after: 200,
+      }),
+    ]));
+  });
+
+  it('records before and after values for text changes', async () => {
+    const result = await getAgentTool('canvas_update_nodes')!.execute(context(), {
+      nodeIds: ['n1'],
+      label: '主视觉',
+      prompt: '一只戴红围巾的猫',
+      aspectRatio: '16:9',
+    });
+
+    expect(result.display?.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: '名称', before: 'n1', after: '主视觉' }),
+      expect.objectContaining({ field: '提示词', before: '一只猫', after: '一只戴红围巾的猫' }),
+      expect.objectContaining({ field: '画面比例', before: undefined, after: '16:9' }),
+    ]));
   });
 
   it('rejects absolute moves that target more than one node', async () => {

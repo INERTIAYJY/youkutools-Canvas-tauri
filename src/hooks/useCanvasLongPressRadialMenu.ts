@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
 export const CANVAS_LONG_PRESS_DELAY_MS = 480;
+export const CANVAS_LONG_PRESS_INDICATOR_DELAY_MS = 180;
 export const CANVAS_LONG_PRESS_MOVE_THRESHOLD_PX = 8;
 
 export interface CanvasRadialMenuPosition {
@@ -37,13 +38,16 @@ export function createCanvasLongPressController(
   delay = CANVAS_LONG_PRESS_DELAY_MS,
   onPendingChange?: (position: CanvasRadialMenuPosition | null) => void,
 ): CanvasLongPressController {
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let triggerTimer: ReturnType<typeof setTimeout> | null = null;
+  let indicatorTimer: ReturnType<typeof setTimeout> | null = null;
   let active: (CanvasRadialMenuPosition & { pointerId: number }) | null = null;
 
   const cancel = () => {
-    const hadPendingPress = timer !== null || active !== null;
-    if (timer !== null) clearTimeout(timer);
-    timer = null;
+    const hadPendingPress = triggerTimer !== null || indicatorTimer !== null || active !== null;
+    if (triggerTimer !== null) clearTimeout(triggerTimer);
+    if (indicatorTimer !== null) clearTimeout(indicatorTimer);
+    triggerTimer = null;
+    indicatorTimer = null;
     active = null;
     if (hadPendingPress) onPendingChange?.(null);
   };
@@ -53,11 +57,17 @@ export function createCanvasLongPressController(
       cancel();
       if (event.button !== 0 || !event.isPrimary) return false;
       active = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-      onPendingChange?.({ x: event.clientX, y: event.clientY });
-      timer = setTimeout(() => {
+      indicatorTimer = setTimeout(() => {
+        indicatorTimer = null;
+        if (!active) return;
+        onPendingChange?.({ x: active.x, y: active.y });
+      }, Math.min(CANVAS_LONG_PRESS_INDICATOR_DELAY_MS, delay));
+      triggerTimer = setTimeout(() => {
         if (!active) return;
         const position = { x: active.x, y: active.y };
-        timer = null;
+        triggerTimer = null;
+        if (indicatorTimer !== null) clearTimeout(indicatorTimer);
+        indicatorTimer = null;
         active = null;
         onPendingChange?.(null);
         onTrigger(position);

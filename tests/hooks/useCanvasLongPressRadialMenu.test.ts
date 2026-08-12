@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CANVAS_LONG_PRESS_DELAY_MS,
+  CANVAS_LONG_PRESS_INDICATOR_DELAY_MS,
   createCanvasLongPressController,
 } from '../../src/hooks/useCanvasLongPressRadialMenu';
 
@@ -45,6 +46,55 @@ describe('canvas long-press radial menu controller', () => {
     vi.advanceTimersByTime(CANVAS_LONG_PRESS_DELAY_MS);
 
     expect(onTrigger).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it('does not show the hold indicator for a normal click', () => {
+    vi.useFakeTimers();
+    const onTrigger = vi.fn();
+    const onPendingChange = vi.fn();
+    const controller = createCanvasLongPressController(
+      onTrigger,
+      CANVAS_LONG_PRESS_DELAY_MS,
+      onPendingChange,
+    );
+
+    controller.pointerDown({
+      button: 0,
+      isPrimary: true,
+      pointerId: 2,
+      clientX: 40,
+      clientY: 60,
+    });
+    vi.advanceTimersByTime(CANVAS_LONG_PRESS_INDICATOR_DELAY_MS - 1);
+    expect(onPendingChange).not.toHaveBeenCalledWith({ x: 40, y: 60 });
+    controller.pointerEnd(2);
+    vi.runAllTimers();
+
+    expect(onTrigger).not.toHaveBeenCalled();
+    expect(onPendingChange).not.toHaveBeenCalledWith({ x: 40, y: 60 });
+    controller.dispose();
+  });
+
+  it('shows the hold indicator only after the pointer stays down briefly', () => {
+    vi.useFakeTimers();
+    const onPendingChange = vi.fn();
+    const controller = createCanvasLongPressController(
+      vi.fn(),
+      CANVAS_LONG_PRESS_DELAY_MS,
+      onPendingChange,
+    );
+
+    controller.pointerDown({
+      button: 0,
+      isPrimary: true,
+      pointerId: 6,
+      clientX: 80,
+      clientY: 90,
+    });
+    vi.advanceTimersByTime(CANVAS_LONG_PRESS_INDICATOR_DELAY_MS);
+
+    expect(onPendingChange).toHaveBeenCalledWith({ x: 80, y: 90 });
     controller.dispose();
   });
 

@@ -14,6 +14,7 @@ import { registerSubAgentAgentTools } from './subAgentTools';
 import { registerProviderConfigAgentTools } from './providerConfigTools';
 import { registerWebAgentTools } from './webTools';
 import { registerAppAgentTools } from './appTools';
+import { registerComfyAgentTools } from './comfyTools';
 
 type AgentToolRegistrationFactory = () => Array<() => void>;
 
@@ -36,6 +37,7 @@ function getRegistrationFactories(): AgentToolRegistrationFactory[] {
   return [
     registerCanvasAgentTools,
     registerMediaAgentTools,
+    registerComfyAgentTools,
     registerFileAgentTools,
     registerSkillAgentTools,
     registerMemoryAgentTools,

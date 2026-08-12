@@ -16,7 +16,7 @@
   border-radius: inherit;
   border: 2px solid transparent;
   border-top-color: var(--brand);
-  animation: canvas-radial-hold-progress 480ms linear forwards;
+  animation: canvas-radial-hold-progress 300ms linear forwards;
 }
 
 @keyframes canvas-radial-hold-progress {

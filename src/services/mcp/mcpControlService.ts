@@ -41,7 +41,11 @@ export const MCP_TOOL_DISCOVERY_TASK_ID = 'mcp-tool-discovery';
  * 完整的子智能体循环并产生真实模型开销。对话内由用户发起尚可接受，外部 MCP 客户端
  * 直接调用则会在零确认下花钱，且它也没有「主任务」语境。
  */
-const MCP_BLOCKED_TOOL_IDS = new Set(['agent_run_sub_agent']);
+const MCP_BLOCKED_TOOL_IDS = new Set([
+  'agent_run_sub_agent',
+  // 动态工作流可使用任意已安装自定义节点，只允许应用内用户逐次确认后执行。
+  'comfyui_execute_workflow',
+]);
 
 const activeRequestTasks = new Map<string, string>();
 

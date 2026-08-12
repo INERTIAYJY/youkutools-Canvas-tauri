@@ -9,6 +9,22 @@ const inferCategory = new Function(`${match[0]}\nreturn inferCategory;`)() as (
   output: Record<string, unknown>,
 ) => string;
 
+const baseNameMatch = source.match(/const workflowBaseName = \(value\) =>[\s\S]*?\.trim\(\);/);
+if (!baseNameMatch) throw new Error('bridge.js 里找不到 workflowBaseName');
+const workflowBaseName = new Function(`${baseNameMatch[0]}\nreturn workflowBaseName;`)() as (
+  value: unknown,
+) => string;
+
+describe('bridge.js workflowBaseName', () => {
+  it('去掉目录、扩展名和 ComfyUI 自动加的重名后缀', () => {
+    expect(workflowBaseName('minimax-h3-i2v.json')).toBe('minimax-h3-i2v');
+    expect(workflowBaseName('workflows/minimax-h3-i2v (3)')).toBe('minimax-h3-i2v');
+    expect(workflowBaseName('C:\\wf\\minimax-h3-i2v (12).json')).toBe('minimax-h3-i2v');
+    expect(workflowBaseName('')).toBe('');
+    expect(workflowBaseName(undefined)).toBe('');
+  });
+});
+
 describe('bridge.js inferCategory', () => {
   it('图生视频里的音频/文本中间节点不再把分类带偏', () => {
     expect(inferCategory({

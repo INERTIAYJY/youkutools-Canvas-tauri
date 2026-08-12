@@ -193,7 +193,7 @@ export default function WorkflowPanel() {
   }, [name]);
 
   // Submit
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback(async () => {
     if (!fileContent) {
       setUploadError('请先选择一个工作流文件');
       return;
@@ -213,10 +213,14 @@ export default function WorkflowPanel() {
       createdAt: Date.now(),
     };
 
-    addWorkflow(workflow);
-    resetForm();
-    setUploadSuccess(`"${workflow.name}" 已添加`);
-    setTimeout(() => setUploadSuccess(''), 2500);
+    try {
+      await addWorkflow(workflow);
+      resetForm();
+      setUploadSuccess(`"${workflow.name}" 已添加`);
+      setTimeout(() => setUploadSuccess(''), 2500);
+    } catch {
+      setUploadError('保存工作流失败，请重试');
+    }
   }, [fileContent, name, category, fileName, ioNodes, addWorkflow, resetForm]);
 
   // Delete workflow
@@ -412,7 +416,7 @@ export default function WorkflowPanel() {
             <motion.button
               type="button"
               className="wf-btn wf-btn-primary ml-auto"
-              onClick={handleSubmit}
+              onClick={() => void handleSubmit()}
               disabled={!fileContent}
               whileHover={fileContent ? { scale: 1.03 } : {}}
               whileTap={fileContent ? { scale: 0.97 } : {}}

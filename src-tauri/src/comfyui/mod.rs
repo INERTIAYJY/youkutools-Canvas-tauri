@@ -31,7 +31,15 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// 直接启动 main.py 的统一参数（API 模式）
 /// -u：禁用 Python 输出缓冲，否则新开的终端窗口长时间黑屏看不到启动日志
-const COMFY_ARGS: &[&str] = &["-u", "-s", "main.py", "--listen", "--enable-cors-header"];
+/// --listen 仅绑定回环地址，避免 ComfyUI API 暴露到局域网
+const COMFY_ARGS: &[&str] = &[
+    "-u",
+    "-s",
+    "main.py",
+    "--listen",
+    "127.0.0.1",
+    "--enable-cors-header",
+];
 const COMFYUI_WINDOW_LABEL: &str = "comfyui";
 const COMFYUI_BRIDGE_SCRIPT: &str = include_str!("bridge.js");
 const MAX_WORKFLOW_JSON_LENGTH: usize = 16 * 1024 * 1024;
@@ -57,6 +65,7 @@ struct ComfyUIEditorPayload<'a> {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ComfyUIWorkflowSavePayload {
+    request_id: String,
     workflow_id: String,
     name: String,
     category: String,
@@ -84,6 +93,14 @@ fn parse_comfyui_url(comfy_url: &str) -> Result<Url, String> {
 
 fn is_local_comfyui_url(url: &Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+}
+
+/// 同源即同一个 ComfyUI 服务。窗口复用只看这个：ComfyUI 前端自己会改路径/查询串，
+/// 拿整个 URL 比会把窗口判成“换了地址”而销毁重建，页面一重载就多出一个同名标签页。
+fn is_same_comfyui_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn comfyui_socket_endpoint(url: &Url) -> Result<(String, u16), String> {
@@ -155,10 +172,7 @@ fn build_editor_script(
 }
 
 fn parse_comfyui_window_action(url: &Url, comfy_url: &Url) -> Option<ComfyUIWindowAction> {
-    let is_same_origin = url.scheme() == comfy_url.scheme()
-        && url.host_str() == comfy_url.host_str()
-        && url.port_or_known_default() == comfy_url.port_or_known_default();
-    if !is_same_origin || url.path() != COMFYUI_ACTION_PATH {
+    if !is_same_comfyui_origin(url, comfy_url) || url.path() != COMFYUI_ACTION_PATH {
         return None;
     }
 
@@ -184,7 +198,8 @@ fn parse_workflow_save_payload(raw: &str) -> Result<ComfyUIWorkflowSavePayload, 
 
     let payload: ComfyUIWorkflowSavePayload =
         serde_json::from_str(raw).map_err(|_| "ComfyUI 工作流保存数据格式无效".to_string())?;
-    if payload.workflow_id.is_empty()
+    if !is_valid_save_request_id(&payload.request_id)
+        || payload.workflow_id.is_empty()
         || payload.workflow_id.len() > 256
         || payload.name.is_empty()
         || payload.name.len() > 512
@@ -212,16 +227,29 @@ fn parse_workflow_save_payload(raw: &str) -> Result<ComfyUIWorkflowSavePayload, 
     Ok(payload)
 }
 
+fn is_valid_save_request_id(request_id: &str) -> bool {
+    request_id.strip_prefix("save-").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.len() <= 120
+            && suffix.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+            })
+    })
+}
+
 fn notify_comfyui_save(
     window: &tauri::WebviewWindow,
+    request_id: Option<&str>,
     success: bool,
     detail: &str,
 ) -> Result<(), String> {
+    let request_id_json = serde_json::to_string(&request_id)
+        .map_err(|error| format!("序列化 ComfyUI 保存请求 ID 失败: {error}"))?;
     let detail_json = serde_json::to_string(detail)
         .map_err(|error| format!("序列化 ComfyUI 保存结果失败: {error}"))?;
     window
         .eval(format!(
-            "window.__AI_CANVAS_COMFY__?.completeSave({success},{detail_json});"
+            "window.__AI_CANVAS_COMFY__?.completeSave({request_id_json},{success},{detail_json});"
         ))
         .map_err(|error| format!("回传 ComfyUI 保存结果失败: {error}"))
 }
@@ -232,25 +260,42 @@ fn transfer_comfyui_save_payload(
 ) -> Result<(), String> {
     let callback_app = app.clone();
     let callback_window = window.clone();
-    window
+    let result = window
         .eval_with_callback(TAKE_SAVE_PAYLOAD_SCRIPT, move |raw| {
             let result = parse_workflow_save_payload(&raw).and_then(|payload| {
-                let name = payload.name.clone();
                 callback_app
                     .emit_to("main", "comfyui-workflow-save", &payload)
                     .map_err(|error| format!("保存 ComfyUI 工作流失败: {error}"))?;
-                Ok(name)
+                Ok(())
             });
-            match result {
-                Ok(name) => {
-                    let _ = notify_comfyui_save(&callback_window, true, &name);
-                }
-                Err(error) => {
-                    let _ = notify_comfyui_save(&callback_window, false, &error);
-                }
+            if let Err(error) = result {
+                let _ = notify_comfyui_save(&callback_window, None, false, &error);
             }
         })
-        .map_err(|error| format!("读取 ComfyUI 工作流失败: {error}"))
+        .map_err(|error| format!("读取 ComfyUI 工作流失败: {error}"));
+    if let Err(error) = &result {
+        let _ = notify_comfyui_save(window, None, false, error);
+    }
+    result
+}
+
+/// 主窗口完成校验与持久化后，才把最终结果回传给 ComfyUI 页面。
+#[tauri::command]
+pub fn complete_comfyui_workflow_save(
+    webview: tauri::Webview,
+    app: tauri::AppHandle,
+    request_id: String,
+    success: bool,
+    detail: String,
+) -> Result<(), String> {
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    if !is_valid_save_request_id(&request_id) {
+        return Err("ComfyUI 保存请求 ID 无效".to_string());
+    }
+    let window = app
+        .get_webview_window(COMFYUI_WINDOW_LABEL)
+        .ok_or_else(|| "ComfyUI 窗口不存在".to_string())?;
+    notify_comfyui_save(&window, Some(&request_id), success, &detail)
 }
 
 fn handle_comfyui_window_action(
@@ -594,7 +639,11 @@ pub async fn open_comfyui_window(
     )?;
 
     if let Some(window) = app.get_webview_window(COMFYUI_WINDOW_LABEL) {
-        if window.url().ok().as_ref() == Some(&url) {
+        // 只要还是同一个 ComfyUI 服务就复用窗口：前端自己改过的路径/查询串不算“换了地址”
+        if window
+            .url()
+            .is_ok_and(|current| is_same_comfyui_origin(&current, &url))
+        {
             window
                 .set_decorations(!use_local_bridge)
                 .map_err(|e| format!("更新 ComfyUI 标题栏失败: {e}"))?;
@@ -692,10 +741,35 @@ pub async fn open_comfyui_window(
 mod tests {
     use super::{
         build_editor_script, comfyui_socket_endpoint, ensure_local_comfyui_reachable,
-        is_local_comfyui_url, parse_comfyui_url, parse_comfyui_window_action,
-        parse_workflow_save_payload, ComfyUIWindowAction,
+        is_local_comfyui_url, is_same_comfyui_origin, parse_comfyui_url,
+        parse_comfyui_window_action, parse_workflow_save_payload, ComfyUIWindowAction, COMFY_ARGS,
     };
     use std::net::TcpListener;
+
+    #[test]
+    fn reuses_window_when_only_the_frontend_route_changed() {
+        let configured = parse_comfyui_url("http://127.0.0.1:8188").unwrap();
+        // ComfyUI 前端自己改过路径/查询串，仍然是同一个服务，不该销毁重建窗口
+        for current in [
+            "http://127.0.0.1:8188/",
+            "http://127.0.0.1:8188/?workflow=demo",
+            "http://127.0.0.1:8188/templates#browse",
+        ] {
+            assert!(is_same_comfyui_origin(
+                &parse_comfyui_url(current).unwrap(),
+                &configured
+            ));
+        }
+        // 换了端口或主机才算换了服务
+        assert!(!is_same_comfyui_origin(
+            &parse_comfyui_url("http://127.0.0.1:8189").unwrap(),
+            &configured
+        ));
+        assert!(!is_same_comfyui_origin(
+            &parse_comfyui_url("http://comfy.example.com:8188").unwrap(),
+            &configured
+        ));
+    }
 
     #[test]
     fn accepts_http_and_https_comfyui_urls() {
@@ -791,6 +865,7 @@ mod tests {
     #[test]
     fn validates_workflow_payload_from_comfyui_webview() {
         let valid = serde_json::json!({
+            "requestId": "save-test-1",
             "workflowId": "wf-1",
             "name": "测试工作流",
             "category": "ai-image",
@@ -807,5 +882,25 @@ mod tests {
         let mut invalid_workflow = valid;
         invalid_workflow["fileContent"] = serde_json::Value::String("not-json".to_string());
         assert!(parse_workflow_save_payload(&invalid_workflow.to_string()).is_err());
+
+        let mut invalid_request_id = serde_json::json!({
+            "requestId": "request-without-save-prefix",
+            "workflowId": "wf-1",
+            "name": "测试工作流",
+            "category": "ai-image",
+            "fileName": "workflow.json",
+            "fileContent": "{}",
+            "editableContent": "{}"
+        });
+        assert!(parse_workflow_save_payload(&invalid_request_id.to_string()).is_err());
+        invalid_request_id["requestId"] = serde_json::Value::String("save-valid".to_string());
+        assert!(parse_workflow_save_payload(&invalid_request_id.to_string()).is_ok());
+    }
+
+    #[test]
+    fn binds_comfyui_http_api_to_loopback_only() {
+        assert!(COMFY_ARGS
+            .windows(2)
+            .any(|args| args == ["--listen", "127.0.0.1"]));
     }
 }

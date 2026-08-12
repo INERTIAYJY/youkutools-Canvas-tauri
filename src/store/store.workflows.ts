@@ -14,21 +14,20 @@ export interface WorkflowSlice {
   workflows: WorkflowDefinition[];
   workflowPanelOpen: boolean;
   setWorkflowPanelOpen: (open: boolean) => void;
-  addWorkflow: (wf: WorkflowDefinition) => void;
+  addWorkflow: (wf: WorkflowDefinition) => Promise<void>;
   updateWorkflow: (id: string, updates: Partial<Omit<WorkflowDefinition, 'id' | 'createdAt'>>) => Promise<void>;
   deleteWorkflow: (id: string) => Promise<void>;
   loadWorkflows: () => Promise<void>;
 }
 
-export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> = (set) => ({
+export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> = (set, get) => ({
   workflows: [],
   workflowPanelOpen: false,
 
   setWorkflowPanelOpen: (open) => set({ workflowPanelOpen: open }),
 
-  addWorkflow: (wf) => {
-    set((state) => ({ workflows: [...state.workflows, wf] }));
-    fileService.saveWorkflow({
+  addWorkflow: async (wf) => {
+    await fileService.saveWorkflow({
       id: wf.id,
       name: wf.name,
       category: wf.category,
@@ -39,20 +38,25 @@ export const createWorkflowSlice: StateCreator<AppState, [], [], WorkflowSlice> 
       defaultNodes: wf.defaultNodes,
       createdAt: wf.createdAt,
       updatedAt: wf.updatedAt,
-    }).catch((e) => console.warn('[保存工作流] 持久化失败:', e));
+    });
+    set((state) => ({ workflows: [...state.workflows, wf] }));
   },
 
   updateWorkflow: async (id, updates) => {
-    let updatedWorkflow: WorkflowDefinition | undefined;
-    set((state) => ({
-      workflows: state.workflows.map((workflow) => {
-        if (workflow.id !== id) return workflow;
-        updatedWorkflow = { ...workflow, ...updates, id: workflow.id, createdAt: workflow.createdAt };
-        return updatedWorkflow;
-      }),
-    }));
-    if (!updatedWorkflow) throw new Error('要更新的工作流不存在');
+    const existing = get().workflows.find((workflow) => workflow.id === id);
+    if (!existing) throw new Error('要更新的工作流不存在');
+    const updatedWorkflow: WorkflowDefinition = {
+      ...existing,
+      ...updates,
+      id: existing.id,
+      createdAt: existing.createdAt,
+    };
     await fileService.saveWorkflow(updatedWorkflow);
+    set((state) => ({
+      workflows: state.workflows.map((workflow) => (
+        workflow.id === id ? updatedWorkflow : workflow
+      )),
+    }));
   },
 
   deleteWorkflow: async (id) => {

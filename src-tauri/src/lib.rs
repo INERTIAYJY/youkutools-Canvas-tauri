@@ -996,6 +996,7 @@ pub fn run() {
             sync_authorized_directories,
             comfyui::launch_comfyui,
             comfyui::open_comfyui_window,
+            comfyui::complete_comfyui_workflow_save,
             onnx::get_models_dir,
             onnx::check_model_exists,
             onnx::image_upscale,

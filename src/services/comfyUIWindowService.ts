@@ -12,6 +12,7 @@ const COMFYUI_SAVE_EVENT = 'comfyui-workflow-save';
 const MAX_WORKFLOW_JSON_LENGTH = 16 * 1024 * 1024;
 
 interface ComfyUIWorkflowSavePayload {
+  requestId: string;
   workflowId?: string | null;
   name: string;
   category: WorkflowCategory;
@@ -33,6 +34,7 @@ const IO_TYPE_RULES: { patterns: RegExp[]; type: WorkflowIONodeType }[] = [
  * 原来那条纹丝不动，默认节点也得重标一遍。
  */
 const WORKFLOW_ID_PATTERN = /^(wf|builtin)-[A-Za-z0-9._:-]{1,160}$/;
+const SAVE_REQUEST_ID_PATTERN = /^save-[A-Za-z0-9._:-]{1,120}$/;
 
 const WORKFLOW_CATEGORIES = new Set<WorkflowCategory>([
   'ai-text',
@@ -117,10 +119,12 @@ function pruneDefaultNodes(
 
 function validateSavePayload(payload: unknown): ComfyUIWorkflowSavePayload {
   if (!isRecord(payload)) throw new Error('ComfyUI 返回的工作流数据无效');
+  const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
   const name = typeof payload.name === 'string' ? payload.name.trim() : '';
   const fileContent = typeof payload.fileContent === 'string' ? payload.fileContent : '';
   const editableContent = typeof payload.editableContent === 'string' ? payload.editableContent : '';
   const category = payload.category as WorkflowCategory;
+  if (!SAVE_REQUEST_ID_PATTERN.test(requestId)) throw new Error('ComfyUI 保存请求无效');
   if (!name || name.length > 120) throw new Error('工作流名称无效');
   if (!WORKFLOW_CATEGORIES.has(category)) throw new Error('工作流分类无效');
   if (!fileContent || fileContent.length > MAX_WORKFLOW_JSON_LENGTH) throw new Error('API 工作流内容无效或过大');
@@ -139,6 +143,7 @@ function validateSavePayload(payload: unknown): ComfyUIWorkflowSavePayload {
   }
 
   return {
+    requestId,
     workflowId: typeof payload.workflowId === 'string' && WORKFLOW_ID_PATTERN.test(payload.workflowId)
       ? payload.workflowId
       : null,
@@ -150,6 +155,18 @@ function validateSavePayload(payload: unknown): ComfyUIWorkflowSavePayload {
     fileContent,
     editableContent,
   };
+}
+
+async function completeComfyUIWorkflowSave(
+  requestId: string,
+  success: boolean,
+  detail: string,
+): Promise<void> {
+  await invoke<void>('complete_comfyui_workflow_save', {
+    requestId,
+    success,
+    detail,
+  });
 }
 
 export async function openComfyUIWorkflowEditor(
@@ -180,12 +197,16 @@ export async function initComfyUIWindowBridge(): Promise<() => void> {
   const { listen } = await import('@tauri-apps/api/event');
   return listen<unknown>(COMFYUI_SAVE_EVENT, async ({ payload }) => {
     const store = useAppStore.getState();
+    const requestId = isRecord(payload) && typeof payload.requestId === 'string'
+      ? payload.requestId
+      : '';
     try {
       const saved = validateSavePayload(payload);
       const existing = saved.workflowId
         ? store.workflows.find((workflow) => workflow.id === saved.workflowId)
         : undefined;
       const now = Date.now();
+      let successMessage: string;
       if (existing) {
         const ioNodes = extractComfyUIIONodes(saved.fileContent);
         await store.updateWorkflow(existing.id, {
@@ -199,25 +220,40 @@ export async function initComfyUIWindowBridge(): Promise<() => void> {
           defaultNodes: pruneDefaultNodes(existing.defaultNodes, ioNodes),
           updatedAt: now,
         });
-        store.showToast(`“${saved.name}”已从 ComfyUI 更新`, 'success');
-        return;
+        successMessage = `“${saved.name}”已从 ComfyUI 更新`;
+      } else {
+        const workflow: WorkflowDefinition = {
+          id: saved.workflowId || `wf-${generateId()}`,
+          name: saved.name,
+          category: saved.category,
+          fileName: saved.fileName,
+          fileContent: saved.fileContent,
+          editableContent: saved.editableContent,
+          ioNodes: extractComfyUIIONodes(saved.fileContent),
+          createdAt: now,
+          updatedAt: now,
+        };
+        await store.addWorkflow(workflow);
+        successMessage = `“${saved.name}”已保存到工作流库`;
       }
 
-      const workflow: WorkflowDefinition = {
-        id: saved.workflowId || `wf-${generateId()}`,
-        name: saved.name,
-        category: saved.category,
-        fileName: saved.fileName,
-        fileContent: saved.fileContent,
-        editableContent: saved.editableContent,
-        ioNodes: extractComfyUIIONodes(saved.fileContent),
-        createdAt: now,
-        updatedAt: now,
-      };
-      store.addWorkflow(workflow);
-      store.showToast(`“${saved.name}”已保存到工作流库`, 'success');
+      try {
+        await completeComfyUIWorkflowSave(saved.requestId, true, saved.name);
+      } catch {
+        store.showToast(`${successMessage}，但无法通知 ComfyUI 窗口`, 'error');
+        return;
+      }
+      store.showToast(successMessage, 'success');
     } catch (error) {
-      store.showToast(error instanceof Error ? error.message : '保存 ComfyUI 工作流失败', 'error');
+      const message = error instanceof Error ? error.message : '保存 ComfyUI 工作流失败';
+      if (SAVE_REQUEST_ID_PATTERN.test(requestId)) {
+        try {
+          await completeComfyUIWorkflowSave(requestId, false, message);
+        } catch {
+          // ComfyUI 窗口可能已关闭；主窗口仍需展示真实持久化结果。
+        }
+      }
+      store.showToast(message, 'error');
     }
   });
 }

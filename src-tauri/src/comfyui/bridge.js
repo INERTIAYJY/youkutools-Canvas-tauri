@@ -11,6 +11,7 @@
   const isMacOS = /Macintosh|Mac OS X/.test(navigator.userAgent);
   let editorContext = null;
   let pendingSavePayload = null;
+  let pendingSaveTimeout = null;
   let actionbarElement = null;
   let actionbarCleanup = null;
   let nativeDockingPreferenceRestored = false;
@@ -94,6 +95,12 @@
     return `wf-${value}`;
   };
 
+  const createSaveRequestId = () => {
+    const value = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `save-${value}`;
+  };
+
   const requestWorkflowName = async (app) => {
     if (editorContext?.name) return editorContext.name;
     const defaultName = `ComfyUI-工作流-${new Date().toLocaleDateString('zh-CN', {
@@ -123,6 +130,7 @@
       if (!name) return;
       const { workflow, output } = await app.graphToPrompt();
       const payload = {
+        requestId: createSaveRequestId(),
         workflowId: editorContext?.workflowId || createWorkflowId(),
         name,
         category: editorContext?.category || inferCategory(output),
@@ -132,15 +140,33 @@
       };
       pendingSavePayload = payload;
       window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__ = payload;
+      pendingSaveTimeout = window.setTimeout(() => {
+        if (pendingSavePayload?.requestId !== payload.requestId) return;
+        pendingSavePayload = null;
+        pendingSaveTimeout = null;
+        delete window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__;
+        showToast(
+          getComfyApp(),
+          'error',
+          '保存超时',
+          'AI Canvas 未返回保存结果，请检查主窗口后重试',
+        );
+      }, 30_000);
       requestHostAction('save');
     } catch (error) {
+      if (pendingSaveTimeout !== null) window.clearTimeout(pendingSaveTimeout);
+      pendingSaveTimeout = null;
       pendingSavePayload = null;
       delete window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__;
       showToast(app || getComfyApp(), 'error', '保存失败', String(error?.message || error));
     }
   };
 
-  const completeSave = (success, detail) => {
+  const completeSave = (requestId, success, detail) => {
+    if (!pendingSavePayload) return;
+    if (requestId && pendingSavePayload.requestId !== requestId) return;
+    if (pendingSaveTimeout !== null) window.clearTimeout(pendingSaveTimeout);
+    pendingSaveTimeout = null;
     if (success && pendingSavePayload) {
       editorContext = { ...editorContext, ...pendingSavePayload };
     }
@@ -543,15 +569,12 @@
         display: none;
       }
       .actionbar-container .ai-canvas-save-action {
-        min-height: 31px;
-        height: 31px;
-        padding-inline: 10px;
+        min-height: 30px;
+        height: 30px;
+        padding-inline: 9px;
         border-radius: 9px;
         color: white;
         background-color: var(--ai-canvas-brand);
-        box-shadow:
-          0 6px 16px rgb(99 102 241 / .3),
-          inset 0 1px 0 rgb(255 255 255 / .16);
         transition:
           background-color 140ms ease,
           box-shadow 140ms ease,
@@ -940,6 +963,83 @@
     });
   };
 
+  /** 本窗口打开过的工作流：workflowId → 传给 ComfyUI 的标签名 */
+  const loadedWorkflowTabs = new Map();
+
+  /** 标签名去掉目录、扩展名和 ComfyUI 自动加的 " (2)" 后缀，用于判断是不是同一个工作流 */
+  const workflowBaseName = (value) => String(value || '')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.json$/i, '')
+    .replace(/\s*\(\d+\)$/, '')
+    .trim();
+
+  /**
+   * 工作流标签页的状态在不同前端版本里挂的位置不一样：新版走 extensionManager，
+   * 老一点的把 pinia store 挂在 window.comfyAPI 上。挨个试，都问不到就返回 null。
+   */
+  const getWorkflowStore = (app) => {
+    const candidates = [
+      app?.extensionManager?.workflow,
+      app?.workflowManager,
+      (() => {
+        try {
+          return window.comfyAPI?.workflowStore?.useWorkflowStore?.();
+        } catch {
+          return null;
+        }
+      })(),
+    ];
+    return candidates.find((store) => Array.isArray(store?.openWorkflows)) ?? null;
+  };
+
+  /** 切换标签页的方法同样可能在 store 上，也可能在 workflowService 上 */
+  const openExistingWorkflow = async (store, workflow) => {
+    const openers = [
+      store?.openWorkflow?.bind(store),
+      (() => {
+        try {
+          const service = window.comfyAPI?.workflowService?.workflowService;
+          return service?.openWorkflow?.bind(service);
+        } catch {
+          return null;
+        }
+      })(),
+    ].filter(Boolean);
+    for (const open of openers) {
+      try {
+        await open(workflow);
+        return true;
+      } catch {
+        // 换下一个
+      }
+    }
+    return false;
+  };
+
+  /**
+   * 同一个工作流反复点「编辑」时，ComfyUI 每次都会新开一个 "名字 (2)(3)" 的标签页。
+   * 先在它自己的已打开列表里找同名的，找到就切过去，不再重复加载
+   * —— 顺带保住用户在那个标签页里还没保存的改动。
+   *
+   * 返回 true=已切换 / false=确实没开着 / null=这个前端版本问不到，无从判断。
+   */
+  const focusOpenWorkflow = async (app, fileName) => {
+    const store = getWorkflowStore(app);
+    if (!store) {
+      console.warn('[AI Canvas] 问不到 ComfyUI 的已打开工作流列表，无法切换标签页');
+      return null;
+    }
+    const target = workflowBaseName(fileName);
+    const match = store.openWorkflows.find(
+      (item) => workflowBaseName(item?.filename ?? item?.path ?? item?.key) === target,
+    );
+    if (!match) return false;
+    if (store.activeWorkflow === match) return true;
+    // 标签页确实开着、只是切不过去：也别再开一个副本
+    return (await openExistingWorkflow(store, match)) ? true : null;
+  };
+
   const loadWorkflow = async (payload) => {
     if (!payload?.apiJson) return;
     const app = await waitForComfyApp();
@@ -949,10 +1049,28 @@
       category: payload.workflowCategory || 'ai-image',
       fileName: payload.workflowFileName || sanitizeFileName(payload.workflowName),
     };
+    // 只对本窗口开过的工作流做切换：按名字盲猜会撞上用户自己同名的本地工作流
+    const knownTab = editorContext.workflowId ? loadedWorkflowTabs.get(editorContext.workflowId) : null;
+    if (knownTab) {
+      const focused = await focusOpenWorkflow(app, knownTab);
+      // false = 标签页确实被关掉了，重新加载；true / null 一律不再开副本
+      if (focused !== false) {
+        showToast(
+          app,
+          'info',
+          focused ? '已切换到已打开的标签页' : '该工作流已在 ComfyUI 中打开',
+          editorContext.name,
+        );
+        return;
+      }
+    }
     if (payload.editableJson) {
       await app.loadGraphData(JSON.parse(payload.editableJson), true, true, editorContext.fileName);
     } else {
       await app.loadApiJson(JSON.parse(payload.apiJson), editorContext.fileName);
+    }
+    if (editorContext.workflowId) {
+      loadedWorkflowTabs.set(editorContext.workflowId, editorContext.fileName);
     }
     showToast(app, 'info', '已从 AI Canvas 打开', editorContext.name);
   };

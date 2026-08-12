@@ -193,7 +193,10 @@ export default function App() {
         if (cancelled) cleanup();
         else dispose = cleanup;
       })
-      .catch(() => {});
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error || '未知错误');
+        useAppStore.getState().showToast(`ComfyUI 保存桥初始化失败：${message}`, 'error');
+      });
     return () => {
       cancelled = true;
       dispose?.();

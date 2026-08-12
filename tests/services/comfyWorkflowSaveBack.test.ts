@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   storeState: {
     workflows: [] as Array<Record<string, unknown>>,
-    addWorkflow: vi.fn<(wf: Record<string, unknown>) => void>(),
+    addWorkflow: vi.fn<(wf: Record<string, unknown>) => Promise<void>>(),
     updateWorkflow: vi.fn<(id: string, updates: Record<string, unknown>) => Promise<void>>(),
     showToast: vi.fn(),
   },
@@ -31,6 +31,7 @@ const EDITABLE_JSON = JSON.stringify({ nodes: [{ id: 1 }] });
 
 function savePayload(workflowId: unknown) {
   return {
+    requestId: 'save-request-1',
     workflowId,
     name: 'MiniMax H3 文生视频',
     category: 'ai-video',
@@ -49,6 +50,9 @@ async function saveFromComfyUI(workflowId: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.invoke.mockResolvedValue(undefined);
+  mocks.storeState.addWorkflow.mockResolvedValue(undefined);
+  mocks.storeState.updateWorkflow.mockResolvedValue(undefined);
   // 保存回写只在 Tauri 里生效，node 环境要先把这个开关立起来
   vi.stubGlobal('window', { __TAURI__: {} });
   mocks.storeState.workflows = [
@@ -83,6 +87,11 @@ describe('ComfyUI 工作流保存回写', () => {
     expect(updates.editableContent).toBe(EDITABLE_JSON);
     // 节点还在，标好的默认节点不该被冲掉
     expect(updates.defaultNodes).toEqual({ prompt: '105:104' });
+    expect(mocks.invoke).toHaveBeenCalledWith('complete_comfyui_workflow_save', {
+      requestId: 'save-request-1',
+      success: true,
+      detail: 'MiniMax H3 文生视频',
+    });
   });
 
   it('手动导入的工作流照常原地更新', async () => {
@@ -106,5 +115,39 @@ describe('ComfyUI 工作流保存回写', () => {
     expect(mocks.storeState.updateWorkflow).not.toHaveBeenCalled();
     expect((mocks.storeState.addWorkflow.mock.calls[0][0] as Record<string, unknown>).id)
       .toBe('builtin-not-seeded-yet');
+  });
+
+  it('更新持久化失败时回传失败，不显示保存成功', async () => {
+    mocks.storeState.updateWorkflow.mockRejectedValueOnce(new Error('磁盘写入失败'));
+
+    await saveFromComfyUI('wf-imported');
+
+    expect(mocks.invoke).toHaveBeenCalledWith('complete_comfyui_workflow_save', {
+      requestId: 'save-request-1',
+      success: false,
+      detail: '磁盘写入失败',
+    });
+    expect(mocks.storeState.showToast).toHaveBeenCalledWith('磁盘写入失败', 'error');
+    expect(mocks.storeState.showToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('已从 ComfyUI 更新'),
+      'success',
+    );
+  });
+
+  it('新建持久化失败时回传失败，不显示保存成功', async () => {
+    mocks.storeState.addWorkflow.mockRejectedValueOnce(new Error('数据库不可用'));
+
+    await saveFromComfyUI(null);
+
+    expect(mocks.invoke).toHaveBeenCalledWith('complete_comfyui_workflow_save', {
+      requestId: 'save-request-1',
+      success: false,
+      detail: '数据库不可用',
+    });
+    expect(mocks.storeState.showToast).toHaveBeenCalledWith('数据库不可用', 'error');
+    expect(mocks.storeState.showToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('已保存到工作流库'),
+      'success',
+    );
   });
 });

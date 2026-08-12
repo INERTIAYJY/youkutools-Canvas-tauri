@@ -165,6 +165,8 @@ export function useKeyboardShortcuts() {
               if (canOpen) {
                 e.preventDefault();
                 e.stopPropagation();
+                // 分镜表节点不弹出 AI 对话框
+                if (data?.type === 'ai-shotlist') return;
                 const el = document.querySelector(`.react-flow__node[data-id="${nodeId}"]`);
                 if (el) {
                   const rect = el.getBoundingClientRect();

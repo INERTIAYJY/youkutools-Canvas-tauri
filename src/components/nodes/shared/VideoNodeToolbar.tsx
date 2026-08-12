@@ -34,11 +34,12 @@ interface VideoNodeToolbarProps {
   onFullscreen: () => void;
   onCopyFile: () => void;
   onReversePrompt: () => void;
+  onShowPrompt: () => void;
   isReversingPrompt?: boolean;
 }
 
 function VideoNodeToolbar({
-  nodeId, onCaptureFrame, onFullscreen, onCopyFile, onReversePrompt, isReversingPrompt,
+  nodeId, onCaptureFrame, onFullscreen, onCopyFile, onReversePrompt, onShowPrompt, isReversingPrompt,
 }: VideoNodeToolbarProps) {
   const nodeType = 'ai-video';
   const registry = getButtonRegistry(nodeType);
@@ -107,6 +108,7 @@ function VideoNodeToolbar({
   const actionMap: Record<string, (e: React.MouseEvent) => void> = {
     copyFile: (e) => { e.stopPropagation(); onCopyFile(); },
     captureFrame: toggleFrameMenu,
+    showPrompt: (e) => { e.stopPropagation(); onShowPrompt(); },
     reversePrompt: (e) => { e.stopPropagation(); if (!isReversingPrompt) onReversePrompt(); },
     fullscreen: (e) => { e.stopPropagation(); onFullscreen(); },
   };

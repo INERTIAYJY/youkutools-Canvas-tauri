@@ -203,6 +203,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
+  const openNodeDialog = useAppStore((s) => s.openNodeDialog);
   const isSingleSelection = useAppStore((s) => s.selectedNodeIds.length <= 1);
   const isSource = data.role === 'source';
   const fallbackDimensions = computeVideoNodeDimensions(data.videoWidth ?? 0, data.videoHeight ?? 0);
@@ -588,6 +589,16 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   }, [data.sourceUrl, data.videoUrl, displayLabel, id, nodeWidth]);
 
   // 反推提示词：抽首/中/尾三帧当序列喂给文本模型，让它把画面和运动一起还原
+  const handleShowPrompt = useCallback(() => {
+    const nodeElement = document.querySelector(`.react-flow__node[data-id="${id}"]`);
+    if (nodeElement) {
+      const rect = nodeElement.getBoundingClientRect();
+      openNodeDialog(id, { x: rect.left + rect.width / 2, y: rect.bottom });
+      return;
+    }
+    openNodeDialog(id);
+  }, [id, openNodeDialog]);
+
   const handleReversePrompt = useCallback(async () => {
     const store = useAppStore.getState();
     const video = videoRef.current;
@@ -646,6 +657,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             onFullscreen={handleOpenFullscreen}
             onCopyFile={handleCopyFile}
             onReversePrompt={handleReversePrompt}
+            onShowPrompt={handleShowPrompt}
             isReversingPrompt={isReversingPrompt}
           />
         </div>

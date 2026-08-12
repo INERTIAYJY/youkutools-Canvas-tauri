@@ -421,6 +421,16 @@
   background: transparent;
   color: var(--text-disabled);
 }
+.prompt-stop-btn {
+  color: var(--danger);
+}
+.prompt-stop-btn:hover {
+  color: var(--danger-light);
+  background: var(--danger-bg);
+}
+.prompt-stop-btn:active {
+  transform: scale(0.9);
+}
 .prompt-pass-through-btn {
   color: var(--success);
 }

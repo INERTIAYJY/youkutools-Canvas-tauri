@@ -8,13 +8,82 @@ import type { WorkflowIONode, WorkflowIONodeType } from '../types';
 import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
 import { mapImageDimensions, mapVideoDimensions, resolveVideoDurationSeconds } from './aiDimensions';
 import { resolveNodeReferences } from './nodeReferenceService';
-import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
+import {
+  cancelNodePolling,
+  cleanupNodePolling,
+  getPendingTasksForProject,
+  registerNodePolling,
+  removePendingTask,
+  savePendingTask,
+  updatePendingTask,
+} from './pollManager';
 import { comfyFetch, pollComfyHistory } from './comfyPolling';
 import { resolveComfyOutputUrl } from './comfyOutputs';
 
 /** ComfyUI 已注册的节点类型；同一次会话里短暂缓存，装完插件重开也能很快看到变化 */
 let nodeClassCache: { baseUrl: string; classes: Set<string>; fetchedAt: number } | null = null;
 const NODE_CLASS_CACHE_TTL = 30_000;
+
+function queueContainsPrompt(queue: unknown, promptId: string): boolean {
+  return Array.isArray(queue)
+    && queue.some((item) => Array.isArray(item) && item[1] === promptId);
+}
+
+async function assertComfyResponse(response: Response, action: string): Promise<void> {
+  if (response.ok) return;
+  const detail = await response.text().catch(() => '');
+  throw new Error(`${action}失败（HTTP ${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`);
+}
+
+/**
+ * 终止一个节点当前提交给 ComfyUI 的任务。
+ * 新版 ComfyUI 使用原子的 job cancel API；旧版回退到队列查询后再做定向删除/中断。
+ */
+export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
+  const currentProjectId = useAppStore.getState().currentProjectId;
+  const task = currentProjectId
+    ? getPendingTasksForProject(currentProjectId).find((item) => (
+      item.nodeId === nodeId && item.taskType === 'comfyui'
+    ))
+    : undefined;
+
+  // 先停止本地上传或轮询，避免取消过程中结果又回写到节点。
+  cancelNodePolling(nodeId);
+  if (!task?.submitted || !task.taskId || !task.baseUrl) return;
+
+  const baseUrl = task.baseUrl.replace(/\/+$/, '');
+  const promptId = task.taskId;
+  const directResponse = await comfyFetch(
+    `${baseUrl}/api/jobs/${encodeURIComponent(promptId)}/cancel`,
+    { method: 'POST' },
+  );
+  if (directResponse.status !== 404) {
+    await assertComfyResponse(directResponse, '终止 ComfyUI 任务');
+    return;
+  }
+
+  // 兼容尚未提供 /api/jobs/:id/cancel 的 ComfyUI 版本。
+  const queueResponse = await comfyFetch(`${baseUrl}/queue`);
+  await assertComfyResponse(queueResponse, '读取 ComfyUI 队列');
+  const queue = (await queueResponse.json()) as Record<string, unknown>;
+  if (queueContainsPrompt(queue.queue_pending, promptId)) {
+    const deleteResponse = await comfyFetch(`${baseUrl}/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delete: [promptId] }),
+    });
+    await assertComfyResponse(deleteResponse, '移除 ComfyUI 排队任务');
+    return;
+  }
+  if (queueContainsPrompt(queue.queue_running, promptId)) {
+    const interruptResponse = await comfyFetch(`${baseUrl}/interrupt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt_id: promptId }),
+    });
+    await assertComfyResponse(interruptResponse, '中断 ComfyUI 运行任务');
+  }
+}
 
 async function fetchComfyNodeClasses(baseUrl: string): Promise<Set<string> | null> {
   if (

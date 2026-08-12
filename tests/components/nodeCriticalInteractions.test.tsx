@@ -607,4 +607,69 @@ describe('critical canvas node interactions', () => {
       status: 'success',
     }));
   });
+
+  it('AINodeDialog exposes a ComfyUI stop action while the node is generating', async () => {
+    const store = createStore([{
+      id: 'image-node',
+      type: 'ai-image',
+      position: { x: 0, y: 0 },
+      data: {
+        type: 'ai-image',
+        label: 'Image node',
+        prompt: 'cat',
+        model: 'comfyui/workflow',
+        provider: 'comfyui',
+        workflowId: 'wf-1',
+        status: 'loading',
+      },
+    }], () => 1);
+    store.activeNodeId = 'image-node';
+    const cancelComfyUINodeTask = vi.fn().mockResolvedValue(undefined);
+
+    await installReactHookDriver();
+    installStoreMock(store);
+    vi.doMock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
+    vi.doMock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => path }));
+    vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({
+      default: function PromptPanelMock() { return null; },
+    }));
+    vi.doMock('../../src/services/aiService', () => ({
+      generateText: vi.fn(),
+      generateImage: vi.fn(),
+      generateImagesBatch: vi.fn(),
+      generateVideo: vi.fn(),
+      generateAudio: vi.fn(),
+      buildPanoramaPrompt: vi.fn(),
+    }));
+    vi.doMock('../../src/services/ai/generateAudio', () => ({ persistAudioGenerationResult: vi.fn() }));
+    vi.doMock('../../src/services/fileService', () => ({ downloadUrlAndSave: vi.fn() }));
+    vi.doMock('../../src/services/imageBatchService', () => ({ applyImageBatchResults: vi.fn() }));
+    vi.doMock('../../src/services/onnxService', () => ({
+      checkModelExists: vi.fn(), createCharacterDirectionGrid: vi.fn(), downloadModel: vi.fn(),
+    }));
+    vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
+    vi.doMock('../../src/services/canvasViewportService', () => ({
+      CANVAS_PAN_DURATION_MS: 200,
+      requestCanvasPanBy: vi.fn(),
+    }));
+    vi.doMock('../../src/services/projectSettingsService', () => ({
+      getImageNodeDimensionsForAspectRatio: vi.fn(),
+      resolveProjectGenerationPrompt: vi.fn(),
+    }));
+    vi.doMock('../../src/services/comfyWorkflowService', () => ({ cancelComfyUINodeTask }));
+
+    const AINodeDialog = (await import('../../src/components/nodes/AINodeDialog')).default as unknown as () => unknown;
+    const tree = AINodeDialog();
+    const promptPanel = findElement(tree, (element) => componentName(element) === 'PromptPanelMock');
+
+    expect(promptPanel.props.isGenerating).toBe(true);
+    expect(promptPanel.props.onCancelGeneration).toEqual(expect.any(Function));
+    (promptPanel.props.onCancelGeneration as () => void)();
+    await vi.waitFor(() => expect(cancelComfyUINodeTask).toHaveBeenCalledWith('image-node'));
+    await vi.waitFor(() => expect(store.updateNodeDataTransient).toHaveBeenCalledWith(
+      'image-node',
+      { status: 'idle', error: undefined },
+    ));
+    expect(store.showToast).toHaveBeenCalledWith('已终止 ComfyUI 任务');
+  });
 });

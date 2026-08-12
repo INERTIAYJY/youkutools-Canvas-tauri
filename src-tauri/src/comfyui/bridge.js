@@ -89,6 +89,20 @@
     return `${base || 'comfyui-workflow'}.json`;
   };
 
+  /** 从 ComfyUI 工作流对象取标签名，去掉路径、扩展名和重名后缀。 */
+  const workflowBaseName = (value) => String(value || '')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.json$/i, '')
+    .replace(/\s*\(\d+\)$/, '')
+    .trim();
+
+  const workflowItemName = (workflow) => workflowBaseName(
+    typeof workflow === 'string'
+      ? workflow
+      : workflow?.filename ?? workflow?.path ?? workflow?.key ?? workflow?.name ?? workflow?.displayName,
+  );
+
   const createWorkflowId = () => {
     const value = globalThis.crypto?.randomUUID?.()
       || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -103,12 +117,15 @@
 
   const requestWorkflowName = async (app) => {
     if (editorContext?.name) return editorContext.name;
-    const defaultName = `ComfyUI-工作流-${new Date().toLocaleDateString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).replace(/\//g, '-')}`;
+    const store = getWorkflowStore(app);
+    const activeWorkflow = store?.activeWorkflow?.value ?? store?.activeWorkflow;
+    const currentWorkflowName = workflowItemName(activeWorkflow);
+    const defaultName = currentWorkflowName || `ComfyUI-工作流-${new Date().toLocaleDateString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).replace(/\//g, '-')}`;
     const value = await app.extensionManager?.dialog?.prompt?.({
       title: '保存工作流到 AI Canvas',
       message: '为当前工作流命名，便于在画布中查找和管理',
@@ -434,9 +451,15 @@
       body {
         overflow: hidden;
       }
+      .pointer-events-auto {
+        background-color: transparent;
+        border-color: transparent;
+        z-index: 9999;
+      }
       .actionbar-container {
+        --ai-canvas-action-size: 28px;
+        --ai-canvas-action-radius: 8px;
         box-sizing: border-box;
-        height: 41px;
         gap: 4px;
         padding: 4px;
         border-color: transparent;
@@ -499,51 +522,54 @@
         gap: 2px;
       }
       .actionbar-container button {
-        border-radius: 9px;
-        padding-inline: 8px;
+        border-radius: var(--ai-canvas-action-radius);
+        padding-inline: 6px;
       }
       .actionbar-container button:not(.batch-count button) {
-        min-height: 31px;
-        height: 31px;
+        min-height: var(--ai-canvas-action-size);
+        height: var(--ai-canvas-action-size);
       }
       .actionbar-container button[aria-label][data-testid="queue-button"],
       .actionbar-container button[aria-label][data-testid="queue-mode-menu-trigger"],
       .actionbar-container button[aria-label]:not([data-testid]):not(.batch-count button) {
-        min-width: 31px;
+        min-width: var(--ai-canvas-action-size);
+      }
+      .actionbar-container button:not(:has(span)):not(.batch-count button) {
+        width: var(--ai-canvas-action-size);
+        min-width: var(--ai-canvas-action-size);
+        padding-inline: 0;
       }
       .actionbar-container .queue-button-group {
-        height: 31px;
-        border-radius: 9px;
+        height: var(--ai-canvas-action-size);
+        border-radius: var(--ai-canvas-action-radius);
       }
       .actionbar-container .batch-count > div {
-        width: 48px;
-        border-radius: 9px 0 0 9px;
+        width: 44px;
+        border-radius: var(--ai-canvas-action-radius) 0 0 var(--ai-canvas-action-radius);
       }
       .actionbar-container .batch-count input {
         padding-inline: 4px 0;
         font-size: 12px;
       }
       .actionbar-container [data-testid="queue-button"] {
-        width: 34px;
-        min-width: 34px;
+        width: var(--ai-canvas-action-size);
+        min-width: var(--ai-canvas-action-size);
         gap: 0;
         padding-inline: 0;
         overflow: hidden;
         font-size: 0;
       }
       .actionbar-container [data-testid="queue-mode-menu-trigger"] {
-        width: 24px;
-        min-width: 24px;
+        width: 22px;
+        min-width: 22px;
         padding-inline: 0;
-        border-radius: 0 9px 9px 0;
+        border-radius: 0 var(--ai-canvas-action-radius) var(--ai-canvas-action-radius) 0;
       }
       .actionbar-container [data-testid="queue-overlay-toggle"] {
-        padding-inline: 10px;
+        padding-inline: 8px;
       }
-      /* 扩展按钮（Manager / rgthree / Image Feed）内部布局各写各的，逐条改字号图标会互相打架，整体缩放最省事 */
-      /* .75 与下面的 32px 相乘得整数 24px，避免圆角在半像素上被切掉 */
       .actionbar-container [data-testid="legacy-topbar-container"] {
-        zoom: .75;
+        font-size: 12px;
       }
       .actionbar-container [data-testid="legacy-topbar-container"] > div,
       .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button-group,
@@ -557,22 +583,65 @@
       .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button,
       .actionbar-container [data-testid="legacy-topbar-container"] .rgthree-comfybar-top-button {
         box-sizing: border-box;
-        min-height: 32px;
-        height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: var(--ai-canvas-action-size);
+        height: var(--ai-canvas-action-size);
+        max-height: var(--ai-canvas-action-size);
+        margin-block: 0;
+        padding-inline: 6px;
         padding-block: 0;
         line-height: 1;
         overflow: hidden;
-        border-radius: 9px;
+        border-radius: var(--ai-canvas-action-radius);
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] .rgthree-comfybar-top-button,
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button:not(:has(span)),
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button[title="ComfyUI Manager"] {
+        width: var(--ai-canvas-action-size);
+        min-width: var(--ai-canvas-action-size);
+        padding-inline: 0;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] .rgthree-comfybar-top-button {
+        border-width: 0;
+        box-shadow: none;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] .rgthree-button-icon,
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button > i {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        line-height: 1;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] i,
+      .actionbar-container [data-testid="legacy-topbar-container"] svg {
+        display: block;
+        width: 14px;
+        height: 14px;
+        font-size: 14px;
       }
       /* Manager 只留图标 */
       .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button[title="ComfyUI Manager"] span {
         display: none;
       }
+      /* Image Feed 与其他扩展入口一样使用纯图标 tiny 按钮 */
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button[title^="Show Image Feed"] {
+        width: var(--ai-canvas-action-size);
+        min-width: var(--ai-canvas-action-size);
+        padding-inline: 0;
+      }
+      .actionbar-container [data-testid="legacy-topbar-container"] .comfyui-button[title^="Show Image Feed"] span {
+        display: none;
+      }
       .actionbar-container .ai-canvas-save-action {
-        min-height: 30px;
-        height: 30px;
-        padding-inline: 9px;
-        border-radius: 9px;
+        min-height: var(--ai-canvas-action-size);
+        height: var(--ai-canvas-action-size);
+        padding-inline: 8px;
+        border-radius: var(--ai-canvas-action-radius);
         color: white;
         background-color: var(--ai-canvas-brand);
         transition:
@@ -965,14 +1034,6 @@
 
   /** 本窗口打开过的工作流：workflowId → 传给 ComfyUI 的标签名 */
   const loadedWorkflowTabs = new Map();
-
-  /** 标签名去掉目录、扩展名和 ComfyUI 自动加的 " (2)" 后缀，用于判断是不是同一个工作流 */
-  const workflowBaseName = (value) => String(value || '')
-    .split(/[\\/]/)
-    .pop()
-    .replace(/\.json$/i, '')
-    .replace(/\s*\(\d+\)$/, '')
-    .trim();
 
   /**
    * 工作流标签页的状态在不同前端版本里挂的位置不一样：新版走 extensionManager，

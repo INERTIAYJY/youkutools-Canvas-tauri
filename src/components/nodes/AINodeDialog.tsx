@@ -35,6 +35,7 @@ import {
   resolveVideoDurationSeconds,
   videoFramesFromDuration,
 } from '../../services/aiDimensions';
+import { cancelComfyUINodeTask } from '../../services/comfyWorkflowService';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
 
@@ -61,6 +62,7 @@ function AINodeDialog() {
 
   const panelRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
+  const cancellingNodeIdsRef = useRef(new Set<string>());
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
@@ -640,7 +642,11 @@ function AINodeDialog() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '生成失败');
-      if (msg === '任务已被取消') {
+      if (
+        (err instanceof DOMException && err.name === 'AbortError')
+        || msg === '任务已被取消'
+        || msg === '请求已取消'
+      ) {
         return;
       }
       if (!isStillCurrentSubmission()) return;
@@ -660,6 +666,23 @@ function AINodeDialog() {
       showToast(msg, 'error');
     }
   }, [activeNodeId, nodeType, currentProjectId, finishContinuousEdit, updateNodeData, updateNodeDataTransient, recordOutputHistory, showToast]);
+
+  const onCancelGeneration = useCallback(async () => {
+    if (!activeNodeId || cancellingNodeIdsRef.current.has(activeNodeId)) return;
+    const nodeId = activeNodeId;
+    cancellingNodeIdsRef.current.add(nodeId);
+    try {
+      await cancelComfyUINodeTask(nodeId);
+      updateNodeDataTransient(nodeId, { status: 'idle', error: undefined });
+      showToast('已终止 ComfyUI 任务');
+    } catch (error) {
+      updateNodeDataTransient(nodeId, { status: 'idle', error: undefined });
+      const message = error instanceof Error ? error.message : '无法终止 ComfyUI 任务';
+      showToast(`已停止本地等待，但${message}`, 'error');
+    } finally {
+      cancellingNodeIdsRef.current.delete(nodeId);
+    }
+  }, [activeNodeId, showToast, updateNodeDataTransient]);
 
   // 直接将输入内容作为节点输出（跳过模型调用）
   const onPassThrough = useCallback(() => {
@@ -877,6 +900,8 @@ function AINodeDialog() {
           animationFrames={data.animationFrames ?? 8}
           onAnimationFramesChange={onAnimationFramesChange}
           canGenerate={data.status !== 'loading'}
+          isGenerating={data.status === 'loading'}
+          onCancelGeneration={data.provider === 'comfyui' ? () => { void onCancelGeneration(); } : undefined}
           onChange={onPromptChange}
           onContinuousEditEnd={finishContinuousEdit}
           onSubmit={onSubmit}

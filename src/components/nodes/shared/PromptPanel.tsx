@@ -308,6 +308,8 @@ interface PromptPanelProps {
   animationFrames?: number;
   onAnimationFramesChange?: (value: number) => void;
   canGenerate?: boolean;
+  isGenerating?: boolean;
+  onCancelGeneration?: () => void;
   onChange: (value: string) => void;
   onContinuousEditEnd?: () => void;
   onSubmit: (overridePrompt?: string, postProcess?: ImagePostProcess) => void;
@@ -375,6 +377,8 @@ export default function PromptPanel({
   animationFrames = 8,
   onAnimationFramesChange,
   canGenerate = true,
+  isGenerating = false,
+  onCancelGeneration,
   onChange,
   onContinuousEditEnd,
   onSubmit,
@@ -791,55 +795,74 @@ export default function PromptPanel({
               </svg>
             </button>
           )}
-          <div
-            ref={batchTriggerRef}
-            className={`prompt-submit-wrap${batchMenuOpen ? ' batch-open' : ''}`}
-          >
-            <button
-              type="button"
-              className={`prompt-btn prompt-submit-btn ${!canGenerate || !prompt.trim() ? 'disabled' : ''}`}
-              disabled={!canGenerate || !prompt.trim()}
-              aria-haspopup={batchSupported ? 'menu' : undefined}
-              aria-expanded={batchSupported ? batchMenuOpen : undefined}
-              data-tooltip={batchSupported ? '点击生成 1 张，长按选择数量' : '调用模型生成'}
-              onPointerDown={handleBatchPointerDown}
-              onPointerUp={clearBatchLongPress}
-              onPointerCancel={clearBatchLongPress}
-              onPointerLeave={clearBatchLongPress}
-              onContextMenu={(event) => { if (batchSupported) event.preventDefault(); }}
-              onClick={handleSubmitClick}
+          {isGenerating && onCancelGeneration ? (
+            <div className="prompt-submit-wrap">
+              <button
+                type="button"
+                className="prompt-btn prompt-stop-btn"
+                data-tooltip="终止 ComfyUI 任务"
+                aria-label="终止 ComfyUI 任务"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCancelGeneration();
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <rect x="5" y="5" width="14" height="14" rx="2" />
+                </svg>
+              </button>
+            </div>
+          ) : (
+            <div
+              ref={batchTriggerRef}
+              className={`prompt-submit-wrap${batchMenuOpen ? ' batch-open' : ''}`}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </button>
-            {batchSupported && (
-              <div className="image-batch-clip">
-                <div
-                  className="image-batch-menu"
-                  role="menu"
-                  aria-label="选择批量生成数量"
-                  aria-hidden={!batchMenuOpen}
-                >
-                  {IMAGE_BATCH_COUNTS.map((count) => (
-                    <button
-                      key={count}
-                      type="button"
-                      role="menuitem"
-                      tabIndex={batchMenuOpen ? 0 : -1}
-                      className={`image-batch-menu-item${batchCount === count ? ' active' : ''}`}
-                      aria-label={`生成 ${count} 张图片`}
-                      title={count >= 4 ? `生成 ${count} 张，费用可能按张计算` : `生成 ${count} 张`}
-                      onClick={handleBatchSelect(count)}
-                    >
-                      {count}
-                    </button>
-                  ))}
+              <button
+                type="button"
+                className={`prompt-btn prompt-submit-btn ${!canGenerate || !prompt.trim() ? 'disabled' : ''}`}
+                disabled={!canGenerate || !prompt.trim()}
+                aria-haspopup={batchSupported ? 'menu' : undefined}
+                aria-expanded={batchSupported ? batchMenuOpen : undefined}
+                data-tooltip={batchSupported ? '点击生成 1 张，长按选择数量' : '调用模型生成'}
+                onPointerDown={handleBatchPointerDown}
+                onPointerUp={clearBatchLongPress}
+                onPointerCancel={clearBatchLongPress}
+                onPointerLeave={clearBatchLongPress}
+                onContextMenu={(event) => { if (batchSupported) event.preventDefault(); }}
+                onClick={handleSubmitClick}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                  <polyline points="12 5 19 12 12 19" />
+                </svg>
+              </button>
+              {batchSupported && (
+                <div className="image-batch-clip">
+                  <div
+                    className="image-batch-menu"
+                    role="menu"
+                    aria-label="选择批量生成数量"
+                    aria-hidden={!batchMenuOpen}
+                  >
+                    {IMAGE_BATCH_COUNTS.map((count) => (
+                      <button
+                        key={count}
+                        type="button"
+                        role="menuitem"
+                        tabIndex={batchMenuOpen ? 0 : -1}
+                        className={`image-batch-menu-item${batchCount === count ? ' active' : ''}`}
+                        aria-label={`生成 ${count} 张图片`}
+                        title={count >= 4 ? `生成 ${count} 张，费用可能按张计算` : `生成 ${count} 张`}
+                        onClick={handleBatchSelect(count)}
+                      >
+                        {count}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

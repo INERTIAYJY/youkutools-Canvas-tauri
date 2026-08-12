@@ -15,6 +15,13 @@ const workflowBaseName = new Function(`${baseNameMatch[0]}\nreturn workflowBaseN
   value: unknown,
 ) => string;
 
+const itemNameMatch = source.match(/const workflowItemName = \(workflow\) => workflowBaseName\([\s\S]*?\r?\n {2}\);/);
+if (!itemNameMatch) throw new Error('bridge.js 里找不到 workflowItemName');
+const workflowItemName = new Function(
+  'workflowBaseName',
+  `${itemNameMatch[0]}\nreturn workflowItemName;`,
+)(workflowBaseName) as (workflow: unknown) => string;
+
 describe('bridge.js workflowBaseName', () => {
   it('去掉目录、扩展名和 ComfyUI 自动加的重名后缀', () => {
     expect(workflowBaseName('minimax-h3-i2v.json')).toBe('minimax-h3-i2v');
@@ -22,6 +29,13 @@ describe('bridge.js workflowBaseName', () => {
     expect(workflowBaseName('C:\\wf\\minimax-h3-i2v (12).json')).toBe('minimax-h3-i2v');
     expect(workflowBaseName('')).toBe('');
     expect(workflowBaseName(undefined)).toBe('');
+  });
+
+  it('从当前工作流对象直接读取标签名称', () => {
+    expect(workflowItemName({ filename: 'Z-Image-turbo文生图.json' })).toBe('Z-Image-turbo文生图');
+    expect(workflowItemName({ path: 'workflows/角色立绘 (2).json' })).toBe('角色立绘');
+    expect(workflowItemName({ name: '场景概念图' })).toBe('场景概念图');
+    expect(workflowItemName('直接传入的工作流.json')).toBe('直接传入的工作流');
   });
 });
 
@@ -57,5 +71,19 @@ describe('bridge.js inferCategory', () => {
     expect(inferCategory({
       '1': { class_type: 'LoadImage', inputs: { self: ['1', 0] } },
     })).toBe('ai-image');
+  });
+});
+
+describe('bridge.js actionbar tiny 尺寸', () => {
+  it('统一使用 28px，并且不再整体缩放扩展按钮', () => {
+    expect(source).toContain('--ai-canvas-action-size: 28px;');
+    expect(source).toContain('height: var(--ai-canvas-action-size);');
+    expect(source).not.toMatch(/legacy-topbar-container"\]\s*\{\s*zoom:/);
+  });
+
+  it('扩展图标居中，并隐藏 Image Feed 文字', () => {
+    expect(source).toContain('.rgthree-button-icon,');
+    expect(source).toContain('align-items: center;');
+    expect(source).toContain('.comfyui-button[title^="Show Image Feed"] span');
   });
 });

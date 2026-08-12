@@ -334,16 +334,24 @@
 .wf-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 10px;
 }
 .wf-group {
-  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
+/* 分组标题贴顶，滚动时仍能看清当前所处分类 */
 .wf-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 4px;
+  padding: 4px 2px;
+  background: var(--glass-panel-bg);
+  backdrop-filter: blur(var(--glass-blur-sm));
 }
 .wf-cat-dot {
   width: 8px;
@@ -360,16 +368,33 @@
   color: var(--theme-text-secondary);
   font-weight: 500;
 }
+.wf-group-count {
+  font-size: 10px;
+  color: var(--theme-text-muted);
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--white-alpha-04);
+}
 .wf-item {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border: 1px solid var(--white-alpha-04);
+  border-radius: 8px;
+  background: var(--white-alpha-03);
+  transition: background var(--transition-base), border-color var(--transition-base);
+}
+.wf-item:hover {
+  background: var(--white-alpha-06);
+  border-color: var(--border-subtle);
+}
+.wf-item.is-expanded {
+  border-color: var(--border-subtle);
+}
+.wf-item-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 24px;
-  border-radius: 6px;
-  transition: background 0.1s;
-}
-.wf-item:hover {
-  background: var(--white-alpha-03);
 }
 .wf-item-info {
   flex: 1;
@@ -385,9 +410,58 @@
   white-space: nowrap;
 }
 .wf-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
   font-size: 11px;
   color: var(--theme-text-muted);
   margin-top: 1px;
+}
+.wf-item-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-item-sep {
+  opacity: 0.5;
+}
+/* 节点徽章折叠开关：平时只留数量，展开后才铺开 */
+.wf-item-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: var(--white-alpha-04);
+  color: var(--theme-text-muted);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: var(--transition-colors);
+}
+.wf-item-toggle:hover {
+  color: var(--theme-text);
+  border-color: var(--border-secondary);
+}
+.wf-item-chevron {
+  transition: transform 0.18s ease;
+}
+.wf-item.is-expanded .wf-item-chevron {
+  transform: rotate(90deg);
+}
+.wf-item-star {
+  color: var(--brand-light);
+}
+.wf-item-toggle[data-tooltip]::after {
+  top: 50%;
+  right: calc(100% + 6px);
+  bottom: auto;
+  left: auto;
+  transform: translateY(-50%);
 }
 .wf-item-del {
   width: 26px;
@@ -427,11 +501,16 @@
   gap: 6px;
   margin-top: 8px;
 }
+.wf-item-ionodes-wrap {
+  overflow: hidden;
+}
 .wf-item-ionodes {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 4px;
+  padding-top: 7px;
+  margin-top: 6px;
+  border-top: 1px dashed var(--border-subtle);
 }
 .wf-ionode-badge {
   display: inline-flex;
@@ -443,17 +522,21 @@
   white-space: nowrap;
 }
 .wf-item-cat {
-  margin-left: 6px;
-  padding: 0 2px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
+  flex-shrink: 0;
+  margin-left: 2px;
+  padding: 0 4px;
+  border: 1px solid var(--white-alpha-08);
+  border-radius: 5px;
+  background: var(--white-alpha-04);
   color: inherit;
   font: inherit;
+  font-size: 10px;
   cursor: pointer;
+  transition: var(--transition-colors);
 }
 .wf-item-cat:hover {
-  border-color: currentColor;
+  color: var(--theme-text);
+  border-color: var(--border-secondary);
 }
 
 /* 列表里的徽章是按钮：点一下把该节点设为对应类型的默认注入目标 */

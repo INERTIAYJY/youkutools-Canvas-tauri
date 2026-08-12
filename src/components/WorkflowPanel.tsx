@@ -130,6 +130,8 @@ export default function WorkflowPanel() {
   const [fileContent, setFileContent] = useState('');
   const [ioNodes, setIoNodes] = useState<WorkflowIONode[]>([]);
   const [listFilter, setListFilter] = useState<WorkflowCategory | 'all'>('all');
+  // 列表里节点徽章默认收起，展开的条目 id 记在这里
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [uploadError, setUploadError] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
@@ -247,6 +249,15 @@ export default function WorkflowPanel() {
     },
     [updateWorkflow, showToast],
   );
+
+  const handleToggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const handleEdit = useCallback(async (workflow: WorkflowDefinition, event: React.MouseEvent) => {
     event.stopPropagation();
@@ -498,87 +509,127 @@ export default function WorkflowPanel() {
                     <div className="wf-group-header">
                       <span className="wf-cat-dot" data-cat={group.value} />
                       <span className="wf-group-label">{group.label}</span>
+                      <span className="wf-group-count">{group.items.length}</span>
                     </div>
-                    {group.items.map((wf) => (
+                    {group.items.map((wf) => {
+                      const nodeCount = wf.ioNodes?.length ?? 0;
+                      const defaultCount = wf.ioNodes?.filter(
+                        (n) => wf.defaultNodes?.[n.type] === n.nodeId,
+                      ).length ?? 0;
+                      const expanded = expandedIds.has(wf.id);
+                      return (
                       <motion.div
                         key={wf.id}
-                        className="wf-item"
+                        className={`wf-item${expanded ? ' is-expanded' : ''}`}
                         layout
                         variants={itemVariants}
                       >
-                        <div className="wf-item-info">
-                          <span className="wf-item-name">{wf.name}</span>
-                          <span className="wf-item-meta">
-                            {wf.fileName} · {new Date(wf.createdAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
-                            {/* 从 ComfyUI 存回来的分类是猜的，猜错了在这里改 */}
-                            <select
-                              className="wf-item-cat"
-                              value={wf.category}
-                              title="修改分类"
-                              onChange={(e) => {
-                                updateWorkflow(wf.id, { category: e.target.value as WorkflowCategory })
-                                  .catch(() => showToast('修改分类失败', 'error'));
-                              }}
+                        <div className="wf-item-row">
+                          <div className="wf-item-info">
+                            <span className="wf-item-name" title={wf.name}>{wf.name}</span>
+                            <span className="wf-item-meta">
+                              <span className="wf-item-file" title={wf.fileName}>{wf.fileName}</span>
+                              <span className="wf-item-sep">·</span>
+                              <span>{new Date(wf.createdAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}</span>
+                              {/* 从 ComfyUI 存回来的分类是猜的，猜错了在这里改 */}
+                              <select
+                                className="wf-item-cat"
+                                value={wf.category}
+                                title="修改分类"
+                                onChange={(e) => {
+                                  updateWorkflow(wf.id, { category: e.target.value as WorkflowCategory })
+                                    .catch(() => showToast('修改分类失败', 'error'));
+                                }}
+                              >
+                                {CATEGORIES.map((cat) => (
+                                  <option key={cat.value} value={cat.value}>{cat.label}</option>
+                                ))}
+                              </select>
+                            </span>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            {nodeCount > 0 && (
+                              <button
+                                type="button"
+                                className="wf-item-toggle"
+                                onClick={() => handleToggleExpand(wf.id)}
+                                data-tooltip={expanded ? '收起输入输出节点' : '展开输入输出节点'}
+                                data-tooltip-pos="left"
+                                aria-expanded={expanded}
+                              >
+                                <svg className="wf-item-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <polyline points="9 18 15 12 9 6" />
+                                </svg>
+                                <span>{nodeCount} 节点</span>
+                                {defaultCount > 0 && <span className="wf-item-star">★{defaultCount}</span>}
+                              </button>
+                            )}
+                            <motion.button
+                              type="button"
+                              className="wf-item-del wf-item-edit"
+                              onClick={(event) => void handleEdit(wf, event)}
+                              data-tooltip="在 ComfyUI 中编辑"
+                              data-tooltip-pos="left"
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
                             >
-                              {CATEGORIES.map((cat) => (
-                                <option key={cat.value} value={cat.value}>{cat.label}</option>
-                              ))}
-                            </select>
-                          </span>
-                          {wf.ioNodes && wf.ioNodes.length > 0 && (
-                            <div className="wf-item-ionodes">
-                              {wf.ioNodes.map((n, i) => {
-                                const isDefault = wf.defaultNodes?.[n.type] === n.nodeId;
-                                return (
-                                  <button
-                                    key={i}
-                                    type="button"
-                                    className={`wf-ionode-badge wf-ionode-${n.type}${isDefault ? ' is-default' : ''}`}
-                                    onClick={() => handleToggleDefaultNode(wf, n)}
-                                    title={isDefault
-                                      ? `已是默认${IONODE_LABELS[n.type]}节点，点击取消`
-                                      : `设为默认${IONODE_LABELS[n.type]}节点：提示词框里的${IONODE_LABELS[n.type]}内容在没 @ 时自动注入这里`}
-                                  >
-                                    {isDefault ? '★' : IONODE_ICONS[n.type]} {n.title}
-                                    <code>#{n.nodeId}</code>
-                                  </button>
-                                );
-                              })}
-                            </div>
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M12 20h9" />
+                                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                              </svg>
+                            </motion.button>
+                            <motion.button
+                              type="button"
+                              className="wf-item-del"
+                              onClick={(e) => handleDelete(wf.id, e)}
+                              data-tooltip="删除工作流"
+                              data-tooltip-pos="left"
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <polyline points="3 6 5 6 21 6" />
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                              </svg>
+                            </motion.button>
+                          </div>
+                        </div>{/* /wf-item-row */}
+
+                        <AnimatePresence initial={false}>
+                          {expanded && nodeCount > 0 && (
+                            <motion.div
+                              key="ionodes"
+                              className="wf-item-ionodes-wrap"
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: 'auto', opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                            >
+                              <div className="wf-item-ionodes">
+                                {(wf.ioNodes ?? []).map((n, i) => {
+                                  const isDefault = wf.defaultNodes?.[n.type] === n.nodeId;
+                                  return (
+                                    <button
+                                      key={i}
+                                      type="button"
+                                      className={`wf-ionode-badge wf-ionode-${n.type}${isDefault ? ' is-default' : ''}`}
+                                      onClick={() => handleToggleDefaultNode(wf, n)}
+                                      title={isDefault
+                                        ? `已是默认${IONODE_LABELS[n.type]}节点，点击取消`
+                                        : `设为默认${IONODE_LABELS[n.type]}节点：提示词框里的${IONODE_LABELS[n.type]}内容在没 @ 时自动注入这里`}
+                                    >
+                                      {isDefault ? '★' : IONODE_ICONS[n.type]} {n.title}
+                                      <code>#{n.nodeId}</code>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </motion.div>
                           )}
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1">
-                          <motion.button
-                            type="button"
-                            className="wf-item-del wf-item-edit"
-                            onClick={(event) => void handleEdit(wf, event)}
-                            data-tooltip="在 ComfyUI 中编辑"
-                            data-tooltip-pos="left"
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M12 20h9" />
-                              <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                            </svg>
-                          </motion.button>
-                          <motion.button
-                            type="button"
-                            className="wf-item-del"
-                            onClick={(e) => handleDelete(wf.id, e)}
-                            data-tooltip="删除工作流"
-                            data-tooltip-pos="left"
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                          </motion.button>
-                        </div>
+                        </AnimatePresence>
                       </motion.div>
-                    ))}
+                      );
+                    })}
                   </motion.div>
                 ))}
               </motion.div>

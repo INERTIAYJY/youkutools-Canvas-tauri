@@ -14,6 +14,7 @@ import { applyImageBatchResults } from './imageBatchService';
 import { mapImageDimensions } from './aiDimensions';
 import { parseMultiPathResponse, splitCommaSeparatedUrls } from './ai/helpers';
 import { resolveComfyOutputUrl, type ComfyOutputKind, type ComfyOutputs } from './comfyOutputs';
+import { pollComfyHistory } from './comfyPolling';
 import { pollResolvedModelProtocol } from './ai/modelProtocol';
 import {
   extractFlowMusicLyrics,
@@ -668,21 +669,15 @@ async function resumeComfyUI(task: PendingTask): Promise<void> {
   const extract = (outputs: ComfyOutputs) => resolveComfyOutputUrl(baseUrl, outputs, kinds);
 
   try {
-    const { url } = await pollTask<ComfyOutputs | undefined, { url: string }>({
-      fetchState: async () => {
-        const res = await fetch(`${baseUrl}/history/${taskId}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const history = (await res.json()) as Record<string, unknown>;
-        const entry = history[taskId] as Record<string, unknown> | undefined;
-        return entry?.outputs as ComfyOutputs | undefined;
-      },
-      isComplete: (outputs) => (outputs ? extract(outputs) : null),
-      interval: 3000,
-      maxAttempts: 1200,
-      onFetchError: 'continue',
-      timeoutMsg: 'ComfyUI 任务恢复超时（1 小时）',
+    // 与实时生成共用轮询：ComfyUI 重启后 promptId 会彻底消失，那里会连 /queue 一起确认并直接判失败，
+    // 不再让恢复出来的任务空转一小时
+    const { url } = await pollComfyHistory(
+      baseUrl,
+      taskId,
+      'ComfyUI 任务恢复超时（1 小时）',
+      extract,
       signal,
-    });
+    );
     await applyNodeResult(nodeId, url, label);
     removePendingTask(nodeId);
   } catch (err) {

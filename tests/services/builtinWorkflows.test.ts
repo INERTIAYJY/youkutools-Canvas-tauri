@@ -156,7 +156,8 @@ describe('内置 MiniMax H3 工作流', () => {
     await runBuiltIn(
       'builtin-minimax-h3-r2v',
       { prompt: '双角色同框', model: 'wf', provider: 'comfyui' },
-      { imageUrls: ['data:image/png;base64,QUJD', 'data:image/png;base64,REVG'] },
+      // 上传结果按内容缓存，这里要用别的用例没传过的图，否则命中缓存就不会真的上传
+      { imageUrls: ['data:image/png;base64,SEhI', 'data:image/png;base64,SUlJ'] },
     );
 
     const submitted = submittedWorkflow();

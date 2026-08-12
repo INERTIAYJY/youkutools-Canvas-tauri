@@ -5,8 +5,8 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   storeState: {
     workflows: [] as Array<Record<string, unknown>>,
-    addWorkflow: vi.fn(),
-    updateWorkflow: vi.fn(async () => {}),
+    addWorkflow: vi.fn<(wf: Record<string, unknown>) => void>(),
+    updateWorkflow: vi.fn<(id: string, updates: Record<string, unknown>) => Promise<void>>(),
     showToast: vi.fn(),
   },
 }));

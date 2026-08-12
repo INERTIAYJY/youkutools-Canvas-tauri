@@ -8,83 +8,9 @@ import type { WorkflowIONode, WorkflowIONodeType } from '../types';
 import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
 import { mapImageDimensions, mapVideoDimensions, resolveVideoDurationSeconds } from './aiDimensions';
 import { resolveNodeReferences } from './nodeReferenceService';
-import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
-import { corsSafeFetch } from './ai/httpTransport';
-import { resolveComfyOutputUrl, type ComfyOutputs } from './comfyOutputs';
-
-// ── 跨域安全的 fetch 包装 ──
-
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
-
-/**
- * 将 ComfyUI 直连地址替换为当前环境可访问的地址：
- * - Tauri 模式：保留原地址（走 Rust proxy_fetch）
- * - 浏览器开发模式：替换为 Vite 代理路径 /api/comfyui
- */
-function normalizeComfyUrl(url: string): string {
-  if (isTauri) return url;
-  // Vite dev proxy: http://127.0.0.1:8188/xxx → /api/comfyui/xxx
-  return url.replace(/^https?:\/\/127\.0\.0\.1:\d+/, '/api/comfyui');
-}
-
-/** 将 FormData 序列化为 base64 编码的 multipart 字节流 */
-async function formDataToBase64(formData: FormData): Promise<{ body: string; contentType: string }> {
-  const boundary = '----WebKitFormBoundary' + Math.random().toString(36).substring(2);
-  const encoder = new TextEncoder();
-  const parts: Uint8Array[] = [];
-
-  for (const [name, value] of formData.entries()) {
-    let header = `--${boundary}\r\n`;
-    if (value instanceof Blob) {
-      const filename = (value as File).name || 'blob';
-      header += `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n`;
-      header += `Content-Type: ${value.type || 'application/octet-stream'}\r\n\r\n`;
-      parts.push(encoder.encode(header));
-      parts.push(new Uint8Array(await value.arrayBuffer()));
-      parts.push(encoder.encode('\r\n'));
-    } else {
-      header += `Content-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
-      parts.push(encoder.encode(header));
-    }
-  }
-  parts.push(encoder.encode(`--${boundary}--\r\n`));
-
-  const totalLen = parts.reduce((acc, p) => acc + p.length, 0);
-  const merged = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const p of parts) {
-    merged.set(p, offset);
-    offset += p.length;
-  }
-
-  let binary = '';
-  for (let i = 0; i < merged.length; i++) binary += String.fromCharCode(merged[i]);
-  return { body: btoa(binary), contentType: `multipart/form-data; boundary=${boundary}` };
-}
-
-/**
- * 跨域安全的 fetch — Tauri 模式走 Rust proxy_fetch，浏览器模式走 Vite 代理。
- * 用法与原生 fetch 一致，自动处理 ComfyUI URL 重写和 FormData 序列化。
- */
-async function comfyFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const resolvedUrl = normalizeComfyUrl(url);
-
-  if (!isTauri) {
-    return corsSafeFetch(resolvedUrl, options);
-  }
-
-  const headers = new Headers(options.headers);
-  let body = options.body;
-  if (body instanceof FormData) {
-    const encoded = await formDataToBase64(body);
-    const binary = atob(encoded.body);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    headers.set('Content-Type', encoded.contentType);
-    body = bytes.buffer;
-  }
-  return corsSafeFetch(resolvedUrl, { ...options, headers, body });
-}
+import { comfyFetch, pollComfyHistory } from './comfyPolling';
+import { resolveComfyOutputUrl } from './comfyOutputs';
 
 /** ComfyUI 已注册的节点类型；同一次会话里短暂缓存，装完插件重开也能很快看到变化 */
 let nodeClassCache: { baseUrl: string; classes: Set<string>; fetchedAt: number } | null = null;
@@ -324,6 +250,41 @@ function normalizeComfyMediaExtension(
   return urlExtension || COMFY_MEDIA_FALLBACK_EXTENSION[kind];
 }
 
+interface ComfyUploadResult {
+  name: string;
+  subfolder?: string;
+  type?: string;
+}
+
+/**
+ * 同一份媒体在一次会话里只传一次 —— ComfyUI 的 input 目录是持久的，
+ * 同一张参考图喂给多个节点、或连续生成多次都不必反复上传。
+ */
+const uploadCache = new Map<string, { result: ComfyUploadResult; uploadedAt: number }>();
+const UPLOAD_CACHE_LIMIT = 64;
+/** 换了 ComfyUI 实例或清过 input 目录时，缓存的文件名会失效，过一会儿重传一次更保险 */
+const UPLOAD_CACHE_TTL = 10 * 60_000;
+
+/** data URL 拿全文当键会把整份 base64 长期留在缓存里，改用内容哈希 */
+async function uploadCacheKey(baseUrl: string, mediaUrl: string, kind: ComfyMediaKind): Promise<string> {
+  const prefix = `${baseUrl}::${kind}::`;
+  const subtle = globalThis.crypto?.subtle;
+  if (!mediaUrl.startsWith('data:') || !subtle) return prefix + mediaUrl;
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(mediaUrl));
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${prefix}sha256:${hex}`;
+}
+
+function rememberUpload(key: string, result: ComfyUploadResult): void {
+  uploadCache.set(key, { result, uploadedAt: Date.now() });
+  // Map 按插入顺序迭代，超限时丢最早的
+  while (uploadCache.size > UPLOAD_CACHE_LIMIT) {
+    const oldest = uploadCache.keys().next();
+    if (oldest.done) break;
+    uploadCache.delete(oldest.value);
+  }
+}
+
 /**
  * 将图片或音频上传到 ComfyUI 服务器，返回 filename/subfolder/type。
  * ComfyUI 只有 /upload/image 与 /upload/mask 两个上传路由，前者不校验扩展名或 MIME，
@@ -334,8 +295,11 @@ async function uploadMediaToComfyUI(
   mediaUrl: string,
   kind: ComfyMediaKind,
   signal?: AbortSignal,
-): Promise<{ name: string; subfolder?: string; type?: string }> {
+): Promise<ComfyUploadResult> {
   const label = COMFY_MEDIA_LABEL[kind];
+  const cacheKey = await uploadCacheKey(baseUrl, mediaUrl, kind);
+  const cached = uploadCache.get(cacheKey);
+  if (cached && Date.now() - cached.uploadedAt < UPLOAD_CACHE_TTL) return cached.result;
   // 1. 获取 Blob（支持 data URL 和远程 URL）
   let blob: Blob;
   let ext: string;
@@ -374,7 +338,9 @@ async function uploadMediaToComfyUI(
 
   // 2. 上传到 ComfyUI /upload/image（表单字段名固定为 image，音频亦然）
   const formData = new FormData();
-  formData.append('image', blob, `upload_${Date.now()}.${ext}`);
+  // 加随机后缀：同一毫秒内的两次上传会撞名，overwrite 之下后者会盖掉前者
+  const unique = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  formData.append('image', blob, `upload_${unique}.${ext}`);
   // 覆盖同名文件，避免重复堆积
   formData.append('overwrite', 'true');
 
@@ -389,11 +355,12 @@ async function uploadMediaToComfyUI(
     throw new Error(`ComfyUI ${label}上传失败 (${uploadRes.status})${errorBody ? ': ' + errorBody.slice(0, 200) : ''}`);
   }
 
-  const uploadResult = (await uploadRes.json()) as { name: string; subfolder?: string; type?: string };
+  const uploadResult = (await uploadRes.json()) as ComfyUploadResult;
   if (!uploadResult.name) {
     throw new Error('ComfyUI 上传返回结果异常：缺少文件名');
   }
 
+  rememberUpload(cacheKey, uploadResult);
   return uploadResult;
 }
 
@@ -948,6 +915,51 @@ async function submitComfyUIWorkflow(
   return { baseUrl, promptId: '', workflowObj };
 }
 
+/**
+ * /prompt 校验失败时返回的是结构化错误：
+ * { error: { message, details }, node_errors: { "14": { class_type, errors: [{ message, details }] } } }
+ * 直接把原始 JSON 截断给用户等于什么都没说，这里翻成「哪个节点的哪个输入不行」。
+ */
+export function formatComfyPromptError(status: number, rawBody: string): string {
+  const head = `ComfyUI 拒绝了工作流 (${status})`;
+  let payload: {
+    error?: { message?: unknown; details?: unknown };
+    node_errors?: Record<string, { class_type?: unknown; errors?: unknown[] }>;
+  };
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    // 不是 JSON（网关错误页之类）就退回原文
+    return rawBody.trim() ? `${head}: ${rawBody.trim().slice(0, 200)}` : head;
+  }
+
+  const lines: string[] = [];
+  const summary = [payload.error?.message, payload.error?.details]
+    .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    .join(' — ');
+  lines.push(summary ? `${head}：${summary}` : head);
+
+  const nodeEntries = Object.entries(payload.node_errors ?? {});
+  for (const [nodeId, nodeError] of nodeEntries.slice(0, 5)) {
+    const classType = typeof nodeError?.class_type === 'string' ? ` ${nodeError.class_type}` : '';
+    const detail = (nodeError?.errors ?? [])
+      .map((item) => {
+        const error = item as { message?: unknown; details?: unknown; extra_info?: { input_name?: unknown } };
+        const inputName = typeof error.extra_info?.input_name === 'string' ? `${error.extra_info.input_name}: ` : '';
+        const text = [error.message, error.details]
+          .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+          .join(' — ');
+        return text ? `${inputName}${text}` : '';
+      })
+      .filter(Boolean)
+      .join('；');
+    lines.push(`· 节点 #${nodeId}${classType}${detail ? ` · ${detail.slice(0, 300)}` : ''}`);
+  }
+  if (nodeEntries.length > 5) lines.push(`· 还有 ${nodeEntries.length - 5} 个节点报错`);
+
+  return lines.join('\n');
+}
+
 /** 提交 workflowObj 到 ComfyUI 并返回 promptId */
 async function promptComfyUIWorkflow(
   baseUrl: string,
@@ -963,7 +975,7 @@ async function promptComfyUIWorkflow(
 
   if (!promptRes.ok) {
     const errorBody = await promptRes.text().catch(() => '');
-    throw new Error(`ComfyUI 提交工作流失败 (${promptRes.status})${errorBody ? ': ' + errorBody.slice(0, 200) : ''}`);
+    throw new Error(formatComfyPromptError(promptRes.status, errorBody));
   }
 
   const promptResult = (await promptRes.json()) as { prompt_id?: string; error?: string };
@@ -975,66 +987,6 @@ async function promptComfyUIWorkflow(
   }
 
   return promptResult.prompt_id;
-}
-
-interface ComfyHistoryEntry {
-  outputs?: ComfyOutputs;
-  status?: {
-    status_str?: string;
-    completed?: boolean;
-    messages?: unknown[];
-  };
-}
-
-function readComfyFailureMessage(entry: ComfyHistoryEntry): string | null {
-  const status = entry.status;
-  if (!status) return null;
-  if (status.status_str?.toLowerCase() === 'error') {
-    for (const message of [...(status.messages ?? [])].reverse()) {
-      if (!Array.isArray(message) || typeof message[1] !== 'object' || message[1] === null) continue;
-      const detail = message[1] as Record<string, unknown>;
-      const text = detail.exception_message ?? detail.error ?? detail.message;
-      if (typeof text === 'string' && text.trim()) return `ComfyUI 执行失败：${text.trim()}`;
-    }
-    return 'ComfyUI 执行失败';
-  }
-  return null;
-}
-
-/**
- * ComfyUI 共享轮询：拉取 /history/{promptId}，每 3 秒一次，最多 1200 次（1 小时）
- * @param extract 从 outputs 中提取结果，返回 null 表示仍需等待
- */
-async function pollComfyHistory<T>(
-  baseUrl: string,
-  promptId: string,
-  timeoutMsg: string,
-  extract: (outputs: ComfyOutputs) => T | null,
-  signal?: AbortSignal,
-): Promise<T> {
-  return pollTask<ComfyHistoryEntry | undefined, T>({
-    fetchState: async () => {
-      const res = await comfyFetch(`${baseUrl}/history/${promptId}`, { signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const history = (await res.json()) as Record<string, unknown>;
-      return history[promptId] as ComfyHistoryEntry | undefined;
-    },
-    isComplete: (entry) => (entry?.outputs ? extract(entry.outputs) : null),
-    isFailed: (entry) => {
-      if (!entry) return null;
-      const failure = readComfyFailureMessage(entry);
-      if (failure) return failure;
-      if (entry.status?.completed === true) {
-        const result = entry.outputs ? extract(entry.outputs) : null;
-        if (result === null) return 'ComfyUI 执行完成但未返回目标媒体';
-      }
-      return null;
-    },
-    interval: 3000,
-    maxAttempts: 1200,
-    timeoutMsg,
-    signal,
-  });
 }
 
 /** 轮询 ComfyUI 执行历史，等待图片生成完成 */

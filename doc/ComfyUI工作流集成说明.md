@@ -222,6 +222,8 @@ ComfyUI 在 AI Canvas 里是一种 **provider**：工作流导入后会出现在
 4. **保存** —— 桥接脚本把两种格式的 JSON 打包放到 `window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__`，Rust 用 `eval_with_callback` 取回来、校验（分类合法、两份 JSON 都能解析、都不超 16 MiB），再 `emit` 出 `comfyui-workflow-save` 事件；
 5. **落库** —— 前端 `initComfyUIWindowBridge` 收到事件后再校验一次，已存在就更新（重新识别 IO 节点、剪掉失效的默认节点），不存在就新建。
 
+能匹配上的 id 只有手动导入的 `wf-` 和内置播种的 `builtin-` 两种（`WORKFLOW_ID_PATTERN`）。**内置工作流走的是同一条路径，编辑后同样原地更新**，不会另存成同名副本；id 认不出来才当新工作流入库。
+
 面板保持打开不关：ComfyUI 那边存回来后列表会实时刷新，方便接着改默认节点。
 
 ## 12. 已知限制

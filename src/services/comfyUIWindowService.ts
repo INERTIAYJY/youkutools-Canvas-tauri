@@ -27,6 +27,13 @@ const IO_TYPE_RULES: { patterns: RegExp[]; type: WorkflowIONodeType }[] = [
   { type: 'prompt', patterns: [/CLIPTextEncode/i, /TextEncode/i, /StringLiteral/i, /PrimitiveString/i, /^ShowText|pysssss/i] },
 ];
 
+/**
+ * 认得出的工作流 id：手动导入的 `wf-`，以及内置播种的 `builtin-`。
+ * 不认这个 id 就会当成新工作流入库 —— 内置工作流在 ComfyUI 里改完存回来会变成同名副本，
+ * 原来那条纹丝不动，默认节点也得重标一遍。
+ */
+const WORKFLOW_ID_PATTERN = /^(wf|builtin)-[A-Za-z0-9._:-]{1,160}$/;
+
 const WORKFLOW_CATEGORIES = new Set<WorkflowCategory>([
   'ai-text',
   'ai-image',
@@ -132,7 +139,7 @@ function validateSavePayload(payload: unknown): ComfyUIWorkflowSavePayload {
   }
 
   return {
-    workflowId: typeof payload.workflowId === 'string' && /^wf-[A-Za-z0-9._:-]{1,160}$/.test(payload.workflowId)
+    workflowId: typeof payload.workflowId === 'string' && WORKFLOW_ID_PATTERN.test(payload.workflowId)
       ? payload.workflowId
       : null,
     name,

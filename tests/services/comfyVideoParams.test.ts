@@ -46,8 +46,26 @@ function registerWorkflow() {
   }];
 }
 
+/** 用别的节点组合覆盖默认工作流 */
+function registerNodes(nodes: Record<string, unknown>) {
+  mocks.storeState.workflows = [{
+    id: 'wf-1',
+    name: '本地出片',
+    category: 'ai-video',
+    fileName: 'x.json',
+    fileContent: JSON.stringify(nodes),
+    ioNodes: [],
+    createdAt: 1,
+  }];
+}
+
 function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+}
+
+/** /object_info/{class} 的返回：输入声明是 { 名字: [类型, 配置] }，combo 的类型就是可选值数组 */
+function objectInfo(classType: string, inputs: Record<string, unknown>) {
+  return { [classType]: { input: { required: inputs } } };
 }
 
 function submittedWorkflow(): Record<string, { inputs: Record<string, unknown> }> {
@@ -55,10 +73,23 @@ function submittedWorkflow(): Record<string, { inputs: Record<string, unknown> }
   return JSON.parse(String((call?.[1] as RequestInit).body)).prompt;
 }
 
+/** 按类型登记 /object_info/{class} 的应答；没登记的类型一律 404，等价于问不到 */
+let objectInfoByClass: Record<string, unknown> = {};
+/** 节点声明在服务里按 baseUrl 缓存，每个用例换个地址免得互相串味 */
+let comfyPort = 8188;
+
 beforeEach(() => {
   vi.clearAllMocks();
   registerWorkflow();
+  objectInfoByClass = {};
+  mocks.storeState.config.comfyUIUrl = `http://comfy.test:${++comfyPort}`;
   mocks.corsSafeFetch.mockImplementation(async (url: string) => {
+    const objectInfoMatch = /\/object_info\/(.+)$/.exec(String(url));
+    if (objectInfoMatch) {
+      const classType = decodeURIComponent(objectInfoMatch[1]);
+      const info = objectInfoByClass[classType];
+      return info ? jsonResponse(info) : { ok: false, status: 404, json: async () => ({}), text: async () => '' };
+    }
     if (url.endsWith('/prompt')) return jsonResponse({ prompt_id: 'prompt-1' });
     if (url.includes('/history/')) {
       return jsonResponse({
@@ -107,5 +138,130 @@ describe('ComfyUI 视频参数注入', () => {
     });
 
     expect(submittedWorkflow()['2'].inputs).toMatchObject({ width: 216, height: 384, length: 121 });
+  });
+
+  it('num_frames / video_frames 也算帧数字段', async () => {
+    registerNodes({
+      // WanVideoWrapper 全家都用 num_frames
+      '1': { class_type: 'WanVideoEmptyEmbeds', inputs: { width: 832, height: 480, num_frames: 81 } },
+      // SVD 用 video_frames，且 fps 是数字
+      '2': { class_type: 'SVD_img2vid_Conditioning', inputs: { width: 1024, height: 576, video_frames: 14, fps: 6 } },
+    });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 640, seedanceRatio: '16:9', videoFps: 20, videoFrames: 101,
+    });
+
+    const submitted = submittedWorkflow();
+    expect(submitted['1'].inputs).toMatchObject({ width: 640, height: 360, num_frames: 101 });
+    expect(submitted['2'].inputs).toMatchObject({ video_frames: 101, fps: 20 });
+  });
+
+  it('连线过来的帧率不会被数字冲掉', async () => {
+    registerNodes({
+      '1': { class_type: 'VHS_VideoCombine', inputs: { frame_rate: ['9', 0] } },
+      '2': { class_type: 'CreateVideo', inputs: { fps: 24 } },
+    });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 640, videoFps: 30, videoFrames: 61,
+    });
+
+    const submitted = submittedWorkflow();
+    expect(submitted['1'].inputs.frame_rate).toEqual(['9', 0]);
+    expect(submitted['2'].inputs.fps).toBe(30);
+  });
+
+  it('输入素材节点和裁剪节点上的同名参数不动', async () => {
+    registerNodes({
+      '1': { class_type: 'VHS_LoadVideo', inputs: { force_rate: 0, custom_width: 0, custom_height: 0, frame_load_cap: 0 } },
+      '2': { class_type: 'Video Slice', inputs: { start_time: 0, duration: 0 } },
+    });
+    objectInfoByClass['Video Slice'] = objectInfo('Video Slice', { duration: ['FLOAT', { min: 0 }] });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 1280, videoFps: 24, videoFrames: 121, seedanceDuration: 5,
+    });
+
+    const submitted = submittedWorkflow();
+    expect(submitted['1'].inputs).toMatchObject({ force_rate: 0, custom_width: 0, custom_height: 0, frame_load_cap: 0 });
+    expect(submitted['2'].inputs.duration).toBe(0);
+  });
+
+  it('API 节点的比例、档位、时长按节点声明的可选值写', async () => {
+    registerNodes({
+      '1': {
+        class_type: 'KlingTextToVideoNode',
+        inputs: { aspect_ratio: '1:1', resolution: '720p', duration: 5 },
+      },
+    });
+    objectInfoByClass.KlingTextToVideoNode = objectInfo('KlingTextToVideoNode', {
+      aspect_ratio: [['16:9', '9:16', '1:1']],
+      resolution: [['540p', '720p', '1080p']],
+      duration: [[5, 10]],
+    });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 1920, seedanceRatio: '9:16', videoFps: 24, videoFrames: 241, seedanceDuration: 9,
+    });
+
+    // 1080p 是长边 1920 最近的一档；9 秒不在可选值里，退到最近的 10
+    expect(submittedWorkflow()['1'].inputs).toMatchObject({
+      aspect_ratio: '9:16', resolution: '1080p', duration: 10,
+    });
+  });
+
+  it('问不到节点声明时，比例和档位一律不写', async () => {
+    registerNodes({
+      '1': { class_type: 'SomeVendorVideoNode', inputs: { aspect_ratio: '1:1', resolution: '720p' } },
+    });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 1920, seedanceRatio: '9:16', videoFps: 24, videoFrames: 121,
+    });
+
+    expect(submittedWorkflow()['1'].inputs).toMatchObject({ aspect_ratio: '1:1', resolution: '720p' });
+  });
+
+  it('ResolutionSelector 的比例按节点自己的档位写法写', async () => {
+    registerNodes({
+      '1': { class_type: 'ResolutionSelector', inputs: { aspect_ratio: '1:1 (Square)', megapixels: 0.4 } },
+    });
+    objectInfoByClass.ResolutionSelector = objectInfo('ResolutionSelector', {
+      aspect_ratio: [['1:1 (Square)', '16:9 (Widescreen)', '9:16 (Portrait Widescreen)']],
+      megapixels: ['FLOAT', { min: 0.1, max: 16 }],
+    });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 832, seedanceRatio: '16:9', videoFps: 24, videoFrames: 121,
+    });
+
+    // 832×464 ≈ 0.39MP
+    expect(submittedWorkflow()['1'].inputs).toMatchObject({
+      aspect_ratio: '16:9 (Widescreen)', megapixels: 0.39,
+    });
+  });
+
+  it('duration_seconds 这类纯数字时长直接写秒数', async () => {
+    registerNodes({
+      '1': { class_type: 'VeoVideoGenerationNode', inputs: { duration_seconds: 5 } },
+    });
+    objectInfoByClass.VeoVideoGenerationNode = objectInfo('VeoVideoGenerationNode', {
+      duration_seconds: ['INT', { min: 5, max: 8 }],
+    });
+
+    await executeComfyUIVideoGenerate({
+      prompt: 'p', model: 'wf', provider: 'comfyui', workflowId: 'wf-1',
+      videoResolution: 1280, videoFps: 24, videoFrames: 289, seedanceDuration: 12,
+    });
+
+    // 节点声明最多 8 秒，超出的按上限收
+    expect(submittedWorkflow()['1'].inputs.duration_seconds).toBe(8);
   });
 });

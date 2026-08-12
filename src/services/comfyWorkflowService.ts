@@ -105,6 +105,81 @@ async function fetchComfyNodeClasses(baseUrl: string): Promise<Set<string> | nul
   return classes;
 }
 
+/** 节点某个输入的声明：combo 的可选值 + 数值范围，用来决定敢不敢写、写多少 */
+interface ComfyInputSpec {
+  options?: unknown[];
+  min?: number;
+  max?: number;
+}
+type ComfyNodeInputSpecs = Record<string, ComfyInputSpec>;
+
+const nodeInputSpecCache = new Map<string, { fetchedAt: number; specs: Promise<ComfyNodeInputSpecs | null> }>();
+
+/** /object_info/{class} 的输入声明形如 { name: [type, config] }，combo 的 type 本身就是可选值数组 */
+function parseNodeInputSpecs(payload: unknown, classType: string): ComfyNodeInputSpecs | null {
+  const groups = (payload as Record<string, { input?: Record<string, Record<string, unknown>> }> | null)
+    ?.[classType]?.input;
+  if (!groups) return null;
+  const specs: ComfyNodeInputSpecs = {};
+  for (const group of ['required', 'optional'] as const) {
+    for (const [name, declaration] of Object.entries(groups[group] ?? {})) {
+      if (!Array.isArray(declaration)) continue;
+      const [type, config] = declaration as [unknown, Record<string, unknown> | undefined];
+      specs[name] = {
+        options: Array.isArray(type) ? type : undefined,
+        min: typeof config?.min === 'number' ? config.min : undefined,
+        max: typeof config?.max === 'number' ? config.max : undefined,
+      };
+    }
+  }
+  return specs;
+}
+
+/** 单个节点类型的输入声明；问不到就返回 null，调用方按「不敢写」处理 */
+async function fetchNodeInputSpecs(baseUrl: string, classType: string): Promise<ComfyNodeInputSpecs | null> {
+  const key = `${baseUrl}::${classType}`;
+  const cached = nodeInputSpecCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < NODE_CLASS_CACHE_TTL) return cached.specs;
+  const specs = (async () => {
+    try {
+      const response = await comfyFetch(`${baseUrl}/object_info/${encodeURIComponent(classType)}`);
+      if (!response.ok) return null;
+      return parseNodeInputSpecs(await response.json(), classType);
+    } catch {
+      return null;
+    }
+  })();
+  nodeInputSpecCache.set(key, { fetchedAt: Date.now(), specs });
+  return specs;
+}
+
+/**
+ * 只为「写之前必须校验」的那几个输入名去问节点声明，一个工作流通常也就一两个节点命中。
+ * 问不到就返回空表，注入时这些字段一律跳过，其余数值字段照常写。
+ */
+async function resolveVideoParamSpecs(
+  baseUrl: string,
+  workflowObj: Record<string, Record<string, unknown>>,
+): Promise<Map<string, ComfyNodeInputSpecs>> {
+  const classTypes = new Set<string>();
+  for (const nodeData of Object.values(workflowObj)) {
+    const inputs = nodeData?.inputs as Record<string, unknown> | undefined;
+    const classType = typeof nodeData?.class_type === 'string' ? nodeData.class_type : '';
+    if (!inputs || !classType) continue;
+    // 连线过来的值是数组，那种轮不到我们写
+    const needsSpec = COMBO_GUARDED_KEYS.some(
+      (key) => typeof inputs[key] === 'string' || typeof inputs[key] === 'number',
+    );
+    if (needsSpec) classTypes.add(classType);
+  }
+  const resolved = new Map<string, ComfyNodeInputSpecs>();
+  await Promise.all([...classTypes].map(async (classType) => {
+    const specs = await fetchNodeInputSpecs(baseUrl, classType);
+    if (specs) resolved.set(classType, specs);
+  }));
+  return resolved;
+}
+
 /**
  * 列出工作流里 ComfyUI 没注册的节点类型（多半是没装或没启用对应插件）。
  * 问不到节点清单时返回空数组：宁可放行让 ComfyUI 自己报错，也不要拦住能用的工作流。
@@ -538,12 +613,17 @@ function writeResolutionSelector(
   inputs: Record<string, unknown>,
   dims: { width: number; height: number },
   aspectRatio: string | undefined,
+  specs?: ComfyNodeInputSpecs,
 ): void {
   if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels !== 'number') return;
-  const label = aspectRatio ? RESOLUTION_SELECTOR_RATIOS[aspectRatio] : undefined;
-  if (label) inputs.aspect_ratio = label;
+  // 问得到可选值就按可选值挑（能兼容表里没有的档位写法），问不到再退回内置对照表
+  const options = specs?.aspect_ratio?.options;
+  const label = options
+    ? pickAspectRatioOption(options, aspectRatio)
+    : aspectRatio ? RESOLUTION_SELECTOR_RATIOS[aspectRatio] : undefined;
+  if (label !== undefined) inputs.aspect_ratio = label;
   const megapixels = Math.round((dims.width * dims.height) / 10_000) / 100;
-  inputs.megapixels = Math.min(16, Math.max(0.1, megapixels));
+  inputs.megapixels = clampToSpec(megapixels, specs?.megapixels, 0.1, 16);
 }
 
 /**
@@ -582,6 +662,157 @@ function writeDurationSeconds(
   return true;
 }
 
+/* ──────────────────────────────────────────────────────────────
+   视频参数注入
+   认哪些输入名是照着 ComfyUI 核心（comfy_extras、comfy_api_nodes）和常用插件的节点定义列的：
+   - 帧数：length（Wan / Hunyuan / Mochi / LTXV latent）、num_frames（WanVideoWrapper 全家、
+           WanTrackToVideo）、video_frames（SVD_img2vid_Conditioning）、frame_count、frames
+   - 帧率：fps（CreateVideo、SaveWEBM、SVD）、frame_rate（LTXVConditioning、VHS_VideoCombine）
+   - 时长：duration / duration_seconds（MiniMax、Kling、Vidu、Pixverse、Sora、Veo 等 API 节点，单位秒）
+   - 尺寸：width/height；ResolutionSelector 的 aspect_ratio + megapixels；
+           API 节点的 aspect_ratio（纯 "16:9"）与 resolution（"720p" 这类档位或 "1920x1080"）
+   刻意不碰的：LoadVideo 系列的 custom_width / custom_height / force_rate / frame_load_cap
+   （那是给输入素材用的），以及裁剪类节点的 duration（Video Slice 的 duration 是截取长度）。
+   ────────────────────────────────────────────────────────────── */
+
+const FRAME_COUNT_KEYS = ['frame_count', 'frames', 'num_frames', 'video_frames'] as const;
+const FPS_KEYS = ['fps', 'frame_rate'] as const;
+const DURATION_KEYS = ['duration', 'duration_seconds'] as const;
+/** 这些输入名要按节点声明的可选值校验才敢写，否则 ComfyUI 会判非法直接拒掉整个任务 */
+const COMBO_GUARDED_KEYS = ['aspect_ratio', 'resolution', ...DURATION_KEYS] as const;
+/** 处理输入素材的节点：同名参数改的是素材本身，不是出片规格 */
+const INPUT_MEDIA_CLASS = /load(video|image)|videoload|loadvideo/i;
+/** 裁剪类节点：duration 是截取长度而非出片时长 */
+const TRIM_CLASS = /slice|trim|cut|crop/i;
+
+/** 档位标签 → 长边像素，用来在 resolution 这类 combo 里挑最接近的一档 */
+const RESOLUTION_LABEL_LONG_SIDES: Record<string, number> = {
+  '360p': 640, '480p': 854, '540p': 960, '720p': 1280,
+  '1080p': 1920, '1440p': 2560, '2160p': 3840,
+  '1k': 1024, '2k': 2048, '4k': 3840,
+};
+
+/** 从 combo 里挑与目标长边最接近的一档；"1920x1080" 这种写法还要求朝向一致 */
+function pickResolutionOption(
+  options: unknown[],
+  dims: { width: number; height: number },
+): string | undefined {
+  const targetLongSide = Math.max(dims.width, dims.height);
+  const isPortrait = dims.height > dims.width;
+  let best: string | undefined;
+  let bestDelta = Infinity;
+  for (const option of options) {
+    if (typeof option !== 'string') continue;
+    const explicit = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(option.trim());
+    let longSide: number | undefined;
+    if (explicit) {
+      const width = Number(explicit[1]);
+      const height = Number(explicit[2]);
+      if (height > width !== isPortrait) continue;
+      longSide = Math.max(width, height);
+    } else {
+      longSide = RESOLUTION_LABEL_LONG_SIDES[option.trim().toLowerCase()];
+    }
+    if (longSide === undefined) continue;
+    const delta = Math.abs(longSide - targetLongSide);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = option;
+    }
+  }
+  return best;
+}
+
+/** "16:9" 和 "16:9 (Widescreen)" 都算命中 */
+function pickAspectRatioOption(options: unknown[], ratio: string | undefined): string | undefined {
+  if (!ratio) return undefined;
+  return options.find(
+    (option): option is string =>
+      typeof option === 'string'
+      && (option.trim() === ratio || option.trim().startsWith(`${ratio} `)),
+  );
+}
+
+/** 时长 combo 只给 5/10 而用户选了 7 时，退到最近的一档，总好过让整个任务被判非法 */
+function pickClosestNumericOption(options: unknown[], target: number): unknown {
+  let best: unknown;
+  let bestDelta = Infinity;
+  for (const option of options) {
+    const value = typeof option === 'number'
+      ? option
+      : typeof option === 'string' ? Number(option.trim().replace(/s$/i, '')) : NaN;
+    if (!Number.isFinite(value)) continue;
+    const delta = Math.abs(value - target);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = option;
+    }
+  }
+  return best;
+}
+
+function clampToSpec(value: number, spec: ComfyInputSpec | undefined, min: number, max: number): number {
+  const lower = typeof spec?.min === 'number' ? Math.max(min, spec.min) : min;
+  const upper = typeof spec?.max === 'number' ? Math.min(max, spec.max) : max;
+  return Math.min(upper, Math.max(lower, value));
+}
+
+/** API 节点上的纯比例（"16:9"）；带 megapixels 的 ResolutionSelector 已在别处写过 */
+function writeAspectRatio(
+  inputs: Record<string, unknown>,
+  ratio: string | undefined,
+  specs: ComfyNodeInputSpecs | undefined,
+): void {
+  if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels === 'number') return;
+  const options = specs?.aspect_ratio?.options;
+  // 问不到可选值就不写：猜错一个档位写法会让整个任务被拒
+  if (!options) return;
+  const picked = pickAspectRatioOption(options, ratio);
+  if (picked !== undefined) inputs.aspect_ratio = picked;
+}
+
+/** API 节点上的档位式 resolution；数字型的（长边像素）按数字写 */
+function writeResolutionInput(
+  inputs: Record<string, unknown>,
+  dims: { width: number; height: number },
+  specs: ComfyNodeInputSpecs | undefined,
+): void {
+  const current = inputs.resolution;
+  if (typeof current === 'number') {
+    // 只认已经是像素量级的，避免把倍率、缩放系数之类的同名参数改坏
+    if (current >= 64) inputs.resolution = clampToSpec(Math.max(dims.width, dims.height), specs?.resolution, 64, 16_384);
+    return;
+  }
+  if (typeof current !== 'string') return;
+  const options = specs?.resolution?.options;
+  if (!options) return;
+  const picked = pickResolutionOption(options, dims);
+  if (picked !== undefined) inputs.resolution = picked;
+}
+
+/** 秒数：数字直接写，combo / 字符串保持原来的写法（"5" 还是 "5s"） */
+function writeDurationInputs(
+  inputs: Record<string, unknown>,
+  classType: string,
+  durationSeconds: number,
+  specs: ComfyNodeInputSpecs | undefined,
+): void {
+  if (TRIM_CLASS.test(classType)) return;
+  for (const key of DURATION_KEYS) {
+    const current = inputs[key];
+    const spec = specs?.[key];
+    if (spec?.options) {
+      const picked = pickClosestNumericOption(spec.options, durationSeconds);
+      if (picked !== undefined) inputs[key] = picked;
+      continue;
+    }
+    // 字符串型（非 combo）不写：写错格式同样会被判非法
+    if (typeof current === 'number') {
+      inputs[key] = clampToSpec(durationSeconds, spec, 0, Number.MAX_SAFE_INTEGER);
+    }
+  }
+}
+
 /**
  * 将视频参数注入工作流。
  * 同样不按 @ 过滤：分辨率、帧率、帧数都在 latent / 合成节点上，用户不会去 @ 它们。
@@ -593,6 +824,7 @@ function injectVideoParamsIntoWorkflow(
   videoFps: number,
   videoFrames: number,
   durationSeconds: number,
+  specsByClass: Map<string, ComfyNodeInputSpecs> = new Map(),
 ): void {
   const dims = mapVideoDimensions(videoResolution, videoRatio);
 
@@ -607,6 +839,9 @@ function injectVideoParamsIntoWorkflow(
     if (!nodeData || typeof nodeData !== 'object') continue;
     const inputs = nodeData.inputs as Record<string, unknown> | undefined;
     if (!inputs) continue;
+    const classType = String(nodeData.class_type ?? '');
+    if (INPUT_MEDIA_CLASS.test(classType)) continue;
+    const specs = specsByClass.get(classType);
 
     // 注入 width/height 到 latent 或 image 节点（按所选比例换算，与图片工作流一致）
     const isSizedNode = typeof inputs.width === 'number' && typeof inputs.height === 'number';
@@ -614,28 +849,28 @@ function injectVideoParamsIntoWorkflow(
       inputs.width = dims.width;
       inputs.height = dims.height;
     }
-    writeResolutionSelector(inputs, dims, videoRatio);
+    writeResolutionSelector(inputs, dims, videoRatio, specs);
+    writeAspectRatio(inputs, videoRatio, specs);
+    writeResolutionInput(inputs, dims, specs);
 
-    // 注入帧率到视频相关节点
-    if (!hasDurationNode && inputs.frame_rate !== undefined) {
-      inputs.frame_rate = videoFps;
-    }
-    if (!hasDurationNode && inputs.fps !== undefined && typeof inputs.fps === 'number') {
-      inputs.fps = videoFps;
+    // 注入帧率到视频相关节点（数字才写：连线过来的值是 ["3", 0] 这种数组，写进去会把连线冲掉）
+    if (!hasDurationNode) {
+      for (const key of FPS_KEYS) {
+        if (typeof inputs[key] === 'number') inputs[key] = clampToSpec(videoFps, specs?.[key], 1, 1000);
+      }
     }
 
     // 注入帧数
-    if (inputs.frame_count !== undefined && typeof inputs.frame_count === 'number') {
-      inputs.frame_count = videoFrames;
-    }
-    if (inputs.frames !== undefined && typeof inputs.frames === 'number') {
-      inputs.frames = videoFrames;
+    for (const key of FRAME_COUNT_KEYS) {
+      if (typeof inputs[key] === 'number') inputs[key] = videoFrames;
     }
     // Wan / Hunyuan / Mochi 的 latent 节点用 length 表示总帧数；
     // 只认带 width/height 的节点，避免误伤其他节点上同名的 length 参数
     if (typeof inputs.length === 'number' && isSizedNode) {
       inputs.length = videoFrames;
     }
+
+    writeDurationInputs(inputs, classType, durationSeconds, specs);
   }
 }
 
@@ -940,7 +1175,7 @@ export async function executeComfyUIVideoGenerate(
       promptMedia,
     );
 
-    // 注入视频参数
+    // 注入视频参数（比例/档位这类 combo 要先问过节点声明才敢写）
     injectVideoParamsIntoWorkflow(
       workflowObj,
       videoResolution,
@@ -948,6 +1183,7 @@ export async function executeComfyUIVideoGenerate(
       videoFps,
       videoFrames,
       resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps),
+      await resolveVideoParamSpecs(baseUrl, workflowObj),
     );
 
     // 提交工作流

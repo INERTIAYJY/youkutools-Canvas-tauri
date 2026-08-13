@@ -5,7 +5,7 @@
  */
 import { writeFile, readFile as tauriReadFile, stat, rename } from '@tauri-apps/plugin-fs';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { identifyAsset } from './fs/assetIndex';
 import { walkDirectoryFiles } from './fs/assetLibrary';
@@ -927,9 +927,14 @@ export async function saveNodeOutputToFile(opts: {
   try {
     // 1. Media: try real file path first
     if (filePath) {
-      const data = await tauriReadFile(filePath);
-      await writeFile(destPath, data);
-      return destPath;
+      try {
+        await writeFile(destPath, await tauriReadFile(filePath));
+        return destPath;
+      } catch (err) {
+        // 源文件被移动/删除时不整体放弃，落到下面的 URL / 文本分支再试一次
+        if (!mediaUrl && !textOutput) throw err;
+        console.warn('[fileService] saveNodeOutputToFile: 源文件读取失败，改用节点 URL:', filePath, err);
+      }
     }
 
     // 2. data: URL
@@ -945,18 +950,12 @@ export async function saveNodeOutputToFile(opts: {
       return destPath;
     }
 
-    // 3. asset:// URL — try fetch via convertFileSrc
-    if (mediaUrl && mediaUrl.startsWith('asset://')) {
-      const src = convertFileSrc(mediaUrl);
-      const resp = await fetch(src);
-      const buffer = await resp.arrayBuffer();
-      await writeFile(destPath, new Uint8Array(buffer));
-      return destPath;
-    }
-
-    // 4. HTTP media URL — fetch and save
-    if (mediaUrl && (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://'))) {
+    // 3. 其余 URL（asset://localhost、http://asset.localhost、blob:、http(s)://）直接 fetch。
+    //    节点里的 asset URL 已经是 convertFileSrc 的产物，再转一次会把整个 URL 当成路径编码进去 —
+    //    Windows 的 asset URL 是 http://asset.localhost/… 走不到这一步，mac 的 asset:// 才会踩到。
+    if (mediaUrl && /^(asset:|blob:|https?:)/.test(mediaUrl)) {
       const resp = await fetch(mediaUrl);
+      if (!resp.ok) throw new Error(`读取媒体失败：HTTP ${resp.status}`);
       const buffer = await resp.arrayBuffer();
       await writeFile(destPath, new Uint8Array(buffer));
       return destPath;

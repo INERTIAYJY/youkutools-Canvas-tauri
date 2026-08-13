@@ -155,4 +155,24 @@
 
   var current = document.querySelector('.dl-card[data-os="' + os + '"]');
   if (current) current.classList.add('is-current');
+
+  /* ---- 版本号：从 GitHub Releases 动态获取 ---- */
+  var versionEls = document.querySelectorAll('[data-version]');
+  if (versionEls.length) {
+    fetch('https://api.github.com/repos/Tenney95/AI-Canvas-tauri/releases/latest')
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var tag = data && data.tag_name;
+        // 只接受形如 v1.2.3（可带 v 前缀）的 tag，避免误写入其他命名
+        if (!/^v?\d+\.\d+\.\d+$/.test(tag)) return;
+        var label = /^v/.test(tag) ? tag : 'v' + tag;
+        versionEls.forEach(function (el) { el.textContent = label; });
+      })
+      .catch(function () {
+        /* 离线或接口受限时保持 HTML 里的兜底版本号，不打扰用户 */
+      });
+  }
 })();

@@ -56,6 +56,36 @@ beforeEach(() => {
 });
 
 describe('canvas agent tools', () => {
+  it('registers advanced canvas operations with closed schemas', () => {
+    const ids = [
+      'canvas_duplicate_node',
+      'canvas_update_note',
+      'canvas_move_note_layer',
+      'canvas_convert_image_kind',
+      'canvas_rename_group',
+      'canvas_fill_storyboard_cell',
+      'canvas_bind_shotlist_frame',
+    ];
+    for (const id of ids) {
+      expect(getAgentTool(id), id).toMatchObject({ effect: 'canvas_write' });
+      expect(getAgentTool(id)?.inputSchema.additionalProperties).toBe(false);
+    }
+  });
+
+  it('duplicates a node and converts an unconnected image into a canvas note', async () => {
+    const duplicated = await getAgentTool('canvas_duplicate_node')!.execute(context(), { nodeId: 'n1' });
+    expect(duplicated.status).toBe('success');
+    expect(useAppStore.getState().nodes).toHaveLength(3);
+
+    useAppStore.setState({ edges: [] });
+    const converted = await getAgentTool('canvas_convert_image_kind')!.execute({
+      ...context(),
+      baseRevision: useAppStore.getState().getCurrentRevision(),
+    }, { nodeId: 'n1' });
+    expect(converted.status).toBe('success');
+    expect(useAppStore.getState().nodes.find((item) => item.id === 'n1')?.type).toBe('canvas-note');
+  });
+
   it('describes requested and actual details for created nodes', async () => {
     const definition = getAgentTool('canvas_create_nodes')!;
     const input = {

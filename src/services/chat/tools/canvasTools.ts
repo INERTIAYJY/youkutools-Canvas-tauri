@@ -1129,6 +1129,62 @@ export function registerCanvasAgentTools(): Array<() => void> {
         };
       },
     }),
+    registerAgentTool<{ nodeId: string }>({
+      id: 'canvas_duplicate_node', title: '复制画布节点', description: '复制一个普通节点或画布笔记；分组节点不可复制。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['nodeId'], additionalProperties: false, properties: { nodeId: { type: 'string', minLength: 1, maxLength: 160 } } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => {
+        assertCanvasRevision(context);
+        const store = useAppStore.getState();
+        const node = store.nodes.find((item) => item.id === input.nodeId);
+        if (!node || node.type === 'group') return { status: 'error', summary: '节点不存在或分组节点不可复制', modelContent: '节点不存在或分组节点不可复制' };
+        const before = new Set(store.nodes.map((item) => item.id));
+        const noteCloneId = node.type === 'canvas-note' ? store.duplicateCanvasNote(node.id) : null;
+        if (node.type !== 'canvas-note') store.duplicateNode(node.id);
+        const cloneId = noteCloneId ?? useAppStore.getState().nodes.find((item) => !before.has(item.id))?.id;
+        if (!cloneId) return { status: 'error', summary: '节点复制失败', modelContent: '节点复制失败' };
+        useAppStore.getState().incrementRevision();
+        return { status: 'success', summary: `已复制节点“${node.data.label}”`, modelContent: JSON.stringify({ sourceNodeId: node.id, cloneNodeId: cloneId, revision: useAppStore.getState().getCurrentRevision() }) };
+      },
+    }),
+    registerAgentTool<{ nodeId: string; text?: string; width?: number; height?: number; opacity?: number; strokeColor?: string; backgroundColor?: string; fontSize?: 16 | 20 | 28 | 36; textAlign?: 'left' | 'center' | 'right' }>({
+      id: 'canvas_update_note', title: '更新画布笔记', description: '更新画布笔记的文字、尺寸和基础样式。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['nodeId'], additionalProperties: false, properties: {
+        nodeId: { type: 'string', minLength: 1, maxLength: 160 }, text: { type: 'string', maxLength: 20_000 }, width: { type: 'number', minimum: 20, maximum: 4000 }, height: { type: 'number', minimum: 20, maximum: 4000 }, opacity: { type: 'number', minimum: 0, maximum: 100 }, strokeColor: { type: 'string', minLength: 1, maxLength: 80 }, backgroundColor: { type: 'string', minLength: 1, maxLength: 80 }, fontSize: { type: 'number', enum: [16, 20, 28, 36] }, textAlign: { type: 'string', enum: ['left', 'center', 'right'] },
+      } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => {
+        assertCanvasRevision(context);
+        const { nodeId, text, width, height, ...style } = input;
+        const changed = useAppStore.getState().updateCanvasNote(nodeId, { text, width, height, style });
+        if (!changed) return { status: 'error', summary: '画布笔记不存在', modelContent: '画布笔记不存在' };
+        useAppStore.getState().incrementRevision();
+        return { status: 'success', summary: '已更新画布笔记', modelContent: JSON.stringify({ nodeId, revision: useAppStore.getState().getCurrentRevision() }) };
+      },
+    }),
+    registerAgentTool<{ nodeId: string; direction: 'back' | 'backward' | 'forward' | 'front' }>({
+      id: 'canvas_move_note_layer', title: '调整画布笔记图层', description: '将画布笔记后移、前移、置底或置顶。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['nodeId', 'direction'], additionalProperties: false, properties: { nodeId: { type: 'string', minLength: 1, maxLength: 160 }, direction: { type: 'string', enum: ['back', 'backward', 'forward', 'front'] } } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => { assertCanvasRevision(context); const moved = useAppStore.getState().moveCanvasNoteLayer(input.nodeId, input.direction); if (!moved) return { status: 'error', summary: '画布笔记不存在或已在目标图层边界', modelContent: '画布笔记不存在或已在目标图层边界' }; useAppStore.getState().incrementRevision(); return { status: 'success', summary: '已调整画布笔记图层', modelContent: JSON.stringify({ nodeId: input.nodeId, direction: input.direction, revision: useAppStore.getState().getCurrentRevision() }) }; },
+    }),
+    registerAgentTool<{ nodeId: string }>({
+      id: 'canvas_convert_image_kind', title: '转换图片节点形态', description: '在图片节点与图片画布笔记之间转换；有连线的普通图片节点不会转换。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['nodeId'], additionalProperties: false, properties: { nodeId: { type: 'string', minLength: 1, maxLength: 160 } } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => { assertCanvasRevision(context); const result = useAppStore.getState().convertImageNodeKind(input.nodeId); if (!result || result === 'connected') return { status: 'error', summary: result === 'connected' ? '图片节点有连线，不能转换为画布笔记' : '节点不是可转换的图片节点', modelContent: result === 'connected' ? '图片节点有连线，不能转换为画布笔记' : '节点不是可转换的图片节点' }; useAppStore.getState().incrementRevision(); return { status: 'success', summary: `已${result === 'to-note' ? '转换为图片笔记' : '转换为图片节点'}`, modelContent: JSON.stringify({ nodeId: input.nodeId, result, revision: useAppStore.getState().getCurrentRevision() }) }; },
+    }),
+    registerAgentTool<{ groupId: string; name: string }>({
+      id: 'canvas_rename_group', title: '重命名画布分组', description: '重命名一个现有画布分组。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['groupId', 'name'], additionalProperties: false, properties: { groupId: { type: 'string', minLength: 1, maxLength: 160 }, name: { type: 'string', minLength: 1, maxLength: 120 } } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => { assertCanvasRevision(context); const group = useAppStore.getState().groups.find((item) => item.id === input.groupId); if (!group) return { status: 'error', summary: '画布分组不存在', modelContent: '画布分组不存在' }; useAppStore.getState().renameGroup(group.id, input.name.trim()); useAppStore.getState().incrementRevision(); return { status: 'success', summary: `已重命名分组为“${input.name.trim()}”`, modelContent: JSON.stringify({ groupId: group.id, name: input.name.trim(), revision: useAppStore.getState().getCurrentRevision() }) }; },
+    }),
+    registerAgentTool<{ storyboardId: string; cellIndex: number; sourceNodeId: string }>({
+      id: 'canvas_fill_storyboard_cell', title: '填充分镜宫格', description: '把已提取的图片节点填入分镜宫格空位；源图片节点按既有语义从画布移除。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['storyboardId', 'cellIndex', 'sourceNodeId'], additionalProperties: false, properties: { storyboardId: { type: 'string', minLength: 1, maxLength: 160 }, cellIndex: { type: 'integer', minimum: 0, maximum: 399 }, sourceNodeId: { type: 'string', minLength: 1, maxLength: 160 } } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => { assertCanvasRevision(context); const before = useAppStore.getState().nodes.some((item) => item.id === input.sourceNodeId); useAppStore.getState().fillStoryboardCell(input.storyboardId, input.cellIndex, input.sourceNodeId); const consumed = before && !useAppStore.getState().nodes.some((item) => item.id === input.sourceNodeId); if (!consumed) return { status: 'error', summary: '宫格、来源图片或目标空位无效', modelContent: '宫格、来源图片或目标空位无效' }; useAppStore.getState().incrementRevision(); return { status: 'success', summary: '已填充分镜宫格', modelContent: JSON.stringify({ storyboardId: input.storyboardId, cellIndex: input.cellIndex, sourceNodeId: input.sourceNodeId, revision: useAppStore.getState().getCurrentRevision() }) }; },
+    }),
+    registerAgentTool<{ shotlistId: string; rowId: string; sourceNodeId: string }>({
+      id: 'canvas_bind_shotlist_frame', title: '绑定镜头表画面', description: '把图片或视频节点绑定到镜头表指定行。', effect: 'canvas_write',
+      inputSchema: { type: 'object', required: ['shotlistId', 'rowId', 'sourceNodeId'], additionalProperties: false, properties: { shotlistId: { type: 'string', minLength: 1, maxLength: 160 }, rowId: { type: 'string', minLength: 1, maxLength: 160 }, sourceNodeId: { type: 'string', minLength: 1, maxLength: 160 } } }, authorize: authorizeCurrentProject,
+      execute: async (context, input) => { assertCanvasRevision(context); const before = JSON.stringify(useAppStore.getState().nodes.find((item) => item.id === input.shotlistId)?.data.shotlistRows ?? []); useAppStore.getState().bindShotlistFrame(input.shotlistId, input.rowId, input.sourceNodeId); const after = JSON.stringify(useAppStore.getState().nodes.find((item) => item.id === input.shotlistId)?.data.shotlistRows ?? []); if (before === after) return { status: 'error', summary: '镜头表、行或来源媒体无效', modelContent: '镜头表、行或来源媒体无效' }; useAppStore.getState().incrementRevision(); return { status: 'success', summary: '已绑定镜头表画面', modelContent: JSON.stringify({ shotlistId: input.shotlistId, rowId: input.rowId, sourceNodeId: input.sourceNodeId, revision: useAppStore.getState().getCurrentRevision() }) }; },
+    }),
     registerAgentTool<NodeTargetInput>({
       id: 'canvas_delete_nodes',
       title: '删除画布节点',

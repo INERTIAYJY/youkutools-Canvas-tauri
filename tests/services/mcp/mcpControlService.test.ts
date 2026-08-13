@@ -39,6 +39,8 @@ describe('MCP control service', () => {
     const tools = await listMcpTools();
     expect(tools.some((tool) => tool.name === 'canvas_query')).toBe(true);
     expect(tools.some((tool) => tool.name === 'app_get_state')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'project_list')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'project_delete')).toBe(true);
     expect(tools.every((tool) => tool.inputSchema.type === 'object')).toBe(true);
     expect(useAppStore.getState().conversations).toContainEqual(
       expect.objectContaining({

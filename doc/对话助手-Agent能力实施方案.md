@@ -2097,6 +2097,39 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 本阶段未修改 Rust、Tauri 安全配置、IndexedDB schema 或依赖；未执行真实付费媒体、子智能体和 ComfyUI 请求。
 - 回滚时恢复上述权限、执行器、MCP 过滤和说明文件即可；不涉及数据迁移、密钥、端口或 Tauri 配置。
 
+### 8.25 MCP 项目管理工具
+
+**任务类型：平台能力**
+
+**状态：已完成**
+
+#### 目标与边界
+
+- 通过 Tool Registry 开放项目列表、详情、创建、重命名、切换、设置、保存和永久删除。
+- 项目工具通过专用会话 `conversationId` 的 `isAvailable` 与 `authorize` 双重限制为 MCP 专用，不进入内置助手工具列表。
+- 只编排既有 Project Store Action，继续复用项目持久化、剧集重定向、目录重命名补偿、关联数据清理和主窗口单写源。
+- 查询结果不返回项目数据目录、绝对路径、快照、素材正文或凭据；设置写入不接收任意配置对象和风格参考本地路径。
+- 项目导入/导出仍依赖原生文件对话框，留到 MCP 文件授权批次处理；本阶段不修改 Tauri、数据库、依赖或安全配置。
+
+#### 实施范围
+
+- 新增 `src/services/chat/tools/projectTools.ts`、`tests/services/chat/projectTools.test.ts`。
+- 修改 `src/services/chat/tools/index.ts`、`tests/services/mcp/mcpControlService.test.ts`、本文档。
+- 计划：`doc/plans/2026-08-13-mcp-project-management-tools.md`。
+
+#### 完成记录与回滚
+
+- 新增 8 个工具：`project_list`、`project_get`、`project_create`、`project_rename`、`project_switch`、`project_update_settings`、`project_save`、`project_delete`。
+- 查询结果仅返回项目 ID、名称、类型、剧集关系、时间与安全设置；不返回数据目录、快照、风格参考路径/URL、剧集全文或素材正文。
+- 项目设置 schema 拒绝未知字段和 `styleReference` 路径对象；写入按四个设置域深合并，并复用 `updateProjectSettings` 的标准化、持久化与失败回滚。
+- 项目工具只在 `mcp-control-*` 专用会话中可发现和执行，避免内置助手任务中途切换或删除项目。
+- 定向回归：项目工具、MCP 发现、Policy 和共享执行器共 4 个文件、47 项通过；最终项目工具、MCP 发现与 Registry 边界共 3 个文件、25 项通过。
+- 全量测试：`npm run test -- --run` 共 158 个文件、1239 项通过；npm 仅提示未来将不再接受未知的 `--run` CLI 配置，Vitest 实际完整运行并通过。
+- `npm run typecheck`、`npm run test:typecheck` 和本阶段 4 个 TypeScript 文件定向 ESLint 通过。
+- `npx vite build --outDir C:\Users\Tenne\AppData\Local\Temp\ai-canvas-mcp-project-tools-final-20260813-1257` 通过；仅保留外部输出目录与既有大 chunk 警告。
+- 未修改 Rust、Tauri 安全配置、IndexedDB schema 或依赖；未执行真实项目永久删除。
+- 回滚时从工具注册入口移除 `registerProjectAgentTools`，删除项目工具及其测试，并恢复本节文档即可；项目数据无需迁移。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -2224,6 +2257,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-13 | 8.25 | 新增 8 个 MCP 项目管理工具，覆盖脱敏查询、创建、重命名、切换、安全设置、保存和永久删除，全部复用既有 Project Store 事务。 |
 | 2026-08-13 | 8.24 | 完成 MCP 全权限第一阶段：现有 Registry 工具固定使用自主权限上下文执行，取消审批依赖并解除子智能体与动态 ComfyUI 工作流屏蔽。 |
 | 2026-08-13 | 8.23 取消 | 按用户决定不接入 TencentDB Agent Memory，完整回退外部记忆映射与通用 Repository 试验，项目记忆继续仅使用 IndexedDB。 |
 | 2026-08-13 | 8.22 | Agent 时间线新增基于脱敏任务事件的实时可折叠执行依据，展示分析、Policy、审批和工具结果，同时明确不包含模型隐藏思维。 |

@@ -1,0 +1,406 @@
+/**
+ * 注册项目管理工具；只编排现有 Project Store Action，不复制持久化与清理事务。
+ */
+import { useAppStore } from '../../../store/useAppStore';
+import type { CanvasProject, ProjectSettings } from '../../../types';
+import type { AgentToolSchema } from '../agentToolSchemas';
+import {
+  registerAgentTool,
+  type AgentToolExecutionResult,
+} from '../toolRegistry';
+
+interface ProjectIdInput {
+  projectId: string;
+}
+
+interface ProjectCreateInput {
+  name?: string;
+}
+
+interface ProjectRenameInput extends ProjectIdInput {
+  name: string;
+}
+
+interface ProjectSettingsPatch {
+  visualStyle?: {
+    styleId?: string;
+    styleName?: string;
+    prompt?: string;
+    locked?: boolean;
+  };
+  promptSuffixes?: Partial<Record<'text' | 'image' | 'video' | 'audio', string>>;
+  defaultModels?: Partial<Record<'text' | 'image' | 'video' | 'audio', string>>;
+  generation?: {
+    imageAspectRatio?: string;
+    imageSize?: string;
+    videoAspectRatio?: string;
+    videoResolution?: '480p' | '720p' | '1080p' | '4k';
+    videoDuration?: number;
+  };
+}
+
+interface ProjectUpdateSettingsInput {
+  settings: ProjectSettingsPatch;
+}
+
+const MCP_CONVERSATION_PREFIX = 'mcp-control-';
+
+const emptySchema: AgentToolSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {},
+};
+
+const projectIdSchema: AgentToolSchema = {
+  type: 'object',
+  required: ['projectId'],
+  additionalProperties: false,
+  properties: {
+    projectId: { type: 'string', minLength: 1, maxLength: 160 },
+  },
+};
+
+const projectNameSchema: AgentToolSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 80,
+};
+
+const projectSettingsSchema: AgentToolSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    visualStyle: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        styleId: { type: 'string', maxLength: 160 },
+        styleName: { type: 'string', maxLength: 160 },
+        prompt: { type: 'string', maxLength: 12_000 },
+        locked: { type: 'boolean' },
+      },
+    },
+    promptSuffixes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', maxLength: 4_000 },
+        image: { type: 'string', maxLength: 4_000 },
+        video: { type: 'string', maxLength: 4_000 },
+        audio: { type: 'string', maxLength: 4_000 },
+      },
+    },
+    defaultModels: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', maxLength: 240 },
+        image: { type: 'string', maxLength: 240 },
+        video: { type: 'string', maxLength: 240 },
+        audio: { type: 'string', maxLength: 240 },
+      },
+    },
+    generation: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        imageAspectRatio: { type: 'string', maxLength: 32 },
+        imageSize: { type: 'string', maxLength: 32 },
+        videoAspectRatio: { type: 'string', maxLength: 32 },
+        videoResolution: { type: 'string', enum: ['480p', '720p', '1080p', '4k'] },
+        videoDuration: { type: 'integer', minimum: 1, maximum: 600 },
+      },
+    },
+  },
+};
+
+function isMcpControlContext(context: { conversationId: string }) {
+  return context.conversationId.startsWith(MCP_CONVERSATION_PREFIX);
+}
+
+function authorizeCurrentProject(context: { projectId: string; conversationId: string }) {
+  const store = useAppStore.getState();
+  return {
+    allowed: isMcpControlContext(context) && store.currentProjectId === context.projectId,
+    reason: isMcpControlContext(context)
+      ? 'MCP 请求所属项目已切换，请重新读取项目状态后再操作'
+      : '项目管理工具只对 MCP 控制会话开放',
+  };
+}
+
+function projectKind(project: CanvasProject, projects: CanvasProject[]) {
+  if (project.parentId) return 'episode';
+  return projects.some((candidate) => candidate.parentId === project.id)
+    ? 'series'
+    : 'project';
+}
+
+function safeProjectSummary(project: CanvasProject, projects: CanvasProject[], currentProjectId: string | null) {
+  return {
+    id: project.id,
+    name: project.name,
+    kind: projectKind(project, projects),
+    current: project.id === currentProjectId,
+    parentId: project.parentId,
+    episodeNo: project.episodeNo,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+  };
+}
+
+function safeProjectSettings(settings: ProjectSettings | undefined) {
+  if (!settings) return undefined;
+  return {
+    visualStyle: settings.visualStyle
+      ? {
+          styleId: settings.visualStyle.styleId,
+          styleName: settings.visualStyle.styleName,
+          prompt: settings.visualStyle.prompt,
+          locked: settings.visualStyle.locked,
+          styleReference: settings.visualStyle.styleReference
+            ? {
+                fileName: settings.visualStyle.styleReference.fileName,
+                enabled: settings.visualStyle.styleReference.enabled,
+              }
+            : undefined,
+        }
+      : undefined,
+    promptSuffixes: settings.promptSuffixes,
+    defaultModels: settings.defaultModels,
+    generation: settings.generation,
+  };
+}
+
+function success(summary: string, content: unknown): AgentToolExecutionResult {
+  return {
+    status: 'success',
+    summary,
+    modelContent: JSON.stringify(content),
+  };
+}
+
+function failure(summary: string, errorCode: string): AgentToolExecutionResult {
+  return {
+    status: 'error',
+    summary,
+    modelContent: summary,
+    errorCode,
+    retryable: false,
+  };
+}
+
+function mergeProjectSettings(
+  current: ProjectSettings | undefined,
+  patch: ProjectSettingsPatch,
+): ProjectSettings {
+  return {
+    ...current,
+    ...(patch.visualStyle
+      ? { visualStyle: { ...current?.visualStyle, ...patch.visualStyle } }
+      : {}),
+    ...(patch.promptSuffixes
+      ? { promptSuffixes: { ...current?.promptSuffixes, ...patch.promptSuffixes } }
+      : {}),
+    ...(patch.defaultModels
+      ? { defaultModels: { ...current?.defaultModels, ...patch.defaultModels } }
+      : {}),
+    ...(patch.generation
+      ? { generation: { ...current?.generation, ...patch.generation } }
+      : {}),
+  };
+}
+
+export function registerProjectAgentTools(): Array<() => void> {
+  return [
+    registerAgentTool<Record<string, never>>({
+      id: 'project_list',
+      title: '列出项目',
+      description: '列出项目、剧集与分集的脱敏摘要，不返回目录、路径、快照或正文。',
+      inputSchema: emptySchema,
+      effect: 'read',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      execute: async () => {
+        const store = useAppStore.getState();
+        return success(`已列出 ${store.projects.length} 个项目记录`, {
+          currentProjectId: store.currentProjectId,
+          projects: store.projects.map((project) => (
+            safeProjectSummary(project, store.projects, store.currentProjectId)
+          )),
+        });
+      },
+    }),
+    registerAgentTool<ProjectIdInput>({
+      id: 'project_get',
+      title: '读取项目详情',
+      description: '读取指定项目的脱敏元数据与安全项目设置；分集详情会包含本集大纲。',
+      inputSchema: projectIdSchema,
+      effect: 'read',
+      isAvailable: isMcpControlContext,
+      authorize: (context, input) => {
+        const current = authorizeCurrentProject(context);
+        if (!current.allowed) return current;
+        return {
+          allowed: useAppStore.getState().projects.some((project) => project.id === input.projectId),
+          reason: '项目不存在',
+        };
+      },
+      summarizeInput: (input) => `读取项目 ${input.projectId}`,
+      execute: async (_context, input) => {
+        const store = useAppStore.getState();
+        const project = store.projects.find((candidate) => candidate.id === input.projectId);
+        if (!project) return failure('项目不存在', 'PROJECT_NOT_FOUND');
+        return success(`已读取项目“${project.name}”`, {
+          ...safeProjectSummary(project, store.projects, store.currentProjectId),
+          settings: safeProjectSettings(project.settings),
+          episodeOutline: project.parentId ? project.episodeOutline : undefined,
+          episodeCount: store.projects.filter((candidate) => candidate.parentId === project.id).length,
+          hasSeriesScript: Boolean(project.series?.script?.trim()),
+          hasOriginalWork: Boolean(project.series?.originalWork),
+        });
+      },
+    }),
+    registerAgentTool<ProjectCreateInput>({
+      id: 'project_create',
+      title: '创建项目',
+      description: '使用既有项目事务创建并切换到新项目；创建前会保存当前项目。',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { name: projectNameSchema },
+      },
+      effect: 'canvas_write',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      summarizeInput: (input) => `创建项目“${input.name?.trim() || '自动命名'}”`,
+      execute: async (_context, input) => {
+        const name = input.name?.trim();
+        if (input.name !== undefined && !name) {
+          return failure('项目名称不能为空', 'PROJECT_NAME_REQUIRED');
+        }
+        const id = await useAppStore.getState().createProject(name);
+        if (!id) return failure('项目创建失败', 'PROJECT_CREATE_FAILED');
+        const project = useAppStore.getState().projects.find((candidate) => candidate.id === id);
+        return success(`已创建项目“${project?.name ?? id}”`, {
+          id,
+          name: project?.name,
+          currentProjectId: useAppStore.getState().currentProjectId,
+        });
+      },
+    }),
+    registerAgentTool<ProjectRenameInput>({
+      id: 'project_rename',
+      title: '重命名项目',
+      description: '通过既有重命名事务更新项目名称和相关数据目录映射。',
+      inputSchema: {
+        type: 'object',
+        required: ['projectId', 'name'],
+        additionalProperties: false,
+        properties: {
+          projectId: projectIdSchema.properties!.projectId,
+          name: projectNameSchema,
+        },
+      },
+      effect: 'canvas_write',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      summarizeInput: (input) => `把项目 ${input.projectId} 重命名为“${input.name.trim()}”`,
+      execute: async (_context, input) => {
+        const name = input.name.trim();
+        const project = useAppStore.getState().projects.find((candidate) => candidate.id === input.projectId);
+        if (!project) return failure('项目不存在', 'PROJECT_NOT_FOUND');
+        const renamed = await useAppStore.getState().renameProject(input.projectId, name);
+        return renamed
+          ? success(`已把项目重命名为“${name}”`, { projectId: input.projectId, name })
+          : failure('项目重命名失败', 'PROJECT_RENAME_FAILED');
+      },
+    }),
+    registerAgentTool<ProjectIdInput>({
+      id: 'project_switch',
+      title: '切换项目',
+      description: '保存当前项目并切换到指定项目；剧集根项目会按既有规则打开第一集。',
+      inputSchema: projectIdSchema,
+      effect: 'canvas_write',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      summarizeInput: (input) => `切换到项目 ${input.projectId}`,
+      execute: async (_context, input) => {
+        const store = useAppStore.getState();
+        const project = store.projects.find((candidate) => candidate.id === input.projectId);
+        if (!project) return failure('项目不存在', 'PROJECT_NOT_FOUND');
+        await store.switchProject(input.projectId, { captureSnapshot: false });
+        const currentProjectId = useAppStore.getState().currentProjectId;
+        return success(`已切换到项目“${project.name}”`, {
+          requestedProjectId: input.projectId,
+          currentProjectId,
+        });
+      },
+    }),
+    registerAgentTool<ProjectUpdateSettingsInput>({
+      id: 'project_update_settings',
+      title: '更新项目设置',
+      description: '更新当前项目的风格、提示词后缀、默认模型和生成默认值；不接受本地路径或任意配置字段。',
+      inputSchema: {
+        type: 'object',
+        required: ['settings'],
+        additionalProperties: false,
+        properties: { settings: projectSettingsSchema },
+      },
+      effect: 'config_write',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      summarizeInput: () => '更新当前项目的安全生成设置',
+      execute: async (context, input) => {
+        const store = useAppStore.getState();
+        const project = store.projects.find((candidate) => candidate.id === context.projectId);
+        if (!project) return failure('当前项目不存在', 'PROJECT_NOT_FOUND');
+        const settings = mergeProjectSettings(project.settings, input.settings);
+        const updated = await store.updateProjectSettings(settings);
+        return updated
+          ? success(`已更新项目“${project.name}”的设置`, {
+              projectId: project.id,
+              settings: safeProjectSettings(settings),
+            })
+          : failure('项目设置保存失败', 'PROJECT_SETTINGS_UPDATE_FAILED');
+      },
+    }),
+    registerAgentTool<Record<string, never>>({
+      id: 'project_save',
+      title: '保存当前项目',
+      description: '通过既有项目保存队列持久化当前画布、分组与共享剧集资产。',
+      inputSchema: emptySchema,
+      effect: 'file_write',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      execute: async (context) => {
+        const savedProjectId = await useAppStore.getState().saveCurrentProject();
+        return savedProjectId === context.projectId
+          ? success('当前项目已保存', { projectId: savedProjectId })
+          : failure('项目保存失败', 'PROJECT_SAVE_FAILED');
+      },
+    }),
+    registerAgentTool<ProjectIdInput>({
+      id: 'project_delete',
+      title: '永久删除项目',
+      description: '永久删除项目及其关联项目域数据；删除剧集会级联删除分集。此操作不可撤销。',
+      inputSchema: projectIdSchema,
+      effect: 'permanent_delete',
+      isAvailable: isMcpControlContext,
+      authorize: authorizeCurrentProject,
+      summarizeInput: (input) => `永久删除项目 ${input.projectId}`,
+      execute: async (_context, input) => {
+        const store = useAppStore.getState();
+        const project = store.projects.find((candidate) => candidate.id === input.projectId);
+        if (!project) return failure('项目不存在', 'PROJECT_NOT_FOUND');
+        await store.deleteProject(input.projectId);
+        if (useAppStore.getState().projects.some((candidate) => candidate.id === input.projectId)) {
+          return failure('项目删除失败', 'PROJECT_DELETE_FAILED');
+        }
+        return success(`已永久删除项目“${project.name}”`, {
+          projectId: project.id,
+          currentProjectId: useAppStore.getState().currentProjectId,
+        });
+      },
+    }),
+  ];
+}

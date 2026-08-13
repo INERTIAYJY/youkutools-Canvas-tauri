@@ -7,6 +7,7 @@
 import { useAppStore } from '../../../store/useAppStore';
 import type { CharacterLibraryScope } from '../../../store/store.dramaAssets';
 import type {
+  CharacterVoiceKind,
   DramaAsset,
   DramaAssetImportance,
   DramaAssetKind,
@@ -360,6 +361,49 @@ export function registerDramaAssetAgentTools(): Array<() => void> {
             scope: input.scope ?? 'project',
           }),
         };
+      },
+    }),
+    registerAgentTool<{ assetId: string; clipId: string; scope?: CharacterLibraryScope; kind?: CharacterVoiceKind; label?: string; transcript?: string }>({
+      id: 'drama_voice_update',
+      title: '更新角色声音',
+      description: '更新已有角色声音片段的用途、名称或台词描述；不接受音频路径或 URL。',
+      inputSchema: { type: 'object', required: ['assetId', 'clipId'], additionalProperties: false, properties: {
+        assetId: { type: 'string', minLength: 1, maxLength: 160 }, clipId: { type: 'string', minLength: 1, maxLength: 160 }, scope: scopeProperty,
+        kind: { type: 'string', enum: ['timbre', 'line', 'emotion', 'other'] }, label: { type: 'string', maxLength: 120 }, transcript: { type: 'string', maxLength: 4000 },
+      } },
+      effect: 'asset_write',
+      authorize: authorizeScope,
+      execute: async (_context, input) => {
+        const asset = findScopedAsset(input.scope, input.assetId);
+        if (asset?.kind !== 'character' || !asset.voiceClips?.some((clip) => clip.id === input.clipId)) {
+          return { status: 'error', summary: '角色声音片段不存在', modelContent: '角色声音片段不存在' };
+        }
+        const saved = await useAppStore.getState().updateCharacterVoiceClip(input.scope ?? 'project', asset.id, input.clipId, { kind: input.kind, label: input.label?.trim(), transcript: input.transcript });
+        return saved ? { status: 'success', summary: '已更新角色声音片段', modelContent: JSON.stringify({ assetId: asset.id, clipId: input.clipId }) } : { status: 'error', summary: '角色声音更新失败', modelContent: '角色声音更新失败' };
+      },
+    }),
+    registerAgentTool<{ assetId: string; clipId: string; scope?: CharacterLibraryScope }>({
+      id: 'drama_voice_set_primary',
+      title: '设置角色主声音',
+      description: '将一个已有声音片段设为角色默认主音色。',
+      inputSchema: { type: 'object', required: ['assetId', 'clipId'], additionalProperties: false, properties: { assetId: { type: 'string', minLength: 1, maxLength: 160 }, clipId: { type: 'string', minLength: 1, maxLength: 160 }, scope: scopeProperty } },
+      effect: 'asset_write',
+      authorize: authorizeScope,
+      execute: async (_context, input) => {
+        const saved = await useAppStore.getState().setCharacterPrimaryVoice(input.scope ?? 'project', input.assetId, input.clipId);
+        return saved ? { status: 'success', summary: '已设置角色主声音', modelContent: JSON.stringify({ assetId: input.assetId, clipId: input.clipId }) } : { status: 'error', summary: '角色或声音片段不存在', modelContent: '角色或声音片段不存在' };
+      },
+    }),
+    registerAgentTool<{ assetId: string; clipId: string; scope?: CharacterLibraryScope }>({
+      id: 'drama_voice_delete',
+      title: '删除角色声音',
+      description: '永久移除一个角色声音片段；不删除画布音频节点和共用文件。',
+      inputSchema: { type: 'object', required: ['assetId', 'clipId'], additionalProperties: false, properties: { assetId: { type: 'string', minLength: 1, maxLength: 160 }, clipId: { type: 'string', minLength: 1, maxLength: 160 }, scope: scopeProperty } },
+      effect: 'permanent_delete',
+      authorize: authorizeScope,
+      execute: async (_context, input) => {
+        const deleted = await useAppStore.getState().removeCharacterVoiceClip(input.scope ?? 'project', input.assetId, input.clipId);
+        return deleted ? { status: 'success', summary: '已删除角色声音片段', modelContent: JSON.stringify({ deleted: true, assetId: input.assetId, clipId: input.clipId }) } : { status: 'error', summary: '角色或声音片段不存在', modelContent: '角色或声音片段不存在' };
       },
     }),
   ];

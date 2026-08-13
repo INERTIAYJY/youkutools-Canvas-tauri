@@ -105,6 +105,76 @@ const splitInputSchema: AgentToolSchema = {
 
 export function registerSeriesAgentTools(): Array<() => void> {
   return [
+    registerAgentTool<Record<string, never>>({
+      id: 'series_get_state',
+      title: '读取剧集与分集状态',
+      description: '读取当前剧集元数据和分集清单，不返回原著路径或完整正文。',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      effect: 'read',
+      authorize: authorizeCurrentProject,
+      execute: async () => {
+        const { state, series } = currentSeries();
+        if (!series) return { status: 'error', summary: '当前项目没有剧集信息', modelContent: '当前项目没有剧集信息', errorCode: 'SERIES_NOT_FOUND' };
+        const episodes = listEpisodes(state.projects, series.id).map((episode) => ({ id: episode.id, episodeNo: episode.episodeNo, name: episode.name, outline: episode.episodeOutline ?? '', current: episode.id === state.currentProjectId }));
+        return { status: 'success', summary: `已读取剧集“${series.name}”的 ${episodes.length} 个分集`, modelContent: JSON.stringify({ series: { id: series.id, name: series.name, hasOriginalWork: !!series.series?.originalWork, scriptLength: series.series?.script?.length ?? 0 }, episodes }) };
+      },
+    }),
+    registerAgentTool<{ script: string }>({
+      id: 'series_update_script',
+      title: '更新全剧剧本',
+      description: '替换当前剧集的全剧剧本文本，不修改原著文件引用。',
+      inputSchema: { type: 'object', required: ['script'], additionalProperties: false, properties: { script: { type: 'string', maxLength: 500_000 } } },
+      effect: 'file_write',
+      authorize: authorizeCurrentProject,
+      summarizeInput: (input) => `更新全剧剧本（${input.script.length} 字）`,
+      execute: async (_context, input) => {
+        const { series } = currentSeries();
+        if (!series) return { status: 'error', summary: '当前项目没有剧集信息', modelContent: '当前项目没有剧集信息', errorCode: 'SERIES_NOT_FOUND' };
+        const saved = await useAppStore.getState().updateSeriesInfo({ ...series.series, script: input.script });
+        return saved ? { status: 'success', summary: '已更新全剧剧本', modelContent: JSON.stringify({ seriesId: series.id, scriptLength: input.script.length }) } : { status: 'error', summary: '全剧剧本更新失败', modelContent: '全剧剧本更新失败', errorCode: 'SERIES_UPDATE_FAILED' };
+      },
+    }),
+    registerAgentTool<{ episodeId: string; outline: string }>({
+      id: 'episode_update_outline',
+      title: '更新分集大纲',
+      description: '更新指定分集的大纲或本集剧本片段。',
+      inputSchema: { type: 'object', required: ['episodeId', 'outline'], additionalProperties: false, properties: { episodeId: { type: 'string', minLength: 1, maxLength: 160 }, outline: { type: 'string', maxLength: 100_000 } } },
+      effect: 'file_write',
+      authorize: authorizeCurrentProject,
+      execute: async (_context, input) => {
+        const { state, series } = currentSeries();
+        const episode = series && listEpisodes(state.projects, series.id).find((item) => item.id === input.episodeId);
+        if (!episode) return { status: 'error', summary: '分集不存在', modelContent: '分集不存在', errorCode: 'EPISODE_NOT_FOUND' };
+        const saved = await state.updateEpisodeOutline(episode.id, input.outline);
+        return saved ? { status: 'success', summary: `已更新“${episode.name}”`, modelContent: JSON.stringify({ episodeId: episode.id, outlineLength: input.outline.length }) } : { status: 'error', summary: '分集更新失败', modelContent: '分集更新失败', errorCode: 'EPISODE_UPDATE_FAILED' };
+      },
+    }),
+    registerAgentTool<{ episodeId: string; direction: -1 | 1 }>({
+      id: 'episode_move',
+      title: '调整分集顺序',
+      description: '将指定分集向前或向后移动一位。',
+      inputSchema: { type: 'object', required: ['episodeId', 'direction'], additionalProperties: false, properties: { episodeId: { type: 'string', minLength: 1, maxLength: 160 }, direction: { type: 'integer', enum: [-1, 1] } } },
+      effect: 'canvas_write',
+      authorize: authorizeCurrentProject,
+      execute: async (_context, input) => {
+        const moved = await useAppStore.getState().moveEpisode(input.episodeId, input.direction);
+        return moved ? { status: 'success', summary: '已调整分集顺序', modelContent: JSON.stringify({ episodeId: input.episodeId, direction: input.direction }) } : { status: 'error', summary: '分集无法继续移动', modelContent: '分集不存在或已位于边界', errorCode: 'EPISODE_MOVE_FAILED' };
+      },
+    }),
+    registerAgentTool<{ episodeId: string }>({
+      id: 'episode_delete',
+      title: '删除分集',
+      description: '永久删除指定分集画布；共享剧集素材不会随单集删除。',
+      inputSchema: { type: 'object', required: ['episodeId'], additionalProperties: false, properties: { episodeId: { type: 'string', minLength: 1, maxLength: 160 } } },
+      effect: 'permanent_delete',
+      authorize: (context, input) => { const state = useAppStore.getState(); const ownerId = seriesOwnerId(state.projects, context.projectId); const episode = state.projects.find((item) => item.id === input.episodeId); return { allowed: state.currentProjectId === context.projectId && episode?.parentId === ownerId, reason: '分集不存在或不属于当前剧集' }; },
+      execute: async (_context, input) => {
+        const episode = useAppStore.getState().projects.find((item) => item.id === input.episodeId);
+        if (!episode?.parentId) return { status: 'error', summary: '分集不存在', modelContent: '分集不存在', errorCode: 'EPISODE_NOT_FOUND' };
+        await useAppStore.getState().deleteProject(episode.id);
+        return { status: 'success', summary: `已删除分集“${episode.name}”`, modelContent: JSON.stringify({ deleted: true, episodeId: episode.id }) };
+      },
+    }),
     registerAgentTool<SeriesReadInput>({
       id: 'series_read',
       title: '读取剧集原著与剧本',

@@ -2134,7 +2134,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 **任务类型：平台能力 / 架构收敛**
 
-**状态：第二批已完成，后续业务域工具实施中**
+**状态：第三批已完成，高级画布工具实施中**
 
 #### 目标与边界
 
@@ -2168,6 +2168,17 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 定向回归：新增管理工具、Skill、记忆和 MCP 控制服务共 4 个文件、32 项通过。
 - `npm run typecheck`、`npm run test:typecheck`、本批 8 个 TypeScript 文件定向 ESLint、`git diff --check` 通过。
 - 回滚时移除工作流/画风工具注册和新增 CRUD 定义，恢复 Skill Store 两个 Action、预设删除与记忆管理工具即可；未修改数据库 schema。
+
+#### 第三批完成记录
+
+- 剧集与分集新增 `series_get_state`、`series_update_script`、`episode_update_outline`、`episode_move`、`episode_delete`；继续复用剧集共享归属、分集排序和项目删除事务，单集删除不清理共享素材。
+- 人物/场景/道具已由既有 `drama_asset_list/get/upsert/delete` 覆盖；本批补充 `drama_voice_update`、`drama_voice_set_primary`、`drama_voice_delete`，只管理已有声音片段元数据，不接收或返回本地音频路径。
+- 会话新增列表、详情、创建、更新、切换和删除工具；删除继续调用现有会话软删除、后台任务停止、文件 grant 清理、记忆来源失效与任务持久化清理链路，且禁止删除当前 MCP 控制对话自身。
+- AgentTask 新增列表、详情、暂停/继续/停止和已结束任务删除；禁止控制或删除当前 MCP 调用自己的审计任务，继续操作复用既有预算、调度和恢复校验。
+- 历史新增 `history_undo`、`history_redo`、`history_list`、`history_delete_entry`、`history_clear_node`、`history_clear_all`；输出历史查询不返回本地文件路径、完整媒体 URL 或任意参数对象。
+- 定向回归：新增操作域、剧集、短剧素材、任务控制和会话执行共 5 个文件、32 项通过。
+- `npm run typecheck`、`npm run test:typecheck`、本批 6 个 TypeScript 文件定向 ESLint、`git diff --check` 通过。
+- 回滚时移除会话与历史工具注册、剧集增量工具和角色声音增量工具即可；未修改持久化 schema。
 
 ## 9. 测试与验证策略
 
@@ -2296,6 +2307,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-13 | 8.26 第三批 | 补齐剧集分集、角色声音、会话、AgentTask、撤销重做和输出历史 MCP 工具，复用既有删除清理与任务调度边界。 |
 | 2026-08-13 | 8.26 第二批 | 补齐工作流、画风、单文件 Skill、项目记忆和快捷指令删除管理工具，继续复用既有 Store 与持久化边界。 |
 | 2026-08-13 | 8.26 第一批 | 新增 11 个 MCP 界面、窗口、画布视口与瞬时截图工具，图像不进入模型上下文、消息或任务持久化。 |
 | 2026-08-13 | 8.25 | 新增 8 个 MCP 项目管理工具，覆盖脱敏查询、创建、重命名、切换、安全设置、保存和永久删除，全部复用既有 Project Store 事务。 |

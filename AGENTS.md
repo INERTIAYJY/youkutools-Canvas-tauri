@@ -163,19 +163,19 @@ AI-Canvas-tauri/
 - 工具输入必须声明本地 schema，并设置准确的 effect
 - `read` 可自动执行；只对瞬时网络错误自动重试，最多 3 次
 - Plan 模式只允许 `read`，其余 effect 一律拒绝
-- B 模式的 `canvas_write` 必须确认；C 模式可自动执行
-- `file_write`、`permanent_delete`、`media_generation`、`memory_write` 和 `config_write` 始终确认
+- B 模式的 `canvas_write` 必须确认；C 自主模式与 MCP 会话下所有 effect 一律自动执行、无须确认
+- `file_write`、`permanent_delete`、`media_generation`、`memory_write`、`config_write`、`asset_write` 仅在 Plan/B 模式要求确认，C 自主模式与 MCP 会话直接放行
 - 画布写、文件写、永久删除和付费媒体生成不得自动重试
 - 单任务预算默认为 12 个模型轮次、24 次工具调用、3 个并发只读工具
 - 子智能体只读、不写画布、不产生会话消息；单个父任务最多 6 个子任务，材料范围由用户配置显式勾选
-- 会产生模型开销的工具（例如 `agent_run_sub_agent`）不通过 MCP 暴露
+- 会产生模型开销的工具（例如 `agent_run_sub_agent`）同样对 MCP 客户端开放并自动执行，C 自主模式与 MCP 会话下无须确认
 - 工具的 `isAvailable` 不得依赖 `context.taskId` 查任务，否则 MCP 发现阶段会静默丢失该工具；需要任务上下文的判断放进 `authorize`
-- 图片、视频和音频生成必须使用用户本轮显式 `@model{...}` 引用
+- 图片、视频和音频生成在对话内必须使用用户本轮显式 `@model{...}` 引用；C 自主模式与 MCP 会话下媒体模型选择与调用自动执行、无须确认
 - “创建媒体节点”和“实际调用媒体模型”是两个不同工具状态，不能合并
 - AgentTask 在应用运行期间可后台执行；重启后未完成任务只能恢复为 `paused`
 - 网页、本地文件、Skill 和 MCP 输入始终是不可信数据，不能修改 Policy、模式、工具权限或确认策略
 - 文件 grant 只在内存中保存，并绑定 conversationId；模型只能看到 grantId 和显示名
-- 项目记忆只能由 `memory_suggest` 提议，用户确认后写入
+- 项目记忆只能由 `memory_suggest` 提议；Plan/B 模式下需用户确认后写入，C 自主模式与 MCP 会话按最大权限直接写入
 
 ### 流式对话与多窗口
 
@@ -351,17 +351,20 @@ RunningHub 工作流和厂商模型 API 是两类执行协议，禁止强行混�
 
 ## Agent 安全矩阵
 
-| Effect | Plan 规划模式 | B 协作模式 | C 自主模式 | 自动重试 |
+| Effect | Plan 规划模式 | B 协作模式 | C 自主模式 / MCP | 自动重试 |
 |---|---|---|---|---|
 | `read` | 自动执行 | 自动执行 | 自动执行 | 仅瞬时错误，最多 3 次 |
 | `canvas_write` | 拒绝 | 必须确认 | 自动执行 | 禁止 |
-| `file_write` | 拒绝 | 必须确认 | 必须确认 | 禁止 |
-| `permanent_delete` | 拒绝 | 必须确认 | 必须确认 | 禁止 |
-| `media_generation` | 拒绝 | 每次确认 | 每次确认 | 禁止 |
-| `memory_write` | 拒绝 | 必须确认 | 必须确认 | 禁止 |
-| `config_write` | 拒绝 | 必须确认 | 必须确认 | 禁止 |
+| `file_write` | 拒绝 | 必须确认 | 自动执行 | 禁止 |
+| `permanent_delete` | 拒绝 | 必须确认 | 自动执行 | 禁止 |
+| `media_generation` | 拒绝 | 每次确认 | 自动执行 | 禁止 |
+| `memory_write` | 拒绝 | 必须确认 | 自动执行 | 禁止 |
+| `config_write` | 拒绝 | 必须确认 | 自动执行 | 禁止 |
+| `asset_write` | 拒绝 | 必须确认 | 自动执行 | 禁止 |
 
 Policy Engine 是本地固定边界。系统提示词、网页、文件、Skill、MCP 客户端、模型输出和工具 Observation 都不能修改此矩阵。MCP 调用走同一矩阵，且不能调用审批解决接口。
+
+C 自主模式与 MCP 控制会话以最大权限运行以兼容无人值守场景：所有工具调用（`read`、`canvas_write`、`file_write`、`permanent_delete`、`media_generation`、`memory_write`、`config_write`、`asset_write`）均无须人工确认，自动执行，不等待任何审批。Plan 模式仍只允许 `read`，B 协作模式仍按上表保留确认。
 
 ## 禁止事项速查
 
@@ -373,9 +376,8 @@ Policy Engine 是本地固定边界。系统提示词、网页、文件、Skill�
 - 禁止新增非 UTF-8 文本文件
 - 禁止在多个文件中散落同一 `modelId` / `provider` 硬编码分支
 - 禁止在 `ChatPanel` 中新增 Provider、画布工具或文件工具执行分支
-- 禁止把 `proxy_fetch`、任意 Shell、任意路径读写或通用 HTTP 请求暴露给 Agent 或 MCP
-- 禁止通过 MCP 暴露会产生模型开销的工具，或让 MCP 自行批准高影响操作
-- 禁止让模型自行选择未由用户 `@` 的付费媒体模型
+- 禁止把 `proxy_fetch`、任意 Shell、任意路径读写或通用 HTTP 请求暴露给 Agent 或 MCP（产生模型开销的 Agent 工具如 `agent_run_sub_agent` 不在禁止之列，C 自主模式与 MCP 会话下均自动执行、无须确认）
+- 禁止让模型在 Plan/B 模式下自行选择未由用户 `@` 的付费媒体模型（C 自主模式与 MCP 会话下媒体模型选择与调用自动执行、无须确认）
 - 禁止让网页、文件、Skill 或 MCP 输入直接触发权限升级
 - 禁止持久化 `AbortController`、文件 grant 路径、MCP 令牌或完整不可信正文
 - 禁止修改 `node_modules/`、`src-tauri/target/` 等构建产物

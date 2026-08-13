@@ -276,7 +276,9 @@ export function getProviderDefinition(
 function inferModelCategory(modelId: string): GeneralModelCategory {
   const id = modelId.toLowerCase();
   if (/tts|speech|audio|music|voice|whisper|transcri/.test(id)) return 'audio';
-  if (/video|seedance|sora|veo|kling|hailuo|wan\d|skyreels|vidu|minimax-h3/.test(id)) return 'video';
+  // minimax-h3 及其 Context-IR / Regeneration 变体均为视频生成模型；
+  // 中转站/自定义目录可能返回 MiniMax_H3、MiniMax H3 等写法，统一按分隔符变体识别。
+  if (/video|seedance|sora|veo|kling|hailuo|wan\d|skyreels|vidu|minimax[-\s_.]?h3/.test(id)) return 'video';
   if (/image|seedream|imagen|flux|banana|midjourney|recraft|dall-e/.test(id)) return 'image';
   return 'text';
 }

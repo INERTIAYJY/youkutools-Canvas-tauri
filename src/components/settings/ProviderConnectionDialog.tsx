@@ -119,12 +119,15 @@ function mergeModels(
     const existingHasFriendlyName = existing
       && existing.name.trim().toLowerCase() !== existing.id.trim().toLowerCase();
     const preserveExistingMetadata = incomingHasOnlyRawName && existingHasFriendlyName;
+    // 用户手动指定过分类时，重新拉取目录或合并模型不再覆盖该分类。
+    const preserveExistingCategory = Boolean(existing?.categoryManual) || preserveExistingMetadata;
     models.set(model.id, {
       ...existing,
       ...model,
       name: preserveExistingMetadata ? existing.name : model.name,
-      category: preserveExistingMetadata ? existing.category : model.category,
+      category: preserveExistingCategory && existing ? existing.category : model.category,
       description: model.description || existing?.description,
+      categoryManual: existing?.categoryManual ?? model.categoryManual,
     });
   }
   return [...models.values()];
@@ -188,6 +191,7 @@ export default function ProviderConnectionDialog({
   const [protocolValid, setProtocolValid] = useState(true);
   const [protocolImportOpen, setProtocolImportOpen] = useState(false);
   const [protocolImportSnapshot, setProtocolImportSnapshot] = useState<ProtocolImportSnapshot | null>(null);
+  const [categoryEditModelId, setCategoryEditModelId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const definition = getProviderDefinition(definitionId);
@@ -265,6 +269,7 @@ export default function ProviderConnectionDialog({
     setProtocolValid(true);
     setProtocolImportOpen(false);
     setProtocolImportSnapshot(null);
+    setCategoryEditModelId(null);
   };
 
   const handleFetchModels = async () => {
@@ -377,11 +382,20 @@ export default function ProviderConnectionDialog({
       name: manualModelName.trim() || id,
       category: manualCategory,
       provider: connectionId || definition.id,
+      categoryManual: true,
     };
     setModels((current) => mergeModels(current, [model]));
     setSelectedIds((current) => new Set(current).add(id));
     setManualModelId('');
     setManualModelName('');
+  };
+
+  const updateModelCategory = (modelId: string, nextCategory: GeneralModelCategory) => {
+    setModels((current) => current.map((model) =>
+      model.id === modelId ? { ...model, category: nextCategory, categoryManual: true } : model,
+    ));
+    setVisibleModelCategories((current) => new Set(current).add(nextCategory));
+    setCategoryEditModelId(null);
   };
 
   const updateModelProtocol = (
@@ -433,13 +447,14 @@ export default function ProviderConnectionDialog({
       category: result.category,
       provider: connectionId || definition.id,
       executionProfile: { preset: 'custom', protocol: result.protocol },
+      categoryManual: true,
     };
     setBaseUrl(result.baseUrl);
     setModels((current) => {
       const existing = current.find((model) => model.id === modelId);
       if (!existing) return [...current, importedModel];
       return current.map((model) => model.id === modelId
-        ? { ...model, category: importedModel.category, executionProfile: importedModel.executionProfile }
+        ? { ...model, category: importedModel.category, executionProfile: importedModel.executionProfile, categoryManual: true }
         : model);
     });
     setSelectedIds((current) => new Set(current).add(modelId));
@@ -863,16 +878,26 @@ export default function ProviderConnectionDialog({
 
                   <div className="provider-model-list">
                     {filteredModels.length > 0 ? filteredModels.map((model) => (
-                      <div key={model.id} className="provider-model-row">
+                      <div
+                        key={model.id}
+                        className={`provider-model-row ${categoryEditModelId === model.id ? 'provider-model-row--editing' : ''}`}
+                      >
+                        <button
+                          type="button"
+                          className={`provider-model-kind is-${model.category}`}
+                          aria-label={`修改 ${model.name} 的模型分类，当前为${CATEGORY_LABELS[model.category]}`}
+                          title="点击修改模型分类"
+                          aria-expanded={categoryEditModelId === model.id}
+                          onClick={() => setCategoryEditModelId((current) => current === model.id ? null : model.id)}
+                        >
+                          {CATEGORY_LABELS[model.category]}
+                        </button>
                         <label className="provider-model-select">
                           <input
                             type="checkbox"
                             checked={selectedIds.has(model.id)}
                             onChange={() => toggleModel(model.id)}
                           />
-                          <span className={`provider-model-kind is-${model.category}`}>
-                            {CATEGORY_LABELS[model.category]}
-                          </span>
                           <span className="provider-model-copy">
                             <strong>{model.name}</strong>
                             <small>{model.id}</small>
@@ -892,6 +917,29 @@ export default function ProviderConnectionDialog({
                               <Icon icon="mdi:tune-variant" width="15" />
                             </AnimatedButton>
                           ) : null}
+                        {categoryEditModelId === model.id ? (
+                          <div
+                            className="provider-model-category-editor"
+                            role="group"
+                            aria-label={`选择 ${model.name} 的模型分类`}
+                          >
+                            <span className="provider-model-category-editor-title">分类</span>
+                            {CATEGORY_ORDER.map((item) => (
+                              <button
+                                key={item}
+                                type="button"
+                                aria-pressed={model.category === item}
+                                className={`provider-category-choice is-${item} ${model.category === item ? 'is-active' : ''}`}
+                                onClick={() => {
+                                  if (model.category === item) setCategoryEditModelId(null);
+                                  else updateModelCategory(model.id, item);
+                                }}
+                              >
+                                {CATEGORY_LABELS[item]}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                     )) : (
                       <div className="provider-model-empty">没有匹配的模型</div>

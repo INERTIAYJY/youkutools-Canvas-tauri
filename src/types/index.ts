@@ -351,6 +351,8 @@ export interface ProviderModelSelection {
   category: GeneralModelCategory;
   provider: string;
   description?: string;
+  /** 分类是否由用户手动指定；为 true 时重新拉取目录或合并模型不再覆盖该分类。 */
+  categoryManual?: boolean;
   /** 自定义媒体模型的提交、轮询与结果解析规则。 */
   executionProfile?: ModelExecutionProfile;
   /** 图片模型存在参考图时使用的请求协议；缺省保持 generations JSON 兼容方式。 */

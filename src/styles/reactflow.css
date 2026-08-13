@@ -260,17 +260,22 @@
 } */
 
 
-/* 与 React Flow Handle 位置对齐 */
+/* wrapper 锚点取 Handle 自身位置（left/right = 0），translate 把按钮中心外推按钮半径（20px ×
+   inv-zoom），再 scale(var(--gooey-inv-zoom)) 绕中心反向补偿缩放。translate 在 scale 之前，
+   translate 量最终会被 scale 抵消：视觉偏移 = 20px × inv-zoom × zoom = 20px（屏幕像素恒定），
+   因此按钮始终紧贴节点边缘外侧、不侵入节点内部。 */
 .gooey-btn-left {
-  left: -10px;
+  left: 0;
   top: 50%;
-  transform: translate(-50%, -50%);
+  transform: translate(calc(-50% - 10px * var(--gooey-inv-zoom, 1)), -50%)
+             scale(var(--gooey-inv-zoom, 1));
 }
 
 .gooey-btn-right {
-  right: -10px;
+  right: 0;
   top: 50%;
-  transform: translate(50%, -50%);
+  transform: translate(calc(50% + 10px * var(--gooey-inv-zoom, 1)), -50%)
+             scale(var(--gooey-inv-zoom, 1));
 }
 
 .gooey-btn-left .gooey-btn::before {

@@ -3,6 +3,7 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import type {
+  AgentMode,
   AgentApprovalResolution,
   AgentStep,
   AgentTask,
@@ -31,6 +32,8 @@ export interface RegisteredAgentToolCallOptions {
     approvalId: string,
     signal: AbortSignal,
   ) => Promise<AgentApprovalResolution>;
+  /** 仅供可信本地编排层覆盖 Policy 模式；工具输入无法设置该值。 */
+  policyMode?: AgentMode;
   onApprovalRequired?: (step: AgentStep) => void;
 }
 
@@ -54,11 +57,12 @@ export async function executeRegisteredAgentToolCall({
   signal,
   transitionTask,
   waitForApproval,
+  policyMode,
   onApprovalRequired,
 }: RegisteredAgentToolCallOptions): Promise<ExecutedToolCall> {
   const round = await import('./agentRoundExecutor');
   const initialTask = round.getTask(taskId);
-  const readCurrentMode = () => useAppStore.getState().conversations.find(
+  const readCurrentMode = () => policyMode ?? useAppStore.getState().conversations.find(
     (conversation) => conversation.id === initialTask.conversationId,
   )?.agentMode ?? initialTask.mode;
   const context: AgentToolContext = {

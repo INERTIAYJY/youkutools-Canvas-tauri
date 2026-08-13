@@ -37,7 +37,7 @@ function createTask(): AgentTask {
     projectId: 'project-approval',
     conversationId: 'conversation-approval',
     userMessageId: 'message-1',
-    mode: 'autonomous',
+    mode: 'collaborative',
     goal: 'write a file',
     status: 'queued',
     steps: [],
@@ -69,7 +69,7 @@ beforeEach(() => {
       pinned: false,
       archived: false,
       messageCount: 0,
-      agentMode: 'autonomous',
+      agentMode: 'collaborative',
     }],
     agentTasks: [createTask()],
   });

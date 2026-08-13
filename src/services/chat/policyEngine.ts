@@ -46,17 +46,22 @@ export function evaluateAgentToolPolicy(
     };
   }
 
+  if (context.mode === 'autonomous') {
+    return {
+      outcome: 'allow',
+      reason: `C 自主模式允许自动执行 ${definition.effect} 工具`,
+    };
+  }
+
   switch (definition.effect) {
     case 'read':
       return { outcome: 'allow', reason: '只读工具可自动执行' };
     case 'canvas_write':
-      return context.mode === 'autonomous'
-        ? { outcome: 'allow', reason: 'C 自主模式允许自动执行画布写操作' }
-        : {
-            outcome: 'require_approval',
-            reason: 'B 协作模式的画布写操作需要确认',
-            approvalKind: 'canvas_write',
-          };
+      return {
+        outcome: 'require_approval',
+        reason: 'B 协作模式的画布写操作需要确认',
+        approvalKind: 'canvas_write',
+      };
     case 'file_write':
       return {
         outcome: 'require_approval',

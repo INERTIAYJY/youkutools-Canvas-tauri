@@ -49,29 +49,47 @@ describe('MCP control service', () => {
     );
   });
 
-  it('不向 MCP 暴露会产生模型开销的子智能体工具', async () => {
+  it('向 MCP 暴露全部当前可用的 Registry 工具', async () => {
     const tools = await listMcpTools();
-    expect(tools.some((tool) => tool.name === 'agent_run_sub_agent')).toBe(false);
-    // 其余只读工具不受影响
+    expect(tools.some((tool) => tool.name === 'agent_run_sub_agent')).toBe(true);
     expect(tools.some((tool) => tool.name === 'canvas_query')).toBe(true);
   });
 
-  it('即使客户端按名字直接调用也拒绝执行子智能体工具', async () => {
-    const before = useAppStore.getState().agentTasks.length;
+  it('不继承内置助手模式，受保护工具也无须审批', async () => {
+    await listMcpTools();
+    useAppStore.getState().updateConversation('mcp-control-project-mcp', {
+      agentMode: 'collaborative',
+    });
+    const execute = vi.fn(async () => ({
+      status: 'success' as const,
+      summary: '配置已写入',
+      modelContent: '配置已写入',
+    }));
+    registerAgentTool({
+      id: 'mcp_control_config_write_test',
+      title: '测试配置写入',
+      description: '验证 MCP 最大权限上下文',
+      effect: 'config_write',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      execute,
+    });
+
     const result = await handleMcpBridgeRequest({
       sessionId: 'session-1',
-      requestId: 'session-1:req-blocked',
+      requestId: 'session-1:req-protected',
       method: 'tools/call',
       params: {
-        name: 'agent_run_sub_agent',
-        arguments: { profileId: 'built-in:script-analyst', assignment: '分析' },
+        name: 'mcp_control_config_write_test',
+        arguments: {},
       },
     }) as { isError: boolean; summary: string };
 
-    expect(result.isError).toBe(true);
-    expect(result.summary).toContain('不对 MCP 客户端开放');
-    // 被拦下的调用不应留下审计任务
-    expect(useAppStore.getState().agentTasks.length).toBe(before);
+    expect(result).toMatchObject({ isError: false, summary: '配置已写入' });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().agentTasks.at(-1)).toMatchObject({
+      mode: 'autonomous',
+      steps: [expect.objectContaining({ kind: 'tool', status: 'succeeded' })],
+    });
   });
 
   it('某个工具的 isAvailable 抛错时不影响其余工具的发现', async () => {

@@ -81,11 +81,10 @@
 
 #### C：自主模式
 
-- 所有画布修改自动执行，包括新增、更新、连线、分组、批量修改和删除节点。
+- 所有已注册工具自动执行，包括画布、文件、永久删除、媒体生成、记忆、配置和资产写入。
 - 所有画布写操作必须经过 revision 校验，并通过统一事务写入撤销历史。
-- 本地文件写入和永久删除必须确认。
-- 图片、视频、音乐和语音生成每次都必须确认。
-- 用户不满意时可以手动“重新生成”，重新生成视为新的付费请求，必须再次确认。
+- 图片、视频、音乐和语音生成及重新生成无须确认，但继续保持零自动重试。
+- 工具 schema、`authorize`、项目/revision、文件 grant、路径策略、预算与审计边界仍然生效。
 
 模式切换不能扩大 Tauri 权限、文件授权或模型权限，也不能由模型或 Skill 内容自行修改。
 
@@ -96,7 +95,7 @@
 - 本地文件必须由用户首次通过原生选择器授权。
 - 文件授权只在当前会话有效，不跨会话、不跨项目、不在重启后自动恢复。
 - 用户撤销授权后，活动读取立即停止，排队调用失败。
-- 文件写入始终使用原生保存流程并逐次确认。
+- B 模式文件写入使用原生保存流程并逐次确认；C 自主模式和 MCP 会话自动执行已授权的写入流程。
 - 不提供删除、移动、执行任意文件或访问任意路径的模型工具。
 
 ### 3.3 上下文和记忆
@@ -106,7 +105,7 @@
 - 根据所选模型的最大上下文动态调整输入预算。
 - 接近上限时自动压缩，压缩只影响发送给模型的上下文，不删除原始历史。
 - 压缩摘要必须保留目标、约束、决定、未完成计划、节点 ID、工具来源和失败原因。
-- 重要偏好和项目事实由 Agent 提议，用户确认后才能写入项目记忆。
+- 重要偏好和项目事实只能由 Agent 提议；B 模式需用户确认，C 自主模式和 MCP 会话自动写入。
 - 文件全文、网页全文、API Key、绝对路径和临时工具结果不能自动进入长期记忆。
 
 ### 3.4 后台执行和恢复
@@ -238,11 +237,14 @@ export interface AgentTask {
 | 读取已授权文件 | 自动 | 自动 | 最多 3 次 |
 | 新增/更新/连线/分组 | 确认 | 自动 | 否 |
 | 删除画布节点 | 确认 | 自动，可撤销 | 否 |
-| 本地文件写入 | 确认 | 确认 | 否 |
-| 永久删除 | 二次确认 | 二次确认 | 否 |
-| 图片/视频/音乐/语音生成 | 每次确认 | 每次确认 | 否 |
-| 媒体重新生成 | 再次确认 | 再次确认 | 否 |
-| 保存项目记忆 | 确认 | 确认 | 否 |
+| 本地文件写入 | 确认 | 自动 | 否 |
+| 永久删除 | 二次确认 | 自动 | 否 |
+| 图片/视频/音乐/语音生成 | 每次确认 | 自动 | 否 |
+| 媒体重新生成 | 再次确认 | 自动 | 否 |
+| 保存项目记忆 | 确认 | 自动 | 否 |
+| 保存厂商配置或资产 | 确认 | 自动 | 否 |
+
+MCP 调用不继承内置助手会话模式，固定按 C 自主模式执行当前已注册且可用的全部工具，因此不产生审批等待。MCP 输入仍不能修改 Policy 模式或绕过工具自身授权。
 
 Policy Engine 的结果统一为：
 
@@ -1666,9 +1668,9 @@ type PolicyDecision =
 
 - 为 Codex 等客户端提供稳定的 stdio MCP 接口，替代依赖窗口坐标、焦点和缩放的桌面自动化。
 - Tauri 只在用户手动开启的会话内监听随机 loopback 端口；一次性令牌只保存在内存中，停止、退出或重新开启后立即失效。
-- MCP 工具继续使用现有 Tool Registry、Policy Engine、AgentTask、审批、画布 revision 和 checkpoint；MCP 不得审批自己的调用。
+- MCP 工具继续使用现有 Tool Registry、Policy Engine、AgentTask、画布 revision 和 checkpoint；原始审批行为已由 8.24 的最大权限上下文取代。
 - 主窗口 Store 保持唯一业务写入源，不开放任意 Shell、任意文件路径、通用 HTTP、直接 IndexedDB、API Key 或 Provider 凭据。
-- 不修改 `tauri.conf.json`、capability、IndexedDB schema、既有 Agent 权限矩阵或媒体逐次确认规则。
+- 本阶段当时未修改 `tauri.conf.json`、capability、IndexedDB schema、既有 Agent 权限矩阵或媒体逐次确认规则；后续权限变更见 8.24。
 
 #### 分阶段进度
 
@@ -2065,6 +2067,36 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 项目记忆恢复为原有 IndexedDB 本地持久化，不保留外部服务配置、网络请求、密钥、数据库迁移或运行时依赖。
 - 现有项目记忆数据、用户确认流程、来源生命周期和 Context Manager 注入行为不受影响。
 
+### 8.24 MCP 全权限第一阶段
+
+**任务类型：架构收敛 / 平台能力**
+
+**状态：已完成**
+
+#### 目标与边界
+
+- MCP 对当前 Tool Registry 中全部可用工具无须应用内确认，且不继承内置助手的 Plan/B/C 模式。
+- 解除 `agent_run_sub_agent` 与 `comfyui_execute_workflow` 的 MCP 屏蔽；模型开销和动态工作流由 MCP 调用方自行控制。
+- C 自主模式同步对 `canvas_write`、`file_write`、`permanent_delete`、`media_generation`、`memory_write`、`config_write` 与 `asset_write` 自动放行。
+- 保留本地 schema、工具 `isAvailable`/`authorize`、项目与 revision 校验、文件 grant、`path_policy`、预算、零副作用重试、审计、取消和 checkpoint。
+- 不新增通用 Shell、任意路径读写、通用 HTTP、直接 Store/IndexedDB 写入或 API Key 读取；不修改 Tauri 安全配置、数据库或依赖。
+
+#### 实施范围
+
+- 权限与执行：`src/services/chat/policyEngine.ts`、`src/services/chat/agentToolExecution.ts`、`src/services/mcp/mcpControlService.ts`。
+- 测试：`tests/services/chat/policyEngine.test.ts`、`tests/services/chat/agentToolExecution.test.ts`、`tests/services/mcp/mcpControlService.test.ts`。
+- 文档与帮助：`src/components/HelpCenterDialog.tsx`、`doc/adr/0004-local-mcp-control-bridge.md`、`doc/plans/2026-08-13-mcp-full-permission-phase-1.md`、本文档。
+
+#### 验证与回滚
+
+- 定向测试先确认旧实现的 9 项新断言失败；实现后权限、共享执行器、MCP、审批、Round、媒体、ComfyUI 与子智能体共 8 个文件、72 项通过。
+- 全量测试：`npm run test -- --run` 共 157 个文件、1231 项通过；npm 仅提示未来将不再接受未知的 `--run` CLI 配置，Vitest 实际完整运行并通过。
+- 类型检查：`npm run typecheck`、`npm run test:typecheck` 通过。
+- 定向 Lint：本阶段 8 个 TypeScript/TSX 文件通过。
+- 生产构建：`npx vite build --outDir C:\Users\Tenne\AppData\Local\Temp\ai-canvas-mcp-full-permission-20260813-1245` 通过；仅保留外部输出目录和既有大 chunk 警告。
+- 本阶段未修改 Rust、Tauri 安全配置、IndexedDB schema 或依赖；未执行真实付费媒体、子智能体和 ComfyUI 请求。
+- 回滚时恢复上述权限、执行器、MCP 过滤和说明文件即可；不涉及数据迁移、密钥、端口或 Tauri 配置。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -2128,7 +2160,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 |---|---|---|
 | Agent 无限循环 | 费用和等待时间失控 | 模型轮次、工具数、并发和重试预算 |
 | C 模式误改画布 | 用户内容变化 | revision 校验、原子事务、一次撤销、操作日志 |
-| 付费媒体重复调用 | 额度损失 | 每次确认、零自动重试、重新生成再次确认 |
+| 付费媒体重复调用 | 额度损失 | B 模式逐次确认；C/MCP 零自动重试并保留审计 |
 | 多会话状态串用 | 错误消息或修改错误项目 | 三重 ID 校验、会话级 Task 和 AbortController |
 | 重启后重复副作用 | 文件或画布重复写入 | 所有遗留任务恢复为暂停，继续前重新校验 |
 | 网页提示注入 | 权限扩大和数据泄露 | 不可信数据边界、Policy Engine 不接受内容修改 |
@@ -2148,12 +2180,12 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - [x] 重启后未完成任务只恢复为暂停。
 - [x] 联网搜索自动执行并展示来源，支持用户选择当前搜索厂商。
 - [x] 本地文件使用可撤销的会话级授权。
-- [x] 所有媒体生成和重新生成逐次确认。
+- [x] B 模式媒体生成和重新生成逐次确认；C 自主模式与 MCP 自动执行且不自动重试。
 - [x] 所有画布自动写入支持一次撤销。
 - [x] 只读瞬时错误最多自动重试 3 次。
 - [x] 写操作和付费工具不自动重试。
 - [x] 显示上下文占用并按模型上限自动压缩。
-- [x] 项目记忆必须由用户确认。
+- [x] B 模式项目记忆必须由用户确认；C 自主模式与 MCP 自动写入。
 - [x] 模型不能访问未注册工具、任意路径、通用 Shell 或无限制网络。
 - [x] 日志不包含 API Key、绝对路径和完整敏感正文。
 - [x] 本文档所有阶段均填写真实完成记录和验证结果。
@@ -2161,7 +2193,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - [x] Plan 模式由 Registry 和 Policy 双层限制为只读。
 - [x] Skill Manifest 只能缩小任务工具集合，不能扩大权限。
 - [x] 模型可发现并按需加载 Skill，但主动加载不改变任务工具权限，且只能读取该 Skill 目录子树内的文本资料。
-- [x] 用户可自建只读领域子智能体并被主任务并行派出，子智能体无写权限，产出必须由主任务经用户确认后落地。
+- [x] 用户可自建只读领域子智能体并被主任务并行派出，子智能体无写权限；B 模式下主任务落地需确认，C/MCP 自动执行落地工具。
 - [x] 只读专家任务无工具、无嵌套、无画布副作用，并在任务中心显示父子关系。
 
 ### 12.1 平台补充：匿名同源 SPA 文档渲染
@@ -2192,6 +2224,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-13 | 8.24 | 完成 MCP 全权限第一阶段：现有 Registry 工具固定使用自主权限上下文执行，取消审批依赖并解除子智能体与动态 ComfyUI 工作流屏蔽。 |
 | 2026-08-13 | 8.23 取消 | 按用户决定不接入 TencentDB Agent Memory，完整回退外部记忆映射与通用 Repository 试验，项目记忆继续仅使用 IndexedDB。 |
 | 2026-08-13 | 8.22 | Agent 时间线新增基于脱敏任务事件的实时可折叠执行依据，展示分析、Policy、审批和工具结果，同时明确不包含模型隐藏思维。 |
 | 2026-08-12 | 8.21 | 用户显式引用的 Skill 在 AgentTask 创建时固定为受预算约束的不可变快照，恢复时确定性注入，并在时间线显示已注入名称。 |

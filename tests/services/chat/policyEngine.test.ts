@@ -67,6 +67,7 @@ describe('evaluateAgentToolPolicy', () => {
     'media_generation',
     'memory_write',
     'config_write',
+    'asset_write',
   ])('denies %s independently in plan mode', (effect) => {
     expect(evaluateAgentToolPolicy(createTool(effect), {}, context('plan'))).toEqual({
       outcome: 'deny',
@@ -75,21 +76,34 @@ describe('evaluateAgentToolPolicy', () => {
     });
   });
 
-  it.each<AgentToolEffect>([
+  it.each<Exclude<AgentToolEffect, 'read'>>([
+    'canvas_write',
     'file_write',
     'permanent_delete',
     'media_generation',
     'memory_write',
     'config_write',
-  ])('always requires approval for %s', (effect) => {
-    for (const mode of ['collaborative', 'autonomous'] as const) {
-      expect(evaluateAgentToolPolicy(createTool(effect), {}, context(mode))).toEqual(
-        expect.objectContaining({
-          outcome: 'require_approval',
-          approvalKind: effect,
-        }),
-      );
-    }
+    'asset_write',
+  ])('allows %s automatically in autonomous mode', (effect) => {
+    expect(evaluateAgentToolPolicy(createTool(effect), {}, context('autonomous')))
+      .toMatchObject({ outcome: 'allow' });
+  });
+
+  it.each<Exclude<AgentToolEffect, 'read'>>([
+    'canvas_write',
+    'file_write',
+    'permanent_delete',
+    'media_generation',
+    'memory_write',
+    'config_write',
+    'asset_write',
+  ])('requires approval for %s in collaborative mode', (effect) => {
+    expect(evaluateAgentToolPolicy(createTool(effect), {}, context('collaborative'))).toEqual(
+      expect.objectContaining({
+        outcome: 'require_approval',
+        approvalKind: effect,
+      }),
+    );
   });
 
   it('denies unauthorized tools before applying mode permissions', () => {

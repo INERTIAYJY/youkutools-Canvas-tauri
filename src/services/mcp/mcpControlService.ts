@@ -2,7 +2,6 @@
  * MCP 前端控制层，将本地 bridge 请求映射到受 Policy 约束的 Agent 工具和专用审计任务。
  */
 import { useAppStore } from '../../store/useAppStore';
-import type { AgentMode } from '../../types/agent';
 import type { ChatConversation, ChatMessage } from '../../types/chat';
 import type {
   McpBridgeRequestEvent,
@@ -25,6 +24,7 @@ import {
 } from './mcpBridgeService';
 
 const MCP_CONVERSATION_TITLE = 'MCP 控制';
+const MCP_EXECUTION_MODE = 'autonomous' as const;
 
 /**
  * 工具发现时没有真实 AgentTask，只能给一个占位 ID。
@@ -33,19 +33,6 @@ const MCP_CONVERSATION_TITLE = 'MCP 控制';
  * 会让该工具从 MCP 列表里静默消失。需要任务上下文的判断请放在 authorize 里。
  */
 export const MCP_TOOL_DISCOVERY_TASK_ID = 'mcp-tool-discovery';
-
-/**
- * 不通过 MCP 暴露、也不允许 MCP 调用的工具。
- *
- * agent_run_sub_agent 是 read effect，Policy 对只读工具一律自动执行，但它内部会跑
- * 完整的子智能体循环并产生真实模型开销。对话内由用户发起尚可接受，外部 MCP 客户端
- * 直接调用则会在零确认下花钱，且它也没有「主任务」语境。
- */
-const MCP_BLOCKED_TOOL_IDS = new Set([
-  'agent_run_sub_agent',
-  // 动态工作流可使用任意已安装自定义节点，只允许应用内用户逐次确认后执行。
-  'comfyui_execute_workflow',
-]);
 
 const activeRequestTasks = new Map<string, string>();
 
@@ -69,15 +56,19 @@ async function ensureToolsRegistered(): Promise<void> {
 
 export function ensureMcpControlConversation(
   projectId: string,
-  defaultMode: AgentMode = 'autonomous',
 ): ChatConversation {
   const store = useAppStore.getState();
   const id = `mcp-control-${projectId}`;
   const existing = store.conversations.find((conversation) => conversation.id === id);
   if (existing) {
-    if (existing.archived || existing.deletedAt) {
-      store.updateConversation(id, { archived: false, deletedAt: undefined });
-      return { ...existing, archived: false, deletedAt: undefined };
+    if (existing.archived || existing.deletedAt || existing.agentMode !== MCP_EXECUTION_MODE) {
+      const updated = {
+        archived: false,
+        deletedAt: undefined,
+        agentMode: MCP_EXECUTION_MODE,
+      };
+      store.updateConversation(id, updated);
+      return { ...existing, ...updated };
     }
     return existing;
   }
@@ -89,7 +80,7 @@ export function ensureMcpControlConversation(
     titleSource: 'user',
     pinned: true,
     archived: false,
-    agentMode: defaultMode,
+    agentMode: MCP_EXECUTION_MODE,
     createdAt: now,
     updatedAt: now,
     messageCount: 0,
@@ -118,9 +109,9 @@ export async function listMcpTools(): Promise<McpToolDescriptor[]> {
     taskId: MCP_TOOL_DISCOVERY_TASK_ID,
     projectId: current.projectId,
     conversationId: current.conversation.id,
-    mode: current.conversation.agentMode,
+    mode: MCP_EXECUTION_MODE,
     baseRevision: useAppStore.getState().getCurrentRevision(),
-  }).filter((definition) => !MCP_BLOCKED_TOOL_IDS.has(definition.id)).map((definition) => ({
+  }).map((definition) => ({
     name: definition.id,
     title: definition.title,
     description: definition.description,
@@ -145,15 +136,6 @@ async function callMcpTool(
     };
   }
   const name = typeof request.params.name === 'string' ? request.params.name : '';
-  // 仅从发现列表移除不构成约束，客户端可以直接按名字调用，执行路径必须同样拦截。
-  if (MCP_BLOCKED_TOOL_IDS.has(name)) {
-    const message = `工具“${name}”不对 MCP 客户端开放`;
-    return {
-      isError: true,
-      summary: message,
-      content: [{ type: 'text', text: message }],
-    };
-  }
   const input = request.params.arguments && typeof request.params.arguments === 'object'
     ? request.params.arguments
     : {};
@@ -185,7 +167,7 @@ async function callMcpTool(
     projectId: current.projectId,
     conversationId: current.conversation.id,
     userMessageId,
-    mode: current.conversation.agentMode,
+    mode: MCP_EXECUTION_MODE,
     goal: `MCP 请求：${title}。${inputSummary}`,
     budget: {
       maxModelRounds: 1,
@@ -220,19 +202,7 @@ async function callMcpTool(
         signal,
         transitionTask: transitionAgentTask,
         waitForApproval: waitForAgentApproval,
-        onApprovalRequired: () => {
-          const currentStore = useAppStore.getState();
-          currentStore.setActiveConversation(current.conversation.id);
-          currentStore.openChat();
-          // 自动开启时主窗口常在后台或最小化，不拉到前台用户看不到审批，请求只能干等到超时。
-          void import('@tauri-apps/api/window')
-            .then(async ({ getCurrentWindow }) => {
-              const window = getCurrentWindow();
-              await window.unminimize();
-              await window.setFocus();
-            })
-            .catch(() => {});
-        },
+        policyMode: MCP_EXECUTION_MODE,
       });
       return executionResult.summary.status === 'success' ? 'completed' : 'failed';
     });

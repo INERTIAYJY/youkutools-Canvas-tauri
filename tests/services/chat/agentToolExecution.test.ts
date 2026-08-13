@@ -8,7 +8,6 @@ import {
   registerAgentTool,
 } from '../../../src/services/chat/toolRegistry';
 import {
-  resolveAgentApproval,
   runAgentTask,
   transitionAgentTask,
   waitForAgentApproval,
@@ -153,7 +152,7 @@ describe('shared Agent tool execution for MCP', () => {
     });
   });
 
-  it('waits for the existing application approval before a protected tool', async () => {
+  it('executes a protected tool without approval in autonomous mode', async () => {
     const execute = vi.fn(async () => ({
       status: 'success' as const,
       summary: 'write complete',
@@ -175,9 +174,6 @@ describe('shared Agent tool execution for MCP', () => {
         signal,
         transitionTask: transitionAgentTask,
         waitForApproval: waitForAgentApproval,
-        onApprovalRequired: (step) => queueMicrotask(() => {
-          resolveAgentApproval(step.approval!.id, { approved: true });
-        }),
       });
       expect(result.summary.status).toBe('success');
       return 'completed';
@@ -185,10 +181,11 @@ describe('shared Agent tool execution for MCP', () => {
 
     expect(execute).toHaveBeenCalledTimes(1);
     expect(task.steps[0]).toMatchObject({
-      kind: 'approval',
+      kind: 'tool',
       status: 'succeeded',
-      approval: { status: 'approved' },
+      toolCall: { effect: 'file_write' },
     });
+    expect(task.steps[0].approval).toBeUndefined();
   });
 
   it('rejects invalid input before tool execution', async () => {

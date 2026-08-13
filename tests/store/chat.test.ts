@@ -86,6 +86,43 @@ describe('chat conversation restoration', () => {
     expect(historyMocks.loadMessages).toHaveBeenCalledWith('conversation-selected', 0, 200);
   });
 
+  it('scopes an episode to its series owner for load and create', async () => {
+    // series-1 是剧集，ep-2 是它的分集（parentId 指向 series-1）
+    useAppStore.setState({
+      projects: [
+        { id: 'series-1', name: 'S', createdAt: 1, updatedAt: 1 },
+        { id: 'ep-2', name: 'E2', createdAt: 1, updatedAt: 1, parentId: 'series-1', episodeNo: 2 },
+      ],
+      currentProjectId: 'ep-2',
+    });
+    historyMocks.loadProjectConversations.mockResolvedValue([]);
+    historyMocks.loadMessages.mockResolvedValue({ messages: [], total: 0 });
+
+    await useAppStore.getState().loadConversationsForProject('ep-2');
+    expect(historyMocks.loadProjectConversations).toHaveBeenCalledWith('series-1');
+
+    const id = useAppStore.getState().createConversation('ep-2');
+    expect(useAppStore.getState().conversations.find((c) => c.id === id)?.projectId).toBe('series-1');
+    expect(localStorageMock.setItem).toHaveBeenCalledWith(
+      'ai-canvas.chat.active-conversation:series-1',
+      id,
+    );
+  });
+
+  it('keeps a normal top-level project scoped to itself', async () => {
+    useAppStore.setState({
+      projects: [{ id: 'project-1', name: 'P', createdAt: 1, updatedAt: 1 }],
+      currentProjectId: 'project-1',
+    });
+    historyMocks.loadProjectConversations.mockResolvedValue([]);
+    historyMocks.loadMessages.mockResolvedValue({ messages: [], total: 0 });
+
+    await useAppStore.getState().loadConversationsForProject('project-1');
+    expect(historyMocks.loadProjectConversations).toHaveBeenCalledWith('project-1');
+    const id = useAppStore.getState().createConversation('project-1');
+    expect(useAppStore.getState().conversations.find((c) => c.id === id)?.projectId).toBe('project-1');
+  });
+
   it('falls back to the first available conversation when the saved one no longer exists', async () => {
     localStorageMock.setItem(
       'ai-canvas.chat.active-conversation:project-1',

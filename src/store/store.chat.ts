@@ -13,6 +13,7 @@ import { AGENT_TERMINAL_STATUSES } from '../types/agent';
 import { clearConversationFileGrants } from '../services/chat/fileGrantService';
 import { stopConversationAgentTasks } from '../services/chat/agentTaskControl';
 import * as chatHistoryService from '../services/chat/chatHistoryService';
+import { seriesOwnerId } from './store.utils';
 
 // ============================================
 // 常量
@@ -332,18 +333,20 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
     if (id) {
       const state = get();
       const projectId = state.conversations.find((conversation) => conversation.id === id)?.projectId
-        ?? state.currentProjectId;
+        ?? (state.currentProjectId ? seriesOwnerId(state.projects, state.currentProjectId) : null);
       if (projectId) persistActiveConversation(projectId, id);
     }
     set({ activeConversationId: id });
   },
 
   createConversation: (projectId, title) => {
+    // 会话按剧集项目归属：同一部剧的分集共用会话，普通项目归自己（seriesOwnerId 对普通项目是恒等）
+    const ownerId = seriesOwnerId(get().projects, projectId);
     const id = `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const now = Date.now();
     const conversation: ChatConversation = {
       id,
-      projectId,
+      projectId: ownerId,
       title: title || '新对话',
       titleSource: title ? 'user' : 'auto',
       pinned: false,
@@ -357,7 +360,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
       conversations: [...s.conversations, conversation],
       activeConversationId: id,
     }));
-    persistActiveConversation(projectId, id);
+    persistActiveConversation(ownerId, id);
     persistConv(conversation);
     return id;
   },
@@ -368,9 +371,11 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
 
   loadConversationsForProject: async (projectId) => {
     try {
-      const conversations = await chatHistoryService.loadProjectConversations(projectId);
+      // 会话按剧集项目归属：分集共用剧集的会话（seriesOwnerId 对普通项目是恒等）
+      const ownerId = seriesOwnerId(get().projects, projectId);
+      const conversations = await chatHistoryService.loadProjectConversations(ownerId);
       if (get().currentProjectId !== projectId) return;
-      const persistedId = readPersistedActiveConversation(projectId);
+      const persistedId = readPersistedActiveConversation(ownerId);
       const restoredConversation = conversations.find((conversation) =>
         conversation.id === persistedId) ?? conversations[0];
       set((state) => ({
@@ -380,7 +385,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
         operationLogs: [],
       }));
       if (restoredConversation) {
-        persistActiveConversation(projectId, restoredConversation.id);
+        persistActiveConversation(ownerId, restoredConversation.id);
         await get().loadConversationMessages(restoredConversation.id);
       }
     } catch (e) {

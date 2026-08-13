@@ -814,6 +814,8 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       }));
       fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
       rememberActiveProject(id);
+      // 新项目要切换到自己的会话，否则聊天面板仍停留在上一个项目的对话
+      get().loadConversationsForProject(id).catch((e) => console.warn('[创建项目] 加载会话失败:', e));
       setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
       return id;
     } finally {

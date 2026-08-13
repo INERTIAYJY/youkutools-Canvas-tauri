@@ -2134,7 +2134,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 **任务类型：平台能力 / 架构收敛**
 
-**状态：全部四批已完成，最终全量验证中**
+**状态：已完成**
 
 #### 目标与边界
 
@@ -2190,6 +2190,16 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 定向回归：画布工具与 MCP 控制共 2 个文件、22 项通过。
 - `npm run typecheck`、`npm run test:typecheck`、画布工具与测试定向 ESLint、`git diff --check` 通过。
 - 回滚时移除上述 7 个工具定义及对应测试即可；Store Action 未修改，无数据迁移。
+
+#### 最终验收
+
+- 当前工具源码共注册 116 个定义；MCP 发现仍按当前项目、运行环境、模型配置和 `isAvailable` 动态过滤，不承诺每次会话固定显示全部定义。
+- 全量测试：`npm run test` 共 162 个文件、1252 项通过。
+- `npm run typecheck` 与 `npm run test:typecheck` 通过；四批全部新增与修改 TypeScript/TSX 文件均完成定向 ESLint 且通过。
+- 全仓 `npm run lint` 仍被既有 ESLint 10 / parser 兼容错误 `scopeManager.addGlobals is not a function` 阻断；未修改依赖掩盖该问题。
+- 生产构建：`npx vite build --outDir C:\Users\Tenne\AppData\Local\Temp\ai-canvas-mcp-complete-control-20260813` 通过；仅保留外部输出目录与既有大 chunk 警告。
+- `git diff --check`、严格 UTF-8 解码与常见乱码扫描通过；工作区无意外变更。
+- 本阶段未修改 Rust、`tauri.conf.json`、capability、依赖或 IndexedDB schema；未执行真实付费媒体、永久项目删除、会话删除或输出历史清空。
 
 ## 9. 测试与验证策略
 

@@ -4,8 +4,19 @@ import {
   generateMcpSessionToken,
   normalizeMcpPort,
 } from '../../src/services/mcp/mcpSessionConfig';
+import { MCP_CONNECTION_REQUIREMENTS } from '../../src/components/settings/mcpConnectionRequirements';
 
 describe('MCP control settings helpers', () => {
+  it('lists the complete local connection environment requirements', () => {
+    expect(MCP_CONNECTION_REQUIREMENTS.map((requirement) => requirement.title)).toEqual([
+      'AI Canvas 桌面端',
+      'Node.js 运行环境',
+      '支持 MCP 的客户端',
+      '在同一台电脑连接',
+    ]);
+    expect(MCP_CONNECTION_REQUIREMENTS.at(-1)?.description).toContain('127.0.0.1');
+  });
+
   it('generates a fresh 256-bit hexadecimal session token', () => {
     const first = generateMcpSessionToken();
     const second = generateMcpSessionToken();

@@ -18,6 +18,7 @@ import {
   rotateMcpSessionToken,
   startConfiguredMcpBridge,
 } from '../../services/mcp/mcpSessionConfig';
+import { MCP_CONNECTION_REQUIREMENTS } from './mcpConnectionRequirements';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -269,6 +270,45 @@ export default function McpControlSettings() {
           </p>
         </div>
       )}
+
+      <section
+        className="rounded-md border border-canvas-border bg-canvas-card px-3 py-3"
+        aria-labelledby="mcp-connection-requirements-title"
+      >
+        <div className="flex items-center gap-2">
+          <Icon icon="lucide:circle-check-big" width="14" height="14" className="text-indigo-400" />
+          <h3 id="mcp-connection-requirements-title" className="text-xs font-medium text-canvas-text">
+            连接环境要求
+          </h3>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {MCP_CONNECTION_REQUIREMENTS.map((requirement) => (
+            <div key={requirement.title} className="flex items-start gap-2 rounded-md bg-canvas-surface px-2.5 py-2">
+              <Icon
+                icon={requirement.icon}
+                width="14"
+                height="14"
+                className="mt-0.5 shrink-0 text-canvas-text-secondary"
+              />
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium text-canvas-text">{requirement.title}</div>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-canvas-text-muted">
+                  {requirement.description}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 border-t border-canvas-border pt-2.5 text-[11px] leading-relaxed text-canvas-text-muted">
+          <p>
+            <span className="font-medium text-canvas-text-secondary">首次连接：</span>
+            开启会话 → 复制上方配置 → 粘贴到客户端的 MCP 配置中 → 完全重启客户端。
+          </p>
+          <p className="mt-1">
+            修改端口或重置令牌后，需要重新复制配置并重启客户端。调用联网、云端模型或本地模型功能时，还需提前配置对应的网络、API Key 或模型环境。
+          </p>
+        </div>
+      </section>
 
       {session && token && !clientConfig && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">

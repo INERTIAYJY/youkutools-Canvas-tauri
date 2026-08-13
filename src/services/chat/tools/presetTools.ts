@@ -747,6 +747,28 @@ export function registerPresetAgentTools(): Array<() => void> {
         };
       },
     }),
+    registerAgentTool<{ presetId: string }>({
+      id: 'preset_delete',
+      title: '删除快捷指令',
+      description: '永久删除一个用户快捷指令。',
+      inputSchema: {
+        type: 'object',
+        required: ['presetId'],
+        additionalProperties: false,
+        properties: { presetId: { type: 'string', minLength: 1, maxLength: 160 } },
+      },
+      effect: 'permanent_delete',
+      authorize: authorizeCurrentProject,
+      summarizeInput: (input) => `删除快捷指令 ${input.presetId}`,
+      execute: async (_context, input) => {
+        const preset = useAppStore.getState().userPresets.find((item) => item.id === input.presetId);
+        if (!preset) {
+          return { status: 'error', summary: '快捷指令不存在', modelContent: '快捷指令不存在', errorCode: 'AGENT_PRESET_NOT_FOUND' };
+        }
+        await useAppStore.getState().deleteUserPreset(preset.id);
+        return { status: 'success', summary: `已删除快捷指令“${preset.name}”`, modelContent: JSON.stringify({ deleted: true, presetId: preset.id }) };
+      },
+    }),
     registerAgentTool<PresetStartRunInput>({
       id: 'preset_start_run',
       title: '调用快捷指令',

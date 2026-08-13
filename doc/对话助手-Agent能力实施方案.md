@@ -2134,7 +2134,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 **任务类型：平台能力 / 架构收敛**
 
-**状态：第一批已完成，后续业务域工具实施中**
+**状态：第二批已完成，后续业务域工具实施中**
 
 #### 目标与边界
 
@@ -2155,6 +2155,19 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 定向测试：界面工具、MCP 图像适配和 MCP 控制服务共 3 个文件、13 项通过。
 - `npm run typecheck`、`npm run test:typecheck`、本批 12 个 TypeScript/TSX 文件定向 ESLint、`git diff --check` 通过。
 - 回滚时移除 UI 工具注册、截图响应器和视口控制器，并恢复 MCP 富内容与帧上限即可；无数据迁移。
+
+#### 第二批完成记录
+
+- 新增工作流 CRUD：`workflow_list`、`workflow_get`、`workflow_create`、`workflow_update`、`workflow_delete`；创建和更新要求有效对象型 JSON，并拒绝本地绝对路径。
+- 新增画风 CRUD：`style_list`、`style_get`、`style_create`、`style_update`、`style_delete`；查询不返回缩略图 Base64。
+- 新增 Skill 管理：`skill_list`、`skill_get`、`skill_create`、`skill_update`、`skill_delete`；MCP 可从正文创建单文件 Skill，不接收本地路径，文件夹型 Skill 仍通过原有文件夹上传更新。
+- Skill Store 新增正文创建与更新 Action，继续复用 Manifest 解析、持久化和删除清理；运行时存储路径不进入 MCP 结果。
+- 新增记忆管理：`memory_list`、`memory_get`、`memory_update`、`memory_delete`；沿用 `memory_suggest` 创建并自动执行，查询不返回来源消息 ID 或任务 ID。
+- 快捷指令补充 `preset_delete`，与现有列表、详情、创建、更新和逐步执行组成完整生命周期。
+- 新增的工作流、画风和 Skill 管理工具只在 `mcp-control-*` 会话可发现；预设和记忆继续沿用当前项目与剧集归属校验。
+- 定向回归：新增管理工具、Skill、记忆和 MCP 控制服务共 4 个文件、32 项通过。
+- `npm run typecheck`、`npm run test:typecheck`、本批 8 个 TypeScript 文件定向 ESLint、`git diff --check` 通过。
+- 回滚时移除工作流/画风工具注册和新增 CRUD 定义，恢复 Skill Store 两个 Action、预设删除与记忆管理工具即可；未修改数据库 schema。
 
 ## 9. 测试与验证策略
 
@@ -2283,6 +2296,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-13 | 8.26 第二批 | 补齐工作流、画风、单文件 Skill、项目记忆和快捷指令删除管理工具，继续复用既有 Store 与持久化边界。 |
 | 2026-08-13 | 8.26 第一批 | 新增 11 个 MCP 界面、窗口、画布视口与瞬时截图工具，图像不进入模型上下文、消息或任务持久化。 |
 | 2026-08-13 | 8.25 | 新增 8 个 MCP 项目管理工具，覆盖脱敏查询、创建、重命名、切换、安全设置、保存和永久删除，全部复用既有 Project Store 事务。 |
 | 2026-08-13 | 8.24 | 完成 MCP 全权限第一阶段：现有 Registry 工具固定使用自主权限上下文执行，取消审批依赖并解除子智能体与动态 ComfyUI 工作流屏蔽。 |

@@ -17,6 +17,8 @@ import { registerAppAgentTools } from './appTools';
 import { registerComfyAgentTools } from './comfyTools';
 import { registerProjectAgentTools } from './projectTools';
 import { registerUiControlAgentTools } from './uiControlTools';
+import { registerWorkflowAgentTools } from './workflowTools';
+import { registerStyleAgentTools } from './styleTools';
 
 type AgentToolRegistrationFactory = () => Array<() => void>;
 
@@ -42,6 +44,8 @@ function getRegistrationFactories(): AgentToolRegistrationFactory[] {
     registerComfyAgentTools,
     registerProjectAgentTools,
     registerUiControlAgentTools,
+    registerWorkflowAgentTools,
+    registerStyleAgentTools,
     registerFileAgentTools,
     registerSkillAgentTools,
     registerMemoryAgentTools,

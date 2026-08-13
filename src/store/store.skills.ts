@@ -26,6 +26,8 @@ function getSkillDescription(content: string): string {
 export interface SkillSlice {
   userSkills: UserSkill[];
   uploadSkill: (source?: SkillUploadSource) => Promise<UserSkill | null>;
+  createSkillFromContent: (fileName: string, content: string) => Promise<UserSkill>;
+  updateSkillContent: (id: string, content: string) => Promise<UserSkill | null>;
   deleteSkill: (id: string) => Promise<void>;
   loadSkills: () => Promise<void>;
 }
@@ -57,6 +59,46 @@ export const createSkillSlice: StateCreator<AppState, [], [], SkillSlice> = (set
     await fileService.saveSkill({ ...skill }).catch((e) => console.warn('[保存 Skill] 持久化失败:', e));
     get().showToast(`已上传 Skill「${skill.name}」`);
     return skill;
+  },
+
+  createSkillFromContent: async (fileName, content) => {
+    const parsed = parseSkillDocument(content);
+    const skill: UserSkill = {
+      id: generateId(),
+      name: parsed.manifest?.name || getSkillName(fileName),
+      description: parsed.manifest?.description
+        || parsed.manifest?.whenToUse
+        || getSkillDescription(parsed.content),
+      fileName,
+      content,
+      sourceType: 'file',
+      entryFileName: fileName,
+      manifest: parsed.manifest,
+      createdAt: Date.now(),
+    };
+    set((state) => ({ userSkills: [...state.userSkills, skill] }));
+    await fileService.saveSkill({ ...skill });
+    return skill;
+  },
+
+  updateSkillContent: async (id, content) => {
+    const existing = get().userSkills.find((skill) => skill.id === id);
+    if (!existing) return null;
+    const parsed = parseSkillDocument(content);
+    const updated: UserSkill = {
+      ...existing,
+      name: parsed.manifest?.name || getSkillName(existing.fileName),
+      description: parsed.manifest?.description
+        || parsed.manifest?.whenToUse
+        || getSkillDescription(parsed.content),
+      content,
+      manifest: parsed.manifest,
+    };
+    set((state) => ({
+      userSkills: state.userSkills.map((skill) => skill.id === id ? updated : skill),
+    }));
+    await fileService.saveSkill({ ...updated });
+    return updated;
   },
 
   deleteSkill: async (id) => {

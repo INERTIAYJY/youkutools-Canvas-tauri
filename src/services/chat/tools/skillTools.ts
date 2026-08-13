@@ -8,6 +8,7 @@
  * - 加载量受 skillCatalog 的任务级预算约束，耗尽后返回可回传的中文原因而不是抛错。
  */
 import { listSkillResourceFiles, readSkillResourceFile } from '../../fileService';
+import { useAppStore } from '../../../store/useAppStore';
 import { isTauriEnv } from '../../fs/core';
 import { SKILL_CONTENT_LIMITS, truncateSkillContent } from '../../skillPromptService';
 import { stripSkillFrontmatter } from '../skillManifest';
@@ -171,6 +172,85 @@ export function registerSkillAgentTools(): Array<() => void> {
             '--- Skill 内容结束 ---',
           ].join('\n'),
         };
+      },
+    }),
+    registerAgentTool<Record<string, never>>({
+      id: 'skill_list',
+      title: '列出 Skill',
+      description: '列出用户 Skill 的安全元数据和 Manifest，不返回正文或存储路径。',
+      effect: 'read',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      isAvailable: (context) => context.conversationId.startsWith('mcp-control-'),
+      authorize: (context) => ({ allowed: context.conversationId.startsWith('mcp-control-'), reason: 'Skill 管理只允许 MCP 控制会话调用' }),
+      execute: async () => {
+        const skills = useAppStore.getState().userSkills.map((skill) => ({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          fileName: skill.fileName,
+          sourceType: skill.sourceType,
+          manifest: skill.manifest,
+          createdAt: skill.createdAt,
+        }));
+        return { status: 'success', summary: `找到 ${skills.length} 个 Skill`, modelContent: JSON.stringify({ skills }) };
+      },
+    }),
+    registerAgentTool<{ skillId: string }>({
+      id: 'skill_get',
+      title: '读取 Skill 定义',
+      description: '读取一个 Skill 的 Manifest 和入口正文，不返回存储路径。',
+      effect: 'read',
+      inputSchema: { type: 'object', required: ['skillId'], additionalProperties: false, properties: { skillId: { type: 'string', minLength: 1, maxLength: 160 } } },
+      isAvailable: (context) => context.conversationId.startsWith('mcp-control-'),
+      authorize: (context) => ({ allowed: context.conversationId.startsWith('mcp-control-'), reason: 'Skill 管理只允许 MCP 控制会话调用' }),
+      execute: async (_context, input) => {
+        const skill = useAppStore.getState().userSkills.find((item) => item.id === input.skillId);
+        if (!skill) return toolError('Skill 不存在', 'SKILL_NOT_FOUND');
+        return { status: 'success', summary: `已读取 Skill「${sanitizeSkillLabel(skill.name, 40)}」`, modelContent: JSON.stringify({ skill: { id: skill.id, name: skill.name, description: skill.description, fileName: skill.fileName, sourceType: skill.sourceType, manifest: skill.manifest, content: skill.content, createdAt: skill.createdAt } }) };
+      },
+    }),
+    registerAgentTool<{ fileName: string; content: string }>({
+      id: 'skill_create',
+      title: '创建 Skill',
+      description: '从 UTF-8 文本内容创建单文件 Skill；不接受本地路径。',
+      effect: 'file_write',
+      inputSchema: { type: 'object', required: ['fileName', 'content'], additionalProperties: false, properties: { fileName: { type: 'string', minLength: 1, maxLength: 120 }, content: { type: 'string', minLength: 1, maxLength: 200_000 } } },
+      isAvailable: (context) => context.conversationId.startsWith('mcp-control-'),
+      authorize: (context) => ({ allowed: context.conversationId.startsWith('mcp-control-'), reason: 'Skill 管理只允许 MCP 控制会话调用' }),
+      execute: async (_context, input) => {
+        const fileName = input.fileName.trim();
+        if (!/^[^\\/:*?"<>|]+\.(?:md|txt|json)$/i.test(fileName)) return toolError('Skill 文件名无效或扩展名不受支持', 'SKILL_FILE_NAME_INVALID');
+        const skill = await useAppStore.getState().createSkillFromContent(fileName, input.content);
+        return { status: 'success', summary: `已创建 Skill「${sanitizeSkillLabel(skill.name, 40)}」`, modelContent: JSON.stringify({ skillId: skill.id, name: skill.name, manifest: skill.manifest }) };
+      },
+    }),
+    registerAgentTool<{ skillId: string; content: string }>({
+      id: 'skill_update',
+      title: '更新 Skill',
+      description: '更新一个单文件 Skill 的入口正文和 Manifest；文件夹型 Skill 仍由文件夹重新上传更新。',
+      effect: 'file_write',
+      inputSchema: { type: 'object', required: ['skillId', 'content'], additionalProperties: false, properties: { skillId: { type: 'string', minLength: 1, maxLength: 160 }, content: { type: 'string', minLength: 1, maxLength: 200_000 } } },
+      isAvailable: (context) => context.conversationId.startsWith('mcp-control-'),
+      authorize: (context, input) => { const skill = useAppStore.getState().userSkills.find((item) => item.id === input.skillId); return { allowed: context.conversationId.startsWith('mcp-control-') && skill?.sourceType === 'file', reason: 'Skill 不存在或文件夹型 Skill 不能原地编辑' }; },
+      execute: async (_context, input) => {
+        const skill = await useAppStore.getState().updateSkillContent(input.skillId, input.content);
+        if (!skill) return toolError('Skill 不存在', 'SKILL_NOT_FOUND');
+        return { status: 'success', summary: `已更新 Skill「${sanitizeSkillLabel(skill.name, 40)}」`, modelContent: JSON.stringify({ skillId: skill.id, name: skill.name, manifest: skill.manifest }) };
+      },
+    }),
+    registerAgentTool<{ skillId: string }>({
+      id: 'skill_delete',
+      title: '删除 Skill',
+      description: '永久删除一个用户 Skill 及其持久化记录。',
+      effect: 'permanent_delete',
+      inputSchema: { type: 'object', required: ['skillId'], additionalProperties: false, properties: { skillId: { type: 'string', minLength: 1, maxLength: 160 } } },
+      isAvailable: (context) => context.conversationId.startsWith('mcp-control-'),
+      authorize: (context, input) => ({ allowed: context.conversationId.startsWith('mcp-control-') && useAppStore.getState().userSkills.some((item) => item.id === input.skillId), reason: 'Skill 不存在或当前不是 MCP 控制会话' }),
+      execute: async (_context, input) => {
+        const skill = useAppStore.getState().userSkills.find((item) => item.id === input.skillId);
+        if (!skill) return toolError('Skill 不存在', 'SKILL_NOT_FOUND');
+        await useAppStore.getState().deleteSkill(skill.id);
+        return { status: 'success', summary: `已删除 Skill「${sanitizeSkillLabel(skill.name, 40)}」`, modelContent: JSON.stringify({ deleted: true, skillId: skill.id }) };
       },
     }),
   ];

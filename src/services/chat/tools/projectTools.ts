@@ -22,6 +22,8 @@ interface ProjectRenameInput extends ProjectIdInput {
 }
 
 interface ProjectSettingsPatch {
+  visionModelId?: string;
+  modelAutoRouting?: boolean;
   visualStyle?: {
     styleId?: string;
     styleName?: string;
@@ -70,6 +72,8 @@ const projectSettingsSchema: AgentToolSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    visionModelId: { type: 'string', maxLength: 240 },
+    modelAutoRouting: { type: 'boolean' },
     visualStyle: {
       type: 'object',
       additionalProperties: false,
@@ -167,6 +171,8 @@ function safeProjectSettings(settings: ProjectSettings | undefined) {
       : undefined,
     promptSuffixes: settings.promptSuffixes,
     defaultModels: settings.defaultModels,
+    visionModelId: settings.visionModelId,
+    modelAutoRouting: settings.modelAutoRouting,
     generation: settings.generation,
   };
 }
@@ -195,6 +201,8 @@ function mergeProjectSettings(
 ): ProjectSettings {
   return {
     ...current,
+    ...(patch.visionModelId !== undefined ? { visionModelId: patch.visionModelId } : {}),
+    ...(patch.modelAutoRouting !== undefined ? { modelAutoRouting: patch.modelAutoRouting } : {}),
     ...(patch.visualStyle
       ? { visualStyle: { ...current?.visualStyle, ...patch.visualStyle } }
       : {}),
@@ -339,7 +347,7 @@ export function registerProjectAgentTools(): Array<() => void> {
     registerAgentTool<ProjectUpdateSettingsInput>({
       id: 'project_update_settings',
       title: '更新项目设置',
-      description: '更新当前项目的风格、提示词后缀、默认模型和生成默认值；不接受本地路径或任意配置字段。',
+      description: '更新当前项目的风格、提示词后缀、默认模型、视觉理解模型、自动选型和生成默认值；不接受本地路径或任意配置字段。',
       inputSchema: {
         type: 'object',
         required: ['settings'],

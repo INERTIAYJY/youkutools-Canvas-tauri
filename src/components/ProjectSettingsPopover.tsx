@@ -26,6 +26,7 @@ import type {
 import { useAppStore } from '../store/useAppStore';
 import {
   getConfiguredModelGroups,
+  hasVisionInputCapability,
   isProviderCategoryVisible,
 } from './nodes/shared/defaultModels';
 import QualityRatioSelector from './nodes/shared/QualityRatioSelector';
@@ -97,6 +98,8 @@ function cloneSettings(settings: ProjectSettings | undefined): ProjectSettings {
       settings?.promptSuffixes?.[row.kind] ?? legacyPromptSuffix,
     ])),
     defaultModels: { ...settings?.defaultModels },
+    visionModelId: settings?.visionModelId,
+    modelAutoRouting: settings?.modelAutoRouting,
     generation: { ...settings?.generation },
   };
 }
@@ -235,6 +238,19 @@ export default function ProjectSettingsPopover({
   const modelGroups = useMemo(() => Object.fromEntries(
     MODEL_ROWS.map((row) => [row.kind, buildModelGroups(row, config)]),
   ) as Record<ProjectModelKind, ModelOptionGroup[]>, [config]);
+  const visionModelGroups = useMemo(() => modelGroups.text.map((group) => ({
+    ...group,
+    options: group.options.filter((option) => {
+      const generalId = option.value.replace(/^general\//, '');
+      const general = config.generalModels?.find((model) => model.id === generalId);
+      return general
+        ? hasVisionInputCapability(general)
+        : hasVisionInputCapability({
+            modelId: option.value,
+            inputModalities: option.inputModalities,
+          });
+    }),
+  })).filter((group) => group.options.length > 0), [config.generalModels, modelGroups.text]);
   const activePromptRow = MODEL_ROWS.find((row) => row.kind === activePromptKind) ?? MODEL_ROWS[0];
 
   const handleStyleChange = (styleId: string) => {
@@ -640,6 +656,46 @@ export default function ProjectSettingsPopover({
                       </label>
                     );
                   })}
+                  <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-3">
+                    <span className="flex items-center gap-2 text-xs text-canvas-text-secondary">
+                      <Icon icon="lucide:scan-eye" className="h-3.5 w-3.5 text-cyan-400" />
+                      视觉理解
+                    </span>
+                    <span className="relative">
+                      <select
+                        value={draft.visionModelId ?? ''}
+                        onChange={(event) => setDraft((current) => ({
+                          ...current,
+                          visionModelId: event.target.value || undefined,
+                        }))}
+                        className="h-9 w-full appearance-none rounded-md border border-canvas-border bg-canvas-card px-3 pr-8 text-xs text-canvas-text outline-none transition-colors hover:border-border-secondary focus:border-indigo-500"
+                      >
+                        <option value="">自动选择可看图模型</option>
+                        {visionModelGroups.map((group) => (
+                          <optgroup key={group.id} label={group.name}>
+                            {group.options.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      <Icon icon="lucide:chevron-down" aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-canvas-text-muted" />
+                    </span>
+                  </label>
+                  <label className="flex items-center justify-between gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5 text-xs text-canvas-text-secondary">
+                    <span>
+                      <span className="block text-canvas-text">允许 Agent 自动选媒体模型</span>
+                      <span className="mt-0.5 block text-[10px] text-canvas-text-muted">显式 @model 始终优先</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={draft.modelAutoRouting === true}
+                      onChange={(event) => setDraft((current) => ({
+                        ...current,
+                        modelAutoRouting: event.target.checked,
+                      }))}
+                    />
+                  </label>
                 </div>
               </section>
 

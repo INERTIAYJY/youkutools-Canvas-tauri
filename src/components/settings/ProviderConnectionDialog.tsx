@@ -126,7 +126,14 @@ function mergeModels(
       ...model,
       name: preserveExistingMetadata ? existing.name : model.name,
       category: preserveExistingCategory && existing ? existing.category : model.category,
-      description: model.description || existing?.description,
+      description: existing?.descriptionManual
+        ? existing.description
+        : model.description || existing?.description,
+      descriptionManual: existing?.descriptionManual ?? model.descriptionManual,
+      inputModalities: existing?.inputModalitiesManual
+        ? existing.inputModalities
+        : model.inputModalities ?? existing?.inputModalities,
+      inputModalitiesManual: existing?.inputModalitiesManual ?? model.inputModalitiesManual,
       categoryManual: existing?.categoryManual ?? model.categoryManual,
     });
   }
@@ -396,6 +403,24 @@ export default function ProviderConnectionDialog({
     ));
     setVisibleModelCategories((current) => new Set(current).add(nextCategory));
     setCategoryEditModelId(null);
+  };
+
+  const updateModelDescription = (modelId: string, description: string) => {
+    setModels((current) => current.map((model) => (
+      model.id === modelId
+        ? { ...model, description: description.slice(0, 500), descriptionManual: true }
+        : model
+    )));
+  };
+
+  const updateModelVisionCapability = (modelId: string, enabled: boolean) => {
+    setModels((current) => current.map((model) => model.id === modelId
+      ? {
+          ...model,
+          inputModalities: enabled ? ['text', 'image'] : ['text'],
+          inputModalitiesManual: true,
+        }
+      : model));
   };
 
   const updateModelProtocol = (
@@ -938,6 +963,29 @@ export default function ProviderConnectionDialog({
                                 {CATEGORY_LABELS[item]}
                               </button>
                             ))}
+                            {model.category === 'text' ? (
+                              <label className="provider-model-capability-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={model.inputModalities?.includes('image') ?? false}
+                                  onChange={(event) => updateModelVisionCapability(
+                                    model.id,
+                                    event.target.checked,
+                                  )}
+                                />
+                                <span>支持图片输入</span>
+                              </label>
+                            ) : null}
+                            <label className="provider-model-description-editor">
+                              <span>Agent 选型说明</span>
+                              <textarea
+                                value={model.description ?? ''}
+                                maxLength={500}
+                                rows={2}
+                                placeholder="例如：适合中文 OCR、角色图分析，速度快、成本低"
+                                onChange={(event) => updateModelDescription(model.id, event.target.value)}
+                              />
+                            </label>
                           </div>
                         ) : null}
                       </div>

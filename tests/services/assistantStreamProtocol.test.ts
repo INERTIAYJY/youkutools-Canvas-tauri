@@ -41,6 +41,49 @@ beforeEach(() => {
 });
 
 describe('assistant custom protocol boundary', () => {
+  it('prefers the current project text model and falls back when it is unavailable', () => {
+    configureAssistant({ preset: 'openai-chat' });
+    useAppStore.setState((state) => ({
+      currentProjectId: 'project-1',
+      projects: [{
+        id: 'project-1',
+        name: 'Project',
+        createdAt: 1,
+        updatedAt: 1,
+        settings: { defaultModels: { text: 'general/project-assistant' } },
+      }],
+      config: {
+        ...state.config,
+        generalModels: [
+          ...(state.config.generalModels ?? []),
+          {
+            id: 'project-assistant',
+            name: '项目助手',
+            modelId: 'project-vlm',
+            category: 'text',
+            providerConfigId: 'custom-assistant',
+          },
+        ],
+      },
+    }));
+
+    expect(resolveAssistantModel()).toMatchObject({
+      selectionId: 'general/project-assistant',
+      modelName: 'project-vlm',
+    });
+
+    useAppStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        settings: { defaultModels: { text: 'general/missing-model' } },
+      })),
+    }));
+    expect(resolveAssistantModel()).toMatchObject({
+      selectionId: 'assistant-model',
+      modelName: 'vendor-chat',
+    });
+  });
+
   it('resolves a configured built-in provider text model selected by model value', () => {
     useAppStore.setState((state) => ({
       config: {
@@ -208,5 +251,48 @@ describe('buildAssistantSystemPrompt 的厂商配置审批时序', () => {
     expect(prompt).toContain('本地 Policy 自动暂停并展示 API 配置审批卡');
     expect(prompt).toContain('不要先用普通文本要求用户回复“确认/添加”');
     expect(prompt).not.toContain('只有用户确认后才能调用 provider_config_apply');
+  });
+
+  it('sends an explicitly referenced image as Base64 content to a vision model', async () => {
+    configureAssistant({ preset: 'openai-chat' });
+    useAppStore.setState((state) => ({
+      currentProjectId: 'project-vision',
+      projects: [{ id: 'project-vision', name: 'Vision', createdAt: 1, updatedAt: 1 }],
+      nodes: [{
+        id: 'image-1',
+        type: 'ai-image',
+        position: { x: 0, y: 0 },
+        data: {
+          type: 'ai-image',
+          label: '参考图',
+          imageUrl: 'data:image/png;base64,QUJDRA==',
+        },
+      }],
+      config: {
+        ...state.config,
+        generalModels: (state.config.generalModels ?? []).map((model) => ({
+          ...model,
+          inputModalities: ['text', 'image'] as Array<'text' | 'image'>,
+        })),
+      },
+    }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '看到了图片' }, finish_reason: 'stop' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await streamAssistantReply({
+      systemPrompt: '系统',
+      userMessage: '分析 @{image-1:参考图}',
+      projectId: 'project-vision',
+      nonStream: true,
+      onEvent: vi.fn(),
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.messages[1].content).toEqual([
+      { type: 'text', text: '分析 图片1' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
+    ]);
   });
 });

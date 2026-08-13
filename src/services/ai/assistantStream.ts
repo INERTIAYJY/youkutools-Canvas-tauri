@@ -14,6 +14,8 @@ import type { ModelExecutionProtocol, ProtocolJsonValue } from '../../types/aiTy
 import {
   findMediaModelOption,
   getConfiguredModelGroups,
+  hasVisionInputCapability,
+  isVisionCapableTextModel,
 } from '../../components/nodes/shared/defaultModels';
 import { DEFAULT_BASE_URLS } from '../../constants/api';
 import { extractModelName } from './helpers';
@@ -25,27 +27,42 @@ import {
   getModelProtocolPreset,
   resolveModelExecutionProfile,
 } from './modelProtocol';
+import { getAssistantTextModelCandidates } from '../projectSettingsService';
+import { prepareAssistantVisualMessages } from '../chat/assistantVisualContext';
 
 // ============================================
 // Config resolution
 // ============================================
 
 interface ResolvedModelConfig {
+  selectionId: string;
   baseUrl: string;
   apiKey: string;
   modelName: string;
   protocol: ModelExecutionProtocol;
+  supportsVision: boolean;
 }
 
 /**
  * 查找已配置的助手模型，返回 API 连接参数。
  * 返回 null 表示未配置助手模型，应回退到本地规则引擎。
  */
-export function resolveAssistantModel(): ResolvedModelConfig | null {
-  const config = useAppStore.getState().config;
-  const assistantModelId = config.assistantModelId;
+export function resolveAssistantModel(projectId?: string | null): ResolvedModelConfig | null {
+  const state = useAppStore.getState();
+  const project = state.projects.find((item) => item.id === (projectId ?? state.currentProjectId));
+  const candidates = getAssistantTextModelCandidates(
+    project?.settings,
+    state.config.assistantModelId,
+  );
+  for (const candidate of candidates) {
+    const resolved = resolveAssistantModelById(candidate);
+    if (resolved) return resolved;
+  }
+  return null;
+}
 
-  if (!assistantModelId) return null;
+function resolveAssistantModelById(assistantModelId: string): ResolvedModelConfig | null {
+  const config = useAppStore.getState().config;
 
   const generalModelId = assistantModelId.replace(/^general\//, '');
   const gm = config.generalModels?.find(
@@ -67,10 +84,12 @@ export function resolveAssistantModel(): ResolvedModelConfig | null {
     }
 
     return {
+      selectionId: assistantModelId,
       baseUrl: baseUrl.replace(/\/+$/, ''),
       apiKey: provider.apiKey || '',
       modelName: gm.modelId,
       protocol,
+      supportsVision: hasVisionInputCapability(gm),
     };
   }
 
@@ -81,12 +100,17 @@ export function resolveAssistantModel(): ResolvedModelConfig | null {
   const provider = config.providers[builtInModel.provider];
   const baseUrl = provider?.baseUrl || DEFAULT_BASE_URLS[builtInModel.provider] || '';
   if (!provider?.apiKey || !baseUrl) return null;
+  const modelName = extractModelName(builtInModel.value, builtInModel.provider);
 
   return {
+    selectionId: assistantModelId,
     baseUrl: baseUrl.replace(/\/+$/, ''),
     apiKey: provider.apiKey,
-    modelName: extractModelName(builtInModel.value, builtInModel.provider),
+    modelName,
     protocol: getModelProtocolPreset('openai-chat'),
+    supportsVision: provider.selectedModels?.find((model) => (
+      `${builtInModel.provider}/${model.id}` === assistantModelId || model.id === modelName
+    ))?.inputModalities?.includes('image') ?? isVisionCapableTextModel(assistantModelId),
   };
 }
 
@@ -116,6 +140,8 @@ export interface StreamingCallOptions {
    * 后台请求（如上下文压缩）传 false，避免被用户“取消任务”误中止或劫持全局控制器。
    */
   trackAbort?: boolean;
+  /** 后台 Agent 必须显式传入，避免项目切换后把视觉缓存写到错误项目。 */
+  projectId?: string;
 }
 
 export interface AssistantModelToolCall {
@@ -127,9 +153,15 @@ export interface AssistantModelToolCall {
   };
 }
 
+export type AssistantModelContent = string | Array<{
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+}>;
+
 export interface AssistantModelMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: AssistantModelContent;
   tool_call_id?: string;
   tool_calls?: AssistantModelToolCall[];
 }
@@ -198,7 +230,7 @@ function buildAssistantTools(userMessage: string): AssistantToolDefinition[] {
  * @returns 完整响应文本
  */
 export async function streamAssistantReply(options: StreamingCallOptions): Promise<string> {
-  const modelConfig = resolveAssistantModel();
+  const modelConfig = resolveAssistantModel(options.projectId);
   if (!modelConfig) {
     throw new Error('未配置助手模型，请在「设置 → API Key」中添加');
   }
@@ -216,6 +248,7 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
     messages: providedMessages,
     tools: providedTools,
     trackAbort = true,
+    projectId,
   } = options;
 
   const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -241,6 +274,13 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
   const tools = providedTools ?? buildAssistantTools(toolContextMessage ?? userMessage);
 
   try {
+    const state = useAppStore.getState();
+    const requestMessages = await prepareAssistantVisualMessages({
+      messages,
+      projectId: projectId ?? state.currentProjectId,
+      supportsVision: modelConfig.supportsVision,
+      signal: controller.signal,
+    });
     const builtRequest = buildModelProtocolRequest({
       apiKey: modelConfig.apiKey,
       baseUrl: modelConfig.baseUrl,
@@ -249,7 +289,7 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
       variables: {
         model: modelConfig.modelName,
         prompt: userMessage,
-        messages: messages as unknown as ProtocolJsonValue,
+        messages: requestMessages as unknown as ProtocolJsonValue,
         stream: !nonStream,
         tools: tools.length > 0 ? tools as unknown as ProtocolJsonValue : undefined,
         toolChoice: tools.length > 0 ? 'auto' : undefined,

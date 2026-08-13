@@ -43,6 +43,55 @@ beforeEach(() => {
 });
 
 describe('media_generate display parameters', () => {
+  it('uses the project default media model when modelRef is omitted', () => {
+    useAppStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        settings: { ...project.settings, defaultModels: { video: 'general/video-default' } },
+      })),
+    }));
+    const prepared = prepareAgentToolCall({
+      callId: 'call-default',
+      toolId: 'media_generate',
+      input: { kind: 'video', prompt: '普通镜头', deliveryMode: 'chat' },
+    }, context);
+
+    expect(prepared).toMatchObject({ ok: true });
+    if (prepared.ok) expect(prepared.prepared.input).toMatchObject({ modelRef: 'general/video-default' });
+  });
+
+  it('autonomous routing ranks user model descriptions and overrides the default', () => {
+    useAppStore.setState((state) => ({
+      config: {
+        ...state.config,
+        providers: {
+          ...state.config.providers,
+          custom: { name: '自定义', apiKey: 'secret', baseUrl: 'https://example.com' },
+        },
+        generalModels: [
+          { id: 'video-default', name: '通用视频', modelId: 'video-a', category: 'video', providerConfigId: 'custom' },
+          { id: 'video-anime', name: '动画专用', description: '擅长二次元动画与运镜', modelId: 'video-b', category: 'video', providerConfigId: 'custom' },
+        ],
+      },
+      projects: state.projects.map((project) => ({
+        ...project,
+        settings: {
+          ...project.settings,
+          defaultModels: { video: 'general/video-default' },
+          modelAutoRouting: true,
+        },
+      })),
+    }));
+    const prepared = prepareAgentToolCall({
+      callId: 'call-auto',
+      toolId: 'media_generate',
+      input: { kind: 'video', prompt: '二次元 动画 运镜', deliveryMode: 'chat' },
+    }, { ...context, mode: 'autonomous' });
+
+    expect(prepared).toMatchObject({ ok: true });
+    if (prepared.ok) expect(prepared.prepared.input).toMatchObject({ modelRef: 'general/video-anime' });
+  });
+
   it('locks project video defaults before approval and exposes them in the display', () => {
     const prepared = prepareAgentToolCall({
       callId: 'call-1',
@@ -54,7 +103,7 @@ describe('media_generate display parameters', () => {
       },
     }, context);
 
-    expect(prepared.ok).toBe(true);
+    expect(prepared).toMatchObject({ ok: true });
     if (!prepared.ok) return;
     expect(prepared.prepared.input).toMatchObject({
       aspectRatio: '16:9',
@@ -88,7 +137,7 @@ describe('media_generate display parameters', () => {
       },
     }, context);
 
-    expect(prepared.ok).toBe(true);
+    expect(prepared).toMatchObject({ ok: true });
     if (!prepared.ok) return;
     expect(prepared.prepared.input).toMatchObject({
       aspectRatio: '9:16',

@@ -65,6 +65,7 @@ import {
   revokeFileGrant,
   subscribeFileGrants,
 } from '../../services/chat/fileGrantService';
+import { getAssistantTextModelCandidates } from '../../services/projectSettingsService';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -94,6 +95,7 @@ export default function ChatPanel({
     messages,
     agentTasks,
     currentProjectId,
+    projects,
     createConversation,
     setActiveConversation,
     updateConversation,
@@ -106,6 +108,7 @@ export default function ChatPanel({
     workflows,
     updateConfig,
     saveConfig,
+    updateProjectSettings,
     projectMemories,
     updateProjectMemory,
     removeProjectMemory,
@@ -122,6 +125,7 @@ export default function ChatPanel({
       messages: s.messages,
       agentTasks: s.agentTasks,
       currentProjectId: s.currentProjectId,
+      projects: s.projects,
       createConversation: s.createConversation,
       setActiveConversation: s.setActiveConversation,
       updateConversation: s.updateConversation,
@@ -134,6 +138,7 @@ export default function ChatPanel({
       workflows: s.workflows,
       updateConfig: s.updateConfig,
       saveConfig: s.saveConfig,
+      updateProjectSettings: s.updateProjectSettings,
       projectMemories: s.projectMemories,
       updateProjectMemory: s.updateProjectMemory,
       removeProjectMemory: s.removeProjectMemory,
@@ -147,7 +152,14 @@ export default function ChatPanel({
   const effectiveAgentTasks = detached ? (detachedSnapshot?.agentTasks ?? []) : agentTasks;
   const effectiveProjectId = detached ? (detachedSnapshot?.projectId ?? null) : currentProjectId;
   const effectiveProjectName = detached ? detachedSnapshot?.projectName : undefined;
-  const effectiveAssistantModelId = detached ? detachedSnapshot?.assistantModelId : assistantModelId;
+  const currentProject = projects.find((item) => item.id === currentProjectId);
+  const projectAssistantModelId = getAssistantTextModelCandidates(
+    currentProject?.settings,
+    assistantModelId,
+  )[0];
+  const effectiveAssistantModelId = detached
+    ? detachedSnapshot?.assistantModelId
+    : projectAssistantModelId;
   const effectiveGeneralModels = useMemo(
     () => detached ? (detachedSnapshot?.generalModels ?? []) : generalModels,
     [detached, detachedSnapshot?.generalModels, generalModels],
@@ -251,11 +263,19 @@ export default function ChatPanel({
   const handleTextModelChange = useCallback((modelId?: string) => {
     if (detached) {
       void emitAction({ type: 'select_model', modelId, category: 'text' });
+    } else if (currentProject) {
+      void updateProjectSettings({
+        ...currentProject.settings,
+        defaultModels: {
+          ...currentProject.settings?.defaultModels,
+          text: modelId,
+        },
+      });
     } else {
       updateConfig({ assistantModelId: modelId });
       void saveConfig({ silent: true });
     }
-  }, [detached, saveConfig, updateConfig]);
+  }, [currentProject, detached, saveConfig, updateConfig, updateProjectSettings]);
 
   const handleAgentModeChange = useCallback((mode: AgentMode) => {
     if (!effectiveActiveConversationId || mode === effectiveAgentMode) return;
@@ -285,8 +305,9 @@ export default function ChatPanel({
   // ── 上下文占用（估算），模型切换后按新上限重新计算 ──
   const contextUsage = useMemo(() => {
     if (!effectiveActiveConversationId) return null;
+    const effectiveGeneralModelId = effectiveAssistantModelId?.replace(/^general\//, '');
     const model = effectiveGeneralModels.find(
-      (item) => item.id === effectiveAssistantModelId && item.category === 'text',
+      (item) => item.id === effectiveGeneralModelId && item.category === 'text',
     ) ?? null;
     return estimateConversationUsage(
       conversationMessages,

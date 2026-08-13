@@ -67,6 +67,17 @@ export function parseProjectModelRef(modelRef: string | undefined): {
   return { model: modelRef, provider: modelRef.slice(0, slashIndex) };
 }
 
+/** 项目默认优先、应用默认兜底的助手文本模型候选。 */
+export function getAssistantTextModelCandidates(
+  settings: ProjectSettings | undefined,
+  applicationModelId: string | undefined,
+): string[] {
+  const candidates = [settings?.defaultModels?.text, applicationModelId]
+    .map((value) => value?.trim())
+    .filter((value): value is string => !!value);
+  return [...new Set(candidates)];
+}
+
 function clean(value: string | undefined): string | undefined {
   const next = value?.trim();
   return next || undefined;
@@ -107,6 +118,7 @@ export function normalizeProjectSettings(settings: ProjectSettings): ProjectSett
       .map(([kind, model]) => [kind, clean(model)])
       .filter((entry): entry is [string, string] => !!entry[1]),
   ) as ProjectSettings['defaultModels'];
+  const visionModelId = clean(settings.visionModelId);
   const hasTypedPromptSuffixes = settings.promptSuffixes !== undefined;
   const promptSuffixes = Object.fromEntries(
     Object.entries(settings.promptSuffixes ?? {})
@@ -142,6 +154,8 @@ export function normalizeProjectSettings(settings: ProjectSettings): ProjectSett
       ? { promptSuffix: clean(settings.promptSuffix) }
       : {}),
     ...(defaultModels && Object.keys(defaultModels).length > 0 ? { defaultModels } : {}),
+    ...(visionModelId ? { visionModelId } : {}),
+    ...(settings.modelAutoRouting === true ? { modelAutoRouting: true } : {}),
     ...(imageAspectRatio || imageSize || videoAspectRatio || videoResolution || videoDuration
       ? {
           generation: {

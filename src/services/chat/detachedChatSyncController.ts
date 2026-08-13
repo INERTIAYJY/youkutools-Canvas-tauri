@@ -41,6 +41,7 @@ import {
   type ChatStateSnapshot,
   type ChatStateSync,
 } from './chatWindowService';
+import { getAssistantTextModelCandidates } from '../projectSettingsService';
 
 const DEFAULT_SYNC_INTERVAL_MS = 150;
 const MAX_SYNC_RETRY_DELAY_MS = 5_000;
@@ -112,7 +113,10 @@ export function buildDetachedChatSnapshot(state: AppState): ChatStateSnapshot {
     projectId: state.currentProjectId,
     projectName: project?.name,
     generalModels: state.config.generalModels ?? [],
-    assistantModelId: state.config.assistantModelId,
+    assistantModelId: getAssistantTextModelCandidates(
+      project?.settings,
+      state.config.assistantModelId,
+    )[0],
     assistantImageModelId: state.config.assistantImageModelId,
     assistantVideoModelId: state.config.assistantVideoModelId,
     mediaModelAvailability: getMediaModelAvailability(
@@ -282,7 +286,20 @@ export function handleDetachedChatAction(
       const category = action.category || 'text';
       if (category === 'image') config.assistantImageModelId = action.modelId;
       else if (category === 'video') config.assistantVideoModelId = action.modelId;
-      else config.assistantModelId = action.modelId;
+      else {
+        const project = store.projects.find((item) => item.id === store.currentProjectId);
+        if (project) {
+          void store.updateProjectSettings({
+            ...project.settings,
+            defaultModels: {
+              ...project.settings?.defaultModels,
+              text: action.modelId,
+            },
+          });
+          break;
+        }
+        config.assistantModelId = action.modelId;
+      }
       store.updateConfig(config);
       void store.saveConfig({ silent: true });
       break;

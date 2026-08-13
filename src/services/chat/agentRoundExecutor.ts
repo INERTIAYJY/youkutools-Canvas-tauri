@@ -611,7 +611,7 @@ export async function executeAgentRound({
   }
 
   // 每轮请求前按当前模型上限复核（工具 Observation 会持续增大上下文；模型可能中途切换）
-  const contextSpec = resolveAssistantContextSpec();
+  const contextSpec = resolveAssistantContextSpec(task.projectId);
   if (estimateModelMessagesTokens(messages) > contextSpec.inputBudget) {
     transitionTask(taskId, 'paused', {
       pausedReason: 'context_budget_exhausted',
@@ -645,6 +645,7 @@ export async function executeAgentRound({
       systemPrompt: '',
       userMessage: '',
       messages,
+      projectId: task.projectId,
       tools,
       signal,
       onEvent: (event: AssistantStreamEvent) => {

@@ -18,6 +18,8 @@ export function listConfiguredModels(store: ReturnType<typeof useAppStore.getSta
       category: 'text' as const,
       provider: model.provider,
       groupName: group.name,
+      description: model.description,
+      inputModalities: model.inputModalities,
     })));
   const customTextModels = (store.config.generalModels ?? [])
     .filter((model) => (
@@ -30,6 +32,8 @@ export function listConfiguredModels(store: ReturnType<typeof useAppStore.getSta
       category: 'text' as const,
       provider: 'general',
       groupName: '通用模型',
+      description: model.description,
+      inputModalities: model.inputModalities,
     }));
   const mediaModels = getMediaModelOptions(
     store.config.generalModels ?? [],
@@ -41,6 +45,7 @@ export function listConfiguredModels(store: ReturnType<typeof useAppStore.getSta
     category: model.mediaKind,
     provider: model.provider,
     groupName: model.groupName,
+    description: model.description,
   }));
 
   return [...textModels, ...customTextModels, ...mediaModels];

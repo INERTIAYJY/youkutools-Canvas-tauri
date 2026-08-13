@@ -1311,6 +1311,34 @@
   font-size: 9px;
   color: var(--theme-text-muted);
 }
+
+.provider-model-capability-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--theme-text-secondary);
+}
+
+.provider-model-description-editor {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 4px;
+  width: 100%;
+  font-size: 11px;
+  color: var(--theme-text-secondary);
+}
+
+.provider-model-description-editor textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  background: var(--theme-card);
+  padding: 6px 8px;
+  color: var(--theme-text);
+  outline: none;
+}
 .provider-model-copy {
   display: flex;
   min-width: 0;

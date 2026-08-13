@@ -13,7 +13,7 @@ import {
 import { parseResponseError, buildAuthHeaders } from './httpUtils';
 import { corsSafeFetch } from './httpTransport';
 import { resolvePromptToChatContent } from './promptResolver';
-import { resolveContentImageUrls } from './imageUtils';
+import { resolveChatContentImageDataUrls } from './imageUtils';
 import { executeModelProtocol, resolveModelExecutionProfile } from './modelProtocol';
 
 // aiService 内部仍保留 runninghubwf 的默认 URL
@@ -74,8 +74,8 @@ export async function generateText(params: AIGenerateParams): Promise<string> {
       ]
     : content;
 
-  // 将本地图片 URL 上传到远端图床，转为公网 URL（apimart 走 apimart 图床，其他走 uguu.se）
-  const resolvedContent = await resolveContentImageUrls(contentWithImages, provider);
+  // 文本/VLM 请求使用 OpenAI 兼容的 Base64 data URL，不经第三方图床泄露视觉素材。
+  const resolvedContent = await resolveChatContentImageDataUrls(contentWithImages);
 
   const messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [];
   messages.push({ role: 'user', content: resolvedContent });

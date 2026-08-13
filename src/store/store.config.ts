@@ -103,6 +103,8 @@ function syncProviderModels(
       modelId: model.id,
       category: model.category,
       contextWindow: existing?.contextWindow,
+      description: model.description ?? existing?.description,
+      inputModalities: model.inputModalities ?? existing?.inputModalities,
       providerConfigId,
       executionProfile: model.executionProfile,
       imageReferenceRequestMode: model.imageReferenceRequestMode
@@ -164,11 +166,11 @@ function clearProjectModelReferences(
   settings: ProjectSettings | undefined,
   references: RemovedModelReferences,
 ): ProjectSettings | undefined {
-  if (!settings?.defaultModels) return settings;
+  if (!settings) return settings;
 
-  let changed = false;
+  let changed = isRemovedModelReference(settings.visionModelId, references);
   const defaultModels = Object.fromEntries(
-    Object.entries(settings.defaultModels).filter(([, model]) => {
+    Object.entries(settings.defaultModels ?? {}).filter(([, model]) => {
       const removed = isRemovedModelReference(model, references);
       changed ||= removed;
       return !removed;
@@ -177,6 +179,7 @@ function clearProjectModelReferences(
   if (!changed) return settings;
 
   const next = { ...settings };
+  if (isRemovedModelReference(next.visionModelId, references)) delete next.visionModelId;
   if (Object.keys(defaultModels).length > 0) next.defaultModels = defaultModels;
   else delete next.defaultModels;
   return next;
@@ -235,6 +238,8 @@ function sanitizeGeneralModel(
     modelId: model.modelId,
     category: model.category,
     contextWindow: model.contextWindow,
+    description: model.description,
+    inputModalities: model.inputModalities,
     providerConfigId,
     executionProfile: model.executionProfile,
     imageReferenceRequestMode: model.imageReferenceRequestMode,

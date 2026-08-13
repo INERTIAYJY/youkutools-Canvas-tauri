@@ -1,5 +1,5 @@
 /**
- * 注册图片、视频和音频生成工具；媒体调用必须沿用显式模型引用、统一运行时和逐次确认策略。
+ * 注册图片、视频和音频生成工具；媒体调用沿用项目默认值、统一运行时和固定 Policy 边界。
  */
 import { useAppStore } from '../../../store/useAppStore';
 import type {
@@ -10,6 +10,7 @@ import type {
 } from '../../../types/media';
 import {
   findMediaModelOption,
+  getMediaModelOptions,
 } from '../../../components/nodes/shared/defaultModels';
 import {
   extractModelMention,
@@ -48,17 +49,38 @@ const MEDIA_PROMPT_DISPLAY_LIMIT = 1_000;
 
 function resolveMediaToolInput(
   input: GenerateMediaInput,
-  context: { projectId: string },
+  context: { projectId: string; mode: string },
 ): GenerateMediaInput {
-  if (input.kind !== 'video') return input;
-  const settings = useAppStore.getState().projects.find(
+  const store = useAppStore.getState();
+  const projectSettings = store.projects.find(
     (project) => project.id === context.projectId,
-  )?.settings?.generation;
-  return {
+  )?.settings;
+  const defaultModel = projectSettings?.defaultModels?.[input.kind];
+  let modelRef = input.modelRef ?? defaultModel;
+  if (!input.modelRef && context.mode === 'autonomous' && projectSettings?.modelAutoRouting) {
+    const terms = input.prompt.toLowerCase().split(/[\s,，。;；、/]+/).filter((term) => term.length >= 2);
+    const options = getMediaModelOptions(
+      store.config.generalModels ?? [],
+      store.config,
+      store.workflows,
+    ).filter((option) => option.mediaKind === input.kind);
+    const ranked = options.map((option) => {
+      const description = `${option.label} ${option.description ?? ''}`.toLowerCase();
+      const relevance = terms.reduce((score, term) => score + (description.includes(term) ? 1 : 0), 0);
+      return { option, score: relevance + (option.value === defaultModel ? 0.25 : 0) };
+    }).sort((a, b) => b.score - a.score);
+    modelRef = ranked[0]?.option.value ?? modelRef;
+  }
+  const resolved: GenerateMediaInput = {
     ...input,
-    aspectRatio: input.aspectRatio ?? settings?.videoAspectRatio,
-    resolution: input.resolution ?? settings?.videoResolution,
-    duration: input.duration ?? settings?.videoDuration,
+    ...(modelRef ? { modelRef } : {}),
+  };
+  if (input.kind !== 'video') return resolved;
+  return {
+    ...resolved,
+    aspectRatio: input.aspectRatio ?? projectSettings?.generation?.videoAspectRatio,
+    resolution: input.resolution ?? projectSettings?.generation?.videoResolution,
+    duration: input.duration ?? projectSettings?.generation?.videoDuration,
   };
 }
 
@@ -144,11 +166,12 @@ export function registerMediaAgentTools(): Array<() => void> {
       title: '生成媒体内容',
       description: [
         '生成图片、视频、音乐或语音。用户本轮已提供 @model 时把模型 ID 写入 modelRef；',
-        '未提供 @model 时省略 modelRef，运行时会在审批卡中让用户选择兼容模型。',
+        '未提供 @model 时省略 modelRef，运行时优先使用项目默认模型。',
+        '若项目已设置该类型默认模型则直接使用；自主模式开启自动路由后，可依据模型能力与用户自定义说明选择。',
         '图片 prompt 可以原样包含用户提供的 @{nodeId:label} 或 @asset{path} 引用，',
         '运行时会自动解析为参考图输入；无需先读取节点原 prompt，也不要要求用户重新描述图片。',
         '视频可显式传入 aspectRatio、resolution 和 duration；省略时在审批前锁定项目默认值。',
-        '每次调用都会向用户确认。deliveryMode 控制结果显示在对话、画布或两者。',
+        '协作模式由 Policy 请求确认，自主模式直接执行。deliveryMode 控制结果显示在对话、画布或两者。',
       ].join(''),
       inputSchema: {
         type: 'object',

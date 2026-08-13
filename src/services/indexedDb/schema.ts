@@ -1,5 +1,5 @@
 export const DB_NAME = 'ai-canvas-db';
-export const DB_VERSION = 18;
+export const DB_VERSION = 19;
 
 export const STORE_PROJECTS = 'projects';
 export const STORE_WORKFLOWS = 'workflows';
@@ -20,6 +20,7 @@ export const STORE_METADATA = 'metadata';
 export const STORE_GLOBAL_CHARACTERS = 'globalCharacters';
 export const STORE_SUB_AGENT_PROFILES = 'subAgentProfiles';
 export const STORE_VIDEO_EDITOR_PROJECTS = 'videoEditorProjects';
+export const STORE_PROJECT_VISUAL_DESCRIPTIONS = 'projectVisualDescriptions';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -115,6 +116,11 @@ export function openDB(): Promise<IDBDatabase> {
         // 按画布项目列出剪辑工程；nodeId 用于从视频节点直接定位其工程
         videoEditorStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
         videoEditorStore.createIndex('nodeId', 'nodeId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_PROJECT_VISUAL_DESCRIPTIONS)) {
+        const visualStore = db.createObjectStore(STORE_PROJECT_VISUAL_DESCRIPTIONS, { keyPath: 'id' });
+        visualStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
+        visualStore.createIndex('projectId_fingerprint', ['projectId', 'fingerprint'], { unique: true });
       }
     };
     request.onsuccess = () => resolve(request.result);

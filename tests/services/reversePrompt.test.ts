@@ -69,7 +69,7 @@ describe('reversePrompt', () => {
 
     const result = await reversePrompt({
       kind: 'image',
-      imageUrls: ['https://example.com/cat.png'],
+      imageUrls: ['data:image/png;base64,Y2F0'],
       ...modelChoice,
     });
 
@@ -79,7 +79,7 @@ describe('reversePrompt', () => {
     expect(body.messages[0].content[0].text).toContain('反推出一段能重新生成它的提示词');
     expect(body.messages[0].content[1]).toEqual({
       type: 'image_url',
-      image_url: { url: 'https://example.com/cat.png' },
+      image_url: { url: 'data:image/png;base64,Y2F0' },
     });
   });
 
@@ -90,7 +90,11 @@ describe('reversePrompt', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const frames = ['https://example.com/f1.png', 'https://example.com/f2.png', 'https://example.com/f3.png'];
+    const frames = [
+      'data:image/png;base64,ZjE=',
+      'data:image/png;base64,ZjI=',
+      'data:image/png;base64,ZjM=',
+    ];
     await reversePrompt({ kind: 'video', imageUrls: frames, extraPrompt: '输出英文', ...modelChoice });
 
     const content = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).messages[0].content;
@@ -108,7 +112,7 @@ describe('reversePrompt', () => {
 
     await expect(reversePrompt({
       kind: 'image',
-      imageUrls: ['https://example.com/cat.png'],
+      imageUrls: ['data:image/png;base64,Y2F0'],
       ...modelChoice,
     })).rejects.toThrow(/不接受图片输入[\s\S]*unknown variant/);
   });

@@ -6,6 +6,9 @@ import { getAssetUrlFromPath } from '../fileService';
 import { corsSafeFetch } from './httpTransport';
 
 const BASE64_IMAGE_DATA_URL_RE = /^data:image\/[^;,]+(?:;[^,]*)*;base64,/i;
+export const VLM_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+export const VLM_MAX_IMAGES = 6;
+export const VLM_MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   avif: 'image/avif',
@@ -41,7 +44,14 @@ async function referenceImageToDataUrl(
   index: number,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (BASE64_IMAGE_DATA_URL_RE.test(url)) return url;
+  if (BASE64_IMAGE_DATA_URL_RE.test(url)) {
+    const encoded = url.slice(url.indexOf(',') + 1).replace(/\s/g, '');
+    const estimatedBytes = Math.floor(encoded.length * 3 / 4);
+    if (estimatedBytes > VLM_MAX_IMAGE_BYTES) {
+      throw new Error(`参考图 ${index + 1} 超过 8 MB 上限`);
+    }
+    return url;
+  }
 
   const usesWebViewFetch = /^(asset:|blob:|data:|file:)/i.test(url)
     || url.includes('asset.localhost');
@@ -54,6 +64,7 @@ async function referenceImageToDataUrl(
 
   const blob = await response.blob();
   if (blob.size === 0) throw new Error(`参考图 ${index + 1} 内容为空`);
+  if (blob.size > VLM_MAX_IMAGE_BYTES) throw new Error(`参考图 ${index + 1} 超过 8 MB 上限`);
   const blobMime = blob.type.split(';')[0].trim().toLowerCase();
   const responseMime = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase();
   const mimeType = [blobMime, responseMime].find((value) => value?.startsWith('image/'))
@@ -194,5 +205,35 @@ export async function resolveImageDataUrlArray(
   urls: string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  return Promise.all(urls.map((url, index) => referenceImageToDataUrl(url, index, signal)));
+  if (urls.length > VLM_MAX_IMAGES) throw new Error(`视觉输入最多允许 ${VLM_MAX_IMAGES} 张图片`);
+  const values = await Promise.all(urls.map((url, index) => referenceImageToDataUrl(url, index, signal)));
+  const totalBytes = values.reduce((sum, value) => {
+    const encoded = value.slice(value.indexOf(',') + 1).replace(/\s/g, '');
+    return sum + Math.floor(encoded.length * 3 / 4);
+  }, 0);
+  if (totalBytes > VLM_MAX_TOTAL_IMAGE_BYTES) throw new Error('视觉输入图片总大小超过 24 MB 上限');
+  return values;
+}
+
+export type OpenAiChatContent = string | Array<{
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+}>;
+
+/** 把 OpenAI 兼容多模态 content 中的图片统一变为受限 Base64 data URL。 */
+export async function resolveChatContentImageDataUrls(
+  content: OpenAiChatContent,
+  signal?: AbortSignal,
+): Promise<OpenAiChatContent> {
+  if (typeof content === 'string') return content;
+  const imageParts = content.filter((part) => part.type === 'image_url' && part.image_url?.url);
+  const dataUrls = await resolveImageDataUrlArray(
+    imageParts.map((part) => part.image_url!.url),
+    signal,
+  );
+  let imageIndex = 0;
+  return content.map((part) => part.type === 'image_url' && part.image_url?.url
+    ? { ...part, image_url: { url: dataUrls[imageIndex++] } }
+    : part);
 }

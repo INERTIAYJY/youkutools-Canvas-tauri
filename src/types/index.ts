@@ -329,6 +329,10 @@ export interface ProjectSettings {
   promptSuffix?: string;
   promptSuffixes?: Partial<Record<ProjectModelKind, string>>;
   defaultModels?: Partial<Record<ProjectModelKind, string>>;
+  /** 专门用于图片理解/描述的文本模型；必须声明 image 输入能力。 */
+  visionModelId?: string;
+  /** 允许 Agent 在未显式 @model 时依据能力和用户描述选择媒体模型。 */
+  modelAutoRouting?: boolean;
   generation?: ProjectGenerationDefaults;
 }
 
@@ -351,6 +355,12 @@ export interface ProviderModelSelection {
   category: GeneralModelCategory;
   provider: string;
   description?: string;
+  /** 用户已手动编辑用途说明，刷新厂商目录时不覆盖。 */
+  descriptionManual?: boolean;
+  /** 可验证的输入模态；自然语言描述不能替代该能力声明。 */
+  inputModalities?: Array<'text' | 'image'>;
+  /** 用户已手动确认输入模态，刷新厂商目录时不覆盖。 */
+  inputModalitiesManual?: boolean;
   /** 分类是否由用户手动指定；为 true 时重新拉取目录或合并模型不再覆盖该分类。 */
   categoryManual?: boolean;
   /** 自定义媒体模型的提交、轮询与结果解析规则。 */
@@ -494,6 +504,8 @@ export interface GeneralModelConfig {
   modelId: string;            // 模型 ID
   category: GeneralModelCategory; // 模型种类
   contextWindow?: number;     // 文本模型上下文窗口（token）；未声明时按模型 ID 目录推断
+  description?: string;       // 用户可编辑的模型用途说明，用于 Agent 路由参考
+  inputModalities?: Array<'text' | 'image'>;
   /** 对应 config.providers 中的连接 ID，凭据和地址仅从该连接读取。 */
   providerConfigId: string;
   executionProfile?: ModelExecutionProfile;
@@ -540,6 +552,7 @@ export interface ModelOption {
   provider: string;           // 归属供应商
   label: string;              // 展示名
   description?: string;       // 简介
+  inputModalities?: Array<'text' | 'image'>; // 可验证的输入模态
   icon?: string;              // 图标路径或内置图标名
   iconType?: 'image' | 'badge';
   badgeText?: string;

@@ -15,6 +15,7 @@ const EXPECTED_STORES = [
   'metadata',
   'presets',
   'projectMemories',
+  'projectVisualDescriptions',
   'projects',
   'skills',
   'styles',
@@ -43,7 +44,7 @@ beforeEach(() => {
 });
 
 describe('indexedDbService schema', () => {
-  it('creates the complete v17 schema for a fresh database', async () => {
+  it('creates the complete v19 schema for a fresh database', async () => {
     const service = await import('../../src/services/indexedDbService');
     await service.saveProjectToDb({
       id: 'project-fresh',
@@ -55,7 +56,7 @@ describe('indexedDbService schema', () => {
     });
 
     const db = await openDatabase(DB_NAME);
-    expect(db.version).toBe(18);
+    expect(db.version).toBe(19);
     expect([...db.objectStoreNames]).toEqual(EXPECTED_STORES);
 
     const taskStore = db.transaction('agentTasks', 'readonly').objectStore('agentTasks');
@@ -66,6 +67,9 @@ describe('indexedDbService schema', () => {
     ]);
     const memoryStore = db.transaction('projectMemories', 'readonly').objectStore('projectMemories');
     expect([...memoryStore.indexNames]).toEqual(['conversationId', 'projectId_updatedAt']);
+    const visualStore = db.transaction('projectVisualDescriptions', 'readonly')
+      .objectStore('projectVisualDescriptions');
+    expect([...visualStore.indexNames]).toEqual(['projectId_fingerprint', 'projectId_updatedAt']);
     const historyStore = db.transaction('history', 'readonly').objectStore('history');
     expect([...historyStore.indexNames]).toEqual([
       'nodeId',
@@ -111,7 +115,7 @@ describe('indexedDbService schema', () => {
       }),
     ]);
     const upgradedDb = await openDatabase(DB_NAME);
-    expect(upgradedDb.version).toBe(18);
+    expect(upgradedDb.version).toBe(19);
     expect([...upgradedDb.objectStoreNames]).toEqual(EXPECTED_STORES);
     upgradedDb.close();
   });
@@ -139,5 +143,33 @@ describe('indexedDbService schema', () => {
 
     await service.deleteGlobalCharacter('global-character');
     expect(await service.getAllGlobalCharacters()).toEqual([]);
+  });
+
+  it('removes cached visual descriptions with project domain data', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    await service.saveProjectToDb({
+      id: 'project-visual',
+      name: 'Visual project',
+      createdAt: 1,
+      updatedAt: 1,
+      nodes: [],
+      edges: [],
+    });
+    await service.putProjectVisualDescription({
+      id: 'project-visual:fingerprint',
+      projectId: 'project-visual',
+      fingerprint: 'fingerprint',
+      description: '一张图片',
+      modelId: 'general/vision',
+      promptVersion: 'visual-description/v1',
+      createdAt: 1,
+      updatedAt: 1,
+      lastUsedAt: 1,
+    });
+
+    await service.deleteProjectFromDb('project-visual');
+
+    expect(await service.getProjectVisualDescription('project-visual', 'fingerprint'))
+      .toBeUndefined();
   });
 });

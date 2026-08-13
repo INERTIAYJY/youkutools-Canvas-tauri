@@ -1032,6 +1032,7 @@ function createConfiguredModelOption(
     provider,
     label: model.name,
     description: model.description || `ID: ${model.id}`,
+    inputModalities: model.inputModalities,
     icon: group.icon,
     iconType: group.iconType,
     badgeText: group.badgeText,
@@ -1096,6 +1097,18 @@ export function getConfiguredModelGroups(
       if (!model.nodeTypes.includes(modelNodeType)) return false;
       if (!filterSelectedModels || selectedIds === null) return true;
       return selectedIds.has(normalizedCatalogModelId(model.value, modelProvider));
+    }).map((model) => {
+      const selected = selectedModels?.find(
+        (candidate) => normalizedCatalogModelId(candidate.id, modelProvider)
+          === normalizedCatalogModelId(model.value, modelProvider),
+      );
+      return selected
+        ? {
+            ...model,
+            description: selected.description || model.description,
+            inputModalities: selected.inputModalities,
+          }
+        : model;
     });
     if (filterSelectedModels && selectedModels) {
       const configuredIds = new Set(
@@ -1164,7 +1177,8 @@ export function getMediaModelOptions(
         value: `general/${model.id}`,
         provider: 'general',
         label: model.name,
-        description: `ID: ${model.modelId}`,
+        description: model.description || `ID: ${model.modelId}`,
+        inputModalities: model.inputModalities,
         iconType: 'badge',
         badgeText: mediaKind === 'image' ? '图' : mediaKind === 'video' ? '视' : '音',
         nodeTypes: [nodeType],
@@ -1264,6 +1278,16 @@ const VISION_TEXT_MODEL_PATTERNS: RegExp[] = [
  */
 export function isVisionCapableTextModel(modelId: string): boolean {
   return VISION_TEXT_MODEL_PATTERNS.some((pattern) => pattern.test(modelId));
+}
+
+/** 显式能力优先；旧模型缺少声明时保留受限的 ID 目录兼容判断。 */
+export function hasVisionInputCapability(model: {
+  modelId: string;
+  inputModalities?: Array<'text' | 'image'>;
+}): boolean {
+  return model.inputModalities !== undefined
+    ? model.inputModalities.includes('image')
+    : isVisionCapableTextModel(model.modelId);
 }
 
 function suggestedOutputBudget(contextWindow: number): number {

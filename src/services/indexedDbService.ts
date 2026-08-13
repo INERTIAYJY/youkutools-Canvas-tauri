@@ -5,6 +5,7 @@ import type { AgentMode, AgentTask } from '../types/agent';
 import type { ConversationContextSummary } from '../types/chat';
 import type { ProjectMemory } from '../types/memory';
 import type { DramaCharacter } from '../types/dramaAssets';
+import type { ProjectVisualDescription } from '../types/visualMemory';
 import {
   openDB,
   STORE_AGENT_TASKS,
@@ -17,6 +18,7 @@ import {
   STORE_HISTORY,
   STORE_METADATA,
   STORE_PROJECT_MEMORIES,
+  STORE_PROJECT_VISUAL_DESCRIPTIONS,
   STORE_PROJECTS,
   STORE_TOOLBAR_LAYOUTS,
 } from './indexedDb/schema';
@@ -115,6 +117,7 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
       STORE_CHAT_MESSAGES,
       STORE_AGENT_TASKS,
       STORE_PROJECT_MEMORIES,
+      STORE_PROJECT_VISUAL_DESCRIPTIONS,
       STORE_HISTORY,
     ], 'readwrite');
 
@@ -169,6 +172,17 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
       .openCursor(projectHistoryRange(id));
     historyCursor.onsuccess = () => {
       const cursor = historyCursor.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+
+    const visualRange = IDBKeyRange.bound([id, 0], [id, Infinity]);
+    const visualCursor = tx.objectStore(STORE_PROJECT_VISUAL_DESCRIPTIONS)
+      .index('projectId_updatedAt')
+      .openCursor(visualRange);
+    visualCursor.onsuccess = () => {
+      const cursor = visualCursor.result;
       if (!cursor) return;
       cursor.delete();
       cursor.continue();
@@ -1143,5 +1157,36 @@ export async function loadToolbarLayoutsFromDb(): Promise<Record<string, unknown
     const request = tx.objectStore(STORE_TOOLBAR_LAYOUTS).get(TOOLBAR_LAYOUTS_KEY);
     request.onsuccess = () => resolve(request.result?.data ?? null);
     request.onerror = () => reject(request.error);
+  });
+}
+
+// ============================================
+// Project visual descriptions
+// ============================================
+
+export async function getProjectVisualDescription(
+  projectId: string,
+  fingerprint: string,
+): Promise<ProjectVisualDescription | undefined> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(STORE_PROJECT_VISUAL_DESCRIPTIONS, 'readonly')
+      .objectStore(STORE_PROJECT_VISUAL_DESCRIPTIONS)
+      .index('projectId_fingerprint')
+      .get([projectId, fingerprint]);
+    request.onsuccess = () => resolve(request.result as ProjectVisualDescription | undefined);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function putProjectVisualDescription(
+  record: ProjectVisualDescription,
+): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PROJECT_VISUAL_DESCRIPTIONS, 'readwrite');
+    tx.objectStore(STORE_PROJECT_VISUAL_DESCRIPTIONS).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }

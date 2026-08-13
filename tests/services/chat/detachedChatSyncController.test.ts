@@ -14,7 +14,10 @@ vi.mock('../../../src/services/chat/conversationExecutionController', () => ({
   submitConversationMessage: conversationControllerMocks.submit,
 }));
 
-import { createDetachedChatSyncController } from '../../../src/services/chat/detachedChatSyncController';
+import {
+  buildDetachedChatSnapshot,
+  createDetachedChatSyncController,
+} from '../../../src/services/chat/detachedChatSyncController';
 import { useAppStore } from '../../../src/store/useAppStore';
 
 function arrangeDetachedState(): void {
@@ -57,6 +60,38 @@ beforeEach(() => {
 });
 
 describe('detached chat sync controller', () => {
+  it('publishes and updates the current project text model', async () => {
+    const updateProjectSettings = vi.fn(async () => true);
+    useAppStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        settings: { defaultModels: { text: 'general/project-model' } },
+      })),
+      config: { ...state.config, assistantModelId: 'general/application-model' },
+      updateProjectSettings,
+    }));
+    expect(buildDetachedChatSnapshot(useAppStore.getState()).assistantModelId)
+      .toBe('general/project-model');
+
+    let onAction: ((action: ChatAction) => void) | undefined;
+    const controller = createDetachedChatSyncController({
+      enabled: true,
+      syncIntervalMs: 0,
+      emitSync: vi.fn(async () => undefined),
+      initListener: vi.fn(async (handler) => {
+        onAction = handler;
+        return () => undefined;
+      }),
+    });
+    await controller.start();
+    onAction?.({ type: 'select_model', category: 'text', modelId: 'general/next-model' });
+    expect(updateProjectSettings).toHaveBeenCalledWith(expect.objectContaining({
+      defaultModels: { text: 'general/next-model' },
+    }));
+    expect(useAppStore.getState().config.assistantModelId).toBe('general/application-model');
+    controller.dispose();
+  });
+
   it('emits an initial snapshot followed by revisioned patches', async () => {
     const emitSync = vi.fn(async () => undefined);
     const initListener = vi.fn(async () => () => undefined);

@@ -12,7 +12,11 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import { seriesOwnerId } from '../../store/store.utils';
-import { resolveTextModelContextSpec, type TextModelContextSpec } from '../../components/nodes/shared/defaultModels';
+import {
+  getConfiguredModelGroups,
+  resolveTextModelContextSpec,
+  type TextModelContextSpec,
+} from '../../components/nodes/shared/defaultModels';
 import { loadMessages } from './chatHistoryService';
 import { compressConversationContext } from './contextCompressionService';
 import type { AssistantModelMessage } from '../ai/assistantStream';
@@ -28,6 +32,7 @@ import {
 import { rankProjectMemories } from './memoryRetrieval';
 import { buildLearnedPromptContext } from './promptLearningService';
 import { estimateTokens } from './tokenEstimate';
+import { getAssistantTextModelCandidates } from '../projectSettingsService';
 
 export { estimateTokens };
 
@@ -61,7 +66,9 @@ const PER_MESSAGE_OVERHEAD = 8;
 export function estimateModelMessagesTokens(messages: AssistantModelMessage[]): number {
   let total = 0;
   for (const message of messages) {
-    total += PER_MESSAGE_OVERHEAD + estimateTokens(message.content);
+    total += PER_MESSAGE_OVERHEAD + estimateTokens(
+      typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+    );
     if (message.tool_calls) {
       total += estimateTokens(JSON.stringify(message.tool_calls));
     }
@@ -80,12 +87,28 @@ export interface AssistantContextSpec extends TextModelContextSpec {
 }
 
 /** 解析当前配置的助手文本模型的上下文规格；未配置时返回保守默认规格。 */
-export function resolveAssistantContextSpec(): AssistantContextSpec {
-  const config = useAppStore.getState().config;
-  const model = config.generalModels?.find(
-    (item) => item.id === config.assistantModelId && item.category === 'text',
+export function resolveAssistantContextSpec(projectId?: string): AssistantContextSpec {
+  const state = useAppStore.getState();
+  const config = state.config;
+  const project = state.projects.find((item) => item.id === (projectId ?? state.currentProjectId));
+  const candidates = getAssistantTextModelCandidates(
+    project?.settings,
+    config.assistantModelId,
   );
-  return toAssistantContextSpec(model ?? null);
+  const configuredModels = getConfiguredModelGroups(config, 'ai-text')
+    .flatMap((group) => group.models);
+  for (const candidate of candidates) {
+    const selectedModelId = candidate.replace(/^general\//, '');
+    const generalModel = config.generalModels?.find(
+      (item) => item.id === selectedModelId && item.category === 'text',
+    );
+    if (generalModel) return toAssistantContextSpec(generalModel);
+    const configuredModel = configuredModels.find((item) => item.value === candidate);
+    if (configuredModel) {
+      return toAssistantContextSpec({ modelId: configuredModel.value, name: configuredModel.label });
+    }
+  }
+  return toAssistantContextSpec(null);
 }
 
 function toAssistantContextSpec(
@@ -337,7 +360,7 @@ export async function assembleAgentContext(
 ): Promise<AssembledAgentContext> {
   const { conversationId, projectId, systemPrompt, userMessage, signal } = options;
   const excludeIds = new Set(options.excludeMessageIds ?? []);
-  const spec = resolveAssistantContextSpec();
+  const spec = resolveAssistantContextSpec(projectId);
   // 对话历史与提示词样本互不依赖，并行读取可避免给每轮 Agent 响应叠加串行存储延迟。
   const [persistedResult, learnedPromptBlock] = await Promise.all([
     loadMessages(conversationId, 0, 200),

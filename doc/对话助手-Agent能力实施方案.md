@@ -2058,32 +2058,12 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 浏览器检查：Web 开发版可正常加载并打开画布助手、创建对话和切换任务中心；当前本机未配置助手模型，无法在不发送真实模型请求的情况下生成活动 AgentTask，具体折叠内容由服务与 SSR 渲染测试覆盖，真实流式任务留待配置模型后的 Tauri 手测。
 - 回滚时移除 `AgentExecutionRationale` 装配、组件和纯派生服务即可；既有任务事件无需迁移或清理。
 
-### 8.23 项目记忆后端边界与 TencentDB 适配验证
+### 8.23 项目记忆外部后端评估（已取消）
 
-#### 目标与边界
-
-- IndexedDB 继续作为默认、离线可用的项目记忆权威源，Store、Context Manager 和用户确认流程保持不变。
-- 抽取覆盖保存、按项目读取、删除、项目改挂和来源失效的 `ProjectMemoryRepository`，为后续可选后端提供稳定边界。
-- 仅验证用户已确认 `ProjectMemory` 到 TencentDB Agent Memory v3 L1 Atomic 的纯数据映射；本阶段不连接远端、不引入 SDK、不新增密钥、设置项、数据库版本、Tauri command 或安全权限。
-- 完整对话、网页正文、文件正文、Skill、工具 Observation 和未确认候选不得进入映射。
-
-#### 完成状态
-
-- [x] `projectMemoryService` 支持注入 Repository，默认 IndexedDB 实现保持原公开 API 和按更新时间倒序行为。
-- [x] Tencent v3 映射固定使用 `team_id / agent_id / user_id` 隔离，`projectId` 映射为 `task_id`，本地记忆 ID 映射为 Atomic `id`。
-- [x] 类别、启用状态、来源和时间戳写入 `ai-canvas.project-memory/v1` 版本化 `background`，合法记录可无损往返。
-- [x] 入站解析采用 fail-closed：非法 schema、跨项目、空或超限正文、非字符串正文及异常元数据均不得恢复为可信项目记忆。
-- [x] ADR 固化本地权威、只映射 L1 和未来安全同步边界；真实同步必须另行实施 Rust `secret_store`、受限端点、outbox、冲突与删除补偿。
-
-#### 验证与回滚
-
-- 定向测试：Repository、Tencent 映射和项目系列记忆回归共 3 个文件、16 项通过。
-- 全量测试：首次并行验收时 1223 项用例通过但 Vitest worker 意外退出，未计为通过；确认无残留进程后使用 `npx vitest run --maxWorkers=1` 重跑，159 个文件、1227 项全部通过。
-- 类型与 Lint：`npm run typecheck`、`npm run test:typecheck` 和本阶段 6 个 TypeScript 文件定向 ESLint 通过。
-- 全量 `npm run check` 仍在 lint 阶段被既有 ESLint 10 / parser 错误 `scopeManager.addGlobals is not a function` 阻断；未修改依赖。
-- 生产构建：`npx vite build --outDir <系统临时目录>` 通过；仅保留既有大 chunk 和外部输出目录提示。
-- 本阶段不需要真实 TencentDB 服务、账号或密钥；映射基线参考官方仓库 `feat/server_team` 分支提交 `4dca55c41bf11cb19b49728dbe495c8e05d25abb`。
-- 回滚时恢复 `projectMemoryService` 直接调用 IndexedDB，并删除 Repository、纯映射器和对应测试；没有数据库迁移、远端数据或配置需要清理。
+- [-] 2026-08-13 曾完成本地 Repository 与 TencentDB Agent Memory v3 L1 纯映射验证。
+- [-] 用户决定不接入 TencentDB Agent Memory；同日完整回退映射器、Repository 抽象、测试、ADR 和实施计划。
+- 项目记忆恢复为原有 IndexedDB 本地持久化，不保留外部服务配置、网络请求、密钥、数据库迁移或运行时依赖。
+- 现有项目记忆数据、用户确认流程、来源生命周期和 Context Manager 注入行为不受影响。
 
 ## 9. 测试与验证策略
 
@@ -2212,7 +2192,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
-| 2026-08-13 | 8.23 | 项目记忆抽取本地权威 Repository，并完成 TencentDB Agent Memory v3 L1 Atomic 的严格隔离、版本化背景和 fail-closed 双向映射验证；未启用网络同步。 |
+| 2026-08-13 | 8.23 取消 | 按用户决定不接入 TencentDB Agent Memory，完整回退外部记忆映射与通用 Repository 试验，项目记忆继续仅使用 IndexedDB。 |
 | 2026-08-13 | 8.22 | Agent 时间线新增基于脱敏任务事件的实时可折叠执行依据，展示分析、Policy、审批和工具结果，同时明确不包含模型隐藏思维。 |
 | 2026-08-12 | 8.21 | 用户显式引用的 Skill 在 AgentTask 创建时固定为受预算约束的不可变快照，恢复时确定性注入，并在时间线显示已注入名称。 |
 | 2026-08-12 | 8.20 | Agent 工具调用增加脱敏结构化参数与结果快照、媒体参考预览、节点创建详情和更新前后差异；视频比例、分辨率、时长在审批前解析并锁定。 |

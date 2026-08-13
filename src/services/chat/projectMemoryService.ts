@@ -5,11 +5,16 @@
  * 并按长度上限截断，禁止把文件全文、网页全文或临时结果写入长期记忆。
  */
 import {
+  putProjectMemory,
+  getProjectMemories,
+  deleteProjectMemory as dbDeleteProjectMemory,
+  deleteProjectMemories as dbDeleteProjectMemories,
+  markConversationMemoriesUnavailable as dbMarkConversationMemoriesUnavailable,
+} from '../indexedDbService';
+import {
   PROJECT_MEMORY_CONTENT_LIMIT,
   type ProjectMemory,
 } from '../../types/memory';
-import { indexedDbProjectMemoryRepository } from './indexedDbProjectMemoryRepository';
-import type { ProjectMemoryRepository } from './projectMemoryRepository';
 
 /**
  * 脱敏记忆正文：移除密钥、凭据和本地绝对路径，并截断到长度上限。
@@ -25,45 +30,37 @@ export function sanitizeMemoryContent(value: string): string {
     .slice(0, PROJECT_MEMORY_CONTENT_LIMIT);
 }
 
-export interface ProjectMemoryService {
-  saveProjectMemory(memory: ProjectMemory): Promise<void>;
-  loadProjectMemories(projectId: string): Promise<ProjectMemory[]>;
-  reassignProjectMemories(fromProjectId: string, toProjectId: string): Promise<void>;
-  removeProjectMemory(id: string): Promise<void>;
-  removeProjectMemories(projectId: string): Promise<void>;
-  markConversationMemoriesUnavailable(conversationId: string): Promise<void>;
+export async function saveProjectMemory(memory: ProjectMemory): Promise<void> {
+  await putProjectMemory(memory);
 }
 
-/** 创建可注入 Repository 的领域服务；生产默认继续使用 IndexedDB。 */
-export function createProjectMemoryService(
-  repository: ProjectMemoryRepository,
-): ProjectMemoryService {
-  return {
-    saveProjectMemory: (memory) => repository.save(memory),
-    loadProjectMemories: async (projectId) => {
-      const records = await repository.listByProject(projectId);
-      return records.sort((a, b) => b.updatedAt - a.updatedAt);
-    },
-    reassignProjectMemories: (fromProjectId, toProjectId) => (
-      repository.reassignProject(fromProjectId, toProjectId)
-    ),
-    removeProjectMemory: (id) => repository.deleteById(id),
-    removeProjectMemories: (projectId) => repository.deleteByProject(projectId),
-    markConversationMemoriesUnavailable: (conversationId) => (
-      repository.markConversationSourceUnavailable(conversationId)
-    ),
-  };
+export async function loadProjectMemories(projectId: string): Promise<ProjectMemory[]> {
+  const records = await getProjectMemories(projectId);
+  return records.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-const defaultProjectMemoryService = createProjectMemoryService(
-  indexedDbProjectMemoryRepository,
-);
+/**
+ * 把记忆整体改挂到另一个项目：普通项目转成剧集时，记忆跟着剧集走，
+ * 否则转换后原有记忆会因为归属 id 变化而查不到。
+ */
+export async function reassignProjectMemories(
+  fromProjectId: string,
+  toProjectId: string,
+): Promise<void> {
+  const records = await getProjectMemories(fromProjectId);
+  await Promise.all(records.map((memory) => putProjectMemory({ ...memory, projectId: toProjectId })));
+}
 
-export const saveProjectMemory = defaultProjectMemoryService.saveProjectMemory;
-export const loadProjectMemories = defaultProjectMemoryService.loadProjectMemories;
-export const reassignProjectMemories = defaultProjectMemoryService.reassignProjectMemories;
-export const removeProjectMemory = defaultProjectMemoryService.removeProjectMemory;
-export const removeProjectMemories = defaultProjectMemoryService.removeProjectMemories;
-export const markConversationMemoriesUnavailable = (
-  defaultProjectMemoryService.markConversationMemoriesUnavailable
-);
+export async function removeProjectMemory(id: string): Promise<void> {
+  await dbDeleteProjectMemory(id);
+}
+
+export async function removeProjectMemories(projectId: string): Promise<void> {
+  await dbDeleteProjectMemories(projectId);
+}
+
+export async function markConversationMemoriesUnavailable(
+  conversationId: string,
+): Promise<void> {
+  await dbMarkConversationMemoriesUnavailable(conversationId);
+}

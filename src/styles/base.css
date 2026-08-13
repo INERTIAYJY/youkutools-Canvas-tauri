@@ -678,6 +678,13 @@ html, body, #root {
     Arial,
     'Noto Sans SC',
     sans-serif;
+}
+
+/* macOS 默认次像素渲染偏粗，灰度抗锯齿更接近系统观感；
+   Windows 相反——antialiased 会关掉 ClearType，1x DPI 下小号中文糊成一团。 */
+html:not([data-os='windows']),
+html:not([data-os='windows']) body,
+html:not([data-os='windows']) #root {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }

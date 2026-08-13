@@ -12,8 +12,12 @@ const searchParams = new URLSearchParams(window.location.search)
 const view = searchParams.get('view')
 const isChatWindow = view === 'chat'
 
-if (isChatWindow && /Windows NT/i.test(navigator.userAgent)) {
-  document.documentElement.setAttribute('data-chat-window-platform', 'windows')
+if (/Windows NT/i.test(navigator.userAgent)) {
+  // Windows 走 ClearType 次像素抗锯齿，见 base.css 的 font-smoothing 分支
+  document.documentElement.setAttribute('data-os', 'windows')
+  if (isChatWindow) {
+    document.documentElement.setAttribute('data-chat-window-platform', 'windows')
+  }
 }
 
 async function applyInitialChatWindowTheme() {

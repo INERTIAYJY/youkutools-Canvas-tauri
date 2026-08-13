@@ -22,6 +22,7 @@ import type {
   ProposedToolCall,
   ToolResultSummary,
 } from '../../types/chat';
+import type { McpContent } from '../../types/mcp';
 import {
   buildAssistantFunctionTools,
   prepareAgentToolCall,
@@ -81,6 +82,7 @@ export interface AgentRoundResult {
 export interface ExecutedToolCall {
   summary: ToolResultSummary;
   modelContent: string;
+  mcpContent?: McpContent[];
 }
 
 export function getTask(taskId: string): AgentTask {
@@ -403,6 +405,7 @@ export async function executePreparedToolCall(
           sources: result.sources,
         },
         modelContent,
+        mcpContent: result.mcpContent,
       };
     } catch (error) {
       if (context.signal.aborted) {

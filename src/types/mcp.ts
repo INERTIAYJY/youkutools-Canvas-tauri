@@ -31,8 +31,12 @@ export interface McpToolDescriptor {
   inputSchema: AgentToolSchema;
 }
 
+export type McpContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: 'image/jpeg' | 'image/png' | 'image/webp' };
+
 export interface McpToolCallResult {
   isError: boolean;
   summary: string;
-  content: Array<{ type: 'text'; text: string }>;
+  content: McpContent[];
 }

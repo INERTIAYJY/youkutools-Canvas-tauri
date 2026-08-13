@@ -13,7 +13,7 @@ import {
 const LOOPBACK_HOST = '127.0.0.1';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1_000;
-const MAX_FRAME_BYTES = 1024 * 1024;
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 
 /**
  * 令牌优先取环境变量：命令行参数会出现在本机进程列表里，固定令牌长期有效时暴露面太大。

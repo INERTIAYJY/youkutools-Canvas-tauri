@@ -2130,6 +2130,32 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 未修改 Rust、Tauri 安全配置、IndexedDB schema 或依赖；未执行真实项目永久删除。
 - 回滚时从工具注册入口移除 `registerProjectAgentTools`，删除项目工具及其测试，并恢复本节文档即可；项目数据无需迁移。
 
+### 8.26 MCP 全面控制工具
+
+**任务类型：平台能力 / 架构收敛**
+
+**状态：第一批已完成，后续业务域工具实施中**
+
+#### 目标与边界
+
+- 补齐 MCP 对应用界面、固定应用窗口、画布视口和当前 Webview 视觉结果的结构化控制。
+- 后续继续补齐工作流、Skill、预设、风格、记忆、剧集素材、会话任务、历史和高级画布操作。
+- 新工具只在 `mcp-control-*` 专用会话中发现和执行；不向内置助手开放，不新增任意系统窗口、Shell、HTTP 或路径能力。
+- 截图复用既有 `html-to-image`，只截 AI Canvas Webview 可见 DOM，敏感输入默认排除，图像只以瞬时 MCP `image` 内容返回，不写消息、任务、IndexedDB 或本地文件。
+- 不新增依赖，不修改 Tauri 安全配置、capability 或 IndexedDB schema。
+
+#### 第一批完成记录
+
+- 新增 11 个工具：`ui_get_layout`、`ui_get_interaction_state`、`ui_set_layout`、`window_list`、`window_get_state`、`window_focus`、`window_set_bounds`、`canvas_get_viewport`、`canvas_set_viewport`、`canvas_fit_view`、`ui_capture_window`。
+- 画布运行时通过内存控制器暴露视口快照、设置和适配，不把 React Flow 实例写入 Store 或持久化层。
+- 窗口工具只接受 `main`、`chat-assistant`、`asset-search`、`video-editor`、`director-desk`、`comfyui` 固定标签；截图只覆盖加载本应用入口的前四类 Webview。
+- MCP 结果协议新增 JPEG/PNG/WebP 图像内容；执行器只把图像传给 MCP 控制层，模型上下文、审计消息和 AgentTask 仅保存脱敏摘要。
+- 桥接单帧上限从 1 MiB 调整为 4 MiB；截图自身限制为约 2.6M Base64 字符，并在超限时逐级缩小尺寸和质量。
+- 计划与设计：`doc/plans/2026-08-13-mcp-complete-control-design.md`、`doc/plans/2026-08-13-mcp-complete-control-implementation.md`。
+- 定向测试：界面工具、MCP 图像适配和 MCP 控制服务共 3 个文件、13 项通过。
+- `npm run typecheck`、`npm run test:typecheck`、本批 12 个 TypeScript/TSX 文件定向 ESLint、`git diff --check` 通过。
+- 回滚时移除 UI 工具注册、截图响应器和视口控制器，并恢复 MCP 富内容与帧上限即可；无数据迁移。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -2257,6 +2283,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-13 | 8.26 第一批 | 新增 11 个 MCP 界面、窗口、画布视口与瞬时截图工具，图像不进入模型上下文、消息或任务持久化。 |
 | 2026-08-13 | 8.25 | 新增 8 个 MCP 项目管理工具，覆盖脱敏查询、创建、重命名、切换、安全设置、保存和永久删除，全部复用既有 Project Store 事务。 |
 | 2026-08-13 | 8.24 | 完成 MCP 全权限第一阶段：现有 Registry 工具固定使用自主权限上下文执行，取消审批依赖并解除子智能体与动态 ComfyUI 工作流屏蔽。 |
 | 2026-08-13 | 8.23 取消 | 按用户决定不接入 TencentDB Agent Memory，完整回退外部记忆映射与通用 Repository 试验，项目记忆继续仅使用 IndexedDB。 |

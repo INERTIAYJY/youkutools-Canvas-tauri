@@ -62,6 +62,7 @@ import { setCanvasPointerPosition } from '../services/canvasPointerService';
 import {
   CANVAS_PAN_BY_EVENT,
   CANVAS_PAN_DURATION_MS,
+  registerCanvasViewportController,
   type CanvasPanByDetail,
 } from '../services/canvasViewportService';
 
@@ -390,6 +391,40 @@ function CanvasInner() {
     startY: number;
     detail: CanvasPanByDetail;
   } | null>(null);
+
+  useEffect(() => registerCanvasViewportController({
+    getSnapshot: () => {
+      const viewport = reactFlowInstance.getViewport();
+      const topLeft = reactFlowInstance.screenToFlowPosition({ x: 0, y: 0 });
+      const bottomRight = reactFlowInstance.screenToFlowPosition({
+        x: window.innerWidth,
+        y: window.innerHeight,
+      });
+      return {
+        ...viewport,
+        visibleBounds: {
+          x: topLeft.x,
+          y: topLeft.y,
+          width: bottomRight.x - topLeft.x,
+          height: bottomRight.y - topLeft.y,
+        },
+      };
+    },
+    setViewport: async (viewport, duration = 0) => {
+      await reactFlowInstance.setViewport(viewport, { duration });
+    },
+    fitView: async (options = {}) => {
+      const ids = options.nodeIds ? new Set(options.nodeIds) : null;
+      const nodes = ids
+        ? reactFlowInstance.getNodes().filter((node) => ids.has(node.id))
+        : undefined;
+      await reactFlowInstance.fitView({
+        nodes,
+        padding: options.padding ?? 0.25,
+        duration: options.duration ?? 0,
+      });
+    },
+  }), [reactFlowInstance]);
   const canvasRootRef = useRef<HTMLDivElement>(null);
   const activeInteractionsRef = useRef(new Set<'node' | 'viewport'>());
 

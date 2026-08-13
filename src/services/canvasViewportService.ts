@@ -17,6 +17,32 @@ export interface CanvasPanByDetail {
   onComplete?: (progress: CanvasPanProgress) => void;
 }
 
+export interface CanvasViewportSnapshot {
+  x: number;
+  y: number;
+  zoom: number;
+  visibleBounds: { x: number; y: number; width: number; height: number };
+}
+
+export interface CanvasViewportController {
+  getSnapshot: () => CanvasViewportSnapshot;
+  setViewport: (viewport: { x: number; y: number; zoom: number }, duration?: number) => Promise<void>;
+  fitView: (options?: { nodeIds?: string[]; padding?: number; duration?: number }) => Promise<void>;
+}
+
+let viewportController: CanvasViewportController | null = null;
+
+export function registerCanvasViewportController(controller: CanvasViewportController): () => void {
+  viewportController = controller;
+  return () => {
+    if (viewportController === controller) viewportController = null;
+  };
+}
+
+export function getCanvasViewportController(): CanvasViewportController | null {
+  return viewportController;
+}
+
 export function requestCanvasPanBy(detail: CanvasPanByDetail) {
   window.dispatchEvent(new CustomEvent<CanvasPanByDetail>(CANVAS_PAN_BY_EVENT, { detail }));
 }

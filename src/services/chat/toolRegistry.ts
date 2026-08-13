@@ -3,6 +3,7 @@
  */
 import type { AgentMode, AgentToolDisplaySnapshot } from '../../types/agent';
 import type { ProposedToolCall, ToolResultSummary, WebSource } from '../../types/chat';
+import type { McpContent } from '../../types/mcp';
 import {
   validateAgentToolInput,
   type AgentToolSchema,
@@ -41,6 +42,8 @@ export interface AgentToolExecutionResult {
   sources?: WebSource[];
   /** 面向用户的脱敏结果详情；不得包含本地路径、密钥或完整媒体 URL。 */
   display?: AgentToolDisplaySnapshot;
+  /** 仅由 MCP 控制层返回的瞬时富内容；不得进入模型上下文、消息或任务持久化。 */
+  mcpContent?: McpContent[];
 }
 
 export interface AgentToolDefinition<TInput = unknown> {

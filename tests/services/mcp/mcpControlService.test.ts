@@ -148,6 +148,37 @@ describe('MCP control service', () => {
     ]));
   });
 
+  it('returns transient image content without persisting its base64 payload', async () => {
+    registerAgentTool({
+      id: 'mcp_control_image_test',
+      title: '测试图像',
+      description: '测试 MCP 图像结果',
+      effect: 'read',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      execute: async () => ({
+        status: 'success',
+        summary: '图像已生成',
+        modelContent: '{"width":640,"height":360}',
+        mcpContent: [{ type: 'image' as const, data: 'YWJj', mimeType: 'image/jpeg' as const }],
+      }),
+    });
+
+    const result = await handleMcpBridgeRequest({
+      sessionId: 'session-image',
+      requestId: 'session-image:call-1',
+      method: 'tools/call',
+      params: { name: 'mcp_control_image_test', arguments: {} },
+    });
+
+    expect(result).toEqual({
+      isError: false,
+      summary: '图像已生成',
+      content: [{ type: 'image', data: 'YWJj', mimeType: 'image/jpeg' }],
+    });
+    expect(JSON.stringify(useAppStore.getState().messages)).not.toContain('YWJj');
+    expect(JSON.stringify(useAppStore.getState().agentTasks)).not.toContain('YWJj');
+  });
+
   it('returns configured built-in, custom and workflow models without private config', async () => {
     useAppStore.setState((state) => ({
       config: {

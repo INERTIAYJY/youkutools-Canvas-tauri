@@ -218,10 +218,12 @@ async function callMcpTool(
     return {
       isError,
       summary,
-      content: [{
-        type: 'text',
-        text: executionResult?.modelContent ?? summary,
-      }],
+      content: executionResult?.mcpContent?.length
+        ? executionResult.mcpContent
+        : [{
+            type: 'text',
+            text: executionResult?.modelContent ?? summary,
+          }],
     };
   } finally {
     activeRequestTasks.delete(request.requestId);

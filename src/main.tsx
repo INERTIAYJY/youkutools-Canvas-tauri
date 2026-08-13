@@ -35,6 +35,8 @@ async function applyInitialChatWindowTheme() {
 
 async function mountRoot() {
   await applyInitialChatWindowTheme()
+  const { installMcpScreenshotResponder } = await import('./services/mcp/mcpUiRuntimeService')
+  void installMcpScreenshotResponder()
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <RootView view={view} />

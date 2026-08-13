@@ -18,6 +18,7 @@ import {
 import { getAgentRecoveryHint } from '../../services/chat/agentErrorCodes';
 import AgentStepCard from './AgentStepCard';
 import AgentApprovalCard from './AgentApprovalCard';
+import AgentExecutionRationale from './AgentExecutionRationale';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
 
 export interface AgentTaskControls {
@@ -246,6 +247,8 @@ export default function AgentTaskTimeline({
           </span>
         </div>
       )}
+
+      <AgentExecutionRationale task={task} />
 
       {expanded && metrics && (metrics.inputTokens > 0 || metrics.outputTokens > 0 || metrics.policyDenied > 0 || metrics.retryCount > 0) && (
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-5 text-[10px] tabular-nums text-canvas-text-muted">

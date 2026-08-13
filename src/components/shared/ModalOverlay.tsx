@@ -152,7 +152,7 @@ export default function ModalOverlay({
       {isOpen && (
         <motion.div
           ref={overlayRef}
-          className="fixed inset-0 z-[250] flex items-center justify-center"
+          className="fixed inset-0 z-[250] flex items-center justify-center rounded-2xl"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

@@ -76,6 +76,8 @@ beforeEach(() => {
       projectId: context.projectId,
       role: 'assistant',
       content: '',
+      timestamp: 1,
+      status: 'done',
       agentTaskId: context.taskId,
       createdAt: 1,
       updatedAt: 1,

@@ -276,7 +276,7 @@ export function getProviderDefinition(
 function inferModelCategory(modelId: string): GeneralModelCategory {
   const id = modelId.toLowerCase();
   if (/tts|speech|audio|music|voice|whisper|transcri/.test(id)) return 'audio';
-  if (/video|seedance|sora|veo|kling|hailuo|wan\d|skyreels|vidu/.test(id)) return 'video';
+  if (/video|seedance|sora|veo|kling|hailuo|wan\d|skyreels|vidu|minimax-h3/.test(id)) return 'video';
   if (/image|seedream|imagen|flux|banana|midjourney|recraft|dall-e/.test(id)) return 'image';
   return 'text';
 }

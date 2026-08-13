@@ -22,6 +22,14 @@ export interface ApimartSeedanceCapability {
   maxImageReferences: number;
   maxVideoReferences?: number;
   maxAudioReferences?: number;
+  /** MiniMax-H3 等模型用独立的首/尾帧字段（而非 image_urls 顺序推断）。 */
+  frameFields?: {
+    first: string;
+    last: string;
+  };
+  /** 支持 AIGC 水印字段（watermark/aigc_watermark）。 */
+  watermarkField?: 'watermark' | 'aigc_watermark';
+  defaultWatermark?: boolean;
 }
 
 export interface ApimartSeedanceRequestParams {
@@ -33,11 +41,20 @@ export interface ApimartSeedanceRequestParams {
   videoUrls?: string[];
   audioUrls?: string[];
   operation?: VideoGenerationOperation;
+  /** MiniMax-H3 首帧图 URL（写入 first_frame_image）。 */
+  firstFrameUrl?: string;
+  /** MiniMax-H3 尾帧图 URL（写入 last_frame_image）。 */
+  lastFrameUrl?: string;
+  /** MiniMax-H3 是否添加 AIGC 水印。 */
+  watermark?: boolean;
 }
 
 const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
 const SD_1_RESOLUTIONS = ['480p', '720p', '1080p'] as const;
 const SD_2_RESOLUTIONS = ['480p', '720p'] as const;
+// MiniMax-H3 分辨率（2K / 768P），宽高比不支持 adaptive，仅具体比例
+const H3_RESOLUTIONS = ['2K', '768P'] as const;
+const H3_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const;
 
 const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> = {
   'doubao-seedance-1-0-pro-fast': {
@@ -132,10 +149,66 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     maxVideoReferences: 3,
     maxAudioReferences: 3,
   },
+  'minimax-h3': {
+    modelId: 'MiniMax-H3',
+    resolutions: H3_RESOLUTIONS,
+    defaultResolution: '2K',
+    ratios: H3_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'aspect_ratio',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
+    frameFields: { first: 'first_frame_image', last: 'last_frame_image' },
+    watermarkField: 'watermark',
+    defaultWatermark: false,
+  },
+  'minimax-h3-context-ir': {
+    modelId: 'MiniMax-H3-Context-IR',
+    resolutions: H3_RESOLUTIONS,
+    defaultResolution: '2K',
+    ratios: H3_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'aspect_ratio',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
+    frameFields: { first: 'first_frame_image', last: 'last_frame_image' },
+    watermarkField: 'watermark',
+    defaultWatermark: false,
+  },
+  'minimax-h3-regeneration': {
+    modelId: 'MiniMax-H3-Regeneration',
+    resolutions: H3_RESOLUTIONS,
+    defaultResolution: '2K',
+    ratios: H3_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'aspect_ratio',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
+    frameFields: { first: 'first_frame_image', last: 'last_frame_image' },
+    watermarkField: 'watermark',
+    defaultWatermark: false,
+  },
 };
 
 function normalizeModelId(model: string): string {
-  return model.startsWith('apimart/') ? model.slice('apimart/'.length) : model;
+  const stripped = model.startsWith('apimart/') ? model.slice('apimart/'.length) : model;
+  // 能力表 key 统一小写，模型 ID（如 MiniMax-H3）大小写不敏感地查找
+  return stripped.toLowerCase();
 }
 
 export function getApimartSeedanceCapability(
@@ -159,10 +232,18 @@ export function buildApimartSeedanceRequest(
   const imageUrls = (params.imageUrls ?? []).filter(Boolean);
   const videoUrls = (params.videoUrls ?? []).filter(Boolean);
   const audioUrls = (params.audioUrls ?? []).filter(Boolean);
+  const frameFields = capability.frameFields;
+  const hasFrame = frameFields
+    ? Boolean(params.firstFrameUrl?.trim() || params.lastFrameUrl?.trim())
+    : false;
+  // MiniMax-H3：首尾帧与多模态参考严格互斥，混用会返回 400
+  if (hasFrame && (imageUrls.length > 0 || videoUrls.length > 0 || audioUrls.length > 0)) {
+    throw new Error(`APIMart ${model} 首尾帧与参考素材不能同时使用`);
+  }
   const operation = params.operation
     ?? (videoUrls.length > 0
       ? 'video-to-video'
-      : imageUrls.length > 0 ? 'image-to-video' : 'text-to-video');
+      : imageUrls.length > 0 || hasFrame ? 'image-to-video' : 'text-to-video');
   if (!capability.operations.includes(operation)) {
     throw new Error(`APIMart ${model} 不支持 ${operation}`);
   }
@@ -178,6 +259,10 @@ export function buildApimartSeedanceRequest(
     throw new Error(capability.maxAudioReferences
       ? `APIMart ${model} 最多支持 ${capability.maxAudioReferences} 个参考音频`
       : `APIMart ${model} 不支持参考音频`);
+  }
+  // MiniMax-H3：音频不能单独使用，必须搭配参考图或参考视频
+  if (audioUrls.length > 0 && imageUrls.length === 0 && videoUrls.length === 0 && !hasFrame) {
+    throw new Error(`APIMart ${model} 参考音频不能单独使用，请搭配参考图或参考视频`);
   }
 
   const resolution = params.resolution && capability.resolutions.includes(params.resolution)
@@ -201,11 +286,21 @@ export function buildApimartSeedanceRequest(
     resolution,
     [capability.ratioField]: ratio,
   };
-  if (imageUrls.length > 0) body.image_urls = imageUrls;
+  if (frameFields) {
+    if (params.firstFrameUrl?.trim()) body[frameFields.first] = params.firstFrameUrl.trim();
+    if (params.lastFrameUrl?.trim()) body[frameFields.last] = params.lastFrameUrl.trim();
+    // MiniMax-H3 参考图（role=reference）仍走 image_urls，与首尾帧互斥已在上方校验
+    if (imageUrls.length > 0) body.image_urls = imageUrls;
+  } else {
+    if (imageUrls.length > 0) body.image_urls = imageUrls;
+  }
   if (videoUrls.length > 0) body.video_urls = videoUrls;
   if (audioUrls.length > 0) body.audio_urls = audioUrls;
   if (capability.audioField) {
     body[capability.audioField] = params.generateAudio ?? capability.defaultAudio ?? false;
+  }
+  if (capability.watermarkField) {
+    body[capability.watermarkField] = params.watermark ?? capability.defaultWatermark ?? false;
   }
   return body;
 }

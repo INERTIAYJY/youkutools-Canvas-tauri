@@ -36,7 +36,7 @@ import {
   executeGeneralAsyncTask,
   generateApimartImagesBatch,
 } from '../../src/services/ai/apimartGen';
-import { buildApimartSeedanceRequest } from '../../src/services/ai/apimartVideoModels';
+import { buildApimartSeedanceRequest, isApimartSeedanceModel } from '../../src/services/ai/apimartVideoModels';
 import { apimartMediaProviderAdapter } from '../../src/services/ai/providers/apimartMedia';
 
 function jsonResponse(body: unknown): Response {
@@ -236,6 +236,74 @@ describe('APIMart video polling', () => {
       'prompt',
       { videoUrls: ['reference.mp4'], operation: 'video-to-video' },
     )).toThrow('不支持 video-to-video');
+  });
+});
+
+describe('APIMart MiniMax-H3 video', () => {
+  it('builds a text-to-video request with H3-specific resolution and watermark', () => {
+    expect(buildApimartSeedanceRequest(
+      'MiniMax-H3',
+      'prompt',
+      { resolution: '768P', ratio: '9:16' },
+    )).toEqual({
+      model: 'MiniMax-H3',
+      prompt: 'prompt',
+      duration: 5,
+      resolution: '768P',
+      aspect_ratio: '9:16',
+      watermark: false,
+    });
+  });
+
+  it('maps first/last frame fields and reference images for MiniMax-H3', () => {
+    expect(buildApimartSeedanceRequest(
+      'apimart/MiniMax-H3',
+      'prompt',
+      { firstFrameUrl: 'https://cdn.example/start.png', lastFrameUrl: 'https://cdn.example/end.png' },
+    )).toMatchObject({
+      model: 'MiniMax-H3',
+      first_frame_image: 'https://cdn.example/start.png',
+      last_frame_image: 'https://cdn.example/end.png',
+    });
+  });
+
+  it('supports multimodal reference (image + video + audio) for MiniMax-H3', () => {
+    expect(buildApimartSeedanceRequest(
+      'MiniMax-H3-Context-IR',
+      'prompt',
+      {
+        imageUrls: ['https://cdn.example/char.png'],
+        videoUrls: ['https://cdn.example/motion.mp4'],
+        audioUrls: ['https://cdn.example/voice.mp3'],
+      },
+    )).toMatchObject({
+      model: 'MiniMax-H3-Context-IR',
+      image_urls: ['https://cdn.example/char.png'],
+      video_urls: ['https://cdn.example/motion.mp4'],
+      audio_urls: ['https://cdn.example/voice.mp3'],
+    });
+  });
+
+  it('rejects mixing first/last frame with reference media for MiniMax-H3', () => {
+    expect(() => buildApimartSeedanceRequest(
+      'MiniMax-H3',
+      'prompt',
+      { firstFrameUrl: 'https://cdn.example/start.png', imageUrls: ['https://cdn.example/char.png'] },
+    )).toThrow('首尾帧与参考素材不能同时使用');
+  });
+
+  it('rejects standalone audio references for MiniMax-H3', () => {
+    expect(() => buildApimartSeedanceRequest(
+      'MiniMax-H3-Regeneration',
+      'prompt',
+      { audioUrls: ['https://cdn.example/voice.mp3'] },
+    )).toThrow('参考音频不能单独使用');
+  });
+
+  it('normalizes MiniMax-H3 model id case-insensitively', () => {
+    expect(isApimartSeedanceModel('minimax-h3')).toBe(true);
+    expect(isApimartSeedanceModel('MiniMax-H3')).toBe(true);
+    expect(isApimartSeedanceModel('apimart/MiniMax-H3-Regeneration')).toBe(true);
   });
 });
 

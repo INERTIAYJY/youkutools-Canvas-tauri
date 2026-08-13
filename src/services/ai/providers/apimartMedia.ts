@@ -25,7 +25,8 @@ import {
   type FlowMusicTaskState,
 } from '../apimartAudio';
 import { generateApimartImagesBatch, generateApimartVideo } from '../apimartGen';
-import { isApimartSeedanceModel } from '../apimartVideoModels';
+import { getApimartSeedanceCapability, isApimartSeedanceModel } from '../apimartVideoModels';
+import { getMediaReferenceUrl } from '../connectedReferenceMedia';
 import { extractModelName } from '../helpers';
 import { resolveImageUrlArray } from '../imageUtils';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
@@ -199,7 +200,40 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
     ) {
       throw new Error('提示词不能为空');
     }
-    const imageUrls = await resolveImageUrlArray(referenceInput.imageUrls, 'apimart');
+    const capability = getApimartSeedanceCapability(modelName);
+    // MiniMax-H3 等模型用独立首/尾帧字段：从 references 按 role 拆分，其余图作参考图
+    let imageUrls: string[];
+    let firstFrameUrl: string | undefined;
+    let lastFrameUrl: string | undefined;
+    if (capability?.frameFields) {
+      const references = referenceInput.references ?? [];
+      const frameUrls = await resolveImageUrlArray(
+        references
+          .filter((ref) => ref.kind === 'image'
+            && (ref.role === 'first_frame' || ref.role === 'last_frame'))
+          .map((ref) => getMediaReferenceUrl(ref)),
+        'apimart',
+      );
+      const frameRoles = references
+        .filter((ref) => ref.kind === 'image'
+          && (ref.role === 'first_frame' || ref.role === 'last_frame'))
+        .map((ref) => ref.role);
+      firstFrameUrl = frameRoles.includes('first_frame')
+        ? frameUrls[frameRoles.indexOf('first_frame')]
+        : undefined;
+      lastFrameUrl = frameRoles.includes('last_frame')
+        ? frameUrls[frameRoles.indexOf('last_frame')]
+        : undefined;
+      // 其余角色为 reference 的图片作为多模态参考图
+      imageUrls = await resolveImageUrlArray(
+        references
+          .filter((ref) => ref.kind === 'image' && ref.role === 'reference')
+          .map((ref) => getMediaReferenceUrl(ref)),
+        'apimart',
+      );
+    } else {
+      imageUrls = await resolveImageUrlArray(referenceInput.imageUrls, 'apimart');
+    }
     if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
     return generateApimartVideo(apiKey, baseUrl, modelName, referenceInput.prompt, params.nodeId, {
       resolution: params.seedanceResolution,
@@ -207,6 +241,8 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       duration: params.seedanceDuration,
       generateAudio: params.generateAudio,
       imageUrls,
+      firstFrameUrl,
+      lastFrameUrl,
       videoUrls: referenceInput.videoUrls,
       audioUrls: referenceInput.audioUrls,
       operation: referenceInput.operation,

@@ -57,7 +57,7 @@ interface ModelRowDefinition {
 interface ModelOptionGroup {
   id: string;
   name: string;
-  options: Array<{ value: string; label: string }>;
+  options: Array<{ value: string; label: string; inputModalities?: Array<'text' | 'image'> }>;
 }
 
 const MODEL_ROWS: ModelRowDefinition[] = [
@@ -117,7 +117,7 @@ function buildModelGroups(
         || seen.has(model.value)
       ) return [];
       seen.add(model.value);
-      return [{ value: model.value, label: model.label }];
+      return [{ value: model.value, label: model.label, inputModalities: model.inputModalities }];
     });
     return options.length > 0 ? [{ id: group.id, name: group.name, options }] : [];
   });
@@ -130,7 +130,7 @@ function buildModelGroups(
     const value = `general/${model.id}`;
     if (seen.has(value)) return [];
     seen.add(value);
-    return [{ value, label: model.name }];
+    return [{ value, label: model.name, inputModalities: model.inputModalities }];
   });
   if (generalOptions.length > 0) {
     groups.push({ id: 'general-models', name: '通用模型', options: generalOptions });

@@ -29,6 +29,7 @@ import LazyLoadBoundary, { LazyLoadFallback } from './components/shared/LazyLoad
 import { useMascotStatus } from './hooks/useMascotStatus';
 import { useMascotDrag } from './hooks/useMascotDrag';
 import { initComfyUIWindowBridge } from './services/comfyUIWindowService';
+import { invoke } from '@tauri-apps/api/core';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -254,26 +255,18 @@ export default function App() {
   };
   const handleMascotActivate = async () => {
     const store = useAppStore.getState();
-    if (!store.chatPanelDetached) {
-      store.openChat();
+    // 独立窗口模式：点击吉祥物关闭独立窗口并收回内嵌（与 Sidebar 入口一致）
+    if (store.chatPanelDetached) {
+      const { emitCloseChatWindow } = await import('./services/chat/chatWindowService');
+      try {
+        await emitCloseChatWindow();
+        await invoke('close_chat_window');
+      } catch { /* ignore */ }
+      store.setChatPanelDetached(false);
       return;
     }
-
-    if (isTauri) {
-      try {
-        const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-        const chatWindow = await WebviewWindow.getByLabel('chat-assistant');
-        if (chatWindow) {
-          await chatWindow.show();
-          await chatWindow.unminimize();
-          await chatWindow.setFocus();
-          return;
-        }
-      } catch { /* fall back to the embedded panel */ }
-    }
-
-    store.setChatPanelDetached(false);
-    store.openChat();
+    // 内嵌面板：打开 ⇄ 关闭切换
+    store.toggleChat();
   };
 
   // 同步主题到 document.documentElement，供 CSS [data-theme] 选择器生效

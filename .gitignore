@@ -33,6 +33,11 @@ src-tauri/update-key.key
 
 promo-video
 
+# 临时诊断文件（勿提交）
+release_list.json
+graphql_result.json
+rest_releases.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

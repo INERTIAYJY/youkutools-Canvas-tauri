@@ -30,6 +30,7 @@ vi.mock('../../src/store/useAppStore', () => ({
 vi.mock('../../src/services/uploadService', () => ({
   isLocalImageUrl: (url: string) => url.startsWith('asset:') || url.includes('asset.localhost'),
   uploadToRemote: serviceMocks.uploadToRemote,
+  resolveMediaReferenceUrl: async (url: string) => url,
 }));
 
 import {
@@ -285,6 +286,46 @@ describe('APIMart Seedance 2.5 video', () => {
       model: 'doubao-seedance-2.5',
       audio_urls: ['https://cdn.example/bgm.mp3'],
     });
+  });
+
+  it('writes first/last frame into image_with_roles instead of image_urls', () => {
+    const body = buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      {
+        imageWithRoles: [
+          { url: 'https://cdn.example/first.jpg', role: 'first_frame' },
+          { url: 'https://cdn.example/last.jpg', role: 'last_frame' },
+        ],
+      },
+    );
+    expect(body).toMatchObject({
+      model: 'doubao-seedance-2.5',
+      image_with_roles: [
+        { url: 'https://cdn.example/first.jpg', role: 'first_frame' },
+        { url: 'https://cdn.example/last.jpg', role: 'last_frame' },
+      ],
+    });
+    expect(body).not.toHaveProperty('image_urls');
+  });
+
+  it('rejects mixing image_with_roles with reference media', () => {
+    expect(() => buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      {
+        imageWithRoles: [{ url: 'https://cdn.example/first.jpg', role: 'first_frame' }],
+        imageUrls: ['https://cdn.example/ref.png'],
+      },
+    )).toThrow('首尾帧与参考素材不能同时使用');
+  });
+
+  it('defaults size to adaptive (2.5 文档默认值)', () => {
+    expect(buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      {},
+    )).toMatchObject({ size: 'adaptive' });
   });
 });
 

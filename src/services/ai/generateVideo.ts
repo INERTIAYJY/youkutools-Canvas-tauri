@@ -3,7 +3,6 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import { DEFAULT_BASE_URLS } from '../../constants/api';
-import { readFileToDataUrl } from '../fileService';
 import { resolveNodeReferences } from '../nodeReferenceService';
 import { generateDreaminaVideo } from '../dreaminaService';
 import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
@@ -39,6 +38,7 @@ import {
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from '../pollManager';
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
+import { resolveMediaReferenceUrl } from '../uploadService';
 
 export function resolveVideoGenerationOperation(
   imageUrls: readonly string[],
@@ -119,36 +119,14 @@ function assignVideoReferenceRoles(references: readonly MediaReference[]): Media
   });
 }
 
-function isRemoteHttpUrl(url: string): boolean {
-  return /^https?:\/\//i.test(url) && !url.includes('asset.localhost');
-}
-
-function assertRemoteVideoAudioReferences(
-  referenceInput: VideoGenerationReferenceInput,
-  target: string,
-): void {
-  for (const [kind, urls] of [
-    ['视频', referenceInput.videoUrls],
-    ['音频', referenceInput.audioUrls],
-  ] as const) {
-    if (urls.some((url) => !isRemoteHttpUrl(url))) {
-      throw new Error(`${target} 的${kind}参考必须是公网 URL；本地文件需由该 Provider 的官方上传接口转换后再提交`);
-    }
-  }
-}
-
 async function resolveGeneralProtocolMediaUrls(
   references: readonly MediaReference[],
   kind: 'video' | 'audio',
 ): Promise<string[]> {
   return Promise.all(references.filter((reference) => reference.kind === kind).map(async (reference) => {
     const url = getMediaReferenceUrl(reference);
-    if (isRemoteHttpUrl(url) || url.startsWith('data:')) return url;
-    if (reference.filePath) {
-      const dataUrl = await readFileToDataUrl(reference.filePath);
-      if (dataUrl) return dataUrl;
-    }
-    throw new Error(`通用模型无法读取本地${kind === 'video' ? '视频' : '音频'}参考，请重新导入文件或使用提供上传能力的模型`);
+    // 通用协议模型需要 data URL（base64）；公网 / data: 原样返回
+    return resolveMediaReferenceUrl(url, { mode: 'dataUrl', kind });
   }));
 }
 
@@ -297,11 +275,7 @@ export async function generateVideo(
       params,
       prompt,
       resolveReferenceInput: async () => {
-        const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
-        if (provider === 'apimart') {
-          assertRemoteVideoAudioReferences(referenceInput, 'APIMart');
-        }
-        return referenceInput;
+        return resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
       },
       signal,
     });

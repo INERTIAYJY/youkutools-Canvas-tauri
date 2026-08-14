@@ -13,6 +13,7 @@
 import { useAppStore } from '../store/useAppStore';
 import { APIMART_BASE_URL } from '../constants/api';
 import { isTauriEnv } from './fs/core';
+import { readFileToDataUrl } from './fileService';
 import { invoke } from '@tauri-apps/api/core';
 
 const DEFAULT_UPLOAD_BASE = APIMART_BASE_URL;
@@ -293,10 +294,10 @@ function setCachedUrl(url: string, remoteUrl: string) {
 }
 
 /**
- * 上传单张本地图片到远端图床
- * @param url    本地图片 URL（data: / asset: / file:）
- * @param provider 提供商标识：'apimart' 走 APIMart 图床，其他走 uguu.se
- * @returns 公网可访问的图片 URL
+ * 上传单个本地文件到远端图床
+ * @param url    本地文件 URL（data: / asset: / file:）
+ * @param provider 提供商标识：'apimart' + 图片走 APIMart /uploads/images，其余走 uguu.se
+ * @returns 公网可访问的 URL
  */
 export async function uploadToRemote(url: string, provider = ''): Promise<string> {
   if (!isLocalImageUrl(url)) return url;
@@ -318,4 +319,42 @@ export async function uploadToRemote(url: string, provider = ''): Promise<string
     console.error('[uploadService] Upload failed:', { sourceType, sourceLength: url.length, provider }, err);
     throw err;
   }
+}
+
+/**
+ * 本地媒体参考统一解析入口：把本地文件（data: / asset: / file:）按目标形态处理为
+ * 公网 URL 或 base64 data URL，供各类模型 Provider 统一拦截。
+ *
+ * 分发策略：
+ *  - `dataUrl`   → 读取本地文件转 base64 data URL（general 通用协议等）
+ *  - `publicUrl` → 上传图床：provider === 'apimart' 且为图片时走 APIMart /uploads/images，
+ *                   其余（含 apimart 的视频/音频，以及所有非 apimart Provider）走 uguu.se
+ *
+ * @param url     原始 URL（本地或公网；公网 / data: 原样返回）
+ * @param options.provider 提供商标识，决定上传图床
+ * @param options.mode     目标形态：'publicUrl'（默认）| 'dataUrl'
+ * @param options.kind     媒体类型（image / video / audio），用于 apimart 图床分流
+ */
+export async function resolveMediaReferenceUrl(
+  url: string,
+  options: {
+    provider?: string;
+    mode?: 'publicUrl' | 'dataUrl';
+    kind?: 'image' | 'video' | 'audio';
+  } = {},
+): Promise<string> {
+  const { provider = '', mode = 'publicUrl', kind = 'image' } = options;
+  if (/^https?:\/\//i.test(url) || url.startsWith('data:')) return url;
+
+  if (mode === 'dataUrl') {
+    const dataUrl = await readFileToDataUrl(url);
+    if (!dataUrl) {
+      throw new Error(`无法读取本地${kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '图片'}参考，请重新导入文件`);
+    }
+    return dataUrl;
+  }
+
+  // APIMart 的 /uploads/images 只接受图片；视频/音频即使 provider 是 apimart 也走通用图床
+  const effectiveProvider = provider === 'apimart' && kind === 'image' ? 'apimart' : '';
+  return uploadToRemote(url, effectiveProvider);
 }

@@ -29,6 +29,7 @@ import { getApimartSeedanceCapability, isApimartSeedanceModel } from '../apimart
 import { getMediaReferenceUrl } from '../connectedReferenceMedia';
 import { extractModelName } from '../helpers';
 import { resolveImageUrlArray } from '../imageUtils';
+import { resolveMediaReferenceUrl } from '../../uploadService';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
 
 function resolveApimartConnection(): { apiKey: string; baseUrl: string } {
@@ -201,29 +202,35 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       throw new Error('提示词不能为空');
     }
     const capability = getApimartSeedanceCapability(modelName);
-    // MiniMax-H3 等模型用独立首/尾帧字段：从 references 按 role 拆分，其余图作参考图
+    // MiniMax-H3 用独立首/尾帧字段；Seedance 2.0/2.5 用 image_with_roles 数组。
+    // 两者都需从 references 按 role 拆分首/尾帧，其余 role=reference 的图作多模态参考图。
+    // 无 references（调用方未提供角色信息）时回退为普通参考图 image_urls。
     let imageUrls: string[];
     let firstFrameUrl: string | undefined;
     let lastFrameUrl: string | undefined;
-    if (capability?.frameFields) {
-      const references = referenceInput.references ?? [];
+    let imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }> = [];
+    const references = referenceInput.references ?? [];
+    if ((capability?.frameFields || capability?.imageWithRoles) && references.length > 0) {
+      const frameRefs = references.filter((ref) => ref.kind === 'image'
+        && (ref.role === 'first_frame' || ref.role === 'last_frame'));
       const frameUrls = await resolveImageUrlArray(
-        references
-          .filter((ref) => ref.kind === 'image'
-            && (ref.role === 'first_frame' || ref.role === 'last_frame'))
-          .map((ref) => getMediaReferenceUrl(ref)),
+        frameRefs.map((ref) => getMediaReferenceUrl(ref)),
         'apimart',
       );
-      const frameRoles = references
-        .filter((ref) => ref.kind === 'image'
-          && (ref.role === 'first_frame' || ref.role === 'last_frame'))
-        .map((ref) => ref.role);
-      firstFrameUrl = frameRoles.includes('first_frame')
-        ? frameUrls[frameRoles.indexOf('first_frame')]
-        : undefined;
-      lastFrameUrl = frameRoles.includes('last_frame')
-        ? frameUrls[frameRoles.indexOf('last_frame')]
-        : undefined;
+      const frameRoles = frameRefs.map((ref) => ref.role);
+      if (capability?.frameFields) {
+        firstFrameUrl = frameRoles.includes('first_frame')
+          ? frameUrls[frameRoles.indexOf('first_frame')]
+          : undefined;
+        lastFrameUrl = frameRoles.includes('last_frame')
+          ? frameUrls[frameRoles.indexOf('last_frame')]
+          : undefined;
+      } else {
+        imageWithRoles = frameRefs.map((ref, index) => ({
+          url: frameUrls[index],
+          role: ref.role as 'first_frame' | 'last_frame',
+        }));
+      }
       // 其余角色为 reference 的图片作为多模态参考图
       imageUrls = await resolveImageUrlArray(
         references
@@ -234,6 +241,11 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
     } else {
       imageUrls = await resolveImageUrlArray(referenceInput.imageUrls, 'apimart');
     }
+    // APIMart 的视频/音频参考必须是公网 URL；本地文件经统一入口上传（视频/音频强制走通用图床）
+    const [videoUrls, audioUrls] = await Promise.all([
+      Promise.all(referenceInput.videoUrls.map((url) => resolveMediaReferenceUrl(url, { kind: 'video' }))),
+      Promise.all(referenceInput.audioUrls.map((url) => resolveMediaReferenceUrl(url, { kind: 'audio' }))),
+    ]);
     if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
     return generateApimartVideo(apiKey, baseUrl, modelName, referenceInput.prompt, params.nodeId, {
       resolution: params.seedanceResolution,
@@ -243,8 +255,9 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       imageUrls,
       firstFrameUrl,
       lastFrameUrl,
-      videoUrls: referenceInput.videoUrls,
-      audioUrls: referenceInput.audioUrls,
+      imageWithRoles,
+      videoUrls,
+      audioUrls,
       operation: referenceInput.operation,
     }, signal);
   },

@@ -3,7 +3,8 @@
  */
 import { resolveNodeReferences } from '../nodeReferenceService';
 import { executeComfyUIAudioGenerate } from '../comfyWorkflowService';
-import { downloadUrlAndSave, isTauriEnv, readFileToDataUrl, saveBinaryToProjectData } from '../fileService';
+import { downloadUrlAndSave, isTauriEnv, saveBinaryToProjectData } from '../fileService';
+import { resolveMediaReferenceUrl } from '../uploadService';
 import type { AIAudioGenParams, AudioGenerationResult, MediaReference } from '../../types/aiTypes';
 import type { MediaPersistenceStatus } from '../../types/media';
 import { resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
@@ -50,12 +51,8 @@ async function resolveGeneralAudioReferenceUrls(
 ): Promise<string[]> {
   return Promise.all(references.filter((reference) => reference.kind === 'audio').map(async (reference) => {
     const url = getMediaReferenceUrl(reference);
-    if (/^https?:\/\//i.test(url) || url.startsWith('data:')) return url;
-    if (reference.filePath) {
-      const dataUrl = await readFileToDataUrl(reference.filePath);
-      if (dataUrl) return dataUrl;
-    }
-    throw new Error('通用模型无法读取本地音频参考，请重新导入文件或使用提供上传能力的模型');
+    // 通用协议模型需要 data URL（base64）；公网 / data: 原样返回
+    return resolveMediaReferenceUrl(url, { mode: 'dataUrl', kind: 'audio' });
   }));
 }
 

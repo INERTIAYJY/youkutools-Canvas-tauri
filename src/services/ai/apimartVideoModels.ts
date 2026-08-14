@@ -30,6 +30,8 @@ export interface ApimartSeedanceCapability {
   /** 支持 AIGC 水印字段（watermark/aigc_watermark）。 */
   watermarkField?: 'watermark' | 'aigc_watermark';
   defaultWatermark?: boolean;
+  /** Seedance 2.0/2.5 用 image_with_roles 数组传递首/尾帧（而非独立字段）。 */
+  imageWithRoles?: boolean;
 }
 
 export interface ApimartSeedanceRequestParams {
@@ -47,6 +49,8 @@ export interface ApimartSeedanceRequestParams {
   lastFrameUrl?: string;
   /** MiniMax-H3 是否添加 AIGC 水印。 */
   watermark?: boolean;
+  /** Seedance 2.0/2.5 带角色的首/尾帧图（写入 image_with_roles）。 */
+  imageWithRoles?: Array<{ url: string; role: 'first_frame' | 'last_frame' }>;
 }
 
 const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
@@ -114,6 +118,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     maxImageReferences: 9,
     maxVideoReferences: 3,
     maxAudioReferences: 3,
+    imageWithRoles: true,
   },
   'doubao-seedance-2.0-fast': {
     modelId: 'doubao-seedance-2.0-fast',
@@ -131,6 +136,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     maxImageReferences: 9,
     maxVideoReferences: 3,
     maxAudioReferences: 3,
+    imageWithRoles: true,
   },
   'doubao-seedance-2.0-mini': {
     modelId: 'doubao-seedance-2.0-mini',
@@ -148,13 +154,14 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     maxImageReferences: 9,
     maxVideoReferences: 3,
     maxAudioReferences: 3,
+    imageWithRoles: true,
   },
   'doubao-seedance-2.5': {
     modelId: 'doubao-seedance-2.5',
     resolutions: SD_2_RESOLUTIONS,
     defaultResolution: '720p',
     ratios: COMMON_RATIOS,
-    defaultRatio: '16:9',
+    defaultRatio: 'adaptive',
     ratioField: 'size',
     minDuration: 4,
     maxDuration: 30,
@@ -167,6 +174,7 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     maxAudioReferences: 10,
     watermarkField: 'watermark',
     defaultWatermark: false,
+    imageWithRoles: true,
   },
   'minimax-h3': {
     modelId: 'MiniMax-H3',
@@ -255,14 +263,18 @@ export function buildApimartSeedanceRequest(
   const hasFrame = frameFields
     ? Boolean(params.firstFrameUrl?.trim() || params.lastFrameUrl?.trim())
     : false;
-  // MiniMax-H3：首尾帧与多模态参考严格互斥，混用会返回 400
-  if (hasFrame && (imageUrls.length > 0 || videoUrls.length > 0 || audioUrls.length > 0)) {
+  // image_with_roles 携带的首/尾帧（Seedance 2.0/2.5）
+  const imageWithRoles = (params.imageWithRoles ?? [])
+    .filter((item) => item.url?.trim() && (item.role === 'first_frame' || item.role === 'last_frame'));
+  const hasImageWithRoles = imageWithRoles.length > 0;
+  // 首/尾帧（frameFields 独立字段 或 image_with_roles）与多模态参考严格互斥，混用会返回 400
+  if ((hasFrame || hasImageWithRoles) && (imageUrls.length > 0 || videoUrls.length > 0 || audioUrls.length > 0)) {
     throw new Error(`APIMart ${model} 首尾帧与参考素材不能同时使用`);
   }
   const operation = params.operation
     ?? (videoUrls.length > 0
       ? 'video-to-video'
-      : imageUrls.length > 0 || hasFrame ? 'image-to-video' : 'text-to-video');
+      : imageUrls.length > 0 || hasFrame || hasImageWithRoles ? 'image-to-video' : 'text-to-video');
   if (!capability.operations.includes(operation)) {
     throw new Error(`APIMart ${model} 不支持 ${operation}`);
   }
@@ -315,6 +327,9 @@ export function buildApimartSeedanceRequest(
     if (params.lastFrameUrl?.trim()) body[frameFields.last] = params.lastFrameUrl.trim();
     // MiniMax-H3 参考图（role=reference）仍走 image_urls，与首尾帧互斥已在上方校验
     if (imageUrls.length > 0) body.image_urls = imageUrls;
+  } else if (hasImageWithRoles) {
+    // Seedance 2.0/2.5：首/尾帧走 image_with_roles（与 image_urls 互斥，此时不写 image_urls）
+    body.image_with_roles = imageWithRoles.map(({ url, role }) => ({ url: url.trim(), role }));
   } else {
     if (imageUrls.length > 0) body.image_urls = imageUrls;
   }

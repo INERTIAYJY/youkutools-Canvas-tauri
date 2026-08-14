@@ -12,6 +12,7 @@ import { mapImageDimensions } from '../../aiDimensions';
 import { runBatchTasks } from '../batchUtils';
 import type { BatchImageResult } from '../../../types/aiTypes';
 import { corsSafeFetch } from '../httpTransport';
+import { mapImageParameters } from '../imageParameterMappings';
 
 export interface VolcengineImageParams {
   apiKey: string;
@@ -40,14 +41,12 @@ export async function generateVolcengineImage(
   // doubao-seedream-5-0-pro-260628 使用 WxH 格式，且不支持 sequential_image_generation
   const isPro = modelName === 'doubao-seedream-5-0-pro-260628';
 
-  const requestBody: Record<string, unknown> = {
+  const requestBody = mapImageParameters('volcengine', modelName, {
     model: modelName,
     prompt,
-    response_format: 'url',
-    size: isPro ? `${dimensions.width}x${dimensions.height}` : seedreamSize,
-    stream: false,
-    watermark: true,
-  };
+    imageSize: isPro ? `${dimensions.width}x${dimensions.height}` : seedreamSize,
+    referenceImageUrls: imageUrls,
+  });
   if (!isPro) {
     requestBody.sequential_image_generation = 'disabled';
   }

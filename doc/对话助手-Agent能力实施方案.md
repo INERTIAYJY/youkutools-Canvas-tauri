@@ -2351,6 +2351,8 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 ## 13. 变更日志
 
+| 2026-08-14 | 媒体参数映射第一阶段 | 新增图片、视频、音频三类统一参数映射注册表；图片标准/APIMart/火山/RunningHub、APIMart 视频 Seedance、APIMart TTS/Flow Music 与通用异步媒体入口接入映射函数；新增 `tests/services/mediaParameterMappings.test.ts` 定向测试。保留现有 URL、鉴权、轮询和响应解析边界，未新增依赖。已执行 `npm run typecheck`、5 个受影响服务测试（68 项）与改动文件定向 ESLint；`npm run check` 仍被仓库既有 ESLint 10 / parser 错误 `scopeManager.addGlobals is not a function` 阻断。 |
+
 | 日期 | 阶段 | 变更 |
 |---|---|---|
 | 2026-08-13 | 8.26 第四批 | 补齐节点复制、画布笔记、图层、图片形态转换、分组重命名、分镜宫格和镜头表绑定工具。 |

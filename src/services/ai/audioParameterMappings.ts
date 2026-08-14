@@ -1,0 +1,98 @@
+import type { AIAudioGenParams, AudioOutputFormat, AudioTtsVoice } from '../../types/aiTypes';
+
+export type AudioParameterKey =
+  | 'model'
+  | 'prompt'
+  | 'batchCount'
+  | 'input'
+  | 'voice'
+  | 'format'
+  | 'speed'
+  | 'soundPrompt'
+  | 'lyrics'
+  | 'title'
+  | 'bpm'
+  | 'length';
+
+export interface AudioParameterMapping {
+  providerId: string;
+  modelPattern?: RegExp;
+  fields: Partial<Record<AudioParameterKey, string>>;
+  staticFields?: Record<string, unknown>;
+}
+
+const DEFAULT_AUDIO_MAPPING: AudioParameterMapping = {
+  providerId: '*',
+  fields: { model: 'model', prompt: 'prompt', batchCount: 'n', input: 'input', voice: 'voice', format: 'response_format', speed: 'speed', soundPrompt: 'sound_prompt', lyrics: 'lyrics', title: 'title', bpm: 'bpm', length: 'length' },
+};
+
+export const AUDIO_PARAMETER_MAPPINGS: readonly AudioParameterMapping[] = [
+  {
+    providerId: 'apimart',
+    modelPattern: /tts|speech|voice/i,
+    fields: { model: 'model', prompt: 'prompt', batchCount: 'n', input: 'input', voice: 'voice', format: 'response_format', speed: 'speed' },
+  },
+  {
+    providerId: 'apimart',
+    modelPattern: /flowmusic|music/i,
+    fields: { model: 'model', soundPrompt: 'sound_prompt', lyrics: 'lyrics', title: 'title', bpm: 'bpm', length: 'length' },
+    staticFields: { model: 'flowmusic' },
+  },
+  {
+    providerId: 'standard',
+    fields: { model: 'model', input: 'input', voice: 'voice', format: 'response_format', speed: 'speed' },
+  },
+];
+
+export function resolveAudioParameterMapping(providerId: string, modelId = ''): AudioParameterMapping {
+  const normalizedProvider = providerId.trim().toLowerCase();
+  const providerMatch = AUDIO_PARAMETER_MAPPINGS.find((mapping) =>
+    mapping.providerId === normalizedProvider
+      && (!mapping.modelPattern || mapping.modelPattern.test(modelId)),
+  );
+  if (providerMatch) return providerMatch;
+  if (normalizedProvider === 'standard') {
+    return AUDIO_PARAMETER_MAPPINGS.find((mapping) => mapping.providerId === 'standard') ?? DEFAULT_AUDIO_MAPPING;
+  }
+  return DEFAULT_AUDIO_MAPPING;
+}
+
+export function mapAudioParameters(
+  providerId: string,
+  modelId: string,
+  values: Partial<Record<AudioParameterKey, unknown>>,
+): Record<string, unknown> {
+  const mapping = resolveAudioParameterMapping(providerId, modelId);
+  const output: Record<string, unknown> = { ...(mapping.staticFields ?? {}) };
+  for (const [key, field] of Object.entries(mapping.fields)) {
+    const value = values[key as AudioParameterKey];
+    if (field && value !== undefined && value !== null && value !== '' && (!Array.isArray(value) || value.length > 0)) {
+      output[field] = value;
+    }
+  }
+  return output;
+}
+
+export interface AudioSpeechMappingInput {
+  model: string;
+  input: string;
+  voice: AudioTtsVoice;
+  format: AudioOutputFormat;
+  speed: number;
+}
+
+export function buildAudioSpeechRequestBody(input: AudioSpeechMappingInput): Record<string, unknown> {
+  return mapAudioParameters('apimart', input.model, input);
+}
+
+export function buildAudioMusicRequestBody(
+  params: Pick<AIAudioGenParams, 'musicTitle' | 'musicLyrics' | 'musicBpm' | 'musicDuration'> & { soundPrompt?: string },
+): Record<string, unknown> {
+  return mapAudioParameters('apimart', 'flowmusic', {
+    soundPrompt: params.soundPrompt,
+    lyrics: params.musicLyrics,
+    title: params.musicTitle,
+    bpm: params.musicBpm === undefined ? undefined : String(Math.max(1, Math.round(params.musicBpm))),
+    length: params.musicDuration === undefined ? undefined : Math.min(240, Math.max(1, Math.round(params.musicDuration))),
+  });
+}

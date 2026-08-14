@@ -40,6 +40,7 @@ import { savePendingTask, updatePendingTask, removePendingTask, registerNodePoll
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
 import { resolveMediaReferenceUrl } from '../uploadService';
+import { mapVideoParameters } from './videoParameterMappings';
 
 export function resolveVideoGenerationOperation(
   imageUrls: readonly string[],
@@ -394,6 +395,17 @@ export async function generateVideo(
       connection.providerConfigId,
       params.nodeId,
       signal,
+      mapVideoParameters(connection.providerConfigId, gm.modelId, {
+        model: gm.modelId,
+        prompt: referenceInput.prompt,
+        resolution: params.seedanceResolution,
+        aspectRatio: params.seedanceRatio,
+        duration: params.seedanceDuration,
+        generateAudio: params.generateAudio,
+        imageUrls: referenceInput.imageUrls,
+        videoUrls: referenceInput.videoUrls,
+        audioUrls: referenceInput.audioUrls,
+      }),
     );
   }
 
@@ -455,14 +467,14 @@ async function generateVolcengineVideo(
     const ratio = params.seedanceRatio || '16:9';
     const duration = params.seedanceDuration ?? 5;
     const resolution = params.seedanceResolution || '720p';
-    const requestBody: Record<string, unknown> = {
+    const requestBody = mapVideoParameters('volcengine', modelName, {
       model: modelName,
-      content,
-      ratio,
+      aspectRatio: ratio,
       duration,
       resolution,
-      watermark: false,
-    };
+    });
+    requestBody.content = content;
+    requestBody.watermark = false;
     if (params.generateAudio) {
       requestBody.generate_audio = true;
     }

@@ -19,6 +19,7 @@ import { collectPromptNodeMediaUrls } from './promptResolver';
 import { executeGeneralAsyncTask } from './apimartGen';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
+import { mapAudioParameters } from './audioParameterMappings';
 
 export interface PersistedAudioGenerationResult {
   mediaUrl: string;
@@ -182,6 +183,11 @@ export async function generateAudio(
       connection.providerConfigId,
       params.nodeId,
       signal,
+      mapAudioParameters('standard', gm.modelId, {
+        model: gm.modelId,
+        prompt,
+        batchCount: 1,
+      }),
     );
   }
 

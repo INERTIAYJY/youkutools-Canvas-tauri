@@ -11,6 +11,7 @@ import {
   getAudioCapabilityDetail,
   type AudioCapabilityKind,
 } from './mediaModelCapabilities';
+import { buildAudioMusicRequestBody, buildAudioSpeechRequestBody } from './audioParameterMappings';
 
 export type ApimartAudioCapability = AudioCapabilityKind;
 
@@ -122,13 +123,7 @@ export async function generateApimartSpeech(
   const response = await corsSafeFetch(endpoint(baseUrl, '/audio/speech'), {
     method: 'POST',
     headers: buildAuthHeaders(apiKey),
-    body: JSON.stringify({
-      model: params.model,
-      input: params.input,
-      voice: params.voice,
-      response_format: params.format,
-      speed: params.speed,
-    }),
+    body: JSON.stringify(buildAudioSpeechRequestBody(params)),
     signal,
   });
   if (!response.ok) {
@@ -212,10 +207,13 @@ export function submitFlowMusicGeneration(
   const lyrics = request.lyrics?.trim();
   if (!soundPrompt && !lyrics) throw new Error('Flow Music 的风格提示词和歌词不能同时为空');
 
-  const body: Record<string, unknown> = { model: 'flowmusic' };
-  if (soundPrompt) body.sound_prompt = soundPrompt;
-  if (lyrics) body.lyrics = lyrics;
-  if (request.title?.trim()) body.title = request.title.trim();
+  const body: Record<string, unknown> = buildAudioMusicRequestBody({
+    soundPrompt,
+    musicLyrics: lyrics,
+    musicTitle: request.title?.trim(),
+    musicBpm: request.bpm,
+    musicDuration: request.length,
+  });
   if (request.bpm !== undefined) {
     if (!Number.isFinite(request.bpm)) throw new Error('Flow Music BPM 必须是有效数字');
     body.bpm = String(Math.max(1, Math.round(request.bpm)));

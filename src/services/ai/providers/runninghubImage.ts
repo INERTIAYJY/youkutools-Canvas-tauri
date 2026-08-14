@@ -17,6 +17,7 @@ import { pollTask } from '../../pollTask';
 import { runBatchTasks } from '../batchUtils';
 import { buildAuthHeaders } from '../httpUtils';
 import { corsSafeFetch } from '../httpTransport';
+import { mapImageParameters } from '../imageParameterMappings';
 
 type RunningHubImageFamily = 'v1' | 'pro' | 'v2' | 'g2' | 'youchuan-v81' | 'youchuan-v7' | 'youchuan-v6';
 
@@ -140,13 +141,17 @@ function buildRequest(
   const editing = imageUrls.length > 0 && Boolean(model.editEndpoint);
   const endpoint = editing ? model.editEndpoint! : model.textEndpoint;
   const resolution = normalizeResolution(params.imageSize);
-  const body: Record<string, unknown> = {
+  const body = mapImageParameters('runninghub', params.model, {
     prompt: params.prompt,
     aspectRatio: params.aspectRatio,
-  };
+    imageSize: resolution,
+    referenceImageUrls: imageUrls,
+  });
 
   if (model.family === 'pro' || model.family === 'v2' || model.family === 'g2') {
     body.resolution = resolution;
+  } else {
+    delete body.resolution;
   }
   if (model.family === 'g2') {
     body.quality = 'medium';
@@ -154,7 +159,10 @@ function buildRequest(
   if (editing) {
     body.imageUrls = imageUrls;
   } else if (model.family.startsWith('youchuan-') && imageUrls[0]) {
+    delete body.imageUrls;
     body.imageUrl = imageUrls[0];
+  } else {
+    delete body.imageUrls;
   }
   if (model.family === 'youchuan-v81') {
     body.hd = resolution !== '1k';

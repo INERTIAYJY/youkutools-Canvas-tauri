@@ -2,6 +2,7 @@
  * 声明 APIMart Seedance 视频模型能力表，并将通用生成参数映射为各模型请求字段。
  */
 import type { VideoGenerationOperation, VideoModelCapability } from '../../types/aiTypes';
+import { mapVideoParameters } from './videoParameterMappings';
 
 export type ApimartSeedanceRatioField = 'aspect_ratio' | 'size';
 export type ApimartSeedanceAudioField = 'audio' | 'generate_audio';
@@ -352,13 +353,17 @@ export function buildApimartSeedanceRequest(
     Math.max(capability.minDuration, requestedDuration),
   );
 
-  const body: Record<string, unknown> = {
+  const body = mapVideoParameters('apimart', capability.modelId, {
     model: capability.modelId,
     prompt,
-    duration,
     resolution,
-    [capability.ratioField]: effectiveRatio,
-  };
+    aspectRatio: effectiveRatio,
+    duration,
+  });
+  if (capability.ratioField !== 'aspect_ratio') {
+    delete body.aspect_ratio;
+    body[capability.ratioField] = effectiveRatio;
+  }
   if (frameFields) {
     if (params.firstFrameUrl?.trim()) body[frameFields.first] = params.firstFrameUrl.trim();
     if (params.lastFrameUrl?.trim()) body[frameFields.last] = params.lastFrameUrl.trim();

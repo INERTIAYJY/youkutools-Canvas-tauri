@@ -12,6 +12,7 @@ import {
 } from './apimartVideoModels';
 import { buildImageCapabilityRequest } from './mediaModelCapabilities';
 import { corsSafeFetch } from './httpTransport';
+import { mapImageParameters } from './imageParameterMappings';
 
 /* ── APIMart 任务轮询共享类型 ── */
 export interface ApimartTaskResult<TResult = Record<string, unknown>> {
@@ -54,6 +55,7 @@ export async function executeGeneralAsyncTask(
   providerConfigId: string,
   nodeId?: string,
   externalSignal?: AbortSignal,
+  requestBody?: Record<string, unknown>,
 ): Promise<{ url: string }> {
   const nodeSignal = nodeId ? registerNodePolling(nodeId) : undefined;
   const signal = nodeSignal && externalSignal
@@ -82,7 +84,7 @@ export async function executeGeneralAsyncTask(
     const submitResp = await corsSafeFetch(apiUrl, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName, prompt, n: 1 }),
+      body: JSON.stringify(requestBody ?? { model: modelName, prompt, n: 1 }),
       signal,
     });
 
@@ -213,14 +215,18 @@ export async function generateApimartImagesBatch(
     }
 
     // 步骤 1: 提交生成任务
-    const submitBody: Record<string, unknown> = capabilityRequest?.body ?? {
+    const submitBody: Record<string, unknown> = capabilityRequest?.body ?? mapImageParameters(
+      'apimart',
       model,
-      prompt,
-      n: requestedCount,
-      resolution: imageSize,
-      size: aspectRatio,
-      ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}),
-    };
+      {
+        model,
+        prompt,
+        imageSize,
+        aspectRatio,
+        batchCount: requestedCount,
+        referenceImageUrls: imageUrls,
+      },
+    );
     const submitResp = await corsSafeFetch(`${baseUrl}/images/generations`, {
       method: 'POST',
       headers: {
@@ -342,7 +348,11 @@ export async function generateApimartVideo(
 
     const seedanceRequest = buildApimartSeedanceRequest(model, prompt, params);
     const submitPath = seedanceRequest ? '/videos/generations' : '/images/generations';
-    const requestBody = seedanceRequest ?? { model, prompt, n: 1 };
+    const requestBody = seedanceRequest ?? mapImageParameters('apimart', model, {
+      model,
+      prompt,
+      batchCount: 1,
+    });
 
     // 步骤 1: 提交视频生成任务
     const submitResp = await corsSafeFetch(`${baseUrl}${submitPath}`, {

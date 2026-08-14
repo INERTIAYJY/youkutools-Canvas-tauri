@@ -14,6 +14,7 @@ import {
 import { runBatchTasks } from '../batchUtils';
 import type { ImageReferenceRequestMode } from '../../../types';
 import type { BatchImageResult, ImageGenerationResult } from '../../../types/aiTypes';
+import { buildStandardImageRequestBody } from '../imageParameterMappings';
 
 export interface StandardImageParams {
   apiKey: string;
@@ -119,22 +120,15 @@ async function requestStandardImages(
   }
 
   const apiUrl = baseUrl.replace(/\/+$/, '') + '/images/generations';
-  const requestBody: Record<string, unknown> = {
-    model: modelName,
+  const requestBody = buildStandardImageRequestBody({
+    modelName,
     prompt,
-    n: count,
+    count,
     size: sizeStr,
-  };
-  if (!isOpenAIGptImageModel(modelName)) {
-    requestBody.response_format = 'url';
-  }
-  if (imageUrls.length > 0) {
-    if (params.imageReferenceRequestMode === 'generation-json-image-data-urls') {
-      requestBody.image = imageUrls;
-    } else {
-      requestBody.image_urls = imageUrls;
-    }
-  }
+    imageUrls,
+    imageReferenceRequestMode: params.imageReferenceRequestMode,
+  });
+  if (isOpenAIGptImageModel(modelName)) delete requestBody.response_format;
 
   return corsSafeFetch(apiUrl, {
     method: 'POST',

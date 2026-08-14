@@ -557,11 +557,12 @@
 }
 .rh-duration-labels {
   display: flex;
-  justify-content: space-between;
 }
+/* 刻度槽按总刻度数均分容器宽度；长时长模型（2.5 的 4~30，共 27 槽）
+   不再按 20px 固定宽度，否则 20s/25s/30s 会溢出右侧且滑杆拖不到上限 */
 .rh-duration-tick {
-  width: 20px;
-  flex: 0 0 20px;
+  flex: 1 1 0;
+  min-width: 0;
   text-align: center;
   font-size: 10px;
   color: var(--theme-text-muted);
@@ -570,6 +571,7 @@
   user-select: none;
   padding: 2px 0;
   border-radius: 3px;
+  white-space: nowrap;
 }
 .rh-duration-tick:hover {
   color: var(--theme-text-secondary);

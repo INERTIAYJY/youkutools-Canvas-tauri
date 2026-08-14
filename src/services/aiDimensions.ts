@@ -13,12 +13,18 @@ export function normalizeVideoFps(fps: number | undefined): number {
     : DEFAULT_VIDEO_FPS;
 }
 
-/** 将用户可理解的秒数限制到通用视频设置支持的范围。 */
-export function normalizeVideoDurationSeconds(durationSeconds: number | undefined): number {
+/**
+ * 将用户可理解的秒数限制到指定上限范围。
+ * maxSeconds 缺省时使用通用视频设置的 15s 上限；Seedance 2.5 等长时长模型可显式传入更大上限。
+ */
+export function normalizeVideoDurationSeconds(
+  durationSeconds: number | undefined,
+  maxSeconds: number = VIDEO_DURATION_MAX_SECONDS,
+): number {
   const duration = Number.isFinite(durationSeconds)
     ? Math.round(Number(durationSeconds))
     : DEFAULT_VIDEO_DURATION_SECONDS;
-  return Math.min(VIDEO_DURATION_MAX_SECONDS, Math.max(VIDEO_DURATION_MIN_SECONDS, duration));
+  return Math.min(maxSeconds, Math.max(VIDEO_DURATION_MIN_SECONDS, duration));
 }
 
 /** 按多数视频工作流的首帧语义，将秒数换算为总帧数。 */
@@ -41,14 +47,15 @@ export function videoDurationFromFrames(
   return normalizeVideoDurationSeconds(duration);
 }
 
-/** 优先使用新秒数字段；旧节点缺失该字段时由总帧数兼容反算。 */
+/** 优先使用新秒数字段；旧节点缺失该字段时由总帧数兼容反算。maxSeconds 可覆盖通用 15s 上限。 */
 export function resolveVideoDurationSeconds(
   durationSeconds: number | undefined,
   frameCount: number | undefined,
   fps: number | undefined,
+  maxSeconds: number = VIDEO_DURATION_MAX_SECONDS,
 ): number {
   return Number.isFinite(durationSeconds)
-    ? normalizeVideoDurationSeconds(durationSeconds)
+    ? normalizeVideoDurationSeconds(durationSeconds, maxSeconds)
     : videoDurationFromFrames(frameCount, fps);
 }
 

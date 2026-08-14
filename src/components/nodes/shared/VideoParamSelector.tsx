@@ -11,6 +11,7 @@ import type { VideoReferenceItem } from '../../../types/aiTypes';
 import type { DramaCharacter } from '../../../types/dramaAssets';
 import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
+import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import {
   resolveVideoDurationSeconds,
   VIDEO_ASPECT_RATIOS,
@@ -170,6 +171,11 @@ export default function VideoParamSelector({
   const apimartCapability = provider === 'apimart'
     ? getApimartSeedanceCapability(selectedModel)
     : undefined;
+  const volcengineCapability = provider === 'volcengine'
+    ? getVolcengineSeedanceCapability(selectedModel)
+    : undefined;
+  // 统一的能力约束：APIMart 或火山方舟都可能有按模型的档位约束，取命中者
+  const seedanceCapability = apimartCapability ?? volcengineCapability;
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
   const customUsesDuration = modelProtocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
   const customUsesResolution = modelProtocolUsesVariable(
@@ -195,25 +201,34 @@ export default function VideoParamSelector({
     ? seedanceRatio
     : VIDEO_ASPECT_RATIOS[0];
   const isVolcengine = provider === 'volcengine';
-  const seedanceResolutions = apimartCapability
-    ? apimartCapability.resolutions.map((value) => ({ value, label: value === '4k' ? '4K' : value }))
+  const seedanceResolutions = seedanceCapability
+    ? seedanceCapability.resolutions.map((value) => ({ value, label: value === '4k' ? '4K' : value }))
     : SEEDANCE_RESOLUTIONS;
-  const seedanceRatios = apimartCapability
-    ? apimartCapability.ratios.map((value) => ({ value, label: value }))
+  const seedanceRatios = seedanceCapability
+    ? seedanceCapability.ratios.map((value) => ({ value, label: value }))
     : isNativeSeedance || !isWorkflowProvider
       ? SEEDANCE_RATIOS
       : genericRatios;
-  const minDuration = apimartCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
-  const maxDuration = apimartCapability?.maxDuration ?? VIDEO_DURATION_MAX_SECONDS;
-  const resolvedDuration = resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps);
+  const minDuration = seedanceCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
+  const maxDuration = seedanceCapability?.maxDuration ?? VIDEO_DURATION_MAX_SECONDS;
+  const resolvedDuration = resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps, maxDuration);
   const displayedDuration = Math.min(maxDuration, Math.max(minDuration, resolvedDuration));
   const displayedResolution = seedanceResolutions.some((item) => item.value === seedanceResolution)
     ? seedanceResolution
-    : apimartCapability?.defaultResolution ?? seedanceResolution;
+    : seedanceCapability?.defaultResolution ?? seedanceResolution;
   const displayedRatio = seedanceRatios.some((item) => item.value === seedanceRatio)
     ? seedanceRatio
-    : apimartCapability?.defaultRatio ?? seedanceRatio;
-  const durationLabelValues = new Set([minDuration, 5, 8, 10, 12, maxDuration]);
+    : seedanceCapability?.defaultRatio ?? seedanceRatio;
+  // 标签按跨度等距抽样，保证数字之间有足够间距不重叠：
+  // 跨度 ≤8（如 4~12）每秒都标；≤16（如 4~15/4~20）每 2s 标一个；
+  // 更大（如 2.5 的 4~30）每 4s 标一个。端点 min/max 始终标。
+  const durationSpan = Math.max(1, maxDuration - minDuration);
+  const labelStep = durationSpan <= 8 ? 1 : durationSpan <= 16 ? 2 : 4;
+  const durationLabelValues = new Set<number>();
+  for (let v = minDuration; v <= maxDuration; v += labelStep) {
+    durationLabelValues.add(v);
+  }
+  durationLabelValues.add(maxDuration);
   // 每一秒都保留一个等宽刻度槽，只隐藏中间文字；位置因此和原生 range 的步进严格一致。
   const durationTicks = Array.from(
     { length: Math.max(1, maxDuration - minDuration + 1) },
@@ -224,16 +239,16 @@ export default function VideoParamSelector({
   // 所有视频模型都以秒数呈现；协议若需要帧数，由生成入口统一换算。
   const showDurationControl = true;
   const supportsAudio = isVolcengine
-    || Boolean(apimartCapability?.audioField)
+    || Boolean(seedanceCapability?.audioField)
     || customUsesAudio
     || !isWorkflowProvider;
   // 自建接口模型默认出有声视频；火山方舟老模型（Seedance 1.0）不支持音频，保持默认关闭
   const displayedGenerateAudio = generateAudio
-    ?? apimartCapability?.defaultAudio
+    ?? seedanceCapability?.defaultAudio
     ?? (isNativeSeedance ? false : true);
 
   useEffect(() => {
-    if (!apimartCapability) return;
+    if (!seedanceCapability) return;
     if (displayedResolution !== seedanceResolution) {
       onChangeSeedanceResolution?.(displayedResolution);
     }
@@ -244,7 +259,7 @@ export default function VideoParamSelector({
       onChangeSeedanceDuration?.(displayedDuration);
     }
   }, [
-    apimartCapability,
+    seedanceCapability,
     displayedDuration,
     displayedRatio,
     displayedResolution,

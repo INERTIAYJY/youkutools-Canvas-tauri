@@ -25,6 +25,8 @@ site/app
 .claude/*
 doc/测试报告.md
 
+generated-images/*
+
 # Rust build output
 src-tauri/target/
 

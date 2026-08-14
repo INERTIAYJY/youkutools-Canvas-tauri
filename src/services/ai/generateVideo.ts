@@ -472,7 +472,7 @@ async function generateVolcengineVideo(
       ratio,
       duration,
       resolution,
-      watermark: true,
+      watermark: false,
     };
     if (params.generateAudio) {
       requestBody.generate_audio = true;

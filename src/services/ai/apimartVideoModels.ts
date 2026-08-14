@@ -149,6 +149,25 @@ const APIMART_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> =
     maxVideoReferences: 3,
     maxAudioReferences: 3,
   },
+  'doubao-seedance-2.5': {
+    modelId: 'doubao-seedance-2.5',
+    resolutions: SD_2_RESOLUTIONS,
+    defaultResolution: '720p',
+    ratios: COMMON_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'size',
+    minDuration: 4,
+    maxDuration: 30,
+    defaultDuration: 5,
+    audioField: 'generate_audio',
+    defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 30,
+    maxVideoReferences: 10,
+    maxAudioReferences: 10,
+    watermarkField: 'watermark',
+    defaultWatermark: false,
+  },
   'minimax-h3': {
     modelId: 'MiniMax-H3',
     resolutions: H3_RESOLUTIONS,
@@ -261,7 +280,12 @@ export function buildApimartSeedanceRequest(
       : `APIMart ${model} 不支持参考音频`);
   }
   // MiniMax-H3：音频不能单独使用，必须搭配参考图或参考视频
-  if (audioUrls.length > 0 && imageUrls.length === 0 && videoUrls.length === 0 && !hasFrame) {
+  // （Seedance 2.5 支持纯音频参考，仅 H3 系列保留此限制）
+  if (frameFields
+    && audioUrls.length > 0
+    && imageUrls.length === 0
+    && videoUrls.length === 0
+    && !hasFrame) {
     throw new Error(`APIMart ${model} 参考音频不能单独使用，请搭配参考图或参考视频`);
   }
 

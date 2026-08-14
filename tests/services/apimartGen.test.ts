@@ -239,6 +239,55 @@ describe('APIMart video polling', () => {
   });
 });
 
+describe('APIMart Seedance 2.5 video', () => {
+  it('clamps duration to 30s and keeps resolution within 480p/720p', () => {
+    expect(buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      { resolution: '1080p', duration: 30 },
+    )).toMatchObject({
+      model: 'doubao-seedance-2.5',
+      duration: 30,
+      resolution: '720p',
+      watermark: false,
+    });
+  });
+
+  it('allows up to 30 images / 10 videos / 10 audio references', () => {
+    const body = buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      {
+        imageUrls: Array.from({ length: 30 }, (_, i) => `https://cdn.example/img${i}.png`),
+        videoUrls: Array.from({ length: 10 }, (_, i) => `https://cdn.example/video${i}.mp4`),
+        audioUrls: Array.from({ length: 10 }, (_, i) => `https://cdn.example/audio${i}.mp3`),
+      },
+    );
+    expect(body?.image_urls).toHaveLength(30);
+    expect(body?.video_urls).toHaveLength(10);
+    expect(body?.audio_urls).toHaveLength(10);
+  });
+
+  it('rejects more than 30 image references', () => {
+    expect(() => buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      { imageUrls: Array.from({ length: 31 }, (_, i) => `https://cdn.example/img${i}.png`) },
+    )).toThrow('最多支持 30 张参考图');
+  });
+
+  it('supports standalone audio reference (no image or video)', () => {
+    expect(buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      { audioUrls: ['https://cdn.example/bgm.mp3'] },
+    )).toMatchObject({
+      model: 'doubao-seedance-2.5',
+      audio_urls: ['https://cdn.example/bgm.mp3'],
+    });
+  });
+});
+
 describe('APIMart MiniMax-H3 video', () => {
   it('builds a text-to-video request with H3-specific resolution and watermark', () => {
     expect(buildApimartSeedanceRequest(

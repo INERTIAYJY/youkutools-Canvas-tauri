@@ -1,3 +1,8 @@
+/**
+ * chat/AgentToolDetails — Agent 工具调用详情折叠面板。
+ * 展示工具调用的输入与结果快照（AgentToolDisplaySnapshot），标注每个字段的取值来源
+ * （用户指定 / 项目默认 / 模型默认 / 有效值），并支持展开查看原始 JSON。
+ */
 import { useState } from 'react';
 import { Icon } from '@iconify/react';
 import type {

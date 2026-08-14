@@ -1,3 +1,8 @@
+/**
+ * settings/ShortcutSettings — 快捷键说明子页。
+ * 根据操作系统（macOS / Windows）动态展示修饰键符号（⌘/⌃/⌥/⇧ vs Ctrl/Alt/Shift），
+ * 列出保存、撤销、复制粘贴、节点创建、画布复位、小地图等快捷键一览。
+ */
 const IS_MAC = typeof navigator !== 'undefined' && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
 function getShortcutList(): { action: string; key: string }[] {

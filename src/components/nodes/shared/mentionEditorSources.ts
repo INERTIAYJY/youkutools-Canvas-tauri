@@ -1,3 +1,8 @@
+/**
+ * nodes/shared/mentionEditorSources — @ 提及候选来源解析。
+ * 收集画布上可被引用的生成节点（含上游连线输出）与工作流 IO 节点，
+ * 解析出带缩略图、输出类型与自引用标记的提及条目，供提示词编辑器联想补全。
+ */
 import type { AppState } from '../../../store/useAppStore';
 import type { BaseNodeData, NodeType, StoryboardCellOverride, WorkflowIONodeType } from '../../../types';
 import { bestNodeThumb } from './mentionEditorDom';

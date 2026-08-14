@@ -1,3 +1,7 @@
+/**
+ * fs/externalEditors — 外部视频编辑器（剪映 / Premiere）探测与唤起。
+ * 按平台（Windows / macOS）探测已安装的编辑器可执行文件，定位最近项目目录并拉起外部编辑器。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import { localDataDir } from '@tauri-apps/api/path';
 import { isTauriEnv, joinPath } from './core';

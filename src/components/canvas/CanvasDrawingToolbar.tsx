@@ -1,3 +1,8 @@
+/**
+ * canvas/CanvasDrawingToolbar — 画布绘图工具栏。
+ * 提供选择、矩形、菱形、椭圆、箭头、直线、自由绘制、文本、图片与橡皮擦等绘图工具切换，
+ * 仅在画布绘图模式（有可绘制的笔记目标）下显示，选中态直接驱动 useCanvasDrawing 的当前工具。
+ */
 import { memo } from 'react';
 import {
   ArrowRight,

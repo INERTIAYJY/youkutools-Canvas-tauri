@@ -1,3 +1,8 @@
+/**
+ * chat/assistantVisualContext — 请求发送前的视觉上下文装配。
+ * 解析用户显式 @ 引用的图片，视觉模型收到 Base64、纯文本模型收到项目缓存描述，
+ * 图片字节只存在于本次请求内，不写入聊天消息或 AgentTask。
+ */
 import type {
   AssistantModelContent,
   AssistantModelMessage,

@@ -1,3 +1,8 @@
+/**
+ * settings/mcpConnectionRequirements — MCP 控制会话的前置条件说明。
+ * 以图标 + 标题 + 描述的形式列出开启本地控制会话所需的软硬件条件
+ * （桌面端运行、Node.js、支持 stdio 的 MCP 客户端、同机回环连接）。
+ */
 export const MCP_CONNECTION_REQUIREMENTS = [
   {
     icon: 'lucide:app-window',

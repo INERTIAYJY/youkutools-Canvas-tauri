@@ -1,3 +1,8 @@
+/**
+ * CharacterLibraryPanel — 角色库侧边面板。
+ * 列出项目级与全局角色，支持新建、编辑（打开 CharacterAssetDialog）、删除与筛选，
+ * 头像取自角色主视觉参考图，全局角色可被跨项目复用。
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';

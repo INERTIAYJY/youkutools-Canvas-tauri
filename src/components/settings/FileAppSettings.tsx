@@ -1,3 +1,8 @@
+/**
+ * settings/FileAppSettings — 文件与应用设置子页。
+ * 展示并配置项目数据目录、默认根目录与应用可执行文件目录，
+ * 支持在系统文件管理器中打开这些目录，并监听磁盘变更事件刷新路径。
+ */
 import { useEffect, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useShallow } from 'zustand/react/shallow';

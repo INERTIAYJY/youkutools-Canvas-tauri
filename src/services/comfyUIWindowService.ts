@@ -1,3 +1,8 @@
+/**
+ * comfyUIWindowService — ComfyUI 独立窗口工作流保存与导入。
+ * 在独立 ComfyUI 窗口（webview）与主窗口之间桥接工作流 JSON，自动推断 IO 节点类型、
+ * 校验缺失节点并回传保存结果，经 Tauri invoke 在主进程落盘。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import type {
   WorkflowCategory,

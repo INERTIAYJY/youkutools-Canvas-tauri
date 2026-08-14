@@ -1,3 +1,8 @@
+/**
+ * character/justifiedRows — 图片等宽排版（justified layout）。
+ * 按图片宽高比顺序贪心分行，使每行宽高比之和尽量接近目标平均值，
+ * 再等比缩放到容器宽度、垂直方向等距排布，用于角色参考图画廊的错落网格。
+ */
 export interface JustifiedRow {
   /** 该行图片在原数组中的下标 */
   items: number[];

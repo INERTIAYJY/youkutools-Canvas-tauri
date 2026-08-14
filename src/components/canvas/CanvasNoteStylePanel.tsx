@@ -1,3 +1,8 @@
+/**
+ * canvas/CanvasNoteStylePanel — 画布笔记样式面板。
+ * 编辑当前选中笔记笔记（CanvasNote）的描边颜色、线宽、线型、箭头、圆角、字体与层级等样式，
+ * 通过 store 的 note patch 动作实时回写并提交历史快照。
+ */
 import { memo, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {

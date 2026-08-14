@@ -1,3 +1,8 @@
+/**
+ * settings/SettingsNavigation — 设置面板左侧导航。
+ * 渲染常规、文件与应用、API Key、存储健康、ComfyUI、快捷键、MCP 控制等标签，
+ * 高亮当前激活的子页并驱动 store.ui 的 SettingsTab 切换。
+ */
 import { Icon } from '@iconify/react';
 import type { SettingsTab } from '../../store/store.ui';
 import AnimatedButton from '../shared/AnimatedButton';

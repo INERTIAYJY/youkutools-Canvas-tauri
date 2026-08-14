@@ -1,3 +1,8 @@
+/**
+ * noteNodes/CanvasNoteNode — 画布笔记节点容器。
+ * 组合形状、文本、图片三个子渲染层，处理选中态、尺寸缩放、曲线控制点、图片嵌入与裁剪，
+ * 几何计算统一走 canvasNoteGeometry，图片落盘走 fileService。
+ */
 import { lazy, memo, Suspense, useCallback, useEffect, useState } from 'react';
 import type {
   CSSProperties,

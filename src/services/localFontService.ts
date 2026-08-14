@@ -1,3 +1,8 @@
+/**
+ * localFontService — 本地字体枚举服务。
+ * 提供系统默认字体选项，并通过 Local Font Access API（或 Tauri 命令）枚举本机字体家族，
+ * 首次调用可能触发系统授权，结果做内存缓存，供视频编辑器等字体选择使用。
+ */
 import { invoke } from '@tauri-apps/api/core';
 
 export interface LocalFontOption {

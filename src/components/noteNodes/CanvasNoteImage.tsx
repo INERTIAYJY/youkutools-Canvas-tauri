@@ -1,3 +1,7 @@
+/**
+ * noteNodes/CanvasNoteImage — 画布笔记的图片渲染层。
+ * 按笔记的圆角样式渲染嵌入图片，图片缺失时给出占位提示，不参与几何计算。
+ */
 import { memo } from 'react';
 import type { CanvasNoteData } from '../../types';
 

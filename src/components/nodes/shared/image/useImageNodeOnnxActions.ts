@@ -1,3 +1,8 @@
+/**
+ * nodes/shared/image/useImageNodeOnnxActions — 图片节点的本地 ONNX 动作封装。
+ * 把图片高清放大（Real-ESRGAN）与主体抠图（RMBG）这两个本地推理能力封装为 React hook，
+ * 负责模型下载、进度回传与结果写入节点数据，推理在子进程隔离运行。
+ */
 import { useCallback, useState } from 'react';
 import type { Node } from '@xyflow/react';
 import { convertFileSrc } from '@tauri-apps/api/core';

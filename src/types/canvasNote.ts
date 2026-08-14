@@ -1,3 +1,8 @@
+/**
+ * types/canvasNote — 画布笔记（CanvasNote）的领域类型。
+ * 定义笔记形状种类（矩形/菱形/椭圆/箭头/直线/自由绘制/文本/图片）、绘图工具、
+ * 描边与粗糙度样式、圆角、字体、层级等类型，以及笔记的点位、补丁与数据模型。
+ */
 export type CanvasNoteKind =
   | 'rectangle'
   | 'diamond'

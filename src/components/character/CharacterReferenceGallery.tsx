@@ -1,3 +1,8 @@
+/**
+ * character/CharacterReferenceGallery — 角色参考图画廊。
+ * 用等宽排版（justifiedRows）把主视觉、头像、全身、表情、转面、服装等参考图铺成网格，
+ * 支持选中、编辑与裁剪预览，并向上汇报实际铺开的图片框供浮层贴边定位。
+ */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { CharacterReferenceImage } from '../../types/dramaAssets';

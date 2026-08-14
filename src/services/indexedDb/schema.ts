@@ -1,3 +1,8 @@
+/**
+ * indexedDb/schema — IndexedDB 数据库 schema 与对象存储定义。
+ * 声明数据库名、版本与全部 object store 常量（项目、工作流、配置、对话、消息、AgentTask、
+ * 项目记忆、角色、子智能体、视频编辑器项目等），openDB 按版本声明补齐缺失的 store/index 并保留旧数据升级。
+ */
 export const DB_NAME = 'ai-canvas-db';
 export const DB_VERSION = 19;
 

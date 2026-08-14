@@ -1,3 +1,8 @@
+/**
+ * useCanvasDrawing — 画布绘图交互 hook。
+ * 把指针拖拽转换为画布笔记（CanvasNote）的绘制草稿，处理选择、矩形/菱形/椭圆/箭头/直线/自由绘制、
+ * 橡皮擦与图片/文本插入，几何计算委托 canvasNoteGeometry，落盘走 fileService 上传源文件。
+ */
 import { useCallback, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useReactFlow, type Node as RFNode } from '@xyflow/react';

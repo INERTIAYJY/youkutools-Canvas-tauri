@@ -1,3 +1,8 @@
+/**
+ * useCanvasLongPressRadialMenu — 画布长按手势控制器。
+ * 追踪指针按下 / 移动 / 抬起，判定长按（超过延迟且位移在阈值内）后触发环形快捷菜单，
+ * 并在拖动改键、取消或组件卸载时清理状态。
+ */
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
 export const CANVAS_LONG_PRESS_DELAY_MS = 480;

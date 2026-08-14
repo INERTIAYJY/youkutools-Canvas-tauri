@@ -1,3 +1,8 @@
+/**
+ * canvas/CanvasRadialMenu — 画布长按弹出的环形快捷菜单。
+ * 展示 6 个可配置槽位（ComfyUI、工作流、素材库、设置、项目库、适应画布等），
+ * 支持拖拽改键（custom-url 打开自定义网页）、空白槽位，并根据视口边界自动校正弹出位置。
+ */
 import { useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { invoke } from '@tauri-apps/api/core';

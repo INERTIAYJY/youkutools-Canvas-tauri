@@ -1,3 +1,8 @@
+/**
+ * CharacterAssetDialog — 角色资产编辑弹窗。
+ * 编辑单个 DramaCharacter 的基本信息、参考图（上传/裁剪/分类）与声音素材（音频/时长），
+ * 按项目或全局作用域写入 store，资产文件经 saveDataUrlToProjectData 落盘到项目数据目录。
+ */
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';

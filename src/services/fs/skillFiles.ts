@@ -1,3 +1,8 @@
+/**
+ * fs/skillFiles — Skill 资料文件的上传、读取与落盘。
+ * 从文件或文件夹导入 Skill 文本资料（md/txt/json）到应用数据目录，
+ * 校验相对路径、生成唯一目标路径并支持上传确认。
+ */
 import { exists, mkdir, readDir, readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appDataDir } from '@tauri-apps/api/path';

@@ -1,3 +1,8 @@
+/**
+ * useCanvasSecondaryClickMenu — 画布右键（次级点击）菜单控制器。
+ * 在已选节点中按屏幕坐标做几何命中，决定弹出节点菜单还是画布菜单；
+ * 多选场景下选择框覆盖在节点之上，改用矩形命中测试而非 elementFromPoint。
+ */
 import { useEffect, useRef, type MutableRefObject } from 'react';
 import type { Node as RFNode } from '@xyflow/react';
 import type { BaseNodeData } from '../types';

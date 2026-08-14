@@ -1,3 +1,8 @@
+/**
+ * settings/ComfyUISettings — ComfyUI 设置子页。
+ * 配置 ComfyUI 服务地址、启动 / 停止本地 ComfyUI、探测服务状态，
+ * 并提供工作流面板入口与相关目录选择。
+ */
 import { useState } from 'react';
 import { Icon } from '@iconify/react';
 import { invoke } from '@tauri-apps/api/core';

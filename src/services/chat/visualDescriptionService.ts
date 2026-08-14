@@ -1,3 +1,8 @@
+/**
+ * chat/visualDescriptionService — 项目视觉描述服务。
+ * 用视觉模型把项目里的图片转成适合后续创作模型使用的中文客观描述，
+ * 结果按图片内容指纹缓存进 IndexedDB（projectVisualDescriptions），不保存图片正文或绝对路径。
+ */
 import { useAppStore } from '../../store/useAppStore';
 import { seriesOwnerId } from '../../store/store.utils';
 import {

@@ -1,3 +1,8 @@
+/**
+ * noteNodes/CanvasNoteText — 画布笔记的文本渲染与编辑层。
+ * 支持双击进入行内编辑、字体族 / 字号 / 对齐样式的实时渲染，
+ * 提交文本通过 onCommit 回写到笔记数据。
+ */
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent } from 'react';
 import type { CanvasNoteData } from '../../types';

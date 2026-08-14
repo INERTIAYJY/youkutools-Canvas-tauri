@@ -1,3 +1,8 @@
+/**
+ * useMascotDrag — 吉祥物拖拽与回弹交互 hook。
+ * 用 framer-motion 追踪拖拽位移，把吉祥物位置约束在视口内，
+ * 松手时根据拖拽力度触发回弹，并同步吉祥物位置到 store。
+ */
 import {
   useCallback,
   useEffect,

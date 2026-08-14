@@ -1,3 +1,8 @@
+/**
+ * nodes/shared/mentionEditorDom — @ 提及编辑器的 DOM 层。
+ * 把画布节点与工作流 IO 节点渲染成可插入提示词的「芯片」（chip）DOM 片段，
+ * 用零宽空格（ZWSP）作分隔占位，配合 mentionEditorSources 提供可点选的提及候选。
+ */
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { WorkflowIONodeType, StoryboardCellOverride } from '../../../types';
 import type { AppState } from '../../../store/useAppStore';

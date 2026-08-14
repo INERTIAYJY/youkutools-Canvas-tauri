@@ -1,3 +1,8 @@
+/**
+ * utils/canvasNoteGeometry — 画布笔记的几何计算。
+ * 提供笔记边界、点位缩放与本地化、直线/平滑/肘形路径、箭头锚点与虚线样式等纯几何函数，
+ * 供 useCanvasDrawing 与 CanvasNote 渲染层复用，不依赖 React 或 store。
+ */
 import type {
   CanvasNoteLineType,
   CanvasNotePoint,

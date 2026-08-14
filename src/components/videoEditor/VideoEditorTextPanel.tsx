@@ -1,3 +1,8 @@
+/**
+ * videoEditor/VideoEditorTextPanel — 视频编辑器文字片段面板。
+ * 编辑选中视频片段的文本内容、对齐、字号与字体（系统默认 + 本地枚举字体），
+ * 支持添加 / 修改 / 移除文字，并与外部交互开始/结束状态联动。
+ */
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
 import {

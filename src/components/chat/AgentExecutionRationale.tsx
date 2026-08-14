@@ -1,3 +1,8 @@
+/**
+ * chat/AgentExecutionRationale — Agent 执行依据展示组件。
+ * 把 buildAgentExecutionRationale 生成的执行依据条目（分析/决策/动作/观察/控制）按语气
+ * 渲染为带图标的可折叠列表，让用户可验证 Agent 每一步「为什么这么做」。
+ */
 import { useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { AgentTask } from '../../types/agent';

@@ -1,3 +1,7 @@
+/**
+ * indexedDb/catalogRepository — 配置目录仓库（配置、预设、风格、Skill、工作流、子智能体）。
+ * 提供这些常驻对象的读写 CRUD，统一走 schema.ts 声明的 object store，是 catalog 类数据的单一入口。
+ */
 import type { PresetAdvancedConfig, SkillManifest, UserPresetMode } from '../../types';
 import {
   openDB,

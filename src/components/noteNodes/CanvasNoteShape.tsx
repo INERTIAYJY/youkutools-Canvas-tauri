@@ -1,3 +1,8 @@
+/**
+ * noteNodes/CanvasNoteShape — 画布笔记的形状渲染层。
+ * 根据笔记类型（矩形/菱形/椭圆/箭头/直线/自由绘制）与描边、粗糙度样式，
+ * 生成 SVG 路径、箭头与虚线，几何细节委托给 canvasNoteGeometry。
+ */
 import { memo, useMemo } from 'react';
 import type { CanvasNoteData, CanvasNotePoint } from '../../types';
 import {

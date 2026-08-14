@@ -1,3 +1,9 @@
+/**
+ * ai/audioParameterMappings — 音频生成参数到各 Provider 请求字段的声明式映射。
+ * 区分 TTS（语音合成）与 FlowMusic（音乐）两类模型模式，把 model、prompt、input、voice、
+ * format、speed、soundPrompt、lyrics、title、bpm、length 等上层参数换算成各家 API 字段名，
+ * 供 buildAudioSpeechRequestBody / buildAudioMusicRequestBody 生成请求体。
+ */
 import type { AIAudioGenParams, AudioOutputFormat, AudioTtsVoice } from '../../types/aiTypes';
 
 export type AudioParameterKey =

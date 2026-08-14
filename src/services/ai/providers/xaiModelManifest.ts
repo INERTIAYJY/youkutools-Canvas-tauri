@@ -1,3 +1,8 @@
+/**
+ * ai/providers/xaiModelManifest — xAI（Grok）官方模型清单与执行协议。
+ * 声明 Grok 文本、图片（Imagine Image）与视频（文生 / 单图生视频）模型，
+ * 以及各自的声明式协议（bearer 鉴权、请求体映射、异步轮询与结果抽取）。
+ */
 import type { NormalizedModelExecutionProtocol } from '../../../types/aiTypes';
 import type { ProviderModelSelection } from '../../../types';
 

@@ -1,3 +1,9 @@
+/**
+ * ai/modelProtocolBody — 声明式模型协议请求体的序列化。
+ * 根据协议声明的 encoding（json / form-urlencoded / multipart）把受信变量映射后的 JSON 对象
+ * 编码成真正的 BodyInit；multipart 支持 $file 字段（data URL）并生成随机边界，
+ * 同时提供 multipart 预览脱敏（Base64 只显示字节数，不泄露正文）。
+ */
 import type { ModelProtocolBodyEncoding, ProtocolJsonValue } from '../../types/aiTypes';
 
 const MIME_TYPE_RE = /^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*\/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*$/;

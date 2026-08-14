@@ -1,6 +1,15 @@
 /**
- * 对话媒体生成统一入口。
- * ChatPanel 不再直接选择 Provider 或调用具体图片、视频服务。
+ * ai/generationRuntime — 对话媒体生成统一入口。
+ *
+ * ChatPanel / Agent 工具不再直接选择 Provider 或调用具体图片、视频、音频服务，
+ * 而是统一走 runMediaGeneration(intent)，由本模块完成：
+ *   1. 解析并剥离 @model{...} 引用（extractModelMention / stripModelMentions）；
+ *   2. 解析媒体模型（resolveMediaModel），统一校验模型类型、API Key、ComfyUI / 即梦等前置条件；
+ *   3. 按 kind 分发到 generateImage / generateVideo / generateAudio；
+ *   4. 产物落盘（persistGeneratedMedia），并如实区分「生成成功」与「已保存到项目」两种状态，
+ *      失败不再被吞掉，避免签名 URL 过期或 blob 失效后留下打不开的产物。
+ *
+ * 产物落盘失败后可通过 retryMediaArtifactPersist 重新写盘。
  */
 import { useAppStore } from '../../store/useAppStore';
 import {

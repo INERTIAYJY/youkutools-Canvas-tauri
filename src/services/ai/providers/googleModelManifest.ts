@@ -1,3 +1,9 @@
+/**
+ * ai/providers/googleModelManifest — Google 官方模型清单与执行协议。
+ * 声明 Gemini 文本、图片（Nano Banana）、视频（Omni / Veo）与 TTS 模型，
+ * 以及各自走 openai 兼容端点或 interactions / predictLongRunning 的声明式协议
+ * （含鉴权、请求体映射、轮询与结果抽取）。
+ */
 import type { ProviderModelSelection } from '../../../types';
 import type { NormalizedModelExecutionProtocol } from '../../../types/aiTypes';
 

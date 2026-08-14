@@ -1,3 +1,9 @@
+/**
+ * ai/imageParameterMappings — 图片生成参数到各 Provider 请求字段的声明式映射。
+ * 把 model、prompt、imageSize、aspectRatio、batchCount、referenceImageUrls 等上层参数
+ * 按厂商与模型模式换算成各家 API 的真实字段名（如 apimart 的 resolution/size、火山 seedream 的 image），
+ * 供 buildStandardImageRequestBody 生成图片请求体，避免在调用点散落厂商判断。
+ */
 import type { ImageReferenceRequestMode } from '../../types';
 
 export type ImageParameterKey =

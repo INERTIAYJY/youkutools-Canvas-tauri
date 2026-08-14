@@ -1,3 +1,9 @@
+/**
+ * ai/videoParameterMappings — 视频生成参数到各 Provider 请求字段的声明式映射。
+ * 统一的上层参数（model、prompt、resolution、aspectRatio、duration、generateAudio
+ * 及参考媒体 imageUrls / videoUrls / audioUrls）按厂商与模型模式换算成各家 API 的真实字段名，
+ * 供 buildGenericVideoRequestBody 生成通用视频请求体，避免在调用点散落 if/switch 硬编码。
+ */
 import type { AIVideoGenParams, MediaReference } from '../../types/aiTypes';
 
 export type VideoParameterKey =

@@ -1,0 +1,137 @@
+/**
+ * Seedling（森之灵）视频 Provider Adapter
+ *
+ * 通过 Seedling CLI 提交视频生成任务并轮询结果：
+ *   - task create（参数白名单由 Rust 侧校验）→ 立即返回 taskId
+ *   - task get 轮询直至 succeeded / failed / expired / cancelled
+ *   - 结果返回 videoUrl（线上地址），由上层 downloadUrlAndSave 统一落盘
+ *
+ * 参考素材规则（与项目 assignVideoReferenceRoles 语义一致）：
+ *   - 显式首/尾帧时按 首帧 → 参考 → 尾帧 排序，全部走 CLI --resource
+ *   - 本地绝对路径直接交给 CLI（CLI 自动上传）；asset/blob/data URL 经通用图床转公网
+ */
+import type { VideoGenerationReferenceInput } from '../../../types/aiTypes';
+import { extractModelName } from '../helpers';
+import { getMediaReferenceUrl } from '../connectedReferenceMedia';
+import { resolveMediaReferenceUrl } from '../../uploadService';
+import {
+  createSeedlingVideoTask,
+  toSeedlingDisplayUrl,
+  waitSeedlingTask,
+} from '../../seedlingService';
+import type { MediaProviderAdapter } from '../mediaProviderRegistry';
+
+/** Seedling CLI 时长下限（秒）；项目通用下限为 2，需在提交前钳制。 */
+const SEEDLING_MIN_DURATION = 4;
+const SEEDLING_MAX_DURATION = 15;
+
+function isPublicHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+/** 本地磁盘绝对路径（Windows 盘符或 Unix 根路径）。 */
+function isLocalDiskPath(value: string): boolean {
+  const t = value.trim();
+  if (!t || isPublicHttpUrl(t)) return false;
+  if (
+    t.startsWith('asset.localhost')
+    || t.startsWith('blob:')
+    || t.startsWith('data:')
+    || t.startsWith('file://')
+  ) {
+    return false;
+  }
+  return t.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(t);
+}
+
+/** 把参考 URL 规范化为 CLI --resource 可用的值：公网/本地路径直传，其余转公网。 */
+async function toCliResource(url: string): Promise<string | undefined> {
+  const trimmed = url.trim();
+  if (!trimmed) return undefined;
+  if (isPublicHttpUrl(trimmed) || isLocalDiskPath(trimmed)) return trimmed;
+  return resolveMediaReferenceUrl(trimmed, { kind: 'image' });
+}
+
+function rankImageReference(role: string | undefined): number {
+  if (role === 'first_frame') return 0;
+  if (role === 'last_frame') return 2;
+  return 1;
+}
+
+/** 收集参考媒体为 CLI --resource 列表：图片按角色排序，视频/音频参考转公网后追加。 */
+async function collectSeedlingResources(
+  referenceInput: VideoGenerationReferenceInput,
+): Promise<string[]> {
+  const resources: string[] = [];
+  const seen = new Set<string>();
+
+  const references = referenceInput.references ?? [];
+  const hasExplicitFrames = references.some(
+    (ref) => ref.kind === 'image' && (ref.role === 'first_frame' || ref.role === 'last_frame'),
+  );
+
+  const imageUrls = hasExplicitFrames
+    ? references
+      .filter((ref) => ref.kind === 'image')
+      .sort((a, b) => rankImageReference(a.role) - rankImageReference(b.role))
+      .map((ref) => getMediaReferenceUrl(ref))
+    : referenceInput.imageUrls;
+
+  for (const url of imageUrls) {
+    const resolved = await toCliResource(url);
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved);
+      resources.push(resolved);
+    }
+  }
+
+  for (const url of referenceInput.videoUrls) {
+    const resolved = await resolveMediaReferenceUrl(url, { kind: 'video' });
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved);
+      resources.push(resolved);
+    }
+  }
+  for (const url of referenceInput.audioUrls) {
+    const resolved = await resolveMediaReferenceUrl(url, { kind: 'audio' });
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved);
+      resources.push(resolved);
+    }
+  }
+
+  return resources;
+}
+
+export const seedlingMediaProviderAdapter: MediaProviderAdapter = {
+  providerId: 'seedling',
+  capabilities: ['video'],
+
+  async generateVideo({ params, prompt, resolveReferenceInput, signal }) {
+    const referenceInput = await resolveReferenceInput();
+    const resources = await collectSeedlingResources(referenceInput);
+
+    const duration = Number.isFinite(params.seedanceDuration)
+      ? Math.min(
+        SEEDLING_MAX_DURATION,
+        Math.max(SEEDLING_MIN_DURATION, Math.round(Number(params.seedanceDuration))),
+      )
+      : undefined;
+
+    const { taskId } = await createSeedlingVideoTask({
+      prompt: referenceInput.prompt || prompt,
+      model: extractModelName(params.model, params.provider),
+      duration,
+      resolution: params.seedanceResolution,
+      ratio: params.seedanceRatio,
+      audio: params.generateAudio,
+      resources,
+    });
+
+    const task = await waitSeedlingTask(taskId, signal);
+    if (!task.videoUrl) {
+      throw new Error(task.errorMessage || 'Seedling 未返回视频结果');
+    }
+    return { url: toSeedlingDisplayUrl(task.videoUrl) };
+  },
+};

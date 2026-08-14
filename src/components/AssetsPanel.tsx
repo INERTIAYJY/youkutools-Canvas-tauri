@@ -498,7 +498,7 @@ export default function AssetsPanel() {
                     onClick={() => switchTab(tab)}
                     whileHover={{ scale: visibleTab === tab ? 1 : 1.03 }} whileTap={{ scale: 0.97 }}
                   >
-                    {tab === 'project' ? '项目文件' : tab === 'permanent' ? '全局资产' : '短剧资产'}
+                    {tab === 'project' ? '项目文件' : tab === 'permanent' ? '全局资产' : '创作资产'}
                     <span className="assets-tab-count">
                       {tab === 'project' ? projectFiles.length : tab === 'permanent' ? permanentFiles.length : dramaAssetCount}
                     </span>

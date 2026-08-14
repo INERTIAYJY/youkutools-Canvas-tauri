@@ -11,6 +11,9 @@ import AnimatedButton from '../shared/AnimatedButton';
 import ModelSelector from '../nodes/shared/ModelSelector';
 import ContextUsageIndicator from './ContextUsageIndicator';
 import ChatComposerEditor, { type ChatComposerEditorHandle } from './ChatComposerEditor';
+import MentionPicker, { type MentionPickerItem } from '../shared/MentionPicker';
+import { resolveDramaMentionItems } from '../nodes/shared/mentionEditorSources';
+import { bestNodeThumb } from '../nodes/shared/mentionEditorDom';
 import type { BaseNodeData, GeneralModelConfig, ModelOption } from '../../types';
 import type { ContextUsageStat } from '../../services/chat/contextManager';
 import { useAppStore } from '../../store/useAppStore';
@@ -21,10 +24,24 @@ import {
 import type { LocalFileGrantSummary } from '../../services/chat/fileGrantService';
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-type ReferenceScope = 'all' | 'nodes' | 'models';
+type ReferenceScope = 'all' | 'nodes' | 'models' | 'assets';
+type PickerTab = 'nodes' | 'assets' | 'models';
+const PICKER_TAB_ORDER: readonly PickerTab[] = ['nodes', 'assets', 'models'];
+type DramaMentionItem = ReturnType<typeof resolveDramaMentionItems>[number];
 type ReferenceSuggestion =
   | { key: string; kind: 'node'; nodeId: string; label: string; displayId?: number }
+  | { key: string; kind: 'drama'; item: DramaMentionItem }
   | { key: string; kind: 'model'; model: MediaModelOption };
+
+const DRAMA_KIND_LABELS: Record<string, string> = { character: '角色', scene: '场景', prop: '道具' };
+const TAB_NOUNS: Record<PickerTab, string> = { nodes: '节点', assets: '资产', models: '模型' };
+
+const MEDIA_KIND_LABELS: Record<string, string> = { image: '图片', video: '视频', audio: '音频' };
+const MEDIA_KIND_ICONS: Record<string, string> = {
+  image: 'mdi:image-outline',
+  video: 'mdi:video-outline',
+  audio: 'mdi:music-note-outline',
+};
 
 const REFERENCE_SUGGESTION_LIST_ID = 'chat-reference-suggestions';
 const SKILL_SUGGESTION_LIST_ID = 'chat-skill-suggestions';
@@ -33,6 +50,7 @@ function parseReferenceQuery(query: string): { scope: ReferenceScope; query: str
   const shortcut = query.toLocaleLowerCase();
   if (shortcut === 'n') return { scope: 'nodes', query: '' };
   if (shortcut === 'm') return { scope: 'models', query: '' };
+  if (shortcut === 'a') return { scope: 'assets', query: '' };
   return { scope: 'all', query };
 }
 
@@ -48,28 +66,6 @@ function resolveNodeThumbnail(data: BaseNodeData): string | undefined {
     return data.thumbnailUrl || data.imageUrl;
   }
   return data.thumbnailUrl;
-}
-
-function NodeReferenceThumbnail({ data }: { data: BaseNodeData }) {
-  const source = resolveNodeThumbnail(data);
-  const [failedSource, setFailedSource] = useState<string>();
-
-  return (
-    <span className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border border-canvas-border/60 bg-canvas-card text-canvas-text-secondary shadow-sm">
-      {source && failedSource !== source ? (
-        <img
-          src={source}
-          alt=""
-          loading="lazy"
-          draggable={false}
-          onError={() => setFailedSource(source)}
-          className="h-full w-full object-cover"
-        />
-      ) : (
-        <Icon icon="mdi:vector-square" width="16" />
-      )}
-    </span>
-  );
 }
 
 function fuzzyMatchModel(model: MediaModelOption, rawQuery: string): boolean {
@@ -145,30 +141,23 @@ export default function ChatInput({
   const reduceMotion = useReducedMotion();
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState('');
-  const [referenceScope, setReferenceScope] = useState<ReferenceScope>('all');
+  const [pickerTab, setPickerTab] = useState<PickerTab>('nodes');
+  const [mediaKind, setMediaKind] = useState<string>('all');
+  const [assetKind, setAssetKind] = useState<string>('all');
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
   const [skillUploading, setSkillUploading] = useState(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
   const canvasNodes = useAppStore((state) => state.nodes);
+  const dramaAssets = useAppStore((state) => state.dramaAssets);
   const userSkills = useAppStore((state) => state.userSkills);
   const uploadSkill = useAppStore((state) => state.uploadSkill);
   const showToast = useAppStore((state) => state.showToast);
   const compatibleMediaModels = mediaModelOptions;
-  const groupedMediaModels = useMemo(() => {
-    const groups = new Map<string, { id: string; name: string; models: MediaModelOption[] }>();
-    for (const model of compatibleMediaModels) {
-      if (!fuzzyMatchModel(model, modelQuery)) continue;
-      const group = groups.get(model.groupId) ?? {
-        id: model.groupId,
-        name: model.groupName,
-        models: [],
-      };
-      group.models.push(model);
-      groups.set(model.groupId, group);
-    }
-    return [...groups.values()];
-  }, [compatibleMediaModels, modelQuery]);
+  const filteredMediaModels = useMemo(
+    () => compatibleMediaModels.filter((model) => fuzzyMatchModel(model, modelQuery)),
+    [compatibleMediaModels, modelQuery],
+  );
   const filteredCanvasNodes = useMemo(() => canvasNodes
     .filter((node) => node.type !== 'group')
     .filter((node) => fuzzyMatchText(
@@ -191,13 +180,61 @@ export default function ChatInput({
     () => new Map(canvasNodes.map((node) => [node.id, node.data.displayId])),
     [canvasNodes],
   );
-  const visibleCanvasNodes = useMemo(
-    () => referenceScope === 'models' ? [] : filteredCanvasNodes,
-    [filteredCanvasNodes, referenceScope],
+  // 媒体模型按类型分档，作为「模型」Tab 的筛选芯片
+  const mediaKindChips = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const model of filteredMediaModels) {
+      counts.set(model.mediaKind, (counts.get(model.mediaKind) ?? 0) + 1);
+    }
+    if (counts.size === 0) return [];
+    return [
+      { id: 'all', label: '全部', count: filteredMediaModels.length },
+      ...[...counts].map(([kind, count]) => ({ id: kind, label: MEDIA_KIND_LABELS[kind] ?? kind, count })),
+    ];
+  }, [filteredMediaModels]);
+  const kindedMediaModels = useMemo(
+    () => (mediaKind === 'all' ? filteredMediaModels : filteredMediaModels.filter((m) => m.mediaKind === mediaKind)),
+    [filteredMediaModels, mediaKind],
   );
-  const visibleMediaGroups = useMemo(
-    () => referenceScope === 'nodes' ? [] : groupedMediaModels,
-    [groupedMediaModels, referenceScope],
+  // 资产库（短剧人物/场景/道具），与节点提示词的 @ 用同一份数据源
+  const filteredDramaAssets = useMemo(
+    () => resolveDramaMentionItems(dramaAssets, modelQuery),
+    [dramaAssets, modelQuery],
+  );
+  const assetKindChips = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of filteredDramaAssets) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+    if (counts.size === 0) return [];
+    return [
+      { id: 'all', label: '全部', count: filteredDramaAssets.length },
+      ...[...counts].map(([kind, count]) => ({ id: kind, label: DRAMA_KIND_LABELS[kind] ?? kind, count })),
+    ];
+  }, [filteredDramaAssets]);
+  const kindedDramaAssets = useMemo(
+    () => (assetKind === 'all' ? filteredDramaAssets : filteredDramaAssets.filter((a) => a.kind === assetKind)),
+    [assetKind, filteredDramaAssets],
+  );
+
+  // 当前 Tab 空而别的 Tab 有内容时自动切过去（输入 @关键词 时不至于对着空网格）
+  const tabCounts: Record<PickerTab, number> = {
+    nodes: filteredCanvasNodes.length,
+    assets: filteredDramaAssets.length,
+    models: filteredMediaModels.length,
+  };
+  const effectiveTab: PickerTab = tabCounts[pickerTab] > 0
+    ? pickerTab
+    : PICKER_TAB_ORDER.find((tab) => tabCounts[tab] > 0) ?? pickerTab;
+  const visibleCanvasNodes = useMemo(
+    () => effectiveTab === 'nodes' ? filteredCanvasNodes : [],
+    [filteredCanvasNodes, effectiveTab],
+  );
+  const visibleDramaAssets = useMemo(
+    () => effectiveTab === 'assets' ? kindedDramaAssets : [],
+    [effectiveTab, kindedDramaAssets],
+  );
+  const visibleMediaModels = useMemo(
+    () => effectiveTab === 'models' ? kindedMediaModels : [],
+    [kindedMediaModels, effectiveTab],
   );
 
   const modelGroupAvailability = useMemo(() => {
@@ -237,7 +274,8 @@ export default function ChatInput({
     });
     setModelMenuOpen(false);
     setModelQuery('');
-    setReferenceScope('all');
+    setPickerTab('nodes');
+    setMediaKind('all');
     setActiveSuggestionIndex(0);
   }, []);
 
@@ -250,7 +288,18 @@ export default function ChatInput({
     });
     setModelMenuOpen(false);
     setModelQuery('');
-    setReferenceScope('all');
+    setPickerTab('nodes');
+    setMediaKind('all');
+    setActiveSuggestionIndex(0);
+  }, []);
+
+  // 资产芯片走 @drama{id:name}，发送前由 promptResolver 展开成设定正文或参考图
+  const insertDramaMention = useCallback((item: DramaMentionItem) => {
+    inputRef.current?.insertReference({ kind: 'drama', id: item.id, label: item.name });
+    setModelMenuOpen(false);
+    setModelQuery('');
+    setPickerTab('nodes');
+    setAssetKind('all');
     setActiveSuggestionIndex(0);
   }, []);
 
@@ -273,14 +322,19 @@ export default function ChatInput({
       label: String(node.data.label || '节点'),
       displayId: node.data.displayId,
     })),
-    ...visibleMediaGroups.flatMap((group) => group.models
+    ...visibleDramaAssets.map((item) => ({
+      key: `drama:${item.id}`,
+      kind: 'drama' as const,
+      item,
+    })),
+    ...visibleMediaModels
       .filter(isModelAvailable)
       .map((model) => ({
         key: `model:${model.mediaKind}:${model.value}`,
         kind: 'model' as const,
         model,
-      }))),
-  ], [isModelAvailable, visibleCanvasNodes, visibleMediaGroups]);
+      })),
+  ], [isModelAvailable, visibleCanvasNodes, visibleDramaAssets, visibleMediaModels]);
   const skillSuggestions = useMemo(
     () => filteredSkills.map((skill) => ({ key: `skill:${skill.id}`, skill })),
     [filteredSkills],
@@ -301,10 +355,12 @@ export default function ChatInput({
   const selectReferenceSuggestion = useCallback((suggestion: ReferenceSuggestion) => {
     if (suggestion.kind === 'node') {
       insertNodeMention(suggestion.nodeId, suggestion.label, suggestion.displayId);
+    } else if (suggestion.kind === 'drama') {
+      insertDramaMention(suggestion.item);
     } else {
       insertModelMention(suggestion.model);
     }
-  }, [insertModelMention, insertNodeMention]);
+  }, [insertDramaMention, insertModelMention, insertNodeMention]);
 
   const handleSuggestionKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     const suggestionsOpen = modelMenuOpen || skillMenuOpen;
@@ -319,7 +375,8 @@ export default function ChatInput({
       setSkillMenuOpen(false);
       setModelQuery('');
       setSkillQuery('');
-      setReferenceScope('all');
+      setPickerTab('nodes');
+      setMediaKind('all');
       return true;
     }
 
@@ -350,6 +407,54 @@ export default function ChatInput({
     skillMenuOpen,
     skillSuggestions,
   ]);
+
+  // @ 面板卡片：先节点后模型，顺序与 referenceSuggestions 一致，键盘高亮才对得上
+  const referenceItems: MentionPickerItem[] = [
+    ...visibleCanvasNodes.map((node) => {
+      const label = String(node.data.label || '节点');
+      const index = referenceSuggestionIndexes.get(`node:${node.id}`);
+      return {
+        key: `node:${node.id}`,
+        domId: index == null ? undefined : `chat-reference-suggestion-${index}`,
+        label,
+        thumbnailUrl: resolveNodeThumbnail(node.data),
+        badge: node.data.displayId != null ? `#${String(node.data.displayId)}` : undefined,
+        title: `${label} · ${String(node.data.type)}`,
+        onSelect: () => insertNodeMention(node.id, label, node.data.displayId),
+      };
+    }),
+    ...visibleDramaAssets.map((item) => {
+      const index = referenceSuggestionIndexes.get(`drama:${item.id}`);
+      const boundNode = item.imageNodeId ? canvasNodes.find((n) => n.id === item.imageNodeId) : undefined;
+      const thumbnailUrl = (boundNode ? bestNodeThumb(boundNode.data) : undefined)
+        || item.imageUrl
+        || item.referenceImages?.find((reference) => !!reference.imageUrl)?.imageUrl;
+      return {
+        key: `drama:${item.id}`,
+        domId: index == null ? undefined : `chat-reference-suggestion-${index}`,
+        label: item.name,
+        thumbnailUrl,
+        icon: 'mdi:account-box-outline',
+        badge: DRAMA_KIND_LABELS[item.kind] ?? item.kind,
+        title: thumbnailUrl ? `${item.name}（引用参考图）` : `${item.name}（引用设定文字）`,
+        onSelect: () => insertDramaMention(item),
+      };
+    }),
+    ...visibleMediaModels.map((model) => {
+      const available = isModelAvailable(model);
+      const index = referenceSuggestionIndexes.get(`model:${model.mediaKind}:${model.value}`);
+      return {
+        key: `model:${model.mediaKind}:${model.value}`,
+        domId: index == null ? undefined : `chat-reference-suggestion-${index}`,
+        label: model.label,
+        icon: MEDIA_KIND_ICONS[model.mediaKind],
+        badge: available ? MEDIA_KIND_LABELS[model.mediaKind] : '未配置',
+        disabled: !available,
+        title: available ? model.description : '请先配置对应供应商',
+        onSelect: () => insertModelMention(model),
+      };
+    }),
+  ];
 
   const activeSuggestionId = modelMenuOpen
     ? (referenceSuggestions.length > 0
@@ -382,7 +487,8 @@ export default function ChatInput({
     const openModelReferences = () => {
       setSkillMenuOpen(false);
       setSkillQuery('');
-      setReferenceScope('models');
+      setPickerTab('models');
+      setMediaKind('all');
       setModelQuery('');
       setModelMenuOpen(true);
       setActiveSuggestionIndex(0);
@@ -436,7 +542,11 @@ export default function ChatInput({
             setModelMenuOpen(query != null);
             setActiveSuggestionIndex(0);
             const parsedQuery = parseReferenceQuery(query ?? '');
-            setReferenceScope(query == null ? 'all' : parsedQuery.scope);
+            // @n / @a / @m 直接落到对应 Tab；关闭时归位到「节点」
+            if (query == null || parsedQuery.scope === 'nodes') setPickerTab('nodes');
+            else if (parsedQuery.scope === 'assets') setPickerTab('assets');
+            else if (parsedQuery.scope === 'models') setPickerTab('models');
+            if (query == null) { setMediaKind('all'); setAssetKind('all'); }
             setModelQuery(parsedQuery.query);
             if (query != null) setSkillMenuOpen(false);
           }}
@@ -450,7 +560,7 @@ export default function ChatInput({
           suggestionListId={modelMenuOpen ? REFERENCE_SUGGESTION_LIST_ID : SKILL_SUGGESTION_LIST_ID}
           activeSuggestionId={activeSuggestionId}
           suggestionsOpen={modelMenuOpen || skillMenuOpen}
-          placeholder="输入消息，@n 选节点 · @m 选模型 · / 调用 Skill"
+          placeholder="输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill"
           disabled={disabled}
         />
 
@@ -461,100 +571,43 @@ export default function ChatInput({
               initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
-               transition={reduceMotion
-                 ? { duration: 0.1 }
-                 : { type: 'spring', visualDuration: 0.22, bounce: 0 }}
-               id={REFERENCE_SUGGESTION_LIST_ID}
-               role="listbox"
-               aria-label="节点与模型引用"
-               className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20 max-h-72 overflow-y-auto rounded-xl border border-canvas-border bg-canvas-surface shadow-xl">
-              {visibleCanvasNodes.length > 0 && (
-                <div className="px-1 pb-1">
-                  <div className="sticky top-0 z-20 -mx-1 flex items-center justify-between bg-canvas-surface px-3 py-1.5 text-[10px] font-medium text-canvas-text-muted">
-                    <span>画布节点</span>
-                    <span>{visibleCanvasNodes.length}</span>
-                  </div>
-                  {visibleCanvasNodes.map((node) => {
-                    const suggestionIndex = referenceSuggestionIndexes.get(`node:${node.id}`);
-                    const active = suggestionIndex === resolvedActiveSuggestionIndex;
-                    return (
-                      <button
-                        key={node.id}
-                        id={suggestionIndex == null ? undefined : `chat-reference-suggestion-${suggestionIndex}`}
-                        type="button"
-                        role="option"
-                        aria-selected={active}
-                        onMouseEnter={() => suggestionIndex != null && setActiveSuggestionIndex(suggestionIndex)}
-                        onClick={() => insertNodeMention(
-                          node.id,
-                          String(node.data.label || '节点'),
-                          node.data.displayId,
-                        )}
-                        className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[11px] text-canvas-text transition-colors ${active ? 'bg-canvas-hover ring-1 ring-inset ring-indigo-400/25' : 'hover:bg-canvas-hover'}`}
-                      >
-                        <NodeReferenceThumbnail data={node.data} />
-                        <span className="min-w-0 flex-1 truncate">{String(node.data.label || '节点')}</span>
-                        {node.data.displayId != null && (
-                          <span className="text-[10px] text-canvas-text-muted">#{String(node.data.displayId)}</span>
-                        )}
-                        <span className="text-[10px] text-canvas-text-muted">{String(node.data.type)}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {visibleMediaGroups.map((group) => (
-                <div key={group.id} className="px-1 pb-1">
-                  <div className="sticky top-0 z-20 -mx-1 flex items-center justify-between bg-canvas-surface px-3 py-1.5 text-[10px] font-medium text-canvas-text-muted">
-                    <span>{group.name}</span>
-                    <span>{group.models.length}</span>
-                  </div>
-                  {group.models.map((model) => {
-                    const available = isModelAvailable(model);
-                    const suggestionIndex = referenceSuggestionIndexes.get(`model:${model.mediaKind}:${model.value}`);
-                    const active = suggestionIndex === resolvedActiveSuggestionIndex;
-                    return (
-                      <button
-                        key={`${model.mediaKind}:${model.value}`}
-                        id={suggestionIndex == null ? undefined : `chat-reference-suggestion-${suggestionIndex}`}
-                        type="button"
-                        role="option"
-                        aria-selected={active}
-                        disabled={!available}
-                        onMouseEnter={() => suggestionIndex != null && setActiveSuggestionIndex(suggestionIndex)}
-                        onClick={() => insertModelMention(model)}
-                        title={available ? model.description : '请先配置对应供应商'}
-                        className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[11px] transition-colors ${available ? `text-canvas-text ${active ? 'bg-canvas-hover ring-1 ring-inset ring-indigo-400/25' : 'hover:bg-canvas-hover'}` : 'cursor-not-allowed text-canvas-text-muted opacity-50'}`}
-                      >
-                        <Icon
-                          icon={model.mediaKind === 'image'
-                            ? 'mdi:image-outline'
-                            : model.mediaKind === 'video'
-                              ? 'mdi:video-outline'
-                              : 'mdi:music-note-outline'}
-                          width="16"
-                        />
-                        <span className="min-w-0 flex-1 truncate">{model.label}</span>
-                        <span className="text-[10px] text-canvas-text-muted">
-                          {model.mediaKind === 'image' ? '图片' : model.mediaKind === 'video' ? '视频' : '音频'}
-                        </span>
-                        {!available && <Icon icon="mdi:lock-outline" width="13" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-              {visibleCanvasNodes.length === 0 && visibleMediaGroups.length === 0 && (
-                <p className="m-1 px-3 py-3 text-center text-[11px] text-canvas-text-muted">
-                  {modelQuery
-                    ? `没有匹配"${modelQuery}"的${referenceScope === 'nodes' ? '节点' : referenceScope === 'models' ? '模型' : '节点或模型'}`
-                    : referenceScope === 'nodes'
-                      ? '暂无可引用的节点'
-                      : referenceScope === 'models'
-                        ? '暂无可引用的模型'
-                        : '暂无可引用的节点或模型'}
-                </p>
-              )}
+              transition={reduceMotion
+                ? { duration: 0.1 }
+                : { type: 'spring', visualDuration: 0.22, bounce: 0 }}
+              className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20"
+            >
+              <MentionPicker
+                listId={REFERENCE_SUGGESTION_LIST_ID}
+                ariaLabel="节点与模型引用"
+                tabs={[
+                  { id: 'nodes', label: '画布节点', icon: 'mdi:image-multiple-outline' },
+                  { id: 'assets', label: '资产库', icon: 'mdi:bookshelf' },
+                  { id: 'models', label: '模型', icon: 'mdi:cube-outline' },
+                ]}
+                activeTab={effectiveTab}
+                onTabChange={(id) => {
+                  setPickerTab(id as PickerTab);
+                  setActiveSuggestionIndex(0);
+                }}
+                chips={effectiveTab === 'models'
+                  ? mediaKindChips
+                  : effectiveTab === 'assets' ? assetKindChips : undefined}
+                activeChip={effectiveTab === 'assets' ? assetKind : mediaKind}
+                onChipChange={(id) => {
+                  if (effectiveTab === 'assets') setAssetKind(id);
+                  else setMediaKind(id);
+                  setActiveSuggestionIndex(0);
+                }}
+                items={referenceItems}
+                activeKey={referenceSuggestions[resolvedActiveSuggestionIndex]?.key}
+                onItemHover={(key) => {
+                  const index = referenceSuggestionIndexes.get(key);
+                  if (index != null) setActiveSuggestionIndex(index);
+                }}
+                emptyText={modelQuery
+                  ? `没有匹配"${modelQuery}"的${TAB_NOUNS[effectiveTab]}`
+                  : `暂无可引用的${TAB_NOUNS[effectiveTab]}`}
+              />
             </motion.div>
           )}
           </AnimatePresence>
@@ -636,7 +689,8 @@ export default function ChatInput({
                 type="button"
                 onClick={() => {
                   setModelQuery('');
-                  setReferenceScope('all');
+                  setPickerTab('nodes');
+                  setMediaKind('all');
                   setSkillMenuOpen(false);
                   setActiveSuggestionIndex(0);
                   setModelMenuOpen((open) => !open);

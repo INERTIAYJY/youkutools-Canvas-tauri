@@ -4,7 +4,7 @@
 import { Icon } from '@iconify/react';
 import { useAppStore, type AppState } from '../../store/useAppStore';
 
-type ReferenceTokenKind = 'node' | 'model' | 'skill' | 'slash';
+type ReferenceTokenKind = 'node' | 'model' | 'skill' | 'drama' | 'slash';
 
 interface ReferenceToken {
   kind: ReferenceTokenKind;
@@ -29,7 +29,7 @@ export interface ChatReferenceHandlers {
 
 type InteractiveChatReferenceTextProps = ChatReferenceTextProps & ChatReferenceHandlers;
 
-const TOKEN_PATTERN = /@\{([^:}\r\n]+):([^}\r\n]+)\}|@model\{([^|}\r\n]+)\|([^}\r\n]*)\}|@skill\{([^|}\r\n]+)\|([^}\r\n]*)\}|\/[^\s/]*/g;
+const TOKEN_PATTERN = /@\{([^:}\r\n]+):([^}\r\n]+)\}|@model\{([^|}\r\n]+)\|([^}\r\n]*)\}|@skill\{([^|}\r\n]+)\|([^}\r\n]*)\}|@drama\{([^:}\r\n]+):([^}\r\n]+)\}|\/[^\s/]*/g;
 
 type NodeDisplayIdMap = ReadonlyMap<string, number | undefined>;
 
@@ -91,6 +91,8 @@ function parseReferenceTokens(
         ? 'model'
       : raw.startsWith('@skill{')
         ? 'skill'
+      : raw.startsWith('@drama{')
+        ? 'drama'
         : 'slash';
     const label = kind === 'node'
       ? match[2]
@@ -98,6 +100,8 @@ function parseReferenceTokens(
         ? match[4] || '模型'
       : kind === 'skill'
         ? decodeLabel(match[6]) || 'Skill'
+      : kind === 'drama'
+        ? match[8] || '资产'
         : raw.slice(1);
     const id = kind === 'node'
       ? match[1]
@@ -105,7 +109,9 @@ function parseReferenceTokens(
         ? match[3]
         : kind === 'skill'
           ? match[5]
-          : undefined;
+          : kind === 'drama'
+            ? match[7]
+            : undefined;
     tokens.push({
       kind,
       raw,
@@ -123,6 +129,7 @@ const INPUT_TOKEN_CLASSES: Record<ReferenceTokenKind, string> = {
   node: 'rounded-[5px] bg-indigo-400/15 text-indigo-200 ring-1 ring-inset ring-indigo-400/25',
   model: 'rounded-[5px] bg-sky-400/15 text-sky-200 ring-1 ring-inset ring-sky-400/20',
   skill: 'rounded-[5px] bg-emerald-400/15 text-emerald-200 ring-1 ring-inset ring-emerald-400/20',
+  drama: 'rounded-[5px] bg-violet-400/15 text-violet-200 ring-1 ring-inset ring-violet-400/20',
   slash: 'rounded-[4px] bg-emerald-400/10 text-emerald-200',
 };
 
@@ -130,7 +137,16 @@ const COMPACT_TOKEN_CLASSES: Record<ReferenceTokenKind, string> = {
   node: 'border-indigo-400/25 bg-indigo-400/10 text-indigo-100',
   model: 'border-sky-400/25 bg-sky-400/10 text-sky-100',
   skill: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
+  drama: 'border-violet-400/25 bg-violet-400/10 text-violet-100',
   slash: 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100',
+};
+
+const ACCENT_CLASSES: Record<ReferenceTokenKind, string> = {
+  node: 'bg-indigo-300/70',
+  model: 'bg-sky-300/70',
+  skill: 'bg-emerald-300/70',
+  drama: 'bg-violet-300/70',
+  slash: 'bg-emerald-300/70',
 };
 
 interface CompactTokenProps extends ChatReferenceHandlers {
@@ -160,13 +176,7 @@ function CompactToken({
     <>
       <span
         aria-hidden="true"
-        className={`mr-1.5 h-3 w-0.5 shrink-0 rounded-full ${missing
-          ? 'bg-red-300/65'
-          : token.kind === 'node'
-            ? 'bg-indigo-300/70'
-            : token.kind === 'model'
-              ? 'bg-sky-300/70'
-              : 'bg-emerald-300/70'}`}
+        className={`mr-1.5 h-3 w-0.5 shrink-0 rounded-full ${missing ? 'bg-red-300/65' : ACCENT_CLASSES[token.kind]}`}
       />
       <span className="truncate">{label || '/'}</span>
       {token.kind === 'node' && token.displayId != null && (

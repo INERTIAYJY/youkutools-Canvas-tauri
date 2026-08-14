@@ -16,6 +16,7 @@
 @import './styles/nodes-director.css';
 @import './styles/nodes-group.css';
 @import './styles/prompt.css';
+@import './styles/mention-picker.css';
 @import './styles/preset-manager.css';
 @import './styles/model-selector.css';
 @import './styles/sidebar.css';

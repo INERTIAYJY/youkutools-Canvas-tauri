@@ -431,8 +431,11 @@ button.shot-frame:hover {
   left: 0;
   width: 100%;
   z-index: 20;
-  max-height: var(--shot-drop-max, 200px);
-  overflow-y: auto;
+}
+
+/* Tab / 芯片行常驻，把可用高度让给卡片网格自己滚 */
+.shot-picker-input .mention-dropdown .mention-picker-grid {
+  max-height: max(120px, calc(var(--shot-drop-max, 200px) - 112px));
 }
 
 .shot-picker-go {

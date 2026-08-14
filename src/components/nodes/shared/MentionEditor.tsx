@@ -12,6 +12,7 @@ import { getAllAssetMeta } from '../../../services/indexedDbService';
 import { springSmooth, fadeFast } from '../../../utils/motion';
 import { AnimatePresence, motion } from 'framer-motion';
 import PopupCloseButton from '../../shared/PopupCloseButton';
+import MentionPicker, { type MentionPickerChip, type MentionPickerItem } from '../../shared/MentionPicker';
 import {
   DRAMA_MENTION_MERGE_ALL,
   buildDramaMentionId,
@@ -38,6 +39,15 @@ import {
   resolveDramaMentionItems,
   resolveWorkflowMentionNodes,
 } from './mentionEditorSources';
+
+// 无缩略图时的卡片占位图标
+const MEDIA_ICONS: Record<'image' | 'video' | 'audio' | 'text', string> = {
+  image: 'mdi:image-outline',
+  video: 'mdi:video-outline',
+  audio: 'mdi:music-note-outline',
+  text: 'mdi:text-box-outline',
+};
+const DRAMA_KIND_LABELS: Record<string, string> = { character: '角色', scene: '场景', prop: '道具' };
 
 // ── Props ──
 export interface MentionEditorProps {
@@ -247,8 +257,15 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
 
   // 展开了参考图二级菜单的角色 id（多图角色才有）
   const [dramaRefPickerId, setDramaRefPickerId] = useState<string | null>(null);
+  // @ 面板的 Tab / 资产种类筛选
+  const [pickerTab, setPickerTab] = useState<'nodes' | 'assets'>('nodes');
+  const [dramaKind, setDramaKind] = useState<string>('all');
   useEffect(() => {
-    if (!showMention) setDramaRefPickerId(null);
+    if (!showMention) {
+      setDramaRefPickerId(null);
+      setPickerTab('nodes');
+      setDramaKind('all');
+    }
   }, [showMention]);
 
   // ── Clear saved range when both mention menu and asset picker are closed ──
@@ -939,6 +956,91 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   // 卸载时清除，避免残留 hover 高亮
   useEffect(() => () => { useAppStore.getState().setHoveredMentionNodeId(null); }, []);
 
+  // ── @ 面板数据：输入图（画布节点 + 工作流 IO） / 资产库（短剧资产） ──
+  const dramaThumbOf = useCallback((item: { imageNodeId?: string; imageUrl?: string }) => {
+    if (!item.imageNodeId) return item.imageUrl;
+    const n = nodes.find((x) => x.id === item.imageNodeId);
+    return bestNodeThumb(n?.data ?? {}) || item.imageUrl;
+  }, [nodes]);
+
+  const nodeTabItems: MentionPickerItem[] = [
+    ...filteredCanvasMentions.map((node) => ({
+      key: `node:${node.id}`,
+      label: node.label,
+      thumbnailUrl: node.thumbnailUrl,
+      icon: MEDIA_ICONS[node.outputType],
+      badge: node.isSelf ? '自身' : node.displayId != null ? `#${node.displayId}` : undefined,
+      onSelect: () => handleSelectCanvasMention(node.id, node.label),
+    })),
+    ...filteredWorkflowMentions.map((node) => ({
+      key: `wf:${node.id}`,
+      label: node.label,
+      icon: MEDIA_ICONS[node._ioType === 'image' || node._ioType === 'video' || node._ioType === 'audio' ? node._ioType : 'text'],
+      badge: '工作流',
+      onSelect: () => handleSelectWorkflowMention(node._ioNodeId, node.label, node._ioType),
+    })),
+  ];
+
+  const drillItem = dramaRefPickerId
+    ? dramaMentionItems.find((item) => item.id === dramaRefPickerId)
+    : undefined;
+  const drillRefs: CharacterReferenceImage[] = (drillItem?.referenceImages ?? [])
+    .filter((reference) => !!reference.imageUrl);
+
+  const dramaKindChips: MentionPickerChip[] = (() => {
+    if (drillItem) return [];
+    const counts = new Map<string, number>();
+    for (const item of dramaMentionItems) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+    if (counts.size === 0) return [];
+    return [
+      { id: 'all', label: '全部', count: dramaMentionItems.length },
+      ...[...counts].map(([kind, count]) => ({ id: kind, label: DRAMA_KIND_LABELS[kind] ?? kind, count })),
+    ];
+  })();
+
+  const assetTabItems: MentionPickerItem[] = drillItem
+    ? [
+      {
+        key: 'drama-merge-all',
+        label: '全部拼成一张',
+        icon: 'lucide:layout-grid',
+        badge: `${drillRefs.length} 图`,
+        onSelect: () => handleSelectDramaReference(drillItem, DRAMA_MENTION_MERGE_ALL, drillRefs[0]?.imageUrl),
+      },
+      ...drillRefs.map((reference) => ({
+        key: `drama-ref:${reference.id}`,
+        label: CHARACTER_REFERENCE_KIND_LABELS[reference.kind],
+        thumbnailUrl: reference.imageUrl,
+        onSelect: () => handleSelectDramaReference(drillItem, reference.id, reference.imageUrl),
+      })),
+    ]
+    : dramaMentionItems
+      .filter((item) => dramaKind === 'all' || item.kind === dramaKind)
+      .map((item) => {
+        const references = (item.referenceImages ?? []).filter((reference) => !!reference.imageUrl);
+        const multiRef = references.length > 1;
+        const thumb = dramaThumbOf(item) || references[0]?.imageUrl;
+        return {
+          key: `drama:${item.id}`,
+          label: item.name,
+          thumbnailUrl: thumb,
+          icon: 'mdi:account-box-outline',
+          badge: multiRef ? `${references.length} 图` : thumb ? undefined : '简介',
+          onSelect: () => {
+            // 多张参考图先钻进二级视图让用户挑图或选合并
+            if (multiRef) setDramaRefPickerId(item.id);
+            else handleSelectDramaMention(item);
+          },
+        };
+      });
+
+  // 当前 Tab 空而另一个有内容时自动切过去（输入 @关键词 时不至于对着空网格）
+  const effectiveTab = pickerTab === 'nodes' && nodeTabItems.length === 0 && assetTabItems.length > 0
+    ? 'assets'
+    : pickerTab === 'assets' && assetTabItems.length === 0 && nodeTabItems.length > 0
+      ? 'nodes'
+      : pickerTab;
+
   return (
     <div className={`mention-editor-wrap relative ${className}`}>
       <div
@@ -984,227 +1086,44 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
 
       {/* @ Mention Dropdown */}
       {showMention && (
-        <div className="mention-dropdown absolute left-3 bottom-full mb-1 w-64 bg-canvas-card border border-canvas-border rounded-lg shadow-xl shadow-black/40 overflow-hidden z-50">
-          {/* Canvas nodes section */}
-          {canvasMentionNodes.length > 0 && (
-            <>
-              <div className="px-3 py-2 text-[11px] text-canvas-text-muted uppercase tracking-wider">
-                引用节点
-              </div>
-              {filteredCanvasMentions.length > 0 ? (
-                filteredCanvasMentions.map((node) => (
-                  <button
-                    key={node.id}
-                    type="button"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      handleSelectCanvasMention(node.id, node.label);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-hover transition-colors text-left"
-                  >
-                    <span
-                      className={`w-6 h-6 rounded flex items-center justify-center text-xs shrink-0 overflow-hidden ${node.outputType === 'image'
-                          ? 'bg-green-500/15 text-green-400'
-                          : node.outputType === 'video'
-                            ? 'bg-blue-500/15 text-blue-400'
-                            : node.outputType === 'audio'
-                              ? 'bg-orange-500/15 text-orange-400'
-                              : 'bg-indigo-500/15 text-indigo-400'
-                        }`}
-                    >
-                      {(node.outputType === 'image' || node.outputType === 'video') && node.thumbnailUrl ? (
-                        <img src={node.thumbnailUrl} alt="" className="w-full h-full object-cover rounded" />
-                      ) : node.outputType === 'video' ? '🎬' : node.outputType === 'image' ? '🖼' : node.outputType === 'audio' ? '🎵' : 'T'}
-                    </span>
-                    <div className="min-w-0 flex-1 flex items-center gap-1 overflow-hidden">
-                      <span className="text-sm text-canvas-text truncate">{node.label}</span>
-                      {node.isSelf && (
-                        <span className="text-[10px] text-indigo-300 bg-indigo-500/15 px-1 py-px rounded shrink-0">自身</span>
-                      )}
-                      <span className="text-[10px] text-canvas-text-muted shrink-0">#{node.displayId}</span>
-                      {/* {!node.hasOutput && (
-                        <span className="text-[10px] text-canvas-text-muted shrink-0">等待生成</span>
-                      )} */}
-                    </div>
-                  </button>
-                ))
-              ) : (
-                mentionQuery ? (
-                  <div className="px-3 py-4 text-center text-xs text-canvas-text-muted">无匹配节点</div>
-                ) : null
-              )}
-            </>
-          )}
-
-          {/* 短剧资产：无图时插入单条简介；有图时引用图像节点 */}
-          {dramaMentionItems.length > 0 && (
-            <>
-              <div className="px-3 py-2 text-[11px] text-violet-400/80 tracking-wider border-t border-canvas-border">
-                短剧资产
-                <span className="ml-1.5 normal-case opacity-70">无图=简介 · 有图=参考图</span>
-              </div>
-              {dramaMentionItems.map((item) => {
-                const kindLabel = item.kind === 'character' ? '人物' : item.kind === 'scene' ? '场景' : '道具';
-                const references: CharacterReferenceImage[] = (item.referenceImages ?? [])
-                  .filter((reference) => !!reference.imageUrl);
-                const multiRef = references.length > 1;
-                const expanded = multiRef && dramaRefPickerId === item.id;
-                let thumb: string | undefined;
-                let hasImage = false;
-                if (item.imageNodeId) {
-                  const n = nodes.find((x) => x.id === item.imageNodeId);
-                  thumb = bestNodeThumb(n?.data ?? {}) || item.imageUrl;
-                  hasImage = !!(
-                    (n?.data?.imageUrl as string | undefined)
-                    || (n?.data?.thumbnailUrl as string | undefined)
-                    || item.imageUrl
-                  );
-                }
-                if (!thumb && references[0]) thumb = references[0].imageUrl;
-                if (!hasImage && references.length > 0) hasImage = true;
-                return (
-                  <div key={`drama-${item.id}`}>
-                    <button
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        // 多张参考图先展开二级菜单，让用户挑图或选合并
-                        if (multiRef) setDramaRefPickerId(expanded ? null : item.id);
-                        else handleSelectDramaMention(item);
-                      }}
-                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-hover transition-colors text-left"
-                    >
-                      <span className="w-6 h-6 rounded flex items-center justify-center text-[10px] shrink-0 overflow-hidden bg-violet-500/15 text-violet-300">
-                        {hasImage && thumb ? (
-                          <img src={thumb} alt="" className="w-full h-full object-cover rounded" />
-                        ) : (
-                          kindLabel[0]
-                        )}
-                      </span>
-                      <div className="min-w-0 flex-1 flex items-center gap-1 overflow-hidden">
-                        <span className="text-sm text-canvas-text truncate">{item.name}</span>
-                        <span className="text-[10px] text-canvas-text-muted shrink-0">{kindLabel}</span>
-                        {hasImage ? (
-                          <span className="text-[10px] text-indigo-300 bg-indigo-500/15 px-1 py-px rounded shrink-0">有图</span>
-                        ) : (
-                          <span className="text-[10px] text-canvas-text-muted bg-canvas-hover px-1 py-px rounded shrink-0">简介</span>
-                        )}
-                      </div>
-                      {multiRef && (
-                        <span className="shrink-0 flex items-center gap-1 text-[10px] text-canvas-text-muted">
-                          {references.length} 图
-                          <Icon icon={expanded ? 'lucide:chevron-down' : 'lucide:chevron-right'} width="12" height="12" />
-                        </span>
-                      )}
-                    </button>
-
-                    {expanded && (
-                      <div className="pl-6 pb-1 border-l border-canvas-border ml-4">
-                        <button
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            handleSelectDramaReference(item, DRAMA_MENTION_MERGE_ALL, references[0]?.imageUrl);
-                          }}
-                          className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-canvas-hover transition-colors text-left"
-                        >
-                          <span className="w-5 h-5 rounded flex items-center justify-center shrink-0 bg-indigo-500/15 text-indigo-300">
-                            <Icon icon="lucide:layout-grid" width="12" height="12" />
-                          </span>
-                          <span className="text-xs text-canvas-text">全部拼成一张</span>
-                          <span className="ml-auto text-[10px] text-canvas-text-muted">{references.length} 图合并</span>
-                        </button>
-                        {references.map((reference) => (
-                          <button
-                            key={reference.id}
-                            type="button"
-                            onMouseDown={(e) => {
-                              e.preventDefault();
-                              handleSelectDramaReference(item, reference.id, reference.imageUrl);
-                            }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-canvas-hover transition-colors text-left"
-                          >
-                            <span className="w-5 h-5 rounded shrink-0 overflow-hidden bg-canvas-hover">
-                              <img src={reference.imageUrl} alt="" className="w-full h-full object-cover" />
-                            </span>
-                            <span className="text-xs text-canvas-text truncate">
-                              {CHARACTER_REFERENCE_KIND_LABELS[reference.kind]}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </>
-          )}
-
-          {/* Workflow IO nodes section */}
-          {workflowMentionNodes.length > 0 && (
-            <>
-              <div className="px-3 py-2 text-[11px] text-amber-400/70 uppercase tracking-wider flex items-center gap-1.5 border-t border-canvas-border">
-                <span><Icon icon="catppuccin:workflow" /></span>
-                <span>工作流: {selectedWorkflow?.name || ''}</span>
-              </div>
-              {filteredWorkflowMentions.length > 0 ? (
-                filteredWorkflowMentions.map((node) => (
-                  <button
-                    key={node.id}
-                    type="button"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      const ioType = (node as typeof node & { _ioType: WorkflowIONodeType })._ioType || 'prompt';
-                      const ioNodeId = (node as typeof node & { _ioNodeId: string })._ioNodeId;
-                      handleSelectWorkflowMention(ioNodeId, node.label, ioType);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-canvas-hover transition-colors text-left"
-                  >
-                    <span
-                      className={`w-6 h-6 rounded flex items-center justify-center text-xs ${(node as typeof node & { _ioType: string })._ioType === 'image'
-                          ? 'bg-green-500/15 text-green-400'
-                          : (node as typeof node & { _ioType: string })._ioType === 'video'
-                            ? 'bg-blue-500/15 text-blue-400'
-                            : (node as typeof node & { _ioType: string })._ioType === 'audio'
-                              ? 'bg-orange-500/15 text-orange-400'
-                              : 'bg-indigo-500/15 text-indigo-400'
-                        }`}
-                    >
-                      {(node as typeof node & { _ioType: string })._ioType === 'image' ? '🖼' : (node as typeof node & { _ioType: string })._ioType === 'video' ? '🎬' : (node as typeof node & { _ioType: string })._ioType === 'audio' ? '🎵' : 'T'}
-                    </span>
-                    <div className="min-w-0 flex-1 overflow-hidden">
-                      <span className="text-sm text-canvas-text truncate">{node.label}</span>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                mentionQuery ? (
-                  <div className="px-3 py-4 text-center text-xs text-canvas-text-muted">无匹配节点</div>
-                ) : null
-              )}
-            </>
-          )}
-
-          {/* No node results for query */}
-          {mentionQuery
-            && filteredCanvasMentions.length === 0
-            && filteredWorkflowMentions.length === 0
-            && dramaMentionItems.length === 0 && (
-            <div className="px-3 py-3 text-center text-xs text-canvas-text-muted">无匹配节点或资产</div>
-          )}
-
-          {/* 引用资产 — 常驻入口 */}
-          <button
-            type="button"
-            onMouseDown={(e) => { e.preventDefault(); openAssetPicker(); }}
-            className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-canvas-hover transition-colors text-left border-t border-canvas-border"
-          >
-            <span className="w-6 h-6 rounded flex items-center justify-center shrink-0 bg-indigo-500/15 text-indigo-300">
-              <Icon icon="solar:gallery-bold" width="14" height="14" />
-            </span>
-            <span className="text-sm text-canvas-text">引用资产</span>
-            <span className="ml-auto text-[10px] text-canvas-text-muted">全局资产</span>
-          </button>
+        <div className="mention-dropdown absolute left-3 bottom-full mb-1 w-[336px] z-50">
+          <MentionPicker
+            ariaLabel="引用节点或资产"
+            tabs={[
+              { id: 'nodes', label: '输入图', icon: 'mdi:image-multiple-outline' },
+              { id: 'assets', label: '资产库', icon: 'mdi:bookshelf' },
+            ]}
+            activeTab={effectiveTab}
+            onTabChange={(id) => { setPickerTab(id as 'nodes' | 'assets'); setDramaRefPickerId(null); }}
+            chips={effectiveTab === 'assets' ? dramaKindChips : undefined}
+            activeChip={dramaKind}
+            onChipChange={setDramaKind}
+            leading={effectiveTab === 'assets' && drillItem ? (
+              <button
+                type="button"
+                className="mention-picker-chip"
+                onMouseDown={(e) => { e.preventDefault(); setDramaRefPickerId(null); }}
+              >
+                <Icon icon="lucide:chevron-left" width="12" height="12" />
+                {drillItem.name}
+              </button>
+            ) : undefined}
+            items={effectiveTab === 'assets' ? assetTabItems : nodeTabItems}
+            emptyText={mentionQuery ? '无匹配节点或资产' : effectiveTab === 'assets' ? '暂无短剧资产' : '暂无可引用的输入'}
+            footer={(
+              <button
+                type="button"
+                onMouseDown={(e) => { e.preventDefault(); openAssetPicker(); }}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-canvas-hover"
+              >
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-indigo-500/15 text-indigo-300">
+                  <Icon icon="solar:gallery-bold" width="14" height="14" />
+                </span>
+                <span className="text-xs text-canvas-text">引用资产</span>
+                <span className="ml-auto text-[10px] text-canvas-text-muted">全局资产</span>
+              </button>
+            )}
+          />
         </div>
       )}
 

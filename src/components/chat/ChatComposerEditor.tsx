@@ -12,7 +12,9 @@ import {
 export type ChatComposerReference =
   | { kind: 'node'; id: string; label: string; displayId?: number }
   | { kind: 'model'; id: string; label: string }
-  | { kind: 'skill'; id: string; label: string };
+  | { kind: 'skill'; id: string; label: string }
+  /** 资产库人物/场景/道具；发送时由 promptResolver 展开为设定正文或参考图 */
+  | { kind: 'drama'; id: string; label: string };
 
 export interface ChatComposerEditorHandle {
   focus: () => void;
@@ -37,8 +39,22 @@ interface ChatComposerEditorProps {
 type ParsedReference = ChatComposerReference & { raw: string };
 
 const ZWSP = '\u200B';
-const REFERENCE_PATTERN = /@\{([^:}\r\n]+):([^}\r\n]+)\}|@model\{([^|}\r\n]+)\|([^}\r\n]*)\}|@skill\{([^|}\r\n]+)\|([^}\r\n]*)\}/g;
-const REFERENCE_TEXT_PATTERN = /@\{[^:}\r\n]+:[^}\r\n]+\}|@model\{[^|}\r\n]+\|[^}\r\n]*\}|@skill\{[^|}\r\n]+\|[^}\r\n]*\}/;
+const REFERENCE_PATTERN = /@\{([^:}\r\n]+):([^}\r\n]+)\}|@model\{([^|}\r\n]+)\|([^}\r\n]*)\}|@skill\{([^|}\r\n]+)\|([^}\r\n]*)\}|@drama\{([^:}\r\n]+):([^}\r\n]+)\}/g;
+const REFERENCE_TEXT_PATTERN = /@\{[^:}\r\n]+:[^}\r\n]+\}|@model\{[^|}\r\n]+\|[^}\r\n]*\}|@skill\{[^|}\r\n]+\|[^}\r\n]*\}|@drama\{[^:}\r\n]+:[^}\r\n]+\}/;
+
+/** 芯片配色：边框 / 底色 / 文字 / 竖条 */
+const REFERENCE_STYLES: Record<ChatComposerReference['kind'], { chip: string; accent: string }> = {
+  node: { chip: 'border-indigo-400/25 bg-indigo-400/10 text-indigo-100', accent: 'bg-indigo-300/70' },
+  model: { chip: 'border-sky-400/25 bg-sky-400/10 text-sky-100', accent: 'bg-sky-300/70' },
+  skill: { chip: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100', accent: 'bg-emerald-300/70' },
+  drama: { chip: 'border-violet-400/25 bg-violet-400/10 text-violet-100', accent: 'bg-violet-300/70' },
+};
+const REFERENCE_ARIA_PREFIX: Record<ChatComposerReference['kind'], string> = {
+  node: '节点',
+  model: '模型',
+  skill: 'Skill',
+  drama: '资产',
+};
 
 function decodeLabel(value: string): string {
   try {
@@ -58,6 +74,9 @@ function serializeReference(reference: ChatComposerReference): string {
   }
   if (reference.kind === 'model') {
     return `@model{${reference.id}|${sanitizeLabel(reference.label) || '模型'}}`;
+  }
+  if (reference.kind === 'drama') {
+    return `@drama{${reference.id}:${sanitizeLabel(reference.label) || '资产'}}`;
   }
   return `@skill{${reference.id}|${encodeURIComponent(reference.label)}}`;
 }
@@ -81,10 +100,18 @@ function parseReference(match: RegExpExecArray, nodeDisplayIds: ReadonlyMap<stri
       raw,
     };
   }
+  if (match[5] !== undefined) {
+    return {
+      kind: 'skill',
+      id: match[5],
+      label: decodeLabel(match[6]) || 'Skill',
+      raw,
+    };
+  }
   return {
-    kind: 'skill',
-    id: match[5],
-    label: decodeLabel(match[6]) || 'Skill',
+    kind: 'drama',
+    id: match[7],
+    label: match[8] || '资产',
     raw,
   };
 }
@@ -111,26 +138,16 @@ function buildReferenceElement(reference: ParsedReference): HTMLSpanElement {
   element.contentEditable = 'false';
   element.setAttribute('data-chat-reference', reference.kind);
   element.setAttribute('data-chat-reference-raw', reference.raw);
-  element.setAttribute('aria-label', reference.kind === 'node'
-    ? `节点 ${reference.label}${reference.displayId != null ? `，编号 ${reference.displayId}` : ''}`
-    : reference.kind === 'model'
-      ? `模型 ${reference.label}`
-      : `Skill ${reference.label}`);
+  const style = REFERENCE_STYLES[reference.kind];
+  element.setAttribute('aria-label', `${REFERENCE_ARIA_PREFIX[reference.kind]} ${reference.label}${
+    reference.kind === 'node' && reference.displayId != null ? `，编号 ${reference.displayId}` : ''
+  }`);
   element.className = `mx-0.5 inline-flex max-w-[min(100%,18rem)] select-none items-center align-middle
-    rounded-[7px] border px-2 py-1 text-[12px] font-medium leading-none shadow-sm
-    ${reference.kind === 'node'
-      ? 'border-indigo-400/25 bg-indigo-400/10 text-indigo-100'
-      : reference.kind === 'model'
-        ? 'border-sky-400/25 bg-sky-400/10 text-sky-100'
-        : 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100'}`;
+    rounded-[7px] border px-2 py-1 text-[12px] font-medium leading-none shadow-sm ${style.chip}`;
 
   const accent = document.createElement('span');
   accent.setAttribute('aria-hidden', 'true');
-  accent.className = `mr-1.5 h-3 w-0.5 shrink-0 rounded-full ${reference.kind === 'node'
-    ? 'bg-indigo-300/70'
-    : reference.kind === 'model'
-      ? 'bg-sky-300/70'
-      : 'bg-emerald-300/70'}`;
+  accent.className = `mr-1.5 h-3 w-0.5 shrink-0 rounded-full ${style.accent}`;
   element.appendChild(accent);
 
   const label = document.createElement('span');

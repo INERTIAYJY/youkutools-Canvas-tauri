@@ -14,6 +14,7 @@ import type {
   VideoReferenceItem,
   VideoGenerationOperation,
   VideoGenerationReferenceInput,
+  VideoModelCapability,
 } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { resolvePromptWithMediaRefs } from './promptResolver';
@@ -177,18 +178,31 @@ export function buildGeneralVideoProtocolVariables(
   modelId: string,
   params: AIVideoGenParams,
   referenceInput: VideoGenerationReferenceInput,
+  videoCapability?: VideoModelCapability,
 ): ModelProtocolVariables {
   const videoResolution = params.videoResolution ?? 1152;
   const aspectRatio = params.seedanceRatio ?? '16:9';
   const { width, height } = mapVideoDimensions(videoResolution, aspectRatio);
   const fps = normalizeVideoFps(params.videoFps);
-  const duration = resolveVideoDurationSeconds(params.seedanceDuration, params.videoFrames, fps);
+  // 通用模型声明了时长上限时按声明钳制，否则沿用全局兜底上限
+  const duration = resolveVideoDurationSeconds(
+    params.seedanceDuration,
+    params.videoFrames,
+    fps,
+    videoCapability?.maxDuration,
+  );
   const frames = videoFramesFromDuration(duration, fps);
   const seedanceResolution = params.seedanceResolution ?? '720p';
   const firstImage = referenceInput.imageUrls[0];
   const lastImage = referenceInput.imageUrls.length > 1
     ? referenceInput.imageUrls[referenceInput.imageUrls.length - 1]
     : undefined;
+  // 带角色的首/尾帧数组（[{ url, role }]），供协议模板按 image_with_roles 语义引用；
+  // 无角色信息（references 缺失）时按图片顺序推断首帧/尾帧。
+  const imageWithRoles = (referenceInput.references ?? [])
+    .filter((reference) => reference.kind === 'image'
+      && (reference.role === 'first_frame' || reference.role === 'last_frame'))
+    .map((reference) => ({ url: getMediaReferenceUrl(reference), role: reference.role }));
 
   return {
     model: modelId,
@@ -213,6 +227,7 @@ export function buildGeneralVideoProtocolVariables(
     imageUrls: referenceInput.imageUrls,
     firstImage,
     lastImage,
+    imageWithRoles,
     referenceImageUrls: referenceInput.imageUrls,
     videoUrls: referenceInput.videoUrls,
     referenceVideoUrl: referenceInput.videoUrls[0],
@@ -363,7 +378,7 @@ export async function generateVideo(
           imageUrls: remoteImageUrls,
           videoUrls,
           audioUrls,
-        }),
+        }, gm.videoCapability),
       });
       const url = urls[0];
       if (!url) throw new Error('视频生成完成但未返回结果');

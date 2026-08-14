@@ -1,7 +1,7 @@
 /**
  * 声明 APIMart Seedance 视频模型能力表，并将通用生成参数映射为各模型请求字段。
  */
-import type { VideoGenerationOperation } from '../../types/aiTypes';
+import type { VideoGenerationOperation, VideoModelCapability } from '../../types/aiTypes';
 
 export type ApimartSeedanceRatioField = 'aspect_ratio' | 'size';
 export type ApimartSeedanceAudioField = 'audio' | 'generate_audio';
@@ -246,6 +246,34 @@ export function getApimartSeedanceCapability(
 
 export function isApimartSeedanceModel(model?: string): boolean {
   return Boolean(getApimartSeedanceCapability(model));
+}
+
+/**
+ * 将通用视频模型的能力声明（VideoModelCapability）适配为 UI 参数面板消费的能力视图。
+ * 缺省字段按通用 Seedance 兜底补齐，使 general 模型也能按声明约束时长/分辨率/比例。
+ */
+export function toSeedanceCapabilityView(
+  capability: VideoModelCapability | undefined,
+): ApimartSeedanceCapability | undefined {
+  if (!capability) return undefined;
+  const resolutions = capability.resolutions?.length ? capability.resolutions : ['480p', '720p', '1080p'];
+  return {
+    modelId: '',
+    resolutions,
+    defaultResolution: capability.defaultResolution ?? resolutions[resolutions.length - 1],
+    ratios: capability.ratios?.length ? capability.ratios : ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'adaptive'],
+    defaultRatio: capability.defaultRatio ?? '16:9',
+    ratioField: 'size',
+    minDuration: capability.minDuration ?? 2,
+    maxDuration: capability.maxDuration ?? 15,
+    defaultDuration: capability.defaultDuration ?? 5,
+    audioField: capability.supportsAudio === false ? undefined : 'generate_audio',
+    defaultAudio: capability.supportsAudio === false ? false : true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: capability.maxImageReferences ?? 9,
+    maxVideoReferences: capability.maxVideoReferences ?? 3,
+    maxAudioReferences: capability.maxAudioReferences ?? 3,
+  };
 }
 
 export function buildApimartSeedanceRequest(

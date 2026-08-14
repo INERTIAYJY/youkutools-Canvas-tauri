@@ -579,4 +579,30 @@ describe('general video protocol variables', () => {
     });
     expect(variables.lastImage).toBeUndefined();
   });
+
+  it('emits imageWithRoles array from reference roles for image_with_roles protocols', () => {
+    const variables = buildGeneralVideoProtocolVariables(
+      'video-model',
+      { model: 'general/video', provider: 'general', prompt: 'prompt' },
+      {
+        prompt: 'prompt',
+        imageUrls: ['https://cdn.example/first.png', 'https://cdn.example/last.png'],
+        videoUrls: [],
+        audioUrls: [],
+        operation: 'image-to-video',
+        references: [
+          { kind: 'image', role: 'first_frame', url: 'https://cdn.example/first.png', origin: 'connection' },
+          { kind: 'image', role: 'last_frame', url: 'https://cdn.example/last.png', origin: 'connection' },
+        ],
+      },
+    );
+
+    expect(variables.imageWithRoles).toEqual([
+      { url: 'https://cdn.example/first.png', role: 'first_frame' },
+      { url: 'https://cdn.example/last.png', role: 'last_frame' },
+    ]);
+    // 独立字段仍按顺序推断，两种传参方式并存，由协议模板决定用哪个
+    expect(variables.firstImage).toBe('https://cdn.example/first.png');
+    expect(variables.lastImage).toBe('https://cdn.example/last.png');
+  });
 });

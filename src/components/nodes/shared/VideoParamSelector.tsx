@@ -10,7 +10,7 @@ import type { BaseNodeData } from '../../../types';
 import type { VideoReferenceItem } from '../../../types/aiTypes';
 import type { DramaCharacter } from '../../../types/dramaAssets';
 import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
-import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
+import { getApimartSeedanceCapability, toSeedanceCapabilityView } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import {
   resolveVideoDurationSeconds,
@@ -159,14 +159,17 @@ export default function VideoParamSelector({
     onChangeVideoReferences?.(references.filter((item) => item.id !== itemId));
   };
 
-  const customProtocolSource = useMemo(() => {
-    if (provider !== 'general' || !selectedModel) return '';
+  const generalModel = useMemo(() => {
+    if (provider !== 'general' || !selectedModel) return undefined;
     const generalModelId = selectedModel.replace(/^general\//, '');
-    const generalModel = generalModels?.find((model) => model.id === generalModelId);
-    return generalModel?.executionProfile?.protocol
-      ? JSON.stringify(generalModel.executionProfile.protocol)
-      : '';
+    return generalModels?.find((model) => model.id === generalModelId);
   }, [generalModels, provider, selectedModel]);
+
+  const customProtocolSource = useMemo(() => (
+    generalModel?.executionProfile?.protocol
+      ? JSON.stringify(generalModel.executionProfile.protocol)
+      : ''
+  ), [generalModel]);
 
   const apimartCapability = provider === 'apimart'
     ? getApimartSeedanceCapability(selectedModel)
@@ -174,8 +177,12 @@ export default function VideoParamSelector({
   const volcengineCapability = provider === 'volcengine'
     ? getVolcengineSeedanceCapability(selectedModel)
     : undefined;
-  // 统一的能力约束：APIMart 或火山方舟都可能有按模型的档位约束，取命中者
-  const seedanceCapability = apimartCapability ?? volcengineCapability;
+  // 通用模型（general）按 videoCapability 声明约束参数；未声明则保持通用兜底
+  const generalCapability = provider === 'general'
+    ? toSeedanceCapabilityView(generalModel?.videoCapability)
+    : undefined;
+  // 统一的能力约束：APIMart / 火山方舟 / 通用模型都可能有按模型的档位约束，取命中者
+  const seedanceCapability = apimartCapability ?? volcengineCapability ?? generalCapability;
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
   const customUsesDuration = modelProtocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
   const customUsesResolution = modelProtocolUsesVariable(

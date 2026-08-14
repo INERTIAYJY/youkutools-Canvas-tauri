@@ -180,6 +180,38 @@ export interface ModelExecutionProfile {
   protocol?: ModelExecutionProtocol;
 }
 
+/**
+ * 视频生成模型的能力声明，用于在参数面板与生成入口里按模型约束
+ * 时长 / 分辨率 / 比例 / 参考素材等，替代「全局 2~15s + 通用分辨率」的兜底。
+ * 字段语义与内置 Seedance 能力表（apimartVideoModels）对齐，便于同一套 UI 消费。
+ */
+export interface VideoModelCapability {
+  /** 可选分辨率档位，如 ['480p', '720p', '1080p']。 */
+  resolutions?: string[];
+  /** 未指定分辨率时的默认值。 */
+  defaultResolution?: string;
+  /** 可选宽高比，如 ['16:9', '9:16', '1:1', 'adaptive']。 */
+  ratios?: string[];
+  /** 未指定比例时的默认值。 */
+  defaultRatio?: string;
+  /** 时长下限（秒）。 */
+  minDuration?: number;
+  /** 时长上限（秒）。 */
+  maxDuration?: number;
+  /** 未指定时长时的默认值（秒）。 */
+  defaultDuration?: number;
+  /** 是否支持生成音频（有声视频）。 */
+  supportsAudio?: boolean;
+  /** 是否支持纯音频参考（无图/视频）。 */
+  supportsStandaloneAudio?: boolean;
+  /** 参考图数量上限。 */
+  maxImageReferences?: number;
+  /** 参考视频数量上限。 */
+  maxVideoReferences?: number;
+  /** 参考音频数量上限。 */
+  maxAudioReferences?: number;
+}
+
 /** 异步任务提交后解析出的轮询描述；不包含 API Key。 */
 export interface ResolvedModelProtocolPoll {
   method: ModelProtocolHttpMethod;

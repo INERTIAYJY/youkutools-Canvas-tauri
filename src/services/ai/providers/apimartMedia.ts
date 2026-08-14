@@ -226,7 +226,7 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
     let imageUrls: string[];
     let firstFrameUrl: string | undefined;
     let lastFrameUrl: string | undefined;
-    let imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }> = [];
+    let imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' | 'reference_image' }> = [];
     const references = referenceInput.references ?? [];
     if (
       (capability?.frameFields || capability?.imageWithRoles)

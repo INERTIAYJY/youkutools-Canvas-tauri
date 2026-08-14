@@ -212,6 +212,49 @@ export interface VideoModelCapability {
   maxAudioReferences?: number;
 }
 
+/**
+ * 图片生成模型的能力声明，用于按模型约束分辨率 / 比例 / 批量数量 / 参考图等，
+ * 替代「全局 2K + 1:1」的兜底。字段语义与内置 APIMart 生图能力表对齐，
+ * 便于同一套参数面板与生成入口消费。
+ */
+export interface ImageModelCapability {
+  /** 可选分辨率档位，如 ['1K', '2K', '4K'] 或 ['1MP', '2MP']。 */
+  resolutions?: string[];
+  /** 未指定分辨率时的默认值。 */
+  defaultResolution?: string;
+  /** 可选宽高比，如 ['1:1', '16:9', '9:16', 'auto']。 */
+  ratios?: string[];
+  /** 未指定比例时的默认值。 */
+  defaultRatio?: string;
+  /** 是否支持批量生成（n > 1）。不支持时生成入口应把数量钳制为 1。 */
+  supportsBatch?: boolean;
+  /** 单次批量数量上限（supportsBatch 为 true 时生效）。 */
+  maxBatchCount?: number;
+  /** 是否支持图生图 / 参考图（image_urls）。false 时传入参考图应报错而非静默丢弃。 */
+  supportsImageReference?: boolean;
+  /** 参考图数量上限（supportsImageReference 为 true 时生效）。 */
+  maxImageReferences?: number;
+  /** 参考图是否支持 Base64 data URI（false 表示仅支持公网 URL）。 */
+  supportsDataUrlReference?: boolean;
+  /** 分辨率字段名（不同模型可能用 resolution / 无此字段 / 其他）。 */
+  resolutionField?: string;
+  /** 是否在请求体中输出分辨率字段（部分模型如 Imagen 4.0 / Grok 无 resolution）。 */
+  hasResolutionField?: boolean;
+}
+
+/**
+ * 音频生成模型的能力声明，用于按模型约束音色 / 输出格式 / 参考音频等。
+ * APIMart 目前只有 speech（TTS）与 music（Flow Music）两类，字段对齐各自协议。
+ */
+export interface AudioModelCapability {
+  /** 能力类型：speech = 语音合成（TTS），music = 音乐生成（Flow Music）。 */
+  kind: 'speech' | 'music';
+  /** 支持的音色列表（仅 speech 生效）。 */
+  voices?: string[];
+  /** 是否支持音色参考（连入的音频作为音色克隆）。当前 APIMart 两类均不支持。 */
+  supportsVoiceReference?: boolean;
+}
+
 /** 异步任务提交后解析出的轮询描述；不包含 API Key。 */
 export interface ResolvedModelProtocolPoll {
   method: ModelProtocolHttpMethod;

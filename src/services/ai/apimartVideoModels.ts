@@ -49,8 +49,8 @@ export interface ApimartSeedanceRequestParams {
   lastFrameUrl?: string;
   /** MiniMax-H3 是否添加 AIGC 水印。 */
   watermark?: boolean;
-  /** Seedance 2.0/2.5 带角色的首/尾帧图（写入 image_with_roles）。 */
-  imageWithRoles?: Array<{ url: string; role: 'first_frame' | 'last_frame' }>;
+  /** Seedance 2.0/2.5 带角色的图片（写入 image_with_roles）：首帧 / 尾帧 / 参考图。 */
+  imageWithRoles?: Array<{ url: string; role: 'first_frame' | 'last_frame' | 'reference_image' }>;
 }
 
 const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
@@ -291,18 +291,25 @@ export function buildApimartSeedanceRequest(
   const hasFrame = frameFields
     ? Boolean(params.firstFrameUrl?.trim() || params.lastFrameUrl?.trim())
     : false;
-  // image_with_roles 携带的首/尾帧（Seedance 2.0/2.5）
+  // image_with_roles 携带的带角色图片（Seedance 2.0/2.5）
   const imageWithRoles = (params.imageWithRoles ?? [])
-    .filter((item) => item.url?.trim() && (item.role === 'first_frame' || item.role === 'last_frame'));
+    .filter((item) => item.url?.trim()
+      && (item.role === 'first_frame' || item.role === 'last_frame' || item.role === 'reference_image'));
+  const hasFrameRoles = imageWithRoles.some((item) => item.role === 'first_frame' || item.role === 'last_frame');
   const hasImageWithRoles = imageWithRoles.length > 0;
-  // 首/尾帧（frameFields 独立字段 或 image_with_roles）与多模态参考严格互斥，混用会返回 400
-  if ((hasFrame || hasImageWithRoles) && (imageUrls.length > 0 || videoUrls.length > 0 || audioUrls.length > 0)) {
+  // 首/尾帧（frameFields 独立字段 或 image_with_roles 首/尾帧）与 image_urls / 视频 / 音频严格互斥，混用会返回 400。
+  // 注意：image_with_roles 中的 reference_image 属于「带角色的参考图」，本身可与首/尾帧共存，
+  // 但不得与 image_urls（无角色参考图）混用。
+  if ((hasFrame || hasFrameRoles) && (imageUrls.length > 0 || videoUrls.length > 0 || audioUrls.length > 0)) {
     throw new Error(`APIMart ${model} 首尾帧与参考素材不能同时使用`);
+  }
+  if (hasImageWithRoles && imageUrls.length > 0) {
+    throw new Error(`APIMart ${model} image_with_roles 与 image_urls 不能同时使用`);
   }
   const operation = params.operation
     ?? (videoUrls.length > 0
       ? 'video-to-video'
-      : imageUrls.length > 0 || hasFrame || hasImageWithRoles ? 'image-to-video' : 'text-to-video');
+      : imageUrls.length > 0 || hasFrame || hasFrameRoles || hasImageWithRoles ? 'image-to-video' : 'text-to-video');
   if (!capability.operations.includes(operation)) {
     throw new Error(`APIMart ${model} 不支持 ${operation}`);
   }
@@ -335,6 +342,8 @@ export function buildApimartSeedanceRequest(
   const ratio = params.ratio && capability.ratios.includes(params.ratio)
     ? params.ratio
     : capability.defaultRatio;
+  // 首/尾帧任务：APIMart 规定 size 仅 adaptive（提交阶段同步校验），强制覆盖，忽略用户所选比例。
+  const effectiveRatio = hasFrameRoles && ratio !== 'adaptive' ? 'adaptive' : ratio;
   const requestedDuration = Number.isFinite(params.duration)
     ? Math.round(params.duration as number)
     : capability.defaultDuration;
@@ -348,7 +357,7 @@ export function buildApimartSeedanceRequest(
     prompt,
     duration,
     resolution,
-    [capability.ratioField]: ratio,
+    [capability.ratioField]: effectiveRatio,
   };
   if (frameFields) {
     if (params.firstFrameUrl?.trim()) body[frameFields.first] = params.firstFrameUrl.trim();
@@ -356,7 +365,7 @@ export function buildApimartSeedanceRequest(
     // MiniMax-H3 参考图（role=reference）仍走 image_urls，与首尾帧互斥已在上方校验
     if (imageUrls.length > 0) body.image_urls = imageUrls;
   } else if (hasImageWithRoles) {
-    // Seedance 2.0/2.5：首/尾帧走 image_with_roles（与 image_urls 互斥，此时不写 image_urls）
+    // Seedance 2.0/2.5：带角色图片走 image_with_roles（与 image_urls 互斥，此时不写 image_urls）
     body.image_with_roles = imageWithRoles.map(({ url, role }) => ({ url: url.trim(), role }));
   } else {
     if (imageUrls.length > 0) body.image_urls = imageUrls;

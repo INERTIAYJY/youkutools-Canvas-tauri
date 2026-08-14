@@ -10,6 +10,7 @@ import {
   buildApimartSeedanceRequest,
   type ApimartSeedanceRequestParams,
 } from './apimartVideoModels';
+import { buildImageCapabilityRequest } from './mediaModelCapabilities';
 import { corsSafeFetch } from './httpTransport';
 
 /* ── APIMart 任务轮询共享类型 ── */
@@ -178,7 +179,16 @@ export async function generateApimartImagesBatch(
   nodeId?: string,
   externalSignal?: AbortSignal,
 ): Promise<BatchImageResult> {
-  const requestedCount = Math.max(1, Math.floor(count));
+  // 能力表驱动：命中 APIMart 生图能力表时，按模型约束分辨率 / 批量数量 / 参考图，
+  // 并复用能力表换算出的结果回填尺寸；未命中则回退通用提交逻辑（兼容旧模型）。
+  const capabilityRequest = buildImageCapabilityRequest(model, prompt, {
+    resolution: imageSize,
+    ratio: aspectRatio,
+    count,
+    imageUrls,
+  });
+  const requestedCount = capabilityRequest?.requestedCount ?? Math.max(1, Math.floor(count));
+  const effectiveDimensions = capabilityRequest?.dimensions ?? dimensions;
   const nodeSignal = nodeId ? registerNodePolling(nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
@@ -203,16 +213,14 @@ export async function generateApimartImagesBatch(
     }
 
     // 步骤 1: 提交生成任务
-    const submitBody: Record<string, unknown> = {
+    const submitBody: Record<string, unknown> = capabilityRequest?.body ?? {
       model,
       prompt,
       n: requestedCount,
       resolution: imageSize,
       size: aspectRatio,
+      ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}),
     };
-    if (imageUrls.length > 0) {
-      submitBody.image_urls = imageUrls;
-    }
     const submitResp = await corsSafeFetch(`${baseUrl}/images/generations`, {
       method: 'POST',
       headers: {
@@ -248,8 +256,8 @@ export async function generateApimartImagesBatch(
           if (imageUrls.length === 0) throw new Error('APIMart 生成完成但未返回图片');
           const results = imageUrls.slice(0, requestedCount).map((url) => ({
             url,
-            width: dimensions.width,
-            height: dimensions.height,
+            width: effectiveDimensions.width,
+            height: effectiveDimensions.height,
           }));
           return {
             requestedCount,

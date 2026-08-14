@@ -271,7 +271,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-image'],
       },
       {
-        value: 'apimart/seedream-4.0',
+        value: 'apimart/doubao-seedream-4.0',
         provider: 'apimart',
         label: 'Seedream 4.0',
         description: '灵活图像功能，支持高分辨率',
@@ -280,7 +280,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-image'],
       },
       {
-        value: 'apimart/seedream-4.5',
+        value: 'apimart/doubao-seedream-4.5',
         provider: 'apimart',
         label: 'Seedream 4.5',
         description: '性能均衡的多模式图像生成',
@@ -289,7 +289,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-image'],
       },
       {
-        value: 'apimart/seedream-5.0-lite',
+        value: 'apimart/doubao-seedream-5.0-lite',
         provider: 'apimart',
         label: 'Seedream 5.0 Lite',
         description: '轻量高效生图，支持 2K/3K',

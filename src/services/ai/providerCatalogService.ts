@@ -22,6 +22,8 @@ import type {
   WebSearchProviderId,
 } from '../../types';
 import { corsSafeFetch } from './httpTransport';
+import { fetchSeedlingModels, type SeedlingModelInfo } from '../seedlingService';
+import type { VideoModelCapability } from '../../types/aiTypes';
 import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
 import {
   GOOGLE_GEMINI_BASE_URL,
@@ -176,6 +178,23 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     authType: 'oauth',
     catalogAdapter: 'local-manifest',
     credentials: [],
+  },
+  {
+    id: 'seedling',
+    name: '森之灵',
+    description: 'Seedling CLI 视频生成；支持 CLI 浏览器授权登录或 API Token',
+    badgeText: 'SL',
+    authType: 'api-key',
+    catalogAdapter: 'seedling-cli',
+    credentials: [
+      {
+        key: 'apiKey',
+        label: 'API Token（机器令牌）',
+        required: false,
+        secret: true,
+        placeholder: '可留空，使用 CLI 浏览器授权登录态',
+      },
+    ],
   },
   {
     id: 'tavily',
@@ -369,6 +388,45 @@ async function fetchOpenAiCompatibleCatalog(
   return normalizeModels(models, providerId);
 }
 
+/** Seedling 模型能力 → 通用视频能力声明（与项目 VideoModelCapability 语义一致）。 */
+function mapSeedlingModelCapability(model: SeedlingModelInfo): VideoModelCapability {
+  const resolutions = model.supportedResolutions?.length ? model.supportedResolutions : ['480p', '720p'];
+  const ratios = model.supportedRatios?.length ? model.supportedRatios : ['16:9', '9:16', '1:1'];
+  return {
+    resolutions,
+    defaultResolution: model.supportedResolutions?.[model.supportedResolutions.length - 1],
+    ratios,
+    defaultRatio: ratios.includes('16:9') ? '16:9' : ratios[0],
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    supportsAudio: model.supportsAudio === true,
+    maxImageReferences: 9,
+    maxVideoReferences: 1,
+    maxAudioReferences: 1,
+  };
+}
+
+/** 通过 Seedling CLI 拉取模型目录（models list --json → ProviderModelSelection）。 */
+async function fetchSeedlingCliCatalog(
+  apiToken: string,
+  signal?: AbortSignal,
+): Promise<ProviderModelSelection[]> {
+  if (signal?.aborted) throw new DOMException('模型列表拉取已取消', 'AbortError');
+  const payload = await fetchSeedlingModels(apiToken);
+  const models: ProviderModelSelection[] = (payload.models ?? []).map((model: SeedlingModelInfo) => ({
+    id: model.id,
+    name: model.name || model.id,
+    category: 'video',
+    provider: 'seedling',
+    description: model.description || undefined,
+    videoCapability: mapSeedlingModelCapability(model),
+  }));
+  const normalized = normalizeModels(models, 'seedling');
+  if (normalized.length === 0) throw new Error('Seedling 未返回可用模型');
+  return normalized;
+}
+
 export async function fetchProviderModelCatalog(
   options: FetchProviderCatalogOptions,
 ): Promise<ProviderCatalogResult> {
@@ -380,6 +438,22 @@ export async function fetchProviderModelCatalog(
 
   if (definition.catalogAdapter === 'local-manifest') {
     return { models: normalizedFallback, source: 'local-manifest' };
+  }
+
+  if (definition.catalogAdapter === 'seedling-cli') {
+    try {
+      return {
+        models: await fetchSeedlingCliCatalog(config.apiKey, signal),
+        source: 'remote',
+      };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
+      const warning = safeCatalogError(error);
+      if (normalizedFallback.length > 0) {
+        return { models: normalizedFallback, source: 'local-fallback', warning };
+      }
+      throw new Error(warning, { cause: error });
+    }
   }
 
   try {

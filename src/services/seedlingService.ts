@@ -158,13 +158,15 @@ export async function logoutSeedling(): Promise<SeedlingAuthLoginRuntime> {
 
 // ── 模型 ──
 
-export async function fetchSeedlingModels(): Promise<{
+export async function fetchSeedlingModels(
+  apiTokenOverride?: string,
+): Promise<{
   models: SeedlingModelInfo[];
   statuses: SeedlingModelStatus[];
 }> {
   return invokeTauri<{ models: SeedlingModelInfo[]; statuses: SeedlingModelStatus[] }>(
     'seedling_models',
-    { apiToken: getSeedlingApiToken() },
+    { apiToken: apiTokenOverride ?? getSeedlingApiToken() },
   );
 }
 

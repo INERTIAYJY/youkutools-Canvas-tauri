@@ -3,7 +3,8 @@
  */
 import { DEFAULT_BASE_URLS } from '../../../constants/api';
 import { useAppStore } from '../../../store/useAppStore';
-import type { AIAudioGenParams, AudioGenerationResult } from '../../../types/aiTypes';
+import type { AIAudioGenParams, AIVideoGenParams, AudioGenerationResult } from '../../../types/aiTypes';
+import type { BaseNodeData } from '../../../types';
 import { mapImageDimensions } from '../../aiDimensions';
 import { pollTask } from '../../pollTask';
 import {
@@ -160,6 +161,23 @@ async function generateFlowMusic(
   }
 }
 
+/**
+ * 用户/调用方是否显式指定了首/尾帧角色。
+ * 未显式指定时（例如只上传多张普通参考图），assignVideoReferenceRoles 会按图片顺序
+ * 自动推断首/尾帧；但 APIMart Seedance 的 image_with_roles 与 image_urls 互斥，
+ * 自动推断会误报「首尾帧与参考素材不能同时使用」。因此只有显式角色才拆分首尾帧，
+ * 其余情况全部图片按普通参考图提交（与火山方舟行为保持一致）。
+ */
+function hasExplicitFrameRoles(params: AIVideoGenParams): boolean {
+  if ((params.referenceMedia ?? []).some((ref) => ref.role === 'first_frame' || ref.role === 'last_frame')) {
+    return true;
+  }
+  if (!params.nodeId) return false;
+  const node = useAppStore.getState().nodes.find((item) => item.id === params.nodeId);
+  return ((node?.data as BaseNodeData | undefined)?.videoReferences ?? [])
+    .some((item) => item.role === 'first_frame' || item.role === 'last_frame');
+}
+
 export const apimartMediaProviderAdapter: MediaProviderAdapter = {
   providerId: 'apimart',
   capabilities: ['image', 'video', 'audio'],
@@ -210,7 +228,11 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
     let lastFrameUrl: string | undefined;
     let imageWithRoles: Array<{ url: string; role: 'first_frame' | 'last_frame' }> = [];
     const references = referenceInput.references ?? [];
-    if ((capability?.frameFields || capability?.imageWithRoles) && references.length > 0) {
+    if (
+      (capability?.frameFields || capability?.imageWithRoles)
+      && references.length > 0
+      && hasExplicitFrameRoles(params)
+    ) {
       const frameRefs = references.filter((ref) => ref.kind === 'image'
         && (ref.role === 'first_frame' || ref.role === 'last_frame'));
       const frameUrls = await resolveImageUrlArray(

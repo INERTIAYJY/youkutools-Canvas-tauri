@@ -1120,6 +1120,10 @@
   color: var(--danger-light);
   background: var(--danger-bg);
 }
+.provider-custom-openai-warning {
+  font-size: 12px;
+  line-height: 1.5;
+}
 .provider-model-toolbar {
   display: flex;
   align-items: center;

@@ -20,6 +20,7 @@ import {
   logoutSeedling,
   startSeedlingAuthLogin,
 } from '../../services/seedlingService';
+import { buildSeedlingCatalogModels } from '../../services/ai/providerCatalogService';
 
 const AUTH_EVENT = 'seedling-login-runtime';
 
@@ -43,6 +44,40 @@ export default function SeedlingSettings() {
   const authMirror = config.seedlingAuth;
   const savedToken = config.providers?.seedling?.apiKey ?? '';
 
+  const loadModels = useCallback(async () => {
+    try {
+      const payload = await fetchSeedlingModels();
+      setModels(payload.models ?? []);
+    } catch {
+      setModels([]);
+    }
+  }, []);
+
+  /**
+   * 认证成功后自动拉取模型目录并启用（写入 catalogModels + selectedModels）。
+   * 仅在尚未勾选任何模型时执行，避免覆盖用户在 API Key 设置里的手动选择。
+   */
+  const ensureSeedlingModelsEnabled = useCallback(async () => {
+    const store = useAppStore.getState();
+    if (store.config.providers?.seedling?.selectedModels?.length) return;
+    try {
+      const payload = await fetchSeedlingModels();
+      const selections = buildSeedlingCatalogModels(payload.models ?? []);
+      if (selections.length === 0) return;
+      store.setProviderConfig('seedling', {
+        name: '森之灵',
+        catalogId: 'seedling',
+        catalogModels: selections,
+        selectedModels: selections,
+      });
+      await store.saveConfig();
+      useAppStore.getState().showToast(`已自动启用 ${selections.length} 个森之灵模型`);
+      await loadModels();
+    } catch {
+      // 拉取失败不阻塞：可在「API Key → 森之灵」中手动拉取目录
+    }
+  }, [loadModels]);
+
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
     try {
@@ -58,22 +93,16 @@ export default function SeedlingSettings() {
             checkTs: Date.now(),
           },
         });
+        if (status.auth.loggedIn || savedToken) {
+          void ensureSeedlingModelsEnabled();
+        }
       }
     } catch (error) {
       setCliStatus({ found: false, source: 'missing', error: error instanceof Error ? error.message : String(error) });
     } finally {
       setStatusLoading(false);
     }
-  }, [savedToken, updateConfig]);
-
-  const loadModels = useCallback(async () => {
-    try {
-      const payload = await fetchSeedlingModels();
-      setModels(payload.models ?? []);
-    } catch {
-      setModels([]);
-    }
-  }, []);
+  }, [ensureSeedlingModelsEnabled, savedToken, updateConfig]);
 
   useEffect(() => {
     const timer = setTimeout(() => {

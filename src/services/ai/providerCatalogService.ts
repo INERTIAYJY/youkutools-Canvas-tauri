@@ -389,7 +389,7 @@ async function fetchOpenAiCompatibleCatalog(
 }
 
 /** Seedling 模型能力 → 通用视频能力声明（与项目 VideoModelCapability 语义一致）。 */
-function mapSeedlingModelCapability(model: SeedlingModelInfo): VideoModelCapability {
+export function mapSeedlingModelCapability(model: SeedlingModelInfo): VideoModelCapability {
   const resolutions = model.supportedResolutions?.length ? model.supportedResolutions : ['480p', '720p'];
   const ratios = model.supportedRatios?.length ? model.supportedRatios : ['16:9', '9:16', '1:1'];
   return {
@@ -407,14 +407,9 @@ function mapSeedlingModelCapability(model: SeedlingModelInfo): VideoModelCapabil
   };
 }
 
-/** 通过 Seedling CLI 拉取模型目录（models list --json → ProviderModelSelection）。 */
-async function fetchSeedlingCliCatalog(
-  apiToken: string,
-  signal?: AbortSignal,
-): Promise<ProviderModelSelection[]> {
-  if (signal?.aborted) throw new DOMException('模型列表拉取已取消', 'AbortError');
-  const payload = await fetchSeedlingModels(apiToken);
-  const models: ProviderModelSelection[] = (payload.models ?? []).map((model: SeedlingModelInfo) => ({
+/** 由 `seedling models list` 的模型项构建 ProviderModelSelection 目录（video 类）。 */
+export function buildSeedlingCatalogModels(models: readonly SeedlingModelInfo[]): ProviderModelSelection[] {
+  return models.map((model) => ({
     id: model.id,
     name: model.name || model.id,
     category: 'video',
@@ -422,6 +417,16 @@ async function fetchSeedlingCliCatalog(
     description: model.description || undefined,
     videoCapability: mapSeedlingModelCapability(model),
   }));
+}
+
+/** 通过 Seedling CLI 拉取模型目录（models list --json → ProviderModelSelection）。 */
+async function fetchSeedlingCliCatalog(
+  apiToken: string,
+  signal?: AbortSignal,
+): Promise<ProviderModelSelection[]> {
+  if (signal?.aborted) throw new DOMException('模型列表拉取已取消', 'AbortError');
+  const payload = await fetchSeedlingModels(apiToken);
+  const models = buildSeedlingCatalogModels(payload.models ?? []);
   const normalized = normalizeModels(models, 'seedling');
   if (normalized.length === 0) throw new Error('Seedling 未返回可用模型');
   return normalized;

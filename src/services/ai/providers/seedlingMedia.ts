@@ -13,7 +13,7 @@
 import type { VideoGenerationReferenceInput } from '../../../types/aiTypes';
 import { extractModelName } from '../helpers';
 import { getMediaReferenceUrl } from '../connectedReferenceMedia';
-import { resolveMediaReferenceUrl } from '../../uploadService';
+import { resolveMediaReferenceUrl, uploadToRemote } from '../../uploadService';
 import {
   createSeedlingVideoTask,
   toSeedlingDisplayUrl,
@@ -65,14 +65,26 @@ function isLocalDiskPath(value: string): boolean {
 
 /**
  * 把参考 URL 规范化为 CLI `--resource` 可用的值。
- * 注意：Seedling CLI 的 `--resource` 只接受 `https://` 开头的 URL——
- * 本地磁盘路径必须先用 `seedling resource upload` 上传拿到在线地址；
- * asset.localhost / blob / data 等本地引用统一经通用图床转公网 URL。
+ * Seedling CLI 的 `--resource` 只接受 `https://` 开头的 URL：
+ *   - https 直传
+ *   - http 远程图：读取后经通用图床转为 https（CLI 不接收 http）
+ *   - 本地磁盘路径：先用 `seedling resource upload` 上传拿到 https 在线地址
+ *   - asset.localhost / blob / data：统一经通用图床转公网 https URL
  */
 async function toCliResource(url: string): Promise<string | undefined> {
   const trimmed = url.trim();
   if (!trimmed) return undefined;
-  if (isPublicHttpUrl(trimmed)) return trimmed;
+  if (/^https:\/\//i.test(trimmed)) return trimmed;
+  if (/^http:\/\//i.test(trimmed)) {
+    try {
+      return await uploadToRemote(trimmed);
+    } catch (error) {
+      throw new Error(
+        `森之灵无法访问 http 参考图（需 https 地址）：${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
   if (isLocalDiskPath(trimmed)) {
     try {
       const { url: uploaded } = await uploadSeedlingResource(trimmed);
@@ -133,6 +145,15 @@ async function collectSeedlingResources(
       seen.add(resolved);
       resources.push(resolved);
     }
+  }
+
+  // 兜底校验：CLI 的 --resource 只接受 https:// URL，任何非 https 资源都会导致
+  // 「资源 URL 必须以 https:// 开头」的 VALIDATION_ERROR。这里提前拦截并指明违规项。
+  const invalid = resources.find((url) => !/^https:\/\//i.test(url));
+  if (invalid) {
+    throw new Error(
+      `森之灵参考素材必须是 https:// 地址，当前存在无法识别的资源：${invalid}`,
+    );
   }
 
   return resources;

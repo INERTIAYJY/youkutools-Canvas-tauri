@@ -15,6 +15,7 @@ const seedlingMocks = vi.hoisted(() => ({
 
 const uploadMocks = vi.hoisted(() => ({
   resolveMediaReferenceUrl: vi.fn(),
+  uploadToRemote: vi.fn(),
 }));
 
 vi.mock('../../src/services/seedlingService', () => seedlingMocks);
@@ -65,6 +66,7 @@ beforeEach(() => {
   seedlingMocks.waitSeedlingTask.mockReset();
   seedlingMocks.uploadSeedlingResource.mockReset();
   uploadMocks.resolveMediaReferenceUrl.mockReset();
+  uploadMocks.uploadToRemote.mockReset();
   seedlingMocks.createSeedlingVideoTask.mockResolvedValue({ taskId: 10001 });
   seedlingMocks.waitSeedlingTask.mockResolvedValue({
     taskId: 10001,
@@ -163,6 +165,28 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
         buildRequest({ imageUrls: ['C:\\project\\frames\\a.png'] }),
       ),
     ).rejects.toThrow('森之灵素材上传失败：上传 400: invalid file');
+  });
+
+  it('http 远程参考图经图床转 https 后传入（CLI 只接受 https）', async () => {
+    uploadMocks.uploadToRemote.mockResolvedValue('https://cdn.example/http-converted.png');
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({ imageUrls: ['http://example.com/ref.png'] }),
+    );
+    expect(uploadMocks.uploadToRemote).toHaveBeenCalledWith('http://example.com/ref.png');
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: ['https://cdn.example/http-converted.png'],
+      }),
+    );
+  });
+
+  it('任一资源非 https 时提前拦截并指明违规项', async () => {
+    uploadMocks.resolveMediaReferenceUrl.mockResolvedValue('http://cdn.example/not-https.png');
+    await expect(
+      seedlingMediaProviderAdapter.generateVideo!(
+        buildRequest({ imageUrls: ['asset.localhost/ref.png'] }),
+      ),
+    ).rejects.toThrow('参考素材必须是 https:// 地址');
   });
 
   it('任务失败时抛出服务端错误信息', async () => {

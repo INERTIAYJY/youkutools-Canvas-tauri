@@ -451,6 +451,16 @@ export default function PromptPanel({
   const pendingPresetAction = useAppStore((s) => s.pendingPresetAction);
   const setPendingPresetAction = useAppStore((s) => s.setPendingPresetAction);
 
+  // 视频节点：是否在当前节点生成（默认 true，老节点按原逻辑）
+  const generateInPlace = useAppStore((s) => {
+    const node = s.nodes.find((n) => n.id === nodeId);
+    return (node?.data as import('../../../types').BaseNodeData | undefined)?.generateInPlace !== false;
+  });
+  const updateNodeData = useAppStore((s) => s.updateNodeData);
+  const onChangeGenerateInPlace = useCallback((value: boolean) => {
+    if (nodeId) updateNodeData(nodeId, { generateInPlace: value });
+  }, [nodeId, updateNodeData]);
+
   const handleSubmit = useCallback((overridePrompt?: string, postProcess?: ImagePostProcess) => {
     const sourcePrompt = overridePrompt ?? prompt;
     onSubmit(expandSkillReferences(sourcePrompt, userSkills), postProcess);
@@ -722,6 +732,8 @@ export default function PromptPanel({
             seedanceRatio={seedanceRatio}
             seedanceDuration={seedanceDuration}
             generateAudio={generateAudio}
+            generateInPlace={generateInPlace}
+            onChangeGenerateInPlace={onChangeGenerateInPlace}
             onChangeSeedanceResolution={onChangeSeedanceResolution}
             onChangeSeedanceRatio={onChangeSeedanceRatio}
             onChangeSeedanceDuration={onChangeSeedanceDuration}

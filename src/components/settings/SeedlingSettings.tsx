@@ -9,7 +9,7 @@
  *
  * 同时展示 CLI 检测状态（found / version / source）与可用模型列表。
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import type { SeedlingAuthLoginRuntime, SeedlingCliStatus, SeedlingModelInfo } from '../../services/seedlingService';
 import {
@@ -144,6 +144,17 @@ export default function SeedlingSettings() {
       clearInterval(timer);
     };
   }, []);
+
+  // 登录成功（CLI 已写入登录令牌）后立即刷新认证镜像并自动启用模型
+  const loginSuccessHandledRef = useRef(false);
+  useEffect(() => {
+    if (loginRuntime?.phase !== 'success') return;
+    if (loginSuccessHandledRef.current) return;
+    loginSuccessHandledRef.current = true;
+    useAppStore.getState().showToast('森之灵登录成功');
+    void refreshStatus();
+    void loadModels();
+  }, [loginRuntime?.phase, refreshStatus, loadModels]);
 
   const openExternalUrl = useCallback(async (url: string) => {
     try {

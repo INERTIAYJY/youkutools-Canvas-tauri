@@ -19,7 +19,25 @@ import {
   toSeedlingDisplayUrl,
   waitSeedlingTask,
 } from '../../seedlingService';
+import { useAppStore } from '../../../store/useAppStore';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
+
+/**
+ * 生成前认证预检：API Token（config.providers.seedling.apiKey）或 CLI 登录态
+ * （config.seedlingAuth.loggedIn 镜像，由设置页刷新写入）任一可用。
+ * 二者皆无时给出明确引导，而不是把 CLI 的原始报错透传给用户。
+ */
+function assertSeedlingAuthorized(): void {
+  const config = useAppStore.getState().config;
+  const hasToken = Boolean(config.providers?.seedling?.apiKey);
+  const cliLoggedIn = Boolean(config.seedlingAuth?.loggedIn);
+  if (!hasToken && !cliLoggedIn) {
+    throw new Error(
+      '森之灵未完成认证：请在「设置 → 森之灵」中完成 CLI 浏览器授权登录（确认配对码），'
+      + '或填写 API Token 后重试',
+    );
+  }
+}
 
 /** Seedling CLI 时长下限（秒）；项目通用下限为 2，需在提交前钳制。 */
 const SEEDLING_MIN_DURATION = 4;
@@ -108,6 +126,7 @@ export const seedlingMediaProviderAdapter: MediaProviderAdapter = {
   capabilities: ['video'],
 
   async generateVideo({ params, prompt, resolveReferenceInput, signal }) {
+    assertSeedlingAuthorized();
     const referenceInput = await resolveReferenceInput();
     const resources = await collectSeedlingResources(referenceInput);
 

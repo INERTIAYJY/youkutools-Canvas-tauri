@@ -829,7 +829,13 @@ fn parse_login_json(app: &AppHandle, line: &str) -> bool {
         let Some(text) = val.as_str() else {
             continue;
         };
-        if (lower.contains("verification") || lower.contains("uri")) && url.is_empty() {
+        // 优先带配对码的完整授权链接（verificationUriComplete / verification_uri_complete），
+        // 否则用户打开的授权页缺少 code 参数，无法完成配对。
+        if lower.contains("verification") && lower.contains("complete") {
+            if url.is_empty() {
+                url = text.to_string();
+            }
+        } else if (lower.contains("verification") || lower.contains("uri")) && url.is_empty() {
             url = text.to_string();
         } else if (lower.contains("user_code") || lower.contains("code")) && code.is_empty() {
             // 配对码是短字符串（如 BXTK-9F2Q），避免误抓长 URL

@@ -124,25 +124,50 @@ function createProviderConfigDraftWithConversationFallback(
 }
 
 
+function normalizeBaseUrlForMatch(value: string | undefined): string {
+  return (value ?? '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+/**
+ * 找出草稿应该落到哪个连接。
+ *
+ * 先按 connectionId 精确匹配；匹配不到再按 Base URL 找已有的自定义连接——助手每轮
+ * 对接都会生成新的 connectionId，同一个中转站会被反复建成新连接，用户看到一堆重名项。
+ * 只认自定义连接：内置厂商连接可能共用同一网关地址，不能被 Agent 并进去。
+ */
+function resolveTargetConnection(draft: ProviderConfigDraft) {
+  const providers = useAppStore.getState().config.providers;
+  const byId = providers[draft.connectionId];
+  if (byId) return { connectionId: draft.connectionId, existing: byId };
+  const draftBaseUrl = normalizeBaseUrlForMatch(draft.baseUrl);
+  const matched = Object.entries(providers).find(([, provider]) => (
+    provider.catalogId === 'custom-openai'
+    && normalizeBaseUrlForMatch(provider.baseUrl) === draftBaseUrl
+  ));
+  return matched
+    ? { connectionId: matched[0], existing: matched[1] }
+    : { connectionId: draft.connectionId, existing: undefined };
+}
+
 /**
  * 预演草稿并入现有连接的结果。
  *
- * 已有连接一律走合并：保留原有模型，同 ID 由草稿覆盖，新模型追加；
+ * 已有连接一律走合并：保留原有模型，同 ID 由草稿覆盖，配置相同的跳过，新模型追加；
  * Base URL 不一致时视为不同网关，拒绝合并而不是悄悄改写。
  */
 function planProviderConfigMerge(draft: ProviderConfigDraft) {
-  const existing = useAppStore.getState().config.providers[draft.connectionId];
+  const { connectionId, existing } = resolveTargetConnection(draft);
   const draftModels = draft.config.selectedModels ?? [];
   if (!existing) {
-    return { existing: undefined, merge: mergeProviderModels([], draftModels) };
+    return { connectionId, existing: undefined, merge: mergeProviderModels([], draftModels) };
   }
-  if (existing.baseUrl && existing.baseUrl !== draft.baseUrl) {
+  if (existing.baseUrl && normalizeBaseUrlForMatch(existing.baseUrl) !== normalizeBaseUrlForMatch(draft.baseUrl)) {
     throw new Error(
       `连接“${existing.name}”当前的 Base URL 是 ${existing.baseUrl}，与本次草稿的 ${draft.baseUrl} 不一致；`
       + '不同网关的模型不能并入同一个连接，请改用新连接名称，或先在设置里调整该连接地址',
     );
   }
-  return { existing, merge: mergeProviderModels(existing.selectedModels, draftModels) };
+  return { connectionId, existing, merge: mergeProviderModels(existing.selectedModels, draftModels) };
 }
 
 export function registerProviderConfigAgentTools(): Array<() => void> {
@@ -282,12 +307,29 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
       execute: async (context, input) => {
         try {
           const draft = createProviderConfigDraftWithConversationFallback(context, input);
+          // 预览阶段就报出落点与重复模型，省得助手为已存在的模型再跑一轮对接
+          let plan = '';
+          try {
+            const { existing, merge } = planProviderConfigMerge(draft);
+            plan = [
+              existing
+                ? `落点：Base URL 与已有连接“${existing.name}”相同，保存时会并入该连接，不会新建。`
+                : '落点：将新建连接。',
+              `合并预览：${describeProviderModelMerge(merge)}。`,
+              merge.unchangedIds.length > 0
+                ? '已存在且配置相同的模型会被原样跳过，不要再为它们生成草稿或重复读文档。'
+                : '',
+            ].filter(Boolean).join('\n');
+          } catch (error) {
+            plan = `落点检查失败：${error instanceof Error ? error.message : '连接不兼容'}`;
+          }
           return {
             status: 'success' as const,
             summary: `已生成“${draft.connectionName}”配置草稿，包含 ${draft.config.selectedModels?.length ?? 0} 个模型`,
             modelContent: [
               `draftId: ${draft.id}`,
               draft.summary,
+              plan,
               '草稿尚未写入设置。请立即调用 provider_config_apply 并只传入 draftId；本地 Policy 会展示审批卡等待用户确认。不要用普通文本要求用户回复“确认”或“添加”。',
             ].join('\n'),
           };
@@ -302,6 +344,8 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
       description: [
         '把 provider_config_preview 生成的任务级草稿保存到 API Key 设置。',
         '输入只允许 draftId；应在预览成功后立即调用，该操作会由本地 Policy 自动请求用户确认。',
+        'Base URL 与已有自定义连接相同时会自动并入那个连接（保留原连接名与原有模型），不会重复新建；',
+        '同 ID 且配置完全相同的模型会被跳过并在结果中列出，不必也不要为它们重新对接。',
         '不会写入 API Key：新连接的密钥保持空白，更新已有连接时保留原密钥。',
       ].join(''),
       inputSchema: {
@@ -317,7 +361,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
       authorize: (context, input) => {
         try {
           const draft = getProviderConfigDraft(context.taskId, input.draftId);
-          const existing = useAppStore.getState().config.providers[draft.connectionId];
+          const { existing } = resolveTargetConnection(draft);
           if (existing && existing.catalogId !== 'custom-openai') {
             return { allowed: false, reason: 'Agent 不能覆盖内置厂商连接' };
           }
@@ -332,9 +376,13 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
       summarizeInput: (input) => {
         const draft = peekProviderConfigDraft(input.draftId);
         if (!draft) return '保存 API 厂商配置（不会写入 API Key）';
-        // 审批卡必须让用户看清这是并入还是新建，以及原有模型会不会受影响
+        // 审批卡必须让用户看清这是并入哪个连接、还是新建，以及原有模型会不会受影响
         try {
-          return `${draft.summary}\n${describeProviderModelMerge(planProviderConfigMerge(draft).merge)}`;
+          const plan = planProviderConfigMerge(draft);
+          const target = plan.existing
+            ? `并入已有连接“${plan.existing.name}”（Base URL 相同）`
+            : '新建连接';
+          return `${draft.summary}\n${target}：${describeProviderModelMerge(plan.merge)}`;
         } catch (error) {
           return `${draft.summary}\n无法并入：${error instanceof Error ? error.message : '连接不兼容'}`;
         }
@@ -344,13 +392,16 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
           const draft = getProviderConfigDraft(context.taskId, input.draftId);
           const store = useAppStore.getState();
           if (!store.configHydrated) throw new Error('配置尚未完成加载，不能保存厂商连接');
-          const { existing, merge } = planProviderConfigMerge(draft);
+          const { connectionId, existing, merge } = planProviderConfigMerge(draft);
           if (existing && existing.catalogId !== 'custom-openai') {
             throw new Error('Agent 不能覆盖内置厂商连接');
           }
+          // 并入已有连接时保留用户自己起的连接名，只往里加模型
+          const connectionName = existing?.name || draft.connectionName;
           const draftCatalog = draft.config.catalogModels ?? [];
-          store.saveProviderConfig(draft.connectionId, {
+          store.saveProviderConfig(connectionId, {
             ...draft.config,
+            name: connectionName,
             apiKey: existing?.apiKey ?? '',
             selectedModels: merge.merged,
             catalogModels: mergeProviderModels(existing?.catalogModels, draftCatalog).merged,
@@ -362,17 +413,22 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
           await useAppStore.getState().saveConfig();
           deleteProviderConfigDraft(context.taskId, input.draftId);
           // 保存成功后打开设置的 API Key 页并弹出该连接编辑框，方便用户立即补填密钥
-          useAppStore.getState().openApiKeySettings(draft.connectionId);
+          useAppStore.getState().openApiKeySettings(connectionId);
           const mergeNote = describeProviderModelMerge(merge);
           return {
             status: 'success' as const,
-            summary: `已保存“${draft.connectionName}”API 厂商配置（${mergeNote}），API Key 未被修改`,
+            summary: `已保存“${connectionName}”API 厂商配置（${mergeNote}），API Key 未被修改`,
             modelContent: [
-              `已保存连接“${draft.connectionName}”：${mergeNote}，该连接现有 ${merge.merged.length} 个模型。`,
+              existing
+                ? `Base URL 与已有连接“${connectionName}”相同，已并入该连接而不是新建：${mergeNote}，该连接现有 ${merge.merged.length} 个模型。`
+                : `已新建连接“${connectionName}”：${mergeNote}，该连接现有 ${merge.merged.length} 个模型。`,
+              merge.unchangedIds.length > 0
+                ? `以下模型已存在且配置相同，本次未改动：${merge.unchangedIds.join('、')}。不要为它们重复生成草稿。`
+                : '',
               existing
                 ? '已保留该连接原有 API Key 和本次未涉及的模型。'
                 : '新连接的 API Key 保持空白，已自动打开设置的 API Key 页并弹出该连接编辑框，请用户在其中填写密钥。',
-            ].join('\n'),
+            ].filter(Boolean).join('\n'),
           };
         } catch (error) {
           return providerConfigError(error);

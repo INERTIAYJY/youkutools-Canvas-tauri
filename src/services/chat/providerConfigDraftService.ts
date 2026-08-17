@@ -183,8 +183,23 @@ export interface ProviderModelMergeResult {
   addedIds: string[];
   /** 草稿覆盖了同 ID 原有模型的模型 ID。 */
   updatedIds: string[];
+  /** 同 ID 且配置逐字段相同、原样跳过的模型 ID。 */
+  unchangedIds: string[];
   /** 本次未涉及、原样保留的模型 ID。 */
   keptIds: string[];
+}
+
+/** 键序无关的稳定序列化，用于判断草稿模型与已有模型是否逐字段相同。 */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
 }
 
 /**
@@ -192,6 +207,7 @@ export interface ProviderModelMergeResult {
  *
  * 用户说「给这个连接再加一个模型」时，草稿里只有那一个模型；直接替换会静默
  * 删掉该连接下其余模型和它们在 generalModels 中的关联项。
+ * 同 ID 且配置完全相同的模型原样跳过，避免助手重复对接时把审批卡刷成一堆「更新」。
  */
 export function mergeProviderModels(
   existingModels: ProviderModelSelection[] | undefined,
@@ -199,12 +215,20 @@ export function mergeProviderModels(
 ): ProviderModelMergeResult {
   const existing = existingModels ?? [];
   const draftById = new Map(draftModels.map((model) => [model.id, model]));
-  const existingIds = new Set(existing.map((model) => model.id));
+  const existingById = new Map(existing.map((model) => [model.id, model]));
 
-  const merged = existing.map((model) => draftById.get(model.id) ?? model);
+  const isUnchanged = (model: ProviderModelSelection) => {
+    const previous = existingById.get(model.id);
+    return previous !== undefined && stableStringify(previous) === stableStringify(model);
+  };
+
+  const merged = existing.map((model) => {
+    const draft = draftById.get(model.id);
+    return draft && !isUnchanged(draft) ? draft : model;
+  });
   const addedIds: string[] = [];
   for (const model of draftModels) {
-    if (existingIds.has(model.id)) continue;
+    if (existingById.has(model.id)) continue;
     merged.push(model);
     addedIds.push(model.id);
   }
@@ -212,7 +236,10 @@ export function mergeProviderModels(
   return {
     merged,
     addedIds,
-    updatedIds: draftModels.filter((model) => existingIds.has(model.id)).map((model) => model.id),
+    updatedIds: draftModels
+      .filter((model) => existingById.has(model.id) && !isUnchanged(model))
+      .map((model) => model.id),
+    unchangedIds: draftModels.filter(isUnchanged).map((model) => model.id),
     keptIds: existing.filter((model) => !draftById.has(model.id)).map((model) => model.id),
   };
 }
@@ -222,6 +249,9 @@ export function describeProviderModelMerge(result: ProviderModelMergeResult): st
   const parts = [
     result.addedIds.length > 0 ? `新增 ${result.addedIds.length} 个模型` : '',
     result.updatedIds.length > 0 ? `更新 ${result.updatedIds.length} 个同 ID 模型` : '',
+    result.unchangedIds.length > 0
+      ? `跳过 ${result.unchangedIds.length} 个已存在且配置相同的模型（${result.unchangedIds.join('、')}）`
+      : '',
     result.keptIds.length > 0 ? `保留原有 ${result.keptIds.length} 个模型` : '',
   ].filter(Boolean);
   return parts.length > 0 ? parts.join('，') : '模型列表无变化';

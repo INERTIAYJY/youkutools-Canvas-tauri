@@ -319,6 +319,62 @@ curl https://gateway.example.com/v1/images/generations \\
     expect(summary).not.toContain('保留原有');
   });
 
+  it('Base URL 相同的草稿并入已有连接，而不是新建重复连接', async () => {
+    useAppStore.getState().saveProviderConfig('custom-relay', {
+      name: '我的中转站',
+      apiKey: 'relay-secret-value',
+      // 末尾斜杠与大小写差异不应导致判成两个网关
+      baseUrl: 'https://Gateway.example.com/v1/',
+      catalogId: 'custom-openai',
+      selectedModels: [{ id: 'text-a', name: 'Text A', category: 'text', provider: 'custom-relay' }],
+    });
+    // 助手没带 connectionId，按老逻辑会生成新的 custom-xxx 连接
+    const preview = await getAgentTool('provider_config_preview')!.execute(context, previewInput());
+    const draftId = readDraftId(preview.modelContent);
+
+    const summary = getAgentTool('provider_config_apply')!.summarizeInput!({ draftId });
+    expect(summary).toContain('并入已有连接“我的中转站”');
+
+    const result = await getAgentTool('provider_config_apply')!.execute(context, { draftId });
+    expect(result).toMatchObject({ status: 'success' });
+
+    const providers = useAppStore.getState().config.providers;
+    expect(Object.keys(providers)).toEqual(['custom-relay']);
+    expect(providers['custom-relay']).toMatchObject({
+      name: '我的中转站',
+      apiKey: 'relay-secret-value',
+    });
+    expect(providers['custom-relay'].selectedModels?.map((model) => model.id))
+      .toEqual(['text-a', 'image-pro']);
+  });
+
+  it('同 ID 且配置相同的模型直接跳过并给出提示', async () => {
+    const first = await getAgentTool('provider_config_preview')!.execute(
+      context,
+      previewInput('custom-existing'),
+    );
+    await getAgentTool('provider_config_apply')!.execute(context, {
+      draftId: readDraftId(first.modelContent),
+    });
+
+    // 完全相同的草稿再来一次：既不新增也不更新，只报告跳过
+    const second = await getAgentTool('provider_config_preview')!.execute(
+      context,
+      previewInput('custom-existing'),
+    );
+    // 预览阶段就要提示，省得助手为已存在的模型再跑一轮
+    expect(second.modelContent).toContain('已存在且配置相同的模型会被原样跳过');
+    const draftId = readDraftId(second.modelContent);
+    expect(getAgentTool('provider_config_apply')!.summarizeInput!({ draftId }))
+      .toContain('跳过 1 个已存在且配置相同的模型（image-pro）');
+
+    const result = await getAgentTool('provider_config_apply')!.execute(context, { draftId });
+    expect(result.modelContent).toContain('以下模型已存在且配置相同，本次未改动：image-pro');
+    expect(result.summary).not.toContain('新增');
+    expect(useAppStore.getState().config.providers['custom-existing'].selectedModels)
+      .toHaveLength(1);
+  });
+
   it('applies an approved draft while preserving an existing API Key', async () => {
     // Base URL 必须与草稿一致，否则会被「不同网关不可并入」守卫拒绝（见上方用例）。
     useAppStore.getState().saveProviderConfig('custom-existing', {
@@ -340,7 +396,8 @@ curl https://gateway.example.com/v1/images/generations \\
 
     expect(result).toMatchObject({ status: 'success' });
     expect(useAppStore.getState().config.providers['custom-existing']).toMatchObject({
-      name: 'Example AI',
+      // 并入已有连接只往里加模型，用户自己起的连接名不被草稿覆盖
+      name: 'Old Name',
       apiKey: 'existing-secret-value',
       baseUrl: 'https://gateway.example.com/v1',
       selectedModels: [{ id: 'image-pro', category: 'image' }],

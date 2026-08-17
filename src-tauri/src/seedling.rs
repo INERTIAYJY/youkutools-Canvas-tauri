@@ -24,6 +24,8 @@ use crate::path_policy::{authorize_path, ensure_trusted_caller, PathAccess};
 const MIN_VERSION: &str = "0.0.4";
 /// 官方发布信息端点（版本号与各平台下载地址）。
 const RELEASE_INFO_URL: &str = "https://seedling.p.ykss.com.cn/cli-release.json";
+/// 官方默认服务地址：应用内下载的 CLI 缺失 endpoint 配置时补写该值。
+const SEEDLING_ENDPOINT: &str = "https://seedling.p.ykss.com.cn";
 /// 登录运行态事件名。
 const RUNTIME_EVENT: &str = "seedling-login-runtime";
 /// 命令错误信息回传前端的最大长度。
@@ -260,69 +262,102 @@ fn download_cli(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// 确保 CLI 已配置服务地址（endpoint）。
+///
+/// 官方安装脚本会自动写入 endpoint，但应用内自动下载的 CLI 是"裸"的——
+/// 配置文件里没有 endpoint 时，models list / auth 等所有联网命令都会失败。
+/// 查询当前 endpoint，未配置时写入官方默认地址（幂等，已配置则跳过）。
+fn ensure_seedling_endpoint(cli: &ResolvedCli) {
+    let mut query = base_command(cli, None);
+    query
+        .args(["config", "get", "endpoint"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let already_configured = match query.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains("https://"),
+        Err(_) => false,
+    };
+    if already_configured {
+        return;
+    }
+    let mut set = base_command(cli, None);
+    set.args(["config", "set", "endpoint", SEEDLING_ENDPOINT])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = set.status();
+}
+
 /// 解析可用的 CLI：PATH → 标准安装目录 → 应用缓存 → 自动下载。
 fn resolve_cli(app: &AppHandle) -> Result<ResolvedCli, String> {
-    let mut tried = Vec::new();
+    let result = (|| {
+        let mut tried = Vec::new();
 
-    if let Some(version) = probe_cli(Path::new("seedling")) {
-        return Ok(ResolvedCli {
-            path: PathBuf::from("seedling"),
-            version,
-            source: "path",
-        });
-    }
-
-    for candidate in standard_install_candidates() {
-        if !candidate.is_file() {
-            continue;
+        if let Some(version) = probe_cli(Path::new("seedling")) {
+            return Ok(ResolvedCli {
+                path: PathBuf::from("seedling"),
+                version,
+                source: "path",
+            });
         }
-        if let Some(version) = probe_cli(&candidate) {
-            if version_at_least(&version, MIN_VERSION) {
-                return Ok(ResolvedCli {
-                    path: candidate.clone(),
-                    version,
-                    source: "system",
-                });
+
+        for candidate in standard_install_candidates() {
+            if !candidate.is_file() {
+                continue;
             }
-            tried.push(format!(
-                "{}（v{version} 低于最低要求 v{MIN_VERSION}）",
-                candidate.display()
-            ));
+            if let Some(version) = probe_cli(&candidate) {
+                if version_at_least(&version, MIN_VERSION) {
+                    return Ok(ResolvedCli {
+                        path: candidate.clone(),
+                        version,
+                        source: "system",
+                    });
+                }
+                tried.push(format!(
+                    "{}（v{version} 低于最低要求 v{MIN_VERSION}）",
+                    candidate.display()
+                ));
+            }
         }
-    }
 
-    let managed = managed_cli_path(app)?;
-    if managed.is_file() {
-        if let Some(version) = probe_cli(&managed) {
-            if version_at_least(&version, MIN_VERSION) {
+        let managed = managed_cli_path(app)?;
+        if managed.is_file() {
+            if let Some(version) = probe_cli(&managed) {
+                if version_at_least(&version, MIN_VERSION) {
+                    return Ok(ResolvedCli {
+                        path: managed.clone(),
+                        version,
+                        source: "bundled",
+                    });
+                }
+                tried.push(format!(
+                    "{}（v{version} 低于最低要求 v{MIN_VERSION}）",
+                    managed.display()
+                ));
+            }
+        }
+
+        if let Ok(path) = download_cli(app) {
+            if let Some(version) = probe_cli(&path) {
                 return Ok(ResolvedCli {
-                    path: managed.clone(),
+                    path,
                     version,
                     source: "bundled",
                 });
             }
-            tried.push(format!(
-                "{}（v{version} 低于最低要求 v{MIN_VERSION}）",
-                managed.display()
-            ));
         }
-    }
 
-    if let Ok(path) = download_cli(app) {
-        if let Some(version) = probe_cli(&path) {
-            return Ok(ResolvedCli {
-                path,
-                version,
-                source: "bundled",
-            });
+        if tried.is_empty() {
+            Err("未找到已安装的 seedling，且自动下载失败。请在设置中检测或手动安装".to_string())
+        } else {
+            Err(format!("未找到可用的 seedling CLI：{}", tried.join("；")))
         }
-    }
+    })();
 
-    if tried.is_empty() {
-        Err("未找到已安装的 seedling，且自动下载失败。请在设置中检测或手动安装".to_string())
-    } else {
-        Err(format!("未找到可用的 seedling CLI：{}", tried.join("；")))
+    if let Ok(cli) = &result {
+        // 应用内下载的 CLI 缺少 endpoint 配置，补写官方默认地址
+        ensure_seedling_endpoint(cli);
     }
+    result
 }
 
 // ──────────────────────────────────────────────

@@ -625,6 +625,15 @@ export default function ProviderConnectionDialog({
               </div>
 
               {definition.id === 'custom-openai' && (
+                <div className="provider-catalog-message is-warning provider-custom-openai-warning">
+                  <Icon icon="mdi:alert-circle-outline" width="16" />
+                  <span>
+                    提示：每个中转站提供的模型和参数规则都不一样，从接口拉取下来的模型，不一定能直接拿来用。不同中转站对同一个模型的名字、传入图片、尺寸等参数往往不同，直接使用可能会报错。请先查看你所用中转站的官方文档，把对应的参数改成文档里的值。如果你不会改，可以这样做：直接把中转站的文档发给对话助手，或者开启智能体并接入 MCP，让助手照着文档帮你添加和配置。
+                  </span>
+                </div>
+              )}
+
+              {definition.id === 'custom-openai' && (
                 <label className="provider-field">
                   <span>连接名称</span>
                   <input

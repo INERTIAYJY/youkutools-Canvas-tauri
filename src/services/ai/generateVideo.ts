@@ -198,12 +198,18 @@ export function buildGeneralVideoProtocolVariables(
   const lastImage = referenceInput.imageUrls.length > 1
     ? referenceInput.imageUrls[referenceInput.imageUrls.length - 1]
     : undefined;
-  // 带角色的首/尾帧数组（[{ url, role }]），供协议模板按 image_with_roles 语义引用；
-  // 无角色信息（references 缺失）时按图片顺序推断首帧/尾帧。
-  const imageWithRoles = (referenceInput.references ?? [])
-    .filter((reference) => reference.kind === 'image'
-      && (reference.role === 'first_frame' || reference.role === 'last_frame'))
-    .map((reference) => ({ url: getMediaReferenceUrl(reference), role: reference.role }));
+  // 带角色的参考图数组（[{ url, role }]），供协议模板按 image_with_roles 语义引用：
+  // 首/尾帧保留原角色，其余参考图按 Seedance 约定写 reference_image；
+  // 为空时置 undefined，让模板省略该字段而不是发出空数组。
+  const roleImages = (referenceInput.references ?? [])
+    .filter((reference) => reference.kind === 'image')
+    .map((reference) => ({
+      url: getMediaReferenceUrl(reference),
+      role: reference.role === 'first_frame' || reference.role === 'last_frame'
+        ? reference.role
+        : 'reference_image',
+    }));
+  const imageWithRoles = roleImages.length > 0 ? roleImages : undefined;
 
   return {
     model: modelId,

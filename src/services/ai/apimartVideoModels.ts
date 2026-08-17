@@ -314,7 +314,8 @@ export function buildApimartSeedanceRequest(
   if (!capability.operations.includes(operation)) {
     throw new Error(`APIMart ${model} 不支持 ${operation}`);
   }
-  if (imageUrls.length > capability.maxImageReferences) {
+  // 参考图上限对 image_urls 与 image_with_roles 一并生效（后者也是参考图，只是带角色）
+  if (imageUrls.length + imageWithRoles.length > capability.maxImageReferences) {
     throw new Error(`APIMart ${model} 最多支持 ${capability.maxImageReferences} 张参考图`);
   }
   if (videoUrls.length > (capability.maxVideoReferences ?? 0)) {

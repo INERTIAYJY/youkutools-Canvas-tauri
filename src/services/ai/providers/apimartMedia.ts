@@ -254,12 +254,23 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
         }));
       }
       // 其余角色为 reference 的图片作为多模态参考图
-      imageUrls = await resolveImageUrlArray(
+      const referenceUrls = await resolveImageUrlArray(
         references
           .filter((ref) => ref.kind === 'image' && ref.role === 'reference')
           .map((ref) => getMediaReferenceUrl(ref)),
         'apimart',
       );
+      // Seedance 2.0/2.5 走 image_with_roles，与 image_urls 互斥；参考图必须并入同一数组
+      // （role=reference_image），否则首尾帧 + 参考图会被判为互斥直接报错。
+      if (capability?.imageWithRoles) {
+        imageWithRoles = [
+          ...imageWithRoles,
+          ...referenceUrls.map((url) => ({ url, role: 'reference_image' as const })),
+        ];
+        imageUrls = [];
+      } else {
+        imageUrls = referenceUrls;
+      }
     } else {
       imageUrls = await resolveImageUrlArray(referenceInput.imageUrls, 'apimart');
     }

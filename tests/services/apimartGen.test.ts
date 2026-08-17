@@ -309,6 +309,26 @@ describe('APIMart Seedance 2.5 video', () => {
     expect(body).not.toHaveProperty('image_urls');
   });
 
+  it('keeps first frame and plain reference images together in image_with_roles', () => {
+    const body = buildApimartSeedanceRequest(
+      'doubao-seedance-2.5',
+      'prompt',
+      {
+        imageWithRoles: [
+          { url: 'https://cdn.example/first.jpg', role: 'first_frame' },
+          { url: 'https://cdn.example/role.png', role: 'reference_image' },
+        ],
+      },
+    );
+    expect(body).toMatchObject({
+      image_with_roles: [
+        { url: 'https://cdn.example/first.jpg', role: 'first_frame' },
+        { url: 'https://cdn.example/role.png', role: 'reference_image' },
+      ],
+    });
+    expect(body).not.toHaveProperty('image_urls');
+  });
+
   it('rejects mixing image_with_roles with reference media', () => {
     expect(() => buildApimartSeedanceRequest(
       'doubao-seedance-2.5',

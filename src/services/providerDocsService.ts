@@ -199,9 +199,10 @@ export function buildRelayCatalogContent(
     '',
     '接口调用格式参考（new-api 公开约定，供生成配置草稿）：',
     '- 文本模型（端点含 chat/completion）：POST /v1/chat/completions，OpenAI 标准 {model, messages} 格式。',
-    '- 图片模型（端点含 image-generation）：POST /v1/images/generations，OpenAI 标准 {model, prompt, size, n} 格式。',
-    '- 视频模型（端点含 video）：POST /v1/videos，请求体含 model、prompt、images（公网 HTTPS 图片 URL 数组）、duration、resolution；异步任务返回任务 ID，用 /v1/videos/{任务ID} 轮询结果。',
+    '- 图片模型（端点含 image-generation）：POST /v1/images/generations，OpenAI 标准 {model, prompt, size, n} 格式；支持图生图时请求体再加 image_urls（公网 HTTPS 图片 URL 数组），并把 imageReferenceRequestMode 设为 generation-json-image-urls。',
+    '- 视频模型（端点含 video）：POST /v1/videos，请求体含 model、prompt、duration、resolution、size（宽高比）；参考素材按该站文档实际字段填写：普通参考图用 image_urls，首尾帧用 first_frame_image / last_frame_image，Seedance 2.x 用 image_with_roles（[{url, role}]，role 取 first_frame / last_frame / reference_image）；异步任务返回任务 ID，用 /v1/videos/{任务ID} 轮询结果。',
     '- 音频模型（端点含 audio/tts/speech）：POST /v1/audio/speech，OpenAI 标准 {model, input, voice} 格式。',
+    '示例里的参数字段名要按该站真实文档写，本项目会按字段名把画布上的分辨率、宽高比、时长、数量与连线的参考素材映射进去；参考素材字段缺失就等于该模型不接参考图。',
   );
   return { title, text: lines.join('\n') };
 }

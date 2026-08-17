@@ -553,6 +553,36 @@ describe('general video protocol variables', () => {
     });
   });
 
+  it('tags reference images as reference_image alongside frames in imageWithRoles', () => {
+    const withRoles = buildGeneralVideoProtocolVariables(
+      'doubao-seedance-2.5',
+      { model: 'general/seedance', provider: 'general', prompt: 'prompt' },
+      {
+        prompt: 'prompt',
+        imageUrls: ['https://cdn.example/first.png', 'https://cdn.example/role.png'],
+        videoUrls: [],
+        audioUrls: [],
+        operation: 'image-to-video',
+        references: [
+          { kind: 'image', url: 'https://cdn.example/first.png', origin: 'connection', role: 'first_frame' },
+          { kind: 'image', url: 'https://cdn.example/role.png', origin: 'connection', role: 'reference' },
+        ],
+      },
+    );
+    expect(withRoles.imageWithRoles).toEqual([
+      { url: 'https://cdn.example/first.png', role: 'first_frame' },
+      { url: 'https://cdn.example/role.png', role: 'reference_image' },
+    ]);
+
+    // 没有参考素材时置 undefined，模板才会省略 image_with_roles 而不是发出空数组
+    const withoutRoles = buildGeneralVideoProtocolVariables(
+      'doubao-seedance-2.5',
+      { model: 'general/seedance', provider: 'general', prompt: 'prompt' },
+      { prompt: 'prompt', imageUrls: [], videoUrls: [], audioUrls: [], operation: 'text-to-video' },
+    );
+    expect(withoutRoles.imageWithRoles).toBeUndefined();
+  });
+
   it('provides usable defaults and omits a last frame when only one image is present', () => {
     const variables = buildGeneralVideoProtocolVariables(
       'video-model',

@@ -62,9 +62,12 @@ export default function SeedlingSettings() {
     }
   }, []);
 
+  const lastModelFailTs = useRef(0);
+
   /**
    * 认证成功后自动拉取模型目录并启用（写入 catalogModels + selectedModels）。
    * 仅在尚未勾选任何模型时执行，避免覆盖用户在 API Key 设置里的手动选择。
+   * 失败时给出可见提示（30s 去重），便于新装电脑定位（CLI 下载/网络问题）。
    */
   const ensureSeedlingModelsEnabled = useCallback(async () => {
     const store = useAppStore.getState();
@@ -82,8 +85,13 @@ export default function SeedlingSettings() {
       await store.saveConfig();
       useAppStore.getState().showToast(`已自动启用 ${selections.length} 个森之灵模型`);
       await loadModels();
-    } catch {
-      // 拉取失败不阻塞：可在「API Key → 森之灵」中手动拉取目录
+    } catch (error) {
+      const now = Date.now();
+      if (now - lastModelFailTs.current > 30_000) {
+        lastModelFailTs.current = now;
+        const message = error instanceof Error ? error.message : String(error);
+        useAppStore.getState().showToast(`森之灵模型加载失败：${message}`, 'error');
+      }
     }
   }, [loadModels]);
 
@@ -102,9 +110,15 @@ export default function SeedlingSettings() {
             checkTs: Date.now(),
           },
         });
-        if (status.auth.loggedIn || savedToken) {
-          void ensureSeedlingModelsEnabled();
-        }
+      }
+      // 关键：不依赖 status.auth 是否存在（新装电脑无 CLI 时 auth 为 null）。
+      // 只要「运行时」有 API Token 或 CLI 登录态，就尝试加载模型；
+      // 从 store 实时读取，避免 handleSaveToken 里 refreshStatus 闭包捕获旧 savedToken。
+      const hasSavedToken = Boolean(
+        useAppStore.getState().config.providers?.seedling?.apiKey,
+      );
+      if (status.auth?.loggedIn || hasSavedToken) {
+        void ensureSeedlingModelsEnabled();
       }
     } catch (error) {
       setCliStatus({ found: false, source: 'missing', error: error instanceof Error ? error.message : String(error) });

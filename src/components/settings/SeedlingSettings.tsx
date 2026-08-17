@@ -24,6 +24,15 @@ import { buildSeedlingCatalogModels } from '../../services/ai/providerCatalogSer
 
 const AUTH_EVENT = 'seedling-login-runtime';
 
+function StatusDot({ ok }: { ok: boolean }) {
+  return (
+    <span
+      className={`inline-block h-2 w-2 rounded-full shrink-0 ${ok ? 'bg-green-400' : 'bg-red-400'}`}
+      aria-hidden="true"
+    />
+  );
+}
+
 export default function SeedlingSettings() {
   const setProviderKey = useAppStore((state) => state.setProviderKey);
   const updateConfig = useAppStore((state) => state.updateConfig);
@@ -216,222 +225,236 @@ export default function SeedlingSettings() {
   const loginPhase = loginRuntime?.phase || 'idle';
   const loginReady = loginPhase === 'oauth_ready' || loginPhase === 'polling';
   const loginWaiting = loginPhase === 'preparing' || loginPhase === 'starting';
+  const cliFound = cliStatus?.found ?? false;
+  const authOk = cliStatus?.auth?.loggedIn ?? false;
 
   return (
-    <div className="settings-pane">
-      <div className="settings-pane-heading">
-        <h2 className="settings-pane-title">森之灵</h2>
+    <div className="space-y-4">
+      {/* ── CLI 状态 ── */}
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-canvas-text">CLI 状态</h3>
+        <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
+          {statusLoading ? (
+            <p className="text-xs text-canvas-text-muted">正在检测 Seedling CLI…</p>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 text-xs text-canvas-text-secondary">
+                <StatusDot ok={cliFound} />
+                <span>CLI 检测：</span>
+                <span className={cliFound ? 'text-green-500' : 'text-red-400'}>
+                  {cliFound ? '已找到' : '未找到'}
+                </span>
+                {cliStatus?.source && (
+                  <span className="text-canvas-text-muted">（来源：{cliStatus.source}）</span>
+                )}
+              </div>
+              {cliStatus?.version && (
+                <div className="text-xs text-canvas-text-secondary">CLI 版本：{cliStatus.version}</div>
+              )}
+              {cliStatus?.auth && (
+                <>
+                  <div className="flex items-center gap-2 text-xs text-canvas-text-secondary">
+                    <StatusDot ok={authOk} />
+                    <span>认证状态：</span>
+                    <span className={authOk ? 'text-green-500' : 'text-red-400'}>
+                      {authOk ? `已登录${cliStatus.auth.username ? `（${cliStatus.auth.username}）` : ''}` : '未登录或令牌失效'}
+                    </span>
+                  </div>
+                  {cliStatus.auth.endpoint && (
+                    <div className="text-xs text-canvas-text-secondary">服务地址：{cliStatus.auth.endpoint}</div>
+                  )}
+                  {cliStatus.auth.tokenPreview && (
+                    <div className="text-xs text-canvas-text-secondary">Token 预览：{cliStatus.auth.tokenPreview}</div>
+                  )}
+                  {cliStatus.auth.message && (
+                    <p className="text-xs text-canvas-text-muted">{cliStatus.auth.message}</p>
+                  )}
+                </>
+              )}
+              {cliStatus?.error && <p className="text-xs text-red-400">{cliStatus.error}</p>}
+            </>
+          )}
+          <button
+            type="button"
+            className="settings-save-btn"
+            disabled={statusLoading}
+            onClick={() => void refreshStatus()}
+          >
+            重新检测
+          </button>
+        </div>
       </div>
 
-      <div className="settings-pane-body provider-settings-body">
-        {/* CLI 状态 */}
-        <section className="provider-section">
-          <h3 className="provider-section-title">CLI 状态</h3>
-          <div className="provider-section-body">
-            {statusLoading && <p className="settings-hint">正在检测 Seedling CLI…</p>}
-            {!statusLoading && cliStatus && (
-              <ul className="settings-status-list">
-                <li>
-                  检测结果：
-                  {cliStatus.found
-                    ? <span className="text-green-500">已找到</span>
-                    : <span className="text-red-500">未找到</span>}
-                  {cliStatus.source && <span className="settings-status-muted">（来源：{cliStatus.source}）</span>}
-                </li>
-                {cliStatus.version && <li>CLI 版本：{cliStatus.version}</li>}
-                {cliStatus.auth && (
-                  <>
-                    <li>
-                      认证状态：
-                      {cliStatus.auth.loggedIn
-                        ? <span className="text-green-500">已登录{cliStatus.auth.username ? `（${cliStatus.auth.username}）` : ''}</span>
-                        : <span className="text-red-500">未登录或令牌失效</span>}
-                    </li>
-                    {cliStatus.auth.endpoint && <li>服务地址：{cliStatus.auth.endpoint}</li>}
-                    {cliStatus.auth.tokenPreview && <li>Token 预览：{cliStatus.auth.tokenPreview}</li>}
-                    {cliStatus.auth.message && <li className="settings-status-muted">{cliStatus.auth.message}</li>}
-                  </>
-                )}
-                {cliStatus.error && <li className="settings-status-error">{cliStatus.error}</li>}
-              </ul>
-            )}
-            <button
-              type="button"
-              className="settings-save-btn"
-              disabled={statusLoading}
-              onClick={() => void refreshStatus()}
-            >
-              重新检测
-            </button>
-          </div>
-        </section>
-
-        {/* 认证方式 A：CLI 浏览器授权登录 */}
-        <section className="provider-section">
-          <h3 className="provider-section-title">认证方式 A — CLI 浏览器授权登录</h3>
-          <div className="provider-section-body">
-            {loggedIn ? (
-              <div className="provider-login-state">
-                <p className="text-green-500">当前已通过 {authMirror?.tokenSource === 'api-key' ? 'API Token' : 'CLI 登录态'} 认证</p>
-                <button
-                  type="button"
-                  className="settings-save-btn settings-btn-ghost"
-                  disabled={logoutLoading}
-                  onClick={() => void handleLogout()}
-                >
-                  {logoutLoading ? '正在退出…' : '退出登录'}
-                </button>
+      {/* ── 认证方式 A：CLI 浏览器授权登录 ── */}
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 A — CLI 浏览器授权登录</h3>
+        <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
+          {loggedIn ? (
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs text-canvas-text-secondary">
+                <StatusDot ok />
+                <span>已通过 {authMirror?.tokenSource === 'api-key' ? 'API Token' : 'CLI 登录态'} 认证</span>
               </div>
-            ) : (
-              <>
-                <p className="settings-hint">
-                  点击下方按钮，在浏览器中确认配对码完成授权，登录态由 Seedling CLI 持久化（90 天有效）。
-                </p>
-                <button
-                  type="button"
-                  className="settings-save-btn"
-                  disabled={loginLoading || loginWaiting}
-                  onClick={() => void handleStartLogin()}
-                >
-                  {loginLoading || loginWaiting ? '正在启动…' : '开始浏览器授权登录'}
-                </button>
-              </>
-            )}
-
-            {loginReady && loginRuntime && (
-              <div className="seedling-login-guide">
-                <div className="dreamina-manual-guide-head">
-                  <div className="dreamina-manual-guide-title">浏览器授权（2 步）</div>
-                </div>
-                <div className="dreamina-manual-step">1) 打开授权链接</div>
-                <div className="dreamina-manual-link-row">
-                  <input
-                    className="dreamina-manual-link-input"
-                    readOnly
-                    aria-label="森之灵授权链接"
-                    value={loginRuntime.verificationUrl}
-                  />
-                  <button
-                    type="button"
-                    className="settings-save-btn"
-                    disabled={!loginRuntime.verificationUrl}
-                    onClick={() => loginRuntime.verificationUrl && openExternalUrl(loginRuntime.verificationUrl)}
-                  >
-                    打开
-                  </button>
-                  <button
-                    type="button"
-                    className="settings-save-btn settings-btn-ghost"
-                    disabled={!loginRuntime.verificationUrl}
-                    onClick={() => handleCopy(loginRuntime.verificationUrl, '授权链接')}
-                  >
-                    复制
-                  </button>
-                </div>
-                <div className="dreamina-manual-step">2) 确认配对码</div>
-                <div className="dreamina-manual-link-row">
-                  <input
-                    className="dreamina-manual-link-input dreamina-manual-code-input"
-                    readOnly
-                    aria-label="森之灵配对码"
-                    value={loginRuntime.userCode}
-                  />
-                  <button
-                    type="button"
-                    className="settings-save-btn settings-btn-ghost"
-                    disabled={!loginRuntime.userCode}
-                    onClick={() => handleCopy(loginRuntime.userCode, '配对码')}
-                  >
-                    复制
-                  </button>
-                </div>
-                <p className="settings-hint">{loginRuntime.message}</p>
-                <button
-                  type="button"
-                  className="settings-save-btn settings-btn-ghost"
-                  onClick={() => void handleCancelLogin()}
-                >
-                  取消登录
-                </button>
-              </div>
-            )}
-
-            {loginRuntime?.phase === 'success' && (
-              <p className="text-green-500">{loginRuntime.message}</p>
-            )}
-            {loginRuntime?.phase === 'failed' && (
-              <p className="settings-status-error">{loginRuntime.error || loginRuntime.message}</p>
-            )}
-          </div>
-        </section>
-
-        {/* 认证方式 B：API Token */}
-        <section className="provider-section">
-          <h3 className="provider-section-title">认证方式 B — API Token（机器令牌）</h3>
-          <div className="provider-section-body">
-            <p className="settings-hint">
-              在 Seedling Web 端 → 头像菜单 → API 访问令牌 中创建（永久有效）。填写后优先于 CLI 登录态。
-            </p>
-            <div className="dreamina-manual-link-row">
-              <input
-                className="dreamina-manual-link-input"
-                type="password"
-                placeholder={savedToken ? '已保存（留空则使用 CLI 登录态）' : '粘贴 API Token'}
-                value={apiToken}
-                onChange={(event) => setApiToken(event.target.value)}
-              />
               <button
                 type="button"
-                className="settings-save-btn"
-                disabled={tokenSaving || !apiToken.trim()}
-                onClick={() => void handleSaveToken()}
+                className="settings-save-btn settings-btn-ghost"
+                disabled={logoutLoading}
+                onClick={() => void handleLogout()}
               >
-                {tokenSaving ? '保存中…' : '保存 Token'}
+                {logoutLoading ? '正在退出…' : '退出登录'}
               </button>
-              {savedToken && (
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-canvas-text-muted leading-relaxed">
+                在浏览器中确认配对码完成授权，登录态由 Seedling CLI 持久化（90 天有效）。
+              </p>
+              <button
+                type="button"
+                className="settings-save-btn shrink-0"
+                disabled={loginLoading || loginWaiting}
+                onClick={() => void handleStartLogin()}
+              >
+                {loginLoading || loginWaiting ? '正在启动…' : '开始浏览器授权登录'}
+              </button>
+            </div>
+          )}
+
+          {loginReady && loginRuntime && (
+            <div className="space-y-2 border-t border-canvas-border pt-2">
+              <div className="text-xs font-medium text-canvas-text">浏览器授权（2 步）</div>
+              <div className="text-xs text-canvas-text-muted">1) 打开授权链接</div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  className="dreamina-manual-link-input"
+                  readOnly
+                  aria-label="森之灵授权链接"
+                  value={loginRuntime.verificationUrl}
+                />
                 <button
                   type="button"
-                  className="settings-save-btn settings-btn-ghost"
-                  onClick={() => void handleClearToken()}
+                  className="settings-save-btn shrink-0"
+                  disabled={!loginRuntime.verificationUrl}
+                  onClick={() => loginRuntime.verificationUrl && openExternalUrl(loginRuntime.verificationUrl)}
                 >
-                  清除
+                  打开
                 </button>
-              )}
+                <button
+                  type="button"
+                  className="settings-save-btn settings-btn-ghost shrink-0"
+                  disabled={!loginRuntime.verificationUrl}
+                  onClick={() => handleCopy(loginRuntime.verificationUrl, '授权链接')}
+                >
+                  复制
+                </button>
+              </div>
+              <div className="text-xs text-canvas-text-muted">2) 确认配对码</div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  className="dreamina-manual-link-input dreamina-manual-code-input"
+                  readOnly
+                  aria-label="森之灵配对码"
+                  value={loginRuntime.userCode}
+                />
+                <button
+                  type="button"
+                  className="settings-save-btn settings-btn-ghost shrink-0"
+                  disabled={!loginRuntime.userCode}
+                  onClick={() => handleCopy(loginRuntime.userCode, '配对码')}
+                >
+                  复制
+                </button>
+              </div>
+              <p className="text-xs text-canvas-text-muted">{loginRuntime.message}</p>
+              <button
+                type="button"
+                className="settings-save-btn settings-btn-ghost"
+                onClick={() => void handleCancelLogin()}
+              >
+                取消登录
+              </button>
             </div>
-            {tokenSavedMsg && <p className="text-green-500">{tokenSavedMsg}</p>}
-          </div>
-        </section>
+          )}
 
-        {/* 可用模型 */}
-        <section className="provider-section">
-          <h3 className="provider-section-title">可用模型</h3>
-          <div className="provider-section-body">
-            {models.length === 0 ? (
-              <p className="settings-hint">暂无模型，请先完成认证后刷新</p>
-            ) : (
-              <ul className="settings-status-list">
-                {models.map((model) => (
-                  <li key={model.id}>
-                    <span className="settings-status-name">{model.name}</span>
-                    <span className="settings-status-muted">（{model.id}）</span>
-                    {model.supportedResolutions?.length
-                      ? ` ${model.supportedResolutions.join('/')}`
-                      : ''}
-                    {model.supportsAudio ? ' · 支持配乐' : ''}
-                    {model.description ? ` — ${model.description}` : ''}
-                  </li>
-                ))}
-              </ul>
-            )}
+          {loginRuntime?.phase === 'success' && (
+            <p className="text-xs text-green-500">{loginRuntime.message}</p>
+          )}
+          {loginRuntime?.phase === 'failed' && (
+            <p className="text-xs text-red-400">{loginRuntime.error || loginRuntime.message}</p>
+          )}
+        </div>
+      </div>
+
+      {/* ── 认证方式 B：API Token ── */}
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 B — API Token（机器令牌）</h3>
+        <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
+          <p className="text-xs text-canvas-text-muted leading-relaxed">
+            在 Seedling Web 端 → 头像菜单 → API 访问令牌 中创建（永久有效）。填写后优先于 CLI 登录态。
+          </p>
+          <div className="flex items-center gap-1.5">
+            <input
+              className="dreamina-manual-link-input"
+              type="password"
+              placeholder={savedToken ? '已保存（留空则使用 CLI 登录态）' : '粘贴 API Token'}
+              value={apiToken}
+              onChange={(event) => setApiToken(event.target.value)}
+            />
             <button
               type="button"
-              className="settings-save-btn"
-              onClick={() => void loadModels()}
+              className="settings-save-btn shrink-0"
+              disabled={tokenSaving || !apiToken.trim()}
+              onClick={() => void handleSaveToken()}
             >
-              刷新模型列表
+              {tokenSaving ? '保存中…' : '保存 Token'}
             </button>
+            {savedToken && (
+              <button
+                type="button"
+                className="settings-save-btn settings-btn-ghost shrink-0"
+                onClick={() => void handleClearToken()}
+              >
+                清除
+              </button>
+            )}
           </div>
-        </section>
+          {tokenSavedMsg && <p className="text-xs text-green-500">{tokenSavedMsg}</p>}
+        </div>
+      </div>
+
+      {/* ── 可用模型 ── */}
+      <div>
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-medium text-canvas-text">可用模型</h3>
+          <button
+            type="button"
+            className="settings-save-btn"
+            onClick={() => void loadModels()}
+          >
+            刷新
+          </button>
+        </div>
+        <div className="rounded-lg border border-canvas-border bg-canvas-card p-3">
+          {models.length === 0 ? (
+            <p className="text-xs text-canvas-text-muted">暂无模型，请先完成认证后刷新</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {models.map((model) => (
+                <li key={model.id} className="flex items-baseline gap-2 text-xs">
+                  <span className="text-canvas-text">{model.name}</span>
+                  <span className="text-canvas-text-muted">{model.id}</span>
+                  {model.supportedResolutions?.length && (
+                    <span className="text-canvas-text-secondary">{model.supportedResolutions.join('/')}</span>
+                  )}
+                  {model.supportsAudio && <span className="text-canvas-text-secondary">· 支持配乐</span>}
+                  {model.description && (
+                    <span className="truncate text-canvas-text-muted">— {model.description}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </div>
   );

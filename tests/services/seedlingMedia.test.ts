@@ -4,11 +4,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VideoGenerationReferenceInput } from '../../src/types/aiTypes';
 import type { MediaProviderRequest } from '../../src/services/ai/mediaProviderRegistry';
+import { useAppStore } from '../../src/store/useAppStore';
 
 const seedlingMocks = vi.hoisted(() => ({
   createSeedlingVideoTask: vi.fn(),
   waitSeedlingTask: vi.fn(),
   toSeedlingDisplayUrl: vi.fn((url: string) => url),
+  uploadSeedlingResource: vi.fn(),
 }));
 
 const uploadMocks = vi.hoisted(() => ({
@@ -52,8 +54,16 @@ function buildRequest(overrides?: {
 }
 
 beforeEach(() => {
+  // 认证预检（assertSeedlingAuthorized）需要 CLI 登录态或 API Token
+  useAppStore.setState({
+    config: {
+      ...useAppStore.getInitialState().config,
+      seedlingAuth: { loggedIn: true },
+    },
+  });
   seedlingMocks.createSeedlingVideoTask.mockReset();
   seedlingMocks.waitSeedlingTask.mockReset();
+  seedlingMocks.uploadSeedlingResource.mockReset();
   uploadMocks.resolveMediaReferenceUrl.mockReset();
   seedlingMocks.createSeedlingVideoTask.mockResolvedValue({ taskId: 10001 });
   seedlingMocks.waitSeedlingTask.mockResolvedValue({
@@ -121,7 +131,10 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
     );
   });
 
-  it('本地磁盘路径直接交给 CLI（CLI 自动上传），asset URL 走通用图床', async () => {
+  it('本地磁盘路径先经 resource upload 上传为 https URL 再传入（CLI 不接受本地路径），asset URL 走通用图床', async () => {
+    seedlingMocks.uploadSeedlingResource.mockResolvedValue({
+      url: 'https://cdn.seedling.com/uploads/a.png',
+    });
     uploadMocks.resolveMediaReferenceUrl.mockImplementation(async (url: string) => {
       if (url === 'asset.localhost/ref.png') return 'https://cdn.example/uploaded.png';
       return url;
@@ -131,15 +144,25 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
         imageUrls: ['C:\\project\\frames\\a.png', 'asset.localhost/ref.png'],
       }),
     );
+    expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith('C:\\project\\frames\\a.png');
     expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
       expect.objectContaining({
-        resources: ['C:\\project\\frames\\a.png', 'https://cdn.example/uploaded.png'],
+        resources: ['https://cdn.seedling.com/uploads/a.png', 'https://cdn.example/uploaded.png'],
       }),
     );
     expect(uploadMocks.resolveMediaReferenceUrl).toHaveBeenCalledWith(
       'asset.localhost/ref.png',
       { kind: 'image' },
     );
+  });
+
+  it('本地素材上传失败时给出明确错误', async () => {
+    seedlingMocks.uploadSeedlingResource.mockRejectedValue(new Error('上传 400: invalid file'));
+    await expect(
+      seedlingMediaProviderAdapter.generateVideo!(
+        buildRequest({ imageUrls: ['C:\\project\\frames\\a.png'] }),
+      ),
+    ).rejects.toThrow('森之灵素材上传失败：上传 400: invalid file');
   });
 
   it('任务失败时抛出服务端错误信息', async () => {

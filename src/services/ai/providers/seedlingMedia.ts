@@ -17,6 +17,7 @@ import { resolveMediaReferenceUrl } from '../../uploadService';
 import {
   createSeedlingVideoTask,
   toSeedlingDisplayUrl,
+  uploadSeedlingResource,
   waitSeedlingTask,
 } from '../../seedlingService';
 import { useAppStore } from '../../../store/useAppStore';
@@ -62,11 +63,27 @@ function isLocalDiskPath(value: string): boolean {
   return t.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(t);
 }
 
-/** 把参考 URL 规范化为 CLI --resource 可用的值：公网/本地路径直传，其余转公网。 */
+/**
+ * 把参考 URL 规范化为 CLI `--resource` 可用的值。
+ * 注意：Seedling CLI 的 `--resource` 只接受 `https://` 开头的 URL——
+ * 本地磁盘路径必须先用 `seedling resource upload` 上传拿到在线地址；
+ * asset.localhost / blob / data 等本地引用统一经通用图床转公网 URL。
+ */
 async function toCliResource(url: string): Promise<string | undefined> {
   const trimmed = url.trim();
   if (!trimmed) return undefined;
-  if (isPublicHttpUrl(trimmed) || isLocalDiskPath(trimmed)) return trimmed;
+  if (isPublicHttpUrl(trimmed)) return trimmed;
+  if (isLocalDiskPath(trimmed)) {
+    try {
+      const { url: uploaded } = await uploadSeedlingResource(trimmed);
+      return uploaded;
+    } catch (error) {
+      throw new Error(
+        `森之灵素材上传失败：${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
   return resolveMediaReferenceUrl(trimmed, { kind: 'image' });
 }
 

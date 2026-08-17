@@ -169,6 +169,39 @@
   background: var(--border-subtle);
   margin-bottom: 12px;
 }
+/* 工作流管理面板的常驻黄字提示：解释未设置默认节点时 ComfyUI 调用需要 @节点 的机制。 */
+.wf-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: -4px 0 10px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--warning-bg);
+  color: var(--warning-light);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.wf-hint > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--warning-light);
+}
+.wf-hint > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.wf-hint-code {
+  display: inline-block;
+  padding: 0 4px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: var(--warning-bg);
+  color: var(--warning-light);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
 .wf-count {
   display: inline-flex;
   align-items: center;

@@ -474,6 +474,17 @@ export default function WorkflowPanel() {
           </div>
           <div className="wf-section-rule" />
 
+          <p className="wf-hint" role="note">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <span>
+              未设置默认节点时，ComfyUI 调用需要在提示词中 <code className="wf-hint-code">@对应节点</code>，提示词或参考图才会写入对应输入。展开下方工作流卡片，点击节点徽章设为该类型默认节点（显示为 <code className="wf-hint-code">★</code>），调用时即可自动注入，无须每次 <code className="wf-hint-code">@</code>。
+            </span>
+          </p>
+
           <AnimatePresence mode="popLayout">
             {workflows.length > 0 && workflowsByCategory.length === 0 ? (
               <motion.div

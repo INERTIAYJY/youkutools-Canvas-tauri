@@ -100,7 +100,9 @@ export default function SeedlingSettings() {
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
     try {
-      const status = await fetchSeedlingCliStatus();
+      // CLI 认证区独立显示：不带 API Token，只反映 CLI 配置文件的登录态。
+      // 否则备用 API Token 存在时，退出 CLI 登录后仍会被 Token 验证成「已登录」。
+      const status = await fetchSeedlingCliStatus(false);
       setCliStatus(status);
       if (status.auth) {
         updateConfig({
@@ -108,14 +110,12 @@ export default function SeedlingSettings() {
             loggedIn: status.auth.loggedIn,
             username: status.auth.username || undefined,
             endpoint: status.auth.endpoint || undefined,
-            tokenSource: savedToken ? 'api-key' : (status.auth.tokenSource || undefined),
+            tokenSource: status.auth.tokenSource || undefined,
             checkTs: Date.now(),
           },
         });
       }
-      // 关键：不依赖 status.auth 是否存在（新装电脑无 CLI 时 auth 为 null）。
-      // 只要「运行时」有 API Token 或 CLI 登录态，就尝试加载模型；
-      // 从 store 实时读取，避免 handleSaveToken 里 refreshStatus 闭包捕获旧 savedToken。
+      // 模型加载：CLI 登录态或（备用）API Token 任一可用即可
       const hasSavedToken = Boolean(
         useAppStore.getState().config.providers?.seedling?.apiKey,
       );
@@ -127,7 +127,7 @@ export default function SeedlingSettings() {
     } finally {
       setStatusLoading(false);
     }
-  }, [ensureSeedlingModelsEnabled, savedToken, updateConfig]);
+  }, [ensureSeedlingModelsEnabled, updateConfig]);
 
   /** 显式安装 / 更新应用内置 CLI（强制下载最新版到应用缓存目录）。 */
   const handleInstallCli = async () => {
@@ -142,7 +142,7 @@ export default function SeedlingSettings() {
             loggedIn: status.auth.loggedIn,
             username: status.auth.username || undefined,
             endpoint: status.auth.endpoint || undefined,
-            tokenSource: savedToken ? 'api-key' : (status.auth.tokenSource || undefined),
+            tokenSource: status.auth.tokenSource || undefined,
             checkTs: Date.now(),
           },
         });
@@ -261,9 +261,9 @@ export default function SeedlingSettings() {
     setTokenSaving(true);
     try {
       setProviderKey('seedling', token);
-      updateConfig({ seedlingAuth: { loggedIn: true, tokenSource: 'api-key', checkTs: Date.now() } });
+      // 注意：不写 seedlingAuth 镜像（那是 CLI 登录态），API Token 是备用认证
       await saveConfig();
-      setTokenSavedMsg('API Token 已保存');
+      setTokenSavedMsg('API Token 已保存（备用认证）');
       setApiToken('');
       await refreshStatus();
       await loadModels();
@@ -286,7 +286,9 @@ export default function SeedlingSettings() {
     }
   };
 
-  const loggedIn = authMirror?.loggedIn || Boolean(savedToken);
+  // CLI 认证区独立判断：authMirror 只反映 CLI 配置文件的登录态（refreshStatus 不带 API Token 查询）。
+  // API Token 是备用认证，存在性单独由 savedToken 判断，不再混入 CLI 登录态。
+  const cliLoggedIn = authMirror?.loggedIn === true;
   const loginPhase = loginRuntime?.phase || 'idle';
   const loginReady = loginPhase === 'oauth_ready' || loginPhase === 'polling';
   const loginWaiting = loginPhase === 'preparing' || loginPhase === 'starting';
@@ -360,15 +362,15 @@ export default function SeedlingSettings() {
         </div>
       </div>
 
-      {/* ── 认证方式 A：CLI 浏览器授权登录 ── */}
+      {/* ── 认证方式 A：CLI 浏览器授权登录（主认证，必选） ── */}
       <div>
-        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 A — CLI 浏览器授权登录</h3>
+        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 A — CLI 浏览器授权登录（主认证）</h3>
         <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
-          {loggedIn ? (
+          {cliLoggedIn ? (
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-xs text-canvas-text-secondary">
                 <StatusDot ok />
-                <span>已通过 {authMirror?.tokenSource === 'api-key' ? 'API Token' : 'CLI 登录态'} 认证</span>
+                <span>CLI 已登录{authMirror?.username ? `（${authMirror.username}）` : ''}</span>
               </div>
               <button
                 type="button"
@@ -381,9 +383,12 @@ export default function SeedlingSettings() {
             </div>
           ) : (
             <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-canvas-text-muted leading-relaxed">
-                在浏览器中确认配对码完成授权，登录态由 Seedling CLI 持久化（90 天有效）。
-              </p>
+              <div className="min-w-0">
+                <p className="text-xs text-canvas-text-secondary">CLI 未登录</p>
+                <p className="mt-0.5 text-xs text-canvas-text-muted leading-relaxed">
+                  在浏览器中确认配对码完成授权，登录态由 Seedling CLI 持久化（90 天有效）。
+                </p>
+              </div>
               <button
                 type="button"
                 className="settings-save-btn shrink-0"
@@ -460,18 +465,22 @@ export default function SeedlingSettings() {
         </div>
       </div>
 
-      {/* ── 认证方式 B：API Token ── */}
+      {/* ── 认证方式 B：API Token（备用认证） ── */}
       <div>
-        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 B — API Token（机器令牌）</h3>
+        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 B — API Token（备用认证）</h3>
         <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
+          <div className="flex items-center gap-2 text-xs text-canvas-text-secondary">
+            <StatusDot ok={Boolean(savedToken)} />
+            <span>{savedToken ? 'API Token 已配置（备用，CLI 不可用时兜底）' : '未配置 API Token（仅使用 CLI 主认证）'}</span>
+          </div>
           <p className="text-xs text-canvas-text-muted leading-relaxed">
-            在 Seedling Web 端 → 头像菜单 → API 访问令牌 中创建（永久有效）。填写后优先于 CLI 登录态。
+            在 Seedling Web 端 → 头像菜单 → API 访问令牌 中创建（永久有效）。
           </p>
           <div className="flex items-center gap-1.5">
             <input
               className="dreamina-manual-link-input"
               type="password"
-              placeholder={savedToken ? '已保存（留空则使用 CLI 登录态）' : '粘贴 API Token'}
+              placeholder={savedToken ? '已保存（输入新值可覆盖）' : '粘贴 API Token'}
               value={apiToken}
               onChange={(event) => setApiToken(event.target.value)}
             />

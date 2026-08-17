@@ -136,8 +136,17 @@ async function invokeTauri<T>(
 
 // ── CLI / 认证 ──
 
-export async function fetchSeedlingCliStatus(): Promise<SeedlingCliStatus> {
-  return invokeTauri<SeedlingCliStatus>('seedling_cli_status', { apiToken: getSeedlingApiToken() });
+/**
+ * 查询 CLI 状态。
+ * includeApiToken=true（默认）：以应用内配置的 API Token 作为 SEEDLING_TOKEN 环境变量验证
+ * （用于整体可用性与模型加载判断）；
+ * includeApiToken=false：仅按 CLI 配置文件中的登录态验证（用于「CLI 认证区」独立显示，
+ * 退出登录后能看到 CLI 真实未登录状态，而不是被备用 API Token 掩盖）。
+ */
+export async function fetchSeedlingCliStatus(includeApiToken = true): Promise<SeedlingCliStatus> {
+  return invokeTauri<SeedlingCliStatus>('seedling_cli_status', {
+    apiToken: includeApiToken ? getSeedlingApiToken() : undefined,
+  });
 }
 
 /**

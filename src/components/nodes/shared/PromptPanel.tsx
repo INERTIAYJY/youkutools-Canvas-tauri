@@ -456,9 +456,18 @@ export default function PromptPanel({
     const node = s.nodes.find((n) => n.id === nodeId);
     return (node?.data as import('../../../types').BaseNodeData | undefined)?.generateInPlace !== false;
   });
+  const generateCount = useAppStore((s) => {
+    const node = s.nodes.find((n) => n.id === nodeId);
+    const raw = (node?.data as import('../../../types').BaseNodeData | undefined)?.generateCount;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 1 && parsed <= 4 ? Math.floor(parsed) : 1;
+  });
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const onChangeGenerateInPlace = useCallback((value: boolean) => {
     if (nodeId) updateNodeData(nodeId, { generateInPlace: value });
+  }, [nodeId, updateNodeData]);
+  const onChangeGenerateCount = useCallback((value: number) => {
+    if (nodeId) updateNodeData(nodeId, { generateCount: Math.min(4, Math.max(1, Math.floor(value))) });
   }, [nodeId, updateNodeData]);
 
   const handleSubmit = useCallback((overridePrompt?: string, postProcess?: ImagePostProcess) => {
@@ -733,7 +742,9 @@ export default function PromptPanel({
             seedanceDuration={seedanceDuration}
             generateAudio={generateAudio}
             generateInPlace={generateInPlace}
+            generateCount={generateCount}
             onChangeGenerateInPlace={onChangeGenerateInPlace}
+            onChangeGenerateCount={onChangeGenerateCount}
             onChangeSeedanceResolution={onChangeSeedanceResolution}
             onChangeSeedanceRatio={onChangeSeedanceRatio}
             onChangeSeedanceDuration={onChangeSeedanceDuration}

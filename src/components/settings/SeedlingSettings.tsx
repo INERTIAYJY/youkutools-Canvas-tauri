@@ -17,6 +17,7 @@ import {
   fetchSeedlingCliStatus,
   fetchSeedlingModels,
   getSeedlingAuthLoginRuntime,
+  installSeedlingCli,
   logoutSeedling,
   startSeedlingAuthLogin,
 } from '../../services/seedlingService';
@@ -41,6 +42,7 @@ export default function SeedlingSettings() {
 
   const [cliStatus, setCliStatus] = useState<SeedlingCliStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
+  const [installing, setInstalling] = useState(false);
   const [models, setModels] = useState<SeedlingModelInfo[]>([]);
   const [apiToken, setApiToken] = useState('');
   const [tokenSaving, setTokenSaving] = useState(false);
@@ -126,6 +128,44 @@ export default function SeedlingSettings() {
       setStatusLoading(false);
     }
   }, [ensureSeedlingModelsEnabled, savedToken, updateConfig]);
+
+  /** 显式安装 / 更新应用内置 CLI（强制下载最新版到应用缓存目录）。 */
+  const handleInstallCli = async () => {
+    setInstalling(true);
+    try {
+      useAppStore.getState().showToast('正在下载 Seedling CLI…');
+      const status = await installSeedlingCli();
+      setCliStatus(status);
+      if (status.auth) {
+        updateConfig({
+          seedlingAuth: {
+            loggedIn: status.auth.loggedIn,
+            username: status.auth.username || undefined,
+            endpoint: status.auth.endpoint || undefined,
+            tokenSource: savedToken ? 'api-key' : (status.auth.tokenSource || undefined),
+            checkTs: Date.now(),
+          },
+        });
+      }
+      if (status.found) {
+        useAppStore.getState().showToast(`Seedling CLI 安装完成（v${status.version ?? '?'}）`);
+        const hasSavedToken = Boolean(
+          useAppStore.getState().config.providers?.seedling?.apiKey,
+        );
+        if (status.auth?.loggedIn || hasSavedToken) {
+          void ensureSeedlingModelsEnabled();
+        }
+        void loadModels();
+      }
+    } catch (error) {
+      useAppStore.getState().showToast(
+        error instanceof Error ? error.message : 'Seedling CLI 安装失败',
+        'error',
+      );
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -299,14 +339,24 @@ export default function SeedlingSettings() {
               {cliStatus?.error && <p className="text-xs text-red-400">{cliStatus.error}</p>}
             </>
           )}
-          <button
-            type="button"
-            className="settings-save-btn"
-            disabled={statusLoading}
-            onClick={() => void refreshStatus()}
-          >
-            重新检测
-          </button>
+          <div className="flex items-center gap-1.5 pt-1">
+            <button
+              type="button"
+              className="settings-save-btn"
+              disabled={statusLoading || installing}
+              onClick={() => void refreshStatus()}
+            >
+              {statusLoading ? '检测中…' : '重新检测'}
+            </button>
+            <button
+              type="button"
+              className={`settings-save-btn ${cliFound ? 'settings-btn-ghost' : ''}`}
+              disabled={installing || statusLoading}
+              onClick={() => void handleInstallCli()}
+            >
+              {installing ? '安装中…' : cliFound ? '更新 CLI' : '安装 CLI'}
+            </button>
+          </div>
         </div>
       </div>
 

@@ -140,6 +140,14 @@ export async function fetchSeedlingCliStatus(): Promise<SeedlingCliStatus> {
   return invokeTauri<SeedlingCliStatus>('seedling_cli_status', { apiToken: getSeedlingApiToken() });
 }
 
+/**
+ * 显式安装 / 更新应用内置 CLI（强制从官方 CDN 下载最新版到应用缓存目录）。
+ * 返回安装后的 CLI 状态（含版本与认证信息）。
+ */
+export async function installSeedlingCli(): Promise<SeedlingCliStatus> {
+  return invokeTauri<SeedlingCliStatus>('seedling_install_cli', {});
+}
+
 export async function startSeedlingAuthLogin(): Promise<SeedlingAuthLoginRuntime> {
   return invokeTauri<SeedlingAuthLoginRuntime>('seedling_auth_login_start', {});
 }

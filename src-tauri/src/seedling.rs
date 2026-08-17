@@ -570,6 +570,32 @@ pub async fn seedling_models(
     run_cli_json_blocking(app, api_token, args).await
 }
 
+/// 显式安装 / 更新应用内置 CLI：强制从官方 CDN 下载最新版到应用数据目录缓存，
+/// 并补写 endpoint 配置。安装成功后返回最新 CLI 状态，前端据此刷新界面。
+#[tauri::command]
+pub async fn seedling_install_cli(app: AppHandle) -> Result<CliStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = download_cli(&app)?;
+        let version = probe_cli(&path).ok_or_else(|| "Seedling CLI 安装后校验失败".to_string())?;
+        let cli = ResolvedCli {
+            path,
+            version: version.clone(),
+            source: "bundled",
+        };
+        ensure_seedling_endpoint(&cli);
+        let auth = fetch_auth_status(&cli, None);
+        Ok(CliStatus {
+            found: true,
+            source: "bundled".to_string(),
+            version: Some(version),
+            auth: Some(auth),
+            error: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("安装 Seedling CLI 失败: {e}"))?
+}
+
 // ──────────────────────────────────────────────
 // 任务命令（参数白名单校验）
 // ──────────────────────────────────────────────

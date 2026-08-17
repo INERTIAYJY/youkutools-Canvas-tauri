@@ -1016,6 +1016,7 @@ pub fn run() {
             secret_store::secret_store_available,
             local_fonts::list_local_fonts,
             seedling::seedling_cli_status,
+            seedling::seedling_install_cli,
             seedling::seedling_models,
             seedling::seedling_task_create,
             seedling::seedling_task_get,

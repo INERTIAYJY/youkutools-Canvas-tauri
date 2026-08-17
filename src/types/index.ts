@@ -522,13 +522,6 @@ export const GENERAL_MODEL_CATEGORY_LABELS: Record<GeneralModelCategory, string>
   video: '视频',
 };
 
-export const GENERAL_MODEL_CATEGORY_COLORS: Record<GeneralModelCategory, string> = {
-  text: '#6366f1',
-  image: '#22c55e',
-  audio: '#f97316',
-  video: '#3b82f6',
-};
-
 /** GeneralModelCategory → 适用的节点类型映射 */
 export const CATEGORY_TO_NODE_TYPES: Record<GeneralModelCategory, NodeType[]> = {
   text: ['ai-text'],
@@ -604,14 +597,6 @@ export interface WorkflowDefinition {
   createdAt: number;
   updatedAt?: number;
 }
-
-/** 工作流分类的显示配置 */
-export const WORKFLOW_CATEGORY_LABELS: Record<WorkflowCategory, string> = {
-  'ai-text': '生成文本',
-  'ai-image': '生成图像',
-  'ai-video': '生成视频',
-  'ai-audio': '生成音频',
-};
 
 /** 按 NodeType 映射其所属工作流分类 */
 export function getWorkflowCategory(nodeType: NodeType): WorkflowCategory | null {

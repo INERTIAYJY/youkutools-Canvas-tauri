@@ -37,10 +37,6 @@ export function drainAgentInterjections(taskId: string): AgentInterjection[] {
   return buffer.splice(0, buffer.length);
 }
 
-export function hasAgentInterjectionBuffer(taskId: string): boolean {
-  return activeBuffers.has(taskId);
-}
-
 export function resetAgentInterjectionsForTests(): void {
   activeBuffers.clear();
 }

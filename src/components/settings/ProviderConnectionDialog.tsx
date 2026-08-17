@@ -11,6 +11,7 @@ import type {
   ProviderModelSelection,
   WebSearchProviderId,
 } from '../../types';
+import { GENERAL_MODEL_CATEGORY_LABELS } from '../../types';
 import {
   fetchProviderModelCatalog,
   getProviderDefinition,
@@ -29,13 +30,6 @@ import ModelProtocolEditor from './ModelProtocolEditor';
 import ProtocolImportPanel from './ProtocolImportPanel';
 
 const CATEGORY_ORDER: GeneralModelCategory[] = ['text', 'image', 'video', 'audio'];
-const CATEGORY_LABELS: Record<GeneralModelCategory, string> = {
-  text: '文本',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-};
-
 const PROVIDER_LINKS: Record<string, string> = {
   apimart: 'https://apimart.ai/register?aff=ZnmCKm',
   volcengine: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
@@ -852,7 +846,7 @@ export default function ProviderConnectionDialog({
                       }`}
                       onClick={() => toggleVisibleCategory(item)}
                     >
-                      {CATEGORY_LABELS[item]}
+                      {GENERAL_MODEL_CATEGORY_LABELS[item]}
                     </button>
                   ))}
                 </div>
@@ -897,7 +891,7 @@ export default function ProviderConnectionDialog({
                           className={`provider-category-choice is-${item} ${category === item ? 'is-active' : ''}`}
                           onClick={() => setCategory(item)}
                         >
-                          {CATEGORY_LABELS[item]}
+                          {GENERAL_MODEL_CATEGORY_LABELS[item]}
                         </button>
                       ))}
                     </div>
@@ -924,12 +918,12 @@ export default function ProviderConnectionDialog({
                         <button
                           type="button"
                           className={`provider-model-kind is-${model.category}`}
-                          aria-label={`修改 ${model.name} 的模型分类，当前为${CATEGORY_LABELS[model.category]}`}
+                          aria-label={`修改 ${model.name} 的模型分类，当前为${GENERAL_MODEL_CATEGORY_LABELS[model.category]}`}
                           title="点击修改模型分类"
                           aria-expanded={categoryEditModelId === model.id}
                           onClick={() => setCategoryEditModelId((current) => current === model.id ? null : model.id)}
                         >
-                          {CATEGORY_LABELS[model.category]}
+                          {GENERAL_MODEL_CATEGORY_LABELS[model.category]}
                         </button>
                         <label className="provider-model-select">
                           <input
@@ -974,7 +968,7 @@ export default function ProviderConnectionDialog({
                                   else updateModelCategory(model.id, item);
                                 }}
                               >
-                                {CATEGORY_LABELS[item]}
+                                {GENERAL_MODEL_CATEGORY_LABELS[item]}
                               </button>
                             ))}
                             {model.category === 'text' ? (
@@ -1045,7 +1039,7 @@ export default function ProviderConnectionDialog({
                       onChange={(event) => setManualCategory(event.target.value as GeneralModelCategory)}
                     >
                       {CATEGORY_ORDER.map((item) => (
-                        <option key={item} value={item}>{CATEGORY_LABELS[item]}</option>
+                        <option key={item} value={item}>{GENERAL_MODEL_CATEGORY_LABELS[item]}</option>
                       ))}
                     </select>
                     <AnimatedButton

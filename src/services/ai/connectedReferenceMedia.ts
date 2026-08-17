@@ -91,13 +91,6 @@ export function pushUniqueUrl(urls: string[], seen: Set<string>, value: unknown)
   urls.push(url);
 }
 
-export function mergeUniqueUrls(primary: string[], additional: string[]): string[] {
-  const urls = [...primary];
-  const seen = new Set(urls);
-  for (const url of additional) pushUniqueUrl(urls, seen, url);
-  return urls;
-}
-
 export function collectConnectedReferenceMedia(nodeId: string | undefined): ConnectedReferenceMedia {
   const empty: ConnectedReferenceMedia = { references: [], imageUrls: [], videoUrls: [], audioUrls: [] };
   if (!nodeId) return empty;

@@ -12,7 +12,6 @@ import {
   BufferTarget,
   CanvasSink,
   CanvasSource,
-  Conversion,
   CustomSource,
   EncodedAudioPacketSource,
   EncodedPacketSink,
@@ -213,16 +212,6 @@ export function guardEncoderProbe(): void {
     }
   };
 }
-
-/** 轨道被丢弃的原因，用于把 mediabunny 的枚举翻成可读提示 */
-const DISCARD_REASON_TEXT: Record<string, string> = {
-  discarded_by_user: '轨道被主动丢弃',
-  max_track_count_reached: '输出轨道数量已达上限',
-  max_track_count_of_type_reached: '输出格式不支持该类型轨道',
-  unknown_source_codec: '无法识别源编码格式',
-  undecodable_source_codec: '当前系统无法解码该编码格式',
-  no_encodable_target_codec: '当前系统缺少可用的编码器',
-};
 
 export class VideoExportCanceledError extends Error {
   constructor() {
@@ -763,50 +752,4 @@ export async function exportLosslessConcat(options: {
     await output.cancel().catch(() => {});
     throw error;
   }
-}
-
-/**
- * 重编码导出（回退路径）。
- *
- * 入点不为 0 时 mediabunny 必然重编码，依赖 VideoEncoder；
- * 只有在无损直通不可用（源编码进不了 MP4）时才该走这里。
- */
-export async function exportTrimmedVideo(options: {
-  input: Input;
-  start: number;
-  end: number;
-  onProgress?: (progress: number) => void;
-  signal?: AbortSignal;
-}): Promise<Uint8Array> {
-  const { input, start, end, onProgress, signal } = options;
-  if (!(end > start)) throw new Error('导出区间无效：出点必须大于入点');
-
-  guardEncoderProbe();
-  const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
-  const conversion = await Conversion.init({ input, output, trim: { start, end } });
-
-  if (!conversion.isValid) {
-    const reasons = [...new Set(
-      conversion.discardedTracks.map((track) => DISCARD_REASON_TEXT[track.reason] ?? track.reason),
-    )].join('、');
-    throw new Error(`当前视频无法导出${reasons ? `：${reasons}` : ''}`);
-  }
-
-  if (onProgress) conversion.onProgress = (progress) => onProgress(progress);
-
-  const onAbort = () => { void conversion.cancel(); };
-  signal?.addEventListener('abort', onAbort, { once: true });
-
-  try {
-    await conversion.execute();
-  } catch (error) {
-    if (signal?.aborted) throw new VideoExportCanceledError();
-    throw error;
-  } finally {
-    signal?.removeEventListener('abort', onAbort);
-  }
-
-  const buffer = (output.target as BufferTarget).buffer;
-  if (!buffer) throw new Error('导出未产生有效数据');
-  return new Uint8Array(buffer);
 }

@@ -12,6 +12,7 @@ import {
 } from 'react';
 import { useMotionValue, type PanInfo } from 'framer-motion';
 import { useAppStore } from '../store/useAppStore';
+import { clamp } from '../utils/num';
 import type { MascotPosition } from '../types';
 
 const MASCOT_SIZE = 100;
@@ -25,10 +26,6 @@ export interface MascotDragForce {
   x: number;
   y: number;
   active: boolean;
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
 }
 
 function getMovementBounds() {

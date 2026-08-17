@@ -301,11 +301,3 @@ export function getEnabledProjectStyleReferenceUrl(
   const url = clean(ref.imageUrl);
   return url || null;
 }
-
-/** 风格母图注入时的固定说明（只迁风格，不抄母图主体） */
-export const PROJECT_STYLE_REFERENCE_HINT = [
-  '【项目风格母图】图片1 为当前项目统一风格参考。',
-  '请严格遵循其画风、色彩、材质、光影与整体气质；',
-  '不要复制母图中的具体人物、场景内容或构图，只迁移视觉风格。',
-  '后续图片序号为内容参考（角色/场景等）时，以内容参考为准保持主体一致，风格仍服从母图。',
-].join('');

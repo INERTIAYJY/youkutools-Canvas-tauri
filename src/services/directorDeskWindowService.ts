@@ -221,34 +221,6 @@ export function subscribeDirectorDeskWindow(
   };
 }
 
-export async function postDirectorWindowSession(
-  instanceId: string,
-  theme: 'dark' | 'light',
-): Promise<void> {
-  await emitHostMessage({
-    instanceId,
-    message: {
-      type: 'storyai:director-desk-session',
-      payload: { instanceId, theme },
-    },
-  });
-}
-
-export async function postDirectorWindowPanorama(
-  instanceId: string,
-  payload: {
-    edgeId?: string;
-    sourceNodeId?: string;
-    imageUrl: string;
-    fileName?: string;
-  },
-): Promise<void> {
-  await emitHostMessage({
-    instanceId,
-    message: { type: 'storyai:director-desk-panorama', payload },
-  });
-}
-
 export function requestDirectorWindowAction(
   instanceId: string,
   action: DirectorExtensionAction,

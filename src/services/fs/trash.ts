@@ -2,7 +2,7 @@
  * fs/trash — 文件/目录删除域
  * 系统回收站、项目级 .trash 暂存（支持撤销）、项目数据目录删除、节点文件删除。
  */
-import { mkdir, exists, remove, rename } from '@tauri-apps/plugin-fs';
+import { mkdir, exists, rename } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriEnv, joinPath, notifyProjectDiskChanged, getProjectDataDir } from './core';
 
@@ -105,17 +105,6 @@ export async function flushUndoTrashDirs(): Promise<void> {
     }
   }
   undoTrashMap.clear();
-}
-
-/** 删除单个文件（Tauri 端），浏览器环境无操作 */
-export async function deleteFile(filePath: string): Promise<void> {
-  if (!isTauriEnv()) return;
-  try {
-    await remove(filePath);
-    console.log('[fileService] Deleted file:', filePath);
-  } catch (err) {
-    console.warn('[fileService] Failed to delete file:', filePath, err);
-  }
 }
 
 /** 将目录移至回收站（Tauri 端），trash crate 本身支持直接移动整个目录 */

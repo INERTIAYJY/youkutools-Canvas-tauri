@@ -58,6 +58,8 @@ function resolvePosition(
     : opposite;
 }
 
+// 视口比 tooltip 还窄时 max < min，此时要收敛到 min（贴左/上边）而不是 max，
+// 与 utils/num 的 clamp 行为不同，故保留本地实现。
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }

@@ -361,9 +361,6 @@ export function normalizeDramaAssetLibrary(value: unknown): DramaAssetLibrary {
   };
 }
 
-/** @ 引用短剧资产标记：@drama{id:name} */
-export const DRAMA_MENTION_PREFIX = '@drama{';
-
 export function formatDramaMention(id: string, name: string): string {
   return `@drama{${id}:${name}}`;
 }

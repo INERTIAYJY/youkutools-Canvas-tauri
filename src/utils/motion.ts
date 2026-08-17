@@ -19,11 +19,8 @@ export const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
  * gentle : 大面板 / 抽屉        —— 柔和落位
  * bouncy : 强调动效（徽标/图标）—— 明显弹性，少量使用
  */
-export const springSnappy: Transition = { type: 'spring', visualDuration: 0.22, bounce: 0.2 };
 export const springSmooth: Transition = { type: 'spring', visualDuration: 0.38, bounce: 0.16 };
 export const springGentle: Transition = { type: 'spring', visualDuration: 0.5, bounce: 0.1 };
-export const springBouncy: Transition = { type: 'spring', visualDuration: 0.45, bounce: 0.42 };
-
 /* ── 纯渐变过渡（无物理感的淡入淡出）────────────────────────────── */
 export const fadeFast: Transition = { duration: 0.18, ease: EASE_OUT_EXPO };
 export const fadeNormal: Transition = { duration: 0.24, ease: EASE_OUT_EXPO };

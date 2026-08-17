@@ -388,34 +388,6 @@ export function getImageCapability(model?: string): ImageCapability | undefined 
   return model ? IMAGE_CAPABILITIES[normalizeImageModelId(model)] : undefined;
 }
 
-export function isImageCapabilityModel(model?: string): boolean {
-  return Boolean(getImageCapability(model));
-}
-
-/**
- * 将通用能力声明（ImageModelCapability）适配为生图能力表结构，供参数面板消费。
- * 缺省字段按通用兜底补齐。
- */
-export function toImageCapabilityView(
-  capability: ImageModelCapability | undefined,
-): ImageCapability | undefined {
-  if (!capability) return undefined;
-  return {
-    modelId: '',
-    resolutions: capability.resolutions ?? ['1K', '2K', '4K'],
-    defaultResolution: capability.defaultResolution ?? '2K',
-    ratios: capability.ratios ?? [...COMMON_RATIOS],
-    defaultRatio: capability.defaultRatio ?? '1:1',
-    // 通用能力声明没有「分辨率取值风格」字段，按最常用的 K 档位处理。
-    resolutionStyle: 'K',
-    supportsBatch: capability.supportsBatch ?? true,
-    maxBatchCount: capability.maxBatchCount ?? 4,
-    supportsImageReference: capability.supportsImageReference ?? true,
-    maxImageReferences: capability.maxImageReferences ?? 9,
-    supportsDataUrlReference: capability.supportsDataUrlReference ?? true,
-  };
-}
-
 /** 将分辨率档位换算为像素短边，用于结果回填的尺寸。 */
 function shortSideFromResolution(resolution: string | undefined): number {
   if (!resolution) return 1024;

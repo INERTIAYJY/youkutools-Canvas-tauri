@@ -8,6 +8,7 @@ import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, generateId } from '../store/useAppStore';
 import { normalizeAssetKey } from '../services/dramaAssetExtract';
+import { clamp } from '../utils/num';
 import { saveDataUrlToProjectData } from '../services/fileService';
 import type {
   CharacterCropRect,
@@ -80,10 +81,6 @@ function readImageFile(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('图片读取失败'));
     reader.readAsDataURL(file);
   });
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function AvatarCropEditor({

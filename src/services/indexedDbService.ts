@@ -675,17 +675,6 @@ export async function getTrashConversations(projectId: string): Promise<ChatConv
   });
 }
 
-/** 删除单个会话 */
-export async function deleteChatConversation(id: string): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_CHAT_CONVERSATIONS, 'readwrite');
-    tx.objectStore(STORE_CHAT_CONVERSATIONS).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
 // ============================================
 // Chat Messages CRUD
 // ============================================

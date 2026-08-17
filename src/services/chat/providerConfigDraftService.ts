@@ -8,6 +8,7 @@ import type {
   ImageReferenceRequestMode,
   ProviderModelSelection,
 } from '../../types';
+import { GENERAL_MODEL_CATEGORY_LABELS } from '../../types';
 import type { ModelExecutionProfile } from '../../types/aiTypes';
 import {
   analyzeModelProtocolExamples,
@@ -247,12 +248,6 @@ function describeReferenceGap(model: ProviderModelSelection): string {
 
 export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string {
   const models = draft.config.selectedModels ?? [];
-  const categoryLabels: Record<GeneralModelCategory, string> = {
-    text: '文本',
-    image: '图片',
-    video: '视频',
-    audio: '音频',
-  };
   const referenceModeLabels: Record<ImageReferenceRequestMode, string> = {
     'generation-json-image-urls': '公网 URL 数组',
     'generation-json-image-data-urls': 'data URL 数组',
@@ -262,7 +257,7 @@ export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string
     `连接：${draft.connectionName}`,
     `地址：${draft.baseUrl}`,
     `模型：${models.map((model) => (
-      `${model.name}（${categoryLabels[model.category]}${model.imageReferenceRequestMode
+      `${model.name}（${GENERAL_MODEL_CATEGORY_LABELS[model.category]}${model.imageReferenceRequestMode
         ? `，参考图：${referenceModeLabels[model.imageReferenceRequestMode]}`
         : ''}${describeReferenceGap(model)}）`
     )).join('、')}`,
@@ -346,10 +341,6 @@ export function getProviderConfigDraft(
 export function deleteProviderConfigDraft(taskId: string, draftId: string): void {
   const draft = getProviderConfigDraft(taskId, draftId);
   if (drafts.get(draftId) === draft) drafts.delete(draftId);
-}
-
-export function getProviderConfigDraftSummary(draftId: string): string | undefined {
-  return peekProviderConfigDraft(draftId)?.summary;
 }
 
 /**

@@ -257,16 +257,6 @@ registry.set('cancelTask', async (plan) => {
 // Public API
 // ============================================
 
-/** 检查命令是否已注册 */
-export function hasCommand(commandId: CommandId): boolean {
-  return registry.has(commandId);
-}
-
-/** 获取已注册命令列表 */
-export function getRegisteredCommands(): CommandId[] {
-  return [...registry.keys()];
-}
-
 /**
  * 执行一条 CommandPlan。
  * 自动处理 revision 校验：计划修订号落后则返回 rejected。

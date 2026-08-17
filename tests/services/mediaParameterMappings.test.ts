@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildAudioMusicRequestBody, buildAudioSpeechRequestBody, mapAudioParameters } from '../../src/services/ai/audioParameterMappings';
 import { buildStandardImageRequestBody, mapImageParameters } from '../../src/services/ai/imageParameterMappings';
-import { buildGenericVideoRequestBody } from '../../src/services/ai/videoParameterMappings';
+import { mapVideoParameters } from '../../src/services/ai/videoParameterMappings';
 
 describe('media parameter mappings', () => {
   it('maps standard image UI fields to OpenAI-compatible fields', () => {
@@ -35,10 +35,12 @@ describe('media parameter mappings', () => {
   });
 
   it('maps video references without exposing provider fields to the caller', () => {
-    expect(buildGenericVideoRequestBody({
-      params: { model: 'apimart/seedance', provider: 'apimart', seedanceResolution: '720p', seedanceRatio: '16:9', seedanceDuration: 5, generateAudio: true },
-      prompt: 'camera move',
-      references: [{ kind: 'image', url: 'https://example.com/ref.png' }],
+    expect(mapVideoParameters('apimart', 'apimart/seedance', {
+      resolution: '720p',
+      aspectRatio: '16:9',
+      duration: 5,
+      generateAudio: true,
+      imageUrls: ['https://example.com/ref.png'],
     })).toMatchObject({
       resolution: '720p',
       aspect_ratio: '16:9',

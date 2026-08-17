@@ -22,7 +22,6 @@ import {
   buildNodeFileName,
   notifyProjectDiskChanged,
   getFileCategory,
-  CATEGORY_EXTENSIONS,
   type AssetFileEntry,
 } from './fs/core';
 
@@ -197,71 +196,6 @@ function browserOpenFile(accept: string): Promise<File | null> {
       { once: true }
     );
   });
-}
-
-// Export canvas as image (screenshot)
-export async function exportAsImage(canvasDataUrl: string): Promise<void> {
-  try {
-    if (isTauriEnv()) {
-      const filePath = await save({
-        defaultPath: `ai-canvas-export-${Date.now()}.png`,
-        filters: [{ name: 'PNG 图片', extensions: ['png'] }],
-        title: '导出画布截图',
-      });
-      if (!filePath) return;
-
-      const response = await fetch(canvasDataUrl);
-      const blob = await response.blob();
-      const buffer = await blob.arrayBuffer();
-      await writeFile(filePath, new Uint8Array(buffer));
-      return;
-    }
-
-    // 浏览器降级：触发图片下载
-    const a = document.createElement('a');
-    a.href = canvasDataUrl;
-    a.download = `ai-canvas-export-${Date.now()}.png`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  } catch (error) {
-    console.error('Export image failed:', error);
-    throw error;
-  }
-}
-
-// Upload file from disk
-export async function uploadFile(): Promise<string | null> {
-  try {
-    if (isTauriEnv()) {
-      const filePath = await open({
-        multiple: false,
-        title: '上传文件',
-      });
-
-      if (!filePath) return null;
-
-      const content = await tauriReadFile(filePath);
-      const base64 = arrayBufferToBase64(content.buffer);
-      const ext = filePath.split('.').pop()?.toLowerCase() || '';
-      const mimeType = getMimeType(ext);
-      return `data:${mimeType};base64,${base64}`;
-    }
-
-    // 浏览器降级：通过 file input 读取
-    const file = await browserOpenFile('*/*');
-    if (!file) return null;
-
-    const buffer = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(buffer);
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    const mimeType = getMimeType(ext);
-
-    return `data:${mimeType};base64,${base64}`;
-  } catch (error) {
-    console.error('Upload failed:', error);
-    throw error;
-  }
 }
 
 /** 读取本地文件路径，返回 data URL（供剪贴板粘贴等场景使用） */
@@ -764,37 +698,6 @@ export async function uploadSourceFileToProject(
 /** 为源节点上传文件 — 返回 data URL + 文件名 + 大小（向后兼容，不保存到项目目录） */
 export async function uploadSourceFile(accept?: string): Promise<UploadResult | null> {
   return uploadSourceFileToProject(accept);
-}
-
-/**
- * 从单个文件路径构建 AssetFileEntry（用于节点 filePath 引用）
- * 尝试 stat 获取文件大小，失败则返回 null
- */
-export async function getFileEntryFromPath(filePath: string): Promise<AssetFileEntry | null> {
-  if (!isTauriEnv()) return null;
-  try {
-    const fileStat = await stat(filePath);
-    if (fileStat.size === undefined) return null;
-    const fileName = filePath.split(/[\\/]/).pop() || 'file';
-    const ext = `.${fileName.split('.').pop()?.toLowerCase()}`;
-    const extLower = ext.toLowerCase();
-    const convertFileSrc = await getConvertFileSrc();
-
-    let assetUrl: string | undefined;
-    if (CATEGORY_EXTENSIONS.image.includes(extLower) && convertFileSrc) {
-      assetUrl = convertFileSrc(filePath);
-    }
-
-    return {
-      name: fileName,
-      path: filePath,
-      assetUrl,
-      size: fileStat.size,
-      category: getFileCategory(fileName),
-    };
-  } catch {
-    return null;
-  }
 }
 
 /**

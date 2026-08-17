@@ -8,7 +8,6 @@ import { buildAuthHeaders, parseResponseError } from './httpUtils';
 import { corsSafeFetch } from './httpTransport';
 import {
   getAudioCapability,
-  getAudioCapabilityDetail,
   type AudioCapabilityKind,
 } from './mediaModelCapabilities';
 import { buildAudioMusicRequestBody, buildAudioSpeechRequestBody } from './audioParameterMappings';
@@ -56,14 +55,6 @@ export interface FlowMusicTaskState {
     music?: FlowMusicTrack[];
     lyrics?: FlowMusicLyrics[];
   };
-}
-
-/**
- * 结构化能力表（含音色列表 / 是否支持音色参考），供参数面板与生成入口消费。
- * 实际数据收口到通用媒体能力表 mediaModelCapabilities.ts。
- */
-export function getApimartAudioCapabilityDetail(model: string) {
-  return getAudioCapabilityDetail(model);
 }
 
 export function getApimartAudioCapability(model: string): ApimartAudioCapability | undefined {

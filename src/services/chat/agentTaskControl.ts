@@ -350,10 +350,6 @@ export function consumeAgentReplanRequest(taskId: string): void {
   store.updateAgentTask(taskId, { replanRequest: undefined });
 }
 
-export function isAgentTaskRunning(taskId: string): boolean {
-  return activeControllers.has(taskId);
-}
-
 export function waitForAgentApproval(
   approvalId: string,
   signal: AbortSignal,

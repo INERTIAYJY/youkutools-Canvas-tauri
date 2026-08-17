@@ -390,12 +390,4 @@ export function mergeDramaExtractIntoLibrary(
   };
 }
 
-/** 检测 prompt 是否为资产提取任务 */
-export function detectDramaExtractKind(prompt: string): DramaAssetKind | null {
-  for (const [k, marker] of Object.entries(DRAMA_EXTRACT_MARKER) as Array<[DramaAssetKind, string]>) {
-    if (prompt.includes(marker)) return k;
-  }
-  return null;
-}
-
 export type { DramaExtractModelResponse };

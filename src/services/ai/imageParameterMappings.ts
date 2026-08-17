@@ -42,7 +42,10 @@ const DEFAULT_IMAGE_MAPPING: ImageParameterMapping = {
   staticFields: { response_format: 'url' },
 };
 
-/** Provider/model overrides live here; UI parameters remain provider agnostic. */
+/**
+ * Provider/model overrides live here; UI parameters remain provider agnostic.
+ * 只收录字段名与 DEFAULT_IMAGE_MAPPING 不同的 Provider；其余（standard 等）走兜底。
+ */
 export const IMAGE_PARAMETER_MAPPINGS: readonly ImageParameterMapping[] = [
   {
     providerId: 'apimart',
@@ -58,23 +61,13 @@ export const IMAGE_PARAMETER_MAPPINGS: readonly ImageParameterMapping[] = [
     providerId: 'runninghub',
     fields: { prompt: 'prompt', aspectRatio: 'aspectRatio', imageSize: 'resolution', referenceImageUrls: 'imageUrls' },
   },
-  {
-    providerId: 'standard',
-    fields: { model: 'model', prompt: 'prompt', imageSize: 'size', batchCount: 'n', referenceImageUrls: 'image_urls' },
-    staticFields: { response_format: 'url' },
-  },
 ];
 
 export function resolveImageParameterMapping(providerId: string, modelId = ''): ImageParameterMapping {
   const normalizedProvider = providerId.trim().toLowerCase();
-  const match = IMAGE_PARAMETER_MAPPINGS.find((mapping) =>
+  return IMAGE_PARAMETER_MAPPINGS.find((mapping) =>
     mapping.providerId === normalizedProvider && (!mapping.modelPattern || mapping.modelPattern.test(modelId)),
-  );
-  if (match) return match;
-  if (normalizedProvider === 'standard') {
-    return IMAGE_PARAMETER_MAPPINGS.find((mapping) => mapping.providerId === 'standard') ?? DEFAULT_IMAGE_MAPPING;
-  }
-  return DEFAULT_IMAGE_MAPPING;
+  ) ?? DEFAULT_IMAGE_MAPPING;
 }
 
 export function mapImageParameters(

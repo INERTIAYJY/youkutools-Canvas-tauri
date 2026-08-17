@@ -3,7 +3,7 @@
  */
 import { Icon } from '@iconify/react';
 import { useMemo, useState } from 'react';
-import type { GeneralModelCategory } from '../../types';
+import { GENERAL_MODEL_CATEGORY_LABELS, type GeneralModelCategory } from '../../types';
 import {
   analyzeModelProtocolExamples,
   type ModelProtocolImportConfidence,
@@ -17,13 +17,6 @@ interface ProtocolImportPanelProps {
   onApply: (result: ModelProtocolImportResult) => void;
   onClose: () => void;
 }
-
-const CATEGORY_LABELS: Record<GeneralModelCategory, string> = {
-  text: '文本',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-};
 
 const FORMAT_LABELS: Record<ModelProtocolImportFormat, string> = {
   fetch: 'Fetch',
@@ -282,7 +275,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
                 <span className="text-canvas-text-muted">{field.label}</span>
                 <code className="min-w-0 break-all font-mono text-canvas-text-secondary">
                   {field.id === 'category'
-                    ? CATEGORY_LABELS[field.value as GeneralModelCategory] ?? field.value
+                    ? GENERAL_MODEL_CATEGORY_LABELS[field.value as GeneralModelCategory] ?? field.value
                     : field.value}
                 </code>
               </div>
@@ -297,8 +290,8 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
                 className="h-7 min-w-28 rounded-md border border-canvas-border bg-canvas-bg/60 px-2 text-[12px] text-canvas-text outline-none focus:border-indigo-400/60"
                 onChange={(event) => analyze(event.target.value as GeneralModelCategory)}
               >
-                {(Object.keys(CATEGORY_LABELS) as GeneralModelCategory[]).map((category) => (
-                  <option key={category} value={category}>{CATEGORY_LABELS[category]}</option>
+                {(Object.keys(GENERAL_MODEL_CATEGORY_LABELS) as GeneralModelCategory[]).map((category) => (
+                  <option key={category} value={category}>{GENERAL_MODEL_CATEGORY_LABELS[category]}</option>
                 ))}
               </select>
             </label>

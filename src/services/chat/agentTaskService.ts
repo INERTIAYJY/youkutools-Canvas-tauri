@@ -8,7 +8,6 @@ import {
   deleteConversationAgentTasks,
   deleteProjectAgentTasks,
   getAgentTask,
-  getConversationAgentTasks,
   getProjectAgentTasks,
   putAgentTask,
 } from '../indexedDbService';
@@ -75,10 +74,6 @@ export async function loadAgentTask(taskId: string): Promise<AgentTask | null> {
 
 export async function loadProjectAgentTasks(projectId: string): Promise<AgentTask[]> {
   return sortNewestFirst(await getProjectAgentTasks(projectId));
-}
-
-export async function loadConversationAgentTasks(conversationId: string): Promise<AgentTask[]> {
-  return sortNewestFirst(await getConversationAgentTasks(conversationId));
 }
 
 export async function removeAgentTask(taskId: string): Promise<void> {

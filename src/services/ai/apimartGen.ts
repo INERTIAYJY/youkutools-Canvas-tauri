@@ -146,28 +146,6 @@ export async function executeGeneralAsyncTask(
     }
   }
 }
-/** APIMart 图片生成 — 异步提交 + 轮询 */
-export async function generateApimartImage(
-  apiKey: string,
-  baseUrl: string,
-  model: string,
-  prompt: string,
-  imageSize: string,
-  aspectRatio: string,
-  dimensions: { width: number; height: number },
-  imageUrls: string[] = [],
-  nodeId?: string,
-  signal?: AbortSignal,
-): Promise<{ url: string; width: number; height: number }> {
-  const batch = await generateApimartImagesBatch(
-    apiKey, baseUrl, model, prompt, imageSize, aspectRatio,
-    dimensions, imageUrls, 1, nodeId, signal,
-  );
-  const result = batch.results[0];
-  if (!result) throw new Error('APIMart 生成完成但未返回图片');
-  return result;
-}
-
 export async function generateApimartImagesBatch(
   apiKey: string,
   baseUrl: string,

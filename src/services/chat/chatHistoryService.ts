@@ -5,11 +5,9 @@
 import {
   putChatConversation,
   getProjectConversations,
-  getTrashConversations,
   putChatMessageWithSequence,
   getConversationMessages,
   deleteConversationMessages,
-  permanentlyDeleteConversation,
   type ChatConversationRecord,
   type ChatMessageRecord,
 } from '../indexedDbService';
@@ -128,12 +126,6 @@ export async function loadProjectConversations(projectId: string): Promise<ChatC
     });
 }
 
-/** 获取回收站会话 */
-export async function loadTrashConversations(projectId: string): Promise<ChatConversation[]> {
-  const records = await getTrashConversations(projectId);
-  return records.map(fromConversationRecord).sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
 /** 软删除：移入回收站 */
 export async function softDeleteConversation(
   conversation: ChatConversation,
@@ -145,24 +137,6 @@ export async function softDeleteConversation(
   };
   await saveConversation(updated);
   return updated;
-}
-
-/** 恢复：从回收站恢复 */
-export async function restoreConversation(
-  conversation: ChatConversation,
-): Promise<ChatConversation> {
-  const updated: ChatConversation = {
-    ...conversation,
-    deletedAt: undefined,
-    updatedAt: Date.now(),
-  };
-  await saveConversation(updated);
-  return updated;
-}
-
-/** 永久删除会话及其全部消息 */
-export async function hardDeleteConversation(convId: string): Promise<void> {
-  await permanentlyDeleteConversation(convId);
 }
 
 // ============================================

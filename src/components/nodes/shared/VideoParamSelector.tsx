@@ -38,6 +38,9 @@ interface VideoParamSelectorProps {
   seedanceRatio?: string;
   seedanceDuration?: number;
   generateAudio?: boolean;
+  /** 视频节点：在此节点生成并替换旧视频；false 时生成到右侧新建节点。默认 true。 */
+  generateInPlace?: boolean;
+  onChangeGenerateInPlace?: (value: boolean) => void;
   onChangeSeedanceResolution?: (value: string) => void;
   onChangeSeedanceRatio?: (value: string) => void;
   onChangeSeedanceDuration?: (value: number) => void;
@@ -86,9 +89,9 @@ export default function VideoParamSelector({
   videoResolution = 832, videoFps = 24, videoFrames = 77,
   onChangeResolution, onChangeFps,
   seedanceResolution = '720p', seedanceRatio = '16:9',
-  seedanceDuration, generateAudio,
+  seedanceDuration, generateAudio, generateInPlace = true,
   onChangeSeedanceResolution, onChangeSeedanceRatio,
-  onChangeSeedanceDuration, onChangeGenerateAudio,
+  onChangeSeedanceDuration, onChangeGenerateAudio, onChangeGenerateInPlace,
   showSeedanceRatio = true, showGenerateAudio = true, onContinuousEditEnd,
 }: VideoParamSelectorProps) {
   const [open, setOpen] = useState(false);
@@ -533,6 +536,26 @@ export default function VideoParamSelector({
                     </div>
                   </div>
                   )}
+
+                  {/* 在此节点生成 — 勾选=替换本节点旧视频；不勾选=生成到右侧新建节点 */}
+                  <div className="rh-vram-adv-row">
+                    <div className="rh-vram-adv-label" style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>在此节点生成</span>
+                        <span className="rh-tip" data-tooltip="勾选时生成结果直接替换本节点旧视频；取消勾选后，点生成会询问数量（1-4 条），每条生成到本节点右侧新建的视频节点并自动连线。">!</span>
+                      </div>
+                      <label className="rh-toggle-switch">
+                        <input
+                          type="checkbox"
+                          checked={generateInPlace}
+                          onChange={(e) => onChangeGenerateInPlace?.(e.target.checked)}
+                        />
+                        <span className="rh-toggle-track">
+                          <span className="rh-toggle-knob" />
+                        </span>
+                      </label>
+                    </div>
+                  </div>
                 </div>
                 )}
               </>

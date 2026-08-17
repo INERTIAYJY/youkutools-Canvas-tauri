@@ -64,17 +64,58 @@ function isLocalDiskPath(value: string): boolean {
 }
 
 /**
+ * 从 Tauri 资产协议 URL（http://asset.localhost/<encoded-path>）解码出本地磁盘路径。
+ * 例：http://asset.localhost/C%3A%2FUsers%2F...%2Fa.mp4 → C:\Users\...\a.mp4
+ */
+function decodeAssetLocalPath(url: string): string | undefined {
+  const marker = 'asset.localhost/';
+  const idx = url.indexOf(marker);
+  if (idx < 0) return undefined;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(url.slice(idx + marker.length));
+  } catch {
+    return undefined;
+  }
+  // Windows 盘符形式（/C:/... 或 C:/...）→ C:\...
+  const withoutLead = decoded.replace(/^\/+/, '');
+  if (/^[a-zA-Z]:[\\/]/.test(withoutLead)) {
+    return withoutLead.replace(/\//g, '\\');
+  }
+  return decoded;
+}
+
+/**
  * 把参考 URL 规范化为 CLI `--resource` 可用的值。
  * Seedling CLI 的 `--resource` 只接受 `https://` 开头的 URL：
  *   - https 直传
+ *   - asset.localhost 资产协议：解码本地路径后经 `resource upload` 上传为 https
+ *     （视频/音频/图片通用；上传失败回退通用图床）
  *   - http 远程图：读取后经通用图床转为 https（CLI 不接收 http）
  *   - 本地磁盘路径：先用 `seedling resource upload` 上传拿到 https 在线地址
- *   - asset.localhost / blob / data：统一经通用图床转公网 https URL
+ *   - blob / data：统一经通用图床转公网 https URL
  */
-async function toCliResource(url: string): Promise<string | undefined> {
+async function toCliResource(
+  url: string,
+  kind: 'image' | 'video' | 'audio' = 'image',
+): Promise<string | undefined> {
   const trimmed = url.trim();
   if (!trimmed) return undefined;
   if (/^https:\/\//i.test(trimmed)) return trimmed;
+
+  if (trimmed.includes('asset.localhost')) {
+    const localPath = decodeAssetLocalPath(trimmed);
+    if (localPath) {
+      try {
+        const { url: uploaded } = await uploadSeedlingResource(localPath);
+        return uploaded;
+      } catch {
+        // 上传失败（路径未授权等）→ 回退通用图床
+      }
+    }
+    return resolveMediaReferenceUrl(trimmed, { kind });
+  }
+
   if (/^http:\/\//i.test(trimmed)) {
     try {
       return await uploadToRemote(trimmed);
@@ -85,6 +126,7 @@ async function toCliResource(url: string): Promise<string | undefined> {
       );
     }
   }
+
   if (isLocalDiskPath(trimmed)) {
     try {
       const { url: uploaded } = await uploadSeedlingResource(trimmed);
@@ -96,7 +138,8 @@ async function toCliResource(url: string): Promise<string | undefined> {
       );
     }
   }
-  return resolveMediaReferenceUrl(trimmed, { kind: 'image' });
+
+  return resolveMediaReferenceUrl(trimmed, { kind });
 }
 
 function rankImageReference(role: string | undefined): number {
@@ -133,14 +176,14 @@ async function collectSeedlingResources(
   }
 
   for (const url of referenceInput.videoUrls) {
-    const resolved = await resolveMediaReferenceUrl(url, { kind: 'video' });
+    const resolved = await toCliResource(url, 'video');
     if (resolved && !seen.has(resolved)) {
       seen.add(resolved);
       resources.push(resolved);
     }
   }
   for (const url of referenceInput.audioUrls) {
-    const resolved = await resolveMediaReferenceUrl(url, { kind: 'audio' });
+    const resolved = await toCliResource(url, 'audio');
     if (resolved && !seen.has(resolved)) {
       seen.add(resolved);
       resources.push(resolved);

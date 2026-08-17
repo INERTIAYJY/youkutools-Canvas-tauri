@@ -31,6 +31,7 @@ function buildRequest(overrides?: {
   generateAudio?: boolean;
   references?: VideoGenerationReferenceInput['references'];
   imageUrls?: string[];
+  videoUrls?: string[];
 }): MediaProviderRequest {
   return {
     params: {
@@ -46,7 +47,7 @@ function buildRequest(overrides?: {
     resolveReferenceInput: async () => ({
       prompt: '测试视频',
       imageUrls: overrides?.imageUrls ?? [],
-      videoUrls: [],
+      videoUrls: overrides?.videoUrls ?? [],
       audioUrls: [],
       operation: 'text-to-video',
       references: overrides?.references,
@@ -133,28 +134,47 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
     );
   });
 
-  it('本地磁盘路径先经 resource upload 上传为 https URL 再传入（CLI 不接受本地路径），asset URL 走通用图床', async () => {
-    seedlingMocks.uploadSeedlingResource.mockResolvedValue({
-      url: 'https://cdn.seedling.com/uploads/a.png',
-    });
-    uploadMocks.resolveMediaReferenceUrl.mockImplementation(async (url: string) => {
-      if (url === 'asset.localhost/ref.png') return 'https://cdn.example/uploaded.png';
-      return url;
-    });
+  it('本地路径与 asset.localhost 资产均先上传为 https URL（CLI 只接受 https）', async () => {
+    seedlingMocks.uploadSeedlingResource.mockImplementation(async (p: string) => ({
+      url: `https://cdn.seedling.com/uploads/${encodeURIComponent(p)}`,
+    }));
     await seedlingMediaProviderAdapter.generateVideo!(
       buildRequest({
-        imageUrls: ['C:\\project\\frames\\a.png', 'asset.localhost/ref.png'],
+        imageUrls: [
+          'C:\\project\\frames\\a.png',
+          'http://asset.localhost/C%3A%2Fproject%2Fframes%2Fb.png',
+        ],
       }),
     );
     expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith('C:\\project\\frames\\a.png');
+    expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith('C:\\project\\frames\\b.png');
     expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
       expect.objectContaining({
-        resources: ['https://cdn.seedling.com/uploads/a.png', 'https://cdn.example/uploaded.png'],
+        resources: [
+          'https://cdn.seedling.com/uploads/C%3A%5Cproject%5Cframes%5Ca.png',
+          'https://cdn.seedling.com/uploads/C%3A%5Cproject%5Cframes%5Cb.png',
+        ],
       }),
     );
-    expect(uploadMocks.resolveMediaReferenceUrl).toHaveBeenCalledWith(
-      'asset.localhost/ref.png',
-      { kind: 'image' },
+    expect(uploadMocks.resolveMediaReferenceUrl).not.toHaveBeenCalled();
+  });
+
+  it('asset.localhost 视频参考解码本地路径后上传为 https', async () => {
+    seedlingMocks.uploadSeedlingResource.mockResolvedValue({
+      url: 'https://cdn.seedling.com/uploads/video.mp4',
+    });
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({
+        videoUrls: ['http://asset.localhost/C%3A%2Fproject%2Fvideo%2F%E5%B7%A6%E5%8F%B3%E6%8A%89%E6%8B%A9.mp4'],
+      }),
+    );
+    expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith(
+      'C:\\project\\video\\左右抉择.mp4',
+    );
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: ['https://cdn.seedling.com/uploads/video.mp4'],
+      }),
     );
   });
 

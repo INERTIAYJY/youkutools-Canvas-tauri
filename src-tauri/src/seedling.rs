@@ -809,16 +809,26 @@ fn fail(app: &AppHandle, message: &str) {
     });
 }
 
-/// 解析 `auth login --json` 的一行输出；提取到授权链接或配对码时更新状态并返回 true。
-fn parse_login_json(app: &AppHandle, line: &str) -> bool {
-    let line = line.trim();
-    if line.is_empty() || !line.starts_with('{') {
-        return false;
-    }
-    let value: serde_json::Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
+/// 按平台打开授权链接（自动呼出默认浏览器）。
+#[cfg(windows)]
+fn open_url(url: &str) {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", "start", "", url]).stdout(Stdio::null()).stderr(Stdio::null());
+    no_window(&mut cmd);
+    let _ = cmd.spawn();
+}
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) {
+    let _ = Command::new("open").arg(url).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+}
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn open_url(url: &str) {
+    let _ = Command::new("xdg-open").arg(url).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+}
+
+/// 从解析好的登录 JSON 对象提取授权链接与配对码；成功则更新运行态并返回 true。
+/// 提取成功后自动呼出浏览器（链接已带配对码参数，可直接完成授权）。
+fn extract_login_fields(app: &AppHandle, value: &serde_json::Value) -> bool {
     let Some(obj) = value.as_object() else {
         return false;
     };
@@ -852,12 +862,15 @@ fn parse_login_json(app: &AppHandle, line: &str) -> bool {
         r.phase = "oauth_ready".into();
         r.message = "请在浏览器中确认配对码并完成授权".into();
         if !url.is_empty() {
-            r.verification_url = url;
+            r.verification_url = url.clone();
         }
         if !code.is_empty() {
-            r.user_code = code;
+            r.user_code = code.clone();
         }
     });
+    if !url.is_empty() {
+        open_url(&url);
+    }
     true
 }
 
@@ -896,12 +909,20 @@ fn run_login_sequence(app: AppHandle) {
     let _ = child.stderr.take();
     *login_child().lock().unwrap() = Some(child);
 
-    // 逐行读取直到 stdout EOF（进程结束：授权完成、超时或被取消）
+    // 逐行累积读取 stdout：CLI 输出的是多行 JSON，需拼成完整对象后再解析；
+    // 读到 EOF（进程结束：授权完成、超时或被取消）后停止。
     let reader = BufReader::new(stdout);
+    let mut buffer = String::new();
     for line in reader.lines() {
         match line {
             Ok(text) => {
-                parse_login_json(&app, &text);
+                buffer.push_str(&text);
+                buffer.push('\n');
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&buffer) {
+                    if extract_login_fields(&app, &value) {
+                        buffer.clear();
+                    }
+                }
             }
             Err(_) => break,
         }

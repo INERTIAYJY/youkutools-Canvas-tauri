@@ -826,51 +826,62 @@ fn open_url(url: &str) {
     let _ = Command::new("xdg-open").arg(url).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
-/// 从解析好的登录 JSON 对象提取授权链接与配对码；成功则更新运行态并返回 true。
-/// 提取成功后自动呼出浏览器（链接已带配对码参数，可直接完成授权）。
-fn extract_login_fields(app: &AppHandle, value: &serde_json::Value) -> bool {
+/// 从登录 JSON 对象提取 (授权链接, 配对码)；链接优先取带配对码的完整变体。
+/// 供 `extract_login_fields` 使用，纯逻辑便于单元测试。
+fn extract_login_pair(value: &serde_json::Value) -> (Option<String>, Option<String>) {
     let Some(obj) = value.as_object() else {
-        return false;
+        return (None, None);
     };
     let mut url = String::new();
+    let mut url_complete = String::new();
     let mut code = String::new();
     for (key, val) in obj {
         let lower = key.to_lowercase();
         let Some(text) = val.as_str() else {
             continue;
         };
-        // 优先带配对码的完整授权链接（verificationUriComplete / verification_uri_complete），
-        // 否则用户打开的授权页缺少 code 参数，无法完成配对。
+        // 带配对码的完整授权链接（verificationUriComplete / verification_uri_complete）单独保存。
+        // 注意 serde_json 默认按 key 排序，verificationUri 可能先于 complete 变体出现，
+        // 因此不能只在 url 为空时赋值，必须最后用 complete 变体覆盖普通链接。
         if lower.contains("verification") && lower.contains("complete") {
-            if url.is_empty() {
-                url = text.to_string();
+            if url_complete.is_empty() {
+                url_complete = text.to_string();
             }
         } else if (lower.contains("verification") || lower.contains("uri")) && url.is_empty() {
             url = text.to_string();
-        } else if (lower.contains("user_code") || lower.contains("code")) && code.is_empty() {
-            // 配对码是短字符串（如 BXTK-9F2Q），避免误抓长 URL
-            if text.len() <= 32 {
+        } else if lower.contains("user_code") || lower.contains("code") {
+            // 配对码是短字符串（如 ZJ4J-3NX7），避免误抓长 URL
+            if code.is_empty() && text.len() <= 32 {
                 code = text.to_string();
             }
         }
     }
-    if url.is_empty() && code.is_empty() {
-        return false;
+    if !url_complete.is_empty() {
+        url = url_complete;
     }
+    (
+        if url.is_empty() { None } else { Some(url) },
+        if code.is_empty() { None } else { Some(code) },
+    )
+}
+
+/// 从解析好的登录 JSON 对象提取授权链接与配对码；成功则更新运行态并返回 true。
+/// 提取成功后自动呼出浏览器（链接已带配对码参数，可直接完成授权）。
+fn extract_login_fields(app: &AppHandle, value: &serde_json::Value) -> bool {
+    let (url, code) = extract_login_pair(value);
+    let Some(url) = url else {
+        return false;
+    };
     update(app, |r| {
         r.active = true;
         r.phase = "oauth_ready".into();
         r.message = "请在浏览器中确认配对码并完成授权".into();
-        if !url.is_empty() {
-            r.verification_url = url.clone();
-        }
-        if !code.is_empty() {
-            r.user_code = code.clone();
+        r.verification_url = url.clone();
+        if let Some(code) = code {
+            r.user_code = code;
         }
     });
-    if !url.is_empty() {
-        open_url(&url);
-    }
+    open_url(&url);
     true
 }
 
@@ -1089,6 +1100,38 @@ mod tests {
         assert!(args.contains(&"--audio".to_string()));
         assert!(args.contains(&"--resource".to_string()));
         assert!(args.contains(&"https://example.com/a.jpg".to_string()));
+    }
+
+    #[test]
+    fn extracts_login_pair_prefers_complete_url() {
+        // 与真实 CLI 输出一致的多行 JSON（键按字母序：expiresIn < userCode < verificationUri < verificationUriComplete）
+        let value: serde_json::Value = serde_json::from_str(
+            "{\n  \"verificationUri\": \"https://seedling.p.ykss.com.cn/cli/auth\",\n  \"verificationUriComplete\": \"https://seedling.p.ykss.com.cn/cli/auth?code=ZJ4J-3NX7\",\n  \"userCode\": \"ZJ4J-3NX7\",\n  \"expiresIn\": 600\n}",
+        ).unwrap();
+        let (url, code) = extract_login_pair(&value);
+        assert_eq!(
+            url.as_deref(),
+            Some("https://seedling.p.ykss.com.cn/cli/auth?code=ZJ4J-3NX7")
+        );
+        assert_eq!(code.as_deref(), Some("ZJ4J-3NX7"));
+    }
+
+    #[test]
+    fn extracts_login_pair_falls_back_to_plain_url() {
+        let value: serde_json::Value = serde_json::from_str(
+            "{\"verificationUri\":\"https://example.com/auth\",\"userCode\":\"ABC-123\"}",
+        ).unwrap();
+        let (url, code) = extract_login_pair(&value);
+        assert_eq!(url.as_deref(), Some("https://example.com/auth"));
+        assert_eq!(code.as_deref(), Some("ABC-123"));
+    }
+
+    #[test]
+    fn extracts_login_pair_returns_none_for_irrelevant_json() {
+        let value: serde_json::Value = serde_json::from_str("{\"foo\":\"bar\"}").unwrap();
+        let (url, code) = extract_login_pair(&value);
+        assert!(url.is_none());
+        assert!(code.is_none());
     }
 
     #[test]

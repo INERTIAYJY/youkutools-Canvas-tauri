@@ -1,7 +1,7 @@
 /**
  * AINodeDialog AI 生成弹窗 — 点击节点后弹出的浮动面板，包含 Prompt 输入、模型选择、参数配置、生成按钮
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
@@ -64,8 +64,6 @@ function AINodeDialog() {
   const panelRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const cancellingNodeIdsRef = useRef(new Set<string>());
-  // 不勾选「在此节点生成」时，待选的新节点数量（null=不显示选择框；1-4 选中后执行）
-  const [pendingVideoCount, setPendingVideoCount] = useState<number | null>(null);
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
@@ -275,10 +273,136 @@ function AINodeDialog() {
     [updateContinuousNodeData]
   );
 
-  // 调用选中模型生成（文本 or 图片）
+    /**
+   * 不勾选「在此节点生成」：串行生成 count 条视频，每条落到源节点右侧新建的视频节点并自动连线。
+   * 一次 addNodesWithEdges 提交全部节点与连线（单个历史快照）。
+   */
+  const runVideoToNewNodes = useCallback(async (count: number) => {
+    const store = useAppStore.getState();
+    const submittingNodeId = activeNodeId;
+    const submittingProjectId = currentProjectId;
+    if (!submittingNodeId || !submittingProjectId) return;
+    const sourceNode = store.nodes.find((n) => n.id === submittingNodeId);
+    if (!sourceNode) return;
+    const latestData = sourceNode.data as BaseNodeData;
+    const rawPrompt = latestData.prompt ?? '';
+    const nodeModel = latestData.model;
+    const nodeProvider = latestData.provider;
+    const nodeLabel = latestData.label ?? '视频';
+    if (!nodeModel || !nodeProvider) {
+      showToast('请先在底部模型选择器中选择一个模型', 'error');
+      return;
+    }
+    const projectSettings = store.projects.find((p) => p.id === submittingProjectId)?.settings;
+    const projectPrompt = resolveProjectGenerationPrompt({
+      prompt: rawPrompt,
+      data: latestData,
+      settings: projectSettings,
+      customStyles: store.customStyles,
+    });
+    const cameraPrompt = buildGenerationCameraPrompt(latestData.cameraSettings);
+    const effectivePrompt = cameraPrompt
+      ? `${projectPrompt}\n\nCamera settings: ${cameraPrompt}.`
+      : projectPrompt;
+    const videoFps = Number(latestData.videoFps) || 24;
+    const seedanceDuration = resolveVideoDurationSeconds(
+      latestData.seedanceDuration,
+      latestData.videoFrames,
+      videoFps,
+    );
+    const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
+    const params = {
+      prompt: effectivePrompt,
+      model: nodeModel,
+      provider: nodeProvider,
+      videoResolution: Number(latestData.videoResolution) || 832,
+      videoFps,
+      videoFrames,
+      seedanceResolution: (latestData.seedanceResolution as string) || '720p',
+      seedanceRatio: (latestData.seedanceRatio as string) || '16:9',
+      seedanceDuration,
+      generateAudio: latestData.generateAudio,
+      workflowId: latestData.workflowId,
+      workflowInputs: latestData.workflowInputs,
+      nodeId: submittingNodeId,
+    };
+    const isStill = () => {
+      const s = useAppStore.getState();
+      return s.currentProjectId === submittingProjectId
+        && s.nodes.some((n) => n.id === submittingNodeId);
+    };
+    updateNodeDataTransient(submittingNodeId, { status: 'loading', error: undefined });
+    showToast(`正在生成 ${count} 条视频`);
+    const results: Array<{ url: string; mediaUrl: string; filePath?: string }> = [];
+    try {
+      for (let i = 0; i < count; i++) {
+        if (!isStill()) return;
+        const result = await generateVideo(params);
+        if (!isStill()) return;
+        const saved = submittingProjectId
+          ? await downloadUrlAndSave(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${i + 1}`).catch(() => null)
+          : null;
+        results.push({ url: result.url, mediaUrl: saved?.assetUrl || result.url, filePath: saved?.filePath });
+        recordOutputHistory(submittingNodeId, {
+          nodeId: submittingNodeId,
+          nodeLabel,
+          timestamp: Date.now(),
+          prompt: effectivePrompt,
+          output: result.url,
+          nodeType: 'ai-video',
+          model: nodeModel,
+          provider: nodeProvider,
+          status: 'success',
+          mediaUrl: result.url,
+          filePath: saved?.filePath,
+          params: { videoResolution: params.videoResolution, videoFps, videoFrames, seedanceResolution: params.seedanceResolution, seedanceRatio: params.seedanceRatio, seedanceDuration, generateAudio: params.generateAudio },
+        });
+      }
+      // 新建节点（垂直排开）+ 连线，一次历史快照
+      const nodeHeight = Number(sourceNode.data?.nodeHeight) || 220;
+      const gap = 40;
+      const newNodes = results.map((r, index) => {
+        const placement = derivedNodePlacement(sourceNode, 40);
+        return {
+          id: `node-${generateId()}`,
+          type: sourceNode.type,
+          position: {
+            x: placement.position.x,
+            y: placement.position.y + index * (nodeHeight + gap),
+          },
+          ...(placement.parentId ? { parentId: placement.parentId } : {}),
+          data: {
+            ...latestData,
+            label: `${nodeLabel}-${index + 1}`,
+            videoUrl: r.mediaUrl,
+            sourceUrl: r.url,
+            filePath: r.filePath,
+            thumbnailUrl: r.url,
+            output: r.url,
+            status: 'success',
+            generateInPlace: true,
+          } as BaseNodeData,
+        };
+      });
+      const newEdges = newNodes.map((n) => ({
+        id: `edge-${submittingNodeId}-${n.id}`,
+        source: submittingNodeId,
+        target: n.id,
+        sourceHandle: 'right',
+        targetHandle: 'left',
+      }));
+      addNodesWithEdges(newNodes, newEdges);
+      updateNodeDataTransient(submittingNodeId, { status: 'idle' });
+      showToast(`已生成 ${count} 条视频`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '视频生成失败');
+      if (isStill()) updateNodeDataTransient(submittingNodeId, { status: 'idle', error: msg });
+      showToast(msg, 'error');
+    }
+  }, [activeNodeId, currentProjectId, showToast, updateNodeDataTransient, recordOutputHistory, addNodesWithEdges]);
+// 调用选中模型生成（文本 or 图片）
   // overridePrompt: / 指令菜单直接触发时传入的整合后模板，不走 store → 对话框不闪烁
-  const onSubmit = useCallback(async (overridePrompt?: string, postProcess?: ImagePostProcess) => {
-    finishContinuousEdit();
+  const onSubmit = useCallback(async (overridePrompt?: string, postProcess?: ImagePostProcess) => {    finishContinuousEdit();
     // 实时从 store 读取全部数据 — 避免闭包 data 为 undefined
     const store = useAppStore.getState();
     const latestNode = store.nodes.find((n) => n.id === activeNodeId);
@@ -496,9 +620,10 @@ function AINodeDialog() {
         });
         showToast('全景图生成完成');
       } else if (nodeType === 'ai-video') {
-        // 「在此节点生成」取消勾选 → 弹出数量选择（1-4 条），每条生成到右侧新建节点
+        // 「在此节点生成」取消勾选 → 按 generateCount 生成到右侧新建节点（不在此弹窗）
         if (latestData.generateInPlace === false) {
-          setPendingVideoCount(0);
+          const count = Math.min(4, Math.max(1, Math.floor(Number(latestData.generateCount) || 1)));
+          await runVideoToNewNodes(count);
           return;
         }
         const videoResolution = (latestData.videoResolution as number) || 832;
@@ -673,137 +798,9 @@ function AINodeDialog() {
       });
       showToast(msg, 'error');
     }
-  }, [activeNodeId, nodeType, currentProjectId, finishContinuousEdit, updateNodeData, updateNodeDataTransient, recordOutputHistory, showToast]);
+  }, [activeNodeId, nodeType, currentProjectId, finishContinuousEdit, updateNodeData, updateNodeDataTransient, recordOutputHistory, showToast, runVideoToNewNodes]);
 
-  /**
-   * 不勾选「在此节点生成」：串行生成 count 条视频，每条落到源节点右侧新建的视频节点并自动连线。
-   * 一次 addNodesWithEdges 提交全部节点与连线（单个历史快照）。
-   */
-  const runVideoToNewNodes = useCallback(async (count: number) => {
-    const store = useAppStore.getState();
-    const submittingNodeId = activeNodeId;
-    const submittingProjectId = currentProjectId;
-    if (!submittingNodeId || !submittingProjectId) return;
-    const sourceNode = store.nodes.find((n) => n.id === submittingNodeId);
-    if (!sourceNode) return;
-    const latestData = sourceNode.data as BaseNodeData;
-    const rawPrompt = latestData.prompt ?? '';
-    const nodeModel = latestData.model;
-    const nodeProvider = latestData.provider;
-    const nodeLabel = latestData.label ?? '视频';
-    if (!nodeModel || !nodeProvider) {
-      showToast('请先在底部模型选择器中选择一个模型', 'error');
-      return;
-    }
-    const projectSettings = store.projects.find((p) => p.id === submittingProjectId)?.settings;
-    const projectPrompt = resolveProjectGenerationPrompt({
-      prompt: rawPrompt,
-      data: latestData,
-      settings: projectSettings,
-      customStyles: store.customStyles,
-    });
-    const cameraPrompt = buildGenerationCameraPrompt(latestData.cameraSettings);
-    const effectivePrompt = cameraPrompt
-      ? `${projectPrompt}\n\nCamera settings: ${cameraPrompt}.`
-      : projectPrompt;
-    const videoFps = Number(latestData.videoFps) || 24;
-    const seedanceDuration = resolveVideoDurationSeconds(
-      latestData.seedanceDuration,
-      latestData.videoFrames,
-      videoFps,
-    );
-    const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
-    const params = {
-      prompt: effectivePrompt,
-      model: nodeModel,
-      provider: nodeProvider,
-      videoResolution: Number(latestData.videoResolution) || 832,
-      videoFps,
-      videoFrames,
-      seedanceResolution: (latestData.seedanceResolution as string) || '720p',
-      seedanceRatio: (latestData.seedanceRatio as string) || '16:9',
-      seedanceDuration,
-      generateAudio: latestData.generateAudio,
-      workflowId: latestData.workflowId,
-      workflowInputs: latestData.workflowInputs,
-      nodeId: submittingNodeId,
-    };
-    const isStill = () => {
-      const s = useAppStore.getState();
-      return s.currentProjectId === submittingProjectId
-        && s.nodes.some((n) => n.id === submittingNodeId);
-    };
-    updateNodeDataTransient(submittingNodeId, { status: 'loading', error: undefined });
-    showToast(`正在生成 ${count} 条视频`);
-    const results: Array<{ url: string; mediaUrl: string; filePath?: string }> = [];
-    try {
-      for (let i = 0; i < count; i++) {
-        if (!isStill()) return;
-        const result = await generateVideo(params);
-        if (!isStill()) return;
-        const saved = submittingProjectId
-          ? await downloadUrlAndSave(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${i + 1}`).catch(() => null)
-          : null;
-        results.push({ url: result.url, mediaUrl: saved?.assetUrl || result.url, filePath: saved?.filePath });
-        recordOutputHistory(submittingNodeId, {
-          nodeId: submittingNodeId,
-          nodeLabel,
-          timestamp: Date.now(),
-          prompt: effectivePrompt,
-          output: result.url,
-          nodeType: 'ai-video',
-          model: nodeModel,
-          provider: nodeProvider,
-          status: 'success',
-          mediaUrl: result.url,
-          filePath: saved?.filePath,
-          params: { videoResolution: params.videoResolution, videoFps, videoFrames, seedanceResolution: params.seedanceResolution, seedanceRatio: params.seedanceRatio, seedanceDuration, generateAudio: params.generateAudio },
-        });
-      }
-      // 新建节点（垂直排开）+ 连线，一次历史快照
-      const nodeHeight = Number(sourceNode.data?.nodeHeight) || 220;
-      const gap = 40;
-      const newNodes = results.map((r, index) => {
-        const placement = derivedNodePlacement(sourceNode, 40);
-        return {
-          id: `node-${generateId()}`,
-          type: sourceNode.type,
-          position: {
-            x: placement.position.x,
-            y: placement.position.y + index * (nodeHeight + gap),
-          },
-          ...(placement.parentId ? { parentId: placement.parentId } : {}),
-          data: {
-            ...latestData,
-            label: `${nodeLabel}-${index + 1}`,
-            videoUrl: r.mediaUrl,
-            sourceUrl: r.url,
-            filePath: r.filePath,
-            thumbnailUrl: r.url,
-            output: r.url,
-            status: 'success',
-            generateInPlace: true,
-          } as BaseNodeData,
-        };
-      });
-      const newEdges = newNodes.map((n) => ({
-        id: `edge-${submittingNodeId}-${n.id}`,
-        source: submittingNodeId,
-        target: n.id,
-        sourceHandle: 'right',
-        targetHandle: 'left',
-      }));
-      addNodesWithEdges(newNodes, newEdges);
-      updateNodeDataTransient(submittingNodeId, { status: 'idle' });
-      showToast(`已生成 ${count} 条视频`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '视频生成失败');
-      if (isStill()) updateNodeDataTransient(submittingNodeId, { status: 'idle', error: msg });
-      showToast(msg, 'error');
-    } finally {
-      setPendingVideoCount(null);
-    }
-  }, [activeNodeId, currentProjectId, showToast, updateNodeDataTransient, recordOutputHistory, addNodesWithEdges]);
+
 
   const onCancelGeneration = useCallback(async () => {
     if (!activeNodeId || cancellingNodeIdsRef.current.has(activeNodeId)) return;
@@ -1001,40 +998,6 @@ function AINodeDialog() {
 
   return (
     <>
-      {/* 不勾选「在此节点生成」时的数量选择浮层 */}
-      {pendingVideoCount !== null && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40"
-          onClick={() => setPendingVideoCount(null)}
-        >
-          <div
-            className="rounded-lg border border-canvas-border bg-canvas-card p-4 space-y-3 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-sm font-medium text-canvas-text">生成几条视频？</div>
-            <div className="flex items-center gap-2">
-              {[1, 2, 3, 4].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  className="settings-save-btn min-w-[52px] justify-center text-sm"
-                  onClick={() => void runVideoToNewNodes(n)}
-                >
-                  {n} 条
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="settings-save-btn settings-btn-ghost w-full"
-              onClick={() => setPendingVideoCount(null)}
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Connected nodes preview — below dialog (model-dropdown covers it) */}
       <div
         ref={previewRef}

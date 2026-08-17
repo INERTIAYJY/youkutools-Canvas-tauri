@@ -10,6 +10,7 @@ import {
   previewModelProtocolResponse,
   validateModelExecutionProtocol,
 } from '../../src/services/ai/modelProtocol';
+import { findUnusedReferenceVariables } from '../../src/services/ai/modelProtocolRuntime';
 
 const jsonResponse = (
   payload: unknown,
@@ -1128,5 +1129,23 @@ describe('declarative model execution protocol', () => {
       },
     })).rejects.toThrow('暂无可用部署');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reference media coverage in custom protocols', () => {
+  it('flags reference media that the protocol has no field for', () => {
+    const withImageField = JSON.stringify({ submit: { body: { image_urls: '{{imageUrls}}' } } });
+    const textOnly = JSON.stringify({ submit: { body: { model: '{{model}}', prompt: '{{prompt}}' } } });
+    const variables = {
+      imageUrls: ['https://cdn.example/ref.png'],
+      referenceImageUrls: ['https://cdn.example/ref.png'],
+      videoUrls: [],
+    };
+
+    expect(findUnusedReferenceVariables(withImageField, variables)).toEqual([]);
+    expect(findUnusedReferenceVariables(textOnly, variables).sort())
+      .toEqual(['imageUrls', 'referenceImageUrls']);
+    // 没有连参考素材就不该提示
+    expect(findUnusedReferenceVariables(textOnly, { imageUrls: [] })).toEqual([]);
   });
 });

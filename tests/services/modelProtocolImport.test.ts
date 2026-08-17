@@ -519,6 +519,64 @@ Content-Type: application/json
     });
   });
 
+  it('maps relay video role images and relay TTS text onto project variables', () => {
+    const video = analyzeModelProtocolExamples({
+      submitRequest: `
+curl -sS -X POST "https://relay.example.com/v1/videos" \\
+  -H "Authorization: Bearer sk-placeholder" \\
+  -d '{
+    "model": "doubao-seedance-2.5",
+    "prompt": "一只猫走过街道",
+    "duration": 5,
+    "resolution": "720p",
+    "size": "16:9",
+    "image_with_roles": [{ "url": "https://cdn.example.com/first.png", "role": "first_frame" }]
+  }'`,
+      submitResponse: '{"task_id":"task_0123456789abcdef","status":"processing"}',
+      pollRequest: `curl -sS "https://relay.example.com/v1/videos/task_0123456789abcdef" -H "Authorization: Bearer sk-placeholder"`,
+      pollResponse: '{"task_id":"task_0123456789abcdef","status":"completed","data":[{"url":"https://cdn.example.com/result.mp4"}]}',
+    });
+
+    expect(video).toMatchObject({
+      category: 'video',
+      protocol: {
+        submit: {
+          body: {
+            model: '{{model}}',
+            prompt: '{{prompt}}',
+            duration: '{{duration}}',
+            resolution: '{{seedanceResolution}}',
+            size: '{{aspectRatio}}',
+            image_with_roles: '{{imageWithRoles}}',
+          },
+        },
+      },
+    });
+
+    const speech = analyzeModelProtocolExamples({
+      submitRequest: `
+curl -sS -X POST "https://relay.example.com/v1/audio/speech" \\
+  -H "Authorization: Bearer sk-placeholder" \\
+  -d '{ "model": "tts-1", "input": "示例文案", "voice": "alloy", "response_format": "mp3" }'`,
+      submitResponse: '{"data":[{"url":"https://cdn.example.com/result.mp3"}]}',
+    });
+
+    expect(speech).toMatchObject({
+      category: 'audio',
+      protocol: {
+        submit: {
+          body: {
+            model: '{{model}}',
+            // 中转 TTS 的待合成文本字段是 input，不映射就会固定发出示例文案
+            input: '{{prompt}}',
+            voice: '{{audioVoice}}',
+            response_format: '{{audioFormat}}',
+          },
+        },
+      },
+    });
+  });
+
   it('reports unsupported callback flows and rejects content without a request', () => {
     const callbackSource = `
 const url = "https://api.example.com/v1/images/generations";

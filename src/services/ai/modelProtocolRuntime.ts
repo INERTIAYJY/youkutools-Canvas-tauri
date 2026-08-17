@@ -9,11 +9,13 @@ import {
   savePendingTask,
 } from '../pollManager';
 import {
+  modelProtocolUsesVariable,
   pollResolvedModelProtocol,
   resolveModelExecutionProfile,
   submitModelProtocol,
   type ModelProtocolVariables,
 } from './modelProtocol';
+import { REFERENCE_PROTOCOL_VARIABLES } from './modelProtocolVariables';
 
 interface RunConfiguredModelProtocolOptions {
   model: GeneralModelConfig;
@@ -35,6 +37,22 @@ function readBatchCount(value: ProtocolJsonValue | undefined): number {
     : 1;
 }
 
+/**
+ * 连线带了参考素材、但该模型的调用协议里一个参考字段都没有时提醒用户。
+ * 中转站文档常常只给出纯文生图/文生视频示例，导入后参考图会被静默丢弃，
+ * 生成结果看起来「没吃参考图」却查不到原因。
+ */
+export function findUnusedReferenceVariables(
+  protocolSource: string,
+  variables: ModelProtocolVariables,
+): string[] {
+  const provided = REFERENCE_PROTOCOL_VARIABLES.filter((name) => {
+    const value = variables[name];
+    return Array.isArray(value) ? value.length > 0 : typeof value === 'string' && value !== '';
+  });
+  return modelProtocolUsesVariable(protocolSource, ...provided) ? [] : provided;
+}
+
 export async function runConfiguredModelProtocol(
   options: RunConfiguredModelProtocolOptions,
 ): Promise<string[]> {
@@ -44,6 +62,12 @@ export async function runConfiguredModelProtocol(
   if (!provider) throw new Error(`模型“${options.model.name}”的连接配置不存在`);
   const baseUrl = provider.baseUrl?.trim() || '';
   if (!baseUrl) throw new Error(`模型“${options.model.name}”未配置接口地址`);
+  if (findUnusedReferenceVariables(JSON.stringify(protocol), options.variables).length > 0) {
+    useAppStore.getState().showToast(
+      `模型“${options.model.name}”的调用协议里没有参考素材字段，连线的参考图/视频/音频不会被发送`,
+      'info',
+    );
+  }
 
   const nodeSignal = options.nodeId ? registerNodePolling(options.nodeId) : undefined;
   const signal = nodeSignal && options.signal

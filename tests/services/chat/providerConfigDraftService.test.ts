@@ -99,6 +99,26 @@ curl -X POST https://www.right.codes/draw/v1/images/generations \\
     expect(JSON.stringify(draft)).not.toContain('sk-placeholder');
   });
 
+  it('flags drafts whose image/video protocol carries no reference media field', () => {
+    // 中转文档只给了纯文生图 / 文生视频示例，画布上连的参考图发不出去，审批卡要说清楚
+    const withoutReferences = createProviderConfigDraft('task-no-ref', createInput());
+    expect(withoutReferences.summary).toContain('Example Image Pro（图片，无参考素材字段）');
+    expect(withoutReferences.summary).toContain('Example Video Pro（视频，无参考素材字段）');
+
+    const withReferences = createProviderConfigDraft('task-ref', {
+      connectionName: 'Example AI',
+      models: [{
+        name: 'Example Video Ref',
+        category: 'video' as const,
+        submitRequest: VIDEO_REQUEST.replace('"duration":5', '"duration":5,"image_urls":["https://cdn.example.com/ref.png"]'),
+        submitResponse: VIDEO_RESPONSE,
+        pollRequest: VIDEO_POLL_REQUEST,
+        pollResponse: VIDEO_POLL_RESPONSE,
+      }],
+    });
+    expect(withReferences.summary).toContain('Example Video Ref（视频）');
+  });
+
   it('merges multiple model protocols into one credential-free provider draft', () => {
     const draft = createProviderConfigDraft('task-1', createInput(), 1_000);
 

@@ -10,6 +10,11 @@ import type {
   ProtocolJsonValue,
 } from '../../types/aiTypes';
 import { validateModelExecutionProtocol } from './modelProtocol';
+import {
+  IMAGE_ARRAY_FIELDS,
+  IMAGE_SINGLE_FIELDS,
+  resolveProtocolFieldTemplate,
+} from './modelProtocolVariables';
 
 export type ModelProtocolImportFormat = 'fetch' | 'axios' | 'curl' | 'python' | 'raw-http' | 'openapi' | 'json';
 export type ModelProtocolImportConfidence = 'high' | 'medium' | 'low';
@@ -643,45 +648,9 @@ function mapBodyValue(
   value: ProtocolJsonValue,
   category: GeneralModelCategory,
 ): ProtocolJsonValue {
-  const normalized = normalizedKey(key);
-  if (['model', 'modelid', 'modelname'].includes(normalized)) return '{{model}}';
-  if (['prompt', 'inputprompt', 'textprompt', 'description'].includes(normalized)) return '{{prompt}}';
-  if (normalized === 'messages') return '{{messages}}';
-  if (normalized === 'stream') return '{{stream}}';
-  if (normalized === 'tools') return '{{tools}}';
-  if (normalized === 'toolchoice') return '{{toolChoice}}';
-  if (normalized === 'size') {
-    if (typeof value === 'string' && /^\d+\s*:\s*\d+$/.test(value)) return '{{aspectRatio}}';
-    return '{{size}}';
-  }
-  if (['aspectratio', 'ratio'].includes(normalized)) return '{{aspectRatio}}';
-  if (normalized === 'resolution') return category === 'image' ? '{{imageSize}}' : '{{seedanceResolution}}';
-  if (['imagesize', 'quality'].includes(normalized)) return '{{imageSize}}';
-  if (normalized === 'width') return '{{width}}';
-  if (normalized === 'height') return '{{height}}';
-  if (['n', 'count', 'numimages', 'batchcount'].includes(normalized)) return '{{n}}';
-  if (['numframes', 'frames', 'framecount'].includes(normalized)) return '{{frames8n1}}';
-  if (['framerate', 'fps'].includes(normalized)) return '{{fps}}';
-  if (['duration', 'seconds', 'videoduration'].includes(normalized)) return '{{duration}}';
-  if (normalized === 'generateaudio') return '{{generateAudio}}';
-  if (['voice', 'audiovoice'].includes(normalized)) return '{{audioVoice}}';
-  if (['format', 'audioformat', 'responseformat'].includes(normalized) && category === 'audio') return '{{audioFormat}}';
-  if (['speed', 'audiospeed'].includes(normalized) && category === 'audio') return '{{audioSpeed}}';
-  if (category === 'video') {
-    if (['firstimage', 'firstframeimage'].includes(normalized)) return '{{firstImage}}';
-    if (['lastimage', 'lastframeimage'].includes(normalized)) return '{{lastImage}}';
-    if (['referenceimageurls', 'referenceimages'].includes(normalized)) return '{{referenceImageUrls}}';
-    if (normalized === 'videourls') return '{{videoUrls}}';
-    if (normalized === 'referencevideourl') return '{{referenceVideoUrl}}';
-    if (['referencevideourls', 'referencevideos'].includes(normalized)) return '{{referenceVideoUrls}}';
-    if (normalized === 'audiourls') return '{{audioUrls}}';
-    if (normalized === 'audiourl') return '{{audioUrl}}';
-    if (['referenceaudios', 'referenceaudiourls'].includes(normalized)) return '{{referenceAudioUrls}}';
-  }
-  if (['imageurls', 'images', 'referenceimages'].includes(normalized)) return '{{imageUrls}}';
-  if (['image', 'inputimage', 'referenceimage', 'firstframeimage'].includes(normalized)) {
-    return Array.isArray(value) ? '{{imageUrls}}' : '{{imageUrls.0}}';
-  }
+  // 字段名 → 变量的对应关系全在 modelProtocolVariables 总表里，这里只负责递归
+  const template = resolveProtocolFieldTemplate(normalizedKey(key), value, category);
+  if (template) return template;
   if (Array.isArray(value)) return value.map((item) => mapNestedBody(item, category));
   if (isRecord(value)) return Object.fromEntries(Object.entries(value)
     .map(([nestedKey, nestedValue]) => [nestedKey, mapBodyValue(nestedKey, nestedValue, category)]));
@@ -709,12 +678,10 @@ function inferImageReferenceRequestMode(
   if (category !== 'image' || !isRecord(request.body)) return undefined;
   for (const [key, value] of Object.entries(request.body)) {
     const normalized = normalizedKey(key);
-    if (['imageurls', 'images', 'referenceimages'].includes(normalized)) {
+    if (IMAGE_ARRAY_FIELDS.includes(normalized)) {
       return 'generation-json-image-urls';
     }
-    if (!['image', 'inputimage', 'referenceimage', 'firstframeimage'].includes(normalized)) {
-      continue;
-    }
+    if (!IMAGE_SINGLE_FIELDS.includes(normalized)) continue;
     if (request.bodyEncoding === 'multipart') return 'edits-multipart';
     const values = Array.isArray(value) ? value : [value];
     if (values.some((item) => typeof item === 'string' && /^data:image\//i.test(item.trim()))) {

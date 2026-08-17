@@ -13,7 +13,15 @@ import {
   analyzeModelProtocolExamples,
   type ModelProtocolExamples,
 } from '../ai/modelProtocolImport';
-import { validateModelExecutionProtocol } from '../ai/modelProtocol';
+import {
+  modelProtocolUsesVariable,
+  resolveModelExecutionProfile,
+  validateModelExecutionProtocol,
+} from '../ai/modelProtocol';
+import {
+  REFERENCE_PROTOCOL_VARIABLES,
+  getCategoryProtocolVariables,
+} from '../ai/modelProtocolVariables';
 
 const PROVIDER_CONFIG_DRAFT_TTL_MS = 30 * 60 * 1_000;
 const MAX_PROVIDER_CONFIG_DRAFTS = 32;
@@ -218,6 +226,25 @@ export function describeProviderModelMerge(result: ProviderModelMergeResult): st
   return parts.length > 0 ? parts.join('，') : '模型列表无变化';
 }
 
+/**
+ * 图片 / 视频模型的协议里一个参考素材字段都没有时给出提示。
+ * 中转站文档常常只给纯文生图 / 文生视频示例，照抄出来的配置在画布上连了参考图
+ * 也发不出去；这个信息要出现在审批卡和回传给模型的摘要里，而不是等生成时才发现。
+ */
+function describeReferenceGap(model: ProviderModelSelection): string {
+  const { category } = model;
+  if (category !== 'image' && category !== 'video') return '';
+  // 图片模型显式声明了参考图请求协议时走标准通道，不看模板
+  if (model.imageReferenceRequestMode) return '';
+  const protocol = resolveModelExecutionProfile(model.executionProfile);
+  if (!protocol) return '';
+  const supported = getCategoryProtocolVariables(category);
+  const variables = REFERENCE_PROTOCOL_VARIABLES.filter((name) => supported.includes(name));
+  return modelProtocolUsesVariable(JSON.stringify(protocol), ...variables)
+    ? ''
+    : '，无参考素材字段';
+}
+
 export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string {
   const models = draft.config.selectedModels ?? [];
   const categoryLabels: Record<GeneralModelCategory, string> = {
@@ -237,7 +264,7 @@ export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string
     `模型：${models.map((model) => (
       `${model.name}（${categoryLabels[model.category]}${model.imageReferenceRequestMode
         ? `，参考图：${referenceModeLabels[model.imageReferenceRequestMode]}`
-        : ''}）`
+        : ''}${describeReferenceGap(model)}）`
     )).join('、')}`,
     '不会写入 API Key：新连接保持空白，已有连接保留原值',
   ].join('\n');

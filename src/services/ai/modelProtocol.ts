@@ -32,53 +32,12 @@ import {
   readModelProtocolUrls,
   type ModelProtocolResponsePreviewEntry,
 } from './modelProtocolResponse';
+import { PROTOCOL_VARIABLE_NAMES } from './modelProtocolVariables';
 
 const TEMPLATE_RE = /{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-]+)*)\s*}}/g;
 const FULL_TEMPLATE_RE = /^{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-]+)*)\s*}}$/;
-const ALLOWED_VARIABLE_ROOTS = new Set([
-  'model',
-  'prompt',
-  'messages',
-  'stream',
-  'tools',
-  'toolChoice',
-  'size',
-  'imageSize',
-  'aspectRatio',
-  'width',
-  'height',
-  'n',
-  'batchCount',
-  'frames',
-  'frames8n1',
-  'fps',
-  'duration',
-  'resolution',
-  'videoResolution',
-  'videoFrames',
-  'videoFps',
-  'seedanceResolution',
-  'seedanceRatio',
-  'seedanceDuration',
-  'generateAudio',
-  'videoOperation',
-  'imageUrls',
-  'firstImage',
-  'lastImage',
-  'referenceImageUrls',
-  'videoUrls',
-  'referenceVideoUrl',
-  'referenceVideoUrls',
-  'audioUrls',
-  'audioUrl',
-  'referenceAudioUrls',
-  'audioVoice',
-  'audioFormat',
-  'audioSpeed',
-  'musicTitle',
-  'musicLyrics',
-  'musicBpm',
-]);
+/** 变量白名单由 modelProtocolVariables 总表派生，避免与字段映射表各自漂移。 */
+const ALLOWED_VARIABLE_ROOTS = PROTOCOL_VARIABLE_NAMES;
 const BLOCKED_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
 const BLOCKED_HEADER_NAMES = new Set([
   'authorization',

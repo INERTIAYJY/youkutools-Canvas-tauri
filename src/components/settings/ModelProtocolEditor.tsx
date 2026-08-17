@@ -35,6 +35,7 @@ import {
   type ModelProtocolResponsePreviewEntry,
   type ModelProtocolVariables,
 } from '../../services/ai/modelProtocol';
+import { getCategoryProtocolVariables } from '../../services/ai/modelProtocolVariables';
 import PopupCloseButton from '../shared/PopupCloseButton';
 
 type ProtocolChoice = ModelProtocolPresetId | 'legacy';
@@ -77,21 +78,12 @@ const PRESET_LABELS: Record<ProtocolChoice, string> = {
   custom: '高级自定义',
 };
 
+// 可用变量列表由 modelProtocolVariables 总表派生，避免与运行时实际提供的变量脱节
 const CATEGORY_VARIABLES: Record<GeneralModelCategory, string[]> = {
-  text: ['model', 'prompt', 'messages', 'stream', 'tools', 'toolChoice'],
-  image: ['model', 'prompt', 'imageSize', 'aspectRatio', 'size', 'width', 'height', 'n', 'batchCount', 'imageUrls'],
-  video: [
-    'model', 'prompt', 'size', 'aspectRatio', 'resolution', 'width', 'height', 'frames',
-    'frames8n1', 'fps', 'duration',
-    'videoResolution', 'videoFrames', 'videoFps', 'seedanceResolution', 'seedanceRatio',
-    'seedanceDuration', 'generateAudio', 'videoOperation', 'imageUrls', 'firstImage',
-    'lastImage', 'referenceImageUrls', 'videoUrls', 'referenceVideoUrl', 'referenceVideoUrls',
-    'audioUrls', 'audioUrl', 'referenceAudioUrls',
-  ],
-  audio: [
-    'model', 'prompt', 'audioVoice', 'audioFormat', 'audioSpeed', 'duration',
-    'musicTitle', 'musicLyrics', 'musicBpm',
-  ],
+  text: getCategoryProtocolVariables('text'),
+  image: getCategoryProtocolVariables('image'),
+  video: getCategoryProtocolVariables('video'),
+  audio: getCategoryProtocolVariables('audio'),
 };
 
 function createPreviewVariables(model: ProviderModelSelection): ModelProtocolVariables {
@@ -140,6 +132,10 @@ function createPreviewVariables(model: ProviderModelSelection): ModelProtocolVar
       imageUrls: ['https://cdn.example/reference-first.png', 'https://cdn.example/reference-last.png'],
       firstImage: 'https://cdn.example/reference-first.png',
       lastImage: 'https://cdn.example/reference-last.png',
+      imageWithRoles: [
+        { url: 'https://cdn.example/reference-first.png', role: 'first_frame' },
+        { url: 'https://cdn.example/reference-last.png', role: 'last_frame' },
+      ],
       referenceImageUrls: ['https://cdn.example/reference-first.png'],
       videoUrls: ['https://cdn.example/reference.mp4'],
       referenceVideoUrl: 'https://cdn.example/reference.mp4',
@@ -158,6 +154,11 @@ function createPreviewVariables(model: ProviderModelSelection): ModelProtocolVar
     musicTitle: 'Sample Track',
     musicLyrics: '',
     musicBpm: 120,
+    n: 1,
+    batchCount: 1,
+    audioUrls: ['https://cdn.example/reference.mp3'],
+    audioUrl: 'https://cdn.example/reference.mp3',
+    referenceAudioUrls: ['https://cdn.example/reference.mp3'],
   };
 }
 

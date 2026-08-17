@@ -905,7 +905,9 @@ fn run_login_sequence(app: AppHandle) {
     let mut cmd = base_command(&cli, None);
     cmd.args(["auth", "login", "--no-browser", "--json"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // stderr 重定向到空设备而不是 piped：授权成功/失败信息会写 stderr，
+        // 管道读端被 drop 后写端可能收到 EPIPE/BrokenPipe，影响 CLI 退出行为。
+        .stderr(Stdio::null());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -917,18 +919,23 @@ fn run_login_sequence(app: AppHandle) {
         fail(&app, "无法读取 Seedling 登录输出");
         return;
     };
-    let _ = child.stderr.take();
     *login_child().lock().unwrap() = Some(child);
 
     // 逐行累积读取 stdout：CLI 输出的是多行 JSON，需拼成完整对象后再解析；
     // 读到 EOF（进程结束：授权完成、超时或被取消）后停止。
     let reader = BufReader::new(stdout);
     let mut buffer = String::new();
+    let mut stdout_tail = String::new();
     for line in reader.lines() {
         match line {
             Ok(text) => {
                 buffer.push_str(&text);
                 buffer.push('\n');
+                if stdout_tail.len() > 1600 {
+                    stdout_tail.clear();
+                }
+                stdout_tail.push_str(&text);
+                stdout_tail.push('\n');
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&buffer) {
                     if extract_login_fields(&app, &value) {
                         buffer.clear();
@@ -962,7 +969,14 @@ fn run_login_sequence(app: AppHandle) {
                 };
             });
         }
-        Ok(_) => fail(&app, "登录未完成：可能已取消、超时或授权被拒绝"),
+        Ok(s) => fail(
+            &app,
+            &format!(
+                "登录未完成（CLI 退出码 {}）：可能已取消、超时或授权被拒绝\nCLI 输出：{}",
+                s.code().map_or_else(|| "未知".to_string(), |c| c.to_string()),
+                truncate(&stdout_tail, ERROR_DETAIL_LIMIT)
+            ),
+        ),
         Err(e) => fail(&app, &format!("等待登录结果失败: {e}")),
     }
 }

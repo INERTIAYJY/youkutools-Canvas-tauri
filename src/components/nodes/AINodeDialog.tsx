@@ -235,6 +235,21 @@ function AINodeDialog() {
     }
     updateNodeDataTransient(activeNodeId, patch);
   }, [activeNodeId, commitToHistory, updateNodeDataTransient]);
+
+  // 视频节点「在此节点生成」与数量：与时长滑块同一套连续写入（transient，拖动不卡）
+  const generateInPlace = data?.generateInPlace !== false;
+  const generateCount = (() => {
+    const raw = Number(data?.generateCount);
+    return Number.isFinite(raw) && raw >= 1 && raw <= 4 ? Math.floor(raw) : 1;
+  })();
+  const onChangeGenerateInPlace = useCallback(
+    (value: boolean) => updateContinuousNodeData({ generateInPlace: value }),
+    [updateContinuousNodeData],
+  );
+  const onChangeGenerateCount = useCallback(
+    (value: number) => updateContinuousNodeData({ generateCount: Math.min(4, Math.max(1, Math.floor(value))) }),
+    [updateContinuousNodeData],
+  );
   const handleCloseNodeDialog = useCallback(() => {
     finishContinuousEdit();
     closeNodeDialog();
@@ -1060,6 +1075,10 @@ function AINodeDialog() {
           seedanceRatio={(data.seedanceRatio as string) || '16:9'}
           seedanceDuration={data.seedanceDuration as number | undefined}
           generateAudio={data.generateAudio as boolean | undefined}
+          generateInPlace={generateInPlace}
+          generateCount={generateCount}
+          onChangeGenerateInPlace={onChangeGenerateInPlace}
+          onChangeGenerateCount={onChangeGenerateCount}
           videoReferences={data.videoReferences}
           onChangeVideoReferences={onChangeVideoReferences}
           onChangeSeedanceResolution={onChangeSeedanceResolution}

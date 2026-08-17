@@ -335,6 +335,12 @@ interface PromptPanelProps {
   seedanceRatio?: string;
   seedanceDuration?: number;
   generateAudio?: boolean;
+  /** 视频节点：在此节点生成并替换旧视频；false 时生成到右侧新建节点。默认 true。 */
+  generateInPlace?: boolean;
+  onChangeGenerateInPlace?: (value: boolean) => void;
+  /** 不在此节点生成时的数量（1-4），默认 1。 */
+  generateCount?: number;
+  onChangeGenerateCount?: (value: number) => void;
   videoReferences?: VideoReferenceItem[];
   onChangeVideoReferences?: (value: VideoReferenceItem[]) => void;
   onChangeSeedanceResolution?: (value: string) => void;
@@ -403,6 +409,10 @@ export default function PromptPanel({
   seedanceRatio,
   seedanceDuration,
   generateAudio,
+  generateInPlace,
+  onChangeGenerateInPlace,
+  generateCount,
+  onChangeGenerateCount,
   videoReferences,
   onChangeVideoReferences,
   onChangeSeedanceResolution,
@@ -450,25 +460,6 @@ export default function PromptPanel({
   const showToast = useAppStore((s) => s.showToast);
   const pendingPresetAction = useAppStore((s) => s.pendingPresetAction);
   const setPendingPresetAction = useAppStore((s) => s.setPendingPresetAction);
-
-  // 视频节点：是否在当前节点生成（默认 true，老节点按原逻辑）
-  const generateInPlace = useAppStore((s) => {
-    const node = s.nodes.find((n) => n.id === nodeId);
-    return (node?.data as import('../../../types').BaseNodeData | undefined)?.generateInPlace !== false;
-  });
-  const generateCount = useAppStore((s) => {
-    const node = s.nodes.find((n) => n.id === nodeId);
-    const raw = (node?.data as import('../../../types').BaseNodeData | undefined)?.generateCount;
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed >= 1 && parsed <= 4 ? Math.floor(parsed) : 1;
-  });
-  const updateNodeData = useAppStore((s) => s.updateNodeData);
-  const onChangeGenerateInPlace = useCallback((value: boolean) => {
-    if (nodeId) updateNodeData(nodeId, { generateInPlace: value });
-  }, [nodeId, updateNodeData]);
-  const onChangeGenerateCount = useCallback((value: number) => {
-    if (nodeId) updateNodeData(nodeId, { generateCount: Math.min(4, Math.max(1, Math.floor(value))) });
-  }, [nodeId, updateNodeData]);
 
   const handleSubmit = useCallback((overridePrompt?: string, postProcess?: ImagePostProcess) => {
     const sourcePrompt = overridePrompt ?? prompt;

@@ -43,8 +43,8 @@ const BUILT_IN_SEARCH_PAGE_BUILDERS = [
     return `https://news.google.com/rss/search?${params.toString()}`;
   },
   (query: string) => {
-    const params = new URLSearchParams({ query });
-    return `https://www.sogou.com/web?${params.toString()}`;
+    const params = new URLSearchParams({ q: query });
+    return `https://www.bing.com/search?${params.toString()}`;
   },
 ] as const;
 

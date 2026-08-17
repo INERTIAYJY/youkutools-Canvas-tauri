@@ -14,6 +14,18 @@ describe('web page SPA rendering fallback', () => {
     expect(shouldRenderDynamicHtml(html, 'text/html; charset=utf-8', '')).toBe(true);
   });
 
+  it('requests rendering for a hashed non-module bundle (e.g. /static/js/index.xxx.js)', () => {
+    const html = `
+      <!doctype html>
+      <html>
+        <head><script defer src="/static/js/index.55998905b6.js"></script></head>
+        <body><div id="root"></div></body>
+      </html>
+    `;
+
+    expect(shouldRenderDynamicHtml(html, 'text/html; charset=utf-8', '')).toBe(true);
+  });
+
   it('keeps substantial server-rendered HTML on the static path', () => {
     const html = `
       <html><body><main>${'<p>API documentation</p>'.repeat(80)}</main>

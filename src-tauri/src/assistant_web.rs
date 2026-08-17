@@ -27,17 +27,30 @@ const MAX_URL_CHARS: usize = 2_048;
 const RENDER_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const RENDER_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 const RENDER_SETTLE_INTERVAL: Duration = Duration::from_millis(500);
-const RENDER_SETTLE_SAMPLES: usize = 12;
-const RENDER_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
+const RENDER_SETTLE_SAMPLES: usize = 20;
+const RENDER_MIN_TEXT_LENGTH: usize = 200;
+// 网络静默判定：连续 N 个采样周期内没有新增网络请求，视为页面已停止加载数据。
+const RENDER_NETWORK_QUIET_SAMPLES: usize = 3;
+// 受控交互与页内遍历的预算上限。
+const RENDER_INTERACT_TIMEOUT: Duration = Duration::from_secs(180);
+const RENDER_SCROLL_STEPS: usize = 10;
+const RENDER_SCROLL_INTERVAL: Duration = Duration::from_millis(300);
+const RENDER_EXPAND_MAX_CLICKS: usize = 20;
+const RENDER_TRAVERSE_MAX_PAGES: usize = 5;
+const RENDER_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src https:; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 const RENDER_INIT_SCRIPT: &str = r#"
 (() => {
   const blocked = () => Promise.reject(new TypeError('Blocked by AI Canvas read-only renderer'));
-  const isSameOriginGet = (input, init = {}) => {
+  const isReadOnlyHttpsGet = (input, init = {}) => {
     try {
       const request = input instanceof Request ? input : null;
       const method = String(init.method || request?.method || 'GET').toUpperCase();
+      if (method !== 'GET') return false;
+      if (init.body != null) return false;
       const rawUrl = request?.url || String(input);
-      return method === 'GET' && new URL(rawUrl, window.location.href).origin === window.location.origin;
+      const parsed = new URL(rawUrl, window.location.href);
+      // 只允许公开 HTTPS 读取，不携带任何凭据；仍禁止 http/data/blob 等协议。
+      return parsed.protocol === 'https:';
     } catch {
       return false;
     }
@@ -48,7 +61,7 @@ const RENDER_INIT_SCRIPT: &str = r#"
     Object.defineProperty(window, 'fetch', {
       configurable: false,
       writable: false,
-      value: (input, init = {}) => isSameOriginGet(input, init)
+      value: (input, init = {}) => isReadOnlyHttpsGet(input, init)
         ? nativeFetch(input, { ...init, method: 'GET', credentials: 'omit' })
         : blocked(),
     });
@@ -59,7 +72,7 @@ const RENDER_INIT_SCRIPT: &str = r#"
     const nativeSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
       const allowed = String(method).toUpperCase() === 'GET'
-        && new URL(String(url), window.location.href).origin === window.location.origin;
+        && (() => { try { return new URL(String(url), window.location.href).protocol === 'https:'; } catch { return false; } })();
       Object.defineProperty(this, '__aiCanvasReadAllowed', { value: allowed });
       return nativeOpen.call(this, method, url, ...rest);
     };
@@ -584,12 +597,20 @@ async fn evaluate_webview_json<T: DeserializeOwned>(
 async fn collect_rendered_page(webview: &WebviewWindow) -> Result<RenderedPagePayload, String> {
     let mut previous_length = None;
     let mut stable_samples = 0usize;
+    let mut quiet_samples = 0usize;
 
     for sample_index in 0..RENDER_SETTLE_SAMPLES {
         tokio::time::sleep(RENDER_SETTLE_INTERVAL).await;
-        let text_length = evaluate_webview_json::<usize>(
+        // 正文长度 + 网络资源计数一起看：既等正文出现，也等不再有新的网络请求。
+        // 资源计数在下方 network_quiet 判断处单独获取，这里仅取正文长度用于稳定判定。
+        let (text_length, _resource_count) = evaluate_webview_json::<(usize, usize)>(
             webview,
-            "document.body ? document.body.innerText.length : 0",
+            r#"(() => {
+              const len = document.body ? document.body.innerText.length : 0;
+              let count = 0;
+              try { count = performance.getEntriesByType('resource').length; } catch {}
+              return [len, count];
+            })()"#,
         )
         .await?;
         if previous_length == Some(text_length) {
@@ -598,11 +619,38 @@ async fn collect_rendered_page(webview: &WebviewWindow) -> Result<RenderedPagePa
             previous_length = Some(text_length);
             stable_samples = 0;
         }
-        if sample_index >= 3 && stable_samples >= 2 {
+
+        let network_quiet = evaluate_webview_json::<bool>(
+            webview,
+            r#"(() => {
+              try {
+                const now = performance.now();
+                const pending = performance.getEntriesByType('resource')
+                  .filter((entry) => entry.responseEnd === 0 || entry.responseEnd >= now)
+                  .length;
+                return pending === 0;
+              } catch { return true; }
+            })()"#,
+        )
+        .await?;
+        quiet_samples = if network_quiet { quiet_samples + 1 } else { 0 };
+
+        // 正文达到一定规模、长度已稳定、且网络已静默多轮 → 认为渲染完成。
+        let has_content = text_length >= RENDER_MIN_TEXT_LENGTH;
+        if sample_index >= 3
+            && stable_samples >= 2
+            && has_content
+            && quiet_samples >= RENDER_NETWORK_QUIET_SAMPLES
+        {
             break;
         }
     }
 
+    extract_rendered_payload(webview).await
+}
+
+/// 从当前 webview 页面提取净化后的正文负载（优先主内容区、剔除导航/页脚等噪声）。
+async fn extract_rendered_payload(webview: &WebviewWindow) -> Result<RenderedPagePayload, String> {
     evaluate_webview_json(
         webview,
         r#"(() => {
@@ -610,8 +658,12 @@ async fn collect_rendered_page(webview: &WebviewWindow) -> Result<RenderedPagePa
             if (!document.documentElement) {
               return { url: location.href, html: '', error: '页面没有可读取的文档节点' };
             }
-            const clone = document.documentElement.cloneNode(true);
-            clone.querySelectorAll('script, style, noscript, iframe, object, embed, form')
+            // 优先取主内容区，去掉侧边导航、页脚等噪声。
+            const root = document.querySelector('main, article, [role="main"]')
+              || document.querySelector('#content, #app, .content, .markdown-body')
+              || document.body;
+            const clone = root.cloneNode(true);
+            clone.querySelectorAll('script, style, noscript, iframe, object, embed, form, nav, aside, footer, header')
               .forEach((node) => node.remove());
             clone.querySelectorAll('*').forEach((node) => {
               for (const attribute of [...node.attributes]) {
@@ -632,6 +684,95 @@ async fn collect_rendered_page(webview: &WebviewWindow) -> Result<RenderedPagePa
         })()"#,
     )
     .await
+}
+
+/// 在页面内做受控交互：逐段滚动触发懒加载，并点击展开/折叠类元素以显形隐藏正文。
+/// 交互仍限定在当前页面内，不触发跳转、不提交表单。
+async fn interact_and_expand(webview: &WebviewWindow) -> Result<(), String> {
+    // 逐段滚动，触发懒加载内容。
+    for _ in 0..RENDER_SCROLL_STEPS {
+        let scrolled = evaluate_webview_json::<bool>(
+            webview,
+            r#"(() => {
+              try {
+                window.scrollBy(0, window.innerHeight);
+                return true;
+              } catch { return false; }
+            })()"#,
+        )
+        .await?;
+        if !scrolled {
+            break;
+        }
+        tokio::time::sleep(RENDER_SCROLL_INTERVAL).await;
+    }
+    // 回到顶部，避免滚动位置影响后续抓取。
+    let _ = evaluate_webview_json::<bool>(webview, "(() => { try { window.scrollTo(0, 0); return true; } catch { return false; } })()").await;
+
+    // 点击展开/折叠类元素，最多 RENDER_EXPAND_MAX_CLICKS 次。
+    for _ in 0..RENDER_EXPAND_MAX_CLICKS {
+        let clicked = evaluate_webview_json::<usize>(
+            webview,
+            r#"(() => {
+              try {
+                const candidates = [];
+                document.querySelectorAll('[aria-expanded="false"], summary, button, [role="button"]')
+                  .forEach((node) => {
+                    if (candidates.length >= 20) return;
+                    const text = (node.textContent || '').trim();
+                    const tag = node.tagName.toLowerCase();
+                    const isExpand = tag === 'summary'
+                      || node.getAttribute('aria-expanded') === 'false'
+                      || /展开|更多|收起|查看|详情|expand|more|show|read\s*more/i.test(text);
+                    if (isExpand && node.offsetParent !== null) {
+                      candidates.push(node);
+                    }
+                  });
+                const target = candidates[0];
+                if (!target) return 0;
+                target.click();
+                return 1;
+              } catch { return 0; }
+            })()"#,
+        )
+        .await?;
+        if clicked == 0 {
+            break;
+        }
+        tokio::time::sleep(RENDER_SCROLL_INTERVAL).await;
+    }
+
+    Ok(())
+}
+
+/// 尝试点击同源的“下一页”链接并等待内容变化，返回是否成功翻页。
+/// 仅跟随同源链接；SPA 内部切换会直接更新 DOM，真跳转则由 on_navigation 的同源约束兜底。
+async fn click_next_page(webview: &WebviewWindow) -> Result<bool, String> {
+    let clicked = evaluate_webview_json::<bool>(
+        webview,
+        r#"(() => {
+          try {
+            const anchors = [...document.querySelectorAll('a[href]')];
+            const next = anchors.find((a) => {
+              const text = (a.textContent || '').trim();
+              const rel = (a.getAttribute('rel') || '').toLowerCase();
+              return rel === 'next' || /^(下一页|下一頁|next|›|»|>)$/i.test(text);
+            });
+            if (!next) return false;
+            const url = new URL(next.getAttribute('href'), location.href);
+            if (url.origin !== location.origin) return false;
+            next.click();
+            return true;
+          } catch { return false; }
+        })()"#,
+    )
+    .await?;
+    if !clicked {
+        return Ok(false);
+    }
+    // 等新页内容加载。
+    tokio::time::sleep(RENDER_SETTLE_INTERVAL).await;
+    Ok(true)
 }
 
 async fn render_public_page(
@@ -708,21 +849,75 @@ async fn render_public_page(
             .await
             .map_err(|_| "动态网页加载超时".to_string())?
             .map_err(|_| "动态网页加载监听已关闭".to_string())?;
-        let rendered = collect_rendered_page(&webview).await?;
-        if let Some(error) = rendered.error.filter(|value| !value.trim().is_empty()) {
-            return Err(format!("动态网页渲染失败: {error}"));
-        }
-        let final_url = validate_url_shape(&rendered.url)?;
-        if !same_origin(&initial_url, &final_url) {
-            return Err("动态网页渲染发生了跨域跳转".to_string());
-        }
-        if rendered.html.trim().is_empty() {
-            return Err("动态网页渲染后没有可读取的正文".to_string());
-        }
+
+        // 受控交互（滚动 + 展开折叠）与同源页内遍历，统一受 180 秒硬超时约束。
+        // 该步骤失败不致命：退回已抓到的首屏正文，保证渲染路径仍可用。
+        let enriched = tokio::time::timeout(RENDER_INTERACT_TIMEOUT, async {
+            let mut merged_html = String::new();
+            let mut final_url = initial_url.to_string();
+            let mut page_count = 0usize;
+
+            loop {
+                interact_and_expand(&webview).await?;
+                let page = collect_rendered_page(&webview).await?;
+                if page.error.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                    break;
+                }
+                let page_url = match validate_url_shape(&page.url) {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+                if !same_origin(&initial_url, &page_url) {
+                    break;
+                }
+                if page.html.trim().is_empty() {
+                    break;
+                }
+                if !merged_html.is_empty() {
+                    merged_html.push_str("\n<!-- page-break -->\n");
+                }
+                merged_html.push_str(&page.html);
+                final_url = page_url.to_string();
+                page_count += 1;
+
+                if page_count >= RENDER_TRAVERSE_MAX_PAGES {
+                    break;
+                }
+                if !click_next_page(&webview).await? {
+                    break;
+                }
+            }
+
+            if merged_html.trim().is_empty() {
+                return Err("动态网页渲染后没有可读取的正文".to_string());
+            }
+            Ok((merged_html, final_url))
+        })
+        .await;
+
+        let (body, final_url) = match enriched {
+            Ok(Ok((merged_html, url))) => (merged_html, url),
+            // 交互/遍历失败或超时，退回首屏单页正文。
+            _ => {
+                let first = collect_rendered_page(&webview).await?;
+                if let Some(error) = first.error.filter(|value| !value.trim().is_empty()) {
+                    return Err(format!("动态网页渲染失败: {error}"));
+                }
+                let url = validate_url_shape(&first.url)?;
+                if !same_origin(&initial_url, &url) {
+                    return Err("动态网页渲染发生了跨域跳转".to_string());
+                }
+                if first.html.trim().is_empty() {
+                    return Err("动态网页渲染后没有可读取的正文".to_string());
+                }
+                (first.html, url.to_string())
+            }
+        };
+
         Ok(AssistantWebReadResponse {
-            url: final_url.to_string(),
+            url: final_url,
             content_type: "text/html; charset=utf-8".to_string(),
-            body: truncate_utf8_bytes(rendered.html, MAX_RESPONSE_BYTES),
+            body: truncate_utf8_bytes(body, MAX_RESPONSE_BYTES),
             fetched_at: now_millis(),
         })
     }

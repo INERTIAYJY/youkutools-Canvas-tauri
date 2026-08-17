@@ -14,7 +14,9 @@ interface NativeWebReadResponse {
 
 const MIN_STATIC_PAGE_TEXT = 800;
 const SPA_ROOT_PATTERN = /<(?:div|main|section)\b[^>]*(?:\bid=["'](?:root|app|__next|__nuxt|svelte)["']|\bdata-reactroot\b)[^>]*>/i;
-const SPA_BOOTSTRAP_PATTERN = /<script\b[^>]*(?:\btype=["']module["']|\bsrc=["'][^"']+(?:\.m?js|\/_next\/|\/_nuxt\/)[^"']*["'])[^>]*>/i;
+// SPA 入口通常由构建工具产出带 hash 的 JS 文件（例如 /static/js/index.55998905b6.js），
+// 这些脚本不一定是 type="module"，src 也可能不是 .mjs/_next/_nuxt，但同样依赖客户端渲染。
+const SPA_BOOTSTRAP_PATTERN = /<script\b[^>]*\bsrc=["'][^"']+\.js(?:\?[^"']*)?["'][^>]*>/i;
 
 export interface WebPageResult {
   source: WebSource;
@@ -144,7 +146,10 @@ function extractReadableText(
   }
   const document = new DOMParser().parseFromString(body, 'text/html');
   const title = normalizeText(document.querySelector('title')?.textContent ?? '') || undefined;
-  const root = document.querySelector('article, main') ?? document.body;
+  // 优先取主内容区，去掉侧边导航、页脚等噪声；与 Rust 侧渲染提取保持一致。
+  const root = document.querySelector('main, article, [role="main"]')
+    ?? document.querySelector('#content, #app, .content, .markdown-body')
+    ?? document.body;
   return {
     title,
     text: root ? normalizeText(structuredText(root)) : '',

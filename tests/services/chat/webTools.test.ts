@@ -177,7 +177,7 @@ describe('web agent tools', () => {
     expect(result.modelContent).toContain(
       'https://news.google.com/rss/search?q=latest+ai&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans',
     );
-    expect(result.modelContent).toContain('https://www.sogou.com/web?query=latest+ai');
+    expect(result.modelContent).toContain('https://www.bing.com/search?q=latest+ai');
   });
 
   it('uses search pages only for navigation and grants their result links', async () => {
@@ -212,7 +212,7 @@ describe('web agent tools', () => {
     expect(extractTool.authorize?.(context, { url: resultUrl })).toEqual({ allowed: true });
   });
 
-  it('switches from Google News to Sogou when the first navigation request fails', async () => {
+  it('switches from Google News to Bing when the first navigation request fails', async () => {
     const googleUrl = 'https://news.google.com/rss/search?q=latest+ai&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans';
     readWebPageMock.mockRejectedValue('网页返回 HTTP 429');
 
@@ -220,10 +220,10 @@ describe('web agent tools', () => {
 
     expect(result).toMatchObject({
       status: 'success',
-      summary: 'Google News 搜索入口不可用，已切换到搜狗',
+      summary: 'Google News 搜索入口不可用，已切换到必应',
     });
-    expect(result.modelContent).toContain('请立即调用 web_extract 打开搜狗搜索入口');
-    expect(result.modelContent).toContain('https://www.sogou.com/web?query=latest+ai');
+    expect(result.modelContent).toContain('请立即调用 web_extract 打开必应搜索入口');
+    expect(result.modelContent).toContain('https://www.bing.com/search?q=latest+ai');
   });
 
   it('browses public HTTPS without a key and grants links discovered on the page', async () => {

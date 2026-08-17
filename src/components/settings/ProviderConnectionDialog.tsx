@@ -49,22 +49,27 @@ const PROVIDER_LINKS: Record<string, string> = {
 };
 
 function buildRelayAssistantPrompt(connectionName: string, baseUrl: string): string {
+  const trimmedBase = baseUrl.trim().replace(/\/+$/, '');
+  // new-api / one-api 的文档页就在 {地址}/docs，从接口地址直接推导，省去用户手动粘贴文档链接。
+  const docsLink = trimmedBase
+    ? `${trimmedBase}/docs`
+    : '【请在这里粘贴该中转站的文档或模型列表页面 HTTPS 链接（若上面的接口地址已填，这里可留空，我会自动尝试 /docs）】';
   return [
     '请把这个「中转站 / 聚合 API」里能识别到的全部模型都添加为自定义接口配置。',
     '',
     `目标连接名称：${connectionName || '（未填，可自定义）'}`,
-    baseUrl
-      ? `接口地址（Base URL）：${baseUrl} —— 所有模型都用这个真实接口地址，不要拿文档站域名当 Base URL。`
-      : '接口地址（Base URL）：未填，请从文档 / 中转站地址里确定真实的 API 接口地址（不是文档站域名）。',
+    trimmedBase
+      ? `接口地址（Base URL）：${trimmedBase} —— 所有模型都用这个真实接口地址，不要拿文档站域名当 Base URL。`
+      : '接口地址（Base URL）：未填。请从文档 / 中转站地址确定真实 API 接口地址（不是文档站域名）；new-api / one-api 中转站的文档域名通常就是 API 域名。',
     '',
     '请这样操作：',
-    '1. 用 provider_docs_read 逐页详细阅读该中转站的文档、模型清单 / 定价页与 API 参考，沿同站链接尽量把所有模型找全。',
-    '2. 逐个核对模型 ID、显示名称、类型（文本 / 图片 / 视频 / 音频）、请求与响应示例，以及异步接口的轮询方式。',
-    '3. 用 provider_config_preview 生成草稿并用 provider_config_apply 保存；尽量涵盖识别到的全部模型（同一 Base URL，单次最多 16 个，超出就分多次保存）。',
+    '1. 用 provider_docs_read 阅读该中转站的文档 / 模型清单。若是 new-api / one-api 中转站，工具会自动返回公开模型清单、公告与接口调用格式。',
+    '2. 逐个核对模型 ID、显示名称、类型（文本 / 图片 / 视频 / 音频）。文档页是登录后台拿不到请求示例时：文本用 OpenAI 标准 chat/completions，图片用 images/generations，视频用 POST /v1/videos（请求体含 model、prompt、images、duration、resolution），音频用 audio/speech；不要因此停下或反复追问。',
+    '3. 读完模型清单后必须立即调用 provider_config_preview 生成草稿，再调用 provider_config_apply 保存；不要只报告模型清单就结束任务。尽量涵盖识别到的全部模型（同一 Base URL，单次最多 16 个，超出就分多次保存）。',
     '4. 不要写入 API Key，把其余内容都填好即可；保存后我会自己补填 API Key。',
     '',
     '中转站文档 / 模型列表链接：',
-    '【请在这里粘贴该中转站的文档或模型列表页面 HTTPS 链接】',
+    docsLink,
   ].join('\n');
 }
 

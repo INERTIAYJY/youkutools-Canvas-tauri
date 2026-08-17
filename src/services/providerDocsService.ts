@@ -3,6 +3,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { normalizeProviderDocUrl } from './chat/providerDocsGrantService';
+import { shouldRenderDynamicHtml } from './webPageService';
 
 interface NativeProviderDocsResponse {
   url: string;
@@ -82,6 +83,182 @@ function extractHtmlPage(body: string, finalUrl: string): {
   return { title, text, links };
 }
 
+// ---- new-api（New API）中转站识别 ----
+
+interface NewApiPricingItem {
+  model_name?: unknown;
+  display_name?: unknown;
+  description?: unknown;
+  model_price?: unknown;
+  supported_endpoint_types?: unknown;
+}
+
+export interface NewApiStatusInfo {
+  systemName?: string;
+  announcements: string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 从模型 ID、显示名与端点类型推断模型类别，返回中文标签，供模型映射到
+ * text / image / video / audio 配置枚举。
+ */
+export function inferRelayModelCategory(item: NewApiPricingItem): string {
+  const types = Array.isArray(item.supported_endpoint_types)
+    ? item.supported_endpoint_types
+      .filter((value): value is string => typeof value === 'string')
+      .join(' ')
+      .toLowerCase()
+    : '';
+  const idName = `${String(item.model_name ?? '')} ${String(item.display_name ?? '')}`.toLowerCase();
+  const haystack = `${types} ${idName}`;
+  if (/video|seedance|sora|veo|kling|hailuo|wan\d|skyreels|vidu|minimax/.test(haystack)) return '视频';
+  if (/image|seedream|imagen|flux|banana|midjourney|recraft|dall-e|drawing/.test(haystack)) return '图片';
+  if (/audio|tts|speech|music|voice|whisper|transcri/.test(haystack)) return '音频';
+  return '文本';
+}
+
+/** 解析 /api/pricing 响应，返回 new-api 模型项；非 new-api 结构返回 null。 */
+export function parseNewApiPricingPayload(body: string): NewApiPricingItem[] | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord(payload) || !Array.isArray(payload.data)) return null;
+  const items = payload.data
+    .filter(isRecord)
+    .filter((item) => typeof item.model_name === 'string' && item.model_name.trim() !== '');
+  return items.length > 0 ? (items as unknown as NewApiPricingItem[]) : null;
+}
+
+/** 解析 /api/status 响应，提取站名与公告；非 new-api 结构返回 null。 */
+export function parseNewApiStatusPayload(body: string): NewApiStatusInfo | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord(payload) || !isRecord(payload.data)) return null;
+  const data = payload.data;
+  const announcements = Array.isArray(data.announcements)
+    ? data.announcements
+      .filter(isRecord)
+      .map((item) => (typeof item.content === 'string' ? item.content.trim() : ''))
+      .filter(Boolean)
+    : [];
+  const systemName = typeof data.system_name === 'string' ? data.system_name.trim() : undefined;
+  if (!systemName && announcements.length === 0) return null;
+  return { systemName, announcements };
+}
+
+/** 把 new-api 模型清单与公告拼成可读文档正文。 */
+export function buildRelayCatalogContent(
+  rawUrl: string,
+  pricing: NewApiPricingItem[],
+  status: NewApiStatusInfo | null,
+): { title: string; text: string } {
+  const hostname = new URL(rawUrl).hostname;
+  const title = status?.systemName || hostname;
+  const lines = [
+    `这是 new-api（New API）中转站「${title}」的公开模型清单。`,
+    '该站文档页是登录后台，无法匿名读取正文；以下信息来自公开接口 /api/pricing 与 /api/status，可直接用于生成配置草稿。',
+    '',
+    `模型清单（共 ${pricing.length} 个）：`,
+  ];
+  pricing.forEach((item, index) => {
+    const id = String(item.model_name ?? '').trim();
+    const name = typeof item.display_name === 'string' && item.display_name.trim()
+      ? item.display_name.trim()
+      : id;
+    const endpointTypes = Array.isArray(item.supported_endpoint_types)
+      ? item.supported_endpoint_types.filter((value): value is string => typeof value === 'string')
+      : [];
+    lines.push(`${index + 1}. ${id}`);
+    lines.push(`   显示名：${name}`);
+    lines.push(`   类型：${inferRelayModelCategory(item)}`);
+    if (endpointTypes.length > 0) lines.push(`   端点类型：${endpointTypes.join('、')}`);
+    if (typeof item.model_price === 'number') lines.push(`   价格：¥${item.model_price}/次`);
+    if (typeof item.description === 'string' && item.description.trim()) {
+      lines.push(`   说明：${item.description.trim().replace(/\s+/g, ' ')}`);
+    }
+  });
+  if (status && status.announcements.length > 0) {
+    lines.push('', '站内公告（来源 /api/status，含最新模型与请求提示）：');
+    for (const announcement of status.announcements.slice(0, 15)) {
+      const condensed = normalizeText(announcement).slice(0, 400);
+      if (condensed) lines.push(`- ${condensed}`);
+    }
+  }
+  lines.push(
+    '',
+    '接口调用格式参考（new-api 公开约定，供生成配置草稿）：',
+    '- 文本模型（端点含 chat/completion）：POST /v1/chat/completions，OpenAI 标准 {model, messages} 格式。',
+    '- 图片模型（端点含 image-generation）：POST /v1/images/generations，OpenAI 标准 {model, prompt, size, n} 格式。',
+    '- 视频模型（端点含 video）：POST /v1/videos，请求体含 model、prompt、images（公网 HTTPS 图片 URL 数组）、duration、resolution；异步任务返回任务 ID，用 /v1/videos/{任务ID} 轮询结果。',
+    '- 音频模型（端点含 audio/tts/speech）：POST /v1/audio/speech，OpenAI 标准 {model, input, voice} 格式。',
+  );
+  return { title, text: lines.join('\n') };
+}
+
+async function probeNewApiPricing(
+  origin: string,
+  signal?: AbortSignal,
+): Promise<NewApiPricingItem[] | null> {
+  if (signal?.aborted) return null;
+  try {
+    const response = await invoke<NativeProviderDocsResponse>(
+      'provider_docs_read',
+      { url: `${origin}/api/pricing` },
+    );
+    if (!response.contentType.startsWith('application/json')) return null;
+    return parseNewApiPricingPayload(response.body);
+  } catch {
+    return null;
+  }
+}
+
+async function probeNewApiStatus(
+  origin: string,
+  signal?: AbortSignal,
+): Promise<NewApiStatusInfo | null> {
+  if (signal?.aborted) return null;
+  try {
+    const response = await invoke<NativeProviderDocsResponse>(
+      'provider_docs_read',
+      { url: `${origin}/api/status` },
+    );
+    if (!response.contentType.startsWith('application/json')) return null;
+    return parseNewApiStatusPayload(response.body);
+  } catch {
+    return null;
+  }
+}
+
+async function readNewApiRelayCatalog(
+  rawUrl: string,
+  signal?: AbortSignal,
+): Promise<ProviderDocsPage | null> {
+  const origin = new URL(rawUrl).origin;
+  const pricing = await probeNewApiPricing(origin, signal);
+  if (!pricing) return null;
+  const status = await probeNewApiStatus(origin, signal);
+  const content = buildRelayCatalogContent(rawUrl, pricing, status);
+  return {
+    title: content.title,
+    url: rawUrl,
+    text: content.text,
+    links: [],
+    fetchedAt: Date.now(),
+    truncated: false,
+  };
+}
+
 export async function readProviderDocsPage(
   rawUrl: string,
   options: { signal?: AbortSignal; maxTextChars?: number } = {},
@@ -92,17 +269,46 @@ export async function readProviderDocsPage(
     throw new Error('厂商文档读取仅在 Tauri 桌面环境可用');
   }
   if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-  const response = await invoke<NativeProviderDocsResponse>('provider_docs_read', { url: normalized });
+  let response = await invoke<NativeProviderDocsResponse>('provider_docs_read', { url: normalized });
   if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-  const finalUrl = normalizeProviderDocUrl(response.url);
+  let finalUrl = normalizeProviderDocUrl(response.url);
   if (!finalUrl || new URL(finalUrl).origin !== new URL(normalized).origin) {
     throw new Error('厂商文档最终地址未通过同站安全校验');
   }
 
-  const extracted = response.contentType.startsWith('application/json')
+  let extracted = response.contentType.startsWith('application/json')
     ? { title: new URL(finalUrl).hostname, text: normalizeText(response.body), links: [] }
     : extractHtmlPage(response.body, finalUrl);
-  if (!extracted.text) throw new Error('厂商文档页面没有可读取的正文');
+
+  // 登录后台 SPA（如 new-api 中转站）读不到正文时，改读公开模型清单与公告。
+  if (!extracted.text) {
+    const relay = await readNewApiRelayCatalog(finalUrl, options.signal);
+    if (relay) {
+      const limit = Math.max(1, Math.min(options.maxTextChars ?? 10_000, 10_000));
+      return { ...relay, text: relay.text.slice(0, limit), truncated: relay.text.length > limit };
+    }
+  }
+
+  // 非中转站的公开 SPA 文档站走受控渲染回退。
+  if (!extracted.text && shouldRenderDynamicHtml(response.body, response.contentType, extracted.text)) {
+    response = await invoke<NativeProviderDocsResponse>('assistant_web_render', { url: finalUrl });
+    if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    const renderedUrl = normalizeProviderDocUrl(response.url);
+    if (!renderedUrl || new URL(renderedUrl).origin !== new URL(normalized).origin) {
+      throw new Error('厂商文档渲染后的最终地址未通过同站安全校验');
+    }
+    finalUrl = renderedUrl;
+    extracted = response.contentType.startsWith('application/json')
+      ? { title: new URL(finalUrl).hostname, text: normalizeText(response.body), links: [] }
+      : extractHtmlPage(response.body, finalUrl);
+  }
+
+  if (!extracted.text) {
+    throw new Error(
+      '厂商文档页面没有可读取的正文；该页面可能是需要登录的后台 SPA，无法匿名读取。'
+      + '请改用公开的模型清单/状态接口，或请用户直接提供模型列表与请求示例，不要重复读取同一地址。',
+    );
+  }
   const limit = Math.max(1, Math.min(options.maxTextChars ?? 10_000, 10_000));
   return {
     title: extracted.title,

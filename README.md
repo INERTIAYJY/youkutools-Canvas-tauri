@@ -17,7 +17,9 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 
 **在线体验：** <https://tenney95.github.io/AI-Canvas-tauri/>（首屏可直接试用，内置演示画布）
 
-[在线体验](https://tenney95.github.io/AI-Canvas-tauri/) · [核心能力](#核心能力) · [快速开始](#快速开始) · [项目文档](#项目文档) · [License](#license)
+**下载：** <https://github.com/tenney95/AI-Canvas-tauri/releases>（获取桌面安装包）
+
+[在线体验](https://tenney95.github.io/AI-Canvas-tauri/) · [下载](https://github.com/tenney95/AI-Canvas-tauri/releases) · [核心能力](#核心能力) · [快速开始](#快速开始) · [项目文档](#项目文档) · [License](#license)
 
 > 在线版适合体验画布与界面。文件系统、凭据存储、独立窗口、3D 导演台、本地模型等能力依赖 Tauri 桌面环境；完整体验请按下方步骤启动桌面应用。
 

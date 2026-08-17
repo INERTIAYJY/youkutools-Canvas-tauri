@@ -288,9 +288,10 @@ function AINodeDialog() {
     [updateContinuousNodeData]
   );
 
-    /**
-   * 不勾选「在此节点生成」：串行生成 count 条视频，每条落到源节点右侧新建的视频节点并自动连线。
-   * 一次 addNodesWithEdges 提交全部节点与连线（单个历史快照）。
+  /**
+   * 不勾选「在此节点生成」：立即构建 count 个空白视频节点（占位，显示生成中），
+   * 并行向模型提交 count 个生成请求，各自完成后把结果填入对应空白节点。
+   * 节点与连线一次 addNodesWithEdges 提交（单个历史快照）。
    */
   const runVideoToNewNodes = useCallback(async (count: number) => {
     const store = useAppStore.getState();
@@ -326,7 +327,7 @@ function AINodeDialog() {
       videoFps,
     );
     const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
-    const params = {
+    const baseParams = {
       prompt: effectivePrompt,
       model: nodeModel,
       provider: nodeProvider,
@@ -339,28 +340,73 @@ function AINodeDialog() {
       generateAudio: latestData.generateAudio,
       workflowId: latestData.workflowId,
       workflowInputs: latestData.workflowInputs,
-      nodeId: submittingNodeId,
     };
     const isStill = () => {
       const s = useAppStore.getState();
       return s.currentProjectId === submittingProjectId
         && s.nodes.some((n) => n.id === submittingNodeId);
     };
-    updateNodeDataTransient(submittingNodeId, { status: 'loading', error: undefined });
-    showToast(`正在生成 ${count} 条视频`);
-    const results: Array<{ url: string; mediaUrl: string; filePath?: string }> = [];
-    try {
-      for (let i = 0; i < count; i++) {
+
+    // 1. 立即构建 count 个空白节点（status='loading' 占位）+ 连线，一次历史快照
+    const nodeHeight = Number(sourceNode.data?.nodeHeight) || 220;
+    const gap = 40;
+    const newNodes = Array.from({ length: count }, (_, index) => {
+      const placement = derivedNodePlacement(sourceNode, 40);
+      return {
+        id: `node-${generateId()}`,
+        type: sourceNode.type,
+        position: {
+          x: placement.position.x,
+          y: placement.position.y + index * (nodeHeight + gap),
+        },
+        ...(placement.parentId ? { parentId: placement.parentId } : {}),
+        data: {
+          ...latestData,
+          label: `${nodeLabel}-${index + 1}`,
+          videoUrl: undefined,
+          sourceUrl: undefined,
+          filePath: undefined,
+          thumbnailUrl: undefined,
+          output: undefined,
+          status: 'loading',
+          error: undefined,
+          generateInPlace: true,
+        } as BaseNodeData,
+      };
+    });
+    const newEdges = newNodes.map((n) => ({
+      id: `edge-${submittingNodeId}-${n.id}`,
+      source: submittingNodeId,
+      target: n.id,
+      sourceHandle: 'right',
+      targetHandle: 'left',
+    }));
+    addNodesWithEdges(newNodes, newEdges);
+    showToast(`正在并行生成 ${count} 条视频`);
+
+    // 2. 并行提交生成请求，每个结果填入对应空白节点
+    await Promise.all(newNodes.map(async (node, index) => {
+      const nodeParams = { ...baseParams, nodeId: node.id };
+      try {
         if (!isStill()) return;
-        const result = await generateVideo(params);
+        const result = await generateVideo(nodeParams);
         if (!isStill()) return;
         const saved = submittingProjectId
-          ? await downloadUrlAndSave(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${i + 1}`).catch(() => null)
+          ? await downloadUrlAndSave(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${index + 1}`).catch(() => null)
           : null;
-        results.push({ url: result.url, mediaUrl: saved?.assetUrl || result.url, filePath: saved?.filePath });
-        recordOutputHistory(submittingNodeId, {
-          nodeId: submittingNodeId,
-          nodeLabel,
+        const mediaUrl = saved?.assetUrl || result.url;
+        useAppStore.getState().updateNodeData(node.id, {
+          videoUrl: mediaUrl,
+          sourceUrl: result.url,
+          filePath: saved?.filePath,
+          thumbnailUrl: result.url,
+          output: result.url,
+          status: 'success',
+          error: undefined,
+        });
+        recordOutputHistory(node.id, {
+          nodeId: node.id,
+          nodeLabel: `${nodeLabel}-${index + 1}`,
           timestamp: Date.now(),
           prompt: effectivePrompt,
           output: result.url,
@@ -370,54 +416,21 @@ function AINodeDialog() {
           status: 'success',
           mediaUrl: result.url,
           filePath: saved?.filePath,
-          params: { videoResolution: params.videoResolution, videoFps, videoFrames, seedanceResolution: params.seedanceResolution, seedanceRatio: params.seedanceRatio, seedanceDuration, generateAudio: params.generateAudio },
+          params: { videoResolution: baseParams.videoResolution, videoFps, videoFrames, seedanceResolution: baseParams.seedanceResolution, seedanceRatio: baseParams.seedanceRatio, seedanceDuration, generateAudio: baseParams.generateAudio },
         });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '视频生成失败');
+        if (isStill()) useAppStore.getState().updateNodeData(node.id, { status: 'error', error: msg });
       }
-      // 新建节点（垂直排开）+ 连线，一次历史快照
-      const nodeHeight = Number(sourceNode.data?.nodeHeight) || 220;
-      const gap = 40;
-      const newNodes = results.map((r, index) => {
-        const placement = derivedNodePlacement(sourceNode, 40);
-        return {
-          id: `node-${generateId()}`,
-          type: sourceNode.type,
-          position: {
-            x: placement.position.x,
-            y: placement.position.y + index * (nodeHeight + gap),
-          },
-          ...(placement.parentId ? { parentId: placement.parentId } : {}),
-          data: {
-            ...latestData,
-            label: `${nodeLabel}-${index + 1}`,
-            videoUrl: r.mediaUrl,
-            sourceUrl: r.url,
-            filePath: r.filePath,
-            thumbnailUrl: r.url,
-            output: r.url,
-            status: 'success',
-            generateInPlace: true,
-          } as BaseNodeData,
-        };
-      });
-      const newEdges = newNodes.map((n) => ({
-        id: `edge-${submittingNodeId}-${n.id}`,
-        source: submittingNodeId,
-        target: n.id,
-        sourceHandle: 'right',
-        targetHandle: 'left',
-      }));
-      addNodesWithEdges(newNodes, newEdges);
-      updateNodeDataTransient(submittingNodeId, { status: 'idle' });
-      showToast(`已生成 ${count} 条视频`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '视频生成失败');
-      if (isStill()) updateNodeDataTransient(submittingNodeId, { status: 'idle', error: msg });
-      showToast(msg, 'error');
-    }
+    }));
+
+    if (isStill()) updateNodeDataTransient(submittingNodeId, { status: 'idle' });
   }, [activeNodeId, currentProjectId, showToast, updateNodeDataTransient, recordOutputHistory, addNodesWithEdges]);
-// 调用选中模型生成（文本 or 图片）
+
+  // 调用选中模型生成（文本 or 图片）
   // overridePrompt: / 指令菜单直接触发时传入的整合后模板，不走 store → 对话框不闪烁
-  const onSubmit = useCallback(async (overridePrompt?: string, postProcess?: ImagePostProcess) => {    finishContinuousEdit();
+  const onSubmit = useCallback(async (overridePrompt?: string, postProcess?: ImagePostProcess) => {
+    finishContinuousEdit();
     // 实时从 store 读取全部数据 — 避免闭包 data 为 undefined
     const store = useAppStore.getState();
     const latestNode = store.nodes.find((n) => n.id === activeNodeId);

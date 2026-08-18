@@ -520,7 +520,7 @@ function AvatarMenu() {
             <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">社区</h3>
             <div className="flex flex-col gap-2">
               <a
-                href="https://github.com/Tenney95/AI-Canvas-tauri"
+                href="https://github.com/INERTIAYJY/youkutools-Canvas-tauri"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-canvas-hover hover:bg-canvas-border transition-colors text-xs text-canvas-text-secondary hover:text-canvas-text"

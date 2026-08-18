@@ -148,6 +148,11 @@ export async function generateImagesBatch(
     return singleResult(await executeComfyUIGenerate({ ...params, prompt }, signal, allImageUrls));
   }
 
+  // comfyui 从不注册在 providers 里，落到下面的 default 分支只会误报「未配置 API Key」
+  if (provider === 'comfyui') {
+    throw new Error('未选择 ComfyUI 工作流\n请在模型选择器中导入并选择工作流');
+  }
+
   // 参考图传输格式由通用模型配置决定；其他 Provider 保持上传图床的既有行为。
   allImageUrls = usesImageDataUrls
     ? await resolveImageDataUrlArray(allImageUrls, signal)

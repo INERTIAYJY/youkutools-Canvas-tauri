@@ -84,6 +84,7 @@ export async function executeGeneration(
         const batch = await generateImagesBatch({
           prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
           imageSize, aspectRatio, nodeId,
+          workflowId: data.workflowId, workflowInputs: data.workflowInputs,
         }, batchCount);
         if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
         await applyImageBatchResults({
@@ -99,6 +100,7 @@ export async function executeGeneration(
       const result = await generateImage({
         prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
         imageSize, aspectRatio, nodeId,
+        workflowId: data.workflowId, workflowInputs: data.workflowInputs,
       });
       if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
 
@@ -147,6 +149,7 @@ export async function executeGeneration(
       const result = await generateImage({
         prompt: buildPanoramaPrompt(effectivePrompt), model: nodeModel, provider: nodeProvider,
         imageSize, aspectRatio, nodeId,
+        workflowId: data.workflowId, workflowInputs: data.workflowInputs,
       });
       if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
       const saved = submittingProjectId
@@ -181,6 +184,7 @@ export async function executeGeneration(
         prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
         videoResolution, videoFps, videoFrames, seedanceResolution, seedanceRatio,
         seedanceDuration, generateAudio: genAudio, nodeId,
+        workflowId: data.workflowId, workflowInputs: data.workflowInputs,
       });
       if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
       const saved = submittingProjectId
@@ -211,6 +215,8 @@ export async function executeGeneration(
         musicDuration: data.musicDuration,
         autoGenerateLyrics: data.autoGenerateLyrics,
         nodeId,
+        workflowId: data.workflowId,
+        workflowInputs: data.workflowInputs,
       });
       if (!isStillCurrentSubmission()) {
         if (result.url.startsWith('blob:')) URL.revokeObjectURL(result.url);

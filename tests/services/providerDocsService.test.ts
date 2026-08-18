@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildGroupedModelChoiceList,
   buildRelayCatalogContent,
   inferRelayModelCategory,
   parseNewApiPricingPayload,
   parseNewApiStatusPayload,
 } from '../../src/services/providerDocsService';
+import { shouldRenderDynamicHtml } from '../../src/services/webPageService';
 
 describe('new-api relay catalog parsing', () => {
   const pricingBody = JSON.stringify({
@@ -90,5 +92,48 @@ describe('new-api relay catalog parsing', () => {
     expect(content.text).toContain('请求体字段务必以该模型自己的文档为准');
     expect(content.text).toContain('400 unsupported field');
     expect(content.text).toContain('/v1/videos');
+  });
+});
+
+describe('中转站文档站的 SPA 识别', () => {
+  it('识别出模型接口页是 SPA 空壳，从而走渲染而不是模型清单兜底', () => {
+    // api.paipu.net 实测：/docs 与 /docs/videos/{模型ID} 返回的都是这个 951 字节空壳。
+    // 这个判断为真，readProviderDocsPage 才会先渲染拿到单模型的真实字段；
+    // 一旦判为假就会退回按 origin 探测的 /api/pricing 清单，助手又只能看到模型 ID。
+    const shell = [
+      '<!doctype html><html lang="en"><head><meta charset="UTF-8" />',
+      '<title>Lec API</title></head>',
+      '<body><div id="root"></div>',
+      '<script type="module" crossorigin src="/assets/index-abc.js"></script>',
+      '</body></html>',
+    ].join('');
+
+    expect(shouldRenderDynamicHtml(shell, 'text/html; charset=utf-8', '')).toBe(true);
+    // 已经有正文的静态页不该多渲染一次
+    expect(shouldRenderDynamicHtml(shell, 'text/html', 'x'.repeat(2000))).toBe(false);
+  });
+});
+
+describe('分类模型清单', () => {
+  it('按 文本/图片/视频/音频 分组，供助手原样转述给用户挑选', () => {
+    const grouped = buildGroupedModelChoiceList([
+      { model_name: 'lec-grok-4.5', display_name: 'Grok 4.5', supported_endpoint_types: ['chat/completions'] },
+      { model_name: 'lec-image-2', display_name: 'image-2 通用版', supported_endpoint_types: ['image-generation'] },
+      { model_name: 'lec-seed-2-0-900', display_name: 'Seedance 2.0 900（专线）', supported_endpoint_types: ['openai-video'] },
+      // 没有 display_name 时用模型 ID 兜底
+      { model_name: 'lec-seed-2-5-900', supported_endpoint_types: ['openai-video'] },
+    ]);
+
+    expect(grouped).toBe([
+      '【文本】',
+      '  - Grok 4.5 —— lec-grok-4.5',
+      '【图片】',
+      '  - image-2 通用版 —— lec-image-2',
+      '【视频】',
+      '  - Seedance 2.0 900（专线） —— lec-seed-2-0-900',
+      '  - lec-seed-2-5-900 —— lec-seed-2-5-900',
+    ].join('\n'));
+
+    expect(buildGroupedModelChoiceList([])).toBe('');
   });
 });

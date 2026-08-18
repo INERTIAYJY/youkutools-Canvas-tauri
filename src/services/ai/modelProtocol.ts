@@ -737,6 +737,19 @@ function resolveAuthentication(auth: ModelProtocolAuthConfig | undefined): Model
   return auth ?? { type: 'bearer' };
 }
 
+/**
+ * 协议声明了鉴权却拿不到 API Key 时直接拦下。
+ * 否则请求会不带 Authorization 头照常发出去，用户看到的是上游一句 401 Invalid token，
+ * 完全看不出是本地没填密钥——Agent 建的连接默认就是空密钥，很容易踩到。
+ */
+function assertModelProtocolApiKey(
+  auth: ModelProtocolAuthConfig | undefined,
+  apiKey: string,
+): void {
+  if (apiKey || resolveAuthentication(auth).type === 'none') return;
+  throw new Error('该模型所在的连接还没有填写 API Key，请在「设置 → API Key」中补填后重试');
+}
+
 function applyQueryAuthentication(
   rawUrl: string,
   auth: ModelProtocolAuthConfig | undefined,
@@ -804,6 +817,7 @@ export function buildModelProtocolRequest(
   options: BuildModelProtocolRequestOptions,
 ): BuiltModelProtocolRequest {
   const protocol = parseModelExecutionProtocol(options.protocol);
+  assertModelProtocolApiKey(protocol.auth, options.apiKey);
   const context: Record<string, unknown> = { ...options.variables };
   const renderedBody = renderRequestBody(protocol.submit, context);
   const url = buildSameOriginUrl(options.baseUrl, protocol.submit, context);

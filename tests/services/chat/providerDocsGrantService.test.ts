@@ -7,7 +7,7 @@ import {
   isProviderDocUrlGranted,
   normalizeProviderDocUrl,
   releaseProviderDocRead,
-} from '../../../src/services/chat/providerDocsGrantService';
+  listProviderDocGrants,} from '../../../src/services/chat/providerDocsGrantService';
 
 afterEach(() => clearProviderDocsGrantsForTests());
 
@@ -34,7 +34,7 @@ describe('providerDocsGrantService', () => {
       'https://other.example.com/models',
     ]);
 
-    expect(completion).toMatchObject({ depth: 0, remainingPages: 7 });
+    expect(completion).toMatchObject({ depth: 0, remainingPages: 23 });
     expect(completion.discoveredUrls).toEqual(['https://docs.example.com/models']);
     expect(isProviderDocUrlGranted(taskId, goal, 'https://docs.example.com/models')).toBe(true);
     expect(isProviderDocUrlGranted(taskId, goal, 'https://other.example.com/models')).toBe(false);
@@ -64,13 +64,64 @@ describe('providerDocsGrantService', () => {
     expect(() => beginProviderDocRead(taskId, goal, reservation.url)).not.toThrow();
   });
 
-  it('enforces the eight-page task budget', () => {
+  it('enforces the per-task page budget', () => {
+    // 中转站要逐个读模型接口页，页数放宽到 24；真正的硬边界是 80k 字符总量
     const taskId = 'task-budget';
-    const roots = Array.from({ length: 9 }, (_, index) => `https://docs.example.com/page-${index}`);
+    const roots = Array.from({ length: 25 }, (_, index) => `https://docs.example.com/page-${index}`);
     const goal = roots.join(' ');
-    for (const url of roots.slice(0, 8)) {
+    for (const url of roots.slice(0, 24)) {
       completeProviderDocRead(beginProviderDocRead(taskId, goal, url), 10, []);
     }
-    expect(() => beginProviderDocRead(taskId, goal, roots[8])).toThrow('最多读取 8 个');
+    expect(() => beginProviderDocRead(taskId, goal, roots[24])).toThrow('最多读取 24 个');
+  });
+});
+
+describe('跨任务的会话级授权', () => {
+  const docsRoot = 'https://api.paipu.net/docs';
+  const modelPage = 'https://api.paipu.net/docs/videos/lec-seed-2-0-900';
+
+  it('列清单的任务结束后，用户选完模型开的新任务仍能读模型接口页', () => {
+    // 第 1 轮：用户给了文档地址，助手读列表页并发现各模型接口页
+    completeProviderDocRead(
+      beginProviderDocRead('task-list', `请接入 ${docsRoot}`, docsRoot, 'conv-1'),
+      500,
+      [modelPage],
+    );
+
+    // 第 2 轮：用户只回「要 Seedance 2.0 900」，goal 里没有任何 URL
+    const goal = '要 Seedance 2.0 900';
+    expect(isProviderDocUrlGranted('task-pick', goal, modelPage, 'conv-1')).toBe(true);
+    expect(() => beginProviderDocRead('task-pick', goal, modelPage, 'conv-1')).not.toThrow();
+
+    // 换个会话不继承，避免授权无限扩散
+    expect(isProviderDocUrlGranted('task-other', goal, modelPage, 'conv-2')).toBe(false);
+  });
+
+  it('页数预算仍按任务独立计算，不被会话授权放大', () => {
+    completeProviderDocRead(
+      beginProviderDocRead('task-a', `请接入 ${docsRoot}`, docsRoot, 'conv-budget'),
+      500,
+      [modelPage],
+    );
+    const completion = completeProviderDocRead(
+      beginProviderDocRead('task-b', '继续', modelPage, 'conv-budget'),
+      500,
+      [],
+    );
+    // 新任务从满预算开始，只算它自己读的这 1 页
+    expect(completion.remainingPages).toBe(23);
+  });
+});
+
+describe('拒绝时给出可读地址', () => {
+  it('列出还没读过的已授权地址，已读的不再列', () => {
+    const goal = '接入 https://api.paipu.net/docs';
+    const root = 'https://api.paipu.net/docs';
+    const model = 'https://api.paipu.net/docs/videos/lec-seed-2-0-900';
+
+    expect(listProviderDocGrants('task-hint', goal)).toEqual([root]);
+    completeProviderDocRead(beginProviderDocRead('task-hint', goal, root), 100, [model]);
+    // 读过的根页不再出现，新发现的模型页可读
+    expect(listProviderDocGrants('task-hint', goal)).toEqual([model]);
   });
 });

@@ -261,7 +261,8 @@ fetch("https://docs.newapi.pro/v1beta/models/string:generateContent/", {
       throw new Error('Gemini 草稿没有生成自定义调用协议');
     }
     const request = buildModelProtocolRequest({
-      apiKey: '',
+      // 协议声明了 bearer 鉴权，空 Key 会被前置拦下；这里只关心 URL 与请求体形状
+      apiKey: 'test-key',
       baseUrl: draft.baseUrl,
       protocol: profile.protocol,
       variables: {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModelExecutionProtocol } from '../../src/types/aiTypes';
 import {
+  buildModelProtocolRequest,
   executeModelProtocol,
   getModelProtocolPreset,
   normalizeFrames8n1,
@@ -10,7 +11,11 @@ import {
   previewModelProtocolResponse,
   validateModelExecutionProtocol,
 } from '../../src/services/ai/modelProtocol';
-import { findUnusedReferenceVariables } from '../../src/services/ai/modelProtocolRuntime';
+import {
+  findUnusedReferenceVariables,
+  runConfiguredModelProtocol,
+} from '../../src/services/ai/modelProtocolRuntime';
+import { useAppStore } from '../../src/store/useAppStore';
 
 const jsonResponse = (
   payload: unknown,
@@ -1147,5 +1152,82 @@ describe('reference media coverage in custom protocols', () => {
       .toEqual(['imageUrls', 'referenceImageUrls']);
     // 没有连参考素材就不该提示
     expect(findUnusedReferenceVariables(textOnly, { imageUrls: [] })).toEqual([]);
+  });
+});
+
+describe('missing API key', () => {
+  it('拦下没有 API Key 的调用，而不是发出不带 Authorization 头的请求', () => {
+    const protocol = getModelProtocolPreset('openai-image');
+    expect(() => buildModelProtocolRequest({
+      apiKey: '',
+      baseUrl: 'https://api.example.com/v1',
+      protocol,
+      variables: { model: 'm', prompt: 'p' },
+    })).toThrow('还没有填写 API Key');
+
+    // 协议明确声明不需要鉴权时照常放行
+    expect(() => buildModelProtocolRequest({
+      apiKey: '',
+      baseUrl: 'https://api.example.com/v1',
+      protocol: { ...protocol, auth: { type: 'none' } },
+      variables: { model: 'm', prompt: 'p' },
+    })).not.toThrow();
+  });
+});
+
+describe('undeliverable reference media', () => {
+  it('协议接不住参考素材时直接失败，并给出可抄的修法', async () => {
+    useAppStore.setState({
+      configHydrated: true,
+      config: {
+        ...useAppStore.getState().config,
+        providers: {
+          'custom-relay': {
+            name: 'Relay', apiKey: 'k', baseUrl: 'https://api.example.com',
+            catalogId: 'custom-openai', selectedModels: [],
+          },
+        },
+      },
+    } as never);
+    const model = {
+      id: 'm1',
+      name: 'Seedance 900',
+      modelId: 'lec-seed-2-0-900',
+      category: 'video' as const,
+      providerConfigId: 'custom-relay',
+      executionProfile: {
+        preset: 'custom' as const,
+        protocol: {
+          version: 2 as const,
+          mode: 'async' as const,
+          // 请求体只有 model / prompt，没有任何参考素材字段
+          submit: { method: 'POST' as const, path: '/v1/videos', body: { model: '{{model}}', prompt: '{{prompt}}' } },
+          response: { type: 'json' as const, taskIdPath: 'id' },
+          poll: {
+            method: 'GET' as const,
+            path: '/v1/videos/{{submit.id}}',
+            response: {
+              statusPath: 'status',
+              successValues: ['completed'],
+              failureValues: ['failed'],
+              result: { urlPath: 'output' },
+            },
+          },
+        },
+      },
+    };
+
+    await expect(runConfiguredModelProtocol({
+      model,
+      category: 'video',
+      variables: { model: 'lec-seed-2-0-900', prompt: '图片1, 释放法术', imageUrls: ['https://cdn.example/a.png'] },
+    })).rejects.toThrow('"images": "{{imageUrls}}"');
+
+    // 没有参考素材时照常放行（会走到网络层，这里只验证没被参考素材检查拦下）
+    await expect(runConfiguredModelProtocol({
+      model,
+      category: 'video',
+      variables: { model: 'lec-seed-2-0-900', prompt: '释放法术', imageUrls: [] },
+    })).rejects.not.toThrow('没有接收参考图');
   });
 });

@@ -10,6 +10,7 @@ import type {
   AgentApprovalKind,
   AgentApprovalResolution,
   AgentStep,
+  ProviderModelChoice,
 } from '../../types/agent';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
 import AgentToolDetails from './AgentToolDetails';
@@ -22,6 +23,7 @@ interface AgentApprovalCardProps {
 }
 
 const KIND_META: Record<AgentApprovalKind, { label: string; icon: string }> = {
+  user_choice: { label: '需要你选择', icon: 'mdi:format-list-checks' },
   canvas_write: { label: '画布修改', icon: 'mdi:vector-square-edit' },
   file_write: { label: '写入文件', icon: 'mdi:content-save-outline' },
   permanent_delete: { label: '永久删除', icon: 'mdi:delete-alert-outline' },
@@ -29,6 +31,14 @@ const KIND_META: Record<AgentApprovalKind, { label: string; icon: string }> = {
   memory_write: { label: '保存记忆', icon: 'mdi:brain' },
   config_write: { label: 'API 配置', icon: 'mdi:api' },
   asset_write: { label: '资产库写入', icon: 'mdi:account-box-multiple-outline' },
+};
+
+
+const PROVIDER_CATEGORY_LABELS: Record<ProviderModelChoice['category'], string> = {
+  text: '文本',
+  image: '图片',
+  video: '视频',
+  audio: '音频',
 };
 
 const MEDIA_KIND_LABELS = {
@@ -45,23 +55,50 @@ export default function AgentApprovalCard({
 }: AgentApprovalCardProps) {
   const approval = step.approval;
   const inputRequest = approval?.inputRequest;
+  const mediaModelRequest = inputRequest?.kind === 'media_model' ? inputRequest : undefined;
+  const providerModelsRequest = inputRequest?.kind === 'provider_models' ? inputRequest : undefined;
   const [selectedModelRef, setSelectedModelRef] = useState(
-    inputRequest?.selectedModelRef,
+    mediaModelRequest?.selectedModelRef,
   );
+  // 中转站接入：默认不预选，由用户明确勾选要接入哪几个
+  const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
+  const providerGroups = useMemo(() => {
+    const groups = new Map<string, ProviderModelChoice[]>();
+    for (const option of providerModelsRequest?.options ?? []) {
+      const list = groups.get(option.category) ?? [];
+      list.push(option);
+      groups.set(option.category, list);
+    }
+    return (['text', 'image', 'video', 'audio'] as const)
+      .flatMap((category) => (groups.has(category)
+        ? [[category, groups.get(category)!] as const]
+        : []));
+  }, [providerModelsRequest]);
+  const toggleModelId = (id: string) => {
+    setSelectedModelIds((current) => (current.includes(id)
+      ? current.filter((item) => item !== id)
+      : [...current, id]));
+  };
+  const toggleCategory = (ids: string[]) => {
+    setSelectedModelIds((current) => (ids.every((id) => current.includes(id))
+      ? current.filter((id) => !ids.includes(id))
+      : [...new Set([...current, ...ids])]));
+  };
   const groupedModels = useMemo(() => {
-    if (!inputRequest) return [];
+    if (!mediaModelRequest) return [];
     const groups = new Map<string, MediaModelOption[]>();
     for (const model of mediaModelOptions) {
-      if (model.mediaKind !== inputRequest.mediaKind) continue;
+      if (model.mediaKind !== mediaModelRequest.mediaKind) continue;
       const models = groups.get(model.groupName) ?? [];
       models.push(model);
       groups.set(model.groupName, models);
     }
     return [...groups.entries()];
-  }, [inputRequest, mediaModelOptions]);
+  }, [mediaModelRequest, mediaModelOptions]);
   if (!approval) return null;
   const meta = KIND_META[approval.kind];
-  const needsModelSelection = inputRequest?.kind === 'media_model';
+  const needsModelSelection = !!mediaModelRequest;
+  const needsProviderSelection = !!providerModelsRequest;
   const hasAvailableModel = groupedModels.some(([, models]) =>
     models.some((model) => mediaModelAvailability[model.value]),
   );
@@ -71,9 +108,8 @@ export default function AgentApprovalCard({
   const handleConfirm = () => {
     onResolve(approval.id, {
       approved: true,
-      ...(needsModelSelection
-        ? { inputValues: { modelRef: selectedModelRef } }
-        : {}),
+      ...(needsModelSelection ? { inputValues: { modelRef: selectedModelRef } } : {}),
+      ...(needsProviderSelection ? { inputValues: { selectedModelIds } } : {}),
     });
   };
 
@@ -101,10 +137,10 @@ export default function AgentApprovalCard({
           <span>不会写入 API Key；新连接保持空白，已有连接保留原值。</span>
         </div>
       )}
-      {inputRequest && (
+      {mediaModelRequest && (
         <div className="mt-3 border-t border-amber-300/15 pt-2.5">
           <p className="mb-2 text-[11px] font-medium text-canvas-text">
-            选择{MEDIA_KIND_LABELS[inputRequest.mediaKind]}模型
+            选择{MEDIA_KIND_LABELS[mediaModelRequest.mediaKind]}模型
           </p>
           {hasAvailableModel ? (
             <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
@@ -147,6 +183,61 @@ export default function AgentApprovalCard({
           )}
         </div>
       )}
+      {providerModelsRequest && (
+        <div className="mt-3 border-t border-amber-300/15 pt-2.5">
+          <p className="mb-2 text-[11px] font-medium text-canvas-text">
+            勾选要接入的模型（已选 {selectedModelIds.length} / {providerModelsRequest.options.length}）
+          </p>
+          <div className="max-h-64 space-y-2.5 overflow-y-auto pr-1">
+            {providerGroups.map(([category, options]) => {
+              const ids = options.map((option) => option.id);
+              const allSelected = ids.every((id) => selectedModelIds.includes(id));
+              return (
+                <div key={category}>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-canvas-text-muted">
+                      {PROVIDER_CATEGORY_LABELS[category]}（{options.length}）
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => toggleCategory(ids)}
+                      className="min-h-6 rounded px-1.5 text-[10px] text-canvas-text-secondary hover:text-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50"
+                    >
+                      {allSelected ? '取消全选' : '全选'}
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {options.map((option) => {
+                      const selected = selectedModelIds.includes(option.id);
+                      return (
+                        <label
+                          key={option.id}
+                          className={`flex min-h-7 cursor-pointer items-start gap-2 rounded border px-2 py-1 text-[11px] leading-4 transition-colors ${
+                            selected
+                              ? 'border-amber-300/70 bg-amber-300/10 text-amber-100'
+                              : 'border-canvas-border text-canvas-text-secondary hover:border-amber-300/40 hover:text-canvas-text'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => toggleModelId(option.id)}
+                            className="mt-0.5 shrink-0 accent-amber-400"
+                          />
+                          <span className="min-w-0 break-words">
+                            {option.name}
+                            <span className="ml-1 text-canvas-text-muted">{option.id}</span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div className="mt-3 flex justify-end gap-2">
         <button
           type="button"
@@ -157,11 +248,16 @@ export default function AgentApprovalCard({
         </button>
         <button
           type="button"
-          disabled={needsModelSelection && !selectedModelAvailable}
+          disabled={(needsModelSelection && !selectedModelAvailable)
+            || (needsProviderSelection && selectedModelIds.length === 0)}
           onClick={handleConfirm}
           className="min-h-8 rounded-md bg-amber-500 px-3 py-1 text-xs font-medium text-black hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
         >
-          {needsModelSelection ? '确认生成' : '确认执行'}
+          {needsModelSelection
+            ? '确认生成'
+            : needsProviderSelection
+              ? `接入选中的 ${selectedModelIds.length} 个模型`
+              : '确认执行'}
         </button>
       </div>
     </div>

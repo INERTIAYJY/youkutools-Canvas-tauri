@@ -1,7 +1,9 @@
 /**
  * 管理任务级 Provider 文档访问图，限制同源链接深度、页面数量和累计文本体积。
  */
-const MAX_PROVIDER_DOC_PAGES = 8;
+// 中转站每个模型一个接口页，逐个读才能拿到真实字段名；页数放宽到能覆盖一站的模型数，
+// 真正的安全边界是下面的字符总量（单页最多 10k，超出 80k 一律停读）。
+const MAX_PROVIDER_DOC_PAGES = 24;
 const MAX_PROVIDER_DOC_DEPTH = 2;
 const MAX_PROVIDER_DOC_TEXT_CHARS = 80_000;
 const MAX_DISCOVERED_LINKS = 80;
@@ -22,6 +24,7 @@ interface ProviderDocsTaskState {
 
 export interface ProviderDocReadReservation extends ProviderDocGrant {
   taskId: string;
+  conversationId?: string;
 }
 
 export interface ProviderDocReadCompletion {
@@ -32,6 +35,22 @@ export interface ProviderDocReadCompletion {
 }
 
 const taskStates = new Map<string, ProviderDocsTaskState>();
+/**
+ * 会话级授权表：同一会话里已授权 / 已发现的文档链接。
+ *
+ * 「先列模型问用户，再读选中模型的接口页」这个流程天然跨两个任务：列清单的任务结束后，
+ * 用户的选择会开一个新任务，而新任务的 goal 里没有 URL。授权只按任务存的话，
+ * 第二轮连第一轮发现的模型接口页都读不了，整个流程直接卡死。
+ * 只放宽「允许读哪些地址」，页数与字符预算仍然按任务独立计算。
+ */
+const conversationGrants = new Map<string, Map<string, ProviderDocGrant>>();
+
+function rememberConversationGrant(conversationId: string | undefined, grant: ProviderDocGrant): void {
+  if (!conversationId) return;
+  const grants = conversationGrants.get(conversationId) ?? new Map<string, ProviderDocGrant>();
+  conversationGrants.set(conversationId, grants);
+  if (!grants.has(grant.url)) grants.set(grant.url, grant);
+}
 
 function createTaskState(): ProviderDocsTaskState {
   return {
@@ -93,13 +112,23 @@ export function extractExplicitProviderDocUrls(text: string): string[] {
   return [...urls];
 }
 
-function ensureTaskState(taskId: string, taskGoal: string): ProviderDocsTaskState {
+function ensureTaskState(
+  taskId: string,
+  taskGoal: string,
+  conversationId?: string,
+): ProviderDocsTaskState {
   const state = taskStates.get(taskId) ?? createTaskState();
   taskStates.set(taskId, state);
   for (const url of extractExplicitProviderDocUrls(taskGoal)) {
     if (!state.grants.has(url)) {
-      state.grants.set(url, { url, origin: new URL(url).origin, depth: 0 });
+      const grant = { url, origin: new URL(url).origin, depth: 0 };
+      state.grants.set(url, grant);
+      rememberConversationGrant(conversationId, grant);
     }
+  }
+  // 继承本会话此前已授权 / 已发现的链接，让跨任务的「选完再读」能继续
+  for (const [url, grant] of conversationGrants.get(conversationId ?? '') ?? []) {
+    if (!state.grants.has(url)) state.grants.set(url, grant);
   }
   return state;
 }
@@ -108,20 +137,22 @@ export function isProviderDocUrlGranted(
   taskId: string,
   taskGoal: string,
   rawUrl: string,
+  conversationId?: string,
 ): boolean {
   const normalized = normalizeProviderDocUrl(rawUrl);
   if (!normalized) return false;
-  return ensureTaskState(taskId, taskGoal).grants.has(normalized);
+  return ensureTaskState(taskId, taskGoal, conversationId).grants.has(normalized);
 }
 
 export function beginProviderDocRead(
   taskId: string,
   taskGoal: string,
   rawUrl: string,
+  conversationId?: string,
 ): ProviderDocReadReservation {
   const normalized = normalizeProviderDocUrl(rawUrl);
   if (!normalized) throw new Error('文档 URL 无效或不满足 HTTPS 安全要求');
-  const state = ensureTaskState(taskId, taskGoal);
+  const state = ensureTaskState(taskId, taskGoal, conversationId);
   const grant = state.grants.get(normalized);
   if (!grant) throw new Error('只能读取用户本轮提供或已读页面发现的同站文档链接');
   if (state.readUrls.has(normalized) || state.reservedUrls.has(normalized)) {
@@ -134,7 +165,7 @@ export function beginProviderDocRead(
     throw new Error('文档正文累计长度已达到任务上限');
   }
   state.reservedUrls.add(normalized);
-  return { taskId, ...grant };
+  return { taskId, conversationId, ...grant };
 }
 
 export function releaseProviderDocRead(reservation: ProviderDocReadReservation): void {
@@ -169,13 +200,11 @@ export function completeProviderDocRead(
     for (const rawUrl of discoveredUrls.slice(0, MAX_DISCOVERED_LINKS)) {
       const normalized = normalizeProviderDocUrl(rawUrl);
       if (!normalized || new URL(normalized).origin !== reservation.origin) continue;
-      if (!state.grants.has(normalized)) {
-        state.grants.set(normalized, {
-          url: normalized,
-          origin: reservation.origin,
-          depth: nextDepth,
-        });
-      }
+      const grant = state.grants.get(normalized)
+        ?? { url: normalized, origin: reservation.origin, depth: nextDepth };
+      state.grants.set(normalized, grant);
+      // 发现的链接同时记进会话，用户下一条消息开的新任务才读得到这些模型接口页
+      rememberConversationGrant(reservation.conversationId, grant);
       granted.push(normalized);
     }
   }
@@ -187,10 +216,21 @@ export function completeProviderDocRead(
   };
 }
 
+/** 当前任务允许读取的文档地址，用于把拒绝原因说清楚而不是只说"不允许"。 */
+export function listProviderDocGrants(
+  taskId: string,
+  taskGoal: string,
+  conversationId?: string,
+): string[] {
+  const state = ensureTaskState(taskId, taskGoal, conversationId);
+  return [...state.grants.keys()].filter((url) => !state.readUrls.has(url));
+}
+
 export function clearProviderDocsTask(taskId: string): void {
   taskStates.delete(taskId);
 }
 
 export function clearProviderDocsGrantsForTests(): void {
   taskStates.clear();
+  conversationGrants.clear();
 }

@@ -46,6 +46,16 @@ export function evaluateAgentToolPolicy(
     };
   }
 
+  // 需要用户作答的工具在任何模式下都必须停下等人：自动"批准"等于替用户做决定，
+  // 拿不到选择结果，工具本身也无事可做。
+  if (definition.effect === 'user_choice') {
+    return {
+      outcome: 'require_approval',
+      reason: '需要你从清单中选择',
+      approvalKind: 'user_choice',
+    };
+  }
+
   if (context.mode === 'autonomous') {
     return {
       outcome: 'allow',

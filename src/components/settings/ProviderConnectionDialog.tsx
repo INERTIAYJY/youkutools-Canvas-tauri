@@ -49,7 +49,7 @@ function buildRelayAssistantPrompt(connectionName: string, baseUrl: string): str
     ? `${trimmedBase}/docs`
     : '【请在这里粘贴该中转站的文档或模型列表页面 HTTPS 链接（若上面的接口地址已填，这里可留空，我会自动尝试 /docs）】';
   return [
-    '请把这个「中转站 / 聚合 API」里能识别到的全部模型都添加为自定义接口配置。',
+    '请帮我把这个「中转站 / 聚合 API」里的模型添加为自定义接口配置。',
     '',
     `目标连接名称：${connectionName || '（未填，可自定义）'}`,
     trimmedBase
@@ -57,11 +57,13 @@ function buildRelayAssistantPrompt(connectionName: string, baseUrl: string): str
       : '接口地址（Base URL）：未填。请从文档 / 中转站地址确定真实 API 接口地址（不是文档站域名）；new-api / one-api 中转站的文档域名通常就是 API 域名。',
     '',
     '请这样操作：',
-    '1. 用 provider_docs_read 阅读该中转站的文档 / 模型清单。若是 new-api / one-api 中转站，工具会自动返回公开模型清单、公告与接口调用格式。',
-    '2. 逐个核对模型 ID、显示名称、类型（文本 / 图片 / 视频 / 音频）。请求体字段一律以该模型自己的文档为准：文档有「请求示例」JSON 就原样用，只有参数表就只写表里的字段，两者都没有才退回 OpenAI 标准端点（chat/completions、images/generations、/v1/videos、audio/speech）。多写一个该模型不认识的字段，接口就会返回 400 unsupported field，所以宁可少写也不要凭印象补字段。',
-    '2.1 文档写明的固定能力（固定时长、宽高比枚举、参考图上限等）用 videoCapability 声明出来，画布上的参数面板会据此约束用户，避免发出该模型不支持的取值。',
-    '3. 读完模型清单后必须立即调用 provider_config_preview 生成草稿，再调用 provider_config_apply 保存；不要只报告模型清单就结束任务。尽量涵盖识别到的全部模型（同一 Base URL，单次最多 16 个，超出就分多次保存）。',
-    '4. 不要写入 API Key，把其余内容都填好即可；保存后我会自己补填 API Key。',
+    '1. 用 provider_docs_read 阅读该中转站的文档首页，拿到模型清单以及每个模型的接口页链接。',
+    '2. 调用 provider_models_select，把清单里的全部模型作为候选传进去，我会在勾选卡片里选。不要在正文里罗列清单让我打字回复，也不要自作主张全部添加。',
+    '3. 我勾选之后，对选中的每个模型用 provider_docs_read 打开它自己的接口页（形如 /docs/videos/{模型ID}），只读这些。只有那里才有该模型真实的参数表、固定能力和请求示例。',
+    '4. 逐个核对模型 ID、显示名称、类型。请求体字段一律以该模型自己的文档为准：文档有「请求示例」JSON 就原样用，只有参数表就只写表里的字段，两者都没有才退回 OpenAI 标准端点（chat/completions、images/generations、/v1/videos、audio/speech）。多写一个该模型不认识的字段，接口就会返回 400 unsupported field，所以宁可少写也不要凭印象补字段。',
+    '4.1 文档写明的固定能力（固定时长、宽高比枚举、参考图上限等）用 videoCapability 声明出来，画布上的参数面板会据此约束用户，避免发出该模型不支持的取值。',
+    '5. 读完所选模型的接口页后必须立即调用 provider_config_preview 生成草稿，再调用 provider_config_apply 保存；不要只报告一遍字段就结束任务（同一 Base URL，单次最多 16 个，超出就分多次保存）。',
+    '6. 不要写入 API Key，把其余内容都填好即可；保存后我会自己补填 API Key。',
     '',
     '中转站文档 / 模型列表链接：',
     docsLink,

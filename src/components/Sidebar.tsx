@@ -16,6 +16,7 @@ import { NODE_TYPE_CONFIG } from '../types';
 import { uploadSourceFileToProject } from '../services/fileService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
 import { classifyFile } from '../hooks/useNodeCreation';
+import { checkForUpdate, downloadAndInstallUpdate } from '../services/updateService';
 import AnimatedButton from './shared/AnimatedButton';
 import LazyLoadBoundary, { LazyLoadFallback } from './shared/LazyLoadBoundary';
 import ProjectLibraryModal from './ProjectLibraryModal';
@@ -305,6 +306,38 @@ function AvatarMenu() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'no-update' | 'available' | 'updating' | 'error'>('idle');
+  const [updateMsg, setUpdateMsg] = useState('');
+  const [updateVersion, setUpdateVersion] = useState('');
+
+  const handleCheckUpdate = async () => {
+    setUpdateStatus('checking');
+    setUpdateMsg('');
+    try {
+      const result = await checkForUpdate();
+      if (result.available) {
+        setUpdateStatus('available');
+        setUpdateVersion(result.version);
+        setUpdateMsg(`发现新版本 v${result.version}`);
+      } else {
+        setUpdateStatus('no-update');
+        setUpdateMsg('已是最新版本');
+      }
+    } catch {
+      setUpdateStatus('error');
+      setUpdateMsg('检查失败，请稍后重试');
+    }
+  };
+
+  const handleDownloadUpdate = async () => {
+    setUpdateStatus('updating');
+    setUpdateMsg('正在下载更新...');
+    const ok = await downloadAndInstallUpdate();
+    if (!ok) {
+      setUpdateStatus('error');
+      setUpdateMsg('下载失败，请稍后重试');
+    }
+  };
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => {});
@@ -407,7 +440,32 @@ function AvatarMenu() {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-canvas-text">AI Canvas</h2>
-              <p className="text-xs text-canvas-text-secondary">v{appVersion} · 森之灵定制版</p>
+              <p className="text-xs text-canvas-text-secondary">v{appVersion} · 开发预览版</p>
+              <button
+                onClick={updateStatus === 'available' ? handleDownloadUpdate : handleCheckUpdate}
+                disabled={updateStatus === 'checking' || updateStatus === 'updating'}
+                className="mt-1 inline-flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 disabled:text-canvas-text-muted transition-colors"
+              >
+                {updateStatus === 'checking' ? (
+                  <>
+                    <Icon icon="svg-spinners:90-ring" width="12" height="12" />
+                    检查中...
+                  </>
+                ) : updateStatus === 'updating' ? (
+                  <>
+                    <Icon icon="svg-spinners:90-ring" width="12" height="12" />
+                    下载中...
+                  </>
+                ) : updateStatus === 'no-update' && updateMsg ? (
+                  updateMsg
+                ) : updateStatus === 'available' ? (
+                  `发现 v${updateVersion}，点击更新`
+                ) : updateStatus === 'error' ? (
+                  updateMsg
+                ) : (
+                  '检查更新'
+                )}
+              </button>
             </div>
           </div>
 
@@ -462,7 +520,7 @@ function AvatarMenu() {
             <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">社区</h3>
             <div className="flex flex-col gap-2">
               <a
-                href="https://github.com/INERTIAYJY/youkutools-Canvas-tauri"
+                href="https://github.com/Tenney95/AI-Canvas-tauri"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-canvas-hover hover:bg-canvas-border transition-colors text-xs text-canvas-text-secondary hover:text-canvas-text"

@@ -22,7 +22,9 @@ import { useTooltipAutoPlacement } from './hooks/useTooltipAutoPlacement';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, type AppState } from './store/useAppStore';
 import * as fileService from './services/fileService';
+import { checkForUpdate, downloadAndInstallUpdate, type UpdateInfo } from './services/updateService';
 import { DOWNLOAD_MASCOT_EVENT } from './components/shared/ModelDownloadDialog';
+import UpdateBubble from './components/shared/mascot/UpdateBubble';
 import LazyLoadBoundary, { LazyLoadFallback } from './components/shared/LazyLoadBoundary';
 import { useMascotStatus } from './hooks/useMascotStatus';
 import { useMascotDrag } from './hooks/useMascotDrag';
@@ -33,6 +35,7 @@ const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
 // 懒加载：吉祥物引入 three + gsap（体积大户），默认隐藏，首次 Ctrl+Shift+M 显示时才加载
 const Mascot = lazy(() => import('./components/shared/mascot/Mascot'));
+const PacmanMascot = lazy(() => import('./components/shared/mascot/PacmanDownloadMascot'));
 const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
 const AINodeDialog = lazy(() => import('./components/nodes/AINodeDialog'));
 const WorkflowPanel = lazy(() => import('./components/WorkflowPanel'));
@@ -110,8 +113,31 @@ export default function App() {
   // 下载弹窗出现时，右下角吉祥物缩小消失
   const [mascotShrink, setMascotShrink] = useState(false);
 
+  // 更新检测
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateBubbleVisible, setUpdateBubbleVisible] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const configHydrated = useAppStore((state) => state.configHydrated);
   const mcpAutoStart = useAppStore((state) => state.config.mcpAutoStart === true);
+
+  // 开屏动画结束后后台静默检查更新
+  useEffect(() => {
+    if (!splashDone || !isTauri || !configHydrated) return;
+    const run = async () => {
+      const result = await checkForUpdate();
+      if (result.available) {
+        const store = useAppStore.getState();
+        // 强制显示吉祥物
+        if (!store.config.mascotVisible) {
+          store.updateConfig({ mascotVisible: true });
+          store.saveConfig();
+        }
+        setUpdateInfo({ version: result.version, body: result.body, date: result.date });
+        setUpdateBubbleVisible(true);
+      }
+    };
+    run();
+  }, [configHydrated, splashDone]);
 
   // 监听下载事件 → 控制吉祥物缩小动画
   useEffect(() => {
@@ -218,6 +244,15 @@ export default function App() {
     };
   }, [configHydrated, mcpAutoStart]);
 
+  // ── 更新相关操作 ──
+  const handleUpdateNow = async () => {
+    setUpdating(true);
+    await downloadAndInstallUpdate();
+    setUpdating(false);
+  };
+  const handleDismissUpdate = () => {
+    setUpdateBubbleVisible(false);
+  };
   const handleMascotActivate = async () => {
     const store = useAppStore.getState();
     // 独立窗口模式：点击吉祥物关闭独立窗口并收回内嵌（与 Sidebar 入口一致）
@@ -433,19 +468,34 @@ export default function App() {
                       </div>
                     )}
                   >
-                  <Mascot
-                    loading={mascotLoading}
-                    status={mascotStatus}
-                    theme={effectiveTheme}
-                    reduceMotion={Boolean(reduceMotion)}
-                    getDragForce={getMascotDragForce}
-                  />
+                    {updating ? (
+                      <PacmanMascot />
+                    ) : (
+                      <Mascot
+                        loading={mascotLoading}
+                        status={mascotStatus}
+                        theme={effectiveTheme}
+                        reduceMotion={Boolean(reduceMotion)}
+                        getDragForce={getMascotDragForce}
+                      />
+                    )}
                   </Suspense>
                 </button>
               </motion.div>
             </motion.div>
           </div>
         </LazyLoadBoundary>
+      )}
+
+      {/* 更新聊天气泡 — 悬停在吉祥物左上方 */}
+      {updateInfo && (
+        <UpdateBubble
+          info={updateInfo}
+          visible={updateBubbleVisible}
+          onUpdate={() => { handleUpdateNow(); }}
+          onDismiss={handleDismissUpdate}
+          updating={updating}
+        />
       )}
 
       <Suspense fallback={null}>

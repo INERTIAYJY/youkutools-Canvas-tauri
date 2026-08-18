@@ -646,7 +646,11 @@ async function resolvePromptReferences(
       return `图片${idx}`;
     }
 
-    if (nodeType === 'ai-text' || nodeType === 'source-text') {
+    if (
+      nodeType === 'ai-text'
+      || nodeType === 'source-text'
+      || nodeType === 'ai-markdown'
+    ) {
       const output = node.data.output as string | undefined;
       if (typeof output === 'string' && output.trim()) return output;
       return '';

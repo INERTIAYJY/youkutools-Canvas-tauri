@@ -10,6 +10,7 @@ import type {
   VideoGenerationReferenceInput,
 } from '../../types/aiTypes';
 import { apimartMediaProviderAdapter } from './providers/apimartMedia';
+import { seedlingMediaProviderAdapter } from './providers/seedlingMedia';
 
 export type MediaProviderCapability = 'image' | 'video' | 'audio';
 
@@ -118,4 +119,5 @@ export class MediaProviderRegistry {
 
 export const mediaProviderRegistry = new MediaProviderRegistry([
   apimartMediaProviderAdapter,
+  seedlingMediaProviderAdapter,
 ]);

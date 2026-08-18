@@ -16,6 +16,7 @@ import McpControlSettings from './settings/McpControlSettings';
 import SettingsNavigation from './settings/SettingsNavigation';
 import ShortcutSettings from './settings/ShortcutSettings';
 import ComfyUISettings from './settings/ComfyUISettings';
+import SeedlingSettings from './settings/SeedlingSettings';
 import FileAppSettings from './settings/FileAppSettings';
 import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
@@ -233,6 +234,8 @@ export default function SettingsPanel() {
             )}
 
             {activeTab === 'comfyui' && <ComfyUISettings />}
+
+            {activeTab === 'seedling' && <SeedlingSettings />}
 
             {activeTab === 'general' && (
               <div className="space-y-4">

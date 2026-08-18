@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ModelSelector 模型选择器 — 下拉面板选择 AI 模型或工作流，支持按供应商分组折叠、搜索过滤、当前选中高亮
  * 未配置 API Key 的供应商分组自动禁用（锁图标 + tooltip + 不可展开）
  * 自动检测上下空间，向上或向下弹出
@@ -141,6 +141,10 @@ export default function ModelSelector({
       }
       // 即梦：走 OAuth 登录，无 API Key，按登录态判定
       if (groupId === 'dreamina') return dreaminaLoggedIn;
+      // 森之灵：API Token 或 CLI 登录态任一可用即可
+      if (groupId === 'seedling') {
+        return !!configProviders.seedling?.apiKey || !!config.seedlingAuth?.loggedIn;
+      }
       const providerKey = groupId === 'runninghubwf'
         ? 'runninghub'
         : groupId === 'runninghub'
@@ -149,7 +153,7 @@ export default function ModelSelector({
       const provider = configProviders[providerKey];
       return !!provider?.apiKey;
     },
-    [configProviders, dreaminaLoggedIn, groupAvailability],
+    [configProviders, dreaminaLoggedIn, config.seedlingAuth?.loggedIn, groupAvailability],
   );
   const ref = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);

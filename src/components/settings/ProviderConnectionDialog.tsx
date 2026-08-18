@@ -242,7 +242,10 @@ export default function ProviderConnectionDialog({
   const missingCredentials = useMemo(() => {
     if (!definition) return true;
     if (definition.authType === 'oauth') return !dreaminaLoggedIn;
-    if (!apiKey.trim()) return true;
+    // API Key 是否必填以目录定义为准：seedling 等厂商允许空 Token（CLI 登录态兜底）
+    const apiKeyField = definition.credentials.find((field) => field.key === 'apiKey');
+    const apiKeyRequired = apiKeyField?.required ?? true;
+    if (apiKeyRequired && !apiKey.trim()) return true;
     return definition.credentials.some((field) =>
       field.required
       && field.key !== 'apiKey'

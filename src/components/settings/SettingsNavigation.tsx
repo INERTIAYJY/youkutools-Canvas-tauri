@@ -11,6 +11,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: '常规' },
   { id: 'files', label: '文件与应用' },
   { id: 'api', label: 'API Key' },
+  { id: 'seedling', label: '森之灵' },
   { id: 'storage', label: '存储健康' },
   { id: 'comfyui', label: 'ComfyUI' },
   { id: 'shortcuts', label: '快捷键' },
@@ -19,6 +20,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
 
 function SettingsTabIcon({ tab }: { tab: SettingsTab }) {
   if (tab === 'mcp') return <Icon icon="lucide:plug-zap" width="14" height="14" />;
+  if (tab === 'seedling') return <Icon icon="lucide:clapperboard" width="14" height="14" />;
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       {tab === 'storage' && (

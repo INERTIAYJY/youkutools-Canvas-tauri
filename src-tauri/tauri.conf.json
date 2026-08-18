@@ -6,16 +6,16 @@
         "frontendDist": "../dist"
     },
     "productName": "AI Canvas",
-    "version": "0.8.8",
+    "version": "0.8.9",
     "identifier": "com.aicanvas.app",
     "plugins": {
         "shell": {
             "open": true
         },
         "updater": {
-            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhDMjRGOUVCOTBBMzhCN0MKUldSOGk2T1E2L2trak9ESGFydzBqdmlDcXFoZzhjaHFXVE9sY1poZlMxUmh2K0NMeGJ5SDk0VmgK",
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3MUZFQkJFMkNBOTZDClJXUnNxU3krNngvM0FCY1crWENhSU1NK2YraUFSemxVM1BHZlBpS1hEU1UzbzYzWEhhR0NPVU1LCg==",
             "endpoints": [
-                "https://github.com/Tenney95/AI-Canvas-tauri/releases/latest/download/latest.json"
+                "https://github.com/INERTIAYJY/youkutools-Canvas-tauri/releases/latest/download/latest.json"
             ],
             "windows": {
                 "installMode": "passive"

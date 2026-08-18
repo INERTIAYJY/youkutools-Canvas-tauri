@@ -90,6 +90,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const [dreaminaRuntime, setDreaminaRuntime] = useState<DreaminaRuntime | null>(null);
   const dreaminaDoneRef = useRef(false);
   const dreaminaAuth = config.dreaminaAuth;
+  const seedlingAuth = config.seedlingAuth;
   const activeWebSearchProviderId = resolveWebSearchProviderId(config);
 
   const fallbackModels = useMemo(() => {
@@ -125,7 +126,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       const definition = getProviderDefinition(id, providerConfig);
       if (!definition) continue;
       if (definition.kind === 'web-search' && id !== activeWebSearchProviderId) continue;
-      if (!shouldListProviderConnection(providerConfig, definition.authType)) continue;
+      // 森之灵：仅 CLI 登录态（无 API Token）时也允许出现在列表
+      if (!shouldListProviderConnection(providerConfig, definition.authType)
+        && !(id === 'seedling' && seedlingAuth?.loggedIn)) continue;
       items.push({ id, config: providerConfig });
     }
     if (config.providers.runninghub?.apiKey && !config.providers['runninghub-model']) {
@@ -140,6 +143,13 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         config: { name: '即梦', apiKey: '', catalogId: 'dreamina' },
       });
     }
+    if ((seedlingAuth?.loggedIn || config.providers.seedling?.apiKey)
+      && !config.providers.seedling) {
+      items.push({
+        id: 'seedling',
+        config: { name: '森之灵', apiKey: '', catalogId: 'seedling' },
+      });
+    }
     const order = [
       'apimart',
       'xai',
@@ -148,6 +158,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       'runninghub-model',
       'grsai',
       'dreamina',
+      'seedling',
       'web-search',
       'custom-openai',
     ];
@@ -162,7 +173,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         : rightDefinition?.id || 'custom-openai';
       return order.indexOf(leftOrderId) - order.indexOf(rightOrderId);
     });
-  }, [activeWebSearchProviderId, config.providers, dreaminaAuth?.loggedIn]);
+  }, [activeWebSearchProviderId, config.providers, dreaminaAuth?.loggedIn, seedlingAuth?.loggedIn]);
 
   const connectedProviderIds = useMemo(
     () => providerItems.map((item) => getProviderDefinition(item.id, item.config)?.id || item.id),

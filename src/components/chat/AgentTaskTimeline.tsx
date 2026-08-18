@@ -283,6 +283,17 @@ export default function AgentTaskTimeline({
             </div>
           )}
 
+          {/* 规划 / 整理阶段没有进行中的步骤卡片，这里补一行在下方明确显示助手当前在做什么 */}
+          {isActive && !activeStep && task.status !== 'waiting_approval' && (
+            <div className="mt-0.5 flex items-center gap-1.5 rounded-md bg-canvas-hover/25 px-2 py-1.5">
+              <Icon icon="mdi:loading" width="14" className="shrink-0 animate-spin motion-reduce:animate-none text-violet-400" />
+              <span className="min-w-0 truncate text-[12px] text-canvas-text-secondary">{activityLabel}</span>
+              <span className="ml-auto shrink-0 text-[10px] tabular-nums text-canvas-text-muted">
+                {formatElapsed(activityStartedAt, now)}
+              </span>
+            </div>
+          )}
+
           {pendingApprovalStep && (
             <AgentApprovalCard
               key={pendingApprovalStep.approval?.id}

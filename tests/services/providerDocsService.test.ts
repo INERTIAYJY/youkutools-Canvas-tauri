@@ -86,7 +86,9 @@ describe('new-api relay catalog parsing', () => {
     expect(content.text).toContain('视频');
     expect(content.text).toContain('站内公告');
     expect(content.text).toContain('## 上架');
-    expect(content.text).toContain('接口调用格式参考');
+    // 字段名必须以各模型自己的文档为准，通用约定只是读不到文档时的兜底
+    expect(content.text).toContain('请求体字段务必以该模型自己的文档为准');
+    expect(content.text).toContain('400 unsupported field');
     expect(content.text).toContain('/v1/videos');
   });
 });

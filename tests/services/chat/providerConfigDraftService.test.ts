@@ -317,3 +317,70 @@ fetch("https://docs.newapi.pro/v1beta/models/string:generateContent/", {
       .toThrow('已过期');
   });
 });
+
+describe('video capability declaration', () => {
+  const VIDEO_MODEL = {
+    modelId: 'lec-seed-2-0-900',
+    name: 'Seedance 2.0 900',
+    category: 'video' as const,
+    // 文档给的请求示例：只有 aspect_ratio / duration / images，没有 size / resolution
+    submitRequest: `
+curl https://gateway.example.com/v1/videos \
+  -H "Authorization: Bearer <token>" \
+  -d '{"aspect_ratio":"16:9","duration":15,"images":["https://example.com/ref.jpg"],"model":"lec-seed-2-0-900","prompt":"a cat"}'`,
+    submitResponse: '{"id":"video_task_example","status":"queued"}',
+    pollRequest: 'curl https://gateway.example.com/v1/videos/video_task_example -H "Authorization: Bearer <token>"',
+    pollResponse: '{"status":"completed","output":{"url":"https://cdn.example.com/result.mp4"}}',
+  };
+
+  it('只映射文档列出的字段，不凭空补 size / resolution', () => {
+    const draft = createProviderConfigDraft('task-doc-fields', {
+      connectionName: 'Relay',
+      models: [VIDEO_MODEL],
+    });
+    const body = draft.config.selectedModels?.[0].executionProfile?.protocol?.submit.body;
+    expect(body).toEqual({
+      model: '{{model}}',
+      prompt: '{{prompt}}',
+      aspect_ratio: '{{aspectRatio}}',
+      duration: '{{duration}}',
+      images: '{{imageUrls}}',
+    });
+  });
+
+  it('保留视频模型声明的固定能力，非视频模型则拒绝', () => {
+    const draft = createProviderConfigDraft('task-capability', {
+      connectionName: 'Relay',
+      models: [{
+        ...VIDEO_MODEL,
+        videoCapability: {
+          ratios: ['16:9', '9:16'],
+          defaultRatio: '16:9',
+          minDuration: 15,
+          maxDuration: 15,
+          defaultDuration: 15,
+          maxImageReferences: 9,
+          maxVideoReferences: 0,
+          maxAudioReferences: 0,
+        },
+      }],
+    });
+    expect(draft.config.selectedModels?.[0].videoCapability).toMatchObject({
+      ratios: ['16:9', '9:16'],
+      minDuration: 15,
+      maxDuration: 15,
+      maxImageReferences: 9,
+    });
+
+    expect(() => createProviderConfigDraft('task-capability-bad', {
+      connectionName: 'Relay',
+      models: [{
+        modelId: 'image-pro',
+        category: 'image',
+        submitRequest: `curl https://gateway.example.com/v1/images/generations -d '{"model":"image-pro","prompt":"cat"}'`,
+        submitResponse: '{"data":[{"url":"https://cdn.example.com/a.png"}]}',
+        videoCapability: { maxDuration: 15 },
+      }],
+    })).toThrow('只有视频分类可以声明 videoCapability');
+  });
+});

@@ -216,6 +216,20 @@ export default function VideoParamSelector({
     : isNativeSeedance || !isWorkflowProvider
       ? SEEDANCE_RATIOS
       : genericRatios;
+  // 参考素材上限只能读模型真正声明的值：toSeedanceCapabilityView 会替通用模型补上
+  // 9/3/3 的兜底默认值，拿它做提示会写出模型根本没声明过的限制。
+  const referenceLimits = apimartCapability ?? volcengineCapability ?? generalModel?.videoCapability;
+  const describeLimit = (max: number | undefined, unit: string, kind: string) => {
+    if (max === undefined) return '';
+    return max === 0 ? `不支持${kind}` : `最多 ${max} ${unit}${kind}`;
+  };
+  const referenceLimitTip = referenceLimits
+    ? [
+      describeLimit(referenceLimits.maxImageReferences, '张', '参考图'),
+      describeLimit(referenceLimits.maxVideoReferences, '个', '参考视频'),
+      describeLimit(referenceLimits.maxAudioReferences, '个', '参考音频'),
+    ].filter(Boolean).join('、')
+    : '';
   const minDuration = seedanceCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
   const maxDuration = seedanceCapability?.maxDuration ?? VIDEO_DURATION_MAX_SECONDS;
   const resolvedDuration = resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps, maxDuration);
@@ -338,7 +352,8 @@ export default function VideoParamSelector({
                 <div className="img-rp-section-label rh-video-ref-head">
                   <span>
                     参考帧
-                    <span className="rh-tip" data-tooltip="可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。">!</span>
+                    <span className="rh-tip" data-tooltip={`可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。${referenceLimitTip ? `
+该模型：${referenceLimitTip}（连线带入的素材一并计数）。` : ''}`}>!</span>
                   </span>
                   <button type="button" className="rh-video-ref-add" onClick={() => setPickerFor(pickerFor === 'frame' ? null : 'frame')}>
                     {pickerFor === 'frame' ? '取消' : '＋ 添加'}

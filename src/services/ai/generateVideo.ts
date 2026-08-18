@@ -175,6 +175,29 @@ function assertVideoOperationSupported(
   }
 }
 
+/**
+ * 按模型声明的参考素材上限拦截，超了直接报错而不是让接口返回一句看不懂的 400。
+ * 上限缺省表示该模型没声明，保持原有的「不拦截、只提醒」行为。
+ */
+export function assertVideoReferenceLimits(
+  referenceInput: VideoGenerationReferenceInput,
+  capability: VideoModelCapability | undefined,
+  modelName: string,
+): void {
+  if (!capability) return;
+  const limits = [
+    { kind: '参考图', count: referenceInput.imageUrls.length, max: capability.maxImageReferences },
+    { kind: '参考视频', count: referenceInput.videoUrls.length, max: capability.maxVideoReferences },
+    { kind: '参考音频', count: referenceInput.audioUrls.length, max: capability.maxAudioReferences },
+  ];
+  for (const { kind, count, max } of limits) {
+    if (max === undefined || count <= max) continue;
+    throw new Error(max === 0
+      ? `模型 "${modelName}" 不支持${kind}，请断开多余的连线`
+      : `模型 "${modelName}" 最多支持 ${max} 个${kind}，当前有 ${count} 个，请断开多余的连线`);
+  }
+}
+
 export function buildGeneralVideoProtocolVariables(
   modelId: string,
   params: AIVideoGenParams,
@@ -369,6 +392,7 @@ export async function generateVideo(
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
+    assertVideoReferenceLimits(referenceInput, gm.videoCapability, gm.name);
     if (gm.executionProfile) {
       const [remoteImageUrls, videoUrls, audioUrls] = await Promise.all([
         resolveImageUrlArray(referenceInput.imageUrls, connection.providerConfigId),

@@ -14,6 +14,8 @@ export interface ApimartSeedanceCapability {
   ratios: readonly string[];
   defaultRatio: string;
   ratioField: ApimartSeedanceRatioField;
+  /** 只允许这几个时长（秒）；为空表示 min~max 连续可选 */
+  durations?: number[];
   minDuration: number;
   maxDuration: number;
   defaultDuration: number;
@@ -265,9 +267,10 @@ export function toSeedanceCapabilityView(
     ratios: capability.ratios?.length ? capability.ratios : ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'adaptive'],
     defaultRatio: capability.defaultRatio ?? '16:9',
     ratioField: 'size',
-    minDuration: capability.minDuration ?? 2,
-    maxDuration: capability.maxDuration ?? 15,
-    defaultDuration: capability.defaultDuration ?? 5,
+    ...(capability.durations?.length ? { durations: capability.durations } : {}),
+    minDuration: capability.minDuration ?? Math.min(...(capability.durations ?? [2])),
+    maxDuration: capability.maxDuration ?? Math.max(...(capability.durations ?? [15])),
+    defaultDuration: capability.defaultDuration ?? capability.durations?.[0] ?? 5,
     audioField: capability.supportsAudio === false ? undefined : 'generate_audio',
     defaultAudio: capability.supportsAudio === false ? false : true,
     operations: ['text-to-video', 'image-to-video', 'video-to-video'],

@@ -232,8 +232,16 @@ export default function VideoParamSelector({
     : '';
   const minDuration = seedanceCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
   const maxDuration = seedanceCapability?.maxDuration ?? VIDEO_DURATION_MAX_SECONDS;
+  // 文档写「仅支持 10 或 15 秒」这类离散取值时，只给这几档，不能用连续滑杆
+  const allowedDurations = seedanceCapability?.durations?.length
+    ? [...seedanceCapability.durations].sort((left, right) => left - right)
+    : undefined;
   const resolvedDuration = resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps, maxDuration);
-  const displayedDuration = Math.min(maxDuration, Math.max(minDuration, resolvedDuration));
+  const displayedDuration = allowedDurations
+    ? allowedDurations.reduce((best, value) => (
+      Math.abs(value - resolvedDuration) < Math.abs(best - resolvedDuration) ? value : best
+    ), allowedDurations[0])
+    : Math.min(maxDuration, Math.max(minDuration, resolvedDuration));
   const displayedResolution = seedanceResolutions.some((item) => item.value === seedanceResolution)
     ? seedanceResolution
     : seedanceCapability?.defaultResolution ?? seedanceResolution;
@@ -497,8 +505,29 @@ export default function VideoParamSelector({
                   {showDurationControl && <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label">
                       <span>生成时长（秒）</span>
-                      <span className="rh-tip" data-tooltip={`整数秒，范围 ${minDuration}-${maxDuration}。值越大视频越长、耗时越高。`}>!</span>
+                      <span className="rh-tip" data-tooltip={allowedDurations
+                        ? `该模型仅支持 ${allowedDurations.join(' / ')} 秒。`
+                        : `整数秒，范围 ${minDuration}-${maxDuration}。值越大视频越长、耗时越高。`}>!</span>
                     </div>
+                    {allowedDurations ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {allowedDurations.map((value) => (
+                          <button
+                            key={value}
+                            type="button"
+                            aria-pressed={displayedDuration === value}
+                            onClick={() => onChangeSeedanceDuration?.(value)}
+                            className={`min-h-7 rounded-full border px-3 py-1 text-[11px] leading-4 transition-colors ${
+                              displayedDuration === value
+                                ? 'border-blue-400/70 bg-blue-400/15 text-blue-200'
+                                : 'border-canvas-border text-canvas-text-secondary hover:border-blue-400/40 hover:text-canvas-text'
+                            }`}
+                          >
+                            {value}s
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
                     <div className="rh-duration-slider">
                       <div className="rh-duration-track">
                         <div
@@ -524,6 +553,7 @@ export default function VideoParamSelector({
                         ))}
                       </div>
                     </div>
+                    )}
                   </div>}
 
 

@@ -209,12 +209,20 @@ export function buildGeneralVideoProtocolVariables(
   const { width, height } = mapVideoDimensions(videoResolution, aspectRatio);
   const fps = normalizeVideoFps(params.videoFps);
   // 通用模型声明了时长上限时按声明钳制，否则沿用全局兜底上限
-  const duration = resolveVideoDurationSeconds(
+  const requestedDuration = resolveVideoDurationSeconds(
     params.seedanceDuration,
     params.videoFrames,
     fps,
     videoCapability?.maxDuration,
   );
+  // 声明了离散时长（如仅 10 / 15 秒）时吸附到最接近的合法档，
+  // 否则画布上的 4 秒会原样发出去换来一句 seconds must be one of 10, 15
+  const allowedDurations = videoCapability?.durations?.length ? videoCapability.durations : undefined;
+  const duration = allowedDurations
+    ? allowedDurations.reduce((best, value) => (
+      Math.abs(value - requestedDuration) < Math.abs(best - requestedDuration) ? value : best
+    ), allowedDurations[0])
+    : requestedDuration;
   const frames = videoFramesFromDuration(duration, fps);
   const seedanceResolution = params.seedanceResolution ?? '720p';
   const firstImage = referenceInput.imageUrls[0];

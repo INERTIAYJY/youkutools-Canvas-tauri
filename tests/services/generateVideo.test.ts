@@ -662,3 +662,27 @@ describe('video reference limits', () => {
     expect(() => assertVideoReferenceLimits(input({ image: 30 }), { maxDuration: 15 }, 'X')).not.toThrow();
   });
 });
+
+describe('离散时长吸附', () => {
+  const build = (seedanceDuration: number, capability?: { durations?: number[]; maxDuration?: number }) =>
+    buildGeneralVideoProtocolVariables(
+      'lec-ac-seedance-900-720p',
+      { model: 'general/relay', provider: 'general', prompt: 'p', seedanceDuration },
+      { prompt: 'p', imageUrls: [], videoUrls: [], audioUrls: [], operation: 'text-to-video' },
+      capability,
+    ).duration;
+
+  it('画布上的 4 秒吸附到模型允许的最近档，而不是原样发出', () => {
+    // 文档：仅支持 10 或 15 秒
+    expect(build(4, { durations: [10, 15] })).toBe(10);
+    expect(build(13, { durations: [10, 15] })).toBe(15);
+    expect(build(15, { durations: [10, 15] })).toBe(15);
+    // 固定时长写成单元素数组
+    expect(build(4, { durations: [15] })).toBe(15);
+  });
+
+  it('没声明离散档位时保持原有的范围钳制', () => {
+    expect(build(8, { maxDuration: 15 })).toBe(8);
+    expect(build(8)).toBe(8);
+  });
+});

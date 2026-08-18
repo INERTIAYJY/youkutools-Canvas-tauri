@@ -133,6 +133,46 @@ function ensureTaskState(
   return state;
 }
 
+/**
+ * 已授权地址的子路径视为同样授权。
+ *
+ * 用户指到 https://站点/docs，那么 /docs/videos/{模型ID} 这类同站子页本就在他授权的范围内。
+ * 只靠"读过的页面里发现的链接"授权，一旦首页渲染超时退回公开清单（清单没有链接），
+ * 模型接口页就永远读不到，助手只能凭空编请求体——正是这个问题的成因。
+ * 仅按已授权 URL 的路径前缀放宽，不放宽到整个域名。
+ */
+function findPrefixGrant(
+  state: ProviderDocsTaskState,
+  normalized: string,
+): ProviderDocGrant | undefined {
+  const target = new URL(normalized);
+  for (const grant of state.grants.values()) {
+    const base = new URL(grant.url);
+    if (base.origin !== target.origin) continue;
+    const basePath = base.pathname.replace(/\/+$/, '');
+    if (!basePath) continue;
+    if (target.pathname === basePath || target.pathname.startsWith(`${basePath}/`)) {
+      return { url: normalized, origin: target.origin, depth: grant.depth + 1 };
+    }
+  }
+  return undefined;
+}
+
+/** 取已有授权；没有精确匹配时按路径前缀补一条，并记入会话。 */
+function resolveGrant(
+  state: ProviderDocsTaskState,
+  normalized: string,
+  conversationId?: string,
+): ProviderDocGrant | undefined {
+  const exact = state.grants.get(normalized);
+  if (exact) return exact;
+  const inherited = findPrefixGrant(state, normalized);
+  if (!inherited || inherited.depth > MAX_PROVIDER_DOC_DEPTH) return undefined;
+  state.grants.set(normalized, inherited);
+  rememberConversationGrant(conversationId, inherited);
+  return inherited;
+}
+
 export function isProviderDocUrlGranted(
   taskId: string,
   taskGoal: string,
@@ -141,7 +181,8 @@ export function isProviderDocUrlGranted(
 ): boolean {
   const normalized = normalizeProviderDocUrl(rawUrl);
   if (!normalized) return false;
-  return ensureTaskState(taskId, taskGoal, conversationId).grants.has(normalized);
+  const state = ensureTaskState(taskId, taskGoal, conversationId);
+  return !!resolveGrant(state, normalized, conversationId);
 }
 
 export function beginProviderDocRead(
@@ -153,7 +194,7 @@ export function beginProviderDocRead(
   const normalized = normalizeProviderDocUrl(rawUrl);
   if (!normalized) throw new Error('文档 URL 无效或不满足 HTTPS 安全要求');
   const state = ensureTaskState(taskId, taskGoal, conversationId);
-  const grant = state.grants.get(normalized);
+  const grant = resolveGrant(state, normalized, conversationId);
   if (!grant) throw new Error('只能读取用户本轮提供或已读页面发现的同站文档链接');
   if (state.readUrls.has(normalized) || state.reservedUrls.has(normalized)) {
     throw new Error('该文档页面已读取或正在读取');

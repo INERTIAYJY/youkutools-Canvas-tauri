@@ -336,7 +336,8 @@ export async function readProviderDocsPage(
     let rendered: NativeProviderDocsResponse | undefined;
     try {
       rendered = await invoke<NativeProviderDocsResponse>('assistant_web_render', { url: finalUrl });
-    } catch {
+    } catch (error) {
+      console.warn('[providerDocs] 动态渲染失败，退回公开清单兜底', finalUrl, error);
       rendered = undefined;
     }
     if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');

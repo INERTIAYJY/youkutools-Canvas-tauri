@@ -241,6 +241,16 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
           reservation = undefined;
           const grantedUrls = new Set(completion.discoveredUrls);
           const links = page.links.filter((link) => grantedUrls.has(link.url));
+          // 对接中转站排查用：文档到底读到了什么、有没有发现可继续读的模型接口页
+          console.info('[provider_docs_read]', {
+            url: page.url,
+            textChars: page.text.length,
+            truncated: page.truncated,
+            linkCount: links.length,
+            links: links.map((link) => link.url),
+            hasModelCatalog: !!page.modelCatalog,
+            textHead: page.text.slice(0, 600),
+          });
           return {
             status: 'success' as const,
             summary: `已读取 ${new URL(page.url).hostname} 文档（深度 ${completion.depth}）`,
@@ -352,7 +362,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
         'Gemini 图片 generateContent 会自动规范化 IMAGE、contents 和 inlineData.data，不要求真实 Base64 响应样例。',
         '图片接口若使用 image 字段接收 data:image/...;base64,... 数组，应把 imageReferenceRequestMode 设为 generation-json-image-data-urls。',
         'submitRequest 必须来自文档的真实请求示例或参数表；不要补充文档没有列出的字段，多余字段会让接口返回 400 unsupported field。',
-        '视频模型请把文档写明的固定能力填进 videoCapability（固定时长写 minDuration=maxDuration=defaultDuration，宽高比枚举写 ratios，参考图上限写 maxImageReferences），画布参数面板会据此约束用户，避免发出该模型不支持的取值。',
+        '视频模型请把文档写明的固定能力填进 videoCapability：文档写「仅支持 10 或 15 秒」这类离散取值时用 durations: [10, 15]（不要写成 min/max，那会放过 12 秒），固定时长写 durations: [15]，宽高比枚举写 ratios，参考图上限写 maxImageReferences。画布参数面板会据此约束用户，避免发出该模型不支持的取值。',
         'docs、developer 等文档站地址不能作为 baseUrl；必须使用用户实际调用模型的 API 网关地址。',
         '当文档示例使用 loading、example 等占位主机时，通过 baseUrl 提供文档或用户明确声明的实际接口地址。',
         '所有模型必须属于同一个 HTTPS Base URL。不得传入 API Key、Token、Authorization 值或其他真实凭据。',
@@ -390,6 +400,7 @@ export function registerProviderConfigAgentTools(): Array<() => void> {
                     defaultResolution: { type: 'string', maxLength: 24 },
                     ratios: { type: 'array', items: { type: 'string' }, maxItems: 12 },
                     defaultRatio: { type: 'string', maxLength: 24 },
+                    durations: { type: 'array', items: { type: 'number' }, maxItems: 12 },
                     minDuration: { type: 'number' },
                     maxDuration: { type: 'number' },
                     defaultDuration: { type: 'number' },

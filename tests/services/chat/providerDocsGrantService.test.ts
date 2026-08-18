@@ -125,3 +125,22 @@ describe('拒绝时给出可读地址', () => {
     expect(listProviderDocGrants('task-hint', goal)).toEqual([model]);
   });
 });
+
+describe('已授权路径下的子页', () => {
+  const goal = '接入 https://api.paipu.net/docs';
+
+  it('首页渲染失败拿不到链接时，模型接口页仍可读', () => {
+    // 兜底清单不带任何链接，只能靠路径前缀授权
+    expect(isProviderDocUrlGranted('task-prefix', goal, 'https://api.paipu.net/docs/videos/lec-ac-seedance-900-720p')).toBe(true);
+    expect(() => beginProviderDocRead('task-prefix', goal, 'https://api.paipu.net/docs/images/lec-image-2')).not.toThrow();
+  });
+
+  it('不放宽到授权路径之外', () => {
+    // 同域但不在 /docs 下
+    expect(isProviderDocUrlGranted('task-scope', goal, 'https://api.paipu.net/dashboard')).toBe(false);
+    // 前缀相近但不是子路径
+    expect(isProviderDocUrlGranted('task-scope', goal, 'https://api.paipu.net/docs-private/x')).toBe(false);
+    // 换个域名
+    expect(isProviderDocUrlGranted('task-scope', goal, 'https://evil.example.com/docs/videos/x')).toBe(false);
+  });
+});

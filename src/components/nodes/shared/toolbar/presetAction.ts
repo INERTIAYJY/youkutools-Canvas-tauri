@@ -193,6 +193,8 @@ export function createPresetNode(
   // 回退读取模型：节点 data → localStorage 偏好 → config generalModels
   const effectiveModel = resolveEffectiveModel(nodeType, sourceNode.data);
 
+  const provider = (resolved.override?.provider || effectiveModel?.provider || sourceNode.data.provider) as string;
+
   // 不 spread sourceNode.data — 不继承 role / output / 媒体文件等
   const newData: BaseNodeData = {
     type: nodeType as NodeType,
@@ -201,7 +203,13 @@ export function createPresetNode(
     role: 'generator',
     status: 'idle',
     model: (resolved.override?.model || effectiveModel?.model || sourceNode.data.model) as string,
-    provider: (resolved.override?.provider || effectiveModel?.provider || sourceNode.data.provider) as string,
+    provider,
+    // ComfyUI 工作流靠 workflowId 走本地执行路径，只带 provider 会在生成时找不到工作流。
+    // workflowInputs 不继承：那是源节点 prompt 里 @ 出来的 IO 赋值，带过来既是脏值，
+    // 又会让 submitComfyUIWorkflow 认为该类型已被 @，从而跳过默认节点的参考图注入。
+    ...(provider === 'comfyui' && sourceNode.data.workflowId
+      ? { workflowId: sourceNode.data.workflowId }
+      : {}),
     imageSize: resolved.override?.imageSize ?? sourceNode.data.imageSize,
     aspectRatio: resolved.override?.aspectRatio ?? sourceNode.data.aspectRatio,
     nodeWidth,

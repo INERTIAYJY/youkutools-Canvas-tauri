@@ -181,6 +181,10 @@ export interface BaseNodeData {
   aspectRatio?: string;       // 图片比例：'1:1' | '16:9' | ...
   batchCount?: number;        // 单次批量生成图片数量，默认 1
   batchGroupId?: string;      // 同一次批量生成的结果分组 ID
+  /** 视频节点：是否在当前节点生成并替换旧视频；false 时生成到右侧新建节点（generateCount 条）。默认 true。 */
+  generateInPlace?: boolean;
+  /** 视频节点：不在此节点生成时的新建数量（1-4），默认 1。 */
+  generateCount?: number;
   cameraSettings?: CameraGenerationSettings; // 生图/生视频摄影参数；字段缺省时由模型自动决定
   videoResolution?: number;   // 视频分辨率：832 | 1024 | 1280 | 1440
   videoFps?: number;          // 视频帧率：16 | 24 | 30
@@ -344,7 +348,7 @@ export type ImageReferenceRequestMode =
   | 'generation-json-image-data-urls'
   | 'edits-multipart';
 
-export type ProviderCatalogAdapter = 'openai-compatible' | 'local-manifest';
+export type ProviderCatalogAdapter = 'openai-compatible' | 'local-manifest' | 'seedling-cli';
 
 export type WebSearchProviderId = 'tavily' | 'bocha' | 'zhipu-search' | 'exa';
 
@@ -367,6 +371,8 @@ export interface ProviderModelSelection {
   executionProfile?: ModelExecutionProfile;
   /** 图片模型存在参考图时使用的请求协议；缺省保持 generations JSON 兼容方式。 */
   imageReferenceRequestMode?: ImageReferenceRequestMode;
+  /** 视频模型的参数能力声明（时长/分辨率/比例/参考素材等），缺省走通用兜底。 */
+  videoCapability?: VideoModelCapability;
 }
 
 export interface ApiProviderConfig {
@@ -398,6 +404,15 @@ export interface DreaminaAuthData {
   credit?: string;            // 额度余额文本
   loginTs?: number;           // 登录时间戳
   cookie?: string;            // 遗留字段（旧 cookie 方案），已弃用且不再持久化（属凭据）
+}
+
+// Seedling/森之灵 CLI 登录态镜像（登录态由 seedling CLI 配置文件持久化，此处仅镜像用于 UI）
+export interface SeedlingAuthMirror {
+  loggedIn: boolean;
+  username?: string;          // 账户昵称
+  endpoint?: string;          // 服务地址
+  tokenSource?: string;       // 'file'（CLI 配置文件）| 'env' | 'api-key'（应用内 API Token）
+  checkTs?: number;           // 最近一次在线验证时间戳
 }
 
 // 即梦 OAuth 登录运行态（对应 Rust LoginRuntime 快照）
@@ -477,6 +492,7 @@ export interface AppConfig {
   comfyUIUrl?: string;        // ComfyUI 服务地址
   comfyUIPath?: string;       // ComfyUI 安装目录路径
   dreaminaAuth?: DreaminaAuthData; // 即梦登录态
+  seedlingAuth?: SeedlingAuthMirror; // 森之灵 CLI 登录态镜像（CLI 配置文件持久化登录态）
   baseDataDir?: string;       // 用户自定义文件保存根目录，保存结构为 {baseDataDir}/{projectId}/**
   generalModels?: GeneralModelConfig[]; // 用户自建通用模型
   sidebarFloating?: boolean;  // 侧边栏是否悬浮显示（半隐于窗口边缘），默认 true

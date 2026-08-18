@@ -1,0 +1,232 @@
+/**
+ * seedlingMedia — Seedling 视频 Provider Adapter 参数映射测试
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { VideoGenerationReferenceInput } from '../../src/types/aiTypes';
+import type { MediaProviderRequest } from '../../src/services/ai/mediaProviderRegistry';
+import { useAppStore } from '../../src/store/useAppStore';
+
+const seedlingMocks = vi.hoisted(() => ({
+  createSeedlingVideoTask: vi.fn(),
+  waitSeedlingTask: vi.fn(),
+  toSeedlingDisplayUrl: vi.fn((url: string) => url),
+  uploadSeedlingResource: vi.fn(),
+}));
+
+const uploadMocks = vi.hoisted(() => ({
+  resolveMediaReferenceUrl: vi.fn(),
+  uploadToRemote: vi.fn(),
+}));
+
+vi.mock('../../src/services/seedlingService', () => seedlingMocks);
+vi.mock('../../src/services/uploadService', () => uploadMocks);
+
+import { seedlingMediaProviderAdapter } from '../../src/services/ai/providers/seedlingMedia';
+
+function buildRequest(overrides?: {
+  prompt?: string;
+  seedanceDuration?: number;
+  seedanceResolution?: string;
+  seedanceRatio?: string;
+  generateAudio?: boolean;
+  references?: VideoGenerationReferenceInput['references'];
+  imageUrls?: string[];
+  videoUrls?: string[];
+}): MediaProviderRequest {
+  return {
+    params: {
+      prompt: '测试视频',
+      model: 'seedling/quality',
+      provider: 'seedling',
+      seedanceDuration: overrides?.seedanceDuration ?? 5,
+      seedanceResolution: overrides?.seedanceResolution ?? '720p',
+      seedanceRatio: overrides?.seedanceRatio ?? '16:9',
+      generateAudio: overrides?.generateAudio ?? false,
+    },
+    prompt: overrides?.prompt ?? '测试视频',
+    resolveReferenceInput: async () => ({
+      prompt: '测试视频',
+      imageUrls: overrides?.imageUrls ?? [],
+      videoUrls: overrides?.videoUrls ?? [],
+      audioUrls: [],
+      operation: 'text-to-video',
+      references: overrides?.references,
+    }),
+  };
+}
+
+beforeEach(() => {
+  // 认证预检（assertSeedlingAuthorized）需要 CLI 登录态或 API Token
+  useAppStore.setState({
+    config: {
+      ...useAppStore.getInitialState().config,
+      seedlingAuth: { loggedIn: true },
+    },
+  });
+  seedlingMocks.createSeedlingVideoTask.mockReset();
+  seedlingMocks.waitSeedlingTask.mockReset();
+  seedlingMocks.uploadSeedlingResource.mockReset();
+  uploadMocks.resolveMediaReferenceUrl.mockReset();
+  uploadMocks.uploadToRemote.mockReset();
+  seedlingMocks.createSeedlingVideoTask.mockResolvedValue({ taskId: 10001 });
+  seedlingMocks.waitSeedlingTask.mockResolvedValue({
+    taskId: 10001,
+    status: 'succeeded',
+    videoUrl: 'https://cdn.example/seedling-video.mp4',
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('seedlingMediaProviderAdapter.generateVideo', () => {
+  it('提交文本生成任务并返回视频地址', async () => {
+    const url = await seedlingMediaProviderAdapter.generateVideo!(buildRequest());
+    expect(url).toEqual({ url: 'https://cdn.example/seedling-video.mp4' });
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith({
+      prompt: '测试视频',
+      model: 'quality',
+      duration: 5,
+      resolution: '720p',
+      ratio: '16:9',
+      audio: false,
+      resources: [],
+    });
+    expect(seedlingMocks.waitSeedlingTask).toHaveBeenCalledWith(10001, undefined);
+  });
+
+  it('时长低于 4 秒时钳制到 4 秒（CLI 下限）', async () => {
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({ seedanceDuration: 2 }),
+    );
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({ duration: 4 }),
+    );
+  });
+
+  it('时长高于 15 秒时钳制到 15 秒（CLI 上限）', async () => {
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({ seedanceDuration: 30 }),
+    );
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({ duration: 15 }),
+    );
+  });
+
+  it('显式首尾帧按 首帧 → 参考 → 尾帧 排序传入 resources', async () => {
+    const references = [
+      { kind: 'image' as const, url: 'https://cdn.example/mid.png', role: 'reference' as const, origin: 'connection' as const },
+      { kind: 'image' as const, url: 'https://cdn.example/last.png', role: 'last_frame' as const, origin: 'connection' as const },
+      { kind: 'image' as const, url: 'https://cdn.example/first.png', role: 'first_frame' as const, origin: 'connection' as const },
+    ];
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({ references, imageUrls: [] }),
+    );
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: [
+          'https://cdn.example/first.png',
+          'https://cdn.example/mid.png',
+          'https://cdn.example/last.png',
+        ],
+      }),
+    );
+  });
+
+  it('本地路径与 asset.localhost 资产均先上传为 https URL（CLI 只接受 https）', async () => {
+    seedlingMocks.uploadSeedlingResource.mockImplementation(async (p: string) => ({
+      url: `https://cdn.seedling.com/uploads/${encodeURIComponent(p)}`,
+    }));
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({
+        imageUrls: [
+          'C:\\project\\frames\\a.png',
+          'http://asset.localhost/C%3A%2Fproject%2Fframes%2Fb.png',
+        ],
+      }),
+    );
+    expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith('C:\\project\\frames\\a.png');
+    expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith('C:\\project\\frames\\b.png');
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: [
+          'https://cdn.seedling.com/uploads/C%3A%5Cproject%5Cframes%5Ca.png',
+          'https://cdn.seedling.com/uploads/C%3A%5Cproject%5Cframes%5Cb.png',
+        ],
+      }),
+    );
+    expect(uploadMocks.resolveMediaReferenceUrl).not.toHaveBeenCalled();
+  });
+
+  it('asset.localhost 视频参考解码本地路径后上传为 https', async () => {
+    seedlingMocks.uploadSeedlingResource.mockResolvedValue({
+      url: 'https://cdn.seedling.com/uploads/video.mp4',
+    });
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({
+        videoUrls: ['http://asset.localhost/C%3A%2Fproject%2Fvideo%2F%E5%B7%A6%E5%8F%B3%E6%8A%89%E6%8B%A9.mp4'],
+      }),
+    );
+    expect(seedlingMocks.uploadSeedlingResource).toHaveBeenCalledWith(
+      'C:\\project\\video\\左右抉择.mp4',
+    );
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: ['https://cdn.seedling.com/uploads/video.mp4'],
+      }),
+    );
+  });
+
+  it('本地素材上传失败时给出明确错误', async () => {
+    seedlingMocks.uploadSeedlingResource.mockRejectedValue(new Error('上传 400: invalid file'));
+    await expect(
+      seedlingMediaProviderAdapter.generateVideo!(
+        buildRequest({ imageUrls: ['C:\\project\\frames\\a.png'] }),
+      ),
+    ).rejects.toThrow('森之灵素材上传失败：上传 400: invalid file');
+  });
+
+  it('http 远程参考图经图床转 https 后传入（CLI 只接受 https）', async () => {
+    uploadMocks.uploadToRemote.mockResolvedValue('https://cdn.example/http-converted.png');
+    await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({ imageUrls: ['http://example.com/ref.png'] }),
+    );
+    expect(uploadMocks.uploadToRemote).toHaveBeenCalledWith('http://example.com/ref.png');
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resources: ['https://cdn.example/http-converted.png'],
+      }),
+    );
+  });
+
+  it('任一资源非 https 时提前拦截并指明违规项', async () => {
+    uploadMocks.resolveMediaReferenceUrl.mockResolvedValue('http://cdn.example/not-https.png');
+    await expect(
+      seedlingMediaProviderAdapter.generateVideo!(
+        buildRequest({ imageUrls: ['asset.localhost/ref.png'] }),
+      ),
+    ).rejects.toThrow('参考素材必须是 https:// 地址');
+  });
+
+  it('任务失败时抛出服务端错误信息', async () => {
+    seedlingMocks.waitSeedlingTask.mockRejectedValue(
+      new Error('任务失败: OutputVideoSensitiveContentDetected'),
+    );
+    await expect(
+      seedlingMediaProviderAdapter.generateVideo!(buildRequest()),
+    ).rejects.toThrow('OutputVideoSensitiveContentDetected');
+  });
+
+  it('任务成功但无视频地址时报错', async () => {
+    seedlingMocks.waitSeedlingTask.mockResolvedValue({
+      taskId: 10001,
+      status: 'succeeded',
+      videoUrl: null,
+      errorMessage: '未生成产物',
+    });
+    await expect(
+      seedlingMediaProviderAdapter.generateVideo!(buildRequest()),
+    ).rejects.toThrow('未生成产物');
+  });
+});

@@ -117,6 +117,11 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
 
   if (option.provider === 'dreamina') {
     if (!config.dreaminaAuth?.loggedIn) throw new Error('请先登录即梦账号');
+  } else if (option.provider === 'seedling') {
+    // 森之灵：API Token（config.providers.seedling.apiKey）或 CLI 登录态任一可用
+    if (!config.providers.seedling?.apiKey && !config.seedlingAuth?.loggedIn) {
+      throw new Error('请先配置森之灵：在「设置 → 森之灵」中填写 API Token 或完成 CLI 登录');
+    }
   } else if (!config.providers[option.provider]?.apiKey) {
     throw new Error(`请先配置 ${option.provider} 的 API Key`);
   }

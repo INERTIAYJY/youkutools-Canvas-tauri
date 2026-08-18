@@ -16,7 +16,7 @@ import { CATEGORY_TO_NODE_TYPES } from '../../../types';
 
 export type MediaModelKind = 'image' | 'video' | 'audio';
 
-type ProviderModelVisibilityConfig = Pick<AppConfig, 'providers' | 'dreaminaAuth'>;
+type ProviderModelVisibilityConfig = Pick<AppConfig, 'providers' | 'dreaminaAuth' | 'seedlingAuth'>;
 
 export interface MediaModelOption extends ModelOption {
   mediaKind: MediaModelKind;
@@ -893,6 +893,16 @@ export const defaultModelGroups: ModelGroup[] = [
     ],
   },
 
+  // --- 森之灵/Seedling（模型由 CLI 目录动态填充，此处仅声明分组） ---
+  {
+    id: 'seedling',
+    name: '森之灵',
+    description: 'Seedling CLI 视频生成：文生视频 / 图生视频 / 首尾帧',
+    iconType: 'badge',
+    badgeText: 'SL',
+    models: [],
+  },
+
   // --- RunningHUB 模型 ---
   {
     id: 'runninghub',
@@ -1102,8 +1112,9 @@ export function getConfiguredModelGroups(
     const providerConfigId = providerConfigIdForGroup(group.id);
     const provider = config.providers[providerConfigId];
     const dreaminaLegacyConnection = group.id === 'dreamina' && !!config.dreaminaAuth?.loggedIn;
-    if (!provider && !dreaminaLegacyConnection) return [];
-    if (group.id !== 'dreamina' && !provider?.apiKey) return [];
+    const seedlingLegacyConnection = group.id === 'seedling' && !!config.seedlingAuth?.loggedIn;
+    if (!provider && !dreaminaLegacyConnection && !seedlingLegacyConnection) return [];
+    if (group.id !== 'dreamina' && group.id !== 'seedling' && !provider?.apiKey) return [];
     if (provider && !isProviderCategoryVisible(config, providerConfigId, category)) return [];
 
     const modelProvider = group.models[0]?.provider || group.id;

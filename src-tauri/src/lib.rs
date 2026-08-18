@@ -28,6 +28,7 @@ mod path_policy;
 mod project_archive;
 mod provider_docs;
 mod secret_store;
+mod seedling;
 mod sprite_export;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -1014,6 +1015,19 @@ pub fn run() {
             secret_store::secret_delete,
             secret_store::secret_store_available,
             local_fonts::list_local_fonts,
+            seedling::seedling_cli_status,
+            seedling::seedling_install_cli,
+            seedling::seedling_models,
+            seedling::seedling_task_create,
+            seedling::seedling_task_get,
+            seedling::seedling_task_list,
+            seedling::seedling_task_cancel,
+            seedling::seedling_task_download,
+            seedling::seedling_resource_upload,
+            seedling::seedling_auth_login_start,
+            seedling::seedling_auth_login_runtime,
+            seedling::seedling_auth_login_cancel,
+            seedling::seedling_auth_logout,
         ])
         .on_window_event(|window, event| {
             // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。

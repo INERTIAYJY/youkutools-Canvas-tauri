@@ -13,7 +13,7 @@
             "open": true
         },
         "updater": {
-            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyQkQ3RkVDQkU5RjVEN0MKUldSOFhaKys3SCs5d3VzbjRBQXlBb3VNWnJOa3o1bzkyZlJoaG1Cc0pJWFczaXhGYUZKTFVsR1gK",
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3MUZFQkJFMkNBOTZDClJXUnNxU3krNngvM0FCY1crWENhSU1NK2YraUFSemxVM1BHZlBpS1hEU1UzbzYzWEhhR0NPVU1LCg==",
             "endpoints": [
                 "https://github.com/INERTIAYJY/youkutools-Canvas-tauri/releases/latest/download/latest.json"
             ],

@@ -2,6 +2,7 @@
  * ModalOverlay — 可复用的模态框外层容器（AnimatePresence + backdrop + 弹簧落位）
  */
 import { useCallback, useEffect, useRef, type PointerEvent, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AnimatePresence,
   motion,
@@ -147,12 +148,12 @@ export default function ModalOverlay({
     };
   }, [isOpen]);
 
-  return (
+  return createPortal(
     <AnimatePresence>
       {isOpen && (
         <motion.div
           ref={overlayRef}
-          className="fixed inset-0 z-[250] flex items-center justify-center rounded-2xl"
+          className="fixed inset-0 z-[250] flex items-center justify-center overflow-hidden rounded-2xl"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -161,7 +162,7 @@ export default function ModalOverlay({
           <motion.div
             data-tauri-drag-region
             aria-hidden="true"
-            className={`absolute inset-0 bg-black/50 rounded-2xl ${backdropBlur ? 'backdrop-blur-sm' : ''}`}
+            className={`absolute inset-0 bg-black/50 ${backdropBlur ? 'backdrop-blur-sm' : ''}`}
             initial={quickMotion ? false : { opacity: 0 }}
             animate={quickMotion ? undefined : { opacity: 1 }}
             exit={quickMotion ? undefined : { opacity: 0 }}
@@ -191,6 +192,7 @@ export default function ModalOverlay({
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

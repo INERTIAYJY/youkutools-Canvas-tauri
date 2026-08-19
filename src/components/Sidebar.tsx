@@ -295,15 +295,16 @@ function NodePicker({
    Avatar / Settings dropdown menu
    ============================================ */
 function AvatarMenu() {
-  const { avatarMenuOpen, closeAvatarMenu, setSettingsOpen } = useAppStore(
+  const { avatarMenuOpen, closeAvatarMenu, setSettingsOpen, helpOpen, setHelpOpen } = useAppStore(
     useShallow((s) => ({
       avatarMenuOpen: s.avatarMenuOpen,
       closeAvatarMenu: s.closeAvatarMenu,
       setSettingsOpen: s.setSettingsOpen,
+      helpOpen: s.helpOpen,
+      setHelpOpen: s.setHelpOpen,
     })),
   );
   const menuRef = useRef<HTMLDivElement>(null);
-  const [helpOpen, setHelpOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'no-update' | 'available' | 'updating' | 'error'>('idle');

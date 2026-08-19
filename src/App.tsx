@@ -2,7 +2,7 @@
  * App 根组件 — 装配 Header / Sidebar / Canvas / NodeMenu / SettingsPanel / Titlebar / Toast / AINodeDialog / WorkflowPanel
  * Tauri 环境下启用自定义窗口装饰和透明圆角窗口
  */
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import Header from './components/Header';
 import Titlebar from './components/Titlebar';
@@ -46,6 +46,10 @@ const ChatPanel = lazy(() => import('./components/chat/ChatPanel'));
 const PresetRunnerDialog = lazy(() => import('./components/nodes/shared/PresetRunnerDialog'));
 const ReversePromptDialog = lazy(() => import('./components/nodes/shared/ReversePromptDialog'));
 const DirectorDeskRuntimeManager = lazy(() => import('./components/director/DirectorDeskRuntimeManager'));
+const OnboardingDialog = lazy(() => import('./components/OnboardingDialog'));
+
+/** 首次启动引导只弹一次；关掉后写入本地标记。 */
+const ONBOARDING_SEEN_KEY = 'ai-canvas-onboarding-seen';
 
 let cachedMascotNodes: AppState['nodes'] | undefined;
 let cachedMascotLoading = false;
@@ -110,6 +114,14 @@ export default function App() {
 
   // 开屏动画状态
   const [splashDone, setSplashDone] = useState(false);
+  // 首次启动引导（开屏动画结束后才弹）
+  const [onboardingOpen, setOnboardingOpen] = useState(
+    () => localStorage.getItem(ONBOARDING_SEEN_KEY) !== 'true',
+  );
+  const closeOnboarding = useCallback(() => {
+    localStorage.setItem(ONBOARDING_SEEN_KEY, 'true');
+    setOnboardingOpen(false);
+  }, []);
   // 下载弹窗出现时，右下角吉祥物缩小消失
   const [mascotShrink, setMascotShrink] = useState(false);
 
@@ -501,6 +513,18 @@ export default function App() {
       <Suspense fallback={null}>
         <DirectorDeskRuntimeManager />
       </Suspense>
+
+      {splashDone && onboardingOpen && (
+        <Suspense fallback={null}>
+          <OnboardingDialog
+            onClose={closeOnboarding}
+            onOpenHelp={() => {
+              closeOnboarding();
+              useAppStore.getState().setHelpOpen(true);
+            }}
+          />
+        </Suspense>
+      )}
 
     </div>
   );

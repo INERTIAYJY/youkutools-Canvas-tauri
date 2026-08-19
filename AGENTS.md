@@ -63,6 +63,7 @@ AI-Canvas-tauri/
 │   │   ├── ProjectLibraryModal.tsx / SessionProjectTabs.tsx / ProjectSettingsPopover.tsx
 │   │   ├── SeriesRail.tsx / ProjectAssetsOverlay.tsx / ProjectSwitchOverlay.tsx
 │   │   ├── CharacterLibraryPanel.tsx / CharacterAssetDialog.tsx / DramaAssetsPanel.tsx
+│   │   ├── HelpCenterDialog.tsx / HelpMentionDemo.tsx / OnboardingDialog.tsx
 │   │   ├── canvas/            # 画布菜单、工具栏、绘图工具栏、多选、分布、操作记录
 │   │   ├── noteNodes/         # 画布笔记的形状、文本与图片渲染
 │   │   ├── nodes/             # AI、源文件、分镜、动画、全景、导演台节点及共享编辑器
@@ -139,6 +140,8 @@ AI-Canvas-tauri/
 - `components/chat/ChatPanel.tsx`：对话容器、主窗口与独立窗口路由，不实现具体工具协议
 - `components/chat/AgentTaskTimeline.tsx`：任务和步骤控制；状态变更必须调用 Agent Runtime
 - `components/settings/`：配置 UI；密钥只经 `providerSecretService.ts` 交给 Rust 凭据存储，不得进入 IndexedDB、消息或操作日志
+- `HelpCenterDialog.tsx` / `OnboardingDialog.tsx`：面向用户的说明文案集中在这里，两者都懒加载；帮助弹窗的开关是 `store.ui.ts` 的 `helpOpen`，不要退回组件局部 state
+- 帮助内的操作演示复用真实组件与真实 DOM 构造器（如 `MentionPicker`、`buildWorkflowChipEl`），禁止另写一套仿真样式，避免演示与实际界面漂移
 - 复杂组件优先拆分子组件，通过 `React.memo` 或稳定 selector 降低画布重渲染
 
 ### 对话与 Agent

@@ -367,6 +367,8 @@ export interface ProviderModelSelection {
   executionProfile?: ModelExecutionProfile;
   /** 图片模型存在参考图时使用的请求协议；缺省保持 generations JSON 兼容方式。 */
   imageReferenceRequestMode?: ImageReferenceRequestMode;
+  /** 视频模型的参数能力声明（时长/分辨率/比例/参考素材等），缺省走通用兜底。 */
+  videoCapability?: VideoModelCapability;
 }
 
 export interface ApiProviderConfig {

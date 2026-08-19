@@ -14,6 +14,7 @@ import type {
 } from '../../types/agent';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
 import AgentToolDetails from './AgentToolDetails';
+import { useT } from '../../i18n';
 
 interface AgentApprovalCardProps {
   step: AgentStep;
@@ -53,6 +54,7 @@ export default function AgentApprovalCard({
   mediaModelAvailability,
   onResolve,
 }: AgentApprovalCardProps) {
+  const t = useT();
   const approval = step.approval;
   const inputRequest = approval?.inputRequest;
   const mediaModelRequest = inputRequest?.kind === 'media_model' ? inputRequest : undefined;
@@ -117,13 +119,13 @@ export default function AgentApprovalCard({
     <div
       className="mt-2 border-l-2 border-amber-400/60 bg-amber-400/5 px-3 py-2.5"
       role="group"
-      aria-label={`${meta.label}待确认`}
+      aria-label={t('{label}待确认', { label: t(meta.label) })}
     >
       <div className="flex items-start gap-2">
         <Icon icon={meta.icon} width="16" className="mt-0.5 shrink-0 text-amber-400" />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-medium text-amber-300">
-            待确认 · {meta.label}
+            {t('待确认')} · {t(meta.label)}
           </p>
           <p className="mt-1 break-words text-xs leading-[18px] text-canvas-text-secondary">
             {step.toolCall?.inputSummary || approval.summary}
@@ -134,13 +136,13 @@ export default function AgentApprovalCard({
       {approval.kind === 'config_write' && (
         <div className="mt-2 flex items-start gap-1.5 border-t border-amber-300/15 pt-2 text-xs leading-[18px] text-canvas-text-secondary">
           <Icon icon="mdi:shield-key-outline" width="14" className="mt-0.5 shrink-0 text-amber-400" />
-          <span>不会写入 API Key；新连接保持空白，已有连接保留原值。</span>
+          <span>{t('不会写入 API Key；新连接保持空白，已有连接保留原值。')}</span>
         </div>
       )}
       {mediaModelRequest && (
         <div className="mt-3 border-t border-amber-300/15 pt-2.5">
           <p className="mb-2 text-[11px] font-medium text-canvas-text">
-            选择{MEDIA_KIND_LABELS[mediaModelRequest.mediaKind]}模型
+            {t('选择{kind}模型', { kind: t(MEDIA_KIND_LABELS[mediaModelRequest.mediaKind]) })}
           </p>
           {hasAvailableModel ? (
             <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
@@ -157,7 +159,7 @@ export default function AgentApprovalCard({
                           type="button"
                           disabled={!available}
                           aria-pressed={selected}
-                          title={available ? model.description : '模型未配置或当前不可用'}
+                          title={available ? model.description : t('模型未配置或当前不可用')}
                           onClick={() => setSelectedModelRef(model.value)}
                           className={`flex min-h-7 max-w-full items-center gap-1 rounded-full border px-2.5 py-1 text-left text-[11px] leading-4 transition-colors active:scale-[0.98] motion-reduce:transform-none ${
                             selected
@@ -178,7 +180,7 @@ export default function AgentApprovalCard({
             </div>
           ) : (
             <p className="text-[11px] leading-[17px] text-canvas-text-muted">
-              暂无可用模型，请先在设置中完成模型配置。
+              {t('暂无可用模型，请先在设置中完成模型配置。')}
             </p>
           )}
         </div>
@@ -186,7 +188,7 @@ export default function AgentApprovalCard({
       {providerModelsRequest && (
         <div className="mt-3 border-t border-amber-300/15 pt-2.5">
           <p className="mb-2 text-[11px] font-medium text-canvas-text">
-            勾选要接入的模型（已选 {selectedModelIds.length} / {providerModelsRequest.options.length}）
+            {t('勾选要接入的模型（已选 {selected} / {total}）', { selected: selectedModelIds.length, total: providerModelsRequest.options.length })}
           </p>
           <div className="max-h-64 space-y-2.5 overflow-y-auto pr-1">
             {providerGroups.map(([category, options]) => {
@@ -196,14 +198,14 @@ export default function AgentApprovalCard({
                 <div key={category}>
                   <div className="mb-1 flex items-center justify-between gap-2">
                     <p className="text-[10px] text-canvas-text-muted">
-                      {PROVIDER_CATEGORY_LABELS[category]}（{options.length}）
+                      {t(PROVIDER_CATEGORY_LABELS[category])}（{options.length}）
                     </p>
                     <button
                       type="button"
                       onClick={() => toggleCategory(ids)}
                       className="min-h-6 rounded px-1.5 text-[10px] text-canvas-text-secondary hover:text-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50"
                     >
-                      {allSelected ? '取消全选' : '全选'}
+                      {allSelected ? t('取消全选') : t('全选')}
                     </button>
                   </div>
                   <div className="space-y-1">
@@ -244,7 +246,7 @@ export default function AgentApprovalCard({
           onClick={() => onResolve(approval.id, { approved: false })}
           className="min-h-8 rounded-md px-3 py-1 text-xs text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50"
         >
-          拒绝
+          {t('拒绝')}
         </button>
         <button
           type="button"
@@ -254,10 +256,10 @@ export default function AgentApprovalCard({
           className="min-h-8 rounded-md bg-amber-500 px-3 py-1 text-xs font-medium text-black hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
         >
           {needsModelSelection
-            ? '确认生成'
+            ? t('确认生成')
             : needsProviderSelection
-              ? `接入选中的 ${selectedModelIds.length} 个模型`
-              : '确认执行'}
+              ? t('接入选中的 {count} 个模型', { count: selectedModelIds.length })
+              : t('确认执行')}
         </button>
       </div>
     </div>

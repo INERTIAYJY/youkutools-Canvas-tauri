@@ -8,6 +8,7 @@ import {
   useImperativeHandle,
   useRef,
 } from 'react';
+import { useT } from '../../i18n';
 
 export type ChatComposerReference =
   | { kind: 'node'; id: string; label: string; displayId?: number }
@@ -265,6 +266,7 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
   placeholder,
   disabled = false,
 }, ref) {
+  const t = useT();
   const editorRef = useRef<HTMLDivElement>(null);
   const lastRangeRef = useRef<Range | null>(null);
   const triggerRangeRef = useRef<Range | null>(null);
@@ -460,7 +462,7 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
       <div
         ref={editorRef}
         role="textbox"
-        aria-label="对话消息"
+        aria-label={t('对话消息')}
         aria-multiline="true"
         aria-autocomplete="list"
         aria-controls={suggestionsOpen ? suggestionListId : undefined}

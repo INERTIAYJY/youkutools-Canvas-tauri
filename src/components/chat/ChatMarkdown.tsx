@@ -4,6 +4,7 @@
 import { useState, type ReactNode } from 'react';
 import { Icon } from '@iconify/react';
 import ChatReferenceText, { type ChatReferenceHandlers } from './ChatReferenceText';
+import { useT } from '../../i18n';
 
 interface ChatMarkdownProps extends ChatReferenceHandlers {
   value: string;
@@ -136,6 +137,7 @@ function InlineContent({
 }
 
 function CodeBlock({ code, language }: { code: string; language?: string }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
 
   const copyCode = async () => {
@@ -155,8 +157,8 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
         <button
           type="button"
           onClick={() => void copyCode()}
-          aria-label={copied ? '代码已复制' : '复制代码'}
-          data-tooltip={copied ? '已复制' : '复制代码'}
+          aria-label={copied ? t('代码已复制') : t('复制代码')}
+          data-tooltip={copied ? t('已复制') : t('复制代码')}
           className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
         >
           <Icon icon={copied ? 'mdi:check' : 'mdi:content-copy'} width="14" />

@@ -11,6 +11,7 @@ import {
   type AgentRationaleKind,
   type AgentRationaleTone,
 } from '../../services/chat/agentExecutionRationale';
+import { useT } from '../../i18n';
 
 interface AgentExecutionRationaleProps {
   task: AgentTask;
@@ -35,6 +36,7 @@ const TONE_CLASSES: Record<AgentRationaleTone, string> = {
 };
 
 export default function AgentExecutionRationale({ task }: AgentExecutionRationaleProps) {
+  const t = useT();
   const entries = buildAgentExecutionRationale(task);
   const [expanded, setExpanded] = useState(() => ACTIVE_STATUSES.has(task.status));
   if (entries.length === 0) return null;
@@ -49,9 +51,9 @@ export default function AgentExecutionRationale({ task }: AgentExecutionRational
         className="flex min-h-8 w-full items-center gap-1.5 rounded-md px-2 text-left transition-colors hover:bg-canvas-hover/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/40"
       >
         <Icon icon="mdi:timeline-text-outline" width="14" className="shrink-0 text-indigo-300/90" />
-        <span className="shrink-0 text-[11px] font-medium text-canvas-text-secondary">执行依据</span>
+        <span className="shrink-0 text-[11px] font-medium text-canvas-text-secondary">{t('执行依据')}</span>
         <span className="min-w-0 truncate text-[10px] text-canvas-text-muted">{latest?.title}</span>
-        <span className="ml-auto shrink-0 text-[10px] text-canvas-text-muted">{entries.length} 项</span>
+        <span className="ml-auto shrink-0 text-[10px] text-canvas-text-muted">{t('{count} 项', { count: entries.length })}</span>
         <Icon icon={expanded ? 'mdi:chevron-up' : 'mdi:chevron-down'} width="14" className="shrink-0 text-canvas-text-muted" />
       </button>
 
@@ -59,7 +61,7 @@ export default function AgentExecutionRationale({ task }: AgentExecutionRational
         <div className="border-t border-canvas-border/50 px-2 py-2">
           <p className="mb-2 flex items-start gap-1.5 text-[10px] leading-4 text-canvas-text-muted">
             <Icon icon="mdi:information-outline" width="12" className="mt-0.5 shrink-0" />
-            <span>来自可验证的任务事件，不包含模型隐藏思维。</span>
+            <span>{t('来自可验证的任务事件，不包含模型隐藏思维。')}</span>
           </p>
           <ol className="space-y-1.5">
             {entries.map((entry) => (

@@ -7,6 +7,7 @@ import type { AgentTask } from '../../types/agent';
 import type { ChatConversation } from '../../types/chat';
 import AgentTaskTimeline, { type AgentTaskControls } from './AgentTaskTimeline';
 import { AGENT_EXPERT_ROLE_LABELS } from '../../services/chat/expertTaskService';
+import { useT } from '../../i18n';
 
 interface AgentTaskCenterProps extends AgentTaskControls {
   tasks: AgentTask[];
@@ -22,6 +23,7 @@ export default function AgentTaskCenter({
   onClose,
   ...controls
 }: AgentTaskCenterProps) {
+  const t = useT();
   const [view, setView] = useState<'active' | 'all'>('active');
   const conversationNames = useMemo(
     () => new Map(conversations.map((conversation) => [conversation.id, conversation.title])),
@@ -46,13 +48,13 @@ export default function AgentTaskCenter({
   }, [tasks]);
 
   return (
-    <section className="agent-task-center flex min-h-0 flex-1 flex-col" aria-label="Agent 任务中心">
+    <section className="agent-task-center flex min-h-0 flex-1 flex-col" aria-label={t('Agent 任务中心')}>
       <header className="agent-task-center__header flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
         <button
           type="button"
           onClick={onClose}
-          aria-label="返回对话"
-          title="返回对话"
+          aria-label={t('返回对话')}
+          title={t('返回对话')}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-canvas-text-muted
                      transition-colors hover:bg-canvas-hover hover:text-canvas-text
                      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
@@ -60,8 +62,8 @@ export default function AgentTaskCenter({
           <Icon icon="mdi:arrow-left" width="18" />
         </button>
         <Icon icon="mdi:progress-wrench" width="17" className="text-[var(--brand)]" />
-        <h2 className="text-sm font-semibold text-canvas-text">任务中心</h2>
-        <span className="text-[11px] tabular-nums text-canvas-text-muted">{activeCount} 运行中</span>
+        <h2 className="text-sm font-semibold text-canvas-text">{t('任务中心')}</h2>
+        <span className="text-[11px] tabular-nums text-canvas-text-muted">{t('{count} 运行中', { count: activeCount })}</span>
         <div className="agent-task-center__tabs ml-auto flex items-center rounded-md border p-0.5" role="tablist">
           {(['active', 'all'] as const).map((item) => (
             <button
@@ -74,7 +76,7 @@ export default function AgentTaskCenter({
                 view === item ? 'is-active text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text'
               }`}
             >
-              {item === 'active' ? '进行中' : '全部'}
+              {item === 'active' ? t('进行中') : t('全部')}
             </button>
           ))}
         </div>
@@ -84,7 +86,7 @@ export default function AgentTaskCenter({
         {visible.length === 0 ? (
           <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 text-canvas-text-muted">
             <Icon icon="mdi:progress-check" width="28" />
-            <p className="text-xs">暂无{view === 'active' ? '进行中的' : ''}任务</p>
+            <p className="text-xs">{view === 'active' ? t('暂无进行中的任务') : t('暂无任务')}</p>
           </div>
         ) : visible.map((task) => (
           <section
@@ -109,12 +111,12 @@ export default function AgentTaskCenter({
                 </p>
                 <p className="mt-0.5 truncate text-[11px] text-canvas-text-muted">
                   {task.parentTaskId
-                    ? `上级任务：${taskNames.get(task.parentTaskId) ?? '已删除任务'}`
-                    : conversationNames.get(task.conversationId) ?? '已删除会话'}
+                    ? t('上级任务：{name}', { name: taskNames.get(task.parentTaskId) ?? t('已删除任务') })
+                    : conversationNames.get(task.conversationId) ?? t('已删除会话')}
                 </p>
                 {!task.parentTaskId && (childCounts.get(task.id) ?? 0) > 0 && (
                   <p className="mt-0.5 text-[10px] text-[var(--success)]">
-                    {childCounts.get(task.id)} 个只读子任务
+                    {t('{count} 个只读子任务', { count: childCounts.get(task.id) ?? 0 })}
                   </p>
                 )}
               </div>

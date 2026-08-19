@@ -2,6 +2,7 @@
  * 在规划、协作和自主三种 Agent 模式间切换，并展示各模式固定权限含义。
  */
 import type { AgentMode } from '../../types/agent';
+import { useT } from '../../i18n';
 
 interface AgentModeSelectorProps {
   mode: AgentMode;
@@ -32,11 +33,12 @@ export default function AgentModeSelector({
   onChange,
   disabled = false,
 }: AgentModeSelectorProps) {
+  const t = useT();
   return (
     <div
       className="pointer-events-auto flex items-center rounded-md border border-canvas-border bg-canvas-bg/60 p-px"
       role="group"
-      aria-label="Agent 模式"
+      aria-label={t('Agent 模式')}
     >
       {MODES.map((item) => (
         <button
@@ -53,12 +55,12 @@ export default function AgentModeSelector({
                         : 'text-canvas-text-muted hover:bg-canvas-hover hover:text-canvas-text'
                       } disabled:cursor-not-allowed disabled:opacity-40`}
           aria-pressed={mode === item.value}
-          aria-label={item.tooltip}
-          data-tooltip={item.tooltip}
+          aria-label={t(item.tooltip)}
+          data-tooltip={t(item.tooltip)}
           disabled={disabled}
           onClick={() => onChange(item.value)}
         >
-          {item.label}
+          {t(item.label)}
         </button>
       ))}
     </div>

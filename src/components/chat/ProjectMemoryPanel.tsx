@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import { Icon } from '@iconify/react';
 import PopupCloseButton from '../shared/PopupCloseButton';
+import { useT } from '../../i18n';
 import {
   PROJECT_MEMORY_CONTENT_LIMIT,
   PROJECT_MEMORY_KIND_LABELS,
@@ -43,6 +44,7 @@ function MemoryRow({
   onUpdate: ProjectMemoryPanelProps['onUpdate'];
   onDelete: ProjectMemoryPanelProps['onDelete'];
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(memory.content);
 
@@ -56,7 +58,7 @@ function MemoryRow({
     <div className={`rounded-lg border border-canvas-border p-2.5 ${memory.enabled ? '' : 'opacity-60'}`}>
       <div className="flex items-center gap-2">
         <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${KIND_BADGE_CLASS[memory.kind]}`}>
-          {PROJECT_MEMORY_KIND_LABELS[memory.kind]}
+          {t(PROJECT_MEMORY_KIND_LABELS[memory.kind])}
         </span>
         <span className="text-[10px] text-canvas-text-muted ml-auto">{formatTime(memory.updatedAt)}</span>
       </div>
@@ -76,14 +78,14 @@ function MemoryRow({
               onClick={() => { setDraft(memory.content); setEditing(false); }}
               className="rounded-md px-2 py-1 text-[11px] text-canvas-text-secondary hover:bg-canvas-hover"
             >
-              取消
+              {t('取消')}
             </button>
             <button
               type="button"
               onClick={save}
               className="rounded-md bg-indigo-500 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-400"
             >
-              保存
+              {t('保存')}
             </button>
           </div>
         </div>
@@ -96,14 +98,14 @@ function MemoryRow({
       <div className="mt-2 flex items-center gap-3 text-[10px] text-canvas-text-muted">
         <span className="flex items-center gap-1">
           <Icon icon={memory.source.unavailable ? 'mdi:link-variant-off' : 'mdi:message-text-outline'} width="12" />
-          {memory.source.unavailable ? '来源对话已删除' : '来自对话'}
+          {memory.source.unavailable ? t('来源对话已删除') : t('来自对话')}
         </span>
         <div className="ml-auto flex items-center gap-1">
           <button
             type="button"
             onClick={() => onUpdate(memory.id, { enabled: !memory.enabled })}
             className="rounded px-1.5 py-0.5 hover:bg-canvas-hover hover:text-canvas-text"
-            title={memory.enabled ? '禁用（不再发送给模型）' : '启用'}
+            title={memory.enabled ? t('禁用（不再发送给模型）') : t('启用')}
           >
             <Icon icon={memory.enabled ? 'mdi:eye-outline' : 'mdi:eye-off-outline'} width="14" />
           </button>
@@ -112,7 +114,7 @@ function MemoryRow({
               type="button"
               onClick={() => { setDraft(memory.content); setEditing(true); }}
               className="rounded px-1.5 py-0.5 hover:bg-canvas-hover hover:text-canvas-text"
-              title="编辑"
+              title={t('编辑')}
             >
               <Icon icon="mdi:pencil-outline" width="14" />
             </button>
@@ -121,7 +123,7 @@ function MemoryRow({
             type="button"
             onClick={() => onDelete(memory.id)}
             className="rounded px-1.5 py-0.5 hover:bg-red-400/10 hover:text-red-400"
-            title="删除"
+            title={t('删除')}
           >
             <Icon icon="mdi:trash-can-outline" width="14" />
           </button>
@@ -137,6 +139,7 @@ export default function ProjectMemoryPanel({
   onDelete,
   onClose,
 }: ProjectMemoryPanelProps) {
+  const t = useT();
   const sorted = [...memories].sort((a, b) => b.updatedAt - a.updatedAt);
 
   return (
@@ -144,8 +147,8 @@ export default function ProjectMemoryPanel({
       <div className="flex items-center justify-between border-b border-canvas-border px-4 py-3">
         <div className="flex items-center gap-2">
           <Icon icon="mdi:brain" width="16" className="text-indigo-400" />
-          <span className="text-sm font-medium text-canvas-text">项目记忆</span>
-          <span className="text-[11px] text-canvas-text-muted">{sorted.length} 条</span>
+          <span className="text-sm font-medium text-canvas-text">{t('项目记忆')}</span>
+          <span className="text-[11px] text-canvas-text-muted">{t('{count} 条', { count: sorted.length })}</span>
         </div>
         <PopupCloseButton onClick={onClose} />
       </div>
@@ -154,9 +157,11 @@ export default function ProjectMemoryPanel({
         {sorted.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-canvas-text-muted">
             <Icon icon="mdi:brain" width="32" className="opacity-40" />
-            <p className="text-xs">还没有项目记忆</p>
+            <p className="text-xs">{t('还没有项目记忆')}</p>
             <p className="text-[11px] leading-4">
-              对话中助手会在你确认后保存偏好、事实、约束和决定，<br />之后的对话会自动参考这些记忆。
+              {t('对话中助手会在你确认后保存偏好、事实、约束和决定，')}
+              <br />
+              {t('之后的对话会自动参考这些记忆。')}
             </p>
           </div>
         ) : (

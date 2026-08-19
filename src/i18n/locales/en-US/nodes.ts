@@ -321,6 +321,39 @@ const nodes = {
   '重置缩放': 'Reset zoom',
   '放大': 'Zoom in',
 
+  // ── VideoNode ──
+  '粘贴视频': 'Paste video',
+  '首帧': 'First frame',
+  '当前帧': 'Current frame',
+  '尾帧': 'Last frame',
+  '没有可截取的视频': 'No video to capture a frame from',
+  '视频尚未加载到可截取的帧': 'Video has not loaded a capturable frame yet',
+  '视频节点已失效，请重试': 'Video node is no longer valid, please retry',
+  '已截取{frame}为图像节点': 'Captured the {frame} as an image node',
+  '截取{frame}失败': 'Failed to capture the {frame}',
+  '截取{frame}失败：{message}': 'Failed to capture the {frame}: {message}',
+  '该视频来源禁止导出{frame}，请先上传为本地视频后再截帧':
+    'This video source does not allow exporting the {frame}; upload it as a local video first',
+  '远程视频受跨域限制，正在转为本地资源后重试...':
+    'The remote video is cross-origin restricted; converting it to a local resource and retrying…',
+  '远程视频本地化失败，无法截取{frame}': 'Failed to localize the remote video; cannot capture the {frame}',
+  '本地资源截帧失败': 'Failed to capture a frame from the local resource',
+  '该视频没有本地文件，无法复制': 'This video has no local file, cannot copy',
+  '已复制视频到剪贴板': 'Video copied to clipboard',
+  '没有可反推的视频': 'No video to reverse',
+  '视频尚未加载到可读取的帧': 'Video has not loaded a readable frame yet',
+  '远程视频受跨域限制，请先把视频本地化后再反推':
+    'The remote video is cross-origin restricted; localize it before reversing',
+  '读取视频帧失败': 'Failed to read the video frame',
+  '{name} {time}s 帧': '{name} {time}s frame',
+  '当前帧已生成图片节点': 'The current frame was turned into an image node',
+  '当前帧生成节点失败': 'Failed to create a node from the current frame',
+  '{name} 剪辑': '{name} edit',
+  '剪辑结果已生成新节点': 'The edited result was turned into a new node',
+  '上传视频': 'Upload video',
+  '生成视频中...': 'Generating video…',
+  '视频预览': 'Video preview',
+
   // ── ImageGenerationHistoryDialog ──
   '历史生成图片': 'Historically generated image',
   '放大查看历史图片': 'Enlarge historical image',

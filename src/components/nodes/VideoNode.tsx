@@ -38,6 +38,7 @@ import {
   listVideoEditorVideoModels,
   runVideoEditorAiTransition,
 } from '../../services/videoEditorAiTransitionService';
+import { useT } from '../../i18n';
 
 const DEFAULT_VIDEO_NODE_WIDTH = 280;
 const DEFAULT_VIDEO_NODE_HEIGHT = 158;
@@ -195,6 +196,7 @@ function captureFrameFromVideoUrl(url: string, currentTime: number): Promise<{ d
 }
 
 function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
+  const t = useT();
   const justCompleted = useCompletionFlash(data.status);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const previewAttemptedSourceRef = useRef<string | null>(null);
@@ -312,7 +314,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   }, [data.videoUrl, data.thumbnailUrl]);
   const handleCloseFullscreen = useCallback(() => setIsFullscreen(false), []);
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴视频');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴视频'));
   const generatedCoverUrl = generatedCover && generatedCover.source === data.videoUrl
     ? generatedCover.dataUrl
     : null;
@@ -387,7 +389,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                 y: framePosition.y + nodeHeight + 40,
               },
               data: {
-                label: `${displayLabel} ${time.toFixed(2)}s 帧`,
+                label: t('{name} {time}s 帧', { name: displayLabel, time: time.toFixed(2) }),
                 type: 'ai-image',
                 role: 'source',
                 status: 'success',
@@ -401,11 +403,11 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             } as Parameters<typeof liveStore.addNode>[0]);
 
             completeCanvasDerivation(frameDerivation);
-            useAppStore.getState().showToast('当前帧已生成图片节点');
+            useAppStore.getState().showToast(t('当前帧已生成图片节点'));
           } catch (error) {
             cancelCanvasDerivation(frameDerivation);
             console.error('[videoEditor] 当前帧回写失败:', error);
-            useAppStore.getState().showToast('当前帧生成节点失败', 'error');
+            useAppStore.getState().showToast(t('当前帧生成节点失败'), 'error');
           }
         })();
         return;
@@ -437,7 +439,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         type: 'ai-video',
         position: { x: position.x + nodeWidth + 40, y: position.y },
         data: {
-          label: `${displayLabel} 剪辑`,
+          label: t('{name} 剪辑', { name: displayLabel }),
           type: 'ai-video',
           role: 'source',
           status: 'success',
@@ -452,39 +454,39 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       } as Parameters<typeof store.addNode>[0]);
 
       completeCanvasDerivation(derivation);
-      useAppStore.getState().showToast('剪辑结果已生成新节点');
+      useAppStore.getState().showToast(t('剪辑结果已生成新节点'));
     });
-  }, [displayLabel, id, nodeHeight, nodeWidth]);
+  }, [displayLabel, id, nodeHeight, nodeWidth, t]);
 
   const handleCopyFile = useCallback(async () => {
     const store = useAppStore.getState();
     const filePath = data.filePath as string | undefined;
     if (!filePath) {
-      store.showToast('该视频没有本地文件，无法复制', 'error');
+      store.showToast(t('该视频没有本地文件，无法复制'), 'error');
       return;
     }
     const ok = await copyFileToClipboard(filePath);
-    store.showToast(ok ? '已复制视频到剪贴板' : '复制失败', ok ? undefined : 'error');
-  }, [data.filePath]);
+    store.showToast(ok ? t('已复制视频到剪贴板') : t('复制失败'), ok ? undefined : 'error');
+  }, [data.filePath, t]);
 
   const handleCaptureFrame = useCallback(async (position: CaptureFramePosition = 'current') => {
     const store = useAppStore.getState();
     const video = videoRef.current;
-    const frameLabel = CAPTURE_FRAME_LABELS[position];
+    const frameLabel = t(CAPTURE_FRAME_LABELS[position]);
 
     if (!video || !data.videoUrl) {
-      store.showToast('没有可截取的视频', 'error');
+      store.showToast(t('没有可截取的视频'), 'error');
       return;
     }
 
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0 || video.videoHeight === 0) {
-      store.showToast('视频尚未加载到可截取的帧', 'error');
+      store.showToast(t('视频尚未加载到可截取的帧'), 'error');
       return;
     }
 
     const derivation = registerCanvasDerivation(store, id);
     if (!derivation) {
-      store.showToast('视频节点已失效，请重试', 'error');
+      store.showToast(t('视频节点已失效，请重试'), 'error');
       return;
     }
     const captureTime = resolveCaptureTime(video, position);
@@ -540,14 +542,14 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       const frame = await captureFrameAtTime(video, captureTime);
       video.currentTime = restoreTime;
       const created = await createFrameNode(frame);
-      if (created) useAppStore.getState().showToast(`已截取${frameLabel}为图像节点`, 'success');
+      if (created) useAppStore.getState().showToast(t('已截取{frame}为图像节点', { frame: frameLabel }), 'success');
     } catch (error) {
       video.currentTime = restoreTime;
       if (!isTaintedCanvasError(error)) {
         cancelCanvasDerivation(derivation);
-        const message = error instanceof Error ? error.message : `截取${frameLabel}失败`;
+        const message = error instanceof Error ? error.message : t('截取{frame}失败', { frame: frameLabel });
         if (useAppStore.getState().currentProjectId === derivation.projectId) {
-          useAppStore.getState().showToast(`截取${frameLabel}失败：${message}`, 'error');
+          useAppStore.getState().showToast(t('截取{frame}失败：{message}', { frame: frameLabel, message }), 'error');
         }
         return;
       }
@@ -555,17 +557,17 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       const remoteUrl = typeof data.sourceUrl === 'string' ? data.sourceUrl : data.videoUrl;
       if (!remoteUrl?.startsWith('http') || derivation.projectId === 'default') {
         cancelCanvasDerivation(derivation);
-        useAppStore.getState().showToast(`该视频来源禁止导出${frameLabel}，请先上传为本地视频后再截帧`, 'error');
+        useAppStore.getState().showToast(t('该视频来源禁止导出{frame}，请先上传为本地视频后再截帧', { frame: frameLabel }), 'error');
         return;
       }
       if (!ensureFresh()) return;
 
-      useAppStore.getState().showToast('远程视频受跨域限制，正在转为本地资源后重试...', 'success');
+      useAppStore.getState().showToast(t('远程视频受跨域限制，正在转为本地资源后重试...'), 'success');
       const saved = await downloadUrlAndSave(remoteUrl, derivation.projectId, 'video-source');
       if (!ensureFresh()) return;
       if (!saved?.assetUrl) {
         cancelCanvasDerivation(derivation);
-        useAppStore.getState().showToast(`远程视频本地化失败，无法截取${frameLabel}`, 'error');
+        useAppStore.getState().showToast(t('远程视频本地化失败，无法截取{frame}', { frame: frameLabel }), 'error');
         return;
       }
 
@@ -577,16 +579,16 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         } as Partial<BaseNodeData>);
 
         const created = await createFrameNode(await captureFrameFromVideoUrl(saved.assetUrl, captureTime));
-        if (created) useAppStore.getState().showToast(`已截取${frameLabel}为图像节点`, 'success');
+        if (created) useAppStore.getState().showToast(t('已截取{frame}为图像节点', { frame: frameLabel }), 'success');
       } catch (fallbackError) {
         cancelCanvasDerivation(derivation);
-        const message = fallbackError instanceof Error ? fallbackError.message : '本地资源截帧失败';
+        const message = fallbackError instanceof Error ? fallbackError.message : t('本地资源截帧失败');
         if (useAppStore.getState().currentProjectId === derivation.projectId) {
-          useAppStore.getState().showToast(`截取${frameLabel}失败：${message}`, 'error');
+          useAppStore.getState().showToast(t('截取{frame}失败：{message}', { frame: frameLabel, message }), 'error');
         }
       }
     }
-  }, [data.sourceUrl, data.videoUrl, displayLabel, id, nodeWidth]);
+  }, [data.sourceUrl, data.videoUrl, displayLabel, id, nodeWidth, t]);
 
   // 反推提示词：抽首/中/尾三帧当序列喂给文本模型，让它把画面和运动一起还原
   const handleShowPrompt = useCallback(() => {
@@ -603,11 +605,11 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     const store = useAppStore.getState();
     const video = videoRef.current;
     if (!video || !data.videoUrl) {
-      store.showToast('没有可反推的视频', 'error');
+      store.showToast(t('没有可反推的视频'), 'error');
       return;
     }
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0) {
-      store.showToast('视频尚未加载到可读取的帧', 'error');
+      store.showToast(t('视频尚未加载到可读取的帧'), 'error');
       return;
     }
 
@@ -630,15 +632,15 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       });
     } catch (error) {
       const message = isTaintedCanvasError(error)
-        ? '远程视频受跨域限制，请先把视频本地化后再反推'
-        : error instanceof Error ? error.message : '读取视频帧失败';
+        ? t('远程视频受跨域限制，请先把视频本地化后再反推')
+        : error instanceof Error ? error.message : t('读取视频帧失败');
       useAppStore.getState().showToast(message, 'error');
     } finally {
       // 三帧一次性取完再复位，中间来回跳会让 seek 互相打架
       video.currentTime = restoreTime;
       setIsReversingPrompt(false);
     }
-  }, [data.videoUrl, id]);
+  }, [data.videoUrl, id, t]);
 
   return (
     <div className="node-wrapper relative" style={{ width: nodeWidth }}>
@@ -690,12 +692,12 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           ) : isUploading ? (
             <div className="node-preview-loading">
               <div className="spinner large" />
-              <span>上传中...</span>
+              <span>{t('上传中...')}</span>
             </div>
           ) : data.status === 'loading' ? (
             <div className="node-preview-loading">
               <div className="spinner large" />
-              <span>生成视频中...</span>
+              <span>{t('生成视频中...')}</span>
             </div>
           ) : (
             isSource ? (
@@ -706,8 +708,8 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                   event.stopPropagation();
                   void handleUpload();
                 }}
-                data-tooltip="上传视频"
-                aria-label="上传视频"
+                data-tooltip={t('上传视频')}
+                aria-label={t('上传视频')}
               >
                 <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -761,7 +763,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         isOpen={isFullscreen}
         onClose={handleCloseFullscreen}
         hidePanel
-        title={(data.label as string) || '视频预览'}
+        title={(data.label as string) || t('视频预览')}
       >
         {data.videoUrl ? (
           <video

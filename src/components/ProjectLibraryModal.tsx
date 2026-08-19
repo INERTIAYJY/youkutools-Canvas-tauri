@@ -10,6 +10,7 @@ import { listTopLevelProjects, resolveOpenTargetId, seriesOwnerId } from '../sto
 import type { CanvasProject } from '../types';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
+import { useT } from '../i18n';
 
 type ProjectSort = 'updated' | 'created' | 'name';
 
@@ -23,7 +24,7 @@ const projectNameCollator = new Intl.Collator('zh-CN', {
   sensitivity: 'base',
 });
 
-function formatProjectTimestamp(timestamp: number): string {
+function formatProjectTimestamp(timestamp: number, t: (text: string, vars?: Record<string, string | number>) => string): string {
   const value = new Date(timestamp);
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -31,12 +32,12 @@ function formatProjectTimestamp(timestamp: number): string {
   const dayDifference = Math.round((startOfToday - startOfValue) / 86_400_000);
   const time = value.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
-  if (dayDifference === 0) return `今天 ${time}`;
-  if (dayDifference === 1) return `昨天 ${time}`;
+  if (dayDifference === 0) return t('今天 {time}', { time });
+  if (dayDifference === 1) return t('昨天 {time}', { time });
   if (value.getFullYear() === now.getFullYear()) {
-    return `${value.getMonth() + 1}月${value.getDate()}日 ${time}`;
+    return t('{month}月{date}日 {time}', { month: value.getMonth() + 1, date: value.getDate(), time });
   }
-  return `${value.getFullYear()}年${value.getMonth() + 1}月${value.getDate()}日`;
+  return t('{year}年{month}月{date}日', { year: value.getFullYear(), month: value.getMonth() + 1, date: value.getDate() });
 }
 
 function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
@@ -61,6 +62,7 @@ function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
 }
 
 export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryModalProps) {
+  const t = useT();
   const {
     projects, currentProjectId, createProject, renameProject, switchProject, deleteProject,
     exportProject, importProject, isCreatingProject,
@@ -245,7 +247,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
     <ModalOverlay
       isOpen={isOpen}
       onClose={requestClose}
-      ariaLabel="项目库"
+      ariaLabel={t('项目库')}
       motionPreset="quick"
       backdropBlur={false}
       className="h-[min(560px,calc(100dvh-24px))] w-[min(840px,calc(100vw-24px))]"
@@ -259,16 +261,16 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-baseline gap-2">
-                <h2 className="text-sm font-semibold text-canvas-text">项目</h2>
+                <h2 className="text-sm font-semibold text-canvas-text">{t('项目')}</h2>
                 <span className="text-[11px] tabular-nums text-canvas-text-muted">{topLevelProjects.length}</span>
               </div>
             </div>
-            <PopupCloseButton ariaLabel="关闭项目库" onClick={requestClose} />
+            <PopupCloseButton ariaLabel={t('关闭项目库')} onClick={requestClose} />
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <label className="relative min-w-[180px] flex-1">
-              <span className="sr-only">搜索项目</span>
+              <span className="sr-only">{t('搜索项目')}</span>
               <Icon
                 icon="mdi:magnify"
                 width="17"
@@ -282,13 +284,13 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 onKeyDown={focusFirstProject}
-                placeholder="搜索项目"
+                placeholder={t('搜索项目')}
                 className="h-9 w-full rounded-lg border border-canvas-border bg-canvas-card pl-9 pr-3 text-xs text-canvas-text outline-none transition-colors placeholder:text-canvas-text-muted hover:border-border-secondary focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15"
               />
             </label>
 
             <label className="relative">
-              <span className="sr-only">项目排序</span>
+              <span className="sr-only">{t('项目排序')}</span>
               <Icon
                 icon="mdi:sort-variant"
                 width="16"
@@ -301,9 +303,9 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                 onChange={(event) => setSort(event.target.value as ProjectSort)}
                 className="h-9 appearance-none rounded-lg border border-canvas-border bg-canvas-card pl-9 pr-8 text-xs text-canvas-text outline-none transition-colors hover:border-border-secondary focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15"
               >
-                <option value="updated">最近更新</option>
-                <option value="created">创建时间</option>
-                <option value="name">项目名称</option>
+                <option value="updated">{t('最近更新')}</option>
+                <option value="created">{t('创建时间')}</option>
+                <option value="name">{t('项目名称')}</option>
               </select>
               <Icon
                 icon="mdi:chevron-down"
@@ -318,7 +320,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               type="button"
               onClick={() => void runImportProject()}
               disabled={isImporting || exportingId !== null}
-              data-tooltip="从 .aicanvas 项目包导入"
+              data-tooltip={t('从 .aicanvas 项目包导入')}
               className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-canvas-border bg-canvas-card px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Icon
@@ -328,7 +330,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                 aria-hidden="true"
                 className={isImporting ? 'animate-spin' : undefined}
               />
-              {isImporting ? '正在导入' : '导入'}
+              {isImporting ? t('正在导入') : t('导入')}
             </button>
 
             <button
@@ -338,7 +340,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               disabled={isCreating}
             >
               <Icon icon="mdi:plus" width="17" height="17" aria-hidden="true" />
-              新建
+              {t('新建')}
             </button>
           </div>
         </header>
@@ -364,7 +366,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   <button
                     type="button"
                     data-project-library-card
-                    aria-label={`打开项目 ${project.name}`}
+                    aria-label={t('打开项目 {name}', { name: project.name })}
                     aria-current={isCurrent ? 'page' : undefined}
                     onClick={() => openProject(project.id)}
                     disabled={isEditingName || isRenaming}
@@ -380,7 +382,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   {isEditingName ? (
                     <form onSubmit={(event) => void submitRenameProject(event)} className="flex min-h-14 items-center gap-1.5 px-2">
                       <label className="min-w-0 flex-1">
-                        <span className="sr-only">项目名称</span>
+                        <span className="sr-only">{t('项目名称')}</span>
                         <input
                           autoFocus
                           value={renameProjectName}
@@ -398,8 +400,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                       </label>
                       <button
                         type="submit"
-                        aria-label="保存项目名称"
-                        data-tooltip="保存"
+                        aria-label={t('保存项目名称')}
+                        data-tooltip={t('保存')}
                         disabled={!renameProjectName.trim() || isRenaming}
                         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-indigo-400 transition-colors hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 disabled:cursor-not-allowed disabled:opacity-40"
                       >
@@ -407,8 +409,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                       </button>
                       <button
                         type="button"
-                        aria-label="取消重命名"
-                        data-tooltip="取消"
+                        aria-label={t('取消重命名')}
+                        data-tooltip={t('取消')}
                         disabled={isRenaming}
                         onClick={cancelRenameProject}
                         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:opacity-40"
@@ -426,19 +428,19 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="truncate text-xs font-medium text-canvas-text">{project.name}</span>
                           {isCurrent ? (
-                            <span className="shrink-0 rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">当前</span>
+                            <span className="shrink-0 rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">{t('当前')}</span>
                           ) : null}
                         </span>
                         <span className="mt-1 block text-[10px] text-canvas-text-muted">
-                          {formatProjectTimestamp(project.updatedAt)}
+                          {formatProjectTimestamp(project.updatedAt, t)}
                         </span>
                       </button>
 
                       <div className="mr-2 flex shrink-0 items-center gap-0.5">
                         <button
                           type="button"
-                          aria-label={`导出项目 ${project.name}`}
-                          data-tooltip="导出项目包"
+                          aria-label={t('导出项目 {name}', { name: project.name })}
+                          data-tooltip={t('导出项目包')}
                           disabled={exportingId !== null || isImporting}
                           onClick={() => void runExportProject(project)}
                           className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-40"
@@ -453,8 +455,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                         </button>
                         <button
                           type="button"
-                          aria-label={`重命名项目 ${project.name}`}
-                          data-tooltip="重命名"
+                          aria-label={t('重命名项目 {name}', { name: project.name })}
+                          data-tooltip={t('重命名')}
                           onClick={() => beginRenameProject(project)}
                           className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border"
                         >
@@ -463,8 +465,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                         {canDeleteProject(project) ? (
                           <button
                             type="button"
-                            aria-label={`删除项目 ${project.name}`}
-                            data-tooltip="删除项目"
+                            aria-label={t('删除项目 {name}', { name: project.name })}
+                            data-tooltip={t('删除项目')}
                             onClick={() => setDeleteTarget(project)}
                             className="flex h-8 w-8 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                           >
@@ -488,12 +490,12 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                     <Icon icon="mdi:folder-plus-outline" width="21" height="21" aria-hidden="true" />
                   </span>
                   <label className="w-full">
-                    <span className="sr-only">新项目名称</span>
+                    <span className="sr-only">{t('新项目名称')}</span>
                     <input
                       ref={createInputRef}
                       value={newProjectName}
                       onChange={(event) => setNewProjectName(event.target.value)}
-                      placeholder="输入项目名称"
+                      placeholder={t('输入项目名称')}
                       disabled={isCreatingProject}
                       className="h-9 w-full rounded-md border border-canvas-border bg-canvas-card px-3 text-center text-sm text-canvas-text outline-none placeholder:text-canvas-text-muted focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15 disabled:cursor-not-allowed disabled:opacity-60"
                     />
@@ -509,7 +511,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                     disabled={isCreatingProject}
                     className="h-8 rounded-md px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    取消
+                    {t('取消')}
                   </button>
                   <button
                     type="submit"
@@ -519,7 +521,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                     {isCreatingProject ? (
                       <Icon icon="mdi:loading" width="15" height="15" className="animate-spin" aria-hidden="true" />
                     ) : null}
-                    {isCreatingProject ? '创建中' : '创建'}
+                    {isCreatingProject ? t('创建中') : t('创建')}
                   </button>
                 </div>
               </form>
@@ -533,7 +535,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-canvas-border bg-canvas-card transition-colors group-hover:border-indigo-400/30 group-hover:bg-indigo-500/10">
                     <Icon icon="mdi:plus" width="21" height="21" aria-hidden="true" />
                   </span>
-                  <span className="mt-3 text-xs font-medium text-canvas-text-secondary group-hover:text-indigo-400">新建项目</span>
+                  <span className="mt-3 text-xs font-medium text-canvas-text-secondary group-hover:text-indigo-400">{t('新建项目')}</span>
                 </button>
               ) : null
             )}
@@ -544,13 +546,13 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-canvas-hover text-canvas-text-muted">
                 <Icon icon="mdi:folder-search-outline" width="22" height="22" aria-hidden="true" />
               </span>
-              <h3 className="mt-3 text-sm font-medium text-canvas-text">没有找到项目</h3>
+              <h3 className="mt-3 text-sm font-medium text-canvas-text">{t('没有找到项目')}</h3>
               <button
                 type="button"
                 onClick={() => setQuery('')}
                 className="mt-3 h-8 rounded-md border border-canvas-border bg-canvas-card px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border"
               >
-                清除搜索
+                {t('清除搜索')}
               </button>
             </div>
           ) : null}
@@ -578,9 +580,9 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   <Icon icon="mdi:alert-outline" width="21" height="21" aria-hidden="true" />
                 </span>
                 <div className="min-w-0">
-                  <h3 id="delete-project-title" className="text-sm font-semibold text-canvas-text">删除“{deleteTarget.name}”？</h3>
+                  <h3 id="delete-project-title" className="text-sm font-semibold text-canvas-text">{t('删除“{name}”？', { name: deleteTarget.name })}</h3>
                   <p id="delete-project-description" className="mt-1.5 text-xs leading-5 text-canvas-text-secondary">
-                    项目画布及本地项目数据将被删除，此操作不可撤销。
+                    {t('项目画布及本地项目数据将被删除，此操作不可撤销。')}
                   </p>
                 </div>
               </div>
@@ -592,7 +594,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   onClick={() => setDeleteTarget(null)}
                   className="h-9 rounded-md px-3.5 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:opacity-50"
                 >
-                  取消
+                  {t('取消')}
                 </button>
                 <button
                   type="button"
@@ -601,7 +603,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   className="inline-flex h-9 items-center gap-2 rounded-md bg-red-500 px-3.5 text-xs font-medium text-white transition-colors hover:bg-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isDeleting ? <Icon icon="mdi:loading" width="16" height="16" className="animate-spin" aria-hidden="true" /> : null}
-                  {isDeleting ? '正在删除' : '确认删除'}
+                  {isDeleting ? t('正在删除') : t('确认删除')}
                 </button>
               </div>
             </motion.div>

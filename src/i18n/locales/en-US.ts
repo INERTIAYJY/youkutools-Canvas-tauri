@@ -181,6 +181,197 @@ const enUS: Record<string, string> = {
   '悬浮显示': 'Floating',
   '侧边栏半隐于窗口边缘，悬浮在画布之上': 'The sidebar half-hides at the window edge and floats over the canvas',
   '侧边栏停靠在窗口内侧': 'The sidebar docks inside the window',
+
+  // ── 新手引导 ──
+  'AI Canvas 新手引导': 'AI Canvas onboarding',
+  '欢迎使用 AI Canvas': 'Welcome to AI Canvas',
+  '花两分钟看完，能少走很多弯路': 'Spend two minutes here to avoid a lot of detours',
+  '关闭引导': 'Close onboarding',
+  '像现在这样——把鼠标停在元素上不动，说明就会自己浮出来。':
+    'Just like this — hover over an element and the description will appear on its own.',
+  '先养成一个习惯：多悬停': 'Build one habit first: hover',
+  '界面上几乎每个按钮、图标和开关都写了说明。把鼠标停在上面约 1 秒，说明就会浮出来。':
+    'Almost every button, icon and toggle has a description. Hover over it for about a second and the hint will appear.',
+  '遇到不认识的图标，先悬停看一眼再点，比点开试错快得多——这段文字本身也可以悬停试试。':
+    'When you see an unfamiliar icon, hover to read it before clicking — it is much faster than trial and error. You can hover over this very text to try it.',
+  '这些操作藏在界面里，不说很难发现': 'These actions are hidden in the UI and hard to find on your own',
+  '下面每一条都可以悬停查看适用条件和限制。':
+    'Hover over each item below to see its conditions and limitations.',
+  '打开节点的提示词对话框': 'Open a node\'s prompt dialog',
+  '单独选中一个内容节点后按空格，直接展开提示词、参数和参考内容的完整编辑面板。':
+    'Select a single content node and press Space to expand the full editor for its prompt, parameters and references.',
+  '只在单独选中一个普通内容节点时生效；正在输入文字、多选节点、分组节点或 Markdown 节点都不会触发。':
+    'Only works when a single regular content node is selected. It won\'t trigger while typing, with multiple nodes selected, or on group and Markdown nodes.',
+  '图像节点批量出图': 'Batch-generate images from an image node',
+  '在图像节点对话框里填好提示词，长按发送/生成按钮，可以选择一次生成 2-8 张。':
+    'Fill in the prompt in an image node dialog, then long-press the generate button to choose 2–8 images at once.',
+  '需要使用支持批量的普通模型且未选择 ComfyUI 工作流；费用可能按实际生成张数计算。':
+    'Requires a regular model that supports batching and no ComfyUI workflow selected. Cost may be based on the actual number of images generated.',
+  '自定义节点工具栏': 'Customize the node toolbar',
+  '单独选中节点后长按上方浮动工具栏，进入编辑状态，可增删按钮或拖拽排序。':
+    'Select a node and long-press the floating toolbar above it to enter edit mode, where you can add, remove or drag to reorder buttons.',
+  '编辑完成后布局会被保存，之后同类节点都用这套工具栏。':
+    'The layout is saved after editing, and all nodes of the same type will use this toolbar.',
+  '拖一下就留副本': 'Drag to leave a copy behind',
+  '按住 Ctrl/⌘ 拖动非分组节点，原位置会留下一个副本，省去复制粘贴再对位。':
+    'Hold Ctrl/⌘ and drag a non-group node to leave a copy at its original position — no copy-paste and re-aligning.',
+  '分组节点不支持这个手势；误操作可用 Ctrl/⌘ + Z 撤销。':
+    'Group nodes don\'t support this gesture; undo any mistake with Ctrl/⌘ + Z.',
+  '锁定节点宽高比例': 'Lock a node\'s aspect ratio',
+  '拖动节点右下角尺寸控制点时按住 Shift，宽高按当前比例一起变化。':
+    'Hold Shift while dragging the resize handle at the bottom-right corner to scale width and height together.',
+  '拖拽过程中可以随时按下或松开 Shift 来切换是否锁定比例。':
+    'You can press or release Shift at any time while dragging to toggle aspect-ratio lock.',
+  '边连线边建节点': 'Create nodes while connecting',
+  '从输出连接点拖出连线，松手在画布空白处，会直接弹出菜单创建已连好的下游节点。':
+    'Drag a connection out from an output handle and release on empty canvas to open a menu that creates the downstream node already wired up.',
+  '菜单里选择的节点类型会自动放在松手的位置，并保留这条连线。':
+    'The node type you pick is placed exactly where you released, keeping the connection.',
+  '在鼠标位置直接建节点': 'Create a node right at the mouse position',
+  '按 1-7 创建文本、图像、视频、音频、全景、动画和 3D 导演台节点；Alt + 1-5 创建对应的源节点。':
+    'Press 1–7 to create text, image, video, audio, panorama, animation and 3D director desk nodes; Alt + 1–5 creates the corresponding source nodes.',
+  '节点会出现在当前鼠标所在的画布位置，不需要先点加号菜单。':
+    'Nodes appear at the current mouse position on the canvas — no need to open the plus menu first.',
+  '快捷指令与 Skill 菜单': 'Quick commands and Skill menu',
+  '在生成节点的提示词输入框里键入 /，可调用内置指令、自定义快捷指令和已上传的 Skill。':
+    'Type / in a generation node\'s prompt box to invoke built-in commands, custom quick commands and uploaded Skills.',
+  '也可以点输入框下方的 / 按钮；在“管理快捷指令”里能定义自己的模板、参数和多步骤流程。':
+    'You can also click the / button below the input; define your own templates, parameters and multi-step flows in "Manage quick commands".',
+  '跨范围搜索素材': 'Search assets across scopes',
+  '打开资源搜索窗口，聚合查询项目文件、全局资产和已添加的外部文件夹，结果可直接拖进画布。':
+    'Open the asset search window to query project files, global assets and added external folders together; results can be dragged straight onto the canvas.',
+  'Ctrl + Shift + Space 是同一个入口的备用组合键。':
+    'Ctrl + Shift + Space is an alternative shortcut for the same entry.',
+  '找回跑远的画布内容': 'Find canvas content that has drifted away',
+  '按 F 把全部内容适配到当前视野，按 M 显示或隐藏小地图。':
+    'Press F to fit all content to the current view, and M to show or hide the minimap.',
+  '画布右下角还有缩放控件，可以精确调整显示比例。':
+    'There are zoom controls at the bottom-right of the canvas for fine-tuning the display scale.',
+  '开始生成前，记得先在“设置 > API Key”配置好模型服务，否则节点里的模型会是不可用状态。':
+    'Before generating, remember to configure your model providers in Settings > API Key, otherwise the models in nodes will be unavailable.',
+  '本引导只在首次启动时出现，之后可从侧边栏头像菜单的「帮助」再次查看完整说明。':
+    'This onboarding only appears on first launch. You can revisit the full guide later via "Help" in the sidebar avatar menu.',
+  '先自己逛逛': 'Explore on my own',
+  '按场景整理的完整说明：画布导航、节点连线、AI 生成、快捷指令、资产与设置':
+    'Complete guide organized by scenario: canvas navigation, node connections, AI generation, quick commands, assets and settings.',
+  '打开帮助中心细读一遍': 'Open the Help Center and read it through',
+
+  // ── 项目库 ──
+  '项目库': 'Project library',
+  '关闭项目库': 'Close project library',
+  '项目': 'Projects',
+  '搜索项目': 'Search projects',
+  '项目排序': 'Sort projects',
+  '最近更新': 'Recently updated',
+  '创建时间': 'Created time',
+  '项目名称': 'Project name',
+  '从 .aicanvas 项目包导入': 'Import from a .aicanvas project package',
+  '正在导入': 'Importing',
+  '导入': 'Import',
+  '新建': 'New',
+  '打开项目 {name}': 'Open project {name}',
+  '保存项目名称': 'Save project name',
+  '保存': 'Save',
+  '取消重命名': 'Cancel rename',
+  '取消': 'Cancel',
+  '当前': 'Current',
+  '导出项目 {name}': 'Export project {name}',
+  '导出项目包': 'Export project package',
+  '重命名项目 {name}': 'Rename project {name}',
+  '重命名': 'Rename',
+  '删除项目 {name}': 'Delete project {name}',
+  '删除项目': 'Delete project',
+  '新项目名称': 'New project name',
+  '输入项目名称': 'Enter project name',
+  '创建中': 'Creating',
+  '创建': 'Create',
+  '新建项目': 'New project',
+  '没有找到项目': 'No projects found',
+  '清除搜索': 'Clear search',
+  '删除“{name}”？': 'Delete "{name}"?',
+  '项目画布及本地项目数据将被删除，此操作不可撤销。':
+    'The project canvas and its local data will be deleted. This action cannot be undone.',
+  '正在删除': 'Deleting',
+  '确认删除': 'Delete',
+  '今天 {time}': 'Today {time}',
+  '昨天 {time}': 'Yesterday {time}',
+  '{month}月{date}日 {time}': '{month}/{date} {time}',
+  '{year}年{month}月{date}日': '{year}/{month}/{date}',
+
+  // ── 角色库 ──
+  '角色保存范围': 'Character save scope',
+  '本项目': 'This project',
+  '全局资产': 'Global assets',
+  '搜索角色、身份或简介': 'Search characters, identity or summary',
+  '清空搜索': 'Clear search',
+  '新建角色': 'New character',
+  '正在读取全局角色…': 'Loading global characters…',
+  '多图参考': 'Reference images',
+  '选择画布图片节点': 'Select a canvas image node',
+  '画布上没有可用的图片节点': 'No image nodes available on the canvas',
+  '图片节点': 'Image node',
+  '角色声音': 'Character voice',
+  '绑定画布音频节点': 'Bind a canvas audio node',
+  '上传音频': 'Upload audio',
+  '选择画布音频节点': 'Select a canvas audio node',
+  '画布上没有可用的音频节点': 'No audio nodes available on the canvas',
+  '音频节点': 'Audio node',
+  '正在绑定…': 'Binding…',
+  '还没有声音，可绑定画布音频节点或上传音频': 'No voice yet — bind a canvas audio node or upload audio',
+  '暂停试听': 'Pause preview',
+  '试听': 'Preview',
+  '设为主音色': 'Set as primary voice',
+  '用这个声音生成台词': 'Generate lines with this voice',
+  '移除该声音': 'Remove this voice',
+  '当前角色': 'Current character',
+  '尚未填写角色简介': 'No character summary yet',
+  '显示并定位节点': 'Show and locate node',
+  '定位画布节点': 'Locate canvas node',
+  '添加到画布': 'Add to canvas',
+  '在画布中隐藏': 'Hide on canvas',
+  '节点已隐藏': 'Node hidden',
+  '从画布添加视角图': 'Add a view image from canvas',
+  '编辑角色': 'Edit character',
+  '复制到全局资产': 'Copy to global assets',
+  '复制到本项目': 'Copy to this project',
+  '删除角色': 'Delete character',
+  '没有匹配的角色': 'No matching characters',
+  '这里还没有角色': 'No characters yet',
+  '角色列表': 'Character list',
+  '本项目角色': 'This project\'s characters',
+  '全局角色': 'Global characters',
+  '确认删除角色': 'Confirm delete character',
+  '删除「{name}」？': 'Delete "{name}"?',
+  '将从本项目移除该角色及其 {count} 张参考图，画布上被收纳的节点会重新显示。':
+    'This will remove the character and its {count} reference images from this project. Nodes that were tucked away on the canvas will reappear.',
+  '将从全局资产永久删除该角色及其 {count} 张参考图，删除后无法恢复。':
+    'This will permanently delete the character and its {count} reference images from global assets. This cannot be undone.',
+  '音频播放失败': 'Audio playback failed',
+  '该节点没有可用的音频': 'This node has no usable audio',
+  '已绑定到本项目角色声音': 'Bound to this project character\'s voice',
+  '已绑定到全局角色声音': 'Bound to the global character\'s voice',
+  '已移除该声音': 'Voice removed',
+  '已创建配音节点，声音已连线为音色参考': 'Voice-over node created; the voice is wired as a timbre reference',
+  '已复制到全局资产': 'Copied to global assets',
+  '已复制到本项目': 'Copied to this project',
+  '角色已删除': 'Character deleted',
+  '节点已显示': 'Node shown',
+  '已将角色参考图添加到画布': 'Character reference image added to canvas',
+
+  // ── 画布空状态 / 右键菜单 ──
+  'AI画布': 'AI Canvas',
+  '右键自由生成节点，或从左侧面板选择节点类型': 'Right-click to create nodes, or pick a node type from the left panel',
+  '复制文字': 'Copy text',
+  '剪切文字': 'Cut text',
+  '解锁': 'Unlock',
+  '锁定': 'Lock',
+  '复制': 'Copy',
+  '粘贴': 'Paste',
+  '复制文件': 'Copy files',
+  '撤销': 'Undo',
+  '重做': 'Redo',
+  '打开项目文件夹': 'Open project folder',
+  '删除': 'Delete',
 };
 
 export default enUS;

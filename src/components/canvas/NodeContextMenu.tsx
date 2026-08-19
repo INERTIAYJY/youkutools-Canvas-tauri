@@ -4,6 +4,7 @@
  */
 import { memo } from 'react';
 import { calcFixedPosition } from '../../utils/popupPosition';
+import { useT } from '../../i18n';
 
 const MENU_ITEMS = [
   { label: '复制', shortcut: 'Ctrl C', action: 'copy' as const },
@@ -81,6 +82,7 @@ export function NodeContextMenu({
   onCopyMedia,
   copyMediaLabel,
 }: NodeContextMenuProps) {
+  const t = useT();
   if (!visible) return null;
 
   const safePos = calcFixedPosition(
@@ -130,11 +132,11 @@ export function NodeContextMenu({
       {hasTextSelection && (
         <>
           <div className="menu-row menu-row-split" onClick={onCopyText}>
-            <span>复制文字</span>
+            <span>{t('复制文字')}</span>
             <span className="menu-kbd">Ctrl C</span>
           </div>
           <div className="menu-row menu-row-split" onClick={onCutText}>
-            <span>剪切文字</span>
+            <span>{t('剪切文字')}</span>
             <span className="menu-kbd">Ctrl X</span>
           </div>
           <div className="menu-sep" />
@@ -149,14 +151,14 @@ export function NodeContextMenu({
           >
             <span>
               {item.dynamicLockLabel && item.action === 'toggleLock'
-                ? (isLocked ? '解锁' : '锁定')
+                ? (isLocked ? t('解锁') : t('锁定'))
                 : item.dynamicLabel && item.action === 'copyMedia'
-                  ? (copyMediaLabel || item.label)
+                  ? (copyMediaLabel || t(item.label))
                   : item.dynamicLabel && item.action === 'convertImage'
-                    ? (imageConversionLabel || item.label)
+                    ? (imageConversionLabel || t(item.label))
                     : item.dynamicLabel && item.action === 'editVideo'
-                      ? (editVideoLabel || item.label)
-                  : item.label}
+                      ? (editVideoLabel || t(item.label))
+                  : t(item.label)}
             </span>
             <span className="menu-kbd">{item.shortcut}</span>
           </div>

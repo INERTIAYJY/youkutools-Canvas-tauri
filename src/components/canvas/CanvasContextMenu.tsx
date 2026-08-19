@@ -5,6 +5,7 @@
 import { memo, useLayoutEffect, useState } from 'react';
 import type { NodeType } from '../../types';
 import { calcFixedPosition, calcSubmenuPosition } from '../../utils/popupPosition';
+import { useT } from '../../i18n';
 
 interface MergedNodeItem {
   label: string;
@@ -107,6 +108,7 @@ function CanvasContextMenu({
   onShowSubmenu,
   onHideSubmenu,
 }: CanvasContextMenuProps) {
+  const t = useT();
   // 估算值仅用于首次布局；挂载后使用真实 DOM 尺寸修正，避免菜单项变化或界面缩放导致底部被裁切。
   const [l1Pos, setL1Pos] = useState<{ left: number; top: number } | null>(null);
   const [subPos, setSubPos] = useState<{ left: number; top: number } | null>(null);
@@ -172,42 +174,42 @@ function CanvasContextMenu({
           onMouseLeave={() => onHideSubmenu(null)}
           onClick={() => onShowSubmenu('addNode')}
         >
-          <span className="menu-rowlabel">添加节点</span>
+          <span className="menu-rowlabel">{t('添加节点')}</span>
           <span className="menu-arrow menu-arrow-ml8">▶</span>
         </div>
         <div className="menu-sep" />
         {hasSelection && (
           <div className="menu-row menu-row-split" onClick={onCopyNodes}>
-            <span>复制</span>
+            <span>{t('复制')}</span>
             <span className="menu-kbd">{MENU_SHORTCUTS.copy}</span>
           </div>
         )}
         <div className="menu-row menu-row-split" onClick={onPaste}>
-          <span>粘贴</span>
+          <span>{t('粘贴')}</span>
           <span className="menu-kbd">{MENU_SHORTCUTS.paste}</span>
         </div>
         {hasSelection && (
           <div className="menu-row menu-row-split" onClick={onCopyFiles}>
-            <span>复制文件</span>
+            <span>{t('复制文件')}</span>
           </div>
         )}
         <div className="menu-row menu-row-split" onClick={onUndo}>
-          <span>撤销</span>
+          <span>{t('撤销')}</span>
           <span className="menu-kbd">{MENU_SHORTCUTS.undo}</span>
         </div>
         <div className="menu-row menu-row-split" onClick={onRedo}>
-          <span>重做</span>
+          <span>{t('重做')}</span>
           <span className="menu-kbd">{MENU_SHORTCUTS.redo}</span>
         </div>
         <div className="menu-sep" />
         <div className="menu-row" onClick={onOpenProjectDir}>
-          <span>打开项目文件夹</span>
+          <span>{t('打开项目文件夹')}</span>
         </div>
         {hasSelection && (
           <>
             <div className="menu-sep" />
             <div className="menu-row menu-row-split menu-row-danger" onClick={onDelete}>
-              <span>删除</span>
+              <span>{t('删除')}</span>
               <span className="menu-kbd">{MENU_SHORTCUTS.delete}</span>
             </div>
           </>
@@ -231,7 +233,7 @@ function CanvasContextMenu({
                 className="menu-row menu-row-split"
                 onClick={() => onAddNode(item.type, item.label, item.role)}
               >
-                <span>{item.label}</span>
+                <span>{t(item.label)}</span>
                 <span className="menu-kbd">{nodeShortcutLabel(item)}</span>
               </div>
             </div>

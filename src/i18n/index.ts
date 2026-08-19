@@ -4,19 +4,25 @@
  */
 import { useSyncExternalStore } from 'react';
 import enUS from './locales/en-US';
+import jaJP from './locales/ja-JP';
+import koKR from './locales/ko-KR';
 
-export const LOCALES = ['zh-CN', 'en-US'] as const;
+export const LOCALES = ['zh-CN', 'en-US', 'ja-JP', 'ko-KR'] as const;
 export type Locale = (typeof LOCALES)[number];
 
 export const LOCALE_LABELS: Record<Locale, string> = {
   'zh-CN': '简体中文',
   'en-US': 'English',
+  'ja-JP': '日本語',
+  'ko-KR': '한국어',
 };
 
 // zh-CN 是源语言，无需字典
 const DICTS: Record<Locale, Record<string, string>> = {
   'zh-CN': {},
   'en-US': enUS,
+  'ja-JP': jaJP,
+  'ko-KR': koKR,
 };
 
 /** 把任意 BCP-47 标签归一到受支持的语言；无法识别时回落中文。 */
@@ -25,6 +31,8 @@ export function normalizeLocale(tag?: string | null): Locale {
   const lower = tag.toLowerCase();
   if (lower.startsWith('zh')) return 'zh-CN';
   if (lower.startsWith('en')) return 'en-US';
+  if (lower.startsWith('ja')) return 'ja-JP';
+  if (lower.startsWith('ko')) return 'ko-KR';
   return 'zh-CN';
 }
 

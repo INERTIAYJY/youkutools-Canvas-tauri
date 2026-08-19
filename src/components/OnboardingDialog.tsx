@@ -5,6 +5,7 @@ import { Icon } from '@iconify/react';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import AnimatedButton from './shared/AnimatedButton';
+import { useT } from '../i18n';
 
 /** 每条都带 tooltip：正文只写动作，前提和限制放到悬停里，顺带让用户习惯悬停看说明。 */
 const HIDDEN_TIPS = [
@@ -86,12 +87,13 @@ interface OnboardingDialogProps {
 }
 
 export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDialogProps) {
+  const t = useT();
   return (
     <ModalOverlay
       isOpen
       onClose={onClose}
       closeOnBackdrop={false}
-      ariaLabel="AI Canvas 新手引导"
+      ariaLabel={t('AI Canvas 新手引导')}
       className="h-[min(660px,calc(100vh-24px))] w-[min(620px,calc(100vw-24px))]"
     >
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-canvas-border px-4 py-3">
@@ -100,41 +102,41 @@ export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDial
             <Icon icon="mdi:hand-wave-outline" width="20" height="20" aria-hidden="true" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-canvas-text">欢迎使用 AI Canvas</h2>
-            <p className="mt-0.5 truncate text-xs text-canvas-text-secondary">花两分钟看完，能少走很多弯路</p>
+            <h2 className="text-sm font-semibold text-canvas-text">{t('欢迎使用 AI Canvas')}</h2>
+            <p className="mt-0.5 truncate text-xs text-canvas-text-secondary">{t('花两分钟看完，能少走很多弯路')}</p>
           </div>
         </div>
-        <PopupCloseButton ariaLabel="关闭引导" onClick={onClose} />
+        <PopupCloseButton ariaLabel={t('关闭引导')} onClick={onClose} />
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <section
-          data-tooltip="像现在这样——把鼠标停在元素上不动，说明就会自己浮出来。"
+          data-tooltip={t('像现在这样——把鼠标停在元素上不动，说明就会自己浮出来。')}
           className="flex gap-3 rounded-xl border border-indigo-400/25 bg-indigo-500/10 p-3"
         >
           <Icon icon="mdi:cursor-default-outline" width="20" height="20" className="mt-0.5 shrink-0 text-indigo-400" aria-hidden="true" />
           <div className="min-w-0">
-            <h3 className="text-sm font-medium text-canvas-text">先养成一个习惯：多悬停</h3>
+            <h3 className="text-sm font-medium text-canvas-text">{t('先养成一个习惯：多悬停')}</h3>
             <p className="mt-1.5 text-xs leading-5 text-canvas-text-secondary">
-              界面上几乎每个按钮、图标和开关都写了说明。把鼠标停在上面约 1 秒，说明就会浮出来。
-              遇到不认识的图标，先悬停看一眼再点，比点开试错快得多——这段文字本身也可以悬停试试。
+              {t('界面上几乎每个按钮、图标和开关都写了说明。把鼠标停在上面约 1 秒，说明就会浮出来。')}
+              {t('遇到不认识的图标，先悬停看一眼再点，比点开试错快得多——这段文字本身也可以悬停试试。')}
             </p>
           </div>
         </section>
 
         <div className="mt-5 mb-2 flex items-center gap-2">
           <Icon icon="mdi:eye-off-outline" width="16" height="16" className="shrink-0 text-canvas-text-muted" aria-hidden="true" />
-          <h3 className="text-sm font-semibold text-canvas-text">这些操作藏在界面里，不说很难发现</h3>
+          <h3 className="text-sm font-semibold text-canvas-text">{t('这些操作藏在界面里，不说很难发现')}</h3>
         </div>
         <p className="mb-3 text-xs leading-5 text-canvas-text-muted">
-          下面每一条都可以悬停查看适用条件和限制。
+          {t('下面每一条都可以悬停查看适用条件和限制。')}
         </p>
 
         <ul className="space-y-1">
           {HIDDEN_TIPS.map((tip) => (
             <li
               key={tip.title}
-              data-tooltip={tip.tooltip}
+              data-tooltip={t(tip.tooltip)}
               className="flex gap-3 rounded-lg border-b border-canvas-border/70 px-2 py-3 transition-colors last:border-b-0 hover:bg-canvas-hover"
             >
               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-canvas-hover text-canvas-text-secondary">
@@ -142,12 +144,12 @@ export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDial
               </span>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="text-sm font-medium text-canvas-text">{tip.title}</h4>
+                  <h4 className="text-sm font-medium text-canvas-text">{t(tip.title)}</h4>
                   <kbd className="rounded-md border border-canvas-border bg-canvas-hover px-1.5 py-0.5 font-sans text-[10px] font-medium text-canvas-text-secondary">
                     {tip.shortcut}
                   </kbd>
                 </div>
-                <p className="mt-1.5 text-xs leading-5 text-canvas-text-secondary">{tip.description}</p>
+                <p className="mt-1.5 text-xs leading-5 text-canvas-text-secondary">{t(tip.description)}</p>
               </div>
             </li>
           ))}
@@ -156,8 +158,8 @@ export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDial
         <div className="mt-5 flex items-start gap-2 border-t border-canvas-border pt-4 text-xs leading-5 text-canvas-text-muted">
           <Icon icon="mdi:information-outline" width="16" height="16" className="mt-0.5 shrink-0" aria-hidden="true" />
           <p>
-            开始生成前，记得先在“设置 &gt; API Key”配置好模型服务，否则节点里的模型会是不可用状态。
-            本引导只在首次启动时出现，之后可从侧边栏头像菜单的「帮助」再次查看完整说明。
+            {t('开始生成前，记得先在“设置 > API Key”配置好模型服务，否则节点里的模型会是不可用状态。')}
+            {t('本引导只在首次启动时出现，之后可从侧边栏头像菜单的「帮助」再次查看完整说明。')}
           </p>
         </div>
       </div>
@@ -168,16 +170,16 @@ export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDial
           onClick={onClose}
           className="rounded-lg px-3 py-2 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text"
         >
-          先自己逛逛
+          {t('先自己逛逛')}
         </AnimatedButton>
         <AnimatedButton
           type="button"
-          data-tooltip="按场景整理的完整说明：画布导航、节点连线、AI 生成、快捷指令、资产与设置"
+          data-tooltip={t('按场景整理的完整说明：画布导航、节点连线、AI 生成、快捷指令、资产与设置')}
           onClick={onOpenHelp}
           className="flex items-center gap-1.5 rounded-lg bg-indigo-500/90 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-500"
         >
           <Icon icon="mdi:book-open-page-variant-outline" width="15" height="15" aria-hidden="true" />
-          打开帮助中心细读一遍
+          {t('打开帮助中心细读一遍')}
         </AnimatedButton>
       </footer>
     </ModalOverlay>

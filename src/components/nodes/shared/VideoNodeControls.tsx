@@ -3,6 +3,7 @@
  */
 import { memo, useCallback, useEffect, useState, type CSSProperties, type RefObject } from 'react';
 import { Icon } from '@iconify/react';
+import { useT } from '../../../i18n';
 
 interface VideoNodeControlsProps {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -23,6 +24,7 @@ function formatMediaTime(value: number): string {
 }
 
 function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsProps) {
+  const t = useT();
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -101,7 +103,7 @@ function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsPr
     <div
       className="video-node-controls nodrag nopan nowheel"
       role="group"
-      aria-label="视频播放控制"
+      aria-label={t('视频播放控制')}
       onPointerDown={(event) => {
         event.stopPropagation();
         onInteract?.();
@@ -117,7 +119,7 @@ function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsPr
         step={0.01}
         value={Math.min(currentTime, Math.max(duration, 0.01))}
         disabled={duration <= 0}
-        aria-label="视频进度"
+        aria-label={t('视频进度')}
         aria-valuetext={`${formatMediaTime(currentTime)} / ${formatMediaTime(duration)}`}
         style={{ '--video-progress': `${progress}%` } as CSSProperties}
         onChange={(event) => handleSeek(Number(event.target.value))}
@@ -127,7 +129,7 @@ function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsPr
         <button
           type="button"
           className="video-node-control-btn"
-          aria-label={isPlaying ? '暂停视频' : '播放视频'}
+          aria-label={isPlaying ? t('暂停视频') : t('播放视频')}
           onClick={togglePlayback}
         >
           <Icon icon={isPlaying ? 'mdi:pause' : 'mdi:play'} width={15} height={15} />
@@ -142,7 +144,7 @@ function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsPr
         <button
           type="button"
           className="video-node-control-btn"
-          aria-label={muted || volume === 0 ? '取消静音' : '静音'}
+          aria-label={muted || volume === 0 ? t('取消静音') : t('静音')}
           onClick={toggleMuted}
         >
           <Icon icon={muted || volume === 0 ? 'mdi:volume-off' : 'mdi:volume-high'} width={15} height={15} />
@@ -155,7 +157,7 @@ function VideoNodeControls({ videoRef, source, onInteract }: VideoNodeControlsPr
           max={1}
           step={0.05}
           value={audibleVolume}
-          aria-label="视频音量"
+          aria-label={t('视频音量')}
           aria-valuetext={`${Math.round(audibleVolume * 100)}%`}
           style={{ '--video-volume': `${audibleVolume * 100}%` } as CSSProperties}
           onChange={(event) => handleVolume(Number(event.target.value))}

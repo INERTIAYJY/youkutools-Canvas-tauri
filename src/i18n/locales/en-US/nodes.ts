@@ -84,7 +84,6 @@ const nodes = {
   '音频转录完成': 'Audio transcription complete',
   '音频转录失败': 'Audio transcription failed',
   '上传音频': 'Upload audio',
-  '上传中...': 'Uploading…',
   '生成音频中...': 'Generating audio…',
   '上传音频文件': 'Upload audio file',
   'TTS 文本转语音': 'TTS text-to-speech',
@@ -160,7 +159,6 @@ const nodes = {
   '超分中 {progress}%': 'Upscaling {progress}%',
   '超分中': 'Upscaling',
   '主体识别中...': 'Detecting subject…',
-  '上传中...': 'Uploading…',
   '生成图像中...': 'Generating image…',
   '上传图片': 'Upload image',
   '图片预览': 'Image preview',
@@ -353,6 +351,15 @@ const nodes = {
   '上传视频': 'Upload video',
   '生成视频中...': 'Generating video…',
   '视频预览': 'Video preview',
+
+  // ── VideoNodeControls ──
+  '视频播放控制': 'Video playback controls',
+  '视频进度': 'Video progress',
+  '暂停视频': 'Pause video',
+  '播放视频': 'Play video',
+  '取消静音': 'Unmute',
+  '静音': 'Mute',
+  '视频音量': 'Video volume',
 
   // ── ImageGenerationHistoryDialog ──
   '历史生成图片': 'Historically generated image',

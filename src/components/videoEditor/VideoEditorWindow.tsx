@@ -77,6 +77,7 @@ import VideoEditorMediaPanel from './VideoEditorMediaPanel';
 import VideoEditorInspector, { type VideoEditorInspectorTab } from './VideoEditorInspector';
 import { resolveClipUrl, useVideoEditorSources } from './useVideoEditorSources';
 import { useTimelineHistory } from './useTimelineHistory';
+import { setLocale } from '../../i18n';
 import {
   createTrack,
   duplicateClipInTracks,
@@ -380,6 +381,7 @@ export default function VideoEditorWindow() {
           'data-theme',
           config?.theme === 'light' ? 'light' : session.theme,
         );
+        setLocale(config?.language);
         setBaseDataDir(config?.baseDataDir);
         await syncAuthorizedDirectories(config ?? {});
         // 独立窗口有自己的模块实例：不注册项目文件夹名，

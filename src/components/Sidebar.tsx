@@ -21,6 +21,7 @@ import AnimatedButton from './shared/AnimatedButton';
 import LazyLoadBoundary, { LazyLoadFallback } from './shared/LazyLoadBoundary';
 import ProjectLibraryModal from './ProjectLibraryModal';
 import { invoke } from '@tauri-apps/api/core';
+import { useT } from '../i18n';
 
 const HelpCenterDialog = lazy(() => import('./HelpCenterDialog'));
 
@@ -106,6 +107,7 @@ function NodePicker({
   onEnter: () => void;
   onLeave: () => void;
 }) {
+  const t = useT();
   const { nodePickerOpen, closeNodePicker, addNode, currentProjectId, showToast } = useAppStore(
     useShallow((s) => ({
       nodePickerOpen: s.nodePickerOpen,
@@ -123,7 +125,7 @@ function NodePicker({
     const isAnimation = type === 'ai-animation';
     const isDirector = type === 'ai-director';
     const nodeData: Record<string, unknown> = {
-      label: NODE_TYPE_CONFIG[type]?.label || generationItems.find((m) => m.type === type)?.label || '节点',
+      label: t(NODE_TYPE_CONFIG[type]?.label || generationItems.find((m) => m.type === type)?.label || '节点'),
       type,
       prompt: '',
       status: 'idle' as const,
@@ -190,7 +192,7 @@ function NodePicker({
       const category = classifyFile(ext);
 
       if (!category) {
-        showToast('不支持的文件类型', 'error');
+        showToast(t('不支持的文件类型'), 'error');
         return;
       }
 
@@ -230,7 +232,7 @@ function NodePicker({
         data: nodeData,
       } as never);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '上传失败';
+      const msg = err instanceof Error ? err.message : t('上传失败');
       showToast(msg, 'error');
     }
   };
@@ -249,7 +251,7 @@ function NodePicker({
           transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
         >
       <div className="menu-section">
-        <span className="menu-title">画布自由生成</span>
+        <span className="menu-title">{t('画布自由生成')}</span>
         <div className="menu-rule" />
       </div>
       {generationItems.map(({ type, label, sub, icon }) => (
@@ -263,13 +265,13 @@ function NodePicker({
         >
           <div className="menu-ico">{icon}</div>
           <div className="menu-txt-wrap">
-            <span className="menu-lbl">{label}</span>
-            <span className="menu-sub">{sub}</span>
+            <span className="menu-lbl">{t(label)}</span>
+            <span className="menu-sub">{t(sub)}</span>
           </div>
         </AnimatedButton>
       ))}
       <div className="menu-section">
-        <span className="menu-title">添加资源</span>
+        <span className="menu-title">{t('添加资源')}</span>
         <div className="menu-rule" />
       </div>
       {resourceItems.map(({ key, label, sub, icon }) => (
@@ -280,8 +282,8 @@ function NodePicker({
         >
           <div className="menu-ico">{icon}</div>
           <div className="menu-txt-wrap">
-            <span className="menu-lbl">{label}</span>
-            <span className="menu-sub">{sub}</span>
+            <span className="menu-lbl">{t(label)}</span>
+            <span className="menu-sub">{t(sub)}</span>
           </div>
         </AnimatedButton>
       ))}
@@ -295,6 +297,7 @@ function NodePicker({
    Avatar / Settings dropdown menu
    ============================================ */
 function AvatarMenu() {
+  const t = useT();
   const { avatarMenuOpen, closeAvatarMenu, setSettingsOpen, helpOpen, setHelpOpen } = useAppStore(
     useShallow((s) => ({
       avatarMenuOpen: s.avatarMenuOpen,
@@ -319,24 +322,24 @@ function AvatarMenu() {
       if (result.available) {
         setUpdateStatus('available');
         setUpdateVersion(result.version);
-        setUpdateMsg(`发现新版本 v${result.version}`);
+        setUpdateMsg(t('发现新版本 v{version}', { version: result.version }));
       } else {
         setUpdateStatus('no-update');
-        setUpdateMsg('已是最新版本');
+        setUpdateMsg(t('已是最新版本'));
       }
     } catch {
       setUpdateStatus('error');
-      setUpdateMsg('检查失败，请稍后重试');
+      setUpdateMsg(t('检查失败，请稍后重试'));
     }
   };
 
   const handleDownloadUpdate = async () => {
     setUpdateStatus('updating');
-    setUpdateMsg('正在下载更新...');
+    setUpdateMsg(t('正在下载更新...'));
     const ok = await downloadAndInstallUpdate();
     if (!ok) {
       setUpdateStatus('error');
-      setUpdateMsg('下载失败，请稍后重试');
+      setUpdateMsg(t('下载失败，请稍后重试'));
     }
   };
 
@@ -383,7 +386,7 @@ function AvatarMenu() {
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
             </svg>
-            设置
+            {t('设置')}
           </AnimatedButton>
           <div className="avatar-menu-sep" />
           <AnimatedButton
@@ -396,7 +399,7 @@ function AvatarMenu() {
             }}
           >
             <Icon icon="mdi:help-circle-outline" width="16" height="16" aria-hidden="true" />
-            帮助
+            {t('帮助')}
           </AnimatedButton>
           <AnimatedButton
             type="button"
@@ -411,15 +414,15 @@ function AvatarMenu() {
               <line x1="12" y1="16" x2="12" y2="12" />
               <line x1="12" y1="8" x2="12.01" y2="8" />
             </svg>
-            关于
+            {t('关于')}
           </AnimatedButton>
         </motion.div>
       )}
     </AnimatePresence>
 
       {helpOpen ? (
-        <LazyLoadBoundary label="帮助中心">
-          <Suspense fallback={<LazyLoadFallback label="帮助中心" />}>
+        <LazyLoadBoundary label={t('帮助中心')}>
+          <Suspense fallback={<LazyLoadFallback label={t('帮助中心')} />}>
             <HelpCenterDialog onClose={() => setHelpOpen(false)} />
           </Suspense>
         </LazyLoadBoundary>
@@ -430,7 +433,7 @@ function AvatarMenu() {
         <ModalOverlay
           isOpen={aboutOpen}
           onClose={() => setAboutOpen(false)}
-          ariaLabel="关于 AI Canvas"
+          ariaLabel={t('关于 AI Canvas')}
           className="w-[420px] max-h-[85vh] overflow-y-auto"
         >
         <div className="p-3 space-y-3">
@@ -441,7 +444,7 @@ function AvatarMenu() {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-canvas-text">AI Canvas</h2>
-              <p className="text-xs text-canvas-text-secondary">v{appVersion} · 开发预览版</p>
+              <p className="text-xs text-canvas-text-secondary">v{appVersion} · {t('开发预览版')}</p>
               <button
                 onClick={updateStatus === 'available' ? handleDownloadUpdate : handleCheckUpdate}
                 disabled={updateStatus === 'checking' || updateStatus === 'updating'}
@@ -450,21 +453,21 @@ function AvatarMenu() {
                 {updateStatus === 'checking' ? (
                   <>
                     <Icon icon="svg-spinners:90-ring" width="12" height="12" />
-                    检查中...
+                    {t('检查中...')}
                   </>
                 ) : updateStatus === 'updating' ? (
                   <>
                     <Icon icon="svg-spinners:90-ring" width="12" height="12" />
-                    下载中...
+                    {t('下载中...')}
                   </>
                 ) : updateStatus === 'no-update' && updateMsg ? (
                   updateMsg
                 ) : updateStatus === 'available' ? (
-                  `发现 v${updateVersion}，点击更新`
+                  t('发现 v{version}，点击更新', { version: updateVersion })
                 ) : updateStatus === 'error' ? (
                   updateMsg
                 ) : (
-                  '检查更新'
+                  t('检查更新')
                 )}
               </button>
             </div>
@@ -472,14 +475,12 @@ function AvatarMenu() {
 
           {/* Description */}
           <p className="text-sm text-canvas-text-secondary leading-relaxed">
-            AI Canvas 是一个智能多媒体创意画布，通过可视化节点编排的方式，
-            调用多种 AI 模型来生成文本、图像、视频和音频内容。支持多厂商模型接入、
-            ComfyUI 工作流、本地文件管理与实时协作。
+            {t('AI Canvas 是一个智能多媒体创意画布，通过可视化节点编排的方式，调用多种 AI 模型来生成文本、图像、视频和音频内容。支持多厂商模型接入、ComfyUI 工作流、本地文件管理与实时协作。')}
           </p>
 
           {/* Feature list */}
           <div className="space-y-2">
-            <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">核心能力</h3>
+            <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">{t('核心能力')}</h3>
             <div className="grid grid-cols-2 gap-2">
               {[
                 { label: 'AI 文本生成', color: 'bg-indigo-500/20 text-indigo-400' },
@@ -495,7 +496,7 @@ function AvatarMenu() {
                   key={label}
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium ${color}`}
                 >
-                  {label}
+                  {t(label)}
                 </span>
               ))}
             </div>
@@ -506,7 +507,7 @@ function AvatarMenu() {
 
           {/* Tech stack */}
           <div className="space-y-2">
-            <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">技术栈</h3>
+            <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">{t('技术栈')}</h3>
             <div className="flex flex-wrap gap-1.5">
               {['Tauri 2', 'React 19', 'React Flow 12', 'TypeScript', 'Zustand 5', 'Tailwind CSS 3', 'Vite 8'].map((tech) => (
                 <span key={tech} className="px-2.5 py-1 rounded-md bg-canvas-hover text-xs text-canvas-text-secondary">
@@ -518,7 +519,7 @@ function AvatarMenu() {
 
           {/* Community */}
           <div className="space-y-2">
-            <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">社区</h3>
+            <h3 className="text-xs font-semibold uppercase text-canvas-text-muted">{t('社区')}</h3>
             <div className="flex flex-col gap-2">
               <a
                 href="https://github.com/Tenney95/AI-Canvas-tauri"
@@ -534,13 +535,13 @@ function AvatarMenu() {
                 onClick={() => {
                   const qq = '873354155';
                   navigator.clipboard?.writeText(qq).catch(() => {});
-                  useAppStore.getState().showToast('已复制 QQ 群号：873354155');
+                  useAppStore.getState().showToast(t('已复制 QQ 群号：873354155'));
                 }}
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-canvas-hover hover:bg-canvas-border transition-colors text-xs text-canvas-text-secondary hover:text-canvas-text text-left cursor-pointer"
-                data-tooltip="点击复制 QQ 群号"
+                data-tooltip={t('点击复制 QQ 群号')}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M21.395 15.035a39.548 39.548 0 0 0-.803-2.264l-1.079-2.695c.001-.032.014-.562.014-.836C19.526 4.632 17.351 0 12 0S4.474 4.632 4.474 9.241c0 .274.013.804.014.836l-1.08 2.695a38.97 38.97 0 0 0-.802 2.264c-1.021 3.283-1.045 4.643-1.045 4.643 0 1.706 1.036 2.841 2.439 2.841.808 0 1.258-.387 1.85-.92.228-.206.463-.372.708-.498.449-.23 1.022-.405 1.719-.479 1.087-.116 3.274-.464 5.223-.464h.001c1.949 0 4.136.348 5.223.464.697.074 1.27.249 1.719.479.245.126.48.292.708.498.592.533 1.042.92 1.85.92 1.403 0 2.439-1.135 2.439-2.841 0 0-.025-1.361-1.046-4.643z"/></svg>
-                QQ 群：873354155
+                {t('QQ 群：873354155')}
               </button>
             </div>
           </div>
@@ -553,7 +554,7 @@ function AvatarMenu() {
               className="px-3 py-1.5 text-xs font-medium text-canvas-text bg-canvas-hover hover:bg-canvas-border rounded-lg transition-colors"
               onClick={() => setAboutOpen(false)}
             >
-              知道了
+              {t('知道了')}
             </AnimatedButton>
           </div>
         </div>
@@ -568,6 +569,7 @@ function AvatarMenu() {
    Logo / Project switcher menu
    ============================================ */
 function LogoMenu() {
+  const t = useT();
   const { projectLibraryOpen, setProjectLibraryOpen } = useAppStore(
     useShallow((state) => ({
       projectLibraryOpen: state.projectLibraryOpen,
@@ -591,7 +593,7 @@ function LogoMenu() {
       <button
         type="button"
         className={`sidebar-btn-v3 sidebar-canvas-btn ${projectLibraryOpen ? 'active' : ''}`}
-        data-tooltip="画布 / 项目"
+        data-tooltip={t('画布 / 项目')}
         aria-haspopup="dialog"
         aria-expanded={projectLibraryOpen}
         onClick={openProjectLibrary}
@@ -621,6 +623,7 @@ function LogoMenu() {
    Main Sidebar
    ============================================ */
 export default function Sidebar() {
+  const t = useT();
   const {
     openNodePicker,
     closeNodePicker,
@@ -668,7 +671,7 @@ export default function Sidebar() {
         onMouseEnter={handleAddEnter}
         onMouseLeave={handleAddLeave}
         onClick={() => (nodePickerOpen ? closeNodePicker() : openNodePicker())}
-        aria-label="添加节点"
+        aria-label={t('添加节点')}
       >
         {/* Normal: plus */}
         <svg className="ico-normal" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -691,7 +694,7 @@ export default function Sidebar() {
       <button
         type="button"
         className="sidebar-btn-v3"
-        data-tooltip={unreadDramaAssetCount > 0 ? `资产 · 新增短剧资产 (${unreadDramaAssetCount})` : '资产'}
+        data-tooltip={unreadDramaAssetCount > 0 ? t('资产 · 新增短剧资产 ({count})', { count: unreadDramaAssetCount }) : t('资产')}
         onClick={() => setAssetsPanelOpen(true)}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><g fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"><path strokeDasharray="64" strokeDashoffset="64" d="M12 7h8c0.55 0 1 0.45 1 1v10c0 0.55 -0.45 1 -1 1h-16c-0.55 0 -1 -0.45 -1 -1v-11Z"><animate fill="freeze" attributeName="stroke-dashoffset" dur="0.6s" values="64;0"/></path><path d="M12 7h-9v0c0 0 0.45 0 1 0h6z" opacity="0"><animate fill="freeze" attributeName="d" begin="0.6s" dur="0.2s" values="M12 7h-9v0c0 0 0.45 0 1 0h6z;M12 7h-9v-1c0 -0.55 0.45 -1 1 -1h6z"/><set fill="freeze" attributeName="opacity" begin="0.6s" to="1"/></path></g></svg>
@@ -706,15 +709,15 @@ export default function Sidebar() {
       <button
         type="button"
         className="sidebar-btn-v3"
-        data-tooltip="角色库"
-        aria-label="打开角色库"
+        data-tooltip={t('角色库')}
+        aria-label={t('打开角色库')}
         onClick={() => setCharacterLibraryOpen(true)}
       >
         <Icon icon="lucide:contact-round" width="20" height="20" aria-hidden="true" />
       </button>
 
       {/* History */}
-      <button type="button" className="sidebar-btn-v3" data-tooltip="输出历史" onClick={() => setHistoryPanelOpen(true)}>
+      <button type="button" className="sidebar-btn-v3" data-tooltip={t('输出历史')} onClick={() => setHistoryPanelOpen(true)}>
         <svg width="20" height="20" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5"><path d="M11.007 21H9.605c-3.585 0-5.377 0-6.491-1.135S2 16.903 2 13.25s0-5.48 1.114-6.615S6.02 5.5 9.605 5.5h3.803c3.585 0 5.378 0 6.492 1.135c.857.873 1.054 2.156 1.1 4.365"/><path d="m18.85 18.85l-1.35-.9V15.7M13 17.5a4.5 4.5 0 1 0 9 0a4.5 4.5 0 0 0-9 0m3-12l-.1-.31c-.494-1.54-.742-2.31-1.331-2.75C13.979 2 13.197 2 11.632 2h-.264c-1.565 0-2.348 0-2.937.44c-.59.44-.837 1.21-1.332 2.75L7 5.5"/></g></svg>
       </button>
 
@@ -722,7 +725,7 @@ export default function Sidebar() {
       <button
         type="button"
         className="sidebar-btn-v3"
-        data-tooltip="画布助手"
+        data-tooltip={t('画布助手')}
         onClick={async () => {
           const store = useAppStore.getState();
           if (store.chatPanelDetached) {
@@ -771,7 +774,7 @@ export default function Sidebar() {
           type="button"
           className="user-gear-plain"
           onClick={toggleAvatarMenu}
-          data-tooltip="设置"
+          data-tooltip={t('设置')}
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="3" />

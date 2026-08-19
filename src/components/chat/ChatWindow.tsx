@@ -8,6 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTooltipAutoPlacement } from '../../hooks/useTooltipAutoPlacement';
 import { loadConfig } from '../../services/fileService';
 import type { AppConfig } from '../../types';
+import { setLocale } from '../../i18n';
 import ChatPanel from './ChatPanel';
 import {
   applyChatStatePatch,
@@ -46,6 +47,7 @@ export default function ChatWindow() {
           ? 'light'
           : config?.theme === 'light' ? 'light' : 'dark';
         document.documentElement.setAttribute('data-theme', effectiveTheme);
+        setLocale(config?.language);
       });
     };
 

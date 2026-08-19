@@ -18,6 +18,7 @@ import {
 import * as fileService from '../services/fileService';
 import { setBaseDataDir, syncAuthorizedDirectories } from '../services/fileService';
 import { deleteProviderSecret } from '../services/providerSecretService';
+import { setLocale } from '../i18n';
 
 const defaultConfig: AppConfig = {
   providers: {},
@@ -31,6 +32,7 @@ const defaultConfig: AppConfig = {
   nodeToolbarMode: 'icons',
   nodeLabelVisible: true,
   startupView: 'last-project',
+  // language 不给默认值：未设置时按系统语言判定
 };
 
 const MODEL_PREF_KEY = 'canvas-model-prefs';
@@ -332,6 +334,9 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if ('nodeLabelVisible' in partial) {
       syncNodeLabelVisible(partial.nodeLabelVisible);
     }
+    if ('language' in partial) {
+      setLocale(partial.language);
+    }
   },
 
   setProviderKey: (providerName, key) =>
@@ -533,6 +538,7 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if (!saved) {
       syncNodeToolbarMode(defaultConfig.nodeToolbarMode);
       syncNodeLabelVisible(defaultConfig.nodeLabelVisible);
+      setLocale(defaultConfig.language);
       set({ configHydrated: true });
       return;
     }
@@ -540,6 +546,7 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...(saved as AppConfig) });
     syncNodeToolbarMode(cfg.nodeToolbarMode);
     syncNodeLabelVisible(cfg.nodeLabelVisible);
+    setLocale(cfg.language);
     set({ config: cfg, configHydrated: true });
     if (missingSecrets.length > 0) {
       console.warn('[设置] 凭据存储中缺少以下连接的凭据:', missingSecrets);

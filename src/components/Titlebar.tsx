@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import AnimatedButton from './shared/AnimatedButton';
+import { useT } from '../i18n';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 const isMacOS = typeof navigator !== 'undefined'
@@ -35,6 +36,7 @@ function TitlebarInner({
 }: {
   getCurrentWindow: typeof import('@tauri-apps/api/window').getCurrentWindow;
 }) {
+  const t = useT();
   const [isWindowExpanded, setIsWindowExpanded] = useState(false);
   const appWindow = getCurrentWindow();
   const sidebarFloating = useAppStore((state) => state.config.sidebarFloating) !== false
@@ -77,21 +79,21 @@ function TitlebarInner({
         >
           {/* 交通灯用 macOS 系统色，不跟随主题调色板 —— 它是窗口控件而非应用配色 */}
           <MacTrafficLight
-            label="关闭"
+            label={t('关闭')}
             className="bg-[#ff5f57] hover:bg-[#ff7b74]"
             onClick={() => appWindow.close()}
           >
             <CloseIcon />
           </MacTrafficLight>
           <MacTrafficLight
-            label="最小化"
+            label={t('最小化')}
             className="bg-[#febc2e] hover:bg-[#ffcb55]"
             onClick={() => appWindow.minimize()}
           >
             <MinimizeIcon />
           </MacTrafficLight>
           <MacTrafficLight
-            label={isWindowExpanded ? '退出全屏' : '全屏'}
+            label={isWindowExpanded ? t('退出全屏') : t('全屏')}
             className="bg-[#28c840] hover:bg-[#4dd662]"
             onClick={() => { void toggleWindowExpanded(); }}
           >
@@ -112,7 +114,7 @@ function TitlebarInner({
         onClick={() => appWindow.minimize()}
         className="w-10 h-9 flex items-center justify-center text-canvas-text-muted
                    hover:bg-canvas-hover hover:text-canvas-text-secondary transition-colors"
-        aria-label="最小化"
+        aria-label={t('最小化')}
       >
         <svg width="10" height="10" viewBox="0 0 10 10">
           <rect x="0" y="5" width="10" height="1" fill="currentColor" />
@@ -124,7 +126,7 @@ function TitlebarInner({
         onClick={() => { void toggleWindowExpanded(); }}
         className="w-10 h-9 flex items-center justify-center text-canvas-text-muted
                    hover:bg-canvas-hover hover:text-canvas-text-secondary transition-colors"
-        aria-label={isWindowExpanded ? '还原' : '最大化'}
+        aria-label={isWindowExpanded ? t('还原') : t('最大化')}
       >
         {isWindowExpanded ? (
           <svg width="10" height="10" viewBox="0 0 10 10">
@@ -143,7 +145,7 @@ function TitlebarInner({
         onClick={() => appWindow.close()}
         className="w-10 h-9 flex items-center justify-center text-canvas-text-muted
                    hover:bg-red-500/70 hover:text-white transition-colors rounded-tr-[16px]"
-        aria-label="关闭"
+        aria-label={t('关闭')}
       >
         <svg width="10" height="10" viewBox="0 0 10 10">
           <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" />

@@ -28,6 +28,7 @@ import type {
 import type { BackgroundDetection } from '../services/backgroundService';
 
 import type { SettingsTab } from '../store/store.ui';
+import { LOCALES, LOCALE_LABELS, getLocale, useT } from '../i18n';
 
 const INTERACTION_MODE_OPTIONS: {
   id: InteractionMode;
@@ -104,6 +105,8 @@ function formatBytes(bytes: number): string {
 }
 
 export default function SettingsPanel() {
+  const t = useT();
+  const locale = getLocale();
   const { settingsOpen, setSettingsOpen, settingsInitialTab, setSettingsInitialTab, config, updateConfig, saveConfig, showToast } =
     useAppStore(
       useShallow((s) => ({
@@ -146,7 +149,7 @@ export default function SettingsPanel() {
 
     // 只允许图片格式
     if (!file.type.startsWith('image/')) {
-      showToast('请选择图片文件', 'error');
+      showToast(t('请选择图片文件'), 'error');
       return;
     }
 
@@ -180,13 +183,17 @@ export default function SettingsPanel() {
 
       const sizeLabel = formatBytes(compression.compressedSize);
       const ratioLabel = compression.keptOriginal
-        ? `（保留原图，重编码会增大）`
+        ? t('（保留原图，重编码会增大）')
         : compression.compressionRatio > 0
-          ? `（缩减 ${compression.compressionRatio}%，${compression.format.toUpperCase()}）`
-          : `（已最优，${compression.format.toUpperCase()}）`;
-      showToast(`${detection.isDark ? '深色' : '浅色'}背景 · ${sizeLabel} ${ratioLabel}`, 'success');
+          ? t('（缩减 {ratio}%，{format}）', { ratio: compression.compressionRatio, format: compression.format.toUpperCase() })
+          : t('（已最优，{format}）', { format: compression.format.toUpperCase() });
+      showToast(t('{tone}背景 · {size} {ratio}', {
+        tone: detection.isDark ? t('深色') : t('浅色'),
+        size: sizeLabel,
+        ratio: ratioLabel,
+      }), 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : '背景图片处理失败', 'error');
+      showToast(err instanceof Error ? err.message : t('背景图片处理失败'), 'error');
     } finally {
       setBgUploading(false);
       // 重置 input 以允许重复选择同一文件
@@ -203,22 +210,22 @@ export default function SettingsPanel() {
     });
     setBgDetection(null);
     await saveConfig();
-    showToast('已恢复默认背景');
+    showToast(t('已恢复默认背景'));
   };
 
   return (
     <ModalOverlay
       isOpen={settingsOpen}
       onClose={() => setSettingsOpen(false)}
-      ariaLabel="设置"
+      ariaLabel={t('设置')}
       className="w-[640px] h-[80vh]"
       closeOnBackdrop={false}
     >
         {/* Header */}
         <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-canvas-border">
-          <h2 className="text-base font-semibold text-canvas-text">设置</h2>
+          <h2 className="text-base font-semibold text-canvas-text">{t('设置')}</h2>
           <PopupCloseButton
-            ariaLabel="关闭设置"
+            ariaLabel={t('关闭设置')}
             onClick={() => setSettingsOpen(false)}
           />
         </div>
@@ -237,11 +244,44 @@ export default function SettingsPanel() {
             {activeTab === 'general' && (
               <div className="space-y-4">
                 <section>
-                  <h3 className="mb-2 text-sm font-medium text-canvas-text">启动时打开</h3>
+                  <h3 className="mb-2 text-sm font-medium text-canvas-text">{t('界面语言')}</h3>
+                  <div
+                    className="grid grid-cols-2 gap-1 rounded-lg border border-canvas-border bg-canvas-card p-1"
+                    role="radiogroup"
+                    aria-label={t('界面语言')}
+                  >
+                    {LOCALES.map((code) => {
+                      const active = locale === code;
+                      return (
+                        <AnimatedButton
+                          key={code}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={async () => {
+                            if (active) return;
+                            updateConfig({ language: code });
+                            await saveConfig();
+                          }}
+                          className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
+                            active
+                              ? 'bg-indigo-500/15 text-indigo-400 shadow-sm'
+                              : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text'
+                          }`}
+                        >
+                          <span>{LOCALE_LABELS[code]}</span>
+                        </AnimatedButton>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section>
+                  <h3 className="mb-2 text-sm font-medium text-canvas-text">{t('启动时打开')}</h3>
                   <div
                     className="grid grid-cols-2 gap-2"
                     role="radiogroup"
-                    aria-label="软件启动时打开"
+                    aria-label={t('软件启动时打开')}
                   >
                     {STARTUP_VIEW_OPTIONS.map((option) => {
                       const active = startupView === option.id;
@@ -271,9 +311,9 @@ export default function SettingsPanel() {
                             <Icon icon={option.icon} width="16" height="16" />
                           </span>
                           <span className="min-w-0">
-                            <span className="block text-xs font-medium text-canvas-text">{option.label}</span>
+                            <span className="block text-xs font-medium text-canvas-text">{t(option.label)}</span>
                             <span className="mt-1 block text-[11px] leading-4 text-canvas-text-muted">
-                              {option.description}
+                              {t(option.description)}
                             </span>
                           </span>
                         </AnimatedButton>
@@ -284,7 +324,7 @@ export default function SettingsPanel() {
 
                 {/* 画布背景主题 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">画布背景</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('画布背景')}</h3>
                   <div className="grid grid-cols-3 gap-2">
                     {BACKGROUND_OPTIONS.map(({ value, label, theme }) => {
                       const isActive = (config.canvasBackground || 'default') === value;
@@ -380,7 +420,7 @@ export default function SettingsPanel() {
                               </>
                             )}
                           </div>
-                          <span className="text-[11px] font-medium">{label}</span>
+                          <span className="text-[11px] font-medium">{t(label)}</span>
                         </AnimatedButton>
                       );
                     })}
@@ -407,14 +447,14 @@ export default function SettingsPanel() {
                               onClick={() => fileInputRef.current?.click()}
                               disabled={bgUploading}
                             >
-                              {bgUploading ? '识别中…' : '更换图片'}
+                              {bgUploading ? t('识别中…') : t('更换图片')}
                             </AnimatedButton>
                             <AnimatedButton
                               type="button"
                               className="text-xs px-3 py-1 rounded-md text-red-400 hover:bg-red-500/10 transition-colors"
                               onClick={handleRemoveCustomBg}
                             >
-                              移除背景
+                              {t('移除背景')}
                             </AnimatedButton>
                           </div>
                           {/* 深色/浅色检测结果 */}
@@ -426,15 +466,15 @@ export default function SettingsPanel() {
                             />
                             <span className="text-[11px] text-canvas-text-secondary">
                               {bgDetection
-                                ? `已识别为${bgDetection.isDark ? '深色' : '浅色'}背景（亮度: ${bgDetection.brightness}/255）`
+                                ? t('已识别为{tone}背景（亮度: {brightness}/255）', { tone: bgDetection.isDark ? t('深色') : t('浅色'), brightness: bgDetection.brightness })
                                 : config.customBackgroundIsDark !== undefined
-                                  ? `已识别为${config.customBackgroundIsDark ? '深色' : '浅色'}背景`
-                                  : '未检测'}
+                                  ? t('已识别为{tone}背景', { tone: config.customBackgroundIsDark ? t('深色') : t('浅色') })
+                                  : t('未检测')}
                             </span>
                           </div>
                           {/* 透明度滑块 */}
                           <div className="flex items-center gap-2">
-                            <span className="text-[11px] text-canvas-text-muted shrink-0">透明度</span>
+                            <span className="text-[11px] text-canvas-text-muted shrink-0">{t('透明度')}</span>
                             <input
                               type="range"
                               min="5"
@@ -470,13 +510,13 @@ export default function SettingsPanel() {
                 <section className="canvas-interaction-settings">
                   <div className="canvas-interaction-heading">
                     <div>
-                      <h3>画布交互方式</h3>
-                      <p>选择更符合你操作习惯的画布手感</p>
+                      <h3>{t('画布交互方式')}</h3>
+                      <p>{t('选择更符合你操作习惯的画布手感')}</p>
                     </div>
-                    <span>即时生效</span>
+                    <span>{t('即时生效')}</span>
                   </div>
 
-                  <div className="canvas-interaction-mode-grid" role="radiogroup" aria-label="画布交互方式">
+                  <div className="canvas-interaction-mode-grid" role="radiogroup" aria-label={t('画布交互方式')}>
                     {INTERACTION_MODE_OPTIONS.map((opt) => {
                       const active = interactionMode === opt.id;
                       return (
@@ -513,10 +553,10 @@ export default function SettingsPanel() {
 
                           <div className="canvas-interaction-mode-copy">
                             <div className="canvas-interaction-mode-title">
-                              <strong>{opt.title}</strong>
-                              <span>{opt.badge}</span>
+                              <strong>{t(opt.title)}</strong>
+                              <span>{t(opt.badge)}</span>
                             </div>
-                            <p>{opt.description}</p>
+                            <p>{t(opt.description)}</p>
                           </div>
 
                           <span className="canvas-interaction-check" aria-hidden="true">
@@ -533,15 +573,15 @@ export default function SettingsPanel() {
                     <div className="canvas-gesture-map-heading">
                       <div>
                         <span className="canvas-gesture-status-dot" />
-                        当前手势地图
+                        {t('当前手势地图')}
                       </div>
-                      <strong>{activeInteractionMode.title}</strong>
+                      <strong>{t(activeInteractionMode.title)}</strong>
                     </div>
                     <div className="canvas-gesture-grid">
                       {activeInteractionMode.gestures.map((gesture) => (
                         <div className="canvas-gesture-item" key={gesture.key}>
-                          <kbd>{gesture.key}</kbd>
-                          <span>{gesture.action}</span>
+                          <kbd>{t(gesture.key)}</kbd>
+                          <span>{t(gesture.action)}</span>
                         </div>
                       ))}
                     </div>
@@ -551,11 +591,11 @@ export default function SettingsPanel() {
 
                 {/* 节点顶部工具栏显示方式 */}
                 <section>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">节点工具栏</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('节点工具栏')}</h3>
                   <div
                     className="grid grid-cols-2 gap-1 rounded-lg border border-canvas-border bg-canvas-card p-1"
                     role="radiogroup"
-                    aria-label="节点工具栏显示方式"
+                    aria-label={t('节点工具栏显示方式')}
                   >
                     {NODE_TOOLBAR_MODE_OPTIONS.map((option) => {
                       const active = nodeToolbarMode === option.id;
@@ -576,7 +616,7 @@ export default function SettingsPanel() {
                           }`}
                         >
                           <Icon icon={option.icon} width="14" height="14" aria-hidden="true" />
-                          <span>{option.label}</span>
+                          <span>{t(option.label)}</span>
                         </AnimatedButton>
                       );
                     })}
@@ -585,7 +625,7 @@ export default function SettingsPanel() {
 
                 {/* 画布笔记工具栏是否显示 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">画布笔记工具栏</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('画布笔记工具栏')}</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -608,11 +648,11 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="sidebar-pref-text">
-                      <div className="sidebar-pref-title">显示笔记工具栏</div>
+                      <div className="sidebar-pref-title">{t('显示笔记工具栏')}</div>
                       <div className="sidebar-pref-desc">
                         {canvasNoteToolbarVisible
-                          ? '在画布左下角显示绘图与笔记工具'
-                          : '隐藏工具栏，已有笔记仍可编辑'}
+                          ? t('在画布左下角显示绘图与笔记工具')
+                          : t('隐藏工具栏，已有笔记仍可编辑')}
                       </div>
                     </div>
 
@@ -624,7 +664,7 @@ export default function SettingsPanel() {
 
                 {/* 节点标题（node-label）是否显示 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">节点标题</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('节点标题')}</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -650,11 +690,11 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="sidebar-pref-text">
-                      <div className="sidebar-pref-title">显示节点标题</div>
+                      <div className="sidebar-pref-title">{t('显示节点标题')}</div>
                       <div className="sidebar-pref-desc">
                         {nodeLabelVisible
-                          ? '节点上方显示类型图标与名称，双击可重命名'
-                          : '隐藏节点上方的标题栏，画布更简洁'}
+                          ? t('节点上方显示类型图标与名称，双击可重命名')
+                          : t('隐藏节点上方的标题栏，画布更简洁')}
                       </div>
                     </div>
 
@@ -666,7 +706,7 @@ export default function SettingsPanel() {
 
                 {/* 主窗口玻璃外框 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">窗口外观</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('窗口外观')}</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -691,11 +731,11 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="sidebar-pref-text">
-                      <div className="sidebar-pref-title">玻璃外框</div>
+                      <div className="sidebar-pref-title">{t('玻璃外框')}</div>
                       <div className="sidebar-pref-desc">
                         {windowGlassFrame
-                          ? '显示 5px 玻璃带与双层边缘高光'
-                          : '内容贴合窗口边缘，不显示外框'}
+                          ? t('显示 5px 玻璃带与双层边缘高光')
+                          : t('内容贴合窗口边缘，不显示外框')}
                       </div>
                     </div>
 
@@ -707,7 +747,7 @@ export default function SettingsPanel() {
 
                 {/* 侧边栏是否悬浮显示 */}
                 <div>
-                  <h3 className="text-sm font-medium text-canvas-text mb-2">侧边栏</h3>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('侧边栏')}</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -726,11 +766,11 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="sidebar-pref-text">
-                      <div className="sidebar-pref-title">悬浮显示</div>
+                      <div className="sidebar-pref-title">{t('悬浮显示')}</div>
                       <div className="sidebar-pref-desc">
                         {sidebarFloating
-                          ? '侧边栏半隐于窗口边缘，悬浮在画布之上'
-                          : '侧边栏停靠在窗口内侧'}
+                          ? t('侧边栏半隐于窗口边缘，悬浮在画布之上')
+                          : t('侧边栏停靠在窗口内侧')}
                       </div>
                     </div>
 

@@ -17,6 +17,7 @@ import { uploadSourceFileToProject } from '../services/fileService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
 import { classifyFile } from '../hooks/useNodeCreation';
 import AnimatedButton from './shared/AnimatedButton';
+import { useT } from '../i18n';
 
 const menuItems: { type: NodeType; label: string; icon: JSX.Element; badge?: string }[] = [
   {
@@ -65,6 +66,7 @@ const NODE_MENU_W = 240;
 const NODE_MENU_H = 434; // items + header + footer
 
 export default function NodeMenu() {
+  const t = useT();
   const { nodeMenuVisible, nodeMenuPosition, hideNodeMenu, addNode, currentProjectId, showToast } = useAppStore(
     useShallow((s) => ({
       nodeMenuVisible: s.nodeMenuVisible,
@@ -100,7 +102,7 @@ export default function NodeMenu() {
       type,
       position: pos,
       data: {
-        label: menuItems.find((m) => m.type === type)?.label || '节点',
+        label: t(menuItems.find((m) => m.type === type)?.label || '节点'),
         type,
         prompt: '',
         status: 'idle' as const,
@@ -142,7 +144,7 @@ export default function NodeMenu() {
       const category = classifyFile(ext);
 
       if (!category) {
-        showToast('不支持的文件类型', 'error');
+        showToast(t('不支持的文件类型'), 'error');
         return;
       }
 
@@ -182,7 +184,7 @@ export default function NodeMenu() {
         data: nodeData,
       } as never);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '上传失败';
+      const msg = err instanceof Error ? err.message : t('上传失败');
       showToast(msg, 'error');
     }
   };
@@ -206,7 +208,7 @@ export default function NodeMenu() {
         >
       <div className="p-2">
         <div className="text-[11px] font-medium text-canvas-text-muted uppercase px-2 py-1.5">
-          添加节点
+          {t('添加节点')}
         </div>
         <div className="space-y-0.5 mt-1">
           {menuItems.map(({ type, label, icon, badge }) => {
@@ -220,7 +222,7 @@ export default function NodeMenu() {
               <div className={`w-8 h-8 rounded-md ${cfg?.bg || 'bg-gray-500/10'} flex items-center justify-center shrink-0`}>
                 {icon}
               </div>
-              <span className="text-sm text-canvas-text">{label}</span>
+              <span className="text-sm text-canvas-text">{t(label)}</span>
               {badge && (
                 <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded ${cfg?.bg || 'bg-gray-500/15'} ${cfg?.color || 'text-gray-400'}`}>
                   {badge}
@@ -242,7 +244,7 @@ export default function NodeMenu() {
               <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
             </svg>
           </div>
-          <span className="text-sm text-canvas-text-secondary">上传文件</span>
+          <span className="text-sm text-canvas-text-secondary">{t('上传文件')}</span>
         </AnimatedButton>
       </div>
       </motion.div>

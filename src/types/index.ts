@@ -6,6 +6,7 @@ import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
 import type { CanvasNoteData } from './canvasNote';
 import type { ShotlistColumnKey, ShotRow } from './shotlist';
+import type { Locale } from '../i18n';
 
 export type {
   CanvasDrawingTool,
@@ -465,6 +466,7 @@ export interface AppConfig {
   /** 当前用于 Agent 联网搜索的厂商；旧配置未设置时优先沿用 Tavily。 */
   webSearchProviderId?: WebSearchProviderId;
   theme: 'dark' | 'light';
+  language?: Locale; // 界面语言，未设置时跟随系统
   canvasBackground?: CanvasBackground; // 画布背景主题
   interactionMode?: InteractionMode; // 画布交互模式，默认 'default'
   nodeToolbarMode?: NodeToolbarMode; // 节点顶部工具栏显示方式，默认 'icons'

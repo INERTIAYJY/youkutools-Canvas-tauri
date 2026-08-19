@@ -10,8 +10,10 @@ import { useAppStore } from '../store/useAppStore';
 import { copyText } from '../services/clipboardService';
 import PopupCloseButton from './shared/PopupCloseButton';
 import { springSmooth, fadeFast } from '../utils/motion';
+import { useT } from '../i18n';
 
 export default function Toast() {
+  const t = useT();
   const { toast, dismissToast } = useAppStore(
     useShallow((s) => ({ toast: s.toast, dismissToast: s.dismissToast })),
   );
@@ -64,8 +66,8 @@ export default function Toast() {
             <button
               type="button"
               onClick={handleCopy}
-              aria-label={copied ? '已复制消息' : '复制消息'}
-              data-tooltip={copied ? '已复制' : '复制消息'}
+              aria-label={copied ? t('已复制消息') : t('复制消息')}
+              data-tooltip={copied ? t('已复制') : t('复制消息')}
               className="chat-panel-close-btn ml-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg
                          text-canvas-text-muted transition-[color,background-color,box-shadow,transform] duration-150
                          hover:bg-canvas-hover hover:text-canvas-text active:scale-95
@@ -76,7 +78,7 @@ export default function Toast() {
             </button>
             <PopupCloseButton
               onClick={dismissToast}
-              ariaLabel="关闭通知"
+              ariaLabel={t('关闭通知')}
               className="ml-0.5"
             />
           </div>

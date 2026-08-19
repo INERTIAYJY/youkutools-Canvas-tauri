@@ -9,6 +9,7 @@ import type { BaseNodeData } from '../../types';
 import type { Node as RFNode } from '@xyflow/react';
 import { calcFixedPosition } from '../../utils/popupPosition';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 interface ConnectionMenuOption {
   label: string;
@@ -46,6 +47,7 @@ function ConnectionMenu({
   onSelect,
   connectionMenuMap,
 }: ConnectionMenuProps) {
+  const t = useT();
   // Hook 必须在任何提前 return 之前调用，否则显示/隐藏切换会错位 Hook 顺序
   const safePos = useMemo(
     () => calcFixedPosition(position.x, position.y, MENU_W, MENU_H),
@@ -72,10 +74,10 @@ function ConnectionMenu({
       {/* Header */}
       <div className="px-3 py-2.5 border-b border-canvas-border">
         <div className="text-[11px] font-medium text-canvas-text-muted uppercase mb-1">
-          引用该节点生成
+          {t('引用该节点生成')}
         </div>
         <div className="text-xs text-canvas-text-secondary truncate">
-          {sourceNode?.data?.label ?? '节点'}
+          {sourceNode?.data?.label ?? t('节点')}
         </div>
       </div>
 
@@ -130,11 +132,11 @@ function ConnectionMenu({
                 )}
               </div>
               <span className="text-sm text-canvas-text group-hover:text-white transition-colors">
-                {opt.label}
+                {t(opt.label)}
               </span>
               {opt.type === 'ai-panorama' && (
                 <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400">
-                  全景
+                  {t('全景')}
                 </span>
               )}
             </AnimatedButton>

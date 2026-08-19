@@ -4,6 +4,7 @@
 import { memo, useCallback } from 'react';
 import { useReactFlow, useStore, type ReactFlowState } from '@xyflow/react';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 interface CanvasToolbarProps {
   showGrid: boolean;
@@ -15,6 +16,7 @@ interface CanvasToolbarProps {
 const selectZoomPercent = (state: ReactFlowState) => Math.round(state.transform[2] * 100);
 
 const ZoomControl = memo(function ZoomControl() {
+  const t = useT();
   const zoomPercent = useStore(selectZoomPercent);
   const { zoomTo } = useReactFlow();
 
@@ -33,7 +35,7 @@ const ZoomControl = memo(function ZoomControl() {
         max="200"
         value={zoomPercent}
         onChange={handleZoomChange}
-        aria-label="画布缩放比例"
+        aria-label={t('画布缩放比例')}
         aria-valuetext={`${zoomPercent}%`}
         className="canvas-zoom-slider"
       />
@@ -48,18 +50,19 @@ function CanvasToolbar({
   onToggleGrid,
   onToggleLine,
 }: CanvasToolbarProps) {
+  const t = useT();
   return (
     <div className="footer-toolbar flex items-center gap-2 border border-canvas-border backdrop-blur-xl rounded-xl shadow-lg">
       <AnimatedButton
         type="button"
-        aria-label={showGrid ? '隐藏背景网格' : '显示背景网格'}
+        aria-label={showGrid ? t('隐藏背景网格') : t('显示背景网格')}
         className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${
           showGrid
             ? 'text-indigo-400 hover:text-indigo-300 bg-indigo-500/15'
             : 'text-canvas-text-secondary hover:text-canvas-text hover:bg-canvas-hover'
         }`}
         onClick={onToggleGrid}
-        data-tooltip={showGrid ? '隐藏背景网格' : '显示背景网格'}
+        data-tooltip={showGrid ? t('隐藏背景网格') : t('显示背景网格')}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
           <circle cx="5" cy="5" r="1.5" /><circle cx="12" cy="5" r="1.5" /><circle cx="19" cy="5" r="1.5" />
@@ -69,10 +72,10 @@ function CanvasToolbar({
       </AnimatedButton>
       <AnimatedButton
         type="button"
-        aria-label={smoothLine ? '切换为曲线连线' : '切换为直角连线'}
+        aria-label={smoothLine ? t('切换为曲线连线') : t('切换为直角连线')}
         className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors text-canvas-text-secondary hover:text-canvas-text hover:bg-canvas-hover"
         onClick={onToggleLine}
-        data-tooltip={smoothLine ? '连线类型：直角 → 切换为曲线' : '连线类型：曲线 → 切换为直角'}
+        data-tooltip={smoothLine ? t('连线类型：直角 → 切换为曲线') : t('连线类型：曲线 → 切换为直角')}
       >
         {smoothLine ? (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">

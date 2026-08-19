@@ -15,8 +15,10 @@ import { uploadSourceFile } from '../../services/fileService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { textNodeHeight } from '../../utils/num';
 import ResizeHandle from './shared/ResizeHandle';
+import { useT } from '../../i18n';
 
 function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
+  const t = useT();
   const justCompleted = useCompletionFlash(data.status);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
@@ -206,7 +208,7 @@ function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; se
     }
   }, [id, updateNodeData]);
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴文本');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴文本'));
 
   // 节点内编辑时隐藏连接手柄：保留布局/位置（不脱锚），仅去掉显示与交互
   const handleHideStyle: React.CSSProperties | undefined = isEditing
@@ -244,8 +246,8 @@ function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; se
             <button
               className="node-upload-btn"
               onClick={(e) => { e.stopPropagation(); handleUpload(); }}
-              data-tooltip="上传文本文件"
-              aria-label="上传文本文件"
+              data-tooltip={t('上传文本文件')}
+              aria-label={t('上传文本文件')}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="12" height="12">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -263,43 +265,43 @@ function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; se
               onBlur={() => finishInlineEdit(true)}
               onKeyDown={handleInlineKeyDown}
               onClick={(e) => e.stopPropagation()}
-              placeholder={isSource ? '输入或粘贴文本内容…' : '输入文本内容…'}
-              aria-label="编辑文本节点内容"
+              placeholder={isSource ? t('输入或粘贴文本内容…') : t('输入文本内容…')}
+              aria-label={t('编辑文本节点内容')}
               spellCheck={false}
             />
           ) : data.output ? (
             <div
               className="text-output-content compact nowheel"
               onDoubleClick={enterInlineEdit}
-              title="双击编辑"
+              title={t('双击编辑')}
             >
               {data.output}
             </div>
           ) : isUploading ? (
             <div className="node-preview-loading">
               <div className="spinner" />
-              <span>上传中...</span>
+              <span>{t('上传中...')}</span>
             </div>
           ) : data.status === 'loading' ? (
             <div className="node-preview-loading">
               <div className="spinner" />
-              <span>生成中...</span>
+              <span>{t('生成中...')}</span>
             </div>
           ) : (
             <div
               className="node-preview-placeholder text-node-empty-editable"
               data-inline-edit-trigger="true"
               onDoubleClick={enterInlineEdit}
-              title="双击编辑"
+              title={t('双击编辑')}
             >
-              <span>{isSource ? '上传文本文件或粘贴内容' : '输入提示词开始创作'}</span>
-              <span className="text-node-edit-hint">双击编辑内容</span>
+              <span>{isSource ? t('上传文本文件或粘贴内容') : t('输入提示词开始创作')}</span>
+              <span className="text-node-edit-hint">{t('双击编辑内容')}</span>
             </div>
           )}
         </div>
         {(isEditing || data.output) && (
           <span className="text-node-wordcount">
-            {(isEditing ? draftOutput.length : ((data.output as string) || '').length).toLocaleString()} 字
+            {(isEditing ? draftOutput.length : ((data.output as string) || '').length).toLocaleString()} {t('字')}
           </span>
         )}
 
@@ -334,7 +336,7 @@ function AITextNode({ id, data, selected }: { id: string; data: BaseNodeData; se
       <FullscreenOverlay
         isOpen={isFullscreen}
       onClose={handleCloseFullscreen}
-      title={(data.label as string) || '文本内容'}
+      title={(data.label as string) || t('文本内容')}
       >
       <textarea
         ref={fullscreenTextareaRef}

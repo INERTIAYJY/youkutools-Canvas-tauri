@@ -15,8 +15,10 @@ import AnimatedButton from '../shared/AnimatedButton';
 import { renderMarkdown } from '../../utils/renderMarkdown';
 import { textNodeHeight } from '../../utils/num';
 import ResizeHandle from './shared/ResizeHandle';
+import { useT } from '../../i18n';
 
 function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
+  const t = useT();
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
@@ -58,20 +60,20 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     e.stopPropagation();
     const content = (data.output as string) || '';
     if (!content) {
-      showToast('暂无文本可复制', 'error');
+      showToast(t('暂无文本可复制'), 'error');
       return;
     }
 
     try {
       await navigator.clipboard.writeText(content);
       setCopied(true);
-      showToast('文本已复制');
+      showToast(t('文本已复制'));
       if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
       copyResetTimer.current = setTimeout(() => setCopied(false), 1500);
     } catch {
-      showToast('复制失败，请手动复制', 'error');
+      showToast(t('复制失败，请手动复制'), 'error');
     }
-  }, [data.output, showToast]);
+  }, [data.output, showToast, t]);
 
   // Auto-focus textarea when fullscreen opens in edit mode
   useEffect(() => {
@@ -188,7 +190,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
   // ── Markdown preview HTML ──（memo：编辑时每次按键都会重渲染，避免全文重复解析）
   const previewHtml = useMemo(() => renderMarkdown((data.output as string) || ''), [data.output]);
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, 'Markdown 文档');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('Markdown 文档'));
 
   return (
     <>
@@ -234,7 +236,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
               className="markdown-mode-btn"
               disabled={isUploading}
               onClick={(e) => { e.stopPropagation(); onUpload(); }}
-              data-tooltip="上传 .md 文件"
+              data-tooltip={t('上传 .md 文件')}
             >
               {isUploading ? (
                 <div className="spinner-sm" />
@@ -250,8 +252,8 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
               type="button"
               className="markdown-mode-btn"
               onClick={handleCopy}
-              data-tooltip={copied ? '已复制' : '复制文本'}
-              aria-label={copied ? '已复制' : '复制文本'}
+              data-tooltip={copied ? t('已复制') : t('复制文本')}
+              aria-label={copied ? t('已复制') : t('复制文本')}
             >
               {copied ? (
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -268,7 +270,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
               type="button"
               className="markdown-mode-btn"
               onClick={(e) => { e.stopPropagation(); handleOpenFullscreen(); }}
-              data-tooltip="全屏显示"
+              data-tooltip={t('全屏显示')}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
@@ -285,7 +287,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
               value={(data.output as string) || ''}
               onChange={handleContentChange}
               onBlur={finishContentEdit}
-              placeholder="# Markdown 文档&#10;&#10;点击上方按钮上传 .md 文件，或直接在此编辑…"
+              placeholder={t('# Markdown 文档&#10;&#10;点击上方按钮上传 .md 文件，或直接在此编辑…')}
               spellCheck={false}
             />
           ) : (
@@ -297,7 +299,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
                 />
               ) : (
                 <div className="node-preview-placeholder">
-                  暂无内容 — 切换到编辑模式开始写作
+                  {t('暂无内容 — 切换到编辑模式开始写作')}
                 </div>
               )}
             </div>
@@ -306,7 +308,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
 
         {/* Status bar */}
         <span className="text-node-wordcount">
-          {((data.output as string) || '').length.toLocaleString()} 字
+          {((data.output as string) || '').length.toLocaleString()} {t('字')}
         </span>
 
         <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-text">
@@ -333,7 +335,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     <FullscreenOverlay
       isOpen={isFullscreen}
       onClose={handleCloseFullscreen}
-      title={(data.label as string) || 'Markdown 文档'}
+      title={(data.label as string) || t('Markdown 文档')}
       headerContent={
         <div className="fullscreen-toolbar">
           <AnimatedButton
@@ -376,7 +378,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
             />
           ) : (
             <div className="node-preview-placeholder" style={{ textAlign: 'center', padding: 40 }}>
-              暂无内容
+              {t('暂无内容')}
             </div>
           )}
         </div>

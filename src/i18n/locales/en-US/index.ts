@@ -9,6 +9,7 @@ import project from './project';
 import character from './character';
 import canvas from './canvas';
 import chat from './chat';
+import nodes from './nodes';
 
 const enUS: Record<string, string> = {
   ...common,
@@ -18,6 +19,7 @@ const enUS: Record<string, string> = {
   ...character,
   ...canvas,
   ...chat,
+  ...nodes,
 };
 
 export default enUS;

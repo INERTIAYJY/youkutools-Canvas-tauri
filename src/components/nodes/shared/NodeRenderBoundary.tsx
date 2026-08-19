@@ -19,6 +19,7 @@ import { Icon } from '@iconify/react';
 import ModalOverlay from '../../shared/ModalOverlay';
 import PopupCloseButton from '../../shared/PopupCloseButton';
 import { useAppStore } from '../../../store/useAppStore';
+import { useT } from '../../../i18n';
 
 const FALLBACK_WIDTH = 320;
 /** 数据预览里超长字符串（data URL / base64）只留头部，避免把几 MB 塞进 DOM */
@@ -61,6 +62,7 @@ function errorMessageOf(error: unknown): string {
 }
 
 function NodeCrashCard({ nodeId, typeName, data, error, onRetry }: NodeCrashCardProps) {
+  const t = useT();
   const deleteNode = useAppStore((s) => s.deleteNode);
   const [isDataOpen, setIsDataOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -98,7 +100,7 @@ function NodeCrashCard({ nodeId, typeName, data, error, onRetry }: NodeCrashCard
             className="shrink-0 text-danger-light"
             aria-hidden="true"
           />
-          <span className="truncate text-xs font-medium text-canvas-text">此节点渲染失败</span>
+          <span className="truncate text-xs font-medium text-canvas-text">{t('此节点渲染失败')}</span>
           {nodeData.displayId != null && (
             <span className="ml-auto shrink-0 text-[10px] text-canvas-text-muted">
               #{nodeData.displayId}
@@ -119,21 +121,21 @@ function NodeCrashCard({ nodeId, typeName, data, error, onRetry }: NodeCrashCard
             className="rounded-md border border-canvas-border px-2 py-1 text-[11px] text-canvas-text transition-colors hover:bg-canvas-hover"
             onClick={() => setIsDataOpen(true)}
           >
-            查看数据
+            {t('查看数据')}
           </button>
           <button
             type="button"
             className="rounded-md border border-canvas-border px-2 py-1 text-[11px] text-canvas-text transition-colors hover:bg-canvas-hover"
             onClick={onRetry}
           >
-            重试渲染
+            {t('重试渲染')}
           </button>
           <button
             type="button"
             className="ml-auto rounded-md border border-danger/40 px-2 py-1 text-[11px] text-danger-light transition-colors hover:bg-danger/10"
             onClick={() => deleteNode(nodeId)}
           >
-            删除节点
+            {t('删除节点')}
           </button>
         </div>
 
@@ -155,12 +157,12 @@ function NodeCrashCard({ nodeId, typeName, data, error, onRetry }: NodeCrashCard
         <ModalOverlay
           isOpen={isDataOpen}
           onClose={() => setIsDataOpen(false)}
-          ariaLabel="节点数据"
+          ariaLabel={t('节点数据')}
           className="w-[min(680px,calc(100vw-48px))] max-h-[70vh] border-canvas-border"
           motionPreset="quick"
         >
           <div className="flex items-center gap-2 border-b border-canvas-border px-4 py-3">
-            <span className="text-sm font-medium text-canvas-text">节点数据</span>
+            <span className="text-sm font-medium text-canvas-text">{t('节点数据')}</span>
             <span className="truncate text-xs text-canvas-text-muted">
               {typeName} · {nodeId}
             </span>
@@ -169,7 +171,7 @@ function NodeCrashCard({ nodeId, typeName, data, error, onRetry }: NodeCrashCard
               className="ml-auto shrink-0 rounded-md border border-canvas-border px-2 py-1 text-xs text-canvas-text transition-colors hover:bg-canvas-hover"
               onClick={handleCopy}
             >
-              {copied ? '已复制' : '复制'}
+              {copied ? t('已复制') : t('复制')}
             </button>
             <PopupCloseButton onClick={() => setIsDataOpen(false)} />
           </div>

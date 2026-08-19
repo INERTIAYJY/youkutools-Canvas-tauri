@@ -13,6 +13,7 @@ import type {
   CanvasQuickActionKind,
 } from '../../types';
 import type { CanvasRadialMenuPosition } from '../../hooks/useCanvasLongPressRadialMenu';
+import { useT } from '../../i18n';
 
 const SLOT_COUNT = 6;
 const MENU_VIEWPORT_PADDING = 122;
@@ -103,6 +104,7 @@ interface CanvasRadialMenuProps {
 }
 
 export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenuProps) {
+  const t = useT();
   const {
     configuredActions,
     comfyUIUrl,
@@ -154,7 +156,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
           window.dispatchEvent(new Event('canvas-fit-view'));
           break;
         case 'custom-url':
-          if (!action.url?.trim()) throw new Error('请先填写网页地址');
+          if (!action.url?.trim()) throw new Error(t('请先填写网页地址'));
           await openExternalUrl(action.url.trim());
           break;
         case 'disabled':
@@ -164,7 +166,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
       showToast(
         typeof error === 'string'
           ? error
-          : error instanceof Error ? error.message : '快捷动作执行失败',
+          : error instanceof Error ? error.message : t('快捷动作执行失败'),
         'error',
       );
     }
@@ -180,7 +182,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
     const normalized = normalizeCanvasQuickActions(draft);
     updateConfig({ canvasQuickActions: normalized });
     await saveConfig({ silent: true });
-    showToast('画布圆环快捷方式已保存');
+    showToast(t('画布圆环快捷方式已保存'));
     setEditing(false);
     onClose();
   };
@@ -198,7 +200,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
           className="canvas-radial-menu"
           style={{ left: menuPosition.x, top: menuPosition.y }}
           role="menu"
-          aria-label="画布快捷方式"
+          aria-label={t('画布快捷方式')}
         >
           {actions.map((action, index) => (
             <button
@@ -207,8 +209,8 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
               className={`canvas-radial-item canvas-radial-slot-${index}`}
               disabled={action.kind === 'disabled'}
               role="menuitem"
-              aria-label={getActionLabel(action)}
-              data-tooltip={getActionLabel(action)}
+              aria-label={t(getActionLabel(action))}
+              data-tooltip={t(getActionLabel(action))}
               onClick={() => void runAction(action)}
             >
               <Icon icon={getActionIcon(action)} width="21" />
@@ -217,7 +219,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
           <button
             type="button"
             className="canvas-radial-center"
-            aria-label="自定义圆环快捷方式"
+            aria-label={t('自定义圆环快捷方式')}
             onClick={() => {
               setDraft(actions);
               setEditing(true);
@@ -232,10 +234,10 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
         <div className="canvas-radial-editor" role="dialog" aria-modal="true" aria-labelledby="canvas-radial-editor-title">
           <div className="canvas-radial-editor-header">
             <div>
-              <h2 id="canvas-radial-editor-title">自定义画布圆环</h2>
-              <p>为 6 个槽位分配常用入口，空白画布长按即可呼出。</p>
+              <h2 id="canvas-radial-editor-title">{t('自定义画布圆环')}</h2>
+              <p>{t('为 6 个槽位分配常用入口，空白画布长按即可呼出。')}</p>
             </div>
-            <button type="button" aria-label="关闭" onClick={() => setEditing(false)}>
+            <button type="button" aria-label={t('关闭')} onClick={() => setEditing(false)}>
               <Icon icon="solar:close-circle-linear" width="22" />
             </button>
           </div>
@@ -247,7 +249,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
                 <Icon icon={getActionIcon(action)} width="20" />
                 <select
                   value={action.kind}
-                  aria-label={`槽位 ${index + 1}`}
+                  aria-label={t('槽位 {index}', { index: index + 1 })}
                   onChange={(event) => updateDraft(index, {
                     kind: event.target.value as CanvasQuickActionKind,
                     label: undefined,
@@ -255,7 +257,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
                   })}
                 >
                   {ACTION_DEFINITIONS.map((definition) => (
-                    <option key={definition.kind} value={definition.kind}>{definition.label}</option>
+                    <option key={definition.kind} value={definition.kind}>{t(definition.label)}</option>
                   ))}
                 </select>
                 {action.kind === 'custom-url' && (
@@ -263,15 +265,15 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
                     <input
                       value={action.label ?? ''}
                       maxLength={24}
-                      placeholder="名称"
-                      aria-label={`槽位 ${index + 1} 名称`}
+                      placeholder={t('名称')}
+                      aria-label={t('槽位 {index} 名称', { index: index + 1 })}
                       onChange={(event) => updateDraft(index, { label: event.target.value })}
                     />
                     <input
                       value={action.url ?? ''}
                       inputMode="url"
                       placeholder="https://example.com"
-                      aria-label={`槽位 ${index + 1} 网址`}
+                      aria-label={t('槽位 {index} 网址', { index: index + 1 })}
                       onChange={(event) => updateDraft(index, { url: event.target.value })}
                     />
                   </div>
@@ -282,10 +284,10 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
 
           <div className="canvas-radial-editor-actions">
             <button type="button" className="is-secondary" onClick={() => setDraft(DEFAULT_CANVAS_QUICK_ACTIONS)}>
-              恢复默认
+              {t('恢复默认')}
             </button>
             <button type="button" className="is-primary" onClick={() => void saveDraft()}>
-              保存设置
+              {t('保存设置')}
             </button>
           </div>
         </div>

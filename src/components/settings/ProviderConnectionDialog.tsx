@@ -28,6 +28,7 @@ import ModalOverlay from '../shared/ModalOverlay';
 import PopupCloseButton from '../shared/PopupCloseButton';
 import ModelProtocolEditor from './ModelProtocolEditor';
 import ProtocolImportPanel from './ProtocolImportPanel';
+import { useT } from '../../i18n';
 
 const CATEGORY_ORDER: GeneralModelCategory[] = ['text', 'image', 'video', 'audio'];
 const PROVIDER_LINKS: Record<string, string> = {
@@ -164,6 +165,7 @@ export default function ProviderConnectionDialog({
   onClose,
   onSave,
 }: ProviderConnectionDialogProps) {
+  const t = useT();
   const editing = !!connectionId && !!initialConfig;
   const initialDefinitionId = initialConfig?.catalogId || connectionId || '';
   const initialDefinition = getProviderDefinition(initialDefinitionId, initialConfig);
@@ -186,7 +188,7 @@ export default function ProviderConnectionDialog({
     initialSelectedModels.length > 0 || initialLocalModels.length > 0 ? 'ready' : 'idle',
   );
   const [catalogMessage, setCatalogMessage] = useState(
-    initialCatalogModels.length > 0 ? `已加载本地缓存 ${initialCatalogModels.length} 个模型` : '',
+    initialCatalogModels.length > 0 ? t('已加载本地缓存 {count} 个模型', { count: initialCatalogModels.length }) : '',
   );
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<GeneralModelCategory | 'all'>('all');
@@ -291,7 +293,7 @@ export default function ProviderConnectionDialog({
     try {
       if (definition.id === 'runninghub-model') {
         const result = await testProviderConnection('runninghub-model', apiKey.trim());
-        if (!result.success) throw new Error(result.error || 'RunningHub API Key 验证失败');
+        if (!result.success) throw new Error(result.error || t('RunningHub API Key 验证失败'));
       }
       const result = await fetchProviderModelCatalog({
         providerId: definition.id,
@@ -307,11 +309,11 @@ export default function ProviderConnectionDialog({
       });
       setModels((current) => mergeModels(current, result.models));
       setCatalogStatus(result.warning ? 'warning' : 'ready');
-      setCatalogMessage(result.warning || `已获取 ${result.models.length} 个模型`);
+      setCatalogMessage(result.warning || t('已获取 {count} 个模型', { count: result.models.length }));
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       setCatalogStatus('error');
-      setCatalogMessage(error instanceof Error ? error.message : '模型列表拉取失败');
+      setCatalogMessage(error instanceof Error ? error.message : t('模型列表拉取失败'));
     }
   };
 
@@ -324,18 +326,18 @@ export default function ProviderConnectionDialog({
   const handleTestWebSearchConnection = async () => {
     if (!isWebSearchProvider || !definition || missingCredentials) return;
     setCatalogStatus('loading');
-    setCatalogMessage(`正在验证 ${definition.name} 连接...`);
+    setCatalogMessage(t('正在验证 {name} 连接...', { name: definition.name }));
     const result = await testProviderConnection(
       definition.id as WebSearchProviderId,
       apiKey.trim(),
     );
     if (result.success) {
       setCatalogStatus('ready');
-      setCatalogMessage(`${definition.name} 连接验证成功`);
+      setCatalogMessage(t('{name} 连接验证成功', { name: definition.name }));
       return;
     }
     setCatalogStatus('error');
-    setCatalogMessage(result.error || `${definition.name} 连接验证失败`);
+    setCatalogMessage(result.error || t('{name} 连接验证失败', { name: definition.name }));
   };
 
   const toggleModel = (modelId: string) => {
@@ -490,7 +492,7 @@ export default function ProviderConnectionDialog({
     setProtocolModelId(modelId);
     setProtocolValid(true);
     setCatalogStatus('ready');
-    setCatalogMessage(`已从接口文档导入模型 ${modelId}，保存前可继续检查调用协议`);
+    setCatalogMessage(t('已从接口文档导入模型 {id}，保存前可继续检查调用协议', { id: modelId }));
     setProtocolImportOpen(false);
   };
 
@@ -559,14 +561,14 @@ export default function ProviderConnectionDialog({
     <ModalOverlay
       isOpen={isOpen}
       onClose={closeDialog}
-      ariaLabel={editing ? '编辑 API 厂商' : '添加 API 厂商'}
+      ariaLabel={editing ? t('编辑 API 厂商') : t('添加 API 厂商')}
       className="provider-dialog"
       closeOnBackdrop={false}
     >
       <header className="provider-dialog-header">
         <div>
-          <span className="provider-dialog-kicker">{editing ? '编辑连接' : '新建连接'}</span>
-          <h3>{isWebSearchProvider ? '联网搜索' : definition ? definition.name : '选择 API 厂商'}</h3>
+          <span className="provider-dialog-kicker">{editing ? t('编辑连接') : t('新建连接')}</span>
+          <h3>{isWebSearchProvider ? t('联网搜索') : definition ? definition.name : t('选择 API 厂商')}</h3>
         </div>
         <div className="flex items-center gap-2">
           {definition?.id === 'custom-openai' && (
@@ -576,7 +578,7 @@ export default function ProviderConnectionDialog({
               onClick={() => void handleAssistantAdd()}
             >
               <Icon icon="mdi:message-processing-outline" width="14" />
-              调用助手添加
+              {t('调用助手添加')}
             </AnimatedButton>
           )}
           <PopupCloseButton onClick={closeDialog} />
@@ -595,8 +597,8 @@ export default function ProviderConnectionDialog({
               >
                 <span className={`provider-badge provider-badge--${item.id}`}>{item.badgeText}</span>
                 <span className="provider-picker-copy">
-                  <strong>{item.kind === 'web-search' ? '联网搜索' : item.name}</strong>
-                  <small>{item.kind === 'web-search' ? 'Tavily、博查、智谱与 Exa' : item.description}</small>
+                  <strong>{item.kind === 'web-search' ? t('联网搜索') : item.name}</strong>
+                  <small>{item.kind === 'web-search' ? t('Tavily、博查、智谱与 Exa') : item.description}</small>
                 </span>
                 <Icon icon="mdi:chevron-right" width="18" />
               </button>
@@ -609,7 +611,7 @@ export default function ProviderConnectionDialog({
             <section className="provider-config-section">
               <div className="provider-section-heading">
                 <div>
-                  <h4>连接信息</h4>
+                  <h4>{t('连接信息')}</h4>
                   <p>{definition.description}</p>
                 </div>
                 {!editing && !isWebSearchProvider && (
@@ -618,7 +620,7 @@ export default function ProviderConnectionDialog({
                     className="provider-text-btn"
                     onClick={returnToDefinitionPicker}
                   >
-                    更换厂商
+                    {t('更换厂商')}
                   </AnimatedButton>
                 )}
               </div>
@@ -627,18 +629,18 @@ export default function ProviderConnectionDialog({
                 <div className="provider-catalog-message is-warning provider-custom-openai-warning">
                   <Icon icon="mdi:alert-circle-outline" width="16" />
                   <span>
-                    提示：每个中转站提供的模型和参数规则都不一样，从接口拉取下来的模型，不一定能直接拿来用。不同中转站对同一个模型的名字、传入图片、尺寸等参数往往不同，直接使用可能会报错。请先查看你所用中转站的官方文档，把对应的参数改成文档里的值。如果你不会改，可以这样做：直接把中转站的文档发给对话助手，或者开启智能体并接入 MCP，让助手照着文档帮你添加和配置。
+                    {t('提示：每个中转站提供的模型和参数规则都不一样，从接口拉取下来的模型，不一定能直接拿来用。不同中转站对同一个模型的名字、传入图片、尺寸等参数往往不同，直接使用可能会报错。请先查看你所用中转站的官方文档，把对应的参数改成文档里的值。如果你不会改，可以这样做：直接把中转站的文档发给对话助手，或者开启智能体并接入 MCP，让助手照着文档帮你添加和配置。')}
                   </span>
                 </div>
               )}
 
               {definition.id === 'custom-openai' && (
                 <label className="provider-field">
-                  <span>连接名称</span>
+                  <span>{t('连接名称')}</span>
                   <input
                     type="text"
                     value={connectionName}
-                    placeholder="例如：团队模型网关"
+                    placeholder={t('例如：团队模型网关')}
                     onChange={(event) => setConnectionName(event.target.value)}
                   />
                 </label>
@@ -648,8 +650,8 @@ export default function ProviderConnectionDialog({
                 <div className="provider-oauth-row">
                   <span className={`provider-connection-dot${dreaminaLoggedIn ? ' is-online' : ''}`} />
                   <div>
-                    <strong>{dreaminaLoggedIn ? '即梦账号已登录' : '即梦账号未登录'}</strong>
-                    <small>模型调用使用桌面端 OAuth 登录态</small>
+                    <strong>{dreaminaLoggedIn ? t('即梦账号已登录') : t('即梦账号未登录')}</strong>
+                    <small>{t('模型调用使用桌面端 OAuth 登录态')}</small>
                   </div>
                   <AnimatedButton
                     type="button"
@@ -657,7 +659,7 @@ export default function ProviderConnectionDialog({
                     disabled={dreaminaLoading}
                     onClick={onDreaminaLogin}
                   >
-                    {dreaminaLoading ? '处理中...' : dreaminaLoggedIn ? '重新登录' : 'OAuth 登录'}
+                    {dreaminaLoading ? t('处理中...') : dreaminaLoggedIn ? t('重新登录') : t('OAuth 登录')}
                   </AnimatedButton>
                 </div>
               ) : (
@@ -686,11 +688,11 @@ export default function ProviderConnectionDialog({
                   })}
                   {definition.id === 'runninghub-model' && (
                     <label className="provider-field">
-                      <span>消费级-会员 API Key</span>
+                      <span>{t('消费级-会员 API Key')}</span>
                       <input
                         type="password"
                         value={workflowApiKey}
-                        placeholder="用于 RunningHub 工作流执行（可选）"
+                        placeholder={t('用于 RunningHub 工作流执行（可选）')}
                         onChange={(event) => setWorkflowApiKey(event.target.value)}
                       />
                     </label>
@@ -705,7 +707,7 @@ export default function ProviderConnectionDialog({
                   onClick={() => void openExternal(PROVIDER_LINKS[definition.id])}
                 >
                   <Icon icon="mdi:open-in-new" width="13" />
-                  {definition.id === 'grsai' ? '前往 API Key 页面' : '前往厂商控制台'}
+                  {definition.id === 'grsai' ? t('前往 API Key 页面') : t('前往厂商控制台')}
                 </button>
               )}
 
@@ -722,7 +724,7 @@ export default function ProviderConnectionDialog({
                       className={catalogStatus === 'loading' ? 'settings-spin' : undefined}
                       width="15"
                     />
-                    {catalogStatus === 'loading' ? '验证中' : '验证连接'}
+                    {catalogStatus === 'loading' ? t('验证中') : t('验证连接')}
                   </AnimatedButton>
                   {catalogMessage && (
                     <div className={`provider-catalog-message is-${catalogStatus} m-0 flex-1`}>
@@ -741,8 +743,8 @@ export default function ProviderConnectionDialog({
               <section className="provider-model-section">
                 <div className="provider-section-heading">
                   <div>
-                    <h4>搜索厂商</h4>
-                    <p>选择当前使用的服务，其他厂商密钥会保留在本地</p>
+                    <h4>{t('搜索厂商')}</h4>
+                    <p>{t('选择当前使用的服务，其他厂商密钥会保留在本地')}</p>
                   </div>
                 </div>
                 <div className="provider-picker-grid">
@@ -760,7 +762,7 @@ export default function ProviderConnectionDialog({
                         <span className={`provider-badge provider-badge--${item.id}`}>{item.badgeText}</span>
                         <span className="provider-picker-copy">
                           <strong>{item.name}</strong>
-                          <small>{configured ? 'API Key 已配置' : item.description}</small>
+                          <small>{configured ? t('API Key 已配置') : item.description}</small>
                         </span>
                         <Icon icon={selected ? 'mdi:check-circle' : 'mdi:chevron-right'} width="18" />
                       </button>
@@ -773,8 +775,8 @@ export default function ProviderConnectionDialog({
             {!isWebSearchProvider && <section className="provider-model-section">
               <div className="provider-section-heading provider-model-heading">
                 <div>
-                  <h4>启用模型</h4>
-                  <p>仅勾选会在应用中使用的模型</p>
+                  <h4>{t('启用模型')}</h4>
+                  <p>{t('仅勾选会在应用中使用的模型')}</p>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
                   {definition.id === 'custom-openai' ? (
@@ -786,7 +788,7 @@ export default function ProviderConnectionDialog({
                           onClick={undoProtocolImport}
                         >
                           <Icon icon="mdi:undo-variant" width="14" />
-                          撤销导入
+                          {t('撤销导入')}
                         </AnimatedButton>
                       ) : null}
                       <AnimatedButton
@@ -796,7 +798,7 @@ export default function ProviderConnectionDialog({
                         onClick={() => setProtocolImportOpen((open) => !open)}
                       >
                         <Icon icon="mdi:file-import-outline" width="14" />
-                        导入文档
+                        {t('导入文档')}
                       </AnimatedButton>
                     </>
                   ) : null}
@@ -811,7 +813,7 @@ export default function ProviderConnectionDialog({
                       className={catalogStatus === 'loading' ? 'settings-spin' : undefined}
                       width="15"
                     />
-                    {catalogStatus === 'loading' ? '拉取中' : '拉取模型'}
+                    {catalogStatus === 'loading' ? t('拉取中') : t('拉取模型')}
                   </AnimatedButton>
                 </div>
               </div>
@@ -826,9 +828,9 @@ export default function ProviderConnectionDialog({
               <div className="mb-3 flex min-h-8 items-center justify-between gap-3 rounded-md border border-canvas-border bg-white/[0.03] px-2.5 py-1.5">
                 <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-canvas-text-secondary">
                   <Icon icon="mdi:eye-outline" width="14" />
-                  是否在对应类型节点中显示
+                  {t('是否在对应类型节点中显示')}
                 </span>
-                <div className="flex min-w-0 flex-wrap justify-end gap-1" role="group" aria-label="节点列表显示分类">
+                <div className="flex min-w-0 flex-wrap justify-end gap-1" role="group" aria-label={t('节点列表显示分类')}>
                   <button
                     type="button"
                     aria-pressed={visibleModelCategories.size === CATEGORY_ORDER.length}
@@ -837,7 +839,7 @@ export default function ProviderConnectionDialog({
                     }`}
                     onClick={toggleAllVisibleCategories}
                   >
-                    全部
+                    {t('全部')}
                   </button>
                   {CATEGORY_ORDER.map((item) => (
                     <button
@@ -873,18 +875,18 @@ export default function ProviderConnectionDialog({
                       <input
                         type="search"
                         value={query}
-                        placeholder="搜索模型 ID 或名称"
+                        placeholder={t('搜索模型 ID 或名称')}
                         onChange={(event) => setQuery(event.target.value)}
                       />
                     </label>
-                    <div className="provider-category-tabs" aria-label="模型类别">
+                    <div className="provider-category-tabs" aria-label={t('模型类别')}>
                       <button
                         type="button"
                         aria-pressed={category === 'all'}
                         className={`provider-category-choice is-all ${category === 'all' ? 'is-active' : ''}`}
                         onClick={() => setCategory('all')}
                       >
-                        全部
+                        {t('全部')}
                       </button>
                       {CATEGORY_ORDER.map((item) => (
                         <button
@@ -907,7 +909,7 @@ export default function ProviderConnectionDialog({
                         checked={filteredModels.length > 0 && filteredModels.every((model) => selectedIds.has(model.id))}
                         onChange={toggleVisibleModels}
                       />
-                      <span>选择当前结果</span>
+                      <span>{t('选择当前结果')}</span>
                     </label>
                     <span>{selectedModels.length} 个已选</span>
                   </div>
@@ -1065,12 +1067,12 @@ export default function ProviderConnectionDialog({
               {isWebSearchProvider
                 ? `当前使用 ${definition.name}`
                 : selectedModels.length > 0
-                  ? `将启用 ${selectedModels.length} 个模型`
-                  : '至少选择一个模型'}
+                  ? t('将启用 {count} 个模型', { count: selectedModels.length })
+                  : t('至少选择一个模型')}
             </span>
             <div>
               <AnimatedButton type="button" className="provider-secondary-btn" onClick={closeDialog}>
-                取消
+                {t('取消')}
               </AnimatedButton>
               <AnimatedButton
                 type="button"
@@ -1082,7 +1084,7 @@ export default function ProviderConnectionDialog({
                 }
                 onClick={() => void handleSave()}
               >
-                {editing ? '保存更改' : '添加厂商'}
+                {editing ? t('保存更改') : t('添加厂商')}
               </AnimatedButton>
             </div>
           </footer>

@@ -24,6 +24,7 @@ import { isSecretStoreAvailable } from '../../services/providerSecretService';
 import DreaminaLoginModal from './DreaminaLoginModal';
 import ProviderConnectionDialog from './ProviderConnectionDialog';
 import { invoke } from '@tauri-apps/api/core';
+import { useT } from '../../i18n';
 
 interface ProviderListItem {
   id: string;
@@ -53,6 +54,7 @@ function isTauri(): boolean {
 }
 
 export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const {
     config,
     updateConfig,
@@ -85,7 +87,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const [secretStoreAvailable, setSecretStoreAvailable] = useState(true);
 
   const [dreaminaLoading, setDreaminaLoading] = useState(false);
-  const [dreaminaStatusMsg, setDreaminaStatusMsg] = useState('首次登录时会自动准备即梦组件');
+  const [dreaminaStatusMsg, setDreaminaStatusMsg] = useState(() => t('首次登录时会自动准备即梦组件'));
   const [dreaminaModalOpen, setDreaminaModalOpen] = useState(false);
   const [dreaminaRuntime, setDreaminaRuntime] = useState<DreaminaRuntime | null>(null);
   const dreaminaDoneRef = useRef(false);
@@ -206,21 +208,21 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     updateConfig({
       dreaminaAuth: {
         loggedIn: true,
-        username: runtime.username || '即梦用户',
+        username: runtime.username || t('即梦用户'),
         credit: runtime.credit || undefined,
         loginTs: Date.now(),
       },
     });
     if (dreaminaDoneRef.current) return;
     dreaminaDoneRef.current = true;
-    useAppStore.getState().showToast('即梦登录成功');
+    useAppStore.getState().showToast(t('即梦登录成功'));
     setTimeout(() => setDreaminaModalOpen(false), 800);
-  }, [updateConfig]);
+  }, [t, updateConfig]);
 
   const handleDreaminaLogin = useCallback(async (force = false) => {
     if (!isTauri()) {
-      setDreaminaStatusMsg('OAuth 登录仅在桌面应用中可用');
-      useAppStore.getState().showToast('OAuth 登录仅在桌面应用中可用', 'error');
+      setDreaminaStatusMsg(t('OAuth 登录仅在桌面应用中可用'));
+      useAppStore.getState().showToast(t('OAuth 登录仅在桌面应用中可用'), 'error');
       return;
     }
     dreaminaDoneRef.current = false;
@@ -230,12 +232,12 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     try {
       setDreaminaRuntime(await tauriInvoke<DreaminaRuntime>('dreamina_login_start', { force }));
     } catch (error) {
-      const message = typeof error === 'string' ? error : (error as Error)?.message || '启动登录失败';
+      const message = typeof error === 'string' ? error : (error as Error)?.message || t('启动登录失败');
       setDreaminaStatusMsg(message);
     } finally {
       setDreaminaLoading(false);
     }
-  }, [tauriInvoke]);
+  }, [t, tauriInvoke]);
 
   const handleDreaminaLogout = useCallback(async () => {
     setDreaminaLoading(true);
@@ -246,9 +248,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     }
     updateConfig({ dreaminaAuth: undefined });
     setDreaminaRuntime(null);
-    setDreaminaStatusMsg('已退出登录');
+    setDreaminaStatusMsg(t('已退出登录'));
     setDreaminaLoading(false);
-  }, [tauriInvoke, updateConfig]);
+  }, [t, tauriInvoke, updateConfig]);
 
   const openExternalUrl = useCallback(async (url: string) => {
     try {
@@ -260,8 +262,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
 
   const handleDreaminaCopy = useCallback((text: string, label: string) => {
     navigator.clipboard?.writeText(text).catch(() => {});
-    useAppStore.getState().showToast(`已复制${label}`);
-  }, []);
+    useAppStore.getState().showToast(t('已复制{label}', { label }));
+  }, [t]);
 
   useEffect(() => {
     if (!dreaminaModalOpen || !isTauri()) return;
@@ -292,11 +294,11 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     void tauriInvoke<DreaminaRuntime>('dreamina_status').then((runtime) => {
       if (!runtime.loggedIn) return;
       setDreaminaRuntime(runtime);
-      setDreaminaStatusMsg('即梦已登录');
+      setDreaminaStatusMsg(t('即梦已登录'));
       updateConfig({
         dreaminaAuth: {
           loggedIn: true,
-          username: runtime.username || '即梦用户',
+          username: runtime.username || t('即梦用户'),
           credit: runtime.credit || undefined,
           loginTs: dreaminaAuth.loginTs || Date.now(),
         },
@@ -366,8 +368,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         <AnimatedButton
           type="button"
           className="settings-add-provider-btn"
-          aria-label="添加 API 厂商"
-          data-tooltip="添加 API 厂商"
+          aria-label={t('添加 API 厂商')}
+          data-tooltip={t('添加 API 厂商')}
           onClick={openAddDialog}
         >
           <Icon icon="mdi:plus" width="18" />
@@ -378,16 +380,16 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         {!secretStoreAvailable && (
           <p className="provider-secret-warning">
             <Icon icon="mdi:shield-alert-outline" width="14" />
-            当前环境无法保存凭据，API Key 不会写入本地，仅本次会话有效。
+            {t('当前环境无法保存凭据，API Key 不会写入本地，仅本次会话有效。')}
           </p>
         )}
         {providerItems.length === 0 ? (
           <div className="provider-empty-state">
             <span className="provider-empty-icon"><Icon icon="mdi:key-chain-variant" width="24" /></span>
-            <strong>尚未添加 API 厂商</strong>
+            <strong>{t('尚未添加 API 厂商')}</strong>
             <AnimatedButton type="button" className="provider-primary-btn" onClick={openAddDialog}>
               <Icon icon="mdi:plus" width="15" />
-              添加厂商
+              {t('添加厂商')}
             </AnimatedButton>
           </div>
         ) : (
@@ -407,17 +409,17 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
               const runningHubKeyCount = Number(hasRunningHubModelKey)
                 + Number(hasRunningHubWorkflowKey);
               const displayName = isWebSearchProvider
-                ? '联网搜索'
+                ? t('联网搜索')
                 : definition.id === 'custom-openai'
                   ? item.config.name.trim() || definition.name
                   : definition.name;
               const statusLabel = isDreamina
-                ? 'OAuth 已连接'
+                ? t('OAuth 已连接')
                 : isRunningHub
-                  ? `${runningHubKeyCount}/2 密钥已配置`
+                  ? t('{count}/2 密钥已配置', { count: runningHubKeyCount })
                   : isPendingApiKey
-                    ? '待填写 API Key'
-                    : '已连接';
+                    ? t('待填写 API Key')
+                    : t('已连接');
               return (
                 <div key={item.id} className="provider-connection-card">
                   <div className={`provider-badge provider-badge--${definition.id}`}>{definition.badgeText}</div>
@@ -431,27 +433,27 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                     <div className="provider-connection-meta">
                       {isRunningHub ? (
                         <>
-                          <span>{hasRunningHubModelKey ? '企业级-共享已配置' : '企业级-共享未配置'}</span>
-                          <span>{hasRunningHubWorkflowKey ? '消费级-会员已配置' : '消费级-会员未配置'}</span>
+                          <span>{hasRunningHubModelKey ? t('企业级-共享已配置') : t('企业级-共享未配置')}</span>
+                          <span>{hasRunningHubWorkflowKey ? t('消费级-会员已配置') : t('消费级-会员未配置')}</span>
                           {hasRunningHubModelKey && (
                             <span>
                               {selectedCount === undefined
-                                ? '沿用内置模型目录'
-                                : `${selectedCount} 个模型`}
+                                ? t('沿用内置模型目录')
+                                : t('{count} 个模型', { count: selectedCount })}
                             </span>
                           )}
                         </>
                       ) : isWebSearchProvider ? (
                         <>
-                          <span>当前厂商：{definition.name}</span>
+                          <span>{t('当前厂商：{name}', { name: definition.name })}</span>
                           {summaryUrl && <span>{summaryUrl}</span>}
                         </>
                       ) : (
                         <>
                           <span>
                             {selectedCount === undefined
-                              ? '沿用内置模型目录'
-                              : `${selectedCount} 个模型`}
+                              ? t('沿用内置模型目录')
+                              : t('{count} 个模型', { count: selectedCount })}
                           </span>
                           {summaryUrl && <span>{summaryUrl}</span>}
                         </>
@@ -461,11 +463,11 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
 
                   {pendingDeleteId === item.id ? (
                     <div className="provider-delete-confirm">
-                      <span>移除此连接？</span>
+                      <span>{t('移除此连接？')}</span>
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
-                        aria-label="取消删除"
+                        aria-label={t('取消删除')}
                         onClick={() => setPendingDeleteId(undefined)}
                       >
                         <Icon icon="mdi:close" width="15" />
@@ -473,7 +475,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn is-danger"
-                        aria-label="确认删除"
+                        aria-label={t('确认删除')}
                         onClick={() => void handleRemoveConnection(item.id)}
                       >
                         <Icon icon="mdi:check" width="15" />
@@ -484,8 +486,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
-                        aria-label={`编辑 ${definition.name}`}
-                        data-tooltip="编辑连接"
+                        aria-label={t('编辑 {name}', { name: definition.name })}
+                        data-tooltip={t('编辑连接')}
                         onClick={() => openEditDialog(item.id)}
                       >
                         <Icon icon="mdi:pencil-outline" width="16" />
@@ -493,8 +495,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
-                        aria-label={`删除 ${definition.name}`}
-                        data-tooltip="删除连接"
+                        aria-label={t('删除 {name}', { name: definition.name })}
+                        data-tooltip={t('删除连接')}
                         onClick={() => setPendingDeleteId(item.id)}
                       >
                         <Icon icon="mdi:trash-can-outline" width="16" />
@@ -518,7 +520,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
               onClose();
             }}
           >
-            完成
+            {t('完成')}
           </AnimatedButton>
         </div>
       </div>

@@ -16,8 +16,10 @@ import {
 } from '../../services/fileService';
 import { useAppStore } from '../../store/useAppStore';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 export default function FileAppSettings({ active }: { active: boolean }) {
+  const t = useT();
   const { config, updateConfig, saveConfig, currentProjectId } = useAppStore(useShallow((state) => ({
     config: state.config,
     updateConfig: state.updateConfig,
@@ -104,65 +106,65 @@ export default function FileAppSettings({ active }: { active: boolean }) {
       id: 'photoshop',
       label: 'Photoshop',
       path: config.photoshopPath,
-      description: '用于图片节点的「在 PS 中打开」',
-      onChoose: () => chooseApplication('选择 Photoshop.exe', 'Photoshop', (photoshopPath) => ({ photoshopPath })),
+      description: t('用于图片节点的「在 PS 中打开」'),
+      onChoose: () => chooseApplication(t('选择 Photoshop.exe'), 'Photoshop', (photoshopPath) => ({ photoshopPath })),
     },
     {
       id: 'jianying',
       label: '剪映专业版',
       path: config.jianyingPath,
-      description: '用于视频节点的「在剪映中打开」',
-      onChoose: () => chooseApplication('选择剪映专业版', '剪映专业版', (jianyingPath) => ({ jianyingPath })),
+      description: t('用于视频节点的「在剪映中打开」'),
+      onChoose: () => chooseApplication(t('选择剪映专业版'), '剪映专业版', (jianyingPath) => ({ jianyingPath })),
     },
     {
       id: 'premiere',
       label: 'Adobe Premiere Pro',
       path: config.premierePath,
-      description: '用于视频节点的「在 PR 中打开」',
-      onChoose: () => chooseApplication('选择 Adobe Premiere Pro', 'Adobe Premiere Pro', (premierePath) => ({ premierePath })),
+      description: t('用于视频节点的「在 PR 中打开」'),
+      onChoose: () => chooseApplication(t('选择 Adobe Premiere Pro'), 'Adobe Premiere Pro', (premierePath) => ({ premierePath })),
     },
   ];
 
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="text-sm font-medium text-canvas-text mb-2">文件保存位置</h3>
+        <h3 className="text-sm font-medium text-canvas-text mb-2">{t('文件保存位置')}</h3>
         <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
           <div className="mb-3">
-            <div className="text-xs text-canvas-text-muted mb-1.5">保存根目录</div>
+            <div className="text-xs text-canvas-text-muted mb-1.5">{t('保存根目录')}</div>
             <div className="flex items-center gap-2">
               <div className={`flex-1 min-w-0 text-[11px] break-all rounded-md px-3 py-1.5 border border-canvas-border ${
                 baseDataDir
                   ? 'text-canvas-text-secondary font-mono leading-relaxed bg-canvas-surface select-all'
                   : 'text-canvas-text-muted bg-canvas-surface italic'
               }`}>
-                {baseDataDir || '未设置（使用系统默认目录）'}
+                {baseDataDir || t('未设置（使用系统默认目录）')}
               </div>
               <AnimatedButton
                 type="button"
                 className="settings-save-btn shrink-0 text-xs"
-                onClick={() => chooseDirectory('选择文件保存根目录', (path) => ({ baseDataDir: path }))}
+                onClick={() => chooseDirectory(t('选择文件保存根目录'), (path) => ({ baseDataDir: path }))}
               >
-                {baseDataDir ? '更换' : '选择文件夹'}
+                {baseDataDir ? t('更换') : t('选择文件夹')}
               </AnimatedButton>
             </div>
           </div>
 
           <div className="text-[11px] text-canvas-text-muted leading-relaxed mb-3">
-            文件保存为：<span className="text-canvas-text-secondary font-mono">{baseDataDir || '系统目录'}/{'{项目ID}'}/...</span>
+            {t('文件保存为：')}<span className="text-canvas-text-secondary font-mono">{baseDataDir || t('系统目录')}/{'{项目ID}'}/...</span>
           </div>
 
           <div className="space-y-2 py-2 border-y border-canvas-border">
             {[
-              ['应用所在目录', appExecutableDir],
-              ['默认存储目录', defaultBaseDir],
+              [t('应用所在目录'), appExecutableDir],
+              [t('默认存储目录'), defaultBaseDir],
             ].map(([label, path]) => (
               <div className="min-w-0" key={label}>
                 <div className="text-xs text-canvas-text-muted mb-0.5">{label}</div>
                 <div className={`text-[11px] break-all leading-relaxed select-all ${
                   path ? 'text-canvas-text-secondary font-mono' : 'text-canvas-text-muted italic'
                 }`}>
-                  {dirLoading ? '加载中…' : path || '仅在 Tauri 桌面环境中可用'}
+                  {dirLoading ? t('加载中…') : path || t('仅在 Tauri 桌面环境中可用')}
                 </div>
               </div>
             ))}
@@ -170,7 +172,7 @@ export default function FileAppSettings({ active }: { active: boolean }) {
 
           <div className="pt-2">
             {dirLoading ? (
-              <div className="text-xs text-canvas-text-muted">加载中…</div>
+              <div className="text-xs text-canvas-text-muted">{t('加载中…')}</div>
             ) : projectDir ? (
               <div className="space-y-2">
                 <div className="flex items-start gap-2 min-w-0">
@@ -178,7 +180,7 @@ export default function FileAppSettings({ active }: { active: boolean }) {
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                   </svg>
                   <div className="min-w-0 flex-1">
-                    <div className="text-xs text-canvas-text-muted mb-0.5">当前项目目录</div>
+                    <div className="text-xs text-canvas-text-muted mb-0.5">{t('当前项目目录')}</div>
                     <div className="text-[11px] text-canvas-text-secondary break-all font-mono leading-relaxed select-all">{projectDir}</div>
                   </div>
                 </div>
@@ -199,18 +201,18 @@ export default function FileAppSettings({ active }: { active: boolean }) {
                     <polyline points="15 3 21 3 21 9" />
                     <line x1="10" y1="14" x2="21" y2="3" />
                   </svg>
-                  打开文件夹
+                  {t('打开文件夹')}
                 </AnimatedButton>
               </div>
             ) : (
-              <div className="text-xs text-canvas-text-muted">仅在 Tauri 桌面环境中可用</div>
+              <div className="text-xs text-canvas-text-muted">{t('仅在 Tauri 桌面环境中可用')}</div>
             )}
           </div>
         </div>
       </div>
 
       <div>
-        <h3 className="text-sm font-medium text-canvas-text mb-2">外部编辑器</h3>
+        <h3 className="text-sm font-medium text-canvas-text mb-2">{t('外部编辑器')}</h3>
         <div className="bg-canvas-card border border-canvas-border rounded-lg p-2 divide-y divide-canvas-border">
           {editors.map((editor) => (
             <div key={editor.id} className="py-2 first:pt-0 last:pb-0">
@@ -221,14 +223,14 @@ export default function FileAppSettings({ active }: { active: boolean }) {
                     ? 'text-canvas-text-secondary font-mono bg-canvas-surface select-all'
                     : 'text-canvas-text-muted bg-canvas-surface italic'
                 }`}>
-                  {editor.path || '未设置（自动检测）'}
+                  {editor.path || t('未设置（自动检测）')}
                 </div>
                 <AnimatedButton type="button" className="settings-save-btn shrink-0 text-xs" onClick={editor.onChoose}>
-                  {editor.path ? '更换' : '选择文件'}
+                  {editor.path ? t('更换') : t('选择文件')}
                 </AnimatedButton>
               </div>
               <p className="text-[11px] text-canvas-text-muted leading-relaxed mt-1.5">
-                {editor.description}；手动路径优先，未设置时自动检测常见安装位置
+                {editor.description}；{t('手动路径优先，未设置时自动检测常见安装位置')}
               </p>
             </div>
           ))}

@@ -11,6 +11,7 @@ import {
   type DirectorDeskRuntimeStatus,
 } from '../../services/directorDeskRuntimeService';
 import { closeDirectorDeskWindow } from '../../services/directorDeskWindowService';
+import { useT } from '../../i18n';
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 MB';
@@ -18,6 +19,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function DirectorDeskStorageManager() {
+  const t = useT();
   const showToast = useAppStore((state) => state.showToast);
   const runtimeAvailable = isDirectorDeskRuntimeAvailable();
   const [status, setStatus] = useState<DirectorDeskRuntimeStatus | null>(null);
@@ -47,7 +49,7 @@ export default function DirectorDeskStorageManager() {
       await closeDirectorDeskWindow();
       setStatus(await removeDirectorDeskRuntime());
       setConfirming(false);
-      showToast('已删除 3D 导演台本地资源', 'success');
+      showToast(t('已删除 3D 导演台本地资源'), 'success');
     } catch (reason) {
       showToast(reason instanceof Error ? reason.message : String(reason), 'error');
     } finally {
@@ -59,9 +61,9 @@ export default function DirectorDeskStorageManager() {
     <section className="mt-5 border-t border-canvas-border pt-5">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-canvas-text">3D 导演台资源</h3>
+          <h3 className="text-sm font-semibold text-canvas-text">{t('3D 导演台资源')}</h3>
           <p className="mt-1 text-xs text-canvas-text-muted">
-            按需下载的运行资源由所有导演台节点共用。
+            {t('按需下载的运行资源由所有导演台节点共用。')}
           </p>
         </div>
         <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-violet-500/15 text-violet-400">
@@ -73,13 +75,13 @@ export default function DirectorDeskStorageManager() {
         <div className="min-w-0">
           <p className="text-xs font-medium text-canvas-text">
             {loading
-              ? '正在读取...'
+              ? t('正在读取...')
               : status?.installed
-                ? `已安装 v${status.version}`
-                : '未安装'}
+                ? t('已安装 v{version}', { version: status.version })
+                : t('未安装')}
           </p>
           <p className="mt-1 text-[11px] text-canvas-text-muted">
-            {status?.installed ? `占用 ${formatBytes(status.installedBytes)}` : '创建或打开导演台节点时可下载'}
+            {status?.installed ? t('占用 {size}', { size: formatBytes(status.installedBytes) }) : t('创建或打开导演台节点时可下载')}
           </p>
         </div>
         {status?.installed && (
@@ -91,7 +93,7 @@ export default function DirectorDeskStorageManager() {
                 onClick={() => setConfirming(false)}
                 disabled={removing}
               >
-                取消
+                {t('取消')}
               </button>
               <button
                 type="button"
@@ -99,7 +101,7 @@ export default function DirectorDeskStorageManager() {
                 onClick={() => { void handleRemove(); }}
                 disabled={removing}
               >
-                {removing ? '正在删除...' : '确认删除'}
+                {removing ? t('正在删除...') : t('确认删除')}
               </button>
             </div>
           ) : (
@@ -109,7 +111,7 @@ export default function DirectorDeskStorageManager() {
               onClick={() => setConfirming(true)}
             >
               <Icon icon="lucide:trash-2" width="13" height="13" />
-              删除资源
+              {t('删除资源')}
             </button>
           )
         )}

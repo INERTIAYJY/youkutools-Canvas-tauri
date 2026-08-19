@@ -8,6 +8,7 @@ import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { DreaminaRuntime } from '../../types';
 import PopupCloseButton from '../shared/PopupCloseButton';
+import { useT } from '../../i18n';
 
 interface DreaminaLoginModalProps {
   isOpen: boolean;
@@ -24,6 +25,7 @@ export default function DreaminaLoginModal({
   onOpenUrl,
   onCopy,
 }: DreaminaLoginModalProps) {
+  const t = useT();
   const phase = runtime?.phase || 'preparing';
   const authUrl = runtime?.verificationUrl || '';
   const userCode = runtime?.userCode || '';
@@ -46,7 +48,7 @@ export default function DreaminaLoginModal({
             className="dreamina-login-modal dreamina-login-modal--guide-open"
             role="dialog"
             aria-modal="true"
-            aria-label="即梦登录"
+            aria-label={t('即梦登录')}
             initial={{ opacity: 0, scale: 0.95, y: 16 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 10 }}
@@ -54,22 +56,22 @@ export default function DreaminaLoginModal({
             onClick={(e) => e.stopPropagation()}
           >
             <PopupCloseButton
-              ariaLabel="关闭即梦登录窗口"
+              ariaLabel={t('关闭即梦登录窗口')}
               className="absolute right-3.5 top-3"
               onClick={onClose}
             />
 
-            <div className="dreamina-login-modal-badge">即梦账号</div>
+            <div className="dreamina-login-modal-badge">{t('即梦账号')}</div>
 
             <div className="dreamina-login-modal-message">
-              {runtime?.message || 'OAuth 登录已启动，请按下方步骤完成授权。'}
+              {runtime?.message || t('OAuth 登录已启动，请按下方步骤完成授权。')}
             </div>
 
             {waiting && (
               <div className="dreamina-login-modal-wait">
                 <div className="dreamina-login-modal-spinner" aria-hidden="true" />
                 <div className="dreamina-login-modal-wait-text">
-                  正在准备授权链接，请稍候…
+                  {t('正在准备授权链接，请稍候…')}
                 </div>
               </div>
             )}
@@ -77,15 +79,15 @@ export default function DreaminaLoginModal({
             {ready && (
               <div className="dreamina-manual-guide">
                 <div className="dreamina-manual-guide-head">
-                  <div className="dreamina-manual-guide-title">OAuth 登录（2 步）</div>
+                  <div className="dreamina-manual-guide-title">{t('OAuth 登录（2 步）')}</div>
                 </div>
                 <div className="dreamina-manual-quick">
-                  <div className="dreamina-manual-step">1) 打开即梦授权链接</div>
+                  <div className="dreamina-manual-step">{t('1) 打开即梦授权链接')}</div>
                   <div className="dreamina-manual-link-row">
                     <input
                       className="dreamina-manual-link-input"
                       readOnly
-                      aria-label="即梦授权链接"
+                      aria-label={t('即梦授权链接')}
                       value={authUrl}
                     />
                     <button
@@ -94,40 +96,40 @@ export default function DreaminaLoginModal({
                       disabled={!authUrl}
                       onClick={() => authUrl && onOpenUrl(authUrl)}
                     >
-                      打开
+                      {t('打开')}
                     </button>
                     <button
                       type="button"
                       className="settings-save-btn settings-btn-ghost"
                       disabled={!authUrl}
-                      onClick={() => authUrl && onCopy(authUrl, '授权链接')}
+                      onClick={() => authUrl && onCopy(authUrl, t('授权链接'))}
                     >
-                      复制
+                      {t('复制')}
                     </button>
                   </div>
 
-                  <div className="dreamina-manual-step">2) 在授权页面输入验证码</div>
+                  <div className="dreamina-manual-step">{t('2) 在授权页面输入验证码')}</div>
                   <div className="dreamina-manual-link-row">
                     <input
                       className="dreamina-manual-link-input dreamina-manual-code-input"
                       readOnly
-                      aria-label="即梦验证码"
+                      aria-label={t('即梦验证码')}
                       value={userCode}
                     />
                     <button
                       type="button"
                       className="settings-save-btn settings-btn-ghost"
                       disabled={!userCode}
-                      onClick={() => userCode && onCopy(userCode, '验证码')}
+                      onClick={() => userCode && onCopy(userCode, t('验证码'))}
                     >
-                      复制验证码
+                      {t('复制验证码')}
                     </button>
                   </div>
                 </div>
                 <div className="dreamina-login-modal-wait dreamina-login-modal-wait--inline">
                   <div className="dreamina-login-modal-spinner" aria-hidden="true" />
                   <div className="dreamina-login-modal-wait-text">
-                    请打开授权链接，在页面输入验证码；系统会自动同步登录状态。
+                    {t('请打开授权链接，在页面输入验证码；系统会自动同步登录状态。')}
                   </div>
                 </div>
               </div>
@@ -135,13 +137,13 @@ export default function DreaminaLoginModal({
 
             {phase === 'failed' && (
               <div className="dreamina-login-modal-error">
-                {runtime?.error || '登录失败，请重试。'}
+                {runtime?.error || t('登录失败，请重试。')}
               </div>
             )}
 
             <div className="dreamina-login-modal-actions">
               <button type="button" className="settings-save-btn settings-btn-ghost" onClick={onClose}>
-                收起登录引导
+                {t('收起登录引导')}
               </button>
             </div>
           </motion.div>

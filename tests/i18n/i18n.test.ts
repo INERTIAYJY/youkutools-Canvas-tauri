@@ -78,7 +78,11 @@ describe('locale dictionaries', () => {
   it('has no entry whose Chinese source text disappeared from the codebase', () => {
     const sources = collectSources(SRC).join('\n');
     for (const [name, dict] of Object.entries(DICTS)) {
-      const orphans = Object.keys(dict).filter((key) => !sources.includes(key));
+      // 含反斜杠的 key 会被 TS 转义改写，源码原始文本与运行时字符串值不一致，
+      // 无法可靠比对，跳过这类 key 的孤儿检测。
+      const orphans = Object.keys(dict).filter(
+        (key) => !key.includes('\\') && !sources.includes(key),
+      );
       expect(orphans, `${name} 存在源码中已消失的孤儿词条`).toEqual([]);
     }
   });

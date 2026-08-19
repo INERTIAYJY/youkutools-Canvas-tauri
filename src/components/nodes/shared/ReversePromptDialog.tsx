@@ -16,6 +16,7 @@ import {
 import { copyText } from '../../../services/clipboardService';
 import ModelSelector from './ModelSelector';
 import PopupCloseButton from '../../shared/PopupCloseButton';
+import { useT } from '../../../i18n';
 
 const panelVariants = {
   hidden: { opacity: 0, scale: 0.97, y: 12 },
@@ -35,7 +36,8 @@ function ReversePromptContent({
   request: ReversePromptRequest;
   onClose: () => void;
 }) {
-  const sourceLabel = REVERSE_PROMPT_SOURCE_LABELS[request.kind];
+  const t = useT();
+  const sourceLabel = t(REVERSE_PROMPT_SOURCE_LABELS[request.kind]);
   const initialModel = useMemo(() => resolveVisionTextModel(), []);
   const [model, setModel] = useState(initialModel?.model ?? '');
   const [provider, setProvider] = useState(initialModel?.provider ?? '');
@@ -52,7 +54,7 @@ function ReversePromptContent({
 
   const handleRun = useCallback(async () => {
     if (!model || !provider) {
-      setError('请先选择一个能读图的文本模型');
+      setError(t('请先选择一个能读图的文本模型'));
       return;
     }
     setRunning(true);
@@ -66,11 +68,11 @@ function ReversePromptContent({
         extraPrompt,
       }));
     } catch (runError) {
-      setError(runError instanceof Error ? runError.message : '提示词反推失败');
+      setError(runError instanceof Error ? runError.message : t('提示词反推失败'));
     } finally {
       setRunning(false);
     }
-  }, [extraPrompt, model, provider, request.imageUrls, request.kind]);
+  }, [extraPrompt, model, provider, request.imageUrls, request.kind, t]);
 
   const handleCopy = useCallback(async () => {
     setCopied(await copyText(result));
@@ -110,11 +112,11 @@ function ReversePromptContent({
                 <Icon icon="mdi:text-search" width={20} height={20} />
               </span>
               <div>
-                <h2 id="reverse-prompt-title">反推提示词</h2>
+                <h2 id="reverse-prompt-title">{t('反推提示词')}</h2>
                 <p>
                   {request.kind === 'video'
-                    ? `已抽取 ${request.imageUrls.length} 帧关键帧，连画面带运动一起反推`
-                    : '读取这张图，反推出能重新生成它的提示词'}
+                    ? t('已抽取 {count} 帧关键帧，连画面带运动一起反推', { count: request.imageUrls.length })
+                    : t('读取这张图，反推出能重新生成它的提示词')}
                 </p>
               </div>
             </div>
@@ -122,14 +124,14 @@ function ReversePromptContent({
           </header>
 
           <div className="preset-runner-body">
-            <div className="reverse-prompt-thumbs" aria-label={`参与反推的${sourceLabel}`}>
+            <div className="reverse-prompt-thumbs" aria-label={t('参与反推的{source}', { source: sourceLabel })}>
               {request.imageUrls.map((url, index) => (
                 <img key={`${url.slice(0, 32)}-${index}`} src={url} alt={`${sourceLabel}${index + 1}`} />
               ))}
             </div>
 
             <label className="preset-manager-field">
-              <span className="preset-manager-label">反推模型</span>
+              <span className="preset-manager-label">{t('反推模型')}</span>
               <div className="reverse-prompt-model">
                 <ModelSelector
                   nodeType="ai-text"
@@ -137,26 +139,26 @@ function ReversePromptContent({
                   selectedProvider={provider}
                   onSelect={handleModelSelect}
                 />
-                <span className="reverse-prompt-hint">需要能读图的模型</span>
+                <span className="reverse-prompt-hint">{t('需要能读图的模型')}</span>
               </div>
             </label>
 
             <label className="preset-manager-field">
-              <span className="preset-manager-label">补充要求（可选）</span>
+              <span className="preset-manager-label">{t('补充要求（可选）')}</span>
               <textarea
                 className="preset-manager-input preset-runner-textarea"
                 value={extraPrompt}
-                placeholder="例如：输出英文提示词 / 只描述角色不描述背景 / 按 Midjourney 风格组织"
+                placeholder={t('例如：输出英文提示词 / 只描述角色不描述背景 / 按 Midjourney 风格组织')}
                 onChange={(event) => setExtraPrompt(event.target.value)}
               />
             </label>
 
             <div className="preset-manager-field">
-              <span className="preset-manager-label">反推结果</span>
+              <span className="preset-manager-label">{t('反推结果')}</span>
               {running ? (
                 <div className="reverse-prompt-loading">
                   <span className="spinner" />
-                  <span>正在读{sourceLabel}并反推提示词...</span>
+                  <span>{t('正在读{source}并反推提示词...', { source: sourceLabel })}</span>
                 </div>
               ) : error ? (
                 <div className="reverse-prompt-error" role="alert">
@@ -167,7 +169,7 @@ function ReversePromptContent({
                 <textarea
                   className="preset-manager-input reverse-prompt-result"
                   value={result}
-                  placeholder="点下面的「开始反推」生成提示词，生成后可直接在这里修改"
+                  placeholder={t('点下面的「开始反推」生成提示词，生成后可直接在这里修改')}
                   onChange={(event) => { setResult(event.target.value); setCopied(false); }}
                 />
               )}
@@ -182,7 +184,7 @@ function ReversePromptContent({
               onClick={handleCopy}
             >
               <Icon icon={copied ? 'mdi:check' : 'mdi:content-copy'} width={15} height={15} />
-              <span>{copied ? '已复制' : '复制'}</span>
+              <span>{copied ? t('已复制') : t('复制')}</span>
             </button>
             <div>
               <button
@@ -192,7 +194,7 @@ function ReversePromptContent({
                 onClick={handleRun}
               >
                 <Icon icon={running ? 'mdi:loading' : 'mdi:refresh'} width={15} height={15} />
-                <span>{running ? '反推中...' : result || error ? '重新反推' : '开始反推'}</span>
+                <span>{running ? t('反推中...') : result || error ? t('重新反推') : t('开始反推')}</span>
               </button>
               <button
                 type="button"
@@ -201,7 +203,7 @@ function ReversePromptContent({
                 onClick={handleAddNode}
               >
                 <Icon icon="mdi:file-document-plus-outline" width={15} height={15} />
-                <span>添加为文本节点</span>
+                <span>{t('添加为文本节点')}</span>
               </button>
             </div>
           </footer>

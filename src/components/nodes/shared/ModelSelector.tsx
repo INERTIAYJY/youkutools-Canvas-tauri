@@ -18,6 +18,7 @@ import {
   isProviderCategoryVisible,
 } from './defaultModels';
 import { useAppStore } from '../../../store/useAppStore';
+import { useT } from '../../../i18n';
 
 const MODEL_PREF_KEY = 'canvas-model-prefs';
 
@@ -69,6 +70,7 @@ export default function ModelSelector({
   groupAvailability,
   defaultExpandedGroupIds = [],
 }: ModelSelectorProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const modelNodeType = nodeType === 'ai-panorama' || nodeType === 'ai-animation' ? 'ai-image' : nodeType;
 
@@ -106,13 +108,13 @@ export default function ModelSelector({
     if (models.length === 0) return null;
     return {
       id: 'general-models',
-      name: '通用模型',
-      description: '用户自定义的兼容接口模型',
+      name: t('通用模型'),
+      description: t('用户自定义的兼容接口模型'),
       iconType: 'badge',
       badgeText: 'GM',
       models,
     };
-  }, [config, generalModels, modelNodeType]);
+  }, [config, generalModels, modelNodeType, t]);
 
   /** 合并默认分组与通用模型分组 */
   const allGroups = useMemo(() => {
@@ -256,7 +258,7 @@ export default function ModelSelector({
 
   const displayLabel = currentWorkflow
     ? currentWorkflow.name
-    : currentModel?.label ?? '选择模型';
+    : currentModel?.label ?? t('选择模型');
 
   // 切换分组折叠（不可用分组拒绝展开）
   const toggleGroup = (groupId: string) => {
@@ -312,7 +314,7 @@ export default function ModelSelector({
                 <button
                   type="button"
                   className={`model-group-header${groupAvailable ? '' : ' disabled'}`}
-                  data-tooltip={groupAvailable ? undefined : `请先在设置中配置 ${group.name} API Key`}
+                  data-tooltip={groupAvailable ? undefined : t('请先在设置中配置 {name} API Key', { name: group.name })}
                   onClick={(e) => {
                     e.stopPropagation();
                     toggleGroup(group.id);
@@ -395,8 +397,8 @@ export default function ModelSelector({
                   </svg>
                 </span>
                 <div className="model-group-info">
-                  <div className="model-group-name">ComfyUI 工作流</div>
-                  <div className="model-group-desc">用户导入的本地工作流</div>
+                  <div className="model-group-name">{t('ComfyUI 工作流')}</div>
+                  <div className="model-group-desc">{t('用户导入的本地工作流')}</div>
                 </div>
               </div>
               <div className="model-group-items">
@@ -407,7 +409,7 @@ export default function ModelSelector({
                       <line x1="12" y1="8" x2="12" y2="12" />
                       <line x1="12" y1="16" x2="12.01" y2="16" />
                     </svg>
-                    <span>暂无匹配的工作流，请在设置中导入</span>
+                    <span>{t('暂无匹配的工作流，请在设置中导入')}</span>
                   </div>
                 ) : (
                   <>

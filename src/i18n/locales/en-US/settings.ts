@@ -1,0 +1,93 @@
+/**
+ * 设置面板：语言与启动 / 画布背景 / 画布交互 / 界面偏好
+ */
+const settings = {
+  // ── 设置 · 语言与启动 ──
+  '界面语言': 'Language',
+  '启动时打开': 'On startup, open',
+  '软件启动时打开': 'What to open on startup',
+  '上次画布': 'Last canvas',
+  '恢复关闭软件时正在编辑的项目': 'Restore the project you were editing when the app closed',
+  '项目列表': 'Project list',
+  '启动后先选择要打开的项目': 'Pick a project to open after launch',
+
+  // ── 设置 · 画布背景 ──
+  '画布背景': 'Canvas background',
+  '默认暗色': 'Default dark',
+  '太阳系': 'Solar system',
+  '星云': 'Nebula',
+  '米白浅色': 'Off-white light',
+  '磨砂暖光': 'Frosted warm',
+  '自定义图片': 'Custom image',
+  '请选择图片文件': 'Please choose an image file',
+  '背景图片处理失败': 'Failed to process the background image',
+  '已恢复默认背景': 'Default background restored',
+  '识别中…': 'Analyzing…',
+  '更换图片': 'Replace image',
+  '移除背景': 'Remove background',
+  '未检测': 'Not analyzed',
+  '透明度': 'Opacity',
+  '深色': 'dark',
+  '浅色': 'light',
+  '{tone}背景 · {size} {ratio}': '{tone} background · {size} {ratio}',
+  '已识别为{tone}背景（亮度: {brightness}/255）': 'Detected as a {tone} background (brightness: {brightness}/255)',
+  '已识别为{tone}背景': 'Detected as a {tone} background',
+  '（保留原图，重编码会增大）': '(kept original — re-encoding would be larger)',
+  '（缩减 {ratio}%，{format}）': '(reduced {ratio}%, {format})',
+  '（已最优，{format}）': '(already optimal, {format})',
+
+  // ── 设置 · 画布交互 ──
+  '画布交互方式': 'Canvas interaction',
+  '选择更符合你操作习惯的画布手感': 'Pick the canvas feel that matches how you work',
+  '即时生效': 'Applies instantly',
+  '当前手势地图': 'Current gesture map',
+  'Figma 模式': 'Figma mode',
+  '经典模式': 'Classic mode',
+  '选择优先': 'Selection first',
+  '导航优先': 'Navigation first',
+  '左键框选，滚轮直接缩放，适合高频编辑节点':
+    'Left-drag to marquee select, scroll to zoom — best for heavy node editing',
+  '左键拖动画布，组合键缩放，适合大范围浏览':
+    'Left-drag to pan, modifier keys to zoom — best for browsing large canvases',
+  '左键拖动': 'Left drag',
+  '右键 / 中键': 'Right / middle button',
+  '滚轮': 'Scroll',
+  'Shift + 点击': 'Shift + click',
+  '右键轻点': 'Right click',
+  'Shift + 左键': 'Shift + left drag',
+  'Shift + 滚轮': 'Shift + scroll',
+  'Ctrl + 滚轮': 'Ctrl + scroll',
+  '鼠标右键': 'Right mouse button',
+  '框选节点': 'Marquee select nodes',
+  '平移画布': 'Pan canvas',
+  '缩放画布': 'Zoom canvas',
+  '追加多选': 'Add to selection',
+  '打开菜单': 'Open menu',
+  '垂直平移': 'Pan vertically',
+  '水平平移': 'Pan horizontally',
+
+  // ── 设置 · 界面偏好 ──
+  '节点工具栏': 'Node toolbar',
+  '节点工具栏显示方式': 'Node toolbar display',
+  '极简图标': 'Icons only',
+  '图标 + 文本': 'Icons + labels',
+  '画布笔记工具栏': 'Canvas note toolbar',
+  '显示笔记工具栏': 'Show note toolbar',
+  '在画布左下角显示绘图与笔记工具': 'Show drawing and note tools at the bottom-left of the canvas',
+  '隐藏工具栏，已有笔记仍可编辑': 'Hide the toolbar — existing notes stay editable',
+  '节点标题': 'Node title',
+  '显示节点标题': 'Show node title',
+  '节点上方显示类型图标与名称，双击可重命名':
+    'Show the type icon and name above each node; double-click to rename',
+  '隐藏节点上方的标题栏，画布更简洁': 'Hide the title bar above nodes for a cleaner canvas',
+  '窗口外观': 'Window appearance',
+  '玻璃外框': 'Glass frame',
+  '显示 5px 玻璃带与双层边缘高光': 'Show a 5px glass band with a double edge highlight',
+  '内容贴合窗口边缘，不显示外框': 'Content sits flush with the window edge, no frame',
+  '侧边栏': 'Sidebar',
+  '悬浮显示': 'Floating',
+  '侧边栏半隐于窗口边缘，悬浮在画布之上': 'The sidebar half-hides at the window edge and floats over the canvas',
+  '侧边栏停靠在窗口内侧': 'The sidebar docks inside the window',
+};
+
+export default settings;

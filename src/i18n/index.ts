@@ -3,7 +3,7 @@
  * 不依赖 zustand，4 个独立窗口（主窗口 / chat / assets / video-editor）共用同一份运行时状态。
  */
 import { useSyncExternalStore } from 'react';
-import enUS from './locales/en-US';
+import enUS from './locales/en-US/index';
 import jaJP from './locales/ja-JP';
 import koKR from './locales/ko-KR';
 

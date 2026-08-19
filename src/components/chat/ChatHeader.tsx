@@ -9,6 +9,7 @@ import MascotAvatar from './MascotAvatar';
 import AgentModeSelector from './AgentModeSelector';
 import type { AgentMode } from '../../types/agent';
 import PopupCloseButton from '../shared/PopupCloseButton';
+import { useT } from '../../i18n';
 
 interface ChatHeaderProps {
   detached: boolean;
@@ -51,6 +52,7 @@ export default function ChatHeader({
   activeTaskCount = 0,
   detachedHeaderActions,
 }: ChatHeaderProps) {
+  const t = useT();
   return (
     <div
       data-tauri-drag-region={detached ? true : undefined}
@@ -66,7 +68,7 @@ export default function ChatHeader({
                        active:scale-95 transition-[color,background-color,box-shadow,transform] duration-150
                        motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
             onClick={onBack}
-            aria-label="返回会话列表"
+            aria-label={t('返回会话列表')}
           >
             <Icon icon="mdi:arrow-left" width="18" height="18" />
           </button>
@@ -74,7 +76,7 @@ export default function ChatHeader({
         <MascotAvatar size={26} className="shrink-0" />
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="chat-panel-title text-sm font-semibold text-canvas-text truncate">
-            AI 助手
+            {t('AI 助手')}
           </span>
           {detached && projectName && (
             <span className="text-[11px] text-canvas-text-muted truncate max-w-[120px]">
@@ -101,8 +103,8 @@ export default function ChatHeader({
                        transition-[color,background-color,box-shadow,transform] duration-150 hover:bg-canvas-hover hover:text-canvas-text
                        active:scale-95 motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
             onClick={onOpenTasks}
-            data-tooltip="任务中心"
-            aria-label={`任务中心${activeTaskCount > 0 ? `，${activeTaskCount} 个进行中` : ''}`}
+            data-tooltip={t('任务中心')}
+            aria-label={activeTaskCount > 0 ? t('任务中心，{count} 个进行中', { count: activeTaskCount }) : t('任务中心')}
           >
             <Icon icon="mdi:progress-wrench" width="16" height="16" />
             {activeTaskCount > 0 && (
@@ -119,8 +121,8 @@ export default function ChatHeader({
                        active:scale-95 transition-[color,background-color,box-shadow,transform] duration-150
                        motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
             onClick={onOpenMemory}
-            data-tooltip="项目记忆"
-            aria-label="项目记忆"
+            data-tooltip={t('项目记忆')}
+            aria-label={t('项目记忆')}
           >
             <Icon icon="mdi:brain" width="16" height="16" />
           </button>
@@ -134,8 +136,8 @@ export default function ChatHeader({
                        active:scale-95 transition-[color,background-color,box-shadow,transform] duration-150
                        motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
             onClick={onOpenSubAgents}
-            data-tooltip="子智能体"
-            aria-label="子智能体"
+            data-tooltip={t('子智能体')}
+            aria-label={t('子智能体')}
           >
             <Icon icon="lucide:users-round" width="16" height="16" />
           </button>
@@ -151,8 +153,8 @@ export default function ChatHeader({
                        active:scale-95 transition-[color,background-color,box-shadow,transform] duration-150
                        motion-reduce:transform-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
             onClick={onDetachToggle}
-            data-tooltip={chatPanelDetached ? '收回内嵌' : '独立窗口'}
-            aria-label={chatPanelDetached ? '收回内嵌' : '独立窗口'}
+            data-tooltip={chatPanelDetached ? t('收回内嵌') : t('独立窗口')}
+            aria-label={chatPanelDetached ? t('收回内嵌') : t('独立窗口')}
           >
             <Icon icon={chatPanelDetached ? 'mdi:dock-left' : 'mdi:dock-window'} width="16" height="16" />
           </button>

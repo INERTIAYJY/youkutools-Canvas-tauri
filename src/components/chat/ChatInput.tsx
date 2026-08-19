@@ -17,6 +17,7 @@ import { bestNodeThumb } from '../nodes/shared/mentionEditorDom';
 import type { BaseNodeData, GeneralModelConfig, ModelOption } from '../../types';
 import type { ContextUsageStat } from '../../services/chat/contextManager';
 import { useAppStore } from '../../store/useAppStore';
+import { useT } from '../../i18n';
 import { isSkillUserInvocable } from '../../services/skillPromptService';
 import {
   type MediaModelOption,
@@ -137,6 +138,7 @@ export default function ChatInput({
   contextUsage,
   disabled = false,
 }: ChatInputProps) {
+  const t = useT();
   const inputRef = useRef<ChatComposerEditorHandle>(null);
   const reduceMotion = useReducedMotion();
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -188,10 +190,10 @@ export default function ChatInput({
     }
     if (counts.size === 0) return [];
     return [
-      { id: 'all', label: '全部', count: filteredMediaModels.length },
-      ...[...counts].map(([kind, count]) => ({ id: kind, label: MEDIA_KIND_LABELS[kind] ?? kind, count })),
+      { id: 'all', label: t('全部'), count: filteredMediaModels.length },
+      ...[...counts].map(([kind, count]) => ({ id: kind, label: t(MEDIA_KIND_LABELS[kind] ?? kind), count })),
     ];
-  }, [filteredMediaModels]);
+  }, [filteredMediaModels, t]);
   const kindedMediaModels = useMemo(
     () => (mediaKind === 'all' ? filteredMediaModels : filteredMediaModels.filter((m) => m.mediaKind === mediaKind)),
     [filteredMediaModels, mediaKind],
@@ -206,10 +208,10 @@ export default function ChatInput({
     for (const item of filteredDramaAssets) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
     if (counts.size === 0) return [];
     return [
-      { id: 'all', label: '全部', count: filteredDramaAssets.length },
-      ...[...counts].map(([kind, count]) => ({ id: kind, label: DRAMA_KIND_LABELS[kind] ?? kind, count })),
+      { id: 'all', label: t('全部'), count: filteredDramaAssets.length },
+      ...[...counts].map(([kind, count]) => ({ id: kind, label: t(DRAMA_KIND_LABELS[kind] ?? kind), count })),
     ];
-  }, [filteredDramaAssets]);
+  }, [filteredDramaAssets, t]);
   const kindedDramaAssets = useMemo(
     () => (assetKind === 'all' ? filteredDramaAssets : filteredDramaAssets.filter((a) => a.kind === assetKind)),
     [assetKind, filteredDramaAssets],
@@ -319,7 +321,7 @@ export default function ChatInput({
       key: `node:${node.id}`,
       kind: 'node' as const,
       nodeId: node.id,
-      label: String(node.data.label || '节点'),
+      label: String(node.data.label || t('节点')),
       displayId: node.data.displayId,
     })),
     ...visibleDramaAssets.map((item) => ({
@@ -334,7 +336,7 @@ export default function ChatInput({
         kind: 'model' as const,
         model,
       })),
-  ], [isModelAvailable, visibleCanvasNodes, visibleDramaAssets, visibleMediaModels]);
+  ], [isModelAvailable, t, visibleCanvasNodes, visibleDramaAssets, visibleMediaModels]);
   const skillSuggestions = useMemo(
     () => filteredSkills.map((skill) => ({ key: `skill:${skill.id}`, skill })),
     [filteredSkills],
@@ -411,7 +413,7 @@ export default function ChatInput({
   // @ 面板卡片：先节点后模型，顺序与 referenceSuggestions 一致，键盘高亮才对得上
   const referenceItems: MentionPickerItem[] = [
     ...visibleCanvasNodes.map((node) => {
-      const label = String(node.data.label || '节点');
+      const label = String(node.data.label || t('节点'));
       const index = referenceSuggestionIndexes.get(`node:${node.id}`);
       return {
         key: `node:${node.id}`,
@@ -435,8 +437,8 @@ export default function ChatInput({
         label: item.name,
         thumbnailUrl,
         icon: 'mdi:account-box-outline',
-        badge: DRAMA_KIND_LABELS[item.kind] ?? item.kind,
-        title: thumbnailUrl ? `${item.name}（引用参考图）` : `${item.name}（引用设定文字）`,
+        badge: t(DRAMA_KIND_LABELS[item.kind] ?? item.kind),
+        title: thumbnailUrl ? t('{name}（引用参考图）', { name: item.name }) : t('{name}（引用设定文字）', { name: item.name }),
         onSelect: () => insertDramaMention(item),
       };
     }),
@@ -448,9 +450,9 @@ export default function ChatInput({
         domId: index == null ? undefined : `chat-reference-suggestion-${index}`,
         label: model.label,
         icon: MEDIA_KIND_ICONS[model.mediaKind],
-        badge: available ? MEDIA_KIND_LABELS[model.mediaKind] : '未配置',
+        badge: available ? t(MEDIA_KIND_LABELS[model.mediaKind]) : t('未配置'),
         disabled: !available,
-        title: available ? model.description : '请先配置对应供应商',
+        title: available ? model.description : t('请先配置对应供应商'),
         onSelect: () => insertModelMention(model),
       };
     }),
@@ -470,11 +472,11 @@ export default function ChatInput({
     try {
       await uploadSkill('file');
     } catch (error) {
-      showToast(error instanceof Error ? error.message : '上传 Skill 失败', 'error');
+      showToast(error instanceof Error ? error.message : t('上传 Skill 失败'), 'error');
     } finally {
       setSkillUploading(false);
     }
-  }, [showToast, skillUploading, uploadSkill]);
+  }, [showToast, skillUploading, t, uploadSkill]);
 
   // 自动聚焦
   useEffect(() => {
@@ -520,7 +522,7 @@ export default function ChatInput({
                 {onRevokeLocalFile && (
                   <button
                     type="button"
-                    aria-label={`撤销 ${grant.displayName} 的读取授权`}
+                    aria-label={t('撤销 {name} 的读取授权', { name: grant.displayName })}
                     onClick={() => onRevokeLocalFile(grant.id)}
                     className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-canvas-text-muted transition-colors
                                hover:bg-red-500/15 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
@@ -560,7 +562,7 @@ export default function ChatInput({
           suggestionListId={modelMenuOpen ? REFERENCE_SUGGESTION_LIST_ID : SKILL_SUGGESTION_LIST_ID}
           activeSuggestionId={activeSuggestionId}
           suggestionsOpen={modelMenuOpen || skillMenuOpen}
-          placeholder="输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill"
+          placeholder={t('输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill')}
           disabled={disabled}
         />
 
@@ -578,11 +580,11 @@ export default function ChatInput({
             >
               <MentionPicker
                 listId={REFERENCE_SUGGESTION_LIST_ID}
-                ariaLabel="节点与模型引用"
+                ariaLabel={t('节点与模型引用')}
                 tabs={[
-                  { id: 'nodes', label: '画布节点', icon: 'mdi:image-multiple-outline' },
-                  { id: 'assets', label: '资产库', icon: 'mdi:bookshelf' },
-                  { id: 'models', label: '模型', icon: 'mdi:cube-outline' },
+                  { id: 'nodes', label: t('画布节点'), icon: 'mdi:image-multiple-outline' },
+                  { id: 'assets', label: t('资产库'), icon: 'mdi:bookshelf' },
+                  { id: 'models', label: t('模型'), icon: 'mdi:cube-outline' },
                 ]}
                 activeTab={effectiveTab}
                 onTabChange={(id) => {
@@ -605,8 +607,8 @@ export default function ChatInput({
                   if (index != null) setActiveSuggestionIndex(index);
                 }}
                 emptyText={modelQuery
-                  ? `没有匹配"${modelQuery}"的${TAB_NOUNS[effectiveTab]}`
-                  : `暂无可引用的${TAB_NOUNS[effectiveTab]}`}
+                  ? t('没有匹配"{query}"的{noun}', { query: modelQuery, noun: t(TAB_NOUNS[effectiveTab]) })
+                  : t('暂无可引用的{noun}', { noun: t(TAB_NOUNS[effectiveTab]) })}
               />
             </motion.div>
           )}
@@ -622,7 +624,7 @@ export default function ChatInput({
                  : { type: 'spring', visualDuration: 0.22, bounce: 0 }}
                id={SKILL_SUGGESTION_LIST_ID}
                role="listbox"
-               aria-label="Skill 引用"
+               aria-label={t('Skill 引用')}
                className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20 max-h-72 overflow-y-auto rounded-xl border border-canvas-border bg-canvas-surface shadow-xl">
               <div className="sticky top-0 z-20 flex items-center justify-between bg-canvas-surface px-3 py-1.5 text-[10px] font-medium text-canvas-text-muted">
                 <span>Skill</span>
@@ -635,8 +637,8 @@ export default function ChatInput({
                       event.stopPropagation();
                       void handleUploadSkill();
                     }}
-                    aria-label="上传 Skill"
-                    title="上传 Skill 文件"
+                    aria-label={t('上传 Skill')}
+                    title={t('上传 Skill 文件')}
                     className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text
                                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 disabled:cursor-wait disabled:opacity-50"
                   >
@@ -665,7 +667,7 @@ export default function ChatInput({
                   </button>
                 )) : (
                   <p className="px-3 py-3 text-center text-[11px] text-canvas-text-muted">
-                    {skillQuery ? `没有匹配"${skillQuery}"的 Skill` : '暂无已上传 Skill'}
+                    {skillQuery ? t('没有匹配"{query}"的 Skill', { query: skillQuery }) : t('暂无已上传 Skill')}
                   </p>
                 )}
               </div>
@@ -696,8 +698,8 @@ export default function ChatInput({
                   setModelMenuOpen((open) => !open);
                   inputRef.current?.focus();
                 }}
-                aria-label="引用画布节点或媒体模型"
-                title="引用画布节点或媒体模型"
+                aria-label={t('引用画布节点或媒体模型')}
+                title={t('引用画布节点或媒体模型')}
                 className={`flex h-7 w-7 items-center justify-center rounded-md transition-[color,background-color,box-shadow]
                   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50
                   ${modelMenuOpen
@@ -717,8 +719,8 @@ export default function ChatInput({
                   setSkillMenuOpen((open) => !open);
                   inputRef.current?.focus();
                 }}
-                aria-label="调用 Skill"
-                title="调用 Skill"
+                aria-label={t('调用 Skill')}
+                title={t('调用 Skill')}
                 className={`flex h-7 w-7 items-center justify-center rounded-md transition-[color,background-color,box-shadow]
                   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50
                   ${skillMenuOpen
@@ -734,8 +736,8 @@ export default function ChatInput({
                   <button
                     type="button"
                     onClick={onAuthorizeLocalFiles}
-                    aria-label="授权当前对话读取本地文件"
-                    title="选择文本文件；授权仅在当前对话和本次运行期间有效"
+                    aria-label={t('授权当前对话读取本地文件')}
+                    title={t('选择文本文件；授权仅在当前对话和本次运行期间有效')}
                     className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-secondary
                                hover:bg-canvas-surface hover:text-canvas-text transition-[color,background-color,box-shadow]
                                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
@@ -758,8 +760,8 @@ export default function ChatInput({
               <button
                 type="button"
                 onClick={onInterject}
-                aria-label="调整当前任务"
-                title="在下一个安全步骤调整当前任务"
+                aria-label={t('调整当前任务')}
+                title={t('在下一个安全步骤调整当前任务')}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-canvas-border
                            bg-canvas-surface text-canvas-text-secondary transition-[color,background-color,border-color]
                            hover:border-brand/40 hover:bg-brand/10 hover:text-brand-light
@@ -772,8 +774,8 @@ export default function ChatInput({
             <AnimatedButton
               scale={1.05}
               disabled={!inputValue.trim() || disabled}
-              aria-label={hasActiveTask ? '将消息加入队列' : '发送消息'}
-              title={hasActiveTask ? '当前任务完成后发送' : '发送消息'}
+              aria-label={hasActiveTask ? t('将消息加入队列') : t('发送消息')}
+              title={hasActiveTask ? t('当前任务完成后发送') : t('发送消息')}
               className={`chat-panel-send-btn flex shrink-0 items-center justify-center h-8 w-8 rounded-full
                           transition-[color,background-color,box-shadow,opacity,transform] duration-200 active:scale-95
                           motion-reduce:transform-none
@@ -793,7 +795,7 @@ export default function ChatInput({
       {/* Disclaimer */}
       <div className="flex min-h-5 items-center justify-center">
         <p className="chat-panel-disclaimer text-[11px] text-canvas-text-muted/75">
-          重要操作执行前会请求确认
+          {t('重要操作执行前会请求确认')}
         </p>
       </div>
     </div>

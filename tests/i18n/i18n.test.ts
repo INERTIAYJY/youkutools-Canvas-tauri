@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { detectLocale, getLocale, normalizeLocale, setLocale, t } from '../../src/i18n';
-import enUS from '../../src/i18n/locales/en-US';
+import enUS from '../../src/i18n/locales/en-US/index';
 import jaJP from '../../src/i18n/locales/ja-JP';
 import koKR from '../../src/i18n/locales/ko-KR';
 
@@ -83,11 +83,12 @@ describe('locale dictionaries', () => {
     }
   });
 
-  it('has the same key set across all dictionaries', () => {
-    const base = Object.keys(enUS).sort();
+  it('has no dictionary key that is missing from en-US', () => {
+    // en-US 是基准字典。日/韩暂缓维护，允许缺词条（回落中文），但不允许出现 en-US 没有的 key。
+    const base = new Set(Object.keys(enUS));
     for (const [name, dict] of Object.entries(DICTS)) {
-      const keys = Object.keys(dict).sort();
-      expect(keys, `${name} 的 key 集合与 en-US 不一致`).toEqual(base);
+      const unknown = Object.keys(dict).filter((key) => !base.has(key));
+      expect(unknown, `${name} 存在 en-US 中没有的 key`).toEqual([]);
     }
   });
 

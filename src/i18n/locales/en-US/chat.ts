@@ -1,0 +1,90 @@
+/**
+ * 对话面板（chat）
+ */
+const chat = {
+  // ── ChatHeader ──
+  '返回会话列表': 'Back to conversation list',
+  'AI 助手': 'AI Assistant',
+  '任务中心': 'Task Center',
+  '任务中心，{count} 个进行中': 'Task Center, {count} in progress',
+  '项目记忆': 'Project memory',
+  '子智能体': 'Sub-agents',
+  '收回内嵌': 'Dock back',
+  '独立窗口': 'Detach window',
+
+  // ── EmptyChatState ──
+  '画布 AI 助手': 'Canvas AI Assistant',
+  '用自然语言读取和操作画布。查询状态、定位节点、批量管理，一个对话框完成。':
+    'Read and control the canvas in natural language. Check status, locate nodes and manage in bulk — all from one dialog.',
+  '新建对话': 'New conversation',
+  '历史记录': 'History',
+  '试试这些：': 'Try these:',
+  '现在有几个失败节点？': 'How many failed nodes are there?',
+  '选中 3 号节点': 'Select node #3',
+  '删除失败节点': 'Delete failed nodes',
+
+  // ── ConversationList ──
+  '对话': 'Conversations',
+  '新对话': 'New conversation',
+  '搜索对话': 'Search conversations',
+  '搜索对话…': 'Search conversations…',
+  '没有匹配的对话': 'No matching conversations',
+  '还没有对话': 'No conversations yet',
+  '置顶': 'Pinned',
+  '最近': 'Recent',
+  '打开“{title}”的操作菜单': 'Open the menu for "{title}"',
+  '重命名': 'Rename',
+  '取消置顶': 'Unpin',
+  '归档': 'Archive',
+  '移入回收站': 'Move to trash',
+  '排队': 'Queued',
+  '规划': 'Planning',
+  '运行': 'Running',
+  '工具': 'Tool',
+  '待确认': 'Awaiting confirmation',
+  '暂停': 'Paused',
+  '失败': 'Failed',
+
+  // ── ChatInput ──
+  '全部': 'All',
+  '节点': 'Node',
+  '未配置': 'Not configured',
+  '请先配置对应供应商': 'Configure the provider first',
+  '{name}（引用参考图）': '{name} (references image)',
+  '{name}（引用设定文字）': '{name} (references text)',
+  '上传 Skill 失败': 'Failed to upload Skill',
+  '撤销 {name} 的读取授权': 'Revoke read access for {name}',
+  '输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill':
+    'Type a message. @n nodes · @a assets · @m models · / for Skills',
+  '节点与模型引用': 'Node and model references',
+  '画布节点': 'Canvas nodes',
+  '资产库': 'Asset library',
+  '模型': 'Model',
+  '没有匹配"{query}"的{noun}': 'No {noun} matching "{query}"',
+  '暂无可引用的{noun}': 'No {noun} to reference yet',
+  'Skill 引用': 'Skill references',
+  '上传 Skill': 'Upload Skill',
+  '上传 Skill 文件': 'Upload a Skill file',
+  '没有匹配"{query}"的 Skill': 'No Skill matching "{query}"',
+  '暂无已上传 Skill': 'No Skills uploaded yet',
+  '引用画布节点或媒体模型': 'Reference canvas nodes or media models',
+  '调用 Skill': 'Invoke a Skill',
+  '授权当前对话读取本地文件': 'Authorize this conversation to read local files',
+  '选择文本文件；授权仅在当前对话和本次运行期间有效':
+    'Choose text files; the grant is valid only for this conversation and this run',
+  '调整当前任务': 'Adjust the current task',
+  '在下一个安全步骤调整当前任务': 'Adjust the current task at the next safe step',
+  '将消息加入队列': 'Queue this message',
+  '发送消息': 'Send message',
+  '当前任务完成后发送': 'Send after the current task finishes',
+  '重要操作执行前会请求确认': 'Important actions require confirmation before running',
+  '角色': 'Character',
+  '场景': 'Scene',
+  '道具': 'Prop',
+  '图片': 'Image',
+  '视频': 'Video',
+  '音频': 'Audio',
+  '资产': 'Asset',
+};
+
+export default chat;

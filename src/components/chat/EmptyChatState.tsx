@@ -6,6 +6,7 @@
 import { Icon } from '@iconify/react';
 import AnimatedButton from '../shared/AnimatedButton';
 import MascotAvatar from './MascotAvatar';
+import { useT } from '../../i18n';
 
 interface EmptyChatStateProps {
   onNew: () => void;
@@ -21,12 +22,13 @@ const EXAMPLES = [
 ];
 
 export default function EmptyChatState({ onNew, onList, onExample }: EmptyChatStateProps) {
+  const t = useT();
   return (
     <div className="chat-empty-state flex flex-col items-center justify-center h-full text-center px-6">
       <MascotAvatar size={72} className="mb-5" />
-      <h3 className="text-base font-semibold text-canvas-text mb-2">画布 AI 助手</h3>
+      <h3 className="text-base font-semibold text-canvas-text mb-2">{t('画布 AI 助手')}</h3>
       <p className="text-sm text-canvas-text-secondary mb-6 max-w-[260px]">
-        用自然语言读取和操作画布。查询状态、定位节点、批量管理，一个对话框完成。
+        {t('用自然语言读取和操作画布。查询状态、定位节点、批量管理，一个对话框完成。')}
       </p>
       <div className="chat-empty-state-actions flex flex-col gap-2 w-48">
         <AnimatedButton
@@ -35,7 +37,7 @@ export default function EmptyChatState({ onNew, onList, onExample }: EmptyChatSt
           onClick={onNew}
         >
           <Icon icon="mdi:plus" width="16" height="16" />
-          新建对话
+          {t('新建对话')}
         </AnimatedButton>
         <AnimatedButton
           className="flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-xl
@@ -44,14 +46,14 @@ export default function EmptyChatState({ onNew, onList, onExample }: EmptyChatSt
           onClick={onList}
         >
           <Icon icon="mdi:history" width="16" height="16" />
-          历史记录
+          {t('历史记录')}
         </AnimatedButton>
       </div>
 
       {/* Example prompts */}
       {onExample && (
         <div className="chat-empty-state-examples mt-8 space-y-2 w-56">
-          <p className="text-[11px] text-canvas-text-muted mb-2">试试这些：</p>
+          <p className="text-[11px] text-canvas-text-muted mb-2">{t('试试这些：')}</p>
           {EXAMPLES.map((example) => (
             <button
               key={example}
@@ -61,7 +63,7 @@ export default function EmptyChatState({ onNew, onList, onExample }: EmptyChatSt
                          border border-canvas-border rounded-lg transition-colors
                          hover:border-brand-light/50 hover:text-canvas-text hover:bg-canvas-hover"
             >
-              {example}
+              {t(example)}
             </button>
           ))}
         </div>

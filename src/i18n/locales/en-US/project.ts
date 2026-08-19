@@ -1,0 +1,47 @@
+/**
+ * 项目库
+ */
+const project = {
+  '项目库': 'Project library',
+  '关闭项目库': 'Close project library',
+  '项目': 'Projects',
+  '搜索项目': 'Search projects',
+  '项目排序': 'Sort projects',
+  '最近更新': 'Recently updated',
+  '创建时间': 'Created time',
+  '项目名称': 'Project name',
+  '从 .aicanvas 项目包导入': 'Import from a .aicanvas project package',
+  '正在导入': 'Importing',
+  '导入': 'Import',
+  '新建': 'New',
+  '打开项目 {name}': 'Open project {name}',
+  '保存项目名称': 'Save project name',
+  '保存': 'Save',
+  '取消重命名': 'Cancel rename',
+  '取消': 'Cancel',
+  '当前': 'Current',
+  '导出项目 {name}': 'Export project {name}',
+  '导出项目包': 'Export project package',
+  '重命名项目 {name}': 'Rename project {name}',
+  '重命名': 'Rename',
+  '删除项目 {name}': 'Delete project {name}',
+  '删除项目': 'Delete project',
+  '新项目名称': 'New project name',
+  '输入项目名称': 'Enter project name',
+  '创建中': 'Creating',
+  '创建': 'Create',
+  '新建项目': 'New project',
+  '没有找到项目': 'No projects found',
+  '清除搜索': 'Clear search',
+  '删除“{name}”？': 'Delete "{name}"?',
+  '项目画布及本地项目数据将被删除，此操作不可撤销。':
+    'The project canvas and its local data will be deleted. This action cannot be undone.',
+  '正在删除': 'Deleting',
+  '确认删除': 'Delete',
+  '今天 {time}': 'Today {time}',
+  '昨天 {time}': 'Yesterday {time}',
+  '{month}月{date}日 {time}': '{month}/{date} {time}',
+  '{year}年{month}月{date}日': '{year}/{month}/{date}',
+};
+
+export default project;

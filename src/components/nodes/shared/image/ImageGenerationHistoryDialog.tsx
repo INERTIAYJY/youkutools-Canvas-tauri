@@ -12,6 +12,7 @@ import ModalOverlay from '../../../shared/ModalOverlay';
 import PopupCloseButton from '../../../shared/PopupCloseButton';
 import FullscreenOverlay from '../../../shared/FullscreenOverlay';
 import ZoomableImage from '../../../shared/ZoomableImage';
+import { useT } from '../../../../i18n';
 
 interface ImageGenerationHistoryDialogProps {
   isOpen: boolean;
@@ -53,6 +54,7 @@ function HistoryImage({
   entry: HistoryRecord;
   onPreview: (preview: PreviewImage) => void;
 }) {
+  const t = useT();
   const remoteSource = getRemoteSource(entry);
   const [src, setSrc] = useState(() => getInitialSource(entry));
   const [unavailable, setUnavailable] = useState(false);
@@ -73,13 +75,13 @@ function HistoryImage({
     );
   }
 
-  const alt = entry.prompt.trim() || '历史生成图片';
+  const alt = entry.prompt.trim() || t('历史生成图片');
 
   return (
     <button
       type="button"
       className="group relative block aspect-[4/3] w-full overflow-hidden bg-canvas-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-400/70"
-      aria-label="放大查看历史图片"
+      aria-label={t('放大查看历史图片')}
       onClick={() => onPreview({ src, alt })}
     >
       <img
@@ -102,6 +104,7 @@ export default function ImageGenerationHistoryDialog({
   nodeId,
   onClose,
 }: ImageGenerationHistoryDialogProps) {
+  const t = useT();
   const currentProjectId = useAppStore((state) => state.currentProjectId);
   const [records, setRecords] = useState<HistoryRecord[]>([]);
   const [recordsProjectId, setRecordsProjectId] = useState<string | null>(null);
@@ -128,7 +131,7 @@ export default function ImageGenerationHistoryDialog({
         if (active) {
           setRecords([]);
           setRecordsProjectId(currentProjectId);
-          setError('生成历史加载失败');
+          setError(t('生成历史加载失败'));
         }
       } finally {
         if (active) setLoading(false);
@@ -138,7 +141,7 @@ export default function ImageGenerationHistoryDialog({
     return () => {
       active = false;
     };
-  }, [currentProjectId, isOpen, loadRevision, nodeId]);
+  }, [currentProjectId, isOpen, loadRevision, nodeId, t]);
 
   const imageRecords = useMemo(() => (
     recordsProjectId === currentProjectId
@@ -160,7 +163,7 @@ export default function ImageGenerationHistoryDialog({
       <ModalOverlay
         isOpen={isOpen && preview === null}
         onClose={handleClose}
-        ariaLabel="图片生成历史"
+        ariaLabel={t('图片生成历史')}
         className="max-h-[82vh] w-[min(94vw,880px)] rounded-lg border-canvas-border bg-canvas-surface"
       >
         <div className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-4 py-3">
@@ -168,9 +171,9 @@ export default function ImageGenerationHistoryDialog({
             <Icon icon="mdi:history" width={18} height={18} aria-hidden="true" />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold text-canvas-text">生成历史</h2>
+            <h2 className="text-sm font-semibold text-canvas-text">{t('生成历史')}</h2>
             <p className="text-[11px] text-canvas-text-muted">
-              {loading ? '正在加载...' : `${imageRecords.length} 张图片`}
+              {loading ? t('正在加载...') : t('{count} 张图片', { count: imageRecords.length })}
             </p>
           </div>
           <PopupCloseButton onClick={handleClose} />
@@ -180,7 +183,7 @@ export default function ImageGenerationHistoryDialog({
           {loading ? (
             <div className="flex min-h-48 items-center justify-center gap-2 text-xs text-canvas-text-muted">
               <Icon icon="mdi:loading" width={18} height={18} className="animate-spin" aria-hidden="true" />
-              <span>正在加载生成历史</span>
+              <span>{t('正在加载生成历史')}</span>
             </div>
           ) : error ? (
             <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-canvas-text-muted">
@@ -191,13 +194,13 @@ export default function ImageGenerationHistoryDialog({
                 className="rounded-md border border-canvas-border px-3 py-1.5 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text"
                 onClick={() => setLoadRevision((revision) => revision + 1)}
               >
-                重试
+                {t('重试')}
               </button>
             </div>
           ) : imageRecords.length === 0 ? (
             <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-canvas-text-muted">
               <Icon icon="mdi:image-multiple-outline" width={32} height={32} aria-hidden="true" />
-              <p className="text-xs">这个节点还没有生成过图片</p>
+              <p className="text-xs">{t('这个节点还没有生成过图片')}</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -210,14 +213,14 @@ export default function ImageGenerationHistoryDialog({
                   <div className="space-y-2.5 p-3">
                     <div className="flex min-w-0 items-center gap-2 text-[11px]">
                       <span className="min-w-0 truncate rounded bg-canvas-hover px-2 py-1 text-canvas-text-secondary">
-                        {[entry.provider, entry.model].filter(Boolean).join(' / ') || '未记录模型'}
+                        {[entry.provider, entry.model].filter(Boolean).join(' / ') || t('未记录模型')}
                       </span>
                       <time className="ml-auto shrink-0 text-canvas-text-muted" dateTime={new Date(entry.timestamp).toISOString()}>
                         {DATE_FORMATTER.format(entry.timestamp)}
                       </time>
                     </div>
                     <p className="whitespace-pre-wrap break-words text-xs leading-5 text-canvas-text-secondary">
-                      {entry.prompt.trim() || '未记录提示词'}
+                      {entry.prompt.trim() || t('未记录提示词')}
                     </p>
                   </div>
                 </article>

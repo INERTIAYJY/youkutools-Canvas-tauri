@@ -306,6 +306,33 @@ const nodes = {
   '自动生成歌词': 'Auto-generate lyrics',
   '先生成歌词，再继续生成音乐': 'Generate the lyrics first, then generate the music',
   '歌词': 'Lyrics',
+
+  // ── Panorama ──
+  '无法加载全景图': 'Cannot load the panorama',
+  '载入中...': 'Loading…',
+  '视角模式 · Esc 退出': 'View mode · Esc to exit',
+  '点击转动视角': 'Click to rotate the view',
+  '重试': 'Retry',
+  '退出': 'Exit',
+
+  // ── ImageEditorZoomControls ──
+  '画布缩放': 'Canvas zoom',
+  '缩小': 'Zoom out',
+  '重置缩放': 'Reset zoom',
+  '放大': 'Zoom in',
+
+  // ── ImageGenerationHistoryDialog ──
+  '历史生成图片': 'Historically generated image',
+  '放大查看历史图片': 'Enlarge historical image',
+  '生成历史加载失败': 'Failed to load generation history',
+  '图片生成历史': 'Image generation history',
+  '生成历史': 'Generation history',
+  '正在加载...': 'Loading…',
+  '{count} 张图片': '{count} image(s)',
+  '正在加载生成历史': 'Loading generation history',
+  '这个节点还没有生成过图片': 'This node has not generated any images yet',
+  '未记录模型': 'Model not recorded',
+  '未记录提示词': 'Prompt not recorded',
 };
 
 export default nodes;

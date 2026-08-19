@@ -2,6 +2,7 @@
  * 图片编辑器通用缩放控件，统一放大、缩小、复位与可访问标签。
  */
 import { Icon } from '@iconify/react';
+import { useT } from '../../../../i18n';
 
 interface ImageEditorZoomControlsProps {
   scale: number;
@@ -22,17 +23,18 @@ export default function ImageEditorZoomControls({
   className,
   step = 0.25,
 }: ImageEditorZoomControlsProps) {
+  const t = useT();
   const classes = ['image-editor-zoom-controls', className].filter(Boolean).join(' ');
   const canZoomOut = scale > minScale + Number.EPSILON;
   const canZoomIn = scale < maxScale - Number.EPSILON;
 
   return (
-    <div className={classes} role="group" aria-label="画布缩放">
+    <div className={classes} role="group" aria-label={t('画布缩放')}>
       <button
         type="button"
         className="image-editor-zoom-btn"
-        data-tooltip="缩小"
-        aria-label="缩小"
+        data-tooltip={t('缩小')}
+        aria-label={t('缩小')}
         disabled={!canZoomOut}
         onClick={() => onZoomChange(Math.max(minScale, scale - step))}
       >
@@ -41,8 +43,8 @@ export default function ImageEditorZoomControls({
       <button
         type="button"
         className="image-editor-zoom-value"
-        data-tooltip="重置缩放"
-        aria-label="重置缩放"
+        data-tooltip={t('重置缩放')}
+        aria-label={t('重置缩放')}
         onClick={onReset}
       >
         {Math.round(scale * 100)}%
@@ -50,8 +52,8 @@ export default function ImageEditorZoomControls({
       <button
         type="button"
         className="image-editor-zoom-btn"
-        data-tooltip="放大"
-        aria-label="放大"
+        data-tooltip={t('放大')}
+        aria-label={t('放大')}
         disabled={!canZoomIn}
         onClick={() => onZoomChange(Math.min(maxScale, scale + step))}
       >

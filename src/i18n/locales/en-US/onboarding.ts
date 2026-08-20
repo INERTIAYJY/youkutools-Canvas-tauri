@@ -13,6 +13,9 @@ const onboarding = {
     'Almost every button, icon and toggle has a description. Hover over it for about a second and the hint will appear.',
   '遇到不认识的图标，先悬停看一眼再点，比点开试错快得多——这段文字本身也可以悬停试试。':
     'When you see an unfamiliar icon, hover to read it before clicking — it is much faster than trial and error. You can hover over this very text to try it.',
+  '界面卡顿或显示不全？开启性能模式': 'Lagging or seeing an incomplete interface? Turn on Performance mode',
+  '前往“设置 > 常规 > 图形与性能”开启。它会关闭毛玻璃、装饰动画和动态背景，同时保留加载与进度提示。':
+    'Open Settings > General > Graphics & performance. It disables frosted glass, decorative animations and animated backgrounds while keeping loading and progress feedback.',
   '这些操作藏在界面里，不说很难发现': 'These actions are hidden in the UI and hard to find on your own',
   '下面每一条都可以悬停查看适用条件和限制。':
     'Hover over each item below to see its conditions and limitations.',

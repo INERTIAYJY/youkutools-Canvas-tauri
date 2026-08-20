@@ -87,8 +87,9 @@ const settings = {
   '性能模式下已关闭玻璃外框': 'The glass frame is disabled in performance mode',
   '图形与性能': 'Graphics & performance',
   '性能模式': 'Performance mode',
-  '已关闭毛玻璃、窗口圆角、玻璃外框和装饰动画':
-    'Frosted glass, window rounding, the glass frame, and decorative animations are disabled',
+  '卡顿或页面显示不全时开启': 'Enable if the interface lags or appears incomplete',
+  '已关闭毛玻璃、自定义圆角、玻璃外框和装饰动画，保留 Windows 默认圆角':
+    'Frosted glass, custom rounding, the glass frame, and decorative animations are disabled; Windows default rounding is kept',
   '保留完整视觉效果与界面动画': 'Keep the full visual effects and interface animations',
   '侧边栏': 'Sidebar',
   '悬浮显示': 'Floating',

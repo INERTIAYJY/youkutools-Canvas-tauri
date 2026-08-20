@@ -776,10 +776,15 @@ export default function SettingsPanel() {
                     </div>
 
                     <div className="sidebar-pref-text">
-                      <div className="sidebar-pref-title">{t('性能模式')}</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <div className="sidebar-pref-title">{t('性能模式')}</div>
+                        <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium leading-none text-amber-300">
+                          {t('卡顿或页面显示不全时开启')}
+                        </span>
+                      </div>
                       <div className="sidebar-pref-desc">
                         {performanceMode
-                          ? t('已关闭毛玻璃、窗口圆角、玻璃外框和装饰动画')
+                          ? t('已关闭毛玻璃、自定义圆角、玻璃外框和装饰动画，保留 Windows 默认圆角')
                           : t('保留完整视觉效果与界面动画')}
                       </div>
                     </div>

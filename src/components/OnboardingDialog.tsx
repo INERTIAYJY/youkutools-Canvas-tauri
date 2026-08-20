@@ -124,6 +124,18 @@ export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDial
           </div>
         </section>
 
+        <section className="mt-3 flex gap-3 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3">
+          <Icon icon="mdi:speedometer" width="20" height="20" className="mt-0.5 shrink-0 text-amber-300" aria-hidden="true" />
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-amber-300">
+              {t('界面卡顿或显示不全？开启性能模式')}
+            </h3>
+            <p className="mt-1.5 text-xs leading-5 text-amber-200/80">
+              {t('前往“设置 > 常规 > 图形与性能”开启。它会关闭毛玻璃、装饰动画和动态背景，同时保留加载与进度提示。')}
+            </p>
+          </div>
+        </section>
+
         <div className="mt-5 mb-2 flex items-center gap-2">
           <Icon icon="mdi:eye-off-outline" width="16" height="16" className="shrink-0 text-canvas-text-muted" aria-hidden="true" />
           <h3 className="text-sm font-semibold text-canvas-text">{t('这些操作藏在界面里，不说很难发现')}</h3>

@@ -221,6 +221,7 @@ const settings = {
   '本地控制会话已开启': 'Local control session is running',
   '本地控制会话已关闭': 'Local control session is stopped',
   '回环端口 {port}{mode}': 'Loopback port {port}{mode}',
+  '远程 HTTP 端口 {port}{mode}': 'Remote HTTP port {port}{mode}',
   '（随机）': ' (random)',
   '（固定）': ' (fixed)',
   '启动软件时自动开启': 'Start automatically with the app',
@@ -230,7 +231,17 @@ const settings = {
   '开启': 'Start',
   '外部客户端无需每次手动开启会话；令牌固定保存在本机凭据存储中。':
     'External clients won\'t need to start the session manually; the token is stored securely in the local credential store.',
+  '连接传输': 'Connection transport',
+  '本机 stdio': 'Local stdio',
+  '只允许本机客户端通过 127.0.0.1 连接': 'Only local clients can connect through 127.0.0.1',
+  '远程 Streamable HTTP': 'Remote Streamable HTTP',
+  '监听 0.0.0.0，允许其他机器或 Docker 连接': 'Listen on 0.0.0.0 for other machines or Docker containers',
+  '传输方式将在下次开启会话时生效。': 'The transport change takes effect the next time the session starts.',
+  '远程 MCP 以最大权限运行': 'Remote MCP runs with full permissions',
+  '已连接的客户端可自动删除项目、写入文件、修改配置和调用付费媒体模型，不会出现逐次审批。仅在受信网络或隔离环境中开启。':
+    'Connected clients can delete projects, write files, change settings, and call paid media models without per-action approval. Enable only on trusted networks or in isolated environments.',
   '固定回环端口': 'Fixed loopback port',
+  '固定 HTTP 端口': 'Fixed HTTP port',
   '留空则每次随机分配': 'Leave empty to assign a random port each time',
   '端口需在 1024-65535 之间': 'The port must be between 1024 and 65535',
   '随机挑一个固定端口': 'Pick a random fixed port',
@@ -246,6 +257,8 @@ const settings = {
   '复制客户端配置': 'Copy client configuration',
   '粘贴到 Claude Desktop / Cursor 等客户端的 MCP 配置中。会话未开启时客户端调用会报错，重新开启即可继续用同一份配置。':
     'Paste into the MCP configuration of clients like Claude Desktop or Cursor. Client calls will error while the session is stopped; restart the session to keep using the same config.',
+  '复制前请把 <AI_CANVAS_IP> 替换为运行 AI Canvas 电脑的局域网 IP。不同客户端的 HTTP 配置字段可能略有差异。':
+    'Before using the config, replace <AI_CANVAS_IP> with the LAN IP of the computer running AI Canvas. HTTP config fields may vary slightly between clients.',
   '连接环境要求': 'Connection requirements',
   'AI Canvas 桌面端': 'AI Canvas desktop app',
   '软件需保持运行，并开启上方“本地控制会话”。': 'Keep the app running and start the "local control session" above.',
@@ -263,6 +276,25 @@ const settings = {
   '修改端口或重置令牌后，需要重新复制配置并重启客户端。调用联网、云端模型或本地模型功能时，还需提前配置对应的网络、API Key 或模型环境。':
     'After changing the port or resetting the token, re-copy the config and restart the client. Using web access, cloud models or local models also requires the corresponding network, API key or model environment to be set up first.',
   '未找到本地 MCP 适配器脚本。': 'Local MCP adapter script not found.',
+  '软件需保持运行，并开启上方“远程控制会话”。': 'Keep the app running and start the "remote control session" above.',
+  '可达的局域网地址': 'Reachable LAN address',
+  '客户端需能访问这台电脑的局域网 IP 和所选端口，防火墙也需放行。':
+    'The client must be able to reach this computer\'s LAN IP and selected port, and the firewall must allow it.',
+  '支持 Streamable HTTP': 'Streamable HTTP support',
+  '客户端需支持 Streamable HTTP MCP，并允许配置 Authorization 请求头。':
+    'The client must support Streamable HTTP MCP and custom Authorization headers.',
+  'Bearer Token 鉴权': 'Bearer token authentication',
+  '每次请求都必须携带本机凭据存储中的 256 位令牌。':
+    'Every request must include the 256-bit token stored in the local credential store.',
+  '确认开启远程 MCP': 'Confirm remote MCP',
+  '确认暴露远程 MCP 服务': 'Confirm remote MCP exposure',
+  '服务将监听 0.0.0.0，局域网内能够到达该端口的设备都可以尝试连接。':
+    'The service will listen on 0.0.0.0, so any device that can reach the port on your LAN can attempt to connect.',
+  '持有 Bearer Token 的客户端按自主模式运行，可无审批执行永久删除、文件写入、配置写入和付费媒体生成。':
+    'Clients holding the Bearer token run autonomously and can permanently delete, write files or settings, and generate paid media without approval.',
+  '请确认运行在受信网络、Docker 或其他隔离环境中，并继续保留独立备份。':
+    'Use this only on a trusted network, in Docker, or another isolated environment, and keep independent backups.',
+  '我了解风险，切换到远程模式': 'I understand the risk; switch to remote mode',
 
   // ── StorageHealthCenter ──
   '图片': 'Images',

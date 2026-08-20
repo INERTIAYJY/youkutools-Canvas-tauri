@@ -3,9 +3,14 @@
  */
 import type { AgentToolSchema } from '../services/chat/agentToolSchemas';
 
+export type McpTransport = 'stdio' | 'streamable-http';
+
 export interface McpBridgeSessionInfo {
   sessionId: string;
   port: number;
+  transport: McpTransport;
+  bindAddress: '127.0.0.1' | '0.0.0.0';
+  endpointPath?: '/mcp';
   adapterPath?: string;
 }
 

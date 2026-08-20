@@ -2226,6 +2226,34 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 本阶段未新增依赖，未修改 Rust、`tauri.conf.json`或 capability，未调用真实付费模型。
 - 回滚时可停用项目模型优先、请求前视觉准备和自动路由；IndexedDB 版本不能从 v19 降级，需保留空 `projectVisualDescriptions` store。
 
+### 8.28 MCP Streamable HTTP 与安装版适配器修复（2026-08-20）
+
+**状态：已完成**
+
+- 保留现有本机 stdio 模式，其内部 bridge 继续固定监听 `127.0.0.1`；新增可选 Streamable HTTP 模式，供不同机器或 Docker 内的 MCP 客户端连接。
+- Streamable HTTP 使用官方 Rust SDK `rmcp`，只在设置页明确选择远程模式并确认最大权限警告后监听 IPv4 `0.0.0.0`，endpoint 固定为 `/mcp`。
+- HTTP 请求必须携带 256 位 Bearer Token；只接受 IP literal/localhost Host，存在 Origin 时必须与 Host 同源，并保留 1 MiB 正文上限和 4 个并发请求上限。
+- 远程与本机入口共用 `mcpControlService.ts`、Tool Registry、固定自主 Policy、AgentTask 审计、项目/revision 校验和结果脱敏，不新增直接 Store、Shell、任意 HTTP 或任意路径能力。
+- 设置页显示本机 stdio / 远程 Streamable HTTP 两种传输；远程确认明确列出永久删除、文件写入、配置写入与付费媒体生成均不会逐次审批。
+- 修复安装版显示“未找到本地 MCP 适配器脚本”：esbuild 将官方 TypeScript SDK 与适配器打成单文件 Tauri resource，运行时优先从资源目录解析，不依赖安装目录存在 `node_modules`。
+- 配置只新增可选 `mcpTransport` 字段，缺失或非法值回退 `stdio`；不提升 IndexedDB schema，不迁移项目数据或凭据。
+- 详细设计与实施步骤见 `doc/plans/2026-08-20-mcp-streamable-http.md`；安全决策见更新后的 `doc/adr/0004-local-mcp-control-bridge.md`。
+
+#### 完成记录
+
+- MCP 设置、stdio 适配器、控制服务和图像结果共 4 个前端测试文件、21 项通过；全量 Vitest 176 个文件、1370 项通过。
+- Rust MCP bridge 10 项测试通过，覆盖令牌、方法白名单、请求隔离、固定端口、远程绑定、Host/Origin/Bearer 校验、连接上限和停止语义。
+- `npm run typecheck`、`npm run test:typecheck`、本阶段 TypeScript/TSX/脚本定向 ESLint、`cargo check --lib` 与 `rustfmt --check` 通过。
+- stdio 单文件适配器重新构建后可在不解析项目 `node_modules` 的情况下直接导入；Tauri resource 解析同时覆盖安装资源目录和开发目录。
+- 前端生产构建输出到系统临时目录并通过；仅保留既有大 chunk 警告。
+- `npx tauri build --debug --no-bundle --ci` 通过，真实执行前端与适配器构建钩子并生成桌面应用；仅保留既有 bundle identifier 与大 chunk 警告。
+- 未执行永久删除、文件写入、配置写入、付费媒体生成或对局域网其他设备的真实控制；自动测试覆盖传输与安全边界，最终安装包仍建议做一次跨机连接验收。
+
+#### 回滚
+
+- 先停止 MCP 会话，再移除 HTTP transport、设置页远程选项和新增 Cargo 依赖即可恢复仅本机 stdio；现有工具、审计任务与项目数据不需迁移。
+- 如需同时回滚安装版适配器修复，再移除 esbuild 构建脚本、生成资源和 `tauri.conf.json` resource 映射。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -2355,6 +2383,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-20 | 8.28 | 保留本机 stdio，并新增经高风险确认的 `0.0.0.0` Streamable HTTP MCP；加入 Bearer/Host/Origin/限长保护，修复安装版适配器资源缺失。 |
 | 2026-08-13 | 8.26 第四批 | 补齐节点复制、画布笔记、图层、图片形态转换、分组重命名、分镜宫格和镜头表绑定工具。 |
 | 2026-08-13 | 8.27 | 项目默认文本模型统一用于对话与 Agent；新增视觉能力声明、Base64 直传、项目图片描述缓存和自主媒体模型路由。 |
 | 2026-08-13 | 8.26 第三批 | 补齐剧集分集、角色声音、会话、AgentTask、撤销重做和输出历史 MCP 工具，复用既有删除清理与任务调度边界。 |

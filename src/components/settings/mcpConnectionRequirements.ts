@@ -1,8 +1,5 @@
-/**
- * settings/mcpConnectionRequirements — MCP 控制会话的前置条件说明。
- * 以图标 + 标题 + 描述的形式列出开启本地控制会话所需的软硬件条件
- * （桌面端运行、Node.js、支持 stdio 的 MCP 客户端、同机回环连接）。
- */
+import type { McpTransport } from '../../types/mcp';
+
 export const MCP_CONNECTION_REQUIREMENTS = [
   {
     icon: 'lucide:app-window',
@@ -25,3 +22,32 @@ export const MCP_CONNECTION_REQUIREMENTS = [
     description: '控制服务只监听 127.0.0.1，不能从局域网或其他电脑远程连接。',
   },
 ] as const;
+
+export const MCP_HTTP_CONNECTION_REQUIREMENTS = [
+  {
+    icon: 'lucide:app-window',
+    title: 'AI Canvas 桌面端',
+    description: '软件需保持运行，并开启上方“远程控制会话”。',
+  },
+  {
+    icon: 'lucide:network',
+    title: '可达的局域网地址',
+    description: '客户端需能访问这台电脑的局域网 IP 和所选端口，防火墙也需放行。',
+  },
+  {
+    icon: 'lucide:plug-zap',
+    title: '支持 Streamable HTTP',
+    description: '客户端需支持 Streamable HTTP MCP，并允许配置 Authorization 请求头。',
+  },
+  {
+    icon: 'lucide:key-round',
+    title: 'Bearer Token 鉴权',
+    description: '每次请求都必须携带本机凭据存储中的 256 位令牌。',
+  },
+] as const;
+
+export function getMcpConnectionRequirements(transport: McpTransport) {
+  return transport === 'streamable-http'
+    ? MCP_HTTP_CONNECTION_REQUIREMENTS
+    : MCP_CONNECTION_REQUIREMENTS;
+}

@@ -207,9 +207,9 @@
 
   /* Duration scale / 时长阶梯 */
   --dur-instant: 100ms;
-  --dur-fast: 150ms;
-  --dur-normal: 200ms;
-  --dur-slow: 300ms;
+  --dur-fast: 135ms;
+  --dur-normal: 180ms;
+  --dur-slow: 260ms;
 
   /* Composite transitions (most common patterns) / 组合过渡（最常用模式） */
   --transition-base: var(--dur-fast) var(--ease-out-expo);
@@ -965,11 +965,6 @@ select option:disabled {
   to { transform: translateX(0); opacity: 1; }
 }
 
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 0 0 var(--brand-alpha-20); }
-  50% { box-shadow: 0 0 20px 4px var(--brand-alpha-10); }
-}
-
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -1004,11 +999,6 @@ select option:disabled {
 
 .fade-in { animation-name: fadeIn; }
 .zoom-in-95 { animation-name: zoomIn95; }
-
-/* Node loading glow / 节点加载辉光 */
-.node-loading .react-flow__node {
-  animation: pulse-glow 2s var(--ease-in-out) infinite;
-}
 
 /* Content Editable styles / 可编辑内容样式 */
 [contenteditable]:hover {

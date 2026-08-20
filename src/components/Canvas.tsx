@@ -137,6 +137,7 @@ const easeOutCubic = (progress: number) => 1 - (1 - progress) ** 3;
 const CANVAS_INTERACTING_CLASS = 'canvas-interacting';
 const NODE_TOOLBAR_MIN_SCREEN_SCALE = 0.8;
 const NODE_TOOLBAR_MAX_SCREEN_SCALE = 1.25;
+const NODE_TOOLBAR_SCALE_EPSILON = 0.0005;
 
 // ── 交互模式预设（冻结对象，避免每次 render 产生新身份，导致 React Flow 内部 effect 重跑、拖拽掉帧）──
 const DEFAULT_INTERACTION = Object.freeze({
@@ -428,15 +429,21 @@ function CanvasInner() {
   const canvasRootRef = useRef<HTMLDivElement>(null);
   const activeInteractionsRef = useRef(new Set<'node' | 'viewport'>());
 
+  const nodeToolbarScaleRef = useRef(Number.NaN);
+
   const updateNodeToolbarScale = useCallback((zoom: number) => {
     if (!Number.isFinite(zoom) || zoom <= 0) return;
     const clampedScreenScale = Math.min(
       NODE_TOOLBAR_MAX_SCREEN_SCALE,
       Math.max(NODE_TOOLBAR_MIN_SCREEN_SCALE, zoom),
     );
+    const compensation = clampedScreenScale / zoom;
+    // 纯平移或极小缩放变化无需写入，避免每帧让全部节点工具条重新计算样式。
+    if (Math.abs(compensation - nodeToolbarScaleRef.current) < NODE_TOOLBAR_SCALE_EPSILON) return;
+    nodeToolbarScaleRef.current = compensation;
     canvasRootRef.current?.style.setProperty(
       '--node-toolbar-zoom-compensation',
-      String(clampedScreenScale / zoom),
+      String(compensation),
     );
   }, []);
 

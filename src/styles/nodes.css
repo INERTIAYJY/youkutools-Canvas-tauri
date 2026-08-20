@@ -7,7 +7,7 @@
   display: flex;
   flex-direction: column;
   position: relative;
-  transition: width 0.28s var(--ease-spring);
+  transition: width 0.24s var(--ease-spring);
 }
 
 .react-flow__nodesselection-rect {
@@ -19,14 +19,15 @@
   display: flex;
   flex-direction: column;
   background: var(--glass-bg-node);
-  backdrop-filter: blur(var(--glass-blur-sm));
+  /* ponytail: 不加 backdrop-filter —— 底色 0.88/0.90 已近乎不透明，6px 模糊看不出来，
+     却让每个节点单独成一层合成表面并逐帧回读背景，是画布平移/缩放的主要开销。 */
   /* border: 1px solid var(--glass-ring); */
   border-radius: 12px;
   transition: border-color var(--transition-smooth), box-shadow var(--transition-smooth),
-    transform var(--dur-fast) var(--ease-out-quart), height 0.28s var(--ease-spring);
+    transform var(--dur-fast) var(--ease-out-quart), height 0.24s var(--ease-spring);
   /* 进场：弹簧式浮入。只用 translate（不用 scale）——scale 会改变 handle 相对父节点的
      偏移，破坏 React Flow 对连线锚点的测量并被缓存，导致连线起止点错位。*/
-  animation: nodeIn 0.34s var(--ease-spring) backwards;
+  animation: nodeIn 0.3s var(--ease-spring) backwards;
 }
 
 /* ── 节点进场 ── */
@@ -168,7 +169,7 @@
 /* Floating Toolbar */
 .node-floating-toolbar {
   --toolbar-offset-x: 0px;
-  --toolbar-reveal-delay: 220ms;
+  --toolbar-reveal-delay: 190ms;
   --toolbar-zoom-compensation: var(--node-toolbar-zoom-compensation, 1);
   position: absolute;
   z-index: 10;
@@ -181,9 +182,9 @@
   transform: translateY(8px) scale(0.94);
   transform-origin: center bottom;
   transition:
-    opacity 1000ms var(--ease-out-expo),
-    transform 1000ms var(--ease-out-expo),
-    visibility 0s linear 1000ms;
+    opacity 850ms var(--ease-out-expo),
+    transform 850ms var(--ease-out-expo),
+    visibility 0s linear 850ms;
   pointer-events: none;
   background: var(--glass-bg-light);
   backdrop-filter: blur(var(--glass-blur-md));
@@ -207,8 +208,8 @@
   opacity: 0;
   transform: translateY(4px) scale(0.96);
   transition:
-    opacity 1000ms var(--ease-out-expo),
-    transform 1000ms var(--ease-out-expo);
+    opacity 850ms var(--ease-out-expo),
+    transform 850ms var(--ease-out-expo);
 }
 
 .node-toolbar-shell.is-visible .node-floating-toolbar .ftb-btn,
@@ -225,16 +226,16 @@
 }
 
 .node-floating-toolbar .ftb-btn:nth-child(1),
-.node-floating-toolbar .img-toolbar-zone:nth-child(1) { transition-delay: 260ms; }
+.node-floating-toolbar .img-toolbar-zone:nth-child(1) { transition-delay: 230ms; }
 .node-floating-toolbar .ftb-btn:nth-child(2),
-.node-floating-toolbar .img-toolbar-zone:nth-child(2) { transition-delay: 300ms; }
+.node-floating-toolbar .img-toolbar-zone:nth-child(2) { transition-delay: 265ms; }
 .node-floating-toolbar .ftb-btn:nth-child(3),
-.node-floating-toolbar .ftb-divider:nth-child(3) { transition-delay: 340ms; }
-.node-floating-toolbar .ftb-btn:nth-child(4) { transition-delay: 380ms; }
-.node-floating-toolbar .ftb-btn:nth-child(5) { transition-delay: 420ms; }
-.node-floating-toolbar .ftb-btn:nth-child(6) { transition-delay: 460ms; }
-.node-floating-toolbar .ftb-btn:nth-child(7) { transition-delay: 500ms; }
-.node-floating-toolbar .ftb-btn:nth-child(8) { transition-delay: 540ms; }
+.node-floating-toolbar .ftb-divider:nth-child(3) { transition-delay: 300ms; }
+.node-floating-toolbar .ftb-btn:nth-child(4) { transition-delay: 335ms; }
+.node-floating-toolbar .ftb-btn:nth-child(5) { transition-delay: 370ms; }
+.node-floating-toolbar .ftb-btn:nth-child(6) { transition-delay: 405ms; }
+.node-floating-toolbar .ftb-btn:nth-child(7) { transition-delay: 440ms; }
+.node-floating-toolbar .ftb-btn:nth-child(8) { transition-delay: 475ms; }
 
 @media (prefers-reduced-motion: reduce) {
   .node-floating-toolbar,
@@ -367,21 +368,17 @@
   object-fit: cover;
 }
 
-/* ── 图片揭示动画：iOS 风格「模糊浮现」── */
-/* 加载完成前柔和模糊 + 微放大，落位时淡入清晰，弹簧缓动 */
+/* ── 图片揭示动画：淡入 + 微放大落位 ── */
+/* 避免 filter 动画逐帧重绘图片；只用合成器处理 opacity/transform。 */
 .img-reveal {
   opacity: 0;
-  filter: blur(12px) saturate(1.15);
-  transform: scale(1.04);
+  transform: scale(1.025);
   transition:
     opacity var(--dur-slow) var(--ease-out-expo),
-    filter var(--dur-slow) var(--ease-out-expo),
-    transform 0.45s var(--ease-spring);
-  will-change: opacity, filter, transform;
+    transform 0.36s var(--ease-spring);
 }
 .img-reveal.is-loaded {
   opacity: 1;
-  filter: blur(0) saturate(1);
   transform: scale(1);
 }
 
@@ -544,9 +541,21 @@
   border-width: 3px;
 }
 
-/* 交互期间冻结装饰动画，把合成与绘制预算留给 React Flow。 */
+/* 交互期间停止绘制装饰动画，把合成与绘制预算留给 React Flow。
+   选择器逐个列出而不是用 *，避免拖拽起止时整棵节点树的样式失效。 */
 .canvas-interacting .node.loading .node-preview::after,
-.canvas-interacting .node.loading .spinner {
+.canvas-interacting .upscale-glow-scan,
+.canvas-interacting .upscale-glow-ring,
+.canvas-interacting .upscale-glow-dot,
+.canvas-interacting .audio-progress-dot {
+  visibility: hidden;
+  animation-play-state: paused;
+}
+
+/* 加载指示仍保留可见，仅冻结旋转，避免交互时失去状态反馈。 */
+.canvas-interacting .node.loading .spinner,
+.canvas-interacting .spinner-sm,
+.canvas-interacting .shot-frame-spinner {
   animation-play-state: paused;
 }
 

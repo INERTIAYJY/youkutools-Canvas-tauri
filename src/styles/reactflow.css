@@ -78,6 +78,12 @@
   stop-opacity: 0.68;
 }
 
+/* 拖拽/平移/缩放期间彻底不画流光层：mask + 渐变是 CPU 光栅化，且拖拽时 edgePath 每帧变化
+   会让 animateMotion 每帧重启（光点原地卡在起点，本来也看不出流动）。 */
+.canvas-interacting .selected-node-edge-flow-group {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .selected-node-edge-flow {
     display: none;

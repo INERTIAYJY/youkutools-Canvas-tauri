@@ -33,6 +33,18 @@ import { MAX_IMAGE_BATCH_COUNT } from '../../../types/aiTypes';
 import type { AudioOutputFormat, AudioTtsVoice, VideoReferenceItem } from '../../../types/aiTypes';
 import type { AudioGenerationPurpose } from '../../../types/media';
 import { useT } from '../../../i18n';
+import { DREAMINA_IMAGE_RATIOS, getDreaminaImageModel } from '../../../services/ai/dreaminaModels';
+
+const IMAGE_RATIO_CLASS_NAMES: Record<string, string> = {
+  '1:1': 'img-rp-sq',
+  '9:16': 'img-rp-tall',
+  '16:9': 'img-rp-wide',
+  '3:4': 'img-rp-p34',
+  '4:3': 'img-rp-l43',
+  '3:2': 'img-rp-l32',
+  '2:3': 'img-rp-p23',
+  '21:9': 'img-rp-ultra',
+};
 
 const ANIMATION_ACTIONS: AnimationAction[] = ['idle', 'walk', 'run', 'jump', 'attack', 'hit'];
 const IMAGE_BATCH_COUNTS = Array.from({ length: MAX_IMAGE_BATCH_COUNT - 1 }, (_, index) => index + 2);
@@ -446,6 +458,25 @@ export default function PromptPanel({
   const batchLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressSubmitClickRef = useRef(false);
   const [batchMenuOpen, setBatchMenuOpen] = useState(false);
+  const dreaminaImageModel = nodeType === 'ai-image' && selectedProvider === 'dreamina'
+    ? getDreaminaImageModel(selectedModel)
+    : undefined;
+
+  useEffect(() => {
+    if (!dreaminaImageModel) return;
+    const normalizedSize = imageSize?.toLowerCase();
+    const supportedSize = dreaminaImageModel.resolutions.some(
+      (size) => size.toLowerCase() === normalizedSize,
+    );
+    if (!supportedSize) {
+      const fallback = dreaminaImageModel.resolutions.find((size) => size.toLowerCase() === '2k')
+        ?? dreaminaImageModel.resolutions[0];
+      onChangeImageSize?.(fallback);
+    }
+    if (aspectRatio && !DREAMINA_IMAGE_RATIOS.includes(aspectRatio as typeof DREAMINA_IMAGE_RATIOS[number])) {
+      onChangeAspectRatio?.('16:9');
+    }
+  }, [aspectRatio, dreaminaImageModel, imageSize, onChangeAspectRatio, onChangeImageSize]);
 
   const userPresets = useAppStore((s) => s.userPresets);
   const userSkills = useAppStore((s) => s.userSkills);
@@ -694,6 +725,14 @@ export default function PromptPanel({
             aspectRatio={aspectRatio}
             onChangeImageSize={onChangeImageSize || (() => {})}
             onChangeAspectRatio={onChangeAspectRatio || (() => {})}
+            imageSizes={dreaminaImageModel?.resolutions}
+            showAdaptive={!dreaminaImageModel}
+            ratios={dreaminaImageModel
+              ? DREAMINA_IMAGE_RATIOS.map((value) => ({
+                value,
+                className: IMAGE_RATIO_CLASS_NAMES[value],
+              }))
+              : undefined}
           />
         )}
 

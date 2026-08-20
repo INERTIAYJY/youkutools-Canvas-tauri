@@ -12,6 +12,7 @@ import type { DramaCharacter } from '../../../types/dramaAssets';
 import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability, toSeedanceCapabilityView } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
+import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
 import {
   resolveVideoDurationSeconds,
   VIDEO_ASPECT_RATIOS,
@@ -177,12 +178,15 @@ export default function VideoParamSelector({
   const volcengineCapability = provider === 'volcengine'
     ? getVolcengineSeedanceCapability(selectedModel)
     : undefined;
+  const dreaminaCapability = provider === 'dreamina'
+    ? getDreaminaVideoCapability(selectedModel)
+    : undefined;
   // 通用模型（general）按 videoCapability 声明约束参数；未声明则保持通用兜底
   const generalCapability = provider === 'general'
     ? toSeedanceCapabilityView(generalModel?.videoCapability)
     : undefined;
-  // 统一的能力约束：APIMart / 火山方舟 / 通用模型都可能有按模型的档位约束，取命中者
-  const seedanceCapability = apimartCapability ?? volcengineCapability ?? generalCapability;
+  // 统一的能力约束：APIMart / 火山方舟 / 即梦 / 通用模型都可能有按模型的档位约束，取命中者
+  const seedanceCapability = apimartCapability ?? volcengineCapability ?? dreaminaCapability ?? generalCapability;
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability);
   const customUsesDuration = modelProtocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
   const customUsesResolution = modelProtocolUsesVariable(
@@ -218,7 +222,10 @@ export default function VideoParamSelector({
       : genericRatios;
   // 参考素材上限只能读模型真正声明的值：toSeedanceCapabilityView 会替通用模型补上
   // 9/3/3 的兜底默认值，拿它做提示会写出模型根本没声明过的限制。
-  const referenceLimits = apimartCapability ?? volcengineCapability ?? generalModel?.videoCapability;
+  const referenceLimits = apimartCapability
+    ?? volcengineCapability
+    ?? dreaminaCapability
+    ?? generalModel?.videoCapability;
   const describeLimit = (max: number | undefined, unit: string, kind: string) => {
     if (max === undefined) return '';
     return max === 0 ? `不支持${kind}` : `最多 ${max} ${unit}${kind}`;

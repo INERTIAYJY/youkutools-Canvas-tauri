@@ -46,6 +46,7 @@ import {
   getVolcengineSeedanceCapability,
   isVolcengineSeedance25Model,
 } from './volcengineVideoModels';
+import { getDreaminaVideoCapability } from './dreaminaModels';
 
 export function resolveVideoGenerationOperation(
   imageUrls: readonly string[],
@@ -339,16 +340,17 @@ export async function generateVideo(
     });
   }
 
-  // 即梦视频：无参考图 → text2video；有参考图 → image2video
+  // 即梦视频：按参考素材自动路由文生、图生、首尾帧或全模态 CLI 子命令
   if (provider === 'dreamina') {
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
-    assertVideoOperationSupported(referenceInput, '即梦视频模型');
     const dreaminaPrompt = referenceInput.prompt;
     if (!dreaminaPrompt.trim()) throw new Error('提示词不能为空');
+    const capability = getDreaminaVideoCapability(model);
+    assertVideoReferenceLimits(referenceInput, capability, '即梦当前视频模型');
     return generateDreaminaVideo({
       prompt: dreaminaPrompt,
       model,
-      imageUrls: referenceInput.imageUrls,
+      references: referenceInput.references ?? [],
       nodeId: params.nodeId,
       ratio: params.seedanceRatio,
       duration: params.seedanceDuration,

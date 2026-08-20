@@ -670,6 +670,8 @@ export default function ProviderConnectionDialog({
                       : field.key === 'baseUrl'
                         ? baseUrl
                         : anthropicUrl;
+                    const baseUrlLocked = field.key === 'baseUrl'
+                      && definition.allowCustomBaseUrl === false;
                     return (
                       <label key={field.key} className="provider-field">
                         <span>{field.label}{field.required ? ' *' : ''}</span>
@@ -677,6 +679,8 @@ export default function ProviderConnectionDialog({
                           type={field.secret ? 'password' : 'text'}
                           value={value}
                           placeholder={field.placeholder}
+                          readOnly={baseUrlLocked}
+                          disabled={baseUrlLocked}
                           onChange={(event) => {
                             if (field.key === 'apiKey') setApiKey(event.target.value);
                             else if (field.key === 'baseUrl') setBaseUrl(event.target.value);

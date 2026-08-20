@@ -3,7 +3,7 @@
  * Tauri 环境下启用自定义窗口装饰和透明圆角窗口
  */
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { motion, useReducedMotion } from 'framer-motion';
+import { MotionConfig, motion, useReducedMotion } from 'framer-motion';
 import Header from './components/Header';
 import Titlebar from './components/Titlebar';
 import SessionProjectTabs from './components/SessionProjectTabs';
@@ -286,6 +286,7 @@ export default function App() {
   const configTheme = useAppStore((s) => s.config.theme);
   const canvasBackground = useAppStore((s) => s.config.canvasBackground);
   const windowGlassFrame = useAppStore((s) => s.config.windowGlassFrame);
+  const performanceMode = useAppStore((s) => s.config.performanceMode === true);
   const mascotVisible = useAppStore((s) => s.config.mascotVisible);
   // 任意节点处于生成中 → 吉祥物切换为 LOADING 形态
   const mascotLoading = useAppStore(selectMascotLoading);
@@ -295,6 +296,12 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', effectiveTheme);
     return () => document.documentElement.removeAttribute('data-theme');
   }, [effectiveTheme]);
+
+  // 性能模式取消 CSS 自绘圆角后，由 Windows DWM 提供系统原生圆角。
+  useEffect(() => {
+    if (!isTauri) return;
+    invoke('set_main_window_native_corners', { rounded: performanceMode }).catch(() => {});
+  }, [performanceMode]);
 
   // Tauri 模式下给 body 加属性，Portal 渲染的弹窗元素也在 body 下，CSS 选择器才能匹配
   useEffect(() => {
@@ -325,7 +332,7 @@ export default function App() {
   // 同步到 body 属性，供 CSS 切换侧边栏停靠/悬浮位置 + 弹窗蒙层的左偏移
   const sidebarFloatingCfg = useAppStore((s) => s.config.sidebarFloating);
   const effectiveFloating = sidebarFloatingCfg !== false && !isMaximized;
-  const showWindowGlassFrame = windowGlassFrame !== false && !isMaximized;
+  const showWindowGlassFrame = windowGlassFrame !== false && !isMaximized && !performanceMode;
   useEffect(() => {
     if (!isTauri) return;
     document.body.toggleAttribute('data-window-glass-frame', showWindowGlassFrame);
@@ -487,7 +494,7 @@ export default function App() {
                         loading={mascotLoading}
                         status={mascotStatus}
                         theme={effectiveTheme}
-                        reduceMotion={Boolean(reduceMotion)}
+                        reduceMotion={performanceMode || Boolean(reduceMotion)}
                         getDragForce={getMascotDragForce}
                       />
                     )}
@@ -530,9 +537,14 @@ export default function App() {
   );
 
   return (
-    <>
-      {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
-      {appContent}
-    </>
+    <MotionConfig
+      reducedMotion={performanceMode ? 'always' : 'user'}
+      transition={performanceMode ? { duration: 0 } : undefined}
+    >
+      <>
+        {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
+        {appContent}
+      </>
+    </MotionConfig>
   );
 }

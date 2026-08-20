@@ -32,7 +32,7 @@ const defaultConfig: AppConfig = {
   nodeToolbarMode: 'icons',
   nodeLabelVisible: true,
   startupView: 'last-project',
-  graphicsCompatibilityMode: false,
+  performanceMode: false,
   // language 不给默认值：未设置时按系统语言判定
 };
 
@@ -48,9 +48,17 @@ function syncNodeLabelVisible(visible: AppConfig['nodeLabelVisible']): void {
   document.documentElement.dataset.nodeLabelVisible = visible === false ? 'false' : 'true';
 }
 
-function syncGraphicsCompatibilityMode(enabled: AppConfig['graphicsCompatibilityMode']): void {
+function syncPerformanceMode(enabled: AppConfig['performanceMode']): void {
   if (typeof document === 'undefined') return;
-  document.documentElement.toggleAttribute('data-graphics-compatibility', enabled === true);
+  document.documentElement.toggleAttribute('data-performance-mode', enabled === true);
+}
+
+function migrateLegacyPerformanceMode(config: AppConfig): AppConfig {
+  const { graphicsCompatibilityMode, ...current } = config;
+  return {
+    ...current,
+    performanceMode: current.performanceMode ?? graphicsCompatibilityMode ?? false,
+  };
 }
 
 interface RemovedModelReferences {
@@ -340,8 +348,8 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if ('nodeLabelVisible' in partial) {
       syncNodeLabelVisible(partial.nodeLabelVisible);
     }
-    if ('graphicsCompatibilityMode' in partial) {
-      syncGraphicsCompatibilityMode(partial.graphicsCompatibilityMode);
+    if ('performanceMode' in partial) {
+      syncPerformanceMode(partial.performanceMode);
     }
     if ('language' in partial) {
       setLocale(partial.language);
@@ -547,16 +555,17 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if (!saved) {
       syncNodeToolbarMode(defaultConfig.nodeToolbarMode);
       syncNodeLabelVisible(defaultConfig.nodeLabelVisible);
-      syncGraphicsCompatibilityMode(defaultConfig.graphicsCompatibilityMode);
+      syncPerformanceMode(defaultConfig.performanceMode);
       setLocale(defaultConfig.language);
       set({ configHydrated: true });
       return;
     }
 
-    const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...(saved as AppConfig) });
+    const migratedPerformanceConfig = migrateLegacyPerformanceMode(saved as AppConfig);
+    const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...migratedPerformanceConfig });
     syncNodeToolbarMode(cfg.nodeToolbarMode);
     syncNodeLabelVisible(cfg.nodeLabelVisible);
-    syncGraphicsCompatibilityMode(cfg.graphicsCompatibilityMode);
+    syncPerformanceMode(cfg.performanceMode);
     setLocale(cfg.language);
     set({ config: cfg, configHydrated: true });
     if (missingSecrets.length > 0) {

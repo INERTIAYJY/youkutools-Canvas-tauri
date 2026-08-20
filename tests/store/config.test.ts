@@ -238,7 +238,7 @@ describe('config hydration guard', () => {
     expect(model).not.toHaveProperty('anthropicUrl');
   });
 
-  it('defaults graphics compatibility off and applies saved or updated preferences immediately', async () => {
+  it('defaults performance mode off, migrates the legacy compatibility flag, and applies changes immediately', async () => {
     const rootAttributes = new Set<string>();
     vi.stubGlobal('document', {
       documentElement: {
@@ -250,8 +250,8 @@ describe('config hydration guard', () => {
       },
     });
 
-    expect(useAppStore.getState().config.graphicsCompatibilityMode).toBe(false);
-    expect(rootAttributes.has('data-graphics-compatibility')).toBe(false);
+    expect(useAppStore.getState().config.performanceMode).toBe(false);
+    expect(rootAttributes.has('data-performance-mode')).toBe(false);
 
     fileMocks.loadConfig.mockResolvedValue({
       providers: {},
@@ -261,11 +261,19 @@ describe('config hydration guard', () => {
 
     await useAppStore.getState().loadConfig();
 
-    expect(rootAttributes.has('data-graphics-compatibility')).toBe(true);
+    expect(useAppStore.getState().config.performanceMode).toBe(true);
+    expect(useAppStore.getState().config).not.toHaveProperty('graphicsCompatibilityMode');
+    expect(rootAttributes.has('data-performance-mode')).toBe(true);
 
-    useAppStore.getState().updateConfig({ graphicsCompatibilityMode: false });
+    await useAppStore.getState().saveConfig({ silent: true });
+    expect(fileMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      performanceMode: true,
+    }));
+    expect(fileMocks.saveConfig.mock.calls[0]?.[0]).not.toHaveProperty('graphicsCompatibilityMode');
 
-    expect(rootAttributes.has('data-graphics-compatibility')).toBe(false);
+    useAppStore.getState().updateConfig({ performanceMode: false });
+
+    expect(rootAttributes.has('data-performance-mode')).toBe(false);
     vi.unstubAllGlobals();
   });
 

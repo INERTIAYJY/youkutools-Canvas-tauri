@@ -84,6 +84,12 @@ const settings = {
   '玻璃外框': 'Glass frame',
   '显示 5px 玻璃带与双层边缘高光': 'Show a 5px glass band with a double edge highlight',
   '内容贴合窗口边缘，不显示外框': 'Content sits flush with the window edge, no frame',
+  '性能模式下已关闭玻璃外框': 'The glass frame is disabled in performance mode',
+  '图形与性能': 'Graphics & performance',
+  '性能模式': 'Performance mode',
+  '已关闭毛玻璃、窗口圆角、玻璃外框和装饰动画':
+    'Frosted glass, window rounding, the glass frame, and decorative animations are disabled',
+  '保留完整视觉效果与界面动画': 'Keep the full visual effects and interface animations',
   '侧边栏': 'Sidebar',
   '悬浮显示': 'Floating',
   '侧边栏半隐于窗口边缘，悬浮在画布之上': 'The sidebar half-hides at the window edge and floats over the canvas',

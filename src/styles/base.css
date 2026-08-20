@@ -680,27 +680,59 @@ html, body, #root {
     sans-serif;
 }
 
-/* 图形兼容模式：避开部分 Windows / WebView2 显卡驱动上的背景滤镜合成异常。
-   保留 Canvas、视频和 3D 的 GPU 加速，只将毛玻璃表面降级为不透明实色。 */
-html[data-graphics-compatibility] {
+/* 性能模式：避开部分 Windows / WebView2 显卡驱动的合成异常，并减少装饰性绘制开销。
+   Canvas、视频和 3D 的功能性 GPU 能力不受影响。 */
+html[data-performance-mode] {
   --glass-bg: var(--theme-surface);
   --glass-bg-light: var(--theme-surface);
   --glass-bg-node: var(--theme-card);
   --glass-panel-bg: var(--theme-surface);
   --floating-surface-bg: var(--theme-surface);
+  --glass-shadow-floating: none;
+  --glass-shadow-menu: none;
+  --glass-shadow-panel: none;
+  --floating-surface-shadow: none;
+  --dur-instant: 0.01ms;
+  --dur-fast: 0.01ms;
+  --dur-normal: 0.01ms;
+  --dur-slow: 0.01ms;
 }
 
-html[data-graphics-compatibility],
-html[data-graphics-compatibility] body,
-html[data-graphics-compatibility] #root {
+html[data-performance-mode],
+html[data-performance-mode] body,
+html[data-performance-mode] #root {
   background: var(--theme-bg);
+  border-radius: 0;
 }
 
-html[data-graphics-compatibility] *,
-html[data-graphics-compatibility] *::before,
-html[data-graphics-compatibility] *::after {
+html[data-performance-mode] *,
+html[data-performance-mode] *::before,
+html[data-performance-mode] *::after {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
+}
+
+/* 状态旋转、进度条和 aria 状态区域保留必要反馈；其余 CSS 动画与过渡直接完成。 */
+html[data-performance-mode] *:not(.animate-spin):not(.animate-pulse):not([class*='spinner']):not([class*='progress']):not([class*='loading']):not([role='status']):not([role='status'] *):not([role='progressbar']):not([role='progressbar'] *):not([data-performance-motion='essential']):not([data-performance-motion='essential'] *) {
+  animation-delay: 0s !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-delay: 0s !important;
+  transition-duration: 0.01ms !important;
+}
+
+html[data-performance-mode] *::before,
+html[data-performance-mode] *::after {
+  animation-delay: 0s !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-delay: 0s !important;
+  transition-duration: 0.01ms !important;
+}
+
+html[data-performance-mode] :is(.shadow-lg, .shadow-xl, .shadow-2xl) {
+  box-shadow: none !important;
 }
 
 /* macOS 默认次像素渲染偏粗，灰度抗锯齿更接近系统观感；
@@ -833,6 +865,32 @@ body[data-tauri-window][data-sidebar-floating] {
 
 body[data-tauri-window][data-sidebar-floating][data-window-glass-frame] {
   --window-overlay-left: 35px;
+}
+
+/* 性能模式使用系统矩形窗口边界，不保留自定义圆角、透明带和玻璃外框。 */
+html[data-performance-mode] .app-shell,
+html[data-performance-mode] .app-shell--glass-frame {
+  --app-shell-inset: 0px;
+  --app-shell-content-radius: 0px;
+}
+
+html[data-performance-mode] .app-shell::before,
+html[data-performance-mode] .app-shell::after {
+  display: none;
+}
+
+html[data-performance-mode] .app-shell__content,
+html[data-performance-mode] .app-canvas-viewport {
+  border-radius: 0;
+  clip-path: none;
+}
+
+html[data-performance-mode] body[data-tauri-window] {
+  --window-overlay-top: 0px;
+  --window-overlay-right: 0px;
+  --window-overlay-bottom: 0px;
+  --window-overlay-left: 0px;
+  --window-overlay-radius: 0px;
 }
 
 body[data-tauri-window] > :is(

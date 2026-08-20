@@ -37,6 +37,7 @@ import {
   PROJECT_STYLE_OPTIONS,
 } from '../services/projectSettingsService';
 import { uploadSourceFileToProject } from '../services/fileService';
+import { useT } from '../i18n';
 
 interface ProjectSettingsPopoverProps {
   isOpen: boolean;
@@ -153,6 +154,7 @@ export default function ProjectSettingsPopover({
   anchorRef,
   onClose,
 }: ProjectSettingsPopoverProps) {
+  const t = useT();
   const panelRef = useRef<HTMLDivElement>(null);
   const reduceMotion = useReducedMotion();
   const [draft, setDraft] = useState<ProjectSettings>(() => cloneSettings(project?.settings));
@@ -235,9 +237,18 @@ export default function ProjectSettingsPopover({
     return [...options.values()];
   }, [customStyles]);
 
-  const modelGroups = useMemo(() => Object.fromEntries(
-    MODEL_ROWS.map((row) => [row.kind, buildModelGroups(row, config)]),
-  ) as Record<ProjectModelKind, ModelOptionGroup[]>, [config]);
+  const modelGroups = useMemo(() => {
+    const groups = Object.fromEntries(
+      MODEL_ROWS.map((row) => [row.kind, buildModelGroups(row, config)]),
+    ) as Record<ProjectModelKind, ModelOptionGroup[]>;
+    // 翻译 buildModelGroups 内模块级无法访问 t 的固定 group name
+    (Object.keys(groups) as ProjectModelKind[]).forEach((kind) => {
+      groups[kind] = groups[kind].map((group) => group.id === 'general-models'
+        ? { ...group, name: t('通用模型') }
+        : group);
+    });
+    return groups;
+  }, [config, t]);
   const visionModelGroups = useMemo(() => modelGroups.text.map((group) => ({
     ...group,
     options: group.options.filter((option) => {
@@ -301,7 +312,7 @@ export default function ProjectSettingsPopover({
     } catch (err) {
       console.error('[项目设置] 上传风格母图失败:', err);
       useAppStore.getState().showToast?.(
-        err instanceof Error ? err.message : '上传风格母图失败',
+        err instanceof Error ? err.message : t('上传风格母图失败'),
         'error',
       );
     } finally {
@@ -407,7 +418,7 @@ export default function ProjectSettingsPopover({
           id="project-settings-popover"
           ref={panelRef}
           role="dialog"
-          aria-label={`${project.name} 项目设置`}
+          aria-label={t('{name} 项目设置', { name: project.name })}
           tabIndex={-1}
           style={{ top: position.top, left: position.left }}
           initial={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: -8 }}
@@ -427,18 +438,18 @@ export default function ProjectSettingsPopover({
                 <Icon icon="lucide:sliders-horizontal" className="h-4 w-4" />
               </span>
               <div className="min-w-0 flex-1">
-                <h2 className="truncate text-sm font-semibold leading-5">项目设置</h2>
+                <h2 className="truncate text-sm font-semibold leading-5">{t('项目设置')}</h2>
                 <p className="truncate text-[11px] leading-4 text-canvas-text-muted">{project.name}</p>
               </div>
-              <PopupCloseButton ariaLabel="关闭项目设置" onClick={onClose} />
+              <PopupCloseButton ariaLabel={t('关闭项目设置')} onClick={onClose} />
             </header>
 
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
               <section className="grid gap-3 px-3 py-3">
-                <SectionTitle icon="lucide:palette">创作基线</SectionTitle>
+                <SectionTitle icon="lucide:palette">{t('创作基线')}</SectionTitle>
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3">
                   <div className="grid gap-1.5">
-                    <span className="text-[11px] font-medium text-canvas-text-muted">整体画风（文字预设）</span>
+                    <span className="text-[11px] font-medium text-canvas-text-muted">{t('整体画风（文字预设）')}</span>
                     <StyleSelector
                       nodeType="ai-image"
                       selectedStyle={draft.visualStyle?.styleId}
@@ -450,7 +461,7 @@ export default function ProjectSettingsPopover({
                     />
                   </div>
                   <div className="grid h-9 grid-cols-[auto_auto] items-center gap-2 text-[11px] text-canvas-text-secondary">
-                    <span>锁定</span>
+                    <span>{t('锁定')}</span>
                     <button
                       type="button"
                       role="switch"
@@ -480,14 +491,14 @@ export default function ProjectSettingsPopover({
                 <div className="grid gap-2 rounded-lg border border-canvas-border bg-canvas-card p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <span className="text-[11px] font-medium text-canvas-text">风格母图</span>
+                      <span className="text-[11px] font-medium text-canvas-text">{t('风格母图')}</span>
                       <p className="mt-0.5 text-[10px] leading-relaxed text-canvas-text-muted">
-                        上传卡通/电影截图等。本项目所有图像生成会自动参考此风格，无需每次 @。
+                        {t('上传卡通/电影截图等。本项目所有图像生成会自动参考此风格，无需每次 @。')}
                       </p>
                     </div>
                     {draft.visualStyle?.styleReference?.imageUrl ? (
                       <div className="grid h-9 shrink-0 grid-cols-[auto_auto] items-center gap-2 text-[11px] text-canvas-text-secondary">
-                        <span>启用</span>
+                        <span>{t('启用')}</span>
                         <button
                           type="button"
                           role="switch"
@@ -517,18 +528,18 @@ export default function ProjectSettingsPopover({
                       <div className="h-16 w-16 shrink-0 overflow-hidden rounded-md border border-canvas-border bg-canvas-bg">
                         <img
                           src={draft.visualStyle.styleReference.imageUrl}
-                          alt="风格母图"
+                          alt={t('风格母图')}
                           className="h-full w-full object-cover"
                         />
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-[11px] text-canvas-text-secondary">
-                          {draft.visualStyle.styleReference.fileName || '已设置风格母图'}
+                          {draft.visualStyle.styleReference.fileName || t('已设置风格母图')}
                         </p>
                         <p className="mt-0.5 text-[10px] text-canvas-text-muted">
                           {draft.visualStyle.styleReference.enabled === false
-                            ? '已关闭：生成时不注入'
-                            : '已启用：生图自动带上'}
+                            ? t('已关闭：生成时不注入')
+                            : t('已启用：生图自动带上')}
                         </p>
                         <div className="mt-1.5 flex flex-wrap gap-1.5">
                           <button
@@ -537,14 +548,14 @@ export default function ProjectSettingsPopover({
                             onClick={() => { void handleUploadStyleReference(); }}
                             className="rounded-md px-2 py-1 text-[11px] text-indigo-300 hover:bg-indigo-500/15 disabled:opacity-50"
                           >
-                            更换
+                            {t('更换')}
                           </button>
                           <button
                             type="button"
                             onClick={handleClearStyleReference}
                             className="rounded-md px-2 py-1 text-[11px] text-red-400/80 hover:bg-red-500/10"
                           >
-                            清除
+                            {t('清除')}
                           </button>
                         </div>
                       </div>
@@ -560,16 +571,16 @@ export default function ProjectSettingsPopover({
                                  hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Icon icon="lucide:image-plus" className="h-4 w-4" />
-                      {styleRefBusy ? '上传中…' : '上传风格母图'}
+                      {styleRefBusy ? t('上传中…') : t('上传风格母图')}
                     </button>
                   )}
                 </div>
                 <div className="grid gap-1.5">
                   <span className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] font-medium text-canvas-text-muted">项目提示词后缀</span>
+                    <span className="text-[11px] font-medium text-canvas-text-muted">{t('项目提示词后缀')}</span>
                     <span
                       role="tablist"
-                      aria-label="提示词后缀节点类型"
+                      aria-label={t('提示词后缀节点类型')}
                       className="flex h-7 items-center gap-0.5 rounded-md bg-canvas-card p-0.5"
                     >
                       {MODEL_ROWS.map((row) => (
@@ -595,7 +606,7 @@ export default function ProjectSettingsPopover({
                     value={draft.promptSuffixes?.[activePromptKind] ?? ''}
                     maxLength={2000}
                     rows={3}
-                    aria-label={`${activePromptRow.label}节点提示词后缀`}
+                    aria-label={t('{label}节点提示词后缀', { label: t(activePromptRow.label) })}
                     onChange={(event) => setDraft((current) => ({
                       ...current,
                       promptSuffixes: {
@@ -607,13 +618,13 @@ export default function ProjectSettingsPopover({
                                text-xs leading-5 text-canvas-text outline-none transition-colors
                                placeholder:text-canvas-text-muted/60 hover:border-border-secondary
                                focus:border-indigo-500"
-                    placeholder={`${activePromptRow.label}节点的一致性约束`}
+                    placeholder={t('{label}节点的一致性约束', { label: t(activePromptRow.label) })}
                   />
                 </div>
               </section>
 
               <section className="grid gap-3 border-t border-border-subtle px-3 py-3">
-                <SectionTitle icon="lucide:cpu">默认模型</SectionTitle>
+                <SectionTitle icon="lucide:cpu">{t('默认模型')}</SectionTitle>
                 <div className="grid gap-2">
                   {MODEL_ROWS.map((row) => {
                     const selectedModel = draft.defaultModels?.[row.kind] ?? '';
@@ -634,9 +645,9 @@ export default function ProjectSettingsPopover({
                                        bg-canvas-card px-3 pr-8 text-xs text-canvas-text outline-none
                                        transition-colors hover:border-border-secondary focus:border-indigo-500"
                           >
-                            <option value="">跟随应用默认</option>
+                            <option value="">{t('跟随应用默认')}</option>
                             {!selectedModelVisible && (
-                              <option value={selectedModel} disabled>已隐藏 · {selectedModel}</option>
+                              <option value={selectedModel} disabled>{t('已隐藏')} · {selectedModel}</option>
                             )}
                             {modelGroups[row.kind].map((group) => (
                               <optgroup key={group.id} label={group.name}>
@@ -659,7 +670,7 @@ export default function ProjectSettingsPopover({
                   <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-3">
                     <span className="flex items-center gap-2 text-xs text-canvas-text-secondary">
                       <Icon icon="lucide:scan-eye" className="h-3.5 w-3.5 text-cyan-400" />
-                      视觉理解
+                      {t('视觉理解')}
                     </span>
                     <span className="relative">
                       <select
@@ -670,7 +681,7 @@ export default function ProjectSettingsPopover({
                         }))}
                         className="h-9 w-full appearance-none rounded-md border border-canvas-border bg-canvas-card px-3 pr-8 text-xs text-canvas-text outline-none transition-colors hover:border-border-secondary focus:border-indigo-500"
                       >
-                        <option value="">自动选择可看图模型</option>
+                        <option value="">{t('自动选择可看图模型')}</option>
                         {visionModelGroups.map((group) => (
                           <optgroup key={group.id} label={group.name}>
                             {group.options.map((option) => (
@@ -684,8 +695,8 @@ export default function ProjectSettingsPopover({
                   </label>
                   <label className="flex items-center justify-between gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5 text-xs text-canvas-text-secondary">
                     <span>
-                      <span className="block text-canvas-text">允许 Agent 自动选媒体模型</span>
-                      <span className="mt-0.5 block text-[10px] text-canvas-text-muted">显式 @model 始终优先</span>
+                      <span className="block text-canvas-text">{t('允许 Agent 自动选媒体模型')}</span>
+                      <span className="mt-0.5 block text-[10px] text-canvas-text-muted">{t('显式 @model 始终优先')}</span>
                     </span>
                     <input
                       type="checkbox"
@@ -700,12 +711,12 @@ export default function ProjectSettingsPopover({
               </section>
 
               <section className="grid gap-3 border-t border-border-subtle px-3 py-3">
-                <SectionTitle icon="lucide:scan">输出默认</SectionTitle>
+                <SectionTitle icon="lucide:scan">{t('输出默认')}</SectionTitle>
                 <div className="grid gap-2">
                   <div className="grid min-h-[68px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5">
                     <div className="min-w-0">
-                      <div className="text-xs font-medium text-canvas-text">图片输出</div>
-                      <div className="mt-0.5 text-[11px] text-canvas-text-muted">比例与画质</div>
+                      <div className="text-xs font-medium text-canvas-text">{t('图片输出')}</div>
+                      <div className="mt-0.5 text-[11px] text-canvas-text-muted">{t('比例与画质')}</div>
                     </div>
                     <div className="flex items-center gap-2">
                       {imageDefaultsEnabled ? (
@@ -717,12 +728,12 @@ export default function ProjectSettingsPopover({
                           placement="top"
                         />
                       ) : (
-                        <span className="text-xs text-canvas-text-muted">跟随节点</span>
+                        <span className="text-xs text-canvas-text-muted">{t('跟随节点')}</span>
                       )}
-                      <label className="relative inline-flex shrink-0 cursor-pointer items-center" title="切换图片项目默认">
+                      <label className="relative inline-flex shrink-0 cursor-pointer items-center" title={t('切换图片项目默认')}>
                         <input
                           type="checkbox"
-                          aria-label="启用图片项目默认"
+                          aria-label={t('启用图片项目默认')}
                           className="peer sr-only"
                           checked={imageDefaultsEnabled}
                           onChange={(event) => handleGenerationDefaultsToggle('image', event.target.checked)}
@@ -734,8 +745,8 @@ export default function ProjectSettingsPopover({
 
                   <div className="grid min-h-[68px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5">
                     <div className="min-w-0">
-                      <div className="text-xs font-medium text-canvas-text">视频输出</div>
-                      <div className="mt-0.5 text-[11px] text-canvas-text-muted">比例、分辨率与时长</div>
+                      <div className="text-xs font-medium text-canvas-text">{t('视频输出')}</div>
+                      <div className="mt-0.5 text-[11px] text-canvas-text-muted">{t('比例、分辨率与时长')}</div>
                     </div>
                     <div className="flex items-center gap-2">
                       {videoDefaultsEnabled ? (
@@ -750,12 +761,12 @@ export default function ProjectSettingsPopover({
                           showGenerateAudio={false}
                         />
                       ) : (
-                        <span className="text-xs text-canvas-text-muted">跟随节点</span>
+                        <span className="text-xs text-canvas-text-muted">{t('跟随节点')}</span>
                       )}
-                      <label className="relative inline-flex shrink-0 cursor-pointer items-center" title="切换视频项目默认">
+                      <label className="relative inline-flex shrink-0 cursor-pointer items-center" title={t('切换视频项目默认')}>
                         <input
                           type="checkbox"
-                          aria-label="启用视频项目默认"
+                          aria-label={t('启用视频项目默认')}
                           className="peer sr-only"
                           checked={videoDefaultsEnabled}
                           onChange={(event) => handleGenerationDefaultsToggle('video', event.target.checked)}
@@ -776,7 +787,7 @@ export default function ProjectSettingsPopover({
                 className="h-8 rounded-md px-3 text-xs font-medium text-canvas-text-secondary
                            transition-colors hover:bg-canvas-hover hover:text-canvas-text disabled:opacity-50"
               >
-                取消
+                {t('取消')}
               </button>
               <button
                 type="submit"
@@ -786,7 +797,7 @@ export default function ProjectSettingsPopover({
                            hover:bg-indigo-400 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
               >
                 {saving ? <Icon icon="lucide:loader-circle" className="h-3.5 w-3.5 animate-spin" /> : null}
-                保存
+                {t('保存')}
               </button>
             </footer>
           </form>

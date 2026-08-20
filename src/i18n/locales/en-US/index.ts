@@ -11,6 +11,7 @@ import canvas from './canvas';
 import chat from './chat';
 import nodes from './nodes';
 import series from './series';
+import projectSettings from './projectSettings';
 
 const enUS: Record<string, string> = {
   ...common,
@@ -22,6 +23,7 @@ const enUS: Record<string, string> = {
   ...chat,
   ...nodes,
   ...series,
+  ...projectSettings,
 };
 
 export default enUS;

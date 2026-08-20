@@ -17,6 +17,7 @@ const canvas = {
   '删除': 'Delete',
 
   // ── NodeContextMenu 静态菜单项（补齐之前缺失的 key） ──
+  '剪切': 'Cut',
   '创建副本': 'Duplicate',
   '解除分组': 'Ungroup',
   '转换图片': 'Convert image',
@@ -197,7 +198,6 @@ const canvas = {
   '已在剪映中打开': 'Opened in JianYing',
   '已在 Premiere Pro 中打开': 'Opened in Premiere Pro',
   '编辑视频（{count} 个素材）': 'Edit video ({count} clip(s))',
-  '编辑视频': 'Edit video',
   '打开视频编辑器失败': 'Failed to open the video editor',
   '无法读取节点数据': 'Cannot read node data',
   '文件已保存': 'File saved',

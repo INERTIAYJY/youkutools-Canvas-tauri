@@ -7,14 +7,15 @@
 import { memo, useCallback, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { probeVideoCodecs, type CodecProbeReport } from '../../services/videoCodecProbe';
-
-const DECLARED_TEXT: Record<string, string> = {
-  supported: '支持',
-  unsupported: '不支持',
-  throw: '抛异常',
-};
+import { useT } from '../../i18n';
 
 function VideoEditorCodecPanel() {
+  const t = useT();
+  const DECLARED_TEXT: Record<string, string> = {
+    supported: t('支持'),
+    unsupported: t('不支持'),
+    throw: t('抛异常'),
+  };
   const [report, setReport] = useState<CodecProbeReport | null>(null);
   const [running, setRunning] = useState(false);
 
@@ -45,25 +46,25 @@ function VideoEditorCodecPanel() {
   return (
     <div className="video-editor-inspect-group">
       <div className="video-editor-inspect-title">
-        编码能力自检
+        {t('编码能力自检')}
         <button
           type="button"
           className="video-editor-probe-btn"
           onClick={() => { void run(); }}
           disabled={running}
         >
-          {running ? '检测中…' : '运行'}
+          {running ? t('检测中…') : t('运行')}
         </button>
         {report && (
           <button type="button" className="video-editor-probe-btn" onClick={copy}>
-            复制
+            {t('复制')}
           </button>
         )}
       </div>
 
       {!report && (
         <div className="video-editor-inspect-hint">
-          实测本机能否编码，用来判断转场 / 合成 / 音轨路线是否可行。
+          {t('实测本机能否编码，用来判断转场 / 合成 / 音轨路线是否可行')}
         </div>
       )}
 
@@ -71,23 +72,23 @@ function VideoEditorCodecPanel() {
         <>
           <div className="video-editor-inspect-row">
             <span>VideoEncoder</span>
-            <span>{report.hasVideoEncoder ? '存在' : '缺失'}</span>
+            <span>{report.hasVideoEncoder ? t('存在') : t('缺失')}</span>
           </div>
           <div className="video-editor-inspect-row">
             <span>VideoDecoder</span>
-            <span>{report.hasVideoDecoder ? '存在' : '缺失'}</span>
+            <span>{report.hasVideoDecoder ? t('存在') : t('缺失')}</span>
           </div>
           <div className="video-editor-inspect-row">
             <span>AudioEncoder</span>
-            <span>{report.hasAudioEncoder ? '存在' : '缺失'}</span>
+            <span>{report.hasAudioEncoder ? t('存在') : t('缺失')}</span>
           </div>
           <div className="video-editor-inspect-row">
             <span>AudioDecoder</span>
-            <span>{report.hasAudioDecoder ? '存在' : '缺失'}</span>
+            <span>{report.hasAudioDecoder ? t('存在') : t('缺失')}</span>
           </div>
           {!report.hasAudioEncoder && (
             <div className="video-editor-inspect-hint">
-              本机没有 AudioEncoder，合成导出无法混流；满足条件时会改用音频分组直通。
+              {t('本机没有 AudioEncoder，合成导出无法混流；满足条件时会改用音频分组直通')}
             </div>
           )}
           {report.results.map((entry) => (
@@ -100,8 +101,8 @@ function VideoEditorCodecPanel() {
               />
               <span className="video-editor-probe-label">{entry.label}</span>
               <span className="video-editor-probe-verdict">
-                实测{entry.actual === 'ok' ? '可用' : '失败'}
-                <em>（声明{DECLARED_TEXT[entry.declared] ?? entry.declared}）</em>
+                {t('实测')}{entry.actual === 'ok' ? t('可用') : t('失败')}
+                <em>（{t('声明')}{DECLARED_TEXT[entry.declared] ?? entry.declared}）</em>
               </span>
             </div>
           ))}

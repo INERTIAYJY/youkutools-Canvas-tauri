@@ -35,6 +35,7 @@ import {
 import type { SourceState } from './useVideoEditorSources';
 import VideoEditorRuler from './VideoEditorRuler';
 import VideoEditorWaveform from './VideoEditorWaveform';
+import { useT } from '../../i18n';
 
 export interface ClipContextMenuState {
   clipId: string;
@@ -184,6 +185,7 @@ function VideoEditorTimeline({
   onUndo,
   onRedo,
 }: VideoEditorTimelineProps) {
+  const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(40);
@@ -695,39 +697,39 @@ function VideoEditorTimeline({
         <div className="video-editor-timeline-actions">
           <span className="video-editor-timeline-title">
             <Icon icon="lucide:panel-bottom" width={13} height={13} />
-            时间轴
+            {t('时间轴')}
           </span>
 
-          <div className="video-editor-toolgroup compact" aria-label="历史操作">
+          <div className="video-editor-toolgroup compact" aria-label={t('历史操作')}>
             <button
               type="button" className="video-editor-timeline-btn icon-only"
-              onClick={onUndo} disabled={!canUndo} data-tooltip="撤销 Ctrl+Z"
-              aria-label="撤销"
+              onClick={onUndo} disabled={!canUndo} data-tooltip={t('撤销 Ctrl+Z')}
+              aria-label={t('撤销')}
             >
               <Icon icon="lucide:undo-2" width={13} height={13} />
             </button>
             <button
               type="button" className="video-editor-timeline-btn icon-only"
-              onClick={onRedo} disabled={!canRedo} data-tooltip="重做 Ctrl+Shift+Z"
-              aria-label="重做"
+              onClick={onRedo} disabled={!canRedo} data-tooltip={t('重做 Ctrl+Shift+Z')}
+              aria-label={t('重做')}
             >
               <Icon icon="lucide:redo-2" width={13} height={13} />
             </button>
           </div>
 
-          <div className="video-editor-toolgroup" aria-label="片段操作">
+          <div className="video-editor-toolgroup" aria-label={t('片段操作')}>
             <button
               type="button" className="video-editor-timeline-btn emphasis"
-              onClick={onSplit} disabled={!canSplit} data-tooltip="在播放头处分割 S"
+              onClick={onSplit} disabled={!canSplit} data-tooltip={t('在播放头处分割 S')}
             >
-              <Icon icon="lucide:scissors" width={13} height={13} />分割
+              <Icon icon="lucide:scissors" width={13} height={13} />{t('分割')}
               <kbd>S</kbd>
             </button>
             <button
               type="button" className="video-editor-timeline-btn icon-only"
               onClick={() => soleSelected && onDuplicateClip(soleSelected.id)}
-              disabled={!soleSelected} data-tooltip="复制片段 Ctrl+D"
-              aria-label="复制片段"
+              disabled={!soleSelected} data-tooltip={t('复制片段 Ctrl+D')}
+              aria-label={t('复制片段')}
             >
               <Icon icon="lucide:copy" width={13} height={13} />
             </button>
@@ -735,8 +737,8 @@ function VideoEditorTimeline({
               type="button" className="video-editor-timeline-btn danger icon-only"
               onClick={onDeleteSelected}
               disabled={!canDeleteSelected}
-              data-tooltip="删除选中片段 Del"
-              aria-label="删除选中片段"
+              data-tooltip={t('删除选中片段 Del')}
+              aria-label={t('删除选中片段')}
             >
               <Icon icon="lucide:trash-2" width={13} height={13} />
             </button>
@@ -746,24 +748,24 @@ function VideoEditorTimeline({
             type="button"
             className={`video-editor-timeline-btn ${snapEnabled ? 'active' : ''}`}
             onClick={onToggleSnap}
-            data-tooltip="边界吸附"
+            data-tooltip={t('边界吸附')}
             aria-pressed={snapEnabled}
           >
-            <Icon icon="lucide:magnet" width={13} height={13} />吸附
+            <Icon icon="lucide:magnet" width={13} height={13} />{t('吸附')}
           </button>
 
-          <div className="video-editor-toolgroup" aria-label="添加轨道">
+          <div className="video-editor-toolgroup" aria-label={t('添加轨道')}>
             <button
               type="button" className="video-editor-timeline-btn"
-              onClick={() => onAddTrack('video')} data-tooltip="新增叠加轨（画中画 / 贴纸）"
+              onClick={() => onAddTrack('video')} data-tooltip={t('新增叠加轨（画中画 / 贴纸）')}
             >
-              <Icon icon="lucide:layers" width={13} height={13} />叠加轨
+              <Icon icon="lucide:layers" width={13} height={13} />{t('叠加轨')}
             </button>
             <button
               type="button" className="video-editor-timeline-btn"
-              onClick={() => onAddTrack('audio')} data-tooltip="新增音频轨"
+              onClick={() => onAddTrack('audio')} data-tooltip={t('新增音频轨')}
             >
-              <Icon icon="lucide:audio-lines" width={13} height={13} />音频轨
+              <Icon icon="lucide:audio-lines" width={13} height={13} />{t('音频轨')}
             </button>
           </div>
         </div>
@@ -777,9 +779,9 @@ function VideoEditorTimeline({
               </span>
             </>
           ) : selectedClipIds.length > 1 ? (
-            <span className="video-editor-timeline-range">已选中 {selectedClipIds.length} 个片段</span>
+            <span className="video-editor-timeline-range">{t('已选中 {count} 个片段', { count: selectedClipIds.length })}</span>
           ) : (
-            <span className="video-editor-timeline-range dim">选择片段后可编辑</span>
+            <span className="video-editor-timeline-range dim">{t('选择片段后可编辑')}</span>
           )}
         </div>
 
@@ -788,14 +790,14 @@ function VideoEditorTimeline({
             type="button"
             className="video-editor-timeline-btn"
             onClick={cycleTrackDensity}
-            data-tooltip={`轨道高度：${density.label}`}
-            aria-label={`轨道高度：${density.label}`}
+            data-tooltip={`${t('轨道高度：紧凑/标准/宽大')}`}
+            aria-label={`${t('轨道高度：紧凑/标准/宽大')}`}
           >
             <Icon icon="lucide:rows-3" width={13} height={13} />
           </button>
           <button
             type="button" className="video-editor-timeline-btn"
-            onClick={() => zoomBy(1 / 1.4)} data-tooltip="缩小"
+            onClick={() => zoomBy(1 / 1.4)} data-tooltip={t('缩小')}
           >
             <Icon icon="lucide:zoom-out" width={13} height={13} />
           </button>
@@ -814,12 +816,12 @@ function VideoEditorTimeline({
               setAutoFit(false);
               setPixelsPerSecond(Number(event.target.value));
             }}
-            aria-label="时间轴缩放"
-            aria-valuetext={`${Math.round(pixelsPerSecond)} 像素每秒`}
+            aria-label={t('时间轴缩放')}
+            aria-valuetext={t('{value} 像素每秒', { value: Math.round(pixelsPerSecond) })}
           />
           <button
             type="button" className="video-editor-timeline-btn"
-            onClick={() => zoomBy(1.4)} data-tooltip="放大"
+            onClick={() => zoomBy(1.4)} data-tooltip={t('放大')}
           >
             <Icon icon="lucide:zoom-in" width={13} height={13} />
           </button>
@@ -861,18 +863,18 @@ function VideoEditorTimeline({
                   ? <Icon icon="lucide:type" width={13} height={13} />
                   : TRACK_KIND_ICON[track.kind] ?? '🎞'}
               </span>
-              <span className="video-editor-track-name">{track.name}</span>
+              <span className="video-editor-track-name">{t(track.name)}</span>
               <button
                 type="button"
                 className={`video-editor-track-flag is-mute ${track.muted ? 'active' : ''}`}
                 onClick={() => toggleTrackFlag(track.id, 'muted')}
-                data-tooltip={track.muted ? '取消静音' : '静音'}
+                data-tooltip={track.muted ? t('取消静音') : t('静音')}
               >M</button>
               <button
                 type="button"
                 className={`video-editor-track-flag is-lock ${track.locked ? 'active' : ''}`}
                 onClick={() => toggleTrackFlag(track.id, 'locked')}
-                data-tooltip={track.locked ? '解锁轨道' : '锁定轨道'}
+                data-tooltip={track.locked ? t('解锁轨道') : t('锁定轨道')}
               >
                 <Icon icon={track.locked ? 'lucide:lock' : 'lucide:unlock'} width={10} height={10} />
               </button>
@@ -880,7 +882,7 @@ function VideoEditorTimeline({
                 type="button"
                 className={`video-editor-track-flag is-visibility ${track.hidden ? 'active' : ''}`}
                 onClick={() => toggleTrackFlag(track.id, 'hidden')}
-                data-tooltip={track.hidden ? '显示轨道' : '隐藏轨道'}
+                data-tooltip={track.hidden ? t('显示轨道') : t('隐藏轨道')}
               >
                 <Icon icon={track.hidden ? 'lucide:eye-off' : 'lucide:eye'} width={10} height={10} />
               </button>
@@ -888,7 +890,7 @@ function VideoEditorTimeline({
                 <button
                   type="button" className="video-editor-track-flag"
                   disabled={track.locked}
-                  onClick={() => onMoveTrack(track.id, 1)} data-tooltip="上移一层"
+                  onClick={() => onMoveTrack(track.id, 1)} data-tooltip={t('上移一层')}
                 >
                   <Icon icon="lucide:chevron-up" width={10} height={10} />
                 </button>
@@ -1001,14 +1003,14 @@ function VideoEditorTimeline({
                           <div
                             className="video-editor-trim-handle in"
                             onPointerDown={(event) => startTrim(clip, 'in', event)}
-                            role="slider" aria-label="入点"
+                            role="slider" aria-label={t('入点')}
                             aria-valuenow={clip.sourceIn} aria-valuemin={0} aria-valuemax={duration}
                             tabIndex={0}
                           />
                           <div
                             className="video-editor-trim-handle out"
                             onPointerDown={(event) => startTrim(clip, 'out', event)}
-                            role="slider" aria-label="出点"
+                            role="slider" aria-label={t('出点')}
                             aria-valuenow={clip.sourceOut} aria-valuemin={0} aria-valuemax={duration}
                             tabIndex={0}
                           />
@@ -1021,10 +1023,10 @@ function VideoEditorTimeline({
                         type="button"
                         className={`video-editor-seam ${hasTransition ? 'has-transition' : ''}`}
                         style={{ left: clip.timelineStart * pixelsPerSecond }}
-                        aria-label={hasTransition ? `编辑转场：${clip.fileName}` : `在这里添加转场：${clip.fileName}`}
+                        aria-label={hasTransition ? t('编辑转场：{name}', { name: clip.fileName }) : t('在这里添加转场：{name}', { name: clip.fileName })}
                         data-tooltip={hasTransition
-                          ? `${TRANSITION_LABELS[transition.kind]} ${transition.duration.toFixed(1)}s`
-                          : '添加转场'}
+                          ? `${t(TRANSITION_LABELS[transition.kind])} ${transition.duration.toFixed(1)}s`
+                          : t('添加转场')}
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -1059,7 +1061,7 @@ function VideoEditorTimeline({
                     <span className="video-editor-clip-name">{clip.fileName}</span>
                   </div>
                 )) : (
-                  <div className="video-editor-track-placeholder">字幕轨二期开放</div>
+                  <div className="video-editor-track-placeholder">{t('字幕轨二期开放')}</div>
                 )}
 
                 {track.kind === 'video' && dropIndicatorPx !== null && dragging?.targetTrackId === track.id && (
@@ -1093,21 +1095,21 @@ function VideoEditorTimeline({
           onPointerDown={(event) => event.stopPropagation()}
         >
           <button type="button" onClick={() => { onSplit(); setClipMenu(null); }} disabled={!canSplit}>
-            在播放头分割<span>S</span>
+            {t('在播放头分割 · S')}
           </button>
           <button
             type="button"
             onClick={() => { onDuplicateClip(clipMenu.clipId); setClipMenu(null); }}
             disabled={clipMenuLocked}
           >
-            复制片段<span>Ctrl D</span>
+            {t('复制片段 · Ctrl D')}
           </button>
           <button
             type="button" className="danger"
             onClick={() => { onDeleteSelected(); setClipMenu(null); }}
             disabled={!canDeleteSelected}
           >
-            删除<span>Del</span>
+            {t('删除 · Del')}
           </button>
         </div>
       )}

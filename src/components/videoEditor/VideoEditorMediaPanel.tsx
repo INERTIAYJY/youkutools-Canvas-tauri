@@ -10,6 +10,7 @@ import type { AssetFileEntry } from '../../services/fileService';
 import { getClipDuration, type VideoEditorClip } from '../../types/videoEditor';
 import type { VideoEditorProjectImageSource } from '../../types/videoEditor';
 import type { SourceState } from './useVideoEditorSources';
+import { useT } from '../../i18n';
 
 type MediaFilter = 'all' | 'video' | 'image';
 
@@ -42,6 +43,7 @@ function VideoEditorMediaPanel({
   onAddCanvasImage,
   onUploadSticker,
 }: VideoEditorMediaPanelProps) {
+  const t = useT();
   const [addMenu, setAddMenu] = useState<'closed' | 'root' | 'library' | 'canvas'>('closed');
   const [query, setQuery] = useState('');
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
@@ -96,12 +98,12 @@ function VideoEditorMediaPanel({
   return (
     <aside className="video-editor-media">
       <div className="video-editor-panel-head video-editor-media-head">
-        <span>素材 · {clips.length}</span>
+        <span>{t('素材 · {count}', { count: clips.length })}</span>
         <div ref={addMenuRef} className="video-editor-media-add-wrap">
           <button
             type="button"
             className="video-editor-media-add"
-            aria-label={addingMedia ? '正在添加素材' : '添加素材'}
+            aria-label={addingMedia ? t('正在添加素材') : t('添加素材')}
             aria-expanded={addMenu !== 'closed'}
             disabled={addingMedia}
             onClick={() => {
@@ -118,7 +120,7 @@ function VideoEditorMediaPanel({
                 <div className="video-editor-media-add-sources">
                   <button type="button" onClick={() => setAddMenu('library')}>
                     <Icon icon="lucide:library" width={16} height={16} />
-                    <span><strong>素材库</strong><em>{libraryAssets.length} 个可用素材</em></span>
+                    <span><strong>{t('素材库')}</strong><em>{t('{count} 个可用素材', { count: libraryAssets.length })}</em></span>
                     <Icon icon="lucide:chevron-right" width={14} height={14} />
                   </button>
                   <button
@@ -130,28 +132,28 @@ function VideoEditorMediaPanel({
                     }}
                   >
                     <Icon icon={addingMedia ? 'lucide:loader-circle' : 'lucide:hard-drive-upload'} width={16} height={16} />
-                    <span><strong>{addingMedia ? '正在导入…' : '本机文件'}</strong><em>视频或图片</em></span>
+                    <span><strong>{addingMedia ? t('正在导入…') : t('本机文件')}</strong><em>{t('视频或图片')}</em></span>
                   </button>
                   <button type="button" onClick={() => setAddMenu('canvas')}>
                     <Icon icon="lucide:workflow" width={16} height={16} />
-                    <span><strong>画布图片节点</strong><em>{projectImages.length} 张图片</em></span>
+                    <span><strong>{t('画布图片节点')}</strong><em>{t('{count} 张图片', { count: projectImages.length })}</em></span>
                     <Icon icon="lucide:chevron-right" width={14} height={14} />
                   </button>
                 </div>
               ) : (
                 <>
                   <div className="video-editor-media-picker-head">
-                    <button type="button" onClick={() => { setQuery(''); setAddMenu('root'); }} aria-label="返回">
+                    <button type="button" onClick={() => { setQuery(''); setAddMenu('root'); }} aria-label={t('返回')}>
                       <Icon icon="lucide:arrow-left" width={14} height={14} />
                     </button>
-                    <strong>{addMenu === 'library' ? '素材库' : '画布图片节点'}</strong>
+                    <strong>{addMenu === 'library' ? t('素材库') : t('画布图片节点')}</strong>
                   </div>
                   <label className="video-editor-media-search">
                     <Icon icon="lucide:search" width={13} height={13} />
                     <input
                       autoFocus
                       value={query}
-                      placeholder="搜索素材"
+                      placeholder={t('搜索素材')}
                       onChange={(event) => setQuery(event.target.value)}
                     />
                   </label>
@@ -167,7 +169,7 @@ function VideoEditorMediaPanel({
                             ? <img src={asset.assetUrl} alt="" loading="lazy" />
                             : <Icon icon={asset.category === 'image' ? 'lucide:image' : 'lucide:film'} width={16} height={16} />}
                         </span>
-                        <span><strong>{asset.name}</strong><em>{asset.category === 'image' ? '图片' : '视频'}</em></span>
+                        <span><strong>{asset.name}</strong><em>{asset.category === 'image' ? t('图片') : t('视频')}</em></span>
                         <Icon icon="lucide:plus" width={14} height={14} />
                       </button>
                     )) : filteredImages.map((image) => (
@@ -179,13 +181,13 @@ function VideoEditorMediaPanel({
                         <span className="video-editor-media-picker-thumb">
                           <img src={image.sourceUrl} alt="" loading="lazy" />
                         </span>
-                        <span><strong>{image.label}</strong><em>画布图片</em></span>
+                        <span><strong>{image.label}</strong><em>{t('图片')}</em></span>
                         <Icon icon="lucide:plus" width={14} height={14} />
                       </button>
                     ))}
                     {((addMenu === 'library' && filteredAssets.length === 0)
                       || (addMenu === 'canvas' && filteredImages.length === 0)) && (
-                      <div className="video-editor-media-picker-empty">没有可用素材</div>
+                      <div className="video-editor-media-picker-empty">{t('没有可用素材')}</div>
                     )}
                   </div>
                 </>
@@ -195,11 +197,11 @@ function VideoEditorMediaPanel({
         </div>
       </div>
       <div className="video-editor-media-tools">
-        <div className="video-editor-media-filters" role="tablist" aria-label="素材类型">
+        <div className="video-editor-media-filters" role="tablist" aria-label={t('素材类型')}>
           {([
-            ['all', '全部'],
-            ['video', '视频'],
-            ['image', '图片'],
+            ['all', t('全部')],
+            ['video', t('视频')],
+            ['image', t('图片')],
           ] as const).map(([filter, label]) => (
             <button
               type="button"
@@ -217,11 +219,11 @@ function VideoEditorMediaPanel({
           <Icon icon="lucide:search" width={13} height={13} />
           <input
             value={mediaQuery}
-            placeholder="搜索工程素材"
+            placeholder={t('搜索工程素材')}
             onChange={(event) => setMediaQuery(event.target.value)}
           />
           {mediaQuery && (
-            <button type="button" onClick={() => setMediaQuery('')} aria-label="清空搜索">
+            <button type="button" onClick={() => setMediaQuery('')} aria-label={t('清空搜索')}>
               <Icon icon="lucide:x" width={12} height={12} />
             </button>
           )}
@@ -237,11 +239,11 @@ function VideoEditorMediaPanel({
               onClick={onUploadSticker}
             >
               <Icon icon={uploadingSticker ? 'lucide:loader-circle' : 'lucide:upload'} width={15} height={15} />
-              {uploadingSticker ? '正在导入…' : '上传本地贴图'}
+              {uploadingSticker ? t('正在导入…') : t('上传本地贴图')}
             </button>
 
             <div className="video-editor-layer-section-head">
-              <span>项目图片节点</span>
+              <span>{t('项目图片节点')}</span>
               <em>{stickerImages.length}</em>
             </div>
             {stickerImages.length > 0 ? (
@@ -261,23 +263,23 @@ function VideoEditorMediaPanel({
             ) : (
               <div className="video-editor-layer-empty compact">
                 <Icon icon="lucide:image-off" width={18} height={18} />
-                <span>{projectImages.length === 0 ? '当前项目还没有可用的图片节点' : '没有匹配的图片节点'}</span>
+                <span>{projectImages.length === 0 ? t('当前项目还没有可用的图片节点') : t('没有匹配的图片节点')}</span>
               </div>
             )}
 
             <p className="video-editor-layer-hint">
-              点击即可作为贴图加入叠加轨；位置、缩放与不透明度在右侧「属性 → 画面」中调整。
+              {t('点击即可作为贴图加入叠加轨；位置、缩放与不透明度在右侧「属性 → 画面」中调整')}
             </p>
 
             <div className="video-editor-layer-section-head">
-              <span>工程内图片片段</span>
+              <span>{t('工程内图片片段')}</span>
               <em>{visibleClips.length}</em>
             </div>
           </div>
         )}
         {visibleClips.length === 0 && (
           <div className="video-editor-panel-empty">
-            {clips.length === 0 ? '工程内暂无素材' : '没有匹配的素材'}
+            {clips.length === 0 ? t('工程内暂无素材') : t('没有匹配的素材')}
           </div>
         )}
         {visibleClips.map((clip) => {
@@ -307,7 +309,7 @@ function VideoEditorMediaPanel({
                   {sourceIndex + 1}. {clip.fileName}
                 </span>
                 <span className="video-editor-media-sub">
-                  {clip.kind === 'image' ? '图片' : '视频'} · {getClipDuration(clip).toFixed(1)}s
+                  {t(clip.kind === 'image' ? '图片 · {time}s' : '视频 · {time}s', { time: getClipDuration(clip).toFixed(1) })}
                 </span>
               </div>
             </button>
@@ -318,18 +320,18 @@ function VideoEditorMediaPanel({
       {visibleClips.length > 0 && (
         <div className="video-editor-media-drag-hint">
           <Icon icon="lucide:mouse-pointer-2" width={12} height={12} />
-          拖动素材到时间轴可调整位置与层级
+          {t('拖动素材到时间轴可调整位置与层级')}
         </div>
       )}
 
       {undecodable.length > 0 && (
         <div className="video-editor-panel-warning">
-          有 {undecodable.length} 个片段当前系统无法解码，缩略图不可用；直通裁剪导出仍可进行。
+          {t('有 {count} 个片段当前系统无法解码，缩略图不可用；直通裁剪导出仍可进行', { count: undecodable.length })}
         </div>
       )}
       {failed.length > 0 && (
         <div className="video-editor-panel-warning">
-          有 {failed.length} 个片段读取失败：{getSource(failed[0])?.error}
+          {t('有 {count} 个片段读取失败：{detail}', { count: failed.length, detail: getSource(failed[0])?.error ?? '' })}
         </div>
       )}
     </aside>

@@ -5,10 +5,12 @@
  * 也能随片段宽度自适应拉伸。
  */
 import { memo } from 'react';
+import { useT } from '../../i18n';
 
 function VideoEditorWaveform({ peaks }: { peaks: number[] }) {
+  const t = useT();
   if (peaks.length === 0) {
-    return <div className="video-editor-waveform-empty">解析波形中…</div>;
+    return <div className="video-editor-waveform-empty">{t('解析波形中…')}</div>;
   }
 
   // 上下对称的包络：viewBox 用 0–100 归一化，交给 CSS 拉伸到片段宽度

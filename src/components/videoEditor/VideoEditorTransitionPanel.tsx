@@ -6,6 +6,7 @@
  */
 import { memo, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
+import { useT } from '../../i18n';
 import VideoEditorAiTransitionPanel from './VideoEditorAiTransitionPanel';
 import type { VideoEditorModelOption } from '../../services/videoEditorWindowService';
 import type { VideoEditorClip, VideoEditorTransitionKind } from '../../types/videoEditor';
@@ -47,6 +48,7 @@ function VideoEditorTransitionPanel({
   onRefreshAiModels,
   onGenerateAiTransition,
 }: VideoEditorTransitionPanelProps) {
+  const t = useT();
   const transition = clip?.transitionIn ?? { kind: 'none' as const, duration: 0.5 };
   const continuousEditHandlers = {
     onPointerDown: onBeginInteraction,
@@ -64,14 +66,14 @@ function VideoEditorTransitionPanel({
   return (
     <div className="video-editor-inspect-group">
       <div className="video-editor-inspect-title">
-        转场（与前一段）
-        {locked && <span className="video-editor-inspect-badge">已锁定</span>}
+        {t('转场')}{t('与前一段')}
+        {locked && <span className="video-editor-inspect-badge">{t('已锁定')}</span>}
       </div>
 
       {clip ? (
         <>
           <label className="video-editor-inspect-slider">
-            <span>类型</span>
+            <span>{t('类型')}</span>
             <select
               value={transition.kind}
               disabled={locked}
@@ -81,13 +83,13 @@ function VideoEditorTransitionPanel({
                 transition.duration,
               )}
             >
-              <option value="none">硬切</option>
-              <option value="dissolve">交叠淡入</option>
-              <option value="fade">黑场淡入</option>
+              <option value="none">{t('硬切')}</option>
+              <option value="dissolve">{t('交叠淡入')}</option>
+              <option value="fade">{t('黑场淡入')}</option>
             </select>
           </label>
           <label className="video-editor-inspect-slider">
-            <span>时长</span>
+            <span>{t('时长')}</span>
             <input
               type="range"
               min={MIN_TRANSITION_DURATION}
@@ -117,7 +119,7 @@ function VideoEditorTransitionPanel({
       ) : (
         <div className="video-editor-layer-empty">
           <Icon icon="lucide:mouse-pointer-2" width={20} height={20} />
-          <span>选中一个片段后设置它与前一段之间的转场</span>
+          <span>{t('选中一个片段后设置它与前一段之间的转场')}</span>
         </div>
       )}
     </div>

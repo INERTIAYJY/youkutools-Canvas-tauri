@@ -12,6 +12,7 @@ import chat from './chat';
 import nodes from './nodes';
 import series from './series';
 import projectSettings from './projectSettings';
+import videoEditor from './videoEditor';
 
 const enUS: Record<string, string> = {
   ...common,
@@ -24,6 +25,7 @@ const enUS: Record<string, string> = {
   ...nodes,
   ...series,
   ...projectSettings,
+  ...videoEditor,
 };
 
 export default enUS;

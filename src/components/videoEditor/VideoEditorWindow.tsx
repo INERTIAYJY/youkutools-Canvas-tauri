@@ -77,7 +77,7 @@ import VideoEditorMediaPanel from './VideoEditorMediaPanel';
 import VideoEditorInspector, { type VideoEditorInspectorTab } from './VideoEditorInspector';
 import { resolveClipUrl, useVideoEditorSources } from './useVideoEditorSources';
 import { useTimelineHistory } from './useTimelineHistory';
-import { setLocale } from '../../i18n';
+import { setLocale, useT } from '../../i18n';
 import {
   createTrack,
   duplicateClipInTracks,
@@ -179,25 +179,31 @@ async function withStage<T>(stage: string, run: () => Promise<T>): Promise<T> {
 }
 
 /** 把失败详情摊在界面上并支持一键复制——这个窗口开不了 devtools */
-function FailureReport({ failure, fallback }: { failure: EditorFailure | null; fallback: string }) {
+function FailureReport({ failure, fallback, copyDetailsLabel, stackLabel, failedSuffix }: {
+  failure: EditorFailure | null;
+  fallback: string;
+  copyDetailsLabel: string;
+  stackLabel: string;
+  failedSuffix: string;
+}) {
   if (!failure) return <span>{fallback}</span>;
 
   const full = `[${failure.stage}] ${failure.message}\n${failure.detail}`;
   return (
     <div className="video-editor-failure">
       <div className="video-editor-failure-line">
-        <strong>{failure.stage}失败：</strong>{failure.message}
+        <strong>{failure.stage}{failedSuffix}</strong>{failure.message}
         <button
           type="button"
           className="video-editor-failure-copy"
           onClick={() => { void navigator.clipboard?.writeText(full).catch(() => {}); }}
         >
-          复制详情
+          {copyDetailsLabel}
         </button>
       </div>
       {failure.detail && failure.detail !== failure.message && (
         <details className="video-editor-failure-detail">
-          <summary>调用栈</summary>
+          <summary>{stackLabel}</summary>
           <pre>{failure.detail}</pre>
         </details>
       )}
@@ -227,12 +233,13 @@ function readSessionParams(): SessionParams | null {
 }
 
 export default function VideoEditorWindow() {
+  const t = useT();
   const session = useMemo(() => readSessionParams(), []);
 
   // 会话参数缺失是渲染前就能判定的，直接作为初始状态，不必绕一圈 effect
   const [phase, setPhase] = useState<EditorPhase>(session ? 'loading' : 'error');
   const [failure, setFailure] = useState<EditorFailure | null>(
-    session ? null : { stage: '启动', message: '缺少必要的会话参数，无法打开编辑器', detail: '' },
+    session ? null : { stage: '启动', message: t('缺少必要的会话参数，无法打开编辑器'), detail: '' },
   );
   const [record, setRecord] = useState<VideoEditorProjectRecord | null>(null);
   const [projectImages, setProjectImages] = useState<VideoEditorProjectImageSource[]>([]);
@@ -468,12 +475,12 @@ export default function VideoEditorWindow() {
   const handleSplit = useCallback(() => {
     if (!videoTrack) return;
     if (videoTrack.locked) {
-      setNotice('轨道已锁定，无法分割片段');
+      setNotice(t('轨道已锁定，无法分割片段'));
       return;
     }
     const split = splitClipsAt(videoTrack.clips, playhead);
     if (!split) {
-      setNotice('当前播放头不在可分割的位置');
+      setNotice(t('当前播放头不在可分割的位置'));
       return;
     }
     setNotice(null);
@@ -481,37 +488,37 @@ export default function VideoEditorWindow() {
     updateTracks((current) => current.map((track) => (
       track.id === videoTrack.id ? { ...track, clips: split } : track
     )));
-  }, [commitChange, playhead, updateTracks, videoTrack]);
+  }, [commitChange, playhead, t, updateTracks, videoTrack]);
 
   const handleDeleteSelected = useCallback(() => {
     if (selectedClipIds.length === 0) return;
     const deletableIds = selectedClipIds.filter((clipId) => !isClipLocked(tracksRef.current, clipId));
     if (deletableIds.length === 0) {
-      setNotice('选中片段所在轨道已锁定');
+      setNotice(t('选中片段所在轨道已锁定'));
       return;
     }
     const deletable = new Set(deletableIds);
     const remainingVideoCount = allClips
       .filter((clip) => clip.kind !== 'text' && !deletable.has(clip.id)).length;
     if (remainingVideoCount === 0) {
-      setNotice('至少要保留一个片段');
+      setNotice(t('至少要保留一个片段'));
       return;
     }
     setNotice(null);
     commitChange();
     updateTracks((current) => removeClipsFromTracks(current, deletableIds));
     setSelectedClipIds((current) => current.filter((clipId) => !deletable.has(clipId)));
-  }, [allClips, commitChange, selectedClipIds, updateTracks]);
+  }, [allClips, commitChange, selectedClipIds, t, updateTracks]);
 
   const handleDuplicateClip = useCallback((clipId: string) => {
     if (isClipLocked(tracksRef.current, clipId)) {
-      setNotice('轨道已锁定，无法复制片段');
+      setNotice(t('轨道已锁定，无法复制片段'));
       return;
     }
     setNotice(null);
     commitChange();
     updateTracks((current) => duplicateClipInTracks(current, clipId));
-  }, [commitChange, updateTracks]);
+  }, [commitChange, t, updateTracks]);
 
   /** 改选中片段的某个属性；这些改动都会让导出切到合成路径 */
   const patchSelectedClip = useCallback((patch: (clip: VideoEditorClip) => VideoEditorClip) => {
@@ -586,11 +593,11 @@ export default function VideoEditorWindow() {
       setProjectImages((current) => [source, ...current]);
       handleAddSticker(source);
     } catch (reason) {
-      setNotice(reason instanceof Error ? `贴图导入失败：${reason.message}` : '贴图导入失败');
+      setNotice(reason instanceof Error ? t('贴图导入失败：{message}', { message: reason.message }) : t('贴图导入失败'));
     } finally {
       setUploadingSticker(false);
     }
-  }, [handleAddSticker, record, uploadingSticker]);
+  }, [handleAddSticker, record, t, uploadingSticker]);
 
   const handleAddVideoSource = useCallback((source: {
     fileName: string;
@@ -669,11 +676,11 @@ export default function VideoEditorWindow() {
         });
       }
     } catch (reason) {
-      setNotice(reason instanceof Error ? `素材导入失败：${reason.message}` : '素材导入失败');
+      setNotice(reason instanceof Error ? t('素材导入失败：{message}', { message: reason.message }) : t('素材导入失败'));
     } finally {
       setAddingMedia(false);
     }
-  }, [addingMedia, handleAddSticker, handleAddVideoSource, record]);
+  }, [addingMedia, handleAddSticker, handleAddVideoSource, record, t]);
 
   const handlePatchText = useCallback((patch: Partial<VideoEditorTextStyle>) => {
     patchSelectedClip((clip) => {
@@ -690,13 +697,13 @@ export default function VideoEditorWindow() {
 
   const handleMoveTrack = useCallback((trackId: string, direction: -1 | 1) => {
     if (isTrackLocked(tracksRef.current, trackId)) {
-      setNotice('请先解锁轨道再调整层级');
+      setNotice(t('请先解锁轨道再调整层级'));
       return;
     }
     setNotice(null);
     commitChange();
     persistTracks(moveTrack(tracksRef.current, trackId, direction));
-  }, [commitChange, persistTracks]);
+  }, [commitChange, persistTracks, t]);
 
   const handleMoveClip = useCallback((clipId: string, targetIndex: number) => {
     if (!videoTrack) return;
@@ -961,12 +968,12 @@ export default function VideoEditorWindow() {
           onStage: setExportStage,
           onAudioMode: (mode, reason) => {
             audioNote = mode === 'encode'
-              ? '音频已重新混流（AAC）'
+              ? t('音频已重新混流（AAC）')
               : mode === 'copy'
-                ? '音频以原始分组直通保留，未重编码'
+                ? t('音频以原始分组直通保留，未重编码')
                 : mode === 'pcm'
-                  ? `音频已混流为未压缩 PCM 音轨：${reason ?? ''}`
-                  : `未输出音轨：${reason ?? '无可用音频'}`;
+                  ? t('音频已混流为未压缩 PCM 音轨：{reason}', { reason: reason ?? '' })
+                  : t('未输出音轨：{reason}', { reason: reason ?? t('无可用音频') });
           },
           signal: controller.signal,
         }));
@@ -974,9 +981,11 @@ export default function VideoEditorWindow() {
 
       if (compositing) {
         bytes = await runComposite();
-        notes.push(`已合成导出 ${allClips.length} 个片段 · ${canvasSize.width}×${canvasSize.height} · ${exportFrameRate}fps`);
-        if (mixedSources) notes.push('素材分辨率或编码不一致，已归一到同一画布');
-        notes.push('画面经过一次重编码');
+        notes.push(t('已合成导出 {count} 个片段 · {width}×{height} · {fps}fps', {
+          count: allClips.length, width: canvasSize.width, height: canvasSize.height, fps: exportFrameRate,
+        }));
+        if (mixedSources) notes.push(t('素材分辨率或编码不一致，已归一到同一画布'));
+        notes.push(t('画面经过一次重编码'));
         if (audioNote) notes.push(audioNote);
       } else {
         // 简单时间轴走无损直通，避免无谓的画质损失
@@ -995,20 +1004,26 @@ export default function VideoEditorWindow() {
           bytes = result.bytes;
 
           const drift = clips[0].sourceIn - result.actualStart;
-          notes.push(`已无损导出 ${clips.length} 个片段，共 ${timelineDuration.toFixed(2)}s`);
+          notes.push(t('已无损导出 {count} 个片段，共 {time}s', {
+            count: clips.length, time: timelineDuration.toFixed(2),
+          }));
           if (drift > 0.05) {
-            notes.push(`首段按关键帧对齐，实际入点 ${result.actualStart.toFixed(2)}s（比设定早 ${drift.toFixed(2)}s）`);
+            notes.push(t('首段按关键帧对齐，实际入点 {actual}s（比设定早 {drift}s）', {
+              actual: result.actualStart.toFixed(2), drift: drift.toFixed(2),
+            }));
           }
           notes.push(result.audioKept
-            ? '音轨已按原始分组直通保留'
-            : `未输出音轨：${result.audioDropReason ?? '未知原因'}`);
+            ? t('音轨已按原始分组直通保留')
+            : t('未输出音轨：{reason}', { reason: result.audioDropReason ?? t('未知原因') }));
         } catch (reason) {
           if (reason instanceof VideoExportCanceledError) throw reason;
           // 直通做不到（例如素材参数不一致）不该把死路甩给用户，自动改走合成
           console.warn('[videoEditor] 无损直通不可用，改走合成:', reason);
           setExportProgress(0);
           bytes = await runComposite();
-          notes.push(`无损直通不可用，已改用合成导出 · ${canvasSize.width}×${canvasSize.height} · ${exportFrameRate}fps`);
+          notes.push(t('无损直通不可用，已改用合成导出 · {width}×{height} · {fps}fps', {
+            width: canvasSize.width, height: canvasSize.height, fps: exportFrameRate,
+          }));
           if (audioNote) notes.push(audioNote);
           notes.push(reason instanceof Error ? reason.message : String(reason));
         }
@@ -1018,10 +1033,10 @@ export default function VideoEditorWindow() {
       if (destination === 'local') {
         const savedPath = await withStage('保存到本地', () => saveBinaryToLocalFile(bytes, fileName));
         if (!savedPath) {
-          setNotice('已取消保存到本地');
+          setNotice(t('已取消保存到本地'));
           return;
         }
-        notes.push(`已保存到本地：${fileName}`);
+        notes.push(t('已保存到本地：{fileName}', { fileName }));
       } else {
         const saved = await withStage('写入项目目录', async () => {
           const result = await saveBinaryToProjectData(bytes, record.projectId, fileName);
@@ -1038,7 +1053,7 @@ export default function VideoEditorWindow() {
           width: compositing ? canvasSize.width : (firstSized?.width ?? 0),
           height: compositing ? canvasSize.height : (firstSized?.height ?? 0),
         }));
-        notes.push('已创建画布视频节点');
+        notes.push(t('已创建画布视频节点'));
       }
 
       setNotice(notes.join('；'));
@@ -1056,7 +1071,7 @@ export default function VideoEditorWindow() {
     }
   }, [
     canvasSize, clips, compositing, exportFrameRate, firstSized?.height, firstSized?.width,
-    mixedSources, record, session, timelineDuration, tracks,
+    mixedSources, record, session, t, timelineDuration, tracks,
   ]);
 
   /**
@@ -1150,7 +1165,9 @@ export default function VideoEditorWindow() {
         width: canvasSize.width,
         height: canvasSize.height,
       }));
-      setNotice(`已导出 ${playhead.toFixed(2)}s 的画面为图片节点 · ${canvasSize.width}×${canvasSize.height}`);
+      setNotice(t('已导出 {time}s 的画面为图片节点 · {width}×{height}', {
+        time: playhead.toFixed(2), width: canvasSize.width, height: canvasSize.height,
+      }));
     } catch (reason) {
       setFailure(describeFailure('导出当前帧', reason));
       console.error('[videoEditor] 导出当前帧失败:', reason);
@@ -1159,7 +1176,7 @@ export default function VideoEditorWindow() {
     }
   }, [
     allTimelineClips.length, canvasSize, exporting, exportingFrame, playhead,
-    record, renderTimelineFramePng, session,
+    record, renderTimelineFramePng, session, t,
   ]);
 
   /** 主窗口回传的 AI 转场落到主轨上：插在触发它的片段之前 */
@@ -1218,7 +1235,7 @@ export default function VideoEditorWindow() {
       setAiTransitionStatus(null);
 
       if (payload.error || !payload.videoUrl) {
-        setAiTransitionError(payload.error || 'AI 转场生成失败');
+        setAiTransitionError(payload.error || t('AI 转场生成失败'));
         return;
       }
       const inserted = insertAiTransitionClip(pending.beforeClipId, {
@@ -1226,15 +1243,15 @@ export default function VideoEditorWindow() {
         filePath: typeof payload.filePath === 'string' ? payload.filePath : undefined,
         fileName: payload.fileName || 'AI 转场',
       });
-      setAiTransitionError(inserted ? null : '转场已生成，但原片段已不在主轨上，未能插入');
-      if (inserted) setNotice('AI 转场已插入主轨');
+      setAiTransitionError(inserted ? null : t('转场已生成，但原片段已不在主轨上，未能插入'));
+      if (inserted) setNotice(t('AI 转场已插入主轨'));
     });
 
     void postVideoEditorModelsRequest(session.instanceId).catch((reason) => {
       console.error('[videoEditor] 请求视频模型列表失败:', reason);
     });
     return unsubscribe;
-  }, [insertAiTransitionClip, session]);
+  }, [insertAiTransitionClip, session, t]);
 
   /**
    * 时间轴接缝上的按钮：没有转场先补一个默认交叠淡入，已有的直接跳去编辑。
@@ -1280,15 +1297,15 @@ export default function VideoEditorWindow() {
     const targetId = selectedClipIds[0] ?? activeClip?.id;
     const index = mainTrack ? mainTrack.clips.findIndex((clip) => clip.id === targetId) : -1;
     if (!mainTrack || index < 0) {
-      setAiTransitionError('请先在主轨上选中一个片段');
+      setAiTransitionError(t('请先在主轨上选中一个片段'));
       return;
     }
     if (index === 0) {
-      setAiTransitionError('首个片段之前没有画面可衔接，请选中第二段及之后的片段');
+      setAiTransitionError(t('首个片段之前没有画面可衔接，请选中第二段及之后的片段'));
       return;
     }
     if (mainTrack.locked) {
-      setAiTransitionError('主轨已锁定，无法插入转场');
+      setAiTransitionError(t('主轨已锁定，无法插入转场'));
       return;
     }
 
@@ -1296,7 +1313,7 @@ export default function VideoEditorWindow() {
     setAiTransitionBusy(true);
     setAiTransitionError(null);
     setFailure(null);
-    setAiTransitionStatus('正在取首尾帧…');
+    setAiTransitionStatus(t('正在取首尾帧…'));
 
     try {
       // 已有的预设转场会让边界附近的画面处在淡入中，取到的参考帧就是半透明的。
@@ -1322,7 +1339,7 @@ export default function VideoEditorWindow() {
       );
 
       const stamp = Date.now().toString(36);
-      setAiTransitionStatus('正在暂存首尾帧…');
+      setAiTransitionStatus(t('正在暂存首尾帧…'));
       const savedFirst = await saveBinaryToProjectData(
         firstFrame, record.projectId, `AI转场首帧-${stamp}.png`,
       );
@@ -1333,7 +1350,7 @@ export default function VideoEditorWindow() {
 
       const requestId = `ait-${stamp}-${Math.random().toString(36).slice(2, 8)}`;
       aiTransitionRef.current = { requestId, beforeClipId: target.id };
-      setAiTransitionStatus('已提交主窗口，正在生成转场…');
+      setAiTransitionStatus(t('已提交主窗口，正在生成转场…'));
       await postVideoEditorAiTransitionRequest(session.instanceId, {
         requestId,
         prompt: options.prompt,
@@ -1354,7 +1371,7 @@ export default function VideoEditorWindow() {
     }
   }, [
     activeClip?.id, aiTransitionBusy, record, renderTimelineFramePng,
-    selectedClipIds, session,
+    selectedClipIds, session, t,
   ]);
 
   const closeWindow = useCallback(async () => {
@@ -1370,10 +1387,10 @@ export default function VideoEditorWindow() {
   return (
     <div className="video-editor-root">
       <header className="video-editor-header" data-tauri-drag-region>
-        <h1 className="video-editor-title">{record?.name || '视频编辑器'}</h1>
+        <h1 className="video-editor-title">{record?.name || t('视频编辑器')}</h1>
           {activeProbe && (
             <span className="video-editor-meta">
-              {activeProbe.width}×{activeProbe.height} · {allClips.length} 个片段 ·{' '}
+              {activeProbe.width}×{activeProbe.height} · {allClips.length}{t('个片段')} ·{' '}
               {timelineDuration.toFixed(2)}s
             </span>
           )}
@@ -1381,14 +1398,14 @@ export default function VideoEditorWindow() {
           {exporting ? (
             <>
               <span className="video-editor-progress">
-                {exportStage ?? '导出中'} {Math.round(exportProgress * 100)}%
+                {exportStage ?? t('导出中')} {Math.round(exportProgress * 100)}%
               </span>
               <button
                 type="button"
                 className="video-editor-btn"
                 onClick={() => exportAbortRef.current?.abort()}
               >
-                取消
+                {t('取消')}
               </button>
             </>
           ) : (
@@ -1398,10 +1415,10 @@ export default function VideoEditorWindow() {
                 className="video-editor-btn"
                 onClick={() => { void handleExportFrame(); }}
                 disabled={phase !== 'ready' || allClips.length === 0 || exportingFrame}
-                title="把播放头所在的画面导出为画布图片节点"
+                title={t('把播放头所在的画面导出为画布图片节点')}
               >
                 <Icon icon="lucide:image-down" width={13} height={13} />
-                {exportingFrame ? '导出当前帧…' : '导出当前帧'}
+                {exportingFrame ? t('导出当前帧…') : t('导出当前帧')}
               </button>
               <button
                 type="button"
@@ -1410,7 +1427,7 @@ export default function VideoEditorWindow() {
                 disabled={phase !== 'ready' || allClips.length === 0 || exportingFrame}
               >
                 <Icon icon="lucide:download" width={13} height={13} />
-                导出到本地
+                {t('导出到本地')}
               </button>
               <button
                 type="button"
@@ -1419,7 +1436,7 @@ export default function VideoEditorWindow() {
                 disabled={phase !== 'ready' || allClips.length === 0 || exportingFrame}
               >
                 <Icon icon="lucide:upload" width={13} height={13} />
-                导出为新节点
+                {t('导出为新节点')}
               </button>
             </>
           )}
@@ -1427,7 +1444,7 @@ export default function VideoEditorWindow() {
             type="button"
             className="video-editor-winbtn"
             onClick={() => { void minimizeWindow(); }}
-            aria-label="最小化"
+            aria-label={t('最小化')}
           >
             <svg width="10" height="10" viewBox="0 0 10 10">
               <rect x="0" y="5" width="10" height="1" fill="currentColor" />
@@ -1437,7 +1454,7 @@ export default function VideoEditorWindow() {
             type="button"
             className="video-editor-winbtn close"
             onClick={() => { void closeWindow(); }}
-            aria-label="关闭"
+            aria-label={t('关闭')}
           >
             <svg width="10" height="10" viewBox="0 0 10 10">
               <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" />
@@ -1449,17 +1466,17 @@ export default function VideoEditorWindow() {
 
       {phase === 'error' && (
         <div className="video-editor-error">
-          <FailureReport failure={failure} fallback="编辑器加载失败" />
+          <FailureReport failure={failure} fallback={t('编辑器加载失败')} copyDetailsLabel={t('复制详情')} stackLabel={t('调用栈')} failedSuffix={t('失败：')} />
         </div>
       )}
 
-      {phase === 'loading' && <div className="video-editor-loading">正在载入素材…</div>}
+      {phase === 'loading' && <div className="video-editor-loading">{t('正在载入素材…')}</div>}
 
       {phase === 'ready' && record && (
         <>
           {failure && (
             <div className="video-editor-error inline">
-              <FailureReport failure={failure} fallback="导出失败" />
+              <FailureReport failure={failure} fallback={t('导出失败')} copyDetailsLabel={t('复制详情')} stackLabel={t('调用栈')} failedSuffix={t('失败：')} />
             </div>
           )}
           {notice && <div className="video-editor-notice">{notice}</div>}

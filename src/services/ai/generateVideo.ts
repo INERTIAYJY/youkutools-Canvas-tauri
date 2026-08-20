@@ -26,6 +26,7 @@ import {
   warnIfTooManyReferences,
 } from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
+import type { ApimartSeedanceCapability } from './apimartVideoModels';
 import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { normalizeFrames8n1, type ModelProtocolVariables } from './modelProtocol';
@@ -41,6 +42,10 @@ import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
 import { resolveMediaReferenceUrl } from '../uploadService';
 import { mapVideoParameters } from './videoParameterMappings';
+import {
+  getVolcengineSeedanceCapability,
+  isVolcengineSeedance25Model,
+} from './volcengineVideoModels';
 
 export function resolveVideoGenerationOperation(
   imageUrls: readonly string[],
@@ -181,7 +186,7 @@ function assertVideoOperationSupported(
  */
 export function assertVideoReferenceLimits(
   referenceInput: VideoGenerationReferenceInput,
-  capability: VideoModelCapability | undefined,
+  capability: VideoModelCapability | ApimartSeedanceCapability | undefined,
   modelName: string,
 ): void {
   if (!capability) return;
@@ -365,29 +370,42 @@ export async function generateVideo(
     }
     const modelName = extractModelName(model, provider);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
-    assertVideoOperationSupported(referenceInput, '火山方舟当前视频接口');
+    const isSeedance25 = isVolcengineSeedance25Model(modelName);
+    const capability = getVolcengineSeedanceCapability(modelName);
+    if (capability) {
+      assertVideoReferenceLimits(referenceInput, capability, '火山方舟当前视频模型');
+    }
+    if (!isSeedance25) {
+      assertVideoOperationSupported(referenceInput, '火山方舟当前视频接口');
+    }
     const resolvedPrompt = referenceInput.prompt;
-    const mergedImageUrls = referenceInput.imageUrls;
-    if (!resolvedPrompt.trim() && mergedImageUrls.length === 0) {
+    const requestReferences = (referenceInput.references ?? [])
+      .filter((reference) => isSeedance25 || reference.kind === 'image');
+    if (!resolvedPrompt.trim() && requestReferences.length === 0) {
       throw new Error('提示词不能为空');
     }
-    const remoteImageUrls = await resolveImageUrlArray(mergedImageUrls, 'volcengine');
-    // 手动挑过首/尾帧时保留其角色；其余图片由请求构造器标为 reference_image。
-    // Seedance 2.0 要求每个 image_url 都显式携带 role，不能省略。
-    const frameRoles = hasManualFrameRoles(resolveVideoNodeReferences(params.nodeId))
-      ? mergedImageUrls.map((url) => {
-        const role = (referenceInput.references ?? [])
-          .find((reference) => reference.kind === 'image' && getMediaReferenceUrl(reference) === url)?.role;
-        return role === 'first_frame' || role === 'last_frame' ? role : undefined;
-      })
-      : [];
+    const preserveFrameRoles = hasManualFrameRoles([
+      ...(params.referenceMedia ?? []),
+      ...resolveVideoNodeReferences(params.nodeId),
+    ]);
+    const remoteReferences = await Promise.all(requestReferences.map(async (reference) => {
+      const sourceUrl = getMediaReferenceUrl(reference);
+      const url = reference.kind === 'image'
+        ? (await resolveImageUrlArray([sourceUrl], 'volcengine'))[0]
+        : await resolveMediaReferenceUrl(sourceUrl, {
+          provider: 'volcengine',
+          kind: reference.kind,
+          mode: 'publicUrl',
+        });
+      return { ...reference, url };
+    }));
     return generateVolcengineVideo(
       apiKey,
       baseUrl,
       modelName,
       resolvedPrompt,
-      remoteImageUrls,
-      frameRoles,
+      remoteReferences,
+      preserveFrameRoles,
       params,
       signal,
     );
@@ -458,9 +476,8 @@ async function generateVolcengineVideo(
   baseUrl: string,
   modelName: string,
   prompt: string,
-  imageUrls: string[],
-  /** 与 imageUrls 一一对应的首/尾帧指派，缺省表示不写 role */
-  imageFrameRoles: Array<'first_frame' | 'last_frame' | undefined>,
+  references: readonly MediaReference[],
+  preserveFrameRoles: boolean,
   params: AIVideoGenParams,
   externalSignal?: AbortSignal,
 ): Promise<{ url: string }> {
@@ -488,23 +505,13 @@ async function generateVolcengineVideo(
       }
     }
 
-    const content = buildVolcengineVideoContent(prompt, imageUrls, imageFrameRoles);
-
-    // 构建请求体 — 直接使用 Seedance 原生参数
-    const ratio = params.seedanceRatio || '16:9';
-    const duration = params.seedanceDuration ?? 5;
-    const resolution = params.seedanceResolution || '720p';
-    const requestBody = mapVideoParameters('volcengine', modelName, {
-      model: modelName,
-      aspectRatio: ratio,
-      duration,
-      resolution,
-    });
-    requestBody.content = content;
-    requestBody.watermark = false;
-    if (params.generateAudio) {
-      requestBody.generate_audio = true;
-    }
+    const requestBody = buildVolcengineVideoRequestBody(
+      modelName,
+      prompt,
+      references,
+      preserveFrameRoles,
+      params,
+    );
 
     // 提交任务
     const apiUrl = `${baseUrl}/contents/generations/tasks`;
@@ -583,19 +590,87 @@ async function generateVolcengineVideo(
 
 export function buildVolcengineVideoContent(
   prompt: string,
-  imageUrls: readonly string[],
-  imageFrameRoles: ReadonlyArray<'first_frame' | 'last_frame' | undefined>,
+  references: readonly MediaReference[],
+  preserveFrameRoles: boolean,
 ): Array<Record<string, unknown>> {
   const content: Array<Record<string, unknown>> = [];
   if (prompt.trim()) {
     content.push({ type: 'text', text: prompt.trim() });
   }
-  imageUrls.forEach((url, index) => {
+  references.forEach((reference) => {
+    if (reference.kind === 'image') {
+      const frameRole = preserveFrameRoles
+        && (reference.role === 'first_frame' || reference.role === 'last_frame')
+        ? reference.role
+        : undefined;
+      content.push({
+        type: 'image_url',
+        image_url: { url: reference.url },
+        role: frameRole ?? 'reference_image',
+      });
+      return;
+    }
+    if (reference.kind === 'video') {
+      content.push({
+        type: 'video_url',
+        video_url: { url: reference.url },
+        role: 'reference_video',
+      });
+      return;
+    }
     content.push({
-      type: 'image_url',
-      image_url: { url },
-      role: imageFrameRoles[index] ?? 'reference_image',
+      type: 'audio_url',
+      audio_url: { url: reference.url },
+      role: 'reference_audio',
     });
   });
   return content;
+}
+
+type VolcengineVideoRequestParams = Pick<
+  AIVideoGenParams,
+  'seedanceResolution' | 'seedanceRatio' | 'seedanceDuration' | 'generateAudio'
+>;
+
+export function buildVolcengineVideoRequestBody(
+  modelName: string,
+  prompt: string,
+  references: readonly MediaReference[],
+  preserveFrameRoles: boolean,
+  params: VolcengineVideoRequestParams,
+): Record<string, unknown> {
+  const isSeedance25 = isVolcengineSeedance25Model(modelName);
+  const hasFrame = preserveFrameRoles && references.some((reference) => (
+    reference.kind === 'image'
+    && (reference.role === 'first_frame' || reference.role === 'last_frame')
+  ));
+  const hasReferenceVideo = references.some((reference) => reference.kind === 'video');
+  const hasOmniReference = references.some((reference) => (
+    reference.kind !== 'image'
+    || !preserveFrameRoles
+    || (reference.role !== 'first_frame' && reference.role !== 'last_frame')
+  ));
+
+  const ratio = isSeedance25 && (hasFrame || hasReferenceVideo)
+    ? 'adaptive'
+    : params.seedanceRatio || '16:9';
+  const duration = isSeedance25 && hasReferenceVideo
+    ? -1
+    : params.seedanceDuration ?? 5;
+  const resolution = params.seedanceResolution || '720p';
+  const requestBody = mapVideoParameters('volcengine', modelName, {
+    model: modelName,
+    aspectRatio: ratio,
+    duration,
+    resolution,
+  });
+  requestBody.content = buildVolcengineVideoContent(prompt, references, preserveFrameRoles);
+  requestBody.watermark = false;
+  if (params.generateAudio) {
+    requestBody.generate_audio = true;
+  }
+  if (isSeedance25 && hasOmniReference) {
+    requestBody.omni_reference_task_type = 'auto';
+  }
+  return requestBody;
 }

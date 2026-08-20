@@ -68,7 +68,7 @@ const VOLCENGINE_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability
   },
   'doubao-seedance-2-5': {
     modelId: 'doubao-seedance-2-5-260628',
-    resolutions: SD_2_RESOLUTIONS,
+    resolutions: [...SD_2_RESOLUTIONS, '1080p'],
     defaultResolution: '720p',
     ratios: COMMON_RATIOS,
     defaultRatio: '16:9',
@@ -101,4 +101,8 @@ export function getVolcengineSeedanceCapability(
 
 export function isVolcengineSeedanceModel(model?: string): boolean {
   return Boolean(getVolcengineSeedanceCapability(model));
+}
+
+export function isVolcengineSeedance25Model(model?: string): boolean {
+  return Boolean(model && normalizeVolcengineModelId(model) === 'doubao-seedance-2-5');
 }

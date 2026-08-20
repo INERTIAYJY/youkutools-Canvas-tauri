@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getVolcengineSeedanceCapability,
+  isVolcengineSeedance25Model,
   isVolcengineSeedanceModel,
 } from '../../src/services/ai/volcengineVideoModels';
 
@@ -36,12 +37,14 @@ describe('volcengine Seedance capability', () => {
     expect(capability?.maxAudioReferences).toBe(3);
   });
 
-  it('resolves Seedance 2.5 with 480p/720p and 4-30s', () => {
+  it('resolves Seedance 2.5 with 480p/720p/1080p, adaptive ratio and 4-30s', () => {
     const capability = getVolcengineSeedanceCapability('volcengine/doubao-seedance-2-5-260628');
     expect(capability).toBeDefined();
     expect(capability?.modelId).toBe('doubao-seedance-2-5-260628');
-    expect(capability?.resolutions).toEqual(['480p', '720p']);
+    expect(capability?.resolutions).toEqual(['480p', '720p', '1080p']);
     expect(capability?.defaultResolution).toBe('720p');
+    expect(capability?.ratios).toContain('adaptive');
+    expect(capability?.defaultRatio).toBe('16:9');
     expect(capability?.minDuration).toBe(4);
     expect(capability?.maxDuration).toBe(30);
     expect(capability?.maxImageReferences).toBe(30);
@@ -53,6 +56,8 @@ describe('volcengine Seedance capability', () => {
     expect(isVolcengineSeedanceModel('doubao-seedance-2-5-260628')).toBe(true);
     expect(isVolcengineSeedanceModel('volcengine/DouBao-Seedance-2-5-260628')).toBe(true);
     expect(isVolcengineSeedanceModel('doubao-seedance-2-5')).toBe(true);
+    expect(isVolcengineSeedance25Model('volcengine/DouBao-Seedance-2-5-260628')).toBe(true);
+    expect(isVolcengineSeedance25Model('doubao-seedance-2-0-mini-260615')).toBe(false);
   });
 
   it('returns undefined for models without a dedicated capability entry', () => {

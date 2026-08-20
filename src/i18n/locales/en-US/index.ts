@@ -10,6 +10,7 @@ import character from './character';
 import canvas from './canvas';
 import chat from './chat';
 import nodes from './nodes';
+import series from './series';
 
 const enUS: Record<string, string> = {
   ...common,
@@ -20,6 +21,7 @@ const enUS: Record<string, string> = {
   ...canvas,
   ...chat,
   ...nodes,
+  ...series,
 };
 
 export default enUS;

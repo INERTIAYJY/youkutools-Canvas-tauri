@@ -16,6 +16,19 @@ const canvas = {
   '打开项目文件夹': 'Open project folder',
   '删除': 'Delete',
 
+  // ── NodeContextMenu 静态菜单项（补齐之前缺失的 key） ──
+  '创建副本': 'Duplicate',
+  '解除分组': 'Ungroup',
+  '转换图片': 'Convert image',
+  '添加到角色库…': 'Add to character library…',
+  '复制媒体': 'Copy media',
+  '在 PS 中打开': 'Open in PS',
+  '编辑视频': 'Edit video',
+  '在剪映中打开': 'Open in JianYing',
+  '在 PR 中打开': 'Open in Premiere',
+  '打开文件所在位置': 'Show in folder',
+  '另存为...': 'Save as…',
+
   // ── CanvasDrawingToolbar ──
   '画布笔记工具': 'Canvas note tools',
   '选择': 'Select',

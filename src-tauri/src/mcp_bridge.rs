@@ -536,13 +536,18 @@ struct HttpSecurity {
 fn parse_allowed_host(value: &str, port: u16) -> Option<String> {
     let parsed = url::Url::parse(&format!("http://{value}")).ok()?;
     let host = parsed.host_str()?;
-    if host != "localhost" && host.parse::<Ipv4Addr>().is_err() {
+    let normalized = host.to_ascii_lowercase();
+    if !matches!(
+        normalized.as_str(),
+        "localhost" | "host.docker.internal" | "gateway.docker.internal"
+    ) && host.parse::<Ipv4Addr>().is_err()
+    {
         return None;
     }
     if parsed.port_or_known_default()? != port {
         return None;
     }
-    Some(host.to_ascii_lowercase())
+    Some(normalized)
 }
 
 fn validate_http_headers(headers: &HeaderMap, security: &HttpSecurity) -> Result<(), StatusCode> {
@@ -1062,6 +1067,10 @@ mod tests {
         headers.insert(AUTHORIZATION, format!("Bearer {TOKEN}").parse().unwrap());
         headers.insert(HOST, "192.168.1.8:43123".parse().unwrap());
         assert_eq!(validate_http_headers(&headers, &security), Ok(()));
+
+        headers.insert(HOST, "host.docker.internal:43123".parse().unwrap());
+        assert_eq!(validate_http_headers(&headers, &security), Ok(()));
+        headers.insert(HOST, "192.168.1.8:43123".parse().unwrap());
 
         headers.insert(ORIGIN, "http://192.168.1.8:43123".parse().unwrap());
         assert_eq!(validate_http_headers(&headers, &security), Ok(()));

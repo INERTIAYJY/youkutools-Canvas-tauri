@@ -278,8 +278,8 @@ const settings = {
   '未找到本地 MCP 适配器脚本。': 'Local MCP adapter script not found.',
   '软件需保持运行，并开启上方“远程控制会话”。': 'Keep the app running and start the "remote control session" above.',
   '可达的局域网地址': 'Reachable LAN address',
-  '客户端需能访问这台电脑的局域网 IP 和所选端口，防火墙也需放行。':
-    'The client must be able to reach this computer\'s LAN IP and selected port, and the firewall must allow it.',
+  '客户端需能访问这台电脑的局域网 IP 和所选端口；Docker 可使用 host.docker.internal。':
+    'The client must be able to reach this computer\'s LAN IP and selected port; Docker can use host.docker.internal.',
   '支持 Streamable HTTP': 'Streamable HTTP support',
   '客户端需支持 Streamable HTTP MCP，并允许配置 Authorization 请求头。':
     'The client must support Streamable HTTP MCP and custom Authorization headers.',

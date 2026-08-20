@@ -2232,7 +2232,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 - 保留现有本机 stdio 模式，其内部 bridge 继续固定监听 `127.0.0.1`；新增可选 Streamable HTTP 模式，供不同机器或 Docker 内的 MCP 客户端连接。
 - Streamable HTTP 使用官方 Rust SDK `rmcp`，只在设置页明确选择远程模式并确认最大权限警告后监听 IPv4 `0.0.0.0`，endpoint 固定为 `/mcp`。
-- HTTP 请求必须携带 256 位 Bearer Token；只接受 IP literal/localhost Host，存在 Origin 时必须与 Host 同源，并保留 1 MiB 正文上限和 4 个并发请求上限。
+- HTTP 请求必须携带 256 位 Bearer Token；只接受 IP literal、localhost、`host.docker.internal` 或 `gateway.docker.internal` Host，存在 Origin 时必须与 Host 同源，并保留 1 MiB 正文上限和 4 个并发请求上限。
 - 远程与本机入口共用 `mcpControlService.ts`、Tool Registry、固定自主 Policy、AgentTask 审计、项目/revision 校验和结果脱敏，不新增直接 Store、Shell、任意 HTTP 或任意路径能力。
 - 设置页显示本机 stdio / 远程 Streamable HTTP 两种传输；远程确认明确列出永久删除、文件写入、配置写入与付费媒体生成均不会逐次审批。
 - 修复安装版显示“未找到本地 MCP 适配器脚本”：esbuild 将官方 TypeScript SDK 与适配器打成单文件 Tauri resource，运行时优先从资源目录解析，不依赖安装目录存在 `node_modules`。

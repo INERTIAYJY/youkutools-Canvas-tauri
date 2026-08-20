@@ -32,7 +32,7 @@ export const MCP_HTTP_CONNECTION_REQUIREMENTS = [
   {
     icon: 'lucide:network',
     title: '可达的局域网地址',
-    description: '客户端需能访问这台电脑的局域网 IP 和所选端口，防火墙也需放行。',
+    description: '客户端需能访问这台电脑的局域网 IP 和所选端口；Docker 可使用 host.docker.internal。',
   },
   {
     icon: 'lucide:plug-zap',

@@ -26,7 +26,7 @@ AI Canvas 的录制和批量操作需要比 Windows 坐标自动化更稳定的�
 
 ## 非功能要求
 
-- **安全性**：stdio 固定 IPv4 loopback；远程 HTTP 必须显式确认后才监听 `0.0.0.0`。两者均使用 256 位令牌；HTTP 额外要求 Bearer Token，只接受 IP literal/localhost Host，存在 Origin 时必须与 Host 同源，并限制 1 MiB 请求体与 4 个并发请求。
+- **安全性**：stdio 固定 IPv4 loopback；远程 HTTP 必须显式确认后才监听 `0.0.0.0`。两者均使用 256 位令牌；HTTP 额外要求 Bearer Token，只接受 IP literal、localhost 或固定 Docker 宿主别名，存在 Origin 时必须与 Host 同源，并限制 1 MiB 请求体与 4 个并发请求。
 - **一致性**：所有业务写入仍从主窗口 Store 发起；项目 ID、会话 ID、task ID 和 canvas revision 在执行前复核。
 - **可恢复性**：连接或适配器失败不影响应用；停止会话后待处理请求失败且不能在新会话重放。
 - **可审计性**：每个 MCP 工具调用都有 AgentTask、Policy 决策、步骤结果和可选画布 checkpoint。

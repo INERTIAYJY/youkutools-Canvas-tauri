@@ -680,6 +680,29 @@ html, body, #root {
     sans-serif;
 }
 
+/* 图形兼容模式：避开部分 Windows / WebView2 显卡驱动上的背景滤镜合成异常。
+   保留 Canvas、视频和 3D 的 GPU 加速，只将毛玻璃表面降级为不透明实色。 */
+html[data-graphics-compatibility] {
+  --glass-bg: var(--theme-surface);
+  --glass-bg-light: var(--theme-surface);
+  --glass-bg-node: var(--theme-card);
+  --glass-panel-bg: var(--theme-surface);
+  --floating-surface-bg: var(--theme-surface);
+}
+
+html[data-graphics-compatibility],
+html[data-graphics-compatibility] body,
+html[data-graphics-compatibility] #root {
+  background: var(--theme-bg);
+}
+
+html[data-graphics-compatibility] *,
+html[data-graphics-compatibility] *::before,
+html[data-graphics-compatibility] *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
 /* macOS 默认次像素渲染偏粗，灰度抗锯齿更接近系统观感；
    Windows 相反——antialiased 会关掉 ClearType，1x DPI 下小号中文糊成一团。 */
 html:not([data-os='windows']),

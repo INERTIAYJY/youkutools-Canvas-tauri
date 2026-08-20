@@ -122,6 +122,7 @@ export default function SettingsPanel() {
     );
   const sidebarFloating = config.sidebarFloating !== false; // 默认开启
   const windowGlassFrame = config.windowGlassFrame !== false; // 默认开启
+  const graphicsCompatibilityMode = config.graphicsCompatibilityMode === true;
   const interactionMode = config.interactionMode ?? 'default';
   const nodeToolbarMode = config.nodeToolbarMode ?? 'icons';
   const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
@@ -736,6 +737,46 @@ export default function SettingsPanel() {
                         {windowGlassFrame
                           ? t('显示 5px 玻璃带与双层边缘高光')
                           : t('内容贴合窗口边缘，不显示外框')}
+                      </div>
+                    </div>
+
+                    <div className="sidebar-pref-switch" aria-hidden="true">
+                      <span />
+                    </div>
+                  </button>
+                </div>
+
+                {/* 图形兼容模式 */}
+                <div>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('图形兼容性')}</h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateConfig({ graphicsCompatibilityMode: !graphicsCompatibilityMode });
+                      saveConfig();
+                    }}
+                    aria-pressed={graphicsCompatibilityMode}
+                    className={`sidebar-pref-card${graphicsCompatibilityMode ? ' is-floating' : ''}`}
+                  >
+                    <div className="sidebar-pref-window overflow-hidden" aria-hidden="true">
+                      <div
+                        className={`absolute inset-[5px] rounded-[5px] border border-canvas-border px-2 py-1.5 transition-colors duration-200 ${
+                          graphicsCompatibilityMode
+                            ? 'bg-canvas-surface'
+                            : 'bg-canvas-surface/60 backdrop-blur-md'
+                        }`}
+                      >
+                        <span className="block h-1 w-2/3 rounded-full bg-canvas-text-muted/50" />
+                        <span className="mt-1.5 block h-3 rounded-[3px] bg-indigo-500/20" />
+                      </div>
+                    </div>
+
+                    <div className="sidebar-pref-text">
+                      <div className="sidebar-pref-title">{t('图形兼容模式')}</div>
+                      <div className="sidebar-pref-desc">
+                        {graphicsCompatibilityMode
+                          ? t('已关闭毛玻璃并使用实色背景，适合出现黑块或闪烁的设备')
+                          : t('保留毛玻璃与透明效果，视觉效果更丰富')}
                       </div>
                     </div>
 

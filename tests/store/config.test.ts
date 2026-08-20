@@ -238,6 +238,37 @@ describe('config hydration guard', () => {
     expect(model).not.toHaveProperty('anthropicUrl');
   });
 
+  it('defaults graphics compatibility off and applies saved or updated preferences immediately', async () => {
+    const rootAttributes = new Set<string>();
+    vi.stubGlobal('document', {
+      documentElement: {
+        dataset: {},
+        toggleAttribute: (name: string, enabled: boolean) => {
+          if (enabled) rootAttributes.add(name);
+          else rootAttributes.delete(name);
+        },
+      },
+    });
+
+    expect(useAppStore.getState().config.graphicsCompatibilityMode).toBe(false);
+    expect(rootAttributes.has('data-graphics-compatibility')).toBe(false);
+
+    fileMocks.loadConfig.mockResolvedValue({
+      providers: {},
+      theme: 'dark',
+      graphicsCompatibilityMode: true,
+    });
+
+    await useAppStore.getState().loadConfig();
+
+    expect(rootAttributes.has('data-graphics-compatibility')).toBe(true);
+
+    useAppStore.getState().updateConfig({ graphicsCompatibilityMode: false });
+
+    expect(rootAttributes.has('data-graphics-compatibility')).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
   it('syncs and clears xAI manifest models through the unified model runtime', () => {
     useAppStore.getState().saveProviderConfig('xai', {
       name: 'xAI / Grok 官方',

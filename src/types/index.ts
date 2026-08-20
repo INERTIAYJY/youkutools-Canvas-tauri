@@ -485,6 +485,7 @@ export interface AppConfig {
   generalModels?: GeneralModelConfig[]; // 用户自建通用模型
   sidebarFloating?: boolean;  // 侧边栏是否悬浮显示（半隐于窗口边缘），默认 true
   windowGlassFrame?: boolean; // 是否显示主窗口玻璃外框，默认 true
+  graphicsCompatibilityMode?: boolean; // 图形兼容模式：关闭毛玻璃并使用实色窗口背景，默认 false
   titlebarFloating?: boolean; // 标题栏是否悬浮显示（macOS 红绿灯内移并带毛玻璃胶囊），默认 true
   mascotVisible?: boolean;   // 是否显示吉祥物，默认 false
   mascotPosition?: MascotPosition; // 吉祥物相对视口位置，未设置时使用右下角默认位置

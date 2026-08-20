@@ -1,7 +1,7 @@
 /**
  * AINodeDialog AI 生成弹窗 — 点击节点后弹出的浮动面板，包含 Prompt 输入、模型选择、参数配置、生成按钮
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
@@ -65,11 +65,12 @@ function AINodeDialog() {
   const panelRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const cancellingNodeIdsRef = useRef(new Set<string>());
+  const [isExpanded, setIsExpanded] = useState(false);
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
     const preview = previewRef.current;
-    if (!panel || !activeNodeId) return;
+    if (!panel || !activeNodeId || isExpanded) return;
 
     let scheduledFrame = 0;
     let settleTimer = 0;
@@ -205,11 +206,11 @@ function AINodeDialog() {
       window.removeEventListener('resize', scheduleUpdate);
       window.visualViewport?.removeEventListener('resize', scheduleUpdate);
     };
-  }, [activeNodeId]);
+  }, [activeNodeId, isExpanded]);
 
   // 节点尺寸变化时，重新计算浮动面板位置，使其跟随节点平滑移动
   useEffect(() => {
-    if (!activeNodeId) return;
+    if (!activeNodeId || isExpanded) return;
     const el = document.querySelector(`.react-flow__node[data-id="${activeNodeId}"]`);
     if (!el) return;
 
@@ -219,7 +220,7 @@ function AINodeDialog() {
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [activeNodeId]);
+  }, [activeNodeId, isExpanded]);
   const editorApiRef = useRef<MentionEditorHandle>(null);
 
   const continuousEditActiveRef = useRef(false);
@@ -248,12 +249,16 @@ function AINodeDialog() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        handleCloseNodeDialog();
+        if (isExpanded) {
+          setIsExpanded(false);
+        } else {
+          handleCloseNodeDialog();
+        }
       }
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [handleCloseNodeDialog]);
+  }, [handleCloseNodeDialog, isExpanded]);
 
   // All hooks must be called before any early return
   const onPromptChange = useCallback(
@@ -866,28 +871,68 @@ function AINodeDialog() {
   return (
     <>
       {/* Connected nodes preview — below dialog (model-dropdown covers it) */}
-      <div
-        ref={previewRef}
-        className="ai-dialog-preview-float"
-        style={dialogPosition ? {
-          left: `${dialogPosition.x}px`,
-          top: `${dialogPosition.y - 10 - 42}px`,
-          transform: 'translateX(-50%)',
-        } : undefined}
-      >
-        <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
-      </div>
+      {!isExpanded && (
+        <div
+          ref={previewRef}
+          className="ai-dialog-preview-float"
+          style={dialogPosition ? {
+            left: `${dialogPosition.x}px`,
+            top: `${dialogPosition.y - 10 - 42}px`,
+            transform: 'translateX(-50%)',
+          } : undefined}
+        >
+          <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
+        </div>
+      )}
+
+      {isExpanded && (
+        <button
+          type="button"
+          className="ai-dialog-expanded-backdrop"
+          aria-label={t('还原')}
+          onClick={() => setIsExpanded(false)}
+        />
+      )}
 
       <div
         ref={panelRef}
-        className="ai-dialog-float"
-        style={{
+        className={`ai-dialog-float${isExpanded ? ' is-expanded' : ''}`}
+        role={isExpanded ? 'dialog' : undefined}
+        aria-modal={isExpanded ? true : undefined}
+        aria-label={isExpanded ? t('节点生成对话框') : undefined}
+        style={isExpanded ? undefined : {
           left: dialogPosition ? `${dialogPosition.x}px` : '50%',
           top: dialogPosition ? `${dialogPosition.y - 20}px` : '50%',
           transform: dialogPosition ? 'translateX(-50%)' : 'translate(-50%, -50%)',
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
+        {isExpanded && (
+          <div className="ai-dialog-preview-float is-expanded">
+            <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
+          </div>
+        )}
+        <button
+          type="button"
+          className="ai-dialog-expand-btn"
+          aria-label={isExpanded ? t('还原') : t('最大化')}
+          aria-pressed={isExpanded}
+          data-tooltip={isExpanded ? t('还原') : t('最大化')}
+          onClick={(event) => {
+            event.stopPropagation();
+            setIsExpanded((current) => !current);
+          }}
+        >
+          {isExpanded ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M9 4v5H4M15 20v-5h5M4 9l5-5M20 15l-5 5" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M4 9V4h5M20 15v5h-5M9 4 4 9M15 20l5-5" />
+            </svg>
+          )}
+        </button>
         <PromptPanel
           editorRef={editorApiRef}
           nodeType={nodeType}

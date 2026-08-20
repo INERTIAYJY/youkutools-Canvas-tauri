@@ -218,7 +218,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
             onMouseLeave={() => { if (isStoryboard) clearPopupDelayed(); }}
             animate={{
               scale, x, y: isHovered ? -4 : 0,
-              opacity: isHovered ? 1 : 0.55,
+              opacity: isHovered ? 1 : 0.85,
               boxShadow: isHovered ? `0 6px 20px rgba(99,102,241,0.25), 0 0 0 2px rgba(99,102,241,0.35)` : `0 0 0 0px rgba(99,102,241,0)`,
               borderColor: isHovered ? 'rgba(99,102,241,0.6)' : 'rgba(195,195,202,0.33)',
             }}

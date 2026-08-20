@@ -52,9 +52,10 @@
 .composer-toolbar {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 32px;
+  grid-template-columns: minmax(0, 1fr) max-content 32px;
   align-items: center;
-  gap: 1px;
+  row-gap: 1px;
+  column-gap: 8px;
   width: max-content;
   max-width: min(calc(100vw - var(--composer-side-reserve) - 190px), 920px);
   padding: 6px;
@@ -78,8 +79,17 @@
   flex-wrap: nowrap;
 }
 
-.composer-toolbar-close {
+.composer-toolbar-actions {
   grid-column: 2;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 1px;
+  min-width: max-content;
+}
+
+.composer-toolbar-close {
+  grid-column: 3;
   justify-self: end;
   margin-right: 0;
 }

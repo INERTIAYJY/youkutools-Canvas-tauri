@@ -267,6 +267,9 @@ export default function ComposerToolbar({ composer, canExport, onFit, onExport, 
           )}
         </div>
 
+      </div>
+
+      <div className="composer-toolbar-actions">
         <AnimatedButton className="crop-aspect-btn icon-only" data-tooltip="适配画布 (⌘0)" aria-label="适配画布" onClick={onFit}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
             <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />

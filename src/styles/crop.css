@@ -105,6 +105,13 @@
   margin-right: 4px;
 }
 
+/* 裁切工具栏的关闭按钮固定在确认按钮右侧，并与多图编辑保持同样的 8px 间隔。 */
+.crop-aspect-btn.crop-toolbar-close {
+  flex: none;
+  margin-right: 0;
+  margin-left: 7px;
+}
+
 .crop-aspect-btn.crop-aspect-close.act-cancel:hover,
 .crop-aspect-btn.crop-aspect-close:hover {
   color: var(--danger);

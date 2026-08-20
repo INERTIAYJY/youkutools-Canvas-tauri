@@ -356,18 +356,6 @@ export default function CropEditor({ isOpen, imageUrl, onClose, onStart, onSave 
       {/* ── 裁切工具栏（模式 + 宽高比/钢笔 + 确认按钮）── */}
       <div className="crop-toolbar-dock">
         <div className="crop-aspect-bar">
-        <AnimatedButton
-          type="button"
-          className="crop-aspect-btn crop-aspect-close act-cancel"
-          data-tooltip="关闭 (Esc)"
-          aria-label="关闭"
-          onClick={handleClose}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
-            <path d="M18 6L6 18M6 6l12 12" />
-          </svg>
-        </AnimatedButton>
-
         {/* 模式切换：矩形 / 钢笔 */}
         <div className="crop-mode-toggle">
           <button
@@ -423,6 +411,17 @@ export default function CropEditor({ isOpen, imageUrl, onClose, onStart, onSave 
             <path d="M3 17l5-5 3 3 8-8" />
           </svg>
           <span>确认</span>
+        </AnimatedButton>
+        <AnimatedButton
+          type="button"
+          className="crop-aspect-btn crop-aspect-close crop-toolbar-close act-cancel"
+          data-tooltip="关闭 (Esc)"
+          aria-label="关闭"
+          onClick={handleClose}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
         </AnimatedButton>
         </div>
         <ImageEditorZoomControls

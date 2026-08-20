@@ -6,14 +6,66 @@
 import type { ApimartSeedanceCapability } from './apimartVideoModels';
 
 const SD_2_RESOLUTIONS = ['480p', '720p'] as const;
+const SD_2_FULL_RESOLUTIONS = [...SD_2_RESOLUTIONS, '1080p', '4k'] as const;
+const SD_2_0_RATIOS = ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] as const;
 const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
 
 /**
- * 火山方舟 Seedance 能力表。仅收录需要区别于「默认兜底」的模型：
- * - Seedance 2.5：仅 480p/720p、时长 4~30s（2.0 支持 1080p/4k、4~15s 仍走兜底）
- * 其余未收录模型保持 VideoParamSelector 的通用 Seedance 默认档位。
+ * 火山方舟 Seedance 能力表。按官方模型规格限制参数面板可选项，
+ * 避免把某个版本不支持的分辨率、比例或时长提交到接口。
  */
 const VOLCENGINE_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> = {
+  'doubao-seedance-2-0': {
+    modelId: 'doubao-seedance-2-0-260128',
+    resolutions: SD_2_FULL_RESOLUTIONS,
+    defaultResolution: '720p',
+    ratios: SD_2_0_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'aspect_ratio',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    audioField: 'generate_audio',
+    defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
+  },
+  'doubao-seedance-2-0-fast': {
+    modelId: 'doubao-seedance-2-0-fast-260128',
+    resolutions: SD_2_RESOLUTIONS,
+    defaultResolution: '720p',
+    ratios: SD_2_0_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'aspect_ratio',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    audioField: 'generate_audio',
+    defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
+  },
+  'doubao-seedance-2-0-mini': {
+    modelId: 'doubao-seedance-2-0-mini-260615',
+    resolutions: SD_2_RESOLUTIONS,
+    defaultResolution: '720p',
+    ratios: SD_2_0_RATIOS,
+    defaultRatio: '16:9',
+    ratioField: 'aspect_ratio',
+    minDuration: 4,
+    maxDuration: 15,
+    defaultDuration: 5,
+    audioField: 'generate_audio',
+    defaultAudio: true,
+    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
+    maxImageReferences: 9,
+    maxVideoReferences: 3,
+    maxAudioReferences: 3,
+  },
   'doubao-seedance-2-5': {
     modelId: 'doubao-seedance-2-5-260628',
     resolutions: SD_2_RESOLUTIONS,

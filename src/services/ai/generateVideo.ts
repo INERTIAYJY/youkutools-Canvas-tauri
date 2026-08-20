@@ -372,7 +372,8 @@ export async function generateVideo(
       throw new Error('提示词不能为空');
     }
     const remoteImageUrls = await resolveImageUrlArray(mergedImageUrls, 'volcengine');
-    // 只有手动挑过首/尾帧才写 role：不写时 Seedance 按参考图模式处理，保持既有行为
+    // 手动挑过首/尾帧时保留其角色；其余图片由请求构造器标为 reference_image。
+    // Seedance 2.0 要求每个 image_url 都显式携带 role，不能省略。
     const frameRoles = hasManualFrameRoles(resolveVideoNodeReferences(params.nodeId))
       ? mergedImageUrls.map((url) => {
         const role = (referenceInput.references ?? [])
@@ -487,19 +488,7 @@ async function generateVolcengineVideo(
       }
     }
 
-    // 构建 content 数组
-    const content: Array<Record<string, unknown>> = [];
-    if (prompt.trim()) {
-      content.push({ type: 'text', text: prompt.trim() });
-    }
-    imageUrls.forEach((url, index) => {
-      const role = imageFrameRoles[index];
-      content.push({
-        type: 'image_url',
-        image_url: { url },
-        ...(role ? { role } : {}),
-      });
-    });
+    const content = buildVolcengineVideoContent(prompt, imageUrls, imageFrameRoles);
 
     // 构建请求体 — 直接使用 Seedance 原生参数
     const ratio = params.seedanceRatio || '16:9';
@@ -590,4 +579,23 @@ async function generateVolcengineVideo(
       removePendingTask(nodeId);
     }
   }
+}
+
+export function buildVolcengineVideoContent(
+  prompt: string,
+  imageUrls: readonly string[],
+  imageFrameRoles: ReadonlyArray<'first_frame' | 'last_frame' | undefined>,
+): Array<Record<string, unknown>> {
+  const content: Array<Record<string, unknown>> = [];
+  if (prompt.trim()) {
+    content.push({ type: 'text', text: prompt.trim() });
+  }
+  imageUrls.forEach((url, index) => {
+    content.push({
+      type: 'image_url',
+      image_url: { url },
+      role: imageFrameRoles[index] ?? 'reference_image',
+    });
+  });
+  return content;
 }

@@ -4,6 +4,7 @@ import {
   annotateCharacterReferences,
   assertVideoReferenceLimits,
   buildGeneralVideoProtocolVariables,
+  buildVolcengineVideoContent,
   generateVideo,
   resolveVideoGenerationOperation,
 } from '../../src/services/ai/generateVideo';
@@ -269,6 +270,28 @@ describe('video prompt media references', () => {
     expect(merged).toHaveLength(2);
     expect(merged[0]).toMatchObject({ origin: 'prompt', sourceNodeId: 'prompt-audio' });
     expect(merged[1].kind).toBe('video');
+  });
+});
+
+describe('Volcengine Seedance content', () => {
+  it('adds a required role to every image while preserving explicit frame roles', () => {
+    expect(buildVolcengineVideoContent(
+      '  推进镜头  ',
+      ['first.png', 'reference.png', 'last.png'],
+      ['first_frame', undefined, 'last_frame'],
+    )).toEqual([
+      { type: 'text', text: '推进镜头' },
+      { type: 'image_url', image_url: { url: 'first.png' }, role: 'first_frame' },
+      { type: 'image_url', image_url: { url: 'reference.png' }, role: 'reference_image' },
+      { type: 'image_url', image_url: { url: 'last.png' }, role: 'last_frame' },
+    ]);
+  });
+
+  it('uses reference_image for ordinary multimodal reference images', () => {
+    expect(buildVolcengineVideoContent('', ['one.png', 'two.png'], [])).toEqual([
+      { type: 'image_url', image_url: { url: 'one.png' }, role: 'reference_image' },
+      { type: 'image_url', image_url: { url: 'two.png' }, role: 'reference_image' },
+    ]);
   });
 });
 

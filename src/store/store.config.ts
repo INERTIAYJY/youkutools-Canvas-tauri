@@ -18,6 +18,7 @@ import {
 import * as fileService from '../services/fileService';
 import { setBaseDataDir, syncAuthorizedDirectories } from '../services/fileService';
 import { deleteProviderSecret } from '../services/providerSecretService';
+import { setLocale } from '../i18n';
 
 const defaultConfig: AppConfig = {
   providers: {},
@@ -31,6 +32,8 @@ const defaultConfig: AppConfig = {
   nodeToolbarMode: 'icons',
   nodeLabelVisible: true,
   startupView: 'last-project',
+  performanceMode: false,
+  // language 不给默认值：未设置时按系统语言判定
 };
 
 const MODEL_PREF_KEY = 'canvas-model-prefs';
@@ -43,6 +46,19 @@ function syncNodeToolbarMode(mode: AppConfig['nodeToolbarMode']): void {
 function syncNodeLabelVisible(visible: AppConfig['nodeLabelVisible']): void {
   if (typeof document === 'undefined') return;
   document.documentElement.dataset.nodeLabelVisible = visible === false ? 'false' : 'true';
+}
+
+function syncPerformanceMode(enabled: AppConfig['performanceMode']): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.toggleAttribute('data-performance-mode', enabled === true);
+}
+
+function migrateLegacyPerformanceMode(config: AppConfig): AppConfig {
+  const { graphicsCompatibilityMode, ...current } = config;
+  return {
+    ...current,
+    performanceMode: current.performanceMode ?? graphicsCompatibilityMode ?? false,
+  };
 }
 
 interface RemovedModelReferences {
@@ -332,6 +348,12 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if ('nodeLabelVisible' in partial) {
       syncNodeLabelVisible(partial.nodeLabelVisible);
     }
+    if ('performanceMode' in partial) {
+      syncPerformanceMode(partial.performanceMode);
+    }
+    if ('language' in partial) {
+      setLocale(partial.language);
+    }
   },
 
   setProviderKey: (providerName, key) =>
@@ -533,13 +555,18 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (s
     if (!saved) {
       syncNodeToolbarMode(defaultConfig.nodeToolbarMode);
       syncNodeLabelVisible(defaultConfig.nodeLabelVisible);
+      syncPerformanceMode(defaultConfig.performanceMode);
+      setLocale(defaultConfig.language);
       set({ configHydrated: true });
       return;
     }
 
-    const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...(saved as AppConfig) });
+    const migratedPerformanceConfig = migrateLegacyPerformanceMode(saved as AppConfig);
+    const cfg = migrateLegacyGeneralModels({ ...defaultConfig, ...migratedPerformanceConfig });
     syncNodeToolbarMode(cfg.nodeToolbarMode);
     syncNodeLabelVisible(cfg.nodeLabelVisible);
+    syncPerformanceMode(cfg.performanceMode);
+    setLocale(cfg.language);
     set({ config: cfg, configHydrated: true });
     if (missingSecrets.length > 0) {
       console.warn('[设置] 凭据存储中缺少以下连接的凭据:', missingSecrets);

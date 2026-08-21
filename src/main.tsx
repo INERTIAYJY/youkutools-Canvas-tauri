@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import RootView from './RootView'
 import type { AppConfig } from './types'
+import { setLocale } from './i18n'
 
 // 复用同一入口，通过 ?view= 区分窗口类型
 const searchParams = new URLSearchParams(window.location.search)
@@ -31,6 +32,8 @@ async function applyInitialChatWindowTheme() {
     effectiveTheme = config?.canvasBackground === 'off-white'
       ? 'light'
       : config?.theme === 'light' ? 'light' : 'dark'
+    // 与主题同批应用，避免独立窗口先闪一帧中文
+    setLocale(config?.language)
   } catch (error) {
     console.warn('[main] failed to load chat window theme:', error)
   }

@@ -3,6 +3,7 @@
  */
 import { Icon } from '@iconify/react';
 import { useAppStore, type AppState } from '../../store/useAppStore';
+import { useT } from '../../i18n';
 
 type ReferenceTokenKind = 'node' | 'model' | 'skill' | 'drama' | 'slash';
 
@@ -163,6 +164,7 @@ function CompactToken({
   onNodeHover,
   onModelActivate,
 }: CompactTokenProps) {
+  const t = useT();
   const label = token.kind === 'skill' || token.kind === 'slash' ? `/${token.label}` : token.label;
   const interactive = token.kind === 'node' || token.kind === 'model';
   const activate = () => {
@@ -196,11 +198,11 @@ function CompactToken({
         onMouseEnter={() => token.kind === 'node' && !missing && token.id && onNodeHover?.(token.id)}
         onMouseLeave={() => token.kind === 'node' && onNodeHover?.(null)}
         aria-label={missing
-          ? `${label}，节点已不存在`
+          ? t('{label}，节点已不存在', { label })
           : token.kind === 'node'
-            ? `定位节点 ${label}`
-            : `重新选择模型，当前为 ${label}`}
-        data-tooltip={missing ? '节点已不存在' : token.kind === 'node' ? '在画布中定位' : '重新选择模型'}
+            ? t('定位节点 {label}', { label })
+            : t('重新选择模型，当前为 {label}', { label })}
+        data-tooltip={missing ? t('节点已不存在') : token.kind === 'node' ? t('在画布中定位') : t('重新选择模型')}
         className={`mx-0.5 inline-flex max-w-full items-center rounded-[7px] border px-2 py-1 align-middle text-[0.92em] font-medium leading-none shadow-sm transition-[border-color,background-color,color,transform]
           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 active:scale-[0.98]
           ${missing
@@ -228,6 +230,7 @@ export default function ChatReferenceText({
   onNodeHover,
   onModelActivate,
 }: InteractiveChatReferenceTextProps) {
+  const t = useT();
   const nodeDisplayIds = useAppStore(selectNodeDisplayIds);
   const currentProjectId = useAppStore((state) => state.currentProjectId);
   const showToast = useAppStore((state) => state.showToast);
@@ -259,7 +262,7 @@ export default function ChatReferenceText({
             key={`${token.start}-${token.raw}`}
             token={token}
             missing={missing}
-            onMissingNode={() => showToast('引用的节点已不存在', 'error')}
+            onMissingNode={() => showToast(t('引用的节点已不存在'), 'error')}
             onNodeActivate={activateNode}
             onNodeHover={hoverNode}
             onModelActivate={activateModel}

@@ -126,17 +126,23 @@ fn load_chat_window_size(
 }
 
 #[cfg(target_os = "windows")]
-fn apply_chat_window_rounded_corners(window: &WebviewWindow) {
+fn apply_native_window_corners(window: &WebviewWindow, rounded: bool) {
     use windows::Win32::{
         Foundation::HWND,
-        Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND},
+        Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_ROUND,
+        },
     };
 
     let Ok(hwnd) = window.hwnd() else {
         return;
     };
     let hwnd = HWND(hwnd.0);
-    let preference = DWMWCP_ROUND;
+    let preference = if rounded {
+        DWMWCP_ROUND
+    } else {
+        DWMWCP_DEFAULT
+    };
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -148,7 +154,16 @@ fn apply_chat_window_rounded_corners(window: &WebviewWindow) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn apply_chat_window_rounded_corners(_window: &WebviewWindow) {}
+fn apply_native_window_corners(_window: &WebviewWindow, _rounded: bool) {}
+
+#[tauri::command]
+fn set_main_window_native_corners(app: tauri::AppHandle, rounded: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口".to_string())?;
+    apply_native_window_corners(&window, rounded);
+    Ok(())
+}
 
 /// 将用户明确选择的保存目录和素材目录加入本次进程的文件与 asset 协议 scope。
 /// ComfyUI 安装目录不经过此命令，仍由专用启动命令独立校验。
@@ -792,7 +807,7 @@ async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
     let chat_window = chat_window_builder
         .build()
         .map_err(|e| format!("创建对话窗口失败: {e}"))?;
-    apply_chat_window_rounded_corners(&chat_window);
+    apply_native_window_corners(&chat_window, true);
 
     // 与主窗口内的助手面板保持一致：显示在主窗口右侧，并留出相同的边距。
     let positioned = if let Some(main_window) = main_window {
@@ -994,6 +1009,7 @@ pub fn run() {
             open_with_app,
             reveal_in_file_manager,
             toggle_devtools,
+            set_main_window_native_corners,
             sync_authorized_directories,
             comfyui::launch_comfyui,
             comfyui::open_comfyui_window,

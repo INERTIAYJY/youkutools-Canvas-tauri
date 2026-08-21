@@ -24,6 +24,8 @@ export interface ProviderDocsPage {
   links: ProviderDocLink[];
   fetchedAt: number;
   truncated: boolean;
+  /** 站点公开模型清单按分类分好组的可直接转述文本；非中转站为 undefined。 */
+  modelCatalog?: string;
 }
 
 const BLOCK_TAGS = new Set([
@@ -197,12 +199,22 @@ export function buildRelayCatalogContent(
   }
   lines.push(
     '',
-    '接口调用格式参考（new-api 公开约定，供生成配置草稿）：',
-    '- 文本模型（端点含 chat/completion）：POST /v1/chat/completions，OpenAI 标准 {model, messages} 格式。',
-    '- 图片模型（端点含 image-generation）：POST /v1/images/generations，OpenAI 标准 {model, prompt, size, n} 格式；支持图生图时请求体再加 image_urls（公网 HTTPS 图片 URL 数组），并把 imageReferenceRequestMode 设为 generation-json-image-urls。',
-    '- 视频模型（端点含 video）：POST /v1/videos，请求体含 model、prompt、duration、resolution、size（宽高比）；参考素材按该站文档实际字段填写：普通参考图用 image_urls，首尾帧用 first_frame_image / last_frame_image，Seedance 2.x 用 image_with_roles（[{url, role}]，role 取 first_frame / last_frame / reference_image）；异步任务返回任务 ID，用 /v1/videos/{任务ID} 轮询结果。',
-    '- 音频模型（端点含 audio/tts/speech）：POST /v1/audio/speech，OpenAI 标准 {model, input, voice} 格式。',
-    '示例里的参数字段名要按该站真实文档写，本项目会按字段名把画布上的分辨率、宽高比、时长、数量与连线的参考素材映射进去；参考素材字段缺失就等于该模型不接参考图。',
+    '【请求体字段务必以该模型自己的文档为准】',
+    '中转站聚合了各家上游，同一类模型的字段名差异很大（宽高比可能叫 aspect_ratio / size / ratio，',
+    '参考图可能叫 images / image_urls / image）。请求体里出现该模型不认识的字段，接口会直接返回',
+    '400 unsupported field，所以：',
+    '- 文档给了「请求示例」JSON 时，原样把它作为 submitRequest 传给 provider_config_preview，不要改字段名、不要补字段。',
+    '- 文档只给了参数表时，只写表里列出的字段；表里没有的一律不写。',
+    '- 文档标注为「固定能力」的参数（如固定时长、枚举取值、参考图上限），用 videoCapability 声明出来（视频模型），别只写进请求体。',
+    '',
+    '仅在完全读不到该模型文档时，才可退回到以下 new-api 通用约定（读得到文档就不要用）：',
+    '- 文本：POST /v1/chat/completions，OpenAI 标准 {model, messages}。',
+    '- 图片：POST /v1/images/generations，OpenAI 标准 {model, prompt, size, n}。',
+    '- 视频：POST /v1/videos，异步任务，用 /v1/videos/{任务ID} 轮询。',
+    '- 音频：POST /v1/audio/speech，OpenAI 标准 {model, input, voice}。',
+    '',
+    '本项目按字段名把画布上的宽高比、分辨率、时长、数量与连线的参考素材映射进请求体；',
+    '文档里没有参考素材字段，就说明该模型不接参考图，不要自己编一个。',
   );
   return { title, text: lines.join('\n') };
 }
@@ -239,6 +251,38 @@ async function probeNewApiStatus(
   } catch {
     return null;
   }
+}
+
+/** 文档站首页（模型总列表所在页）才值得额外探一次公开清单。 */
+function isDocsIndexUrl(rawUrl: string): boolean {
+  const path = new URL(rawUrl).pathname.replace(/\/+$/, '');
+  return path === '' || path === '/docs' || path === '/api-docs' || path === '/doc';
+}
+
+/**
+ * 把公开模型清单按 文本/图片/视频/音频 分好组，供助手原样转述给用户挑选。
+ *
+ * 助手自己从上万字的文档正文里归纳分类清单很不稳定（实测会直接跳过不列），
+ * 这里用 /api/pricing 的结构化数据把清单拼好，它只需要照搬。
+ */
+export function buildGroupedModelChoiceList(pricing: NewApiPricingItem[]): string {
+  const groups = new Map<string, string[]>();
+  for (const item of pricing) {
+    const id = String(item.model_name ?? '').trim();
+    if (!id) continue;
+    const name = typeof item.display_name === 'string' && item.display_name.trim()
+      ? item.display_name.trim()
+      : id;
+    const category = inferRelayModelCategory(item);
+    const lines = groups.get(category) ?? [];
+    groups.set(category, lines);
+    lines.push(`  - ${name} —— ${id}`);
+  }
+  const ordered = ['文本', '图片', '视频', '音频'].filter((category) => groups.has(category));
+  if (ordered.length === 0) return '';
+  return ordered
+    .map((category) => [`【${category}】`, ...(groups.get(category) ?? [])].join('\n'))
+    .join('\n');
 }
 
 async function readNewApiRelayCatalog(
@@ -281,35 +325,53 @@ export async function readProviderDocsPage(
     ? { title: new URL(finalUrl).hostname, text: normalizeText(response.body), links: [] }
     : extractHtmlPage(response.body, finalUrl);
 
-  // 登录后台 SPA（如 new-api 中转站）读不到正文时，改读公开模型清单与公告。
+  // SPA 文档站先走受控渲染，拿到真实正文与同站链接。
+  //
+  // 顺序很重要：/api/pricing 兜底是按 origin 探测的，一旦排在渲染之前，同一站点下
+  // 任何读不到正文的页面（包括 /docs/videos/{模型ID} 这种单模型文档页）都会被换成
+  // 那份只有模型 ID 的清单，助手永远看不到真实字段名，只能自己编请求体。
+  if (!extracted.text && shouldRenderDynamicHtml(response.body, response.contentType, extracted.text)) {
+    // 渲染是尽力而为：SPA 首屏偶尔会超时，此时应退到下面的公开清单兜底，
+    // 而不是让整次文档读取失败（渲染排到兜底之前后，抛错会直接吞掉兜底路径）。
+    let rendered: NativeProviderDocsResponse | undefined;
+    try {
+      rendered = await invoke<NativeProviderDocsResponse>('assistant_web_render', { url: finalUrl });
+    } catch (error) {
+      console.warn('[providerDocs] 动态渲染失败，退回公开清单兜底', finalUrl, error);
+      rendered = undefined;
+    }
+    if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    const renderedUrl = rendered ? normalizeProviderDocUrl(rendered.url) : null;
+    if (rendered && (!renderedUrl || new URL(renderedUrl).origin !== new URL(normalized).origin)) {
+      throw new Error('厂商文档渲染后的最终地址未通过同站安全校验');
+    }
+    if (rendered && renderedUrl) {
+      response = rendered;
+      finalUrl = renderedUrl;
+      extracted = response.contentType.startsWith('application/json')
+        ? { title: new URL(finalUrl).hostname, text: normalizeText(response.body), links: [] }
+        : extractHtmlPage(response.body, finalUrl);
+    }
+  }
+
+  // 渲染后仍读不到正文（如需要登录的后台 SPA），最后才退回公开模型清单与公告。
   if (!extracted.text) {
     const relay = await readNewApiRelayCatalog(finalUrl, options.signal);
     if (relay) {
       const limit = Math.max(1, Math.min(options.maxTextChars ?? 10_000, 10_000));
       return { ...relay, text: relay.text.slice(0, limit), truncated: relay.text.length > limit };
     }
-  }
-
-  // 非中转站的公开 SPA 文档站走受控渲染回退。
-  if (!extracted.text && shouldRenderDynamicHtml(response.body, response.contentType, extracted.text)) {
-    response = await invoke<NativeProviderDocsResponse>('assistant_web_render', { url: finalUrl });
-    if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-    const renderedUrl = normalizeProviderDocUrl(response.url);
-    if (!renderedUrl || new URL(renderedUrl).origin !== new URL(normalized).origin) {
-      throw new Error('厂商文档渲染后的最终地址未通过同站安全校验');
-    }
-    finalUrl = renderedUrl;
-    extracted = response.contentType.startsWith('application/json')
-      ? { title: new URL(finalUrl).hostname, text: normalizeText(response.body), links: [] }
-      : extractHtmlPage(response.body, finalUrl);
-  }
-
-  if (!extracted.text) {
     throw new Error(
       '厂商文档页面没有可读取的正文；该页面可能是需要登录的后台 SPA，无法匿名读取。'
       + '请改用公开的模型清单/状态接口，或请用户直接提供模型列表与请求示例，不要重复读取同一地址。',
     );
   }
+  // 文档首页额外附一份分好类的模型清单：让助手转述现成结构，而不是从长正文里自己归纳
+  const pricing = isDocsIndexUrl(finalUrl)
+    ? await probeNewApiPricing(new URL(finalUrl).origin, options.signal)
+    : null;
+  const modelCatalog = pricing ? buildGroupedModelChoiceList(pricing) : '';
+
   const limit = Math.max(1, Math.min(options.maxTextChars ?? 10_000, 10_000));
   return {
     title: extracted.title,
@@ -318,5 +380,6 @@ export async function readProviderDocsPage(
     links: extracted.links.slice(0, 24),
     fetchedAt: response.fetchedAt,
     truncated: extracted.text.length > limit,
+    ...(modelCatalog ? { modelCatalog } : {}),
   };
 }

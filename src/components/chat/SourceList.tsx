@@ -4,6 +4,7 @@
 import { Icon } from '@iconify/react';
 import type { WebSource } from '../../types/chat';
 import { normalizePublicWebUrl } from '../../services/chat/webAccessGrantService';
+import { useT } from '../../i18n';
 
 interface SourceListProps {
   sources: WebSource[];
@@ -20,12 +21,13 @@ async function openExternalUrl(url: string): Promise<void> {
 }
 
 export default function SourceList({ sources }: SourceListProps) {
+  const t = useT();
   if (sources.length === 0) return null;
   return (
     <details className="mt-3 border-t border-canvas-border/70 pt-2">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[12px] text-canvas-text-secondary hover:text-canvas-text">
         <Icon icon="mdi:web" width="14" />
-        来源（{sources.length}）
+        {t('来源（{count}）', { count: sources.length })}
         <Icon icon="mdi:chevron-down" width="14" className="ml-auto" />
       </summary>
       <div className="mt-2 space-y-1.5">

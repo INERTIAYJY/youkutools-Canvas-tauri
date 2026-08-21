@@ -7,6 +7,7 @@
 import { Icon } from '@iconify/react';
 import type { AgentStep, AgentStepStatus } from '../../types/agent';
 import AgentToolDetails from './AgentToolDetails';
+import { useT } from '../../i18n';
 
 interface AgentStepCardProps {
   step: AgentStep;
@@ -32,6 +33,7 @@ function formatDuration(step: AgentStep): string | null {
 }
 
 export default function AgentStepCard({ step }: AgentStepCardProps) {
+  const t = useT();
   const meta = STATUS_META[step.status];
   const duration = formatDuration(step);
   const retryCount = step.toolCall?.retryCount ?? 0;
@@ -49,9 +51,9 @@ export default function AgentStepCard({ step }: AgentStepCardProps) {
       <div className="min-w-0 flex-1">
         <div className="flex min-h-5 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] leading-[17px]">
           <span className="truncate text-[12px] text-canvas-text-secondary">{step.title}</span>
-          <span className={`shrink-0 text-[10px] ${meta.className}`}>{meta.label}</span>
+          <span className={`shrink-0 text-[10px] ${meta.className}`}>{t(meta.label)}</span>
           {retryCount > 0 && (
-            <span className="shrink-0 text-[10px] text-canvas-text-muted">· 重试 {retryCount}</span>
+            <span className="shrink-0 text-[10px] text-canvas-text-muted">· {t('重试 {count}', { count: retryCount })}</span>
           )}
           {duration && (
             <span className="ml-auto shrink-0 text-[10px] tabular-nums text-canvas-text-muted">{duration}</span>

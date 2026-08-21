@@ -9,6 +9,7 @@ import {
 } from '../ai/assistantStream';
 import type {
   AgentApprovalInputRequest,
+  ProviderModelChoice,
   AgentApprovalResolution,
   AgentStep,
   AgentTask,
@@ -513,6 +514,14 @@ export function prepareApprovalInput(
   prepared: PreparedAgentToolCall;
   inputRequest?: AgentApprovalInputRequest;
 } {
+  // 中转站接入：把候选模型交给审批卡渲染成勾选列表，选择结果随确认回传
+  if (prepared.definition.id === 'provider_models_select') {
+    const options = (prepared.input as { models?: ProviderModelChoice[] }).models ?? [];
+    return options.length > 0
+      ? { prepared, inputRequest: { kind: 'provider_models', options } }
+      : { prepared };
+  }
+
   if (
     prepared.definition.id !== 'media_generate'
     || prepared.definition.effect !== 'media_generation'
@@ -832,7 +841,27 @@ export async function executeAgentRound({
       const resolution = await waitForApproval(approvalId, signal);
       let approvalError: ToolResultSummary | undefined;
       const selectedModelRef = resolution.inputValues?.modelRef?.trim();
-      if (resolution.approved && approvalInput.inputRequest) {
+      const selectedModelIds = resolution.inputValues?.selectedModelIds ?? [];
+      if (resolution.approved && approvalInput.inputRequest?.kind === 'provider_models') {
+        if (selectedModelIds.length === 0) {
+          approvalError = {
+            callId: call.callId,
+            toolId: call.toolId,
+            status: 'denied',
+            summary: '没有选择任何模型',
+            truncated: false,
+          };
+        } else {
+          // 选择结果回灌成工具输入，execute 直接把它交回给模型
+          resolvedCall = {
+            ...call,
+            input: { ...(prepared.input as Record<string, unknown>), selectedIds: selectedModelIds },
+          };
+          const selectedPrepared = prepareAgentToolCall(resolvedCall, roundContext);
+          if (!selectedPrepared.ok) approvalError = selectedPrepared.result;
+          else prepared = selectedPrepared.prepared;
+        }
+      } else if (resolution.approved && approvalInput.inputRequest) {
         if (!selectedModelRef) {
           approvalError = {
             callId: call.callId,

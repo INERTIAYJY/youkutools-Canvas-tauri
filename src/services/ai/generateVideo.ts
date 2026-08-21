@@ -26,6 +26,7 @@ import {
   warnIfTooManyReferences,
 } from './connectedReferenceMedia';
 import { executeGeneralAsyncTask } from './apimartGen';
+import type { ApimartSeedanceCapability } from './apimartVideoModels';
 import { pollTask } from '../pollTask';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import { normalizeFrames8n1, type ModelProtocolVariables } from './modelProtocol';
@@ -41,6 +42,11 @@ import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
 import { resolveMediaReferenceUrl } from '../uploadService';
 import { mapVideoParameters } from './videoParameterMappings';
+import {
+  getVolcengineSeedanceCapability,
+  isVolcengineSeedance25Model,
+} from './volcengineVideoModels';
+import { getDreaminaVideoCapability } from './dreaminaModels';
 
 export function resolveVideoGenerationOperation(
   imageUrls: readonly string[],
@@ -175,6 +181,29 @@ function assertVideoOperationSupported(
   }
 }
 
+/**
+ * 按模型声明的参考素材上限拦截，超了直接报错而不是让接口返回一句看不懂的 400。
+ * 上限缺省表示该模型没声明，保持原有的「不拦截、只提醒」行为。
+ */
+export function assertVideoReferenceLimits(
+  referenceInput: VideoGenerationReferenceInput,
+  capability: VideoModelCapability | ApimartSeedanceCapability | undefined,
+  modelName: string,
+): void {
+  if (!capability) return;
+  const limits = [
+    { kind: '参考图', count: referenceInput.imageUrls.length, max: capability.maxImageReferences },
+    { kind: '参考视频', count: referenceInput.videoUrls.length, max: capability.maxVideoReferences },
+    { kind: '参考音频', count: referenceInput.audioUrls.length, max: capability.maxAudioReferences },
+  ];
+  for (const { kind, count, max } of limits) {
+    if (max === undefined || count <= max) continue;
+    throw new Error(max === 0
+      ? `模型 "${modelName}" 不支持${kind}，请断开多余的连线`
+      : `模型 "${modelName}" 最多支持 ${max} 个${kind}，当前有 ${count} 个，请断开多余的连线`);
+  }
+}
+
 export function buildGeneralVideoProtocolVariables(
   modelId: string,
   params: AIVideoGenParams,
@@ -186,12 +215,20 @@ export function buildGeneralVideoProtocolVariables(
   const { width, height } = mapVideoDimensions(videoResolution, aspectRatio);
   const fps = normalizeVideoFps(params.videoFps);
   // 通用模型声明了时长上限时按声明钳制，否则沿用全局兜底上限
-  const duration = resolveVideoDurationSeconds(
+  const requestedDuration = resolveVideoDurationSeconds(
     params.seedanceDuration,
     params.videoFrames,
     fps,
     videoCapability?.maxDuration,
   );
+  // 声明了离散时长（如仅 10 / 15 秒）时吸附到最接近的合法档，
+  // 否则画布上的 4 秒会原样发出去换来一句 seconds must be one of 10, 15
+  const allowedDurations = videoCapability?.durations?.length ? videoCapability.durations : undefined;
+  const duration = allowedDurations
+    ? allowedDurations.reduce((best, value) => (
+      Math.abs(value - requestedDuration) < Math.abs(best - requestedDuration) ? value : best
+    ), allowedDurations[0])
+    : requestedDuration;
   const frames = videoFramesFromDuration(duration, fps);
   const seedanceResolution = params.seedanceResolution ?? '720p';
   const firstImage = referenceInput.imageUrls[0];
@@ -303,16 +340,17 @@ export async function generateVideo(
     });
   }
 
-  // 即梦视频：无参考图 → text2video；有参考图 → image2video
+  // 即梦视频：按参考素材自动路由文生、图生、首尾帧或全模态 CLI 子命令
   if (provider === 'dreamina') {
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
-    assertVideoOperationSupported(referenceInput, '即梦视频模型');
     const dreaminaPrompt = referenceInput.prompt;
     if (!dreaminaPrompt.trim()) throw new Error('提示词不能为空');
+    const capability = getDreaminaVideoCapability(model);
+    assertVideoReferenceLimits(referenceInput, capability, '即梦当前视频模型');
     return generateDreaminaVideo({
       prompt: dreaminaPrompt,
       model,
-      imageUrls: referenceInput.imageUrls,
+      references: referenceInput.references ?? [],
       nodeId: params.nodeId,
       ratio: params.seedanceRatio,
       duration: params.seedanceDuration,
@@ -334,28 +372,42 @@ export async function generateVideo(
     }
     const modelName = extractModelName(model, provider);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
-    assertVideoOperationSupported(referenceInput, '火山方舟当前视频接口');
+    const isSeedance25 = isVolcengineSeedance25Model(modelName);
+    const capability = getVolcengineSeedanceCapability(modelName);
+    if (capability) {
+      assertVideoReferenceLimits(referenceInput, capability, '火山方舟当前视频模型');
+    }
+    if (!isSeedance25) {
+      assertVideoOperationSupported(referenceInput, '火山方舟当前视频接口');
+    }
     const resolvedPrompt = referenceInput.prompt;
-    const mergedImageUrls = referenceInput.imageUrls;
-    if (!resolvedPrompt.trim() && mergedImageUrls.length === 0) {
+    const requestReferences = (referenceInput.references ?? [])
+      .filter((reference) => isSeedance25 || reference.kind === 'image');
+    if (!resolvedPrompt.trim() && requestReferences.length === 0) {
       throw new Error('提示词不能为空');
     }
-    const remoteImageUrls = await resolveImageUrlArray(mergedImageUrls, 'volcengine');
-    // 只有手动挑过首/尾帧才写 role：不写时 Seedance 按参考图模式处理，保持既有行为
-    const frameRoles = hasManualFrameRoles(resolveVideoNodeReferences(params.nodeId))
-      ? mergedImageUrls.map((url) => {
-        const role = (referenceInput.references ?? [])
-          .find((reference) => reference.kind === 'image' && getMediaReferenceUrl(reference) === url)?.role;
-        return role === 'first_frame' || role === 'last_frame' ? role : undefined;
-      })
-      : [];
+    const preserveFrameRoles = hasManualFrameRoles([
+      ...(params.referenceMedia ?? []),
+      ...resolveVideoNodeReferences(params.nodeId),
+    ]);
+    const remoteReferences = await Promise.all(requestReferences.map(async (reference) => {
+      const sourceUrl = getMediaReferenceUrl(reference);
+      const url = reference.kind === 'image'
+        ? (await resolveImageUrlArray([sourceUrl], 'volcengine'))[0]
+        : await resolveMediaReferenceUrl(sourceUrl, {
+          provider: 'volcengine',
+          kind: reference.kind,
+          mode: 'publicUrl',
+        });
+      return { ...reference, url };
+    }));
     return generateVolcengineVideo(
       apiKey,
       baseUrl,
       modelName,
       resolvedPrompt,
-      remoteImageUrls,
-      frameRoles,
+      remoteReferences,
+      preserveFrameRoles,
       params,
       signal,
     );
@@ -369,6 +421,7 @@ export async function generateVideo(
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
+    assertVideoReferenceLimits(referenceInput, gm.videoCapability, gm.name);
     if (gm.executionProfile) {
       const [remoteImageUrls, videoUrls, audioUrls] = await Promise.all([
         resolveImageUrlArray(referenceInput.imageUrls, connection.providerConfigId),
@@ -425,9 +478,8 @@ async function generateVolcengineVideo(
   baseUrl: string,
   modelName: string,
   prompt: string,
-  imageUrls: string[],
-  /** 与 imageUrls 一一对应的首/尾帧指派，缺省表示不写 role */
-  imageFrameRoles: Array<'first_frame' | 'last_frame' | undefined>,
+  references: readonly MediaReference[],
+  preserveFrameRoles: boolean,
   params: AIVideoGenParams,
   externalSignal?: AbortSignal,
 ): Promise<{ url: string }> {
@@ -455,35 +507,13 @@ async function generateVolcengineVideo(
       }
     }
 
-    // 构建 content 数组
-    const content: Array<Record<string, unknown>> = [];
-    if (prompt.trim()) {
-      content.push({ type: 'text', text: prompt.trim() });
-    }
-    imageUrls.forEach((url, index) => {
-      const role = imageFrameRoles[index];
-      content.push({
-        type: 'image_url',
-        image_url: { url },
-        ...(role ? { role } : {}),
-      });
-    });
-
-    // 构建请求体 — 直接使用 Seedance 原生参数
-    const ratio = params.seedanceRatio || '16:9';
-    const duration = params.seedanceDuration ?? 5;
-    const resolution = params.seedanceResolution || '720p';
-    const requestBody = mapVideoParameters('volcengine', modelName, {
-      model: modelName,
-      aspectRatio: ratio,
-      duration,
-      resolution,
-    });
-    requestBody.content = content;
-    requestBody.watermark = false;
-    if (params.generateAudio) {
-      requestBody.generate_audio = true;
-    }
+    const requestBody = buildVolcengineVideoRequestBody(
+      modelName,
+      prompt,
+      references,
+      preserveFrameRoles,
+      params,
+    );
 
     // 提交任务
     const apiUrl = `${baseUrl}/contents/generations/tasks`;
@@ -558,4 +588,91 @@ async function generateVolcengineVideo(
       removePendingTask(nodeId);
     }
   }
+}
+
+export function buildVolcengineVideoContent(
+  prompt: string,
+  references: readonly MediaReference[],
+  preserveFrameRoles: boolean,
+): Array<Record<string, unknown>> {
+  const content: Array<Record<string, unknown>> = [];
+  if (prompt.trim()) {
+    content.push({ type: 'text', text: prompt.trim() });
+  }
+  references.forEach((reference) => {
+    if (reference.kind === 'image') {
+      const frameRole = preserveFrameRoles
+        && (reference.role === 'first_frame' || reference.role === 'last_frame')
+        ? reference.role
+        : undefined;
+      content.push({
+        type: 'image_url',
+        image_url: { url: reference.url },
+        role: frameRole ?? 'reference_image',
+      });
+      return;
+    }
+    if (reference.kind === 'video') {
+      content.push({
+        type: 'video_url',
+        video_url: { url: reference.url },
+        role: 'reference_video',
+      });
+      return;
+    }
+    content.push({
+      type: 'audio_url',
+      audio_url: { url: reference.url },
+      role: 'reference_audio',
+    });
+  });
+  return content;
+}
+
+type VolcengineVideoRequestParams = Pick<
+  AIVideoGenParams,
+  'seedanceResolution' | 'seedanceRatio' | 'seedanceDuration' | 'generateAudio'
+>;
+
+export function buildVolcengineVideoRequestBody(
+  modelName: string,
+  prompt: string,
+  references: readonly MediaReference[],
+  preserveFrameRoles: boolean,
+  params: VolcengineVideoRequestParams,
+): Record<string, unknown> {
+  const isSeedance25 = isVolcengineSeedance25Model(modelName);
+  const hasFrame = preserveFrameRoles && references.some((reference) => (
+    reference.kind === 'image'
+    && (reference.role === 'first_frame' || reference.role === 'last_frame')
+  ));
+  const hasReferenceVideo = references.some((reference) => reference.kind === 'video');
+  const hasOmniReference = references.some((reference) => (
+    reference.kind !== 'image'
+    || !preserveFrameRoles
+    || (reference.role !== 'first_frame' && reference.role !== 'last_frame')
+  ));
+
+  const ratio = isSeedance25 && (hasFrame || hasReferenceVideo)
+    ? 'adaptive'
+    : params.seedanceRatio || '16:9';
+  const duration = isSeedance25 && hasReferenceVideo
+    ? -1
+    : params.seedanceDuration ?? 5;
+  const resolution = params.seedanceResolution || '720p';
+  const requestBody = mapVideoParameters('volcengine', modelName, {
+    model: modelName,
+    aspectRatio: ratio,
+    duration,
+    resolution,
+  });
+  requestBody.content = buildVolcengineVideoContent(prompt, references, preserveFrameRoles);
+  requestBody.watermark = false;
+  if (params.generateAudio) {
+    requestBody.generate_audio = true;
+  }
+  if (isSeedance25 && hasOmniReference) {
+    requestBody.omni_reference_task_type = 'auto';
+  }
+  return requestBody;
 }

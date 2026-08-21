@@ -16,6 +16,7 @@ import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 import {
   describeCanvasChange,
   type HistoryOperationLabel,
@@ -28,6 +29,7 @@ interface TimelineRow extends HistoryOperationLabel {
 }
 
 export default function HistoryTimelinePanel() {
+  const t = useT();
   const [expanded, setExpanded] = useState(true);
   const { history, historyIndex, undo, redo, pinned, chatOpen, chatPanelDetached } = useAppStore(
     useShallow((state) => ({
@@ -121,8 +123,8 @@ export default function HistoryTimelinePanel() {
         <AnimatedButton
           type="button"
           className="canvas-history-btn"
-          data-tooltip="撤销 (Ctrl+Z)"
-          aria-label="撤销"
+          data-tooltip={t('撤销 (Ctrl+Z)')}
+          aria-label={t('撤销')}
           disabled={!canUndo}
           onClick={() => { void undo(); }}
         >
@@ -131,20 +133,20 @@ export default function HistoryTimelinePanel() {
         <AnimatedButton
           type="button"
           className="canvas-history-btn"
-          data-tooltip="还原 (Ctrl+Shift+Z)"
-          aria-label="还原"
+          data-tooltip={t('还原 (Ctrl+Shift+Z)')}
+          aria-label={t('还原')}
           disabled={!canRedo}
           onClick={() => { void redo(); }}
         >
           <Icon icon="mdi:redo" width="15" />
         </AnimatedButton>
-        <span className="canvas-history-panel__title">操作记录</span>
+        <span className="canvas-history-panel__title">{t('操作记录')}</span>
         <AnimatedButton
           type="button"
           className={`canvas-history-btn${pinned ? ' canvas-history-btn--on' : ' canvas-history-btn--ghost'}`}
-          aria-label={pinned ? '取消锁定常显' : '锁定常显'}
+          aria-label={pinned ? t('取消锁定常显') : t('锁定常显')}
           aria-pressed={pinned}
-          data-tooltip={pinned ? '取消锁定' : '锁定常显'}
+          data-tooltip={pinned ? t('取消锁定') : t('锁定常显')}
           onClick={togglePinned}
         >
           <Icon icon={pinned ? 'mdi:pin' : 'mdi:pin-outline'} width="14" />
@@ -152,8 +154,8 @@ export default function HistoryTimelinePanel() {
         <AnimatedButton
           type="button"
           className="canvas-history-btn canvas-history-btn--ghost"
-          aria-label={expanded ? '收起操作记录' : '展开操作记录'}
-          data-tooltip={expanded ? '收起' : '展开'}
+          aria-label={expanded ? t('收起操作记录') : t('展开操作记录')}
+          data-tooltip={expanded ? t('收起') : t('展开')}
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >
@@ -162,9 +164,9 @@ export default function HistoryTimelinePanel() {
       </div>
 
       {expanded && (
-        <ul className="canvas-history-list" aria-label="画布操作记录">
+        <ul className="canvas-history-list" aria-label={t('画布操作记录')}>
           {orderedRows.length === 0 ? (
-            <li className="canvas-history-empty">暂无操作记录</li>
+            <li className="canvas-history-empty">{t('暂无操作记录')}</li>
           ) : (
             orderedRows.map((row) => {
               const isCurrent = row.index === historyIndex;
@@ -175,8 +177,8 @@ export default function HistoryTimelinePanel() {
                   className={`canvas-history-item${isCurrent ? ' is-current' : ''}${isUndone ? ' is-undone' : ''}`}
                 >
                   <Icon icon={row.icon} width="13" className="canvas-history-item__icon" />
-                  <span className="canvas-history-item__title">{row.title}</span>
-                  {isCurrent && <span className="canvas-history-item__badge">当前</span>}
+                  <span className="canvas-history-item__title">{t(row.title)}</span>
+                  {isCurrent && <span className="canvas-history-item__badge">{t('当前')}</span>}
                 </li>
               );
             })

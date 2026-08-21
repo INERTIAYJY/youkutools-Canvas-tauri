@@ -16,6 +16,7 @@ import { hasVideoSource, isEditableMediaNode, openVideoEditorForNodes } from '..
 import type { BaseNodeData, NodeType } from '../types';
 import type { Node as RFNode } from '@xyflow/react';
 import { isEligibleCharacterReferenceNode } from '../store/store.dramaAssets';
+import { useT } from '../i18n';
 
 export interface NodeContextMenuState {
   visible: boolean;
@@ -25,6 +26,7 @@ export interface NodeContextMenuState {
 }
 
 export function useNodeContextMenu() {
+  const t = useT();
   const nodes = useAppStore((s) => s.nodes);
   const selectedNodeIds = useAppStore((s) => s.selectedNodeIds);
   const copySelectedNodes = useAppStore((s) => s.copySelectedNodes);
@@ -94,8 +96,8 @@ export function useNodeContextMenu() {
   const handleCopy = useCallback(() => {
     copySelectedNodes();
     closeMenu();
-    useAppStore.getState().showToast('节点已复制');
-  }, [copySelectedNodes, closeMenu]);
+    useAppStore.getState().showToast(t('节点已复制'));
+  }, [copySelectedNodes, closeMenu, t]);
 
   // ── Cut: copy + delete ──
   const handleCut = useCallback(() => {
@@ -103,8 +105,8 @@ export function useNodeContextMenu() {
     copySelectedNodes();
     deleteNode(menu.nodeId);
     closeMenu();
-    useAppStore.getState().showToast('节点已剪切');
-  }, [menu.nodeId, copySelectedNodes, deleteNode, closeMenu]);
+    useAppStore.getState().showToast(t('节点已剪切'));
+  }, [menu.nodeId, copySelectedNodes, deleteNode, closeMenu, t]);
 
   // ── Text selection copy/cut ──
   const handleCopyText = useCallback(async () => {
@@ -113,8 +115,8 @@ export function useNodeContextMenu() {
     useAppStore.setState({ clipboard: { nodes: [], groups: [], projectId: null } });
     window.getSelection()?.removeAllRanges();
     closeMenu();
-    useAppStore.getState().showToast('已复制选中文字');
-  }, [menu.textSelection, closeMenu]);
+    useAppStore.getState().showToast(t('已复制选中文字'));
+  }, [menu.textSelection, closeMenu, t]);
 
   const handleCutText = useCallback(async () => {
     if (!menu.nodeId || !menu.textSelection) return;
@@ -127,8 +129,8 @@ export function useNodeContextMenu() {
     useAppStore.setState({ clipboard: { nodes: [], groups: [], projectId: null } });
     window.getSelection()?.removeAllRanges();
     closeMenu();
-    useAppStore.getState().showToast('已剪切选中文字');
-  }, [menu.nodeId, menu.textSelection, nodes, updateNodeData, closeMenu]);
+    useAppStore.getState().showToast(t('已剪切选中文字'));
+  }, [menu.nodeId, menu.textSelection, nodes, updateNodeData, closeMenu, t]);
 
   // ── Duplicate: copy + paste at offset (group-aware) ──
   const handleDuplicate = useCallback(() => {
@@ -138,24 +140,24 @@ export function useNodeContextMenu() {
     copySelectedNodes();
     pasteNodes({ x: source.position.x + 30, y: source.position.y + 30 });
     closeMenu();
-    useAppStore.getState().showToast('节点已创建副本');
-  }, [menu.nodeId, nodes, copySelectedNodes, pasteNodes, closeMenu]);
+    useAppStore.getState().showToast(t('节点已创建副本'));
+  }, [menu.nodeId, nodes, copySelectedNodes, pasteNodes, closeMenu, t]);
 
   // ── Ungroup ──
   const handleUngroup = useCallback(() => {
     if (!menu.nodeId) return;
     ungroupSelectedNodes();
     closeMenu();
-    useAppStore.getState().showToast('已解除分组');
-  }, [menu.nodeId, ungroupSelectedNodes, closeMenu]);
+    useAppStore.getState().showToast(t('已解除分组'));
+  }, [menu.nodeId, ungroupSelectedNodes, closeMenu, t]);
 
   // ── Delete ──
   const handleDelete = useCallback(() => {
     if (!menu.nodeId) return;
     deleteNode(menu.nodeId);
     closeMenu();
-    useAppStore.getState().showToast('节点已删除');
-  }, [menu.nodeId, deleteNode, closeMenu]);
+    useAppStore.getState().showToast(t('节点已删除'));
+  }, [menu.nodeId, deleteNode, closeMenu, t]);
 
   // ── 打开文件所在位置 ──
   const mediaTypes: NodeType[] = [
@@ -172,7 +174,7 @@ export function useNodeContextMenu() {
   const isImageNode = nodeType === 'ai-image' || nodeType === 'source-image';
   const showImageConversion = (isImageNote || isImageNode)
     && !!(nodeData?.imageUrl || nodeData?.thumbnailUrl);
-  const imageConversionLabel = isImageNote ? '转换为图片节点' : '转换为图片笔记';
+  const imageConversionLabel = isImageNote ? t('转换为图片节点') : t('转换为图片笔记');
 
   const handleConvertImage = useCallback(() => {
     if (!menu.nodeId) return;
@@ -180,12 +182,12 @@ export function useNodeContextMenu() {
     closeMenu();
     const store = useAppStore.getState();
     if (result === 'connected') {
-      store.showToast('该图片节点存在连线，请先断开连线', 'error');
+      store.showToast(t('该图片节点存在连线，请先断开连线'), 'error');
       return;
     }
-    if (result === 'to-note') store.showToast('已转换为图片笔记');
-    if (result === 'to-node') store.showToast('已转换为图片节点');
-  }, [closeMenu, convertImageNodeKind, menu.nodeId]);
+    if (result === 'to-note') store.showToast(t('已转换为图片笔记'));
+    if (result === 'to-node') store.showToast(t('已转换为图片节点'));
+  }, [closeMenu, convertImageNodeKind, menu.nodeId, t]);
 
   const handleToggleLock = useCallback(() => {
     if (!menu.nodeId) return;
@@ -199,8 +201,8 @@ export function useNodeContextMenu() {
       ? { ...candidate, draggable: nextLocked ? false : undefined }
       : candidate));
     closeMenu();
-    store.showToast(nextLocked ? '节点已锁定' : '节点已解锁');
-  }, [closeMenu, menu.nodeId]);
+    store.showToast(nextLocked ? t('节点已锁定') : t('节点已解锁'));
+  }, [closeMenu, menu.nodeId, t]);
 
   const handleAddToCharacter = useCallback(() => {
     if (!menu.nodeId) return;
@@ -221,19 +223,19 @@ export function useNodeContextMenu() {
     const node = nodes.find((n) => n.id === menu.nodeId);
     const fp = (node?.data as BaseNodeData | undefined)?.filePath;
     if (!fp) {
-      useAppStore.getState().showToast('无法找到文件路径');
+      useAppStore.getState().showToast(t('无法找到文件路径'));
       closeMenu();
       return;
     }
     try {
       await revealFileInFolder(fp);
       closeMenu();
-      useAppStore.getState().showToast('已打开文件位置');
+      useAppStore.getState().showToast(t('已打开文件位置'));
     } catch {
-      useAppStore.getState().showToast('无法打开文件位置');
+      useAppStore.getState().showToast(t('无法打开文件位置'));
       closeMenu();
     }
-  }, [menu.nodeId, nodes, closeMenu]);
+  }, [menu.nodeId, nodes, closeMenu, t]);
 
   // ── 在 Photoshop 中打开 ──
   const openInPSTypes: NodeType[] = [
@@ -249,7 +251,7 @@ export function useNodeContextMenu() {
     const node = nodes.find((n) => n.id === menu.nodeId);
     const fp = (node?.data as BaseNodeData | undefined)?.filePath;
     if (!fp) {
-      useAppStore.getState().showToast('无法找到文件路径');
+      useAppStore.getState().showToast(t('无法找到文件路径'));
       closeMenu();
       return;
     }
@@ -257,13 +259,13 @@ export function useNodeContextMenu() {
       const photoshopPath = useAppStore.getState().config.photoshopPath;
       await openInPhotoshop(fp, photoshopPath);
       closeMenu();
-      useAppStore.getState().showToast('已在 Photoshop 中打开');
+      useAppStore.getState().showToast(t('已在 Photoshop 中打开'));
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '打开失败';
+      const message = err instanceof Error ? err.message : t('打开失败');
       useAppStore.getState().showToast(message, 'error');
       closeMenu();
     }
-  }, [menu.nodeId, nodes, closeMenu]);
+  }, [menu.nodeId, nodes, closeMenu, t]);
 
   // ── 在视频编辑器中打开 ──
   const openInVideoEditorTypes: NodeType[] = ['ai-video', 'source-video'];
@@ -277,7 +279,7 @@ export function useNodeContextMenu() {
     const node = nodes.find((candidate) => candidate.id === menu.nodeId);
     const filePath = (node?.data as BaseNodeData | undefined)?.filePath;
     if (!filePath) {
-      useAppStore.getState().showToast('无法找到文件路径');
+      useAppStore.getState().showToast(t('无法找到文件路径'));
       closeMenu();
       return;
     }
@@ -286,18 +288,18 @@ export function useNodeContextMenu() {
     try {
       if (editor === 'jianying') {
         await openInJianying(filePath, state.config.jianyingPath);
-        state.showToast('已在剪映中打开');
+        state.showToast(t('已在剪映中打开'));
       } else {
         await openInPremiere(filePath, state.config.premierePath);
-        state.showToast('已在 Premiere Pro 中打开');
+        state.showToast(t('已在 Premiere Pro 中打开'));
       }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '打开失败';
+      const message = err instanceof Error ? err.message : t('打开失败');
       state.showToast(message, 'error');
     } finally {
       closeMenu();
     }
-  }, [menu.nodeId, nodes, closeMenu]);
+  }, [menu.nodeId, nodes, closeMenu, t]);
 
   // ── 内置视频编辑器（独立窗口）──
   // 右键点在多选内时，把整批可用素材（视频 + 图片）一起送进时间轴
@@ -318,8 +320,8 @@ export function useNodeContextMenu() {
 
   const showEditVideo = editVideoNodes.length > 0 && hasVideoSource(editVideoNodes);
   const editVideoLabel = editVideoNodes.length > 1
-    ? `编辑视频（${editVideoNodes.length} 个素材）`
-    : '编辑视频';
+    ? t('编辑视频（{count} 个素材）', { count: editVideoNodes.length })
+    : t('编辑视频');
 
   const handleEditVideo = useCallback(async () => {
     const store = useAppStore.getState();
@@ -330,11 +332,11 @@ export function useNodeContextMenu() {
         theme: store.config.theme === 'light' ? 'light' : 'dark',
       });
     } catch (err: unknown) {
-      store.showToast(err instanceof Error ? err.message : '打开视频编辑器失败', 'error');
+      store.showToast(err instanceof Error ? err.message : t('打开视频编辑器失败'), 'error');
     } finally {
       closeMenu();
     }
-  }, [closeMenu, editVideoNodes]);
+  }, [closeMenu, editVideoNodes, t]);
 
   const handleOpenInJianying = useCallback(
     () => handleOpenInVideoEditor('jianying'),
@@ -361,7 +363,7 @@ export function useNodeContextMenu() {
     const node = nodes.find((n) => n.id === menu.nodeId);
     const data = node?.data as BaseNodeData | undefined;
     if (!data) {
-      useAppStore.getState().showToast('无法读取节点数据');
+      useAppStore.getState().showToast(t('无法读取节点数据'));
       closeMenu();
       return;
     }
@@ -377,13 +379,13 @@ export function useNodeContextMenu() {
       });
       closeMenu();
       if (result) {
-        useAppStore.getState().showToast('文件已保存');
+        useAppStore.getState().showToast(t('文件已保存'));
       }
     } catch {
-      useAppStore.getState().showToast('文件保存失败');
+      useAppStore.getState().showToast(t('文件保存失败'));
       closeMenu();
     }
-  }, [menu.nodeId, nodeType, nodes, closeMenu]);
+  }, [menu.nodeId, nodeType, nodes, closeMenu, t]);
 
   // ── 复制媒体（系统剪贴板）──
   // 图像节点复制位图到剪贴板；视频/音频节点复制文件到剪贴板（CF_HDROP，可在资源管理器粘贴）。
@@ -393,10 +395,10 @@ export function useNodeContextMenu() {
     && copyMediaTypes.includes(nodeType)
     && (!!nodeData?.imageUrl || !!nodeData?.videoUrl || !!nodeData?.audioUrl);
   const copyMediaLabel = nodeType === 'ai-image'
-    ? '复制图像'
+    ? t('复制图像')
     : nodeType === 'ai-video'
-      ? '复制视频'
-      : '复制音频';
+      ? t('复制视频')
+      : t('复制音频');
 
   const handleCopyMedia = useCallback(async () => {
     if (!menu.nodeId) return;
@@ -409,19 +411,19 @@ export function useNodeContextMenu() {
     try {
       if (nodeType === 'ai-image') {
         const imageUrl = data.imageUrl || data.thumbnailUrl;
-        if (!imageUrl) { toast('没有可用的图片', 'error'); closeMenu(); return; }
+        if (!imageUrl) { toast(t('没有可用的图片'), 'error'); closeMenu(); return; }
         ok = await copyImageToClipboard(imageUrl);
       } else {
         const filePath = data.filePath;
-        if (!filePath) { toast('该节点没有本地文件，无法复制', 'error'); closeMenu(); return; }
+        if (!filePath) { toast(t('该节点没有本地文件，无法复制'), 'error'); closeMenu(); return; }
         ok = await copyFileToClipboard(filePath);
       }
-      toast(ok ? `已${copyMediaLabel}到剪贴板` : '复制失败', ok ? undefined : 'error');
+      toast(ok ? t('已{label}到剪贴板', { label: copyMediaLabel }) : t('复制失败'), ok ? undefined : 'error');
     } catch {
-      toast('复制失败', 'error');
+      toast(t('复制失败'), 'error');
     }
     closeMenu();
-  }, [menu.nodeId, nodes, nodeType, copyMediaLabel, closeMenu]);
+  }, [menu.nodeId, nodes, nodeType, copyMediaLabel, closeMenu, t]);
 
   return {
     menu,

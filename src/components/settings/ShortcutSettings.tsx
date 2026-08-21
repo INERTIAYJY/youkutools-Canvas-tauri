@@ -3,6 +3,8 @@
  * 根据操作系统（macOS / Windows）动态展示修饰键符号（⌘/⌃/⌥/⇧ vs Ctrl/Alt/Shift），
  * 列出保存、撤销、复制粘贴、节点创建、画布复位、小地图等快捷键一览。
  */
+import { useT } from '../../i18n';
+
 const IS_MAC = typeof navigator !== 'undefined' && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
 function getShortcutList(): { action: string; key: string }[] {
@@ -32,12 +34,13 @@ function getShortcutList(): { action: string; key: string }[] {
 }
 
 export default function ShortcutSettings() {
+  const t = useT();
   return (
     <div className="space-y-1">
-      <p className="text-sm text-canvas-text-muted mb-4">键盘快捷键配置</p>
+      <p className="text-sm text-canvas-text-muted mb-4">{t('键盘快捷键配置')}</p>
       {getShortcutList().map(({ action, key }) => (
         <div key={action} className="flex items-center justify-between py-2 px-2.5 rounded-lg hover:bg-canvas-hover">
-          <span className="text-sm text-canvas-text">{action}</span>
+          <span className="text-sm text-canvas-text">{t(action)}</span>
           <kbd className="px-2 py-0.5 bg-canvas-card border border-canvas-border rounded text-[11px] text-canvas-text-secondary font-mono">
             {key}
           </kbd>

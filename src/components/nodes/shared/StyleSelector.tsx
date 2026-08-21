@@ -10,6 +10,7 @@ import PopupCloseButton from '../../shared/PopupCloseButton';
 import { useAppStore } from '../../../store/useAppStore';
 import { useShallow } from 'zustand/react/shallow';
 import { PROJECT_STYLE_OPTIONS } from '../../../services/projectSettingsService';
+import { useT } from '../../../i18n';
 
 // ── 画风缩略图 ──
 import thumbRealistic from '../../../assets/images/styles/realistic.png';
@@ -82,6 +83,7 @@ export default function StyleSelector({
   respectProjectLock = true,
   onModalOpenChange,
 }: StyleSelectorProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -215,7 +217,7 @@ export default function StyleSelector({
         >
           <Icon icon="lucide:palette" className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
           <span className={`min-w-0 flex-1 truncate ${selectedName ? '' : 'text-canvas-text-muted'}`}>
-            {selectedName || '选择画风'}
+            {selectedName || t('选择画风')}
           </span>
           <Icon icon="lucide:chevron-right" className="h-3.5 w-3.5 shrink-0 text-canvas-text-muted" />
         </button>
@@ -224,8 +226,8 @@ export default function StyleSelector({
           type="button"
           className={`prompt-btn style-selector-btn${open ? ' style-active' : ''}${effectiveSelectedStyle ? ' has-style' : ''}${lockedProjectStyle ? ' cursor-not-allowed opacity-70' : ''}`}
           data-tooltip={lockedProjectStyle
-            ? `项目已锁定画风：${selectedName || '项目画风'}`
-            : selectedName ? `画风: ${selectedName}` : '选择画风'}
+            ? t('项目已锁定画风：{name}', { name: selectedName || t('项目画风') })
+            : selectedName ? t('画风: {name}', { name: selectedName }) : t('选择画风')}
           disabled={!!lockedProjectStyle}
           aria-disabled={!!lockedProjectStyle}
           onClick={handleToggle}
@@ -241,19 +243,19 @@ export default function StyleSelector({
         <ModalOverlay
           isOpen={open}
           onClose={() => setOpen(false)}
-          ariaLabel="选择画风"
+          ariaLabel={t('选择画风')}
           className="style-picker-panel"
         >
           <div className="style-picker-header">
-            <span className="asset-picker-title">选择画风</span>
+            <span className="asset-picker-title">{t('选择画风')}</span>
             <div className="style-picker-header-actions">
               {effectiveSelectedStyle ? (
                 <button
                   type="button"
                   className="style-add-btn"
                   onClick={() => handleSelect('')}
-                  data-tooltip="清除画风"
-                  aria-label="清除当前画风"
+                  data-tooltip={t('清除画风')}
+                  aria-label={t('清除当前画风')}
                 >
                   <Icon icon="lucide:circle-off" className="h-4 w-4" />
                 </button>
@@ -262,7 +264,7 @@ export default function StyleSelector({
                 type="button"
                 className="style-add-btn"
                 onClick={openAddForm}
-                data-tooltip="添加自定义画风"
+                data-tooltip={t('添加自定义画风')}
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <line x1="12" y1="5" x2="12" y2="19" />
@@ -270,14 +272,14 @@ export default function StyleSelector({
                 </svg>
               </button>
               <PopupCloseButton
-                ariaLabel="关闭画风选择"
+                ariaLabel={t('关闭画风选择')}
                 onClick={() => setOpen(false)}
               />
             </div>
           </div>
           <div className="style-picker-grid">
             {styles.length === 0 && (
-              <div className="style-picker-empty">暂无可选画风</div>
+              <div className="style-picker-empty">{t('暂无可选画风')}</div>
             )}
             {styles.map((s) => (
               <button
@@ -292,17 +294,17 @@ export default function StyleSelector({
                   ) : (
                     <div className="style-card-placeholder" />
                   )}
-                  <span className="style-card-name">{s.name}</span>
+                  <span className="style-card-name">{s.isCustom ? s.name : t(s.name)}</span>
                 </div>
                 {s.description && (
-                  <div className="style-card-desc">{s.description}</div>
+                  <div className="style-card-desc">{s.isCustom ? s.description : t(s.description)}</div>
                 )}
                 {s.isCustom && (
                   <button
                     type="button"
                     className="style-card-delete"
                     onClick={(e) => handleDeleteCustom(e, s.id)}
-                    data-tooltip="删除此画风"
+                    data-tooltip={t('删除此画风')}
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                       <line x1="18" y1="6" x2="6" y2="18" />
@@ -322,14 +324,14 @@ export default function StyleSelector({
         <ModalOverlay
           isOpen={addOpen}
           onClose={() => setAddOpen(false)}
-          ariaLabel="添加自定义画风"
+          ariaLabel={t('添加自定义画风')}
           className="style-add-panel"
           closeOnBackdrop={false}
         >
           <div className="style-picker-header">
-            <span className="asset-picker-title">添加自定义画风</span>
+            <span className="asset-picker-title">{t('添加自定义画风')}</span>
             <PopupCloseButton
-              ariaLabel="关闭自定义画风编辑"
+              ariaLabel={t('关闭自定义画风编辑')}
               onClick={() => setAddOpen(false)}
             />
           </div>
@@ -345,7 +347,7 @@ export default function StyleSelector({
                     <circle cx="8.5" cy="8.5" r="1.5" />
                     <polyline points="21 15 16 10 5 21" />
                   </svg>
-                  <span>点击上传缩略图</span>
+                  <span>{t('点击上传缩略图')}</span>
                 </div>
               )}
               <input
@@ -357,21 +359,21 @@ export default function StyleSelector({
               />
             </div>
             {/* 名称 */}
-            <label className="style-add-label">画风名称</label>
+            <label className="style-add-label">{t('画风名称')}</label>
             <input
               type="text"
               className="style-add-input"
-              placeholder="例如：赛博朋克"
+              placeholder={t('例如：赛博朋克')}
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleAddSubmit(); }}
               autoFocus
             />
             {/* 提示词 */}
-            <label className="style-add-label">提示词</label>
+            <label className="style-add-label">{t('提示词')}</label>
             <textarea
               className="style-add-textarea"
-              placeholder="输入该画风对应的提示词，生成时会自动附加到主提示词中"
+              placeholder={t('输入该画风对应的提示词，生成时会自动附加到主提示词中')}
               value={formPrompt}
               onChange={(e) => setFormPrompt(e.target.value)}
               rows={3}
@@ -383,7 +385,7 @@ export default function StyleSelector({
                 className="style-add-cancel"
                 onClick={() => setAddOpen(false)}
               >
-                取消
+                {t('取消')}
               </button>
               <button
                 type="button"
@@ -391,7 +393,7 @@ export default function StyleSelector({
                 disabled={!formName.trim()}
                 onClick={handleAddSubmit}
               >
-                保存
+                {t('保存')}
               </button>
             </div>
           </div>

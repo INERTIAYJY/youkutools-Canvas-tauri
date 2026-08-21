@@ -15,6 +15,7 @@ import { copyFile as copyFileToClipboard } from '../../services/clipboardService
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { transcribeAudio } from '../../services/ai/transcribeAudio';
 import { textNodeHeight } from '../../utils/num';
+import { useT } from '../../i18n';
 
 /* ── Waveform data ── */
 interface WaveformData {
@@ -166,6 +167,7 @@ function formatTime(seconds: number): string {
 /* ── Main Component ── */
 
 function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
+  const t = useT();
   const justCompleted = useCompletionFlash(data.status);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const isSingleSelection = useAppStore((s) => s.selectedNodeIds.length <= 1);
@@ -183,25 +185,25 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const waveformRef = useRef<WaveformData | null>(null);
   const animFrameRef = useRef(0);
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴音频');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴音频'));
 
   const handleCopyFile = useCallback(async () => {
     const store = useAppStore.getState();
     const filePath = data.filePath as string | undefined;
     if (!filePath) {
-      store.showToast('该音频没有本地文件，无法复制', 'error');
+      store.showToast(t('该音频没有本地文件，无法复制'), 'error');
       return;
     }
     const ok = await copyFileToClipboard(filePath);
-    store.showToast(ok ? '已复制音频到剪贴板' : '复制失败', ok ? undefined : 'error');
-  }, [data.filePath]);
+    store.showToast(ok ? t('已复制音频到剪贴板') : t('复制失败'), ok ? undefined : 'error');
+  }, [data.filePath, t]);
 
   const handleTranscribe = useCallback(async () => {
     const store = useAppStore.getState();
     const sourceNode = store.nodes.find((node) => node.id === id);
     const audioUrl = sourceNode?.data.audioUrl;
     if (!sourceNode || !audioUrl) {
-      store.showToast('没有可转录的音频', 'error');
+      store.showToast(t('没有可转录的音频'), 'error');
       return;
     }
 
@@ -224,7 +226,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         (count, line) => count + Math.max(1, Math.ceil(line.length / 36)),
         0,
       );
-      const sourceLabel = liveSource.data.label?.trim() || liveSource.data.fileName?.trim() || '音频';
+      const sourceLabel = liveSource.data.label?.trim() || liveSource.data.fileName?.trim() || t('音频');
       const transcriptNode: Node<BaseNodeData> = {
         id: newNodeId,
         type: 'ai-text',
@@ -233,7 +235,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           y: liveSource.position.y,
         },
         data: {
-          label: `${sourceLabel} 转录`,
+          label: t('{name} 转录', { name: sourceLabel }),
           type: 'ai-text',
           role: 'source',
           output: transcript,
@@ -251,14 +253,14 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       };
 
       liveStore.addNodeWithEdge(transcriptNode, edge);
-      liveStore.showToast('音频转录完成');
+      liveStore.showToast(t('音频转录完成'));
     } catch (error) {
-      const message = error instanceof Error ? error.message : '音频转录失败';
+      const message = error instanceof Error ? error.message : t('音频转录失败');
       useAppStore.getState().showToast(message, 'error');
     } finally {
       setIsTranscribing(false);
     }
-  }, [id]);
+  }, [id, t]);
 
   // ── Reset when URL changes ──
   useEffect(() => {
@@ -441,8 +443,8 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             <button
               className="node-upload-btn"
               onClick={(e) => { e.stopPropagation(); handleUpload(); }}
-              data-tooltip="上传音频"
-              aria-label="上传音频"
+              data-tooltip={t('上传音频')}
+              aria-label={t('上传音频')}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="12" height="12">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -477,12 +479,12 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           ) : isUploading ? (
             <div className="node-preview-loading">
               <div className="spinner" />
-              <span>上传中...</span>
+              <span>{t('上传中...')}</span>
             </div>
           ) : data.status === 'loading' ? (
             <div className="node-preview-loading">
               <div className="spinner" />
-              <span>生成音频中...</span>
+              <span>{t('生成音频中...')}</span>
             </div>
           ) : (
             <div className="node-preview-placeholder">
@@ -499,7 +501,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                   <circle cx="18" cy="16" r="3" />
                 </svg>
               )}
-              <span>{isSource ? '上传音频文件' : 'TTS 文本转语音'}</span>
+              <span>{isSource ? t('上传音频文件') : t('TTS 文本转语音')}</span>
             </div>
           )}
         </div>

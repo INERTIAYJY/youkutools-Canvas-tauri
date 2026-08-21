@@ -6,6 +6,7 @@ import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
 import type { CanvasNoteData } from './canvasNote';
 import type { ShotlistColumnKey, ShotRow } from './shotlist';
+import type { Locale } from '../i18n';
 
 export type {
   CanvasDrawingTool,
@@ -478,6 +479,7 @@ export interface AppConfig {
   /** 当前用于 Agent 联网搜索的厂商；旧配置未设置时优先沿用 Tavily。 */
   webSearchProviderId?: WebSearchProviderId;
   theme: 'dark' | 'light';
+  language?: Locale; // 界面语言，未设置时跟随系统
   canvasBackground?: CanvasBackground; // 画布背景主题
   interactionMode?: InteractionMode; // 画布交互模式，默认 'default'
   nodeToolbarMode?: NodeToolbarMode; // 节点顶部工具栏显示方式，默认 'icons'
@@ -497,6 +499,9 @@ export interface AppConfig {
   generalModels?: GeneralModelConfig[]; // 用户自建通用模型
   sidebarFloating?: boolean;  // 侧边栏是否悬浮显示（半隐于窗口边缘），默认 true
   windowGlassFrame?: boolean; // 是否显示主窗口玻璃外框，默认 true
+  performanceMode?: boolean; // 性能模式：关闭高开销视觉效果与装饰动画，默认 false
+  /** @deprecated 仅用于读取早期图形兼容模式配置，加载后迁移到 performanceMode。 */
+  graphicsCompatibilityMode?: boolean;
   titlebarFloating?: boolean; // 标题栏是否悬浮显示（macOS 红绿灯内移并带毛玻璃胶囊），默认 true
   mascotVisible?: boolean;   // 是否显示吉祥物，默认 false
   mascotPosition?: MascotPosition; // 吉祥物相对视口位置，未设置时使用右下角默认位置
@@ -510,7 +515,8 @@ export interface AppConfig {
   assistantVideoModelId?: string;  // 助手生视频模型 ID：generalModels 中的 video 模型 id
   cloudParseEnabled?: boolean; // 是否启用云端解析，默认 true；关闭后助手仅使用本地规则
   mcpAutoStart?: boolean;     // 启动软件时自动开启 MCP 本地控制会话，默认 false
-  mcpPort?: number;           // MCP 回环固定端口，1024-65535；未设置时随机分配
+  mcpPort?: number;           // MCP 固定端口，1024-65535；未设置时随机分配
+  mcpTransport?: 'stdio' | 'streamable-http'; // 默认 stdio；HTTP 模式监听 0.0.0.0
 }
 
 // ── 通用模型配置 ──

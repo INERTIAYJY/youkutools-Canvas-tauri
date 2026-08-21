@@ -6,6 +6,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { Icon } from '@iconify/react';
 import type { NodeType } from '../../../types';
 import { getNodeTypeConfig } from '../../../types';
+import { useT } from '../../../i18n';
 
 interface NodeLabelProps {
   kind: NodeType;
@@ -17,6 +18,7 @@ interface NodeLabelProps {
 }
 
 export default function NodeLabel({ kind, label, displayId, isBeta, nodeId: _nodeId, onRename }: NodeLabelProps) {
+  const t = useT();
   const config = getNodeTypeConfig(kind);
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(label);
@@ -78,7 +80,7 @@ export default function NodeLabel({ kind, label, displayId, isBeta, nodeId: _nod
         <span
           className="node-label-text text-xs font-medium text-canvas-text truncate flex-1 min-w-0 cursor-default"
           onDoubleClick={handleDoubleClick}
-          data-tooltip="双击重命名"
+          data-tooltip={t('双击重命名')}
         >
           {label}
         </span>

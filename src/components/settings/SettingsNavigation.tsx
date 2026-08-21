@@ -6,6 +6,7 @@
 import { Icon } from '@iconify/react';
 import type { SettingsTab } from '../../store/store.ui';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: '常规' },
@@ -77,6 +78,7 @@ export default function SettingsNavigation({
   activeTab: SettingsTab;
   onSelect: (tab: SettingsTab) => void;
 }) {
+  const t = useT();
   return (
     <nav className="w-44 border-r border-canvas-border p-3 space-y-0.5 shrink-0">
       {SETTINGS_TABS.map(({ id, label }) => (
@@ -88,7 +90,7 @@ export default function SettingsNavigation({
           }`}
         >
           <SettingsTabIcon tab={id} />
-          {label}
+          {t(label)}
         </AnimatedButton>
       ))}
     </nav>

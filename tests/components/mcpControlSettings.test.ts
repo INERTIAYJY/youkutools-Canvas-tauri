@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildMcpClientConfig,
+  buildMcpHttpEndpoint,
   generateMcpSessionToken,
+  getConfiguredMcpTransport,
   normalizeMcpPort,
 } from '../../src/services/mcp/mcpSessionConfig';
-import { MCP_CONNECTION_REQUIREMENTS } from '../../src/components/settings/mcpConnectionRequirements';
+import {
+  getMcpConnectionRequirements,
+  MCP_CONNECTION_REQUIREMENTS,
+} from '../../src/components/settings/mcpConnectionRequirements';
 
 describe('MCP control settings helpers', () => {
   it('lists the complete local connection environment requirements', () => {
@@ -15,6 +20,17 @@ describe('MCP control settings helpers', () => {
       '在同一台电脑连接',
     ]);
     expect(MCP_CONNECTION_REQUIREMENTS.at(-1)?.description).toContain('127.0.0.1');
+  });
+
+  it('replaces local Node requirements with remote HTTP security requirements', () => {
+    const requirements = getMcpConnectionRequirements('streamable-http');
+    expect(requirements.map((requirement) => requirement.title)).toEqual([
+      'AI Canvas 桌面端',
+      '可达的局域网地址',
+      '支持 Streamable HTTP',
+      'Bearer Token 鉴权',
+    ]);
+    expect(requirements.some((requirement) => requirement.title === 'Node.js 运行环境')).toBe(false);
   });
 
   it('generates a fresh 256-bit hexadecimal session token', () => {
@@ -30,6 +46,8 @@ describe('MCP control settings helpers', () => {
     const config = buildMcpClientConfig({
       sessionId: 'session-1',
       port: 43123,
+      transport: 'stdio',
+      bindAddress: '127.0.0.1',
       adapterPath: 'D:\\AI Canvas\\scripts\\ai-canvas-mcp.mjs',
     }, token);
 
@@ -45,7 +63,39 @@ describe('MCP control settings helpers', () => {
     // 令牌不能出现在命令行参数里：argv 对本机所有进程可见
     expect(JSON.parse(config ?? '').mcpServers['ai-canvas'].args.join(' ')).not.toContain(token);
 
-    expect(buildMcpClientConfig({ sessionId: 'session-1', port: 43123 }, token)).toBeNull();
+    expect(buildMcpClientConfig({
+      sessionId: 'session-1',
+      port: 43123,
+      transport: 'stdio',
+      bindAddress: '127.0.0.1',
+    }, token)).toBeNull();
+  });
+
+  it('builds a bearer-authenticated Streamable HTTP endpoint without persisting the token', () => {
+    const token = 'cd'.repeat(32);
+    const session = {
+      sessionId: 'session-http',
+      port: 43124,
+      transport: 'streamable-http' as const,
+      bindAddress: '0.0.0.0',
+      endpointPath: '/mcp',
+    } as const;
+
+    expect(buildMcpHttpEndpoint(session)).toBe('http://<AI_CANVAS_IP>:43124/mcp');
+    expect(JSON.parse(buildMcpClientConfig(session, token) ?? '')).toEqual({
+      mcpServers: {
+        'ai-canvas': {
+          url: 'http://<AI_CANVAS_IP>:43124/mcp',
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      },
+    });
+  });
+
+  it('defaults invalid or missing persisted transports to local stdio', () => {
+    expect(getConfiguredMcpTransport(undefined)).toBe('stdio');
+    expect(getConfiguredMcpTransport('invalid')).toBe('stdio');
+    expect(getConfiguredMcpTransport('streamable-http')).toBe('streamable-http');
   });
 
   it('accepts only user-assignable ports as the fixed port', () => {

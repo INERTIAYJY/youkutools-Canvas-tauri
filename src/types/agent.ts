@@ -42,6 +42,7 @@ export type AgentStepKind =
   | 'response';
 
 export type AgentApprovalKind =
+  | 'user_choice'
   | 'canvas_write'
   | 'file_write'
   | 'permanent_delete'
@@ -218,14 +219,28 @@ export interface AgentToolCallSnapshot {
   canvasCheckpoint?: AgentCanvasCheckpoint;
 }
 
-export interface AgentApprovalInputRequest {
-  kind: 'media_model';
-  mediaKind: 'image' | 'video' | 'audio';
-  selectedModelRef?: string;
+/** 供用户勾选的候选模型；category 用于在卡片里分组。 */
+export interface ProviderModelChoice {
+  id: string;
+  name: string;
+  category: 'text' | 'image' | 'video' | 'audio';
 }
+
+export type AgentApprovalInputRequest =
+  | {
+    kind: 'media_model';
+    mediaKind: 'image' | 'video' | 'audio';
+    selectedModelRef?: string;
+  }
+  | {
+    /** 中转站接入：让用户从清单里勾选要接入哪几个模型 */
+    kind: 'provider_models';
+    options: ProviderModelChoice[];
+  };
 
 export interface AgentApprovalInputValues {
   modelRef?: string;
+  selectedModelIds?: string[];
 }
 
 export interface AgentApprovalResolution {

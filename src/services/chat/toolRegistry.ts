@@ -11,6 +11,8 @@ import {
 
 export type AgentToolEffect =
   | 'read'
+  /** 不改任何东西，但必须由用户作答；任何模式下都会弹卡片等待，不会自动执行 */
+  | 'user_choice'
   | 'canvas_write'
   | 'file_write'
   | 'permanent_delete'

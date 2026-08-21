@@ -4,6 +4,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useReactFlow, useViewport } from '@xyflow/react';
 import { useAppStore } from '../../store/useAppStore';
+import { useT } from '../../i18n';
 import {
   adjustAdjacentNodeGap,
   distributeNodesWithEqualGap,
@@ -28,6 +29,7 @@ interface DragSession {
 }
 
 function DistributionGapHandles({ axis }: DistributionGapHandlesProps) {
+  const t = useT();
   const nodes = useAppStore((state) => state.nodes);
   const selectedNodeIds = useAppStore((state) => state.selectedNodeIds);
   const { flowToScreenPosition, screenToFlowPosition } = useReactFlow();
@@ -161,8 +163,8 @@ function DistributionGapHandles({ axis }: DistributionGapHandlesProps) {
           type="button"
           data-distribution-axis={axis}
           data-gap-index={gapIndex}
-          aria-label={`${isHorizontal ? '横向' : '纵向'}间距手柄 ${gapIndex + 1}`}
-          title="拖动调整全部间距，Shift 仅调整相邻节点"
+          aria-label={t('{dir}间距手柄 {index}', { dir: isHorizontal ? t('横向') : t('纵向'), index: gapIndex + 1 })}
+          title={t('拖动调整全部间距，Shift 仅调整相邻节点')}
           className={`nokey nodrag nopan fixed pointer-events-auto border border-indigo-400/40 bg-indigo-400/25 backdrop-blur-sm transition-[opacity,border-color,background-color] hover:border-indigo-400/70 hover:bg-indigo-400/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/70 ${
             isHorizontal
               ? 'h-5 w-1.5 cursor-ew-resize rounded-full'

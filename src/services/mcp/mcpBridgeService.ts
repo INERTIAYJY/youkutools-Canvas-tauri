@@ -5,6 +5,7 @@ import type {
   McpBridgeRequestEvent,
   McpBridgeResponseInput,
   McpBridgeSessionInfo,
+  McpTransport,
 } from '../../types/mcp';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -12,8 +13,13 @@ import { invoke } from '@tauri-apps/api/core';
 export async function startMcpBridge(
   token: string,
   port?: number,
+  transport: McpTransport = 'stdio',
 ): Promise<McpBridgeSessionInfo> {
-  return invoke<McpBridgeSessionInfo>('mcp_bridge_start', { token, port: port ?? null });
+  return invoke<McpBridgeSessionInfo>('mcp_bridge_start', {
+    token,
+    port: port ?? null,
+    transport,
+  });
 }
 
 export async function stopMcpBridge(): Promise<void> {

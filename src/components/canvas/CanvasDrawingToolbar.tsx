@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { CanvasDrawingTool } from '../../types';
+import { useT } from '../../i18n';
 
 interface CanvasDrawingToolbarProps {
   activeTool: CanvasDrawingTool;
@@ -39,8 +40,9 @@ const TOOLS: Array<{ id: CanvasDrawingTool; label: string; icon: LucideIcon }> =
 ];
 
 function CanvasDrawingToolbar({ activeTool, imageReady, onSelectTool }: CanvasDrawingToolbarProps) {
+  const t = useT();
   return (
-    <div className="canvas-drawing-toolbar canvas-drawing-ui" role="toolbar" aria-label="画布笔记工具">
+    <div className="canvas-drawing-toolbar canvas-drawing-ui" role="toolbar" aria-label={t('画布笔记工具')}>
       {TOOLS.map(({ id, label, icon: ToolIcon }) => {
         const selected = activeTool === id;
         return (
@@ -48,9 +50,9 @@ function CanvasDrawingToolbar({ activeTool, imageReady, onSelectTool }: CanvasDr
             key={id}
             type="button"
             className={`canvas-drawing-tool ${selected ? 'is-active' : ''}`}
-            aria-label={label}
+            aria-label={t(label)}
             aria-pressed={selected}
-            data-tooltip={id === 'image' && selected && !imageReady ? '选择图片' : label}
+            data-tooltip={id === 'image' && selected && !imageReady ? t('选择图片') : t(label)}
             onClick={() => onSelectTool(id)}
           >
             <ToolIcon size={18} strokeWidth={1.8} aria-hidden="true" />

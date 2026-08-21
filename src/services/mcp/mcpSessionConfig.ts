@@ -1,7 +1,7 @@
 /**
  * 管理 MCP 会话令牌（固定令牌存凭据存储，不落 IndexedDB）与本地服务启动命令。
  */
-import type { McpBridgeSessionInfo } from '../../types/mcp';
+import type { McpBridgeSessionInfo, McpTransport } from '../../types/mcp';
 import { readAppSecret, writeAppSecret } from '../providerSecretService';
 import { useAppStore } from '../../store/useAppStore';
 import { startMcpBridge } from './mcpBridgeService';
@@ -42,25 +42,52 @@ export function normalizeMcpPort(value: unknown): number | undefined {
   return port;
 }
 
+export function getConfiguredMcpTransport(value: unknown): McpTransport {
+  return value === 'streamable-http' ? 'streamable-http' : 'stdio';
+}
+
 /** 按用户配置（固定端口 + 固定令牌）开启 bridge。 */
 export async function startConfiguredMcpBridge(): Promise<{
   session: McpBridgeSessionInfo;
   token: string;
 }> {
   const token = await ensureMcpSessionToken();
-  const port = normalizeMcpPort(useAppStore.getState().config.mcpPort);
-  const session = await startMcpBridge(token, port);
+  const config = useAppStore.getState().config;
+  const port = normalizeMcpPort(config.mcpPort);
+  const transport = getConfiguredMcpTransport(config.mcpTransport);
+  const session = await startMcpBridge(token, port, transport);
   return { session, token };
+}
+
+export function buildMcpHttpEndpoint(session: McpBridgeSessionInfo): string | null {
+  if (session.transport !== 'streamable-http') return null;
+  return `http://<AI_CANVAS_IP>:${session.port}${session.endpointPath ?? '/mcp'}`;
 }
 
 /**
  * 生成客户端配置片段（Claude Desktop / Cursor 等的 mcpServers 格式）。
- * 令牌走 env 而不是命令行参数：命令行对本机所有进程可见，固定令牌长期有效时不该这么放。
+ * stdio 令牌走 env 而不是命令行参数；HTTP 令牌按标准 Bearer header 发送。
  */
 export function buildMcpClientConfig(
   session: McpBridgeSessionInfo,
   token: string,
 ): string | null {
+  if (session.transport === 'streamable-http') {
+    const endpoint = buildMcpHttpEndpoint(session);
+    if (!endpoint) return null;
+    return JSON.stringify(
+      {
+        mcpServers: {
+          'ai-canvas': {
+            url: endpoint,
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        },
+      },
+      null,
+      2,
+    );
+  }
   if (!session.adapterPath) return null;
   return JSON.stringify(
     {

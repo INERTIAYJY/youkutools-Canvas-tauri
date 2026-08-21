@@ -9,7 +9,7 @@ import type {
   ProviderModelSelection,
 } from '../../types';
 import { GENERAL_MODEL_CATEGORY_LABELS } from '../../types';
-import type { ModelExecutionProfile } from '../../types/aiTypes';
+import type { ModelExecutionProfile, VideoModelCapability } from '../../types/aiTypes';
 import {
   analyzeModelProtocolExamples,
   type ModelProtocolExamples,
@@ -42,6 +42,7 @@ export interface ProviderConfigModelExamples extends ModelProtocolExamples {
   name?: string;
   category?: GeneralModelCategory;
   imageReferenceRequestMode?: ImageReferenceRequestMode;
+  videoCapability?: VideoModelCapability;
 }
 
 export interface ProviderConfigDraftInput {
@@ -163,6 +164,10 @@ function createModelSelection(
   if (imageReferenceRequestMode && category !== 'image') {
     throw new Error(`模型“${displayName || result.modelId}”只有图片分类可以配置参考图请求协议`);
   }
+  // 能力声明只对视频模型生效：参数面板据此约束时长 / 比例 / 分辨率 / 参考素材数量
+  if (examples.videoCapability && category !== 'video') {
+    throw new Error(`模型“${displayName || result.modelId}”只有视频分类可以声明 videoCapability`);
+  }
   return {
     baseUrl: normalizeBaseUrl(result.baseUrl),
     selection: {
@@ -172,6 +177,7 @@ function createModelSelection(
       provider: connectionId,
       executionProfile,
       ...(imageReferenceRequestMode ? { imageReferenceRequestMode } : {}),
+      ...(examples.videoCapability ? { videoCapability: examples.videoCapability } : {}),
     },
   };
 }

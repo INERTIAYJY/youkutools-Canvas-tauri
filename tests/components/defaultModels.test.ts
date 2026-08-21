@@ -21,6 +21,30 @@ function createConfig(selectedModels: ProviderModelSelection[]): AppConfig {
 }
 
 describe('内置厂商动态模型目录', () => {
+  it('内置即梦 CLI v1.4.17 完整媒体模型目录', () => {
+    const models = defaultModelGroups.find((group) => group.id === 'dreamina')?.models ?? [];
+
+    expect(models.map((model) => model.value)).toEqual([
+      'dreamina/3.0',
+      'dreamina/3.1',
+      'dreamina/4.0',
+      'dreamina/4.1',
+      'dreamina/4.5',
+      'dreamina/4.6',
+      'dreamina/4.7',
+      'dreamina/5.0',
+      'dreamina/5.0Pro',
+      'dreamina/seedance2.0',
+      'dreamina/seedance2.0fast',
+      'dreamina/seedance2.0_vip',
+      'dreamina/seedance2.0fast_vip',
+      'dreamina/seedance2.0mini',
+      'dreamina/seedance2.5',
+    ]);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-image'))).toHaveLength(9);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-video'))).toHaveLength(6);
+  });
+
   it('内置 GRSAI 官网当前完整模型目录', () => {
     const models = defaultModelGroups.find((group) => group.id === 'grsai')?.models ?? [];
 

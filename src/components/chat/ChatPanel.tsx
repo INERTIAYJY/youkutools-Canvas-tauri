@@ -66,6 +66,7 @@ import {
   subscribeFileGrants,
 } from '../../services/chat/fileGrantService';
 import { getAssistantTextModelCandidates } from '../../services/projectSettingsService';
+import { useT } from '../../i18n';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -82,6 +83,7 @@ export default function ChatPanel({
   detachedInitialized = true,
   detachedHeaderActions,
 }: ChatPanelProps = {}) {
+  const t = useT();
   const reduceMotion = useReducedMotion();
   const {
     chatOpen,
@@ -396,13 +398,13 @@ export default function ChatPanel({
         canvasNodeId: nodeId,
         canvasError: undefined,
       });
-      store.showToast('已添加到画布');
+      store.showToast(t('已添加到画布'));
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : '添加节点失败';
+      const errorMessage = error instanceof Error ? error.message : t('添加节点失败');
       store.updateMessage(messageId, { canvasStatus: 'failed', canvasError: errorMessage });
       store.showToast(errorMessage, 'error');
     }
-  }, [detached]);
+  }, [detached, t]);
 
   /** 落盘失败的产物重新下载保存，成功后同步刷新已派生的画布节点。 */
   const handleRetryMediaSave = useCallback(async (messageId: string) => {
@@ -421,14 +423,14 @@ export default function ChatPanel({
       if (message.canvasNodeId) {
         currentStore.settleMediaPlaceholder(message.canvasNodeId, artifact);
       }
-      currentStore.showToast('产物已保存到项目');
+      currentStore.showToast(t('产物已保存到项目'));
     } catch (error) {
       useAppStore.getState().showToast(
-        error instanceof Error ? error.message : '保存失败',
+        error instanceof Error ? error.message : t('保存失败'),
         'error',
       );
     }
-  }, [detached]);
+  }, [detached, t]);
 
   const handleResolveApproval = useCallback((
     approvalId: string,
@@ -439,9 +441,9 @@ export default function ChatPanel({
       return;
     }
     if (!resolveConversationAgentApproval(approvalId, resolution)) {
-      showToast('该确认已过期，请重新发起操作', 'info');
+      showToast(t('该确认已过期，请重新发起操作'), 'info');
     }
-  }, [detached, showToast]);
+  }, [detached, showToast, t]);
 
   const scrollToBottom = useCallback(() => {
     setTimeout(() => {
@@ -457,26 +459,26 @@ export default function ChatPanel({
       if (detached) { void emitAction({ type: 'pause_agent_task', taskId }); return; }
       cancelScheduledAgentExecution(taskId);
       pauseAgentTask(taskId);
-      showToast('已暂停任务', 'info');
+      showToast(t('已暂停任务'), 'info');
     },
     onResume: (taskId: string) => {
       if (detached) { void emitAction({ type: 'resume_agent_task', taskId }); return; }
       const result = resumeAgentTaskExecution(taskId, scrollToBottom);
-      showToast(result.ok ? '已继续任务' : (result.message ?? '无法继续该任务'), result.ok ? 'info' : 'error');
+      showToast(result.ok ? t('已继续任务') : (result.message ?? t('无法继续该任务')), result.ok ? 'info' : 'error');
     },
     onStop: (taskId: string) => {
       if (detached) { void emitAction({ type: 'stop_agent_task', taskId }); return; }
       cancelScheduledAgentExecution(taskId);
       stopAgentTask(taskId);
-      showToast('已停止任务', 'info');
+      showToast(t('已停止任务'), 'info');
     },
     onSkip: (taskId: string, stepId: string) => {
       if (detached) { void emitAction({ type: 'skip_agent_step', taskId, stepId }); return; }
       try {
         skipAgentStep(taskId, stepId);
-        showToast('已跳过当前步骤，可继续或重新规划', 'info');
+        showToast(t('已跳过当前步骤，可继续或重新规划'), 'info');
       } catch {
-        showToast('该步骤已无法跳过', 'error');
+        showToast(t('该步骤已无法跳过'), 'error');
       }
     },
     onReplan: (taskId: string) => {
@@ -486,19 +488,19 @@ export default function ChatPanel({
         cancelScheduledAgentExecution(taskId);
         requestAgentReplan(taskId);
       } catch {
-        showToast('该任务当前状态无法重新规划', 'error');
+        showToast(t('该任务当前状态无法重新规划'), 'error');
         return;
       }
       const result = resumeAgentTaskExecution(taskId, scrollToBottom);
       showToast(
-        result.ok ? '正在重新规划任务' : (result.message ?? '无法重新规划该任务'),
+        result.ok ? t('正在重新规划任务') : (result.message ?? t('无法重新规划该任务')),
         result.ok ? 'info' : 'error',
       );
     },
     onRewind: (taskId: string) => {
       if (detached) { void emitAction({ type: 'rewind_agent_task', taskId }); return; }
       void rewindAgentTaskCanvas(taskId).then((result) => {
-        showToast(result.ok ? '已回退该任务的画布修改' : (result.message ?? '无法回退任务'), result.ok ? 'info' : 'error');
+        showToast(result.ok ? t('已回退该任务的画布修改') : (result.message ?? t('无法回退任务')), result.ok ? 'info' : 'error');
       });
     },
   }), [
@@ -508,6 +510,7 @@ export default function ChatPanel({
     mediaModelOptions,
     showToast,
     scrollToBottom,
+    t,
   ]);
 
   const handleAuthorizeLocalFiles = useCallback(() => {
@@ -522,15 +525,15 @@ export default function ChatPanel({
     void authorizeConversationFiles(effectiveActiveConversationId)
       .then((created) => {
         showToast(
-          created.length > 0 ? `已授权 ${created.length} 个文件` : '未新增文件授权',
+          created.length > 0 ? t('已授权 {count} 个文件', { count: created.length }) : t('未新增文件授权'),
           'info',
         );
       })
       .catch((error) => showToast(
-        error instanceof Error ? error.message : '文件授权失败',
+        error instanceof Error ? error.message : t('文件授权失败'),
         'error',
       ));
-  }, [detached, effectiveActiveConversationId, showToast]);
+  }, [detached, effectiveActiveConversationId, showToast, t]);
 
   const handleRevokeLocalFile = useCallback((grantId: string) => {
     if (!effectiveActiveConversationId) return;
@@ -604,11 +607,11 @@ export default function ChatPanel({
     }
     const nodeExists = useAppStore.getState().nodes.some((node) => node.id === nodeId);
     if (!nodeExists) {
-      showToast('引用的节点已不存在', 'error');
+      showToast(t('引用的节点已不存在'), 'error');
       return;
     }
     window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId } }));
-  }, [detached, showToast]);
+  }, [detached, showToast, t]);
 
   const handleNodeHover = useCallback((nodeId: string | null) => {
     if (detached) {
@@ -634,7 +637,7 @@ export default function ChatPanel({
   // ── 分离 / 附着 ──
   const handleDetachToggle = useCallback(async () => {
     if (!isTauri) {
-      showToast('独立窗口功能需要 Tauri 环境', 'info');
+      showToast(t('独立窗口功能需要 Tauri 环境'), 'info');
       return;
     }
 
@@ -650,10 +653,10 @@ export default function ChatPanel({
         setChatPanelDetached(true);
       } catch (e) {
         console.error('[ChatPanel] failed to open chat window:', e);
-        showToast('打开独立窗口失败', 'error');
+        showToast(t('打开独立窗口失败'), 'error');
       }
     }
-  }, [chatPanelDetached, setChatPanelDetached, showToast]);
+  }, [chatPanelDetached, setChatPanelDetached, showToast, t]);
 
   // ── 空状态判断 ──
   const showEmptyState = !effectiveActiveConversationId && viewMode === 'chat';

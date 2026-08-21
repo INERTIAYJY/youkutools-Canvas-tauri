@@ -12,6 +12,7 @@ import MessageBubble from './MessageBubble';
 import EmptyChatState from './EmptyChatState';
 import type { AgentTaskControls } from './AgentTaskTimeline';
 import type { ChatReferenceHandlers } from './ChatReferenceText';
+import { useT } from '../../i18n';
 
 interface ChatMessagesProps extends ChatReferenceHandlers {
   messages: ChatMessage[];
@@ -73,6 +74,7 @@ export default function ChatMessages({
   onNodeHover,
   onModelActivate,
 }: ChatMessagesProps) {
+  const t = useT();
   const reduceMotion = useReducedMotion();
   const messagesRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -199,9 +201,9 @@ export default function ChatMessages({
             <div className="w-11 h-11 rounded-xl bg-indigo-500/12 flex items-center justify-center mb-3">
               <Icon icon="mdi:chat-processing-outline" width="20" height="20" className="text-indigo-400" />
             </div>
-            <p className="text-[13px] text-canvas-text-secondary mb-0.5">开始对话</p>
+            <p className="text-[13px] text-canvas-text-secondary mb-0.5">{t('开始对话')}</p>
             <p className="text-[11px] text-canvas-text-muted mb-4">
-              用自然语言操作画布，AI 助手帮你完成
+              {t('用自然语言操作画布，AI 助手帮你完成')}
             </p>
             {onExampleClick && (
               <div className="flex flex-wrap justify-center gap-1.5 max-w-[260px]">
@@ -213,7 +215,7 @@ export default function ChatMessages({
                     className="rounded-full border border-canvas-border px-2.5 py-1 text-[11px] text-canvas-text-secondary
                                hover:border-indigo-400/50 hover:text-canvas-text transition-colors"
                   >
-                    {example}
+                    {t(example)}
                   </button>
                 ))}
               </div>
@@ -230,11 +232,11 @@ export default function ChatMessages({
         <button
           type="button"
           onClick={scrollToLatest}
-          aria-label={unreadCount > 0 ? `回到最新消息，${unreadCount} 条未读` : '回到最新消息'}
+          aria-label={unreadCount > 0 ? t('回到最新消息，{count} 条未读', { count: unreadCount }) : t('回到最新消息')}
           className="absolute bottom-3 left-1/2 z-10 flex h-8 -translate-x-1/2 items-center gap-1.5 rounded-full border border-canvas-border bg-canvas-surface/95 px-3 text-[11px] font-medium text-canvas-text-secondary shadow-lg shadow-black/25 backdrop-blur-md transition-[border-color,color,transform] hover:border-indigo-400/45 hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 active:translate-y-px"
         >
           <Icon icon="mdi:arrow-down" width="14" />
-          <span>最新消息</span>
+          <span>{t('最新消息')}</span>
           {unreadCount > 0 && (
             <span className="min-w-4 rounded-full bg-indigo-400/20 px-1 text-center text-[10px] tabular-nums text-indigo-200">
               {unreadCount > 99 ? '99+' : unreadCount}

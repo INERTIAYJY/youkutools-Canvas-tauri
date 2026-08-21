@@ -10,6 +10,8 @@ import { pollTask } from './pollTask';
 import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from './pollManager';
 import { useAppStore } from '../store/useAppStore';
 import { logAiRequest } from './ai/httpTransport';
+import { getDreaminaImageModel, getDreaminaVideoCapability } from './ai/dreaminaModels';
+import type { MediaReference } from '../types/aiTypes';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 const DREAMINA_RATIOS = ['21:9', '16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'];
@@ -20,12 +22,13 @@ function mapRatio(aspectRatio?: string): string {
   return DREAMINA_RATIOS.includes(r) ? r : '1:1';
 }
 
-/** imageSize + 模型版本 → CLI --resolution_type（3.x: 1k/2k；4.x/5.0: 2k/4k） */
+/** imageSize + 模型版本 → CLI --resolution_type */
 function mapResolution(imageSize: string | undefined, modelVersion: string): string {
   const size = (imageSize || '2K').toUpperCase();
   if (modelVersion.startsWith('3')) {
     return size === '1K' ? '1k' : '2k';
   }
+  if (modelVersion.toLowerCase() === '5.0pro' && size === '1.5K') return '1.5k';
   return size === '4K' ? '4k' : '2k';
 }
 
@@ -123,6 +126,11 @@ export async function generateDreaminaImage(opts: {
     ? AbortSignal.any([nodeSignal, externalSignal])
     : nodeSignal ?? externalSignal;
   try {
+    const imageModel = getDreaminaImageModel(opts.model);
+    if (!imageModel) throw new Error(`即梦不支持图片模型版本“${modelVersion}”`);
+    if (opts.imageUrls.length > 0 && !imageModel.supportsImageReference) {
+      throw new Error(`${imageModel.label} 仅支持文生图，请移除参考图片或改用 4.0 及以上模型`);
+    }
     const params: Record<string, unknown> = {
       kind,
       prompt: opts.prompt,
@@ -168,42 +176,100 @@ export async function generateDreaminaImage(opts: {
   }
 }
 
-/** 即梦视频生成（无参考图 → text2video；有参考图 → image2video） */
+export interface BuildDreaminaVideoParamsOptions {
+  prompt: string;
+  model: string;
+  references: readonly MediaReference[];
+  ratio?: string;
+  duration?: number;
+  resolution?: string;
+}
+
+export function buildDreaminaVideoParams(
+  opts: BuildDreaminaVideoParamsOptions,
+): Record<string, unknown> {
+  const capability = getDreaminaVideoCapability(opts.model);
+  if (!capability) {
+    throw new Error(`即梦不支持视频模型版本“${modelVersionOf(opts.model)}”`);
+  }
+
+  const images = opts.references.filter((item) => item.kind === 'image');
+  const videos = opts.references.filter((item) => item.kind === 'video');
+  const audios = opts.references.filter((item) => item.kind === 'audio');
+  const totalReferences = images.length + videos.length + audios.length;
+  if (images.length > capability.maxImageReferences
+    || videos.length > capability.maxVideoReferences
+    || audios.length > capability.maxAudioReferences
+    || totalReferences > capability.maxTotalReferences) {
+    throw new Error(
+      `${capability.label} 参考素材超限：最多 ${capability.maxImageReferences} 张图片、`
+      + `${capability.maxVideoReferences} 个视频、${capability.maxAudioReferences} 个音频，`
+      + `总计 ${capability.maxTotalReferences} 个`,
+    );
+  }
+  if (images.length === 0 && videos.length === 0 && audios.length > 0 && !capability.allowsAudioOnly) {
+    throw new Error(`${capability.label} 使用参考音频时至少需要一张参考图或一个参考视频`);
+  }
+
+  const resolution = capability.resolutions.includes(opts.resolution ?? '')
+    ? opts.resolution!
+    : capability.defaultResolution;
+  const ratio = capability.ratios.includes(opts.ratio ?? '')
+    ? opts.ratio!
+    : capability.defaultRatio;
+  const duration = Math.min(
+    capability.maxDuration,
+    Math.max(capability.minDuration, Math.floor(opts.duration ?? capability.defaultDuration)),
+  );
+  const base: Record<string, unknown> = {
+    prompt: opts.prompt,
+    modelVersion: capability.version,
+    duration,
+    videoResolution: resolution,
+  };
+
+  const firstFrame = images.find((item) => item.role === 'first_frame');
+  const lastFrame = images.find((item) => item.role === 'last_frame');
+  const isFramePair = images.length === 2
+    && videos.length === 0
+    && audios.length === 0
+    && firstFrame
+    && lastFrame;
+  if (isFramePair) {
+    return { ...base, kind: 'frames2video', first: firstFrame.url, last: lastFrame.url };
+  }
+  if (videos.length > 0 || audios.length > 0 || images.length > 1) {
+    return {
+      ...base,
+      kind: 'multimodal2video',
+      ratio,
+      images: images.map((item) => item.url),
+      videos: videos.map((item) => item.url),
+      audios: audios.map((item) => item.url),
+    };
+  }
+  if (images.length === 1) {
+    return { ...base, kind: 'image2video', image: images[0].url };
+  }
+  return { ...base, kind: 'text2video', ratio };
+}
+
+/** 即梦视频生成：按素材自动选择文生、图生、首尾帧或全模态命令。 */
 export async function generateDreaminaVideo(opts: {
   prompt: string;
   model: string;
-  imageUrls: string[];
+  references: readonly MediaReference[];
   nodeId?: string;
   ratio?: string;
   duration?: number;
   resolution?: string;
 }, externalSignal?: AbortSignal): Promise<{ url: string }> {
-  const modelVersion = modelVersionOf(opts.model);
-  const hasImage = opts.imageUrls.length > 0;
   const nodeSignal = opts.nodeId ? registerNodePolling(opts.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
     : nodeSignal ?? externalSignal;
   try {
-    const params: Record<string, unknown> = {
-      kind: hasImage ? 'image2video' : 'text2video',
-      prompt: opts.prompt,
-    };
-    // 仅透传 seedance* 系列视频模型版本，其余用 CLI 默认，避免无效组合
-    if (modelVersion.startsWith('seedance')) params.modelVersion = modelVersion;
-    if (hasImage) params.image = opts.imageUrls[0];
-
-    // Seedance 视频参数 — 与火山方舟共用同一套参数
-    if (opts.ratio && !hasImage) {
-      // image2video 时比例由参考图决定，不传 --ratio
-      params.ratio = opts.ratio;
-    }
-    if (opts.duration != null && opts.duration >= 2 && opts.duration <= 15) {
-      params.duration = opts.duration;
-    }
-    if (opts.resolution) {
-      params.videoResolution = opts.resolution;
-    }
+    const params = buildDreaminaVideoParams(opts);
 
     // 预存待续任务（在 invoke 之前），确保关窗重启后能恢复
     if (opts.nodeId) {

@@ -42,6 +42,7 @@ import {
   type CanvasDerivationGuard,
 } from '../../services/canvasDerivationGuard';
 import { useImageNodeOnnxActions } from './shared/image/useImageNodeOnnxActions';
+import { useT } from '../../i18n';
 
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
@@ -111,6 +112,7 @@ const PointEditEditor = lazy(async () => {
    AIImageNode
    ════════════════════════════════════════════ */
 function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
+  const t = useT();
   const justCompleted = useCompletionFlash(data.status);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
@@ -186,15 +188,15 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     const store = useAppStore.getState();
     const sourceNode = store.nodes.find((node) => node.id === id) as Node<BaseNodeData> | undefined;
     if (!sourceNode) {
-      store.showToast('图片节点不存在', 'error');
+      store.showToast(t('图片节点不存在'), 'error');
       return;
     }
 
     const modeLabel = result.mode === 'camera'
-      ? '摄影机视角'
+      ? t('摄影机视角')
       : result.mode === 'lighting'
-        ? '摄影棚打光'
-        : '视角与打光';
+        ? t('摄影棚打光')
+        : t('视角与打光');
     const { node, edge } = createPresetNode(sourceNode, {
       label: modeLabel,
       icon: 'mdi:camera-control',
@@ -205,7 +207,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     store.addNodeWithEdge(node, edge);
     setIsCameraStudio(false);
     void executeGeneration(node.id, node.data.prompt, undefined, node.data);
-  }, [id]);
+  }, [id, t]);
 
   /* ════════════════════════════════════════════
      Crop State
@@ -215,11 +217,11 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   const handleOpenCrop = useCallback(() => {
     if (pendingCropDerivation.current) {
-      useAppStore.getState().showToast('已有裁切任务正在处理，请稍候');
+      useAppStore.getState().showToast(t('已有裁切任务正在处理，请稍候'));
       return;
     }
     setIsCrop(true);
-  }, []);
+  }, [t]);
   const handleCloseCrop = useCallback(() => {
     setIsCrop(false);
   }, []);
@@ -241,7 +243,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       },
     });
     if (!derivation) {
-      store.showToast('图片节点已失效，请重试', 'error');
+      store.showToast(t('图片节点已失效，请重试'), 'error');
       return;
     }
     pendingCropDerivation.current = derivation;
@@ -251,7 +253,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       type: 'ai-image',
       position: { x: currentPos.x + nodeWidth + 40, y: currentPos.y },
       data: {
-        label: `${(data.label as string) || '图像'} 裁切`,
+        label: t('{name} 裁切', { name: (data.label as string) || t('图像') }),
         type: 'ai-image',
         role: 'source',
         status: 'loading',
@@ -261,7 +263,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     };
     store.addNode(newNode);
     setIsCrop(false);
-  }, [id, data.label, nodeWidth]);
+  }, [id, data.label, nodeWidth, t]);
 
   /** 后台裁切完成后调用：更新节点数据 */
   const handleCropSave = useCallback(
@@ -277,7 +279,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         clearPending();
         const store = useAppStore.getState();
         if (!derivation || store.currentProjectId === derivation.projectId) {
-          store.showToast('裁切失败，请重试', 'error');
+          store.showToast(t('裁切失败，请重试'), 'error');
         }
         return;
       }
@@ -295,7 +297,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         let assetUrl = croppedDataUrl;
         let filePath: string | undefined;
         if (derivation.projectId !== 'default') {
-          const savedName = buildNodeFileName(`${(data.label as string) || '图像'} 裁切`, 'png', 'cropped');
+          const savedName = buildNodeFileName(t('{name} 裁切', { name: (data.label as string) || t('图像') }), 'png', 'cropped');
           const saved = await saveDataUrlToProjectData(croppedDataUrl, derivation.projectId, savedName);
           if (saved?.assetUrl) {
             assetUrl = saved.assetUrl;
@@ -320,15 +322,15 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         liveStore.commitToHistory();
         completeCanvasDerivation(derivation);
         clearPending();
-        liveStore.showToast('裁切完成，已创建新节点');
+        liveStore.showToast(t('裁切完成，已创建新节点'));
       } catch {
         const shouldNotify = isCanvasDerivationFresh(derivation, useAppStore.getState());
         cancelCanvasDerivation(derivation);
         clearPending();
-        if (shouldNotify) useAppStore.getState().showToast('裁切失败，请重试', 'error');
+        if (shouldNotify) useAppStore.getState().showToast(t('裁切失败，请重试'), 'error');
       }
     },
-    [data.label],
+    [data.label, t],
   );
 
   /* ════════════════════════════════════════════
@@ -346,7 +348,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       const store = useAppStore.getState();
       const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
       if (!imageUrl) {
-        store.showToast('无可裁切的图像', 'error');
+        store.showToast(t('无可裁切的图像'), 'error');
         return;
       }
 
@@ -362,7 +364,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         type: 'ai-storyboard',
         position: { x: srcPos.x + nodeWidth + 60, y: srcPos.y },
         data: {
-          label: `${(data.label as string) || '图像'} 自定义宫格${rows}×${cols}`,
+          label: t('{name} 自定义宫格{rows}×{cols}', { name: (data.label as string) || t('图像'), rows, cols }),
           type: 'ai-storyboard',
           role: 'source',
           status: 'success',
@@ -377,9 +379,9 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         } as BaseNodeData,
       });
       store.commitToHistory();
-      store.showToast(`已按线生成 ${rows}×${cols} 自定义宫格节点`);
+      store.showToast(t('已按线生成 {rows}×{cols} 自定义宫格节点', { rows, cols }));
     },
-    [id, data.imageUrl, data.thumbnailUrl, data.label, data.filePath, nodeWidth],
+    [id, data.imageUrl, data.thumbnailUrl, data.label, data.filePath, nodeWidth, t],
   );
 
   /* ════════════════════════════════════════════
@@ -390,7 +392,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       const store = useAppStore.getState();
       const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
       if (!imageUrl) {
-        store.showToast('无可裁切的图像', 'error');
+        store.showToast(t('无可裁切的图像'), 'error');
         return;
       }
 
@@ -404,7 +406,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         type: 'ai-storyboard',
         position: { x: srcPos.x + nodeWidth + 60, y: srcPos.y },
         data: {
-          label: `${(data.label as string) || '图像'} 宫格${side}×${side}`,
+          label: t('{name} 宫格{side}×{side}', { name: (data.label as string) || t('图像'), side }),
           type: 'ai-storyboard',
           role: 'source',
           status: 'success',
@@ -417,9 +419,9 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         } as BaseNodeData,
       });
       store.commitToHistory();
-      store.showToast(`已生成 ${side}×${side} 宫格分镜节点`);
+      store.showToast(t('已生成 {side}×{side} 宫格分镜节点', { side }));
     },
-    [id, data.imageUrl, data.thumbnailUrl, data.label, data.filePath, nodeWidth],
+    [id, data.imageUrl, data.thumbnailUrl, data.label, data.filePath, nodeWidth, t],
   );
 
   /* ════════════════════════════════════════════
@@ -430,11 +432,11 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   const handleOpenCompose = useCallback(() => {
     if (pendingComposeDerivation.current) {
-      useAppStore.getState().showToast('已有合成任务正在处理，请稍候');
+      useAppStore.getState().showToast(t('已有合成任务正在处理，请稍候'));
       return;
     }
     setIsCompose(true);
-  }, []);
+  }, [t]);
   const handleCloseCompose = useCallback(() => {
     setIsCompose(false);
   }, []);
@@ -455,7 +457,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       },
     });
     if (!derivation) {
-      store.showToast('图片节点已失效，请重试', 'error');
+      store.showToast(t('图片节点已失效，请重试'), 'error');
       return;
     }
     pendingComposeDerivation.current = derivation;
@@ -465,7 +467,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       type: 'ai-image',
       position: { x: currentPos.x + nodeWidth + 40, y: currentPos.y },
       data: {
-        label: `${(data.label as string) || '图像'} 合成`,
+        label: t('{name} 合成', { name: (data.label as string) || t('图像') }),
         type: 'ai-image',
         role: 'source',
         status: 'loading',
@@ -475,7 +477,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     };
     store.addNode(newNode);
     setIsCompose(false);
-  }, [id, data.label, nodeWidth]);
+  }, [id, data.label, nodeWidth, t]);
 
   /** 合成完成后回填节点数据 */
   const handleComposeSave = useCallback(
@@ -491,7 +493,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         clearPending();
         const store = useAppStore.getState();
         if (!derivation || store.currentProjectId === derivation.projectId) {
-          store.showToast('合成失败，请重试', 'error');
+          store.showToast(t('合成失败，请重试'), 'error');
         }
         return;
       }
@@ -509,7 +511,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         let assetUrl = composedDataUrl;
         let filePath: string | undefined;
         if (derivation.projectId !== 'default') {
-          const savedName = buildNodeFileName(`${(data.label as string) || '图像'} 合成`, 'png', 'composed');
+          const savedName = buildNodeFileName(t('{name} 合成', { name: (data.label as string) || t('图像') }), 'png', 'composed');
           const saved = await saveDataUrlToProjectData(composedDataUrl, derivation.projectId, savedName);
           if (saved?.assetUrl) {
             assetUrl = saved.assetUrl;
@@ -534,15 +536,15 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         liveStore.commitToHistory();
         completeCanvasDerivation(derivation);
         clearPending();
-        liveStore.showToast('合成完成，已创建新节点');
+        liveStore.showToast(t('合成完成，已创建新节点'));
       } catch {
         const shouldNotify = isCanvasDerivationFresh(derivation, useAppStore.getState());
         cancelCanvasDerivation(derivation);
         clearPending();
-        if (shouldNotify) useAppStore.getState().showToast('合成失败，请重试', 'error');
+        if (shouldNotify) useAppStore.getState().showToast(t('合成失败，请重试'), 'error');
       }
     },
-    [data.label],
+    [data.label, t],
   );
 
   /* ════════════════════════════════════════════
@@ -563,13 +565,13 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       setIsExpand(false);
 
       if (meta.provider !== 'apimart') {
-        store.showToast(`${meta.provider} 扩图暂未实现`, 'error');
+        store.showToast(t('{provider} 扩图暂未实现', { provider: meta.provider }), 'error');
         return;
       }
 
       const apiKey = store.config.providers.apimart?.apiKey;
       if (!apiKey) {
-        store.showToast('请先在设置中配置 APIMart API Key', 'error');
+        store.showToast(t('请先在设置中配置 APIMart API Key'), 'error');
         return;
       }
 
@@ -588,7 +590,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         },
       });
       if (!derivation) {
-        store.showToast('图片节点已失效，请重试', 'error');
+        store.showToast(t('图片节点已失效，请重试'), 'error');
         return;
       }
       const newNode: Node<BaseNodeData> = {
@@ -596,7 +598,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         type: 'ai-image',
         position: { x: currentPos.x + nodeWidth + 40, y: currentPos.y },
         data: {
-          label: `${(data.label as string) || '图像'} 扩图`,
+          label: t('{name} 扩图', { name: (data.label as string) || t('图像') }),
           type: 'ai-image',
           role: 'source',
           status: 'loading',
@@ -617,7 +619,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           { apiKey, model, imageUrl: compositeDataUrl, size: meta.size, prompt: meta.prompt },
           (progress) => {
             if (!ensureFresh()) return;
-            useAppStore.getState().updateNodeDataTransient(newNodeId, { output: `扩图中 ${progress}%...` });
+            useAppStore.getState().updateNodeDataTransient(newNodeId, { output: t('扩图中 {progress}%...', { progress }) });
           },
         );
         if (!ensureFresh()) return;
@@ -634,7 +636,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         let filePath: string | undefined;
         if (derivation.projectId !== 'default') {
           const ext = blob.type.split('/').pop() || 'png';
-          const savedName = buildNodeFileName(`${(data.label as string) || '图像'} 扩图`, ext, 'expand');
+          const savedName = buildNodeFileName(t('{name} 扩图', { name: (data.label as string) || t('图像') }), ext, 'expand');
           const saved = await saveDataUrlToProjectData(dataUrl, derivation.projectId, savedName);
           if (saved?.assetUrl) {
             assetUrl = saved.assetUrl;
@@ -659,15 +661,15 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         } as Partial<BaseNodeData>);
         liveStore.commitToHistory();
         completeCanvasDerivation(derivation);
-        liveStore.showToast('扩图完成，已创建新节点');
+        liveStore.showToast(t('扩图完成，已创建新节点'));
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : '扩图失败';
+        const message = err instanceof Error ? err.message : t('扩图失败');
         const shouldNotify = isCanvasDerivationFresh(derivation, useAppStore.getState());
         cancelCanvasDerivation(derivation);
         if (shouldNotify) useAppStore.getState().showToast(message, 'error');
       }
     },
-    [id, data.label, nodeWidth],
+    [id, data.label, nodeWidth, t],
   );
 
   /* ════════════════════════════════════════════
@@ -735,22 +737,22 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     const store = useAppStore.getState();
     const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
     if (!imageUrl) {
-      store.showToast('没有可用的图片', 'error');
+      store.showToast(t('没有可用的图片'), 'error');
       return;
     }
     const ok = await copyImageToClipboard(imageUrl);
-    store.showToast(ok ? '已复制图像到剪贴板' : '复制失败', ok ? undefined : 'error');
-  }, [data.imageUrl, data.thumbnailUrl]);
+    store.showToast(ok ? t('已复制图像到剪贴板') : t('复制失败'), ok ? undefined : 'error');
+  }, [data.imageUrl, data.thumbnailUrl, t]);
 
   const handleReversePrompt = useCallback(() => {
     const store = useAppStore.getState();
     const imageUrl = (data.imageUrl || data.thumbnailUrl) as string | undefined;
     if (!imageUrl) {
-      store.showToast('没有可反推的图片', 'error');
+      store.showToast(t('没有可反推的图片'), 'error');
       return;
     }
     store.setReversePromptRequest({ sourceNodeId: id, kind: 'image', imageUrls: [imageUrl] });
-  }, [data.imageUrl, data.thumbnailUrl, id]);
+  }, [data.imageUrl, data.thumbnailUrl, id, t]);
 
   const {
     isUpscaling,
@@ -774,7 +776,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   });
 
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, '粘贴图像');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴图像'));
 
   return (
     <>
@@ -800,12 +802,12 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                       <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" />
                       <polyline points="21 15 16 10 5 21" />
                     </svg>
-                    <span className="text-xs">图片加载失败</span>
+                    <span className="text-xs">{t('图片加载失败')}</span>
                     <button
                       onClick={(e) => { e.stopPropagation(); setImgState({}); }}
                       className="text-[10px] px-2 py-0.5 rounded bg-canvas-hover hover:bg-canvas-border transition-colors"
                     >
-                      重新加载
+                      {t('重新加载')}
                     </button>
                   </div>
                 ) : (
@@ -860,7 +862,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     <div className="upscale-glow-ring" />
                     <span className="upscale-glow-label">
                       <span className="upscale-glow-dot" />
-                      {upscaleProgress > 0 ? `超分中 ${upscaleProgress}%` : '超分中'}
+                      {upscaleProgress > 0 ? t('超分中 {progress}%', { progress: upscaleProgress }) : t('超分中')}
                     </span>
                   </div>
                 )}
@@ -871,7 +873,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     <div className="upscale-glow-ring" />
                     <span className="upscale-glow-label">
                       <span className="upscale-glow-dot" />
-                      主体识别中...
+                      {t('主体识别中...')}
                     </span>
                   </div>
                 )}
@@ -879,12 +881,12 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             ) : isUploading ? (
               <div className="node-preview-loading">
                 <div className="spinner large" />
-                <span>上传中...</span>
+                <span>{t('上传中...')}</span>
               </div>
             ) : data.status === 'loading' ? (
               <div className="node-preview-loading">
                 <div className="spinner large" />
-                <span>生成图像中...</span>
+                <span>{t('生成图像中...')}</span>
               </div>
             ) : (
               isSource ? (
@@ -895,8 +897,8 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     event.stopPropagation();
                     void handleUpload();
                   }}
-                  data-tooltip="上传图片"
-                  aria-label="上传图片"
+                  data-tooltip={t('上传图片')}
+                  aria-label={t('上传图片')}
                 >
                   <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -1049,7 +1051,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       <FullscreenOverlay
         isOpen={isFullscreen}
         onClose={handleCloseFullscreen}
-        data-tooltip={(data.label as string) || '图片预览'}
+        data-tooltip={(data.label as string) || t('图片预览')}
         hidePanel
       >
         {fullscreenError ? (
@@ -1059,18 +1061,18 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" />
               <polyline points="21 15 16 10 5 21" />
             </svg>
-            <span className="text-sm">图片加载失败</span>
+            <span className="text-sm">{t('图片加载失败')}</span>
             <button
               onClick={() => setFullscreenFailedSrc(undefined)}
               className="text-xs px-3 py-1 rounded bg-canvas-hover hover:bg-canvas-border transition-colors"
             >
-              重新加载
+              {t('重新加载')}
             </button>
           </div>
         ) : (
           <ZoomableImage
             src={(data.imageUrl || data.thumbnailUrl) as string}
-            alt={(data.label as string) || '预览'}
+            alt={(data.label as string) || t('预览')}
             className="fullscreen-img-view"
             originRect={fullscreenOrigin}
             onClose={handleCloseFullscreen}

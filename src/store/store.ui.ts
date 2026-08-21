@@ -18,6 +18,8 @@ export interface UISlice {
   nodePickerOpen: boolean;
   avatarMenuOpen: boolean;
   projectLibraryOpen: boolean;
+  /** 帮助中心弹窗；侧边栏菜单和首次引导都从这里打开 */
+  helpOpen: boolean;
   activeNodeId: string | null;
   dialogPosition: { x: number; y: number } | null;
   assetsPanelOpen: boolean;
@@ -58,6 +60,7 @@ export interface UISlice {
   toggleAvatarMenu: () => void;
   closeAvatarMenu: () => void;
   setProjectLibraryOpen: (open: boolean) => void;
+  setHelpOpen: (open: boolean) => void;
   openNodeDialog: (nodeId: string, position?: { x: number; y: number }) => void;
   closeNodeDialog: () => void;
   setAssetsPanelOpen: (open: boolean) => void;
@@ -80,6 +83,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   nodePickerOpen: false,
   avatarMenuOpen: false,
   projectLibraryOpen: false,
+  helpOpen: false,
   activeNodeId: null,
   dialogPosition: null,
   assetsPanelOpen: false,
@@ -122,6 +126,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   toggleAvatarMenu: () => set((s) => ({ avatarMenuOpen: !s.avatarMenuOpen, nodePickerOpen: false })),
   closeAvatarMenu: () => set({ avatarMenuOpen: false }),
   setProjectLibraryOpen: (open) => set({ projectLibraryOpen: open }),
+  setHelpOpen: (open) => set({ helpOpen: open }),
   openNodeDialog: (nodeId, position) => set({ activeNodeId: nodeId, dialogPosition: position ?? null }),
   closeNodeDialog: () => set({ activeNodeId: null, dialogPosition: null, pendingPresetAction: null }),
   setAssetsPanelOpen: (open) => set(open

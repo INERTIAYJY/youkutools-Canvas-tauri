@@ -4,12 +4,14 @@
 import { motion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
+import { useT } from '../i18n';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 const isMacOS = typeof navigator !== 'undefined'
   && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
 export default function Header() {
+  const t = useT();
   const { projectName, setProjectName, createProject, isCreatingProject } = useAppStore(
     useShallow((s) => ({
       projectName: s.projectName,
@@ -92,7 +94,7 @@ export default function Header() {
         suppressContentEditableWarning
         spellCheck={false}
         onBlur={(e) => {
-          const name = e.currentTarget.textContent?.trim() || '新项目';
+          const name = e.currentTarget.textContent?.trim() || t('新项目');
           setProjectName(name);
         }}
         onKeyDown={(e) => {
@@ -114,12 +116,12 @@ export default function Header() {
       {/* Actions */}
       <motion.button
         type="button"
-        aria-label={isCreatingProject ? '正在新建画布' : '新建画布'}
+        aria-label={isCreatingProject ? t('正在新建画布') : t('新建画布')}
         onClick={() => void createProject()}
         disabled={isCreatingProject}
         className="w-7 h-7 rounded-lg hover:bg-canvas-hover flex items-center justify-center
                    text-canvas-text-secondary hover:text-canvas-text disabled:cursor-not-allowed disabled:opacity-50"
-        data-tooltip={isCreatingProject ? '正在新建画布' : '新建画布'}
+        data-tooltip={isCreatingProject ? t('正在新建画布') : t('新建画布')}
         whileHover={isCreatingProject ? undefined : { scale: 1.1 }}
         whileTap={isCreatingProject ? undefined : { scale: 0.92 }}
         transition={{ type: 'spring', stiffness: 400, damping: 17 }}

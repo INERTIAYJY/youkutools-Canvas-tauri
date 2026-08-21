@@ -3,6 +3,7 @@
  */
 import { useState, useRef, useEffect } from 'react';
 import AnimatedButton from '../../shared/AnimatedButton';
+import { useT } from '../../../i18n';
 
 interface RatioOption {
   value: string;
@@ -20,6 +21,8 @@ interface QualityRatioSelectorProps {
   showAdaptive?: boolean;
   /** 自定义比例选项列表，不传则使用默认 */
   ratios?: RatioOption[];
+  /** 自定义画质档位，不传则使用通用档位 */
+  imageSizes?: readonly string[];
   /** 弹出方向：'top'(默认，向上，适合底部工具栏) | 'bottom'(向下，适合顶部工具栏) */
   placement?: 'top' | 'bottom';
 }
@@ -32,8 +35,10 @@ export default function QualityRatioSelector({
   showImageSize = true,
   showAdaptive = true,
   ratios: customRatios,
+  imageSizes = ['720p', '1K', '2K', '4K'],
   placement = 'top',
 }: QualityRatioSelectorProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -110,9 +115,9 @@ export default function QualityRatioSelector({
           <div className={`img-ratio-popup ui-schema-popup ui-schema-quality-ratio-popup${placement === 'bottom' ? ' img-ratio-popup--down' : ''}`} style={{ display: 'block' }}>
             {showImageSize && (
               <div className="img-rp-quality-area" data-ui-schema-field="imageSize" data-ui-schema-type="segmented" data-ui-schema-default="2K">
-                <div className="img-rp-section-label">画质</div>
+                <div className="img-rp-section-label">{t('画质')}</div>
                 <div className="img-rp-quality-segmented">
-                  {['720p', '1K', '2K', '4K'].map((size) => (
+                  {imageSizes.map((size) => (
                     <AnimatedButton
                       key={size}
                       type="button"
@@ -129,7 +134,7 @@ export default function QualityRatioSelector({
             )}
 
             <div className="img-rp-ratio-area" data-ui-schema-field="aspectRatio" data-ui-schema-type="segmented" data-ui-schema-default={showAdaptive ? '自适应' : '16:9'}>
-              <div className="img-rp-section-label">比例</div>
+              <div className="img-rp-section-label">{t('比例')}</div>
               <div className={`img-rp-ratio-split${showAdaptive ? ' has-adaptive' : ''}`}>
                 {showAdaptive && (
                   <div className="img-rp-ratio-left">
@@ -145,7 +150,7 @@ export default function QualityRatioSelector({
                         <path d="M3 9h18" />
                         <path d="M9 21V9" />
                       </svg>
-                      <span>自适应</span>
+                      <span>{t('自适应')}</span>
                     </AnimatedButton>
                   </div>
                 )}

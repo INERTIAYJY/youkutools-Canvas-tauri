@@ -12,6 +12,7 @@ import {
   type ModelProtocolExamples,
 } from '../../services/ai/modelProtocolImport';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 interface ProtocolImportPanelProps {
   onApply: (result: ModelProtocolImportResult) => void;
@@ -75,6 +76,7 @@ function ExampleEditor({ label, value, placeholder, onChange }: ExampleEditorPro
 }
 
 export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImportPanelProps) {
+  const t = useT();
   const [examples, setExamples] = useState<ModelProtocolExamples>(EMPTY_EXAMPLES);
   const [pollingEnabled, setPollingEnabled] = useState(false);
   const [result, setResult] = useState<ModelProtocolImportResult | null>(null);
@@ -120,7 +122,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
       setAcceptedLowConfidence(false);
     } catch (analysisError) {
       setResult(null);
-      setError(analysisError instanceof Error ? analysisError.message : '接口文档解析失败');
+      setError(analysisError instanceof Error ? analysisError.message : t('接口文档解析失败'));
       setAcceptedLowConfidence(false);
     }
   };
@@ -136,23 +138,23 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
   return (
     <section
       className="mb-3 flex min-w-0 flex-col gap-3 border-y border-canvas-border bg-black/10 px-3 py-3 text-[12px]"
-      aria-label="从接口文档导入"
+      aria-label={t('从接口文档导入')}
     >
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 font-medium text-canvas-text">
             <Icon icon="mdi:file-import-outline" width="15" className="text-indigo-300" />
-            从接口文档导入
+            {t('从接口文档导入')}
           </div>
           <p className="mt-1 text-[12px] leading-relaxed text-canvas-text-muted">
-            分别粘贴文档中的请求代码和响应 JSON，支持 Fetch、Axios、cURL、Python、Raw HTTP 与 OpenAPI JSON。
+            {t('分别粘贴文档中的请求代码和响应 JSON，支持 Fetch、Axios、cURL、Python、Raw HTTP 与 OpenAPI JSON。')}
           </p>
         </div>
         <button
           type="button"
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-white/[0.06] hover:text-canvas-text"
-          aria-label="关闭接口文档导入"
-          title="关闭"
+          aria-label={t('关闭接口文档导入')}
+          title={t('关闭')}
           onClick={onClose}
         >
           <Icon icon="mdi:close" width="16" />
@@ -161,20 +163,20 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
 
       <div className="flex min-w-0 flex-col gap-2.5 border-t border-canvas-border pt-3">
         <div className="flex items-center justify-between gap-2">
-          <strong className="text-[12px] font-medium text-canvas-text">提交阶段</strong>
-          <span className="text-[11px] text-canvas-text-muted">请求与响应均必填</span>
+          <strong className="text-[12px] font-medium text-canvas-text">{t('提交阶段')}</strong>
+          <span className="text-[11px] text-canvas-text-muted">{t('请求与响应均必填')}</span>
         </div>
         <div className="grid min-w-0 grid-cols-2 gap-3 max-[700px]:grid-cols-1">
           <ExampleEditor
-            label="提交请求示例"
+            label={t('提交请求示例')}
             value={examples.submitRequest}
-            placeholder="粘贴 Fetch、cURL、Python 或 Raw HTTP 请求..."
+            placeholder={t('粘贴 Fetch、cURL、Python 或 Raw HTTP 请求...')}
             onChange={(value) => updateExample('submitRequest', value)}
           />
           <ExampleEditor
-            label="提交响应示例"
+            label={t('提交响应示例')}
             value={examples.submitResponse}
-            placeholder="粘贴提交接口返回的 JSON..."
+            placeholder={t('粘贴提交接口返回的 JSON...')}
             onChange={(value) => updateExample('submitResponse', value)}
           />
         </div>
@@ -185,7 +187,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
           <button
             type="button"
             role="switch"
-            aria-label="包含异步轮询"
+            aria-label={t('包含异步轮询')}
             aria-checked={pollingEnabled}
             className={`relative h-4 w-7 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--theme-surface)] ${
               pollingEnabled
@@ -205,20 +207,20 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
                 : 'border-[var(--border-secondary)] bg-[var(--theme-surface)]'
             }`} />
           </button>
-          <span>包含异步轮询</span>
+          <span>{t('包含异步轮询')}</span>
         </div>
         {pollingEnabled ? (
           <div className="grid min-w-0 grid-cols-2 gap-3 max-[700px]:grid-cols-1">
             <ExampleEditor
-              label="轮询请求示例"
+              label={t('轮询请求示例')}
               value={examples.pollRequest ?? ''}
-              placeholder="粘贴查询任务状态的请求代码..."
+              placeholder={t('粘贴查询任务状态的请求代码...')}
               onChange={(value) => updateExample('pollRequest', value)}
             />
             <ExampleEditor
-              label="轮询响应示例"
+              label={t('轮询响应示例')}
               value={examples.pollResponse ?? ''}
-              placeholder="粘贴任务完成时返回的 JSON..."
+              placeholder={t('粘贴任务完成时返回的 JSON...')}
               onChange={(value) => updateExample('pollResponse', value)}
             />
           </div>
@@ -226,7 +228,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-[12px] text-canvas-text-muted">只在本地静态解析，不执行代码、不请求接口、不导入密钥</span>
+        <span className="text-[12px] text-canvas-text-muted">{t('只在本地静态解析，不执行代码、不请求接口、不导入密钥')}</span>
         <div className="flex items-center gap-2">
           {hasAnyExample ? (
             <button
@@ -234,7 +236,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
               className="h-7 rounded-md px-2.5 text-[12px] text-canvas-text-secondary hover:bg-white/[0.05] hover:text-canvas-text"
               onClick={clear}
             >
-              清空
+              {t('清空')}
             </button>
           ) : null}
           <AnimatedButton
@@ -244,7 +246,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
             onClick={() => analyze()}
           >
             <Icon icon="mdi:auto-fix" width="14" />
-            识别文档
+            {t('识别文档')}
           </AnimatedButton>
         </div>
       </div>
@@ -260,7 +262,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
         <div className="flex min-w-0 flex-col gap-3" aria-live="polite">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-t border-canvas-border pt-3">
             <span className={`rounded border px-1.5 py-0.5 text-[11px] ${CONFIDENCE_CLASSES[result.confidence]}`}>
-              {CONFIDENCE_LABELS[result.confidence]}
+              {t(CONFIDENCE_LABELS[result.confidence])}
             </span>
             {result.formats.map((format) => (
               <span key={format} className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-canvas-text-secondary">
@@ -275,7 +277,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
                 <span className="text-canvas-text-muted">{field.label}</span>
                 <code className="min-w-0 break-all font-mono text-canvas-text-secondary">
                   {field.id === 'category'
-                    ? GENERAL_MODEL_CATEGORY_LABELS[field.value as GeneralModelCategory] ?? field.value
+                    ? t(GENERAL_MODEL_CATEGORY_LABELS[field.value as GeneralModelCategory] ?? field.value)
                     : field.value}
                 </code>
               </div>
@@ -284,14 +286,14 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
 
           {result.category ? (
             <label className="flex min-w-0 items-center gap-2">
-              <span className="shrink-0 text-canvas-text-muted">模型分类</span>
+              <span className="shrink-0 text-canvas-text-muted">{t('模型分类')}</span>
               <select
                 value={result.category}
                 className="h-7 min-w-28 rounded-md border border-canvas-border bg-canvas-bg/60 px-2 text-[12px] text-canvas-text outline-none focus:border-indigo-400/60"
                 onChange={(event) => analyze(event.target.value as GeneralModelCategory)}
               >
                 {(Object.keys(GENERAL_MODEL_CATEGORY_LABELS) as GeneralModelCategory[]).map((category) => (
-                  <option key={category} value={category}>{GENERAL_MODEL_CATEGORY_LABELS[category]}</option>
+                  <option key={category} value={category}>{t(GENERAL_MODEL_CATEGORY_LABELS[category])}</option>
                 ))}
               </select>
             </label>
@@ -318,12 +320,12 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
                 className="mt-0.5 accent-indigo-500"
                 onChange={(event) => setAcceptedLowConfidence(event.target.checked)}
               />
-              <span>我已检查低置信度字段，确认将识别结果应用到当前草稿</span>
+              <span>{t('我已检查低置信度字段，确认将识别结果应用到当前草稿')}</span>
             </label>
           ) : null}
 
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-canvas-border pt-3">
-            <span className="text-canvas-text-muted">应用后仍需保存厂商设置；现有 API Key 不会被覆盖</span>
+            <span className="text-canvas-text-muted">{t('应用后仍需保存厂商设置；现有 API Key 不会被覆盖')}</span>
             <AnimatedButton
               type="button"
               className="provider-primary-btn h-7"
@@ -331,7 +333,7 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
               onClick={() => result && onApply(result)}
             >
               <Icon icon="mdi:check" width="14" />
-              应用识别结果
+              {t('应用识别结果')}
             </AnimatedButton>
           </div>
         </div>

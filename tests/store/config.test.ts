@@ -238,6 +238,45 @@ describe('config hydration guard', () => {
     expect(model).not.toHaveProperty('anthropicUrl');
   });
 
+  it('defaults performance mode off, migrates the legacy compatibility flag, and applies changes immediately', async () => {
+    const rootAttributes = new Set<string>();
+    vi.stubGlobal('document', {
+      documentElement: {
+        dataset: {},
+        toggleAttribute: (name: string, enabled: boolean) => {
+          if (enabled) rootAttributes.add(name);
+          else rootAttributes.delete(name);
+        },
+      },
+    });
+
+    expect(useAppStore.getState().config.performanceMode).toBe(false);
+    expect(rootAttributes.has('data-performance-mode')).toBe(false);
+
+    fileMocks.loadConfig.mockResolvedValue({
+      providers: {},
+      theme: 'dark',
+      graphicsCompatibilityMode: true,
+    });
+
+    await useAppStore.getState().loadConfig();
+
+    expect(useAppStore.getState().config.performanceMode).toBe(true);
+    expect(useAppStore.getState().config).not.toHaveProperty('graphicsCompatibilityMode');
+    expect(rootAttributes.has('data-performance-mode')).toBe(true);
+
+    await useAppStore.getState().saveConfig({ silent: true });
+    expect(fileMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      performanceMode: true,
+    }));
+    expect(fileMocks.saveConfig.mock.calls[0]?.[0]).not.toHaveProperty('graphicsCompatibilityMode');
+
+    useAppStore.getState().updateConfig({ performanceMode: false });
+
+    expect(rootAttributes.has('data-performance-mode')).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
   it('syncs and clears xAI manifest models through the unified model runtime', () => {
     useAppStore.getState().saveProviderConfig('xai', {
       name: 'xAI / Grok 官方',

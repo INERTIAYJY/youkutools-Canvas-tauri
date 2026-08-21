@@ -92,20 +92,6 @@ function MattingToolbar({
 
   return (
     <div className="matting-toolbar" ref={toolbarRef}>
-      {/* Cancel */}
-      <AnimatedButton
-        className="matting-btn icon-only act-cancel"
-        data-tooltip="取消 (Esc)"
-        aria-label="取消"
-        onClick={handleCancel}
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
-          <path d="M18 6L6 18M6 6l12 12" />
-        </svg>
-      </AnimatedButton>
-
-      <div className="matting-divider" />
-
       {/* Brush — click again to toggle alpha mode */}
       <AnimatedButton
         className={`matting-btn icon-only tool-btn${activeTool === 'brush' ? ' active' : ''}`}
@@ -230,6 +216,20 @@ function MattingToolbar({
           <path d="M7 3v4h8" />
         </svg>
         <span>保存</span>
+      </AnimatedButton>
+
+      <div className="matting-divider" />
+
+      {/* Cancel */}
+      <AnimatedButton
+        className="matting-btn icon-only act-cancel"
+        data-tooltip="取消 (Esc)"
+        aria-label="取消"
+        onClick={handleCancel}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
+          <path d="M18 6L6 18M6 6l12 12" />
+        </svg>
       </AnimatedButton>
     </div>
   );

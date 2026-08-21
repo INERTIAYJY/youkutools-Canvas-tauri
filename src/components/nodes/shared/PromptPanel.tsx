@@ -32,6 +32,19 @@ import { expandSkillReferences } from '../../../services/skillPromptService';
 import { MAX_IMAGE_BATCH_COUNT } from '../../../types/aiTypes';
 import type { AudioOutputFormat, AudioTtsVoice, VideoReferenceItem } from '../../../types/aiTypes';
 import type { AudioGenerationPurpose } from '../../../types/media';
+import { useT } from '../../../i18n';
+import { DREAMINA_IMAGE_RATIOS, getDreaminaImageModel } from '../../../services/ai/dreaminaModels';
+
+const IMAGE_RATIO_CLASS_NAMES: Record<string, string> = {
+  '1:1': 'img-rp-sq',
+  '9:16': 'img-rp-tall',
+  '16:9': 'img-rp-wide',
+  '3:4': 'img-rp-p34',
+  '4:3': 'img-rp-l43',
+  '3:2': 'img-rp-l32',
+  '2:3': 'img-rp-p23',
+  '21:9': 'img-rp-ultra',
+};
 
 const ANIMATION_ACTIONS: AnimationAction[] = ['idle', 'walk', 'run', 'jump', 'attack', 'hit'];
 const IMAGE_BATCH_COUNTS = Array.from({ length: MAX_IMAGE_BATCH_COUNT - 1 }, (_, index) => index + 2);
@@ -57,6 +70,7 @@ const CAMERA_APERTURE_OPTIONS: CameraAperture[] = ['f/1.4', 'f/2', 'f/2.8', 'f/4
 const CAMERA_EXPOSURE_OPTIONS: CameraExposureTime[] = ['1/2000s', '1/1000s', '1/500s', '1/250s', '1/125s', '1/60s', '1/30s', '1/8s', '1/2s', '1s', '5s'];
 
 function CameraSettingsPreview({ settings }: { settings: CameraGenerationSettings }) {
+  const t = useT();
   const lens = settings.lens;
   const macro = lens === 'macro';
   const subjectScale = lens === '15mm' ? 0.66
@@ -98,7 +112,7 @@ function CameraSettingsPreview({ settings }: { settings: CameraGenerationSetting
   const fisheye = lens === 'fisheye';
 
   return (
-    <svg viewBox="0 0 400 168" className="h-full w-full" fill="none" aria-label="摄影参数综合成像预览" role="img">
+    <svg viewBox="0 0 400 168" className="h-full w-full" fill="none" aria-label={t('摄影参数综合成像预览')} role="img">
       <defs>
         <linearGradient id="camera-preview-sky" x1="0" y1="0" x2="0" y2="1">
           <stop stopColor="#312e81" />
@@ -174,6 +188,7 @@ function CameraSettingsSelector({
   value?: CameraGenerationSettings;
   onChange: (value: CameraGenerationSettings | undefined) => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const activeCount = Object.values(value).filter(Boolean).length;
@@ -200,10 +215,10 @@ function CameraSettingsSelector({
       <button
         type="button"
         className={`prompt-btn${activeCount > 0 ? ' text-indigo-400 bg-indigo-500/10' : ''}`}
-        aria-label={activeCount > 0 ? `摄影参数：已设置 ${activeCount} 项` : '选择摄影参数'}
+        aria-label={activeCount > 0 ? t('摄影参数：已设置 {count} 项', { count: activeCount }) : t('选择摄影参数')}
         aria-haspopup="dialog"
         aria-expanded={open}
-        data-tooltip={activeCount > 0 ? `摄影参数 · ${activeCount} 项` : '摄影参数'}
+        data-tooltip={activeCount > 0 ? t('摄影参数 · {count} 项', { count: activeCount }) : t('摄影参数')}
         onClick={(event) => {
           event.stopPropagation();
           setOpen((current) => !current);
@@ -218,48 +233,48 @@ function CameraSettingsSelector({
       {open && (
         <div
           role="dialog"
-          aria-label="摄影参数"
+          aria-label={t('摄影参数')}
           className="absolute bottom-10 left-1/2 z-50 w-[430px] -translate-x-1/2 rounded-xl border border-canvas-border bg-canvas-surface p-3 shadow-2xl"
           onPointerDown={(event) => event.stopPropagation()}
         >
           <div className="mb-2 flex items-center justify-between px-0.5">
-            <span className="text-xs font-semibold text-canvas-text">摄影参数</span>
-            <button type="button" className="text-[10px] text-canvas-text-muted hover:text-canvas-text" onClick={() => onChange(undefined)}>全部自动</button>
+            <span className="text-xs font-semibold text-canvas-text">{t('摄影参数')}</span>
+            <button type="button" className="text-[10px] text-canvas-text-muted hover:text-canvas-text" onClick={() => onChange(undefined)}>{t('全部自动')}</button>
           </div>
           <div className="h-[168px] overflow-hidden rounded-lg border border-canvas-border bg-canvas-bg text-canvas-text">
             <CameraSettingsPreview settings={value} />
           </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <label className="min-w-0 text-[10px] text-canvas-text-muted">
-              <span className="mb-1 block">焦距</span>
+              <span className="mb-1 block">{t('焦距')}</span>
               <select className="h-8 w-full rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text outline-none focus:border-indigo-400" value={value.lens ?? ''} onChange={(event) => updateSetting('lens', event.target.value as CameraLens || undefined)}>
-                <option value="">自动</option>
-                {CAMERA_LENS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                <option value="">{t('自动')}</option>
+                {CAMERA_LENS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{t(option.label)}</option>)}
               </select>
             </label>
             <label className="min-w-0 text-[10px] text-canvas-text-muted">
-              <span className="mb-1 block">快门效果</span>
+              <span className="mb-1 block">{t('快门效果')}</span>
               <select className="h-8 w-full rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text outline-none focus:border-indigo-400" value={value.shutterEffect ?? ''} onChange={(event) => updateSetting('shutterEffect', event.target.value as CameraShutterEffect || undefined)}>
-                <option value="">自动</option>
-                {CAMERA_SHUTTER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                <option value="">{t('自动')}</option>
+                {CAMERA_SHUTTER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{t(option.label)}</option>)}
               </select>
             </label>
             <label className="min-w-0 text-[10px] text-canvas-text-muted">
-              <span className="mb-1 block">光圈</span>
+              <span className="mb-1 block">{t('光圈')}</span>
               <select className="h-8 w-full rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text outline-none focus:border-indigo-400" value={value.aperture ?? ''} onChange={(event) => updateSetting('aperture', event.target.value as CameraAperture || undefined)}>
-                <option value="">自动</option>
+                <option value="">{t('自动')}</option>
                 {CAMERA_APERTURE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
               </select>
             </label>
             <label className="min-w-0 text-[10px] text-canvas-text-muted">
-              <span className="mb-1 block">曝光时间</span>
+              <span className="mb-1 block">{t('曝光时间')}</span>
               <select className="h-8 w-full rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text outline-none focus:border-indigo-400" value={value.exposureTime ?? ''} onChange={(event) => updateSetting('exposureTime', event.target.value as CameraExposureTime || undefined)}>
-                <option value="">自动</option>
+                <option value="">{t('自动')}</option>
                 {CAMERA_EXPOSURE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
               </select>
             </label>
           </div>
-          <p className="mt-2 px-0.5 text-[9px] text-canvas-text-muted">自动项不会写入提示词；预览仅用于表达景深、明暗、透视与动态趋势。</p>
+          <p className="mt-2 px-0.5 text-[9px] text-canvas-text-muted">{t('自动项不会写入提示词；预览仅用于表达景深、明暗、透视与动态趋势。')}</p>
         </div>
       )}
     </div>
@@ -374,7 +389,7 @@ export default function PromptPanel({
   nodeType,
   nodeId,
   prompt = '',
-  placeholder = '输入提示词开始创作   (Enter 生成，Shift+Enter 换行)',
+  placeholder,
   selectedModel,
   selectedProvider,
   selectedWorkflowId,
@@ -441,6 +456,8 @@ export default function PromptPanel({
   selectedStyle,
   onStyleChange,
 }: PromptPanelProps) {
+  const t = useT();
+  const effectivePlaceholder = placeholder ?? t('输入提示词开始创作   (Enter 生成，Shift+Enter 换行)');
   const [focused, setFocused] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
   const [skillManagerOpen, setSkillManagerOpen] = useState(false);
@@ -451,6 +468,25 @@ export default function PromptPanel({
   const batchLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressSubmitClickRef = useRef(false);
   const [batchMenuOpen, setBatchMenuOpen] = useState(false);
+  const dreaminaImageModel = nodeType === 'ai-image' && selectedProvider === 'dreamina'
+    ? getDreaminaImageModel(selectedModel)
+    : undefined;
+
+  useEffect(() => {
+    if (!dreaminaImageModel) return;
+    const normalizedSize = imageSize?.toLowerCase();
+    const supportedSize = dreaminaImageModel.resolutions.some(
+      (size) => size.toLowerCase() === normalizedSize,
+    );
+    if (!supportedSize) {
+      const fallback = dreaminaImageModel.resolutions.find((size) => size.toLowerCase() === '2k')
+        ?? dreaminaImageModel.resolutions[0];
+      onChangeImageSize?.(fallback);
+    }
+    if (aspectRatio && !DREAMINA_IMAGE_RATIOS.includes(aspectRatio as typeof DREAMINA_IMAGE_RATIOS[number])) {
+      onChangeAspectRatio?.('16:9');
+    }
+  }, [aspectRatio, dreaminaImageModel, imageSize, onChangeAspectRatio, onChangeImageSize]);
 
   const userPresets = useAppStore((s) => s.userPresets);
   const userSkills = useAppStore((s) => s.userSkills);
@@ -585,11 +621,11 @@ export default function PromptPanel({
 
   const handleRunAdvancedPreset = useCallback((preset: UserPreset) => {
     if (!nodeId) {
-      showToast('高级快捷指令需要从画布节点中运行', 'error');
+      showToast(t('高级快捷指令需要从画布节点中运行'), 'error');
       return;
     }
     setPresetRunRequest({ presetId: preset.id, sourceNodeId: nodeId });
-  }, [nodeId, setPresetRunRequest, showToast]);
+  }, [nodeId, setPresetRunRequest, showToast, t]);
 
   const handleManageSkills = useCallback(() => {
     setSkillManagerOpen(true);
@@ -608,10 +644,10 @@ export default function PromptPanel({
     try {
       await uploadSkill(source);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '上传 Skill 失败';
+      const msg = err instanceof Error ? err.message : t('上传 Skill 失败');
       showToast(msg, 'error');
     }
-  }, [showToast, uploadSkill]);
+  }, [showToast, uploadSkill, t]);
 
   return (
     <>
@@ -622,7 +658,7 @@ export default function PromptPanel({
           value={prompt}
           onChange={onChange}
           onSubmit={handleSingleSubmit}
-          placeholder={placeholder}
+          placeholder={effectivePlaceholder}
           nodeId={nodeId}
           selectedWorkflowId={selectedWorkflowId}
           canSubmit={canGenerate}
@@ -647,14 +683,14 @@ export default function PromptPanel({
 
         {nodeType === 'ai-animation' && onAnimationActionChange && (
           <>
-            <div className="animation-action-picker" role="group" aria-label="动画动作">
+            <div className="animation-action-picker" role="group" aria-label={t('动画动作')}>
               {ANIMATION_ACTIONS.map((action) => (
                 <button
                   key={action}
                   type="button"
                   className={`animation-pose-btn${animationAction === action ? ' active' : ''}`}
-                  data-tooltip={ANIMATION_ACTION_LABELS[action]}
-                  aria-label={ANIMATION_ACTION_LABELS[action]}
+                  data-tooltip={t(ANIMATION_ACTION_LABELS[action])}
+                  aria-label={t(ANIMATION_ACTION_LABELS[action])}
                   aria-pressed={animationAction === action}
                   onClick={(event) => {
                     event.stopPropagation();
@@ -668,14 +704,14 @@ export default function PromptPanel({
             <select
               className="animation-frames-select"
               value={animationFrames}
-              aria-label="生成帧数"
+              aria-label={t('生成帧数')}
               onChange={(event) => {
                 event.stopPropagation();
                 onAnimationFramesChange?.(Number(event.target.value));
               }}
             >
               {[6, 8, 10, 12, 16, 20].map((count) => (
-                <option key={count} value={count}>{count} 帧</option>
+                <option key={count} value={count}>{t('{count} 帧', { count })}</option>
               ))}
             </select>
           </>
@@ -699,6 +735,14 @@ export default function PromptPanel({
             aspectRatio={aspectRatio}
             onChangeImageSize={onChangeImageSize || (() => {})}
             onChangeAspectRatio={onChangeAspectRatio || (() => {})}
+            imageSizes={dreaminaImageModel?.resolutions}
+            showAdaptive={!dreaminaImageModel}
+            ratios={dreaminaImageModel
+              ? DREAMINA_IMAGE_RATIOS.map((value) => ({
+                value,
+                className: IMAGE_RATIO_CLASS_NAMES[value],
+              }))
+              : undefined}
           />
         )}
 
@@ -774,7 +818,7 @@ export default function PromptPanel({
               ref={slashBtnRef}
               type="button"
               className={`prompt-btn prompt-slash-btn${slashOpen ? ' slash-active' : ''}`}
-              data-tooltip="预设提示词"
+              data-tooltip={t('预设提示词')}
               onClick={handleButtonSlash}
             >
               /
@@ -784,7 +828,7 @@ export default function PromptPanel({
             <button
               type="button"
               className="prompt-btn prompt-debug-btn"
-              data-tooltip="调试 API 参数"
+              data-tooltip={t('调试 API 参数')}
               onClick={(e) => { e.stopPropagation(); onDebug(); }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -797,7 +841,7 @@ export default function PromptPanel({
               type="button"
               className={`prompt-btn prompt-pass-through-btn ${!prompt.trim() ? 'disabled' : ''}`}
               disabled={!canGenerate || !prompt.trim()}
-              data-tooltip="直接输出（跳过模型调用）"
+              data-tooltip={t('直接输出（跳过模型调用）')}
               onClick={(e) => {
                 e.stopPropagation();
                 if (prompt.trim()) onPassThrough();
@@ -814,8 +858,8 @@ export default function PromptPanel({
               <button
                 type="button"
                 className="prompt-btn prompt-stop-btn"
-                data-tooltip="终止 ComfyUI 任务"
-                aria-label="终止 ComfyUI 任务"
+                data-tooltip={t('终止 ComfyUI 任务')}
+                aria-label={t('终止 ComfyUI 任务')}
                 onClick={(event) => {
                   event.stopPropagation();
                   onCancelGeneration();
@@ -837,7 +881,7 @@ export default function PromptPanel({
                 disabled={!canGenerate || !prompt.trim()}
                 aria-haspopup={batchSupported ? 'menu' : undefined}
                 aria-expanded={batchSupported ? batchMenuOpen : undefined}
-                data-tooltip={batchSupported ? '点击生成 1 张，长按选择数量' : '调用模型生成'}
+                data-tooltip={batchSupported ? t('点击生成 1 张，长按选择数量') : t('调用模型生成')}
                 onPointerDown={handleBatchPointerDown}
                 onPointerUp={clearBatchLongPress}
                 onPointerCancel={clearBatchLongPress}
@@ -855,7 +899,7 @@ export default function PromptPanel({
                   <div
                     className="image-batch-menu"
                     role="menu"
-                    aria-label="选择批量生成数量"
+                    aria-label={t('选择批量生成数量')}
                     aria-hidden={!batchMenuOpen}
                   >
                     {IMAGE_BATCH_COUNTS.map((count) => (
@@ -865,8 +909,8 @@ export default function PromptPanel({
                         role="menuitem"
                         tabIndex={batchMenuOpen ? 0 : -1}
                         className={`image-batch-menu-item${batchCount === count ? ' active' : ''}`}
-                        aria-label={`生成 ${count} 张图片`}
-                        title={count >= 4 ? `生成 ${count} 张，费用可能按张计算` : `生成 ${count} 张`}
+                        aria-label={t('生成 {count} 张图片', { count })}
+                        title={count >= 4 ? t('生成 {count} 张，费用可能按张计算', { count }) : t('生成 {count} 张', { count })}
                         onClick={handleBatchSelect(count)}
                       >
                         {count}

@@ -13,6 +13,15 @@ export default function CanvasBackground() {
   const canvasBackground = useAppStore((s) => s.config.canvasBackground);
   const customBgUrl = useAppStore((s) => s.config.customBackgroundUrl);
   const customBgOpacity = useAppStore((s) => s.config.customBackgroundOpacity);
+  const performanceMode = useAppStore((s) => s.config.performanceMode === true);
+
+  if (performanceMode && (
+    canvasBackground === 'solar-system'
+    || canvasBackground === 'nebula'
+    || canvasBackground === 'frosted-glass'
+  )) {
+    return null;
+  }
 
   switch (canvasBackground) {
     case 'solar-system':

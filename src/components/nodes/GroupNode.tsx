@@ -13,6 +13,7 @@ import { useAppStore, type AppState } from '../../store/useAppStore';
 import { useNodeLocked } from '../../hooks/useNodeLocked';
 import AnimatedButton from '../shared/AnimatedButton';
 import { batchExecuteNodes, type BatchContext } from '../../utils/batchExecute';
+import { useT } from '../../i18n';
 
 interface GroupNodeData {
   groupId: string;
@@ -36,6 +37,7 @@ function getGroupChildCount(nodes: AppState['nodes'], groupId: string) {
 }
 
 export default function GroupNode({ id, data, selected }: NodeProps) {
+  const t = useT();
   const { groupId, color, label } = data as unknown as GroupNodeData;
   const renameGroup = useAppStore((s) => s.renameGroup);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
@@ -72,12 +74,12 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
     setBatchRunning(false);
 
     const parts: string[] = [];
-    if (ok > 0) parts.push(`${ok} 个成功`);
-    if (fail > 0) parts.push(`${fail} 个失败`);
+    if (ok > 0) parts.push(t('{count} 个成功', { count: ok }));
+    if (fail > 0) parts.push(t('{count} 个失败', { count: fail }));
     if (parts.length > 0) {
-      showToast(`分组批量生成完成：${parts.join('，')}`, fail > 0 ? 'error' : undefined);
+      showToast(t('分组批量生成完成：{result}', { result: parts.join('，') }), fail > 0 ? 'error' : undefined);
     }
-  }, [id]);
+  }, [id, t]);
 
   return (
     <>
@@ -129,10 +131,10 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
           >
             {label}
           </span>
-          <span className="canvas-group-count">{childCount} 节点</span>
+          <span className="canvas-group-count">{t('{count} 节点', { count: childCount })}</span>
           {selected && (
             <AnimatedButton
-              data-tooltip="批量生成"
+              data-tooltip={t('批量生成')}
               disabled={batchRunning}
               onClick={executeGroupBatch}
               className="w-5 h-5 rounded flex items-center justify-center ml-1 transition-colors hover:text-green-300 hover:bg-green-500/15 disabled:opacity-30 disabled:cursor-not-allowed"

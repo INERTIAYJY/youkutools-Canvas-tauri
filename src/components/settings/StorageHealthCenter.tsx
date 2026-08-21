@@ -18,6 +18,7 @@ import {
   type DuplicateFileGroup,
 } from '../../services/fs/storageHealth';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 // ============================================
 // 颜色映射
@@ -128,6 +129,7 @@ function DonutChart({ segments, total, size = 160 }: {
   total: number;
   size?: number;
 }) {
+  const t = useT();
   const cx = size / 2;
   const cy = size / 2;
   const innerR = size * 0.27;
@@ -143,7 +145,7 @@ function DonutChart({ segments, total, size = 160 }: {
           <circle cx={cx} cy={cy} r={outerR} fill="none" stroke="#1a1a26" strokeWidth={outerR - innerR} />
           <text x={cx} y={cy} textAnchor="middle" fill="#e8e8ed" fontSize="13" fontWeight="600">0 B</text>
         </svg>
-        <div className="text-[11px] text-canvas-text-muted">暂无数据</div>
+        <div className="text-[11px] text-canvas-text-muted">{t('暂无数据')}</div>
       </div>
     );
   }
@@ -169,7 +171,7 @@ function DonutChart({ segments, total, size = 160 }: {
             onMouseLeave={() => setHoverIdx(null)}
           >
             <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: s.color }} />
-            <span className="text-canvas-text-secondary">{s.label}</span>
+            <span className="text-canvas-text-secondary">{t(s.label)}</span>
           </div>
         ))}
       </div>
@@ -229,12 +231,13 @@ interface BarItem {
 }
 
 function StackedBar({ items }: { items: BarItem[] }) {
+  const t = useT();
   const total = items.reduce((s, i) => s + i.value, 0);
 
   if (items.length === 0 || total === 0) {
     return (
       <div className="flex items-center justify-center py-8 text-xs text-canvas-text-muted">
-        暂无项目数据
+        {t('暂无项目数据')}
       </div>
     );
   }
@@ -266,7 +269,7 @@ function StackedBar({ items }: { items: BarItem[] }) {
                     ? '0 7px 7px 0'
                     : undefined,
               }}
-              title={`${seg.label}: ${formatBytes(seg.value)} (${seg.pct.toFixed(1)}%)`}
+              title={`${t(seg.label)}: ${formatBytes(seg.value)} (${seg.pct.toFixed(1)}%)`}
             />
           );
         })}
@@ -277,7 +280,7 @@ function StackedBar({ items }: { items: BarItem[] }) {
         {segments.map((seg, i) => (
           <div key={i} className="flex items-center gap-1.5 text-[11px]">
             <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: seg.color }} />
-            <span className="text-canvas-text-secondary truncate max-w-[80px]" title={seg.label}>{seg.label}</span>
+            <span className="text-canvas-text-secondary truncate max-w-[80px]" title={t(seg.label)}>{t(seg.label)}</span>
             <span className="text-canvas-text-muted tabular-nums">{seg.pct.toFixed(0)}%</span>
             <span className="text-canvas-text-muted tabular-nums">{formatBytes(seg.value)}</span>
           </div>
@@ -292,6 +295,7 @@ function StackedBar({ items }: { items: BarItem[] }) {
 // ============================================
 
 export default function StorageHealthCenter() {
+  const t = useT();
   const { projects, nodes, showToast } = useAppStore(
     useShallow((s) => ({
       projects: s.projects,
@@ -329,19 +333,19 @@ export default function StorageHealthCenter() {
 
       if (issueCount > 0) {
         showToast(
-          `总占用 ${totalLabel}，可释放 ${reclaimLabel}，发现 ${issueCount} 个问题`,
+          t('总占用 {total}，可释放 {reclaim}，发现 {count} 个问题', { total: totalLabel, reclaim: reclaimLabel, count: issueCount }),
           result.reclaimableSize > 0 ? 'info' : 'success',
         );
       } else {
-        showToast(`总占用 ${totalLabel}，一切正常`);
+        showToast(t('总占用 {total}，一切正常', { total: totalLabel }));
       }
     } catch (err) {
       console.error('Storage scan failed:', err);
-      showToast('扫描失败，请重试', 'error');
+      showToast(t('扫描失败，请重试'), 'error');
     } finally {
       setScanning(false);
     }
-  }, [projects, nodes, showToast]);
+  }, [projects, nodes, showToast, t]);
 
   // 打开时自动扫描一次
   useEffect(() => {
@@ -357,12 +361,12 @@ export default function StorageHealthCenter() {
     setDeleting((prev) => new Set(prev).add(trash.trashDir));
     try {
       await clearTrashDir(trash.trashDir);
-      showToast(`已清空「${trash.projectName}」的回收站缓存`);
+      showToast(t('已清空「{name}」的回收站缓存', { name: trash.projectName }));
       // 重置扫描标记以触发重新扫描
       scannedRef.current = false;
       await handleScan();
     } catch {
-      showToast('清理失败', 'error');
+      showToast(t('清理失败'), 'error');
     } finally {
       setDeleting((prev) => {
         const next = new Set(prev);
@@ -370,7 +374,7 @@ export default function StorageHealthCenter() {
         return next;
       });
     }
-  }, [showToast, handleScan]);
+  }, [showToast, handleScan, t]);
 
   // 删除孤儿文件
   const handleDeleteOrphan = useCallback(async (orphan: OrphanFileInfo) => {
@@ -378,14 +382,14 @@ export default function StorageHealthCenter() {
     try {
       const ok = await deleteOrphanFile(orphan.path);
       if (ok) {
-        showToast(`已删除：${orphan.name}`);
+        showToast(t('已删除：{name}', { name: orphan.name }));
         scannedRef.current = false;
         await handleScan();
       } else {
-        showToast('删除失败', 'error');
+        showToast(t('删除失败'), 'error');
       }
     } catch {
-      showToast('删除失败', 'error');
+      showToast(t('删除失败'), 'error');
     } finally {
       setDeleting((prev) => {
         const next = new Set(prev);
@@ -393,7 +397,7 @@ export default function StorageHealthCenter() {
         return next;
       });
     }
-  }, [showToast, handleScan]);
+  }, [showToast, handleScan, t]);
 
   // 删除重复文件
   const handleDeleteDuplicate = useCallback(async (file: DuplicateFileGroup['files'][0]) => {
@@ -401,14 +405,14 @@ export default function StorageHealthCenter() {
     try {
       const ok = await deleteDuplicateFile(file.path);
       if (ok) {
-        showToast(`已删除：${file.name}`);
+        showToast(t('已删除：{name}', { name: file.name }));
         scannedRef.current = false;
         await handleScan();
       } else {
-        showToast('删除失败', 'error');
+        showToast(t('删除失败'), 'error');
       }
     } catch {
-      showToast('删除失败', 'error');
+      showToast(t('删除失败'), 'error');
     } finally {
       setDeleting((prev) => {
         const next = new Set(prev);
@@ -416,7 +420,7 @@ export default function StorageHealthCenter() {
         return next;
       });
     }
-  }, [showToast, handleScan]);
+  }, [showToast, handleScan, t]);
 
   // 清空所有 .trash
   const handleClearAllTrash = useCallback(async () => {
@@ -424,10 +428,10 @@ export default function StorageHealthCenter() {
     for (const trash of report.trashes) {
       await clearTrashDir(trash.trashDir);
     }
-    showToast('已清空所有回收站缓存');
+    showToast(t('已清空所有回收站缓存'));
     scannedRef.current = false;
     await handleScan();
-  }, [report, showToast, handleScan]);
+  }, [report, showToast, handleScan, t]);
 
   // 删除所有孤儿文件
   const handleDeleteAllOrphans = useCallback(async () => {
@@ -437,10 +441,10 @@ export default function StorageHealthCenter() {
       const ok = await deleteOrphanFile(orphan.path);
       if (ok) count++;
     }
-    showToast(`已删除 ${count} 个孤儿文件`);
+    showToast(t('已删除 {count} 个孤儿文件', { count }));
     scannedRef.current = false;
     await handleScan();
-  }, [report, showToast, handleScan]);
+  }, [report, showToast, handleScan, t]);
 
   // 汇总数据
   const overview = useMemo(() => {
@@ -472,28 +476,28 @@ export default function StorageHealthCenter() {
     const issueSections = [
       {
         id: 'trash',
-        label: '回收站残留',
+        label: t('回收站残留'),
         count: report.trashes.length,
         totalSize: report.trashes.reduce((s, t) => s + t.trashSize, 0),
         color: '#fbbf24',
       },
       {
         id: 'orphans',
-        label: '孤儿文件',
+        label: t('孤儿文件'),
         count: report.orphans.length,
         totalSize: report.orphans.reduce((s, o) => s + o.size, 0),
         color: '#f472b6',
       },
       {
         id: 'duplicates',
-        label: '重复文件',
+        label: t('重复文件'),
         count: report.duplicates.length,
         totalSize: report.duplicates.reduce((s, d) => s + d.reclaimableSize, 0),
         color: '#fb923c',
       },
       {
         id: 'offline',
-        label: '离线文件夹',
+        label: t('离线文件夹'),
         count: report.offlineFolders.length,
         totalSize: 0,
         color: '#ef4444',
@@ -501,7 +505,7 @@ export default function StorageHealthCenter() {
     ].filter((s) => s.count > 0);
 
     return { donutSegments, projectBars, issueSections };
-  }, [report]);
+  }, [report, t]);
 
   const isEmpty = !report || (report.projects.length === 0 && report.trashes.length === 0);
 
@@ -510,9 +514,9 @@ export default function StorageHealthCenter() {
       {/* 标题栏 + 扫描按钮 */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-canvas-text">存储健康中心</h3>
+          <h3 className="text-sm font-semibold text-canvas-text">{t('存储健康中心')}</h3>
           <p className="text-[11px] text-canvas-text-muted mt-0.5">
-            检测各项目的存储占用与可优化空间
+            {t('检测各项目的存储占用与可优化空间')}
           </p>
         </div>
         <AnimatedButton
@@ -526,7 +530,7 @@ export default function StorageHealthCenter() {
               <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
               </svg>
-              扫描中…
+              {t('扫描中…')}
             </>
           ) : (
             <>
@@ -534,7 +538,7 @@ export default function StorageHealthCenter() {
                 <polyline points="1 4 1 10 7 10" />
                 <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
               </svg>
-              重新扫描
+              {t('重新扫描')}
             </>
           )}
         </AnimatedButton>
@@ -545,7 +549,7 @@ export default function StorageHealthCenter() {
           <svg className="animate-spin text-indigo-400" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
           </svg>
-          <p className="text-xs text-canvas-text-secondary">正在分析存储状况…</p>
+          <p className="text-xs text-canvas-text-secondary">{t('正在分析存储状况…')}</p>
         </div>
       )}
 
@@ -564,18 +568,18 @@ export default function StorageHealthCenter() {
               {/* 右侧统计 */}
               <div className="flex-1 space-y-2.5">
                 <div>
-                  <div className="text-[11px] text-canvas-text-muted mb-0.5">总占用空间</div>
+                  <div className="text-[11px] text-canvas-text-muted mb-0.5">{t('总占用空间')}</div>
                   <div className="text-lg font-semibold text-canvas-text">{formatBytes(report.totalSize)}</div>
                 </div>
                 <div>
-                  <div className="text-[11px] text-canvas-text-muted mb-0.5">可释放空间</div>
+                  <div className="text-[11px] text-canvas-text-muted mb-0.5">{t('可释放空间')}</div>
                   <div className={`text-lg font-semibold ${report.reclaimableSize > 0 ? 'text-emerald-400' : 'text-canvas-text'}`}>
                     {formatBytes(report.reclaimableSize)}
                   </div>
                 </div>
                 <div className="flex gap-3 text-[11px] text-canvas-text-muted">
-                  <span>{report.projects.length} 个项目</span>
-                  <span>{report.projects.reduce((s, p) => s + p.fileCount, 0)} 个文件</span>
+                  <span>{t('{count} 个项目', { count: report.projects.length })}</span>
+                  <span>{t('{count} 个文件', { count: report.projects.reduce((s, p) => s + p.fileCount, 0) })}</span>
                 </div>
                 {/* 问题标签 */}
                 {overview.issueSections.length > 0 && (
@@ -604,17 +608,17 @@ export default function StorageHealthCenter() {
 
           {/* 条状图 — 各项目存储占用 */}
           <div className="bg-canvas-card border border-canvas-border rounded-[10px] p-3">
-            <h4 className="text-sm font-medium text-canvas-text mb-4">各项目占用空间</h4>
+            <h4 className="text-sm font-medium text-canvas-text mb-4">{t('各项目占用空间')}</h4>
             <StackedBar items={overview.projectBars} />
           </div>
 
           {/* 详情区域切换按钮 */}
           <div className="flex gap-1.5 border-b border-canvas-border pb-1">
             {[
-              { id: 'overview', label: '概览' },
-              { id: 'trash', label: `回收站残留 ${report.trashes.length > 0 ? `(${report.trashes.length})` : ''}` },
-              { id: 'orphans', label: `孤儿文件 ${report.orphans.length > 0 ? `(${report.orphans.length})` : ''}` },
-              { id: 'duplicates', label: `重复文件 ${report.duplicates.length > 0 ? `(${report.duplicates.length})` : ''}` },
+              { id: 'overview', label: t('概览') },
+              { id: 'trash', label: `${t('回收站残留')} ${report.trashes.length > 0 ? `(${report.trashes.length})` : ''}` },
+              { id: 'orphans', label: `${t('孤儿文件')} ${report.orphans.length > 0 ? `(${report.orphans.length})` : ''}` },
+              { id: 'duplicates', label: `${t('重复文件')} ${report.duplicates.length > 0 ? `(${report.duplicates.length})` : ''}` },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -647,11 +651,11 @@ export default function StorageHealthCenter() {
                         className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-canvas-surface text-canvas-text-secondary"
                       >
                         <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: CATEGORY_COLORS[cat] || '#94a3b8' }} />
-                        {cat} {info.count}个 · {formatBytes(info.size)}
+                        {t(cat)} {info.count}{t('个')} · {formatBytes(info.size)}
                       </span>
                     ))}
                     {Object.keys(p.categories).length === 0 && (
-                      <span className="text-[10px] text-canvas-text-muted">暂无文件</span>
+                      <span className="text-[10px] text-canvas-text-muted">{t('暂无文件')}</span>
                     )}
                   </div>
                 </div>
@@ -667,7 +671,7 @@ export default function StorageHealthCenter() {
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mx-auto mb-2 opacity-40">
                     <path d="M9 9l6 6m0-6l-6 6m-7 3h20L19 4H5L2 18z" />
                   </svg>
-                  没有发现回收站残留，很好！
+                  {t('没有发现回收站残留，很好！')}
                 </div>
               ) : (
                 <>
@@ -677,7 +681,7 @@ export default function StorageHealthCenter() {
                       className="text-[11px] text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-400/10 transition-colors"
                       onClick={handleClearAllTrash}
                     >
-                      清空全部
+                      {t('清空全部')}
                     </AnimatedButton>
                   </div>
                   {report.trashes.map((trash) => (
@@ -689,7 +693,7 @@ export default function StorageHealthCenter() {
                             {formatShortPath(trash.trashDir)}
                           </div>
                           <div className="text-[11px] text-amber-400 mt-1">
-                            {formatBytes(trash.trashSize)} · {trash.fileCount} 个文件
+                            {formatBytes(trash.trashSize)} · {t('{count} 个文件', { count: trash.fileCount })}
                           </div>
                         </div>
                         <AnimatedButton
@@ -698,7 +702,7 @@ export default function StorageHealthCenter() {
                           onClick={() => handleClearTrash(trash)}
                           disabled={deleting.has(trash.trashDir)}
                         >
-                          {deleting.has(trash.trashDir) ? '清理中…' : '清空'}
+                          {deleting.has(trash.trashDir) ? t('清理中…') : t('清空')}
                         </AnimatedButton>
                       </div>
                     </div>
@@ -716,18 +720,18 @@ export default function StorageHealthCenter() {
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mx-auto mb-2 opacity-40">
                     <path d="M22 11.08V12a10 10 0 11-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" />
                   </svg>
-                  没有发现孤儿文件，所有文件均有引用
+                  {t('没有发现孤儿文件，所有文件均有引用')}
                 </div>
               ) : (
                 <>
                   <div className="flex justify-between text-[11px] text-canvas-text-muted mb-1">
-                    <span>共 {report.orphans.length} 个孤儿文件，可释放 {formatBytes(report.orphans.reduce((s, o) => s + o.size, 0))}</span>
+                    <span>{t('共 {count} 个孤儿文件，可释放 {size}', { count: report.orphans.length, size: formatBytes(report.orphans.reduce((s, o) => s + o.size, 0)) })}</span>
                     <AnimatedButton
                       type="button"
                       className="text-red-400 hover:text-red-300 px-2 py-0.5 rounded hover:bg-red-400/10 transition-colors"
                       onClick={handleDeleteAllOrphans}
                     >
-                      全部清理
+                      {t('全部清理')}
                     </AnimatedButton>
                   </div>
                   <div className="max-h-[300px] overflow-y-auto space-y-1.5">
@@ -747,7 +751,7 @@ export default function StorageHealthCenter() {
                           onClick={() => handleDeleteOrphan(orphan)}
                           disabled={deleting.has(orphan.path)}
                         >
-                          {deleting.has(orphan.path) ? '…' : '删除'}
+                          {deleting.has(orphan.path) ? '…' : t('删除')}
                         </AnimatedButton>
                       </div>
                     ))}
@@ -765,7 +769,7 @@ export default function StorageHealthCenter() {
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mx-auto mb-2 opacity-40">
                     <rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
                   </svg>
-                  没有发现重复文件
+                  {t('没有发现重复文件')}
                 </div>
               ) : (
                 <div className="max-h-[300px] overflow-y-auto space-y-2">
@@ -773,10 +777,10 @@ export default function StorageHealthCenter() {
                     <div key={group.key} className="bg-canvas-hover rounded-lg p-3 border border-canvas-border">
                       <div className="flex items-center justify-between mb-2">
                         <div className="text-[11px] font-medium text-canvas-text truncate max-w-[280px]" title={group.files[0]?.name}>
-                          {group.files[0]?.name || '未知文件'}
+                          {group.files[0]?.name || t('未知文件')}
                         </div>
                         <span className="text-[10px] text-orange-400 shrink-0 ml-2">
-                          {group.files.length} 份 · 可释放 {formatBytes(group.reclaimableSize)}
+                          {t('{count} 份 · 可释放 {size}', { count: group.files.length, size: formatBytes(group.reclaimableSize) })}
                         </span>
                       </div>
                       <div className="space-y-1">
@@ -793,7 +797,7 @@ export default function StorageHealthCenter() {
                                 onClick={() => handleDeleteDuplicate(file)}
                                 disabled={deleting.has(file.path)}
                               >
-                                {deleting.has(file.path) ? '…' : '删除'}
+                                {deleting.has(file.path) ? '…' : t('删除')}
                               </AnimatedButton>
                             )}
                           </div>
@@ -813,14 +817,14 @@ export default function StorageHealthCenter() {
           <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mx-auto mb-3 text-canvas-text-muted opacity-40">
             <path d="M4 19.5A2.5 2.5 0 016.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
           </svg>
-          <p className="text-sm text-canvas-text-secondary mb-1">暂无存储数据</p>
-          <p className="text-[11px] text-canvas-text-muted mb-4">尚未创建项目或项目目录为空</p>
+          <p className="text-sm text-canvas-text-secondary mb-1">{t('暂无存储数据')}</p>
+          <p className="text-[11px] text-canvas-text-muted mb-4">{t('尚未创建项目或项目目录为空')}</p>
           <AnimatedButton
             type="button"
             className="text-xs px-3 py-1.5 rounded-lg bg-canvas-hover text-canvas-text-secondary hover:text-canvas-text transition-colors"
             onClick={handleScan}
           >
-            重新扫描
+            {t('重新扫描')}
           </AnimatedButton>
         </div>
       )}

@@ -291,17 +291,6 @@ export default function ExpandEditor({ isOpen, imageUrl, onClose, onGenerate }: 
       >
         {/* ── 顶部：画幅预设 + 确认 ── */}
         <div className="crop-aspect-bar">
-          <AnimatedButton
-            type="button"
-            className="crop-aspect-btn crop-aspect-close act-cancel"
-            data-tooltip="关闭 (Esc)"
-            aria-label="关闭"
-            onClick={handleClose}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </AnimatedButton>
           {ASPECT_OPTIONS.map((opt) => (
             <button
               key={opt.key}
@@ -323,6 +312,17 @@ export default function ExpandEditor({ isOpen, imageUrl, onClose, onGenerate }: 
               <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
             </svg>
             <span>扩图</span>
+          </AnimatedButton>
+          <AnimatedButton
+            type="button"
+            className="crop-aspect-btn crop-aspect-close crop-toolbar-close act-cancel"
+            data-tooltip="关闭 (Esc)"
+            aria-label="关闭"
+            onClick={handleClose}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
           </AnimatedButton>
         </div>
 

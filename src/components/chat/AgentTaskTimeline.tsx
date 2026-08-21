@@ -20,6 +20,7 @@ import AgentStepCard from './AgentStepCard';
 import AgentApprovalCard from './AgentApprovalCard';
 import AgentExecutionRationale from './AgentExecutionRationale';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
+import { useT } from '../../i18n';
 
 export interface AgentTaskControls {
   onResolveApproval: (approvalId: string, resolution: AgentApprovalResolution) => void;
@@ -86,23 +87,23 @@ function findActiveStep(task: AgentTask): AgentStep | undefined {
   return undefined;
 }
 
-function getActivityLabel(task: AgentTask, step?: AgentStep): string {
+function getActivityLabel(task: AgentTask, step: AgentStep | undefined, t: (k: string, v?: Record<string, string | number>) => string): string {
   if (task.status === 'waiting_approval' || step?.status === 'waiting_approval') {
-    return step ? `等待确认：${step.title}` : '等待用户确认';
+    return step ? t('等待确认：{title}', { title: step.title }) : t('等待用户确认');
   }
-  if (step?.status === 'pending') return `准备${step.title}`;
+  if (step?.status === 'pending') return t('准备{title}', { title: step.title });
   if (step?.status === 'running') {
-    return TOOL_ACTIVITY_LABELS[step.toolCall?.toolId ?? ''] ?? `正在${step.title}`;
+    return TOOL_ACTIVITY_LABELS[step.toolCall?.toolId ?? ''] ?? t('正在{title}', { title: step.title });
   }
-  if (task.status === 'queued') return '正在等待执行';
+  if (task.status === 'queued') return t('正在等待执行');
   if (task.status === 'planning') {
     return task.steps.some((item) => item.status === 'succeeded')
-      ? '正在分析工具结果'
-      : '正在分析请求';
+      ? t('正在分析工具结果')
+      : t('正在分析请求');
   }
-  if (task.status === 'waiting_tool') return '正在调用工具';
-  if (task.status === 'running') return '正在整理结果';
-  return STATUS_META[task.status].label;
+  if (task.status === 'waiting_tool') return t('正在调用工具');
+  if (task.status === 'running') return t('正在整理结果');
+  return t(STATUS_META[task.status].label);
 }
 
 function getActivityStartedAt(task: AgentTask, step?: AgentStep): number {
@@ -169,6 +170,7 @@ export default function AgentTaskTimeline({
   onReplan,
   onRewind,
 }: AgentTaskTimelineProps) {
+  const t = useT();
   const isTerminal = AGENT_TERMINAL_STATUSES.has(task.status);
   const isExpertTask = !!task.parentTaskId;
   const [expanded, setExpanded] = useState(!isTerminal);
@@ -176,7 +178,7 @@ export default function AgentTaskTimeline({
   const meta = STATUS_META[task.status];
   const isActive = ACTIVE_STATUSES.includes(task.status);
   const activeStep = findActiveStep(task);
-  const activityLabel = getActivityLabel(task, activeStep);
+  const activityLabel = getActivityLabel(task, activeStep, t);
   const activityDetail = activeStep?.toolCall?.inputSummary ?? activeStep?.approval?.summary;
   const activityStartedAt = getActivityStartedAt(task, activeStep);
   const [now, setNow] = useState(() => Date.now());
@@ -199,7 +201,7 @@ export default function AgentTaskTimeline({
   const taskDuration = task.startedAt
     ? Math.max(0, (task.completedAt ?? task.updatedAt) - task.startedAt)
     : 0;
-  const terminalLabel = task.status === 'completed' ? '运行记录' : meta.label;
+  const terminalLabel = task.status === 'completed' ? t('运行记录') : t(meta.label);
 
   return (
     <div className="agent-task-timeline mt-2 max-w-full py-0.5">
@@ -225,7 +227,7 @@ export default function AgentTaskTimeline({
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-canvas-text-muted">
           {task.steps.length > 0 && (
-            <span>{isTerminal ? task.steps.length : `${doneSteps}/${task.steps.length}`} 步</span>
+            <span>{t('{count} 步', { count: isTerminal ? task.steps.length : `${doneSteps}/${task.steps.length}` })}</span>
           )}
           {!isActive && taskDuration > 0 && <span>· {formatDuration(taskDuration)}</span>}
           <Icon icon={expanded ? 'mdi:chevron-up' : 'mdi:chevron-down'} width="15" />
@@ -241,7 +243,7 @@ export default function AgentTaskTimeline({
       {!!task.skillBindings?.length && (
         <div className="mt-1 flex min-w-0 items-start gap-1.5 pl-5 text-[10px] leading-4 text-canvas-text-muted">
           <Icon icon="mdi:book-check-outline" width="13" className="mt-0.5 shrink-0 text-indigo-300/80" />
-          <span className="shrink-0">已注入 Skill</span>
+          <span className="shrink-0">{t('已注入 Skill')}</span>
           <span className="min-w-0 truncate text-canvas-text-secondary">
             {task.skillBindings.map((binding) => binding.name).join('、')}
           </span>
@@ -253,14 +255,14 @@ export default function AgentTaskTimeline({
       {expanded && metrics && (metrics.inputTokens > 0 || metrics.outputTokens > 0 || metrics.policyDenied > 0 || metrics.retryCount > 0) && (
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-5 text-[10px] tabular-nums text-canvas-text-muted">
           {totalTokens > 0 && <span>{totalTokens.toLocaleString()} token</span>}
-          {metrics.policyDenied > 0 && <span>{metrics.policyDenied} 次拒绝</span>}
-          {metrics.retryCount > 0 && <span>{metrics.retryCount} 次重试</span>}
+          {metrics.policyDenied > 0 && <span>{t('{count} 次拒绝', { count: metrics.policyDenied })}</span>}
+          {metrics.retryCount > 0 && <span>{t('{count} 次重试', { count: metrics.retryCount })}</span>}
         </div>
       )}
 
       {task.status === 'paused' && task.pausedReason && (
         <p className="mt-1.5 text-[11px] leading-[17px] text-amber-300/90">
-          {PAUSE_REASON_LABELS[task.pausedReason] ?? task.pausedReason}
+          {task.pausedReason ? t(PAUSE_REASON_LABELS[task.pausedReason] ?? task.pausedReason) : ''}
         </p>
       )}
       {task.status === 'failed' && task.errorMessage && (
@@ -283,6 +285,17 @@ export default function AgentTaskTimeline({
             </div>
           )}
 
+          {/* 规划 / 整理阶段没有进行中的步骤卡片，这里补一行在下方明确显示助手当前在做什么 */}
+          {isActive && !activeStep && task.status !== 'waiting_approval' && (
+            <div className="mt-0.5 flex items-center gap-1.5 rounded-md bg-canvas-hover/25 px-2 py-1.5">
+              <Icon icon="mdi:loading" width="14" className="shrink-0 animate-spin motion-reduce:animate-none text-violet-400" />
+              <span className="min-w-0 truncate text-[12px] text-canvas-text-secondary">{activityLabel}</span>
+              <span className="ml-auto shrink-0 text-[10px] tabular-nums text-canvas-text-muted">
+                {formatElapsed(activityStartedAt, now)}
+              </span>
+            </div>
+          )}
+
           {pendingApprovalStep && (
             <AgentApprovalCard
               key={pendingApprovalStep.approval?.id}
@@ -297,33 +310,33 @@ export default function AgentTaskTimeline({
           {!isTerminal && !isExpertTask && (
             <div className="mt-2.5 flex flex-wrap items-center gap-1 border-t border-canvas-border/60 pt-2">
               {isActive && task.status !== 'waiting_approval' && (
-                <ControlButton icon="mdi:pause" label="暂停" onClick={() => onPause(task.id)} />
+                <ControlButton icon="mdi:pause" label={t('暂停')} onClick={() => onPause(task.id)} />
               )}
               {task.status === 'paused' && (
-                <ControlButton icon="mdi:play" label="继续" tone="primary" onClick={() => onResume(task.id)} />
+                <ControlButton icon="mdi:play" label={t('继续')} tone="primary" onClick={() => onResume(task.id)} />
               )}
               {pendingApprovalStep && (
                 <ControlButton
                   icon="mdi:debug-step-over"
-                  label="跳过此步"
+                  label={t('跳过此步')}
                   onClick={() => onSkip(task.id, pendingApprovalStep.id)}
                 />
               )}
-              <ControlButton icon="mdi:refresh" label="重新规划" onClick={() => onReplan(task.id)} />
-              <ControlButton icon="mdi:stop" label="停止" tone="danger" onClick={() => onStop(task.id)} />
+              <ControlButton icon="mdi:refresh" label={t('重新规划')} onClick={() => onReplan(task.id)} />
+              <ControlButton icon="mdi:stop" label={t('停止')} tone="danger" onClick={() => onStop(task.id)} />
             </div>
           )}
 
           {task.status === 'failed' && !isExpertTask && (
             <div className="mt-2.5 flex items-center gap-1 border-t border-canvas-border/60 pt-2">
-              <ControlButton icon="mdi:play" label="继续" tone="primary" onClick={() => onResume(task.id)} />
+              <ControlButton icon="mdi:play" label={t('继续')} tone="primary" onClick={() => onResume(task.id)} />
             </div>
           )}
           {!isExpertTask && !isActive && hasCanvasCheckpoint && (
             <div className="mt-2.5 flex items-center gap-1 border-t border-canvas-border/60 pt-2">
               <ControlButton
                 icon="mdi:backup-restore"
-                label="回退任务画布修改"
+                label={t('回退任务画布修改')}
                 onClick={() => onRewind(task.id)}
               />
             </div>

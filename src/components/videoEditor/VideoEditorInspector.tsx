@@ -6,6 +6,7 @@
  */
 import { memo, useState, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
+import { useT } from '../../i18n';
 import VideoEditorCodecPanel from './VideoEditorCodecPanel';
 import VideoEditorTextPanel from './VideoEditorTextPanel';
 import VideoEditorTransitionPanel from './VideoEditorTransitionPanel';
@@ -58,7 +59,7 @@ interface VideoEditorInspectorProps {
   }) => void;
 }
 
-const PENDING_SECTIONS = ['滤镜'];
+const PENDING_SECTIONS = ['滤镜'] as const;
 export type VideoEditorInspectorTab = 'properties' | 'text' | 'transition';
 type PropertyTab = 'clip' | 'transform' | 'audio' | 'export';
 
@@ -99,6 +100,7 @@ function VideoEditorInspector({
   onRefreshAiModels,
   onGenerateAiTransition,
 }: VideoEditorInspectorProps) {
+  const t = useT();
   const [propertyTab, setPropertyTab] = useState<PropertyTab>('clip');
   const kept = clip ? getClipDuration(clip) : 0;
   const transform = clip?.transform ?? DEFAULT_TRANSFORM;
@@ -112,11 +114,11 @@ function VideoEditorInspector({
   };
 
   const panelHead = (
-    <div className="video-editor-panel-head video-editor-inspector-tabs" role="tablist" aria-label="视频编辑工具">
+    <div className="video-editor-panel-head video-editor-inspector-tabs" role="tablist" aria-label={t('视频编辑工具')}>
       {([
-        ['properties', 'lucide:sliders-horizontal', '属性'],
-        ['text', 'lucide:type', '文字'],
-        ['transition', 'lucide:blend', '转场'],
+        ['properties', 'lucide:sliders-horizontal', t('属性')],
+        ['text', 'lucide:type', t('文字')],
+        ['transition', 'lucide:blend', t('转场')],
       ] as const).map(([tab, icon, label]) => (
         <button
           type="button"
@@ -171,10 +173,10 @@ function VideoEditorInspector({
   }
 
   const propertyTabs = ([
-    ['clip', 'lucide:film', '片段'],
-    ['transform', 'lucide:move-3d', '画面'],
-    ['audio', 'lucide:audio-lines', '音频'],
-    ['export', 'lucide:settings-2', '工程'],
+    ['clip', 'lucide:film', t('片段')],
+    ['transform', 'lucide:move-3d', t('画面')],
+    ['audio', 'lucide:audio-lines', t('音频')],
+    ['export', 'lucide:settings-2', t('工程')],
   ] as const).filter(([tab]) => tab !== 'audio' || clip?.kind === 'video' || !!probe?.audioCodec);
   const resolvedPropertyTab = propertyTabs.some(([tab]) => tab === propertyTab)
     ? propertyTab
@@ -184,7 +186,7 @@ function VideoEditorInspector({
     <aside className="video-editor-inspector">
       {panelHead}
 
-      <div className="video-editor-property-tabs" role="tablist" aria-label="属性分类">
+      <div className="video-editor-property-tabs" role="tablist" aria-label={t('属性分类')}>
         {propertyTabs.map(([tab, icon, label]) => (
           <button
             type="button"
@@ -203,55 +205,55 @@ function VideoEditorInspector({
       {resolvedPropertyTab === 'clip' && (
         <>
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">时间轴</div>
+        <div className="video-editor-inspect-title">{t('时间轴')}</div>
         <div className="video-editor-inspect-row">
-          <span>片段数</span><span>{clipCount}</span>
+          <span>{t('片段数')}</span><span>{clipCount}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>总时长</span><span>{timelineDuration.toFixed(2)}s</span>
+          <span>{t('总时长')}</span><span>{timelineDuration.toFixed(2)}s</span>
         </div>
       </div>
 
       <div className="video-editor-inspect-group">
         <div className="video-editor-inspect-title">
-          片段
-          {locked && <span className="video-editor-inspect-badge">已锁定</span>}
+          {t('片段')}
+          {locked && <span className="video-editor-inspect-badge">{t('已锁定')}</span>}
         </div>
         <div className="video-editor-inspect-row">
-          <span>名称</span>
+          <span>{t('名称')}</span>
           <span className="video-editor-inspect-ellipsis" title={clip?.fileName}>
             {clip?.fileName ?? '—'}
           </span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>类型</span>
-          <span>{clip ? (clip.kind === 'image' ? '图片' : clip.kind === 'text' ? '文字' : '视频') : '—'}</span>
+          <span>{t('类型')}</span>
+          <span>{clip ? (clip.kind === 'image' ? t('图片') : clip.kind === 'text' ? t('文字') : t('视频')) : '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>入点</span><span>{clip ? `${clip.sourceIn.toFixed(2)}s` : '—'}</span>
+          <span>{t('入点')}</span><span>{clip ? `${clip.sourceIn.toFixed(2)}s` : '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>出点</span><span>{clip ? `${clip.sourceOut.toFixed(2)}s` : '—'}</span>
+          <span>{t('出点')}</span><span>{clip ? `${clip.sourceOut.toFixed(2)}s` : '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>保留时长</span><span>{clip ? `${kept.toFixed(2)}s` : '—'}</span>
+          <span>{t('保留时长')}</span><span>{clip ? `${kept.toFixed(2)}s` : '—'}</span>
         </div>
       </div>
 
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">源素材</div>
+        <div className="video-editor-inspect-title">{t('源素材')}</div>
         <div className="video-editor-inspect-row">
-          <span>分辨率</span>
+          <span>{t('分辨率')}</span>
           <span>{probe ? `${probe.width}×${probe.height}` : '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>总时长</span><span>{probe ? `${probe.duration.toFixed(2)}s` : '—'}</span>
+          <span>{t('总时长')}</span><span>{probe ? `${probe.duration.toFixed(2)}s` : '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>视频编码</span><span>{probe?.videoCodec ?? '—'}</span>
+          <span>{t('视频编码')}</span><span>{probe?.videoCodec ?? '—'}</span>
         </div>
         <div className="video-editor-inspect-row">
-          <span>音频编码</span><span>{probe?.audioCodec ?? '—'}</span>
+          <span>{t('音频编码')}</span><span>{probe?.audioCodec ?? '—'}</span>
         </div>
       </div>
         </>
@@ -261,13 +263,13 @@ function VideoEditorInspector({
       {resolvedPropertyTab === 'transform' && (
         <>
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">画面变换</div>
+        <div className="video-editor-inspect-title">{t('画面变换')}</div>
         {([
-          ['水平位置', 'x', 0, 1, 0.01],
-          ['垂直位置', 'y', 0, 1, 0.01],
-          ['缩放', 'scale', 0.05, 2, 0.01],
-          ['旋转', 'rotation', -180, 180, 1],
-          ['不透明度', 'opacity', 0, 1, 0.01],
+          [t('水平位置'), 'x', 0, 1, 0.01],
+          [t('垂直位置'), 'y', 0, 1, 0.01],
+          [t('缩放'), 'scale', 0.05, 2, 0.01],
+          [t('旋转'), 'rotation', -180, 180, 1],
+          [t('不透明度'), 'opacity', 0, 1, 0.01],
         ] as const).map(([label, key, min, max, step]) => (
           <label key={key} className="video-editor-inspect-slider">
             <span>{label}</span>
@@ -288,7 +290,7 @@ function VideoEditorInspector({
         {PENDING_SECTIONS.map((section) => (
           <div key={section} className="video-editor-inspect-group pending">
             <div className="video-editor-inspect-title">
-              {section}<span className="video-editor-inspect-badge">规划中</span>
+              {t(section)}<span className="video-editor-inspect-badge">{t('规划中')}</span>
             </div>
           </div>
         ))}
@@ -297,9 +299,9 @@ function VideoEditorInspector({
 
       {resolvedPropertyTab === 'audio' && (
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">音量</div>
+        <div className="video-editor-inspect-title">{t('音量')}</div>
         <label className="video-editor-inspect-slider">
-          <span>片段增益</span>
+          <span>{t('片段增益')}</span>
           <input
             type="range" min={0} max={2} step={0.05}
             value={clip?.volume ?? 1}
@@ -316,33 +318,33 @@ function VideoEditorInspector({
       {resolvedPropertyTab === 'export' && (
         <>
       <div className="video-editor-inspect-group">
-        <div className="video-editor-inspect-title">导出</div>
+        <div className="video-editor-inspect-title">{t('导出')}</div>
         <div className="video-editor-inspect-row">
-          <span>方式</span>
-          <span>{compositing ? '合成（重编码）' : '无损直通'}</span>
+          <span>{t('方式')}</span>
+          <span>{compositing ? t('合成（重编码）') : t('无损直通')}</span>
         </div>
         {mixedSources && (
           <div className="video-editor-inspect-hint">
-            素材分辨率或编码不一致，无法直通拼接，将归一到同一画布导出。
+            {t('素材分辨率或编码不一致，无法直通拼接，将归一到同一画布导出')}
           </div>
         )}
         <div className="video-editor-inspect-row">
-          <span>画布</span><span>{canvasSize.width}×{canvasSize.height}</span>
+          <span>{t('画布')}</span><span>{canvasSize.width}×{canvasSize.height}</span>
         </div>
         <label className="video-editor-inspect-slider">
-          <span>分辨率</span>
+          <span>{t('分辨率')}</span>
           <select
             value={outputScale}
             disabled={!compositing}
             onChange={(event) => onOutputScaleChange(Number(event.target.value))}
           >
-            <option value={1}>原始</option>
+            <option value={1}>{t('原始')}</option>
             <option value={0.5}>50%</option>
             <option value={0.25}>25%</option>
           </select>
         </label>
         <label className="video-editor-inspect-slider">
-          <span>帧率</span>
+          <span>{t('帧率')}</span>
           <select
             value={frameRate}
             disabled={!compositing}

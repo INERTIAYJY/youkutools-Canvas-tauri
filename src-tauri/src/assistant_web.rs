@@ -24,7 +24,9 @@ const CLOUDFLARE_DOH_URL: &str = "https://cloudflare-dns.com/dns-query";
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
 const MAX_REDIRECTS: usize = 5;
 const MAX_URL_CHARS: usize = 2_048;
-const RENDER_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+// 中转站文档这类 SPA 的 load 事件常卡在 15s 边缘（实测成功时耗时 15.5~16.3s），
+// 卡在阈值上会时成时败；放宽到 25s，与下方 HTTP 读取的超时保持一致。
+const RENDER_LOAD_TIMEOUT: Duration = Duration::from_secs(25);
 const RENDER_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 const RENDER_SETTLE_INTERVAL: Duration = Duration::from_millis(500);
 const RENDER_SETTLE_SAMPLES: usize = 20;

@@ -13,6 +13,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../../store/useAppStore';
 import type { BaseNodeData, StoryboardCellOverride } from '../../../types';
+import { useT } from '../../../i18n';
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 function localAssetUrl(filePath?: string): string | undefined {
@@ -42,6 +43,7 @@ interface SbCellItem {
 }
 
 export default function ConnectedNodesPreview({ nodeId, onInsertMention }: ConnectedNodesPreviewProps) {
+  const t = useT();
   // 只订阅画布数据：对话框打开期间的聊天流式、轮询进度等无关变更不再触发重渲染
   const { nodes, edges } = useAppStore(
     useShallow((s) => ({ nodes: s.nodes, edges: s.edges })),
@@ -137,7 +139,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
 
               sbCells.push({
                 idx, r, c,
-                label: `第${r + 1}行${c + 1}列`,
+                label: t('第{row}行{col}列', { row: r + 1, col: c + 1 }),
                 mentionId: `${n.id}/cell/${idx}`,
                 bgStyle,
                 overrideUrl: override?.url,
@@ -148,7 +150,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
 
         return {
           id: n.id,
-          label: data.label || '节点',
+          label: data.label || t('节点'),
           displayId: data.displayId,
           outputType,
           thumbnailUrl,
@@ -162,7 +164,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
           sbRows,
         };
       });
-  }, [nodeId, nodes, edges]);
+  }, [nodeId, nodes, edges, t]);
 
   // ── Dock 动效状态 ──
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -208,7 +210,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
             key={node.id}
             type="button"
             className={`connected-node-thumb ${!node.hasOutput ? 'thumb-idle' : ''} thumb-${node.outputType}${isStoryboard ? ' thumb-storyboard' : ''}${isShotlist ? ' thumb-shotlist' : ''}`}
-            data-tooltip={`${node.label}${node.displayId != null ? ` #${node.displayId}` : ''} — 点击引用`}
+            data-tooltip={`${node.label}${node.displayId != null ? ` #${node.displayId}` : ''} — ${t('点击引用')}`}
             onClick={() => handleClick(node.id, node.label)}
             onHoverStart={() => onHoverStart(idx)}
             onHoverEnd={onHoverEnd}
@@ -216,7 +218,7 @@ export default function ConnectedNodesPreview({ nodeId, onInsertMention }: Conne
             onMouseLeave={() => { if (isStoryboard) clearPopupDelayed(); }}
             animate={{
               scale, x, y: isHovered ? -4 : 0,
-              opacity: isHovered ? 1 : 0.55,
+              opacity: isHovered ? 1 : 0.85,
               boxShadow: isHovered ? `0 6px 20px rgba(99,102,241,0.25), 0 0 0 2px rgba(99,102,241,0.35)` : `0 0 0 0px rgba(99,102,241,0)`,
               borderColor: isHovered ? 'rgba(99,102,241,0.6)' : 'rgba(195,195,202,0.33)',
             }}

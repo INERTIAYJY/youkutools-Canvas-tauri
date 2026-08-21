@@ -6,6 +6,7 @@
  */
 import { memo } from 'react';
 import { buildTicks, formatTickLabel, pickTickStep } from './rulerTicks';
+import { useT } from '../../i18n';
 
 interface VideoEditorRulerProps {
   duration: number;
@@ -20,6 +21,7 @@ function VideoEditorRuler({
   pixelsPerSecond,
   onScrub,
 }: VideoEditorRulerProps) {
+  const t = useT();
   const step = pickTickStep(duration, pixelsPerSecond);
   const ticks = buildTicks(duration, step);
 
@@ -28,7 +30,7 @@ function VideoEditorRuler({
       className="video-editor-ruler"
       onPointerDown={onScrub}
       role="slider"
-      aria-label="播放头"
+      aria-label={t('播放头')}
       aria-valuenow={playhead}
       aria-valuemin={0}
       aria-valuemax={duration}

@@ -12,6 +12,7 @@ import type { DramaCharacter } from '../../../types/dramaAssets';
 import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability, toSeedanceCapabilityView } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
+import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
 import {
   resolveVideoDurationSeconds,
   VIDEO_ASPECT_RATIOS,
@@ -190,6 +191,9 @@ export default function VideoParamSelector({
   const volcengineCapability = provider === 'volcengine'
     ? getVolcengineSeedanceCapability(selectedModel)
     : undefined;
+  const dreaminaCapability = provider === 'dreamina'
+    ? getDreaminaVideoCapability(selectedModel)
+    : undefined;
   // 通用模型（general）按 videoCapability 声明约束参数；未声明则保持通用兜底
   const generalCapability = provider === 'general'
     ? toSeedanceCapabilityView(generalModel?.videoCapability)
@@ -202,8 +206,8 @@ export default function VideoParamSelector({
       ?? (seedlingSelectedModels ?? []).find((model) => model.id === modelId);
     return toSeedanceCapabilityView(catalogModel?.videoCapability);
   }, [provider, selectedModel, seedlingCatalogModels, seedlingSelectedModels]);
-  // 统一的能力约束：APIMart / 火山方舟 / 森之灵 / 通用模型都可能有按模型的档位约束，取命中者
-  const seedanceCapability = apimartCapability ?? volcengineCapability ?? seedlingCapability ?? generalCapability;
+  // 统一的能力约束：APIMart / 火山方舟 / 森之灵 / 即梦 / 通用模型都可能有按模型的档位约束，取命中者
+  const seedanceCapability = apimartCapability ?? volcengineCapability ?? seedlingCapability ?? dreaminaCapability ?? generalCapability;
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
     || provider === 'seedling'
     || Boolean(apimartCapability);
@@ -239,10 +243,35 @@ export default function VideoParamSelector({
     : isNativeSeedance || !isWorkflowProvider
       ? SEEDANCE_RATIOS
       : genericRatios;
+  // 参考素材上限只能读模型真正声明的值：toSeedanceCapabilityView 会替通用模型补上
+  // 9/3/3 的兜底默认值，拿它做提示会写出模型根本没声明过的限制。
+  const referenceLimits = apimartCapability
+    ?? volcengineCapability
+    ?? dreaminaCapability
+    ?? generalModel?.videoCapability;
+  const describeLimit = (max: number | undefined, unit: string, kind: string) => {
+    if (max === undefined) return '';
+    return max === 0 ? `不支持${kind}` : `最多 ${max} ${unit}${kind}`;
+  };
+  const referenceLimitTip = referenceLimits
+    ? [
+      describeLimit(referenceLimits.maxImageReferences, '张', '参考图'),
+      describeLimit(referenceLimits.maxVideoReferences, '个', '参考视频'),
+      describeLimit(referenceLimits.maxAudioReferences, '个', '参考音频'),
+    ].filter(Boolean).join('、')
+    : '';
   const minDuration = seedanceCapability?.minDuration ?? VIDEO_DURATION_MIN_SECONDS;
   const maxDuration = seedanceCapability?.maxDuration ?? VIDEO_DURATION_MAX_SECONDS;
+  // 文档写「仅支持 10 或 15 秒」这类离散取值时，只给这几档，不能用连续滑杆
+  const allowedDurations = seedanceCapability?.durations?.length
+    ? [...seedanceCapability.durations].sort((left, right) => left - right)
+    : undefined;
   const resolvedDuration = resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps, maxDuration);
-  const displayedDuration = Math.min(maxDuration, Math.max(minDuration, resolvedDuration));
+  const displayedDuration = allowedDurations
+    ? allowedDurations.reduce((best, value) => (
+      Math.abs(value - resolvedDuration) < Math.abs(best - resolvedDuration) ? value : best
+    ), allowedDurations[0])
+    : Math.min(maxDuration, Math.max(minDuration, resolvedDuration));
   const displayedResolution = seedanceResolutions.some((item) => item.value === seedanceResolution)
     ? seedanceResolution
     : seedanceCapability?.defaultResolution ?? seedanceResolution;
@@ -361,7 +390,8 @@ export default function VideoParamSelector({
                 <div className="img-rp-section-label rh-video-ref-head">
                   <span>
                     参考帧
-                    <span className="rh-tip" data-tooltip="可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。">!</span>
+                    <span className="rh-tip" data-tooltip={`可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。${referenceLimitTip ? `
+该模型：${referenceLimitTip}（连线带入的素材一并计数）。` : ''}`}>!</span>
                   </span>
                   <button type="button" className="rh-video-ref-add" onClick={() => setPickerFor(pickerFor === 'frame' ? null : 'frame')}>
                     {pickerFor === 'frame' ? '取消' : '＋ 添加'}
@@ -505,8 +535,29 @@ export default function VideoParamSelector({
                   {showDurationControl && <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label">
                       <span>生成时长（秒）</span>
-                      <span className="rh-tip" data-tooltip={`整数秒，范围 ${minDuration}-${maxDuration}。值越大视频越长、耗时越高。`}>!</span>
+                      <span className="rh-tip" data-tooltip={allowedDurations
+                        ? `该模型仅支持 ${allowedDurations.join(' / ')} 秒。`
+                        : `整数秒，范围 ${minDuration}-${maxDuration}。值越大视频越长、耗时越高。`}>!</span>
                     </div>
+                    {allowedDurations ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {allowedDurations.map((value) => (
+                          <button
+                            key={value}
+                            type="button"
+                            aria-pressed={displayedDuration === value}
+                            onClick={() => onChangeSeedanceDuration?.(value)}
+                            className={`min-h-7 rounded-full border px-3 py-1 text-[11px] leading-4 transition-colors ${
+                              displayedDuration === value
+                                ? 'border-blue-400/70 bg-blue-400/15 text-blue-200'
+                                : 'border-canvas-border text-canvas-text-secondary hover:border-blue-400/40 hover:text-canvas-text'
+                            }`}
+                          >
+                            {value}s
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
                     <div className="rh-duration-slider">
                       <div className="rh-duration-track">
                         <div
@@ -532,6 +583,7 @@ export default function VideoParamSelector({
                         ))}
                       </div>
                     </div>
+                    )}
                   </div>}
 
 

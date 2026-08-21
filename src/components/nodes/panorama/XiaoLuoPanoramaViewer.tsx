@@ -15,6 +15,7 @@ import {
   type PanoramaCoreHandle,
 } from 'xiaoluo-vr-panorama/core';
 import 'xiaoluo-vr-panorama/core.css';
+import { useT } from '../../../i18n';
 
 export interface XiaoLuoPanoramaViewerHandle {
   captureScreenshot: (aspect?: number | null) => Promise<string | null>;
@@ -83,6 +84,7 @@ const XiaoLuoPanoramaViewer = forwardRef<
   XiaoLuoPanoramaViewerHandle,
   XiaoLuoPanoramaViewerProps
 >(function XiaoLuoPanoramaViewer({ imageUrl, interactive = false, onActivate }, forwardedRef) {
+  const t = useT();
   const coreRef = useRef<PanoramaCoreHandle>(null);
   const veilDownRef = useRef<{ x: number; y: number } | null>(null);
   const [viewerKey, setViewerKey] = useState(0);
@@ -134,19 +136,19 @@ const XiaoLuoPanoramaViewer = forwardRef<
         }}
         onError={(message) => {
           setLoading(false);
-          setError(message || '无法加载全景图');
+          setError(message || t('无法加载全景图'));
         }}
       />
 
       {loading ? (
         <div className="xiaoluo-pano-status" role="status">
           <span className="spinner" />
-          <span>载入中...</span>
+          <span>{t('载入中...')}</span>
         </div>
       ) : null}
 
       {interactive ? (
-        <div className="xiaoluo-pano-active-badge">视角模式 · Esc 退出</div>
+        <div className="xiaoluo-pano-active-badge">{t('视角模式 · Esc 退出')}</div>
       ) : !loading && !error ? (
         <div
           className="xiaoluo-pano-veil"
@@ -156,7 +158,7 @@ const XiaoLuoPanoramaViewer = forwardRef<
         >
           <span className="xiaoluo-pano-veil-hint">
             <Icon icon="lucide:move-3d" width="12" height="12" />
-            点击转动视角
+            {t('点击转动视角')}
           </span>
         </div>
       ) : null}
@@ -174,7 +176,7 @@ const XiaoLuoPanoramaViewer = forwardRef<
               setViewerKey((key) => key + 1);
             }}
           >
-            重试
+            {t('重试')}
           </button>
         </div>
       ) : null}

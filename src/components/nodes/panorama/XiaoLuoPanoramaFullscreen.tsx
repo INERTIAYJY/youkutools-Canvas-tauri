@@ -7,6 +7,7 @@ import {
   type PanoramaCaptureResult,
 } from 'xiaoluo-vr-panorama';
 import 'xiaoluo-vr-panorama/dist/style.css';
+import { useT } from '../../../i18n';
 
 interface XiaoLuoPanoramaFullscreenProps {
   imageUrl: string;
@@ -21,6 +22,7 @@ function XiaoLuoPanoramaFullscreen({
   onClose,
   onCapture,
 }: XiaoLuoPanoramaFullscreenProps) {
+  const t = useT();
   return (
     <PanoramaViewer
       imageUrl={imageUrl}
@@ -28,7 +30,7 @@ function XiaoLuoPanoramaFullscreen({
       captureMode="ratio"
       theme={theme}
       cornerRadius="6px"
-      closeText="退出"
+      closeText={t('退出')}
       onClose={onClose}
       onCapture={onCapture}
       className="xiaoluo-panorama-compact nodrag nowheel"

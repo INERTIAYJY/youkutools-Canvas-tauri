@@ -17,6 +17,7 @@ import type {
 } from '../types/dramaAssets';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
+import { useT } from '../i18n';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
 import type { ReferenceStageBox } from './character/CharacterReferenceGallery';
@@ -58,6 +59,7 @@ function CharacterAvatar({ character }: { character: DramaCharacter }) {
 }
 
 export default function CharacterLibraryPanel() {
+  const t = useT();
   const {
     open,
     setOpen,
@@ -173,9 +175,9 @@ export default function CharacterLibraryPanel() {
   }, [nodes, scope, selectedCharacter, selectedReference]);
   const canvasActionLabel = sourceNode
     ? sourceNode.data.hiddenByCharacterLibrary
-      ? '显示并定位节点'
-      : '定位画布节点'
-    : '添加到画布';
+      ? t('显示并定位节点')
+      : t('定位画布节点')
+    : t('添加到画布');
   const canvasActionIcon = sourceNode
     ? sourceNode.data.hiddenByCharacterLibrary
       ? 'lucide:eye'
@@ -219,7 +221,7 @@ export default function CharacterLibraryPanel() {
     player.src = clip.audioUrl;
     void player.play()
       .then(() => setPlayingVoice({ characterId: selectedCharacter.id, clipId: clip.id }))
-      .catch(() => showToast('音频播放失败', 'error'));
+      .catch(() => showToast(t('音频播放失败'), 'error'));
   };
 
   const handleBindVoiceNode = async (nodeId: string) => {
@@ -227,7 +229,7 @@ export default function CharacterLibraryPanel() {
     const node = nodes.find((item) => item.id === nodeId);
     const audioUrl = node?.data.audioUrl;
     if (!audioUrl) {
-      showToast('该节点没有可用的音频', 'error');
+      showToast(t('该节点没有可用的音频'), 'error');
       return;
     }
     setVoicePickerOpen(false);
@@ -241,14 +243,14 @@ export default function CharacterLibraryPanel() {
     });
     setBindingVoice(false);
     if (!clipId) return;
-    showToast(scope === 'project' ? '已绑定到本项目角色声音' : '已绑定到全局角色声音');
+    showToast(scope === 'project' ? t('已绑定到本项目角色声音') : t('已绑定到全局角色声音'));
   };
 
   const handleRemoveVoiceClip = async (clip: CharacterVoiceClip) => {
     if (!selectedCharacter) return;
     if (playingVoiceClipId === clip.id) voicePlayerRef.current?.pause();
     if (await removeCharacterVoiceClip(scope, selectedCharacter.id, clip.id)) {
-      showToast('已移除该声音');
+      showToast(t('已移除该声音'));
     }
   };
 
@@ -268,7 +270,7 @@ export default function CharacterLibraryPanel() {
     if (!selectedCharacter) return;
     const nodeId = createVoiceOverNodeFromCharacterVoice(scope, selectedCharacter.id, clip.id);
     if (!nodeId) return;
-    showToast('已创建配音节点，声音已连线为音色参考');
+    showToast(t('已创建配音节点，声音已连线为音色参考'));
     focusNode(nodeId);
   };
 
@@ -283,7 +285,7 @@ export default function CharacterLibraryPanel() {
     if (scope === 'project') {
       const copiedId = await copyCharacterToGlobal(selectedCharacter.id);
       if (!copiedId) return;
-      showToast('已复制到全局资产');
+      showToast(t('已复制到全局资产'));
       setScope('global');
       setSelectedCharacterId(copiedId);
       setSelectedReferenceId(null);
@@ -291,7 +293,7 @@ export default function CharacterLibraryPanel() {
     }
     const copiedId = copyGlobalCharacterToProject(selectedCharacter.id);
     if (!copiedId) return;
-    showToast('已复制到本项目');
+    showToast(t('已复制到本项目'));
     setScope('project');
     setSelectedCharacterId(copiedId);
     setSelectedReferenceId(null);
@@ -305,7 +307,7 @@ export default function CharacterLibraryPanel() {
     } else if (!await deleteGlobalCharacter(selectedCharacter.id)) {
       return;
     }
-    showToast('角色已删除');
+    showToast(t('角色已删除'));
     setSelectedCharacterId(null);
     setSelectedReferenceId(null);
   };
@@ -315,7 +317,7 @@ export default function CharacterLibraryPanel() {
     let nodeId = sourceNode?.id ?? null;
     if (sourceNode?.data.hiddenByCharacterLibrary) {
       setCharacterLibraryNodeHidden(sourceNode.id, false);
-      showToast('节点已显示');
+      showToast(t('节点已显示'));
     } else if (!sourceNode) {
       nodeId = createImageNodeFromCharacterReference(
         scope,
@@ -323,7 +325,7 @@ export default function CharacterLibraryPanel() {
         selectedReference.id,
       );
       if (!nodeId) return;
-      showToast('已将角色参考图添加到画布');
+      showToast(t('已将角色参考图添加到画布'));
     }
     if (!nodeId) return;
 
@@ -337,11 +339,11 @@ export default function CharacterLibraryPanel() {
       <ModalOverlay
         isOpen={open}
         onClose={() => setOpen(false)}
-        ariaLabel="角色库"
+        ariaLabel={t('角色库')}
         className="character-library-panel"
       >
         <div className="character-library-toolbar">
-          <div className="character-library-tabs" role="tablist" aria-label="角色保存范围">
+          <div className="character-library-tabs" role="tablist" aria-label={t('角色保存范围')}>
             <button
               type="button"
               role="tab"
@@ -349,7 +351,7 @@ export default function CharacterLibraryPanel() {
               className={scope === 'project' ? 'is-active' : ''}
               onClick={() => switchScope('project')}
             >
-              本项目
+              {t('本项目')}
               <span>{projectCharacters.length}</span>
             </button>
             <button
@@ -359,7 +361,7 @@ export default function CharacterLibraryPanel() {
               className={scope === 'global' ? 'is-active' : ''}
               onClick={() => switchScope('global')}
             >
-              全局资产
+              {t('全局资产')}
               <span>{globalCharacters.length}</span>
             </button>
           </div>
@@ -368,17 +370,17 @@ export default function CharacterLibraryPanel() {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="搜索角色、身份或简介"
+              placeholder={t('搜索角色、身份或简介')}
             />
             {search ? (
-              <button type="button" aria-label="清空搜索" onClick={() => setSearch('')}>
+              <button type="button" aria-label={t('清空搜索')} onClick={() => setSearch('')}>
                 <Icon icon="lucide:x" width="13" height="13" aria-hidden="true" />
               </button>
             ) : null}
           </label>
           <button type="button" className="character-library-new" onClick={() => openEditor(null)}>
             <Icon icon="lucide:plus" width="13" height="13" aria-hidden="true" />
-            新建角色
+            {t('新建角色')}
           </button>
           <PopupCloseButton onClick={() => setOpen(false)} />
         </div>
@@ -387,12 +389,12 @@ export default function CharacterLibraryPanel() {
           {scope === 'global' && globalCharactersLoading ? (
             <div className="character-library-empty">
               <Icon icon="lucide:loader-circle" className="animate-spin" width="26" height="26" aria-hidden="true" />
-              <p>正在读取全局角色…</p>
+              <p>{t('正在读取全局角色…')}</p>
             </div>
           ) : selectedCharacter ? (
             <section
               className="character-library-gallery"
-              aria-label="多图参考"
+              aria-label={t('多图参考')}
               style={referenceStage ? {
                 '--character-stage-width': `${referenceStage.width}px`,
                 '--character-stage-height': `${referenceStage.height}px`,
@@ -408,9 +410,9 @@ export default function CharacterLibraryPanel() {
 
               <div className="character-library-dock">
                 {pickerOpen ? (
-                  <div className="character-node-picker" role="listbox" aria-label="选择画布图片节点">
+                  <div className="character-node-picker" role="listbox" aria-label={t('选择画布图片节点')}>
                     {pickableNodes.length === 0 ? (
-                      <span className="character-node-picker-empty">画布上没有可用的图片节点</span>
+                      <span className="character-node-picker-empty">{t('画布上没有可用的图片节点')}</span>
                     ) : pickableNodes.map((node) => (
                       <button
                         key={node.id}
@@ -423,21 +425,21 @@ export default function CharacterLibraryPanel() {
                         }}
                       >
                         <img src={node.data.imageUrl ?? node.data.thumbnailUrl} alt="" draggable={false} />
-                        <span>{node.data.label || '图片节点'}</span>
+                        <span>{node.data.label || t('图片节点')}</span>
                       </button>
                     ))}
                   </div>
                 ) : null}
 
-                <section className="character-voice-dock" aria-label="角色声音">
+                <section className="character-voice-dock" aria-label={t('角色声音')}>
                   <div className="character-voice-dock-head">
                     <Icon icon="lucide:audio-lines" width="14" height="14" aria-hidden="true" />
-                    <span>角色声音</span>
+                    <span>{t('角色声音')}</span>
                     <strong>{voiceClips.length}</strong>
                     <button
                       type="button"
-                      data-tooltip="绑定画布音频节点"
-                      aria-label="绑定画布音频节点"
+                      data-tooltip={t('绑定画布音频节点')}
+                      aria-label={t('绑定画布音频节点')}
                       aria-expanded={voicePickerOpen}
                       className={voicePickerOpen ? 'is-active' : ''}
                       disabled={bindingVoice}
@@ -450,8 +452,8 @@ export default function CharacterLibraryPanel() {
                     </button>
                     <button
                       type="button"
-                      data-tooltip="上传音频"
-                      aria-label="上传音频"
+                      data-tooltip={t('上传音频')}
+                      aria-label={t('上传音频')}
                       onClick={() => openEditor(selectedCharacter)}
                     >
                       <Icon icon="lucide:upload" width="15" height="15" aria-hidden="true" />
@@ -459,9 +461,9 @@ export default function CharacterLibraryPanel() {
                   </div>
 
                   {voicePickerOpen ? (
-                    <div className="character-voice-picker" role="listbox" aria-label="选择画布音频节点">
+                    <div className="character-voice-picker" role="listbox" aria-label={t('选择画布音频节点')}>
                       {pickableAudioNodes.length === 0 ? (
-                        <span className="character-node-picker-empty">画布上没有可用的音频节点</span>
+                        <span className="character-node-picker-empty">{t('画布上没有可用的音频节点')}</span>
                       ) : pickableAudioNodes.map((node) => (
                         <button
                           key={node.id}
@@ -471,7 +473,7 @@ export default function CharacterLibraryPanel() {
                           onClick={() => void handleBindVoiceNode(node.id)}
                         >
                           <Icon icon="lucide:audio-lines" width="15" height="15" aria-hidden="true" />
-                          <span>{node.data.label || '音频节点'}</span>
+                          <span>{node.data.label || t('音频节点')}</span>
                         </button>
                       ))}
                     </div>
@@ -479,7 +481,7 @@ export default function CharacterLibraryPanel() {
 
                   {voiceClips.length === 0 ? (
                     <p className="character-voice-dock-empty">
-                      {bindingVoice ? '正在绑定…' : '还没有声音，可绑定画布音频节点或上传音频'}
+                      {bindingVoice ? t('正在绑定…') : t('还没有声音，可绑定画布音频节点或上传音频')}
                     </p>
                   ) : (
                     <div className="character-voice-chips" role="list">
@@ -494,7 +496,7 @@ export default function CharacterLibraryPanel() {
                           <button
                             type="button"
                             className="character-voice-play"
-                            aria-label={playingVoiceClipId === clip.id ? '暂停试听' : '试听'}
+                            aria-label={playingVoiceClipId === clip.id ? t('暂停试听') : t('试听')}
                             disabled={!clip.audioUrl}
                             onClick={() => toggleVoicePlayback(clip)}
                           >
@@ -514,8 +516,8 @@ export default function CharacterLibraryPanel() {
                           <span className="character-voice-chip-actions">
                             <button
                               type="button"
-                              data-tooltip="设为主音色"
-                              aria-label="设为主音色"
+                              data-tooltip={t('设为主音色')}
+                              aria-label={t('设为主音色')}
                               className={clip.id === selectedCharacter.primaryVoiceClipId ? 'is-active' : ''}
                               onClick={() => void setCharacterPrimaryVoice(scope, selectedCharacter.id, clip.id)}
                             >
@@ -523,16 +525,16 @@ export default function CharacterLibraryPanel() {
                             </button>
                             <button
                               type="button"
-                              data-tooltip="用这个声音生成台词"
-                              aria-label="用这个声音生成台词"
+                              data-tooltip={t('用这个声音生成台词')}
+                              aria-label={t('用这个声音生成台词')}
                               onClick={() => handleVoiceOver(clip)}
                             >
                               <Icon icon="lucide:mic" width="13" height="13" aria-hidden="true" />
                             </button>
                             <button
                               type="button"
-                              data-tooltip={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
-                              aria-label={clip.sourceNodeId ? '定位画布节点' : '添加到画布'}
+                              data-tooltip={clip.sourceNodeId ? t('定位画布节点') : t('添加到画布')}
+                              aria-label={clip.sourceNodeId ? t('定位画布节点') : t('添加到画布')}
                               onClick={() => handleVoiceToCanvas(clip)}
                             >
                               <Icon
@@ -544,8 +546,8 @@ export default function CharacterLibraryPanel() {
                             </button>
                             <button
                               type="button"
-                              data-tooltip="移除该声音"
-                              aria-label="移除该声音"
+                              data-tooltip={t('移除该声音')}
+                              aria-label={t('移除该声音')}
                               onClick={() => void handleRemoveVoiceClip(clip)}
                             >
                               <Icon icon="lucide:trash-2" width="13" height="13" aria-hidden="true" />
@@ -557,14 +559,14 @@ export default function CharacterLibraryPanel() {
                   )}
                 </section>
 
-                <section className="character-library-profile" aria-label="当前角色">
+                <section className="character-library-profile" aria-label={t('当前角色')}>
                   <div className="character-library-profile-copy">
                     <div className="character-library-profile-name">
                       <h3>{selectedCharacter.name}</h3>
                       {selectedCharacter.identity ? <span>{selectedCharacter.identity}</span> : null}
                       {selectedCharacter.storyRole ? <span>{selectedCharacter.storyRole}</span> : null}
                     </div>
-                    <p>{selectedCharacter.summary || selectedCharacter.visualNotes || '尚未填写角色简介'}</p>
+                    <p>{selectedCharacter.summary || selectedCharacter.visualNotes || t('尚未填写角色简介')}</p>
                   </div>
                   <div className="character-library-profile-actions">
                     {selectedReference ? (
@@ -575,10 +577,10 @@ export default function CharacterLibraryPanel() {
                     {sourceNode && !sourceNode.data.hiddenByCharacterLibrary ? (
                       <button
                         type="button"
-                        data-tooltip="在画布中隐藏"
-                        aria-label="在画布中隐藏"
+                        data-tooltip={t('在画布中隐藏')}
+                        aria-label={t('在画布中隐藏')}
                         onClick={() => {
-                          if (setCharacterLibraryNodeHidden(sourceNode.id, true)) showToast('节点已隐藏');
+                          if (setCharacterLibraryNodeHidden(sourceNode.id, true)) showToast(t('节点已隐藏'));
                         }}
                       >
                         <Icon icon="lucide:eye-off" width="16" height="16" aria-hidden="true" />
@@ -586,8 +588,8 @@ export default function CharacterLibraryPanel() {
                     ) : null}
                     <button
                       type="button"
-                      data-tooltip="从画布添加视角图"
-                      aria-label="从画布添加视角图"
+                      data-tooltip={t('从画布添加视角图')}
+                      aria-label={t('从画布添加视角图')}
                       aria-expanded={pickerOpen}
                       className={pickerOpen ? 'is-active' : ''}
                       onClick={() => {
@@ -597,18 +599,18 @@ export default function CharacterLibraryPanel() {
                     >
                       <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
                     </button>
-                    <button type="button" data-tooltip="编辑角色" aria-label="编辑角色" onClick={() => openEditor(selectedCharacter)}>
+                    <button type="button" data-tooltip={t('编辑角色')} aria-label={t('编辑角色')} onClick={() => openEditor(selectedCharacter)}>
                       <Icon icon="lucide:pencil" width="16" height="16" aria-hidden="true" />
                     </button>
                     <button
                       type="button"
-                      data-tooltip={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
-                      aria-label={scope === 'project' ? '复制到全局资产' : '复制到本项目'}
+                      data-tooltip={scope === 'project' ? t('复制到全局资产') : t('复制到本项目')}
+                      aria-label={scope === 'project' ? t('复制到全局资产') : t('复制到本项目')}
                       onClick={() => void handleCopy()}
                     >
                       <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
                     </button>
-                    <button type="button" data-tooltip="删除角色" aria-label="删除角色" onClick={() => setDeleteConfirmOpen(true)}>
+                    <button type="button" data-tooltip={t('删除角色')} aria-label={t('删除角色')} onClick={() => setDeleteConfirmOpen(true)}>
                       <Icon icon="lucide:trash-2" width="16" height="16" aria-hidden="true" />
                     </button>
                   </div>
@@ -625,20 +627,20 @@ export default function CharacterLibraryPanel() {
           ) : (
             <div className="character-library-empty">
               <Icon icon="lucide:contact-round" width="34" height="34" aria-hidden="true" />
-              <h3>{search ? '没有匹配的角色' : '这里还没有角色'}</h3>
+              <h3>{search ? t('没有匹配的角色') : t('这里还没有角色')}</h3>
               {!search ? (
                 <button type="button" className="character-button-primary mt-3 text-white" onClick={() => openEditor(null)}>
                   <Icon icon="lucide:plus" width="15" height="15" aria-hidden="true" />
-                  新建角色
+                  {t('新建角色')}
                 </button>
               ) : null}
             </div>
           )}
         </main>
 
-        <footer className="character-library-strip" aria-label="角色列表">
+        <footer className="character-library-strip" aria-label={t('角色列表')}>
           <div className="character-library-strip-label">
-            <span>{scope === 'project' ? '本项目角色' : '全局角色'}</span>
+            <span>{scope === 'project' ? t('本项目角色') : t('全局角色')}</span>
             <strong>{characters.length}</strong>
           </div>
           <div className="character-library-strip-list" role="list">
@@ -680,7 +682,7 @@ export default function CharacterLibraryPanel() {
         <ModalOverlay
           isOpen
           onClose={() => setDeleteConfirmOpen(false)}
-          ariaLabel="确认删除角色"
+          ariaLabel={t('确认删除角色')}
           className="character-confirm-dialog"
           motionPreset="quick"
         >
@@ -689,20 +691,20 @@ export default function CharacterLibraryPanel() {
               <Icon icon="lucide:trash-2" width="18" height="18" />
             </span>
             <div>
-              <h3>删除「{selectedCharacter.name}」？</h3>
+              <h3>{t('删除「{name}」？', { name: selectedCharacter.name })}</h3>
               <p>
                 {scope === 'project'
-                  ? `将从本项目移除该角色及其 ${selectedCharacter.referenceImages?.length ?? 0} 张参考图，画布上被收纳的节点会重新显示。`
-                  : `将从全局资产永久删除该角色及其 ${selectedCharacter.referenceImages?.length ?? 0} 张参考图，删除后无法恢复。`}
+                  ? t('将从本项目移除该角色及其 {count} 张参考图，画布上被收纳的节点会重新显示。', { count: selectedCharacter.referenceImages?.length ?? 0 })
+                  : t('将从全局资产永久删除该角色及其 {count} 张参考图，删除后无法恢复。', { count: selectedCharacter.referenceImages?.length ?? 0 })}
               </p>
             </div>
           </div>
           <footer className="character-dialog-footer">
             <button type="button" className="character-button-secondary" onClick={() => setDeleteConfirmOpen(false)}>
-              取消
+              {t('取消')}
             </button>
             <button type="button" className="character-button-danger" onClick={() => void handleDelete()}>
-              删除角色
+              {t('删除角色')}
             </button>
           </footer>
         </ModalOverlay>,

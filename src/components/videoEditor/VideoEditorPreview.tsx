@@ -25,6 +25,7 @@ import {
   type VideoEditorTransform,
 } from '../../types/videoEditor';
 import { resolveClipUrl } from './useVideoEditorSources';
+import { useT } from '../../i18n';
 
 interface VideoEditorPreviewProps {
   clip: VideoEditorClip | null;
@@ -289,6 +290,7 @@ function VideoEditorPreview({
   onEndInteraction,
   onTransformChange,
 }: VideoEditorPreviewProps) {
+  const t = useT();
   const previewRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -727,7 +729,7 @@ function VideoEditorPreview({
           ref={canvasFrameRef}
           className={`video-editor-canvas-frame ${previewZoom === 'fit' ? 'fit' : 'zoomed'}`}
           style={canvasFrameStyle}
-          aria-label={stageInfo ? `输出画布 ${stageInfo}` : '输出画布'}
+          aria-label={stageInfo ? `${t('输出画布')} ${stageInfo}` : t('输出画布')}
         >
           {/* 交叠淡入的底画面：必须排在主轨画面之前，靠 z-index 压在下层 */}
           {dissolveUnderlay && clip && (
@@ -742,7 +744,7 @@ function VideoEditorPreview({
 
           {/* 主轨画面：背景 + video/img 居中 */}
           {!clip || !clipUrl ? (
-            <div className="video-editor-stage-empty">无可预览的素材</div>
+            <div className="video-editor-stage-empty">{t('无可预览的素材')}</div>
           ) : clip.kind === 'image' ? (
             <img
               src={clipUrl}
@@ -766,7 +768,7 @@ function VideoEditorPreview({
             />
           )}
           {mainTrackHidden && (
-            <div className="video-editor-stage-empty">主视频轨已隐藏</div>
+            <div className="video-editor-stage-empty">{t('主视频轨已隐藏')}</div>
           )}
 
           {clip && clipUrl && !mainTrackHidden && (
@@ -777,7 +779,7 @@ function VideoEditorPreview({
                 mainLocked ? 'locked' : '',
               ].filter(Boolean).join(' ')}
               style={mainSelectionStyle}
-              aria-label={`画面内调整 ${clip.fileName}`}
+              aria-label={t('画面内调整 {name}', { name: clip.fileName })}
               onPointerDown={mainLocked
                 ? (event) => {
                   event.stopPropagation();
@@ -792,7 +794,7 @@ function VideoEditorPreview({
                       type="button"
                       key={pos}
                       className={`video-editor-overlay-handle ${pos}`}
-                      aria-label="等比缩放"
+                      aria-label={t('等比缩放')}
                       onPointerDown={(event) => startTransformInteraction(clip, 'scale', event, pos)}
                     />
                   ))}
@@ -800,7 +802,7 @@ function VideoEditorPreview({
                   <button
                     type="button"
                     className="video-editor-rotation-handle"
-                    aria-label="旋转"
+                    aria-label={t('旋转')}
                     onPointerDown={(event) => startTransformInteraction(clip, 'rotate', event)}
                   >
                     <Icon icon="lucide:rotate-cw" width={11} height={11} />
@@ -860,7 +862,7 @@ function VideoEditorPreview({
                         type="button"
                         key={pos}
                         className={`video-editor-overlay-handle ${pos}`}
-                        aria-label="等比缩放"
+                        aria-label={t('等比缩放')}
                         onPointerDown={(event) => startTransformInteraction(overlayClip, 'scale', event, pos)}
                       />
                     ))}
@@ -868,7 +870,7 @@ function VideoEditorPreview({
                     <button
                       type="button"
                       className="video-editor-rotation-handle"
-                      aria-label="旋转"
+                      aria-label={t('旋转')}
                       onPointerDown={(event) => startTransformInteraction(overlayClip, 'rotate', event)}
                     >
                       <Icon icon="lucide:rotate-cw" width={11} height={11} />
@@ -907,12 +909,12 @@ function VideoEditorPreview({
 
       {stageInfo && (
         <div className="video-editor-stage-info">
-          <span className="video-editor-canvas-size-label">输出画布</span>
+          <span className="video-editor-canvas-size-label">{t('输出画布')}</span>
           <span>{stageInfo}</span>
           {activeOverlays.length > 0 && (
-            <span className="dim">· {activeOverlays.length} 个叠加层</span>
+            <span className="dim">· {t('{count} 个叠加层', { count: activeOverlays.length })}</span>
           )}
-          <span className="dim">· {previewZoom === 'fit' ? '适应窗口' : `${previewZoom}%`}</span>
+          <span className="dim">· {previewZoom === 'fit' ? t('适应窗口') : `${previewZoom}%`}</span>
         </div>
       )}
 
@@ -931,7 +933,7 @@ function VideoEditorPreview({
               autoFocus
               className="video-editor-timecode-input"
               value={timecodeDraft}
-              aria-label="当前时间码"
+              aria-label={t('当前时间码')}
               onChange={(event) => setTimecodeDraft(event.target.value)}
               onBlur={commitTimecode}
               onKeyDown={(event) => {
@@ -946,7 +948,7 @@ function VideoEditorPreview({
             <button
               type="button"
               className="video-editor-timecode-edit"
-              aria-label="编辑当前时间码"
+              aria-label={t('编辑当前时间码')}
               onClick={() => {
                 setTimecodeDraft(formatTime(playhead));
                 setEditingTimecode(true);
@@ -960,20 +962,20 @@ function VideoEditorPreview({
         </div>
 
         <div className="video-editor-transport-playback">
-          <button type="button" className="video-editor-transport-btn" onClick={() => step(-1)} aria-label="上一帧">
+          <button type="button" className="video-editor-transport-btn" onClick={() => step(-1)} aria-label={t('上一帧')}>
             <Icon icon="lucide:chevron-first" width={16} height={16} />
           </button>
           <button
             type="button"
             className="video-editor-transport-btn primary"
             onClick={togglePlay}
-            aria-label={playing ? '暂停' : '播放'}
+            aria-label={playing ? t('暂停') : t('播放')}
             aria-keyshortcuts="Space"
-            data-tooltip={playing ? '暂停 Space' : '播放 Space'}
+            data-tooltip={playing ? t('暂停 Space') : t('播放 Space')}
           >
             <Icon icon={playing ? 'lucide:pause' : 'lucide:play'} width={16} height={16} />
           </button>
-          <button type="button" className="video-editor-transport-btn" onClick={() => step(1)} aria-label="下一帧">
+          <button type="button" className="video-editor-transport-btn" onClick={() => step(1)} aria-label={t('下一帧')}>
             <Icon icon="lucide:chevron-last" width={16} height={16} />
           </button>
           <span className="video-editor-shortcut-hint" aria-hidden="true">
@@ -986,13 +988,13 @@ function VideoEditorPreview({
             <Icon icon="lucide:search" width={13} height={13} />
             <select
               value={previewZoom}
-              aria-label="预览缩放"
+              aria-label={t('预览缩放')}
               onChange={(event) => {
                 const value = event.target.value;
                 setPreviewZoom(value === 'fit' ? 'fit' : Number(value) as PreviewZoom);
               }}
             >
-              <option value="fit">适应</option>
+              <option value="fit">{t('适应')}</option>
               <option value="25">25%</option>
               <option value="50">50%</option>
               <option value="100">100%</option>
@@ -1001,22 +1003,22 @@ function VideoEditorPreview({
           <button
             type="button"
             className="video-editor-transport-btn"
-            aria-label={fullscreen ? '退出全屏' : '全屏预览'}
+            aria-label={fullscreen ? t('退出全屏') : t('全屏预览')}
             onClick={toggleFullscreen}
           >
             <Icon icon={fullscreen ? 'lucide:minimize-2' : 'lucide:maximize-2'} width={16} height={16} />
           </button>
           <details className="video-editor-shortcuts">
-            <summary aria-label="查看快捷键" data-tooltip="快捷键">
+            <summary aria-label={t('查看快捷键')} data-tooltip={t('快捷键')}>
               <Icon icon="lucide:keyboard" width={16} height={16} />
             </summary>
             <div className="video-editor-shortcuts-popover">
-              <strong>快捷键</strong>
-              <span><em>播放 / 暂停</em><kbd>Space</kbd></span>
-              <span><em>后退 1 秒 / 暂停 / 播放</em><kbd>J K L</kbd></span>
-              <span><em>逐帧 / 跳转 1 秒</em><kbd>← → / Shift</kbd></span>
-              <span><em>分割 / 复制 / 删除</em><kbd>S / ⌘D / Del</kbd></span>
-              <span><em>撤销 / 重做</em><kbd>⌘Z / ⇧⌘Z</kbd></span>
+              <strong>{t('快捷键')}</strong>
+              <span><em>{t('播放 / 暂停')}</em><kbd>Space</kbd></span>
+              <span><em>{t('后退 1 秒 / 暂停 / 播放')}</em><kbd>J K L</kbd></span>
+              <span><em>{t('逐帧 / 跳转 1 秒')}</em><kbd>← → / Shift</kbd></span>
+              <span><em>{t('分割 / 复制 / 删除')}</em><kbd>S / ⌘D / Del</kbd></span>
+              <span><em>{t('撤销 / 重做')}</em><kbd>⌘Z / ⇧⌘Z</kbd></span>
             </div>
           </details>
         </div>

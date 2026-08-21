@@ -1,5 +1,7 @@
 # AI Canvas Tauri
 
+**简体中文** · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
+
 <p align="center">
   <img src="public/icons.svg" alt="AI Canvas Tauri Icon" width="140" height="140" />
 </p>
@@ -8,7 +10,7 @@
 
 AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown、分镜、360° 全景和手绘笔记组织成可连接的画布节点。你可以在同一个项目中编排生成链路、管理角色库与本地素材、执行 ComfyUI 工作流，也可以通过对话助手查询或修改画布、生成媒体、派出只读子智能体、读取授权文件并沉淀项目记忆。项目还能拆成剧集与分集，一部短剧的每一集各占一张画布，角色库与素材整部剧共用。
 
-![Version](https://img.shields.io/badge/version-0.8.9-6366f1)
+![Version](https://img.shields.io/badge/version-0.9.0-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
 ![React Flow](https://img.shields.io/badge/React_Flow-12-ff0072)
@@ -41,6 +43,7 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 | 本地优先与安全 | 媒体保存在项目数据目录，结构化数据由 IndexedDB 持久化；API Key 由 Rust 凭据存储隔离保管。 |
 | 剧集与分集 | 项目可拆成剧集与分集，每集独占一张画布，共用角色库、项目记忆与素材目录；助手可读完剧本后批量建集。 |
 | 项目与资产 | 支持多项目、资产库、可恢复删除和 `.aicanvas` 项目整体导入导出。 |
+| 新手引导与帮助中心 | 首次启动弹出引导，集中说明悬停提示与空格开对话框、长按批量出图等隐藏操作；帮助中心按场景分类，并用真实 @ 芯片演示 ComfyUI 输入节点的写入过程。 |
 | 按需 3D 导演台 | 首次创建导演台节点时下载固定且经过校验的运行资源，并在 Tauri 独立窗口中完成场景摆位、机位预演和截图回传。 |
 
 更详细的功能说明与阶段进度见[功能方案](doc/对话式画布助手-功能方案.md)和[Agent 能力实施方案](doc/对话助手-Agent能力实施方案.md)。

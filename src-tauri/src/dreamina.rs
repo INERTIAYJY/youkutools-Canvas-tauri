@@ -14,6 +14,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 
 // 各平台二进制按 cfg 选用，未选中的常量在该平台上不会被引用
@@ -27,6 +28,7 @@ const DARWIN_AMD64_URL: &str = "https://lf3-static.bytednsdoc.com/obj/eden-cn/ps
 const LOGIN_SUCCESS_MARKER: &str = "[DREAMINA:LOGIN_SUCCESS]";
 const LOGIN_REUSED_MARKER: &str = "[DREAMINA:LOGIN_REUSED]";
 const RUNTIME_EVENT: &str = "dreamina-login-runtime";
+const CLI_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// 暴露给前端的登录运行态快照
 #[derive(Clone, Default, serde::Serialize)]
@@ -156,6 +158,32 @@ fn probe(path: &PathBuf, cwd: &PathBuf) -> bool {
     matches!(cmd.status(), Ok(s) if s.success())
 }
 
+fn cli_needs_refresh(path: &Path) -> bool {
+    let Ok(modified) = std::fs::metadata(path).and_then(|metadata| metadata.modified()) else {
+        return true;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age >= CLI_REFRESH_INTERVAL)
+        .unwrap_or(false)
+}
+
+fn replace_cli(download: &Path, target: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return std::fs::rename(download, target).map_err(|e| format!("安装即梦组件失败: {e}"));
+    }
+
+    let backup = target.with_extension("backup");
+    let _ = std::fs::remove_file(&backup);
+    std::fs::rename(target, &backup).map_err(|e| format!("准备更新即梦组件失败: {e}"))?;
+    if let Err(error) = std::fs::rename(download, target) {
+        let _ = std::fs::rename(&backup, target);
+        return Err(format!("更新即梦组件失败: {error}"));
+    }
+    let _ = std::fs::remove_file(backup);
+    Ok(())
+}
+
 /// 确保 CLI 存在，必要时下载到应用数据目录
 fn ensure_cli(app: &AppHandle) -> Result<PathBuf, String> {
     let path = managed_path(app)?;
@@ -163,7 +191,8 @@ fn ensure_cli(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
-    if path.is_file() && probe(&path, &cwd) {
+    let existing_usable = path.is_file() && probe(&path, &cwd);
+    if existing_usable && !cli_needs_refresh(&path) {
         return Ok(path);
     }
 
@@ -172,16 +201,19 @@ fn ensure_cli(app: &AppHandle) -> Result<PathBuf, String> {
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| format!("创建下载客户端失败: {e}"))?;
-    let bytes = client
+    let download_result = client
         .get(url)
         .send()
-        .map_err(|e| format!("下载即梦组件失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("下载即梦组件失败: {e}"))?
-        .bytes()
-        .map_err(|e| format!("读取即梦组件失败: {e}"))?;
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.bytes());
+    let bytes = match download_result {
+        Ok(bytes) => bytes,
+        Err(_error) if existing_usable => return Ok(path),
+        Err(error) => return Err(format!("下载即梦组件失败: {error}")),
+    };
 
     let tmp = path.with_extension("download");
+    let _ = std::fs::remove_file(&tmp);
     std::fs::write(&tmp, &bytes).map_err(|e| format!("写入即梦组件失败: {e}"))?;
 
     #[cfg(unix)]
@@ -190,11 +222,19 @@ fn ensure_cli(app: &AppHandle) -> Result<PathBuf, String> {
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
     }
 
-    std::fs::rename(&tmp, &path).map_err(|e| format!("安装即梦组件失败: {e}"))?;
-
-    if !probe(&path, &cwd) {
-        let _ = std::fs::remove_file(&path);
+    if !probe(&tmp, &cwd) {
+        let _ = std::fs::remove_file(&tmp);
+        if existing_usable {
+            return Ok(path);
+        }
         return Err("即梦组件校验失败，请检查网络后重试".into());
+    }
+    if let Err(error) = replace_cli(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        if existing_usable && path.is_file() {
+            return Ok(path);
+        }
+        return Err(error);
     }
     Ok(path)
 }
@@ -738,7 +778,7 @@ const LOCAL_KEYS: &[&str] = &[
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateParams {
-    /// text2image | image2image | text2video | image2video
+    /// text2image | image2image | text2video | image2video | frames2video | multimodal2video
     kind: String,
     prompt: String,
     #[serde(default)]
@@ -757,6 +797,18 @@ pub struct GenerateParams {
     /// image2video 的首帧图
     #[serde(default)]
     image: String,
+    /// frames2video 的首帧图
+    #[serde(default)]
+    first: String,
+    /// frames2video 的尾帧图
+    #[serde(default)]
+    last: String,
+    /// multimodal2video 的参考视频
+    #[serde(default)]
+    videos: Vec<String>,
+    /// multimodal2video 的参考音频
+    #[serde(default)]
+    audios: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -802,6 +854,37 @@ fn run_capture(path: &PathBuf, cwd: &PathBuf, args: &[String]) -> (bool, String)
     }
 }
 
+fn push_video_controls(args: &mut Vec<String>, params: &GenerateParams, include_ratio: bool) {
+    if let Some(duration) = params.duration {
+        args.push("--duration".into());
+        args.push(duration.to_string());
+    }
+    if include_ratio && !params.ratio.is_empty() {
+        args.push("--ratio".into());
+        args.push(params.ratio.clone());
+    }
+    if !params.video_resolution.is_empty() {
+        args.push("--video_resolution".into());
+        args.push(params.video_resolution.clone());
+    }
+    if !params.model_version.is_empty() {
+        args.push("--model_version".into());
+        args.push(params.model_version.clone());
+    }
+}
+
+fn friendly_cli_error(message: &str) -> String {
+    if message.contains("AigcComplianceConfirmationRequired") {
+        return "该模型首次使用前需要完成合规确认。请先在即梦网页版使用同一模型成功生成一次，再返回重试。".into();
+    }
+    if message.contains("unknown flag") || message.contains("unsupported model_version") {
+        return format!(
+            "当前本地即梦 CLI 版本不支持所选模型或参数，请重新打开即梦登录以更新组件后重试。\n{message}"
+        );
+    }
+    message.to_string()
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -845,8 +928,35 @@ fn guess_ext(url: &str, content_type: &str) -> String {
     if ct.contains("webp") {
         return "webp".into();
     }
+    if ct.contains("video/mp4") {
+        return "mp4".into();
+    }
+    if ct.contains("quicktime") {
+        return "mov".into();
+    }
+    if ct.contains("video/webm") {
+        return "webm".into();
+    }
+    if ct.contains("audio/mpeg") {
+        return "mp3".into();
+    }
+    if ct.contains("wav") {
+        return "wav".into();
+    }
+    if ct.contains("audio/aac") {
+        return "aac".into();
+    }
+    if ct.contains("flac") {
+        return "flac".into();
+    }
+    if ct.contains("ogg") {
+        return "ogg".into();
+    }
     let lower = url.to_lowercase();
-    for ext in ["png", "jpg", "jpeg", "webp", "gif", "bmp"] {
+    for ext in [
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "mp4", "mov", "webm", "mp3", "wav",
+        "aac", "flac", "ogg",
+    ] {
         if lower.contains(&format!(".{ext}")) {
             return ext.into();
         }
@@ -854,11 +964,11 @@ fn guess_ext(url: &str, content_type: &str) -> String {
     "png".into()
 }
 
-/// 把各种形式的图片输入归一化为 CLI 可用的本地文件路径
+/// 把各种形式的媒体输入归一化为 CLI 可用的本地文件路径
 fn normalize_media(input: &str, inputs_dir: &PathBuf) -> Result<String, String> {
     let u = input.trim();
     if u.is_empty() {
-        return Err("空图片输入".into());
+        return Err("空媒体输入".into());
     }
     // asset.localhost → 本地路径
     if u.contains("asset.localhost/") {
@@ -890,12 +1000,12 @@ fn normalize_media(input: &str, inputs_dir: &PathBuf) -> Result<String, String> 
             use base64::Engine;
             base64::engine::general_purpose::STANDARD
                 .decode(payload)
-                .map_err(|e| format!("解码图片失败: {e}"))?
+                .map_err(|e| format!("解码媒体失败: {e}"))?
         } else {
             percent_decode(payload).into_bytes()
         };
         let target = inputs_dir.join(format!("input-{stamp}.{ext}"));
-        std::fs::write(&target, &bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+        std::fs::write(&target, &bytes).map_err(|e| format!("写入媒体失败: {e}"))?;
         return Ok(target.to_string_lossy().to_string());
     }
     // http(s) → 下载
@@ -907,9 +1017,9 @@ fn normalize_media(input: &str, inputs_dir: &PathBuf) -> Result<String, String> 
         let resp = client
             .get(u)
             .send()
-            .map_err(|e| format!("下载图片失败: {e}"))?
+            .map_err(|e| format!("下载媒体失败: {e}"))?
             .error_for_status()
-            .map_err(|e| format!("下载图片失败: {e}"))?;
+            .map_err(|e| format!("下载媒体失败: {e}"))?;
         let ct = resp
             .headers()
             .get("content-type")
@@ -917,12 +1027,12 @@ fn normalize_media(input: &str, inputs_dir: &PathBuf) -> Result<String, String> 
             .unwrap_or("")
             .to_string();
         let ext = guess_ext(u, &ct);
-        let bytes = resp.bytes().map_err(|e| format!("读取图片失败: {e}"))?;
+        let bytes = resp.bytes().map_err(|e| format!("读取媒体失败: {e}"))?;
         let target = inputs_dir.join(format!("input-{stamp}.{ext}"));
-        std::fs::write(&target, &bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+        std::fs::write(&target, &bytes).map_err(|e| format!("写入媒体失败: {e}"))?;
         return Ok(target.to_string_lossy().to_string());
     }
-    Err(format!("无法识别的图片输入: {}", &u[..u.len().min(80)]))
+    Err(format!("无法识别的媒体输入: {}", &u[..u.len().min(80)]))
 }
 
 fn first_str(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> String {
@@ -1020,10 +1130,7 @@ fn dreamina_generate_blocking(
     app: AppHandle,
     params: GenerateParams,
 ) -> Result<GenerateResult, String> {
-    let path = managed_path(&app)?;
-    if !path.is_file() {
-        return Err("即梦尚未登录，请先在「设置 → 即梦」完成 OAuth 登录".into());
-    }
+    let path = ensure_cli(&app)?;
     let work = workdir(&app);
     let inputs_dir = work.join("inputs");
 
@@ -1084,22 +1191,7 @@ fn dreamina_generate_blocking(
             args.push("text2video".into());
             args.push("--prompt".into());
             args.push(params.prompt.clone());
-            if let Some(d) = params.duration {
-                args.push("--duration".into());
-                args.push(d.to_string());
-            }
-            if !params.ratio.is_empty() {
-                args.push("--ratio".into());
-                args.push(params.ratio.clone());
-            }
-            if !params.video_resolution.is_empty() {
-                args.push("--video_resolution".into());
-                args.push(params.video_resolution.clone());
-            }
-            if !params.model_version.is_empty() {
-                args.push("--model_version".into());
-                args.push(params.model_version.clone());
-            }
+            push_video_controls(&mut args, &params, true);
         }
         "image2video" => {
             if params.image.trim().is_empty() {
@@ -1111,18 +1203,55 @@ fn dreamina_generate_blocking(
             args.push(local);
             args.push("--prompt".into());
             args.push(params.prompt.clone());
-            if let Some(d) = params.duration {
-                args.push("--duration".into());
-                args.push(d.to_string());
+            push_video_controls(&mut args, &params, false);
+        }
+        "frames2video" => {
+            if params.first.trim().is_empty() || params.last.trim().is_empty() {
+                return Err("frames2video 需要首帧和尾帧两张图片".into());
             }
-            if !params.video_resolution.is_empty() {
-                args.push("--video_resolution".into());
-                args.push(params.video_resolution.clone());
+            let first = normalize_media(&params.first, &inputs_dir)?;
+            let last = normalize_media(&params.last, &inputs_dir)?;
+            args.push("frames2video".into());
+            args.push("--first".into());
+            args.push(first);
+            args.push("--last".into());
+            args.push(last);
+            args.push("--prompt".into());
+            args.push(params.prompt.clone());
+            push_video_controls(&mut args, &params, false);
+        }
+        "multimodal2video" => {
+            let mut images = Vec::new();
+            for input in &params.images {
+                images.push(normalize_media(input, &inputs_dir)?);
             }
-            if !params.model_version.is_empty() {
-                args.push("--model_version".into());
-                args.push(params.model_version.clone());
+            let mut videos = Vec::new();
+            for input in &params.videos {
+                videos.push(normalize_media(input, &inputs_dir)?);
             }
+            let mut audios = Vec::new();
+            for input in &params.audios {
+                audios.push(normalize_media(input, &inputs_dir)?);
+            }
+            if images.is_empty() && videos.is_empty() && audios.is_empty() {
+                return Err("multimodal2video 需要至少一个参考素材".into());
+            }
+            args.push("multimodal2video".into());
+            for input in images {
+                args.push("--image".into());
+                args.push(input);
+            }
+            for input in videos {
+                args.push("--video".into());
+                args.push(input);
+            }
+            for input in audios {
+                args.push("--audio".into());
+                args.push(input);
+            }
+            args.push("--prompt".into());
+            args.push(params.prompt.clone());
+            push_video_controls(&mut args, &params, true);
         }
         other => return Err(format!("不支持的生成类型: {other}")),
     }
@@ -1152,7 +1281,7 @@ fn dreamina_generate_blocking(
 请确认账号已开通 CLI/API 生成权限后重试；日志见 ~/.dreamina_cli/logs/。"
                 .into()
         };
-        return Err(msg);
+        return Err(friendly_cli_error(&msg));
     }
     Ok(GenerateResult { submit_id })
 }
@@ -1194,11 +1323,12 @@ fn dreamina_query_result_blocking(app: AppHandle, submit_id: String) -> Result<Q
                     fail_reason: String::new(),
                 });
             }
-            return Err(if output.trim().is_empty() {
+            let detail = if output.trim().is_empty() {
                 "查询失败".into()
             } else {
                 tail_summary(&output.lines().map(|s| s.to_string()).collect::<Vec<_>>())
-            });
+            };
+            return Err(friendly_cli_error(&detail));
         }
     };
 
@@ -1227,10 +1357,40 @@ fn dreamina_query_result_blocking(app: AppHandle, submit_id: String) -> Result<Q
     let gen_status = find_first_key(&value, &["gen_status", "genStatus", "status"]);
     let status = gen_status_phase(&gen_status, !outputs.is_empty()).to_string();
     let fail_reason = if status == "failed" {
-        find_first_key(&value, &["fail_reason", "failReason", "message", "msg", "error"])
+        friendly_cli_error(&find_first_key(
+            &value,
+            &["fail_reason", "failReason", "message", "msg", "error"],
+        ))
     } else {
         String::new()
     };
 
     Ok(QueryResult { status, outputs, fail_reason })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{friendly_cli_error, guess_ext};
+
+    #[test]
+    fn preserves_video_and_audio_extensions_for_multimodal_inputs() {
+        assert_eq!(guess_ext("https://cdn.example/reference.mp4", ""), "mp4");
+        assert_eq!(guess_ext("", "audio/mpeg"), "mp3");
+        assert_eq!(guess_ext("", "video/quicktime"), "mov");
+    }
+
+    #[test]
+    fn explains_first_use_compliance_confirmation() {
+        let message =
+            friendly_cli_error("AigcComplianceConfirmationRequired: confirmation required");
+        assert!(message.contains("即梦网页版"));
+        assert!(message.contains("成功生成一次"));
+    }
+
+    #[test]
+    fn explains_outdated_cli_flags() {
+        let message = friendly_cli_error("unknown flag: --video_resolution");
+        assert!(message.contains("更新组件"));
+        assert!(message.contains("unknown flag"));
+    }
 }

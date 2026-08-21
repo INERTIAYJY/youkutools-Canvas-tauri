@@ -20,6 +20,7 @@ import {
   distributeNodesWithEqualGap,
   type DistributionAxis,
 } from '../../utils/distributionGeometry';
+import { useT } from '../../i18n';
 
 // ── Align & Distribute config ──
 type AlignKey = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom';
@@ -72,6 +73,7 @@ function getCanvasNodeElements(nodeIds: string[]): Map<string, HTMLElement> {
 }
 
 function MultiSelectToolbar() {
+  const t = useT();
   const selectedNodeIds = useAppStore((s) => s.selectedNodeIds);
   // 仅当选中 ≥2 个节点时才订阅 nodes；否则返回稳定空引用，
   // 这样单节点拖拽（每帧改 nodes）完全不会触发本工具栏重渲染。
@@ -256,7 +258,7 @@ function MultiSelectToolbar() {
     const hasExecutable = hasBatchExecutableNodes(currentIds, currentNodes);
 
     if (!hasExecutable) {
-      toast('选中的节点中没有可执行的（需要配置模型且有 prompt）', 'error');
+      toast(t('选中的节点中没有可执行的（需要配置模型且有 prompt）'), 'error');
       return;
     }
 
@@ -272,16 +274,16 @@ function MultiSelectToolbar() {
 
     setBatchRunning(false);
     const parts: string[] = [];
-    if (ok > 0) parts.push(`${ok} 个成功`);
-    if (fail > 0) parts.push(`${fail} 个失败`);
-    toast(`批量生成完成：${parts.join('，')}`, fail > 0 ? 'error' : undefined);
-  }, [recordOutputHistory]);
+    if (ok > 0) parts.push(t('{count} 个成功', { count: ok }));
+    if (fail > 0) parts.push(t('{count} 个失败', { count: fail }));
+    toast(t('批量生成完成：{result}', { result: parts.join('，') }), fail > 0 ? 'error' : undefined);
+  }, [recordOutputHistory, t]);
 
   // ── Copy selected nodes to internal clipboard ──
   const handleCopyNodes = useCallback(() => {
     copySelectedNodes();
-    useAppStore.getState().showToast(`已复制 ${useAppStore.getState().selectedNodeIds.length} 个节点`);
-  }, [copySelectedNodes]);
+    useAppStore.getState().showToast(t('已复制 {count} 个节点', { count: useAppStore.getState().selectedNodeIds.length }));
+  }, [copySelectedNodes, t]);
 
   if (selectedCount < 2 || !toolbarScreenPos) return null;
 
@@ -298,7 +300,7 @@ function MultiSelectToolbar() {
     >
       {/* Batch execute */}
       <AnimatedButton
-        data-tooltip="批量生成"
+        data-tooltip={t('批量生成')}
         disabled={batchRunning}
         onClick={executeBatch}
         className="w-8 h-8 rounded flex items-center justify-center transition-colors hover:text-green-300 hover:bg-green-500/15 disabled:opacity-30 disabled:cursor-not-allowed"
@@ -310,7 +312,7 @@ function MultiSelectToolbar() {
 
       {/* Copy nodes */}
       <AnimatedButton
-        data-tooltip="复制节点"
+        data-tooltip={t('复制节点')}
         onClick={handleCopyNodes}
         className="w-8 h-8 rounded flex items-center justify-center transition-colors text-canvas-text-secondary hover:text-canvas-text hover:bg-canvas-hover"
       >
@@ -323,7 +325,7 @@ function MultiSelectToolbar() {
       {ALIGN_ACTIONS.map(({ icon, label, key }) => (
         <AnimatedButton
           key={key}
-          data-tooltip={label}
+          data-tooltip={t(label)}
           onClick={() => doAlign(key as AlignKey)}
           className="w-8 h-8 rounded flex items-center justify-center transition-colors text-canvas-text-secondary hover:text-canvas-text hover:bg-canvas-hover"
         >
@@ -338,7 +340,7 @@ function MultiSelectToolbar() {
           {DISTRIBUTE_ACTIONS.map(({ icon, label, key }) => (
             <AnimatedButton
               key={key}
-              data-tooltip={label}
+              data-tooltip={t(label)}
               onClick={() => doDistribute(key as DistributeKey)}
               className="w-8 h-8 rounded flex items-center justify-center transition-colors text-canvas-text-secondary hover:text-canvas-text hover:bg-canvas-hover"
             >

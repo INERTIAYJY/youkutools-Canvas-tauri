@@ -10,6 +10,7 @@ import type {
   AgentToolDisplayValue,
 } from '../../types/agent';
 import { useAppStore } from '../../store/useAppStore';
+import { useT } from '../../i18n';
 
 interface AgentToolDetailsProps {
   input?: AgentToolDisplaySnapshot;
@@ -24,9 +25,9 @@ const SOURCE_LABELS = {
   resolved: '有效值',
 } as const;
 
-function formatValue(value: AgentToolDisplayValue | undefined): string {
-  if (value === undefined || value === '') return '未设置';
-  if (typeof value === 'boolean') return value ? '是' : '否';
+function formatValue(value: AgentToolDisplayValue | undefined, t: (k: string) => string): string {
+  if (value === undefined || value === '') return t('未设置');
+  if (typeof value === 'boolean') return value ? t('是') : t('否');
   return String(value);
 }
 
@@ -45,6 +46,7 @@ export default function AgentToolDetails({
   result,
   defaultExpanded = false,
 }: AgentToolDetailsProps) {
+  const t = useT();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const nodes = useAppStore((state) => state.nodes);
   // React SSR 使用 Store 初始快照；测试与独立窗口预渲染时仍应读取当前已加载节点。
@@ -64,7 +66,7 @@ export default function AgentToolDetails({
         className="flex min-h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[11px] text-canvas-text-muted transition-colors hover:bg-canvas-hover/50 hover:text-canvas-text-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/40"
       >
         <Icon icon="mdi:tune-variant" width="13" />
-        <span>调用详情</span>
+        <span>{t('调用详情')}</span>
         <Icon
           icon={expanded ? 'mdi:chevron-up' : 'mdi:chevron-down'}
           width="14"
@@ -76,16 +78,16 @@ export default function AgentToolDetails({
         <div className="space-y-2 border-t border-canvas-border/50 px-2 py-2 text-[11px] leading-[17px]">
           {input?.fields?.length ? (
             <div>
-              <p className="mb-1 font-medium text-canvas-text-secondary">参数</p>
+              <p className="mb-1 font-medium text-canvas-text-secondary">{t('参数')}</p>
               <dl className="space-y-0.5">
                 {input.fields.map((field, index) => (
                   <div key={`${field.label}-${index}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
                     <dt className="text-canvas-text-muted">{field.label}</dt>
                     <dd className="min-w-0 break-words text-canvas-text-secondary">
-                      {formatValue(field.value)}
+                      {formatValue(field.value, t)}
                       {field.source && (
                         <span className="ml-1.5 text-[10px] text-canvas-text-muted">
-                          {SOURCE_LABELS[field.source]}
+                          {t(SOURCE_LABELS[field.source])}
                         </span>
                       )}
                     </dd>
@@ -97,7 +99,7 @@ export default function AgentToolDetails({
 
           {references.length > 0 && (
             <div>
-              <p className="mb-1 font-medium text-canvas-text-secondary">参考素材</p>
+              <p className="mb-1 font-medium text-canvas-text-secondary">{t('参考素材')}</p>
               <div className="grid grid-cols-2 gap-1.5">
                 {references.map((reference, index) => {
                   const node = reference.kind === 'node'
@@ -133,8 +135,8 @@ export default function AgentToolDetails({
                         <span className="block truncate text-canvas-text-secondary">{reference.label}</span>
                         <span className="block truncate text-[10px] text-canvas-text-muted">
                           {reference.kind === 'node'
-                            ? node ? reference.id : '素材已不可用'
-                            : '用户上传素材'}
+                            ? node ? reference.id : t('素材已不可用')
+                            : t('用户上传素材')}
                         </span>
                       </span>
                     </div>
@@ -146,7 +148,7 @@ export default function AgentToolDetails({
 
           {entities.length > 0 && (
             <div>
-              <p className="mb-1 font-medium text-canvas-text-secondary">对象</p>
+              <p className="mb-1 font-medium text-canvas-text-secondary">{t('对象')}</p>
               <div className="space-y-1">
                 {entities.map((entity, index) => (
                   <div key={`${entity.id ?? entity.title}-${index}`} className="rounded border border-canvas-border/50 px-2 py-1.5">
@@ -154,7 +156,7 @@ export default function AgentToolDetails({
                     {entity.subtitle && <p className="text-canvas-text-muted">{entity.subtitle}</p>}
                     {entity.fields?.map((field, fieldIndex) => (
                       <p key={`${field.label}-${fieldIndex}`} className="text-canvas-text-muted">
-                        {field.label}：<span className="text-canvas-text-secondary">{formatValue(field.value)}</span>
+                        {field.label}：<span className="text-canvas-text-secondary">{formatValue(field.value, t)}</span>
                       </p>
                     ))}
                     {entity.preview && (
@@ -170,7 +172,7 @@ export default function AgentToolDetails({
 
           {changes.length > 0 && (
             <div>
-              <p className="mb-1 font-medium text-canvas-text-secondary">变更</p>
+              <p className="mb-1 font-medium text-canvas-text-secondary">{t('变更')}</p>
               <div className="space-y-1">
                 {changes.map((change, index) => (
                   <div key={`${change.targetId}-${change.field}-${index}`} className="rounded border border-canvas-border/50 px-2 py-1.5">
@@ -178,9 +180,9 @@ export default function AgentToolDetails({
                       {change.targetLabel || change.targetId} · {change.field}
                     </p>
                     <p className="break-words text-canvas-text-muted">
-                      {formatValue(change.before)}
+                      {formatValue(change.before, t)}
                       <Icon icon="mdi:arrow-right" width="12" className="mx-1 inline" />
-                      <span className="text-canvas-text-secondary">{formatValue(change.after)}</span>
+                      <span className="text-canvas-text-secondary">{formatValue(change.after, t)}</span>
                     </p>
                   </div>
                 ))}
@@ -190,12 +192,12 @@ export default function AgentToolDetails({
 
           {result?.fields?.length ? (
             <div>
-              <p className="mb-1 font-medium text-canvas-text-secondary">结果</p>
+              <p className="mb-1 font-medium text-canvas-text-secondary">{t('结果')}</p>
               <dl className="space-y-0.5">
                 {result.fields.map((field, index) => (
                   <div key={`${field.label}-${index}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
                     <dt className="text-canvas-text-muted">{field.label}</dt>
-                    <dd className="break-words text-canvas-text-secondary">{formatValue(field.value)}</dd>
+                    <dd className="break-words text-canvas-text-secondary">{formatValue(field.value, t)}</dd>
                   </div>
                 ))}
               </dl>

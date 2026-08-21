@@ -1,7 +1,7 @@
 /**
  * AINodeDialog AI 生成弹窗 — 点击节点后弹出的浮动面板，包含 Prompt 输入、模型选择、参数配置、生成按钮
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
@@ -36,10 +36,12 @@ import {
   videoFramesFromDuration,
 } from '../../services/aiDimensions';
 import { cancelComfyUINodeTask } from '../../services/comfyWorkflowService';
+import { useT } from '../../i18n';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
 
 function AINodeDialog() {
+  const t = useT();
   const { activeNodeId, dialogPosition, closeNodeDialog, updateNodeData, updateNodeDataTransient, commitToHistory, recordOutputHistory, showToast, workflows, currentProjectId, addNodesWithEdges } = useAppStore(
     useShallow((s) => ({
       activeNodeId: s.activeNodeId,
@@ -64,11 +66,12 @@ function AINodeDialog() {
   const panelRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const cancellingNodeIdsRef = useRef(new Set<string>());
+  const [isExpanded, setIsExpanded] = useState(false);
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
     const preview = previewRef.current;
-    if (!panel || !activeNodeId) return;
+    if (!panel || !activeNodeId || isExpanded) return;
 
     let scheduledFrame = 0;
     let settleTimer = 0;
@@ -204,11 +207,11 @@ function AINodeDialog() {
       window.removeEventListener('resize', scheduleUpdate);
       window.visualViewport?.removeEventListener('resize', scheduleUpdate);
     };
-  }, [activeNodeId]);
+  }, [activeNodeId, isExpanded]);
 
   // 节点尺寸变化时，重新计算浮动面板位置，使其跟随节点平滑移动
   useEffect(() => {
-    if (!activeNodeId) return;
+    if (!activeNodeId || isExpanded) return;
     const el = document.querySelector(`.react-flow__node[data-id="${activeNodeId}"]`);
     if (!el) return;
 
@@ -218,7 +221,7 @@ function AINodeDialog() {
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [activeNodeId]);
+  }, [activeNodeId, isExpanded]);
   const editorApiRef = useRef<MentionEditorHandle>(null);
 
   const continuousEditActiveRef = useRef(false);
@@ -262,12 +265,16 @@ function AINodeDialog() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        handleCloseNodeDialog();
+        if (isExpanded) {
+          setIsExpanded(false);
+        } else {
+          handleCloseNodeDialog();
+        }
       }
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [handleCloseNodeDialog]);
+  }, [handleCloseNodeDialog, isExpanded]);
 
   // All hooks must be called before any early return
   const onPromptChange = useCallback(
@@ -436,12 +443,12 @@ function AINodeDialog() {
     const latestNode = store.nodes.find((n) => n.id === activeNodeId);
     const latestData = latestNode?.data as BaseNodeData | undefined;
     if (!latestData) {
-      showToast('节点不存在', 'error');
+      showToast(t('节点不存在'), 'error');
       return;
     }
     const rawPrompt = overridePrompt ?? (latestData.prompt as string) ?? '';
     if (!rawPrompt.trim()) {
-      showToast('请输入提示词', 'error');
+      showToast(t('请输入提示词'), 'error');
       return;
     }
     const projectSettings = store.projects.find(
@@ -461,7 +468,7 @@ function AINodeDialog() {
     const nodeProvider = latestData?.provider;
     const nodeLabel = latestData?.label ?? '';
     if (!nodeModel || !nodeProvider) {
-      showToast('请先在底部模型选择器中选择一个模型', 'error');
+      showToast(t('请先在底部模型选择器中选择一个模型'), 'error');
       return;
     }
     const submittingNodeId = activeNodeId!;
@@ -477,10 +484,10 @@ function AINodeDialog() {
     try {
       const batchCount = Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(latestData.batchCount) || 1)));
       if (nodeType === 'ai-image' && batchCount > 1) {
-        if (postProcess) throw new Error('批量生成暂不支持图片后处理，请将数量设为 1');
+        if (postProcess) throw new Error(t('批量生成暂不支持图片后处理，请将数量设为 1'));
         const imageSize = (latestData.imageSize as string) || '2K';
         const aspectRatio = (latestData.aspectRatio as string) || '1:1';
-        showToast(`正在批量生成 ${batchCount} 张图片`);
+        showToast(t('正在批量生成 {count} 张图片', { count: batchCount }));
         const batch = await generateImagesBatch({
           prompt: effectivePrompt,
           model: nodeModel,
@@ -559,9 +566,9 @@ function AINodeDialog() {
         });
         if (postProcess === 'character-8-direction-grid') {
           if (!saved?.filePath) {
-            showToast('原图已生成，但未能保存到本地，无法自动生成 8 向宫格', 'error');
+            showToast(t('原图已生成，但未能保存到本地，无法自动生成 8 向宫格'), 'error');
           } else {
-            showToast('图片生成完成，正在后台切图生成 8 向宫格');
+            showToast(t('图片生成完成，正在后台切图生成 8 向宫格'));
             try {
               if (!isStillCurrentSubmission()) return;
 
@@ -590,18 +597,18 @@ function AINodeDialog() {
                   nodeHeight: 360,
                 },
               });
-              showToast('角色 8 向宫格已生成');
+              showToast(t('角色 8 向宫格已生成'));
             } catch (postProcessError) {
               const message = postProcessError instanceof Error
                 ? postProcessError.message
                 : typeof postProcessError === 'string'
                   ? postProcessError
-                  : '未知错误';
-              showToast(`原图已生成，8 向宫格处理失败：${message}`, 'error');
+                  : t('未知错误');
+              showToast(t('原图已生成，8 向宫格处理失败：{message}', { message }), 'error');
             }
           }
         } else {
-          showToast(isAnimation ? 'Sprite Sheet 生成完成' : '图片生成完成');
+          showToast(isAnimation ? t('Sprite Sheet 生成完成') : t('图片生成完成'));
         }
       } else if (nodeType === 'ai-panorama') {
         const imageSize = (latestData.imageSize as string) || '2K';
@@ -646,7 +653,7 @@ function AINodeDialog() {
           filePath: saved?.filePath,
           params: { imageSize, aspectRatio },
         });
-        showToast('全景图生成完成');
+        showToast(t('全景图生成完成'));
       } else if (nodeType === 'ai-video') {
         // 「在此节点生成」取消勾选 → 按 generateCount 生成到右侧新建节点（不在此弹窗）
         if (latestData.generateInPlace === false) {
@@ -708,7 +715,7 @@ function AINodeDialog() {
           filePath: saved?.filePath,
           params: { videoResolution, videoFps, videoFrames, seedanceResolution, seedanceRatio, seedanceDuration, generateAudio, cameraSettings: latestData.cameraSettings },
         });
-        showToast('视频生成完成');
+        showToast(t('视频生成完成'));
       } else if (nodeType === 'ai-audio') {
         const result = await generateAudio({
           prompt: effectivePrompt,
@@ -764,7 +771,7 @@ function AINodeDialog() {
             autoGenerateLyrics: latestData.autoGenerateLyrics,
           },
         });
-        showToast('音频生成完成');
+        showToast(t('音频生成完成'));
       } else {
         const result = await generateText({
           prompt: effectivePrompt,
@@ -793,16 +800,16 @@ function AINodeDialog() {
             });
           }
           const kindLabel =
-            processed.kind === 'character' ? '人物' : processed.kind === 'scene' ? '场景' : '道具';
+            processed.kind === 'character' ? t('人物') : processed.kind === 'scene' ? t('场景') : t('道具');
           if (processed.ok) {
-            showToast(`${kindLabel}简介已提取并入库 · 「资产管理 > 短剧资产」可查看`);
+            showToast(t('{kind}简介已提取并入库 · 「资产管理 > 短剧资产」可查看', { kind: kindLabel }));
           } else {
-            showToast('已提取，但 JSON 未完全规范化，请检查输出', 'error');
+            showToast(t('已提取，但 JSON 未完全规范化，请检查输出'), 'error');
           }
         }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '生成失败');
+      const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : t('生成失败'));
       if (
         (err instanceof DOMException && err.name === 'AbortError')
         || msg === '任务已被取消'
@@ -826,9 +833,7 @@ function AINodeDialog() {
       });
       showToast(msg, 'error');
     }
-  }, [activeNodeId, nodeType, currentProjectId, finishContinuousEdit, updateNodeData, updateNodeDataTransient, recordOutputHistory, showToast, runVideoToNewNodes]);
-
-
+  }, [activeNodeId, nodeType, currentProjectId, finishContinuousEdit, updateNodeData, updateNodeDataTransient, recordOutputHistory, showToast, runVideoToNewNodes, t]);
 
   const onCancelGeneration = useCallback(async () => {
     if (!activeNodeId || cancellingNodeIdsRef.current.has(activeNodeId)) return;
@@ -837,15 +842,15 @@ function AINodeDialog() {
     try {
       await cancelComfyUINodeTask(nodeId);
       updateNodeDataTransient(nodeId, { status: 'idle', error: undefined });
-      showToast('已终止 ComfyUI 任务');
+      showToast(t('已终止 ComfyUI 任务'));
     } catch (error) {
       updateNodeDataTransient(nodeId, { status: 'idle', error: undefined });
-      const message = error instanceof Error ? error.message : '无法终止 ComfyUI 任务';
-      showToast(`已停止本地等待，但${message}`, 'error');
+      const message = error instanceof Error ? error.message : t('无法终止 ComfyUI 任务');
+      showToast(t('已停止本地等待，但{message}', { message }), 'error');
     } finally {
       cancellingNodeIdsRef.current.delete(nodeId);
     }
-  }, [activeNodeId, showToast, updateNodeDataTransient]);
+  }, [activeNodeId, showToast, t, updateNodeDataTransient]);
 
   // 直接将输入内容作为节点输出（跳过模型调用）
   const onPassThrough = useCallback(() => {
@@ -1027,34 +1032,74 @@ function AINodeDialog() {
   return (
     <>
       {/* Connected nodes preview — below dialog (model-dropdown covers it) */}
-      <div
-        ref={previewRef}
-        className="ai-dialog-preview-float"
-        style={dialogPosition ? {
-          left: `${dialogPosition.x}px`,
-          top: `${dialogPosition.y - 10 - 42}px`,
-          transform: 'translateX(-50%)',
-        } : undefined}
-      >
-        <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
-      </div>
+      {!isExpanded && (
+        <div
+          ref={previewRef}
+          className="ai-dialog-preview-float"
+          style={dialogPosition ? {
+            left: `${dialogPosition.x}px`,
+            top: `${dialogPosition.y - 10 - 42}px`,
+            transform: 'translateX(-50%)',
+          } : undefined}
+        >
+          <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
+        </div>
+      )}
+
+      {isExpanded && (
+        <button
+          type="button"
+          className="ai-dialog-expanded-backdrop"
+          aria-label={t('还原')}
+          onClick={() => setIsExpanded(false)}
+        />
+      )}
 
       <div
         ref={panelRef}
-        className="ai-dialog-float"
-        style={{
+        className={`ai-dialog-float${isExpanded ? ' is-expanded' : ''}`}
+        role={isExpanded ? 'dialog' : undefined}
+        aria-modal={isExpanded ? true : undefined}
+        aria-label={isExpanded ? t('节点生成对话框') : undefined}
+        style={isExpanded ? undefined : {
           left: dialogPosition ? `${dialogPosition.x}px` : '50%',
           top: dialogPosition ? `${dialogPosition.y - 20}px` : '50%',
           transform: dialogPosition ? 'translateX(-50%)' : 'translate(-50%, -50%)',
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
+        {isExpanded && (
+          <div className="ai-dialog-preview-float is-expanded">
+            <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
+          </div>
+        )}
+        <button
+          type="button"
+          className="ai-dialog-expand-btn"
+          aria-label={isExpanded ? t('还原') : t('最大化')}
+          aria-pressed={isExpanded}
+          data-tooltip={isExpanded ? t('还原') : t('最大化')}
+          onClick={(event) => {
+            event.stopPropagation();
+            setIsExpanded((current) => !current);
+          }}
+        >
+          {isExpanded ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M9 4v5H4M15 20v-5h5M4 9l5-5M20 15l-5 5" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M4 9V4h5M20 15v5h-5M9 4 4 9M15 20l5-5" />
+            </svg>
+          )}
+        </button>
         <PromptPanel
           editorRef={editorApiRef}
           nodeType={nodeType}
           nodeId={activeNodeId}
           prompt={data.prompt || ''}
-          placeholder={`描述任何你想要生成的内容，按 @ 引用素材，/呼出指令\n(Enter 生成，Shift+Enter 换行)`}
+          placeholder={t('描述任何你想要生成的内容，按 @ 引用素材，/呼出指令\n(Enter 生成，Shift+Enter 换行)')}
           selectedModel={data.model}
           selectedProvider={data.provider}
           selectedWorkflowId={data.workflowId}

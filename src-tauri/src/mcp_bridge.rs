@@ -1,6 +1,28 @@
-//! 本地 MCP loopback 控制桥，负责会话鉴权、帧协议、前端事件转发和响应超时。
-//! 监听范围固定为本机，令牌与活动连接仅保存在进程内存中。
+//! MCP 控制桥：本机 stdio 走 loopback 适配器，远程模式走 Streamable HTTP。
+//! 两种传输共用前端 Tool Registry、Policy、审计与响应通道。
 
+use axum::{
+    body::Body,
+    extract::{Request, State as AxumState},
+    http::{
+        header::{AUTHORIZATION, HOST, ORIGIN},
+        HeaderMap, StatusCode,
+    },
+    middleware::{self, Next},
+    response::Response,
+    Router,
+};
+use rmcp::{
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ListToolsResult,
+        ServerCapabilities, ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
+    ErrorData, ServerHandler,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,6 +34,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio_util::sync::CancellationToken;
+use tower::limit::ConcurrencyLimitLayer;
 
 pub const MCP_REQUEST_EVENT: &str = "mcp:request";
 const PROTOCOL_VERSION: u8 = 1;
@@ -21,15 +45,28 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// 固定端口后同时接多个客户端（Claude Desktop、Cursor…）是常态，仍留上限防跑飞。
 const MAX_CLIENTS: usize = 4;
 const READ_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+const HTTP_ENDPOINT_PATH: &str = "/mcp";
 
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static CONNECTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpTransport {
+    #[default]
+    Stdio,
+    StreamableHttp,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpBridgeSessionInfo {
     pub session_id: String,
     pub port: u16,
+    pub transport: McpTransport,
+    pub bind_address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adapter_path: Option<String>,
 }
@@ -93,6 +130,7 @@ struct BridgeSession {
     info: McpBridgeSessionInfo,
     active: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>>,
+    cancellation: CancellationToken,
 }
 
 #[derive(Default)]
@@ -114,7 +152,9 @@ fn token_matches(expected: &str, provided: &str) -> bool {
     expected
         .bytes()
         .zip(provided.bytes())
-        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
         == 0
 }
 
@@ -141,7 +181,11 @@ fn parse_request(line: &str, expected_token: &str) -> Result<IncomingRequest, St
     Ok(request)
 }
 
-fn response_error(id: impl Into<String>, code: &str, message: impl Into<String>) -> OutgoingResponse {
+fn response_error(
+    id: impl Into<String>,
+    code: &str,
+    message: impl Into<String>,
+) -> OutgoingResponse {
     OutgoingResponse {
         version: PROTOCOL_VERSION,
         id: id.into(),
@@ -211,7 +255,11 @@ fn handle_connection(
         if bytes_read > MAX_FRAME_BYTES || !line.ends_with('\n') {
             let _ = write_shared_response(
                 &writer,
-                &response_error("invalid", "MCP_FRAME_TOO_LARGE", "MCP bridge 请求超过 1 MiB 上限"),
+                &response_error(
+                    "invalid",
+                    "MCP_FRAME_TOO_LARGE",
+                    "MCP bridge 请求超过 1 MiB 上限",
+                ),
             );
             break;
         }
@@ -277,7 +325,11 @@ fn handle_connection(
             }
             let _ = write_shared_response(
                 &writer,
-                &response_error(request.id, "MCP_FRONTEND_UNAVAILABLE", "AI Canvas 主窗口尚未就绪"),
+                &response_error(
+                    request.id,
+                    "MCP_FRONTEND_UNAVAILABLE",
+                    "AI Canvas 主窗口尚未就绪",
+                ),
             );
             continue;
         }
@@ -301,7 +353,9 @@ fn handle_connection(
                     Ok(frontend) => response_error(
                         request.id,
                         "MCP_FRONTEND_ERROR",
-                        frontend.error.unwrap_or_else(|| "AI Canvas MCP 请求失败".to_string()),
+                        frontend
+                            .error
+                            .unwrap_or_else(|| "AI Canvas MCP 请求失败".to_string()),
                     ),
                     Err(mpsc::RecvTimeoutError::Timeout) => response_error(
                         request.id,
@@ -341,8 +395,252 @@ fn try_acquire_client_slot(connections: &AtomicUsize) -> bool {
     false
 }
 
+fn forward_frontend_request(
+    app: &AppHandle,
+    info: &McpBridgeSessionInfo,
+    pending: &Arc<Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>>,
+    request_id: String,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let inserted = pending
+        .lock()
+        .map_err(|_| "MCP bridge 请求锁不可用".to_string())?
+        .insert(request_id.clone(), sender)
+        .is_none();
+    if !inserted {
+        return Err("MCP bridge 请求 ID 重复".to_string());
+    }
+    if app
+        .emit_to(
+            "main",
+            MCP_REQUEST_EVENT,
+            McpBridgeRequestEvent {
+                session_id: info.session_id.clone(),
+                request_id: request_id.clone(),
+                method: method.to_string(),
+                params,
+            },
+        )
+        .is_err()
+    {
+        if let Ok(mut requests) = pending.lock() {
+            requests.remove(&request_id);
+        }
+        return Err("AI Canvas 主窗口尚未就绪".to_string());
+    }
+    let received = receiver.recv_timeout(RESPONSE_TIMEOUT);
+    if let Ok(mut requests) = pending.lock() {
+        requests.remove(&request_id);
+    }
+    match received {
+        Ok(response) if response.ok => Ok(response.result.unwrap_or(Value::Null)),
+        Ok(response) => Err(response
+            .error
+            .unwrap_or_else(|| "AI Canvas MCP 请求失败".to_string())),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("AI Canvas MCP 请求等待超时".to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("AI Canvas MCP 会话已停止".to_string()),
+    }
+}
+
+#[derive(Clone)]
+struct HttpMcpHandler {
+    app: AppHandle,
+    info: McpBridgeSessionInfo,
+    pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>>,
+}
+
+impl HttpMcpHandler {
+    async fn request_frontend(
+        &self,
+        method: &'static str,
+        params: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ErrorData> {
+        let sequence = CONNECTION_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+        let request_id = format!("{}:http:{sequence:x}", self.info.session_id);
+        let app = self.app.clone();
+        let info = self.info.clone();
+        let pending = Arc::clone(&self.pending);
+        let target_id = request_id.clone();
+        let request = tokio::task::spawn_blocking(move || {
+            forward_frontend_request(&app, &info, &pending, request_id, method, params)
+        });
+        tokio::select! {
+            result = request => result
+                .map_err(|_| ErrorData::internal_error("AI Canvas MCP 转发任务异常结束", None))?
+                .map_err(|message| ErrorData::internal_error(message, None)),
+            _ = cancellation.cancelled() => {
+                let app = self.app.clone();
+                let info = self.info.clone();
+                let pending = Arc::clone(&self.pending);
+                let cancel_id = format!("{}:http-cancel:{sequence:x}", self.info.session_id);
+                tokio::task::spawn_blocking(move || {
+                    let _ = forward_frontend_request(
+                        &app,
+                        &info,
+                        &pending,
+                        cancel_id,
+                        "requests/cancel",
+                        serde_json::json!({ "requestId": target_id }),
+                    );
+                });
+                Err(ErrorData::internal_error("AI Canvas MCP 请求已取消", None))
+            }
+        }
+    }
+}
+
+impl ServerHandler for HttpMcpHandler {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let value = self
+            .request_frontend("tools/list", serde_json::json!({}), context.ct)
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|_| ErrorData::internal_error("AI Canvas 返回了无效的工具列表", None))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let params = serde_json::json!({
+            "name": request.name,
+            "arguments": request.arguments.unwrap_or_default(),
+        });
+        let value = self
+            .request_frontend("tools/call", params, context.ct)
+            .await?;
+        let result: CallToolResult = serde_json::from_value(value)
+            .map_err(|_| ErrorData::internal_error("AI Canvas 返回了无效的工具结果", None))?;
+        Ok(result.into())
+    }
+}
+
+#[derive(Clone)]
+struct HttpSecurity {
+    token: String,
+    port: u16,
+}
+
+fn parse_allowed_host(value: &str, port: u16) -> Option<String> {
+    let parsed = url::Url::parse(&format!("http://{value}")).ok()?;
+    let host = parsed.host_str()?;
+    let normalized = host.to_ascii_lowercase();
+    if !matches!(
+        normalized.as_str(),
+        "localhost" | "host.docker.internal" | "gateway.docker.internal"
+    ) && host.parse::<Ipv4Addr>().is_err()
+    {
+        return None;
+    }
+    if parsed.port_or_known_default()? != port {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn validate_http_headers(headers: &HeaderMap, security: &HttpSecurity) -> Result<(), StatusCode> {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !token_matches(&security.token, authorization) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let host_header = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let host = parse_allowed_host(host_header, security.port).ok_or(StatusCode::FORBIDDEN)?;
+    if let Some(origin_header) = headers.get(ORIGIN) {
+        let origin = origin_header.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
+        let parsed = url::Url::parse(origin).map_err(|_| StatusCode::FORBIDDEN)?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().map(str::to_ascii_lowercase).as_deref() != Some(host.as_str())
+            || parsed.port_or_known_default() != Some(security.port)
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    Ok(())
+}
+
+async fn authorize_http_request(
+    AxumState(security): AxumState<HttpSecurity>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    validate_http_headers(request.headers(), &security)?;
+    Ok(next.run(request).await)
+}
+
+fn run_streamable_http_server(
+    listener: TcpListener,
+    app: AppHandle,
+    info: McpBridgeSessionInfo,
+    pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>>,
+    token: String,
+    cancellation: CancellationToken,
+) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("ai-canvas-mcp-http-worker")
+        .build()
+        .map_err(|error| format!("无法启动 MCP HTTP 运行时: {error}"))?;
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::from_std(listener)
+            .map_err(|error| format!("无法接管 MCP HTTP 监听器: {error}"))?;
+        let handler = HttpMcpHandler {
+            app,
+            info: info.clone(),
+            pending,
+        };
+        let service: StreamableHttpService<HttpMcpHandler, LocalSessionManager> =
+            StreamableHttpService::new(
+                move || Ok(handler.clone()),
+                Default::default(),
+                StreamableHttpServerConfig::default()
+                    .with_json_response(true)
+                    // 外层 middleware 只允许 IP/localhost Host，并校验同源 Origin。
+                    // 关闭 SDK 的默认 loopback Host 列表，否则合法局域网 IP 会被二次拒绝。
+                    .disable_allowed_hosts()
+                    .with_max_request_body_bytes(MAX_FRAME_BYTES as usize)
+                    .with_cancellation_token(cancellation.child_token()),
+            );
+        let security = HttpSecurity {
+            token,
+            port: info.port,
+        };
+        let router = Router::new()
+            .nest_service(HTTP_ENDPOINT_PATH, service)
+            .layer(ConcurrencyLimitLayer::new(MAX_CLIENTS))
+            .layer(middleware::from_fn_with_state(
+                security,
+                authorize_http_request,
+            ));
+        axum::serve(listener, router)
+            .with_graceful_shutdown(cancellation.cancelled_owned())
+            .await
+            .map_err(|error| format!("MCP HTTP 服务异常退出: {error}"))
+    })
+}
+
 fn stop_session(session: BridgeSession) {
     session.active.store(false, Ordering::Release);
+    session.cancellation.cancel();
     if let Ok(mut requests) = session.pending.lock() {
         for (_, sender) in requests.drain() {
             let _ = sender.try_send(FrontendResponse {
@@ -380,14 +678,38 @@ fn bind_loopback(port: u16) -> Result<TcpListener, String> {
     })
 }
 
+fn bind_streamable_http(port: u16) -> Result<TcpListener, String> {
+    let mut last_error = None;
+    for _ in 0..10 {
+        match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)) {
+            Ok(listener) => return Ok(listener),
+            Err(error) => {
+                last_error = Some(error);
+                if port == 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    let error = last_error.expect("bind 失败必然带错误");
+    Err(if port == 0 {
+        format!("无法启动 MCP Streamable HTTP 服务: {error}")
+    } else {
+        format!("无法绑定 MCP HTTP 固定端口 {port}: {error}")
+    })
+}
+
 #[tauri::command]
 pub fn mcp_bridge_start(
     app: AppHandle,
     state: State<'_, McpBridgeState>,
     token: String,
     port: Option<u16>,
+    transport: Option<McpTransport>,
 ) -> Result<McpBridgeSessionInfo, String> {
     validate_token(&token)?;
+    let transport = transport.unwrap_or_default();
     // 固定端口要先放掉旧会话，否则新监听必然撞上自己上一次的端口。
     let previous = state
         .session
@@ -397,7 +719,10 @@ pub fn mcp_bridge_start(
     if let Some(previous) = previous {
         stop_session(previous);
     }
-    let listener = bind_loopback(port.unwrap_or(0))?;
+    let listener = match transport {
+        McpTransport::Stdio => bind_loopback(port.unwrap_or(0))?,
+        McpTransport::StreamableHttp => bind_streamable_http(port.unwrap_or(0))?,
+    };
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("无法配置 MCP loopback bridge: {error}"))?;
@@ -413,11 +738,21 @@ pub fn mcp_bridge_start(
     let info = McpBridgeSessionInfo {
         session_id: format!("mcp-{epoch_ms:x}-{sequence:x}"),
         port: bound_port,
-        adapter_path: resolve_adapter_path(&app),
+        transport,
+        bind_address: match transport {
+            McpTransport::Stdio => Ipv4Addr::LOCALHOST.to_string(),
+            McpTransport::StreamableHttp => Ipv4Addr::UNSPECIFIED.to_string(),
+        },
+        endpoint_path: (transport == McpTransport::StreamableHttp)
+            .then(|| HTTP_ENDPOINT_PATH.to_string()),
+        adapter_path: (transport == McpTransport::Stdio)
+            .then(|| resolve_adapter_path(&app))
+            .flatten(),
     };
     let active = Arc::new(AtomicBool::new(true));
     let connections = Arc::new(AtomicUsize::new(0));
     let pending = Arc::new(Mutex::new(HashMap::new()));
+    let cancellation = CancellationToken::new();
 
     let mut current = state
         .session
@@ -427,53 +762,70 @@ pub fn mcp_bridge_start(
         info: info.clone(),
         active: Arc::clone(&active),
         pending: Arc::clone(&pending),
+        cancellation: cancellation.clone(),
     });
     drop(current);
 
     let thread_info = info.clone();
+    let thread_name = match transport {
+        McpTransport::Stdio => "ai-canvas-mcp-bridge",
+        McpTransport::StreamableHttp => "ai-canvas-mcp-http",
+    };
     thread::Builder::new()
-        .name("ai-canvas-mcp-bridge".to_string())
-        .spawn(move || {
-            while active.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        if !try_acquire_client_slot(&connections) {
-                            let mut stream = stream;
-                            let _ = write_response(
-                                &mut stream,
-                                &response_error(
-                                    "connect",
-                                    "MCP_CLIENT_LIMIT_REACHED",
-                                    format!("当前 MCP 会话已连接 {MAX_CLIENTS} 个适配器"),
-                                ),
-                            );
-                            continue;
-                        }
-                        let connection_app = app.clone();
-                        let connection_info = thread_info.clone();
-                        let connection_token = token.clone();
-                        let connection_active = Arc::clone(&active);
-                        let connection_connected = Arc::clone(&connections);
-                        let connection_pending = Arc::clone(&pending);
-                        let _ = thread::Builder::new()
-                            .name("ai-canvas-mcp-client".to_string())
-                            .spawn(move || {
-                                handle_connection(
-                                    connection_app,
-                                    stream,
-                                    connection_info,
-                                    connection_token,
-                                    connection_active,
-                                    connection_connected,
-                                    connection_pending,
+        .name(thread_name.to_string())
+        .spawn(move || match transport {
+            McpTransport::Stdio => {
+                while active.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            if !try_acquire_client_slot(&connections) {
+                                let mut stream = stream;
+                                let _ = write_response(
+                                    &mut stream,
+                                    &response_error(
+                                        "connect",
+                                        "MCP_CLIENT_LIMIT_REACHED",
+                                        format!("当前 MCP 会话已连接 {MAX_CLIENTS} 个适配器"),
+                                    ),
                                 );
-                            });
+                                continue;
+                            }
+                            let connection_app = app.clone();
+                            let connection_info = thread_info.clone();
+                            let connection_token = token.clone();
+                            let connection_active = Arc::clone(&active);
+                            let connection_connected = Arc::clone(&connections);
+                            let connection_pending = Arc::clone(&pending);
+                            let _ = thread::Builder::new()
+                                .name("ai-canvas-mcp-client".to_string())
+                                .spawn(move || {
+                                    handle_connection(
+                                        connection_app,
+                                        stream,
+                                        connection_info,
+                                        connection_token,
+                                        connection_active,
+                                        connection_connected,
+                                        connection_pending,
+                                    );
+                                });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(ACCEPT_RETRY_DELAY);
+                        }
+                        Err(_) => break,
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(ACCEPT_RETRY_DELAY);
-                    }
-                    Err(_) => break,
                 }
+            }
+            McpTransport::StreamableHttp => {
+                let _ = run_streamable_http_server(
+                    listener,
+                    app,
+                    thread_info,
+                    pending,
+                    token,
+                    cancellation,
+                );
             }
         })
         .map_err(|error| format!("无法启动 MCP bridge 线程: {error}"))?;
@@ -501,10 +853,16 @@ fn adapter_candidates(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> 
     roots
         .into_iter()
         .flat_map(|root| {
-            root.ancestors()
-                .take(6)
-                .map(|directory| directory.join("scripts").join("ai-canvas-mcp.mjs"))
-                .collect::<Vec<_>>()
+            let mut candidates = vec![
+                root.join("ai-canvas-mcp.mjs"),
+                root.join("resources").join("ai-canvas-mcp.mjs"),
+            ];
+            candidates.extend(
+                root.ancestors()
+                    .take(6)
+                    .map(|directory| directory.join("scripts").join("ai-canvas-mcp.mjs")),
+            );
+            candidates
         })
         .collect()
 }
@@ -634,10 +992,14 @@ mod tests {
             info: McpBridgeSessionInfo {
                 session_id: "session".to_string(),
                 port: 43123,
+                transport: McpTransport::Stdio,
+                bind_address: "127.0.0.1".to_string(),
+                endpoint_path: None,
                 adapter_path: None,
             },
             active: Arc::clone(&active),
             pending: Arc::new(Mutex::new(requests)),
+            cancellation: CancellationToken::new(),
         };
 
         stop_session(session);
@@ -688,12 +1050,61 @@ mod tests {
     }
 
     #[test]
+    fn binds_remote_http_on_all_ipv4_interfaces() {
+        let listener = bind_streamable_http(0).unwrap();
+        let address = listener.local_addr().unwrap();
+        assert_eq!(address.ip(), std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(address.port(), 0);
+    }
+
+    #[test]
+    fn http_security_requires_bearer_ip_host_and_matching_origin() {
+        let security = HttpSecurity {
+            token: TOKEN.to_string(),
+            port: 43123,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {TOKEN}").parse().unwrap());
+        headers.insert(HOST, "192.168.1.8:43123".parse().unwrap());
+        assert_eq!(validate_http_headers(&headers, &security), Ok(()));
+
+        headers.insert(HOST, "host.docker.internal:43123".parse().unwrap());
+        assert_eq!(validate_http_headers(&headers, &security), Ok(()));
+        headers.insert(HOST, "192.168.1.8:43123".parse().unwrap());
+
+        headers.insert(ORIGIN, "http://192.168.1.8:43123".parse().unwrap());
+        assert_eq!(validate_http_headers(&headers, &security), Ok(()));
+
+        headers.insert(ORIGIN, "http://attacker.example:43123".parse().unwrap());
+        assert_eq!(
+            validate_http_headers(&headers, &security),
+            Err(StatusCode::FORBIDDEN)
+        );
+        headers.remove(ORIGIN);
+
+        headers.insert(HOST, "attacker.example:43123".parse().unwrap());
+        assert_eq!(
+            validate_http_headers(&headers, &security),
+            Err(StatusCode::FORBIDDEN)
+        );
+        headers.insert(HOST, "192.168.1.8:43123".parse().unwrap());
+        headers.insert(AUTHORIZATION, "Bearer wrong".parse().unwrap());
+        assert_eq!(
+            validate_http_headers(&headers, &security),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
     fn adapter_lookup_walks_up_from_tauri_build_directories() {
         let candidates = adapter_candidates([PathBuf::from(
             "D:/workspace/AI-Canvas-tauri/src-tauri/target/debug",
         )]);
         assert!(candidates.contains(&PathBuf::from(
             "D:/workspace/AI-Canvas-tauri/scripts/ai-canvas-mcp.mjs",
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            "D:/workspace/AI-Canvas-tauri/src-tauri/target/debug/ai-canvas-mcp.mjs",
         )));
     }
 }

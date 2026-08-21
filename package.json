@@ -1,7 +1,7 @@
 {
     "name": "ai-canvas-tauri",
     "private": true,
-    "version": "0.8.9",
+    "version": "0.9.0",
     "type": "module",
     "scripts": {
         "postinstall": "node scripts/setup-hooks.js",
@@ -15,6 +15,7 @@
         "check": "npm run lint && npm run typecheck && npm run test:typecheck && npm run test",
         "ci": "npm run check && npm run build",
         "build": "tsc -b && vite build",
+        "build:mcp-adapter": "node scripts/build-mcp-adapter.mjs",
         "preview": "vite preview",
         "tauri": "tauri",
         "tauri:raw": "tauri",
@@ -59,6 +60,7 @@
         "@types/three": "^0.184.1",
         "@vitejs/plugin-react": "^6.0.1",
         "autoprefixer": "^10.4.21",
+        "esbuild": "^0.28.2",
         "eslint": "^10.3.0",
         "eslint-plugin-react-hooks": "^7.1.1",
         "eslint-plugin-react-refresh": "^0.5.2",

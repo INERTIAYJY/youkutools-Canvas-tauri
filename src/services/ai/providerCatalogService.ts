@@ -95,7 +95,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     catalogAdapter: 'openai-compatible',
     defaultBaseUrl: APIMART_BASE_URL,
     modelsPath: '/models',
-    allowCustomBaseUrl: true,
+    allowCustomBaseUrl: false,
     credentials: [
       API_KEY_FIELD,
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: APIMART_BASE_URL },
@@ -136,7 +136,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     catalogAdapter: 'openai-compatible',
     defaultBaseUrl: VOLCENGINE_BASE_URL,
     modelsPath: '/models',
-    allowCustomBaseUrl: true,
+    allowCustomBaseUrl: false,
     credentials: [
       API_KEY_FIELD,
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: VOLCENGINE_BASE_URL },
@@ -164,7 +164,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     authType: 'api-key',
     catalogAdapter: 'local-manifest',
     defaultBaseUrl: GRSAI_BASE_URL,
-    allowCustomBaseUrl: true,
+    allowCustomBaseUrl: false,
     credentials: [
       API_KEY_FIELD,
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: GRSAI_BASE_URL },

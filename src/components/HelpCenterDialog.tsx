@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
+import HelpMentionDemo from './HelpMentionDemo';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 
@@ -147,6 +148,11 @@ const HELP_CATEGORIES = [
       {
         title: '使用 ComfyUI 工作流',
         description: '先在“设置 > ComfyUI”配置服务并进入工作流管理，导入工作流 JSON、确认分类和输入节点。保存后可在对应生成节点的模型选择器中直接选择。',
+      },
+      {
+        title: 'ComfyUI 调用要指定输入节点',
+        description: '未设置默认节点时，ComfyUI 调用需要在提示词中 @ 对应节点，提示词或参考图才会写入该输入。在工作流管理里展开工作流卡片、点击节点徽章设为该类型默认节点（显示为 ★），之后调用会自动注入，无须每次 @。',
+        shortcut: '@节点 / ★ 默认节点',
       },
       {
         title: '留意付费操作',
@@ -605,6 +611,8 @@ export default function HelpCenterDialog({ onClose }: HelpCenterDialogProps) {
                       </li>
                     ))}
                   </ol>
+
+                  {activeHelpCategory === 'generation' ? <HelpMentionDemo /> : null}
 
                   <div className="mt-5 flex items-start gap-2 border-t border-canvas-border pt-4 text-xs leading-5 text-canvas-text-muted">
                     <Icon icon="mdi:keyboard-outline" width="16" height="16" className="mt-0.5 shrink-0" aria-hidden="true" />

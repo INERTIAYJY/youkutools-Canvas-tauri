@@ -8,6 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTooltipAutoPlacement } from '../../hooks/useTooltipAutoPlacement';
 import { loadConfig } from '../../services/fileService';
 import type { AppConfig } from '../../types';
+import { setLocale, useT } from '../../i18n';
 import ChatPanel from './ChatPanel';
 import {
   applyChatStatePatch,
@@ -27,6 +28,7 @@ const EMPTY_SNAPSHOT: ChatStateSnapshot = {
 };
 
 export default function ChatWindow() {
+  const t = useT();
   useTooltipAutoPlacement();
   const [snapshot, setSnapshot] = useState<ChatStateSnapshot>(EMPTY_SNAPSHOT);
   const [initialized, setInitialized] = useState(false);
@@ -46,6 +48,7 @@ export default function ChatWindow() {
           ? 'light'
           : config?.theme === 'light' ? 'light' : 'dark';
         document.documentElement.setAttribute('data-theme', effectiveTheme);
+        setLocale(config?.language);
       });
     };
 
@@ -125,7 +128,7 @@ export default function ChatWindow() {
         type="button"
         className="pointer-events-auto flex items-center justify-center w-7 h-7 rounded-md
                    text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover transition-colors"
-        data-tooltip="收回内嵌"
+        data-tooltip={t('收回内嵌')}
         onClick={closeWindow}
       >
         <Icon icon="mdi:dock-left" width="16" height="16" />
@@ -137,8 +140,8 @@ export default function ChatWindow() {
                       ? 'text-amber-400 bg-amber-400/15'
                       : 'text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover'
                     }`}
-        data-tooltip={isLocked ? '已锁定到主窗口' : '锁定到主窗口'}
-        aria-label={isLocked ? '取消位置锁定' : '锁定到主窗口'}
+        data-tooltip={isLocked ? t('已锁定到主窗口') : t('锁定到主窗口')}
+        aria-label={isLocked ? t('取消位置锁定') : t('锁定到主窗口')}
         onClick={handleToggleLock}
       >
         <Icon icon={isLocked ? 'mdi:lock' : 'mdi:lock-open-outline'} width="16" height="16" />
@@ -147,7 +150,7 @@ export default function ChatWindow() {
         type="button"
         className="pointer-events-auto flex items-center justify-center w-7 h-7 rounded-md
                    text-canvas-text-muted hover:text-canvas-text hover:bg-red-500/20 transition-colors"
-        aria-label="关闭独立窗口"
+        aria-label={t('关闭独立窗口')}
         onClick={closeWindow}
       >
         <Icon icon="mdi:close" width="16" height="16" />

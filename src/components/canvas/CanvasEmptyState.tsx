@@ -4,6 +4,7 @@
 import { memo } from 'react';
 import type { NodeType } from '../../types';
 import { useAppStore, generateId } from '../../store/useAppStore';
+import { useT } from '../../i18n';
 import AnimatedButton from '../shared/AnimatedButton';
 
 const EMPTY_STATE_NODE_TYPES = ['ai-text', 'ai-image', 'ai-video'] as NodeType[];
@@ -16,6 +17,7 @@ const EMPTY_STATE_LABELS: Partial<Record<NodeType, string>> = {
 };
 
 function CanvasEmptyState() {
+  const t = useT();
   const addNode = useAppStore((s) => s.addNode);
 
   return (
@@ -29,8 +31,8 @@ function CanvasEmptyState() {
           className="h-16 w-16 select-none"
         />
         <div className="text-center">
-          <div className="text-lg font-medium text-canvas-text mb-1">AI画布</div>
-          <div className="text-sm text-canvas-text-muted">右键自由生成节点，或从左侧面板选择节点类型</div>
+          <div className="text-lg font-medium text-canvas-text mb-1">{t('AI画布')}</div>
+          <div className="text-sm text-canvas-text-muted">{t('右键自由生成节点，或从左侧面板选择节点类型')}</div>
         </div>
         <div className="flex gap-2 mt-2 pointer-events-auto">
           {EMPTY_STATE_NODE_TYPES.map((type) => (
@@ -43,7 +45,7 @@ function CanvasEmptyState() {
                   type,
                   position: { x: 250 + offset * 3, y: 200 + offset * 2 },
                   data: {
-                    label: EMPTY_STATE_LABELS[type] || '',
+                    label: t(EMPTY_STATE_LABELS[type] || ''),
                     type,
                     prompt: '',
                     status: 'idle',
@@ -52,7 +54,7 @@ function CanvasEmptyState() {
               }}
               className="px-4 py-2 bg-canvas-card border border-canvas-border rounded-lg text-sm text-canvas-text-secondary hover:border-indigo-500/50 hover:text-canvas-text transition-colors"
             >
-              {EMPTY_STATE_LABELS[type]}
+              {t(EMPTY_STATE_LABELS[type] || '')}
             </AnimatedButton>
           ))}
         </div>

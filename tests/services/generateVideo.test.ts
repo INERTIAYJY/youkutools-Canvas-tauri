@@ -2,7 +2,10 @@ import type { Node } from '@xyflow/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   annotateCharacterReferences,
+  assertVideoReferenceLimits,
   buildGeneralVideoProtocolVariables,
+  buildVolcengineVideoContent,
+  buildVolcengineVideoRequestBody,
   generateVideo,
   resolveVideoGenerationOperation,
 } from '../../src/services/ai/generateVideo';
@@ -268,6 +271,122 @@ describe('video prompt media references', () => {
     expect(merged).toHaveLength(2);
     expect(merged[0]).toMatchObject({ origin: 'prompt', sourceNodeId: 'prompt-audio' });
     expect(merged[1].kind).toBe('video');
+  });
+});
+
+describe('Volcengine Seedance content', () => {
+  const reference = (
+    kind: 'image' | 'video' | 'audio',
+    url: string,
+    role: 'reference' | 'first_frame' | 'last_frame' | 'reference_audio' = 'reference',
+  ) => ({ kind, url, role, origin: 'connection' as const });
+
+  it('adds provider roles to every multimodal reference', () => {
+    expect(buildVolcengineVideoContent(
+      '  推进镜头  ',
+      [
+        reference('image', 'character.png'),
+        reference('video', 'motion.mp4'),
+        reference('audio', 'music.mp3', 'reference_audio'),
+      ],
+      false,
+    )).toEqual([
+      { type: 'text', text: '推进镜头' },
+      { type: 'image_url', image_url: { url: 'character.png' }, role: 'reference_image' },
+      { type: 'video_url', video_url: { url: 'motion.mp4' }, role: 'reference_video' },
+      { type: 'audio_url', audio_url: { url: 'music.mp3' }, role: 'reference_audio' },
+    ]);
+  });
+
+  it('preserves explicit first and last frame roles only in frame mode', () => {
+    expect(buildVolcengineVideoContent('', [
+      reference('image', 'first.png', 'first_frame'),
+      reference('image', 'last.png', 'last_frame'),
+    ], true)).toEqual([
+      { type: 'image_url', image_url: { url: 'first.png' }, role: 'first_frame' },
+      { type: 'image_url', image_url: { url: 'last.png' }, role: 'last_frame' },
+    ]);
+  });
+
+  it('keeps text-only parameters unchanged for Seedance 2.5', () => {
+    expect(buildVolcengineVideoRequestBody(
+      'doubao-seedance-2-5-260628',
+      '纯文本生成',
+      [],
+      false,
+      { seedanceResolution: '1080p', seedanceRatio: '9:16', seedanceDuration: 12 },
+    )).toMatchObject({
+      resolution: '1080p',
+      ratio: '9:16',
+      duration: 12,
+      content: [{ type: 'text', text: '纯文本生成' }],
+    });
+  });
+
+  it('uses adaptive ratio for explicit first/last frame generation', () => {
+    const body = buildVolcengineVideoRequestBody(
+      'doubao-seedance-2-5-260628',
+      '首尾帧转场',
+      [
+        reference('image', 'first.png', 'first_frame'),
+        reference('image', 'last.png', 'last_frame'),
+      ],
+      true,
+      { seedanceResolution: '720p', seedanceRatio: '16:9', seedanceDuration: 8 },
+    );
+    expect(body).toMatchObject({ ratio: 'adaptive', duration: 8 });
+    expect(body).not.toHaveProperty('omni_reference_task_type');
+  });
+
+  it('uses auto omni mode while preserving dimensions for image/audio references', () => {
+    expect(buildVolcengineVideoRequestBody(
+      'doubao-seedance-2-5-260628',
+      '参考角色和音乐生成',
+      [
+        reference('image', 'character.png'),
+        reference('audio', 'music.mp3', 'reference_audio'),
+      ],
+      false,
+      { seedanceResolution: '720p', seedanceRatio: '16:9', seedanceDuration: 15 },
+    )).toMatchObject({
+      omni_reference_task_type: 'auto',
+      ratio: '16:9',
+      duration: 15,
+    });
+  });
+
+  it('uses the safe auto/adaptive/-1 combination whenever a reference video is present', () => {
+    expect(buildVolcengineVideoRequestBody(
+      'doubao-seedance-2-5-260628',
+      '把视频中的人物替换成图片角色',
+      [
+        reference('video', 'source.mp4'),
+        reference('image', 'character.png'),
+      ],
+      false,
+      { seedanceResolution: '720p', seedanceRatio: '16:9', seedanceDuration: 20 },
+    )).toMatchObject({
+      omni_reference_task_type: 'auto',
+      ratio: 'adaptive',
+      duration: -1,
+      content: [
+        { type: 'text', text: '把视频中的人物替换成图片角色' },
+        { type: 'video_url', video_url: { url: 'source.mp4' }, role: 'reference_video' },
+        { type: 'image_url', image_url: { url: 'character.png' }, role: 'reference_image' },
+      ],
+    });
+  });
+
+  it('does not apply Seedance 2.5 omni overrides to Seedance 2.0 requests', () => {
+    const body = buildVolcengineVideoRequestBody(
+      'doubao-seedance-2-0-mini-260615',
+      '参考图片生成',
+      [reference('image', 'reference.png')],
+      false,
+      { seedanceResolution: '720p', seedanceRatio: '9:16', seedanceDuration: 10 },
+    );
+    expect(body).toMatchObject({ ratio: '9:16', duration: 10 });
+    expect(body).not.toHaveProperty('omni_reference_task_type');
   });
 });
 
@@ -634,5 +753,54 @@ describe('general video protocol variables', () => {
     // 独立字段仍按顺序推断，两种传参方式并存，由协议模板决定用哪个
     expect(variables.firstImage).toBe('https://cdn.example/first.png');
     expect(variables.lastImage).toBe('https://cdn.example/last.png');
+  });
+});
+
+describe('video reference limits', () => {
+  const input = (counts: { image?: number; video?: number; audio?: number }) => ({
+    prompt: 'prompt',
+    imageUrls: Array.from({ length: counts.image ?? 0 }, (_, i) => `https://cdn.example/i${i}.png`),
+    videoUrls: Array.from({ length: counts.video ?? 0 }, (_, i) => `https://cdn.example/v${i}.mp4`),
+    audioUrls: Array.from({ length: counts.audio ?? 0 }, (_, i) => `https://cdn.example/a${i}.mp3`),
+    operation: 'image-to-video' as const,
+  });
+
+  it('rejects reference media beyond what the model declared', () => {
+    const capability = { maxImageReferences: 9, maxVideoReferences: 0, maxAudioReferences: 0 };
+    expect(() => assertVideoReferenceLimits(input({ image: 12 }), capability, 'Seedance 900'))
+      .toThrow('模型 "Seedance 900" 最多支持 9 个参考图，当前有 12 个');
+    expect(() => assertVideoReferenceLimits(input({ image: 1, video: 1 }), capability, 'Seedance 900'))
+      .toThrow('不支持参考视频');
+    // 正好到上限不拦
+    expect(() => assertVideoReferenceLimits(input({ image: 9 }), capability, 'Seedance 900')).not.toThrow();
+  });
+
+  it('未声明上限的模型保持原有的不拦截行为', () => {
+    expect(() => assertVideoReferenceLimits(input({ image: 30, video: 5 }), undefined, 'X')).not.toThrow();
+    expect(() => assertVideoReferenceLimits(input({ image: 30 }), { maxDuration: 15 }, 'X')).not.toThrow();
+  });
+});
+
+describe('离散时长吸附', () => {
+  const build = (seedanceDuration: number, capability?: { durations?: number[]; maxDuration?: number }) =>
+    buildGeneralVideoProtocolVariables(
+      'lec-ac-seedance-900-720p',
+      { model: 'general/relay', provider: 'general', prompt: 'p', seedanceDuration },
+      { prompt: 'p', imageUrls: [], videoUrls: [], audioUrls: [], operation: 'text-to-video' },
+      capability,
+    ).duration;
+
+  it('画布上的 4 秒吸附到模型允许的最近档，而不是原样发出', () => {
+    // 文档：仅支持 10 或 15 秒
+    expect(build(4, { durations: [10, 15] })).toBe(10);
+    expect(build(13, { durations: [10, 15] })).toBe(15);
+    expect(build(15, { durations: [10, 15] })).toBe(15);
+    // 固定时长写成单元素数组
+    expect(build(4, { durations: [15] })).toBe(15);
+  });
+
+  it('没声明离散档位时保持原有的范围钳制', () => {
+    expect(build(8, { maxDuration: 15 })).toBe(8);
+    expect(build(8)).toBe(8);
   });
 });

@@ -13,6 +13,7 @@ import type {
   WorkflowDefinition,
 } from '../../../types';
 import { CATEGORY_TO_NODE_TYPES } from '../../../types';
+import { DREAMINA_IMAGE_MODELS, DREAMINA_VIDEO_MODELS } from '../../../services/ai/dreaminaModels';
 
 export type MediaModelKind = 'image' | 'video' | 'audio';
 
@@ -836,60 +837,24 @@ export const defaultModelGroups: ModelGroup[] = [
     iconType: 'badge',
     badgeText: 'JM',
     models: [
-      {
-        value: 'dreamina/4.0',
+      ...DREAMINA_IMAGE_MODELS.map((model) => ({
+        value: `dreamina/${model.version}`,
         provider: 'dreamina',
-        label: '即梦4.0',
-        description: '无图文生图 / 单图图生图',
-        iconType: 'badge',
+        label: model.label,
+        description: model.description,
+        iconType: 'badge' as const,
         badgeText: 'JM',
-        nodeTypes: ['ai-image'],
-      },
-      {
-        value: 'dreamina/4.5',
+        nodeTypes: ['ai-image' as const],
+      })),
+      ...DREAMINA_VIDEO_MODELS.map((model) => ({
+        value: `dreamina/${model.version}`,
         provider: 'dreamina',
-        label: '即梦4.5',
-        description: '综合性能均衡，推荐默认',
-        iconType: 'badge',
+        label: model.label,
+        description: model.description,
+        iconType: 'badge' as const,
         badgeText: 'JM',
-        nodeTypes: ['ai-image'],
-      },
-      {
-        value: 'dreamina/4.7',
-        provider: 'dreamina',
-        label: '即梦4.7',
-        description: '细节增强，生成更稳定',
-        iconType: 'badge',
-        badgeText: 'JM',
-        nodeTypes: ['ai-image'],
-      },
-      {
-        value: 'dreamina/5.0',
-        provider: 'dreamina',
-        label: '即梦5.0',
-        description: '新版模型，画面表现更强',
-        iconType: 'badge',
-        badgeText: 'JM',
-        nodeTypes: ['ai-image'],
-      },
-      {
-        value: 'dreamina/seedance2.0fast',
-        provider: 'dreamina',
-        label: '即梦视频 Seedance2.0 Fast',
-        description: '文生视频 / 图生视频，速度优先',
-        iconType: 'badge',
-        badgeText: 'JM',
-        nodeTypes: ['ai-video'],
-      },
-      {
-        value: 'dreamina/seedance2.0',
-        provider: 'dreamina',
-        label: '即梦视频 Seedance2.0',
-        description: '文生视频 / 图生视频，质量优先',
-        iconType: 'badge',
-        badgeText: 'JM',
-        nodeTypes: ['ai-video'],
-      },
+        nodeTypes: ['ai-video' as const],
+      })),
     ],
   },
 

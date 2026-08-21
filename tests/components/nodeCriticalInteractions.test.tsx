@@ -86,6 +86,7 @@ async function installReactHookDriver(
       useLayoutEffect: () => undefined,
       useMemo: <T,>(factory: () => T) => factory(),
       useRef: <T,>(initialValue: T) => ({ current: initialValue }),
+      useSyncExternalStore: () => 'zh-CN',
       useState: <T,>(initialValue: T | (() => T)) => {
         const resolved = typeof initialValue === 'function'
           ? (initialValue as () => T)()

@@ -1,0 +1,325 @@
+/**
+ * 对话面板（chat）
+ */
+const chat = {
+  // ── ChatHeader ──
+  '返回会话列表': 'Back to conversation list',
+  'AI 助手': 'AI Assistant',
+  '任务中心': 'Task Center',
+  '任务中心，{count} 个进行中': 'Task Center, {count} in progress',
+  '项目记忆': 'Project memory',
+  '子智能体': 'Sub-agents',
+  '收回内嵌': 'Dock back',
+  '独立窗口': 'Detach window',
+
+  // ── EmptyChatState ──
+  '画布 AI 助手': 'Canvas AI Assistant',
+  '用自然语言读取和操作画布。查询状态、定位节点、批量管理，一个对话框完成。':
+    'Read and control the canvas in natural language. Check status, locate nodes and manage in bulk — all from one dialog.',
+  '新建对话': 'New conversation',
+  '历史记录': 'History',
+  '试试这些：': 'Try these:',
+  '现在有几个失败节点？': 'How many failed nodes are there?',
+  '选中 3 号节点': 'Select node #3',
+  '删除失败节点': 'Delete failed nodes',
+
+  // ── ConversationList ──
+  '对话': 'Conversations',
+  '新对话': 'New conversation',
+  '搜索对话': 'Search conversations',
+  '搜索对话…': 'Search conversations…',
+  '没有匹配的对话': 'No matching conversations',
+  '还没有对话': 'No conversations yet',
+  '置顶': 'Pinned',
+  '最近': 'Recent',
+  '打开“{title}”的操作菜单': 'Open the menu for "{title}"',
+  '重命名': 'Rename',
+  '取消置顶': 'Unpin',
+  '归档': 'Archive',
+  '移入回收站': 'Move to trash',
+  '排队': 'Queued',
+  '规划': 'Planning',
+  '运行': 'Running',
+  '工具': 'Tool',
+  '待确认': 'Awaiting confirmation',
+  '暂停': 'Paused',
+  '失败': 'Failed',
+
+  // ── ChatInput ──
+  '全部': 'All',
+  '节点': 'Node',
+  '未配置': 'Not configured',
+  '请先配置对应供应商': 'Configure the provider first',
+  '{name}（引用参考图）': '{name} (references image)',
+  '{name}（引用设定文字）': '{name} (references text)',
+  '上传 Skill 失败': 'Failed to upload Skill',
+  '撤销 {name} 的读取授权': 'Revoke read access for {name}',
+  '输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill':
+    'Type a message. @n nodes · @a assets · @m models · / for Skills',
+  '节点与模型引用': 'Node and model references',
+  '画布节点': 'Canvas nodes',
+  '资产库': 'Asset library',
+  '模型': 'Model',
+  '没有匹配"{query}"的{noun}': 'No {noun} matching "{query}"',
+  '暂无可引用的{noun}': 'No {noun} to reference yet',
+  'Skill 引用': 'Skill references',
+  '上传 Skill': 'Upload Skill',
+  '上传 Skill 文件': 'Upload a Skill file',
+  '没有匹配"{query}"的 Skill': 'No Skill matching "{query}"',
+  '暂无已上传 Skill': 'No Skills uploaded yet',
+  '引用画布节点或媒体模型': 'Reference canvas nodes or media models',
+  '调用 Skill': 'Invoke a Skill',
+  '授权当前对话读取本地文件': 'Authorize this conversation to read local files',
+  '选择文本文件；授权仅在当前对话和本次运行期间有效':
+    'Choose text files; the grant is valid only for this conversation and this run',
+  '调整当前任务': 'Adjust the current task',
+  '在下一个安全步骤调整当前任务': 'Adjust the current task at the next safe step',
+  '将消息加入队列': 'Queue this message',
+  '发送消息': 'Send message',
+  '当前任务完成后发送': 'Send after the current task finishes',
+  '重要操作执行前会请求确认': 'Important actions require confirmation before running',
+  '角色': 'Character',
+  '场景': 'Scene',
+  '道具': 'Prop',
+  '图片': 'Image',
+  '视频': 'Video',
+  '音频': 'Audio',
+  '资产': 'Asset',
+
+  // ── AgentModeSelector ──
+  'Agent 模式': 'Agent mode',
+  '协作': 'Collaborate',
+  '自主': 'Autonomous',
+  'Plan 模式：仅分析与规划，只能使用只读工具':
+    'Plan mode: analyze and plan only, read-only tools',
+  'B 协作模式：画布写操作先预览确认':
+    'B Collaborate mode: canvas writes are previewed for confirmation first',
+  'C 自主模式：画布操作自动执行，付费媒体和文件写入仍需确认':
+    'C Autonomous mode: canvas actions run automatically, paid media and file writes still require confirmation',
+
+  // ── ContextUsageIndicator ──
+  '模型配置声明': 'declared in model config',
+  '按模型 ID 推断': 'inferred from model ID',
+  '未识别模型，使用保守默认值': 'unrecognized model, using a conservative default',
+  '上下文占用（估算）：约 {tokens} token': 'Context usage (estimated): about {tokens} tokens',
+  '模型上下文窗口：{tokens} token（{source}）': 'Model context window: {tokens} tokens ({source})',
+  '输入预算：{tokens} token，已用约 {percent}%': 'Input budget: {tokens} tokens, about {percent}% used',
+  '接近上限时会自动压缩较早的对话，不会删除原始历史':
+    'Earlier messages are compressed automatically when nearing the limit; the original history is never deleted',
+  '上下文占用约 {percent}%': 'Context usage about {percent}%',
+
+  // ── ChatMessages ──
+  '开始对话': 'Start a conversation',
+  '用自然语言操作画布，AI 助手帮你完成': 'Control the canvas in natural language, and the AI assistant will help',
+  '回到最新消息，{count} 条未读': 'Back to latest, {count} unread',
+  '回到最新消息': 'Back to latest messages',
+  '最新消息': 'Latest',
+
+  // ── ChatPanel toast ──
+  '已添加到画布': 'Added to canvas',
+  '添加节点失败': 'Failed to add node',
+  '产物已保存到项目': 'Artifact saved to project',
+  '保存失败': 'Save failed',
+  '该确认已过期，请重新发起操作': 'This confirmation has expired; please retry the action',
+  '已暂停任务': 'Task paused',
+  '已继续任务': 'Task resumed',
+  '无法继续该任务': 'Cannot resume this task',
+  '已停止任务': 'Task stopped',
+  '已跳过当前步骤，可继续或重新规划': 'Current step skipped; you can continue or replan',
+  '该步骤已无法跳过': 'This step can no longer be skipped',
+  '该任务当前状态无法重新规划': 'This task cannot be replanned in its current state',
+  '正在重新规划任务': 'Replanning the task',
+  '无法重新规划该任务': 'Cannot replan this task',
+  '已回退该任务的画布修改': 'Canvas changes from this task have been rolled back',
+  '无法回退任务': 'Cannot roll back the task',
+  '已授权 {count} 个文件': 'Authorized {count} file(s)',
+  '未新增文件授权': 'No new file grants',
+  '文件授权失败': 'File authorization failed',
+  '引用的节点已不存在': 'The referenced node no longer exists',
+  '独立窗口功能需要 Tauri 环境': 'The detach window feature requires the Tauri environment',
+  '打开独立窗口失败': 'Failed to open the detached window',
+
+  // ── MessageBubble ──
+  '正在分析请求': 'Analyzing the request',
+  '正在生成媒体内容...': 'Generating media…',
+  '生成的图片': 'Generated image',
+  '您的浏览器不支持视频播放': 'Your browser does not support video playback',
+  '生成的音乐': 'Generated music',
+  '生成的语音': 'Generated voice',
+  '您的浏览器不支持音频播放': 'Your browser does not support audio playback',
+  '已生成但未保存到项目：{error}': 'Generated but not saved to the project: {error}',
+  '写入项目目录失败': 'Failed to write to the project directory',
+  '保存中': 'Saving',
+  '重试保存': 'Retry save',
+  '媒体生成失败：{error}': 'Media generation failed: {error}',
+  '未知错误': 'Unknown error',
+  '正在创建画布节点...': 'Creating canvas node…',
+  '节点创建失败：{error}': 'Node creation failed: {error}',
+  '响应失败': 'Response failed',
+  '响应中断': 'Response interrupted',
+  '消息已复制': 'Message copied',
+  '复制消息': 'Copy message',
+  '复制': 'Copy',
+  '编辑并再次发送': 'Edit and resend',
+  '再次生成回答': 'Regenerate the answer',
+  '再次生成': 'Regenerate',
+
+  // ── SourceList ──
+  '来源（{count}）': 'Sources ({count})',
+
+  // ── AgentTaskTimeline · 状态 ──
+  '排队中': 'Queued',
+  '规划中': 'Planning',
+  '执行中': 'Running',
+  '调用工具': 'Calling tool',
+  '等待确认': 'Awaiting confirmation',
+  '已暂停': 'Paused',
+  '已完成': 'Completed',
+  '已停止': 'Stopped',
+  '运行记录': 'Run log',
+  '等待确认：{title}': 'Awaiting confirmation: {title}',
+  '等待用户确认': 'Awaiting user confirmation',
+  '准备{title}': 'Preparing {title}',
+  '正在{title}': 'Running {title}',
+  '正在等待执行': 'Waiting to run',
+  '正在分析工具结果': 'Analyzing tool results',
+  '正在调用工具': 'Calling a tool',
+  '正在整理结果': 'Compiling results',
+  '{count} 步': '{count} step(s)',
+  '{count} 次拒绝': '{count} denial(s)',
+  '{count} 次重试': '{count} retry/retries',
+
+  // ── AgentTaskTimeline · 暂停原因 ──
+  '你已暂停': 'Paused by you',
+  '已达模型轮次上限': 'Model round limit reached',
+  '已达工具调用上限': 'Tool call limit reached',
+  '工具结果已达上限': 'Tool result limit reached',
+  '上下文接近模型上限': 'Context is near the model limit',
+  '已达任务总预算上限': 'Total task budget reached',
+  '上下文压缩失败': 'Context compression failed',
+  '已跳过步骤，需重新规划': 'Step skipped; replan required',
+  '已请求重新规划': 'Replan requested',
+  '应用重启后暂停': 'Paused after app restart',
+
+  // ── AgentTaskTimeline · 工具活动 ──
+  '正在搜索网页': 'Searching the web',
+  '正在浏览网页': 'Browsing a web page',
+  '正在查看已授权文件': 'Listing authorized files',
+  '正在读取文件': 'Reading a file',
+  '正在读取接口文档': 'Reading provider docs',
+
+  // ── AgentTaskTimeline · 控制 ──
+  '已注入 Skill': 'Skill injected',
+  '继续': 'Resume',
+  '跳过此步': 'Skip this step',
+  '重新规划': 'Replan',
+  '停止': 'Stop',
+  '回退任务画布修改': 'Roll back canvas changes',
+
+  // ── AgentStepCard ──
+  '等待': 'Waiting',
+  '完成': 'Done',
+  '跳过': 'Skipped',
+  '重试 {count}': 'retried {count}',
+
+  // ── AgentApprovalCard ──
+  '需要你选择': 'Needs your choice',
+  '画布修改': 'Canvas change',
+  '写入文件': 'Write file',
+  '永久删除': 'Permanent delete',
+  '生成媒体': 'Generate media',
+  '保存记忆': 'Save memory',
+  'API 配置': 'API config',
+  '资产库写入': 'Asset library write',
+  '{label}待确认': '{label} pending confirmation',
+  '不会写入 API Key；新连接保持空白，已有连接保留原值。':
+    'API keys are never written; new connections stay blank and existing ones keep their values.',
+  '生图': 'Image',
+  '选择{kind}模型': 'Choose a {kind} model',
+  '模型未配置或当前不可用': 'Model not configured or currently unavailable',
+  '暂无可用模型，请先在设置中完成模型配置。': 'No available models; configure them in Settings first.',
+  '勾选要接入的模型（已选 {selected} / {total}）': 'Select models to add ({selected}/{total} selected)',
+  '取消全选': 'Deselect all',
+  '全选': 'Select all',
+  '拒绝': 'Reject',
+  '确认生成': 'Confirm generate',
+  '接入选中的 {count} 个模型': 'Add {count} selected model(s)',
+  '确认执行': 'Confirm',
+
+  // ── AgentTaskCenter ──
+  'Agent 任务中心': 'Agent Task Center',
+  '返回对话': 'Back to conversation',
+  '{count} 运行中': '{count} running',
+  '进行中': 'Active',
+  '暂无进行中的任务': 'No active tasks',
+  '暂无任务': 'No tasks',
+  '上级任务：{name}': 'Parent task: {name}',
+  '已删除任务': 'Deleted task',
+  '已删除会话': 'Deleted conversation',
+  '{count} 个只读子任务': '{count} read-only subtask(s)',
+
+  // ── ProjectMemoryPanel ──
+  '偏好': 'Preference',
+  '事实': 'Fact',
+  '约束': 'Constraint',
+  '决定': 'Decision',
+  '保存': 'Save',
+  '来源对话已删除': 'Source conversation deleted',
+  '来自对话': 'From conversation',
+  '禁用（不再发送给模型）': 'Disable (stop sending to the model)',
+  '启用': 'Enable',
+  '编辑': 'Edit',
+  '删除': 'Delete',
+  '{count} 条': '{count} item(s)',
+  '还没有项目记忆': 'No project memory yet',
+  '对话中助手会在你确认后保存偏好、事实、约束和决定，': 'During conversations the assistant saves preferences, facts, constraints and decisions after your confirmation,',
+  '之后的对话会自动参考这些记忆。': 'and later conversations reference these memories automatically.',
+
+  // ── AgentToolDetails ──
+  '未设置': 'Not set',
+  '是': 'Yes',
+  '否': 'No',
+  '调用详情': 'Call details',
+  '参数': 'Parameters',
+  '用户指定': 'User-specified',
+  '项目默认': 'Project default',
+  '模型默认': 'Model default',
+  '有效值': 'Resolved',
+  '参考素材': 'References',
+  '素材已不可用': 'Asset no longer available',
+  '用户上传素材': 'User-uploaded asset',
+  '对象': 'Entities',
+  '变更': 'Changes',
+  '结果': 'Result',
+
+  // ── AgentExecutionRationale ──
+  '执行依据': 'Execution rationale',
+  '{count} 项': '{count} item(s)',
+  '来自可验证的任务事件，不包含模型隐藏思维。': 'From verifiable task events; no hidden model reasoning.',
+
+  // ── SubAgentPanel ──
+  '{count} 个': '{count}',
+
+  // ── ChatWindow ──
+  '已锁定到主窗口': 'Locked to the main window',
+  '锁定到主窗口': 'Lock to the main window',
+  '取消位置锁定': 'Unlock position',
+  '关闭独立窗口': 'Close the detached window',
+
+  // ── ChatMarkdown ──
+  '代码已复制': 'Code copied',
+  '复制代码': 'Copy code',
+
+  // ── ChatReferenceText ──
+  '{label}，节点已不存在': '{label} — node no longer exists',
+  '定位节点 {label}': 'Locate node {label}',
+  '重新选择模型，当前为 {label}': 'Reselect model, currently {label}',
+  '节点已不存在': 'Node no longer exists',
+  '在画布中定位': 'Locate on canvas',
+  '重新选择模型': 'Reselect model',
+
+  // ── ChatComposerEditor ──
+  '对话消息': 'Conversation message',
+};
+
+export default chat;

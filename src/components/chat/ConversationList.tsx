@@ -10,6 +10,7 @@ import { useAppStore } from '../../store/useAppStore';
 import type { ChatConversation } from '../../types/chat';
 import type { AgentTask, AgentTaskStatus } from '../../types/agent';
 import AnimatedButton from '../shared/AnimatedButton';
+import { useT } from '../../i18n';
 
 interface ConversationListProps {
   onSelect: (id: string) => void;
@@ -40,6 +41,7 @@ export default function ConversationList({
   onArchiveConversation,
   onDeleteConversation,
 }: ConversationListProps) {
+  const t = useT();
   const isExternal = !!extConversations; // 独立窗口模式判断
   const reduceMotion = useReducedMotion();
 
@@ -151,14 +153,14 @@ export default function ConversationList({
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-3 border-b border-canvas-border">
         <span className="text-xs font-semibold text-canvas-text-muted">
-          对话
+          {t('对话')}
         </span>
         <AnimatedButton
           scale={1.05}
           className="flex h-7 w-7 items-center justify-center rounded-lg text-canvas-text-secondary transition-colors
                      hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
           onClick={onNew}
-          data-tooltip="新对话"
+          data-tooltip={t('新对话')}
         >
           <Icon icon="mdi:plus" width="16" height="16" />
         </AnimatedButton>
@@ -177,8 +179,8 @@ export default function ConversationList({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            aria-label="搜索对话"
-            placeholder="搜索对话…"
+            aria-label={t('搜索对话')}
+            placeholder={t('搜索对话…')}
             className="w-full h-8 pl-7 pr-3 text-xs bg-canvas-bg border border-canvas-border rounded-lg
                        text-canvas-text placeholder:text-canvas-text-muted
                        focus:outline-none focus:border-canvas-text-secondary transition-colors"
@@ -197,7 +199,7 @@ export default function ConversationList({
               className="flex flex-col items-center justify-center py-8 text-xs text-canvas-text-muted"
             >
               <Icon icon="mdi:chat-outline" width="28" height="28" className="mb-2 opacity-40" />
-              {searchQuery ? '没有匹配的对话' : '还没有对话'}
+              {searchQuery ? t('没有匹配的对话') : t('还没有对话')}
             </motion.div>
           )}
 
@@ -205,7 +207,7 @@ export default function ConversationList({
           {pinned.length > 0 && (
             <>
               <div className="px-2 py-1 text-[11px] font-medium text-canvas-text-muted">
-                置顶
+                {t('置顶')}
               </div>
               {pinned.map((conv) => (
                 <ConversationItem
@@ -233,7 +235,7 @@ export default function ConversationList({
             <>
               {pinned.length > 0 && (
                 <div className="px-2 py-1 text-[11px] font-medium text-canvas-text-muted">
-                  最近
+                  {t('最近')}
                 </div>
               )}
               {normal.map((conv) => (
@@ -294,6 +296,7 @@ function ConversationItem({
   onArchive: () => void;
   onDelete: () => void;
 }) {
+  const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
@@ -372,7 +375,7 @@ function ConversationItem({
           className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors
                       ${menuOpen ? 'opacity-100 bg-canvas-hover' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100'}
                       text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover`}
-          aria-label={`打开“${conv.title}”的操作菜单`}
+          aria-label={t('打开“{title}”的操作菜单', { title: conv.title })}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={(e) => {
@@ -398,7 +401,7 @@ function ConversationItem({
             >
               <ContextMenuItem
                 icon="mdi:pencil-outline"
-                label="重命名"
+                label={t('重命名')}
                 onClick={() => {
                   onRename();
                   setMenuOpen(false);
@@ -406,7 +409,7 @@ function ConversationItem({
               />
               <ContextMenuItem
                 icon={conv.pinned ? 'mdi:pin-off' : 'mdi:pin-outline'}
-                label={conv.pinned ? '取消置顶' : '置顶'}
+                label={conv.pinned ? t('取消置顶') : t('置顶')}
                 onClick={() => {
                   onTogglePin();
                   setMenuOpen(false);
@@ -414,7 +417,7 @@ function ConversationItem({
               />
               <ContextMenuItem
                 icon="mdi:archive-outline"
-                label="归档"
+                label={t('归档')}
                 onClick={() => {
                   onArchive();
                   setMenuOpen(false);
@@ -423,7 +426,7 @@ function ConversationItem({
               <div className="border-t border-canvas-border" />
               <ContextMenuItem
                 icon="mdi:delete-outline"
-                label="移入回收站"
+                label={t('移入回收站')}
                 danger
                 onClick={() => {
                   onDelete();
@@ -439,14 +442,15 @@ function ConversationItem({
 }
 
 function AgentTaskStatusBadge({ status }: { status: AgentTaskStatus }) {
+  const t = useT();
   const config: Partial<Record<AgentTaskStatus, { label: string; className: string }>> = {
-    queued: { label: '排队', className: 'text-slate-400' },
-    planning: { label: '规划', className: 'text-violet-400' },
-    running: { label: '运行', className: 'text-emerald-400' },
-    waiting_tool: { label: '工具', className: 'text-sky-400' },
-    waiting_approval: { label: '待确认', className: 'text-amber-400' },
-    paused: { label: '暂停', className: 'text-slate-400' },
-    failed: { label: '失败', className: 'text-red-400' },
+    queued: { label: t('排队'), className: 'text-slate-400' },
+    planning: { label: t('规划'), className: 'text-violet-400' },
+    running: { label: t('运行'), className: 'text-emerald-400' },
+    waiting_tool: { label: t('工具'), className: 'text-sky-400' },
+    waiting_approval: { label: t('待确认'), className: 'text-amber-400' },
+    paused: { label: t('暂停'), className: 'text-slate-400' },
+    failed: { label: t('失败'), className: 'text-red-400' },
   };
   const item = config[status];
   if (!item) return null;

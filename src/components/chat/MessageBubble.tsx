@@ -12,6 +12,7 @@ import AgentTaskTimeline, { type AgentTaskControls } from './AgentTaskTimeline';
 import ChatReferenceText, { type ChatReferenceHandlers } from './ChatReferenceText';
 import ChatMarkdown from './ChatMarkdown';
 import SourceList from './SourceList';
+import { useT } from '../../i18n';
 
 interface MessageBubbleProps extends ChatReferenceHandlers {
   message: ChatMessage;
@@ -44,6 +45,7 @@ function MessageBubble({
   onModelActivate,
   agentControls,
 }: MessageBubbleProps) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const [savingMedia, setSavingMedia] = useState(false);
   const isUser = message.role === 'user';
@@ -134,7 +136,7 @@ function MessageBubble({
               width="15"
               className="shrink-0 animate-spin text-canvas-text-muted motion-reduce:animate-none"
             />
-            <span>正在分析请求</span>
+            <span>{t('正在分析请求')}</span>
           </div>
         )}
         {message.content && (isUser ? (
@@ -166,7 +168,7 @@ function MessageBubble({
         {isGenerating && (
           <div className="chat-message-media-generating flex items-center gap-2 mt-2 text-[11px] text-canvas-text-muted">
             <span className="inline-block w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-            正在生成媒体内容...
+            {t('正在生成媒体内容...')}
           </div>
         )}
 
@@ -175,7 +177,7 @@ function MessageBubble({
           <div className="chat-message-image mt-1 pt-2 rounded-lg overflow-hidden border border-canvas-border">
             <img
               src={mediaResult.url}
-              alt={mediaResult.prompt || '生成的图片'}
+              alt={mediaResult.prompt || t('生成的图片')}
               className="w-full h-auto max-h-[280px] object-contain bg-canvas-bg rounded-lg"
               loading="lazy"
             />
@@ -196,7 +198,7 @@ function MessageBubble({
               className="w-full max-h-[280px] bg-canvas-bg"
               preload="metadata"
             >
-              您的浏览器不支持视频播放
+              {t('您的浏览器不支持视频播放')}
             </video>
             {mediaResult.prompt && (
               <p className="bg-canvas-bg/60 px-2 py-1.5 text-[11px] leading-[17px] text-canvas-text-muted">
@@ -212,10 +214,10 @@ function MessageBubble({
                 icon={mediaResult.audioPurpose === 'music' ? 'mdi:music-note' : 'mdi:account-voice'}
                 width="14"
               />
-              {mediaResult.audioPurpose === 'music' ? '生成的音乐' : '生成的语音'}
+              {mediaResult.audioPurpose === 'music' ? t('生成的音乐') : t('生成的语音')}
             </div>
             <audio src={mediaResult.url} controls className="h-9 w-full" preload="metadata">
-              您的浏览器不支持音频播放
+              {t('您的浏览器不支持音频播放')}
             </audio>
             {mediaResult.prompt && (
               <p className="mt-1.5 text-[11px] leading-[17px] text-canvas-text-muted">
@@ -228,7 +230,7 @@ function MessageBubble({
           <div className="chat-message-media-unsaved mt-2 flex flex-wrap items-start gap-1.5 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[11px] text-amber-300">
             <Icon icon="mdi:content-save-alert-outline" width="13" height="13" className="mt-0.5 shrink-0" />
             <span className="min-w-0 flex-1">
-              已生成但未保存到项目：{mediaResult?.persistError || '写入项目目录失败'}
+              {t('已生成但未保存到项目：{error}', { error: mediaResult?.persistError || t('写入项目目录失败') })}
             </span>
             {onRetryMediaSave && (
               <button
@@ -243,7 +245,7 @@ function MessageBubble({
                   width="12"
                   className={savingMedia ? 'animate-spin motion-reduce:animate-none' : undefined}
                 />
-                {savingMedia ? '保存中' : '重试保存'}
+                {savingMedia ? t('保存中') : t('重试保存')}
               </button>
             )}
           </div>
@@ -251,25 +253,25 @@ function MessageBubble({
         {message.mediaStatus === 'failed' && (
           <div className="chat-message-media-error flex items-start gap-1 mt-2 text-[11px] text-red-400">
             <Icon icon="mdi:alert-circle-outline" width="13" height="13" className="mt-0.5 shrink-0" />
-            <span>媒体生成失败：{message.mediaError || '未知错误'}</span>
+            <span>{t('媒体生成失败：{error}', { error: message.mediaError || t('未知错误') })}</span>
           </div>
         )}
         {message.canvasStatus === 'pending' && (
           <div className="mt-2 flex items-center gap-1 text-[11px] text-blue-400">
             <Icon icon="mdi:vector-square" width="13" />
-            正在创建画布节点...
+            {t('正在创建画布节点...')}
           </div>
         )}
         {message.canvasStatus === 'created' && message.canvasNodeId && (
           <div className="mt-2 flex items-center gap-1 text-[11px] text-green-400">
             <Icon icon="mdi:check-circle-outline" width="13" />
-            已添加到画布
+            {t('已添加到画布')}
           </div>
         )}
         {message.canvasStatus === 'failed' && (
           <div className="mt-2 flex items-start gap-1 text-[11px] text-red-400">
             <Icon icon="mdi:vector-square-remove" width="13" className="mt-0.5 shrink-0" />
-            <span>节点创建失败：{message.canvasError || '未知错误'}</span>
+            <span>{t('节点创建失败：{error}', { error: message.canvasError || t('未知错误') })}</span>
           </div>
         )}
         {!isUser && message.sources && message.sources.length > 0 && (
@@ -283,7 +285,7 @@ function MessageBubble({
                        hover:bg-canvas-card hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
           >
             <Icon icon="mdi:plus-box-outline" width="14" />
-            添加到画布
+            {t('添加到画布')}
           </button>
         )}
 
@@ -294,13 +296,13 @@ function MessageBubble({
         {message.status === 'error' && (
           <div className="chat-message-status chat-message-status-error flex items-center gap-1 mt-1 text-[11px] text-red-400">
             <Icon icon="mdi:alert-circle" width="12" height="12" />
-            响应失败
+            {t('响应失败')}
           </div>
         )}
         {message.status === 'interrupted' && (
           <div className="chat-message-status chat-message-status-interrupted flex items-center gap-1 mt-1 text-[11px] text-amber-400">
             <Icon icon="mdi:alert-outline" width="12" height="12" />
-            响应中断
+            {t('响应中断')}
           </div>
         )}
 
@@ -309,8 +311,8 @@ function MessageBubble({
             <button
               type="button"
               onClick={() => void copyMessage()}
-              aria-label={copied ? '消息已复制' : '复制消息'}
-              data-tooltip={copied ? '已复制' : '复制'}
+              aria-label={copied ? t('消息已复制') : t('复制消息')}
+              data-tooltip={copied ? t('已复制') : t('复制')}
               className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
             >
               <Icon icon={copied ? 'mdi:check' : 'mdi:content-copy'} width="14" />
@@ -319,8 +321,8 @@ function MessageBubble({
               <button
                 type="button"
                 onClick={() => onEditMessage(message.content)}
-                aria-label="编辑并再次发送"
-                data-tooltip="编辑并再次发送"
+                aria-label={t('编辑并再次发送')}
+                data-tooltip={t('编辑并再次发送')}
                 className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
               >
                 <Icon icon="mdi:pencil-outline" width="14" />
@@ -330,8 +332,8 @@ function MessageBubble({
               <button
                 type="button"
                 onClick={() => onRegenerate?.(regeneratePrompt || '')}
-                aria-label="再次生成回答"
-                data-tooltip="再次生成"
+                aria-label={t('再次生成回答')}
+                data-tooltip={t('再次生成')}
                 className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
               >
                 <Icon icon="mdi:refresh" width="15" />

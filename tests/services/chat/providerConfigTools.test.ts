@@ -15,6 +15,8 @@ import {
   getProviderConfigDraft,
 } from '../../../src/services/chat/providerConfigDraftService';
 import { registerProviderConfigAgentTools } from '../../../src/services/chat/tools/providerConfigTools';
+import { evaluateAgentToolPolicy } from '../../../src/services/chat/policyEngine';
+import { prepareApprovalInput } from '../../../src/services/chat/agentRoundExecutor';
 import {
   clearAgentToolRegistryForTests,
   getAgentTool,
@@ -419,5 +421,47 @@ curl https://gateway.example.com/v1/images/generations \\
     expect(applied).toMatchObject({ status: 'success' });
     const customConfig = Object.values(useAppStore.getState().config.providers)[0];
     expect(customConfig.apiKey).toBe('');
+  });
+});
+
+describe('模型勾选卡片', () => {
+  const models = [
+    { id: 'lec-grok-4.5', name: 'Grok 4.5', category: 'text' as const },
+    { id: 'lec-seed-2-0-900', name: 'Seedance 2.0 900', category: 'video' as const },
+    { id: 'lec-seed-2-5-900', name: 'Seedance 2.5 900', category: 'video' as const },
+  ];
+
+  it('任何模式下都要用户作答，不会自动放行', () => {
+    const tool = getAgentTool('provider_models_select')!;
+    expect(tool.effect).toBe('user_choice');
+    for (const mode of ['collaborative', 'autonomous'] as const) {
+      const decision = evaluateAgentToolPolicy(tool, { models }, { ...context, mode });
+      expect(decision).toMatchObject({ outcome: 'require_approval', approvalKind: 'user_choice' });
+    }
+  });
+
+  it('把候选模型交给审批卡渲染成勾选列表', () => {
+    const tool = getAgentTool('provider_models_select')!;
+    const { inputRequest } = prepareApprovalInput(
+      { definition: tool, input: { models } } as never,
+      '接入中转站',
+    );
+    expect(inputRequest).toEqual({ kind: 'provider_models', options: models });
+  });
+
+  it('只把用户勾中的模型交回给助手', async () => {
+    const tool = getAgentTool('provider_models_select')!;
+    const result = await tool.execute(context, {
+      models,
+      selectedIds: ['lec-seed-2-0-900', 'lec-seed-2-5-900'],
+    });
+    expect(result.status).toBe('success');
+    expect(result.modelContent).toContain('Seedance 2.0 900（lec-seed-2-0-900，video）');
+    expect(result.modelContent).toContain('Seedance 2.5 900');
+    expect(result.modelContent).not.toContain('Grok 4.5');
+
+    const empty = await tool.execute(context, { models, selectedIds: [] });
+    expect(empty.status).toBe('error');
+    expect(empty.summary).toContain('没有选择任何模型');
   });
 });

@@ -5,6 +5,7 @@
  * 所有数值为估算口径（无精确 tokenizer），悬停提示中注明。
  */
 import type { ContextUsageStat } from '../../services/chat/contextManager';
+import { useT } from '../../i18n';
 
 interface ContextUsageIndicatorProps {
   usage: ContextUsageStat | null;
@@ -16,6 +17,7 @@ const R = (SIZE - STROKE) / 2;
 const CIRC = 2 * Math.PI * R;
 
 export default function ContextUsageIndicator({ usage }: ContextUsageIndicatorProps) {
+  const t = useT();
   if (!usage) return null;
 
   const ratio = Math.min(1, Math.max(0, usage.ratio));
@@ -27,15 +29,15 @@ export default function ContextUsageIndicator({ usage }: ContextUsageIndicatorPr
       : '#818cf8'; // indigo-400
 
   const windowSourceLabel = usage.source === 'declared'
-    ? '模型配置声明'
+    ? t('模型配置声明')
     : usage.source === 'catalog'
-      ? '按模型 ID 推断'
-      : '未识别模型，使用保守默认值';
+      ? t('按模型 ID 推断')
+      : t('未识别模型，使用保守默认值');
   const tooltip = [
-    `上下文占用（估算）：约 ${usage.estimatedTokens.toLocaleString()} token`,
-    `模型上下文窗口：${usage.contextWindow.toLocaleString()} token（${windowSourceLabel}）`,
-    `输入预算：${usage.inputBudget.toLocaleString()} token，已用约 ${percent}%`,
-    usage.ratio >= 0.75 ? '接近上限时会自动压缩较早的对话，不会删除原始历史' : '',
+    t('上下文占用（估算）：约 {tokens} token', { tokens: usage.estimatedTokens.toLocaleString() }),
+    t('模型上下文窗口：{tokens} token（{source}）', { tokens: usage.contextWindow.toLocaleString(), source: windowSourceLabel }),
+    t('输入预算：{tokens} token，已用约 {percent}%', { tokens: usage.inputBudget.toLocaleString(), percent }),
+    usage.ratio >= 0.75 ? t('接近上限时会自动压缩较早的对话，不会删除原始历史') : '',
   ].filter(Boolean).join('\n');
 
   return (
@@ -43,7 +45,7 @@ export default function ContextUsageIndicator({ usage }: ContextUsageIndicatorPr
       className="chat-context-usage inline-flex shrink-0 items-center justify-center"
       title={tooltip}
       role="img"
-      aria-label={`上下文占用约 ${percent}%`}
+      aria-label={t('上下文占用约 {percent}%', { percent })}
     >
       <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} className="-rotate-90">
         <circle

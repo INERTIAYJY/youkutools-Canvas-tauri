@@ -6,6 +6,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import type { AudioOutputFormat, AudioTtsVoice } from '../../../types/aiTypes';
 import type { AudioGenerationPurpose } from '../../../types/media';
 import AnimatedButton from '../../shared/AnimatedButton';
+import { useT } from '../../../i18n';
 
 interface AudioParamSelectorProps {
   purpose?: AudioGenerationPurpose;
@@ -59,6 +60,7 @@ function AudioParamSelector({
   onChangeAutoGenerateLyrics,
   onContinuousEditEnd,
 }: AudioParamSelectorProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -93,7 +95,7 @@ function AudioParamSelector({
           type="button"
           className="img-pill-btn ui-schema-menu-trigger"
           aria-expanded={open}
-          data-tooltip={purpose === 'speech' ? '语音参数' : '音乐参数'}
+          data-tooltip={purpose === 'speech' ? t('语音参数') : t('音乐参数')}
           onClick={(event) => {
             event.stopPropagation();
             setOpen((value) => !value);
@@ -108,7 +110,7 @@ function AudioParamSelector({
             {purpose === 'speech' ? (
               <div className="rh-v5-meta-panel">
                 <label className="rh-vram-adv-row">
-                  <span className="rh-vram-adv-label">音色</span>
+                  <span className="rh-vram-adv-label">{t('音色')}</span>
                   <select
                     className="w-full rounded-md border border-canvas-border bg-canvas-bg px-2 py-1.5 text-xs text-canvas-text outline-none focus:border-orange-400"
                     value={voice}
@@ -121,7 +123,7 @@ function AudioParamSelector({
                 </label>
 
                 <div className="img-rp-quality-area">
-                  <div className="img-rp-section-label">输出格式</div>
+                  <div className="img-rp-section-label">{t('输出格式')}</div>
                   <div className="img-rp-quality-segmented rh-video-resolution-seg">
                     {FORMATS.map((item) => (
                       <AnimatedButton
@@ -137,7 +139,7 @@ function AudioParamSelector({
                 </div>
 
                 <label className="rh-vram-adv-row">
-                  <span className="rh-vram-adv-label">语速 {speed}x</span>
+                  <span className="rh-vram-adv-label">{t('语速 {speed}x', { speed })}</span>
                   <input
                     type="range"
                     className="rh-duration-input"
@@ -153,7 +155,7 @@ function AudioParamSelector({
             ) : (
               <div className="rh-v5-meta-panel">
                 <label className="rh-vram-adv-row">
-                  <span className="rh-vram-adv-label">标题</span>
+                  <span className="rh-vram-adv-label">{t('标题')}</span>
                   <input
                     className="w-full rounded-md border border-canvas-border bg-canvas-bg px-2 py-1.5 text-xs text-canvas-text outline-none focus:border-orange-400"
                     value={musicTitle}
@@ -179,7 +181,7 @@ function AudioParamSelector({
                     />
                   </label>
                   <label className="rh-vram-adv-row">
-                    <span className="rh-vram-adv-label">时长 {musicDuration}s</span>
+                    <span className="rh-vram-adv-label">{t('时长 {duration}s', { duration: musicDuration })}</span>
                     <input
                       type="range"
                       className="rh-duration-input"
@@ -194,8 +196,8 @@ function AudioParamSelector({
                 </div>
 
                 <div className="flex items-center justify-between gap-3">
-                  <span className="rh-vram-adv-label">自动生成歌词</span>
-                  <label className="rh-toggle-switch" data-tooltip="先生成歌词，再继续生成音乐">
+                  <span className="rh-vram-adv-label">{t('自动生成歌词')}</span>
+                  <label className="rh-toggle-switch" data-tooltip={t('先生成歌词，再继续生成音乐')}>
                     <input
                       type="checkbox"
                       checked={autoGenerateLyrics}
@@ -207,7 +209,7 @@ function AudioParamSelector({
 
                 {!autoGenerateLyrics ? (
                   <label className="rh-vram-adv-row">
-                    <span className="rh-vram-adv-label">歌词</span>
+                    <span className="rh-vram-adv-label">{t('歌词')}</span>
                     <textarea
                       className="min-h-24 w-full resize-y rounded-md border border-canvas-border bg-canvas-bg px-2 py-1.5 text-xs leading-5 text-canvas-text outline-none focus:border-orange-400"
                       value={musicLyrics}

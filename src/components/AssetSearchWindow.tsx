@@ -30,6 +30,7 @@ import { ALL_CATEGORIES, CATEGORY_ICONS, shortFolderName } from '../utils/assetF
 import { springSmooth, fadeFast } from '../utils/motion';
 import AssetThumb from './shared/AssetThumb';
 import type { AppConfig } from '../types';
+import { setLocale } from '../i18n';
 
 /** 单页渲染数量（增量加载步长）*/
 const PAGE_SIZE = 60;
@@ -65,6 +66,7 @@ export default function AssetSearchWindow() {
       const cfg = (await loadConfig()) as AppConfig | null;
       // 主题（独立窗口需自行应用 data-theme）
       document.documentElement.setAttribute('data-theme', cfg?.theme === 'light' ? 'light' : 'dark');
+      setLocale(cfg?.language);
       // 同步用户自定义数据根目录到 fileService
       setBaseDataDir(cfg?.baseDataDir);
       await syncAuthorizedDirectories(cfg ?? {});

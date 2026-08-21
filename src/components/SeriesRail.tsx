@@ -12,6 +12,7 @@ import { getProjectDataDir, uploadSourceFileToProject } from '../services/fileSe
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import ProjectAssetsOverlay from './ProjectAssetsOverlay';
+import { useT } from '../i18n';
 
 const SPLIT_PROMPT = '先用 series_read 读完当前剧集的剧本（没有剧本就读原著），'
   + '按剧情节奏把它拆成若干集，每集给出标题和一段大纲，'
@@ -45,6 +46,7 @@ function TextEditorDialog({
   onClose: () => void;
   onSave: (next: string) => Promise<boolean>;
 }) {
+  const t = useT();
   const [isSaving, setIsSaving] = useState(false);
 
   const submit = async () => {
@@ -72,7 +74,7 @@ function TextEditorDialog({
             <h2 className="truncate text-sm font-semibold leading-5">{title}</h2>
             <p className="truncate text-[11px] leading-4 text-canvas-text-muted">{hint}</p>
           </div>
-          <PopupCloseButton ariaLabel={`关闭${title}`} onClick={onClose} />
+          <PopupCloseButton ariaLabel={t('关闭{title}', { title })} onClick={onClose} />
         </header>
         <textarea
           value={draft}
@@ -80,10 +82,10 @@ function TextEditorDialog({
           spellCheck={false}
           className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-[13px] leading-relaxed
                      text-canvas-text outline-none placeholder:text-canvas-text-muted"
-          placeholder="粘贴或输入正文…"
+          placeholder={t('粘贴或输入正文…')}
         />
         <footer className="flex h-14 shrink-0 items-center justify-between gap-3 border-t border-border-subtle px-4">
-          <span className="text-[11px] text-canvas-text-muted">{draft.length} 字</span>
+          <span className="text-[11px] text-canvas-text-muted">{draft.length} {t('字')}</span>
           <button
             type="button"
             disabled={isSaving}
@@ -91,7 +93,7 @@ function TextEditorDialog({
             className="h-8 rounded-lg bg-indigo-500/90 px-4 text-xs font-medium text-white
                        transition-colors hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60"
           >
-            {isSaving ? '保存中…' : '保存'}
+            {isSaving ? t('保存中…') : t('保存')}
           </button>
         </footer>
       </div>
@@ -100,6 +102,7 @@ function TextEditorDialog({
 }
 
 export default function SeriesRail() {
+  const t = useT();
   const {
     projects, currentProjectId, projectLoadStatus,
     switchProject, addEpisode, updateSeriesInfo, updateEpisodeOutline,
@@ -160,7 +163,7 @@ export default function SeriesRail() {
     const uploaded = await uploadSourceFileToProject('txt,md', currentProjectId);
     if (!uploaded) return;
     if (!uploaded.filePath) {
-      showToast('原著需要保存到项目目录，请在桌面端添加', 'error');
+      showToast(t('原著需要保存到项目目录，请在桌面端添加'), 'error');
       return;
     }
     const projectDir = await getProjectDataDir(currentProjectId);
@@ -194,8 +197,8 @@ export default function SeriesRail() {
       >
         <button
           type="button"
-          aria-label="展开剧集栏（双击打开项目资产）"
-          data-tooltip="单击：展开剧集栏｜双击：打开项目资产"
+          aria-label={t('展开剧集栏（双击打开项目资产）')}
+          data-tooltip={t('单击：展开剧集栏｜双击：打开项目资产')}
           onClick={() => {
             // 清除之前的定时器（如果有）
             if (singleClickTimer.current) clearTimeout(singleClickTimer.current);
@@ -218,7 +221,7 @@ export default function SeriesRail() {
                      ${pinned ? 'opacity-0 scale-100' : 'opacity-40 hover:opacity-70 hover:scale-[1.2]'}`}
         />
         <aside
-          aria-label="剧集"
+          aria-label={t('剧集')}
           aria-hidden={!pinned}
           className={`glass-bevel glass-bevel--panel absolute right-2.5 top-1/2 flex max-h-full
                      w-[min(360px,calc(100vw-32px))] -translate-y-1/2 flex-col overflow-hidden
@@ -238,10 +241,10 @@ export default function SeriesRail() {
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold leading-4">{series.name}</p>
               <p className="truncate text-[10px] leading-4 text-canvas-text-muted">
-                {episodes.length > 0 ? `共 ${episodes.length} 集` : '还没有分集'}
+                {episodes.length > 0 ? t('共 {count} 集', { count: episodes.length }) : t('还没有分集')}
               </p>
             </div>
-            <PopupCloseButton ariaLabel="收起剧集栏" onClick={() => setPinned(false)} />
+            <PopupCloseButton ariaLabel={t('收起剧集栏')} onClick={() => setPinned(false)} />
           </header>
 
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
@@ -250,18 +253,18 @@ export default function SeriesRail() {
                 <div className="grid min-w-0 flex-1 gap-1.5">
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
                     <Icon icon="lucide:book-open" className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">原著</span>
+                    <span className="truncate">{t('原著')}</span>
                   </div>
                   <div className="flex h-8 items-center gap-1 rounded-lg border border-canvas-border bg-canvas-card px-2 leading-none">
                     <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
-                      {originalWork?.fileName ?? '未添加（txt / md）'}
+                      {originalWork?.fileName ?? t('未添加（txt / md）')}
                     </span>
                     <button
                       type="button"
                       disabled={!ready || busy !== null}
                       onClick={() => { void handleUploadOriginal(); }}
-                      data-tooltip={originalWork ? '更换原著文件' : '添加原著文件'}
-                      aria-label={originalWork ? '更换原著文件' : '添加原著文件'}
+                      data-tooltip={originalWork ? t('更换原著文件') : t('添加原著文件')}
+                      aria-label={originalWork ? t('更换原著文件') : t('添加原著文件')}
                       className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-canvas-text-muted
                                  transition-colors hover:bg-canvas-hover hover:text-canvas-text
                                  disabled:cursor-not-allowed disabled:opacity-40"
@@ -273,8 +276,8 @@ export default function SeriesRail() {
                         type="button"
                         disabled={busy !== null}
                         onClick={() => { void handleRemoveOriginal(); }}
-                        data-tooltip="移除引用（不删文件）"
-                        aria-label="移除原著引用"
+                        data-tooltip={t('移除引用（不删文件）')}
+                        aria-label={t('移除原著引用')}
                         className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-canvas-text-muted
                                    transition-colors hover:bg-red-500/15 hover:text-red-400
                                    disabled:cursor-not-allowed disabled:opacity-40"
@@ -287,7 +290,7 @@ export default function SeriesRail() {
                 <div className="grid min-w-0 flex-1 gap-1.5">
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
                     <Icon icon="lucide:scroll-text" className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">剧本</span>
+                    <span className="truncate">{t('剧本')}</span>
                   </div>
                   <button
                     type="button"
@@ -298,7 +301,7 @@ export default function SeriesRail() {
                                disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
-                      {script ? `${script.length} 字` : '未填写，点击编辑'}
+                      {script ? `${script.length} ${t('字')}` : t('未填写，点击编辑')}
                     </span>
                     <Icon icon="lucide:pencil" className="h-3.5 w-3.5 shrink-0 text-canvas-text-muted" />
                   </button>
@@ -309,7 +312,7 @@ export default function SeriesRail() {
             <section className="grid gap-1.5 border-t border-border-subtle p-2">
               <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
                 <Icon icon="lucide:list-video" className="h-3.5 w-3.5" />
-                分集
+                {t('分集')}
               </div>
 
               {episodes.map((episode, index) => {
@@ -339,7 +342,7 @@ export default function SeriesRail() {
                           if (event.key === 'Enter') event.currentTarget.blur();
                           if (event.key === 'Escape') setRenamingId(null);
                         }}
-                        aria-label="分集名称"
+                        aria-label={t('分集名称')}
                         className="min-w-0 flex-1 h-full rounded-md bg-canvas-bg/60 px-1.5 text-[11px] leading-none
                                    text-canvas-text outline-none ring-1 ring-inset ring-indigo-400/50"
                       />
@@ -353,7 +356,7 @@ export default function SeriesRail() {
                           setRenameDraft(episode.name);
                         }}
                         aria-current={isCurrent}
-                        data-tooltip={`${episode.name}（双击改名）`}
+                        data-tooltip={t('{name}（双击改名）', { name: episode.name })}
                         className={`min-w-0 flex-1 truncate px-1 text-left text-[11px] leading-none transition-colors ${
                           isCurrent ? 'text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text-secondary'
                         }`}
@@ -368,7 +371,7 @@ export default function SeriesRail() {
                         type="button"
                         disabled={index === 0 || busy !== null}
                         onClick={() => { void runBusy('move', () => moveEpisode(episode.id, -1)); }}
-                        aria-label={`把 ${episode.name} 上移`}
+                        aria-label={t('把 {name} 上移', { name: episode.name })}
                         className="grid h-5 w-5 place-items-center rounded text-canvas-text-muted
                                    transition-colors hover:bg-canvas-hover hover:text-canvas-text
                                    disabled:cursor-not-allowed disabled:opacity-25"
@@ -379,7 +382,7 @@ export default function SeriesRail() {
                         type="button"
                         disabled={index === episodes.length - 1 || busy !== null}
                         onClick={() => { void runBusy('move', () => moveEpisode(episode.id, 1)); }}
-                        aria-label={`把 ${episode.name} 下移`}
+                        aria-label={t('把 {name} 下移', { name: episode.name })}
                         className="grid h-5 w-5 place-items-center rounded text-canvas-text-muted
                                    transition-colors hover:bg-canvas-hover hover:text-canvas-text
                                    disabled:cursor-not-allowed disabled:opacity-25"
@@ -398,9 +401,9 @@ export default function SeriesRail() {
                           setConfirmDeleteId(episode.id);
                         }}
                         aria-label={confirmDeleteId === episode.id
-                          ? `确认删除 ${episode.name}`
-                          : `删除 ${episode.name}`}
-                        data-tooltip={confirmDeleteId === episode.id ? '再点一次确认删除' : '删除这一集'}
+                          ? t('确认删除 {name}', { name: episode.name })
+                          : t('删除 {name}', { name: episode.name })}
+                        data-tooltip={confirmDeleteId === episode.id ? t('再点一次确认删除') : t('删除这一集')}
                         className={`grid h-5 w-5 place-items-center rounded transition-colors
                                     disabled:cursor-not-allowed disabled:opacity-25 ${
                                       confirmDeleteId === episode.id
@@ -427,7 +430,7 @@ export default function SeriesRail() {
                 <Icon icon={busy === 'add' ? 'lucide:loader-2' : 'lucide:plus'}
                   className={`h-3.5 w-3.5 ${busy === 'add' ? 'animate-spin motion-reduce:animate-none' : ''}`}
                 />
-                {episodes.length > 0 ? '新增分集' : '转为剧集并新增分集'}
+                {episodes.length > 0 ? t('新增分集') : t('转为剧集并新增分集')}
               </button>
 
               {/* 拆分由对话助手完成：把提示词填进输入框，用户确认后再发起。 */}
@@ -440,7 +443,7 @@ export default function SeriesRail() {
                            hover:text-canvas-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Icon icon="lucide:wand-sparkles" className="h-3.5 w-3.5" />
-                让助手按剧本拆分集
+                {t('让助手按剧本拆分集')}
               </button>
             </section>
 
@@ -448,7 +451,7 @@ export default function SeriesRail() {
               <section className="grid gap-2 border-t border-border-subtle p-2">
                 <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
                   <Icon icon="lucide:notebook-pen" className="h-3.5 w-3.5" />
-                  本集大纲
+                  {t('本集大纲')}
                 </div>
                 <button
                   type="button"
@@ -460,7 +463,7 @@ export default function SeriesRail() {
                              px-2.5 py-2 text-left transition-colors hover:bg-canvas-hover"
                 >
                   <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
-                    {currentEpisode.episodeOutline?.trim() || '未填写，点击编辑'}
+                    {currentEpisode.episodeOutline?.trim() || t('未填写，点击编辑')}
                   </span>
                   <Icon icon="lucide:pencil" className="h-3.5 w-3.5 shrink-0 text-canvas-text-muted" />
                 </button>

@@ -22,7 +22,7 @@ import type {
   ShotRow,
   StoryboardCellOverride,
 } from '../types';
-import { createCanvasNoteData } from '../types';
+import { createCanvasNoteData, STORYBOARD_CELL_SOURCE_TYPES } from '../types';
 import type { MediaGenerationIntent, MediaGenerationResult } from '../types/media';
 import { generateId, getNextDisplayId } from './store.utils';
 import { BATCH_NODE_LIMIT } from './store.chat';
@@ -32,9 +32,39 @@ import { cancelNodePolling } from '../services/pollManager';
 import { applyProjectDefaultsToNodeData } from '../services/projectSettingsService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
 import { requiresDirectorDeskRuntime } from '../services/directorDeskRuntimeService';
+import { clearPluginFileGrants } from '../services/plugins/pluginFileGrantService';
 
 interface GroupNodeDataAccess {
   groupId: string;
+}
+
+export function isCanvasConnectionValid(connection: {
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+}): boolean {
+  if (connection.source === connection.target) return false;
+  const { sourceHandle, targetHandle } = connection;
+  if (
+    (sourceHandle === 'left' || sourceHandle === 'right')
+    && (targetHandle === 'left' || targetHandle === 'right')
+  ) {
+    return sourceHandle !== targetHandle;
+  }
+  return true;
+}
+
+function normalizeCanvasConnection(connection: Connection): Connection | null {
+  if (!isCanvasConnectionValid(connection)) return null;
+  const draggedFromInput = connection.sourceHandle === 'left' && connection.targetHandle === 'right';
+  if (!draggedFromInput) return connection;
+  return {
+    source: connection.target,
+    target: connection.source,
+    sourceHandle: connection.targetHandle,
+    targetHandle: connection.sourceHandle,
+  };
 }
 
 function hasMaterializedNodeOutput(data: BaseNodeData, nodeType: string | undefined): boolean {
@@ -75,6 +105,45 @@ function prepareDuplicateNodeData(
   return duplicate;
 }
 
+/**
+ * 删除节点前统计「还有人在用」的文件：存活节点的媒体文件、宫格各格引用的图片、
+ * 对话里的媒体产物。宫格格子和源图共用同一个文件，漏掉它就会把还在显示的图搬进回收站。
+ */
+export function collectKeepPaths(
+  nodes: Node<BaseNodeData>[],
+  idsToDelete: ReadonlySet<string>,
+  messages: { mediaResult?: { filePath?: string } }[],
+): Set<string> {
+  const keepPaths = new Set<string>();
+  for (const node of nodes) {
+    const data = node.data as BaseNodeData;
+    if (!idsToDelete.has(node.id) && data.filePath) keepPaths.add(data.filePath);
+    // 宫格格子无论节点存活与否都不删：删除路径只清 filePath，撤销也只还原 filePath
+    for (const override of data.storyboardOverrides ?? []) {
+      if (override?.filePath) keepPaths.add(override.filePath);
+    }
+  }
+  for (const message of messages) {
+    if (message.mediaResult?.filePath) keepPaths.add(message.mediaResult.filePath);
+  }
+  return keepPaths;
+}
+
+function mergeNodeData(previous: BaseNodeData, patch: Partial<BaseNodeData>): BaseNodeData {
+  const next = { ...previous, ...patch } as BaseNodeData;
+  // 节点换了底层文件（重新生成、裁切、重命名…）就必须一并作废旧的资产身份：
+  // 加载时 relativePath 的优先级高于 filePath，留着上一次的身份会把节点解析回上一张图。
+  // 调用方自己带了 assetId / relativePath（移动到分组目录之类）说明身份仍然有效，按它的来。
+  if (
+    'filePath' in patch && patch.filePath !== previous.filePath
+    && !('assetId' in patch) && !('relativePath' in patch)
+  ) {
+    next.assetId = undefined;
+    next.relativePath = undefined;
+  }
+  return next;
+}
+
 function mergeCanvasNotePatch(note: CanvasNoteData, patch: CanvasNotePatch): CanvasNoteData {
   return {
     ...note,
@@ -101,8 +170,12 @@ function pruneDeletedNodesAndEmptyGroups(
       ...group,
       nodeIds: group.nodeIds.filter((nodeId) => !deletedNodeIds.has(nodeId)),
     }));
+  // 只清理「因删除而变空」的分组；手动创建的空文件夹要留着
   const emptyGroupIds = new Set(
-    prunedGroups.filter((group) => group.nodeIds.length === 0).map((group) => group.id),
+    prunedGroups
+      .filter((group) => group.nodeIds.length === 0
+        && (groups.find((g) => g.id === group.id)?.nodeIds.length ?? 0) > 0)
+      .map((group) => group.id),
   );
   const allDeletedNodeIds = new Set(deletedNodeIds);
   for (const groupId of emptyGroupIds) allDeletedNodeIds.add(groupId);
@@ -124,11 +197,18 @@ function pruneDeletedNodesAndEmptyGroups(
   };
 }
 
-export function filterCharacterLibraryCanvasElements(
+/** 渲染前剔除隐藏元素：角色库收纳的节点、已折叠分组的子节点，以及它们的连线 */
+export function filterHiddenCanvasElements(
   nodes: Node<BaseNodeData>[],
   edges: Edge[],
 ): { nodes: Node<BaseNodeData>[]; edges: Edge[] } {
-  const visibleNodes = nodes.filter((node) => node.data.hiddenByCharacterLibrary !== true);
+  const collapsedGroupIds = new Set(
+    nodes.filter((node) => node.data.groupCollapsed === true).map((node) => node.id),
+  );
+  const visibleNodes = nodes.filter((node) => (
+    node.data.hiddenByCharacterLibrary !== true
+    && !(node.parentId && collapsedGroupIds.has(node.parentId))
+  ));
   if (visibleNodes.length === nodes.length) return { nodes, edges };
   const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
   return {
@@ -444,7 +524,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     get().commitToHistory();
     set((state) => ({
       nodes: state.nodes.map((n) =>
-        n.id === nodeId ? { ...n, data: { ...n.data, ...data } as BaseNodeData } : n
+        n.id === nodeId ? { ...n, data: mergeNodeData(n.data, data) } : n
       ),
     }));
   },
@@ -452,7 +532,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
   updateNodeDataTransient: (nodeId, data) => {
     set((state) => ({
       nodes: state.nodes.map((node) =>
-        node.id === nodeId ? { ...node, data: { ...node.data, ...data } as BaseNodeData } : node
+        node.id === nodeId ? { ...node, data: mergeNodeData(node.data, data) } : node
       ),
     }));
   },
@@ -471,7 +551,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     get().commitToHistory();
     set((state) => ({
       nodes: state.nodes.map((node) => targetIds.has(node.id)
-        ? { ...node, data: { ...node.data, ...data } as BaseNodeData }
+        ? { ...node, data: mergeNodeData(node.data, data) }
         : node),
     }));
   },
@@ -748,6 +828,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         q.push(c.id);
       });
     }
+    clearPluginFileGrants(undefined, idsToDelete);
 
     // Cancel any active polling for all deleted nodes
     for (const id of idsToDelete) {
@@ -755,14 +836,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     }
 
     // Delete local files for all affected nodes —— 跳过仍被存活节点引用的共享文件（复制节点场景）
-    const keepPaths = new Set(
-      nodes.filter((n) => !idsToDelete.has(n.id))
-        .map((n) => (n.data as BaseNodeData).filePath)
-        .filter((p): p is string => !!p),
-    );
-    for (const message of get().messages) {
-      if (message.mediaResult?.filePath) keepPaths.add(message.mediaResult.filePath);
-    }
+    const keepPaths = collectKeepPaths(nodes, idsToDelete, get().messages);
     for (const id of idsToDelete) {
       const n = nodes.find((nn) => nn.id === id);
       if (n && !n.data.artifactId) {
@@ -800,6 +874,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         q.push(c.id);
       });
     }
+    clearPluginFileGrants(undefined, idsToDelete);
 
     // 取消所有轮询
     for (const id of idsToDelete) {
@@ -807,14 +882,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     }
 
     // 清理文件
-    const keepPaths = new Set(
-      nodes.filter((n) => !idsToDelete.has(n.id))
-        .map((n) => (n.data as BaseNodeData).filePath)
-        .filter((p): p is string => !!p),
-    );
-    for (const message of get().messages) {
-      if (message.mediaResult?.filePath) keepPaths.add(message.mediaResult.filePath);
-    }
+    const keepPaths = collectKeepPaths(nodes, idsToDelete, get().messages);
     for (const id of idsToDelete) {
       const n = nodes.find((nn) => nn.id === id);
       if (n && !n.data.artifactId) {
@@ -879,7 +947,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     const { nodes } = get();
     const sb = nodes.find((n) => n.id === storyboardId && n.type === 'ai-storyboard');
     const src = nodes.find((n) => n.id === sourceNodeId);
-    if (!sb || !src || src.type !== 'ai-image') return;
+    if (!sb || !src || !STORYBOARD_CELL_SOURCE_TYPES.includes(src.type ?? '')) return;
     const url = (src.data.imageUrl || src.data.thumbnailUrl) as string | undefined;
     if (!url) return;
 
@@ -924,14 +992,14 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
   },
 
   onConnect: (connection) => {
+    // Loose 模式允许从任一端开始拖拽；持久化前统一为「右侧输出 → 左侧输入」。
+    const normalized = normalizeCanvasConnection(connection);
+    if (!normalized) return;
     get().commitToHistory();
     const id = `edge-${generateId()}`;
     const edge: Edge = {
       id,
-      source: connection.source!,
-      target: connection.target!,
-      sourceHandle: connection.sourceHandle,
-      targetHandle: connection.targetHandle,
+      ...normalized,
     };
     set((state) => ({ edges: [...state.edges, edge] }));
   },

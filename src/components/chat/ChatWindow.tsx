@@ -7,6 +7,8 @@ import { Icon } from '@iconify/react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTooltipAutoPlacement } from '../../hooks/useTooltipAutoPlacement';
 import { loadConfig } from '../../services/fileService';
+import { useAppStore } from '../../store/useAppStore';
+import { emptyDramaAssetLibrary } from '../../types/dramaAssets';
 import type { AppConfig } from '../../types';
 import { setLocale, useT } from '../../i18n';
 import ChatPanel from './ChatPanel';
@@ -25,7 +27,14 @@ const EMPTY_SNAPSHOT: ChatStateSnapshot = {
   agentTasks: [],
   projectId: null,
   generalModels: [],
+  nodes: [],
+  dramaAssets: emptyDramaAssetLibrary(),
+  userSkills: [],
+  composerDraft: '',
 };
+
+const HANDSHAKE_RETRY_MS = 500;
+const HANDSHAKE_TIMEOUT_MS = 8000;
 
 export default function ChatWindow() {
   const t = useT();
@@ -62,6 +71,16 @@ export default function ChatWindow() {
     };
   }, []);
 
+  // 直接把同步过来的画布切片灌进本窗口 Store，@ 引用 / 调用详情等组件照旧读 Store
+  useEffect(() => {
+    useAppStore.setState({
+      nodes: snapshot.nodes,
+      dramaAssets: snapshot.dramaAssets,
+      userSkills: snapshot.userSkills,
+      currentProjectId: snapshot.projectId,
+    });
+  }, [snapshot.nodes, snapshot.dramaAssets, snapshot.userSkills, snapshot.projectId]);
+
   const closeWindow = useCallback(() => {
     void (async () => {
       try {
@@ -85,8 +104,15 @@ export default function ChatWindow() {
   }, []);
 
   useEffect(() => {
-    const fallbackTimer = setTimeout(() => setInitialized(true), 3000);
+    // initChatWindowListener 是异步的，可能在 cleanup 之后才 resolve；
+    // 不记住这个标记就会漏掉一个永不注销的监听 + 一个还在发 request_sync 的定时器
+    let disposed = false;
     let cleanup: (() => void) | undefined;
+    let handshake: ReturnType<typeof setInterval> | undefined;
+    const stopHandshake = () => {
+      if (handshake) clearInterval(handshake);
+      handshake = undefined;
+    };
 
     void initChatWindowListener(
       (sync) => {
@@ -101,17 +127,34 @@ export default function ChatWindow() {
           resyncRequestedRef.current = true;
           void emitAction({ type: 'request_sync' });
         }
+        stopHandshake();
         setInitialized(true);
-        clearTimeout(fallbackTimer);
       },
       closeWindow,
     ).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
       cleanup = dispose;
+      const startedAt = Date.now();
       void emitAction({ type: 'request_sync' });
+      // 主窗口可能还没准备好接收，重试到首帧快照到手为止
+      handshake = setInterval(() => {
+        if (Date.now() - startedAt > HANDSHAKE_TIMEOUT_MS) {
+          stopHandshake();
+          // 握手失败不该伪装成「没有对话」，先放行 UI 再把原因留在控制台
+          console.error('[ChatWindow] no snapshot from the main window; sync channel is down');
+          setInitialized(true);
+          return;
+        }
+        void emitAction({ type: 'request_sync' });
+      }, HANDSHAKE_RETRY_MS);
     });
 
     return () => {
-      clearTimeout(fallbackTimer);
+      disposed = true;
+      stopHandshake();
       cleanup?.();
     };
   }, [closeWindow]);

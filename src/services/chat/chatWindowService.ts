@@ -16,8 +16,10 @@
  * - 独立窗口可独立读取 IndexedDB 做初始化加载
  */
 
+import type { Node } from '@xyflow/react';
 import type { ChatConversation, ChatMessage } from '../../types/chat';
-import type { GeneralModelConfig } from '../../types';
+import type { BaseNodeData, GeneralModelConfig, UserSkill } from '../../types';
+import type { DramaAssetLibrary } from '../../types/dramaAssets';
 import type {
   AgentApprovalResolution,
   AgentMode,
@@ -47,6 +49,12 @@ export interface ChatStateSnapshot {
   assistantVideoModelId?: string;
   mediaModelAvailability?: Record<string, boolean>;
   localFileGrants?: LocalFileGrantSummary[];
+  /** 画布节点精简投影，供 @ 引用与调用详情渲染；不含提示词/坐标等正文 */
+  nodes: Node<BaseNodeData>[];
+  dramaAssets: DramaAssetLibrary;
+  userSkills: UserSkill[];
+  /** 输入框草稿，独立窗口打开/收回时接力 */
+  composerDraft: string;
 }
 
 interface ChatEntityPatch<T> {
@@ -69,6 +77,10 @@ export interface ChatStatePatch {
     assistantVideoModelId: string | null;
     mediaModelAvailability: Record<string, boolean> | null;
     localFileGrants: LocalFileGrantSummary[] | null;
+    nodes: Node<BaseNodeData>[];
+    dramaAssets: DramaAssetLibrary;
+    userSkills: UserSkill[];
+    composerDraft: string;
   }>;
 }
 
@@ -171,6 +183,10 @@ export function createChatStatePatch(
     next.mediaModelAvailability,
   );
   setChangedField(fields, 'localFileGrants', previous.localFileGrants, next.localFileGrants);
+  setChangedField(fields, 'nodes', previous.nodes, next.nodes);
+  setChangedField(fields, 'dramaAssets', previous.dramaAssets, next.dramaAssets);
+  setChangedField(fields, 'userSkills', previous.userSkills, next.userSkills);
+  setChangedField(fields, 'composerDraft', previous.composerDraft, next.composerDraft);
 
   return {
     conversations: createEntityPatch(previous.conversations, next.conversations),
@@ -213,6 +229,10 @@ export function applyChatStatePatch(
     localFileGrants: fields.localFileGrants === null
       ? undefined
       : (fields.localFileGrants ?? current.localFileGrants),
+    nodes: fields.nodes ?? current.nodes,
+    dramaAssets: fields.dramaAssets ?? current.dramaAssets,
+    userSkills: fields.userSkills ?? current.userSkills,
+    composerDraft: fields.composerDraft ?? current.composerDraft,
     conversations: applyEntityPatch(current.conversations, patch.conversations),
     messages: applyEntityPatch(current.messages, patch.messages),
     agentTasks: applyEntityPatch(current.agentTasks, patch.agentTasks),
@@ -253,6 +273,7 @@ export type ChatAction =
   | { type: 'select_model'; modelId?: string; category?: 'text' | 'image' | 'video' }
   | { type: 'focus_node'; nodeId: string }
   | { type: 'set_hovered_node'; nodeId: string | null }
+  | { type: 'set_composer_draft'; draft: string }
   | { type: 'confirm_commands'; messageId: string }
   | { type: 'cancel_commands'; messageId: string }
   | { type: 'request_sync' };
@@ -261,16 +282,15 @@ export type ChatAction =
 // 主窗口：发送状态 + 接收 action
 // ============================================
 
-let mainInitDone = false;
-
-/** 启动主窗口监听：接收来自独立窗口的 action */
+/**
+ * 启动主窗口监听：接收来自独立窗口的 action。
+ * 生命周期归调用方（同步控制器）管，这里不做模块级去重 —— StrictMode 下
+ * 第二次挂载会被旧实例的标记挡掉，结果两边都没有监听器，独立窗口永远拿不到快照。
+ */
 export async function initMainWindowListener(
   onAction: (action: ChatAction) => void,
   onDetachClosed: () => void,
 ): Promise<() => void> {
-  if (mainInitDone) return () => {};
-  mainInitDone = true;
-
   const { listen } = await import('@tauri-apps/api/event');
 
   const unlistenAction = await listen<ChatAction>(CHAT_ACTION_EVENT, (event) => {
@@ -282,7 +302,6 @@ export async function initMainWindowListener(
   });
 
   return () => {
-    mainInitDone = false;
     unlistenAction();
     unlistenClose();
   };
@@ -306,16 +325,11 @@ export async function emitCloseChatWindow(): Promise<void> {
 // 独立窗口：接收状态 + 发送 action
 // ============================================
 
-let chatWindowInit = false;
-
-/** 启动独立窗口监听：接收来自主窗口的状态同步 */
+/** 启动独立窗口监听：接收来自主窗口的状态同步（同样由调用方管生命周期） */
 export async function initChatWindowListener(
   onSync: (sync: ChatStateSync) => void,
   onCloseRequest: () => void,
 ): Promise<() => void> {
-  if (chatWindowInit) return () => {};
-  chatWindowInit = true;
-
   const { listen } = await import('@tauri-apps/api/event');
 
   const unlistenSync = await listen<ChatStateSync>(CHAT_SYNC_EVENT, (event) => {
@@ -327,7 +341,6 @@ export async function initChatWindowListener(
   });
 
   return () => {
-    chatWindowInit = false;
     unlistenSync();
     unlistenClose();
   };

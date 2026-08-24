@@ -5,6 +5,8 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { getActiveTextSelection, type ActiveTextSelection } from '../utils/textSelection';
 import {
+  ensureGroupFolder,
+  openDirectoryInFileManager,
   revealFileInFolder,
   openInJianying,
   openInPhotoshop,
@@ -17,6 +19,7 @@ import type { BaseNodeData, NodeType } from '../types';
 import type { Node as RFNode } from '@xyflow/react';
 import { isEligibleCharacterReferenceNode } from '../store/store.dramaAssets';
 import { useT } from '../i18n';
+import { executeNodePluginTool, getAvailableNodePluginTools } from '../services/plugins/pluginRuntime';
 
 export interface NodeContextMenuState {
   visible: boolean;
@@ -36,6 +39,7 @@ export function useNodeContextMenu() {
   const setSelectedNodeIds = useAppStore((s) => s.setSelectedNodeIds);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const convertImageNodeKind = useAppStore((s) => s.convertImageNodeKind);
+  const installedPlugins = useAppStore((s) => s.installedPlugins);
 
   const [menu, setMenu] = useState<NodeContextMenuState>({
     visible: false,
@@ -168,8 +172,16 @@ export function useNodeContextMenu() {
   const currentNode = nodes.find((n) => n.id === menu.nodeId);
   const nodeType = (currentNode?.type) as NodeType | undefined;
   const nodeData = currentNode?.data as BaseNodeData | undefined;
+  const pluginTools = getAvailableNodePluginTools(installedPlugins, nodeType);
   const isNodeLocked = currentNode?.draggable === false;
-  const showAddToCharacter = isEligibleCharacterReferenceNode(currentNode);
+  const actionMediaIdentity = [nodeData?.fileName, nodeData?.filePath, nodeData?.imageUrl]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ');
+  const hasCharacterActionMedia = Boolean(nodeData?.videoUrl)
+    || /(?:^|[./\\])[^?#]*\.gif(?:[?#]|$)/i.test(actionMediaIdentity)
+    || nodeData?.imageUrl?.startsWith('data:image/gif') === true;
+  const showAddToCharacter = isEligibleCharacterReferenceNode(currentNode)
+    || hasCharacterActionMedia;
   const isImageNote = nodeType === 'canvas-note' && nodeData?.note?.kind === 'image';
   const isImageNode = nodeType === 'ai-image' || nodeType === 'source-image';
   const showImageConversion = (isImageNote || isImageNode)
@@ -195,13 +207,42 @@ export function useNodeContextMenu() {
     const node = store.nodes.find((candidate) => candidate.id === menu.nodeId);
     if (!node) return;
 
+    // 多选时整批锁定/解锁；锁定分组同时锁定组内子节点
+    const picked = store.selectedNodeIds.includes(menu.nodeId)
+      ? store.selectedNodeIds
+      : [menu.nodeId];
+    const targets = new Set(picked);
+    for (const candidate of store.nodes) {
+      if (candidate.parentId && targets.has(candidate.parentId)) targets.add(candidate.id);
+    }
+
     const nextLocked = node.draggable !== false;
     store.commitToHistory();
-    store.setNodes(store.nodes.map((candidate) => candidate.id === menu.nodeId
+    store.setNodes(store.nodes.map((candidate) => targets.has(candidate.id)
       ? { ...candidate, draggable: nextLocked ? false : undefined }
       : candidate));
     closeMenu();
     store.showToast(nextLocked ? t('节点已锁定') : t('节点已解锁'));
+  }, [closeMenu, menu.nodeId, t]);
+
+  // ── 分组：在系统文件管理器中打开分组文件夹 ──
+  const handleOpenGroupFolder = useCallback(async () => {
+    const store = useAppStore.getState();
+    const node = store.nodes.find((n) => n.id === menu.nodeId);
+    const gid = (node?.data as BaseNodeData | undefined)?.groupId as string | undefined;
+    const group = store.groups.find((g) => g.id === (gid ?? menu.nodeId));
+    closeMenu();
+    if (!group) return;
+    const dir = await ensureGroupFolder(store.currentProjectId, group.name);
+    if (!dir) {
+      store.showToast(t('无法打开文件位置'));
+      return;
+    }
+    try {
+      await openDirectoryInFileManager(dir);
+    } catch {
+      store.showToast(t('无法打开文件位置'));
+    }
   }, [closeMenu, menu.nodeId, t]);
 
   const handleAddToCharacter = useCallback(() => {
@@ -425,6 +466,27 @@ export function useNodeContextMenu() {
     closeMenu();
   }, [menu.nodeId, nodes, nodeType, copyMediaLabel, closeMenu, t]);
 
+  const handlePluginTool = useCallback((pluginId: string, toolId: string) => {
+    if (!menu.nodeId) return;
+    const state = useAppStore.getState();
+    const current = state.nodes.find((node) => node.id === menu.nodeId);
+    const available = getAvailableNodePluginTools(
+      state.installedPlugins,
+      current?.data.type,
+    ).find((item) => item.pluginId === pluginId && item.tool.id === toolId);
+    closeMenu();
+    if (!available) {
+      state.showToast(t('插件工具已不可用'), 'error');
+      return;
+    }
+    void executeNodePluginTool(available, menu.nodeId).catch((error) => {
+      useAppStore.getState().showToast(
+        error instanceof Error ? error.message : t('插件工具执行失败'),
+        'error',
+      );
+    });
+  }, [closeMenu, menu.nodeId, t]);
+
   return {
     menu,
     menuRef,
@@ -441,6 +503,7 @@ export function useNodeContextMenu() {
     showImageConversion,
     imageConversionLabel,
     handleUngroup,
+    handleOpenGroupFolder,
     handleDelete,
     handleShowInFolder,
     showInFolder,
@@ -461,5 +524,7 @@ export function useNodeContextMenu() {
     handleAddToCharacter,
     closeCharacterCapture,
     showAddToCharacter,
+    pluginTools,
+    handlePluginTool,
   };
 }

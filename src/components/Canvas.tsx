@@ -32,6 +32,7 @@ import StoryboardNode from './nodes/StoryboardNode';
 import ShotlistNode from './nodes/ShotlistNode';
 import GroupNode from './nodes/GroupNode';
 import CanvasNoteNode from './noteNodes/CanvasNoteNode';
+import PluginNode from './nodes/PluginNode';
 import NodeRenderBoundary from './nodes/shared/NodeRenderBoundary';
 import ConnectionMenu from './canvas/ConnectionMenu';
 import CanvasContextMenu from './canvas/CanvasContextMenu';
@@ -51,12 +52,12 @@ import { useNodeContextMenu } from '../hooks/useNodeContextMenu';
 import { useCanvasSecondaryClickMenu } from '../hooks/useCanvasSecondaryClickMenu';
 import { useCanvasLongPressRadialMenu } from '../hooks/useCanvasLongPressRadialMenu';
 import { useAppStore } from '../store/useAppStore';
-import { filterCharacterLibraryCanvasElements } from '../store/store.nodes';
+import { filterHiddenCanvasElements, isCanvasConnectionValid } from '../store/store.nodes';
 import { useNodeCreation } from '../hooks/useNodeCreation';
 import { useCanvasDrawing } from '../hooks/useCanvasDrawing';
 import type { BaseNodeData } from '../types';
-import { SHOTLIST_FRAME_SOURCE_TYPES } from '../types';
-import type { Node as RFNode, NodeProps, NodeTypes, Connection, Edge, OnMove } from '@xyflow/react';
+import { SHOTLIST_FRAME_SOURCE_TYPES, STORYBOARD_CELL_SOURCE_TYPES } from '../types';
+import type { Node as RFNode, NodeProps, NodeTypes, OnMove } from '@xyflow/react';
 import { useNodeSnap, ResizeSnapContext, type SnapLine } from '../hooks/useNodeSnap';
 import { setCanvasPointerPosition } from '../services/canvasPointerService';
 import {
@@ -116,6 +117,7 @@ const nodeTypes: NodeTypes = withNodeRenderBoundaries({
   comment: TextNode,
   group: GroupNode,
   'canvas-note': CanvasNoteNode,
+  'plugin-node': PluginNode,
 });
 
 const edgeTypes: EdgeTypes = {
@@ -128,7 +130,7 @@ const FIT_VIEW_OPTIONS = { padding: 0.2, maxZoom: 1 };
 const PRO_OPTIONS = { hideAttribution: true };
 const PAN_ON_DRAG_DEFAULT = [1, 2]; // 默认交互：右键(2) + 中键(1) 拖拽平移
 const PAN_ON_DRAG_CLASSIC = [0];    // 传统交互：左键(0) 拖拽平移
-const DEFAULT_EDGE_STYLE = { stroke: '#33334a', strokeWidth: 1.5 };
+const DEFAULT_EDGE_STYLE = { stroke: 'var(--canvas-edge)', strokeWidth: 1.5 };
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 const isMacOS = typeof navigator !== 'undefined'
   && /Macintosh|Mac OS X/.test(navigator.userAgent);
@@ -173,7 +175,6 @@ const MINIMAP_STYLE = {
   borderRadius: '8px',
 };
 const INLINE_EDIT_DOUBLE_CLICK_DELAY_MS = 280;
-const isValidConnection = (conn: Connection | Edge) => conn.source !== conn.target;
 const minimapNodeColor = (node: RFNode) => {
   switch (node.type) {
     case 'ai-text':
@@ -564,6 +565,15 @@ function CanvasInner() {
     (e: React.MouseEvent) => {
       const flowPos = reactFlowInstance.screenToFlowPosition({ x: e.clientX, y: e.clientY });
       setCanvasPointerPosition(flowPos);
+
+      const toolbar = e.target instanceof Element
+        ? e.target.closest<HTMLElement>('.node-floating-toolbar')
+        : null;
+      if (toolbar) {
+        const rect = toolbar.getBoundingClientRect();
+        toolbar.style.setProperty('--toolbar-pointer-x', `${((e.clientX - rect.left) / rect.width) * 100}%`);
+        toolbar.style.setProperty('--toolbar-pointer-y', `${((e.clientY - rect.top) / rect.height) * 100}%`);
+      }
     },
     [reactFlowInstance],
   );
@@ -600,6 +610,7 @@ function CanvasInner() {
     showImageConversion,
     imageConversionLabel,
     handleUngroup,
+    handleOpenGroupFolder,
     handleDelete,
     handleShowInFolder,
     showInFolder,
@@ -620,6 +631,8 @@ function CanvasInner() {
     handleAddToCharacter,
     closeCharacterCapture,
     showAddToCharacter,
+    pluginTools,
+    handlePluginTool,
   } = useNodeContextMenu();
   const isGroupNode = nodeCtxMenu.nodeId
     ? nodes.find((n) => n.id === nodeCtxMenu.nodeId && n.type === 'group') != null
@@ -632,9 +645,12 @@ function CanvasInner() {
     submenuRef: ctxSubmenuRef,
     openMenu: openCtxMenu,
     addNodeAtCtxPos,
+    addPluginNodeAtCtxPos,
+    pluginNodes,
     handleUndo: handleCtxUndo,
     handleRedo: handleCtxRedo,
     handlePaste: handleCtxPaste,
+    handleCreateFolder: handleCtxCreateFolder,
     handleDelete: handleCtxDelete,
     handleCopyNodes: handleCtxCopyNodes,
     handleCopyFiles: handleCtxCopyFiles,
@@ -902,7 +918,7 @@ function CanvasInner() {
   );
 
   const renderableGraph = useMemo(
-    () => filterCharacterLibraryCanvasElements(nodes, edges),
+    () => filterHiddenCanvasElements(nodes, edges),
     [edges, nodes],
   );
   const renderedCanvasNodes = useMemo(() => {
@@ -1029,6 +1045,16 @@ function CanvasInner() {
     shotlistDropTarget.current = null;
   }, []);
 
+  // 拖到折叠分组（文件夹）上：文件夹打开，被拖节点缩小并微微倾斜
+  const folderDropTarget = useRef<HTMLElement | null>(null);
+  const folderDropNode = useRef<HTMLElement | null>(null);
+  const clearFolderDropTarget = useCallback(() => {
+    folderDropTarget.current?.classList.remove('is-folder-drop-target');
+    folderDropTarget.current = null;
+    folderDropNode.current?.classList.remove('folder-drop-shrink');
+    folderDropNode.current = null;
+  }, []);
+
   /**
    * 命中分镜表的画面格。
    * 与宫格不同，已绑定的格子也接受放置——直接换绑，比先解绑再拖一次顺手。
@@ -1056,7 +1082,7 @@ function CanvasInner() {
     clientX: number,
     clientY: number,
   ): { storyboard: HTMLElement; emptyCell: HTMLElement | null } | null => {
-    if (node.type !== 'ai-image') return null;
+    if (!STORYBOARD_CELL_SOURCE_TYPES.includes(node.type ?? '')) return null;
     const stack = document.elementsFromPoint(clientX, clientY);
     for (const el of stack) {
       const storyboard = el.closest<HTMLElement>('.storyboard-node');
@@ -1074,6 +1100,22 @@ function CanvasInner() {
 
   const handleNodeDrag = useCallback(
     (e: React.MouseEvent, node: RFNode) => {
+      const folder = node.type === 'group'
+        ? null
+        : document.elementsFromPoint(e.clientX, e.clientY)
+          .map((el) => el.closest<HTMLElement>('.canvas-group-folder'))
+          .find((el): el is HTMLElement => el != null) ?? null;
+      if (folder !== folderDropTarget.current) {
+        clearFolderDropTarget();
+        if (folder) {
+          folder.classList.add('is-folder-drop-target');
+          folderDropTarget.current = folder;
+          const dragged = document.querySelector<HTMLElement>(`.react-flow__node[data-id="${node.id}"]`);
+          dragged?.classList.add('folder-drop-shrink');
+          folderDropNode.current = dragged;
+        }
+      }
+
       const hit = findStoryboardDropHit(node, e.clientX, e.clientY);
       const cell = hit?.emptyCell ?? null;
       if (cell !== sbDropTarget.current) {
@@ -1104,7 +1146,7 @@ function CanvasInner() {
         }
       }
     },
-    [findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, findShotlistDropHit, clearShotlistDropTarget],
+    [findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, findShotlistDropHit, clearShotlistDropTarget, clearFolderDropTarget],
   );
 
   // ── Auto group/ungroup on drag stop ──
@@ -1115,6 +1157,7 @@ function CanvasInner() {
       const frameCell = findShotlistDropHit(node, event.clientX, event.clientY);
       clearSbDropTarget();
       clearShotlistDropTarget();
+      clearFolderDropTarget();
       setDropGhost(null);
       clearGhostNodeHidden();
       if (frameCell) {
@@ -1138,7 +1181,7 @@ function CanvasInner() {
       settleNodeGroupingOnDragStop(node as RFNode<BaseNodeData>);
       onNodeDragStop();
     },
-    [onNodeDragStop, settleNodeGroupingOnDragStop, findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, setCanvasInteraction, findShotlistDropHit, clearShotlistDropTarget],
+    [onNodeDragStop, settleNodeGroupingOnDragStop, findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, setCanvasInteraction, findShotlistDropHit, clearShotlistDropTarget, clearFolderDropTarget],
   );
 
   return (
@@ -1155,7 +1198,7 @@ function CanvasInner() {
         edges={renderedEdges}
         onConnect={onConnect}
         onConnectEnd={handleConnectEnd}
-        isValidConnection={isValidConnection}
+        isValidConnection={isCanvasConnectionValid}
         onNodeClick={onNodeClick}
         onDoubleClick={onDoubleClick}
         onSelectionChange={onSelectionChange}
@@ -1168,6 +1211,7 @@ function CanvasInner() {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         connectionMode={ConnectionMode.Loose}
+        connectionRadius={64}
         onlyRenderVisibleElements
         fitView
         fitViewOptions={FIT_VIEW_OPTIONS}
@@ -1298,6 +1342,7 @@ function CanvasInner() {
         visible={connectionMenu.visible}
         position={connectionMenu.position}
         sourceNodeType={connectionMenu.sourceNodeType}
+        direction={connectionMenu.direction}
         sourceNode={sourceNode}
         menuRef={connectionMenuRef}
         onSelect={handleConnectionMenuSelect}
@@ -1312,9 +1357,12 @@ function CanvasInner() {
         menuRef={ctxMenuRef}
         submenuRef={ctxSubmenuRef}
         onAddNode={addNodeAtCtxPos}
+        onAddPluginNode={addPluginNodeAtCtxPos}
+        pluginNodes={pluginNodes}
         onUndo={handleCtxUndo}
         onRedo={handleCtxRedo}
         onPaste={handleCtxPaste}
+        onCreateFolder={handleCtxCreateFolder}
         onDelete={handleCtxDelete}
         onCopyNodes={handleCtxCopyNodes}
         onCopyFiles={handleCtxCopyFiles}
@@ -1341,6 +1389,7 @@ function CanvasInner() {
         imageConversionLabel={imageConversionLabel}
         onAddToCharacter={showAddToCharacter ? handleAddToCharacter : undefined}
         onUngroup={isGroupNode ? handleUngroup : undefined}
+        onOpenGroupFolder={isGroupNode ? handleOpenGroupFolder : undefined}
         onDelete={handleDelete}
         onShowInFolder={showInFolder ? handleShowInFolder : undefined}
         onSaveAs={showSaveAs ? handleSaveAs : undefined}
@@ -1351,6 +1400,8 @@ function CanvasInner() {
         onOpenInPremiere={showOpenInVideoEditor ? handleOpenInPremiere : undefined}
         onCopyMedia={showCopyMedia ? handleCopyMedia : undefined}
         copyMediaLabel={copyMediaLabel}
+        pluginTools={pluginTools}
+        onPluginTool={handlePluginTool}
       />
 
       {characterCaptureNodeId ? createPortal(

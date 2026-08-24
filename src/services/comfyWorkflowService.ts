@@ -4,6 +4,7 @@
  * Handles workflow JSON mutation, image upload, submission, and result polling.
  */
 import { useAppStore } from '../store/useAppStore';
+import { comfyBaseUrlFor } from './comfyServers';
 import type { WorkflowIONode, WorkflowIONodeType } from '../types';
 import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
 import { mapImageDimensions, mapVideoDimensions, resolveVideoDurationSeconds } from './aiDimensions';
@@ -18,6 +19,7 @@ import {
   updatePendingTask,
 } from './pollManager';
 import { comfyFetch, pollComfyHistory } from './comfyPolling';
+import { corsSafeFetch } from './ai/httpTransport';
 import { resolveComfyOutputUrl } from './comfyOutputs';
 
 /** ComfyUI 已注册的节点类型；同一次会话里短暂缓存，装完插件重开也能很快看到变化 */
@@ -199,10 +201,9 @@ export async function findMissingNodeClasses(
   }
 }
 
-/** 从 Store 获取 ComfyUI 配置并校验 */
-function getComfyUIConfig() {
-  const config = useAppStore.getState().config;
-  const comfyUrl = config.comfyUIUrl?.trim();
+/** 取工作流要提交的服务端地址并校验（绑定了服务端就用绑定的那台） */
+function getComfyUIConfig(workflowId?: string) {
+  const comfyUrl = comfyBaseUrlFor(workflowId);
   if (!comfyUrl) {
     throw new Error('未配置 ComfyUI 服务地址\n请在「设置 → 服务地址」中配置');
   }
@@ -387,8 +388,11 @@ async function uploadMediaToComfyUI(
     blob = new Blob([byteArr], { type: mimeType });
     ext = normalizeComfyMediaExtension(kind, match[2].toLowerCase(), undefined);
   } else {
-    // 远程 URL → fetch 获取
-    const response = await fetch(mediaUrl, { signal });
+    // 远程 URL → 取回字节。http(s) 一律走 Rust 通道：WebView 对 ComfyUI /view、
+    // 各家 CDN 这类第三方源没有 CORS 许可，裸 fetch 会直接 Failed to fetch。
+    // asset.localhost / blob: 是 WebView 自己的资源，reqwest 拿不到，仍走原生 fetch。
+    const useNativeChannel = /^https?:\/\//i.test(mediaUrl) && !mediaUrl.includes('asset.localhost');
+    const response = await (useNativeChannel ? corsSafeFetch : fetch)(mediaUrl, { signal });
     if (!response.ok) {
       throw new Error(`下载${label}失败 (${response.status})`);
     }
@@ -921,7 +925,7 @@ async function submitComfyUIWorkflow(
   /** 提示词框里引用的图片/视频，用于填充工作流指定的默认 IO 节点 */
   promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
 ): Promise<{ baseUrl: string; promptId: string; workflowObj: Record<string, Record<string, unknown>> }> {
-  const baseUrl = getComfyUIConfig();
+  const baseUrl = getComfyUIConfig(workflowId);
 
   // 从 store 中获取工作流定义
   const workflows = useAppStore.getState().workflows;
@@ -1079,7 +1083,7 @@ export async function executeComfyUIGenerate(
   referenceImageUrls: string[] = [],
 ): Promise<{ url: string; width: number; height: number }> {
   const { workflowId, workflowInputs, prompt, imageSize = '2K', aspectRatio = '1:1' } = params;
-  const comfyUrl = useAppStore.getState().config.comfyUIUrl?.trim() || '';
+  const comfyUrl = comfyBaseUrlFor(workflowId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
@@ -1163,7 +1167,7 @@ export async function executeComfyUIVideoGenerate(
     // 画面比例决定注入工作流的 width/height；未设置时按 16:9
     seedanceRatio = '16:9',
   } = params;
-  const comfyUrl = useAppStore.getState().config.comfyUIUrl?.trim() || '';
+  const comfyUrl = comfyBaseUrlFor(workflowId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
@@ -1244,7 +1248,7 @@ export async function executeComfyUIAudioGenerate(
   referenceAudioUrls: string[] = [],
 ): Promise<{ url: string }> {
   const { workflowId, workflowInputs, prompt } = params;
-  const comfyUrl = useAppStore.getState().config.comfyUIUrl?.trim() || '';
+  const comfyUrl = comfyBaseUrlFor(workflowId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])

@@ -4,6 +4,7 @@
  */
 import { memo, useLayoutEffect, useState } from 'react';
 import type { NodeType } from '../../types';
+import type { AvailablePluginNode } from '../../types/plugin';
 import { calcFixedPosition, calcSubmenuPosition } from '../../utils/popupPosition';
 import { useT } from '../../i18n';
 
@@ -25,6 +26,7 @@ const MENU_SHORTCUTS = {
 };
 
 function nodeShortcutLabel(item: MergedNodeItem): string {
+  if (item.type === 'ai-director') return item.shortcut;
   if (item.role === 'source') return `${IS_MAC_OS ? '⌥' : 'Alt'} ${item.shortcut}`;
   return item.shortcut;
 }
@@ -54,7 +56,7 @@ const MENU_PADDING = 10;
 /** 根菜单项数（添加节点 + [复制] + 粘贴 + [复制文件] + 撤销 + 重做 + 打开项目文件夹 + [删除]）
  *  hasSelection 为真时最多 8 个 .menu-row + 3 个 .menu-sep；未选中时 5 个 .menu-row + 2 个 .menu-sep。
  *  以选中态最大项数估算高度，避免溢出。 */
-const L1_ITEM_COUNT = 8;
+const L1_ITEM_COUNT = 9;
 const L1_SEP_COUNT = 3;
 /** 子菜单项数（7 个内容节点 + 1 条分割线 + 6 个源节点 = 13 个 .menu-row + 1 个 .menu-sep） */
 const SUB_ITEM_COUNT = 13;
@@ -78,9 +80,12 @@ interface CanvasContextMenuProps {
   menuRef: React.RefObject<HTMLDivElement | null>;
   submenuRef: React.RefObject<HTMLDivElement | null>;
   onAddNode: (type: NodeType, label: string, role: 'generator' | 'source') => void;
+  onAddPluginNode: (pluginNode: AvailablePluginNode) => void;
+  pluginNodes: AvailablePluginNode[];
   onUndo: () => void;
   onRedo: () => void;
   onPaste: () => void;
+  onCreateFolder: () => void;
   onDelete: () => void;
   onCopyNodes?: () => void;
   onCopyFiles?: () => void;
@@ -97,9 +102,12 @@ function CanvasContextMenu({
   menuRef,
   submenuRef,
   onAddNode,
+  onAddPluginNode,
+  pluginNodes,
   onUndo,
   onRedo,
   onPaste,
+  onCreateFolder,
   onDelete,
   onCopyNodes,
   onCopyFiles,
@@ -144,8 +152,10 @@ function CanvasContextMenu({
 
     const l1Rect = l1El.getBoundingClientRect();
     const subEl = submenuRef.current;
-    const subH = subEl?.offsetHeight ?? estMenuHeight(SUB_ITEM_COUNT, SUB_SEP_COUNT);
-    const subW = subEl?.offsetWidth ?? estMenuWidth(SUB_ITEM_COUNT);
+    const subItemCount = SUB_ITEM_COUNT + pluginNodes.length;
+    const subSepCount = SUB_SEP_COUNT + (pluginNodes.length > 0 ? 1 : 0);
+    const subH = subEl?.offsetHeight ?? estMenuHeight(subItemCount, subSepCount);
+    const subW = subEl?.offsetWidth ?? estMenuWidth(subItemCount);
     const sub = calcSubmenuPosition(l1Rect, subW, subH, 'right');
     const nextSubPos = {
       left: sub.left - (fixedContainerRect?.left ?? 0),
@@ -156,7 +166,7 @@ function CanvasContextMenu({
         ? current
         : nextSubPos
     ));
-  }, [visible, position.x, position.y, hoverMenu, hasSelection, l1Pos, menuRef, submenuRef]);
+  }, [visible, position.x, position.y, hoverMenu, hasSelection, pluginNodes.length, l1Pos, menuRef, submenuRef]);
 
   if (!visible) return null;
 
@@ -176,6 +186,9 @@ function CanvasContextMenu({
         >
           <span className="menu-rowlabel">{t('添加节点')}</span>
           <span className="menu-arrow menu-arrow-ml8">▶</span>
+        </div>
+        <div className="menu-row" onClick={onCreateFolder}>
+          <span>{t('创建文件夹')}</span>
         </div>
         <div className="menu-sep" />
         {hasSelection && (
@@ -220,7 +233,7 @@ function CanvasContextMenu({
       {hoverMenu === 'addNode' && subPos && (
         <div
           ref={submenuRef}
-          className="canvas-ctx-menu submenu"
+          className="canvas-ctx-menu submenu max-h-[calc(100vh-16px)] overflow-y-auto"
           style={{ left: subPos.left, top: subPos.top }}
           onMouseEnter={() => onShowSubmenu('addNode')}
           onMouseLeave={() => onHideSubmenu(null)}
@@ -238,6 +251,22 @@ function CanvasContextMenu({
               </div>
             </div>
           ))}
+          {pluginNodes.length > 0 && (
+            <>
+              <div className="menu-sep" />
+              {pluginNodes.map((pluginNode) => (
+                <div
+                  key={`${pluginNode.pluginId}-${pluginNode.node.id}`}
+                  className="menu-row menu-row-split"
+                  title={pluginNode.pluginName}
+                  onClick={() => onAddPluginNode(pluginNode)}
+                >
+                  <span>{pluginNode.node.title}</span>
+                  <span className="menu-kbd">{pluginNode.pluginName}</span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
     </>

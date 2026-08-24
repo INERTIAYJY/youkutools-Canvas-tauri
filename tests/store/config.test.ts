@@ -142,6 +142,14 @@ describe('config hydration guard', () => {
         modelId: 'legacy-chat',
         apiKey: 'legacy-secret',
         category: 'text',
+      }, {
+        id: 'legacy-model-2',
+        name: '旧模型二',
+        openaiUrl: 'https://legacy.example/v1',
+        anthropicUrl: 'https://legacy.example/anthropic',
+        modelId: 'legacy-chat-2',
+        apiKey: 'legacy-secret',
+        category: 'text',
       }],
     });
 
@@ -156,6 +164,8 @@ describe('config hydration guard', () => {
       apiKey: 'legacy-secret',
       baseUrl: 'https://legacy.example/v1',
     });
+    // anthropicUrl 从未参与请求，只有它不同的旧模型应并进同一条连接而不是各建一条
+    expect(Object.keys(migrated.providers).filter((id) => id.startsWith('custom-'))).toHaveLength(1);
 
     await useAppStore.getState().saveConfig();
     const saved = fileMocks.saveConfig.mock.calls[0]?.[0] as AppConfig | undefined;
@@ -216,7 +226,6 @@ describe('config hydration guard', () => {
       name: '当前连接',
       apiKey: 'provider-only-secret',
       baseUrl: 'https://current.example/v1',
-      anthropicUrl: 'https://current.example/anthropic',
       catalogId: 'custom-openai',
       selectedModels: [{
         id: 'current-image',
@@ -224,6 +233,12 @@ describe('config hydration guard', () => {
         category: 'image',
         provider: 'custom-current',
         imageReferenceRequestMode: 'edits-multipart',
+      }, {
+        id: 'current-chat',
+        name: '当前文本模型',
+        category: 'text',
+        provider: 'custom-current',
+        contextWindow: 262_144,
       }],
     });
 
@@ -233,9 +248,69 @@ describe('config hydration guard', () => {
       providerConfigId: 'custom-current',
       imageReferenceRequestMode: 'edits-multipart',
     });
+    expect(useAppStore.getState().config.generalModels?.[1]).toMatchObject({
+      modelId: 'current-chat',
+      contextWindow: 262_144,
+    });
     expect(model).not.toHaveProperty('apiKey');
     expect(model).not.toHaveProperty('openaiUrl');
     expect(model).not.toHaveProperty('anthropicUrl');
+  });
+
+  it('syncs editable video capabilities into the unified model runtime', async () => {
+    useAppStore.getState().saveProviderConfig('custom-video', {
+      name: '视频连接',
+      apiKey: 'provider-only-secret',
+      baseUrl: 'https://video.example/v1',
+      catalogId: 'custom-openai',
+      selectedModels: [{
+        id: 'custom-video-model',
+        name: '自定义视频模型',
+        category: 'video',
+        provider: 'custom-video',
+        videoCapability: {
+          ratios: ['16:9', '9:16'],
+          defaultRatio: '16:9',
+          resolutions: ['720p', '1080p'],
+          defaultResolution: '1080p',
+          frameRates: [24, 30],
+          defaultFrameRate: 24,
+          minDuration: 4,
+          maxDuration: 12,
+          defaultDuration: 6,
+        },
+      }],
+    });
+
+    expect(useAppStore.getState().config.generalModels?.[0]?.videoCapability).toEqual({
+      ratios: ['16:9', '9:16'],
+      defaultRatio: '16:9',
+      resolutions: ['720p', '1080p'],
+      defaultResolution: '1080p',
+      frameRates: [24, 30],
+      defaultFrameRate: 24,
+      minDuration: 4,
+      maxDuration: 12,
+      defaultDuration: 6,
+    });
+
+    // 保存/加载都会过 sanitizeGeneralModel，能力声明必须原样留在通用模型上
+    fileMocks.loadConfig.mockResolvedValue(useAppStore.getState().config);
+    await useAppStore.getState().loadConfig();
+    expect(useAppStore.getState().config.generalModels?.[0]?.videoCapability?.frameRates)
+      .toEqual([24, 30]);
+
+    useAppStore.getState().saveProviderConfig('custom-video', {
+      ...useAppStore.getState().config.providers['custom-video'],
+      selectedModels: [{
+        id: 'custom-video-model',
+        name: '自定义视频模型',
+        category: 'video',
+        provider: 'custom-video',
+      }],
+    });
+
+    expect(useAppStore.getState().config.generalModels?.[0]?.videoCapability).toBeUndefined();
   });
 
   it('defaults performance mode off, migrates the legacy compatibility flag, and applies changes immediately', async () => {

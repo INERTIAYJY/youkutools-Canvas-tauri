@@ -3,6 +3,7 @@
  * 提供这些常驻对象的读写 CRUD，统一走 schema.ts 声明的 object store，是 catalog 类数据的单一入口。
  */
 import type { PresetAdvancedConfig, SkillManifest, UserPresetMode } from '../../types';
+import type { InstalledPlugin } from '../../types/plugin';
 import {
   openDB,
   STORE_CONFIG,
@@ -11,6 +12,7 @@ import {
   STORE_STYLES,
   STORE_SUB_AGENT_PROFILES,
   STORE_WORKFLOWS,
+  STORE_PLUGINS,
 } from './schema';
 
 const CONFIG_KEY = 'app-config';
@@ -24,6 +26,8 @@ export interface WorkflowRecord {
   editableContent?: string;
   ioNodes?: { nodeId: string; title: string; type: string }[];
   defaultNodes?: Record<string, string>;
+  /** 绑定的 ComfyUI 服务端 id */
+  serverId?: string;
   createdAt: number;
   updatedAt?: number;
 }
@@ -166,3 +170,12 @@ export const getAllStyles = (): Promise<CustomStyleRecord[]> =>
 
 export const deleteStyleFromDb = (id: string): Promise<void> =>
   deleteRecord(STORE_STYLES, id);
+
+export const savePluginToDb = (record: InstalledPlugin): Promise<void> =>
+  putRecord(STORE_PLUGINS, record);
+
+export const getAllPlugins = (): Promise<InstalledPlugin[]> =>
+  getAllRecords(STORE_PLUGINS);
+
+export const deletePluginFromDb = (id: string): Promise<void> =>
+  deleteRecord(STORE_PLUGINS, id);

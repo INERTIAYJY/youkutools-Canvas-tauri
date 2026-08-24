@@ -24,6 +24,7 @@ import type {
 import { corsSafeFetch } from './httpTransport';
 import { fetchSeedlingModels, type SeedlingModelInfo } from '../seedlingService';
 import type { VideoModelCapability } from '../../types/aiTypes';
+import { baseUrlCandidates } from './providerBaseUrl';
 import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
 import {
   GOOGLE_GEMINI_BASE_URL,
@@ -31,7 +32,7 @@ import {
 } from './providers/googleModelManifest';
 
 export type ProviderAuthType = 'api-key' | 'oauth';
-export type ProviderCredentialKey = 'apiKey' | 'baseUrl' | 'anthropicUrl';
+export type ProviderCredentialKey = 'apiKey' | 'baseUrl';
 
 export interface ProviderCredentialField {
   key: ProviderCredentialKey;
@@ -62,6 +63,8 @@ export interface ProviderCatalogResult {
   models: ProviderModelSelection[];
   source: 'remote' | 'local-manifest' | 'local-fallback';
   warning?: string;
+  /** 实际拉通的接口地址；与用户填的不同（如补了 /v1）时调用方应回写。 */
+  resolvedBaseUrl?: string;
 }
 
 export interface FetchProviderCatalogOptions {
@@ -243,7 +246,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
     id: 'custom-openai',
     name: '自定义接口',
-    description: 'OpenAI 或 Anthropic 兼容接口',
+    description: 'OpenAI 兼容接口；非标准接口用模型的调用协议单独声明',
     badgeText: 'API',
     authType: 'api-key',
     catalogAdapter: 'openai-compatible',
@@ -251,8 +254,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     allowCustomBaseUrl: true,
     credentials: [
       API_KEY_FIELD,
-      { key: 'baseUrl', label: 'OpenAI 接口地址', required: true },
-      { key: 'anthropicUrl', label: 'Anthropic 接口地址', required: false },
+      { key: 'baseUrl', label: '接口地址', required: true },
     ],
   },
 ];
@@ -260,6 +262,24 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
 const PROVIDER_DEFINITION_MAP = new Map(
   BUILT_IN_PROVIDER_DEFINITIONS.map((definition) => [definition.id, definition]),
 );
+
+/**
+ * 落库的目录缓存上限。catalogModels 只是「下次打开对话框免去重新拉取」的缓存，
+ * 而中转站 /models 常返回上千个模型，全量存进 config 会跟着每次 saveConfig
+ * 重新序列化一遍。已勾选的模型是真配置，一个都不能丢，超出部分才截断。
+ */
+export const MAX_CACHED_CATALOG_MODELS = 300;
+
+export function capCatalogModels(
+  models: ProviderModelSelection[],
+  selectedIds: ReadonlySet<string>,
+): ProviderModelSelection[] {
+  if (models.length <= MAX_CACHED_CATALOG_MODELS) return models;
+  const selected = models.filter((model) => selectedIds.has(model.id));
+  const remaining = MAX_CACHED_CATALOG_MODELS - selected.length;
+  if (remaining <= 0) return selected;
+  return [...selected, ...models.filter((model) => !selectedIds.has(model.id)).slice(0, remaining)];
+}
 
 export function getProviderDefinitions(): readonly ProviderDefinition[] {
   return BUILT_IN_PROVIDER_DEFINITIONS;
@@ -283,6 +303,17 @@ export function resolveWebSearchProviderId(
   }
   if (configured('tavily')) return 'tavily';
   return WEB_SEARCH_PROVIDER_IDS.find(configured);
+}
+
+/**
+ * 连接 ID：内置厂商每种只允许一条连接，直接用目录 ID；
+ * 自定义接口可以有多条，加随机后缀区分。
+ */
+export function createConnectionId(providerId: string): string {
+  if (providerId !== 'custom-openai') return providerId;
+  const suffix = globalThis.crypto?.randomUUID?.().slice(0, 8)
+    ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  return `custom-${suffix}`;
 }
 
 export function getProviderDefinition(
@@ -364,15 +395,13 @@ async function fetchCatalogResponse(
   return corsSafeFetch(url, { method: 'GET', headers, signal });
 }
 
-async function fetchOpenAiCompatibleCatalog(
+async function fetchCatalogAt(
+  baseUrl: string,
   definition: ProviderDefinition,
   providerId: string,
   config: ApiProviderConfig,
   signal?: AbortSignal,
 ): Promise<ProviderModelSelection[]> {
-  const baseUrl = (config.baseUrl || definition.defaultBaseUrl || '').replace(/\/+$/, '');
-  if (!baseUrl) throw new Error('请填写接口地址');
-
   const response = await fetchCatalogResponse(
     `${baseUrl}${definition.modelsPath || '/models'}`,
     config.apiKey,
@@ -432,6 +461,30 @@ async function fetchSeedlingCliCatalog(
   return normalized;
 }
 
+async function fetchOpenAiCompatibleCatalog(
+  definition: ProviderDefinition,
+  providerId: string,
+  config: ApiProviderConfig,
+  signal?: AbortSignal,
+): Promise<{ models: ProviderModelSelection[]; baseUrl: string }> {
+  const candidates = baseUrlCandidates(config.baseUrl || definition.defaultBaseUrl);
+  if (candidates.length === 0) throw new Error('请填写接口地址');
+
+  let lastError: unknown;
+  for (const baseUrl of candidates) {
+    try {
+      return {
+        models: await fetchCatalogAt(baseUrl, definition, providerId, config, signal),
+        baseUrl,
+      };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('模型列表拉取失败');
+}
+
 export async function fetchProviderModelCatalog(
   options: FetchProviderCatalogOptions,
 ): Promise<ProviderCatalogResult> {
@@ -462,10 +515,13 @@ export async function fetchProviderModelCatalog(
   }
 
   try {
-    return {
-      models: await fetchOpenAiCompatibleCatalog(definition, providerId, config, signal),
-      source: 'remote',
-    };
+    const { models, baseUrl } = await fetchOpenAiCompatibleCatalog(
+      definition,
+      providerId,
+      config,
+      signal,
+    );
+    return { models, source: 'remote', resolvedBaseUrl: baseUrl };
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     const warning = safeCatalogError(error);

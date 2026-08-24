@@ -5,7 +5,7 @@ import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
 import type { ReversePromptRequest } from '../types';
 
-export type SettingsTab = 'general' | 'files' | 'api' | 'shortcuts' | 'comfyui' | 'storage' | 'mcp' | 'seedling';
+export type SettingsTab = 'general' | 'files' | 'api' | 'shortcuts' | 'comfyui' | 'storage' | 'mcp' | 'seedling' | 'plugins';
 
 export interface UISlice {
   settingsOpen: boolean;

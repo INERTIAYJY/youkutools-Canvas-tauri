@@ -5,6 +5,7 @@
 import { memo } from 'react';
 import { calcFixedPosition } from '../../utils/popupPosition';
 import { useT } from '../../i18n';
+import type { AvailableNodePluginTool } from '../../types/plugin';
 
 const MENU_ITEMS = [
   { label: '复制', shortcut: 'Ctrl C', action: 'copy' as const },
@@ -13,6 +14,7 @@ const MENU_ITEMS = [
   { label: '锁定', shortcut: '', action: 'toggleLock' as const, dynamicLockLabel: true },
   { label: '转换图片', shortcut: '', action: 'convertImage' as const, conditional: true, dynamicLabel: true },
   { label: '解除分组', shortcut: '', action: 'ungroup' as const, groupOnly: true },
+  { label: '打开文件夹', shortcut: '', action: 'openGroupFolder' as const, conditional: true },
   { label: '添加到角色库…', shortcut: '', action: 'addToCharacter' as const, conditional: true },
   { label: '复制媒体', shortcut: '', action: 'copyMedia' as const, conditional: true, dynamicLabel: true },
   { label: '在 PS 中打开', shortcut: '', action: 'openInPS' as const, conditional: true },
@@ -44,6 +46,7 @@ interface NodeContextMenuProps {
   imageConversionLabel?: string;
   onAddToCharacter?: () => void;
   onUngroup?: () => void;
+  onOpenGroupFolder?: () => void;
   onDelete: () => void;
   onShowInFolder?: () => void;
   onSaveAs?: () => void;
@@ -54,6 +57,8 @@ interface NodeContextMenuProps {
   onOpenInPremiere?: () => void;
   onCopyMedia?: () => void;
   copyMediaLabel?: string;
+  pluginTools?: AvailableNodePluginTool[];
+  onPluginTool?: (pluginId: string, toolId: string) => void;
 }
 export function NodeContextMenu({
   visible,
@@ -71,6 +76,7 @@ export function NodeContextMenu({
   imageConversionLabel,
   onAddToCharacter,
   onUngroup,
+  onOpenGroupFolder,
   onDelete,
   onShowInFolder,
   onSaveAs,
@@ -81,6 +87,8 @@ export function NodeContextMenu({
   onOpenInPremiere,
   onCopyMedia,
   copyMediaLabel,
+  pluginTools = [],
+  onPluginTool,
 }: NodeContextMenuProps) {
   const t = useT();
   if (!visible) return null;
@@ -89,7 +97,9 @@ export function NodeContextMenu({
     position.x,
     position.y,
     MENU_W,
-    MENU_H + (hasTextSelection ? TEXT_SELECTION_MENU_EXTRA_H : 0),
+    MENU_H
+      + (hasTextSelection ? TEXT_SELECTION_MENU_EXTRA_H : 0)
+      + (pluginTools.length > 0 ? 28 + pluginTools.length * 32 : 0),
   );
 
   const actionMap: Record<string, () => void> = {
@@ -101,6 +111,7 @@ export function NodeContextMenu({
     addToCharacter: onAddToCharacter || (() => {}),
     delete: onDelete,
     showInFolder: onShowInFolder || (() => {}),
+    openGroupFolder: onOpenGroupFolder || (() => {}),
     saveAs: onSaveAs || (() => {}),
     openInPS: onOpenInPS || (() => {}),
     editVideo: onEditVideo || (() => {}),
@@ -112,6 +123,7 @@ export function NodeContextMenu({
   const items = MENU_ITEMS.filter((item) => {
     if (item.groupOnly && !onUngroup) return false;
     if (item.conditional && item.action === 'showInFolder' && !onShowInFolder) return false;
+    if (item.conditional && item.action === 'openGroupFolder' && !onOpenGroupFolder) return false;
     if (item.conditional && item.action === 'saveAs' && !onSaveAs) return false;
     if (item.conditional && item.action === 'openInPS' && !onOpenInPS) return false;
     if (item.conditional && item.action === 'editVideo' && !onEditVideo) return false;
@@ -122,6 +134,28 @@ export function NodeContextMenu({
     if (item.conditional && item.action === 'convertImage' && !onConvertImage) return false;
     return true;
   });
+  const renderItem = (item: (typeof MENU_ITEMS)[number]) => (
+    <div key={item.action}>
+      {item.danger && <div className="menu-sep" />}
+      <div
+        className={`menu-row menu-row-split${item.danger ? ' menu-row-danger' : ''}`}
+        onClick={item.action === 'ungroup' ? onUngroup : actionMap[item.action]}
+      >
+        <span>
+          {item.dynamicLockLabel && item.action === 'toggleLock'
+            ? (isLocked ? t('解锁') : t('锁定'))
+            : item.dynamicLabel && item.action === 'copyMedia'
+              ? (copyMediaLabel || t(item.label))
+              : item.dynamicLabel && item.action === 'convertImage'
+                ? (imageConversionLabel || t(item.label))
+                : item.dynamicLabel && item.action === 'editVideo'
+                  ? (editVideoLabel || t(item.label))
+                  : t(item.label)}
+        </span>
+        <span className="menu-kbd">{item.shortcut}</span>
+      </div>
+    </div>
+  );
 
   return (
     <div
@@ -142,28 +176,25 @@ export function NodeContextMenu({
           <div className="menu-sep" />
         </>
       )}
-      {items.map((item) => (
-        <div key={item.action}>
-          {item.danger && <div className="menu-sep" />}
-          <div
-            className={`menu-row menu-row-split${item.danger ? ' menu-row-danger' : ''}`}
-            onClick={item.action === 'ungroup' ? onUngroup : actionMap[item.action]}
-          >
-            <span>
-              {item.dynamicLockLabel && item.action === 'toggleLock'
-                ? (isLocked ? t('解锁') : t('锁定'))
-                : item.dynamicLabel && item.action === 'copyMedia'
-                  ? (copyMediaLabel || t(item.label))
-                  : item.dynamicLabel && item.action === 'convertImage'
-                    ? (imageConversionLabel || t(item.label))
-                    : item.dynamicLabel && item.action === 'editVideo'
-                      ? (editVideoLabel || t(item.label))
-                  : t(item.label)}
-            </span>
-            <span className="menu-kbd">{item.shortcut}</span>
-          </div>
-        </div>
-      ))}
+      {items.filter((item) => !item.danger).map(renderItem)}
+      {pluginTools.length > 0 && onPluginTool && (
+        <>
+          <div className="menu-sep" />
+          <div className="px-3 py-1 text-[10px] text-canvas-text-muted">插件工具</div>
+          {pluginTools.map((pluginTool) => (
+            <div
+              key={`${pluginTool.pluginId}:${pluginTool.tool.id}`}
+              className="menu-row menu-row-split"
+              title={pluginTool.tool.description}
+              onClick={() => onPluginTool(pluginTool.pluginId, pluginTool.tool.id)}
+            >
+              <span>{pluginTool.tool.title}</span>
+              <span className="menu-kbd">{pluginTool.pluginName}</span>
+            </div>
+          ))}
+        </>
+      )}
+      {items.filter((item) => item.danger).map(renderItem)}
     </div>
   );
 }

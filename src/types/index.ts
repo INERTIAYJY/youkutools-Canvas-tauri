@@ -85,6 +85,7 @@ export type NodeType =
   | 'source-video'
   | 'source-audio'
   | 'source-text'
+  | 'plugin-node'
   | 'canvas-note'
   | 'comment';
 
@@ -122,6 +123,9 @@ export const ANIMATION_FRAME_GRIDS: Record<6 | 8 | 10 | 12 | 16 | 20, { cols: nu
   16: { cols: 4, rows: 4 },
   20: { cols: 5, rows: 4 },
 };
+
+/** 可以拖进宫格空格的节点类型（角色库参考图落在画布上是 source-image） */
+export const STORYBOARD_CELL_SOURCE_TYPES = ['ai-image', 'source-image'];
 
 // 宫格分镜：被拖入某格的图片覆盖
 export interface StoryboardCellOverride {
@@ -169,6 +173,10 @@ export interface BaseNodeData {
   characterLibraryLinks?: CharacterLibraryNodeLink[];
   /** 仅表示该节点当前由角色库收纳隐藏，节点与连线仍保留在项目数据中。 */
   hiddenByCharacterLibrary?: boolean;
+  /** 分组节点：折叠为文件夹卡片，组内节点与其连线暂不渲染 */
+  groupCollapsed?: boolean;
+  /** 分组节点：折叠前的尺寸，展开时还原 */
+  groupExpandedSize?: { width: number; height: number };
   mattingMask?: string;       // 遮罩编辑器蒙版数据（data URL，独立于图片存储）
   annotation?: string;        // 旧版标注数据（data URL，透明 PNG；仅用于兼容读取）
   annotationLayer?: ImageAnnotationLayer; // 可编辑矢量标注层，独立于原图存储
@@ -368,6 +376,11 @@ export interface ProviderModelSelection {
   inputModalitiesManual?: boolean;
   /** 分类是否由用户手动指定；为 true 时重新拉取目录或合并模型不再覆盖该分类。 */
   categoryManual?: boolean;
+  /**
+   * 文本模型的上下文窗口（token）。缺省时按模型 ID 猜目录，猜不中退回保守默认值，
+   * 中转站的自定义命名基本都猜不中，声明出来助手才不会过早压缩上下文。
+   */
+  contextWindow?: number;
   /** 自定义媒体模型的提交、轮询与结果解析规则。 */
   executionProfile?: ModelExecutionProfile;
   /** 图片模型存在参考图时使用的请求协议；缺省保持 generations JSON 兼容方式。 */
@@ -388,7 +401,6 @@ export interface ApiProviderConfig {
   baseUrl?: string;
   /** 内置目录定义 ID；自定义连接的配置 key 与目录定义 ID 不同。 */
   catalogId?: string;
-  anthropicUrl?: string;
   /** undefined 表示旧配置尚未选择；空数组表示用户明确未启用任何模型。 */
   selectedModels?: ProviderModelSelection[];
   /** 最近一次拉取并保存在本地的完整模型目录，不包含凭据。 */
@@ -491,7 +503,8 @@ export interface AppConfig {
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）
   customBackgroundOpacity?: number; // 自定义背景透明度 0-1，默认 0.3
-  comfyUIUrl?: string;        // ComfyUI 服务地址
+  comfyUIUrl?: string;        // ComfyUI 默认服务地址（工作流没绑定服务端时用它）
+  comfyServers?: ComfyServer[]; // 额外的 ComfyUI 服务端，供工作流按需绑定
   comfyUIPath?: string;       // ComfyUI 安装目录路径
   dreaminaAuth?: DreaminaAuthData; // 即梦登录态
   seedlingAuth?: SeedlingAuthMirror; // 森之灵 CLI 登录态镜像（CLI 配置文件持久化登录态）
@@ -592,6 +605,13 @@ export interface ModelGroup {
 // 工作流定义 — ComfyUI workflow import
 // ============================================
 
+/** 额外的 ComfyUI 服务端；图片 / 视频分开部署时，工作流各自绑定一台 */
+export interface ComfyServer {
+  id: string;
+  name: string;
+  url: string;
+}
+
 /** 工作流分类 — 对应各节点类型 */
 export type WorkflowCategory = 'ai-text' | 'ai-image' | 'ai-video' | 'ai-audio';
 
@@ -616,6 +636,8 @@ export interface WorkflowDefinition {
   ioNodes?: WorkflowIONode[]; // 识别出的输入/输出节点
   /** 各类型的默认 IO 节点（type → nodeId）；用户没 @ 该类型节点时，提示词框里的同类内容自动注入这里 */
   defaultNodes?: Partial<Record<WorkflowIONodeType, string>>;
+  /** 绑定的 ComfyUI 服务端 id；为空或服务端已删除时回落到默认地址 */
+  serverId?: string;
   createdAt: number;
   updatedAt?: number;
 }
@@ -668,6 +690,7 @@ export const NODE_TYPE_CONFIG: Record<string, NodeTypeVisualConfig> = {
   'ai-storyboard': { icon: 'mdi:grid',                    color: 'text-pink-400',    bg: 'bg-pink-500/15',    label: '宫格分镜' },
   'ai-shotlist':   { icon: 'mdi:table-large',             color: 'text-amber-400',   bg: 'bg-amber-500/15',   label: '分镜表' },
   'ai-director':   { icon: 'mdi:video-3d',                color: 'text-violet-400',  bg: 'bg-violet-500/15',  label: '3D 导演台' },
+  'plugin-node':   { icon: 'mdi:puzzle-outline',          color: 'text-indigo-400',  bg: 'bg-indigo-500/15',  label: '插件节点' },
   'canvas-note':   { icon: 'mdi:draw',                    color: 'text-sky-400',     bg: 'bg-sky-500/15',     label: '画布笔记' },
 };
 

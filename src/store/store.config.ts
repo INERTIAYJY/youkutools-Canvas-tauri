@@ -118,13 +118,14 @@ function syncProviderModels(
       name: model.name,
       modelId: model.id,
       category: model.category,
-      contextWindow: existing?.contextWindow,
+      contextWindow: model.contextWindow ?? existing?.contextWindow,
       description: model.description ?? existing?.description,
       inputModalities: model.inputModalities ?? existing?.inputModalities,
       providerConfigId,
       executionProfile: model.executionProfile,
       imageReferenceRequestMode: model.imageReferenceRequestMode
         ?? existing?.imageReferenceRequestMode,
+      videoCapability: model.videoCapability,
     } satisfies GeneralModelConfig;
   });
   return [...otherModels, ...selectedModels];
@@ -240,7 +241,6 @@ function clearLocalModelPreferences(references: RemovedModelReferences): void {
 interface LegacyGeneralModelConfig extends Omit<GeneralModelConfig, 'providerConfigId'> {
   providerConfigId?: string;
   openaiUrl?: string;
-  anthropicUrl?: string;
   apiKey?: string;
 }
 
@@ -259,6 +259,7 @@ function sanitizeGeneralModel(
     providerConfigId,
     executionProfile: model.executionProfile,
     imageReferenceRequestMode: model.imageReferenceRequestMode,
+    videoCapability: model.videoCapability,
   };
 }
 
@@ -288,16 +289,14 @@ function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
   const connectionBySignature = new Map<string, string>();
   for (const [providerId, provider] of Object.entries(providers)) {
     if (provider.catalogId !== 'custom-openai') continue;
-    connectionBySignature.set(
-      `${provider.baseUrl || ''}\u0000${provider.anthropicUrl || ''}\u0000${provider.apiKey}`,
-      providerId,
-    );
+    // anthropicUrl 从未参与任何请求，签名里去掉它等于把同网关的旧模型并成一条连接
+    connectionBySignature.set(`${provider.baseUrl || ''}\u0000${provider.apiKey}`, providerId);
   }
 
   let nextCustomIndex = 1;
   const migratedModels = generalModels.map((model) => {
     if (model.providerConfigId) return sanitizeGeneralModel(model, model.providerConfigId);
-    const signature = `${model.openaiUrl || ''}\u0000${model.anthropicUrl || ''}\u0000${model.apiKey || ''}`;
+    const signature = `${model.openaiUrl || ''}\u0000${model.apiKey || ''}`;
     let providerConfigId = connectionBySignature.get(signature);
     if (!providerConfigId) {
       do {
@@ -308,7 +307,6 @@ function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
         name: model.name || '自定义接口',
         apiKey: model.apiKey || '',
         baseUrl: model.openaiUrl || '',
-        anthropicUrl: model.anthropicUrl || '',
         catalogId: 'custom-openai',
         selectedModels: [],
       };

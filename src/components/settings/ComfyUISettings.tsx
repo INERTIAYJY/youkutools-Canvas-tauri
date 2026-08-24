@@ -9,10 +9,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';
+import type { ComfyServer } from '../../types';
 import AnimatedButton from '../shared/AnimatedButton';
 import { useT } from '../../i18n';
 
 type ComfyStatus = 'idle' | 'starting' | 'ready' | 'failed';
+
+const INPUT_CLASS = 'text-xs bg-canvas-surface border border-canvas-border rounded-md px-2.5 py-1.5 text-canvas-text placeholder-canvas-text-muted focus:outline-none focus:border-indigo-500 transition-colors';
 
 export default function ComfyUISettings() {
   const {
@@ -100,6 +103,24 @@ export default function ComfyUISettings() {
     }
   };
 
+  const servers = config.comfyServers ?? [];
+
+  const saveServers = async (next: ComfyServer[]) => {
+    updateConfig({ comfyServers: next });
+    await saveConfig();
+  };
+
+  const addServer = () => saveServers([
+    ...servers,
+    { id: crypto.randomUUID(), name: t('服务端 {index}', { index: servers.length + 1 }), url: '' },
+  ]);
+
+  const patchServer = (id: string, patch: Partial<ComfyServer>) => saveServers(
+    servers.map((server) => (server.id === id ? { ...server, ...patch } : server)),
+  );
+
+  const removeServer = (id: string) => saveServers(servers.filter((server) => server.id !== id));
+
   const openWorkflows = () => {
     setSettingsOpen(false);
     setWorkflowPanelOpen(true);
@@ -112,12 +133,12 @@ export default function ComfyUISettings() {
         <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
           <div className="text-xs text-canvas-text-muted mb-1.5">{t('ComfyUI 根目录路径')}</div>
           <div className="flex items-center gap-2 mb-3">
-            <div className={`flex-1 min-w-0 text-[11px] break-all bg-canvas-surface rounded-md px-3 py-1.5 border border-canvas-border ${
-              comfyUIPath ? 'text-canvas-text-secondary font-mono leading-relaxed select-all' : 'text-canvas-text-muted italic'
+            <div className={`flex-1 min-w-0 text-[11px] leading-4 break-all bg-canvas-surface rounded-md px-2.5 py-1 border border-canvas-border ${
+              comfyUIPath ? 'text-canvas-text-secondary font-mono select-all' : 'text-canvas-text-muted italic'
             }`}>
               {comfyUIPath || t('未设置')}
             </div>
-            <AnimatedButton type="button" className="settings-save-btn shrink-0 text-xs" onClick={choosePath}>
+            <AnimatedButton type="button" className="settings-save-btn self-stretch shrink-0 text-xs" onClick={choosePath}>
               {comfyUIPath ? t('更换') : t('选择文件夹')}
             </AnimatedButton>
           </div>
@@ -128,31 +149,31 @@ export default function ComfyUISettings() {
             <div className="grid grid-cols-2 gap-2">
               <AnimatedButton
                 type="button"
-                className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 transition-colors text-sm font-medium"
+                className="flex items-center justify-center gap-1.5 py-1.5 rounded-md bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 transition-colors text-xs font-medium"
                 onClick={launch}
                 disabled={launching}
               >
                 {launching ? (
                   <>
-                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="8" />
                     </svg>
                     {t('正在启动…')}
                   </>
                 ) : (
                   <>
-                    <Icon icon="lucide:play" width="16" height="16" />
+                    <Icon icon="lucide:play" width="14" height="14" />
                     {t('启动 ComfyUI')}
                   </>
                 )}
               </AnimatedButton>
               <AnimatedButton
                 type="button"
-                className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-canvas-surface border border-canvas-border text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text transition-colors text-sm font-medium"
+                className="flex items-center justify-center gap-1.5 py-1.5 rounded-md bg-canvas-surface border border-canvas-border text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text transition-colors text-xs font-medium"
                 onClick={() => void openComfyUI()}
                 disabled={opening}
               >
-                <Icon icon={opening ? 'lucide:loader-circle' : 'lucide:external-link'} width="16" height="16" className={opening ? 'animate-spin' : ''} />
+                <Icon icon={opening ? 'lucide:loader-circle' : 'lucide:external-link'} width="14" height="14" className={opening ? 'animate-spin' : ''} />
                 {t('打开 ComfyUI 页面')}
               </AnimatedButton>
             </div>
@@ -167,10 +188,10 @@ export default function ComfyUISettings() {
       <div>
         <h3 className="text-sm font-medium text-canvas-text mb-2">{t('ComfyUI 服务地址')}</h3>
         <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
-          <div className="text-xs text-canvas-text-muted mb-1.5">{t('后端地址')}</div>
+          <div className="text-xs text-canvas-text-muted mb-1.5">{t('默认地址')}</div>
           <input
             type="text"
-            className="w-full text-sm bg-canvas-surface border border-canvas-border rounded-md px-3 py-2 text-canvas-text placeholder-canvas-text-muted focus:outline-none focus:border-indigo-500 transition-colors"
+            className={`${INPUT_CLASS} w-full`}
             placeholder="http://127.0.0.1:8188"
             defaultValue={config.comfyUIUrl || ''}
             onBlur={async (event) => {
@@ -179,6 +200,58 @@ export default function ComfyUISettings() {
             }}
           />
           <p className="text-[11px] text-canvas-text-muted mt-2">{t('ComfyUI 后端服务的地址，用于执行导入的工作流。默认端口为 8188')}</p>
+
+          <div className="mt-3 pt-3 border-t border-canvas-border">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-canvas-text-muted">{t('其他服务端')}</span>
+              <button
+                type="button"
+                className="flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors"
+                onClick={() => void addServer()}
+              >
+                <Icon icon="lucide:plus" width="13" height="13" />
+                {t('添加服务端')}
+              </button>
+            </div>
+            {servers.length === 0 ? (
+              <p className="text-[11px] text-canvas-text-muted">
+                {t('图片与视频分开部署时，在这里添加另一台服务端，再到「工作流管理」里把工作流绑定过去')}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {servers.map((server) => (
+                  <div key={server.id} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      className={`${INPUT_CLASS} w-28 shrink-0`}
+                      placeholder={t('服务端名称')}
+                      defaultValue={server.name}
+                      onBlur={(event) => void patchServer(server.id, { name: event.target.value.trim() })}
+                    />
+                    <input
+                      type="text"
+                      className={`${INPUT_CLASS} min-w-0 flex-1`}
+                      placeholder="http://127.0.0.1:8189"
+                      defaultValue={server.url}
+                      onBlur={(event) => void patchServer(server.id, { url: event.target.value.trim() })}
+                    />
+                    <button
+                      type="button"
+                      className="shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-canvas-text-muted hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                      aria-label={t('删除服务端')}
+                      data-tooltip={t('删除服务端')}
+                      onClick={() => void removeServer(server.id)}
+                    >
+                      <Icon icon="lucide:trash-2" width="14" height="14" />
+                    </button>
+                  </div>
+                ))}
+                <p className="text-[11px] text-canvas-text-muted">
+                  {t('在「工作流管理」里给工作流选择服务端；删掉服务端后，绑过它的工作流回落到默认地址')}
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

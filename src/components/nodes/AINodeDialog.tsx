@@ -1,7 +1,9 @@
 /**
  * AINodeDialog AI 生成弹窗 — 点击节点后弹出的浮动面板，包含 Prompt 输入、模型选择、参数配置、生成按钮
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+// 生成中的流光边框：仅在生成时按需加载
+const BorderBeam = lazy(() => import('border-beam').then((m) => ({ default: m.BorderBeam })));
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
@@ -60,6 +62,7 @@ function AINodeDialog() {
 
   // 仅订阅当前激活的节点（而非整个 nodes 数组），拖拽其他节点时不会触发本弹窗重渲染
   const node = useAppStore((s) => (s.activeNodeId ? s.nodes.find((n) => n.id === s.activeNodeId) : undefined));
+  const performanceMode = useAppStore((s) => s.config.performanceMode === true);
   const data: BaseNodeData | undefined = node?.data;
   const nodeType = data?.type;
 
@@ -1068,9 +1071,28 @@ function AINodeDialog() {
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
+        {data.status === 'loading' && !performanceMode && (
+          <Suspense fallback={null}>
+            <BorderBeam
+              className="ai-dialog-beam"
+              borderRadius={14}
+              colorVariant="colorful"
+              /* 长宽比大，角度匀速旋转在角落会加速；放慢一圈的时间让观感平顺些 */
+              duration={5}
+              strength={0.85}
+              theme={typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'}
+            >
+              {null}
+            </BorderBeam>
+          </Suspense>
+        )}
         {isExpanded && (
           <div className="ai-dialog-preview-float is-expanded">
-            <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
+            <ConnectedNodesPreview
+              nodeId={activeNodeId}
+              onInsertMention={handleInsertMention}
+              hoverEmphasis="expanded"
+            />
           </div>
         )}
         <button

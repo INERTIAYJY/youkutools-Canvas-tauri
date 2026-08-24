@@ -69,6 +69,7 @@ import { getAssistantTextModelCandidates } from '../../services/projectSettingsS
 import { useT } from '../../i18n';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+const DRAFT_SYNC_DEBOUNCE_MS = 300;
 
 interface ChatPanelProps {
   detached?: boolean;
@@ -242,12 +243,49 @@ export default function ChatPanel({
       ? listConversationFileGrants(effectiveActiveConversationId)
       : [];
 
+  // 草稿只在切换窗口时用得上，逐键写 Store / 发 IPC 是白扔的开销，防抖到停手后再同步一次
+  const draftSyncRef = useRef<{
+    timer: ReturnType<typeof setTimeout> | null;
+    value: string | null;
+  }>({ timer: null, value: null });
+
+  const flushDraftSync = useCallback(() => {
+    const pending = draftSyncRef.current;
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = null;
+    if (pending.value == null) return;
+    const value = pending.value;
+    pending.value = null;
+    if (detached) void emitAction({ type: 'set_composer_draft', draft: value });
+    else useAppStore.getState().setChatComposerLiveDraft(value);
+  }, [detached]);
+
+  const queueDraftSync = useCallback((value: string) => {
+    const pending = draftSyncRef.current;
+    pending.value = value;
+    if (pending.timer) return;
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      flushDraftSync();
+    }, DRAFT_SYNC_DEBOUNCE_MS);
+  }, [flushDraftSync]);
+
+  // 关窗时 React 的清理未必来得及跑，beforeunload 兜住独立窗口这一侧
+  useEffect(() => {
+    window.addEventListener('beforeunload', flushDraftSync);
+    return () => {
+      window.removeEventListener('beforeunload', flushDraftSync);
+      flushDraftSync();
+    };
+  }, [flushDraftSync]);
+
   const updateInputDraft = useCallback((value: string) => {
     setInputValue(value);
+    queueDraftSync(value);
     if (!effectiveActiveConversationId) return;
     if (value) conversationDraftsRef.current.set(effectiveActiveConversationId, value);
     else conversationDraftsRef.current.delete(effectiveActiveConversationId);
-  }, [effectiveActiveConversationId]);
+  }, [effectiveActiveConversationId, queueDraftSync]);
 
   useEffect(() => {
     if (effectiveActiveConversationId && pendingConversationDraftRef.current != null) {
@@ -261,6 +299,31 @@ export default function ChatPanel({
       ? (conversationDraftsRef.current.get(effectiveActiveConversationId) ?? '')
       : '');
   }, [effectiveActiveConversationId]);
+
+  // 面板接管时把对方留下的草稿灌一次（独立窗口首帧 / 收回内嵌），之后各自本地编辑
+  const draftHandoffRef = useRef(false);
+  useEffect(() => {
+    const owning = detached ? detachedInitialized : !chatPanelDetached;
+    if (!owning) {
+      draftHandoffRef.current = false;
+      return;
+    }
+    if (draftHandoffRef.current) return;
+    draftHandoffRef.current = true;
+    const draft = detached
+      ? (detachedSnapshot?.composerDraft ?? '')
+      : useAppStore.getState().chatComposerLiveDraft;
+    if (!draft) return;
+    // 灌草稿是一次性跨面板同步，放到下一帧异步执行，避免在 effect 内同步 setState 引发级联渲染
+    const frame = requestAnimationFrame(() => updateInputDraft(draft));
+    return () => cancelAnimationFrame(frame);
+  }, [
+    chatPanelDetached,
+    detached,
+    detachedInitialized,
+    detachedSnapshot?.composerDraft,
+    updateInputDraft,
+  ]);
 
   const handleTextModelChange = useCallback((modelId?: string) => {
     if (detached) {
@@ -648,15 +711,18 @@ export default function ChatPanel({
       } catch { /* ignore */ }
       setChatPanelDetached(false);
     } else {
+      // 必须先置位：独立窗口一加载就会来要快照，而同步器在 detached 为假时会把请求丢掉
+      flushDraftSync();
+      setChatPanelDetached(true);
       try {
         await invoke('open_chat_window');
-        setChatPanelDetached(true);
       } catch (e) {
+        setChatPanelDetached(false);
         console.error('[ChatPanel] failed to open chat window:', e);
         showToast(t('打开独立窗口失败'), 'error');
       }
     }
-  }, [chatPanelDetached, setChatPanelDetached, showToast, t]);
+  }, [chatPanelDetached, flushDraftSync, setChatPanelDetached, showToast, t]);
 
   // ── 空状态判断 ──
   const showEmptyState = !effectiveActiveConversationId && viewMode === 'chat';
@@ -798,6 +864,7 @@ export default function ChatPanel({
                       onAuthorizeLocalFiles={handleAuthorizeLocalFiles}
                       onRevokeLocalFile={handleRevokeLocalFile}
                       contextUsage={contextUsage}
+                      allowSkillUpload={!detached}
                     />
                   )}
                 </motion.div>

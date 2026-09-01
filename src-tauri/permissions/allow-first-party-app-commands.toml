@@ -77,4 +77,18 @@ commands.allow = [
   "get_plugin_registration_status",
   "execute_node_plugin_tool",
   "get_python_plugin_runtime_status",
+  # 森之灵定制（Seedling CLI 视频生成）
+  "seedling_cli_status",
+  "seedling_install_cli",
+  "seedling_models",
+  "seedling_task_create",
+  "seedling_task_get",
+  "seedling_task_list",
+  "seedling_task_cancel",
+  "seedling_task_download",
+  "seedling_resource_upload",
+  "seedling_auth_login_start",
+  "seedling_auth_login_runtime",
+  "seedling_auth_login_cancel",
+  "seedling_auth_logout",
 ]

@@ -357,6 +357,31 @@ pub fn authorize_path_with_roots<R: Runtime>(
     Ok(resolved)
 }
 
+/// 仅校验路径位于应用自有数据目录（项目素材、缓存等）或 fs scope 内。
+///
+/// 与通用 [`authorize_path`] 的区别：本函数**不**做 `overlaps_private_app_path` 校验。
+/// 用途：seedling 等命令只读取用户素材路径，不会触碰 Rust 私有注册表（凭据/智能体/插件/Blender），
+/// 这类路径虽然在 app owned roots 下，但在某些边缘情况（符号链接、canonicalize 不一致）
+/// 下可能被新增的 private 检查误判。这里提供一个有意识的豁免入口。
+///
+/// 调用方必须自行保证：
+/// - 不会把结果路径继续传给读取/归档/删除私有目录的命令
+/// - 调用方语义上等同于「上传用户自己的素材文件」
+pub fn authorize_app_owned_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    raw: &str,
+    access: PathAccess,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_path(raw, access)?;
+    if !is_authorized(app, &resolved, access, &[]) {
+        return Err(format!(
+            "路径未获授权，请先在设置中添加该目录: {}",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 /// 用户把文件拖入自有窗口，等同于对该文件的一次显式授权（与文件对话框选中同义）。
 /// 登记进 fs scope 后，后续的复制 / 读取命令才能通过路径校验。
 pub fn grant_dropped_paths<R: Runtime>(app: &tauri::AppHandle<R>, paths: &[PathBuf]) {

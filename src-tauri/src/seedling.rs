@@ -18,7 +18,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, Webview};
 
-use crate::path_policy::{authorize_path, ensure_trusted_caller, PathAccess};
+use crate::path_policy::{authorize_app_owned_path, authorize_path, ensure_trusted_caller, PathAccess};
 
 /// CLI 最低可接受版本（该版本起实测支持 `--json` 输出）。
 const MIN_VERSION: &str = "0.0.4";
@@ -805,7 +805,9 @@ pub async fn seedling_resource_upload(
     api_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     ensure_trusted_caller(&webview)?;
-    let file = authorize_path(&app, &file_path, PathAccess::Read)?;
+    // 用户素材路径：仅校验 app owned roots / fs scope，跳过 private 检查
+    // （避免母项目新增的 overlaps_private_app_path 在边缘情况误判合法路径）
+    let file = authorize_app_owned_path(&app, &file_path, PathAccess::Read)?;
     tauri::async_runtime::spawn_blocking(move || {
         let cli = resolve_cli(&app)?;
         let args = vec![

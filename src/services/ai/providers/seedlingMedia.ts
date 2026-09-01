@@ -106,12 +106,11 @@ async function toCliResource(
   if (trimmed.includes('asset.localhost')) {
     const localPath = decodeAssetLocalPath(trimmed);
     if (localPath) {
-      try {
-        const { url: uploaded } = await uploadSeedlingResource(localPath);
-        return uploaded;
-      } catch {
-        // 上传失败（路径未授权等）→ 回退通用图床
-      }
+      // 直接抛出真实错误，便于诊断 path_policy / 上传失败原因。
+      // （之前 catch 掉后，兜底函数会把 asset.localhost 当 http 返原 URL，
+      // 触发「必须 https」校验，根因被掩盖。）
+      const { url: uploaded } = await uploadSeedlingResource(localPath);
+      return uploaded;
     }
     return resolveMediaReferenceUrl(trimmed, { kind });
   }

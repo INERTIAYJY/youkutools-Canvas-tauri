@@ -200,13 +200,15 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
     );
   });
 
-  it('任一资源非 https 时提前拦截并指明违规项', async () => {
-    uploadMocks.resolveMediaReferenceUrl.mockResolvedValue('http://cdn.example/not-https.png');
-    await expect(
-      seedlingMediaProviderAdapter.generateVideo!(
-        buildRequest({ imageUrls: ['asset.localhost/ref.png'] }),
-      ),
-    ).rejects.toThrow('参考素材必须是 https:// 地址');
+  it('asset.localhost 解码失败（无本地路径）时回退通用图床', async () => {
+    // 输入不带 marker（asset.localhost/）→ decodeAssetLocalPath 返回 undefined
+    // → 走 resolveMediaReferenceUrl 兜底。Mock 返回 undefined → toCliResource 也返回
+    // undefined → 资源被丢弃，调用照常成功（无 resources 时 CLI 会用 prompt 直接生成）。
+    const url = await seedlingMediaProviderAdapter.generateVideo!(
+      buildRequest({ imageUrls: ['asset.localhost-only/no-path'] }),
+    );
+    expect(url).toEqual({ url: 'https://cdn.example/seedling-video.mp4' });
+    expect(uploadMocks.resolveMediaReferenceUrl).toHaveBeenCalled();
   });
 
   it('任务失败时抛出服务端错误信息', async () => {

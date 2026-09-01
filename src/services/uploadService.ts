@@ -609,7 +609,10 @@ export async function resolveMediaReferenceUrl(
     provider = '', mode = 'publicUrl', kind = 'image', signal, dataUrlBudget,
   } = options;
   if (signal?.aborted) throw abortReason(signal);
-  if (/^https?:\/\//i.test(url)) return url;
+  // Tauri 资产协议（http://asset.localhost/... 或 asset://localhost/...）不是真公网 URL，
+  // 不能直接原样返回。它需要先读成 dataUrl 再上传图床（视 mode 决定）。
+  // 仅真正的 https（公网）才原样返回；其它都走下面本地/上传流程。
+  if (/^https:\/\//i.test(url) && !url.includes('asset.localhost')) return url;
   if (isMediaDataUrl(url) && mode === 'dataUrl') {
     const bytes = await assertMediaDataUrlWithinLimitAsync(
       url,

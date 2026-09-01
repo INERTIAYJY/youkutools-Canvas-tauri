@@ -332,23 +332,26 @@ function AINodeDialog() {
     const effectivePrompt = cameraPrompt
       ? `${projectPrompt}\n\nCamera settings: ${cameraPrompt}.`
       : projectPrompt;
-    const videoFps = Number(latestData.videoFps) || 24;
-    const seedanceDuration = resolveVideoDurationSeconds(
-      latestData.seedanceDuration,
-      latestData.videoFrames,
-      videoFps,
-    );
-    const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
+    const videoControls = resolveVideoSubmissionControls({
+      provider: nodeProvider,
+      workflowId: latestData.workflowId,
+      videoResolution: latestData.videoResolution as number | undefined,
+      videoFps: latestData.videoFps as number | undefined,
+      videoFrames: latestData.videoFrames as number | undefined,
+      seedanceResolution: latestData.seedanceResolution as string | undefined,
+      seedanceRatio: latestData.seedanceRatio as string | undefined,
+      seedanceDuration: latestData.seedanceDuration as number | undefined,
+    });
     const baseParams = {
       prompt: effectivePrompt,
       model: nodeModel,
       provider: nodeProvider,
-      videoResolution: Number(latestData.videoResolution) || 832,
-      videoFps,
-      videoFrames,
-      seedanceResolution: (latestData.seedanceResolution as string) || '720p',
-      seedanceRatio: (latestData.seedanceRatio as string) || '16:9',
-      seedanceDuration,
+      videoResolution: videoControls.videoResolution,
+      videoFps: videoControls.videoFps,
+      videoFrames: videoControls.videoFrames,
+      seedanceResolution: videoControls.seedanceResolution,
+      seedanceRatio: videoControls.seedanceRatio,
+      seedanceDuration: videoControls.seedanceDuration,
       generateAudio: latestData.generateAudio,
       workflowId: latestData.workflowId,
       workflowInputs: latestData.workflowInputs,
@@ -428,7 +431,7 @@ function AINodeDialog() {
           status: 'success',
           mediaUrl: result.url,
           filePath: saved?.filePath,
-          params: { videoResolution: baseParams.videoResolution, videoFps, videoFrames, seedanceResolution: baseParams.seedanceResolution, seedanceRatio: baseParams.seedanceRatio, seedanceDuration, generateAudio: baseParams.generateAudio },
+          params: { videoResolution: baseParams.videoResolution, videoFps: baseParams.videoFps, videoFrames: baseParams.videoFrames, seedanceResolution: baseParams.seedanceResolution, seedanceRatio: baseParams.seedanceRatio, seedanceDuration: baseParams.seedanceDuration, generateAudio: baseParams.generateAudio },
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '视频生成失败');

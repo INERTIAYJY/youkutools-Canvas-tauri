@@ -182,13 +182,6 @@ export default function VideoParamSelector({
   const [pickerFor, setPickerFor] = useState<VideoReferenceItem['kind'] | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const generalModels = useAppStore((state) => state.config.generalModels);
-  // 森之灵：能力来自 CLI 目录模型声明的 videoCapability
-  const seedlingCatalogModels = useAppStore(
-    (state) => state.config.providers?.seedling?.catalogModels,
-  );
-  const seedlingSelectedModels = useAppStore(
-    (state) => state.config.providers?.seedling?.selectedModels,
-  );
   const projectCharacters = useAppStore((state) => state.dramaAssets.characters);
   const globalCharacters = useAppStore((state) => state.globalCharacters);
   const loadGlobalCharacters = useAppStore((state) => state.loadGlobalCharacters);
@@ -269,27 +262,9 @@ export default function VideoParamSelector({
     ? generalModel.videoCapability
       ?? getModelProtocolPresetVideoCapability(generalModel.executionProfile)
     : undefined;
-  // 森之灵（seedling）：能力来自 CLI 目录模型声明的 videoCapability
-  const seedlingCapability = useMemo(() => {
-    if (provider !== 'seedling' || !selectedModel) return undefined;
-    const modelId = selectedModel.replace(/^seedling\//, '');
-    const catalogModel = (seedlingCatalogModels ?? []).find((model) => model.id === modelId)
-      ?? (seedlingSelectedModels ?? []).find((model) => model.id === modelId);
-    return toSeedanceCapabilityView(catalogModel?.videoCapability);
-  }, [provider, selectedModel, seedlingCatalogModels, seedlingSelectedModels]);
-  // 统一的能力约束：APIMart / 火山方舟 / 森之灵 / 即梦 / 通用模型都可能有按模型的档位约束，取命中者
-  const seedanceCapability = apimartCapability ?? volcengineCapability ?? seedlingCapability ?? dreaminaCapability ?? generalCapability;
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
     || provider === 'seedling'
     || Boolean(apimartCapability);
-  const customUsesDuration = modelProtocolUsesVariable(customProtocolSource, 'duration', 'seedanceDuration');
-  const customUsesResolution = modelProtocolUsesVariable(
-    customProtocolSource,
-    'resolution',
-    'seedanceResolution',
-  );
-  const customUsesRatio = modelProtocolUsesVariable(customProtocolSource, 'aspectRatio', 'seedanceRatio');
-  const customUsesAudio = modelProtocolUsesVariable(customProtocolSource, 'generateAudio');
   const generalDisplayState = resolveGeneralVideoParameterDisplayState(generalCapability, {
     resolution: seedanceResolution,
     ratio: seedanceRatio,

@@ -1,7 +1,7 @@
 /**
  * ImageNode 图像节点 — 在画布上渲染图像内容，支持上传/粘贴图片、遮罩编辑、工具栏、全屏预览
  */
-import { memo, lazy, Suspense, useCallback, useRef, useState } from 'react';
+import { memo, lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { Node } from '@xyflow/react';
 import type {
@@ -43,6 +43,7 @@ import {
 } from '../../services/canvasDerivationGuard';
 import { useImageNodeOnnxActions } from './shared/image/useImageNodeOnnxActions';
 import { useT } from '../../i18n';
+import { getImageLoadRetryDelay, isRetryableImageSource } from '../../utils/imageLoadRetry';
 
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
@@ -160,12 +161,19 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   const [isCameraStudio, setIsCameraStudio] = useState(false);
   // 加载状态按来源记账：来源一变旧状态自然失效，无需 effect 逐个重置
-  const [imgState, setImgState] = useState<{ src?: string; loaded?: boolean; failed?: boolean }>({});
+  const [imgState, setImgState] = useState<{
+    src?: string;
+    loaded?: boolean;
+    failed?: boolean;
+    retryAttempt?: number;
+    retrying?: boolean;
+  }>({});
+  const imageRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const imageRetryRef = useRef<{ src?: string; scheduledAttempts: number }>({ scheduledAttempts: 0 });
   const [fullscreenFailedSrc, setFullscreenFailedSrc] = useState<string | undefined>();
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [mattingFailedSrc, setMattingFailedSrc] = useState<string | undefined>();
   const [annotateFailedSrc, setAnnotateFailedSrc] = useState<string | undefined>();
-  const imagePreviewRef = useRef<HTMLImageElement>(null);
-  const [fullscreenOrigin, setFullscreenOrigin] = useState<{ left: number; top: number; width: number; height: number } | undefined>();
 
   // 文件被外部工具覆盖时只刷新本地预览，不修改节点数据或撤销历史。
   const revisionFor = useReferencedImageRevisions([data.filePath]);
@@ -177,9 +185,62 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   // imageUrl 或外部文件版本变化后，下面这些标记自动回到初始态
   const imgLoaded = imgState.src === displaySrc && !!imgState.loaded;
   const imgLoadError = imgState.src === displaySrc && !!imgState.failed;
+  const imgRetrying = imgState.src === displaySrc && !!imgState.retrying;
+  const imgRetryAttempt = imgState.src === displaySrc ? (imgState.retryAttempt ?? 0) : 0;
   const fullscreenError = !!displaySrc && fullscreenFailedSrc === displaySrc;
   const mattingError = !!data.mattingMask && mattingFailedSrc === data.mattingMask;
   const annotateError = !!data.annotation && annotateFailedSrc === data.annotation;
+
+  useEffect(() => {
+    imageRetryRef.current = { src: displaySrc, scheduledAttempts: 0 };
+    return () => {
+      if (imageRetryTimerRef.current) clearTimeout(imageRetryTimerRef.current);
+      imageRetryTimerRef.current = null;
+    };
+  }, [displaySrc]);
+
+  const handlePreviewImageLoad = useCallback(() => {
+    if (!displaySrc) return;
+    if (imageRetryTimerRef.current) clearTimeout(imageRetryTimerRef.current);
+    imageRetryTimerRef.current = null;
+    imageRetryRef.current = { src: displaySrc, scheduledAttempts: 0 };
+    setImgState({ src: displaySrc, loaded: true });
+  }, [displaySrc]);
+
+  const handlePreviewImageError = useCallback(() => {
+    if (!displaySrc) return;
+
+    if (imageRetryTimerRef.current) clearTimeout(imageRetryTimerRef.current);
+    imageRetryTimerRef.current = null;
+
+    if (imageRetryRef.current.src !== displaySrc) {
+      imageRetryRef.current = { src: displaySrc, scheduledAttempts: 0 };
+    }
+    const scheduledAttempts = imageRetryRef.current.scheduledAttempts;
+    const retryDelay = isRetryableImageSource(displaySrc)
+      ? getImageLoadRetryDelay(scheduledAttempts)
+      : null;
+    if (retryDelay === null) {
+      setImgState({ src: displaySrc, failed: true, retryAttempt: scheduledAttempts });
+      return;
+    }
+
+    const nextAttempt = scheduledAttempts + 1;
+    imageRetryRef.current.scheduledAttempts = nextAttempt;
+    setImgState({ src: displaySrc, retryAttempt: scheduledAttempts, retrying: true });
+    imageRetryTimerRef.current = setTimeout(() => {
+      imageRetryTimerRef.current = null;
+      if (imageRetryRef.current.src !== displaySrc) return;
+      setImgState({ src: displaySrc, retryAttempt: nextAttempt, retrying: true });
+    }, retryDelay);
+  }, [displaySrc]);
+
+  const handlePreviewImageReload = useCallback(() => {
+    if (imageRetryTimerRef.current) clearTimeout(imageRetryTimerRef.current);
+    imageRetryTimerRef.current = null;
+    imageRetryRef.current = { src: displaySrc, scheduledAttempts: 0 };
+    setImgState({});
+  }, [displaySrc]);
 
   const handleOpenCameraStudio = useCallback(() => setIsCameraStudio(true), []);
   const handleCloseCameraStudio = useCallback(() => setIsCameraStudio(false), []);
@@ -710,16 +771,8 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   /* ════════════════════════════════════════════
      Fullscreen State
      ════════════════════════════════════════════ */
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const handleOpenFullscreen = useCallback(() => {
-    const rect = imagePreviewRef.current?.getBoundingClientRect();
-    setFullscreenOrigin(rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined);
-    setIsFullscreen(true);
-  }, []);
-  const handleCloseFullscreen = useCallback(() => {
-    setIsFullscreen(false);
-    setFullscreenOrigin(undefined);
-  }, []);
+  const handleOpenFullscreen = useCallback(() => setIsFullscreen(true), []);
+  const handleCloseFullscreen = useCallback(() => setIsFullscreen(false), []);
 
   /** 重绘 — 打开 PromptPanel 对话框 */
   const handleRepaint = useCallback(() => {
@@ -778,6 +831,16 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴图像'));
 
+  // 重编辑器会自行解码原图或建立 GPU 纹理；打开期间卸载画布预览，避免同一资源双份常驻。
+  const shouldSuspendCanvasPreview = isFullscreen
+    || isMatting
+    || isAnnotate
+    || isExpand
+    || isCrop
+    || isCustomGrid
+    || isCameraStudio
+    || isCompose;
+
   return (
     <>
       <div className="node-wrapper relative" style={{ width: nodeWidth }}>
@@ -795,6 +858,21 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           <div className="node-preview compact">
             {displaySrc ? (
               <div className="image-preview-container">
+                {shouldSuspendCanvasPreview && (
+                  <div
+                    className="image-preview-suspended pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 overflow-hidden rounded-xl bg-gradient-to-br from-canvas-card via-canvas-bg to-canvas-surface text-canvas-text-muted"
+                    aria-hidden="true"
+                  >
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.25" opacity="0.42">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" />
+                      <polyline points="21 15 16 10 5 21" />
+                    </svg>
+                    <span className="text-[10px] tracking-[0.16em] opacity-50">{t('编辑中')}</span>
+                  </div>
+                )}
+                {!shouldSuspendCanvasPreview && (
+                  <>
                 {imgLoadError ? (
                   <div className="flex flex-col items-center justify-center gap-2 h-full min-h-[80px] text-canvas-text-muted">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.5">
@@ -804,7 +882,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     </svg>
                     <span className="text-xs">{t('图片加载失败')}</span>
                     <button
-                      onClick={(e) => { e.stopPropagation(); setImgState({}); }}
+                      onClick={(e) => { e.stopPropagation(); handlePreviewImageReload(); }}
                       className="text-[10px] px-2 py-0.5 rounded bg-canvas-hover hover:bg-canvas-border transition-colors"
                     >
                       {t('重新加载')}
@@ -812,15 +890,20 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                   </div>
                 ) : (
                   <img
-                    ref={imagePreviewRef}
+                    key={`${displaySrc}:${imgRetryAttempt}`}
                     src={displaySrc}
                     alt="Generated"
                     className={`image-preview-img compact img-reveal${imgLoaded ? ' is-loaded' : ''}`}
                     data-source-url={data.sourceUrl}
-                    onLoad={() => setImgState({ src: displaySrc, loaded: true })}
-                    onError={() => setImgState({ src: displaySrc, failed: true })}
+                    onLoad={handlePreviewImageLoad}
+                    onError={handlePreviewImageError}
                     onDoubleClick={(e) => { e.stopPropagation(); handleOpenFullscreen(); }}
                   />
+                )}
+                {imgRetrying && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-canvas-card" aria-hidden="true">
+                    <div className="spinner" />
+                  </div>
                 )}
                 {data.mattingMask && !mattingError && (
                   <img
@@ -876,6 +959,8 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                       {t('主体识别中...')}
                     </span>
                   </div>
+                )}
+                  </>
                 )}
               </div>
             ) : isUploading ? (
@@ -1005,6 +1090,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           <CropEditor
             isOpen={isCrop}
             imageUrl={(data.imageUrl || data.thumbnailUrl) as string}
+            operationKey={`image-node:${id}`}
             onClose={handleCloseCrop}
             onStart={handleCropStart}
             onSave={handleCropSave}
@@ -1053,8 +1139,9 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         onClose={handleCloseFullscreen}
         data-tooltip={(data.label as string) || t('图片预览')}
         hidePanel
+        className="fullscreen-overlay--image-preview image-node-fullscreen-overlay"
       >
-        {fullscreenError ? (
+        {isFullscreen && (fullscreenError ? (
           <div className="flex flex-col items-center justify-center gap-3 text-canvas-text-muted" style={{ height: '100vh' }}>
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.5">
               <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -1069,16 +1156,15 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               {t('重新加载')}
             </button>
           </div>
-        ) : (
+        ) : displaySrc ? (
           <ZoomableImage
-            src={(data.imageUrl || data.thumbnailUrl) as string}
+            src={displaySrc}
             alt={(data.label as string) || t('预览')}
             className="fullscreen-img-view"
-            originRect={fullscreenOrigin}
             onClose={handleCloseFullscreen}
             onError={() => setFullscreenFailedSrc(displaySrc)}
           />
-        )}
+        ) : null)}
       </FullscreenOverlay>
 
       {/* ── 超分模型下载弹窗（Portal → body）── */}

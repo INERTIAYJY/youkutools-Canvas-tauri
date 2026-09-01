@@ -8,13 +8,18 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
 import { derivedNodePlacement } from '../../store/store.utils';
-import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption } from '../../types';
-import { ANIMATION_FRAME_GRIDS } from '../../types';
+import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption, ShotlistColumnKey, ShotRow } from '../../types';
+import { ANIMATION_FRAME_GRIDS, resolveShotlistColumns } from '../../types';
+import { buildShotlistGenerationPrompt, carryOverShotFrames, parseShotlistRows } from '../../services/shotlistGenerate';
 import { MAX_IMAGE_BATCH_COUNT, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
 import { generateText, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from '../../services/aiService';
 import { persistAudioGenerationResult } from '../../services/ai/generateAudio';
 import { downloadUrlAndSave } from '../../services/fileService';
-import { applyImageBatchResults } from '../../services/imageBatchService';
+import {
+  applyImageBatchResults,
+  failImageBatchNodes,
+  prepareImageBatchNodes,
+} from '../../services/imageBatchService';
 import { createCharacterDirectionGrid } from '../../services/onnxService';
 import PromptPanel from './shared/PromptPanel';
 import type { MentionEditorHandle } from './shared/MentionEditor';
@@ -32,11 +37,8 @@ import {
   buildAnimationSpritePrompt,
   resolveAnimationSheetAspectRatio,
 } from '../../services/ai/animationPrompt';
+import { resolveVideoSubmissionControls } from '../../services/ai/videoRequestResolver';
 import { buildGenerationCameraPrompt } from './shared/image/cameraStudio';
-import {
-  resolveVideoDurationSeconds,
-  videoFramesFromDuration,
-} from '../../services/aiDimensions';
 import { cancelComfyUINodeTask } from '../../services/comfyWorkflowService';
 import { useT } from '../../i18n';
 
@@ -484,12 +486,18 @@ function AINodeDialog() {
       );
     };
     updateNodeDataTransient(activeNodeId!, { status: 'loading', error: undefined });
+    let batchNodeIds: string[] | undefined;
     try {
       const batchCount = Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(latestData.batchCount) || 1)));
       if (nodeType === 'ai-image' && batchCount > 1) {
         if (postProcess) throw new Error(t('批量生成暂不支持图片后处理，请将数量设为 1'));
         const imageSize = (latestData.imageSize as string) || '2K';
         const aspectRatio = (latestData.aspectRatio as string) || '1:1';
+        batchNodeIds = prepareImageBatchNodes({
+          nodeId: submittingNodeId,
+          count: batchCount,
+          projectId: submittingProjectId,
+        }).nodeIds;
         showToast(t('正在批量生成 {count} 张图片', { count: batchCount }));
         const batch = await generateImagesBatch({
           prompt: effectivePrompt,
@@ -504,6 +512,7 @@ function AINodeDialog() {
         if (!isStillCurrentSubmission()) return;
         await applyImageBatchResults({
           nodeId: submittingNodeId,
+          targetNodeIds: batchNodeIds,
           batch,
           projectId: submittingProjectId,
           prompt: effectivePrompt,
@@ -664,16 +673,23 @@ function AINodeDialog() {
           await runVideoToNewNodes(count);
           return;
         }
-        const videoResolution = (latestData.videoResolution as number) || 832;
-        const videoFps = (latestData.videoFps as number) || 24;
-        const seedanceDuration = resolveVideoDurationSeconds(
-          latestData.seedanceDuration as number | undefined,
-          latestData.videoFrames as number | undefined,
+        const {
+          videoResolution,
           videoFps,
-        );
-        const videoFrames = videoFramesFromDuration(seedanceDuration, videoFps);
-        const seedanceResolution = (latestData.seedanceResolution as string) || '720p';
-        const seedanceRatio = (latestData.seedanceRatio as string) || '16:9';
+          videoFrames,
+          seedanceResolution,
+          seedanceRatio,
+          seedanceDuration,
+        } = resolveVideoSubmissionControls({
+          provider: nodeProvider,
+          workflowId: latestData.workflowId,
+          videoResolution: latestData.videoResolution as number | undefined,
+          videoFps: latestData.videoFps as number | undefined,
+          videoFrames: latestData.videoFrames as number | undefined,
+          seedanceResolution: latestData.seedanceResolution as string | undefined,
+          seedanceRatio: latestData.seedanceRatio as string | undefined,
+          seedanceDuration: latestData.seedanceDuration as number | undefined,
+        });
         const generateAudio = latestData.generateAudio as boolean | undefined;
         const result = await generateVideo({
           prompt: effectivePrompt,
@@ -775,6 +791,34 @@ function AINodeDialog() {
           },
         });
         showToast(t('音频生成完成'));
+      } else if (nodeType === 'ai-shotlist') {
+        // 分镜表要的是表格行不是一段文字：按当前显示的列出题，把回答解析回 shotlistRows
+        const columns = resolveShotlistColumns(latestData.shotlistColumns as ShotlistColumnKey[] | undefined);
+        const result = await generateText({
+          prompt: buildShotlistGenerationPrompt(effectivePrompt, columns),
+          model: nodeModel,
+          provider: nodeProvider,
+        });
+        if (!isStillCurrentSubmission()) return;
+        const generated = parseShotlistRows(result);
+        // 生成期间用户可能还在改表，取最新一份做画面接续，别拿 await 前的快照
+        const previousRows = (useAppStore.getState().nodes.find((n) => n.id === submittingNodeId)
+          ?.data.shotlistRows as ShotRow[] | undefined) ?? [];
+        const rows = carryOverShotFrames(previousRows, generated);
+        updateNodeData(activeNodeId!, { shotlistRows: rows, status: 'success' });
+        recordOutputHistory(activeNodeId!, {
+          nodeId: activeNodeId!,
+          nodeLabel: nodeLabel,
+          timestamp: Date.now(),
+          prompt: effectivePrompt,
+          output: result,
+          nodeType: 'ai-shotlist',
+          model: nodeModel,
+          provider: nodeProvider,
+          status: 'success',
+          params: { columns },
+        });
+        showToast(t('已生成 {count} 个镜头', { count: rows.length }));
       } else {
         const result = await generateText({
           prompt: effectivePrompt,
@@ -821,6 +865,7 @@ function AINodeDialog() {
         return;
       }
       if (!isStillCurrentSubmission()) return;
+      if (batchNodeIds) failImageBatchNodes(batchNodeIds, msg, submittingProjectId);
       updateNodeDataTransient(activeNodeId!, { status: 'error', error: msg });
       recordOutputHistory(activeNodeId!, {
         nodeId: activeNodeId!,
@@ -855,6 +900,16 @@ function AINodeDialog() {
     }
   }, [activeNodeId, showToast, t, updateNodeDataTransient]);
 
+  /**
+   * 「直接输出」只对产物就是文字的节点成立：媒体节点没有模型就没有素材，
+   * 分镜表的产物是表格行，把提示词原样倒进 output 也不会出现在表里。
+   */
+  const supportsPassThrough = nodeType !== 'ai-image'
+    && nodeType !== 'ai-animation'
+    && nodeType !== 'ai-video'
+    && nodeType !== 'ai-audio'
+    && nodeType !== 'ai-shotlist';
+
   // 直接将输入内容作为节点输出（跳过模型调用）
   const onPassThrough = useCallback(() => {
     const ld = useAppStore.getState().nodes.find((n) => n.id === activeNodeId)?.data as BaseNodeData | undefined;
@@ -879,10 +934,19 @@ function AINodeDialog() {
         model: model.value,
         provider: model.provider,
         audioPurpose: model.audioPurpose,
+        ...(nodeType === 'ai-video' && model.provider === 'general' ? {
+          videoResolution: undefined,
+          videoFps: undefined,
+          videoFrames: undefined,
+          seedanceResolution: undefined,
+          seedanceRatio: undefined,
+          seedanceDuration: undefined,
+          generateAudio: undefined,
+        } : {}),
         ...(model.provider === 'dreamina' ? { batchCount: 1 } : {}),
       });
     },
-    [activeNodeId, updateNodeData]
+    [activeNodeId, nodeType, updateNodeData]
   );
 
   const onWorkflowSelect = useCallback(
@@ -928,27 +992,27 @@ function AINodeDialog() {
   );
 
   const onChangeVideoFps = useCallback(
-    (value: number) => updateNodeData(activeNodeId!, { videoFps: value }),
+    (value: number | undefined) => updateNodeData(activeNodeId!, { videoFps: value }),
     [activeNodeId, updateNodeData]
   );
 
   const onChangeSeedanceResolution = useCallback(
-    (value: string) => updateNodeData(activeNodeId!, { seedanceResolution: value }),
+    (value: string | undefined) => updateNodeData(activeNodeId!, { seedanceResolution: value }),
     [activeNodeId, updateNodeData]
   );
 
   const onChangeSeedanceRatio = useCallback(
-    (value: string) => updateNodeData(activeNodeId!, { seedanceRatio: value }),
+    (value: string | undefined) => updateNodeData(activeNodeId!, { seedanceRatio: value }),
     [activeNodeId, updateNodeData]
   );
 
   const onChangeSeedanceDuration = useCallback(
-    (value: number) => updateContinuousNodeData({ seedanceDuration: value }),
+    (value: number | undefined) => updateContinuousNodeData({ seedanceDuration: value }),
     [updateContinuousNodeData]
   );
 
   const onChangeGenerateAudio = useCallback(
-    (value: boolean) => updateNodeData(activeNodeId!, { generateAudio: value }),
+    (value: boolean | undefined) => updateNodeData(activeNodeId!, { generateAudio: value }),
     [activeNodeId, updateNodeData]
   );
 
@@ -1137,7 +1201,7 @@ function AINodeDialog() {
           onSubmit={onSubmit}
           onModelSelect={onModelSelect}
           onWorkflowSelect={onWorkflowSelect}
-          onPassThrough={(nodeType !== 'ai-image' && nodeType !== 'ai-animation' && nodeType !== 'ai-video' && nodeType !== 'ai-audio') ? onPassThrough : undefined}
+          onPassThrough={supportsPassThrough ? onPassThrough : undefined}
           imageSize={(data.imageSize as string) || '2K'}
           aspectRatio={(data.aspectRatio as string) || (nodeType === 'ai-panorama' ? '2:1' : '1:1')}
           onChangeImageSize={onChangeImageSize}
@@ -1146,13 +1210,13 @@ function AINodeDialog() {
           onChangeBatchCount={onChangeBatchCount}
           cameraSettings={data.cameraSettings}
           onChangeCameraSettings={onChangeCameraSettings}
-          videoResolution={(data.videoResolution as number) || 832}
-          videoFps={(data.videoFps as number) || 24}
-          videoFrames={(data.videoFrames as number) || 77}
+          videoResolution={data.videoResolution as number | undefined}
+          videoFps={data.videoFps as number | undefined}
+          videoFrames={data.videoFrames as number | undefined}
           onChangeVideoResolution={onChangeVideoResolution}
           onChangeVideoFps={onChangeVideoFps}
-          seedanceResolution={(data.seedanceResolution as string) || '720p'}
-          seedanceRatio={(data.seedanceRatio as string) || '16:9'}
+          seedanceResolution={data.seedanceResolution as string | undefined}
+          seedanceRatio={data.seedanceRatio as string | undefined}
           seedanceDuration={data.seedanceDuration as number | undefined}
           generateAudio={data.generateAudio as boolean | undefined}
           generateInPlace={generateInPlace}

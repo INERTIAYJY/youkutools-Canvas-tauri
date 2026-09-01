@@ -5,6 +5,11 @@ import type { AudioOutputFormat, AudioTtsVoice, ModelExecutionProfile, VideoMode
 import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
 import type { CanvasNoteData } from './canvasNote';
+import type {
+  DirectorResultManifestReference,
+  DirectorRuntimeKind,
+  DirectorSceneReference,
+} from './directorScene';
 import type { ShotlistColumnKey, ShotRow } from './shotlist';
 import type { Locale } from '../i18n';
 
@@ -29,6 +34,32 @@ export type {
 } from './canvasNote';
 export { createCanvasNoteData, DEFAULT_CANVAS_NOTE_STYLE, isCanvasNoteKind } from './canvasNote';
 
+export type {
+  DirectorBlendProjectArtifact,
+  DirectorCamera,
+  DirectorCameraInterpolation,
+  DirectorCameraKeyframe,
+  DirectorCoordinateSystem,
+  DirectorEnvironment,
+  DirectorFrameImageArtifact,
+  DirectorProjectFileReference,
+  DirectorReferenceVideoArtifact,
+  DirectorResultArtifact,
+  DirectorResultManifest,
+  DirectorResultManifestReference,
+  DirectorResultProducer,
+  DirectorRuntimeKind,
+  DirectorScene,
+  DirectorSceneEntity,
+  DirectorSceneParent,
+  DirectorSceneReference,
+  DirectorShot,
+  DirectorTimeline,
+  DirectorTransform,
+  DirectorVector3,
+  DirectorWorldColor,
+} from './directorScene';
+
 export type { ShotFrameBinding, ShotFrameCandidate, ShotlistColumnKey, ShotRow } from './shotlist';
 export {
   buildShotFramePrompt,
@@ -42,6 +73,7 @@ export {
   isShotRowTextOnly,
   readShotFrameSource,
   resolveShotDuration,
+  resolveShotlistColumns,
   resolveShotTransitionKind,
   SHOT_CAMERA_OPTIONS,
   SHOT_SIZE_OPTIONS,
@@ -231,10 +263,13 @@ export interface BaseNodeData {
   shotlistRows?: ShotRow[];                 // 逐行镜头
   shotlistColumns?: ShotlistColumnKey[];    // 当前显示的列（常驻列恒在其中）
   // ── 3D 导演台（ai-director）──
+  directorRuntimeKind?: DirectorRuntimeKind; // 缺失=lightweight-web；未知运行时必须失败关闭
   directorInstanceId?: string;           // 导演台 localStorage 隔离实例 ID
   directorStatus?: 'idle' | 'open' | 'ready';
   directorCaptureUrls?: string[];        // 从导演台同步的截图 URL 列表
   directorCaptureFilePaths?: string[];   // 对应本地路径
+  directorScene?: DirectorSceneReference; // 结构化 Director Scene 的不可变项目文件引用
+  directorResultManifest?: DirectorResultManifestReference; // 当前结果清单的不可变项目文件引用
   /** 轻量笔记/绘图元素。与 AI 生成节点数据语义隔离。 */
   note?: CanvasNoteData;
   [key: string]: unknown;
@@ -259,6 +294,26 @@ export interface OutputHistoryEntry {
   params?: Record<string, unknown>; // 生成参数快照
 }
 
+/** 单集创作要点；只描述写作结构。 */
+export interface EpisodeCreativeInfo {
+  /** 本集要完成的叙事任务。 */
+  task?: string;
+  /** 对立双方、争夺目标与失败代价。 */
+  coreConflict?: string;
+  /** 开场几秒内建立的冲突或悬念。 */
+  openingHook?: string;
+  /** 本集的关键反转或情绪爆点。 */
+  reversal?: string;
+  /** 结尾未完成动作、揭露或关系反转。 */
+  endingHook?: string;
+  /** 按发生顺序排列的主要情节点。 */
+  beats?: string[];
+  /** 目标时长（秒），仅用于创作统计提示。 */
+  targetDurationSec?: number;
+  /** 原著章节、页码或段落范围。 */
+  sourceRange?: string;
+}
+
 export interface CanvasProject {
   id: string;
   name: string;
@@ -279,8 +334,12 @@ export interface CanvasProject {
   parentId?: string;
   /** 分集序号，从 1 开始；仅分集项目有。 */
   episodeNo?: number;
-  /** 本集大纲或剧本片段；仅分集项目有。 */
+  /** 本集大纲；仅分集项目有。旧项目继续兼容此字段。 */
   episodeOutline?: string;
+  /** 本集完整剧本正文；与大纲分开保存。 */
+  episodeScript?: string;
+  /** 本集结构化创作要点。 */
+  episodeCreative?: EpisodeCreativeInfo;
   /** 剧集级原著与剧本；仅剧集项目有。 */
   series?: ProjectSeriesInfo;
 }
@@ -460,6 +519,9 @@ export type NodeToolbarMode = 'icons' | 'icons-and-text';
 /** 软件启动后优先展示的视图。 */
 export type StartupView = 'last-project' | 'project-library';
 
+/** 主窗口可固定的宽高比 */
+export type WindowAspectRatio = '16:9' | '16:10' | '4:3';
+
 /** 吉祥物在可拖动视口中的相对位置，x/y 均为 0-1。 */
 export interface MascotPosition {
   x: number;
@@ -473,6 +535,8 @@ export type CanvasQuickActionKind =
   | 'assets'
   | 'settings'
   | 'projects'
+  | 'video-editor'
+  | 'action-library'
   | 'fit-view'
   | 'custom-url'
   | 'disabled';
@@ -500,6 +564,10 @@ export interface AppConfig {
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
   canvasQuickActions?: CanvasQuickAction[]; // 画布空白处长按圆环，最多 6 个槽位
   startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'last-project'
+  windowAspectRatio?: WindowAspectRatio; // 窗口尺寸预设所用比例，默认 '16:9'
+  windowAspectLocked?: boolean; // 拖拽缩放窗口时是否固定为上面的比例，默认 false
+  windowSize?: { width: number; height: number }; // 上次退出时的窗口逻辑尺寸，启动时恢复
+  customCursor?: boolean; // 是否启用内置鼠标指针样式，默认 true
   customBackgroundUrl?: string;  // 自定义背景图片 data URL
   customBackgroundIsDark?: boolean; // 自定义背景是否为深色（自动识别）
   customBackgroundOpacity?: number; // 自定义背景透明度 0-1，默认 0.3
@@ -510,7 +578,7 @@ export interface AppConfig {
   seedlingAuth?: SeedlingAuthMirror; // 森之灵 CLI 登录态镜像（CLI 配置文件持久化登录态）
   baseDataDir?: string;       // 用户自定义文件保存根目录，保存结构为 {baseDataDir}/{projectId}/**
   generalModels?: GeneralModelConfig[]; // 用户自建通用模型
-  sidebarFloating?: boolean;  // 侧边栏是否悬浮显示（半隐于窗口边缘），默认 true
+  sidebarFloating?: boolean;  // 侧边栏是否悬浮显示（半隐于窗口边缘），默认 false
   windowGlassFrame?: boolean; // 是否显示主窗口玻璃外框，默认 true
   performanceMode?: boolean; // 性能模式：关闭高开销视觉效果与装饰动画，默认 false
   /** @deprecated 仅用于读取早期图形兼容模式配置，加载后迁移到 performanceMode。 */
@@ -724,6 +792,8 @@ export interface PresetSequenceStep {
   promptTemplate: string;
   model?: string;
   provider?: string;
+  /** provider=comfyui 时指定本地工作流；缺省则沿用触发节点的工作流 */
+  workflowId?: string;
   imageSize?: string;
   aspectRatio?: string;
 }

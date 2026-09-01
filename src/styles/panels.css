@@ -16,6 +16,15 @@
   animation: floatIn var(--dur-normal) var(--ease-out-expo);
   transition: left 0.28s var(--ease-spring), top 0.28s var(--ease-spring);
 }
+
+/* 画布平移、缩放或节点拖动时暂时隐藏浮动对话框；交互结束并同步到节点新位置后再显示。 */
+.canvas-interacting .ai-dialog-float:not(.is-expanded),
+.canvas-interacting .ai-dialog-preview-float {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
 /* 生成中：border-beam 覆盖层（仅描边环，中间透明，不挡内容）
    z-index 必须高于面板内容：底部工具栏等子元素有自己的背景，
    压在光束上会让光束在那一段"消失"，看起来就像瞬移 */
@@ -39,7 +48,7 @@
   border: 0;
   background: var(--black-alpha-50);
   backdrop-filter: blur(3px);
-  cursor: default;
+  cursor: var(--cursor-default, default);
   animation: aiDialogBackdropIn var(--dur-normal) var(--ease-out-expo);
 }
 .ai-dialog-float.is-expanded {
@@ -69,7 +78,7 @@
   border-radius: 8px;
   background: color-mix(in srgb, var(--theme-surface) 82%, transparent);
   color: var(--theme-text-secondary);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base), border-color var(--transition-base), transform var(--transition-base);
 }
 .ai-dialog-float .ai-dialog-expand-btn:hover {
@@ -229,7 +238,7 @@
   background: transparent;
   color: var(--theme-text-secondary);
   border-radius: 7px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
   padding: 0;
 }
@@ -311,7 +320,7 @@
   background: var(--white-alpha-04);
   border: 1px solid var(--white-alpha-08);
   border-radius: 7px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-colors);
 }
 .wf-reset-btn:hover {
@@ -440,7 +449,7 @@
   background: var(--white-alpha-03);
   color: var(--theme-text-secondary);
   border-radius: 7px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-colors);
   font-family: inherit;
 }
@@ -453,57 +462,25 @@
   border-color: color-mix(in srgb, var(--brand) 40%, transparent);
   background: var(--brand-alpha-12);
 }
-
-/* 拖放上传区 */
-.wf-dropzone {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 18px 14px;
-  text-align: center;
-  border: 1.5px dashed var(--separator-color);
-  border-radius: 14px;
-  background: var(--white-alpha-02);
-  cursor: pointer;
-  transition: border-color var(--transition-base), background var(--transition-base);
+.wf-cat-chip--text.active {
+  color: var(--node-text-light);
+  border-color: color-mix(in srgb, var(--node-text) 40%, transparent);
+  background: var(--node-text-bg);
 }
-.wf-dropzone:hover,
-.wf-dropzone:focus-visible,
-.wf-dropzone.is-dragover {
-  border-color: color-mix(in srgb, var(--brand) 55%, transparent);
-  background: var(--brand-alpha-04);
-  outline: none;
+.wf-cat-chip--image.active {
+  color: var(--node-image-light);
+  border-color: color-mix(in srgb, var(--node-image) 40%, transparent);
+  background: var(--node-image-bg);
 }
-.wf-dropzone-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--theme-text);
+.wf-cat-chip--video.active {
+  color: var(--node-video-light);
+  border-color: color-mix(in srgb, var(--node-video) 40%, transparent);
+  background: var(--node-video-bg);
 }
-.wf-dropzone-icon {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  color: var(--brand-light);
-  background:
-    radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--brand) 26%, transparent), transparent 70%),
-    var(--white-alpha-04);
-  box-shadow:
-    0 6px 18px color-mix(in srgb, var(--brand) 22%, transparent),
-    inset 0 0 0 1px var(--white-alpha-08);
-  transition: transform var(--transition-base);
-}
-.wf-dropzone:hover .wf-dropzone-icon,
-.wf-dropzone.is-dragover .wf-dropzone-icon {
-  transform: translateY(-2px) scale(1.04);
-}
-.wf-dropzone-hint {
-  max-width: 240px;
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--theme-text-muted);
+.wf-cat-chip--audio.active {
+  color: var(--node-audio-light);
+  border-color: color-mix(in srgb, var(--node-audio) 40%, transparent);
+  background: var(--node-audio-bg);
 }
 
 /* 已选文件卡片 */
@@ -557,7 +534,7 @@
   border-radius: 50%;
   background: transparent;
   color: var(--theme-text-muted);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-colors);
 }
 .wf-file-card-clear:hover {
@@ -589,7 +566,7 @@
 }
 .wf-btn-ghost:disabled {
   opacity: 0.35;
-  cursor: not-allowed;
+  cursor: var(--cursor-not-allowed, not-allowed);
 }
 .wf-actions-row .wf-msg {
   flex: 1 1 100%;
@@ -602,7 +579,7 @@
   font-size: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-family: inherit;
   transition: var(--transition-control);
 }
@@ -617,7 +594,7 @@
 }
 .wf-btn-primary:disabled {
   opacity: 0.35;
-  cursor: not-allowed;
+  cursor: var(--cursor-not-allowed, not-allowed);
 }
 .wf-msg {
   font-size: 12px;
@@ -752,7 +729,7 @@
   font: inherit;
   font-size: 11px;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-colors);
 }
 .wf-item-toggle:hover {
@@ -785,7 +762,7 @@
   background: transparent;
   color: var(--theme-text-muted);
   border-radius: 5px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
   padding: 0;
   flex-shrink: 0;
@@ -836,19 +813,28 @@
 .wf-item-cat {
   flex-shrink: 0;
   margin-left: 2px;
-  padding: 0 4px;
+}
+.ui-select__trigger.wf-item-cat-trigger {
+  height: auto;
+  min-height: 18px;
+  padding: 0 14px 0 4px;
   border: 1px solid var(--white-alpha-08);
   border-radius: 5px;
   background: var(--white-alpha-04);
   color: inherit;
   font: inherit;
   font-size: 10px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-colors);
 }
-.wf-item-cat:hover {
+.ui-select__trigger.wf-item-cat-trigger:hover {
   color: var(--theme-text);
   border-color: var(--border-secondary);
+}
+.ui-select__trigger.wf-item-cat-trigger .ui-select__chevron {
+  right: 2px;
+  width: 10px;
+  height: 10px;
 }
 
 /* 列表里的徽章是按钮：点一下把该节点设为对应类型的默认注入目标 */
@@ -856,7 +842,7 @@ button.wf-ionode-badge {
   border: 1px solid transparent;
   font: inherit;
   font-size: 11px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 button.wf-ionode-badge:hover {
@@ -902,12 +888,10 @@ button.wf-ionode-badge.is-default {
     var(--glass-bevel-border) border-box;
 }
 [data-theme='light'] .wf-section-title,
-[data-theme='light'] .wf-dropzone-hint,
 [data-theme='light'] .wf-file-card-meta,
 [data-theme='light'] .wf-empty {
   color: var(--theme-text-secondary);
 }
-[data-theme='light'] .wf-dropzone,
 [data-theme='light'] .wf-file-card {
   background: var(--theme-surface);
   border-color: color-mix(in srgb, var(--theme-text-secondary) 44%, var(--theme-surface));
@@ -930,9 +914,25 @@ button.wf-ionode-badge.is-default {
   color: color-mix(in srgb, var(--brand) 82%, var(--theme-text));
   border-color: color-mix(in srgb, var(--brand) 68%, var(--theme-surface));
 }
-[data-theme='light'] .wf-dropzone:hover,
-[data-theme='light'] .wf-dropzone.is-dragover {
-  border-color: var(--brand);
+[data-theme='light'] .wf-cat-chip--text.active {
+  color: color-mix(in srgb, var(--node-text) 82%, var(--theme-text));
+  border-color: color-mix(in srgb, var(--node-text) 68%, var(--theme-surface));
+  background: var(--node-text-bg);
+}
+[data-theme='light'] .wf-cat-chip--image.active {
+  color: color-mix(in srgb, var(--node-image) 82%, var(--theme-text));
+  border-color: color-mix(in srgb, var(--node-image) 68%, var(--theme-surface));
+  background: var(--node-image-bg);
+}
+[data-theme='light'] .wf-cat-chip--video.active {
+  color: color-mix(in srgb, var(--node-video) 82%, var(--theme-text));
+  border-color: color-mix(in srgb, var(--node-video) 68%, var(--theme-surface));
+  background: var(--node-video-bg);
+}
+[data-theme='light'] .wf-cat-chip--audio.active {
+  color: color-mix(in srgb, var(--node-audio) 82%, var(--theme-text));
+  border-color: color-mix(in srgb, var(--node-audio) 68%, var(--theme-surface));
+  background: var(--node-audio-bg);
 }
 [data-theme='light'] .wf-btn-primary {
   color: color-mix(in srgb, var(--brand) 82%, var(--theme-text));
@@ -1035,7 +1035,7 @@ button.wf-ionode-badge.is-default {
   background: transparent;
   color: var(--theme-text-secondary);
   border-radius: 7px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
   padding: 0;
 }
@@ -1063,7 +1063,7 @@ button.wf-ionode-badge.is-default {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color 0.15s, border-color 0.15s;
   margin-bottom: -1px;
 }
@@ -1122,7 +1122,7 @@ button.wf-ionode-badge.is-default {
   background: var(--white-alpha-04);
   border: none;
   border-radius: 8px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-control);
 }
 .assets-cat-chip:hover:not(:disabled) {
@@ -1136,7 +1136,7 @@ button.wf-ionode-badge.is-default {
 }
 .assets-cat-chip:disabled {
   opacity: 0.35;
-  cursor: default;
+  cursor: var(--cursor-default, default);
 }
 .assets-cat-count {
   font-size: 10px;
@@ -1153,7 +1153,7 @@ button.wf-ionode-badge.is-default {
   border-radius: 8px;
   background: var(--theme-card);
   color: var(--theme-text-secondary);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: var(--transition-control);
 }
 .assets-filter-more svg {
@@ -1226,6 +1226,24 @@ button.wf-ionode-badge.is-default {
   background: var(--white-alpha-03);
   border: 1px solid var(--border-subtle);
   transition: border-color 0.2s, background 0.2s;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 260px;
+}
+
+/* 短剧资产可能一次挂载大量卡片；离屏时跳过布局与绘制，尺寸由浏览器记忆。 */
+.drama-asset-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 148px;
+}
+
+.project-asset-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 150px;
+}
+
+.character-action-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
 }
 .assets-waterfall-card:hover {
   border-color: var(--border-secondary);
@@ -1307,7 +1325,7 @@ button.wf-ionode-badge.is-default {
   backdrop-filter: blur(var(--glass-blur-sm));
   color: rgba(255, 255, 255, 0.8);
   border-radius: 6px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
   padding: 0;
 }
@@ -1410,7 +1428,7 @@ button.wf-ionode-badge.is-default {
   border: none;
   background: transparent;
   color: var(--theme-text-muted);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   padding: 2px;
   border-radius: 4px;
   transition: color var(--transition-base), background var(--transition-base);
@@ -1445,7 +1463,7 @@ button.wf-ionode-badge.is-default {
   border-radius: 5px;
   background: transparent;
   color: var(--theme-text-secondary);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
 }
 .assets-column-stepper button svg {
@@ -1462,7 +1480,7 @@ button.wf-ionode-badge.is-default {
 }
 .assets-column-stepper button:disabled {
   opacity: 0.3;
-  cursor: default;
+  cursor: var(--cursor-default, default);
 }
 .assets-column-stepper output {
   color: var(--theme-text);
@@ -1473,32 +1491,37 @@ button.wf-ionode-badge.is-default {
 }
 
 /* 项目选择下拉（仅项目文件 Tab） */
-.assets-project-select {
+.assets-project-select-wrap {
   flex-shrink: 0;
   max-width: 200px;
-  padding: 7px 10px;
+}
+.ui-select--custom .assets-project-select.ui-select__trigger {
+  width: 100%;
+  padding: 7px 26px 7px 10px;
   background: var(--theme-card);
   border: 1px solid var(--theme-border);
   border-radius: 9px;
   color: var(--theme-text);
   font-size: 13px;
   font-family: inherit;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   outline: none;
   transition: border-color var(--transition-base), background var(--transition-base);
 }
-.assets-project-select:hover { background: var(--theme-surface); }
-.assets-project-select:focus { border-color: var(--border-focus); }
+.ui-select--custom .assets-project-select.ui-select__trigger:hover { background: var(--theme-surface); }
+.ui-select--custom .assets-project-select.ui-select__trigger:focus-visible { border-color: var(--border-focus); }
 
 /* 资产面板顶部工具栏保持紧凑，不影响独立资源搜索窗口的同名控件。 */
 .assets-panel .assets-toolbar {
   gap: 6px;
   padding: 2px 8px 0;
 }
-.assets-panel .assets-project-select {
+.assets-panel .assets-project-select-wrap {
   width: clamp(140px, 14vw, 168px);
+}
+.assets-panel .ui-select--custom .assets-project-select.ui-select__trigger {
   height: 30px;
-  padding: 4px 8px;
+  padding: 4px 22px 4px 8px;
   border-radius: 7px;
   font-size: 12px;
 }
@@ -1553,10 +1576,10 @@ button.wf-ionode-badge.is-default {
   color: #fff;
   font-size: 13px;
   font-weight: 500;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-family: inherit;
 }
-.assets-add-btn:disabled { opacity: 0.6; cursor: default; }
+.assets-add-btn:disabled { opacity: 0.6; cursor: var(--cursor-default, default); }
 .assets-add-menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -1583,7 +1606,7 @@ button.wf-ionode-badge.is-default {
   border-radius: 7px;
   color: var(--theme-text-secondary);
   font-size: 13px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-family: inherit;
   transition: background var(--transition-base), color var(--transition-base);
 }
@@ -1618,7 +1641,7 @@ button.wf-ionode-badge.is-default {
   border-radius: 50%;
   background: var(--white-alpha-08);
   color: var(--theme-text-muted);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-size: 13px;
   line-height: 1;
   transition: background var(--transition-base), color var(--transition-base);
@@ -1670,7 +1693,7 @@ button.wf-ionode-badge.is-default {
   border: none;
   background: transparent;
   color: var(--brand-pale);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-size: 12px;
   line-height: 1;
   padding: 0;
@@ -1743,19 +1766,19 @@ button.wf-ionode-badge.is-default {
 [data-theme='light'] .assets-filter-more,
 [data-theme='light'] .assets-search,
 [data-theme='light'] .assets-column-stepper,
-[data-theme='light'] .assets-project-select,
+[data-theme='light'] .ui-select--custom .assets-project-select.ui-select__trigger,
 [data-theme='light'] .assets-folder-chip {
   background-color: var(--assets-light-control-bg);
   border-color: var(--assets-light-control-border);
 }
 [data-theme='light'] .assets-cat-chip:hover:not(:disabled),
 [data-theme='light'] .assets-filter-more:hover,
-[data-theme='light'] .assets-project-select:hover {
+[data-theme='light'] .ui-select--custom .assets-project-select.ui-select__trigger:hover {
   background-color: var(--theme-surface);
   border-color: color-mix(in srgb, var(--theme-text-secondary) 58%, var(--theme-surface));
 }
 [data-theme='light'] .assets-search:focus-within,
-[data-theme='light'] .assets-project-select:focus {
+[data-theme='light'] .ui-select--custom .assets-project-select.ui-select__trigger:focus-visible {
   background-color: var(--theme-surface);
   border-color: var(--brand);
 }
@@ -1834,7 +1857,7 @@ button.wf-ionode-badge.is-default {
   background: transparent;
   color: var(--theme-text-muted);
   border-radius: 8px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
 }
 .asset-search-winbtn:hover { color: var(--theme-text); background: var(--white-alpha-08); }
@@ -1862,11 +1885,11 @@ button.wf-ionode-badge.is-default {
   height: 30px;
   border-radius: 8px;
   color: var(--theme-text-muted);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base);
 }
 .asset-search-refresh:hover:not(:disabled) { color: var(--theme-text); background: var(--theme-surface); }
-.asset-search-refresh:disabled { opacity: 0.5; cursor: default; }
+.asset-search-refresh:disabled { opacity: 0.5; cursor: var(--cursor-default, default); }
 .asset-search-toolbar {
   display: flex;
   align-items: center;
@@ -1913,6 +1936,8 @@ button.wf-ionode-badge.is-default {
    Chat Panel — AI 对话助手悬浮面板（右侧）
    ============================================ */
 .chat-panel {
+  container-name: chat-panel;
+  container-type: inline-size;
   right: var(--chat-panel-inset);
   bottom: var(--chat-panel-inset);
   width: var(--chat-panel-width);
@@ -1929,6 +1954,40 @@ button.wf-ionode-badge.is-default {
   border-radius: 16px;
   overflow: hidden;
   isolation: isolate;
+}
+
+.chat-panel-resize-handle {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 8px;
+  cursor: var(--cursor-ew-resize, ew-resize);
+  touch-action: none;
+}
+
+.chat-panel-resize-handle::after {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--brand) 70%, transparent);
+  content: '';
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease-out;
+}
+
+.chat-panel-resize-handle:hover::after,
+body.chat-panel-resizing .chat-panel-resize-handle::after {
+  opacity: 1;
+}
+
+body.chat-panel-resizing {
+  cursor: var(--cursor-ew-resize, ew-resize);
+  user-select: none;
 }
 
 .chat-panel-detached {
@@ -1993,6 +2052,11 @@ button.wf-ionode-badge.is-default {
   background-color: color-mix(in srgb, var(--theme-hover) 58%, transparent);
 }
 
+/* Keep message timeline hover airy in the light theme instead of mixing dark utility RGB. */
+[data-theme='light'] .agent-step-card:hover {
+  background-color: color-mix(in srgb, var(--brand) 12%, var(--theme-surface));
+}
+
 [data-theme='light'] .agent-task-center [class~='text-slate-400'] {
   color: var(--theme-text-muted);
 }
@@ -2047,6 +2111,56 @@ button.wf-ionode-badge.is-default {
 .chat-panel-header::after {
   bottom: -12px;
   background: linear-gradient(to bottom, var(--glass-panel-bg), transparent);
+}
+
+/* Header actions have a larger fixed minimum width than the brand area.
+   Query the panel itself (not the viewport) because the docked panel is resizable. */
+@container chat-panel (max-width: 480px) {
+  .chat-panel-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    row-gap: 0.375rem;
+  }
+
+  .chat-panel-header-brand {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .chat-panel-header-window-actions {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .chat-panel-header-actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    margin-left: 0;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+}
+
+@container chat-panel (max-width: 390px) {
+  .chat-panel-header-actions {
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+  }
+
+  .chat-panel-header-actions > [role='group'] {
+    flex: 1 0 100%;
+  }
+
+  .chat-panel-header-actions > [role='group'] > button {
+    flex: 1 1 0;
+  }
+
+  .chat-panel-header-actions > span[aria-hidden='true'] {
+    display: none;
+  }
 }
 
 .chat-panel-input-area::before {

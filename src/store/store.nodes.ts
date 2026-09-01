@@ -31,7 +31,7 @@ import { playNodeExit } from '../utils/nodeAnimations';
 import { cancelNodePolling } from '../services/pollManager';
 import { applyProjectDefaultsToNodeData } from '../services/projectSettingsService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
-import { requiresDirectorDeskRuntime } from '../services/directorDeskRuntimeService';
+import { resolveDirectorRuntime } from '../services/directorRuntimeRegistry';
 import { clearPluginFileGrants } from '../services/plugins/pluginFileGrantService';
 
 interface GroupNodeDataAccess {
@@ -74,7 +74,47 @@ function hasMaterializedNodeOutput(data: BaseNodeData, nodeType: string | undefi
   }
   if (['ai-video', 'source-video'].includes(nodeType ?? '')) return hasValue(data.videoUrl);
   if (['ai-audio', 'source-audio'].includes(nodeType ?? '')) return hasValue(data.audioUrl);
+  if (nodeType === 'ai-director') {
+    return hasValue(data.imageUrl)
+      || hasValue(data.videoUrl)
+      || (Array.isArray(data.directorCaptureUrls) && data.directorCaptureUrls.some(hasValue));
+  }
   return hasValue(data.output);
+}
+
+function prepareDirectorNodeDataForInsertion(
+  data: BaseNodeData,
+  nodeType: string | undefined,
+  instanceId: string,
+): BaseNodeData {
+  if (nodeType !== 'ai-director') return data;
+  const resolution = resolveDirectorRuntime(data.directorRuntimeKind);
+  const next: BaseNodeData = {
+    ...data,
+    ...(Array.isArray(data.directorCaptureUrls)
+      ? { directorCaptureUrls: [...data.directorCaptureUrls] }
+      : {}),
+    ...(Array.isArray(data.directorCaptureFilePaths)
+      ? { directorCaptureFilePaths: [...data.directorCaptureFilePaths] }
+      : {}),
+    directorInstanceId: instanceId,
+    directorStatus: 'idle',
+  };
+  if (resolution.supported) next.directorRuntimeKind = resolution.kind;
+  if (next.status === undefined || next.status === 'loading' || next.status === 'error') {
+    next.status = hasMaterializedNodeOutput(next, nodeType) ? 'success' : 'idle';
+  }
+  delete next.error;
+  return next;
+}
+
+function prepareNodeForInsertion(
+  node: Node<BaseNodeData>,
+  data: BaseNodeData,
+  displayId: number,
+): Node<BaseNodeData> {
+  const prepared = prepareDirectorNodeDataForInsertion(data, node.type, node.id);
+  return { ...node, data: { ...prepared, displayId } } as Node<BaseNodeData>;
 }
 
 function prepareDuplicateNodeData(
@@ -90,9 +130,7 @@ function prepareDuplicateNodeData(
   }
 
   if (nodeType === 'ai-director') {
-    duplicate.directorInstanceId = cloneId;
-    duplicate.directorStatus = 'idle';
-    delete duplicate.error;
+    return prepareDirectorNodeDataForInsertion(duplicate, nodeType, cloneId);
   }
 
   if (nodeType === 'ai-markdown') {
@@ -117,7 +155,9 @@ export function collectKeepPaths(
   const keepPaths = new Set<string>();
   for (const node of nodes) {
     const data = node.data as BaseNodeData;
-    if (!idsToDelete.has(node.id) && data.filePath) keepPaths.add(data.filePath);
+    if (!idsToDelete.has(node.id)) {
+      fileService.collectNodeFileReferences(data).forEach((reference) => keepPaths.add(reference));
+    }
     // 宫格格子无论节点存活与否都不删：删除路径只清 filePath，撤销也只还原 filePath
     for (const override of data.storyboardOverrides ?? []) {
       if (override?.filePath) keepPaths.add(override.filePath);
@@ -219,19 +259,6 @@ export function filterHiddenCanvasElements(
   };
 }
 
-function requestDirectorDeskRuntimeForNodes(
-  nodes: Node<BaseNodeData>[],
-  get: () => AppState,
-) {
-  if (!requiresDirectorDeskRuntime()) return;
-  const directorNode = nodes.find((node) => node.type === 'ai-director');
-  if (!directorNode) return;
-  const instanceId = typeof directorNode.data.directorInstanceId === 'string'
-    ? directorNode.data.directorInstanceId.trim()
-    : '';
-  get().requestDirectorDeskRuntime(instanceId || directorNode.id, true);
-}
-
 export interface NodeSlice {
   nodes: Node<BaseNodeData>[];
   edges: Edge[];
@@ -315,10 +342,9 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
       const data = applyProjectDefaultsToNodeData(node.data, settings);
       return {
-        nodes: [...state.nodes, { ...node, data: { ...data, displayId } } as Node<BaseNodeData>],
+        nodes: [...state.nodes, prepareNodeForInsertion(node, data, displayId)],
       };
     });
-    requestDirectorDeskRuntimeForNodes([node], get);
   },
 
   addNodeWithEdge: (node, edge) => {
@@ -328,11 +354,10 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
       const data = applyProjectDefaultsToNodeData(node.data, settings);
       return {
-        nodes: [...state.nodes, { ...node, data: { ...data, displayId } } as Node<BaseNodeData>],
+        nodes: [...state.nodes, prepareNodeForInsertion(node, data, displayId)],
         edges: [...state.edges, edge],
       };
     });
-    requestDirectorDeskRuntimeForNodes([node], get);
   },
 
   addNodesWithEdges: (nodes, edges) => {
@@ -344,14 +369,13 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       for (const node of nodes) {
         const displayId = getNextDisplayId(nextNodes);
         const data = applyProjectDefaultsToNodeData(node.data, settings);
-        nextNodes.push({ ...node, data: { ...data, displayId } } as Node<BaseNodeData>);
+        nextNodes.push(prepareNodeForInsertion(node, data, displayId));
       }
       return {
         nodes: nextNodes,
         edges: [...state.edges, ...edges],
       };
     });
-    requestDirectorDeskRuntimeForNodes(nodes, get);
   },
 
   addNodes: (nodes) => {
@@ -368,11 +392,10 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       for (const node of nodes) {
         const displayId = getNextDisplayId(nextNodes);
         const data = applyProjectDefaultsToNodeData(node.data, settings);
-        nextNodes.push({ ...node, data: { ...data, displayId } } as Node<BaseNodeData>);
+        nextNodes.push(prepareNodeForInsertion(node, data, displayId));
       }
       return { nodes: nextNodes };
     });
-    requestDirectorDeskRuntimeForNodes(nodes, get);
   },
 
   createMediaPlaceholder: (intent, requestedPosition) => {

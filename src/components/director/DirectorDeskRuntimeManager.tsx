@@ -2,6 +2,7 @@
  * 协调导演台运行时检测、下载、取消和打开窗口，并维护下载对话框阶段状态。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../store/useAppStore';
 import {
   cancelDirectorDeskInstall,
@@ -11,7 +12,10 @@ import {
   subscribeDirectorDeskInstallProgress,
   type DirectorDeskInstallProgress,
 } from '../../services/directorDeskRuntimeService';
-import { openDirectorDeskWindow } from '../../services/directorDeskWindowService';
+import {
+  openDirectorRuntime,
+  resolveDirectorRuntime,
+} from '../../services/directorRuntimeRegistry';
 import DirectorDeskDownloadDialog, {
   type DirectorDeskDialogPhase,
 } from './DirectorDeskDownloadDialog';
@@ -26,7 +30,7 @@ function progressState(progress: DirectorDeskInstallProgress) {
     return { percent: ratio * 78, text: '正在下载运行资源...' };
   }
   if (progress.stage === 'verifying') {
-    return { percent: 82, text: '正在校验下载内容...' };
+    return { percent: 82, text: '正在校验安装包...' };
   }
   if (progress.stage === 'extracting') {
     return { percent: 84 + ratio * 15, text: '正在安装本地资源...' };
@@ -90,13 +94,13 @@ function DirectorDeskRuntimeRequestController({
     return () => { active = false; };
   }, [clearRequest, runtimeAvailable]);
 
-  const startInstall = useCallback(async () => {
+  const startInstall = useCallback(async (archivePath?: string) => {
     if (installStartedRef.current) return;
     installStartedRef.current = true;
     setPhase('downloading');
     setError(null);
-    setProgress(0);
-    setStageText('正在连接下载服务...');
+    setProgress(archivePath ? 78 : 0);
+    setStageText(archivePath ? '正在读取本地安装包...' : '正在连接下载服务...');
     setCancelling(false);
     cancelRequestedRef.current = false;
 
@@ -111,7 +115,7 @@ function DirectorDeskRuntimeRequestController({
         clearRequest();
         return;
       }
-      const status = await installDirectorDeskRuntime();
+      const status = await installDirectorDeskRuntime(archivePath);
       if (cancelRequestedRef.current) {
         clearRequest();
         return;
@@ -119,15 +123,23 @@ function DirectorDeskRuntimeRequestController({
       setVersion(status.version);
       setProgress(100);
       clearRequest();
-      const nodeStillExists = useAppStore.getState().nodes.some((node) => {
+      const matchingNode = useAppStore.getState().nodes.find((node) => {
         if (node.type !== 'ai-director') return false;
         const nodeInstanceId = typeof node.data.directorInstanceId === 'string'
           ? node.data.directorInstanceId
           : node.id;
         return nodeInstanceId === request.instanceId;
       });
-      if (request.openAfterInstall && nodeStillExists) {
-        await openDirectorDeskWindow({
+      const runtimeResolution = matchingNode
+        ? resolveDirectorRuntime(matchingNode.data.directorRuntimeKind)
+        : null;
+      if (
+        request.openAfterInstall
+        && matchingNode
+        && runtimeResolution?.supported
+        && runtimeResolution.kind === 'lightweight-web'
+      ) {
+        await openDirectorRuntime(matchingNode.data.directorRuntimeKind, {
           instanceId: request.instanceId,
           theme: theme === 'light' ? 'light' : 'dark',
         });
@@ -145,6 +157,24 @@ function DirectorDeskRuntimeRequestController({
       setCancelling(false);
     }
   }, [clearRequest, request, theme]);
+
+  const handleSelectArchive = useCallback(async () => {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: `选择 director-desk-v${version}.tar.gz`,
+        filters: [{ name: '3D 导演台安装包（.tar.gz）', extensions: ['gz'] }],
+      });
+      if (typeof selected === 'string') {
+        await startInstall(selected);
+      }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      setPhase('error');
+    }
+  }, [startInstall, version]);
 
   const handleCancel = useCallback(() => {
     if (phase !== 'downloading') {
@@ -174,6 +204,7 @@ function DirectorDeskRuntimeRequestController({
       error={error}
       cancelling={cancelling}
       onConfirm={() => { void startInstall(); }}
+      onSelectArchive={() => { void handleSelectArchive(); }}
       onCancel={handleCancel}
       onRetry={() => { void startInstall(); }}
     />

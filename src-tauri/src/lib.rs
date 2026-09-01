@@ -15,16 +15,88 @@ use tauri::{
 use tauri_plugin_fs::FsExt;
 use url::Url;
 
+mod agent_package;
 mod assistant_web;
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod blender_runtime;
 mod clipboard;
 mod comfyui;
 mod director_desk_runtime;
 mod dreamina;
 mod file_transfer;
-mod mcp_bridge;
 mod local_fonts;
+mod mcp_bridge;
+#[cfg(feature = "local-onnx")]
 pub mod onnx;
+#[cfg(not(feature = "local-onnx"))]
+pub mod onnx {
+    const UNSUPPORTED_MESSAGE: &str =
+        "x64-legacy 版本为兼容不支持 AVX 的 CPU，未包含本地 ONNX Runtime";
+
+    fn unsupported<T>() -> Result<T, String> {
+        Err(UNSUPPORTED_MESSAGE.to_string())
+    }
+
+    #[tauri::command]
+    pub fn get_models_dir() -> Result<String, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub fn check_model_exists(_model_name: String) -> Result<bool, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub async fn download_onnx_model(
+        _app: tauri::AppHandle,
+        _model_name: String,
+        _url: String,
+        _task_id: String,
+    ) -> Result<String, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub fn get_onnx_gpu_status() -> Result<String, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub async fn image_upscale(
+        _app: tauri::AppHandle,
+        _webview: tauri::Webview,
+        _input_path: String,
+        _output_path: String,
+        _model_name: String,
+        _task_id: String,
+    ) -> Result<String, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub async fn subject_matting(
+        _app: tauri::AppHandle,
+        _webview: tauri::Webview,
+        _input_path: String,
+        _output_path: String,
+        _model_name: String,
+        _task_id: String,
+    ) -> Result<String, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub async fn character_direction_grid(
+        _app: tauri::AppHandle,
+        _webview: tauri::Webview,
+        _input_path: String,
+    ) -> Result<String, String> {
+        unsupported()
+    }
+}
 mod path_policy;
+mod plugin_registry;
 mod plugin_runtime;
 mod project_archive;
 mod provider_docs;
@@ -168,11 +240,17 @@ fn set_main_window_native_corners(app: tauri::AppHandle, rounded: bool) -> Resul
 
 /// 将用户明确选择的保存目录和素材目录加入本次进程的文件与 asset 协议 scope。
 /// ComfyUI 安装目录不经过此命令，仍由专用启动命令独立校验。
+///
+/// `base_data_dir` 另外会被记为原生侧的用户存储根：需要落到用户目录的派生数据
+/// （例如智能体压缩包解压目录）由它定位，从而不必占用系统盘。
 #[tauri::command]
 fn sync_authorized_directories(
     app: tauri::AppHandle,
     directories: Vec<String>,
+    base_data_dir: Option<String>,
 ) -> Result<Vec<String>, String> {
+    path_policy::set_user_storage_root(&app, base_data_dir.as_deref());
+
     let fs_scope = app.fs_scope();
     let asset_scope = app.state::<tauri::scope::Scopes>();
     let mut rejected = Vec::new();
@@ -968,7 +1046,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(proxy_http_state)
+        .manage(blender_runtime::BlenderRuntimeState::default())
+        .manage(blender_runtime::ProjectGrantState::default())
+        .manage(blender_runtime::production_blender_job_core())
         .manage(mcp_bridge::McpBridgeState::default())
+        .manage(path_policy::UserStorageRoot::default())
         .register_uri_scheme_protocol("director-desk", director_desk_runtime::handle_protocol)
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -986,6 +1068,19 @@ pub fn run() {
             assistant_web::assistant_web_extract,
             assistant_web::assistant_web_render,
             provider_docs::provider_docs_read,
+            blender_runtime::discover_blender_installations,
+            blender_runtime::register_blender_installation,
+            blender_runtime::project_grant::create_blender_project_grant,
+            blender_runtime::project_grant::revoke_blender_project_grant,
+            blender_runtime::start_blender_job,
+            blender_runtime::get_blender_job_status,
+            blender_runtime::cancel_blender_job,
+            blender_runtime::collect_blender_job_result,
+            agent_package::agent_source_link,
+            agent_package::agent_package_import_archive,
+            agent_package::agent_source_probe,
+            agent_package::agent_source_remove,
+            agent_package::agent_source_read_text,
             project_archive::pack_project_archive,
             project_archive::unpack_project_archive,
             file_transfer::copy_file_streamed,
@@ -1045,7 +1140,14 @@ pub fn run() {
             seedling::seedling_auth_login_runtime,
             seedling::seedling_auth_login_cancel,
             seedling::seedling_auth_logout,
+            plugin_registry::stage_plugin_revision,
+            plugin_registry::activate_plugin_revision,
+            plugin_registry::ensure_plugin_registration,
+            plugin_registry::set_plugin_registration_enabled,
+            plugin_registry::remove_plugin_registration,
+            plugin_registry::get_plugin_registration_status,
             plugin_runtime::execute_node_plugin_tool,
+            plugin_runtime::get_python_plugin_runtime_status,
         ])
         .on_window_event(|window, event| {
             // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。
@@ -1092,16 +1194,24 @@ pub fn run() {
             // 凭据目录只允许本进程的 secret_* 命令访问：从 fs 与 asset scope 中拒掉，
             // 否则 Renderer 能绕过命令直接读走整份凭据文件
             secret_store::deny_secret_dir_access(_app.handle());
-
-            // 调试构建自动打开 DevTools（方便排查打包后白屏等问题）
-            #[cfg(debug_assertions)]
-            {
-                if let Some(window) = _app.get_webview_window("main") {
-                    window.open_devtools();
-                }
+            // Agent 外部来源的真实路径只保存在 Rust 私有注册表中，Renderer 仅持有 sourceId。
+            // 拒绝失败只影响 Agent 子系统的诊断，不得阻断普通功能启动。
+            agent_package::deny_agent_private_dir_access(_app.handle());
+            // 插件入口源码与活动/回滚版本只保存在 Rust 私有注册表中。
+            plugin_registry::deny_plugin_private_dir_access(_app.handle());
+            if let Err(error) = blender_runtime::prepare_blender_private_runtime(_app.handle()) {
+                eprintln!("[blender-runtime] {error}");
             }
+
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app_handle
+                    .state::<blender_runtime::BlenderJobCore>()
+                    .shutdown();
+            }
+        });
 }

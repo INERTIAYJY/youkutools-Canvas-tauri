@@ -10,6 +10,13 @@
   padding: 0;
 }
 
+/* 裁切和扩图舞台直接遮暗背景，避免原图编辑时再模糊整个窗口。 */
+.fullscreen-overlay--transparent.crop-overlay {
+  background: var(--black-alpha-60);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .crop-overlay > .fullscreen-close--absolute {
   display: none;
 }
@@ -90,7 +97,7 @@
   color: var(--theme-text-secondary);
   font-size: 12px;
   font-weight: 500;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: color var(--transition-base), background var(--transition-base), border-color var(--transition-base);
   white-space: nowrap;
   display: inline-flex;
@@ -145,7 +152,7 @@
   border-radius: 12px;
   font-size: 12px;
   font-weight: 500;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: background var(--transition-base), color var(--transition-base), border-color var(--transition-base);
   white-space: nowrap;
   background: transparent;
@@ -288,7 +295,7 @@
 /* 确认按钮禁用态 */
 .crop-action-btn:disabled {
   opacity: 0.4;
-  cursor: not-allowed;
+  cursor: var(--cursor-not-allowed, not-allowed);
   pointer-events: none;
 }
 
@@ -310,7 +317,7 @@
   display: none;
 }
 .crop-stage.pen-mode .crop-pen-svg {
-  cursor: crosshair;
+  cursor: var(--cursor-crosshair, crosshair);
 }
 
 /* 路径填充与描边 */
@@ -335,7 +342,7 @@
 .crop-pen-anchor {
   fill: #fff;
   stroke: #111;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 .crop-pen-anchor.selected {
   fill: var(--brand, #6366f1);
@@ -442,7 +449,7 @@
   border-radius: 2px;
   background: var(--theme-border);
   outline: none;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 .expand-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -451,7 +458,7 @@
   height: 14px;
   border-radius: 50%;
   background: var(--brand);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   border: 2px solid var(--theme-surface, #15151c);
 }
 

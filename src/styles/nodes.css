@@ -153,7 +153,7 @@
   background: rgba(10, 10, 15, 0.55);
   backdrop-filter: blur(var(--glass-blur-sm));
   color: var(--theme-text-secondary);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: background var(--transition-base), color var(--transition-base), border-color var(--transition-base), opacity var(--transition-base);
   flex-shrink: 0;
   opacity: 0.7;
@@ -164,6 +164,19 @@
   color: var(--theme-text);
   border-color: rgba(255, 255, 255, 0.25);
   opacity: 1;
+}
+
+[data-theme='light'] .node-upload-btn {
+  border-color: var(--border-secondary);
+  background: color-mix(in srgb, var(--theme-surface) 88%, var(--theme-hover));
+  color: var(--brand-pale);
+  opacity: 1;
+}
+
+[data-theme='light'] .node-upload-btn:hover {
+  border-color: var(--brand-alpha-30);
+  background: var(--brand-alpha-10);
+  color: var(--brand-light);
 }
 
 /* Floating Toolbar */
@@ -723,10 +736,10 @@
   height: 14px;
 }
 
-.node-resize-handle--nw { left: 0; top: 0; cursor: nwse-resize; }
-.node-resize-handle--ne { right: 0; top: 0; cursor: nesw-resize; }
-.node-resize-handle--sw { left: 0; bottom: 0; cursor: nesw-resize; }
-.node-resize-handle--se { right: 0; bottom: 0; cursor: nwse-resize; }
+.node-resize-handle--nw { left: 0; top: 0; cursor: var(--cursor-nwse-resize, nwse-resize); }
+.node-resize-handle--ne { right: 0; top: 0; cursor: var(--cursor-nesw-resize, nesw-resize); }
+.node-resize-handle--sw { left: 0; bottom: 0; cursor: var(--cursor-nesw-resize, nesw-resize); }
+.node-resize-handle--se { right: 0; bottom: 0; cursor: var(--cursor-nwse-resize, nwse-resize); }
 
 /* 边把手：骑在边线上的 6px 窄条，两端让出角把手，避免与节点内容抢事件 */
 .node-resize-handle--n,
@@ -734,7 +747,7 @@
   left: 14px;
   right: 14px;
   height: 6px;
-  cursor: ns-resize;
+  cursor: var(--cursor-ns-resize, ns-resize);
 }
 
 .node-resize-handle--n { top: -3px; }
@@ -745,7 +758,7 @@
   top: 14px;
   bottom: 14px;
   width: 6px;
-  cursor: ew-resize;
+  cursor: var(--cursor-ew-resize, ew-resize);
 }
 
 .node-resize-handle--w { left: -3px; }
@@ -861,7 +874,7 @@
   border-radius: 6px;
   background: transparent;
   color: inherit;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: background var(--dur-fast) ease, transform 80ms ease-out;
 }
 
@@ -903,7 +916,7 @@
   padding: 0;
   appearance: none;
   background: transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 
 .video-node-progress {
@@ -947,7 +960,7 @@
 }
 
 .video-node-progress:disabled {
-  cursor: default;
+  cursor: var(--cursor-default, default);
   opacity: 0.45;
 }
 
@@ -979,6 +992,13 @@
   backdrop-filter: blur(8px);
   flex-direction: column;
   padding: 0;
+}
+
+/* 大图预览不模糊整个画布，避免 WebView2 为背景建立整窗离屏缓冲。 */
+.fullscreen-overlay--transparent.fullscreen-overlay--image-preview {
+  background: rgba(0, 0, 0, 0.58);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .fullscreen-panel {
@@ -1020,7 +1040,7 @@
   border: none;
   background: transparent;
   color: var(--theme-text-secondary);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   border-radius: 6px;
   transition: color var(--transition-base), background var(--transition-base);
 }
@@ -1180,28 +1200,22 @@
   animation: imgZoomIn 0.5s var(--ease-out-expo) both;
 }
 
-.zoomable-image-stage.is-origin-linked {
-  animation: none;
-}
-
-.zoomable-image-stage.is-flying {
-  z-index: 1;
-  pointer-events: none;
-  will-change: left, top, width, height, opacity, filter;
-}
-
-.zoomable-image-stage.is-flying .fullscreen-img-view {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
-  object-fit: contain;
-}
-
 /* 容器内的图片不再单独执行入场动画，transform 完全由 JS 控制 */
 .zoomable-image-container .fullscreen-img-view {
   animation: none;
   cursor: inherit;
+}
+
+/* 图片节点全屏预览即时入场；其他 ZoomableImage 调用保留原视觉效果。 */
+.fullscreen-overlay--image-preview .zoomable-image-stage {
+  animation: none;
+  will-change: auto;
+}
+
+/* 安全预览作用域内不对大尺寸图片/视频表面做滤镜入场。 */
+.fullscreen-overlay--image-preview .fullscreen-img-view,
+.fullscreen-overlay--image-preview .fullscreen-video-view {
+  animation: none;
 }
 
 .zoom-controls {
@@ -1254,7 +1268,7 @@
   border-radius: 999px;
   background: transparent;
   color: rgba(255, 255, 255, 0.88);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: background 0.15s ease, transform 0.12s ease, opacity 0.15s ease;
 }
 
@@ -1268,7 +1282,7 @@
 
 .zoom-controls .zoom-btn:disabled {
   opacity: 0.35;
-  cursor: default;
+  cursor: var(--cursor-default, default);
 }
 
 .zoom-controls .zoom-percent {
@@ -1281,7 +1295,7 @@
   color: rgba(255, 255, 255, 0.92);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: background 0.15s ease;
 }
 
@@ -1319,7 +1333,7 @@
   border: 1px solid transparent;
   background: transparent;
   color: var(--theme-text-secondary);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   transition: background var(--transition-base), color var(--transition-base), border-color var(--transition-base);
 }
 
@@ -1336,7 +1350,7 @@
 
 .markdown-mode-btn:disabled {
   opacity: 0.4;
-  cursor: not-allowed;
+  cursor: var(--cursor-not-allowed, not-allowed);
 }
 
 .markdown-node-content {

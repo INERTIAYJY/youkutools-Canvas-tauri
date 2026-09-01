@@ -8,7 +8,10 @@
 //! 2. 路径校验：解析真实路径（含符号链接），要求落在应用自有数据目录，
 //!    或用户通过对话框 / 外部素材目录显式授权过的 fs scope 内。
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::Mutex,
+};
 
 use tauri::{Manager, Runtime, Webview};
 use tauri_plugin_fs::FsExt;
@@ -106,6 +109,36 @@ fn is_secret_path<R: Runtime>(app: &tauri::AppHandle<R>, resolved: &Path) -> boo
     is_under_secret_dir(&secret_dir, resolved)
 }
 
+/// 除凭据外，智能体来源映射与插件信任快照也只能由 Rust 专用命令读取。
+fn is_private_app_path<R: Runtime>(app: &tauri::AppHandle<R>, resolved: &Path) -> bool {
+    is_secret_path(app, resolved)
+        || crate::agent_package::is_agent_private_path(app, resolved)
+        || crate::plugin_registry::is_plugin_private_path(app, resolved)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    is_within(left, right) || is_within(right, left)
+}
+
+/// 用作 Blender 项目根时，既不能位于私有目录内，也不能成为私有目录的祖先。
+fn overlaps_private_app_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    resolved: &Path,
+) -> bool {
+    let overlaps_secret = crate::secret_store::secret_dir(app)
+        .map(|directory| {
+            let normalized = directory.components().collect::<PathBuf>();
+            paths_overlap(resolved, &normalized)
+                || canonicalize_simplified(&directory)
+                    .is_ok_and(|canonical| paths_overlap(resolved, &canonical))
+        })
+        .unwrap_or(false);
+    overlaps_secret
+        || crate::agent_package::is_agent_private_path_overlap(app, resolved)
+        || crate::plugin_registry::is_plugin_private_path_overlap(app, resolved)
+        || crate::blender_runtime::is_blender_private_path_overlap(app, resolved)
+}
+
 /// 凭据目录可能尚未创建（无法 canonicalize），因此同时按原始路径与解析后路径比对。
 fn is_under_secret_dir(secret_dir: &Path, resolved: &Path) -> bool {
     let normalized = secret_dir.components().collect::<PathBuf>();
@@ -178,6 +211,120 @@ fn is_authorized<R: Runtime>(
     false
 }
 
+#[cfg(windows)]
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+/// 校验用途单一的外部目录授权，并只返回经过解析的普通目录。
+///
+/// 与通用 [`authorize_path`] 不同，这个入口不接受文件或尚不存在的目标，也不在错误中
+/// 回显调用方提供的路径。Blender 项目 grant 使用它，避免把绝对项目路径带回前端日志。
+pub fn authorize_existing_plain_directory<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    const INVALID_DIRECTORY: &str = "目录无效、不可访问或未获授权";
+    const MAX_DIRECTORY_CHARS: usize = 32_768;
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed != raw
+        || raw.chars().count() > MAX_DIRECTORY_CHARS
+        || raw.chars().any(char::is_control)
+    {
+        return Err(INVALID_DIRECTORY.to_string());
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(INVALID_DIRECTORY.to_string());
+    }
+
+    authorize_existing_plain_directory_path(app, &path)
+}
+
+fn authorize_existing_plain_directory_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &Path,
+) -> Result<PathBuf, String> {
+    const INVALID_DIRECTORY: &str = "目录无效、不可访问或未获授权";
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| INVALID_DIRECTORY.to_string())?;
+    if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+        return Err(INVALID_DIRECTORY.to_string());
+    }
+
+    let resolved = canonicalize_simplified(path)
+        .map_err(|_| INVALID_DIRECTORY.to_string())?;
+    let resolved_metadata = std::fs::symlink_metadata(&resolved)
+        .map_err(|_| INVALID_DIRECTORY.to_string())?;
+    if !resolved_metadata.is_dir() || is_link_or_reparse(&resolved_metadata) {
+        return Err(INVALID_DIRECTORY.to_string());
+    }
+    if overlaps_private_app_path(app, &resolved)
+        || !is_authorized(app, &resolved, PathAccess::Read, &[])
+        || !is_authorized(app, &resolved, PathAccess::Write, &[])
+    {
+        return Err(INVALID_DIRECTORY.to_string());
+    }
+
+    Ok(resolved)
+}
+
+/// 对已登记的 Blender 项目根执行每次 Job 启动前的重新授权与身份复核。
+pub fn reauthorize_existing_plain_directory<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &Path,
+) -> Result<PathBuf, String> {
+    authorize_existing_plain_directory_path(app, path)
+}
+
+/// 只接受由文件对话框或 fs scope 明确授权的普通现有文件，不回显路径。
+pub fn authorize_existing_plain_file<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    const INVALID_FILE: &str = "文件无效、不可访问或未获授权";
+    const MAX_FILE_CHARS: usize = 32_768;
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed != raw
+        || raw.chars().count() > MAX_FILE_CHARS
+        || raw.chars().any(char::is_control)
+    {
+        return Err(INVALID_FILE.to_string());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(INVALID_FILE.to_string());
+    }
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| INVALID_FILE.to_string())?;
+    if !metadata.is_file() || is_link_or_reparse(&metadata) {
+        return Err(INVALID_FILE.to_string());
+    }
+    let resolved = canonicalize_simplified(&path).map_err(|_| INVALID_FILE.to_string())?;
+    let resolved_metadata =
+        std::fs::symlink_metadata(&resolved).map_err(|_| INVALID_FILE.to_string())?;
+    if !resolved_metadata.is_file()
+        || is_link_or_reparse(&resolved_metadata)
+        || is_private_app_path(app, &resolved)
+        || !is_authorized(app, &resolved, PathAccess::Read, &[])
+    {
+        return Err(INVALID_FILE.to_string());
+    }
+    Ok(resolved)
+}
+
 /// 校验并解析命令收到的路径参数，返回可安全使用的真实路径。
 pub fn authorize_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
@@ -195,8 +342,11 @@ pub fn authorize_path_with_roots<R: Runtime>(
     extra_roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
     let resolved = resolve_path(raw, access)?;
-    if is_secret_path(app, &resolved) {
-        return Err("凭据目录不允许通过该命令访问".to_string());
+    // 递归读取、归档、解包和删除类命令只在这里校验一次根路径。除了私有子树本身，
+    // 也必须拒绝它们的祖先；否则 appLocalData 根会把 secrets/plugin-private 一并暴露。
+    // 普通同级文件不会与私有目录形成 Path 组件级祖先关系，因此不会被误判。
+    if overlaps_private_app_path(app, &resolved) {
+        return Err("应用私有目录不允许通过该命令访问".to_string());
     }
     if !is_authorized(app, &resolved, access, extra_roots) {
         return Err(format!(
@@ -312,6 +462,62 @@ pub fn authorize_launch_target<R: Runtime>(
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+/// 用户在设置里指定的文件保存根目录（`AppConfig.baseDataDir` 的原生侧投影）。
+///
+/// 只存在于本进程内存：权威值持久化在前端 AppConfig，每次启动或改动都会由
+/// `sync_authorized_directories` 重新带入。需要落到用户目录的派生数据
+/// （例如智能体压缩包解压目录）通过它定位，避免默认写进系统盘。
+#[derive(Default)]
+pub struct UserStorageRoot(pub Mutex<Option<PathBuf>>);
+
+/// 记录用户设置的保存根目录；传入空值表示回退到应用自有目录。
+///
+/// 校验标准与 fs scope 授权保持一致：必须是已存在的普通目录，且不得落在应用
+/// 私有子树内。校验失败时静默清空并回退，不阻断设置同步 —— 否则用户把一个
+/// 暂时不可用的盘符设为保存根目录后，整个设置面板都会报错。
+pub fn set_user_storage_root<R: Runtime>(app: &tauri::AppHandle<R>, raw: Option<&str>) {
+    let next = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| resolve_user_storage_root(app, value));
+
+    if let Some(state) = app.try_state::<UserStorageRoot>() {
+        if let Ok(mut guard) = state.0.lock() {
+            *guard = next;
+        }
+    }
+}
+
+fn resolve_user_storage_root<R: Runtime>(app: &tauri::AppHandle<R>, raw: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    // 与 fs scope 授权同样拒绝符号链接：否则可用软链把「用户目录」指向凭据等私有子树。
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+        return None;
+    }
+    let resolved = canonicalize_simplified(&path).ok()?;
+    let resolved_metadata = std::fs::symlink_metadata(&resolved).ok()?;
+    if !resolved_metadata.is_dir() || is_link_or_reparse(&resolved_metadata) {
+        return None;
+    }
+    if overlaps_private_app_path(app, &resolved) {
+        return None;
+    }
+    Some(resolved)
+}
+
+/// 读取用户设置的保存根目录；未设置或当前不可用时返回 None，由调用方回退到应用自有目录。
+pub fn user_storage_root<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    app.try_state::<UserStorageRoot>()?
+        .0
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +534,40 @@ mod tests {
         // 同级目录不能被误判，否则会挡掉正常的项目素材路径
         assert!(!is_under_secret_dir(&secret_dir, Path::new("/data/app/projects/a.png")));
         assert!(!is_under_secret_dir(&secret_dir, Path::new("/data/app/secrets-backup/x")));
+    }
+
+    #[test]
+    fn agent_private_directory_helper_rejects_only_its_own_subtree() {
+        let private_dir = PathBuf::from("/data/app/agent-private");
+        assert!(crate::agent_package::is_under_agent_private_dir(
+            &private_dir,
+            Path::new("/data/app/agent-private/sources.json"),
+        ));
+        assert!(!crate::agent_package::is_under_agent_private_dir(
+            &private_dir,
+            Path::new("/data/app/agent-private-copy/sources.json"),
+        ));
+    }
+
+    #[test]
+    fn private_roots_overlap_their_ancestors_but_not_siblings() {
+        let app_root = Path::new("/data/app");
+        let private = Path::new("/data/app/plugin-private");
+
+        assert!(paths_overlap(app_root, private));
+        assert!(paths_overlap(private, app_root));
+        assert!(paths_overlap(
+            private,
+            Path::new("/data/app/plugin-private/revisions")
+        ));
+        assert!(!paths_overlap(
+            private,
+            Path::new("/data/app/plugin-private-backup"),
+        ));
+        assert!(!paths_overlap(
+            private,
+            Path::new("/data/app/projects/a.png")
+        ));
     }
 
     #[test]

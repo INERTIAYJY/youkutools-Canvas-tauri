@@ -2,7 +2,7 @@
  * App 根组件 — 装配 Header / Sidebar / Canvas / NodeMenu / SettingsPanel / Titlebar / Toast / AINodeDialog / WorkflowPanel
  * Tauri 环境下启用自定义窗口装饰和透明圆角窗口
  */
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { MotionConfig, motion, useReducedMotion } from 'framer-motion';
 import Header from './components/Header';
 import Titlebar from './components/Titlebar';
@@ -19,6 +19,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useAutoSave } from './hooks/useAutoSave';
 import { useReferencedImageWatcher } from './hooks/useReferencedImageWatcher';
 import { useTooltipAutoPlacement } from './hooks/useTooltipAutoPlacement';
+import { parseAspectRatio, useMainWindowSize } from './hooks/useMainWindowSize';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, type AppState } from './store/useAppStore';
 import * as fileService from './services/fileService';
@@ -27,7 +28,10 @@ import { DOWNLOAD_MASCOT_EVENT } from './components/shared/ModelDownloadDialog';
 import UpdateBubble from './components/shared/mascot/UpdateBubble';
 import LazyLoadBoundary, { LazyLoadFallback } from './components/shared/LazyLoadBoundary';
 import { useMascotStatus } from './hooks/useMascotStatus';
+import { useMascotLifecycle } from './hooks/useMascotLifecycle';
 import { useMascotDrag } from './hooks/useMascotDrag';
+// type-only：Mascot 是懒加载的，类型导入不会把它拖进主包
+import type { MascotHandle } from './components/shared/mascot/Mascot';
 import { initComfyUIWindowBridge } from './services/comfyUIWindowService';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -77,6 +81,9 @@ export default function App() {
   useAutoSave();
   useReferencedImageWatcher();
   useTooltipAutoPlacement();
+  // 记住窗口尺寸；勾了「固定窗口比例」时还会把比例锁住
+  const lockedAspect = useAppStore((s) => (s.config.windowAspectLocked ? s.config.windowAspectRatio ?? '16:9' : null));
+  useMainWindowSize(parseAspectRatio(lockedAspect));
   const {
     constraintsRef: mascotDragConstraintsRef,
     x: mascotX,
@@ -95,7 +102,7 @@ export default function App() {
       nodeDialog: state.activeNodeId !== null,
       workflows: state.workflowPanelOpen,
       assets: state.assetsPanelOpen,
-      characters: state.characterLibraryOpen,
+      characters: state.characterLibraryOpen || state.characterActionLibraryOpen,
       history: state.historyPanelOpen,
       chat: state.chatOpen || state.chatPanelDetached,
       presetRunner: state.presetRunRequest !== null,
@@ -161,6 +168,11 @@ export default function App() {
   // Load projects from IndexedDB on mount
   const initFromDb = useAppStore((s) => s.initFromDb);
   const migrateHistoryAndLoad = useAppStore((s) => s.migrateHistoryAndLoad);
+  const loadAgentPackages = useAppStore((s) => s.loadAgentPackages);
+  // Agent Package 是可选增强层：独立加载且不参与项目、配置或画布 readiness。
+  useEffect(() => {
+    void loadAgentPackages();
+  }, [loadAgentPackages]);
   useEffect(() => {
     void initFromDb().then(() => {
       const store = useAppStore.getState();
@@ -289,14 +301,13 @@ export default function App() {
   };
   const handleMascotActivate = async () => {
     const store = useAppStore.getState();
-    // 独立窗口模式：点击吉祥物关闭独立窗口并收回内嵌（与 Sidebar 入口一致）
+    // 独立窗口模式是用户选择的显示偏好；窗口关闭后再次点击应重新打开独立窗口。
     if (store.chatPanelDetached) {
-      const { emitCloseChatWindow } = await import('./services/chat/chatWindowService');
       try {
-        await emitCloseChatWindow();
-        await invoke('close_chat_window');
-      } catch { /* ignore */ }
-      store.setChatPanelDetached(false);
+        await invoke('open_chat_window');
+      } catch {
+        store.showToast('打开独立窗口失败', 'error');
+      }
       return;
     }
     // 内嵌面板：打开 ⇄ 关闭切换
@@ -313,11 +324,22 @@ export default function App() {
   // 任意节点处于生成中 → 吉祥物切换为 LOADING 形态
   const mascotLoading = useAppStore(selectMascotLoading);
   const mascotStatus = useMascotStatus();
+  // 播放句柄：窗口失焦、待审批任务等事件通过它触发一次性动画片段
+  const mascotHandleRef = useRef<MascotHandle | null>(null);
+  // 下载更新时显示的是吃豆人吉祥物，生命周期片段对不上，先停掉
+  useMascotLifecycle(mascotHandleRef, Boolean(mascotVisible) && !updating);
   const effectiveTheme = canvasBackground === 'off-white' ? 'light' : configTheme;
+  const nativeCursor = useAppStore((s) => s.config.customCursor === false);
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', effectiveTheme);
     return () => document.documentElement.removeAttribute('data-theme');
   }, [effectiveTheme]);
+
+  // 关闭自定义指针时打标记，cursors.css 据此把 --cursor-* 清空、回落系统指针
+  useEffect(() => {
+    document.documentElement.toggleAttribute('data-native-cursor', nativeCursor);
+    return () => document.documentElement.removeAttribute('data-native-cursor');
+  }, [nativeCursor]);
 
   // 性能模式取消 CSS 自绘圆角后，由 Windows DWM 提供系统原生圆角。
   useEffect(() => {
@@ -350,10 +372,10 @@ export default function App() {
     return () => { unlisten?.(); };
   }, []);
 
-  // 侧边栏悬浮显示开关（默认开启）；最大化时强制非悬浮。
+  // 侧边栏悬浮显示开关（默认关闭）；最大化时强制非悬浮。
   // 同步到 body 属性，供 CSS 切换侧边栏停靠/悬浮位置 + 弹窗蒙层的左偏移
   const sidebarFloatingCfg = useAppStore((s) => s.config.sidebarFloating);
-  const effectiveFloating = sidebarFloatingCfg !== false && !isMaximized;
+  const effectiveFloating = sidebarFloatingCfg === true && !isMaximized;
   const showWindowGlassFrame = windowGlassFrame !== false && !isMaximized && !performanceMode;
   useEffect(() => {
     if (!isTauri) return;
@@ -518,6 +540,7 @@ export default function App() {
                         theme={effectiveTheme}
                         reduceMotion={performanceMode || Boolean(reduceMotion)}
                         getDragForce={getMascotDragForce}
+                        handleRef={mascotHandleRef}
                       />
                     )}
                   </Suspense>

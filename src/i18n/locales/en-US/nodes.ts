@@ -28,6 +28,7 @@ const nodes = {
   '全景图生成完成': 'Panorama generated',
   '视频生成完成': 'Video generated',
   '音频生成完成': 'Audio generated',
+  '已生成 {count} 个镜头': 'Generated {count} shots',
   '人物': 'character',
   '场景': 'scene',
   '道具': 'prop',
@@ -374,6 +375,12 @@ const nodes = {
   '这个节点还没有生成过图片': 'This node has not generated any images yet',
   '未记录模型': 'Model not recorded',
   '未记录提示词': 'Prompt not recorded',
+  '节点生成对话框': 'Node generation dialog',
+  '长按全屏显示': 'Press and hold for fullscreen',
+  '暂无可预览内容': 'Nothing to preview yet',
+  '单击引用': 'Click to reference',
+  '插件工具已不可用': 'This plugin tool is no longer available',
+  '插件工具执行失败': 'Plugin tool failed',
 };
 
 export default nodes;

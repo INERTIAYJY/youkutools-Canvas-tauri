@@ -11,6 +11,13 @@
   clip-path: inset(0 round var(--window-overlay-radius, 16px));
 }
 
+/* 合成器覆盖整个视口，直接遮暗背景以避免整窗 backdrop blur 的离屏缓冲。 */
+.fullscreen-overlay--transparent.composer-overlay {
+  background: var(--black-alpha-60);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .composer-root {
   /* 右侧属性面板占位：工作区与底部命令栏都按这个宽度让位，避免画面被面板压住 */
   --composer-side-w: 268px;
@@ -147,7 +154,7 @@
   border: 1px solid var(--theme-border);
   border-radius: 6px;
   background: transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 
 /* ── 主体：舞台 + 右侧面板 ──
@@ -173,7 +180,7 @@
 }
 
 /* 画笔 / 橡皮模式 */
-.composer-stage-wrap.drawing { cursor: crosshair; }
+.composer-stage-wrap.drawing { cursor: var(--cursor-crosshair, crosshair); }
 
 /* 拖入图片高亮 */
 .composer-stage-wrap.drag-over::after {
@@ -268,7 +275,7 @@
   background: transparent;
   color: var(--theme-text);
   font-size: 12px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   text-align: left;
 }
 .composer-menu-item.row { justify-content: flex-start; }
@@ -359,7 +366,7 @@
   border: 1px solid color-mix(in srgb, var(--theme-border) 80%, transparent);
   border-radius: 12px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 .composer-side-expand:hover { background: var(--theme-hover); }
 
@@ -367,12 +374,10 @@
   from {
     opacity: 0;
     transform: scale(0.965);
-    filter: blur(10px);
   }
   to {
     opacity: 1;
     transform: scale(1);
-    filter: blur(0);
   }
 }
 
@@ -458,7 +463,7 @@
   font-size: 11px;
   text-transform: none;
   letter-spacing: 0;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   padding: 0;
 }
 
@@ -470,7 +475,7 @@
   padding: 4px 6px;
   border-radius: 7px;
   border: 1px solid transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-size: 12px;
   color: var(--theme-text);
 }
@@ -504,7 +509,7 @@
 .composer-icon-btn {
   border: none;
   background: transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   font-size: 12px;
   line-height: 1;
   padding: 2px;
@@ -552,7 +557,7 @@
   border: 1px solid var(--theme-border);
   border-radius: 6px;
   background: transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 
 /* ── 滑杆 ──
@@ -575,7 +580,7 @@
   height: 16px;
   margin: 0;
   background: transparent;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 
 .composer-side input[type='range']::-webkit-slider-runnable-track,
@@ -663,7 +668,7 @@
   border-radius: 6px;
   color: var(--theme-text);
   font-size: 12px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 
 /* 数值输入网格（X/Y/宽/高/旋转…） */
@@ -703,7 +708,7 @@
   color: var(--theme-text);
   font-size: 12px;
   border-radius: 6px;
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
 }
 .composer-seg button:hover { background: var(--theme-hover); }
 .composer-seg button.active { color: var(--brand); border-color: var(--brand-alpha-30); background: var(--brand-alpha-10); }
@@ -723,7 +728,7 @@
   border: 1px solid var(--theme-border);
   border-radius: 8px;
   background: var(--theme-surface, rgba(0, 0, 0, 0.25));
-  cursor: pointer;
+  cursor: var(--cursor-pointer, pointer);
   overflow: hidden;
   transition: border-color var(--transition-base), background var(--transition-base);
 }

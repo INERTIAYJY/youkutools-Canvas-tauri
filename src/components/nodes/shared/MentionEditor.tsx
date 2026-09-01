@@ -14,6 +14,7 @@ import { calcAnchoredPosition } from '../../../utils/popupPosition';
 import { AnimatePresence, motion } from 'framer-motion';
 import PopupCloseButton from '../../shared/PopupCloseButton';
 import MentionPicker, { type MentionPickerChip, type MentionPickerItem } from '../../shared/MentionPicker';
+import ViewportImage from '../../shared/ViewportImage';
 import {
   DRAMA_MENTION_MERGE_ALL,
   buildDramaMentionId,
@@ -752,6 +753,8 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   // ── KeyDown: mention navigation / submit / chip deletion ──
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
+      // 输入法组合中：回车/方向键属于候选框，不该触发提交或 @ 选中
+      if (e.nativeEvent.isComposing) return;
       // 方向键导航前先补好行首芯片的光标落点（ZWSP），否则光标跳不到芯片前
       if (e.key.startsWith('Arrow') && editorRef.current) normalizeChipSlots(editorRef.current);
       // @ mention: Enter → select first match
@@ -1266,7 +1269,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
                           onClick={() => handleSelectAsset(file)}
                         >
                           {file.assetUrl ? (
-                            <img src={file.assetUrl} alt={file.name} loading="lazy" decoding="async" />
+                            <ViewportImage src={file.assetUrl} alt={file.name} />
                           ) : (
                             <span className="asset-picker-card-icon">
                               {file.category === 'video' ? '🎬' : file.category === 'audio' ? '🎵' : file.category === 'text' ? '📄' : '📁'}

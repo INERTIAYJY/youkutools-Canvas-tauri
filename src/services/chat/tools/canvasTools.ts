@@ -20,6 +20,8 @@ import {
   PROJECT_IMAGE_SIZES,
   PROJECT_VIDEO_ASPECT_RATIOS,
 } from '../../projectSettingsService';
+import { nodeHeightForAspectRatio } from '../../../utils/nodeBounds';
+import { textNodeHeight } from '../../../utils/num';
 import { executeCommand, logOperation } from '../commandRegistry';
 import {
   registerAgentTool,
@@ -46,7 +48,31 @@ const NODE_TYPES: NodeType[] = [
   'comment',
 ];
 
+/** 宫格分镜只能由已有图片裁切产生，通用 Agent 创建入口不得伪造空宫格。 */
+const AGENT_CREATABLE_NODE_TYPES = NODE_TYPES.filter((type) => type !== 'ai-storyboard');
+
 const NODE_STATUSES = ['idle', 'loading', 'success', 'error'] as const;
+
+/** 画面比例对这些节点才有意义；动画/分镜/镜头表的节点框由各自组件按格数算，不在这里改。 */
+const VISUAL_NODE_TYPES = new Set<NodeType>([
+  'ai-image',
+  'ai-video',
+  'ai-panorama',
+]);
+
+/** source-* 与批注节点的正文直接落进 output，建好就能被下游引用。 */
+function isSourceNodeType(type: NodeType): boolean {
+  return type.startsWith('source-') || type === 'comment';
+}
+
+/**
+ * 节点正文：content 是已经写好的定稿，直接进 output，节点建出来就能看、能被 @ 引用。
+ * source-* / comment 没有 content 时沿用旧行为，把 prompt 当正文。
+ * 生成型节点的 prompt 不是正文——它要等模型跑完才有 output，不能塞进这里。
+ */
+function resolveNodeBody(input: CreateNodeInput): string | undefined {
+  return input.content?.trim() || (isSourceNodeType(input.type) ? input.prompt?.trim() : undefined);
+}
 
 /** 画面比例取图片与视频两套项目常量的并集，具体是否支持由生成运行时判断。 */
 const ASPECT_RATIOS = [...new Set<string>([
@@ -80,6 +106,8 @@ interface CreateNodesInput {
     type: NodeType;
     label: string;
     prompt?: string;
+    content?: string;
+    aspectRatio?: string;
     x?: number;
     y?: number;
   }>;
@@ -125,6 +153,10 @@ interface UpdateNodesInput extends NodeTargetInput {
   aspectRatio?: string;
   imageSize?: string;
   batchCount?: number;
+  /** 统一视频参数名；节点内部继续兼容 seedanceResolution。 */
+  videoResolution?: string;
+  /** 统一视频参数名；节点内部继续兼容 seedanceDuration。 */
+  videoDuration?: number;
 }
 
 interface ConnectNodesInput {
@@ -149,6 +181,8 @@ interface NodeAuditSnapshot {
   aspectRatio?: string;
   imageSize?: string;
   batchCount?: number;
+  videoResolution?: string;
+  videoDuration?: number;
 }
 
 function displayPreview(value: string | undefined): string | undefined {
@@ -163,6 +197,9 @@ function createNodesInputDisplay(input: CreateNodesInput): AgentToolDisplaySnaps
       title: nodeInput.label.trim(),
       fields: [
         { label: '类型', value: nodeInput.type },
+        ...(nodeInput.aspectRatio
+          ? [{ label: '比例', value: nodeInput.aspectRatio }]
+          : []),
         {
           label: '位置',
           value: nodeInput.x !== undefined && nodeInput.y !== undefined
@@ -173,7 +210,7 @@ function createNodesInputDisplay(input: CreateNodesInput): AgentToolDisplaySnaps
             : 'resolved',
         },
       ],
-      preview: displayPreview(nodeInput.prompt),
+      preview: displayPreview(nodeInput.content ?? nodeInput.prompt),
     })),
   };
 }
@@ -192,6 +229,8 @@ function captureNodeAudit(node: Node<BaseNodeData>): NodeAuditSnapshot {
     aspectRatio: typeof data.aspectRatio === 'string' ? data.aspectRatio : undefined,
     imageSize: typeof data.imageSize === 'string' ? data.imageSize : undefined,
     batchCount: typeof data.batchCount === 'number' ? data.batchCount : undefined,
+    videoResolution: typeof data.seedanceResolution === 'string' ? data.seedanceResolution : undefined,
+    videoDuration: typeof data.seedanceDuration === 'number' ? data.seedanceDuration : undefined,
   };
 }
 
@@ -213,6 +252,8 @@ const UPDATE_DISPLAY_FIELDS: Array<{
   { inputKey: 'aspectRatio', auditKey: 'aspectRatio', label: '画面比例' },
   { inputKey: 'imageSize', auditKey: 'imageSize', label: '图片尺寸' },
   { inputKey: 'batchCount', auditKey: 'batchCount', label: '批量数量' },
+  { inputKey: 'videoResolution', auditKey: 'videoResolution', label: '视频分辨率' },
+  { inputKey: 'videoDuration', auditKey: 'videoDuration', label: '视频时长' },
 ];
 
 function buildUpdateChanges(
@@ -359,6 +400,8 @@ function describeNode(node: Node<BaseNodeData>): Record<string, unknown> {
     aspectRatio: data.aspectRatio,
     imageSize: data.imageSize,
     batchCount: data.batchCount,
+    videoResolution: data.seedanceResolution,
+    videoDuration: data.seedanceDuration,
     workflowId: data.workflowId,
     prompt: truncateText(data.prompt),
     outputKind,
@@ -484,7 +527,25 @@ async function executeCanvasCommand(
   };
 }
 
+/**
+ * 节点框大小按内容推断，避免一批节点全是同样的 280x160：
+ * 视觉节点按画面比例撑开，正文已经就位的文本节点按行数撑高，其余用默认值。
+ * 布局排布和真正落库的节点共用这里，两边尺寸必须一致，否则会算错碰撞。
+ */
 function getNodeDimensions(input: CreateNodeInput): { width: number; height: number } {
+  if (input.aspectRatio && VISUAL_NODE_TYPES.has(input.type)) {
+    return {
+      width: DEFAULT_NODE_WIDTH,
+      height: nodeHeightForAspectRatio(input.aspectRatio, DEFAULT_NODE_WIDTH),
+    };
+  }
+  const content = resolveNodeBody(input);
+  if (content) {
+    return {
+      width: DEFAULT_NODE_WIDTH,
+      height: textNodeHeight(content.split('\n').length),
+    };
+  }
   return {
     width: DEFAULT_NODE_WIDTH,
     height: input.type === 'comment' ? COMMENT_NODE_HEIGHT : DEFAULT_NODE_HEIGHT,
@@ -631,8 +692,10 @@ function createCanvasNode(
 ): Node<BaseNodeData> {
   const id = `node-agent-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`;
   const type = input.type;
-  const isSource = type.startsWith('source-') || type === 'comment';
-  const content = input.prompt?.trim();
+  const body = resolveNodeBody(input);
+  const isSource = isSourceNodeType(type) || Boolean(input.content?.trim());
+  const prompt = isSourceNodeType(type) && !input.content ? undefined : input.prompt?.trim();
+  const dimensions = getNodeDimensions(input);
   return {
     id,
     type,
@@ -641,10 +704,14 @@ function createCanvasNode(
       label: input.label.trim(),
       type,
       role: isSource ? 'source' : 'generator',
-      ...(isSource ? { output: content } : { prompt: content }),
-      status: 'idle',
-      nodeWidth: DEFAULT_NODE_WIDTH,
-      nodeHeight: type === 'comment' ? COMMENT_NODE_HEIGHT : DEFAULT_NODE_HEIGHT,
+      ...(body ? { output: body } : {}),
+      ...(prompt ? { prompt } : {}),
+      ...(input.aspectRatio && VISUAL_NODE_TYPES.has(type)
+        ? { aspectRatio: input.aspectRatio }
+        : {}),
+      status: body ? 'success' : 'idle',
+      nodeWidth: dimensions.width,
+      nodeHeight: dimensions.height,
     },
   };
 }
@@ -708,8 +775,24 @@ export function registerCanvasAgentTools(): Array<() => void> {
     registerAgentTool<CreateNodesInput>({
       id: 'canvas_create_nodes',
       title: '新建画布节点',
-      description: '在画布上原子创建一个或多个节点；不会自动运行节点模型。'
-        + 'prompt 里可写 @{nodeId:label} 或 @drama{assetId:name} 引用已有节点输出与资产库设定，生成时自动展开。',
+      description: [
+        '在画布上原子创建一个或多个节点；不会自动运行节点模型。',
+        'prompt 里可写 @{nodeId:label} 或 @drama{assetId:name} 引用已有节点输出与资产库设定，生成时自动展开。',
+        'type 按这个节点最终要产出什么来选，不要因为内容是文字描述就一律建文本节点：',
+        '产物是画面的（角色设定图、场景图、道具图、关键帧、单张分镜）用 ai-image，把画面描述写进 prompt；',
+        '产物是镜头的用 ai-video，配乐旁白用 ai-audio，多宫格图片也用 ai-image，镜头表用 ai-shotlist。',
+        'ai-storyboard 是把已有图片进行宫格裁切后产生的素材节点，本工具不能直接创建，也不能给它提示词或运行生成。',
+        '产物本身就是文字的用 ai-text（markdown 排版用 ai-markdown）。',
+        '文本节点分 prompt 和 content 两个口，别混：',
+        'content 是已经写好的正文（全局提示词、视觉基调、世界观设定、剧本全文、你自己刚写完的段落），',
+        '直接落进节点正文，建完就能看见、能被下游 @{nodeId:label} 引用，不需要再跑模型；',
+        'prompt 是给模型的生成指令（“把这集拆成镜头表”），节点正文会留空，等用户点生成才有内容。',
+        '你已经写出成品文字时一律放 content；放进 prompt 只会让节点显示空白，引用它也只能拿到空内容。',
+        '视觉节点要按画面内容给 aspectRatio，不要整批用同一个比例：',
+        '人物立绘、定妆图用 3:4，场景板、镜头画面、分镜用 16:9，道具、图标、材质用 1:1，竖屏短视频用 9:16，宽银幕气氛图用 21:9；',
+        '项目已经定了画幅（如剧本写明 16:9）时，镜头类节点跟随项目画幅，只有人物、道具这类单体参考图才另选比例。',
+        '节点框大小由本地按比例和正文长度自动算，不用也不能自己传宽高。',
+      ].join(''),
       inputSchema: {
         type: 'object',
         required: ['nodes'],
@@ -724,9 +807,11 @@ export function registerCanvasAgentTools(): Array<() => void> {
               required: ['type', 'label'],
               additionalProperties: false,
               properties: {
-                type: { type: 'string', enum: NODE_TYPES },
+                type: { type: 'string', enum: AGENT_CREATABLE_NODE_TYPES },
                 label: { type: 'string', minLength: 1, maxLength: 120 },
                 prompt: { type: 'string', maxLength: 8000 },
+                content: { type: 'string', maxLength: 40000 },
+                aspectRatio: { type: 'string', enum: ASPECT_RATIOS },
                 x: { type: 'number', minimum: -100000, maximum: 100000 },
                 y: { type: 'number', minimum: -100000, maximum: 100000 },
               },
@@ -740,6 +825,19 @@ export function registerCanvasAgentTools(): Array<() => void> {
       buildInputDisplay: createNodesInputDisplay,
       execute: async (context, input) => {
         assertCanvasRevision(context);
+        const storyboardCount = input.nodes.filter((node) => node.type === 'ai-storyboard').length;
+        if (storyboardCount > 0) {
+          const message = `宫格分镜只能由已有图片裁切产生，不能直接创建（${storyboardCount} 个无效节点）`;
+          return { status: 'error', summary: message, modelContent: message };
+        }
+        // 媒体节点的 output 存的是本地路径或 URL，写正文进去会直接建出一个坏节点
+        const nonText = input.nodes.filter(
+          (node) => node.content?.trim() && !TEXT_OUTPUT_NODE_TYPES.has(node.type),
+        );
+        if (nonText.length > 0) {
+          const message = `content 只能用于文本类节点，${nonText.length} 个节点不是文本节点`;
+          return { status: 'error', summary: message, modelContent: message };
+        }
         const positions = resolveCreateNodePositions(context, input.nodes);
         const nodes = input.nodes.map((nodeInput, index) => createCanvasNode(
           nodeInput,
@@ -777,7 +875,7 @@ export function registerCanvasAgentTools(): Array<() => void> {
                   source: 'resolved',
                 },
               ],
-              preview: displayPreview(node.data.prompt),
+              preview: displayPreview(node.data.prompt ?? node.data.output),
             })),
           },
         };
@@ -788,6 +886,7 @@ export function registerCanvasAgentTools(): Array<() => void> {
       title: '更新画布节点',
       description: [
         '批量更新匹配节点：名称、提示词、正文内容、位置、尺寸、生成模型和生成参数。',
+        '视频节点使用统一字段 videoResolution / videoDuration；内部会映射到对应厂商协议字段。',
         'content 改写节点正文，只能用于文本类节点（ai-text / ai-markdown / source-text / comment）。',
         'prompt 里可写 @{nodeId:label} 引用其他节点输出、@drama{assetId:name} 引用资产库设定，生成时自动展开；ID 必须真实存在。',
         'x/y 是绝对坐标，一次只能移动一个节点；dx/dy 是相对位移，可批量。',
@@ -811,6 +910,8 @@ export function registerCanvasAgentTools(): Array<() => void> {
           aspectRatio: { type: 'string', enum: ASPECT_RATIOS },
           imageSize: { type: 'string', enum: [...PROJECT_IMAGE_SIZES] },
           batchCount: { type: 'integer', minimum: 1, maximum: MAX_IMAGE_BATCH_COUNT },
+          videoResolution: { type: 'string', minLength: 1, maxLength: 40 },
+          videoDuration: { type: 'integer', minimum: 1, maximum: 3600 },
         },
         additionalProperties: false,
       },
@@ -838,12 +939,25 @@ export function registerCanvasAgentTools(): Array<() => void> {
           ...(input.aspectRatio !== undefined ? { aspectRatio: input.aspectRatio } : {}),
           ...(input.imageSize !== undefined ? { imageSize: input.imageSize } : {}),
           ...(input.batchCount !== undefined ? { batchCount: input.batchCount } : {}),
+          ...(input.videoResolution !== undefined ? { seedanceResolution: input.videoResolution.trim() } : {}),
+          ...(input.videoDuration !== undefined ? { seedanceDuration: input.videoDuration } : {}),
         };
         const targets = useAppStore.getState().nodes
           .filter((node) => targetIds.includes(node.id));
+        if (input.prompt?.trim() && targets.some((node) => node.data.type === 'ai-storyboard')) {
+          const message = '宫格分镜是已有图片的裁切结果，不能设置生成提示词';
+          return { status: 'error', summary: message, modelContent: message };
+        }
         const beforeAudit = new Map(
           targets.map((node) => [node.id, captureNodeAudit(node)]),
         );
+        if (input.videoResolution !== undefined || input.videoDuration !== undefined) {
+          const nonVideo = targets.filter((node) => node.data.type !== 'ai-video');
+          if (nonVideo.length > 0) {
+            const message = `videoResolution / videoDuration 只能用于视频节点，${nonVideo.length} 个目标节点不是视频节点`;
+            return { status: 'error', summary: message, modelContent: message };
+          }
+        }
         if (input.content !== undefined) {
           // 媒体节点的 output 存的是本地路径或 URL，改写会直接破坏节点
           const nonText = targets.filter((node) => !TEXT_OUTPUT_NODE_TYPES.has(node.data.type));
@@ -1091,6 +1205,13 @@ export function registerCanvasAgentTools(): Array<() => void> {
         }
         if (targetIds.length > MAX_RUN_NODES) {
           const message = `一次最多运行 ${MAX_RUN_NODES} 个节点，当前匹配 ${targetIds.length} 个`;
+          return { status: 'error', summary: message, modelContent: message };
+        }
+        const storyboardCount = useAppStore.getState().nodes.filter((node) => (
+          targetIds.includes(node.id) && node.data.type === 'ai-storyboard'
+        )).length;
+        if (storyboardCount > 0) {
+          const message = `宫格分镜是已有图片的裁切结果，不能运行生成（${storyboardCount} 个无效节点）`;
           return { status: 'error', summary: message, modelContent: message };
         }
         const results: Array<{ nodeId: string; status: string; message?: string }> = [];

@@ -29,7 +29,7 @@ const EMPTY_SNAPSHOT: ChatStateSnapshot = {
   generalModels: [],
   nodes: [],
   dramaAssets: emptyDramaAssetLibrary(),
-  userSkills: [],
+  skillOptions: [],
   composerDraft: '',
 };
 
@@ -57,6 +57,7 @@ export default function ChatWindow() {
           ? 'light'
           : config?.theme === 'light' ? 'light' : 'dark';
         document.documentElement.setAttribute('data-theme', effectiveTheme);
+        document.documentElement.toggleAttribute('data-native-cursor', config?.customCursor === false);
         setLocale(config?.language);
       });
     };
@@ -76,10 +77,9 @@ export default function ChatWindow() {
     useAppStore.setState({
       nodes: snapshot.nodes,
       dramaAssets: snapshot.dramaAssets,
-      userSkills: snapshot.userSkills,
       currentProjectId: snapshot.projectId,
     });
-  }, [snapshot.nodes, snapshot.dramaAssets, snapshot.userSkills, snapshot.projectId]);
+  }, [snapshot.nodes, snapshot.dramaAssets, snapshot.projectId]);
 
   const closeWindow = useCallback(() => {
     void (async () => {
@@ -88,6 +88,17 @@ export default function ChatWindow() {
         await invoke('close_chat_window');
       } catch (error) {
         console.error('[ChatWindow] failed to close window:', error);
+      }
+    })();
+  }, []);
+
+  const dockWindow = useCallback(() => {
+    void (async () => {
+      try {
+        await emitAction({ type: 'dock_window' });
+        await invoke('close_chat_window');
+      } catch (error) {
+        console.error('[ChatWindow] failed to dock window:', error);
       }
     })();
   }, []);
@@ -172,7 +183,7 @@ export default function ChatWindow() {
         className="pointer-events-auto flex items-center justify-center w-7 h-7 rounded-md
                    text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover transition-colors"
         data-tooltip={t('收回内嵌')}
-        onClick={closeWindow}
+        onClick={dockWindow}
       >
         <Icon icon="mdi:dock-left" width="16" height="16" />
       </button>

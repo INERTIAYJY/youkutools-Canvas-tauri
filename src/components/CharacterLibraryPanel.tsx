@@ -10,7 +10,12 @@ import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../store/useAppStore';
 import { isEligibleCharacterVoiceNode } from '../store/store.dramaAssets';
-import { saveBinaryToProjectData } from '../services/fileService';
+import {
+  assertMediaDataUrlSize,
+  assertMediaDataUrlWithinLimit,
+  inferMediaDataUrlKind,
+  saveBinaryToProjectData,
+} from '../services/fileService';
 import type { BaseNodeData } from '../types';
 import type {
   CharacterActionCategory,
@@ -22,6 +27,9 @@ import type {
 } from '../types/dramaAssets';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
+import Select from './shared/Select';
+import ViewportImage from './shared/ViewportImage';
+import ViewportVideo from './shared/ViewportVideo';
 import { useT } from '../i18n';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
@@ -168,7 +176,7 @@ function CharacterAvatar({ character }: { character: DramaCharacter }) {
   return (
     <span className="character-avatar">
       {reference?.imageUrl ? (
-        <img
+        <ViewportImage
           src={reference.imageUrl}
           alt=""
           draggable={false}
@@ -186,6 +194,8 @@ export default function CharacterLibraryPanel() {
   const t = useT();
   const {
     open,
+    actionLibraryOpen,
+    setActionLibraryOpen,
     setOpen,
     projectCharacters,
     globalCharacters,
@@ -214,6 +224,8 @@ export default function CharacterLibraryPanel() {
     useShallow((state) => ({
       open: state.characterLibraryOpen,
       setOpen: state.setCharacterLibraryOpen,
+      actionLibraryOpen: state.characterActionLibraryOpen,
+      setActionLibraryOpen: state.setCharacterActionLibraryOpen,
       projectCharacters: state.dramaAssets.characters,
       globalCharacters: state.globalCharacters,
       globalCharactersLoading: state.globalCharactersLoading,
@@ -263,7 +275,6 @@ export default function CharacterLibraryPanel() {
   const [bindingVoice, setBindingVoice] = useState(false);
   const [captureNodeId, setCaptureNodeId] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [actionLibraryOpen, setActionLibraryOpen] = useState(false);
   const [actionCategory, setActionCategory] = useState<CharacterActionCategory>('standing');
   const [actionFilter, setActionFilter] = useState<CharacterActionCategory | 'all'>('all');
   const [actionName, setActionName] = useState('');
@@ -278,8 +289,12 @@ export default function CharacterLibraryPanel() {
   const actionMediaInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (open) void loadGlobalCharacters();
-  }, [loadGlobalCharacters, open]);
+    if (open || actionLibraryOpen) void loadGlobalCharacters();
+  }, [actionLibraryOpen, loadGlobalCharacters, open]);
+
+  // 面板卸载时清掉动作库标记：关角色库的路径有好几条（开设置、开素材库…），
+  // 不清的话下次从侧边栏进角色库会莫名直接弹出动作库
+  useEffect(() => () => setActionLibraryOpen(false), [setActionLibraryOpen]);
 
   const sourceCharacters = scope === 'project' ? projectCharacters : globalCharacters;
   const characters = useMemo(() => {
@@ -449,6 +464,8 @@ export default function CharacterLibraryPanel() {
   const storeActionMediaFile = async (file: File): Promise<CharacterActionMedia | null> => {
     const kind = actionMediaKind(file);
     if (!kind) return null;
+    const mediaKind = inferMediaDataUrlKind(file.type || file.name);
+    assertMediaDataUrlSize(file.size, mediaKind, file.name);
     let url: string | undefined;
     let filePath: string | undefined;
     if (scope === 'project' && currentProjectId && currentProjectId !== 'default') {
@@ -460,7 +477,10 @@ export default function CharacterLibraryPanel() {
       url = stored?.assetUrl || undefined;
       filePath = stored?.filePath;
     }
-    if (!url) url = await readFileAsDataUrl(file);
+    if (!url) {
+      url = await readFileAsDataUrl(file);
+      assertMediaDataUrlWithinLimit(url, mediaKind, file.name);
+    }
     const now = Date.now();
     return {
       id: `action-media-${generateId()}`,
@@ -699,7 +719,7 @@ export default function CharacterLibraryPanel() {
                           setPickerOpen(false);
                         }}
                       >
-                        <img src={node.data.imageUrl ?? node.data.thumbnailUrl} alt="" draggable={false} />
+                        <ViewportImage src={node.data.imageUrl ?? node.data.thumbnailUrl} alt="" draggable={false} />
                         <span>{node.data.label || t('图片节点')}</span>
                       </button>
                     ))}
@@ -1025,17 +1045,32 @@ export default function CharacterLibraryPanel() {
                   <p className="mt-0.5 text-[10px] text-canvas-text-muted">{t('同一动作可继续添加多份演示素材')}</p>
                 </div>
                 <label className="flex items-center gap-2 text-[10px] text-canvas-text-secondary">
+                  {t('角色')}
+                  <Select
+                    value={selectedCharacter.id}
+                    onChange={(value) => setSelectedCharacterId(value)}
+                    className="min-w-32 max-w-44"
+                    triggerStyle={{ height: 32 }}
+                    fixedMenu
+                    options={characters.map((character) => ({ value: character.id, label: character.name }))}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-[10px] text-canvas-text-secondary">
                   {t('筛选')}
-                  <select
+                  <Select
                     value={actionFilter}
-                    onChange={(event) => setActionFilter(event.target.value as CharacterActionCategory | 'all')}
-                    className="h-8 min-w-32 rounded-lg border border-canvas-border bg-canvas-card px-2 text-xs text-canvas-text outline-none focus:border-indigo-400"
-                  >
-                    <option value="all">{t('全部类别')}</option>
-                    {CHARACTER_ACTION_CATEGORIES.map((category) => (
-                      <option key={category.id} value={category.id}>{t(category.label)}</option>
-                    ))}
-                  </select>
+                    onChange={(value) => setActionFilter(value as CharacterActionCategory | 'all')}
+                    className="min-w-32"
+                    triggerStyle={{ height: 32 }}
+                    fixedMenu
+                    options={[
+                      { value: 'all', label: t('全部类别') },
+                      ...CHARACTER_ACTION_CATEGORIES.map((category) => ({
+                        value: category.id,
+                        label: t(category.label),
+                      })),
+                    ]}
+                  />
                 </label>
               </div>
 
@@ -1054,7 +1089,7 @@ export default function CharacterLibraryPanel() {
                         ? action.customCategory
                         : category?.label ?? '自定义';
                       return (
-                        <article key={action.id} className="flex min-w-0 flex-col rounded-xl border border-canvas-border bg-canvas-card p-3 shadow-sm">
+                        <article key={action.id} className="character-action-card flex min-w-0 flex-col rounded-xl border border-canvas-border bg-canvas-card p-3 shadow-sm">
                           <div className="flex items-start gap-2">
                             <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-canvas-border bg-canvas-surface text-indigo-400">
                               <Icon icon={category?.icon ?? 'lucide:shapes'} width="15" height="15" aria-hidden="true" />
@@ -1086,9 +1121,9 @@ export default function CharacterLibraryPanel() {
                             {(action.media ?? []).map((media) => (
                               <figure key={media.id} className="group relative m-0 aspect-video overflow-hidden rounded-lg border border-canvas-border bg-canvas-surface">
                                 {media.kind !== 'video' ? (
-                                  <img src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
+                                  <ViewportImage src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
                                 ) : (
-                                  <video src={media.url} className="size-full object-cover" controls preload="metadata" aria-label={media.name} />
+                                  <ViewportVideo src={media.url} className="size-full object-cover" controls aria-label={media.name} />
                                 )}
                                 <span className="pointer-events-none absolute bottom-1 left-1 max-w-[calc(100%-8px)] truncate rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white">
                                   {media.name}
@@ -1168,7 +1203,7 @@ export default function CharacterLibraryPanel() {
                                         >
                                           <span className="block aspect-video overflow-hidden bg-canvas-bg">
                                             {node.data.videoUrl ? (
-                                              <video
+                                              <ViewportVideo
                                                 src={previewUrl}
                                                 className="size-full object-cover"
                                                 muted
@@ -1177,7 +1212,7 @@ export default function CharacterLibraryPanel() {
                                                 aria-hidden="true"
                                               />
                                             ) : (
-                                              <img
+                                              <ViewportImage
                                                 src={previewUrl}
                                                 alt=""
                                                 className="size-full object-cover"
@@ -1224,15 +1259,16 @@ export default function CharacterLibraryPanel() {
 
                 <label className="mt-4 grid gap-1 text-[10px] text-canvas-text-secondary">
                   {t('动作类别')}
-                  <select
+                  <Select
                     value={actionCategory}
-                    onChange={(event) => setActionCategory(event.target.value as CharacterActionCategory)}
-                    className="h-9 rounded-lg border border-canvas-border bg-canvas-surface px-3 text-xs text-canvas-text outline-none focus:border-indigo-400"
-                  >
-                    {CHARACTER_ACTION_CATEGORIES.map((category) => (
-                      <option key={category.id} value={category.id}>{t(category.label)}</option>
-                    ))}
-                  </select>
+                    onChange={(value) => setActionCategory(value as CharacterActionCategory)}
+                    triggerStyle={{ height: 36 }}
+                    fixedMenu
+                    options={CHARACTER_ACTION_CATEGORIES.map((category) => ({
+                      value: category.id,
+                      label: t(category.label),
+                    }))}
+                  />
                 </label>
 
                 {actionCategory === 'custom' ? (
@@ -1278,9 +1314,9 @@ export default function CharacterLibraryPanel() {
                       {pendingActionMedia.map((media) => (
                         <figure key={media.id} className="relative m-0 aspect-video overflow-hidden rounded-lg border border-canvas-border bg-canvas-surface">
                           {media.kind !== 'video' ? (
-                            <img src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
+                            <ViewportImage src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
                           ) : (
-                            <video src={media.url} className="size-full object-cover" preload="metadata" aria-label={media.name} />
+                            <ViewportVideo src={media.url} className="size-full object-cover" aria-label={media.name} />
                           )}
                           <button
                             type="button"

@@ -1,11 +1,30 @@
 /**
  * toolbarRegistry.ts — 各节点类型 Toolbar 的按钮注册表与默认布局
  */
-import type { ToolbarButtonDef, ToolbarZoneLayout, ToolbarLayout } from '../../../../types';
+import type { NodeType, ToolbarButtonDef, ToolbarZoneLayout, ToolbarLayout } from '../../../../types';
+import type { AvailableNodePluginTool, InstalledPlugin } from '../../../../types/plugin';
+import { getAvailableNodePluginTools } from '../../../../services/plugins/pluginRuntime';
 
 // ── 通用图标（复用 inline SVG 太繁琐，用 iconify name，回退到 emoji）──
 
 export const TOOLBAR_MORE_KEY = 'more';
+
+export function getPluginToolbarButtonKey(pluginTool: AvailableNodePluginTool): string {
+  return `${pluginTool.pluginId}:${pluginTool.tool.id}`;
+}
+
+/** 把启用插件贡献的节点工具映射为可编辑 Toolbar 按钮；默认不进入布局，因此显示在“更多”。 */
+export function getPluginToolbarButtonRegistry(
+  plugins: InstalledPlugin[],
+  nodeType: string,
+): ToolbarButtonDef[] {
+  return getAvailableNodePluginTools(plugins, nodeType as NodeType, 'node-toolbar').map((pluginTool) => ({
+    key: getPluginToolbarButtonKey(pluginTool),
+    label: `${pluginTool.tool.title} · ${pluginTool.pluginName}`,
+    icon: pluginTool.tool.icon || 'lucide:blocks',
+    defaultZone: '更多',
+  }));
+}
 
 function createMoreButton(defaultZone: string): ToolbarButtonDef {
   return {
@@ -50,7 +69,9 @@ export const IMAGE_BUTTONS: ToolbarButtonDef[] = [
   { key: 'expand',         label: '扩图',        icon: 'mdi:arrow-expand-all',           defaultZone: 'Primary' },
   { key: 'multiGrid',      label: '宫格裁切',    icon: 'mdi:grid',                       defaultZone: 'Primary' },
   { key: 'cameraStudio',   label: '小逻摄影棚',  icon: 'mdi:camera-control',              defaultZone: 'Primary' },
-  { key: 'repaint',        label: '重绘',        icon: 'mdi:draw',                       defaultZone: 'Primary' },
+  // 行为与文本/视频节点的 showPrompt 一致（都是打开节点对话框），统一成同一套文案与图标；
+  // key 仍保留 repaint，避免用户已保存的工具栏布局丢掉这个按钮
+  { key: 'repaint',        label: '查看提示词',  icon: 'mdi:message-text-outline',       defaultZone: 'Primary' },
   { key: 'upscale',        label: '高清超分',    icon: 'mdi:image-auto-adjust',          defaultZone: 'Primary' },
   { key: 'subjectMatting', label: '自动识别主体',icon: 'mdi:hexagon-outline',             defaultZone: 'Primary' },
   { key: 'annotate',       label: '标注',        icon: 'mdi:draw-pen',                   defaultZone: 'Primary' },
@@ -233,7 +254,7 @@ export function getButtonRegistry(nodeType: string): ToolbarButtonDef[] {
   }
 }
 
-/** 返回未出现在当前布局中的内置按钮；“更多”自身不收纳自己。 */
+/** 返回未出现在当前布局中的已注册按钮；“更多”自身不收纳自己。 */
 export function getHiddenDefaultToolbarButtons(
   registry: ToolbarButtonDef[],
   activeButtonKeys: ReadonlySet<string>,

@@ -30,6 +30,11 @@ import {
   GOOGLE_GEMINI_BASE_URL,
   GOOGLE_MODEL_MANIFEST,
 } from './providers/googleModelManifest';
+import {
+  SORA2U_BASE_URL,
+  SORA2U_MODEL_MANIFEST,
+  SORA2U_REQUEST_QUERY,
+} from './providers/sora2uModelManifest';
 
 export type ProviderAuthType = 'api-key' | 'oauth';
 export type ProviderCredentialKey = 'apiKey' | 'baseUrl';
@@ -52,6 +57,14 @@ export interface ProviderDefinition {
   defaultBaseUrl?: string;
   modelsPath?: string;
   allowCustomBaseUrl?: boolean;
+  /** 用户主动打开的注册、获取 Key 或充值页面；不得用作 API Base URL。 */
+  externalUrl?: string;
+  /** 无生成副作用的连接验证路径。 */
+  connectionTestPath?: string;
+  /** 该厂商 API 请求必须携带的固定查询参数。 */
+  requestQuery?: Readonly<Record<string, string>>;
+  /** 暂时不向用户暴露的模型 ID；保留底层协议，便于后续恢复。 */
+  hiddenModelIds?: readonly string[];
   credentials: ProviderCredentialField[];
   /** 内置厂商随应用发布的模型及声明式执行协议。 */
   models?: readonly ProviderModelSelection[];
@@ -80,6 +93,13 @@ const API_KEY_FIELD: ProviderCredentialField = {
   required: true,
   secret: true,
 };
+
+const SORA2U_HIDDEN_MODEL_IDS = [
+  'seedance-2.5',
+  'seedance-2.5-character',
+  'seedance-2.5-character-mono',
+] as const;
+const SORA2U_HIDDEN_MODEL_ID_SET = new Set<string>(SORA2U_HIDDEN_MODEL_IDS);
 
 export const WEB_SEARCH_PROVIDER_IDS: readonly WebSearchProviderId[] = [
   'tavily',
@@ -129,6 +149,25 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       { ...API_KEY_FIELD, placeholder: 'Google AI Studio API Key' },
     ],
     models: GOOGLE_MODEL_MANIFEST,
+  },
+  {
+    id: 'sora2u',
+    name: 'Sora2U',
+    description: 'Seedance 全模态视频与 Gemini/Kontext 图片模型',
+    badgeText: 'S2U',
+    authType: 'api-key',
+    catalogAdapter: 'openai-compatible',
+    defaultBaseUrl: SORA2U_BASE_URL,
+    modelsPath: '/api/v1/models',
+    allowCustomBaseUrl: false,
+    externalUrl: 'https://sora2u.com/?utm_source=tenney&utm_medium=canvas&utm_content=wx',
+    connectionTestPath: '/api/v1/credits',
+    requestQuery: SORA2U_REQUEST_QUERY,
+    hiddenModelIds: SORA2U_HIDDEN_MODEL_IDS,
+    credentials: [
+      { ...API_KEY_FIELD, placeholder: 'sk_sora_...' },
+    ],
+    models: SORA2U_MODEL_MANIFEST.filter((model) => !SORA2U_HIDDEN_MODEL_ID_SET.has(model.id)),
   },
   {
     id: 'volcengine',
@@ -259,6 +298,12 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   },
 ];
 
+export function isProviderModelVisible(catalogId: string | undefined, modelId: string): boolean {
+  if (!catalogId) return true;
+  const definition = BUILT_IN_PROVIDER_DEFINITIONS.find((item) => item.id === catalogId);
+  return !definition?.hiddenModelIds?.includes(modelId);
+}
+
 const PROVIDER_DEFINITION_MAP = new Map(
   BUILT_IN_PROVIDER_DEFINITIONS.map((definition) => [definition.id, definition]),
 );
@@ -342,6 +387,58 @@ function readCatalogItems(payload: unknown): unknown[] {
   return [];
 }
 
+function readStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+  return items.length > 0 ? items : undefined;
+}
+
+function readNumberArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+  return items.length > 0 ? items : undefined;
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function parseVideoCapability(
+  record: Record<string, unknown>,
+  category: GeneralModelCategory,
+): ProviderModelSelection['videoCapability'] {
+  if (category !== 'video') return undefined;
+  const durations = readNumberArray(record.durations);
+  const durationRange = readRecord(record.duration_range ?? record.durationRange);
+  const referenceLimits = readRecord(record.reference_limits ?? record.referenceLimits);
+  const capability: NonNullable<ProviderModelSelection['videoCapability']> = {
+    durations,
+    minDuration: readFiniteNumber(durationRange?.min) ?? (durations ? Math.min(...durations) : undefined),
+    maxDuration: readFiniteNumber(durationRange?.max) ?? (durations ? Math.max(...durations) : undefined),
+    defaultDuration: readFiniteNumber(record.default_duration ?? record.defaultDuration),
+    ratios: readStringArray(record.aspect_ratios ?? record.aspectRatios),
+    defaultRatio: typeof (record.default_aspect_ratio ?? record.defaultAspectRatio) === 'string'
+      ? String(record.default_aspect_ratio ?? record.defaultAspectRatio)
+      : undefined,
+    resolutions: readStringArray(record.resolutions),
+    defaultResolution: typeof (record.default_resolution ?? record.defaultResolution) === 'string'
+      ? String(record.default_resolution ?? record.defaultResolution)
+      : undefined,
+    maxImageReferences: readFiniteNumber(referenceLimits?.image),
+    maxVideoReferences: readFiniteNumber(referenceLimits?.video),
+    maxAudioReferences: readFiniteNumber(referenceLimits?.audio),
+    supportsStandaloneAudio: record.supports_audio === true ? true : undefined,
+    requiresReference: record.supports_text_only === false ? true : undefined,
+  };
+  return Object.values(capability).some((value) => value !== undefined) ? capability : undefined;
+}
+
 function parseCatalogItem(item: unknown, providerId: string): ProviderModelSelection | null {
   if (typeof item === 'string') {
     const id = item.trim();
@@ -355,7 +452,16 @@ function parseCatalogItem(item: unknown, providerId: string): ProviderModelSelec
   const id = rawId.trim();
   const rawName = record.name ?? record.display_name ?? record.displayName;
   const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : id;
-  return { id, name, category: inferModelCategory(id), provider: providerId };
+  const category = inferModelCategory(id);
+  const supportsImageInput = record.supports_image === true || record.supportsImage === true;
+  return {
+    id,
+    name,
+    category,
+    provider: providerId,
+    inputModalities: supportsImageInput ? ['text', 'image'] : undefined,
+    videoCapability: parseVideoCapability(record, category),
+  };
 }
 
 function normalizeModels(
@@ -376,6 +482,29 @@ function normalizeModels(
   return [...unique.values()].sort((left, right) =>
     left.name.localeCompare(right.name, 'zh-CN', { sensitivity: 'base' }),
   );
+}
+
+function mergeRemoteCatalogMetadata(
+  remoteModels: ProviderModelSelection[],
+  fallbackModels: ProviderModelSelection[],
+): ProviderModelSelection[] {
+  const fallbackById = new Map(fallbackModels.map((model) => [model.id, model]));
+  return remoteModels.map((remote) => {
+    const fallback = fallbackById.get(remote.id);
+    if (!fallback) return remote;
+    return {
+      ...fallback,
+      ...remote,
+      description: remote.description ?? fallback.description,
+      inputModalities: remote.inputModalities ?? fallback.inputModalities,
+      executionProfile: remote.executionProfile ?? fallback.executionProfile,
+      imageReferenceRequestMode: remote.imageReferenceRequestMode
+        ?? fallback.imageReferenceRequestMode,
+      videoCapability: remote.videoCapability || fallback.videoCapability
+        ? { ...fallback.videoCapability, ...remote.videoCapability }
+        : undefined,
+    };
+  });
 }
 
 function safeCatalogError(error: unknown): string {
@@ -402,8 +531,12 @@ async function fetchCatalogAt(
   config: ApiProviderConfig,
   signal?: AbortSignal,
 ): Promise<ProviderModelSelection[]> {
+  const url = new URL(`${baseUrl}${definition.modelsPath || '/models'}`);
+  for (const [key, value] of Object.entries(definition.requestQuery ?? {})) {
+    url.searchParams.set(key, value);
+  }
   const response = await fetchCatalogResponse(
-    `${baseUrl}${definition.modelsPath || '/models'}`,
+    url.toString(),
     config.apiKey,
     signal,
   );
@@ -412,7 +545,9 @@ async function fetchCatalogAt(
   const payload: unknown = await response.json().catch(() => null);
   const models = readCatalogItems(payload)
     .map((item) => parseCatalogItem(item, providerId))
-    .filter((item): item is ProviderModelSelection => item !== null);
+    .filter((item): item is ProviderModelSelection => (
+      item !== null && isProviderModelVisible(definition.id, item.id)
+    ));
   if (models.length === 0) throw new Error('模型列表拉取失败 (HTTP 200)');
   return normalizeModels(models, providerId);
 }
@@ -492,7 +627,8 @@ export async function fetchProviderModelCatalog(
   if (signal?.aborted) throw new DOMException('模型列表拉取已取消', 'AbortError');
   const definition = getProviderDefinition(providerId, config);
   if (!definition) throw new Error('未知厂商目录');
-  const normalizedFallback = normalizeModels(fallbackModels, providerId);
+  const normalizedFallback = normalizeModels(fallbackModels, providerId)
+    .filter((model) => isProviderModelVisible(definition.id, model.id));
 
   if (definition.catalogAdapter === 'local-manifest') {
     return { models: normalizedFallback, source: 'local-manifest' };
@@ -521,7 +657,11 @@ export async function fetchProviderModelCatalog(
       config,
       signal,
     );
-    return { models, source: 'remote', resolvedBaseUrl: baseUrl };
+    return {
+      models: mergeRemoteCatalogMetadata(models, normalizedFallback),
+      source: 'remote',
+      resolvedBaseUrl: baseUrl,
+    };
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     const warning = safeCatalogError(error);

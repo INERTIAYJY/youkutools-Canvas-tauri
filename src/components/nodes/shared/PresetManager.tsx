@@ -175,6 +175,12 @@ export default function PresetManager() {
     [activeTab, userPresets],
   );
 
+  // 高级模式的结构错误实时算，编辑器里已经列出来了，这里只用来锁保存
+  const advancedError = useMemo(
+    () => (presetMode === 'advanced' ? validatePresetAdvancedConfig(advancedConfig)[0] : undefined),
+    [advancedConfig, presetMode],
+  );
+
   // Load selected preset
   useEffect(() => {
     if (!presetManagerOpen) return;
@@ -329,6 +335,7 @@ export default function PresetManager() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.nativeEvent.isComposing) return; // 输入法组合中，回车属于候选框
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         handleEditorInput();
@@ -728,7 +735,13 @@ export default function PresetManager() {
               <span>按步骤顺序自动执行，失败时停止</span>
             </div>
           )}
-          <AnimatedButton type="button" className="preset-modal-btn-primary" onClick={handleSave}>
+          <AnimatedButton
+            type="button"
+            className="preset-modal-btn-primary"
+            onClick={handleSave}
+            disabled={!!advancedError}
+            title={advancedError}
+          >
             保存
           </AnimatedButton>
         </div>

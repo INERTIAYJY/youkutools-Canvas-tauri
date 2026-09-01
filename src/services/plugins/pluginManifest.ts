@@ -5,12 +5,14 @@ import type {
   PluginCustomNodeFieldManifest,
   PluginCustomNodeFieldType,
   PluginCustomNodeManifest,
-  PluginDialogFieldType,
+  PluginDialogFieldManifest,
   PluginManifest,
   PluginNodePortType,
   PluginNodeOutputMode,
   PluginPermission,
   PluginPlacement,
+  PluginRuntime,
+  PluginNodeToolDialogFieldType,
   PluginToolDialogManifest,
 } from '../../types/plugin';
 
@@ -92,7 +94,7 @@ const PERMISSIONS = new Set<PluginPermission>([
 const OUTPUT_MODES = new Set<PluginNodeOutputMode>(['update-current', 'create-node']);
 const CATEGORIES = new Set<PluginCategory>(['content', 'media', 'workflow', 'utility']);
 const PLACEMENTS = new Set<PluginPlacement>(['node-context-menu', 'node-toolbar']);
-const DIALOG_FIELD_TYPES = new Set<PluginDialogFieldType>(['text', 'textarea', 'number', 'select', 'boolean']);
+const DIALOG_FIELD_TYPES = new Set<PluginNodeToolDialogFieldType>(['text', 'textarea', 'number', 'select', 'boolean', 'model']);
 const CUSTOM_NODE_FIELD_TYPES = new Set<PluginCustomNodeFieldType>([
   ...DIALOG_FIELD_TYPES,
   'model',
@@ -165,7 +167,7 @@ function parseToolDialog(value: unknown, toolId: string): PluginToolDialogManife
     if (!FIELD_RE.test(id)) throw new Error(`${toolId} 的弹窗字段 id 无效: ${id}`);
     if (seenFieldIds.has(id)) throw new Error(`${toolId} 的弹窗字段 id 重复: ${id}`);
     seenFieldIds.add(id);
-    const type = nonEmptyString(field.type, `${toolId}.${id}.type`, 16) as PluginDialogFieldType;
+    const type = nonEmptyString(field.type, `${toolId}.${id}.type`, 16) as PluginNodeToolDialogFieldType;
     if (!DIALOG_FIELD_TYPES.has(type)) throw new Error(`${toolId}.${id} 使用了不支持的弹窗字段类型`);
     if (field.required !== undefined && typeof field.required !== 'boolean') {
       throw new Error(`${toolId}.${id}.required 必须是布尔值`);
@@ -189,6 +191,19 @@ function parseToolDialog(value: unknown, toolId: string): PluginToolDialogManife
       });
     } else if (field.options !== undefined) {
       throw new Error(`${toolId}.${id} 只有 select 字段可以配置 options`);
+    }
+
+    let modelCategories: PluginDialogFieldManifest['modelCategories'];
+    if (type === 'model') {
+      const rawCategories = field.modelCategories === undefined
+        ? ['text', 'image', 'video', 'audio']
+        : stringArray(field.modelCategories, `${toolId}.${id}.modelCategories`, 4);
+      if (rawCategories.some((category) => !MODEL_CATEGORIES.has(category))) {
+        throw new Error(`${toolId}.${id} 包含不支持的模型分类`);
+      }
+      modelCategories = [...new Set(rawCategories)] as PluginDialogFieldManifest['modelCategories'];
+    } else if (field.modelCategories !== undefined) {
+      throw new Error(`${toolId}.${id} 只有 model 字段可以配置 modelCategories`);
     }
 
     let defaultValue: string | number | boolean | undefined;
@@ -216,6 +231,7 @@ function parseToolDialog(value: unknown, toolId: string): PluginToolDialogManife
       required: field.required as boolean | undefined,
       defaultValue,
       options,
+      modelCategories,
     };
   });
 
@@ -364,11 +380,21 @@ function parseCustomNodes(value: unknown): PluginCustomNodeManifest[] {
 
 function parseManifest(value: unknown): PluginManifest {
   const root = objectValue(value, 'manifest');
-  if (root.apiVersion !== 1 && root.apiVersion !== 2) throw new Error('仅支持 apiVersion: 1 或 2');
+  if (root.apiVersion !== 1 && root.apiVersion !== 2 && root.apiVersion !== 3) {
+    throw new Error('仅支持 apiVersion: 1、2 或 3');
+  }
   const id = nonEmptyString(root.id, '插件 id', 128);
   if (!PLUGIN_ID_RE.test(id)) throw new Error('插件 id 只能使用小写字母、数字、点、下划线和短横线');
   const entry = nonEmptyString(root.entry, 'entry', 32);
-  if (entry !== 'main.js') throw new Error('首版插件入口必须是 main.js');
+  const runtime = (root.runtime === undefined ? 'javascript' : nonEmptyString(root.runtime, 'runtime', 16)) as PluginRuntime;
+  if (runtime !== 'javascript' && runtime !== 'python') throw new Error('runtime 仅支持 javascript 或 python');
+  if (root.apiVersion === 3) {
+    if (runtime !== 'python') throw new Error('apiVersion: 3 当前仅用于可信 Python 插件');
+    if (entry !== 'main.py') throw new Error('Python 插件入口必须是 main.py');
+  } else {
+    if (runtime === 'python') throw new Error('Python 插件必须使用 apiVersion: 3');
+    if (entry !== 'main.js') throw new Error('JavaScript 插件入口必须是 main.js');
+  }
 
   const permissions = stringArray(root.permissions, 'permissions', 8);
   if (permissions.some((permission) => !PERMISSIONS.has(permission as PluginPermission))) {
@@ -381,7 +407,7 @@ function parseManifest(value: unknown): PluginManifest {
   const rawNodeTools = contributes.nodeTools ?? [];
   if (!Array.isArray(rawNodeTools)) throw new Error('contributes.nodeTools 必须是数组');
   const customNodes = parseCustomNodes(contributes.nodes);
-  if (root.apiVersion === 1 && customNodes.length > 0) throw new Error('自定义节点需要 apiVersion: 2');
+  if (root.apiVersion === 1 && customNodes.length > 0) throw new Error('自定义节点需要 apiVersion: 2 或 3');
   if (rawNodeTools.length === 0 && customNodes.length === 0) throw new Error('插件至少需要贡献一个节点工具或自定义节点');
   if (rawNodeTools.length > MAX_TOOLS) throw new Error(`节点工具不能超过 ${MAX_TOOLS} 个`);
 
@@ -452,6 +478,15 @@ function parseManifest(value: unknown): PluginManifest {
   if (nodeTools.length > 0 && !permissions.includes('node.write')) {
     throw new Error('节点工具插件必须声明 node.write');
   }
+  const nodeToolUsesModelField = nodeTools.some(
+    (tool) => (tool.dialog?.fields ?? []).some((field) => field.type === 'model'),
+  );
+  if (nodeToolUsesModelField && !permissions.includes('models.read')) {
+    throw new Error('使用模型字段的节点工具必须声明 models.read');
+  }
+  if (root.apiVersion === 1 && (nodeToolUsesModelField || permissions.includes('models.invoke'))) {
+    throw new Error('节点工具调用宿主模型需要 apiVersion: 2 或 3');
+  }
   if (customNodes.length > 0 && !permissions.includes('node.write')) {
     throw new Error('自定义节点插件必须声明 node.write');
   }
@@ -474,6 +509,7 @@ function parseManifest(value: unknown): PluginManifest {
 
   return {
     apiVersion: root.apiVersion,
+    runtime,
     id,
     name: nonEmptyString(root.name, '插件名称', 80),
     version: nonEmptyString(root.version, '插件版本', 32),
@@ -484,16 +520,14 @@ function parseManifest(value: unknown): PluginManifest {
     license: optionalString(root.license, 'license', 80),
     category,
     keywords,
-    entry: 'main.js',
+    entry: entry as PluginManifest['entry'],
     permissions: [...new Set(permissions)] as PluginPermission[],
     contributes: { nodeTools, nodes: customNodes },
   };
 }
 
-export function parsePluginBundle(manifestText: string, source: string): PluginManifest {
+export function parsePluginManifest(manifestText: string): PluginManifest {
   if (new Blob([manifestText]).size > MAX_MANIFEST_BYTES) throw new Error('manifest.json 过大');
-  if (new Blob([source]).size > MAX_SOURCE_BYTES) throw new Error('main.js 过大');
-  if (!source.trim()) throw new Error('main.js 不能为空');
   let raw: unknown;
   try {
     raw = JSON.parse(manifestText);
@@ -501,6 +535,13 @@ export function parsePluginBundle(manifestText: string, source: string): PluginM
     throw new Error('manifest.json 不是有效 JSON');
   }
   return parseManifest(raw);
+}
+
+export function parsePluginBundle(manifestText: string, source: string): PluginManifest {
+  const manifest = parsePluginManifest(manifestText);
+  if (new Blob([source]).size > MAX_SOURCE_BYTES) throw new Error(`${manifest.entry} 过大`);
+  if (!source.trim()) throw new Error(`${manifest.entry} 不能为空`);
+  return manifest;
 }
 
 export function createInstalledPlugin(

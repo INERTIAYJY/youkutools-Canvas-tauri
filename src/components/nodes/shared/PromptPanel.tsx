@@ -346,7 +346,7 @@ interface PromptPanelProps {
   videoFps?: number;
   videoFrames?: number;
   onChangeVideoResolution?: (value: number) => void;
-  onChangeVideoFps?: (value: number) => void;
+  onChangeVideoFps?: (value: number | undefined) => void;
   // ── Seedance 参数 ──
   seedanceResolution?: string;
   seedanceRatio?: string;
@@ -360,10 +360,10 @@ interface PromptPanelProps {
   onChangeGenerateCount?: (value: number) => void;
   videoReferences?: VideoReferenceItem[];
   onChangeVideoReferences?: (value: VideoReferenceItem[]) => void;
-  onChangeSeedanceResolution?: (value: string) => void;
-  onChangeSeedanceRatio?: (value: string) => void;
-  onChangeSeedanceDuration?: (value: number) => void;
-  onChangeGenerateAudio?: (value: boolean) => void;
+  onChangeSeedanceResolution?: (value: string | undefined) => void;
+  onChangeSeedanceRatio?: (value: string | undefined) => void;
+  onChangeSeedanceDuration?: (value: number | undefined) => void;
+  onChangeGenerateAudio?: (value: boolean | undefined) => void;
   audioPurpose?: AudioGenerationPurpose;
   audioVoice?: AudioTtsVoice;
   audioFormat?: AudioOutputFormat;

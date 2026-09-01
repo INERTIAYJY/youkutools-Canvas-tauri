@@ -94,6 +94,8 @@ interface AssetReferenceLike {
   relativePath?: string;
   filePath?: string;
   storyboardOverrides?: (AssetReferenceLike | null)[];
+  directorScene?: AssetReferenceLike;
+  directorResultManifest?: AssetReferenceLike;
 }
 
 interface PersistedNodeLike {
@@ -129,6 +131,8 @@ function collectAssetReferences(record: ProjectSaveData): AssetReferenceLike[] {
         if (isRecord(override)) references.push(override);
       });
     }
+    if (isRecord(value.directorScene)) references.push(value.directorScene);
+    if (isRecord(value.directorResultManifest)) references.push(value.directorResultManifest);
   };
 
   if (Array.isArray(record.nodes)) {
@@ -425,6 +429,8 @@ async function duplicateEpisodes(episodeIds: string[], target: ProjectImportResu
         parentId: next.parentId,
         episodeNo: next.episodeNo,
         episodeOutline: next.episodeOutline,
+        episodeScript: next.episodeScript,
+        episodeCreative: next.episodeCreative,
       });
     } catch (error) {
       console.warn('[项目复制] 分集复制失败:', episodeId, error);

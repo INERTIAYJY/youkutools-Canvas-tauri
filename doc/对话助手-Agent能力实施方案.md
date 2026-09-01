@@ -1,6 +1,6 @@
 # 对话助手 Agent 能力实施方案
 
-> 文档状态：P3、P4 阶段已完成；P5-A/P5-B/P5-D 已完成，P5-C 待实施
+> 文档状态：P3、P4 阶段已完成；P5-A/P5-B/P5-D 已完成，P5-C 待实施；8.29 Agent Package 首批纵向切片、任务级 Skill 按需绑定与 MCP 只读兼容已完成，项目覆盖和后台表面待实施；安全前置 Phase 0-A（Tauri 应用 command 外层 ACL）与 Phase 0-B（高风险原生命令 Rust 调用方校验）已完成；3D 镜头台 Phase 0-C 双运行时前端契约、Phase 0-D 协议冻结、Phase 1-A Scene/Result 纯数据层与 Phase 1-B Blender 安装候选发现已完成，Phase 1-C Windows Blender 原生运行时预览已接通并继续完成故障注入验收
 > 创建日期：2026-07-16
 > 适用项目：AI Canvas Tauri
 > 关联方案：`doc/对话式画布助手-功能方案.md`
@@ -59,6 +59,13 @@
 | P5-C | `[ ]` | 端到端安全回归与验收 |  |  |
 | P5-D | `[x]` | 通用联网搜索、受控网页提取和来源引用 | 2026-07-22 | 2026-07-22 |
 | 角色库 S1 | `[x]` | 多图角色类型、旧数据迁移与全局角色持久化 | 2026-07-25 | 2026-07-25 |
+| 安全前置 0-A | `[x]` | Tauri 应用 command 外层 ACL | 2026-08-28 | 2026-08-28 |
+| 安全前置 0-B | `[x]` | 插件执行与导演台资源命令 Rust 调用方校验 | 2026-08-28 | 2026-08-28 |
+| 导演台 0-C | `[x]` | 同一 `ai-director` 的 `lightweight-web` / `blender` 双运行时前端契约 | 2026-08-28 | 2026-08-28 |
+| 导演台 0-D | `[x]` | Blender 场景权威、固定脚本和后续原生阶段范围冻结 | 2026-08-28 | 2026-08-28 |
+| 导演台 1-A | `[x]` | Director Scene/Result 严格合同、不可变项目文件与归档识别 | 2026-08-28 | 2026-08-28 |
+| 导演台 1-B | `[x]` | 受限 Blender 安装候选发现、opaque ID 与进程内记录 | 2026-08-28 | 2026-08-28 |
+| 导演台 1-C | `[~]` | 固定 Blender 5.2.1 资源、原生 Job、同节点打开/截图/视频与结果回收预览 | 2026-08-28 |  |
 
 ## 3. 已确认的产品决策
 
@@ -2254,6 +2261,282 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - 先停止 MCP 会话，再移除 HTTP transport、设置页远程选项和新增 Cargo 依赖即可恢复仅本机 stdio；现有工具、审计任务与项目数据不需迁移。
 - 如需同时回滚安装版适配器修复，再移除 esbuild 构建脚本、生成资源和 `tauri.conf.json` resource 映射。
 
+### 8.29 全局 Agent Package 首批纵向切片（2026-08-27）
+
+**状态：首批纵向切片、任务级 Skill 按需绑定与 MCP 只读兼容已完成；项目覆盖和后台表面接入待后续阶段**
+
+- 建立用户安装的 Agent Package v1 合同、严格 Manifest 校验和独立 `ai-canvas-agent-catalog` IndexedDB；可选目录加载失败时退化为空目录，不参与项目、画布和配置的启动 readiness。
+- 全局安装记录只持有 Manifest、包内相对入口、健康信息和不透明 `sourceId`；不保存真实路径、入口正文、API Key 或包内容。没有外部智能体时，默认助手、画布、工作流和模型发送链保持原样。
+- AI 助手 Header 和空态新增“智能体中心”，支持选择文件夹与压缩包、查看预检结果、启停和移除。写操作只在主窗口提供，独立助手窗口不成为第二个写入源。
+- 文件夹采用只读 linked 来源；`ai-canvas-agent.json` 是可选增强清单。没有该清单但能识别有效 `AGENTS.md` / `SKILL.md` 入口的通用目录，由宿主生成 `legacy.<hash>` 兼容清单并按 `ready` 正常载入，不写回用户源目录；旧版留下的缺清单提醒会被精确迁移，同时保留用户原有启停选择。
+- 压缩包采用 managed 导入，首批支持 `.aicanvas-agent`、`.tgz`、`.tar.gz`。归档在空 staging 中完成条目数、体积、重复路径、路径逃逸、链接和设备文件检查，通过后再原子迁入托管目录；失败清理半安装来源。
+- Rust 私有注册表保存 `sourceId` 到真实路径的映射，并从 Renderer 的通用 fs/asset 与自定义路径命令中拒绝访问；包内资源只允许通过 `sourceId + 相对路径` 有界读取，不执行包内脚本。
+- 卸载 linked 来源只解除注册、不删除外部目录；卸载 managed 来源删除托管副本。同一包升级并更换来源后会清理旧来源，避免孤儿副本。
+- 助手执行链补充任务项目作用域：后台任务不再把当前已切换画布的节点摘要当作任务画布，也不会在任务所属画布未加载时执行旧管线画布写入。
+
+#### 完成记录
+
+- 前端类型：`npm run typecheck` 与 `npm run test:typecheck` 通过。
+- 定向测试：Agent Catalog、Manifest、Store、导入服务、助手中心、助手项目作用域和会话控制共 7 个文件、55 项通过；快进 fork 后连同上游厂商配置回归共 8 个文件、71 项通过。
+- 定向 Lint：本阶段 25 个 TypeScript/TSX 文件通过，无告警。
+- Rust：`cargo test --no-default-features agent_package::tests --lib` 10 项通过；`cargo test --no-default-features path_policy::tests --lib` 6 项通过；`cargo check --lib` 与新增模块 `rustfmt --check` 通过。新增断言确认私有来源注册表不会持久化指令正文。
+- 生产构建：Vite 输出到系统临时目录并通过；仅报告既有动态导入失效和大 chunk 警告。
+- Fork 同步：绕过失效的本机代理获取 `myfork/master`，确认远端只改 3 个无重叠文件后，把本地 `master` 从 `4622b35` 快进到 `dc85e67`；当前实现保留且快进后重新通过类型、测试和生产构建。
+- 本阶段未新增依赖，未修改 `tauri.conf.json`、capability、核心 IndexedDB schema、Agent Policy 或媒体确认策略；未执行真实外部目录的 Tauri 对话框端到端手测。
+- 普通 `.zip` 尚未支持；其安全实现需要增加直接 Rust 依赖，必须在用户单独确认新增依赖后进入后续阶段。
+- 2026-08-30 修正通用目录兼容语义：`ai-canvas-agent.json` 不再作为健康门槛；有效无清单目录按 `ready` 载入且首次默认启用。旧 `legacy.*` 记录仅在命中精确历史提醒时迁移，保留用户启停状态和其他真实提醒；迁移写回失败会保留修正后的内存记录并将 Catalog 标记为受限。
+- 本次回归：Agent Package 相关 Vitest 5 个文件、37 项通过；Rust `agent_package::tests` 11 项通过；`npm run typecheck`、`npm run test:typecheck`、改动 TypeScript 定向 ESLint、`cargo check --lib` 和目标 `agent_package.rs` rustfmt 检查通过。全 crate `cargo fmt --check` 仍被多个未改 Rust 文件的既有格式差异阻断，未格式化无关文件。
+
+#### 2026-08-30 Skill 与 MCP 兼容扩展
+
+- 已安装且启用的 Agent Package 在主窗口构建运行期只读 Skill 目录；Manifest 包遵守 `skillRoots` / `excludePaths`，无清单通用目录使用已发现的 `SKILL.md` 入口。Skill 稳定 ID 由安装 ID 与相对入口生成，正文和原生来源句柄不写入 UserSkill 数据库或 Agent Catalog。
+- 聊天 `/` 选择器合并“我的 Skill”和各智能体包分组，支持按 Skill 或包名搜索；用户显式引用时在 AgentTask 内固定正文、版本、工具声明和来源审计快照，后续恢复不再读取可变全局记录。包级路由说明不会被伪装成额外 Skill，也不会自动注入 legacy 包正文。
+- 新增 `skill_search`，并把 Skill Catalog 分成 `assistant-model`、`assistant-user` 和 `mcp` 三个 surface。MCP 通用 Skill 工具在空目录时仍可稳定发现；包内 Skill 仅在宿主显式开启只读授权后支持 list/search/get/load/read_file，创建、更新和删除仍只作用于用户 Skill。
+- MCP 授权默认关闭，停用、删除、重新导入或关闭授权时会在 Store 同步撤下/撤权旧运行时快照；每次 MCP 调用还会交叉校验当前安装、健康、授权、sourceId、内容哈希和相对入口，避免异步目录刷新窗口继续读取旧内容。
+- 包内附属资料继续经过 Rust `sourceId + 相对路径` 包根边界；Renderer 只允许有界安全文本。正文明确引用的同包跨 Skill 资料可按需读取，实验 B 路线与其他路线双向隔离，脚本和未声明跨根文件拒绝读取。
+- 独立助手窗口只同步 `SkillPickerOption` 安全元数据；任务投影会清空 Skill 正文并移除包路径、内容哈希和原生来源信息，主窗口仍保留完整不可变任务快照用于执行和恢复。
+- 验证：`npm run lint`、`npm run typecheck`、`npm run test:typecheck` 通过；18 个 Skill/AgentPackage/MCP/独立窗口相关测试文件共 197 项通过；Vite 生产构建通过，仅报告既有动态导入失效和大 chunk 警告；37 个本批文本文件的严格 UTF-8 检查与 scoped `git diff --check` 均通过。
+- 全量 `npm run check` 的 lint、类型与测试类型阶段通过；全量 Vitest 为 233 个文件通过、1931/1932 项测试通过。剩余失败包括范围外既有 i18n 孤儿键 `让助手按剧本拆分集`，以及两个共同导入未改动 `scripts/ai-canvas-mcp.mjs` 的 suite 在 Vitest 导入期报无定位 `SyntaxError`；该脚本的 Node `--check` 和原生动态 import 均通过。本阶段未修改 Rust、依赖、Tauri 安全配置、IndexedDB schema 或 Policy，也未启动安装版做真实 MCP 连接端到端手测。
+
+#### 回滚
+
+- 移除助手中心入口、Agent Package Store/独立 Catalog、前端导入服务和 Rust `agent_package` 命令注册即可回到无兼容层状态；核心项目数据库没有迁移，无需降级。
+- 回滚前应先通过智能体中心移除 managed 安装，避免在应用私有目录保留无入口的托管副本；linked 外部目录始终由用户保留。
+
+### 8.30 平台安全前置：Tauri 应用 command 外层 ACL（Phase 0-A）
+
+**状态：** `[x]`
+
+#### 目标与边界
+
+- 为本阶段纳入范围的 Tauri 应用 command 增加统一的外层调用方 ACL，在进入既有业务校验和副作用前拒绝未授权窗口或调用来源。
+- 保留各 command 现有参数校验、路径策略、业务逻辑和错误语义；外层 ACL 只收紧调用入口，不扩大任何权限。
+- 本阶段不修改 Agent/MCP Tool Registry、Policy Engine 或确认矩阵，不新增 Agent/MCP 工具；不修改 IndexedDB schema、持久化数据、UI、导演台运行时或 Blender 行为。
+
+#### 验收与回滚
+
+- 授权应用窗口的既有 command 调用保持可用；生成的 ACL 必须确认未授权窗口不会获得应用 command 权限。
+- 完成记录只填写实际修改文件和真实执行过的 Rust/差异检查，不把静态配置检查等同于完整窗口运行时验收。
+- 回滚仅撤销本阶段应用 permission 与 capability 引用并重新生成 ACL/schema；既有 command 实现、Agent/MCP Policy、数据库、UI 和导演台行为保持不变，无数据迁移或降级。
+
+#### 完成记录
+
+- 新增 `src-tauri/permissions/allow-first-party-app-commands.toml`，将 `invoke_handler` 当前注册的 61 个应用 commands 收口到单一 permission；`capabilities/default.json` 只为 `main`、`asset-search`、`chat-assistant`、`video-editor` 引用它。`director-desk`、`dreamina-login` 与 `comfyui` capability 均未获得该 permission。
+- `cargo check --lib` 通过；生成的 `__app-acl__` 为 allow 61、deny 0，源 handler 与 permission 集合 missing 0、extra 0。Windows 构建实际更新 `acl-manifests.json`、`capabilities.json`、`desktop-schema.json` 与 `windows-schema.json`；平台专属 `macOS-schema.json` 未由 Windows target 重写。
+- `cargo test --no-default-features --lib` 通过：83 项通过、0 失败、1 项既有 176 MiB 压力测试忽略。`cargo test --lib` 已执行，但被既有 ORT/MSVC 链接环境以 LNK1120 阻断，39 个 `__std_find_*` 等符号未解析；本阶段未修改 ONNX、Cargo 依赖或工具链。
+- 严格 UTF-8、生成 JSON 解析和 `git diff --check` 通过；未启动应用做窗口级动态拒绝手测，因此本阶段验收证据为 Tauri 构建解析、生成 ACL 结构与既有 Rust 测试，不把它表述为完整运行时端到端验收。
+
+### 8.31 平台安全前置：Python、导演台与 Blender 运行边界（Phase 0-B）
+
+**状态：** `[x]`
+
+#### 目标与边界
+
+- 现有 Python 能力仅指 Plugin API v3 的受信本机插件运行时：它执行用户明确安装并启用的 `main.py`，沿用既有高风险提示、宿主 effect、canvas revision 和输出校验；它不是导演台安装器，也不作为未来 Blender 适配器的通用脚本执行入口。
+- 当前 3D 导演台的轻量网页运行时继续由 Rust `director_desk_runtime` 按固定发布清单下载、校验 SHA-256、限制并解包归档、校验发布元数据，再通过 `director-desk://` 提供静态资源；该链路不调用 Python、Shell 或任意脚本进程。
+- 后续 Blender 运行时只能调用应用自带、版本固定且可校验的脚本，并只接受结构化场景清单和固定参数；不得接收模型、插件、网页、Agent/MCP 或普通用户输入的任意 Python 源码、脚本路径、自由命令行参数或任意工作目录。Blender 接入仍属于后续阶段，本阶段不实现或宣称已接通。
+- 本阶段在 Phase 0-A 外层 ACL 之外，为任意插件源码执行、Python 环境探测以及轻量导演台资源状态、安装、取消和删除命令增加 Rust `ensure_trusted_caller` 校验；只接受 AI Canvas 自有本地窗口，第三方 `director-desk`、远程登录页与其他未授权窗口即使未来 capability 配置漂移也会被命令本身拒绝。
+- 本阶段不修改 Agent/MCP Tool Registry、Policy Engine 或确认矩阵，不修改数据库、UI、导演台下载清单、资源格式、现有节点协议或 Blender 行为。
+
+#### 验收与回滚
+
+- 受保护的 6 个 Tauri commands 必须先校验调用窗口，再执行环境探测、插件源码、网络下载、安装状态变更或资源删除；校验发生在启动子进程、设置安装状态和磁盘写入之前。
+- 主窗口前端 `invoke` 的业务参数与返回数据保持兼容；`get_python_plugin_runtime_status` 仅由 Rust 外层增加可拒绝错误，不改变成功时的 `PythonPluginRuntimeStatus` 数据结构。
+- 执行 Rust 编译、非 ONNX 既有 Rust 测试、命令结构静态核对、严格 UTF-8 与 `git diff --check`；不把源码静态检查表述为窗口级动态端到端验收。
+- 回滚只需撤销两个 Rust 模块的 `Webview` 参数与调用方校验，以及本节台账；Phase 0-A ACL、项目数据库、现有导演台资源和用户插件文件均不迁移、不删除。
+
+#### 完成记录
+
+- `plugin_runtime.rs` 的 `execute_node_plugin_tool` 与 `get_python_plugin_runtime_status` 已注入 `Webview` 并在启动 QuickJS/Python 运行、探测 Python 进程前调用 `ensure_trusted_caller`；为保持既有单元测试不构造真实 Webview，仅把运行时分派提取为同文件私有 `execute_plugin_tool_inner`，生产命令仍先经过调用方校验。
+- `director_desk_runtime.rs` 的状态、安装、取消与删除 4 个命令已在读取或修改安装状态、下载、解包和删除资源前执行同一校验；私有 `runtime_status`、`install_runtime` 与 `director-desk://` 静态资源协议没有扩权或改写。
+- `cargo check --lib` 通过；`cargo test --no-default-features --lib` 通过，83 项通过、0 失败、1 项既有 176 MiB 压力测试忽略。没有重复运行 Phase 0-A 已确认会被本机 ORT/MSVC LNK1120 阻断的完整特性测试。
+- 两个受影响前端服务测试通过：2 个测试文件、10 项测试；`npm run typecheck` 通过。命令名、前端 `invoke` 参数和成功响应结构保持不变，Tauri 注入的 `Webview` 不需要前端传参。
+- 两个改动 Rust 文件的定向 `rustfmt --check` 通过；全仓 `cargo fmt --check` 已执行但被其他既有 Rust 文件的格式差异阻断，本阶段未批量格式化或覆盖这些文件。
+- 6 个命令的 guard-before-operation 静态顺序检查、严格 UTF-8 与 scoped `git diff --check` 通过；生成 ACL/schema 无变化。未启动应用做 `main`/`director-desk` 窗口级动态拒绝手测，因此不把本阶段表述为完整运行时端到端验收。
+
+### 8.32 3D 镜头台双运行时前端契约（Phase 0-C）
+
+**状态：** `[x]`
+
+#### 目标与边界
+
+- “3D 镜头台”继续使用唯一的 `ai-director` NodeType；`lightweight-web` 与 `blender` 是同一节点的运行时状态，不新增 NodeType、节点菜单、平行 Store 或第二套下游连线语义。
+- 保留现有截图、参考视频、复制、历史和项目持久化行为；旧节点缺少运行时字段时解释为 `lightweight-web`，未知非空值失败关闭。
+- 本阶段只建立前端类型、固定 registry/facade、现有节点选择和复制语义；Blender adapter 保持 unavailable，不检测安装、不启动进程、不执行 Python。
+
+#### 实施结果
+
+- `BaseNodeData` 增加可选 `directorRuntimeKind`；新建节点在 Store 插入边界获得显式 `lightweight-web` 默认值和稳定实例 ID，恢复旧项目不做静默迁移。
+- 固定 `directorRuntimeRegistry` 统一打开、订阅、当前帧和参考视频操作；它没有动态 `register()` 或通用 action，Blender 与未知分支不会调用旧网页窗口服务。
+- 现有 `DirectorDeskNode` 内显示运行时状态；普通轻量节点不能主动选择尚未接入的 Blender，导入的 Blender 状态可以显式切回轻量运行时。
+- 同项目粘贴与 Ctrl 拖拽继续创建同类型节点，保留已有媒体，重建瞬时实例并清除会话错误；不触发轻量运行资源下载提示。
+- 轻量资源安装完成后重新核对节点、实例 ID 和运行时，防止安装期间切换状态或删除节点后误开网页窗口。
+
+#### 验收与回滚
+
+- 定向测试首轮 5 个文件共 28 项通过；最终核心回归 3 个文件共 19 项通过。`npm run typecheck`、8 个受影响 TS/TSX/测试文件的定向 ESLint 和临时目录生产构建通过。
+- 9 个目标文件严格 UTF-8 与 scoped `git diff --check` 通过；未修改 Rust、Tauri capability、依赖或 IndexedDB，未启动 Blender，也未下载或安装导演台资源。
+- 回滚时移除运行时字段、固定 registry 与现有节点选择 UI，恢复轻量 facade 直连即可；旧媒体和项目数据不删除，不需要数据库降级。
+
+#### 完成记录
+
+- 本地提交：`7279555df8a9aef5a7e33838fbf64d88544055f4`（`feat(director): 建立双运行时前端契约`）。
+- 提交精确包含 `doc/架构说明.md`、`DirectorDeskRuntimeManager.tsx`、现有 `DirectorDeskNode.tsx`、`directorRuntimeRegistry.ts`、`store.nodes.ts`、`types/index.ts` 以及 registry、clipboard、运行资源提示 3 个测试文件，共 9 文件。
+- 当前只完成同项目复制。旧 Director 多媒体跨项目复制仍受单一 `filePath` 和平行 URL/path 数组限制，留待结构化 artifact 阶段处理，禁止猜测配对。
+
+### 8.33 Blender 原生运行时协议冻结（Phase 0-D）
+
+**状态：** `[x]`
+
+#### 目标与边界
+
+- 冻结同一 `ai-director` 节点接入 Blender 的产品、数据和执行边界；不新增节点、节点菜单或第二套连线协议。
+- [ADR 0003](./adr/0003-director-desk-prebuilt-runtime.md) 继续约束长期正式的 `lightweight-web`；[ADR 0010](./adr/0010-director-dual-runtime-and-blender-scene-authority.md) 管理双运行时、Scene/Result 与 Blender 安全边界，两者互不取代。
+- 本阶段仅修改 5 个正式文档，不改产品代码、Rust、数据库、依赖、Tauri 安全配置或安装包资源，不启动 Blender、不安装资源、不执行 Python。
+
+#### 冻结决策
+
+- Director Scene JSON 是 AI Canvas 可理解场景的可移植权威；节点只保存项目相对路径、revision、大小和 SHA-256 等不可变引用。
+- `.blend` 是绑定 Scene revision/hash 的 Blender 工作产物，不得自动覆盖 JSON，也不承诺与 JSON 无损双向转换。
+- Scene 中的项目文件引用必须同时绑定相对路径、大小和 SHA-256；仅有相对路径的引用无效，跨项目复制在完成哈希校验和引用重写前失败关闭。
+- Result Manifest 是截图、参考视频和 `.blend` 等不可变结果文件的清单权威，不负责场景编辑状态，也不能自行创建或覆盖 Scene；新的 Scene revision 只能来自独立通过白名单和父 revision/hash 校验的 portable Scene proposal。
+- Blender 内只允许由 Rust 第一方信任根解析、版本固定且通过哈希或签名校验的 AI Canvas 脚本；具体资源交付方式留到 Phase 1-C 检查点。不得复用 Plugin API v3 的可信 Python 入口，也不得接收 Python 源码、脚本路径、`--python-expr`、自由 argv、cwd、env 或绝对输出路径。
+- 项目目录必须先由 `main` 窗口建立绑定 `projectId` 的 Rust 进程内 grant；Job 只接收不透明 `projectGrantId`。`installationId` 只作查找键，每次启动前重新验证；`jobId` 由 Rust 生成并只用于状态表查找。真实可执行文件、模板、脚本、参数和 Job 目录均由 Rust 从受信状态派生。
+
+#### 下一阶段范围
+
+1. Phase 1-A：Director Scene/Result 纯 TypeScript 合同、不可变项目文件和归档识别，Blender 继续 unavailable。
+2. Phase 1-B：用途单一的 Rust Blender 安装候选发现，只返回不透明 ID，不执行候选、不持久化绝对路径。
+3. Phase 1-C：固定 Application Template、固定脚本 Job、进度/取消/崩溃恢复和 Result Manifest 回收；C1 自动化通过后仍 unavailable，只有用户明确授权的真机 C2 验收全部通过才可启用。涉及 bundle resources 或安全配置时另设检查点。
+4. Phase 1-D：结构化 Director artifact 与跨项目复制，不能提前猜测旧媒体 URL/path 配对。
+5. Phase 2/3：Blender 导演模式模板和 AI Canvas 内快速导演，始终写回同一 `ai-director` 节点。
+
+详细阶段、候选文件、验收和回滚见 [3D 镜头台 Blender 原生运行时实施计划](./plans/2026-08-28-director-blender-native-runtime.md)。
+
+#### 验收与回滚
+
+- 五份文档必须一致声明唯一 `ai-director`、`lightweight-web | blender` 状态、轻量运行时长期保留、Scene JSON 权威、`.blend` revision/hash 约束以及固定第一方脚本边界。
+- 新增文档链接存在，严格 UTF-8、乱码扫描和 scoped `git diff --check` 通过；文档批次不以编译或 mock 结果宣称 Blender 已安装、已启动或已渲染。
+- 回滚只恢复 3 个既有文档并移除 ADR 0010 与新实施计划；不回滚 Phase 0-C 代码、不迁移数据库、不删除导演台资源或用户产物。
+
+#### 完成记录
+
+- 实际正式范围为 5 份文档：更新 ADR 0003、产品方案和本文档；新增 ADR 0010 与 Blender 原生运行时实施计划。未修改产品代码、Rust、数据库、依赖、Tauri 安全配置或安装包资源。
+- 严格 UTF-8 / BOM / 常见乱码扫描覆盖 5 文件并通过；12 个本地 Markdown 链接全部存在；2 个新增文档的一级标题、代码围栏、尾随空白和 CRCRLF 检查通过；既有 3 个文档的 scoped `git diff --check` 通过。
+- 本阶段没有启动 Blender、安装导演台或 Blender 资源、执行 Python、生成 `.blend`、截图或参考视频。`blender` adapter 继续保持 unavailable；本文档状态只代表协议与后续阶段范围已冻结。
+- 阶段文档以独立本地提交交付，不包含 push、tag 或 Release；后续从 Phase 1-A 开始仍按独立范围与检查点实施。
+
+### 8.34 Director Scene/Result 纯数据层（Phase 1-A）
+
+**状态：** `[x]`
+
+#### 目标与边界
+
+- “3D 镜头台”继续使用唯一 `ai-director` NodeType；本阶段只增加同一节点可选的 `directorScene` / `directorResultManifest` 不可变引用，不新增节点、菜单、平行 Store 或下游连线协议。
+- 建立纯 TypeScript Scene/Result 合同、项目文件完整性与归档识别；不修改 Rust、Tauri capability、IndexedDB schema、依赖或 Blender adapter，不探测/启动 Blender，不安装资源，不执行 Python。
+- 旧 `directorCaptureUrls` / `directorCaptureFilePaths` 与通用视频输出保持原样；缺少新引用的旧项目继续按既有轻量运行时工作，不做静默迁移或媒体配对猜测。
+
+#### 实施结果
+
+- 新增 Director 领域类型并由 `types/index.ts` 兼容导出：Scene reference 绑定 schema、scene ID、revision、项目相对路径、SHA-256 与 bytes；Manifest reference 额外绑定 Scene revision/hash 与 manifest revision。
+- 新增严格 v1 schema：所有嵌套对象采用固定字段白名单，拒绝未来 schema、未知字段、非有限数字、危险路径、重复 ID、越界帧与错误 camera 引用；Scene JSON 上限 2 MiB，Manifest 上限 512 KiB。
+- Scene 明确右手系、Z-up、-Y forward、米/度/XYZ；transform、集合数量、关键帧总量与 artifact 数量均有限制。Result artifact 只接受 `frame-image/image/png`、`reference-video/video/mp4` 和 `blend-project/application/x-blender` 固定组合。
+- 新增项目文件边界：严格相对路径、逐级 `lstat` 拒绝静态符号链接、Web Crypto SHA-256、`writeFile(..., { createNew: true })` 独占创建、写后读回校验；同路径同内容幂等，不同内容或损坏目标失败关闭且不覆盖。
+- Scene 保存要求精确父 revision/hash 并验证直接父文件；Manifest 必须绑定已验证 Scene，先验证所有 artifact，最后写入清单。Manifest revision 为追加式清单，旧 artifact 身份不可改写，新 revision 至少追加一个新 artifact。
+- 项目归档保持 format version 1 和原有三个顶层条目；现有 Rust 归档递归携带 `director/**`，前端只显式识别 `directorScene` / `directorResultManifest` 两个已知嵌套引用用于缺失统计，不解析清单或递归猜测未知对象。
+
+#### 验收、限制与回滚
+
+- 最终定向验证通过：schema/service/transfer 3 个测试文件共 41 项；Blender unavailable 契约回归 1 个文件 5 项；`npm run typecheck`、9 文件定向 ESLint、临时目录生产构建、严格 UTF-8/无 BOM/无尾随空白与 scoped `git diff --check` 通过。
+- `npm run check` 的全仓 lint、typecheck 与 test:typecheck 通过；全量 Vitest 有 209 个文件、1701 项测试通过，另有 3 个范围外既有失败：i18n 两个孤儿词条，以及两个 MCP 测试文件导入时 `SyntaxError`。失败文件不在本阶段差异中，未为通过检查而扩大范围。
+- Renderer 对 Scene asset 与 Result artifact 的总读取复核上限为 64 MiB；真实视频和 `.blend` 仍必须由 Phase 1-C Rust 流式哈希。TypeScript `lstat` 与实际读写之间的 TOCTOU 窗口不能作为原生 Job 安全边界，因此 `blender` adapter 继续 unavailable。
+- 回滚时移除两个可选节点引用、Director 类型/schema/服务/项目文件模块及归档 collector 的两个显式字段即可；旧截图、视频与轻量运行时数据不删除，已存在的不可变项目文件保留为可恢复孤儿文件，不做破坏性清理。
+- 正式范围为 9 个产品/测试文件加本文档共 10 文件；没有修改 Rust、Tauri 安全配置、数据库、依赖、运行资源或现有 Blender unavailable 实现。
+
+### 8.35 Blender 安装候选发现（Phase 1-B）
+
+**状态：** `[x]`
+
+#### 目标与边界
+
+- 只在 Windows 的 `ProgramW6432`、`ProgramFiles`、`ProgramFiles(x86)` 非权威根提示下检查固定标准层级 `Blender Foundation/<直接版本目录>/blender.exe`；不递归扫描 Program Files，不读取 PATH、注册表、Steam、WindowsApps、用户目录或整盘。
+- 新 command 不接收路径、扫描深度、命令行或其他业务参数；先通过既有 trusted caller 本地来源校验，再额外限制为 `main` 窗口。发现过程不调用 Blender、Shell、Python、`--version` 或任何子进程。
+- 返回值只含 opaque `installationId`、安全展示名、固定来源、未验证目录版本提示，以及 scope / `exhaustive=false` / partial / truncated 状态；绝对根和可执行文件路径仅存当前 Rust 进程内，不进入前端持久化、节点、IndexedDB 或日志。
+- 本阶段发现记录不构成 Blender 身份、版本、架构、兼容性或执行授权。Phase 1-C 启动前必须使用操作系统 Known Folder 或等价可信根重新验证，并重新 canonicalize、检查普通文件和兼容性；不能直接信任环境变量或本阶段 ID。
+- 前端 registry、节点和 UI 不在本阶段修改；`blender` 保持 `selectable: false`、全部 capabilities false 与 unavailable，轻量网页导演台继续正常工作。
+
+#### 当前实施与验证
+
+- 新增独立 `blender_runtime.rs`：固定 3 个根、每个 vendor 目录 128 项、最终 16 个候选上限；第 129 项整根失败关闭，去重和稳定排序后才截断。候选 ID 使用带域分隔的 SHA-256 规范路径摘要，不含路径明文，也不是凭据。
+- 根、vendor、直接版本目录和候选均执行 `symlink_metadata`、Windows reparse point 拒绝、canonicalize、精确父层级与包含关系校验；外部根提示只接受普通盘符路径，内部 Windows verbatim canonical 路径继续允许，UNC 与 DeviceNS 不放行。
+- Rust 状态以一次互斥锁替换本轮候选表；旧发现记录不会与新结果混合。后续 Job 仍须重新验证，不得只按 ID 直接启动。
+- 最终定向测试 15 项通过，覆盖固定层级、错误文件名、过深目录、目录伪装候选、链接逃逸、无需 symlink 权限的 canonical 越界、Windows reparse 属性、本地盘/UNC/DeviceNS、去重、稳定 ID/排序、3/4 根、128/129 条目、16/17 候选、版本提示、非穷尽空结果和进程内状态替换。
+- `cargo check --locked --lib` 与新增 Rust 文件 `rustfmt --check` 通过且无警告；handler、首方 permission 和生成 ACL 均为 62 项，missing/extra/deny 均为 0；既有 Blender unavailable registry 1 文件/5 项回归通过。
+- 五个阶段文件严格 UTF-8、无 BOM 和常见乱码检查通过；静态检查确认 trusted caller → main-only → scan 顺序，且模块不含 Python、Command、Shell 或 `--version`；`git diff --check` 无内容错误。三路最终只读审阅均未发现 P0–P2 阻断。
+
+#### 实际文件与回滚
+
+- 当前实际范围为新增 `src-tauri/src/blender_runtime.rs`；修改 `src-tauri/src/lib.rs`、`src-tauri/permissions/allow-first-party-app-commands.toml`、构建实际生成的 `src-tauri/gen/schemas/acl-manifests.json` 和本文档。没有修改依赖、`tauri.conf.json`、capability、数据库、前端、Blender 资源或 macOS schema。
+- 回滚时移除模块、State、command 注册和首方 ACL 条目，再由 Rust 构建重新生成 ACL manifest，并恢复本文档记录即可。没有 Blender 进程、安装文件、配置、数据库迁移或用户产物需要终止、删除或清理。
+- 本阶段只在注入的临时目录测试发现算法，没有调用发现 command、扫描或报告真实本机 Blender 安装状态，也没有启动 Blender、安装资源、推送、打 tag 或发布。Phase 1-B 模块没有 Python、Command、Shell 或子进程入口；主流程与并行复审合计三次运行了范围过大的全量无默认特性 Rust 回归，最新结果为 98 passed、0 failed、1 ignored，但每次都会连带执行仓库既有的两项 Python Plugin API 测试。该范围偏差已向用户披露并停止重复，结果不作为 Blender 能力证据。
+
+### 8.36 Blender 固定资源与原生 Job 预览（Phase 1-C）
+
+**状态：** `[~]`
+
+#### 已实施边界
+
+- 继续使用唯一 `ai-director` 节点；`lightweight-web` 作为免安装正式运行时保持不变，Blender 只由用户在同一节点内显式选择。
+- Rust 增加用途单一的手选候选登记、项目内存 grant、Job 启动/状态/取消/收集命令。Renderer 只持有 opaque installation、grant 与 job ID；Blender 可执行文件和项目根绝对路径不写入 Store、IndexedDB、节点或 Result Manifest。
+- 固定 Application Template、`startup.blend`、运行 manifest 与 Blender 内 `bpy` 适配脚本通过 `include_bytes!` / `include_str!` 编译内嵌并在安装前校验，不修改 `tauri.conf.json` resources。Python 只执行该固定脚本，不负责启动进程，也不接收源码、脚本路径、自由 argv、cwd、环境变量或输出路径。
+- Windows native runner 使用固定参数序列。高级编辑不再使用 `--app-template`：Blender 先按官网安装、Steam、便携版等自身规则读取正常用户配置、脚本和扩展，复用语言、主题、键位及已启用插件，再加载固定 `startup.blend` 并依次执行固定初始化脚本和 Job 脚本。后台截图/视频显式使用 `--factory-startup`，不读取用户首选项或加载用户插件，但仍加载同一组固定启动资源。全部子进程纳入 Windows Job Object，结果回收前由 Rust 独立校验 manifest、目录包含关系、类型、大小与哈希。
+- 前端 `directorBlenderRuntimeService.ts` 把 Scene/Manifest 引用映射为固定 Job 请求，统一处理轮询、Abort 取消、grant 清理与 Tauri 字符串错误；节点继续通过 canvas derivation guard 拒绝已切换项目、节点或 Scene 的过期结果。
+- 设置页增加共享 Blender 选择入口。Windows 自动发现组合 App Paths、卸载注册表、PATH、Steam library/app manifest 与 Program Files 官方布局；所有直接候选重新经过本地盘、普通文件/目录、canonical parent、固定文件名和 x64 PE 校验，只显示脱敏候选摘要。无系统登记的便携版继续由系统文件对话框手选 `blender.exe`。Windows canonical verbatim 路径在登记时统一，避免 `F:\...` 与 `\\?\F:\...` 被误判为不同候选。
+
+#### 当前验证证据
+
+- 固定资源锁定 Blender `5.2.1 LTS`：template init、`startup.blend` 与 Job 脚本均由 manifest 绑定 bytes 和 SHA-256；嵌入资源一致性、幂等安装和已存在内容冲突失败关闭测试通过。
+- Blender 5.2.1 真机完成 Application Template 加载、单帧、8 帧 MP4、高级编辑两次保存返回、同 Scene `.blend` 续接、内容寻址 artifact、篡改 base hash 拒绝和已有结果不覆盖验证。
+- Steam 手选路径回归后，AI Canvas 原 `ai-director` 节点真实启动私有 Job 目录中的 Blender 5.2.1 `project.blend`，节点进入载入阶段，用户确认现场可用；没有创建第二种节点。
+- 修复 Job 临时 `BLENDER_USER_CONFIG` 与固定 `BLENDER_USER_SCRIPTS` 覆盖导致 Quick Setup 重复、正常首选项及用户插件不可用的问题。真机对照进一步确认：`1.0.1` 系统 Application Template 已生效，但 AI Canvas 窗口仍为英文，同版本正常窗口为简体中文。因此固定运行资源继续升级为 `1.0.2`，移除 `--app-template` 上下文，改为正常启动后直接加载经哈希校验的 `startup.blend`、初始化脚本和 Job 脚本；旧 `1.0.0` / `1.0.1` 私有资源保留但不再被新 Job 使用。环境与参数回归确认编辑器保留 `APPDATA` 且不覆盖用户脚本，后台 Job 使用工厂设置；外部 `BLENDER_*` / `PYTHON*` 路径覆盖仍被过滤。Blender runtime 定向测试 25 项与 `cargo check --locked --lib` 通过；`1.0.2` 真机简体中文与插件界面复核留给本轮应用手测。
+- 修复既有 Windows checkout 中固定 Job Python 保留 CRLF、`include_bytes!` 嵌入原始工作树字节而与 LF 清单不一致的问题。固定运行资源升级为 `1.0.3`：受信 UTF-8 文本在哈希校验和安装前确定性规范化为 LF，孤立 CR 仍失败关闭，`.blend` 二进制保持原始字节，清单固定 SHA 不放宽。真实应用私有目录已生成 `1.0.3`，四项安装资源长度与 SHA 均逐项匹配；Blender runtime 32 项和 `cargo check --lib` 通过。完整编辑器窗口交互仍以本轮应用手测为准。
+- 官方手册、5.2 release 源码与 Blender MCP 可见窗口对照确认：高级编辑器已正确读取标准 `userpref.blend`，实际语言、界面翻译开关和活动 locale 均为 `zh_HANS`；残留英文仅是固定自定义 `.blend` 中的 `Layout`、`Modeling` 等 WorkSpace 数据块名称。固定运行资源升级为 `1.0.4`，初始化脚本仅在可见编辑器且用户启用“翻译新建数据”时，使用 Blender 官方 `WorkSpace` 翻译上下文本地化全部工作区名称；不写死中文、不修改用户偏好，后台 Job 不执行该本地化。真机结果为“布局、建模、雕刻、UV编辑、纹理绘制、着色、动画、渲染、合成、几何节点、脚本”；Blender runtime 32 项与 `cargo check --lib` 通过。
+- 真实 AI Canvas 节点复核进一步发现：Rust 安全登记保留的 Windows canonical 路径以 `\\?\` 开头，并同时作为 `CreateProcessW` 的应用路径和 `argv[0]` 传给 Blender；Blender 5.2 因而把 bundled locale 解析为 `\\?\...\5.2\datafiles\locale`，语言偏好仍显示 `zh_HANS`，但翻译 catalog 加载失败，菜单与 WorkSpace 翻译均回退英文。同机同版本 A/B 已稳定复现普通路径为“文件/布局”、扩展路径为 `File/Layout`。Native runner 继续把已复核 canonical executable 作为 `CreateProcessW.lpApplicationName`，仅将命令行 `argv[0]` 转为标准 Windows 路径；信任登记、真实进程映像、身份校验和目录边界均不变。用户确认从同一 3D 导演台重新打开后界面与工作区均恢复中文。Blender runtime 32 项、`cargo check --lib`、定向 rustfmt 与 `git diff --check` 通过。
+- 最新范围检查通过：Rust `blender_runtime::` 23 项、前端 Blender service/registry 17 项、`cargo check --lib`、`npm run typecheck`、定向 ESLint、定向 rustfmt、临时目录 Vite 生产构建、严格 UTF-8 与 `git diff --check`。生产构建仅保留既有动态导入和大 chunk 警告。
+
+#### 剩余门与回滚
+
+- Phase 1-C 仍为进行中：真实 Blender 的超时、崩溃、应用退出进程树回收，以及修复后的完整节点“保存并返回”结果投影还需形成可重复故障注入证据。当前代码和本地真机证据不得表述为这些项目已完成。
+- 回滚时把 `blender` descriptor 恢复为 unavailable，移除原生 commands、Job State 和固定资源安装入口；保留 `lightweight-web`、既有 Scene/Result、`.blend` 与已验证媒体，不删除用户产物。
+- 当前产品/测试范围为 Rust runtime 与 5 个子模块、4 份固定资源、Tauri 注册/ACL/路径边界、前端节点/设置/运行时服务与两份定向测试；不包含数据库迁移、Agent/MCP 工具、通用 Shell/Python 能力或 `tauri.conf.json` 安全配置放宽。
+
+### 8.37 Blender 新手导演操作台（Phase 2-A）
+
+**状态：** `[~]`
+
+#### 本期实施边界
+
+- 继续使用唯一 `ai-director` / 3D 导演台节点；只有 AI Canvas 固定 editor session 才显示右侧 Properties/Scene「AI Canvas 导演操作台」，3D View 侧栏保留紧凑入口。普通 Blender 启动不进入该 session，不安装全局插件，也不覆盖用户配置。
+- 首批操作包含方块、球体、地面、桌子、人物占位，摄影棚、室内、办公室、街道、绿幕场景，所选对象落地，近景/中景/全景/过肩/俯拍/仰拍，24/35/50/85 mm 焦段、所选对焦、三点/柔光/日景/夜景灯光，以及用户通过 Blender 原生文件选择器导入 OBJ/FBX/GLB/GLTF。
+- 主 3D View 右下角增加 session-only 的实时摄像机预览：相机画面继续由 Blender `GPUOffScreen.draw_view3d` 与真实相机矩阵生成，只自绘圆角叠层、标题和关闭交互；约 8 FPS 刷新，关闭后可从 Properties 导演操作台重新显示。未拆分第二个 Blender 编辑区，也未新增节点。
+- 本期导入只写入当前 `.blend`，不进入项目素材库；FBX/OBJ 贴图可能继续引用外部文件。Blender 内不冒充节点端截图或视频 Job，保存返回后仍由同一节点执行「同步当前帧」和「导出参考视频」。
+- 所有场景写操作要求 Object mode 和活动 editor session。操作台只清理由固定 owner 标记且位于专属 collection 的基础模型、场景与灯光；同名用户 collection/material、Director Scene 原对象、协议相机、用户导入模型与用户手动切换的 World 均不跨域删除或覆盖。
+- 模型路径只来自 Blender 原生文件选择器；Tauri、Agent、MCP 和插件仍不能传入任意 Python、脚本路径、argv、cwd、env、模型路径或输出路径。固定资源包升级为 `1.2.0`，template/job schema 和 `startup.blend` 不变，旧 `1.1.0` / `1.0.4` 目录保留为回滚点。
+
+#### 当前验证证据
+
+- Blender 5.2.1 后台真实操作符冒烟已覆盖人物占位、办公室、三点布光、中景镜头、OBJ 导入、时间轴/活动相机恢复、所有权隔离、专属 World 恢复、协议相机不随普通对象落地，以及桌子根级整体移动和清理；最终模板脚本 UTF-8 编译与 `git diff --check` 通过。
+- 真实 AI Canvas 节点已安装并启动 `1.1.0`，Properties/Scene 专属操作台可见，「保存并返回 AI Canvas」返回 `FINISHED` 并关闭 Blender。该次实机同时暴露 `CreateProcessW.lpApplicationName` 仍使用 `\\?\` canonical spelling，导致 `bpy.app.binary_path` 带扩展前缀、翻译 catalog 未加载；runner 已改为把重新 canonicalize 且只去除 verbatim spelling 的同一可信路径同时用于 application name 与 `argv[0]`。用户随后确认从同一节点重开后菜单、工作区与操作台均恢复中文。
+- Blender 5.2.1 可见测试确认圆角预览使用协议相机真实显示测试方块，`last_error=null`、纹理有效；离屏重绘实测约 8.1 FPS。连续关闭/重开 50 次均返回 `FINISHED`；关闭时 draw handler、应用 timer、GPU OffScreen 与 owner window/area/region 指针全部清理，重新打开只保留一套活动状态。旧版 X 按钮已做真实鼠标点击关闭；最终圆角与字体居中版的 Windows 鼠标复测被用户按 Esc 停止，随后只以 Blender MCP 验证命中矩形、hide/show 和资源释放。
+- Blender runtime 32 项（含固定资源 4 项，以 `--no-default-features` 隔离无关 ONNX 链接）、前端导演台 4 文件 26 项、`cargo check --lib`、`npm run typecheck` 与两个改动 Rust 文件的 `rustfmt --check` 通过。默认特性 Rust test 在本机 VS2019 链接器与当前 ONNX Runtime 预编译库之间出现范围外 `__std_find_trivial_*` 未解析；同一 Blender runtime 测试关闭无关 `local-onnx` 后 32/32 通过。全仓 `cargo fmt -- --check` 被范围外既有 Rust 格式差异阻断，没有为此格式化无关文件。
+- 固定资源升级为 `1.2.0`，模板 init 的 canonical LF 长度 `73713`、SHA-256 `a1586bd43ee9398a341e130a38f24c1b80b31ff863a836f77604100209edd372` 已重新锁定；标题按 Blender 当前字体实际高度与基线补偿计算，不依赖写死的垂直偏移。最终后台冒烟、严格 UTF-8/Python 编译、固定哈希与 `git diff --check` 均通过。
+
+#### 剩余门、限制与回滚
+
+- 下一次真机补做最终 `1.2.0` 圆角版本 X 按钮鼠标点击与节点「保存并返回」即可；Phase 1-C 的超时、崩溃和应用退出进程树故障注入仍是独立未完成门。
+- Phase 2-A 尚不包含正式人物/道具资产库、项目模型资产化、简化时间轴、基础运镜、Blender 内直接截图/视频同步或 Director Scene JSON 双向同步。
+- 回滚时恢复 `1.0.4` 固定包引用并停用本期面板即可；旧资源目录、用户 `.blend` 与既有 artifact 不自动删除，`lightweight-web` 继续可用。
+
 ## 9. 测试与验证策略
 
 ### 9.1 当前仓库事实
@@ -2349,7 +2632,7 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 - [x] 同会话任务串行，安全边界支持插话，成功写操作恢复后不重放。
 - [x] Plan 模式由 Registry 和 Policy 双层限制为只读。
 - [x] Skill Manifest 只能缩小任务工具集合，不能扩大权限。
-- [x] 模型可发现并按需加载 Skill，但主动加载不改变任务工具权限，且只能读取该 Skill 目录子树内的文本资料。
+- [x] 模型可发现并按需加载 Skill，但主动加载不改变任务工具权限；UserSkill 只能读取自身目录子树，Agent Package Skill 可读取自身根及正文明确引用的同包安全文本，实验 B 路线保持隔离。
 - [x] 用户可自建只读领域子智能体并被主任务并行派出，子智能体无写权限；B 模式下主任务落地需确认，C/MCP 自动执行落地工具。
 - [x] 只读专家任务无工具、无嵌套、无画布副作用，并在任务中心显示父子关系。
 
@@ -2406,12 +2689,111 @@ P4-C 只完成了 Skill Manifest 的解析与工具上限，Skill 对模型仍�
 
 本阶段经用户确认新增 `rquickjs 0.12.2` Rust 依赖，未修改 `tauri.conf.json` 或 capability，未开放文件、网络、Shell 或凭据权限。回滚时移除插件设置/节点菜单入口、Plugin Store、QuickJS command 与依赖即可；IndexedDB 保留 v20 和空 `plugins` store，不降版本且不影响项目数据。
 
+### 12.2.1 平台补充：可信 Python 插件兼容
+
+目标：在不降低 JavaScript QuickJS 沙箱的前提下，让用户明确选择以本机权限运行 Python 插件，复用本机 Python 3 与已安装依赖。
+
+- [x] Plugin API v3 增加 `runtime: "python"` 与固定 `main.py` 入口；v1/v2 和旧 IndexedDB 记录继续归一化为 `javascript` / `main.js`。
+- [x] 本地文件夹与 GitHub Release 都先解析 Manifest，再读取其声明入口；源码继续使用 512 KiB 上限和现有身份、权限、字段校验。
+- [x] Python 使用一次性子进程和固定参数数组，不经过 Shell；源码、toolId 与裁剪输入通过 JSON stdin 传入，结果经 stdout 返回并复用前端输出校验。
+- [x] Rust 自动探测 `python`、`python3` 与 Windows `py -3`，提供解释器状态、30 秒超时、终止回收、1 MiB 输出及 64 KiB 错误上限。
+- [x] Python runner 支持同步 `define_plugin({"tools": ...})` 协议和本机 site-packages；不下载 Python、不创建虚拟环境、不读取或执行 `requirements.txt`。
+- [x] 设置页展示 Python 环境与版本；安装、更新和重新启用 Python 插件均提示其可访问文件、网络、环境变量并启动本机程序。
+- [x] Manifest 权限继续约束宿主 effect、输入投影、输出字段、canvas revision 和 Store Action；文档明确 Python 本身是可信代码而非操作系统沙箱。
+- [x] Python 能力未注册为 Agent/MCP 工具，未新增依赖、IndexedDB schema、Tauri Shell capability 或安全配置。
+
+实际检查将在本阶段最终验证后记录。回滚时移除 v3 解析、Python command、环境状态和风险 UI 即可；JavaScript 插件、v20 `plugins` store 与现有画布节点无需迁移。
+
+### 12.3 平台补充：Sora2U 内置图片与视频厂商
+
+目标：把 Sora2U 作为独立内置厂商接入统一模型目录与声明式媒体协议，并使用合作方提供的专属站点入口，同时保持真实 API Base URL、凭据和付费请求安全边界不变。
+
+- [x] 内置 Sora2U 厂商卡片、固定 `https://sora2u.com` API Base URL，以及仅由用户主动打开的 UTM 专属站点链接。
+- [x] 额度验证、模型目录、生成提交和任务轮询统一附带 `utm_source=tenney&utm_medium=canvas&utm_content=wx`；验证改用无生成副作用的 `/api/v1/credits` 并展示 GP 余额，返回的签名媒体 URL 不做改写。
+- [x] API Key 页面每次打开自动刷新 Sora2U 余额并显示在连接状态右侧；暂时隐藏 Sora2U 的三个 Seedance 2.5 变体，已有连接同步清理对应选择项，但保留底层协议供后续恢复。
+- [x] 节点模型菜单和对话媒体目录把 Sora2U 显示为独立厂商分组，同时保持 `general/...` 模型引用与生成路由不变；自定义中转站仍归入通用模型。
+- [x] 本地兜底清单包含公开文档当前列出的 7 个 Seedance 视频模型和 2 个图片模型；填写 Key 后从 `/api/v1/models` 动态同步远端新增模型与能力字段。
+- [x] 远端目录按模型 ID 合并本地执行协议，归一化时长、比例、分辨率、文本直出能力和图片/视频/音频参考上限；目录失败时继续使用不含凭据的本地清单。
+- [x] 图片和视频统一通过声明式协议提交 `/api/v1/videos`，从 `task.id` 构建同源轮询，分别读取 `task.image_url` / `task.video_url`，失败展示 `task.error`。
+- [x] 多模态参考按公网 `reference_urls` 与带 MIME 的内联 `references` 分流；Seedance 1.5 / 2.5 无参考时在本地拒绝，创建付费任务不自动重试。
+- [x] 所选模型继续同步为不含 API Key 的 `generalModels`，节点与对话 `@model` 复用现有统一媒体生成入口、取消信号和产物持久化。
+- [x] 视频模型能力增加声明式提交前校验；Sora2U 全部视频模型统一拦截 Prompt 少于 10 个字符、Base64 解码总量超过 20 MiB、参考视频宽度低于 300 px、参考视频时长达到 15 秒，以及参考音频短于 3 秒或达到 15 秒。自定义通用接口可在视频能力编辑器中修改或清空相同规则，未声明规则的旧模型保持不变。
+
+实际检查：
+
+本次输入校验增量检查（2026-08-26）：
+
+- `npm run typecheck`：通过。
+- `npm run test:typecheck`：通过。
+- 视频输入校验、Sora2U 运行时/manifest、模型目录和通用视频生成定向 Vitest：5 个文件、53 项通过。
+- 全量 Vitest：197 个文件中 196 个直接通过，1508 项中 1507 项通过；唯一失败为无关的图片裁剪交互测试偶发 5 秒超时，随后单独复跑该文件 8 项全部通过。
+- 本次改动文件定向 ESLint：通过。
+- `npx vite build --outDir <系统临时目录>`：生产构建通过；仅有既有动态导入和大 chunk 警告。
+
+原始 Sora2U 接入检查（2026-08-25）：
+
+- 改动文件定向 ESLint：通过。
+- Sora2U、目录、Store、协议导入、默认模型与生成运行时定向 Vitest：10 个文件、122 项通过。
+- 全量 `npm run test`：196 个文件、1500 项通过。
+- `npx vite build --outDir <系统临时目录>`：生产构建通过；仅报告既有动态导入和大 chunk 警告。
+- `npm run check`：被仓库已知 ESLint 10 / parser 兼容错误 `scopeManager.addGlobals is not a function` 阻断；未修改依赖，定向 ESLint 已通过。
+- `npm run test:typecheck`：被既有 `tests/services/chat/agentRoundExecutor.test.ts` mock 缺少 `AgentApprovalResolution.approved` 字段阻断；本次 Sora2U 定向测试和前端类型检查均通过。
+- 未配置真实 Sora2U API Key，因此未发送付费生成请求；真实余额、扣费和上游内容审核仍需用户在应用内手测。
+
+本阶段未新增依赖，未修改 `tauri.conf.json`、capability、IndexedDB schema、Agent Policy 或媒体确认策略。回滚时移除 Sora2U 厂商定义与 manifest、统一模型同步标识，以及通用参考数组变量即可；已有连接配置会保留为未知厂商数据，不涉及数据库降级。
+
+本次输入校验增量同样未新增依赖，未修改 Tauri 安全配置、IndexedDB schema、Agent Policy 或媒体确认策略。回滚时移除 `inputConstraints`、通用生成入口中的校验调用和自定义编辑区即可，不需要数据迁移。
+
+### 12.4 平台补充：自定义视频 API Canonical Request 第一阶段
+
+目标：统一自定义视频模型在画布、批处理、视频编辑器和对话助手中的产品语义与提交前校验，同时把各平台不同的 endpoint、鉴权、嵌套请求体、任务轮询和结果路径继续留在声明式传输协议，不制造一个虚假的“通用视频 JSON”。
+
+- [x] 新增 provider-neutral 视频请求解析层，统一 operation、text/keyframe/reference 输入形态、画幅、分辨率、时长、帧率、音频策略和带角色参考素材；旧 `AIVideoGenParams` 与 V2 模板变量继续通过兼容投影运行。
+- [x] `VideoModelCapability` 成为通用视频提交前与参数 UI 的权威来源；移除协议正文反向决定控件和 direct general 的 720p、16:9、5 秒、24 fps、15 秒截断等隐藏猜测。
+- [x] 支持按输入形态声明比例约束与默认值；文生、首尾帧和多模态参考不再被迫共用一个比例默认。参考视频、参考音频同时支持单项与合计时长约束。
+- [x] 自定义视频缺少 execution profile 时在本地明确失败，不再静默提交 `/videos/generations`；文字、图片和已有内置视频 adapter 保持原执行边界。
+- [x] 声明式协议补齐数组索引变量识别、字符串/数字任务 ID、精确动态 task 绑定、origin 轮询、`video_generation` 容器和嵌套 URL 对象保留。
+- [x] 新增受限 `$whenPresent` 与 `$forEach`：只允许 JSON 请求体数组项，数组展开仅限三类受信参考 URL 数组且最多 64 项；复合或低置信结构必须人工复核。
+- [x] 首帧、尾帧、普通参考图、参考视频和参考音频按实际角色与数量分别验证；多项数组只绑定 `.0` 不再被误判为已完整发送。
+- [x] 请求模板可声明 `maxBodyBytes`，提交前按真实序列化字节数拦截；multipart 与未贯通的 poll 限制在保存前拒绝。
+- [x] `provider_config_preview` 支持直接提交声明式协议，并执行凭据/危险键/复杂度/变量/动态轮询校验及 text、keyframe、reference 纯本地 dry-run；固定提示词、漏传/重复素材、能力与协议不一致的草稿不能应用。
+- [x] Agnes Video 2.5 Flash fixture 验证 `/v1/videos`、字符串秒数、动态 mode、互斥参考字段、origin `/agnesapi` 和 `metadata.url` 结果路径；MiniMax H3 fixture 验证 `{ url }` 嵌套、多类参考数组展开、按输入形态比例、64 MiB 请求体上限和动态 `task_id` 轮询。
+
+实际检查（2026-08-28）：
+
+- 本批 18 个改动测试文件及协议变量回归：19 个文件、287 项通过。
+- `npm run typecheck`、`npm run test:typecheck`、本批 TypeScript/TSX 定向 ESLint、`git diff --check`、严格 UTF-8 与乱码扫描：通过。
+- `npm run check` 中 lint、前端类型和测试类型通过；全量 Vitest 210 个文件中 207 个通过，1668 项中 1667 项通过。3 个失败均为未被本阶段修改的既有基线：i18n 两个孤儿词条，以及两个 MCP 测试导入带 shebang 入口时的 Vite 收集错误。
+- `npx vite build --outDir <系统临时目录>`：生产构建通过；仅有既有动态导入和大 chunk 警告，临时输出已清理。
+- 已通过 `ai-canvas` MCP 在运行中的应用完成 Agnes AI 与 MetaSo MiniMax 两个 declarative 配置的 preview、纯本地 dry-run 和 apply；目录回查确认两个通用视频模型均已出现。
+- MCP 画布节点更新补充统一的 `videoResolution` / `videoDuration` 输入，并安全映射到现有节点协议字段；定向画布工具测试 1 个文件、17 项通过，非视频节点会拒绝这两个字段。
+- MetaSo MiniMax 使用精确自定义模型创建独立视频节点并真实调用一次：提交到厂商后返回 `402 H3 积分余额不足 (1008)`。这证明请求已越过本地模型、URL 与协议渲染阶段并到达计费校验；未创建任务，异步轮询和结果 URL 仍需充值后验证。未自动重试。
+
+本阶段未新增依赖，未修改 Tauri 安全配置、IndexedDB schema、Agent Policy 或媒体确认策略。回滚时可移除 canonical resolver、能力新增字段和有限协议指令，并恢复旧 V2 兼容入口；无数据迁移或数据库降级。
+
 ## 13. 变更日志
 
 | 2026-08-14 | 媒体参数映射第一阶段 | 新增图片、视频、音频三类统一参数映射注册表；图片标准/APIMart/火山/RunningHub、APIMart 视频 Seedance、APIMart TTS/Flow Music 与通用异步媒体入口接入映射函数；新增 `tests/services/mediaParameterMappings.test.ts` 定向测试。保留现有 URL、鉴权、轮询和响应解析边界，未新增依赖。已执行 `npm run typecheck`、5 个受影响服务测试（68 项）与改动文件定向 ESLint；`npm run check` 仍被仓库既有 ESLint 10 / parser 错误 `scopeManager.addGlobals is not a function` 阻断。 |
 
 | 日期 | 阶段 | 变更 |
 |---|---|---|
+| 2026-08-30 | Blender 新手导演操作台（Phase 2-A，进行中） | 同一 `ai-director` 增加 AI Canvas session-only 的 Properties 导演操作台、基础模型/场景/镜头/灯光/本地导入和保存返回，并在主 3D View 右下角增加 Blender 原生离屏相机画面的圆角实时预览、关闭与重开；固定包升级 `1.2.0` 并保留旧目录，owner collection/material/World、原生文件选择器及固定脚本边界不变。Blender 5.2.1 实测约 8.1 FPS、50 次开关清理通过；最终圆角版鼠标点击因用户停止 Windows UI 控制留作一次补充真机项。 |
+| 2026-08-30 | 导演台界面与工作区本地化 | 固定运行资源升级为 `1.0.4`，按 Blender 官方 `WorkSpace` 上下文和用户“翻译新建数据”开关动态本地化工作区；随后通过同机 A/B 定位到 Rust 把 `\\?\` canonical executable 直接作为 `argv[0]`，导致 Blender 5.2 bundled locale catalog 加载失败。Native runner 继续以 canonical 路径作为 `CreateProcessW.lpApplicationName`，只把命令行 `argv[0]` 转成标准 Windows 路径；信任校验与后台 Job 隔离边界不变。用户确认同一 3D 导演台真实打开后菜单与工作区均为中文；Blender runtime 32 项与 `cargo check --lib` 通过。 |
+| 2026-08-30 | 导演台安装发现与资源修复 | Windows Blender 自动发现扩展到 App Paths、卸载注册表、PATH、Steam 和官方布局，便携版保留手选；固定运行资源升级为 `1.0.3`，在固定哈希校验前严格规范化受信文本 CRLF→LF，解决既有 checkout 跨电脑完整性失败。真实私有目录四项资源核验一致，Blender runtime 32 项与 `cargo check --lib` 通过。 |
+| 2026-08-29 | 导演台 1-C 修复 | 真机对照确认 `1.0.1` 系统 Application Template 仍未继承正常简体中文界面；固定运行资源升级为 `1.0.2`，高级编辑移除 `--app-template`，改为正常读取用户配置、脚本、扩展和已启用插件后直接加载固定 `startup.blend` 与固定初始化/Job 脚本。后台截图/视频继续使用工厂设置保持隔离；外部 Blender/Python 路径注入仍被过滤。Blender runtime 25 项与 `cargo check --locked --lib` 通过。 |
+| 2026-08-28 | 导演台 1-C | 接通固定 Blender 5.2.1 Application Template、Rust native Job、项目内存 grant、Windows Job Object、同一 `ai-director` 的高级编辑/截图/视频和结果回收预览；修复 Steam 手选 canonical 路径与原生错误透传。核心真机流程已通过，超时/崩溃/应用退出等故障注入门仍进行中。 |
+| 2026-08-28 | 导演台 1-B | 新增用途单一的 Rust Blender 安装候选发现：固定 Program Files 标准层级、main-only 双层 guard、reparse/canonical 边界、有界稳定 opaque ID、非穷尽结果状态与进程内记录；Blender 继续 unavailable，未扫描或启动真实 Blender。 |
+| 2026-08-28 | 导演台 1-A | 为同一 `ai-director` 节点建立 Director Scene/Result 严格 v1 合同、内容寻址不可变项目文件、父 revision/Manifest 追加校验与归档嵌套引用识别；Blender 继续 unavailable，未修改 Rust、数据库或安全配置。 |
+| 2026-08-28 | 导演台 0-D | 冻结同一 `ai-director` 节点的 Blender 双运行时、Director Scene JSON 权威、不可变 Result Manifest、项目 grant、安装复核、Rust Job ID、固定第一方脚本与 C2 真机启用门；仅修改 5 份文档，Blender 继续 unavailable。 |
+| 2026-08-28 | 导演台 0-C | 在现有 `ai-director` 节点内建立 `lightweight-web` / `blender` 双运行时前端契约，统一打开与导出 facade、旧节点默认、未知值失败关闭、同项目复制和安装提示语义；未新增节点、Rust、数据库或 Blender 进程能力。 |
+| 2026-08-28 | 自定义视频 API Stage 1 | 建立 Canonical Video Request 与 capability 权威校验，移除自定义视频猜测端点和隐藏默认；声明式协议补齐安全条件项、多参考数组展开、逐角色完整消费、动态任务轮询与真实请求体上限；助手 direct protocol 增加凭据防护和三种输入形态本地 dry-run；MCP 画布节点增加统一视频规格字段。Agnes 2.5 Flash、MiniMax H3 契约测试通过，MetaSo 实机提交到计费校验并准确返回余额不足。 |
+| 2026-08-28 | 安全前置 0-B | 为受信插件执行/Python 环境探测与轻量导演台资源状态、安装、取消、删除命令增加 Rust 调用方校验；明确导演台安装不使用 Python，未来 Blender 仅允许应用固定脚本。未修改 Agent/MCP Policy、数据库、UI 或 Blender 行为。 |
+| 2026-08-28 | 安全前置 0-A | 为 61 个 Tauri 应用 commands 增加只由首方 default capability 引用的外层 ACL；未修改 Agent/MCP Policy、数据库、UI、导演台运行时或 Blender 行为。 |
+| 2026-08-30 | 8.29 Skill/MCP 兼容 | 将已安装 Agent Package 的包内 Skill 接入聊天分组选择、不可变任务快照和显式授权的 MCP 只读工具；补齐运行期目录、受限跨根资料、独立窗口脱敏及停用/撤权立即 fail-closed，不复制进 UserSkill 数据库。 |
+| 2026-08-27 | 8.29 | 完成全局 Agent Package 首批纵向切片：助手内上传与管理、linked 文件夹、managed tar.gz、独立目录库、私有 sourceId 注册和无智能体旁路；任务级按需绑定与普通 zip 留待后续。 |
+| 2026-08-26 | Python 插件兼容 | Plugin API v3 增加可信 `main.py` 运行时，复用本机 Python 与现有依赖；独立子进程执行并加入高风险确认、环境检测、协议限长和超时终止，JavaScript QuickJS 沙箱保持不变。 |
+| 2026-08-26 | Sora2U 输入校验 | 视频模型能力新增声明式提交前约束；Sora2U 拦截 Prompt、Base64 总量、参考视频宽度/时长和参考音频时长，自定义通用接口可编辑同类规则。 |
+| 2026-08-25 | 平台补充 | 内置 Sora2U 的 9 个公开图片/视频模型与动态能力目录，接通多模态参考、异步轮询、统一模型同步和合作专属站点入口；不新增依赖或安全权限。 |
 | 2026-08-24 | 插件上传体验统一 | 插件设置页复用 ComfyUI 工作流 `wf-dropzone` 上传区，支持点击目录选择和拖入插件文件夹；递归读取目录并限制最多 256 个文件，继续校验唯一 `manifest.json` 与同级 `main.js`。 |
 | 2026-08-23 | 用户插件平台 MVP | 建立 AI Canvas Plugin Manifest Standard v1、QuickJS 沙箱、v20 插件持久化、插件管理页，以及按节点类型出现的右键工具与节点工具栏按钮；工具栏入口由宿主渲染声明式操作弹窗，按钮图标、节点输入、弹窗参数和输出字段均由 manifest 声明并校验，异步写回复用 canvas revision 和 Store 历史边界。 |
 | 2026-08-20 | 8.28 | 保留本机 stdio，并新增经高风险确认的 `0.0.0.0` Streamable HTTP MCP；加入 Bearer/Host/Origin/限长保护，修复安装版适配器资源缺失。 |

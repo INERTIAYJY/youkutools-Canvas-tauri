@@ -164,6 +164,75 @@ describe('canvas agent tools', () => {
     expect(generator.data.output).toBeUndefined();
   });
 
+  it('materializes prompt mentions as de-duplicated edges in the same history entry', async () => {
+    useAppStore.setState({
+      nodes: [
+        ...useAppStore.getState().nodes,
+        node('grid', { type: 'ai-storyboard', label: '分镜宫格' }, { x: 800, y: 100 }),
+      ],
+    });
+    const result = await getAgentTool('canvas_create_nodes')!.execute(context(), {
+      nodes: [
+        {
+          type: 'ai-image',
+          label: '合成画面',
+          prompt: '参考 @{n1:主图}，再次参考 @{n1:主图副本}，并使用 @{grid/cell/2:第三格}',
+        },
+        {
+          type: 'ai-text',
+          label: '改写结果',
+          prompt: '根据 @{n2:剧本正文} 改写',
+        },
+        {
+          type: 'source-text',
+          label: '引用说明',
+          content: '正文中提到 @{n1:主图}，但它不是生成依赖',
+        },
+      ],
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.summary).toContain('自动连接 3 条引用');
+    const created = useAppStore.getState().nodes.slice(3);
+    const addedEdges = useAppStore.getState().edges.slice(1);
+    expect(addedEdges.map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle,
+      targetHandle: edge.targetHandle,
+    }))).toEqual([
+      { source: 'n1', target: created[0].id, sourceHandle: 'right', targetHandle: 'left' },
+      { source: 'grid', target: created[0].id, sourceHandle: 'right', targetHandle: 'left' },
+      { source: 'n2', target: created[1].id, sourceHandle: 'right', targetHandle: 'left' },
+    ]);
+    expect(JSON.parse(result.modelContent).edges).toEqual(addedEdges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+    })));
+
+    await expect(useAppStore.getState().undo()).resolves.toBe(true);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['n1', 'n2', 'grid']);
+    expect(useAppStore.getState().edges.map((edge) => edge.id)).toEqual(['e1']);
+  });
+
+  it('rejects missing prompt references before creating any nodes or edges', async () => {
+    const beforeNodes = useAppStore.getState().nodes;
+    const beforeEdges = useAppStore.getState().edges;
+    const result = await getAgentTool('canvas_create_nodes')!.execute(context(), {
+      nodes: [{
+        type: 'ai-image',
+        label: '坏引用节点',
+        prompt: '使用 @{missing-node:已删除节点} 作为参考',
+      }],
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('missing-node');
+    expect(useAppStore.getState().nodes).toBe(beforeNodes);
+    expect(useAppStore.getState().edges).toBe(beforeEdges);
+  });
+
   it('refuses to write content into media nodes whose output holds a path', async () => {
     const result = await getAgentTool('canvas_create_nodes')!.execute(context(), {
       nodes: [{ type: 'ai-image', label: '角色·林默', content: '不该写进图片节点' }],
@@ -224,7 +293,29 @@ describe('canvas agent tools', () => {
     expect(result.modelContent).not.toContain('asset://');
     expect(result.modelContent).not.toContain('D:/data');
     expect(payload.nodes[1].outputText).toEqual({ text: '剧本正文', truncated: false });
-    expect(payload.edges).toEqual([{ id: 'e1', source: 'n1', target: 'n2' }]);
+    expect(payload.edges).toEqual([{
+      id: 'e1', source: 'n1', target: 'n2', sourceHandle: null, targetHandle: null,
+      layout: { sourceRightX: 380, targetLeftX: 500, horizontalGap: 120, recommendedMinGap: 80, warning: null },
+    }]);
+  });
+
+  it.each<{ label: string; data: Partial<BaseNodeData>; outputKind: string | null }>([
+    { label: 'video with thumbnail and poster', data: { type: 'ai-video', videoUrl: 'asset://clip.mp4', thumbnailUrl: 'asset://thumb.jpg', imageUrl: 'asset://poster.png' }, outputKind: 'video' },
+    { label: 'audio with thumbnail and cover', data: { type: 'ai-audio', audioUrl: 'asset://audio.wav', thumbnailUrl: 'asset://thumb.jpg', imageUrl: 'asset://cover.png' }, outputKind: 'audio' },
+    { label: 'image', data: { imageUrl: 'asset://image.png' }, outputKind: 'image' },
+    { label: 'thumbnail-only image', data: { thumbnailUrl: 'asset://thumb.jpg' }, outputKind: 'image' },
+    { label: 'text with thumbnail', data: { type: 'source-text', output: '实际正文', thumbnailUrl: 'asset://thumb.jpg' }, outputKind: 'text' },
+    { label: 'text', data: { type: 'ai-text', output: '实际正文' }, outputKind: 'text' },
+    { label: 'video type without a result', data: { type: 'ai-video', status: 'success' }, outputKind: null },
+    { label: 'audio type without a result', data: { type: 'ai-audio' }, outputKind: null },
+  ])('reports the actual primary output for $label without exposing media URLs', async ({ data, outputKind }) => {
+    useAppStore.setState({ nodes: [node('result', data)], edges: [] });
+    const result = await getAgentTool('canvas_query')!.execute(context(), { nodeIds: ['result'], detail: true });
+    expect(result.status).toBe('success');
+    const detail = JSON.parse(result.modelContent).nodes[0];
+    expect(detail.outputKind).toBe(outputKind);
+    expect(detail.outputText).toEqual(outputKind === 'text' ? { text: '实际正文', truncated: false } : undefined);
+    expect(result.modelContent).not.toContain('asset://');
   });
 
   it('shifts nodes with dx/dy and resizes them in one call', async () => {
@@ -398,6 +489,37 @@ describe('canvas agent tools', () => {
     const result = await definition.execute(context(), { sourceId: 'n1' });
     expect(result.status).toBe('success');
     expect(useAppStore.getState().edges.map((edge) => edge.id)).toEqual(['e2']);
+  });
+
+  it('reports backward layout even when connection ports are right-to-left, without moving nodes', async () => {
+    const tool = getAgentTool('canvas_connect_nodes')!;
+    const before = useAppStore.getState().nodes.map((item) => ({ ...item.position }));
+    const result = await tool.execute(context(), { sourceId: 'n2', targetId: 'n1' });
+    const payload = JSON.parse(result.modelContent);
+    expect(payload).toMatchObject({ sourceHandle: 'right', targetHandle: 'left' });
+    expect(payload.layout.horizontalGap).toBeLessThan(0);
+    expect(payload.layout.warning).toContain('上游应放左');
+    expect(useAppStore.getState().nodes.map((item) => item.position)).toEqual(before);
+    const revision = useAppStore.getState().getCurrentRevision();
+    const repeated = await tool.execute({ ...context(), baseRevision: revision }, { sourceId: 'n2', targetId: 'n1' });
+    expect(JSON.parse(repeated.modelContent)).toMatchObject({ alreadyConnected: true, layout: payload.layout });
+    expect(useAppStore.getState().getCurrentRevision()).toBe(revision);
+  });
+
+  it('checks absolute grouped positions and returns actual ports in canvas detail', async () => {
+    const parent = node('group', {}, { x: 1000, y: 0 });
+    const source = { ...node('src', { type: 'source-image', nodeWidth: 400 }, { x: 100, y: 0 }), parentId: 'group' };
+    const target = node('dst', {}, { x: 1580, y: 200 });
+    useAppStore.setState({ nodes: [parent, source, target], edges: [] });
+    const result = await getAgentTool('canvas_connect_nodes')!.execute(context(), { sourceId: 'src', targetId: 'dst' });
+    const payload = JSON.parse(result.modelContent);
+    expect(payload.layout).toEqual({ sourceRightX: 1500, targetLeftX: 1580, horizontalGap: 80, recommendedMinGap: 80, warning: null });
+    const query = await getAgentTool('canvas_query')!.execute(context(), { nodeIds: ['src'], detail: true });
+    expect(JSON.parse(query.modelContent).edges[0]).toMatchObject({ sourceHandle: 'right', targetHandle: 'left', layout: payload.layout });
+    useAppStore.setState({ nodes: useAppStore.getState().nodes.map((item) => item.id === 'dst'
+      ? { ...item, position: { ...item.position, x: 1579 } } : item) });
+    const crowded = await getAgentTool('canvas_connect_nodes')!.execute(context(), { sourceId: 'src', targetId: 'dst' });
+    expect(JSON.parse(crowded.modelContent).layout.warning).toContain('80');
   });
 
   it('runs matched nodes serially and skips ones already generating', async () => {

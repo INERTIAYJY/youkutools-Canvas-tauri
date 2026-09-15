@@ -6,14 +6,13 @@ import { createPortal } from 'react-dom';
 import { ReactFlow,
   Background,
   Controls,
-  MiniMap,
   BackgroundVariant,
   ConnectionMode,
   SelectionMode,
   PanOnScrollMode,
   useReactFlow,
+  useStoreApi,
   useViewport,
-  useUpdateNodeInternals,
   ReactFlowProvider,
   Panel,
   applyNodeChanges,
@@ -34,7 +33,11 @@ import GroupNode from './nodes/GroupNode';
 import CanvasNoteNode from './noteNodes/CanvasNoteNode';
 import PluginNode from './nodes/PluginNode';
 import NodeRenderBoundary from './nodes/shared/NodeRenderBoundary';
+import CanvasNodeLodBoundary from './nodes/shared/CanvasNodeLodBoundary';
+import { CanvasNodeLodContext } from '../hooks/useCanvasNodeLod';
+import { createCanvasNodeLodRuntime } from '../services/canvasNodeLodRuntime';
 import { isEditableTarget } from '../utils/textSelection';
+import { playNodeFocusPulse } from '../utils/nodeAnimations';
 import ConnectionMenu from './canvas/ConnectionMenu';
 import CanvasContextMenu from './canvas/CanvasContextMenu';
 import NodeContextMenu from './canvas/NodeContextMenu';
@@ -42,6 +45,7 @@ import CanvasToolbar from './canvas/CanvasToolbar';
 import CanvasDrawingToolbar from './canvas/CanvasDrawingToolbar';
 import CanvasNoteStylePanel from './canvas/CanvasNoteStylePanel';
 import RoundedMiniMapMask from './canvas/RoundedMiniMapMask';
+import MiniMapNodeStats from './canvas/MiniMapNodeStats';
 import MultiSelectToolbar from './canvas/MultiSelectToolbar';
 import CanvasEmptyState from './canvas/CanvasEmptyState';
 import HistoryTimelinePanel from './canvas/HistoryTimelinePanel';
@@ -68,6 +72,7 @@ import {
 } from '../utils/canvasRenderProjection';
 import { useNodeCreation } from '../hooks/useNodeCreation';
 import { useCanvasDrawing } from '../hooks/useCanvasDrawing';
+import { useCanvasWheelZoom } from '../hooks/useCanvasWheelZoom';
 import type { BaseNodeData } from '../types';
 import { SHOTLIST_FRAME_SOURCE_TYPES, STORYBOARD_CELL_SOURCE_TYPES } from '../types';
 import type { Node as RFNode, NodeProps, NodeTypes, OnMove } from '@xyflow/react';
@@ -102,12 +107,18 @@ const CharacterAssetDialog = lazy(() => import('./CharacterAssetDialog'));
  */
 function withNodeRenderBoundaries(types: NodeTypes): NodeTypes {
   return Object.fromEntries(Object.entries(types).map(([typeName, NodeComponent]) => {
+    const mediaLod = typeName === 'ai-image' || typeName === 'source-image'
+      || typeName === 'ai-video' || typeName === 'source-video';
     const Bounded = (props: NodeProps) => {
       const liveData = useAppStore((state) => getCanvasNodeById(state.nodes, props.id)?.data);
       const data = liveData ?? props.data;
       return (
         <NodeRenderBoundary nodeId={props.id} typeName={typeName} data={data}>
-          <NodeComponent {...props} data={data} />
+          {mediaLod ? (
+            <CanvasNodeLodBoundary node={props} data={data as BaseNodeData} video={typeName.endsWith('video')}>
+              <NodeComponent {...props} data={data} />
+            </CanvasNodeLodBoundary>
+          ) : <NodeComponent {...props} data={data} />}
         </NodeRenderBoundary>
       );
     };
@@ -154,10 +165,14 @@ const isMacOS = typeof navigator !== 'undefined'
 const shouldUseMacTrackpadPan = isTauri && isMacOS;
 const easeOutCubic = (progress: number) => 1 - (1 - progress) ** 3;
 const CANVAS_INTERACTING_CLASS = 'canvas-interacting';
-type CanvasInteractionKind = 'node' | 'viewport';
+type CanvasInteractionKind = 'node' | 'viewport' | 'wheel';
+const MIN_CANVAS_ZOOM = 0.1;
+const MAX_CANVAS_ZOOM = 5;
 const NODE_TOOLBAR_MIN_SCREEN_SCALE = 0.8;
 const NODE_TOOLBAR_MAX_SCREEN_SCALE = 1.25;
 const NODE_TOOLBAR_SCALE_EPSILON = 0.0005;
+const VISIBLE_NODE_TOOLBARS = '.node-toolbar-shell.is-visible .node-floating-toolbar, .node:hover .node-floating-toolbar, .node.selected .node-floating-toolbar';
+const VISIBLE_GOOEY_BUTTONS = '.react-flow__node:hover .gooey-btn-wrapper, .react-flow__node.selected .gooey-btn-wrapper, .node-handle:hover .gooey-btn-wrapper';
 
 // ── 交互模式预设（冻结对象，避免每次 render 产生新身份，导致 React Flow 内部 effect 重跑、拖拽掉帧）──
 const DEFAULT_INTERACTION = Object.freeze({
@@ -186,35 +201,7 @@ const CLASSIC_INTERACTION = Object.freeze({
   selectionMode: SelectionMode.Partial,
   deleteKeyCode: null,
 });
-const MINIMAP_STYLE = {
-  width: 180,
-  height: 120,
-  border: '1px solid var(--theme-border)',
-  borderRadius: '8px',
-};
 const INLINE_EDIT_DOUBLE_CLICK_DELAY_MS = 280;
-const minimapNodeColor = (node: RFNode) => {
-  switch (node.type) {
-    case 'ai-text':
-    case 'source-text':
-    case 'comment': return 'color-mix(in srgb, var(--node-text-light) 50%, transparent)';
-    case 'ai-image':
-    case 'source-image':
-    case 'ai-storyboard': return 'color-mix(in srgb, var(--node-image-light) 50%, transparent)';
-    case 'ai-video':
-    case 'source-video': return 'color-mix(in srgb, var(--node-video-light) 50%, transparent)';
-    case 'ai-audio':
-    case 'source-audio': return 'color-mix(in srgb, var(--node-audio-light) 50%, transparent)';
-    case 'ai-animation': return 'color-mix(in srgb, var(--brand) 50%, transparent)';
-    case 'ai-panorama': return 'color-mix(in srgb, var(--node-panorama) 50%, transparent)';
-    case 'ai-markdown': return 'color-mix(in srgb, var(--node-markdown-light) 50%, transparent)';
-    case 'ai-director': return 'color-mix(in srgb, #a78bfa 50%, transparent)';
-    case 'ai-shotlist': return 'color-mix(in srgb, #fbbf24 50%, transparent)';
-    case 'canvas-note': return 'color-mix(in srgb, var(--brand-light) 55%, transparent)';
-    case 'group': return '#4b556380';
-    default: return '#6b728080';
-  }
-};
 
 // ── Snap lines overlay ──
 type SpacingSnapLine = Extract<SnapLine, { kind: 'spacing' }>;
@@ -397,6 +384,7 @@ function CanvasInner() {
   const minimapVisible = useAppStore((s) => s.minimapVisible);
   const closeNodeDialog = useAppStore((s) => s.closeNodeDialog);
   const interactionMode = useAppStore((s) => s.config.interactionMode ?? 'default');
+  const currentProjectId = useAppStore((s) => s.currentProjectId);
   const canvasNoteToolbarVisible = useAppStore((s) => s.config.canvasNoteToolbarVisible !== false);
   const [nodeProjectionCache] = useState(createCanvasNodeProjectionCache);
   const interaction = interactionMode === 'classic' ? CLASSIC_INTERACTION : DEFAULT_INTERACTION;
@@ -409,7 +397,21 @@ function CanvasInner() {
     syncCanvasNodeIndex(nodes);
   }, [nodes]);
   const reactFlowInstance = useReactFlow();
-  const updateNodeInternals = useUpdateNodeInternals();
+  const flowStore = useStoreApi();
+  const lodSession = useMemo(() => ({
+    projectId: currentProjectId,
+    runtime: createCanvasNodeLodRuntime(reactFlowInstance.getViewport().zoom),
+  }), [currentProjectId, reactFlowInstance]);
+  const nodeLodRuntime = lodSession.runtime;
+  useEffect(() => {
+    nodeLodRuntime.activate();
+    const { x, y, zoom } = reactFlowInstance.getViewport();
+    const { width, height } = flowStore.getState();
+    nodeLodRuntime.viewport(zoom, (width / 2 - x) / zoom, (height / 2 - y) / zoom);
+    nodeLodRuntime.interaction(activeInteractionsRef.current.size > 0);
+    return () => nodeLodRuntime.deactivate();
+  }, [nodeLodRuntime, reactFlowInstance, flowStore]);
+  const wheelZoomCancelRef = useRef<(() => void) | null>(null);
   const activeCanvasPanRef = useRef<{
     startX: number;
     startY: number;
@@ -435,9 +437,11 @@ function CanvasInner() {
       };
     },
     setViewport: async (viewport, duration = 0) => {
+      wheelZoomCancelRef.current?.();
       await reactFlowInstance.setViewport(viewport, { duration });
     },
     fitView: async (options = {}) => {
+      wheelZoomCancelRef.current?.();
       const ids = options.nodeIds ? new Set(options.nodeIds) : null;
       const nodes = ids
         ? reactFlowInstance.getNodes().filter((node) => ids.has(node.id))
@@ -454,38 +458,117 @@ function CanvasInner() {
   const interactionReleaseFramesRef = useRef<Record<CanvasInteractionKind, number>>({
     node: 0,
     viewport: 0,
+    wheel: 0,
   });
 
   const nodeToolbarScaleRef = useRef(Number.NaN);
+  const gooeyScaleRef = useRef(Number.NaN);
+  const latestCanvasZoomRef = useRef(Number.NaN);
+  const localToolbarsRef = useRef(new Set<HTMLElement>());
+  const localGooeyButtonsRef = useRef(new Set<HTMLElement>());
+  const zoomTargetsObserverRef = useRef<MutationObserver | null>(null);
 
-  const updateNodeToolbarScale = useCallback((zoom: number) => {
-    if (!Number.isFinite(zoom) || zoom <= 0) return;
+  const clearLocalZoomCompensation = useCallback(() => {
+    localToolbarsRef.current.forEach((element) => element.style.removeProperty('--toolbar-zoom-compensation'));
+    localGooeyButtonsRef.current.forEach((element) => element.style.removeProperty('--gooey-inv-zoom'));
+    localToolbarsRef.current.clear();
+    localGooeyButtonsRef.current.clear();
+  }, []);
+
+  const updateNodeZoomCompensation = useCallback((zoom: number, refreshTargets = false) => {
+    const canvasRoot = canvasRootRef.current;
+    if (!canvasRoot || !Number.isFinite(zoom) || zoom <= 0) return;
+    const previousZoom = latestCanvasZoomRef.current;
+    latestCanvasZoomRef.current = zoom;
+    const gooeyCompensation = Math.min(1, 1 / zoom);
     const clampedScreenScale = Math.min(
       NODE_TOOLBAR_MAX_SCREEN_SCALE,
       Math.max(NODE_TOOLBAR_MIN_SCREEN_SCALE, zoom),
     );
     const compensation = clampedScreenScale / zoom;
-    // 纯平移或极小缩放变化无需写入，避免每帧让全部节点工具条重新计算样式。
-    if (Math.abs(compensation - nodeToolbarScaleRef.current) < NODE_TOOLBAR_SCALE_EPSILON) return;
-    nodeToolbarScaleRef.current = compensation;
-    canvasRootRef.current?.style.setProperty(
-      '--node-toolbar-zoom-compensation',
-      String(compensation),
-    );
-  }, []);
+
+    if (activeInteractionsRef.current.size > 0) {
+      // 普通平移无需查找控件；缩放只改控件自身，避免根变量让整个媒体子树重算样式。
+      if (!refreshTargets && zoom === previousZoom) return;
+      const updateLocal = (selector: string, elements: Set<HTMLElement>, property: string, value: number) => {
+        canvasRoot.querySelectorAll<HTMLElement>(selector).forEach((element) => elements.add(element));
+        const text = String(value);
+        elements.forEach((element) => {
+          if (!canvasRoot.contains(element)) {
+            element.style.removeProperty(property);
+            elements.delete(element);
+          } else if (element.style.getPropertyValue(property) !== text) {
+            element.style.setProperty(property, text);
+          }
+        });
+      };
+      if (localToolbarsRef.current.size > 0
+        || !(Math.abs(compensation - nodeToolbarScaleRef.current) < NODE_TOOLBAR_SCALE_EPSILON)) {
+        updateLocal(VISIBLE_NODE_TOOLBARS, localToolbarsRef.current, '--toolbar-zoom-compensation', compensation);
+      }
+      if (localGooeyButtonsRef.current.size > 0 || gooeyCompensation !== gooeyScaleRef.current) {
+        updateLocal(VISIBLE_GOOEY_BUTTONS, localGooeyButtonsRef.current, '--gooey-inv-zoom', gooeyCompensation);
+      }
+      return;
+    }
+
+    // 根引用只记录已发布的值；整段交互结束时先同步，再移除局部覆盖。
+    if (gooeyCompensation !== gooeyScaleRef.current) {
+      gooeyScaleRef.current = gooeyCompensation;
+      canvasRoot.style.setProperty('--gooey-inv-zoom', String(gooeyCompensation));
+    }
+    if (!(Math.abs(compensation - nodeToolbarScaleRef.current) < NODE_TOOLBAR_SCALE_EPSILON)) {
+      nodeToolbarScaleRef.current = compensation;
+      canvasRoot.style.setProperty('--node-toolbar-zoom-compensation', String(compensation));
+    }
+    clearLocalZoomCompensation();
+  }, [clearLocalZoomCompensation]);
+
+  const refreshLocalZoomTargets = useCallback(() => {
+    if (activeInteractionsRef.current.size > 0) {
+      updateNodeZoomCompensation(latestCanvasZoomRef.current, true);
+    }
+  }, [updateNodeZoomCompensation]);
+
+  const stopObservingZoomTargets = useCallback(() => {
+    zoomTargetsObserverRef.current?.disconnect();
+    zoomTargetsObserverRef.current = null;
+    canvasRootRef.current?.removeEventListener('pointerover', refreshLocalZoomTargets);
+    canvasRootRef.current?.removeEventListener('pointerout', refreshLocalZoomTargets);
+  }, [refreshLocalZoomTargets]);
 
   useEffect(() => {
-    updateNodeToolbarScale(reactFlowInstance.getViewport().zoom);
-  }, [reactFlowInstance, updateNodeToolbarScale]);
+    updateNodeZoomCompensation(reactFlowInstance.getViewport().zoom);
+  }, [reactFlowInstance, updateNodeZoomCompensation]);
 
   const setCanvasInteraction = useCallback((kind: CanvasInteractionKind, active: boolean) => {
+    const wasInteracting = activeInteractionsRef.current.size > 0;
     if (active) activeInteractionsRef.current.add(kind);
     else activeInteractionsRef.current.delete(kind);
-    document.documentElement.classList.toggle(
-      CANVAS_INTERACTING_CLASS,
-      activeInteractionsRef.current.size > 0,
-    );
-  }, []);
+    const interacting = activeInteractionsRef.current.size > 0;
+    if (wasInteracting === interacting) return;
+    nodeLodRuntime.interaction(interacting);
+    if (interacting) {
+      const canvasRoot = canvasRootRef.current;
+      if (canvasRoot) {
+        // 只在交互期间监听挂载/选中与 hover；不读取布局，也不监听自身的 style 写入。
+        const observer = new MutationObserver((records) => {
+          if (records.some((record) => record.type === 'childList'
+            || (record.target instanceof Element && record.target.matches('.react-flow__node, .node, .node-toolbar-shell')))) {
+            refreshLocalZoomTargets();
+          }
+        });
+        zoomTargetsObserverRef.current = observer;
+        observer.observe(canvasRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+        canvasRoot.addEventListener('pointerover', refreshLocalZoomTargets, { passive: true });
+        canvasRoot.addEventListener('pointerout', refreshLocalZoomTargets, { passive: true });
+      }
+    } else {
+      stopObservingZoomTargets();
+      updateNodeZoomCompensation(reactFlowInstance.getViewport().zoom);
+    }
+    document.documentElement.classList.toggle(CANVAS_INTERACTING_CLASS, interacting);
+  }, [nodeLodRuntime, reactFlowInstance, refreshLocalZoomTargets, stopObservingZoomTargets, updateNodeZoomCompensation]);
 
   const beginCanvasInteraction = useCallback((kind: CanvasInteractionKind) => {
     const pendingFrame = interactionReleaseFramesRef.current[kind];
@@ -531,39 +614,53 @@ function CanvasInner() {
       if (frameId) cancelAnimationFrame(frameId);
     });
     activeInteractionsRef.current.clear();
+    stopObservingZoomTargets();
+    clearLocalZoomCompensation();
     document.documentElement.classList.remove(CANVAS_INTERACTING_CLASS);
-  }, []);
+  }, [clearLocalZoomCompensation, stopObservingZoomTargets]);
 
   const handleCanvasViewportMoveStart = useCallback<OnMove>(() => {
     beginCanvasInteraction('viewport');
   }, [beginCanvasInteraction]);
 
   const handleCanvasViewportMoveEnd = useCallback<OnMove>(() => {
+    if (activeInteractionsRef.current.has('wheel')) {
+      setCanvasInteraction('viewport', false);
+      return;
+    }
     endCanvasInteraction('viewport');
-  }, [endCanvasInteraction]);
+  }, [endCanvasInteraction, setCanvasInteraction]);
 
   const handleCanvasViewportMove = useCallback<OnMove>((_, viewport) => {
-    updateNodeToolbarScale(viewport.zoom);
+    const { width, height } = flowStore.getState();
+    nodeLodRuntime.viewport(viewport.zoom, (width / 2 - viewport.x) / viewport.zoom, (height / 2 - viewport.y) / viewport.zoom);
+    updateNodeZoomCompensation(viewport.zoom);
     const activePan = activeCanvasPanRef.current;
     if (!activePan) return;
     activePan.detail.onProgress?.({
       deltaX: viewport.x - activePan.startX,
       deltaY: viewport.y - activePan.startY,
     });
-  }, [updateNodeToolbarScale]);
+  }, [flowStore, nodeLodRuntime, updateNodeZoomCompensation]);
 
-  // 节点进场动画（translateY）会让 React Flow 在挂载瞬间测得偏移的 handle 锚点并缓存，
-  // 导致连线起止点错位。进场动画结束（落位 translateY:0）后重新测量该节点的 handle。
-  useEffect(() => {
-    const onAnimEnd = (e: AnimationEvent) => {
-      if (e.animationName !== 'nodeIn') return;
-      const el = (e.target as HTMLElement | null)?.closest?.('.react-flow__node');
-      const id = el?.getAttribute('data-id');
-      if (id) updateNodeInternals(id);
-    };
-    document.addEventListener('animationend', onAnimEnd);
-    return () => document.removeEventListener('animationend', onAnimEnd);
-  }, [updateNodeInternals]);
+  const handleWheelZoomStart = useCallback(() => beginCanvasInteraction('wheel'), [beginCanvasInteraction]);
+  const handleWheelZoomEnd = useCallback((interrupted: boolean) => {
+    if (interrupted) setCanvasInteraction('wheel', false);
+    else endCanvasInteraction('wheel');
+  }, [endCanvasInteraction, setCanvasInteraction]);
+  useCanvasWheelZoom({
+    rootRef: canvasRootRef,
+    cancelRef: wheelZoomCancelRef,
+    enabled: interactionMode === 'default',
+    nativeMouseWheel: shouldUseMacTrackpadPan,
+    projectId: currentProjectId,
+    getViewport: reactFlowInstance.getViewport,
+    setViewport: reactFlowInstance.setViewport,
+    onStart: handleWheelZoomStart,
+    onEnd: handleWheelZoomEnd,
+    minZoom: MIN_CANVAS_ZOOM,
+    maxZoom: MAX_CANVAS_ZOOM,
+  });
 
   const {
     isDragOver,
@@ -760,6 +857,7 @@ function CanvasInner() {
   // ── Fit view event (project switch / F key) ──
   useEffect(() => {
     const handler = () => {
+      wheelZoomCancelRef.current?.();
       // Wait one frame for React to finish rendering new nodes/edges
       requestAnimationFrame(() => {
         void reactFlowInstance.fitView(FIT_VIEW_OPTIONS);
@@ -778,6 +876,7 @@ function CanvasInner() {
       if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) return;
       if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) return;
 
+      wheelZoomCancelRef.current?.();
       const viewport = reactFlowInstance.getViewport();
       const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       const activePan = {
@@ -821,9 +920,10 @@ function CanvasInner() {
   // ── Focus node events (history / Agent-created node batch) ──
   useEffect(() => {
     const scheduledFrames = new Set<number>();
+    const scheduledTimers = new Set<number>();
     const focusNodes = (
       nodeIds: string[],
-      options?: { padding?: number; maxZoom?: number; duration?: number },
+      options?: { padding?: number; maxZoom?: number; duration?: number; pulse?: boolean },
     ) => {
       if (nodeIds.length === 0) return;
       const firstFrame = requestAnimationFrame(() => {
@@ -834,21 +934,33 @@ function CanvasInner() {
           const targetNodes = reactFlowInstance.getNodes().filter((node) => targetIds.has(node.id));
           if (targetNodes.length === 0) return;
           const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+          const duration = reduceMotion ? 0 : (options?.duration ?? 420);
           void reactFlowInstance.fitView({
             nodes: targetNodes,
             padding: options?.padding ?? (targetNodes.length === 1 ? 0.45 : 0.3),
             minZoom: targetNodes.length > 6 ? 0.18 : 0.28,
             maxZoom: options?.maxZoom ?? (targetNodes.length === 1 ? 1.1 : 0.95),
-            duration: reduceMotion ? 0 : (options?.duration ?? 420),
+            duration,
           });
+          // 单个节点定位后补一记「放大 → 回弹」脉冲，等镜头停稳再播
+          if (options?.pulse && nodeIds.length === 1 && !reduceMotion) {
+            const [nodeId] = nodeIds;
+            const timer = window.setTimeout(() => {
+              scheduledTimers.delete(timer);
+              playNodeFocusPulse(nodeId);
+            }, duration + 90);
+            scheduledTimers.add(timer);
+          }
         });
         scheduledFrames.add(secondFrame);
       });
       scheduledFrames.add(firstFrame);
     };
     const handleSingleNodeFocus = (e: Event) => {
-      const detail = (e as CustomEvent<{ nodeId: string }>).detail;
-      if (detail?.nodeId) focusNodes([detail.nodeId], { maxZoom: 1, duration: 400 });
+      const detail = (e as CustomEvent<{ nodeId: string; pulse?: boolean }>).detail;
+      if (detail?.nodeId) {
+        focusNodes([detail.nodeId], { maxZoom: 1, duration: 400, pulse: detail.pulse });
+      }
     };
     const handleNodeBatchFocus = (e: Event) => {
       const detail = (e as CustomEvent<{
@@ -865,6 +977,7 @@ function CanvasInner() {
       window.removeEventListener('canvas-focus-node', handleSingleNodeFocus);
       window.removeEventListener('canvas-focus-nodes', handleNodeBatchFocus);
       for (const frameId of scheduledFrames) cancelAnimationFrame(frameId);
+      for (const timerId of scheduledTimers) window.clearTimeout(timerId);
     };
   }, [reactFlowInstance]);
 
@@ -914,20 +1027,45 @@ function CanvasInner() {
         }, INLINE_EDIT_DOUBLE_CLICK_DELAY_MS);
         return;
       }
-      // Non-generative canvas elements have no AI dialog.
-      if (liveNode.type === 'group') return;
-      if (liveNode.type === 'canvas-note') return;
-      if (liveNode.data?.type === 'ai-markdown') return;
-      if (liveNode.data?.role === 'source') return;
-      if (liveNode.data?.type === 'ai-text' && liveNode.data?.output) return;
-      if (liveNode.data?.type === 'ai-image' && liveNode.data?.imageUrl) return;
-      if (liveNode.data?.type === 'ai-animation' && liveNode.data?.imageUrl) return;
-      if (liveNode.data?.type === 'ai-panorama' && liveNode.data?.imageUrl) return;
-      if (liveNode.data?.type === 'ai-video' && liveNode.data?.videoUrl) return;
+      // 硬边界：这几类节点没有任何可用的 AI 对话框。
+      // group / ai-markdown 与空格键（useKeyboardShortcuts.ts）的 canOpen 规则一致；
+      // canvas-note 的 data.type 是 'canvas-note'，一旦唤起会让 AINodeDialog 给 PromptPanel 传入
+      // 未知 nodeType，所以点击路径上一律不打开，只能走它自己的绘图/文本交互。
+      const isNeverDialogNode =
+        liveNode.type === 'group' ||
+        liveNode.type === 'canvas-note' ||
+        liveNode.data?.type === 'ai-markdown';
+      if (isNeverDialogNode) {
+        // 用户已经切换了选中节点，关闭可能仍停留在上一个节点上的对话框，避免浮层卡在错处。
+        closeNodeDialog();
+        return;
+      }
+
+      // 对话框已开启时直接切到被点击的节点：已有产物的节点也一视同仁，不必再按空格。
+      // 这里读 getState() 而非订阅 activeNodeId，避免对话框开关导致 onNodeClick 反复重建。
+      const isDialogOpen = useAppStore.getState().activeNodeId !== null;
+      if (isDialogOpen) {
+        openDialogForNode(liveNode);
+        return;
+      }
+
+      // 对话框未开启：已有产物的节点与源节点保持「不自动弹窗」，需要空格键唤起。
+      const isSilentOnFirstClick =
+        liveNode.data?.role === 'source' ||
+        (liveNode.data?.type === 'ai-text' && liveNode.data?.output) ||
+        (liveNode.data?.type === 'ai-image' && liveNode.data?.imageUrl) ||
+        (liveNode.data?.type === 'ai-animation' && liveNode.data?.imageUrl) ||
+        (liveNode.data?.type === 'ai-panorama' && liveNode.data?.imageUrl) ||
+        (liveNode.data?.type === 'ai-video' && liveNode.data?.videoUrl) ||
+        (liveNode.data?.type === 'ai-audio' && liveNode.data?.audioUrl);
+      if (isSilentOnFirstClick) {
+        closeNodeDialog();
+        return;
+      }
 
       openDialogForNode(liveNode);
     },
-    [openDialogForNode],
+    [openDialogForNode, closeNodeDialog],
   );
 
   // ── Selection sync ──
@@ -1250,6 +1388,7 @@ function CanvasInner() {
   );
 
   return (
+    <CanvasNodeLodContext.Provider value={nodeLodRuntime}>
     <ResizeSnapContext.Provider value={resizeSnapApi}>
     <div
       ref={canvasRootRef}
@@ -1281,8 +1420,8 @@ function CanvasInner() {
         onlyRenderVisibleElements
         fitView
         fitViewOptions={FIT_VIEW_OPTIONS}
-        minZoom={0.1}
-        maxZoom={5}
+        minZoom={MIN_CANVAS_ZOOM}
+        maxZoom={MAX_CANVAS_ZOOM}
         defaultEdgeOptions={defaultEdgeOptions}
         proOptions={PRO_OPTIONS}
         {...drawingInteraction}
@@ -1299,7 +1438,7 @@ function CanvasInner() {
         onDrop={onDrop}
       >
         {/* Snap alignment lines */}
-        <SnapLinesOverlay lines={snapLines} />
+        {snapLines.length > 0 && <SnapLinesOverlay lines={snapLines} />}
 
         {/* Grid background */}
         {showGrid && (
@@ -1315,21 +1454,7 @@ function CanvasInner() {
         {/* Mini Map — interactive navigator, toggle with M key */}
         {minimapVisible && (
           <>
-            <MiniMap
-              position="bottom-right"
-              pannable
-              zoomable
-              nodeColor={minimapNodeColor}
-              nodeStrokeColor="var(--theme-border)"
-              nodeStrokeWidth={1.5}
-              nodeBorderRadius={35}
-              bgColor="var(--theme-surface)"
-              maskColor="var(--minimap-mask)"
-              maskStrokeColor="var(--brand)"
-              maskStrokeWidth={2}
-              style={MINIMAP_STYLE}
-              className="!bottom-12 !right-1 max-[900px]:!bottom-28"
-            />
+            <MiniMapNodeStats />
             <RoundedMiniMapMask />
           </>
         )}
@@ -1506,6 +1631,7 @@ function CanvasInner() {
       document.body,
     )}
     </ResizeSnapContext.Provider>
+    </CanvasNodeLodContext.Provider>
   );
 }
 

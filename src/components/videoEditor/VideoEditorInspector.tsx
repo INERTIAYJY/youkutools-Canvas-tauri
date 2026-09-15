@@ -4,6 +4,7 @@
  * 一期只读展示选中片段与源素材信息；Transform / Appearance / Effects 等
  * 可编辑分组留到二期，分组骨架先按最终布局占位。
  */
+import Select from '../shared/Select';
 import { memo, useState, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
 import { useT } from '../../i18n';
@@ -333,27 +334,27 @@ function VideoEditorInspector({
         </div>
         <label className="video-editor-inspect-slider">
           <span>{t('分辨率')}</span>
-          <select
+          <Select fixedMenu
             value={outputScale}
             disabled={!compositing}
-            onChange={(event) => onOutputScaleChange(Number(event.target.value))}
+            onChange={(selectedOptionValue) => onOutputScaleChange(Number(selectedOptionValue))}
           >
             <option value={1}>{t('原始')}</option>
             <option value={0.5}>50%</option>
             <option value={0.25}>25%</option>
-          </select>
+          </Select>
         </label>
         <label className="video-editor-inspect-slider">
           <span>{t('帧率')}</span>
-          <select
+          <Select fixedMenu
             value={frameRate}
             disabled={!compositing}
-            onChange={(event) => onFrameRateChange(Number(event.target.value))}
+            onChange={(selectedOptionValue) => onFrameRateChange(Number(selectedOptionValue))}
           >
             {[24, 25, 30, 50, 60].map((fps) => (
               <option key={fps} value={fps}>{fps} fps</option>
             ))}
-          </select>
+          </Select>
         </label>
       </div>
 

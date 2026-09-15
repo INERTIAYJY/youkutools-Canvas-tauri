@@ -1,6 +1,7 @@
 /**
  * 接收多种 API 请求示例，展示协议识别结果与置信度，并把用户确认的草稿交给模型编辑器。
  */
+import Select from '../shared/Select';
 import { Icon } from '@iconify/react';
 import { useMemo, useState } from 'react';
 import { GENERAL_MODEL_CATEGORY_LABELS, type GeneralModelCategory } from '../../types';
@@ -287,15 +288,15 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
           {result.category ? (
             <label className="flex min-w-0 items-center gap-2">
               <span className="shrink-0 text-canvas-text-muted">{t('模型分类')}</span>
-              <select
+              <Select fixedMenu
                 value={result.category}
-                className="h-7 min-w-28 rounded-md border border-canvas-border bg-canvas-bg/60 px-2 text-[12px] text-canvas-text outline-none focus:border-indigo-400/60"
-                onChange={(event) => analyze(event.target.value as GeneralModelCategory)}
+                className="min-w-0 min-w-28" size="sm"
+                onChange={(selectedOptionValue) => analyze(selectedOptionValue as GeneralModelCategory)}
               >
                 {(Object.keys(GENERAL_MODEL_CATEGORY_LABELS) as GeneralModelCategory[]).map((category) => (
                   <option key={category} value={category}>{t(GENERAL_MODEL_CATEGORY_LABELS[category])}</option>
                 ))}
-              </select>
+              </Select>
             </label>
           ) : null}
 

@@ -1,6 +1,7 @@
 /**
  * 子智能体设置页：管理用户自建的只读领域子智能体，内置典范只读可复制。
  */
+import Select from '../shared/Select';
 import { useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import AnimatedButton from '../shared/AnimatedButton';
@@ -264,16 +265,16 @@ export default function SubAgentSettings({ hideHeading }: SubAgentSettingsProps 
 
           <label className="block space-y-1">
             <span className="text-[11px] text-canvas-text-secondary">{t('绑定 Skill（可选）')}</span>
-            <select
+            <Select fixedMenu
               value={draft.skillId ?? ''}
-              onChange={(e) => setDraft({ ...draft, skillId: e.target.value || undefined })}
-              className="w-full rounded-md border border-canvas-border bg-canvas-surface px-2.5 py-1.5 text-xs text-canvas-text"
+              onChange={(selectedOptionValue) => setDraft({ ...draft, skillId: selectedOptionValue || undefined })}
+              className="min-w-0 w-full"
             >
               <option value="">{t('不绑定，使用下方提示词')}</option>
               {userSkills.map((skill) => (
                 <option key={skill.id} value={skill.id}>{skill.name}</option>
               ))}
-            </select>
+            </Select>
           </label>
 
           <label className="block space-y-1">

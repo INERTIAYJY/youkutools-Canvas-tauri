@@ -3,11 +3,12 @@
  * 编辑单个 DramaCharacter 的基本信息、参考图（上传/裁剪/分类）与声音素材（音频/时长），
  * 按项目或全局作用域写入 store；项目资产优先二进制落盘，避免先构造 Base64。
  */
+import Select from './shared/Select';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, generateId } from '../store/useAppStore';
-import { isEligibleCharacterReferenceNode } from '../store/store.dramaAssets';
+import { isEligibleCharacterReferenceNode, isEligibleCharacterVoiceNode } from '../store/store.dramaAssets';
 import { normalizeAssetKey } from '../services/dramaAssetExtract';
 import { clamp } from '../utils/num';
 import {
@@ -319,6 +320,7 @@ function CharacterNodeCaptureDialog({
     globalCharacters,
     loadGlobalCharacters,
     captureImageNodeToCharacter,
+    bindAudioNodeToCharacterVoice,
     addCharacterAction,
     addCharacterActionMedia,
     showToast,
@@ -329,6 +331,7 @@ function CharacterNodeCaptureDialog({
       globalCharacters: state.globalCharacters,
       loadGlobalCharacters: state.loadGlobalCharacters,
       captureImageNodeToCharacter: state.captureImageNodeToCharacter,
+      bindAudioNodeToCharacterVoice: state.bindAudioNodeToCharacterVoice,
       addCharacterAction: state.addCharacterAction,
       addCharacterActionMedia: state.addCharacterActionMedia,
       showToast: state.showToast,
@@ -338,8 +341,14 @@ function CharacterNodeCaptureDialog({
     ? sourceNode?.data.imageUrl ?? sourceNode?.data.thumbnailUrl
     : undefined;
   const actionMedia = useMemo(() => actionMediaFromNode(sourceNode), [sourceNode]);
-  const [captureTab, setCaptureTab] = useState<'reference' | 'action'>(
-    imageUrl ? 'reference' : actionMedia ? 'action' : 'reference',
+  const audioUrl = isEligibleCharacterVoiceNode(sourceNode) ? sourceNode?.data.audioUrl : undefined;
+  const [voiceKind, setVoiceKind] = useState<CharacterVoiceKind>('timbre');
+  const [voiceLabel, setVoiceLabel] = useState(sourceNode?.data.label ?? '');
+  const [voiceTranscript, setVoiceTranscript] = useState(sourceNode?.data.prompt ?? '');
+  const [makePrimaryVoice, setMakePrimaryVoice] = useState(false);
+  const [voiceDuration, setVoiceDuration] = useState<number>();
+  const [captureTab, setCaptureTab] = useState<'reference' | 'action' | 'voice'>(
+    audioUrl ? 'voice' : imageUrl ? 'reference' : actionMedia ? 'action' : 'reference',
   );
   const [scope, setScope] = useState<CharacterLibraryScope>(initialScope ?? 'project');
   const [targetMode, setTargetMode] = useState<'existing' | 'new'>(
@@ -390,7 +399,7 @@ function CharacterNodeCaptureDialog({
     }
   };
 
-  const switchCaptureTab = (tab: 'reference' | 'action') => {
+  const switchCaptureTab = (tab: 'reference' | 'action' | 'voice') => {
     setCaptureTab(tab);
     if (tab === 'action') setTargetMode('existing');
   };
@@ -398,6 +407,29 @@ function CharacterNodeCaptureDialog({
   const handleCapture = async () => {
     if (!sourceNode) {
       showToast('无法读取来源节点', 'error');
+      return;
+    }
+
+    if (captureTab === 'voice') {
+      if (!audioUrl || !effectiveCharacterId) {
+        showToast(!audioUrl ? '该节点没有可用的音频' : '请选择要添加到的角色', 'error');
+        return;
+      }
+      setSaving(true);
+      try {
+        const clipId = await bindAudioNodeToCharacterVoice({
+          nodeId: sourceNodeId, scope, characterId: effectiveCharacterId,
+          kind: voiceKind, label: voiceLabel, transcript: voiceTranscript,
+          makePrimary: makePrimaryVoice, durationSec: voiceDuration, hideNode,
+        });
+        if (!clipId) return;
+        showToast('已添加到角色声音库');
+        onClose();
+      } catch {
+        showToast('添加声音失败，请重试', 'error');
+      } finally {
+        setSaving(false);
+      }
       return;
     }
 
@@ -435,6 +467,7 @@ function CharacterNodeCaptureDialog({
           effectiveCharacterId,
           effectiveActionId,
           [actionMedia],
+          { nodeId: sourceNodeId, hideNode },
         );
       } else {
         const normalizedActionName = actionName.trim();
@@ -454,7 +487,7 @@ function CharacterNodeCaptureDialog({
           name: normalizedActionName,
           prompt: actionPrompt.trim(),
           media: [actionMedia],
-        }));
+        }, { nodeId: sourceNodeId, hideNode }));
       }
       setSaving(false);
       if (!saved) return;
@@ -541,15 +574,32 @@ function CharacterNodeCaptureDialog({
           <Icon icon="lucide:film" width="14" height="14" aria-hidden="true" />
           动作素材
         </button>
+        {audioUrl ? (
+          <button type="button" role="tab" aria-selected={captureTab === 'voice'}
+            className={`ui-btn ui-btn--sm ${captureTab === 'voice' ? 'is-active' : ''}`}
+            onClick={() => switchCaptureTab('voice')}>
+            <Icon icon="lucide:audio-lines" width="14" height="14" aria-hidden="true" />
+            声音素材
+          </button>
+        ) : null}
       </div>
 
       <div className="character-capture-body">
         <section
           className="character-capture-preview"
-          aria-label={captureTab === 'reference' ? '待添加图片' : '待添加动作素材'}
+          aria-label={captureTab === 'voice' ? '待添加声音' : captureTab === 'reference' ? '待添加图片' : '待添加动作素材'}
         >
           <div className="grid min-h-80 w-full place-items-center overflow-hidden rounded-lg border border-canvas-border bg-canvas-bg/70 p-1 max-[920px]:mx-auto max-[920px]:max-w-[360px]">
-            {captureTab === 'action' && actionMedia?.kind === 'video' ? (
+            {captureTab === 'voice' && audioUrl ? (
+              <div className="flex w-full min-w-0 flex-col items-center gap-4 p-3">
+                <Icon icon="lucide:audio-lines" width="48" height="48" className="text-canvas-text-secondary" aria-hidden="true" />
+                <audio key={audioUrl} src={audioUrl} controls preload="metadata" className="w-full"
+                  onLoadedMetadata={(event) => {
+                    const duration = event.currentTarget.duration;
+                    setVoiceDuration(Number.isFinite(duration) && duration > 0 ? duration : undefined);
+                  }} />
+              </div>
+            ) : captureTab === 'action' && actionMedia?.kind === 'video' ? (
               <video
                 src={actionMedia.url}
                 className="max-h-[min(62vh,720px)] max-w-full object-contain"
@@ -584,7 +634,7 @@ function CharacterNodeCaptureDialog({
 
         <section
           className="character-capture-options"
-          aria-label={captureTab === 'reference' ? '角色与参考图信息' : '角色与动作信息'}
+          aria-label={captureTab === 'voice' ? '角色与声音信息' : captureTab === 'reference' ? '角色与参考图信息' : '角色与动作信息'}
         >
           <div className="character-capture-group">
             <span className="character-capture-label">保存范围</span>
@@ -610,7 +660,36 @@ function CharacterNodeCaptureDialog({
             </div>
           </div>
 
-          {captureTab === 'reference' ? (
+          {captureTab === 'voice' ? (
+            <>
+              <label className="character-field character-field-wide">
+                <span>添加到角色</span>
+                <Select fixedMenu autoFocus value={effectiveCharacterId} disabled={!characters.length || saving}
+                  onChange={(selectedOptionValue) => setSelectedCharacterId(selectedOptionValue)}>
+                  {!characters.length ? <option value="">当前范围暂无角色，请先在角色库新建</option> : null}
+                  {characters.map((character) => <option key={character.id} value={character.id}>{character.name}</option>)}
+                </Select>
+              </label>
+              <label className="character-field character-field-wide">
+                <span>声音名称</span>
+                <input value={voiceLabel} onChange={(event) => setVoiceLabel(event.target.value)} />
+              </label>
+              <label className="character-field">
+                <span>声音用途</span>
+                <Select fixedMenu value={voiceKind} onChange={(selectedOptionValue) => setVoiceKind(selectedOptionValue as CharacterVoiceKind)}>
+                  {VOICE_KINDS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </Select>
+              </label>
+              <label className="character-field character-field-wide">
+                <span>台词文本</span>
+                <textarea value={voiceTranscript} rows={3} onChange={(event) => setVoiceTranscript(event.target.value)} />
+              </label>
+              <label className="character-capture-hide-option">
+                <input type="checkbox" checked={makePrimaryVoice} onChange={(event) => setMakePrimaryVoice(event.target.checked)} />
+                <span>设为角色主音色</span>
+              </label>
+            </>
+          ) : captureTab === 'reference' ? (
             <>
           <div className="character-capture-group">
             <span className="character-capture-label">添加方式</span>
@@ -640,15 +719,15 @@ function CharacterNodeCaptureDialog({
           {targetMode === 'existing' ? (
             <label className="character-field character-field-wide">
               <span>添加到角色</span>
-              <select
+              <Select fixedMenu
                 autoFocus
                 value={effectiveCharacterId}
-                onChange={(event) => setSelectedCharacterId(event.target.value)}
+                onChange={(selectedOptionValue) => setSelectedCharacterId(selectedOptionValue)}
               >
                 {characters.map((character) => (
                   <option key={character.id} value={character.id}>{character.name}</option>
                 ))}
-              </select>
+              </Select>
             </label>
           ) : (
             <div className="character-capture-new-fields">
@@ -684,14 +763,14 @@ function CharacterNodeCaptureDialog({
           <div className="character-capture-reference-fields">
             <label className="character-field">
               <span>图片用途</span>
-              <select
+              <Select fixedMenu
                 value={kind}
-                onChange={(event) => setKind(event.target.value as CharacterReferenceKind)}
+                onChange={(selectedOptionValue) => setKind(selectedOptionValue as CharacterReferenceKind)}
               >
                 {REFERENCE_KINDS.map(([value, label]) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className="character-field character-field-wide">
               <span>图片提示词</span>
@@ -703,26 +782,17 @@ function CharacterNodeCaptureDialog({
               />
             </label>
           </div>
-
-          <label className="character-capture-hide-option">
-            <input
-              type="checkbox"
-              checked={hideNode}
-              onChange={(event) => setHideNode(event.target.checked)}
-            />
-            <span>添加后隐藏画布节点</span>
-          </label>
             </>
           ) : (
             <>
               <label className="character-field character-field-wide">
                 <span>添加到角色</span>
-                <select
+                <Select fixedMenu
                   autoFocus
                   value={effectiveCharacterId}
                   disabled={characters.length === 0}
-                  onChange={(event) => {
-                    setSelectedCharacterId(event.target.value);
+                  onChange={(selectedOptionValue) => {
+                    setSelectedCharacterId(selectedOptionValue);
                     setSelectedActionId('');
                   }}
                 >
@@ -730,7 +800,7 @@ function CharacterNodeCaptureDialog({
                   {characters.map((character) => (
                     <option key={character.id} value={character.id}>{character.name}</option>
                   ))}
-                </select>
+                </Select>
               </label>
 
               <div className="character-capture-group">
@@ -761,27 +831,27 @@ function CharacterNodeCaptureDialog({
               {actionAttachMode === 'existing' ? (
                 <label className="character-field character-field-wide">
                   <span>已有动作</span>
-                  <select
+                  <Select fixedMenu
                     value={effectiveActionId}
-                    onChange={(event) => setSelectedActionId(event.target.value)}
+                    onChange={(selectedOptionValue) => setSelectedActionId(selectedOptionValue)}
                   >
                     {actions.map((action) => (
                       <option key={action.id} value={action.id}>{action.name}</option>
                     ))}
-                  </select>
+                  </Select>
                 </label>
               ) : (
                 <div className="character-capture-reference-fields">
                   <label className="character-field">
                     <span>动作类别</span>
-                    <select
+                    <Select fixedMenu
                       value={actionCategory}
-                      onChange={(event) => setActionCategory(event.target.value as CharacterActionCategory)}
+                      onChange={(selectedOptionValue) => setActionCategory(selectedOptionValue as CharacterActionCategory)}
                     >
                       {ACTION_CATEGORIES.map(([value, label]) => (
                         <option key={value} value={value}>{label}</option>
                       ))}
-                    </select>
+                    </Select>
                   </label>
                   {actionCategory === 'custom' ? (
                     <label className="character-field">
@@ -815,10 +885,18 @@ function CharacterNodeCaptureDialog({
 
               <div className="flex min-h-10 items-center gap-2 rounded-lg border border-canvas-border bg-canvas-surface px-3 text-[10px] leading-4 text-canvas-text-muted">
                 <Icon icon="lucide:link-2" width="14" height="14" className="shrink-0" aria-hidden="true" />
-                动作素材会绑定到所选角色，原画布节点保持不变。
+                动作素材会绑定到所选角色，可在动作库中切换画布节点的显示与隐藏。
               </div>
             </>
           )}
+          <label className="character-capture-hide-option">
+            <input
+              type="checkbox"
+              checked={hideNode}
+              onChange={(event) => setHideNode(event.target.checked)}
+            />
+            <span>添加后隐藏画布节点</span>
+          </label>
         </section>
       </div>
 
@@ -829,6 +907,7 @@ function CharacterNodeCaptureDialog({
           className="character-button-primary text-white"
           disabled={saving
             || !sourceNode
+            || (captureTab === 'voice' && (!audioUrl || !effectiveCharacterId))
             || (captureTab === 'reference' && (!imageUrl
               || (targetMode === 'existing' ? !effectiveCharacterId : !name.trim())))
             || (captureTab === 'action' && (!actionMedia
@@ -840,12 +919,12 @@ function CharacterNodeCaptureDialog({
           onClick={() => void handleCapture()}
         >
           <Icon
-            icon={captureTab === 'action' ? 'lucide:film' : 'lucide:contact-round'}
+            icon={captureTab === 'voice' ? 'lucide:audio-lines' : captureTab === 'action' ? 'lucide:film' : 'lucide:contact-round'}
             width="15"
             height="15"
             aria-hidden="true"
           />
-          {saving ? '添加中…' : captureTab === 'action' ? '添加到动作库' : '添加到角色库'}
+          {saving ? '添加中…' : captureTab === 'voice' ? '添加到声音库' : captureTab === 'action' ? '添加到动作库' : '添加到角色库'}
         </button>
       </footer>
     </ModalOverlay>
@@ -1253,16 +1332,16 @@ function CharacterAssetEditorDialog({
                 <div className="character-reference-editor-fields">
                   <label className="character-field">
                     <span>图片用途</span>
-                    <select
+                    <Select fixedMenu
                       value={selectedReference.kind}
-                      onChange={(event) => patchReference({
-                        kind: event.target.value as CharacterReferenceKind,
+                      onChange={(selectedOptionValue) => patchReference({
+                        kind: selectedOptionValue as CharacterReferenceKind,
                       })}
                     >
                       {REFERENCE_KINDS.map(([value, label]) => (
                         <option key={value} value={value}>{label}</option>
                       ))}
-                    </select>
+                    </Select>
                   </label>
                   <label className="character-field">
                     <span>图片提示词</span>
@@ -1397,16 +1476,16 @@ function CharacterAssetEditorDialog({
                   </label>
                   <label className="character-field">
                     <span>用途</span>
-                    <select
+                    <Select fixedMenu
                       value={selectedVoiceClip.kind}
-                      onChange={(event) => patchVoiceClip({
-                        kind: event.target.value as CharacterVoiceKind,
+                      onChange={(selectedOptionValue) => patchVoiceClip({
+                        kind: selectedOptionValue as CharacterVoiceKind,
                       })}
                     >
                       {VOICE_KINDS.map(([value, label]) => (
                         <option key={value} value={value}>{label}</option>
                       ))}
-                    </select>
+                    </Select>
                   </label>
                 </div>
                 <label className="character-field">

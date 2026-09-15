@@ -14,7 +14,7 @@ import ChatComposerEditor, { type ChatComposerEditorHandle } from './ChatCompose
 import MentionPicker, { type MentionPickerItem } from '../shared/MentionPicker';
 import { resolveDramaMentionItems } from '../nodes/shared/mentionEditorSources';
 import { bestNodeThumb } from '../nodes/shared/mentionEditorDom';
-import type { BaseNodeData, GeneralModelConfig, ModelOption } from '../../types';
+import type { BaseNodeData, GeneralModelConfig, ModelGroup, ModelOption } from '../../types';
 import type { SkillPickerOption } from '../../types/agentPackage';
 import type { ContextUsageStat } from '../../services/chat/contextManager';
 import { useAppStore } from '../../store/useAppStore';
@@ -148,6 +148,8 @@ interface ChatInputProps {
   /** 当前选中的文本模型 ID */
   assistantModelId?: string;
   onAssistantModelChange: (modelId?: string) => void;
+  /** 独立窗口由主窗口下发的脱敏文本模型分组。 */
+  assistantModelGroups?: ModelGroup[];
   mediaModels: GeneralModelConfig[];
   mediaModelOptions: MediaModelOption[];
   mediaModelAvailability: Record<string, boolean>;
@@ -171,6 +173,7 @@ interface ChatInputProps {
 export default function ChatInput({
   assistantModelId,
   onAssistantModelChange,
+  assistantModelGroups,
   mediaModels,
   mediaModelOptions,
   mediaModelAvailability,
@@ -762,6 +765,7 @@ export default function ChatInput({
               nodeType="ai-text"
               selectedModel={selectedTextModel}
               onSelect={handleTextModelSelect}
+              configuredGroupsOverride={assistantModelGroups}
               generalModelsOverride={mediaModels}
               groupAvailability={modelGroupAvailability}
             />

@@ -1,7 +1,7 @@
 /**
  * types 全局类型定义 — 定义 NodeType、BaseNodeData、CanvasProject、AppConfig、ModelOption、WorkflowDefinition 等核心类型
  */
-import type { AudioOutputFormat, AudioTtsVoice, ModelExecutionProfile, VideoModelCapability, VideoReferenceItem } from './aiTypes';
+import type { AudioOutputFormat, AudioSpeechSettings, AudioTtsVoice, ModelExecutionProfile, VideoModelCapability, VideoReferenceItem } from './aiTypes';
 import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
 import type { CanvasNoteData } from './canvasNote';
@@ -10,8 +10,9 @@ import type {
   DirectorRuntimeKind,
   DirectorSceneReference,
 } from './directorScene';
-import type { ShotlistColumnKey, ShotRow } from './shotlist';
+import type { ShotlistColumnKey, ShotRow, ShotlistScriptSource, ShotlistProductionSource } from './shotlist';
 import type { Locale } from '../i18n';
+import type { McpToolExposure } from './mcp';
 
 export type {
   CanvasDrawingTool,
@@ -167,10 +168,43 @@ export interface StoryboardCellOverride {
   relativePath?: string; // 项目目录内的相对路径（持久化优先）
 }
 
-export interface CharacterLibraryNodeLink {
+export type CharacterLibraryNodeLink = {
   scope: 'project' | 'global';
   characterId: string;
+} & ({
   referenceImageId: string;
+  actionId?: never;
+  mediaId?: never;
+} | {
+  referenceImageId?: never;
+  actionId: string;
+  mediaId: string;
+});
+
+/** 视频拉片插件写入图片节点的结构化结果；不包含本地路径或调用级 resourceId。 */
+export interface VideoFrameAnalysisData {
+  sourceVideoNodeId: string;
+  sourceVideoName?: string;
+  shotId?: string;
+  inPoint?: number;
+  outPoint?: number;
+  sampleRole?: 'start' | 'middle' | 'end' | 'custom';
+  reviewStatus?: 'unreviewed' | 'reviewed' | 'edited';
+  overrideFields?: string[];
+  aiOriginal?: Record<string, string | number | null>;
+  requestedTime: number;
+  actualTime: number;
+  frameDuration?: number;
+  approximateFrame?: number;
+  shotSize?: string;
+  camera?: string;
+  content?: string;
+  dialogue?: string;
+  audio?: string;
+  transition?: string;
+  duration?: number;
+  note?: string;
+  confidence?: number | null;
 }
 
 // 节点数据接口
@@ -186,7 +220,12 @@ export interface BaseNodeData {
   model?: string;             // 选择的模型 ID（如 qwen/qwen3.5-397b-a17b）
   provider?: string;          // 选择的供应商 ID（如 apimart）
   workflowId?: string;        // 选择的工作流 ID
-  workflowInputs?: Record<string, string>; // 工作流 IO 节点赋值: ioNodeId → value
+  workflowInputs?: Record<string, string>; // 本地 IO 或云工作流 nodeId/fieldName 赋值
+  runninghubOutputs?: import('./runninghub').RunningHubOutput[];
+  runninghubModelParameters?: Record<string, string>;
+  runninghubStage?: string;
+  workflowApiOutputs?: import('./workflowApi').CloudWorkflowOutput[];
+  workflowApiStage?: string;
   imageUrl?: string;          // 生成的图片 URL（Tauri: asset://localhost/..., 浏览器: data:...）
   videoUrl?: string;          // 生成的视频 URL
   audioUrl?: string;          // 生成的音频 URL
@@ -241,6 +280,7 @@ export interface BaseNodeData {
   generateAudio?: boolean;    // 生成有声视频（Seedance 2.0 / 1.5 pro）
   videoReferences?: VideoReferenceItem[]; // 手动挑选的参考帧 / 参考角色；不选则沿用连线顺序
   audioVoice?: AudioTtsVoice; // TTS 音色
+  audioSpeechSettings?: AudioSpeechSettings;
   audioFormat?: AudioOutputFormat; // TTS 输出格式
   audioSpeed?: number;        // TTS 播放速度：0.25-4
   audioPurpose?: AudioGenerationPurpose; // 当前音频模型用途
@@ -262,6 +302,9 @@ export interface BaseNodeData {
   // ── 分镜表（ai-shotlist）──
   shotlistRows?: ShotRow[];                 // 逐行镜头
   shotlistColumns?: ShotlistColumnKey[];    // 当前显示的列（常驻列恒在其中）
+  shotlistScriptSource?: ShotlistScriptSource;
+  shotlistProductionSource?: ShotlistProductionSource;
+  frameAnalysis?: VideoFrameAnalysisData;   // 视频拉片抽帧及画面分析结果
   // ── 3D 导演台（ai-director）──
   directorRuntimeKind?: DirectorRuntimeKind; // 缺失=lightweight-web；未知运行时必须失败关闭
   directorInstanceId?: string;           // 导演台 localStorage 隔离实例 ID
@@ -411,6 +454,12 @@ export interface ProjectSettings {
 // API 配置
 export type GeneralModelCategory = 'text' | 'image' | 'audio' | 'video';
 
+/** 连接级文本/对话 API 协议；缺省保持 OpenAI Chat Completions 兼容。 */
+export type ChatApiProtocol =
+  | 'openai-compatible'
+  | 'anthropic-compatible'
+  | 'gemini-native';
+
 export type ImageReferenceRequestMode =
   | 'generation-json-image-urls'
   | 'generation-json-image-data-urls'
@@ -458,6 +507,8 @@ export interface ApiProviderConfig {
   /** 凭据在凭据存储中的条目名；由持久化层维护，业务代码不要直接读写。 */
   apiKeyRef?: string;
   baseUrl?: string;
+  /** 文本/对话请求协议；旧配置缺失时按 openai-compatible 处理。 */
+  chatApiProtocol?: ChatApiProtocol;
   /** 内置目录定义 ID；自定义连接的配置 key 与目录定义 ID 不同。 */
   catalogId?: string;
   /** undefined 表示旧配置尚未选择；空数组表示用户明确未启用任何模型。 */
@@ -562,6 +613,7 @@ export interface AppConfig {
   nodeLabelVisible?: boolean; // 是否显示节点顶部标题标签，默认 true
   canvasNoteToolbarVisible?: boolean; // 是否显示画布笔记工具栏，默认 true
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
+  outputHistoryPinned?: boolean; // 输出历史面板是否固定常驻（固定后跳转节点不关闭面板）
   canvasQuickActions?: CanvasQuickAction[]; // 画布空白处长按圆环，最多 6 个槽位
   startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'last-project'
   windowAspectRatio?: WindowAspectRatio; // 窗口尺寸预设所用比例，默认 '16:9'
@@ -598,6 +650,7 @@ export interface AppConfig {
   mcpAutoStart?: boolean;     // 启动软件时自动开启 MCP 本地控制会话，默认 false
   mcpPort?: number;           // MCP 固定端口，1024-65535；未设置时随机分配
   mcpTransport?: 'stdio' | 'streamable-http'; // 默认 stdio；HTTP 模式监听 0.0.0.0
+  mcpToolExposure?: McpToolExposure; // 默认 compact；full 兼容客户端原生工具发现
 }
 
 // ── 通用模型配置 ──
@@ -695,6 +748,9 @@ export interface WorkflowIONode {
 
 /** 导入的 ComfyUI 工作流 */
 export interface WorkflowDefinition {
+  adapterType?: 'comfyui' | 'runninghub' | 'workflow-api';
+  runninghub?: import('./runninghub').RunningHubWorkflowManifest;
+  workflowApi?: import('./workflowApi').WorkflowApiManifest;
   id: string;
   name: string;               // 工作流名称
   category: WorkflowCategory; // 归属分类

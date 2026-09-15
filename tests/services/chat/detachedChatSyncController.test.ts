@@ -94,6 +94,38 @@ describe('detached chat sync controller', () => {
     controller.dispose();
   });
 
+  it('projects configured text model groups without provider credentials', () => {
+    useAppStore.setState((state) => ({
+      config: {
+        ...state.config,
+        providers: {
+          apimart: {
+            name: 'APIMart',
+            apiKey: 'provider-secret-key',
+            baseUrl: 'https://private-gateway.example/v1',
+            selectedModels: [{
+              id: 'apimart/gpt-5.4',
+              name: 'GPT-5.4',
+              category: 'text',
+              provider: 'apimart',
+            }],
+          },
+        },
+      },
+    }));
+
+    const snapshot = buildDetachedChatSnapshot(useAppStore.getState());
+
+    expect(snapshot.assistantModelGroups).toEqual([
+      expect.objectContaining({
+        id: 'apimart',
+        models: [expect.objectContaining({ value: 'apimart/gpt-5.4' })],
+      }),
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain('provider-secret-key');
+    expect(JSON.stringify(snapshot)).not.toContain('private-gateway.example');
+  });
+
   it('emits an initial snapshot followed by revisioned patches', async () => {
     const emitSync = vi.fn(async (_sync: ChatStateSync) => undefined);
     const initListener = vi.fn(async () => () => undefined);

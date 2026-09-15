@@ -4,6 +4,7 @@
  * 转场作用于选中片段与它前一段之间：预设靠不透明度在本地合成，
  * AI 转场则把首尾帧交给视频模型生成一段真实过渡画面。
  */
+import Select from '../shared/Select';
 import { memo, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
 import { useT } from '../../i18n';
@@ -74,19 +75,19 @@ function VideoEditorTransitionPanel({
         <>
           <label className="video-editor-inspect-slider">
             <span>{t('类型')}</span>
-            <select
+            <Select fixedMenu
               value={transition.kind}
               disabled={locked}
-              {...continuousEditHandlers}
-              onChange={(event) => onTransitionChange(
-                event.target.value as VideoEditorTransitionKind,
-                transition.duration,
-              )}
+              onChange={(selectedOptionValue) => {
+                onBeginInteraction();
+                onTransitionChange(selectedOptionValue as VideoEditorTransitionKind, transition.duration);
+                onEndInteraction();
+              }}
             >
               <option value="none">{t('硬切')}</option>
               <option value="dissolve">{t('交叠淡入')}</option>
               <option value="fade">{t('黑场淡入')}</option>
-            </select>
+            </Select>
           </label>
           <label className="video-editor-inspect-slider">
             <span>{t('时长')}</span>

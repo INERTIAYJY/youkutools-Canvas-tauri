@@ -1,6 +1,7 @@
 /**
  * 收集高级预设运行参数，预览步骤并把确认后的执行请求交给预设序列服务。
  */
+import Select from '../../shared/Select';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -65,16 +66,16 @@ function ParameterInput({
 
   if (parameter.type === 'select') {
     return (
-      <select
-        className="preset-manager-input"
+      <Select fixedMenu
+        className="min-w-0"
         value={String(value ?? '')}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(selectedOptionValue) => onChange(selectedOptionValue)}
       >
         <option value="">请选择</option>
         {(parameter.options ?? []).filter(Boolean).map((option) => (
           <option key={option} value={option}>{option}</option>
         ))}
-      </select>
+      </Select>
     );
   }
 

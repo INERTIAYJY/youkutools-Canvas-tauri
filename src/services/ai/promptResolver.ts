@@ -11,8 +11,10 @@ import {
   findDramaAsset,
   formatDramaAssetTextBrief,
   resolveDramaAssetImageRef,
+  resolveDramaActionMediaRef,
+  resolveDramaVoiceRef,
 } from '../dramaAssetPrompt';
-import type { DramaAsset } from '../../types/dramaAssets';
+import type { CharacterVoiceKind, DramaAsset } from '../../types/dramaAssets';
 import { formatShotRowBrief, isShotRowBlank, readShotFrameSource } from '../../types';
 import type { BaseNodeData, ImageAnnotationLayer, ShotRow, StoryboardCellOverride } from '../../types';
 import type { MediaReference } from '../../types/aiTypes';
@@ -120,6 +122,7 @@ export function resolveShotlistMention(
   shotlistData: BaseNodeData,
   nodes: Array<{ id: string; type?: string; data: BaseNodeData }>,
   addImage: (key: string, entry: PromptImageEntry) => number,
+  imageLabel: (index: number) => string = (index) => `图片${index}`,
 ): string {
   const rows = (shotlistData.shotlistRows as ShotRow[] | undefined) ?? [];
   const lines: string[] = [];
@@ -137,7 +140,7 @@ export function resolveShotlistMention(
           sourceNodeId: frame.nodeId,
           sourceUrl: source?.data.sourceUrl as string | undefined,
         });
-        line += `（图片${idx}）`;
+        line += `（${imageLabel(idx)}）`;
       }
     }
     lines.push(line);
@@ -194,8 +197,34 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
     if (match[2] !== undefined) {
       const dramaId = match[2];
       const dramaName = match[3] || '';
-      const { assetId, referenceImageId, mergeAll } = parseDramaMentionId(dramaId);
+      const { assetId, referenceImageId, mergeAll, actionId, actionMediaId, voiceClipId } = parseDramaMentionId(dramaId);
       const dramaAsset = findDramaAsset(store.dramaAssets, assetId);
+      if (voiceClipId !== undefined) {
+        const voice = resolveDramaVoiceRef(dramaAsset, voiceClipId);
+        if (!voice) throw new Error(`角色音频引用已失效：${dramaName || '未命名角色'}`);
+        parts.push(`${voice.label}（${voice.url}）`);
+        lastIndex = chipRegex.lastIndex;
+        continue;
+      }
+      if (actionId !== undefined) {
+        const media = resolveDramaActionMediaRef(dramaAsset, actionId, actionMediaId);
+        if (!media) throw new Error(`动作素材引用已失效：${dramaName || '未命名动作'}`);
+        if (media.kind === 'video') {
+          // 文本模型沿用画布视频引用的 URL 文本语义。
+          parts.push(`${media.label}（${media.url}）`);
+        } else {
+          const key = `drama:${dramaId}`;
+          let idx = imageKeyToIndex.get(key);
+          if (idx === undefined) {
+            idx = imageEntries.length + 1;
+            imageKeyToIndex.set(key, idx);
+            imageEntries.push({ url: media.url, filePath: media.filePath });
+          }
+          parts.push(`图片${idx}（${media.label}）`);
+        }
+        lastIndex = chipRegex.lastIndex;
+        continue;
+      }
       const mergedUrl = dramaAsset && mergeAll
         ? await resolveMergedCharacterImage(
           dramaAsset,
@@ -374,23 +403,44 @@ export async function resolvePromptToChatContent(rawPrompt: string): Promise<{
   return { content: contentArr, textContent: textContent || rawPrompt.trim() };
 }
 
+/** 仅供本次请求编译使用，不持久化；同一媒体可同时属于多个角色。 */
+export interface PromptCharacterBinding {
+  id: string;
+  name: string;
+  usage: 'appearance' | 'action' | CharacterVoiceKind;
+}
+
+export type PromptMediaSegment = string | {
+  reference: MediaReference;
+  character?: PromptCharacterBinding;
+};
+
 export interface PromptMediaReferences {
   prompt: string;
   references: MediaReference[];
   imageUrls: string[];
   videoUrls: string[];
   audioUrls: string[];
+  segments?: PromptMediaSegment[];
 }
 
-/** 收集提示词中直接 @ 的视频/音频节点产物，不改变提示词文本。 */
+/** 收集提示词中直接 @ 的视频/音频节点和角色音频，不改变提示词文本。 */
 export function collectPromptNodeMediaUrls(
   rawPrompt: string,
 ): Pick<PromptMediaReferences, 'references' | 'videoUrls' | 'audioUrls'> {
-  const { nodes } = useAppStore.getState();
+  const { nodes, dramaAssets } = useAppStore.getState();
   const references: MediaReference[] = [];
 
-  for (const match of rawPrompt.matchAll(/@\{([^:]+):[^}]+\}/g)) {
-    const rawNodeId = match[1];
+  for (const match of rawPrompt.matchAll(/@drama\{([^:]+):([^}]+)\}|@\{([^:]+):[^}]+\}/g)) {
+    if (match[1] !== undefined) {
+      const { assetId, voiceClipId } = parseDramaMentionId(match[1]);
+      if (voiceClipId === undefined) continue;
+      const voice = resolveDramaVoiceRef(findDramaAsset(dramaAssets, assetId), voiceClipId);
+      if (!voice) throw new Error(`角色音频引用已失效：${match[2] || '未命名角色'}`);
+      references.push({ kind: 'audio', url: voice.url, filePath: voice.filePath, origin: 'prompt', role: 'reference_audio' });
+      continue;
+    }
+    const rawNodeId = match[3];
     if (rawNodeId.includes('/cell/')) continue;
     const node = nodes.find((item) => item.id === rawNodeId);
     if (!node) continue;
@@ -434,6 +484,7 @@ export function collectPromptNodeMediaUrls(
 async function resolvePromptReferences(
   rawPrompt: string,
   extractMediaReferences: boolean,
+  preserveBindings = false,
 ): Promise<PromptMediaReferences> {
   const store = useAppStore.getState();
   const { nodes } = store;
@@ -487,6 +538,15 @@ async function resolvePromptReferences(
   const videoKeyToIndex = new Map<string, number>();
   const audioKeyToIndex = new Map<string, number>();
 
+  // 仅把解析器生成的媒体位置编码为临时占位符，不重写用户正文中的「图片N」。
+  const tokenPrefix = preserveBindings ? `\uE000${crypto.randomUUID()}:` : '';
+  const tokens: Array<{ kind: MediaReference['kind']; index: number; character?: PromptCharacterBinding }> = [];
+  const mediaLabel = (kind: MediaReference['kind'], index: number, character?: PromptCharacterBinding): string => {
+    if (!preserveBindings) return `${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频'}${index}`;
+    tokens.push({ kind, index, character });
+    return `${tokenPrefix}${tokens.length - 1}\uE001`;
+  };
+
   /** 登记一张参考图并返回它的「图片N」序号；同一张图重复引用只占一个位置 */
   const addImage = (key: string, entry: PromptImageEntry): number => {
     let idx = imageKeyToIndex.get(key);
@@ -517,11 +577,43 @@ async function resolvePromptReferences(
         imageKeyToIndex.set(key, idx);
         imageEntries.push({ url: dataUrl });
       }
-      return `图片${idx}`;
+      return mediaLabel('image', idx);
     }
 
     if (dramaId !== undefined) {
-      const { assetId, referenceImageId } = parseDramaMentionId(dramaId);
+      const { assetId, referenceImageId, actionId, actionMediaId, voiceClipId } = parseDramaMentionId(dramaId);
+      const asset = findDramaAsset(store.dramaAssets, assetId);
+      const characterBinding = (usage: PromptCharacterBinding['usage']): PromptCharacterBinding | undefined =>
+        asset?.kind === 'character' ? { id: asset.id, name: asset.name, usage } : undefined;
+      if (voiceClipId !== undefined) {
+        const voice = resolveDramaVoiceRef(findDramaAsset(store.dramaAssets, assetId), voiceClipId);
+        if (!voice) throw new Error(`角色音频引用已失效：${dramaName || '未命名角色'}`);
+        if (!extractMediaReferences) return voice.url;
+        const key = `drama:${dramaId}`;
+        let idx = audioKeyToIndex.get(key);
+        if (idx === undefined) {
+          idx = audioKeyToIndex.size + 1;
+          audioKeyToIndex.set(key, idx);
+          mediaReferences.push({ kind: 'audio', url: voice.url, filePath: voice.filePath, origin: 'prompt', role: 'reference_audio' });
+        }
+        return mediaLabel('audio', idx, characterBinding(voice.kind));
+      }
+      if (actionId !== undefined) {
+        const media = resolveDramaActionMediaRef(findDramaAsset(store.dramaAssets, assetId), actionId, actionMediaId);
+        if (!media) throw new Error(`动作素材引用已失效：${dramaName || '未命名动作'}`);
+        const key = `drama:${dramaId}`;
+        if (media.kind !== 'video') {
+          return mediaLabel('image', addImage(key, { url: media.url, filePath: media.filePath }), characterBinding('action'));
+        }
+        if (!extractMediaReferences) return media.url;
+        let idx = videoKeyToIndex.get(key);
+        if (idx === undefined) {
+          idx = videoKeyToIndex.size + 1;
+          videoKeyToIndex.set(key, idx);
+          mediaReferences.push({ kind: 'video', url: media.url, filePath: media.filePath, origin: 'prompt', role: 'reference' });
+        }
+        return mediaLabel('video', idx, characterBinding('action'));
+      }
       const mergedUrl = dramaMergedMap.get(dramaId);
       if (mergedUrl) {
         const key = `drama:${dramaId}`;
@@ -531,7 +623,7 @@ async function resolvePromptReferences(
           imageKeyToIndex.set(key, idx);
           imageEntries.push({ url: mergedUrl });
         }
-        return `图片${idx}`;
+        return mediaLabel('image', idx, characterBinding('appearance'));
       }
       const dramaAsset = findDramaAsset(store.dramaAssets, assetId);
       if (dramaAsset) {
@@ -557,7 +649,7 @@ async function resolvePromptReferences(
               sourceUrl: (imgNode?.data?.sourceUrl as string | undefined) || undefined,
             });
           }
-          return `图片${idx}`;
+          return mediaLabel('image', idx, characterBinding('appearance'));
         }
         return formatDramaAssetTextBrief(dramaAsset);
       }
@@ -577,7 +669,7 @@ async function resolvePromptReferences(
           imageKeyToIndex.set(key, idx);
           imageEntries.push({ url: sbUrl, sourceNodeId: rawNodeId });
         }
-        return `图片${idx}`;
+        return mediaLabel('image', idx);
       }
       return '';
     }
@@ -587,7 +679,7 @@ async function resolvePromptReferences(
     const nodeType = (node.data.type as string) || '';
 
     if (nodeType === 'ai-shotlist') {
-      return resolveShotlistMention(node.data as BaseNodeData, nodes, addImage);
+      return resolveShotlistMention(node.data as BaseNodeData, nodes, addImage, (index) => mediaLabel('image', index));
     }
 
     if (
@@ -613,7 +705,7 @@ async function resolvePromptReferences(
               imageKeyToIndex.set(key, idx);
               imageEntries.push({ url: first, sourceNodeId: rawNodeId });
             }
-            return `图片${idx}`;
+            return mediaLabel('image', idx);
           }
         }
         return '';
@@ -643,7 +735,7 @@ async function resolvePromptReferences(
           }
         }
       }
-      return `图片${idx}`;
+      return mediaLabel('image', idx);
     }
 
     if (
@@ -673,7 +765,7 @@ async function resolvePromptReferences(
           sourceUrl: node.data.sourceUrl as string | undefined,
         });
       }
-      return `视频${idx}`;
+      return mediaLabel('video', idx);
     }
     const audioUrl = node.data.audioUrl as string | undefined;
     if (typeof audioUrl === 'string' && audioUrl.trim()) {
@@ -692,7 +784,7 @@ async function resolvePromptReferences(
           sourceUrl: node.data.sourceUrl as string | undefined,
         });
       }
-      return `音频${idx}`;
+      return mediaLabel('audio', idx);
     }
 
     return '';
@@ -731,12 +823,33 @@ async function resolvePromptReferences(
   );
 
   const media = toLegacyReferenceMedia(mergeMediaReferences(imageReferences, mediaReferences));
+  const segments: PromptMediaSegment[] = [];
+  let resolvedPrompt = prompt;
+  if (preserveBindings) {
+    const byKind = {
+      image: imageReferences,
+      video: mediaReferences.filter((reference) => reference.kind === 'video'),
+      audio: mediaReferences.filter((reference) => reference.kind === 'audio'),
+    };
+    let position = 0;
+    resolvedPrompt = prompt.replace(new RegExp(`${tokenPrefix}(\\d+)\uE001`, 'g'), (token, rawIndex: string, offset: number) => {
+      segments.push(prompt.slice(position, offset));
+      const binding = tokens[Number(rawIndex)];
+      const reference = binding && byKind[binding.kind][binding.index - 1];
+      if (!reference) throw new Error('媒体引用解析失败，请重新选择素材');
+      segments.push({ reference, character: binding.character });
+      position = offset + token.length;
+      return `${binding.kind === 'image' ? '图片' : binding.kind === 'video' ? '视频' : '音频'}${binding.index}`;
+    });
+    segments.push(prompt.slice(position));
+  }
   return {
-    prompt,
+    prompt: resolvedPrompt,
     references: media.references,
     imageUrls: media.imageUrls,
     videoUrls: media.videoUrls,
     audioUrls: media.audioUrls,
+    ...(preserveBindings ? { segments } : {}),
   };
 }
 
@@ -747,6 +860,6 @@ export async function resolvePromptWithImageRefs(rawPrompt: string): Promise<{ p
 }
 
 /** 视频生成入口：图片、视频和音频引用都提取为对应的独立媒体参数。 */
-export async function resolvePromptWithMediaRefs(rawPrompt: string): Promise<PromptMediaReferences> {
-  return resolvePromptReferences(rawPrompt, true);
+export async function resolvePromptWithMediaRefs(rawPrompt: string, options: { preserveBindings?: boolean } = {}): Promise<PromptMediaReferences> {
+  return resolvePromptReferences(rawPrompt, true, options.preserveBindings);
 }

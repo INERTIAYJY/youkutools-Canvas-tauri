@@ -7,7 +7,9 @@
  * 文案是面向开发与设计的设计系统术语（类名、变量名保持英文原样），
  * 与 AssetSearchWindow 一样不做逐条 i18n。
  */
+import Select from '../shared/Select';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import StyleGuideMascot from './StyleGuideMascot';
 
 /* ── 分区 id 约定 ──────────────────────────────────────────────────────────
    每个 <Section> 的 id 同时是左侧目录的锚点，目录列表在 StyleGuideWindow.tsx
@@ -411,72 +413,29 @@ function InputsSection() {
 /** 自定义 select：触发器和展开面板与 .ui-menu 完全一致，同时保留隐藏原生 <select> */
 function CustomSelectDemo() {
   const [value, setValue] = useState('flux');
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const options = [
-    { value: 'flux', label: 'FLUX.1 [dev]' },
-    { value: 'sdxl', label: 'SDXL 1.0' },
-    { value: 'kolors', label: '可图 Kolors' },
-    { value: 'custom', label: '自定义（未配置）', disabled: true },
-  ];
-  const selected = options.find((o) => o.value === value);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [open]);
-
+  const [runtime, setRuntime] = useState('blender');
   return (
-    <div className="ui-field" style={{ maxWidth: 240 }}>
+    <div className="ui-field max-w-60">
       <label className="ui-label" htmlFor="sg-select-custom">图像模型</label>
-      <div className="ui-select ui-select--custom" ref={wrapRef}>
-        <button
-          id="sg-select-custom"
-          type="button"
-          className="ui-select__trigger"
-          aria-haspopup="listbox"
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-        >
-          <span className="ui-select__trigger-text">{selected?.label}</span>
-          <svg className="ui-select__chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </button>
-        <select
-          className="ui-select__native"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          tabIndex={-1}
-          aria-hidden="true"
-        >
-          {options.map((o) => (
-            <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>
-          ))}
-        </select>
-        {open ? (
-          <div className="ui-menu" role="listbox">
-            {options.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                role="option"
-                aria-selected={value === o.value}
-                disabled={o.disabled}
-                className={`ui-menu__item${value === o.value ? ' is-active' : ''}${o.disabled ? ' is-disabled' : ''}`}
-                onClick={() => { setValue(o.value); setOpen(false); }}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
+      <Select fixedMenu id="sg-select-custom" value={value} onChange={setValue}
+        options={[
+          { value: 'flux', label: 'FLUX.1 [dev]' },
+          { value: 'sdxl', label: 'SDXL 1.0' },
+          { label: '其他模型', options: [
+            { value: 'kolors', label: '可图 Kolors' },
+            { value: 'custom', label: '自定义（未配置）', disabled: true },
+          ] },
+        ]} />
       <p className="ui-hint">当前值：{value}</p>
+      <label className="ui-label" htmlFor="sg-select-content-width">窄按钮与长选项</label>
+      <Select fixedMenu id="sg-select-content-width" size="sm" className="w-24"
+        value={runtime} onChange={setRuntime}
+        options={[
+          { value: 'light', label: '轻量导演台' },
+          { value: 'blender', label: 'Blender' },
+          { value: 'extended', label: '带摄影机与灯光配置的导演台' },
+        ]} />
+      <p className="ui-hint">菜单按内容宽度展开，宽于或窄于按钮均可，最长不超过屏幕。</p>
     </div>
   );
 }
@@ -544,7 +503,7 @@ function SelectsSection() {
     <Section
       id="sg-selects"
       title="下拉选择"
-      desc="普通选项用原生 .ui-select（可访问性好、键盘可用）；需要图标、分组、危险项或快捷键时再用 .ui-menu 自定义菜单。"
+      desc="选择字段统一复用 Select 组件；支持键盘、分组及禁用项，菜单挂到页面顶层以避免父容器裁剪。"
     >
       <Demo label="自定义下拉（视觉与 .ui-menu 一致）" code="ui-select ui-select--custom > ui-select__trigger + ui-select__native + ui-menu">
         <CustomSelectDemo />
@@ -1050,7 +1009,7 @@ function LayoutSection() {
 /* ==========================================================================
    内容装配
    ========================================================================== */
-export function StyleGuideContent() {
+export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
   return (
     <>
       <header className="mb-7">
@@ -1073,6 +1032,9 @@ export function StyleGuideContent() {
       <CardsSection />
       <BadgesSection />
       <FeedbackSection />
+      <Section id="sg-mascot" title="吉祥物" desc="预览真实吉祥物的状态、表情与身体动作，支持循环演示和不同尺寸查看。">
+        <StyleGuideMascot theme={theme} />
+      </Section>
       <LayoutSection />
     </>
   );

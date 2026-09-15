@@ -34,11 +34,26 @@ interface BuiltInWorkflowSpec {
   id: string;
   name: string;
   fileName: string;
+  category?: WorkflowDefinition['category'];
   /** 用户没 @ 具体节点时，提示词与参考媒体默认送进这些节点 */
   defaultNodes: Partial<Record<WorkflowIONodeType, string>>;
 }
 
 const BUILT_IN_SPECS: BuiltInWorkflowSpec[] = [
+  {
+    id: 'builtin-auk-tts',
+    name: 'AuK 文生语音',
+    fileName: 'auk-tts.json',
+    category: 'ai-audio',
+    defaultNodes: { prompt: '4' },
+  },
+  {
+    id: 'builtin-auk-voice-cloning',
+    name: 'AuK 参考音频与声音克隆',
+    fileName: 'auk-voice-cloning.json',
+    category: 'ai-audio',
+    defaultNodes: { prompt: '10', audio: '7' },
+  },
   {
     id: 'builtin-minimax-h3-t2v',
     name: 'MiniMax H3 文生视频',
@@ -82,7 +97,7 @@ function toWorkflowDefinition(spec: BuiltInWorkflowSpec, createdAt: number): Wor
   return {
     id: spec.id,
     name: spec.name,
-    category: 'ai-video',
+    category: spec.category ?? 'ai-video',
     fileName: spec.fileName,
     fileContent,
     editableContent: readWorkflowUiFile(spec.fileName),

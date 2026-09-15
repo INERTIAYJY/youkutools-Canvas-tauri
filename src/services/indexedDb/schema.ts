@@ -3,10 +3,13 @@
  * 声明数据库名、版本与全部 object store 常量（项目、工作流、配置、对话、消息、AgentTask、
  * 项目记忆、角色、子智能体、视频编辑器项目等），openDB 按版本声明补齐缺失的 store/index 并保留旧数据升级。
  */
+import { toProjectSummaryRecord } from './projectSummary';
+
 export const DB_NAME = 'ai-canvas-db';
-export const DB_VERSION = 20;
+export const DB_VERSION = 21;
 
 export const STORE_PROJECTS = 'projects';
+export const STORE_PROJECT_SUMMARIES = 'projectSummaries';
 export const STORE_WORKFLOWS = 'workflows';
 export const STORE_CONFIG = 'config';
 export const STORE_PRESETS = 'presets';
@@ -33,12 +36,34 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 /** 打开数据库并按历史版本声明补齐缺失的 store/index。 */
 export function openDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
+  const opening = new Promise<IDBDatabase>((resolve, reject) => {
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_PROJECTS)) {
         db.createObjectStore(STORE_PROJECTS, { keyPath: 'id' });
+      }
+      const needsProjectSummaryBackfill = !db.objectStoreNames.contains(STORE_PROJECT_SUMMARIES);
+      const projectSummaryStore = needsProjectSummaryBackfill
+        ? db.createObjectStore(STORE_PROJECT_SUMMARIES, { keyPath: 'id' })
+        : request.transaction!.objectStore(STORE_PROJECT_SUMMARIES);
+      if (needsProjectSummaryBackfill) {
+        // IndexedDB 没有字段投影能力。旧库升级必须读一次完整项目，但用 cursor 逐条处理，
+        // 避免 getAll() 同时结构化克隆全部大型画布记录；后续启动只读取轻量摘要。
+        const cursorRequest = request.transaction!.objectStore(STORE_PROJECTS).openCursor();
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return;
+          const summary = toProjectSummaryRecord(cursor.value);
+          if (summary) projectSummaryStore.put(summary);
+          cursor.continue();
+        };
       }
       if (!db.objectStoreNames.contains(STORE_WORKFLOWS)) {
         db.createObjectStore(STORE_WORKFLOWS, { keyPath: 'id' });
@@ -132,8 +157,34 @@ export function openDB(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_PLUGINS, { keyPath: 'id' });
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      // blocked 请求无法取消；调用方已收到失败后，迟到的连接必须释放。
+      if (settled) {
+        db.close();
+        return;
+      }
+      settled = true;
+      const invalidate = () => {
+        if (dbPromise === opening) dbPromise = null;
+      };
+      db.onversionchange = () => {
+        db.close();
+        invalidate();
+      };
+      db.onclose = invalidate;
+      resolve(db);
+    };
+    request.onerror = () => fail(request.error);
+    request.onblocked = () => fail(new DOMException(
+      '本地数据库正在等待其他软件窗口释放，请关闭其他实例后重试',
+      'InvalidStateError',
+    ));
   });
-  return dbPromise;
+  dbPromise = opening;
+  // 同时覆盖异步请求失败和 indexedDB.open 同步抛错；旧请求不得清掉新连接。
+  void opening.catch(() => {
+    if (dbPromise === opening) dbPromise = null;
+  });
+  return opening;
 }

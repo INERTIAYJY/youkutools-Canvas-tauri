@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WorkflowPanel 工作流面板 — 管理 RunningHUB 工作流定义，支持导入 JSON、分类筛选、拖放到画布
  * 使用 framer-motion 驱动面板进出场动画
  */
@@ -11,6 +11,8 @@ import { extractComfyUIIONodes, openComfyUIWorkflowEditor } from '../services/co
 import { comfyBaseUrlFor, DEFAULT_COMFY_URL } from '../services/comfyServers';
 import PopupCloseButton from './shared/PopupCloseButton';
 import Select from './shared/Select';
+import RunningHubWorkflowImport from './runninghub/RunningHubWorkflowImport';
+import { readBinaryFile } from '../services/fileService';
 
 const CATEGORIES: { value: WorkflowCategory; label: string }[] = [
   { value: 'ai-text', label: '生成文本' },
@@ -112,6 +114,8 @@ export default function WorkflowPanel() {
     workflows,
     workflowPanelOpen,
     setWorkflowPanelOpen,
+    importSource,
+    setImportSource,
     addWorkflow,
     deleteWorkflow,
     updateWorkflow,
@@ -123,6 +127,8 @@ export default function WorkflowPanel() {
       workflows: s.workflows,
       workflowPanelOpen: s.workflowPanelOpen,
       setWorkflowPanelOpen: s.setWorkflowPanelOpen,
+      importSource: s.workflowPanelSource,
+      setImportSource: s.setWorkflowPanelSource,
       addWorkflow: s.addWorkflow,
       deleteWorkflow: s.deleteWorkflow,
       updateWorkflow: s.updateWorkflow,
@@ -133,6 +139,9 @@ export default function WorkflowPanel() {
   );
 
   const [name, setName] = useState('');
+  const [editingCloud, setEditingCloud] = useState<WorkflowDefinition>();
+  const [editorOpen, setEditorOpen] = useState<{ workflowId: string; phase: 'checking' | 'opening' | 'ready' | 'error'; detail: string }>();
+  const editorOpeningRef = useRef(false);
   const [category, setCategory] = useState<WorkflowCategory>('ai-text');
   const [fileName, setFileName] = useState('');
   const [fileContent, setFileContent] = useState('');
@@ -146,6 +155,7 @@ export default function WorkflowPanel() {
   // 重置会覆盖改过的内置工作流，点两下才执行
   const [resetArmed, setResetArmed] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
 
   // Close on Escape
   useEffect(() => {
@@ -176,7 +186,7 @@ export default function WorkflowPanel() {
   }, [setWorkflowPanelOpen, resetForm]);
 
   // 点击选择与拖放共用的读取入口
-  const acceptFile = useCallback(async (file: File) => {
+  const acceptFile = useCallback(async (file: Pick<File, 'name' | 'text'>, isCurrent: () => boolean = () => true) => {
     setUploadError('');
     setUploadSuccess('');
     if (!/\.json$/i.test(file.name)) {
@@ -185,6 +195,7 @@ export default function WorkflowPanel() {
     }
     try {
       const content = await file.text();
+      if (!isCurrent()) return;
       // Validate it's likely a ComfyUI workflow
       const parsed = JSON.parse(content);
       if (!parsed || typeof parsed !== 'object') {
@@ -198,6 +209,7 @@ export default function WorkflowPanel() {
       // Auto-fill name from filename
       setName((current) => current || file.name.replace(/\.json$/i, ''));
     } catch {
+      if (!isCurrent()) return;
       setUploadError('JSON 解析失败，请检查文件格式');
     }
   }, []);
@@ -209,10 +221,61 @@ export default function WorkflowPanel() {
 
   const handleDrop = useCallback((event: React.DragEvent) => {
     event.preventDefault();
+    event.stopPropagation();
     setDragOver(false);
     const file = event.dataTransfer.files?.[0];
     if (file) void acceptFile(file);
   }, [acceptFile]);
+
+  // 桌面文件拖放由 Tauri 接管，不会触发上面的 HTML5 onDrop。
+  // 画布按 workflowPanelOpen 跳过原生拖放，本面板只接收导入区内的文件。
+  useEffect(() => {
+    if (!workflowPanelOpen || importSource !== 'comfyui' || !('__TAURI_INTERNALS__' in window)) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+      if (cancelled) return;
+      const release = await getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+        if (cancelled) return;
+        if (payload.type === 'leave') {
+          setDragOver(false);
+          return;
+        }
+        const rect = dropZoneRef.current?.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const x = payload.position.x / scale;
+        const y = payload.position.y / scale;
+        const inside = !!rect && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+        setDragOver(inside && payload.type !== 'drop');
+        if (payload.type !== 'drop' || !inside) return;
+        const path = payload.paths[0];
+        if (!path) return;
+        let readFailed = false;
+        await acceptFile({
+          name: path.split(/[/\\]/).pop() || '',
+          text: async () => {
+            try {
+              return new TextDecoder('utf-8').decode(await readBinaryFile(path));
+            } catch {
+              if (!cancelled) setUploadError('工作流文件读取失败，请重新拖入或点击选择文件');
+              readFailed = true;
+              return '';
+            }
+          },
+        }, () => !cancelled && !readFailed);
+      });
+      if (cancelled) release();
+      else unlisten = release;
+    })().catch(() => {
+      if (!cancelled) setUploadError('拖放接收不可用，请点击选择工作流文件');
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      setDragOver(false);
+    };
+  }, [workflowPanelOpen, importSource, acceptFile]);
 
   // 清掉已选文件，名称与分类留着，方便换个文件继续
   const handleClearFile = useCallback((event: React.MouseEvent) => {
@@ -258,9 +321,9 @@ export default function WorkflowPanel() {
   const handleDelete = useCallback(
     (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
-      deleteWorkflow(id);
+      void deleteWorkflow(id).catch(() => showToast('删除工作流失败，请重试', 'error'));
     },
-    [deleteWorkflow]
+    [deleteWorkflow, showToast]
   );
 
   // 默认 IO 节点：用户没 @ 该类型节点时，提示词框里的同类内容自动注入这里
@@ -296,11 +359,26 @@ export default function WorkflowPanel() {
 
   const handleEdit = useCallback(async (workflow: WorkflowDefinition, event: React.MouseEvent) => {
     event.stopPropagation();
+    if (workflow.adapterType === 'workflow-api') {
+      useAppStore.getState().setWorkflowPanelOpen(false);
+      useAppStore.getState().setSettingsOpen(true, 'api');
+      useAppStore.getState().setPendingApiKeyConnectionId(workflow.workflowApi?.connectionId ?? null);
+      useAppStore.getState().showToast('在工作流 API 连接中编辑路径、参数与输出类型'); return;
+    }
+    if (workflow.adapterType === 'runninghub' && workflow.runninghub) {
+      setImportSource(workflow.runninghub.kind); setEditingCloud(workflow); return;
+    }
+    if (editorOpeningRef.current) return;
+    editorOpeningRef.current = true;
+    setEditorOpen({ workflowId: workflow.id, phase: 'checking', detail: '正在检查工作流…' });
     try {
-      const missing = await openComfyUIWorkflowEditor(
+      const result = await openComfyUIWorkflowEditor(
         comfyBaseUrlFor(workflow.id) || DEFAULT_COMFY_URL,
         workflow,
+        (phase) => setEditorOpen({ workflowId: workflow.id, phase, detail: phase === 'checking' ? '正在检查工作流…' : '正在载入 ComfyUI 画布，请稍候…' }),
       );
+      const missing = result.missingNodeClasses;
+      setEditorOpen({ workflowId: workflow.id, phase: 'ready', detail: `${result.detail} · ${result.nodeCount} 个画布节点${missing.length ? `；缺少节点：${missing.join('、')}` : ''}` });
       // 缺节点不拦，ComfyUI 会把缺的节点标红；这里只提醒一句缺了什么
       if (missing.length > 0) {
         showToast(`已打开，但 ComfyUI 缺少这些节点：${missing.join('、')}`, 'error');
@@ -311,8 +389,11 @@ export default function WorkflowPanel() {
         ? error
         : error instanceof Error ? error.message : '无法在 ComfyUI 中打开工作流';
       showToast(message, 'error');
+      setEditorOpen({ workflowId: workflow.id, phase: 'error', detail: message });
+    } finally {
+      editorOpeningRef.current = false;
     }
-  }, [showToast]);
+  }, [showToast, setImportSource]);
 
   const handleResetBuiltIns = useCallback(() => {
     if (!resetArmed) {
@@ -326,12 +407,15 @@ export default function WorkflowPanel() {
       .catch(() => showToast('恢复内置工作流失败', 'error'));
   }, [resetArmed, resetBuiltIns, showToast]);
 
-  // Filter workflows by category for the preview list
+  // 来源与输出分类共同过滤，不把其他执行平台混入当前来源。
+  const sourceWorkflows = workflows.filter((workflow) => importSource === 'comfyui'
+    ? !workflow.adapterType || workflow.adapterType === 'comfyui'
+    : workflow.adapterType === 'runninghub' && workflow.runninghub?.kind === importSource);
   const workflowsByCategory = CATEGORIES
     .filter((cat) => listFilter === 'all' || cat.value === listFilter)
     .map((cat) => ({
       ...cat,
-      items: workflows.filter((w) => w.category === cat.value),
+      items: sourceWorkflows.filter((w) => w.category === cat.value),
     }))
     .filter((g) => g.items.length > 0);
 
@@ -363,9 +447,12 @@ export default function WorkflowPanel() {
             >
         {/* 左卡片：上传与添加 */}
         <div className="wf-panel-card wf-panel-import">
-          <span className="wf-section-title">导入 ComfyUI 工作流</span>
+          <span className="wf-section-title">导入工作流</span>
+          <label className="mt-3 flex flex-col gap-1 text-xs">来源<Select fixedMenu className="min-w-0 w-full" value={importSource} onChange={(selectedOptionValue) => { setImportSource(selectedOptionValue as typeof importSource); setEditingCloud(undefined); setListFilter('all'); }}>
+            <option value="comfyui">ComfyUI 工作流</option><option value="workflow">RunningHub 云工作流</option><option value="app">RunningHub AI 应用</option>
+          </Select></label>
           <div className="wf-section-rule" />
-
+          {importSource !== 'comfyui' ? <RunningHubWorkflowImport key={`${importSource}:${editingCloud?.id ?? 'new'}`} kind={importSource} editing={editingCloud?.runninghub?.kind === importSource ? editingCloud : undefined} onSaved={() => { setEditingCloud(undefined); showToast('已保存云工作流', 'success'); }} /> : <>
           {/* Name */}
           <div className="wf-field">
             <label className="wf-label">工作流名称</label>
@@ -401,6 +488,7 @@ export default function WorkflowPanel() {
           <div className="wf-field">
             <label className="wf-label">工作流文件</label>
             <motion.div
+              ref={dropZoneRef}
               className={`ui-dropzone${dragOver ? ' is-dragover' : ''}`}
               role="button"
               tabIndex={0}
@@ -411,8 +499,9 @@ export default function WorkflowPanel() {
                   void handlePickFile();
                 }
               }}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
+              onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }}
+              onDragLeave={(e) => { e.stopPropagation(); setDragOver(false); }}
               onDrop={handleDrop}
               whileTap={{ scale: 0.995 }}
             >
@@ -526,6 +615,7 @@ export default function WorkflowPanel() {
               )}
             </AnimatePresence>
           </div>
+          </>}
         </div>
 
         {/* 右卡片：已导入工作流管理 */}
@@ -552,7 +642,7 @@ export default function WorkflowPanel() {
           <div className="wf-list-header">
             <span className="wf-section-title">
               已导入工作流
-              <span className="wf-count">{workflows.length}</span>
+              <span className="wf-count">{sourceWorkflows.length}</span>
             </span>
             <div className="wf-filter-row">
               {LIST_FILTERS.map((cat) => (
@@ -571,7 +661,7 @@ export default function WorkflowPanel() {
 
           {/* 顶栏与筛选固定，只有提示与列表滚动 */}
           <div className="wf-list-scroll">
-          <p className="wf-hint" role="note">
+          {importSource === 'comfyui' && <p className="wf-hint" role="note">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
               <line x1="12" y1="9" x2="12" y2="13" />
@@ -580,10 +670,10 @@ export default function WorkflowPanel() {
             <span>
               未设置默认节点时，ComfyUI 调用需要在提示词中 <code className="wf-hint-code">@对应节点</code>，提示词或参考图才会写入对应输入。展开下方工作流卡片，点击节点徽章设为该类型默认节点（显示为 <code className="wf-hint-code">★</code>），调用时即可自动注入，无须每次 <code className="wf-hint-code">@</code>。
             </span>
-          </p>
+          </p>}
 
           <AnimatePresence mode="popLayout">
-            {workflows.length > 0 && workflowsByCategory.length === 0 ? (
+            {sourceWorkflows.length > 0 && workflowsByCategory.length === 0 ? (
               <motion.div
                 key="filtered-empty"
                 className="wf-empty"
@@ -592,7 +682,7 @@ export default function WorkflowPanel() {
               >
                 <span>该分类下暂无工作流</span>
               </motion.div>
-            ) : workflows.length === 0 ? (
+            ) : sourceWorkflows.length === 0 ? (
               <motion.div
                 key="empty"
                 className="wf-empty"
@@ -605,7 +695,7 @@ export default function WorkflowPanel() {
                   <line x1="3" y1="9" x2="21" y2="9" />
                   <line x1="9" y1="21" x2="9" y2="9" />
                 </svg>
-                <span>暂无工作流，请导入 ComfyUI 工作流文件</span>
+                <span>{importSource === 'comfyui' ? '暂无 ComfyUI 工作流，请从左侧导入文件' : importSource === 'workflow' ? '暂无 RunningHub 云工作流，请从左侧导入定义' : '暂无 RunningHub AI 应用，请从左侧导入定义'}</span>
               </motion.div>
             ) : (
               <motion.div key="list" className="wf-list">
@@ -649,14 +739,14 @@ export default function WorkflowPanel() {
                                 triggerClassName="wf-item-cat-trigger"
                                 value={wf.category}
                                 title="修改分类"
-                                options={CATEGORIES.map((cat) => ({ value: cat.value, label: cat.label }))}
+                                options={CATEGORIES.filter((cat) => wf.adapterType === 'workflow-api' ? cat.value === wf.category : wf.adapterType !== 'runninghub' || cat.value !== 'ai-text').map((cat) => ({ value: cat.value, label: cat.label }))}
                                 onChange={(value) => {
                                   updateWorkflow(wf.id, { category: value as WorkflowCategory })
                                     .catch(() => showToast('修改分类失败', 'error'));
                                 }}
                               />
                               {/* 只有配了多台服务端才需要选：单台时这一栏是纯噪音 */}
-                              {(comfyServers?.length ?? 0) > 0 && (
+                              {!['runninghub', 'workflow-api'].includes(wf.adapterType ?? '') && (comfyServers?.length ?? 0) > 0 && (
                                 <Select
                                   className="wf-item-cat"
                                   triggerClassName="wf-item-cat-trigger"
@@ -696,17 +786,20 @@ export default function WorkflowPanel() {
                             )}
                             <motion.button
                               type="button"
-                              className="wf-item-del wf-item-edit"
+                              className="wf-item-del wf-item-edit disabled:opacity-50 disabled:cursor-wait"
                               onClick={(event) => void handleEdit(wf, event)}
-                              data-tooltip="在 ComfyUI 中编辑"
+                              disabled={wf.adapterType !== 'runninghub' && (editorOpen?.phase === 'checking' || editorOpen?.phase === 'opening')}
+                              aria-label={`编辑工作流：${wf.name}`}
+                              aria-busy={editorOpen?.workflowId === wf.id && (editorOpen.phase === 'checking' || editorOpen.phase === 'opening')}
+                              data-tooltip={wf.adapterType === 'workflow-api' ? '编辑工作流 API 连接' : wf.adapterType === 'runninghub' ? '编辑云工作流参数' : '在 ComfyUI 中编辑'}
                               data-tooltip-pos="left"
                               whileHover={{ scale: 1.1 }}
                               whileTap={{ scale: 0.9 }}
                             >
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              {editorOpen?.workflowId === wf.id && (editorOpen.phase === 'checking' || editorOpen.phase === 'opening') ? <span className="ui-spinner" aria-hidden="true" /> : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                 <path d="M12 20h9" />
                                 <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                              </svg>
+                              </svg>}
                             </motion.button>
                             <motion.button
                               type="button"
@@ -724,6 +817,13 @@ export default function WorkflowPanel() {
                             </motion.button>
                           </div>
                         </div>{/* /wf-item-row */}
+
+                        {wf.adapterType !== 'runninghub' && editorOpen?.workflowId === wf.id && (
+                          <div className={`ui-alert mt-2 flex-wrap ${editorOpen.phase === 'error' ? 'ui-alert--danger' : 'ui-alert--info'}`} role={editorOpen.phase === 'error' ? 'alert' : 'status'}>
+                            <span className="min-w-0 flex-1 break-words text-xs">{editorOpen.detail}</span>
+                            {editorOpen.phase === 'error' && <button type="button" className="ui-btn ui-btn--sm" onClick={(event) => void handleEdit(wf, event)}>重试打开</button>}
+                          </div>
+                        )}
 
                         <AnimatePresence initial={false}>
                           {expanded && nodeCount > 0 && (

@@ -7,7 +7,7 @@ import {
   isEligibleCharacterVoiceNode,
 } from '../../src/store/store.dramaAssets';
 import { filterHiddenCanvasElements } from '../../src/store/store.nodes';
-import type { DramaCharacter } from '../../src/types/dramaAssets';
+import type { CharacterActionMedia, DramaCharacter } from '../../src/types/dramaAssets';
 import { emptyDramaAssetLibrary } from '../../src/types/dramaAssets';
 import type { BaseNodeData } from '../../src/types';
 
@@ -56,6 +56,218 @@ function deferred<T>() {
   const promise = new Promise<T>((next) => { resolve = next; });
   return { promise, resolve };
 }
+
+describe('角色声音移除与画布来源', () => {
+  function setupVoice(sourceNodeId?: string) {
+    const node: Node<BaseNodeData> = {
+      id: 'audio-1', type: 'ai-audio', position: { x: 20, y: 30 },
+      data: { type: 'ai-audio', label: '生成声音', audioUrl: 'https://cdn/voice.wav', hiddenByCharacterLibrary: true },
+    };
+    const edge: Edge = { id: 'audio-edge', source: node.id, target: 'next' };
+    const character = sampleCharacter({
+      primaryVoiceClipId: 'voice',
+      voiceClips: [{ id: 'voice', kind: 'timbre', audioUrl: node.data.audioUrl, sourceNodeId, transcript: '', createdAt: 1, updatedAt: 1 }],
+    });
+    useAppStore.setState({ nodes: [node], edges: [edge], dramaAssets: { ...emptyDramaAssetLibrary(), characters: [character] } });
+    return { node, edge, character };
+  }
+
+  it('解除关联恢复隐藏节点，保留节点内容和连线', async () => {
+    const { node, edge } = setupVoice('audio-1');
+    const store = useAppStore.getState();
+    expect(await store.removeCharacterVoiceClip('project', 'char_1', 'voice')).toBe(true);
+    const state = useAppStore.getState();
+    expect(state.dramaAssets.characters[0].voiceClips).toEqual([]);
+    expect(state.dramaAssets.characters[0].primaryVoiceClipId).toBeUndefined();
+    expect(state.nodes).toEqual([{ ...node, data: { ...node.data, hiddenByCharacterLibrary: false } }]);
+    expect(state.edges).toEqual([edge]);
+    expect(state.selectedNodeIds).toEqual([]);
+  });
+
+  it('移除上传声音只删除条目，不按相同 URL 猜测或恢复画布节点', async () => {
+    const { node, edge } = setupVoice();
+    expect(await useAppStore.getState().removeCharacterVoiceClip('project', 'char_1', 'voice')).toBe(true);
+    expect(useAppStore.getState().dramaAssets.characters[0].voiceClips).toEqual([]);
+    expect(useAppStore.getState().nodes).toEqual([node]);
+    expect(useAppStore.getState().edges).toEqual([edge]);
+  });
+
+  it('用上传声音生成台词不会把音频副本登记为来源关联', () => {
+    setupVoice();
+    const id = useAppStore.getState().createVoiceOverNodeFromCharacterVoice('project', 'char_1', 'voice');
+    const state = useAppStore.getState();
+    expect(id).toBeTruthy();
+    expect(state.dramaAssets.characters[0].voiceClips?.[0].sourceNodeId).toBeUndefined();
+    const edge = state.edges.find((item) => item.target === id);
+    expect(edge).toBeDefined();
+    expect(state.nodes.find((node) => node.id === edge?.source)?.data.audioUrl).toBe('https://cdn/voice.wav');
+  });
+
+  it('原关联节点已删除时可移除声音，不创建替代节点', async () => {
+    setupVoice('deleted-node');
+    const before = useAppStore.getState().nodes;
+    expect(await useAppStore.getState().removeCharacterVoiceClip('project', 'char_1', 'voice')).toBe(true);
+    expect(useAppStore.getState().nodes).toBe(before);
+  });
+
+  it('声音保存失败时不解除关联或恢复节点', async () => {
+    const { node, character } = setupVoice('audio-1');
+    useAppStore.setState({ saveCharacterCard: vi.fn(async () => false) });
+    expect(await useAppStore.getState().removeCharacterVoiceClip('project', 'char_1', 'voice')).toBe(false);
+    expect(useAppStore.getState().nodes).toEqual([node]);
+    expect(useAppStore.getState().dramaAssets.characters).toEqual([character]);
+  });
+
+  it.each(['project', 'revision', 'deleted-node'])('等待保存期间 %s 变化不会恢复过期节点', async (change) => {
+    setupVoice('audio-1');
+    const pending = deferred<boolean>();
+    useAppStore.setState({ saveCharacterCard: vi.fn(() => pending.promise) });
+    const result = useAppStore.getState().removeCharacterVoiceClip('project', 'char_1', 'voice');
+    if (change === 'project') useAppStore.setState({ currentProjectId: 'p2' });
+    if (change === 'revision') useAppStore.getState().setCanvasRevision(1);
+    if (change === 'deleted-node') useAppStore.setState({ nodes: [] });
+    pending.resolve(true);
+    expect(await result).toBe(true);
+    expect(useAppStore.getState().nodes[0]?.data.hiddenByCharacterLibrary).not.toBe(false);
+  });
+});
+
+const actionMedia: CharacterActionMedia = {
+  id: 'media-1', kind: 'image', name: '站立', url: 'https://cdn/action.png', createdAt: 1, updatedAt: 1,
+};
+
+function setupActionCapture() {
+  useAppStore.setState({
+    dramaAssets: { ...emptyDramaAssetLibrary(), characters: [sampleCharacter()] },
+    globalCharacters: [sampleCharacter()],
+    selectedNodeIds: ['action-node'],
+    nodes: [{
+      id: 'action-node', type: 'source-image', selected: true, position: { x: 0, y: 0 },
+      data: { type: 'source-image', label: '动作素材', imageUrl: actionMedia.url },
+    }],
+  });
+}
+
+describe('character action canvas visibility', () => {
+  it.each([true, false])('captures a new action with hideNode=%s and keeps its node identity', async (hideNode) => {
+    setupActionCapture();
+    const pending = deferred<string>();
+    const save = vi.fn(async () => 'p1').mockImplementationOnce(() => pending.promise);
+    useAppStore.setState({ saveCurrentProjectSilent: save });
+    const result = useAppStore.getState().addCharacterAction('project', 'char_1', {
+      category: 'standing', name: '站立', prompt: '', media: [actionMedia],
+    }, { nodeId: 'action-node', hideNode });
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).not.toBe(true);
+    pending.resolve('p1');
+    const actionId = await result;
+    expect(actionId).toBeTruthy();
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toEqual([
+      { scope: 'project', characterId: 'char_1', actionId, mediaId: 'media-1' },
+    ]);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary === true).toBe(hideNode);
+    expect(useAppStore.getState().selectedNodeIds).toEqual(hideNode ? [] : ['action-node']);
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+
+  it('appends media, preserves reference links and supports showing and hiding repeatedly', async () => {
+    setupActionCapture();
+    const store = useAppStore.getState();
+    store.linkNodeToCharacter('action-node', {
+      scope: 'project', characterId: 'char_1', referenceImageId: 'ref-1',
+    }, false);
+    const actionId = await store.addCharacterAction('project', 'char_1', { category: 'standing', name: '站立', prompt: '' });
+    expect(await store.addCharacterActionMedia('project', 'char_1', actionId!, [actionMedia], {
+      nodeId: 'action-node', hideNode: true,
+    })).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toHaveLength(2);
+    store.setCharacterLibraryNodeHidden('action-node', false);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(false);
+    store.setCharacterLibraryNodeHidden('action-node', true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+    // 再收纳为参考图也不能覆盖动作关联。
+    store.linkNodeToCharacter('action-node', {
+      scope: 'project', characterId: 'char_1', referenceImageId: 'ref-2',
+    }, false);
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toHaveLength(2);
+    await store.removeCharacterActionMedia('project', 'char_1', actionId!, 'media-1');
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toEqual([
+      { scope: 'project', characterId: 'char_1', referenceImageId: 'ref-2' },
+    ]);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+  });
+
+  it.each(['project', 'global'] as const)('does not hide or link a node when %s persistence fails', async (scope) => {
+    setupActionCapture();
+    if (scope === 'project') useAppStore.setState({ saveCurrentProjectSilent: vi.fn(async () => undefined) });
+    else characterLibraryMocks.saveGlobalCharacterCard.mockRejectedValueOnce(new Error('failed'));
+    expect(await useAppStore.getState().addCharacterAction(scope, 'char_1', {
+      category: 'standing', name: '站立', prompt: '', media: [actionMedia],
+    }, { nodeId: 'action-node', hideNode: true })).toBeNull();
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).not.toBe(true);
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toBeUndefined();
+    expect(useAppStore.getState().dramaAssets.characters[0].actions).toBeUndefined();
+    expect(useAppStore.getState().selectedNodeIds).toEqual(['action-node']);
+  });
+
+  it.each(['project', 'revision', 'deleted-node'])('does not hide stale nodes after a %s change during saving', async (change) => {
+    setupActionCapture();
+    const pending = deferred<string>();
+    useAppStore.setState({ saveCurrentProjectSilent: vi.fn(() => pending.promise) });
+    const result = useAppStore.getState().addCharacterAction('project', 'char_1', {
+      category: 'standing', name: '站立', prompt: '', media: [actionMedia],
+    }, { nodeId: 'action-node', hideNode: true });
+    if (change === 'project') useAppStore.setState({ currentProjectId: 'p2' });
+    if (change === 'revision') useAppStore.getState().setCanvasRevision(1);
+    if (change === 'deleted-node') useAppStore.setState({ nodes: [] });
+    pending.resolve('p1');
+    expect(await result).toBeTruthy();
+    expect(useAppStore.getState().nodes[0]?.data.hiddenByCharacterLibrary).not.toBe(true);
+    expect(useAppStore.getState().nodes[0]?.data.characterLibraryLinks).toBeUndefined();
+  });
+
+  it('links global media by stable ids even when global storage rewrites the media url', async () => {
+    setupActionCapture();
+    characterLibraryMocks.saveGlobalCharacterCard.mockImplementation(async (character) => ({
+      ...character,
+      actions: character.actions?.map((action) => ({
+        ...action, media: action.media?.map((media) => ({ ...media, url: 'asset://global/action.png' })),
+      })),
+    }));
+    const actionId = await useAppStore.getState().addCharacterAction('global', 'char_1', {
+      category: 'standing', name: '站立', prompt: '', media: [actionMedia],
+    }, { nodeId: 'action-node', hideNode: true });
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toEqual([
+      { scope: 'global', characterId: 'char_1', actionId, mediaId: 'media-1' },
+    ]);
+    expect(useAppStore.getState().globalCharacters[0].actions?.[0].media?.[0].url).toBe('asset://global/action.png');
+  });
+
+  it.each(['media', 'action', 'character'])('restores the node when its last %s association is removed', async (removal) => {
+    setupActionCapture();
+    const store = useAppStore.getState();
+    const actionId = await store.addCharacterAction('project', 'char_1', {
+      category: 'standing', name: '站立', prompt: '', media: [actionMedia],
+    }, { nodeId: 'action-node', hideNode: true });
+    if (removal === 'media') await store.removeCharacterActionMedia('project', 'char_1', actionId!, 'media-1');
+    if (removal === 'action') await store.removeCharacterAction('project', 'char_1', actionId!);
+    if (removal === 'character') store.deleteDramaAsset('character', 'char_1');
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(false);
+    expect(useAppStore.getState().nodes[0].data.characterLibraryLinks).toBeUndefined();
+  });
+
+  it('can undo and redo canvas hiding without deleting the saved action', async () => {
+    setupActionCapture();
+    const store = useAppStore.getState();
+    await store.addCharacterAction('project', 'char_1', {
+      category: 'standing', name: '站立', prompt: '', media: [actionMedia],
+    }, { nodeId: 'action-node', hideNode: true });
+    expect(await store.undo()).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).not.toBe(true);
+    expect(useAppStore.getState().dramaAssets.characters[0].actions).toHaveLength(1);
+    expect(await store.redo()).toBe(true);
+    expect(useAppStore.getState().nodes[0].data.hiddenByCharacterLibrary).toBe(true);
+  });
+});
 
 describe('dramaAssets store', () => {
   it('counts only assets created after the library was viewed', () => {

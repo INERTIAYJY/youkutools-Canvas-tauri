@@ -18,7 +18,7 @@
 
 import type { Node } from '@xyflow/react';
 import type { ChatConversation, ChatMessage } from '../../types/chat';
-import type { BaseNodeData, GeneralModelConfig } from '../../types';
+import type { BaseNodeData, GeneralModelConfig, ModelGroup } from '../../types';
 import type { SkillPickerOption } from '../../types/agentPackage';
 import type { DramaAssetLibrary } from '../../types/dramaAssets';
 import type {
@@ -45,6 +45,8 @@ export interface ChatStateSnapshot {
   projectId: string | null;
   projectName?: string;
   generalModels: GeneralModelConfig[];
+  /** 主窗口按配置投影的文本模型分组；仅含选择器元数据，不含厂商凭据或地址。 */
+  assistantModelGroups: ModelGroup[];
   assistantModelId?: string;
   assistantImageModelId?: string;
   assistantVideoModelId?: string;
@@ -74,6 +76,7 @@ export interface ChatStatePatch {
     projectId: string | null;
     projectName: string | null;
     generalModels: GeneralModelConfig[];
+    assistantModelGroups: ModelGroup[];
     assistantModelId: string | null;
     assistantImageModelId: string | null;
     assistantVideoModelId: string | null;
@@ -175,6 +178,7 @@ export function createChatStatePatch(
   setChangedField(fields, 'projectId', previous.projectId, next.projectId);
   setChangedField(fields, 'projectName', previous.projectName, next.projectName);
   setChangedField(fields, 'generalModels', previous.generalModels, next.generalModels);
+  setChangedField(fields, 'assistantModelGroups', previous.assistantModelGroups, next.assistantModelGroups);
   setChangedField(fields, 'assistantModelId', previous.assistantModelId, next.assistantModelId);
   setChangedField(fields, 'assistantImageModelId', previous.assistantImageModelId, next.assistantImageModelId);
   setChangedField(fields, 'assistantVideoModelId', previous.assistantVideoModelId, next.assistantVideoModelId);
@@ -231,6 +235,7 @@ export function applyChatStatePatch(
     localFileGrants: fields.localFileGrants === null
       ? undefined
       : (fields.localFileGrants ?? current.localFileGrants),
+    assistantModelGroups: fields.assistantModelGroups ?? current.assistantModelGroups,
     nodes: fields.nodes ?? current.nodes,
     dramaAssets: fields.dramaAssets ?? current.dramaAssets,
     skillOptions: fields.skillOptions ?? current.skillOptions,

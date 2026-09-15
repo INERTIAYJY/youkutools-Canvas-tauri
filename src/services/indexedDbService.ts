@@ -6,6 +6,9 @@ import type { ConversationContextSummary } from '../types/chat';
 import type { ProjectMemory } from '../types/memory';
 import type { DramaCharacter } from '../types/dramaAssets';
 import type { ProjectVisualDescription } from '../types/visualMemory';
+import { StorageError } from './storageDiagnostics';
+import { configValuesEqual } from './configPatch';
+import { createDurableSettingsTransaction } from './indexedDb/catalogRepository';
 import {
   openDB,
   STORE_AGENT_TASKS,
@@ -19,17 +22,18 @@ import {
   STORE_METADATA,
   STORE_PROJECT_MEMORIES,
   STORE_PROJECT_VISUAL_DESCRIPTIONS,
+  STORE_PROJECT_SUMMARIES,
   STORE_PROJECTS,
   STORE_TOOLBAR_LAYOUTS,
 } from './indexedDb/schema';
+import {
+  toProjectSummaryRecord,
+  type ProjectSummaryRecord,
+} from './indexedDb/projectSummary';
 
 const LAST_ACTIVE_PROJECT_KEY = 'last-active-project';
 
-interface ProjectRecord {
-  id: string;
-  name: string;
-  createdAt: number;
-  updatedAt: number;
+export interface ProjectRecord extends ProjectSummaryRecord {
   nodes: unknown;
   edges: unknown;
 }
@@ -39,18 +43,21 @@ export * from './indexedDb/videoEditorRepository';
 
 /** 保存整个项目（含 nodes/edges）到 IndexedDB */
 export async function saveProjectToDb(record: ProjectRecord): Promise<void> {
+  const summary = toProjectSummaryRecord(record);
+  if (!summary) throw new Error('项目摘要无效，无法写入 IndexedDB');
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PROJECTS, 'readwrite');
-    const store = tx.objectStore(STORE_PROJECTS);
-    const request = store.put(record);
+    const tx = db.transaction([STORE_PROJECTS, STORE_PROJECT_SUMMARIES], 'readwrite');
+    const projectRequest = tx.objectStore(STORE_PROJECTS).put(record);
+    const summaryRequest = tx.objectStore(STORE_PROJECT_SUMMARIES).put(summary);
     let settled = false;
     const fail = (error: DOMException | null) => {
       if (settled) return;
       settled = true;
       reject(error ?? new Error(`项目 ${record.id} 的 IndexedDB 写入失败`));
     };
-    request.onerror = () => fail(request.error);
+    projectRequest.onerror = () => fail(projectRequest.error);
+    summaryRequest.onerror = () => fail(summaryRequest.error);
     tx.oncomplete = () => {
       if (settled) return;
       settled = true;
@@ -113,6 +120,7 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction([
       STORE_PROJECTS,
+      STORE_PROJECT_SUMMARIES,
       STORE_CHAT_CONVERSATIONS,
       STORE_CHAT_MESSAGES,
       STORE_AGENT_TASKS,
@@ -122,6 +130,7 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
     ], 'readwrite');
 
     tx.objectStore(STORE_PROJECTS).delete(id);
+    tx.objectStore(STORE_PROJECT_SUMMARIES).delete(id);
 
     const conversationStore = tx.objectStore(STORE_CHAT_CONVERSATIONS);
     const conversationRange = IDBKeyRange.bound([id, 0], [id, Infinity]);
@@ -194,12 +203,12 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
   });
 }
 
-/** 获取全部项目列表（只含元数据，不含 nodes/edges） */
-export async function getAllProjects(): Promise<ProjectRecord[]> {
+/** 获取全部项目列表摘要；不会读取 projects store 中的 nodes/edges。 */
+export async function getAllProjects(): Promise<ProjectSummaryRecord[]> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PROJECTS, 'readonly');
-    const store = tx.objectStore(STORE_PROJECTS);
+    const tx = db.transaction(STORE_PROJECT_SUMMARIES, 'readonly');
+    const store = tx.objectStore(STORE_PROJECT_SUMMARIES);
     const request = store.getAll();
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -1132,10 +1141,47 @@ const TOOLBAR_LAYOUTS_KEY = 'layouts';
 export async function saveToolbarLayoutsToDb(data: Record<string, unknown>): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_TOOLBAR_LAYOUTS, 'readwrite');
+    const tx = createDurableSettingsTransaction(db, STORE_TOOLBAR_LAYOUTS);
     tx.objectStore(STORE_TOOLBAR_LAYOUTS).put({ id: TOOLBAR_LAYOUTS_KEY, data });
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new DOMException('Toolbar transaction aborted', 'AbortError'));
+  });
+}
+
+function toolbarRecordData(record: unknown): Record<string, unknown> | null {
+  if (record === undefined) return null;
+  const data = (record as { data?: unknown } | null)?.data;
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    throw new StorageError('toolbar-read', 'corrupt');
+  }
+  return data as Record<string, unknown>;
+}
+
+/** 同一事务内读取最新记录，只更新一个节点类型，保留其他实例保存的布局。 */
+export async function saveToolbarLayoutToDb(nodeType: string, layout: unknown | null, expected?: { baseline: unknown }): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = createDurableSettingsTransaction(db, STORE_TOOLBAR_LAYOUTS);
+    const store = tx.objectStore(STORE_TOOLBAR_LAYOUTS);
+    const request = store.get(TOOLBAR_LAYOUTS_KEY);
+    let failure: unknown;
+    request.onsuccess = () => {
+      try {
+        const next = { ...toolbarRecordData(request.result) };
+        if (expected && !configValuesEqual(next[nodeType] ?? null, expected.baseline)
+          && !configValuesEqual(next[nodeType] ?? null, layout)) throw new StorageError('toolbar-write', 'conflict');
+        if (layout === null) delete next[nodeType];
+        else Object.defineProperty(next, nodeType, { value: layout, enumerable: true, configurable: true, writable: true });
+        store.put({ id: TOOLBAR_LAYOUTS_KEY, data: next });
+      } catch (error) {
+        failure = error;
+        tx.abort();
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => { failure ??= tx.error; };
+    tx.onabort = () => reject(failure ?? tx.error ?? new DOMException('Toolbar transaction aborted', 'AbortError'));
   });
 }
 
@@ -1144,8 +1190,15 @@ export async function loadToolbarLayoutsFromDb(): Promise<Record<string, unknown
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_TOOLBAR_LAYOUTS, 'readonly');
     const request = tx.objectStore(STORE_TOOLBAR_LAYOUTS).get(TOOLBAR_LAYOUTS_KEY);
-    request.onsuccess = () => resolve(request.result?.data ?? null);
-    request.onerror = () => reject(request.error);
+    let data: Record<string, unknown> | null = null;
+    let failure: unknown;
+    request.onsuccess = () => {
+      try { data = toolbarRecordData(request.result); }
+      catch (error) { failure = error; tx.abort(); }
+    };
+    tx.oncomplete = () => resolve(data);
+    tx.onerror = () => { failure ??= tx.error; };
+    tx.onabort = () => reject(failure ?? tx.error ?? new DOMException('Toolbar transaction aborted', 'AbortError'));
   });
 }
 

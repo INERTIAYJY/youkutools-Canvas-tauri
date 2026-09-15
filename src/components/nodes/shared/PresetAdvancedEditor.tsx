@@ -1,7 +1,9 @@
 /**
  * 编辑高级预设的参数定义、模板和多步骤节点序列，并提供即时结构校验。
  */
+import Select from '../../shared/Select';
 import { useMemo } from 'react';
+import { workflowExecution } from '../../../services/workflowExecutionService';
 import { Icon } from '@iconify/react';
 import type {
   ModelOption,
@@ -93,16 +95,16 @@ function ParameterDefaultEditor({
   if (parameter.type === 'select') {
     const options = parameter.options ?? [];
     return (
-      <select
-        className="preset-manager-input preset-advanced-compact-input"
+      <Select fixedMenu
+        className="min-w-0"
         value={String(parameter.defaultValue ?? '')}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(selectedOptionValue) => onChange(selectedOptionValue)}
       >
         <option value="">无默认值</option>
         {options.filter(Boolean).map((option) => (
           <option key={option} value={option}>{option}</option>
         ))}
-      </select>
+      </Select>
     );
   }
 
@@ -204,12 +206,12 @@ export default function PresetAdvancedEditor({
                   />
                   <span>{'}}'}</span>
                 </div>
-                <select
-                  className="preset-manager-input"
+                <Select fixedMenu
+                  className="min-w-0"
                   value={parameter.type}
                   aria-label={'参数 ' + (index + 1) + ' 类型'}
-                  onChange={(event) => {
-                    const type = event.target.value as PresetParameterType;
+                  onChange={(selectedOptionValue) => {
+                    const type = selectedOptionValue as PresetParameterType;
                     updateParameter(parameter.id, {
                       type,
                       defaultValue: type === 'boolean' ? false : '',
@@ -220,7 +222,7 @@ export default function PresetAdvancedEditor({
                   {Object.entries(PARAMETER_TYPE_LABELS).map(([value, label]) => (
                     <option key={value} value={value}>{label}</option>
                   ))}
-                </select>
+                </Select>
                 {parameter.type === 'select' ? (
                   <div className="preset-advanced-select-config">
                     <input
@@ -336,12 +338,12 @@ export default function PresetAdvancedEditor({
                       placeholder="步骤名称"
                       onChange={(event) => updateStep(step.id, { name: event.target.value })}
                     />
-                    <select
-                      className="preset-manager-input preset-advanced-step-type"
+                    <Select fixedMenu
+                      className="min-w-0"
                       value={step.nodeType}
                       aria-label={'步骤 ' + (index + 1) + ' 节点类型'}
-                      onChange={(event) => updateStep(step.id, {
-                        nodeType: event.target.value as PresetNodeType,
+                      onChange={(selectedOptionValue) => updateStep(step.id, {
+                        nodeType: selectedOptionValue as PresetNodeType,
                         model: undefined,
                         provider: undefined,
                         workflowId: undefined,
@@ -354,7 +356,7 @@ export default function PresetAdvancedEditor({
                           {PRESET_NODE_TYPE_LABELS[nodeType].replace('预设', '生成')}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                     <div className="preset-advanced-row-actions">
                       <button
                         type="button"
@@ -449,9 +451,10 @@ export default function PresetAdvancedEditor({
                           provider: model.provider,
                           workflowId: undefined,
                         })}
-                        onWorkflowSelect={(workflowId) => updateStep(step.id, workflowId
-                          ? { workflowId, provider: 'comfyui', model: 'comfyui/workflow' }
-                          : { workflowId: undefined })}
+                        onWorkflowSelect={(workflowId) => {
+                          const workflow = workflows.find((item) => item.id === workflowId);
+                          updateStep(step.id, workflow ? workflowExecution(workflow) : { workflowId: undefined });
+                        }}
                       />
                       {step.model || step.workflowId ? (
                         <button

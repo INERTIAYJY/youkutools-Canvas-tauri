@@ -2,6 +2,7 @@
  * storageService — IndexedDB-backed persistence wrappers for projects,
  * workflows, app config, user presets, and uploaded skills.
  */
+import { isTauriAssetUrl, localMediaUrlToPath } from '../utils/mediaUrl';
 import {
   saveProjectToDb,
   getAllProjects,
@@ -11,6 +12,7 @@ import {
   getAllWorkflows,
   deleteWorkflowFromDb,
   saveConfigToDb,
+  patchConfigToDb,
   loadConfigFromDb,
   savePresetToDb,
   getAllPresets,
@@ -21,21 +23,36 @@ import {
   saveStyleToDb,
   getAllStyles,
   deleteStyleFromDb,
-  saveToolbarLayoutsToDb,
+  saveToolbarLayoutToDb,
   loadToolbarLayoutsFromDb,
   type WorkflowRecord,
   type PresetRecord,
   type SkillRecord,
   type CustomStyleRecord,
 } from './indexedDbService';
-import { exists } from '@tauri-apps/plugin-fs';
-import type { BaseNodeData, ProjectSettings, StoryboardCellOverride } from '../types';
-import { getAssetUrlFromPath, getProjectDataDir, joinPath, stripVerbatimPrefix } from './fs/core';
+import { exists, mkdir, writeFile } from '@tauri-apps/plugin-fs';
+import type { BaseNodeData, ProjectSettings } from '../types';
+import {
+  getAssetUrlFromPath,
+  getProjectDataDir,
+  isTauriEnv,
+  joinPath,
+  notifyProjectDiskChanged,
+  stripVerbatimPrefix,
+} from './fs/core';
 import { walkDirectoryFiles } from './fs/assetLibrary';
 import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
 import type { DramaAssetLibrary } from '../types/dramaAssets';
 import { normalizeDramaAssetLibrary } from '../types/dramaAssets';
-import { restoreConfigSecrets, stripConfigSecrets } from './providerSecretService';
+import { deleteProviderSecretIfUnchanged, hasPlaintextSecret, readProviderSecretFingerprint, restoreConfigSecrets, stripConfigSecrets } from './providerSecretService';
+import { enqueueConfigPersistence } from './configPersistenceQueue';
+import { applyConfigPatch, ConfigConflictError, configValuesEqual, configWithoutSecrets, createConfigPatch, type ConfigChange } from './configPatch';
+import { classifyStorageError, readStorageWithRetry, storageError } from './storageDiagnostics';
+import {
+  decodeDataUrlBytesAsync,
+  MEDIA_DATA_URL_BYTE_LIMITS,
+  sha256BytesHex,
+} from './mediaDataUrl';
 
 interface PersistedNodeLike {
   data?: BaseNodeData;
@@ -58,6 +75,161 @@ interface AssetReferenceLike {
   fileName?: string;
 }
 
+const NODE_MEDIA_URL_KEYS = [
+  'imageUrl',
+  'videoUrl',
+  'audioUrl',
+  'thumbnailUrl',
+  'sourceUrl',
+  'output',
+  'mattingMask',
+  'annotation',
+] as const;
+
+const ASSET_REFERENCE_URL_KEYS = ['imageUrl', 'videoUrl', 'audioUrl', 'url'] as const;
+const NODE_PRIMARY_MEDIA_KEYS = new Set<string>(['imageUrl', 'videoUrl', 'audioUrl', 'output']);
+
+interface MaterializedInlineMedia {
+  filePath: string;
+  assetUrl: string;
+}
+
+interface MediaSerializationContext {
+  projectId: string;
+  projectDir: string;
+  cache: Map<string, Promise<MaterializedInlineMedia>>;
+  directoryReady?: Promise<void>;
+}
+
+type InlineMediaKind = keyof typeof MEDIA_DATA_URL_BYTE_LIMITS;
+
+function isTransientMediaValue(value: unknown): value is string {
+  return typeof value === 'string' && (/^data:(?:image|video|audio)\//i.test(value) || /^blob:/i.test(value));
+}
+
+function inferInlineMediaKind(
+  source: string,
+  key: string,
+  data: Record<string, unknown>,
+): InlineMediaKind {
+  if (/^data:image\//i.test(source)) return 'image';
+  if (/^data:video\//i.test(source)) return 'video';
+  if (/^data:audio\//i.test(source)) return 'audio';
+  const hint = `${key} ${String(data.type ?? '')} ${String(data.kind ?? '')}`.toLowerCase();
+  if (hint.includes('video')) return 'video';
+  if (hint.includes('audio') || hint.includes('voice')) return 'audio';
+  return 'image';
+}
+
+function inlineMediaExtension(source: string, kind: InlineMediaKind): string {
+  const mime = /^data:([^;,]+)/i.exec(source)?.[1]?.toLowerCase();
+  const byMime: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm',
+    'video/quicktime': '.mov',
+    'audio/mpeg': '.mp3',
+    'audio/wav': '.wav',
+    'audio/ogg': '.ogg',
+  };
+  if (mime && byMime[mime]) return byMime[mime];
+  if (kind === 'video') return '.mp4';
+  if (kind === 'audio') return '.mp3';
+  return '.png';
+}
+
+async function inlineMediaBytes(source: string, kind: InlineMediaKind): Promise<Uint8Array> {
+  if (/^data:/i.test(source)) {
+    return decodeDataUrlBytesAsync(source, {
+      maxBytes: MEDIA_DATA_URL_BYTE_LIMITS[kind],
+      label: '项目内嵌媒体',
+    });
+  }
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(`读取已存储媒体失败：HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MEDIA_DATA_URL_BYTE_LIMITS[kind]) {
+    throw new Error('项目内嵌媒体超过允许的内存迁移上限');
+  }
+  return bytes;
+}
+
+function inlineMediaPrefix(kind: InlineMediaKind): string {
+  if (kind === 'video') return 'embedded-video';
+  if (kind === 'audio') return 'embedded-audio';
+  return 'embedded-image';
+}
+
+async function persistTransientMedia(
+  source: string,
+  context: MediaSerializationContext,
+  kind: InlineMediaKind,
+): Promise<MaterializedInlineMedia> {
+  const cached = context.cache.get(source);
+  if (cached) return cached;
+  const pending = (async () => {
+    const bytes = await inlineMediaBytes(source, kind);
+    const digest = await sha256BytesHex(bytes);
+    const fileName = `${inlineMediaPrefix(kind)}-${digest.slice(0, 20)}${inlineMediaExtension(source, kind)}`;
+    const filePath = joinPath(context.projectDir, fileName);
+    // 使用本次保存捕获的目录，等待初始化完成后再访问媒体文件。
+    // 加载旧项目时的媒体迁移也经过这里，不能依赖 Store 后台创建目录。
+    context.directoryReady ??= mkdir(context.projectDir, { recursive: true });
+    await context.directoryReady;
+    if (!await exists(filePath)) {
+      await writeFile(filePath, bytes);
+      notifyProjectDiskChanged();
+    }
+    return { filePath, assetUrl: await getAssetUrlFromPath(filePath) };
+  })();
+  context.cache.set(source, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    context.cache.delete(source);
+    throw error;
+  }
+}
+
+async function materializeMediaFields<T extends Record<string, unknown>>(
+  data: T,
+  keys: readonly string[],
+  context: MediaSerializationContext,
+  primaryKeys: ReadonlySet<string> = new Set(),
+): Promise<T> {
+  let migrated: Record<string, unknown> | null = null;
+  let primaryFilePath: string | undefined;
+  for (const key of keys) {
+    const value = (migrated ?? data)[key];
+    if (!isTransientMediaValue(value)) continue;
+    const persisted = await persistTransientMedia(
+      value,
+      context,
+      inferInlineMediaKind(value, key, data),
+    );
+    if (!migrated) migrated = { ...data };
+    migrated[key] = persisted.assetUrl;
+    if (!primaryFilePath && primaryKeys.has(key)) primaryFilePath = persisted.filePath;
+  }
+  if (migrated && primaryFilePath) migrated.filePath = primaryFilePath;
+  return (migrated ?? data) as T;
+}
+
+async function materializeAssetReference<T extends AssetReferenceLike>(
+  data: T,
+  context: MediaSerializationContext,
+): Promise<T> {
+  return materializeMediaFields(
+    data as T & Record<string, unknown>,
+    ASSET_REFERENCE_URL_KEYS,
+    context,
+    new Set(ASSET_REFERENCE_URL_KEYS),
+  );
+}
+
 async function serializeAssetReference<T extends AssetReferenceLike>(
   data: T,
   projectId: string,
@@ -67,6 +239,7 @@ async function serializeAssetReference<T extends AssetReferenceLike>(
   const normalizedPath = data.filePath.replace(/\\/g, '/');
   const normalizedDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
   if (!normalizedPath.toLowerCase().startsWith(`${normalizedDir.toLowerCase()}/`)) return data;
+  if (!await exists(normalizedPath).catch(() => false)) return data;
 
   // ponytail: 文件仍停在记录的相对路径上时直接沿用旧身份，省掉每次自动保存对每个节点的
   // stat + 索引读写；代价是索引里的 size/mtime 不会被保存刷新（加载扫描和资产库列举会刷）。
@@ -91,33 +264,148 @@ async function serializeAssetReference<T extends AssetReferenceLike>(
   return serialized;
 }
 
-async function serializeProjectNodes(nodes: unknown, projectId: string): Promise<unknown> {
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
+function assetReferenceContainsInlineMedia(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const record = data as Record<string, unknown>;
+  return ASSET_REFERENCE_URL_KEYS.some((key) => isTransientMediaValue(record[key]));
+}
+
+function nodeDataContainsInlineMedia(data: BaseNodeData | undefined): boolean {
+  if (!data) return false;
+  if (NODE_MEDIA_URL_KEYS.some((key) => isTransientMediaValue(data[key]))) return true;
+  if ((data.storyboardOverrides ?? []).some(assetReferenceContainsInlineMedia)) return true;
+  if ((data.shotlistRows ?? []).some((row) => assetReferenceContainsInlineMedia(row.frame))) return true;
+  if ((data.videoReferences ?? []).some(assetReferenceContainsInlineMedia)) return true;
+  return Array.isArray(data.directorCaptureUrls) && data.directorCaptureUrls.some(isTransientMediaValue);
+}
+
+async function serializeProjectNodes(
+  nodes: unknown,
+  context: MediaSerializationContext,
+): Promise<unknown> {
   if (!Array.isArray(nodes)) return nodes;
-  const projectDir = await getProjectDataDir(projectId);
-  if (!projectDir) return nodes;
-  return Promise.all((nodes as PersistedNodeLike[]).map(async (node) => {
+  const concurrency = projectNodesContainInlineMedia(nodes) ? 1 : 4;
+  return mapWithConcurrency(nodes as PersistedNodeLike[], concurrency, async (node) => {
     if (!node.data) return node;
-    let data = await serializeAssetReference(node.data, projectId, projectDir);
+    let data = await materializeMediaFields(
+      node.data as BaseNodeData & Record<string, unknown>,
+      NODE_MEDIA_URL_KEYS,
+      context,
+      NODE_PRIMARY_MEDIA_KEYS,
+    );
+    data = await serializeAssetReference(data, context.projectId, context.projectDir);
     if (Array.isArray(data.storyboardOverrides)) {
-      const storyboardOverrides = await Promise.all(data.storyboardOverrides.map(async (override) => (
-        override ? serializeAssetReference(override as StoryboardCellOverride, projectId, projectDir) : null
-      )));
+      const storyboardOverrides = await mapWithConcurrency(data.storyboardOverrides, 4, async (override) => {
+        if (!override) return null;
+        const materialized = await materializeAssetReference(override, context);
+        return serializeAssetReference(materialized, context.projectId, context.projectDir);
+      });
       data = { ...data, storyboardOverrides };
     }
+    if (Array.isArray(data.shotlistRows)) {
+      const shotlistRows = await mapWithConcurrency(data.shotlistRows, 4, async (row) => {
+        if (!row.frame) return row;
+        const materialized = await materializeAssetReference(row.frame, context);
+        const frame = await serializeAssetReference(materialized, context.projectId, context.projectDir);
+        return { ...row, frame };
+      });
+      data = { ...data, shotlistRows };
+    }
+    if (Array.isArray(data.videoReferences)) {
+      const videoReferences = await mapWithConcurrency(data.videoReferences, 4, async (reference) => {
+        const materialized = await materializeAssetReference(reference, context);
+        return serializeAssetReference(materialized, context.projectId, context.projectDir);
+      });
+      data = { ...data, videoReferences };
+    }
+    if (Array.isArray(data.directorCaptureUrls)) {
+      const existingPaths = Array.isArray(data.directorCaptureFilePaths)
+        ? data.directorCaptureFilePaths as string[]
+        : [];
+      const captures = await mapWithConcurrency(data.directorCaptureUrls, 2, async (url, index) => {
+        if (!isTransientMediaValue(url)) return { url, filePath: existingPaths[index] };
+        const persisted = await persistTransientMedia(url, context, 'image');
+        return { url: persisted.assetUrl, filePath: persisted.filePath };
+      });
+      data = {
+        ...data,
+        directorCaptureUrls: captures.map((capture) => capture.url),
+        directorCaptureFilePaths: captures.map((capture) => capture.filePath),
+      };
+    }
     return { ...node, data };
-  }));
+  });
+}
+
+function projectNodesContainInlineMedia(nodes: unknown): boolean {
+  return Array.isArray(nodes)
+    && (nodes as PersistedNodeLike[]).some((node) => nodeDataContainsInlineMedia(node.data));
+}
+
+function projectSettingsContainInlineMedia(settings: ProjectSettings | undefined): boolean {
+  return assetReferenceContainsInlineMedia(settings?.visualStyle?.styleReference);
+}
+
+async function serializeProjectSettings(
+  settings: ProjectSettings | undefined,
+  context: MediaSerializationContext,
+): Promise<ProjectSettings | undefined> {
+  const reference = settings?.visualStyle?.styleReference;
+  if (!settings?.visualStyle || !reference) return settings;
+  const materialized = await materializeAssetReference(reference, context);
+  const styleReference = await serializeAssetReference(
+    materialized,
+    context.projectId,
+    context.projectDir,
+  );
+  return {
+    ...settings,
+    visualStyle: { ...settings.visualStyle, styleReference },
+  };
+}
+
+function dramaAssetsContainInlineMedia(library: DramaAssetLibrary | undefined): boolean {
+  if (!library) return false;
+  return library.characters.some((character) => (
+    isTransientMediaValue(character.imageUrl)
+    || (character.referenceImages ?? []).some(assetReferenceContainsInlineMedia)
+    || (character.voiceClips ?? []).some(assetReferenceContainsInlineMedia)
+    || (character.actions ?? []).some((action) => (
+      (action.media ?? []).some(assetReferenceContainsInlineMedia)
+    ))
+  )) || library.scenes.some((scene) => isTransientMediaValue(scene.imageUrl))
+    || library.props.some((prop) => isTransientMediaValue(prop.imageUrl));
+}
+
+function projectRecordContainsInlineMedia(record: ProjectSaveData): boolean {
+  return projectNodesContainInlineMedia(record.nodes)
+    || projectSettingsContainInlineMedia(record.settings)
+    || dramaAssetsContainInlineMedia(record.dramaAssets);
 }
 
 /** 从展示用的 asset URL 还原本地路径（convertFileSrc 的逆运算），非本地 URL 返回 undefined。 */
 function assetUrlToPath(url: string | undefined): string | undefined {
-  if (!url || !(url.includes('asset.localhost') || url.startsWith('asset://'))) return undefined;
-  try {
-    const { pathname } = new URL(url);
-    const decoded = decodeURIComponent(pathname.replace(/^\//, ''));
-    return decoded ? stripVerbatimPrefix(decoded) : undefined;
-  } catch {
-    return undefined;
-  }
+  if (!isTauriAssetUrl(url)) return undefined;
+  const path = localMediaUrlToPath(url);
+  return path ? stripVerbatimPrefix(path) : undefined;
 }
 
 async function restoreAssetReference<T extends AssetReferenceLike>(
@@ -222,7 +510,7 @@ async function restoreAssetReferenceSafely<T extends AssetReferenceLike>(
 async function refreshProjectAssetIndex(projectId: string, projectDir: string): Promise<void> {
   let diskFiles: Awaited<ReturnType<typeof walkDirectoryFiles>>;
   try {
-    diskFiles = await walkDirectoryFiles(projectDir);
+    diskFiles = await walkDirectoryFiles(projectDir, { excludedRootDirectories: ['.thumbnail'] });
   } catch {
     console.warn('[项目加载] 资产目录扫描失败，已继续加载画布', { projectId });
     return;
@@ -244,9 +532,18 @@ async function refreshProjectAssetIndex(projectId: string, projectDir: string): 
 }
 
 /** 节点记录了资产身份却没解析出磁盘文件 —— 文件多半被外部改名/移动了。 */
+function nodeAssetReferences(node: PersistedNodeLike): AssetReferenceLike[] {
+  if (!node.data) return [];
+  const overrides = Array.isArray(node.data.storyboardOverrides) ? node.data.storyboardOverrides : [];
+  const frames = Array.isArray(node.data.shotlistRows)
+    ? node.data.shotlistRows.map((row) => row.frame).filter(Boolean)
+    : [];
+  const videoReferences = Array.isArray(node.data.videoReferences) ? node.data.videoReferences : [];
+  return [node.data, ...overrides, ...frames, ...videoReferences] as AssetReferenceLike[];
+}
+
 function hasUnresolvedAsset(node: PersistedNodeLike): boolean {
-  const overrides = Array.isArray(node.data?.storyboardOverrides) ? node.data.storyboardOverrides : [];
-  return [node.data as AssetReferenceLike | undefined, ...overrides].some((reference) => (
+  return nodeAssetReferences(node).some((reference) => (
     Boolean(reference && !reference.filePath && (reference.assetId || reference.relativePath))
   ));
 }
@@ -260,10 +557,38 @@ async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<u
     if (!node.data) return node;
     let data = await restoreAssetReferenceSafely(node.data, projectId, projectDir);
     if (Array.isArray(data.storyboardOverrides)) {
-      const storyboardOverrides = await Promise.all(data.storyboardOverrides.map(async (override) => (
+      const storyboardOverrides = await mapWithConcurrency(data.storyboardOverrides, 4, async (override) => (
         override ? restoreAssetReferenceSafely(override, projectId, projectDir) : null
-      )));
+      ));
       data = { ...data, storyboardOverrides };
+    }
+    if (Array.isArray(data.shotlistRows)) {
+      const shotlistRows = await mapWithConcurrency(data.shotlistRows, 4, async (row) => ({
+        ...row,
+        frame: row.frame
+          ? await restoreAssetReferenceSafely(row.frame, projectId, projectDir)
+          : row.frame,
+      }));
+      data = { ...data, shotlistRows };
+    }
+    if (Array.isArray(data.videoReferences)) {
+      const videoReferences = await mapWithConcurrency(data.videoReferences, 4, (reference) => (
+        restoreAssetReferenceSafely(reference, projectId, projectDir)
+      ));
+      data = { ...data, videoReferences };
+    }
+    if (Array.isArray(data.directorCaptureUrls) && Array.isArray(data.directorCaptureFilePaths)) {
+      const directorCaptureUrls = await mapWithConcurrency(
+        data.directorCaptureUrls,
+        2,
+        async (url, index) => {
+          const filePath = data.directorCaptureFilePaths?.[index];
+          return filePath && await exists(filePath).catch(() => false)
+            ? getAssetUrlFromPath(filePath)
+            : url;
+        },
+      );
+      data = { ...data, directorCaptureUrls };
     }
     return { ...node, data };
   };
@@ -276,47 +601,112 @@ async function restoreProjectNodes(nodes: unknown, projectId: string): Promise<u
   return Promise.all((nodes as PersistedNodeLike[]).map(restoreNode));
 }
 
+async function restoreProjectSettings(
+  settings: ProjectSettings | undefined,
+  projectId: string,
+  projectDir: string,
+): Promise<ProjectSettings | undefined> {
+  const reference = settings?.visualStyle?.styleReference;
+  if (!settings?.visualStyle || !reference) return settings;
+  const styleReference = await restoreAssetReferenceSafely(reference, projectId, projectDir);
+  return {
+    ...settings,
+    visualStyle: { ...settings.visualStyle, styleReference },
+  };
+}
+
 /** 角色库参考图与角色声音与画布节点共用本地文件，落库时同样只保留 assetId + relativePath */
 async function serializeProjectDramaAssets(
   library: DramaAssetLibrary | undefined,
-  projectId: string,
+  context: MediaSerializationContext,
 ): Promise<DramaAssetLibrary | undefined> {
-  if (!library?.characters.length) return library;
-  const projectDir = await getProjectDataDir(projectId);
-  if (!projectDir) return library;
-  const characters = await Promise.all(library.characters.map(async (character) => ({
-    ...character,
-    referenceImages: await Promise.all((character.referenceImages ?? []).map((reference) =>
-      serializeAssetReference(reference, projectId, projectDir))),
-    voiceClips: await Promise.all((character.voiceClips ?? []).map((clip) =>
-      serializeAssetReference(clip, projectId, projectDir))),
-  })));
-  return { ...library, characters };
+  if (!library) return library;
+  const serializeReference = async <T extends AssetReferenceLike>(reference: T): Promise<T> => {
+    const materialized = await materializeAssetReference(reference, context);
+    return serializeAssetReference(materialized, context.projectId, context.projectDir);
+  };
+  const characters = await mapWithConcurrency(library.characters, 2, async (character) => {
+    const topLevel = await serializeReference(character);
+    const referenceImages = await mapWithConcurrency(
+      character.referenceImages ?? [],
+      2,
+      serializeReference,
+    );
+    const voiceClips = await mapWithConcurrency(character.voiceClips ?? [], 2, serializeReference);
+    const actions = await mapWithConcurrency(character.actions ?? [], 2, async (action) => ({
+      ...action,
+      media: await mapWithConcurrency(action.media ?? [], 2, serializeReference),
+    }));
+    const primaryReference = referenceImages.find(
+      (reference) => reference.id === character.primaryReferenceImageId,
+    ) ?? referenceImages[0];
+    return {
+      ...topLevel,
+      referenceImages,
+      voiceClips,
+      actions,
+      imageUrl: primaryReference?.imageUrl ?? topLevel.imageUrl,
+    };
+  });
+  const scenes = await mapWithConcurrency(library.scenes, 2, serializeReference);
+  const props = await mapWithConcurrency(library.props, 2, serializeReference);
+  return { ...library, characters, scenes, props };
+}
+
+async function serializeProjectRecord(data: ProjectSaveData): Promise<ProjectSaveData> {
+  const projectDir = await getProjectDataDir(data.id);
+  if (!projectDir) {
+    if (projectRecordContainsInlineMedia(data)) {
+      throw new Error('当前环境没有项目目录，无法将内嵌媒体写入 IndexedDB');
+    }
+    return data;
+  }
+  const context: MediaSerializationContext = {
+    projectId: data.id,
+    projectDir,
+    cache: new Map(),
+  };
+  const nodes = await serializeProjectNodes(data.nodes, context);
+  const settings = await serializeProjectSettings(data.settings, context);
+  const dramaAssets = await serializeProjectDramaAssets(data.dramaAssets, context);
+  return { ...data, nodes, settings, dramaAssets };
 }
 
 async function restoreProjectDramaAssets(
   library: DramaAssetLibrary,
   projectId: string,
 ): Promise<DramaAssetLibrary> {
-  if (!library.characters.length) return library;
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return library;
-  const characters = await Promise.all(library.characters.map(async (character) => {
-    const referenceImages = await Promise.all((character.referenceImages ?? []).map((reference) =>
-      restoreAssetReferenceSafely(reference, projectId, projectDir)));
-    const voiceClips = await Promise.all((character.voiceClips ?? []).map((clip) =>
-      restoreAssetReferenceSafely(clip, projectId, projectDir)));
+  const restoreReference = <T extends AssetReferenceLike>(reference: T): Promise<T> => (
+    restoreAssetReferenceSafely(reference, projectId, projectDir)
+  );
+  const characters = await mapWithConcurrency(library.characters, 2, async (character) => {
+    const topLevel = await restoreReference(character);
+    const referenceImages = await mapWithConcurrency(
+      character.referenceImages ?? [],
+      2,
+      restoreReference,
+    );
+    const voiceClips = await mapWithConcurrency(character.voiceClips ?? [], 2, restoreReference);
+    const actions = await mapWithConcurrency(character.actions ?? [], 2, async (action) => ({
+      ...action,
+      media: await mapWithConcurrency(action.media ?? [], 2, restoreReference),
+    }));
     const primaryReference = referenceImages.find(
       (reference) => reference.id === character.primaryReferenceImageId,
     ) ?? referenceImages[0];
     return {
-      ...character,
+      ...topLevel,
       referenceImages,
       voiceClips,
-      imageUrl: primaryReference?.imageUrl ?? character.imageUrl,
+      actions,
+      imageUrl: primaryReference?.imageUrl ?? topLevel.imageUrl,
     };
-  }));
-  return { ...library, characters };
+  });
+  const scenes = await mapWithConcurrency(library.scenes, 2, restoreReference);
+  const props = await mapWithConcurrency(library.props, 2, restoreReference);
+  return { ...library, characters, scenes, props };
 }
 
 export interface ProjectSaveData {
@@ -343,14 +733,12 @@ export interface ProjectSaveData {
   series?: import('../types').ProjectSeriesInfo;
 }
 
+export type ProjectSummaryData = Omit<ProjectSaveData, 'nodes' | 'edges' | 'groups' | 'dramaAssets'>;
+
 /** 保存项目到 IndexedDB */
 export async function saveProject(data: ProjectSaveData): Promise<string> {
   try {
-    const payload: ProjectSaveData = {
-      ...data,
-      nodes: await serializeProjectNodes(data.nodes, data.id),
-      dramaAssets: await serializeProjectDramaAssets(data.dramaAssets, data.id),
-    };
+    const payload = await serializeProjectRecord(data);
     await saveProjectToDb(payload);
     console.log('Project saved to IndexedDB:', data.id);
     return data.id;
@@ -361,7 +749,7 @@ export async function saveProject(data: ProjectSaveData): Promise<string> {
 }
 
 /** 从 IndexedDB 加载所有项目元数据 */
-export async function loadProjectsList(): Promise<ProjectSaveData[]> {
+export async function loadProjectsList(): Promise<ProjectSummaryData[]> {
   try {
     return await getAllProjects();
   } catch (error) {
@@ -375,19 +763,38 @@ export async function loadProjectData(id: string): Promise<ProjectSaveData | nul
   try {
     const record = await getProjectById(id);
     if (!record) return null;
-    let nodes = record.nodes;
+    let persistedRecord = record as ProjectSaveData;
+    if (projectRecordContainsInlineMedia(persistedRecord)) {
+      try {
+        persistedRecord = await serializeProjectRecord(persistedRecord);
+        await saveProjectToDb(persistedRecord);
+        console.log('[项目加载] 已将旧的内嵌媒体迁移到项目目录:', id);
+      } catch (error) {
+        console.warn('[项目加载] 内嵌媒体迁移失败，未覆盖原项目数据', { projectId: id, error });
+      }
+    }
+    let nodes = persistedRecord.nodes;
     try {
-      nodes = await restoreProjectNodes(record.nodes, id);
+      nodes = await restoreProjectNodes(nodes, id);
     } catch {
       console.warn('[项目加载] 资产恢复未完成，已使用原始画布数据', { projectId: id });
     }
-    let dramaAssets = normalizeDramaAssetLibrary((record as ProjectSaveData).dramaAssets);
+    const projectDir = await getProjectDataDir(id);
+    let settings = persistedRecord.settings;
+    if (projectDir) {
+      try {
+        settings = await restoreProjectSettings(settings, id, projectDir);
+      } catch {
+        console.warn('[项目加载] 项目风格参考图恢复失败，已保留原始设置', { projectId: id });
+      }
+    }
+    let dramaAssets = normalizeDramaAssetLibrary(persistedRecord.dramaAssets);
     try {
       dramaAssets = await restoreProjectDramaAssets(dramaAssets, id);
     } catch {
       console.warn('[项目加载] 角色库本地文件恢复未完成，已使用原始角色数据', { projectId: id });
     }
-    return { ...record, nodes, dramaAssets } as ProjectSaveData;
+    return { ...persistedRecord, nodes, settings, dramaAssets };
   } catch (error) {
     console.error('Load project data failed:', error);
     return null;
@@ -420,7 +827,7 @@ export async function loadWorkflows(): Promise<WorkflowRecord[]> {
     return await getAllWorkflows();
   } catch (error) {
     console.error('Load workflows failed:', error);
-    return [];
+    throw error;
   }
 }
 
@@ -437,17 +844,220 @@ export async function deleteWorkflow(id: string): Promise<void> {
 /**
  * 保存应用配置到 IndexedDB。
  * 凭据先摘进 Rust 侧凭据存储，数据库里只留引用；存储失败也不落明文。
+ * 桌面凭据保存失败时拒绝整份配置回写，保留原数据库记录。
  * @returns 未能写入凭据存储、仅本次会话有效的连接 ID
  */
-export async function saveConfig(data: unknown): Promise<string[]> {
+export interface ConfigSaveOptions {
+  baseline: unknown;
+  changes: ConfigChange[];
+  /** 连接 ID → 本次凭据变更的随机版本，只在明确编辑凭据时提供。 */
+  secretChanges?: Record<string, string>;
+  onCommitted?: (config: unknown) => void;
+}
+
+export class ConfigCleanupError extends Error {
+  constructor() { super('设置已保存，但旧渠道凭据清理失败，请重试'); this.name = 'ConfigCleanupError'; }
+}
+
+/**
+ * 删除整条连接时，凭据版本可能刚被同一应用的另一保存任务推进。
+ * 版本只用于防止旧 Key 回写，不属于用户可编辑配置；普通字段一致时以最新版本为删除基线。
+ */
+function rebaseDeletedProviderRevisions(
+  baseline: Record<string, unknown>,
+  current: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const baselineProviders = baseline.providers;
+  const currentProviders = current.providers;
+  const nextProviders = next.providers;
+  if (!baselineProviders || typeof baselineProviders !== 'object' || Array.isArray(baselineProviders)
+    || !currentProviders || typeof currentProviders !== 'object' || Array.isArray(currentProviders)
+    || !nextProviders || typeof nextProviders !== 'object' || Array.isArray(nextProviders)) return baseline;
+
+  let rebased: Record<string, unknown> | undefined;
+  const providers = baselineProviders as Record<string, unknown>;
+  for (const [id, originalProvider] of Object.entries(providers)) {
+    if (id in nextProviders) continue;
+    const currentProvider = (currentProviders as Record<string, unknown>)[id];
+    if (!originalProvider || typeof originalProvider !== 'object' || Array.isArray(originalProvider)
+      || !currentProvider || typeof currentProvider !== 'object' || Array.isArray(currentProvider)) continue;
+    const { apiKeyRevision: _originalRevision, ...originalOrdinary } = originalProvider as Record<string, unknown>;
+    const { apiKeyRevision: _currentRevision, ...currentOrdinary } = currentProvider as Record<string, unknown>;
+    if (!configValuesEqual(originalOrdinary, currentOrdinary)) continue;
+    rebased ??= structuredClone(baseline);
+    (rebased.providers as Record<string, unknown>)[id] = structuredClone(currentProvider);
+  }
+  return rebased ?? baseline;
+}
+
+function configItemIdentity(item: unknown): string | null {
+  if (typeof item === 'string') return `string:${item}`;
+  if (typeof item === 'number' && Number.isFinite(item)) return `number:${item}`;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const id = Reflect.get(item, 'id');
+  return typeof id === 'string' && id ? `id:${id}` : null;
+}
+
+function identifiedItems(value: unknown): Map<string, unknown> | null {
+  if (!Array.isArray(value)) return null;
+  const items = new Map<string, unknown>();
+  for (const item of value) {
+    const identity = configItemIdentity(item);
+    if (identity === null || items.has(identity)) return null;
+    items.set(identity, item);
+  }
+  return items;
+}
+
+function configValueAtPath(root: Record<string, unknown>, path: string[]): unknown {
+  let value: unknown = root;
+  for (const key of path) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    value = Reflect.get(value, key);
+  }
+  return value;
+}
+
+/**
+ * 带稳定身份的配置列表允许合并纯删除：删除目标以调用时基线为准，
+ * 同时发生的其他条目编辑和新增从最新持久化值保留。
+ */
+function rebaseIdentifiedArrayRemovals(
+  baseline: Record<string, unknown>,
+  current: Record<string, unknown>,
+  next: Record<string, unknown>,
+  changes: ConfigChange[],
+): { baseline: Record<string, unknown>; next: Record<string, unknown> } {
+  let rebasedBaseline = baseline;
+  let rebasedNext = next;
+  for (const change of changes) {
+    const beforeItems = identifiedItems(change.before);
+    const afterItems = identifiedItems(change.after);
+    if (!beforeItems || !afterItems || beforeItems.size <= afterItems.size) continue;
+    const beforeOrder = [...beforeItems.keys()];
+    let previousIndex = -1;
+    const pureRemoval = [...afterItems].every(([id, item]) => {
+      const index = beforeOrder.indexOf(id);
+      if (index <= previousIndex || !configValuesEqual(beforeItems.get(id), item)) return false;
+      previousIndex = index;
+      return true;
+    });
+    if (!pureRemoval) continue;
+    const currentValue = configValueAtPath(current, change.path);
+    const currentItems = identifiedItems(currentValue);
+    if (!currentItems) continue;
+    const removedIds = new Set([...beforeItems.keys()].filter((id) => !afterItems.has(id)));
+    const merged = (currentValue as unknown[]).filter((item) => {
+      const identity = configItemIdentity(item);
+      return identity !== null && !removedIds.has(identity);
+    });
+    rebasedBaseline = applyConfigPatch(rebasedBaseline, [{
+      path: change.path,
+      before: configValueAtPath(rebasedBaseline, change.path),
+      after: currentValue,
+    }], false);
+    rebasedNext = applyConfigPatch(rebasedNext, [{
+      path: change.path,
+      before: configValueAtPath(rebasedNext, change.path),
+      after: merged,
+    }], false);
+  }
+  return { baseline: rebasedBaseline, next: rebasedNext };
+}
+
+/** 与连接删除同事务持久化；仅含指纹，重启后仍可完成清理。必须在配置队列内调用。 */
+async function completeSecretCleanup(raw: unknown): Promise<unknown> {
+  const config = raw as { providers?: Record<string, unknown>; _pendingSecretCleanup?: Record<string, string> } | null;
+  const pending = config?._pendingSecretCleanup;
+  if (pending === undefined) return raw;
+  if (!pending || typeof pending !== 'object' || Array.isArray(pending)) throw new ConfigCleanupError();
+  let committed = raw;
+  for (const [id, fingerprint] of Object.entries(pending)) {
+    if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) throw new ConfigCleanupError();
+    try {
+      // 已重新出现的连接不能作为旧删除任务清理；条件删除也不能删掉已换值的条目。
+      if (!config?.providers?.[id]) await deleteProviderSecretIfUnchanged(id, fingerprint);
+      committed = await patchConfigToDb([{ path: ['_pendingSecretCleanup', id], before: fingerprint, after: undefined }]);
+    } catch (error) {
+      if (classifyStorageError(error) === 'conflict') {
+        // 原生值已变化，旧清理意图作废，保留新凭据。
+        committed = await patchConfigToDb([{ path: ['_pendingSecretCleanup', id], before: fingerprint, after: undefined }]);
+      } else { throw new ConfigCleanupError(); }
+    }
+  }
+  return committed;
+}
+
+export async function saveConfig(data: unknown, options?: ConfigSaveOptions): Promise<string[]> {
   try {
-    const { config, unstored } = await stripConfigSecrets(data);
-    await saveConfigToDb(config);
-    console.log('Config saved to IndexedDB');
-    return unstored;
+    // 入队前捕获快照，异步凭据操作期间调用方修改对象不能改变本次保存内容。
+    const snapshot: unknown = structuredClone(data);
+    const intent = options ? structuredClone({ baseline: options.baseline, changes: options.changes, secretChanges: options.secretChanges }) : undefined;
+    return await enqueueConfigPersistence(async () => {
+      // 先读已保存记录，确认既有引用；读取失败时不触碰任何凭据。
+      const previous = await completeSecretCleanup(await readStorageWithRetry('config-read', loadConfigFromDb));
+      if (intent) {
+        let baseline = configWithoutSecrets(intent.baseline);
+        let next = applyConfigPatch(baseline, intent.changes, false);
+        const sourceProviders = (snapshot as { providers?: Record<string, Record<string, unknown>> })?.providers ?? {};
+        const providers = (next.providers ?? {}) as Record<string, Record<string, unknown>>;
+        const changedProviders: Record<string, Record<string, unknown>> = {};
+        for (const [id, revision] of Object.entries(intent.secretChanges ?? {})) {
+          const provider = sourceProviders[id];
+          if (!provider || typeof provider.apiKey !== 'string' || !provider.apiKey) continue;
+          providers[id] = { ...providers[id], apiKeyRevision: revision };
+          changedProviders[id] = provider;
+        }
+        if (next.providers || Object.keys(changedProviders).length) next.providers = providers;
+        const current = configWithoutSecrets(previous);
+        ({ baseline, next } = rebaseIdentifiedArrayRemovals(
+          baseline,
+          current,
+          next,
+          intent.changes,
+        ));
+        baseline = rebaseDeletedProviderRevisions(baseline, current, next);
+        // 先检查普通字段与凭据版本冲突，拒绝后不触碰原生凭据。
+        applyConfigPatch(current, createConfigPatch(baseline, next));
+        const deleted = Object.keys((baseline.providers ?? {}) as Record<string, unknown>).filter((id) => !providers[id]);
+        const cleanup: Record<string, string> = {};
+        for (const id of deleted) {
+          const fingerprint = await readProviderSecretFingerprint(id);
+          if (fingerprint) cleanup[id] = fingerprint;
+        }
+        if (Object.keys(cleanup).length) next._pendingSecretCleanup = cleanup;
+        let unstored: string[] = [];
+        if (Object.keys(changedProviders).length) {
+          const result = await stripConfigSecrets({ providers: changedProviders }, previous);
+          unstored = result.unstored;
+          if (result.failedExistingSecrets.length || (isTauriEnv() && unstored.length)) throw new Error('渠道凭据保存未完成');
+          const storedProviders = (result.config as { providers: Record<string, Record<string, unknown>> }).providers;
+          for (const [id, provider] of Object.entries(storedProviders)) {
+            if (provider.apiKeyRef) providers[id].apiKeyRef = provider.apiKeyRef;
+          }
+          next = configWithoutSecrets(next);
+        }
+        const committed = await patchConfigToDb(createConfigPatch(baseline, next));
+        options?.onCommitted?.(committed);
+        const cleaned = await completeSecretCleanup(committed);
+        options?.onCommitted?.(cleaned);
+        return unstored;
+      }
+      const { config, unstored, failedExistingSecrets } = await stripConfigSecrets(snapshot, previous);
+      if (failedExistingSecrets.length > 0) throw new Error('既有配置凭据保存未完成');
+      // 桌面新渠道也必须确认 Key 已持久化，不能降级为重启后丢 Key 的会话配置。
+      if (isTauriEnv() && unstored.length > 0) throw new Error('渠道凭据保存未完成');
+      await saveConfigToDb(config);
+      console.log('Config saved to IndexedDB');
+      return unstored;
+    });
   } catch (error) {
-    console.error('Save config failed:', error);
-    throw error;
+    if (error instanceof ConfigCleanupError) throw error;
+    if (error instanceof ConfigConflictError || classifyStorageError(error) === 'conflict') throw new ConfigConflictError();
+    console.error('[storage] 配置保存失败，未确认配置持久化');
+    // eslint-disable-next-line preserve-caught-error -- 原始存储错误可能包含凭据或路径。
+    throw new Error('保存应用配置失败，请重试或检查存储状态');
   }
 }
 
@@ -455,28 +1065,86 @@ export interface LoadedConfig {
   config: unknown | null;
   /** 引用存在但凭据存储里读不到的连接 ID，需要用户重新输入 */
   missingSecrets: string[];
+  /** 只有凭据读取失败；普通配置已经读到，允许无关设置继续保存。 */
+  unreadSecrets?: string[];
+  persistedConfig?: unknown;
+  cleanupPending?: boolean;
+}
+
+/** 保留版本不兼容分类供启动层提示，不传播存储路径或原始错误正文。 */
+function configLoadError(error: unknown): Error {
+  const failure = new Error('读取应用配置失败，请重试或检查存储状态');
+  if (classifyStorageError(error) === 'version') failure.name = 'VersionError';
+  console.error('[storage] 配置加载失败:', failure.name);
+  return failure;
 }
 
 /**
  * 从 IndexedDB 加载应用配置，并按引用从凭据存储补回凭据。
- * 遇到旧版明文配置会迁进凭据存储并立刻回写清理后的记录。
+ * 遇到旧版明文或丢失的凭据引用会恢复并立刻回写不含明文的记录。
+ * 只有配置记录不存在才返回 null；读取或迁移失败必须阻止上层保存默认配置。
  */
-export async function loadConfigWithSecrets(): Promise<LoadedConfig> {
+export async function loadConfigWithSecrets(options?: {
+  allowSecretReadFailure?: boolean;
+  /** 旧模型到渠道的纯转换必须在凭据迁移和数据库清理之前执行。 */
+  normalize?: (config: unknown) => unknown;
+}): Promise<LoadedConfig> {
   try {
-    const raw = await loadConfigFromDb();
-    if (raw === null || raw === undefined) return { config: null, missingSecrets: [] };
+    return await enqueueConfigPersistence(async () => {
+      const stored = await readStorageWithRetry('config-read', loadConfigFromDb);
+      let raw = stored;
+      let cleanupPending = false;
+      try { raw = await completeSecretCleanup(stored); }
+      catch (error) {
+        if (!options?.allowSecretReadFailure || !(error instanceof ConfigCleanupError)) throw error;
+        // 删除已提交但后续清理失败，不影响已有普通设置的读取；由 Store 提供重试状态。
+        cleanupPending = true;
+      }
+      if (raw === null || raw === undefined) return { config: null, missingSecrets: [] };
+      const normalized = options?.normalize ? options.normalize(structuredClone(raw)) : raw;
+      const normalizationChanged = createConfigPatch(raw, normalized).length > 0;
+      const legacyModels = (raw as { generalModels?: Array<{ apiKey?: unknown }> }).generalModels;
+      const hasLegacyKey = Array.isArray(legacyModels) && legacyModels.some((model) => !!model?.apiKey);
 
-    const { config, migrated, missing } = await restoreConfigSecrets(raw);
-    if (migrated) {
-      // 明文已进凭据存储，立刻覆盖掉数据库里的旧记录
-      const { config: scrubbed } = await stripConfigSecrets(config);
-      await saveConfigToDb(scrubbed);
-      console.log('[storage] 已将明文 API Key 迁移到凭据存储并清理数据库记录');
-    }
-    return { config, missingSecrets: missing };
+      if (options?.allowSecretReadFailure && !hasPlaintextSecret(normalized)
+        && !hasPlaintextSecret(raw) && !hasLegacyKey) {
+        const config = structuredClone(normalized) as { providers?: Record<string, unknown> };
+        const providers = config.providers ?? {};
+        const unreadSecrets: string[] = [];
+        const missingSecrets: string[] = [];
+        for (const [id, provider] of Object.entries(providers)) {
+          try {
+            const restored = await restoreConfigSecrets({ providers: { [id]: provider } });
+            providers[id] = (restored.config as { providers: Record<string, unknown> }).providers[id];
+            missingSecrets.push(...restored.missing);
+          } catch { unreadSecrets.push(id); }
+        }
+        let persistedConfig: unknown = raw;
+        // 空 Key 等旧字段也必须从实际记录中移除，否则整条连接删除时，
+        // 数据库对象与不含凭据的比较基线不同，会被误判为并发修改。
+        const migrationChanges = createConfigPatch(raw, configWithoutSecrets(config));
+        if (migrationChanges.length) {
+          persistedConfig = await patchConfigToDb(migrationChanges);
+        }
+        return { config, persistedConfig, missingSecrets, unreadSecrets, ...(cleanupPending ? { cleanupPending } : {}) };
+      }
+
+      const { config, migrated, missing } = await restoreConfigSecrets(normalized);
+      // 旧凭据全部迁移失败时不能开放保存，否则后续保存可能清掉尚未迁出的唯一副本。
+      if (hasPlaintextSecret(normalized) && !migrated) throw new Error('配置凭据迁移未完成');
+      if (migrated || normalizationChanged) {
+        // 在同一持久化锁内确认凭据可用，再清理数据库中的旧明文。
+        const { config: scrubbed, unstored } = await stripConfigSecrets(config, raw);
+        if (unstored.length > 0) throw new Error('配置凭据迁移未完成');
+        await saveConfigToDb(scrubbed);
+        console.log('[storage] 已更新配置中的凭据引用并清理明文字段');
+      }
+      return { config, missingSecrets: missing,
+        ...(cleanupPending ? { cleanupPending } : {}),
+        ...(options?.allowSecretReadFailure ? { persistedConfig: configWithoutSecrets(config) } : {}) };
+    });
   } catch (error) {
-    console.error('Load config failed:', error);
-    return { config: null, missingSecrets: [] };
+    throw configLoadError(error);
   }
 }
 
@@ -491,10 +1159,10 @@ export async function loadConfig(): Promise<unknown | null> {
  */
 export async function loadConfigWithoutSecrets(): Promise<unknown | null> {
   try {
-    return await loadConfigFromDb();
+    const raw = await readStorageWithRetry('config-read', loadConfigFromDb);
+    return raw == null ? null : configWithoutSecrets(raw);
   } catch (error) {
-    console.error('Load config failed:', error);
-    return null;
+    throw configLoadError(error);
   }
 }
 
@@ -591,20 +1259,14 @@ export type { WorkflowRecord, PresetRecord, SkillRecord, CustomStyleRecord };
 
 // ── Toolbar Layouts ──
 
-export async function saveToolbarLayouts(data: Record<string, unknown>): Promise<void> {
+export async function saveToolbarLayout(nodeType: string, layout: unknown | null, expected?: { baseline: unknown }): Promise<void> {
   try {
-    await saveToolbarLayoutsToDb(data);
+    await enqueueConfigPersistence(() => saveToolbarLayoutToDb(nodeType, layout, expected));
   } catch (error) {
-    console.error('Save toolbar layouts failed:', error);
-    throw error;
+    throw storageError('toolbar-write', error);
   }
 }
 
 export async function loadToolbarLayouts(): Promise<Record<string, unknown> | null> {
-  try {
-    return await loadToolbarLayoutsFromDb();
-  } catch (error) {
-    console.error('Load toolbar layouts failed:', error);
-    return null;
-  }
+  return enqueueConfigPersistence(() => readStorageWithRetry('toolbar-read', loadToolbarLayoutsFromDb));
 }

@@ -5,6 +5,7 @@
  * 翻转、对齐）→ 外观（混合模式、透明度、类型专属属性）→ 调整（图片调色滤镜）
  * → 画布尺寸 → 连线文件。可整体折叠，把工作区还给画面。
  */
+import Select from '../../../../shared/Select';
 import { useMemo, useState } from 'react';
 import AnimatedButton from '../../../../shared/AnimatedButton';
 import { useAppStore } from '../../../../../store/useAppStore';
@@ -270,22 +271,22 @@ export default function ComposerSidePanel({
 
             <label className="composer-field">
               <span>混合</span>
-              <select
-                className="composer-select"
+              <Select fixedMenu
+                className="min-w-0"
                 value={selectedLayer.blendMode}
-                onChange={(e) => patch({ blendMode: e.target.value as BlendMode })}
+                onChange={(selectedOptionValue) => patch({ blendMode: selectedOptionValue as BlendMode })}
               >
                 {BLEND_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-              </select>
+              </Select>
             </label>
 
             {selectedLayer.type === 'text' && (
               <>
                 <label className="composer-field">
                   <span>字体</span>
-                  <select className="composer-select" value={selectedLayer.fontFamily} onChange={(e) => patch({ fontFamily: e.target.value } as Partial<Layer>)}>
+                  <Select fixedMenu className="min-w-0" value={selectedLayer.fontFamily} onChange={(selectedOptionValue) => patch({ fontFamily: selectedOptionValue } as Partial<Layer>)}>
                     {FONT_FAMILIES.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
-                  </select>
+                  </Select>
                 </label>
                 <div className="composer-num-grid">
                   <NumField label="字号" value={selectedLayer.fontSize} min={8} max={600} onCommit={(v) => patch({ fontSize: v } as Partial<Layer>)} />

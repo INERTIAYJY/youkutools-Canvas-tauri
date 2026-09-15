@@ -3,10 +3,12 @@
  *
  * Handles workflow JSON mutation, image upload, submission, and result polling.
  */
+import { applyAudioSpeechSettings, audioSpeechModeIssue, resolveAudioSpeechWorkflow, stripAudioSpeechReferences } from './ai/audioSpeechSettings';
+import { isRemoteMediaUrl } from '../utils/mediaUrl';
 import { useAppStore } from '../store/useAppStore';
 import { comfyBaseUrlFor } from './comfyServers';
 import type { WorkflowIONode, WorkflowIONodeType } from '../types';
-import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams } from '../types/aiTypes';
+import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams, AudioSpeechSettings } from '../types/aiTypes';
 import { mapImageDimensions, mapVideoDimensions, resolveVideoDurationSeconds } from './aiDimensions';
 import { resolveNodeReferences } from './nodeReferenceService';
 import {
@@ -18,9 +20,10 @@ import {
   savePendingTask,
   updatePendingTask,
 } from './pollManager';
-import { comfyFetch, pollComfyHistory } from './comfyPolling';
+import { ComfyPendingError, comfyFetch, pollComfyHistory } from './comfyPolling';
 import { corsSafeFetch } from './ai/httpTransport';
 import { resolveComfyOutputUrl } from './comfyOutputs';
+import { createComfyProgressSession, type ComfyProgressSession } from './comfyProgress';
 
 /** ComfyUI 已注册的节点类型；同一次会话里短暂缓存，装完插件重开也能很快看到变化 */
 let nodeClassCache: { baseUrl: string; classes: Set<string>; fetchedAt: number } | null = null;
@@ -49,9 +52,13 @@ export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
     ))
     : undefined;
 
-  // 先停止本地上传或轮询，避免取消过程中结果又回写到节点。
-  cancelNodePolling(nodeId);
-  if (!task?.submitted || !task.taskId || !task.baseUrl) return;
+  if (!task?.submitted || !task.taskId || !task.baseUrl) {
+    cancelNodePolling(nodeId);
+    return;
+  }
+  // 标记后再中止本地等待；远端取消失败时仍可重试，不能丢失任务身份。
+  updatePendingTask(nodeId, { comfyRecoveryState: 'cancel_pending' }, task.taskId);
+  cancelNodePolling(nodeId, true);
 
   const baseUrl = task.baseUrl.replace(/\/+$/, '');
   const promptId = task.taskId;
@@ -61,6 +68,7 @@ export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
   );
   if (directResponse.status !== 404) {
     await assertComfyResponse(directResponse, '终止 ComfyUI 任务');
+    removePendingTask(nodeId, promptId);
     return;
   }
 
@@ -75,6 +83,7 @@ export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
       body: JSON.stringify({ delete: [promptId] }),
     });
     await assertComfyResponse(deleteResponse, '移除 ComfyUI 排队任务');
+    removePendingTask(nodeId, promptId);
     return;
   }
   if (queueContainsPrompt(queue.queue_running, promptId)) {
@@ -84,6 +93,17 @@ export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
       body: JSON.stringify({ prompt_id: promptId }),
     });
     await assertComfyResponse(interruptResponse, '中断 ComfyUI 运行任务');
+  }
+  removePendingTask(nodeId, promptId);
+}
+
+function assertComfyNodeCanSubmit(nodeId?: string): void {
+  const projectId = useAppStore.getState().currentProjectId;
+  if (!nodeId || !projectId) return;
+  if (getPendingTasksForProject(projectId).some((task) => (
+    task.nodeId === nodeId && task.taskType === 'comfyui' && task.submitted && task.comfyRecoveryState
+  ))) {
+    throw new Error('该节点还有未确认结束的 ComfyUI 任务，请先继续查询或终止任务');
   }
 }
 
@@ -105,8 +125,11 @@ async function fetchComfyNodeClasses(baseUrl: string): Promise<Set<string> | nul
 /** 节点某个输入的声明：combo 的可选值 + 数值范围，用来决定敢不敢写、写多少 */
 interface ComfyInputSpec {
   options?: unknown[];
+  type?: string;
+  optional?: boolean;
   min?: number;
   max?: number;
+  step?: number;
 }
 type ComfyNodeInputSpecs = Record<string, ComfyInputSpec>;
 
@@ -124,8 +147,11 @@ function parseNodeInputSpecs(payload: unknown, classType: string): ComfyNodeInpu
       const [type, config] = declaration as [unknown, Record<string, unknown> | undefined];
       specs[name] = {
         options: Array.isArray(type) ? type : undefined,
+        type: typeof type === 'string' ? type : undefined,
+        optional: group === 'optional',
         min: typeof config?.min === 'number' ? config.min : undefined,
         max: typeof config?.max === 'number' ? config.max : undefined,
+        step: typeof config?.step === 'number' ? config.step : undefined,
       };
     }
   }
@@ -154,9 +180,10 @@ async function fetchNodeInputSpecs(baseUrl: string, classType: string): Promise<
  * 只为「写之前必须校验」的那几个输入名去问节点声明，一个工作流通常也就一两个节点命中。
  * 问不到就返回空表，注入时这些字段一律跳过，其余数值字段照常写。
  */
-async function resolveVideoParamSpecs(
+async function resolveParamSpecs(
   baseUrl: string,
   workflowObj: Record<string, Record<string, unknown>>,
+  inputKeys: readonly string[],
 ): Promise<Map<string, ComfyNodeInputSpecs>> {
   const classTypes = new Set<string>();
   for (const nodeData of Object.values(workflowObj)) {
@@ -164,9 +191,7 @@ async function resolveVideoParamSpecs(
     const classType = typeof nodeData?.class_type === 'string' ? nodeData.class_type : '';
     if (!inputs || !classType) continue;
     // 连线过来的值是数组，那种轮不到我们写
-    const needsSpec = COMBO_GUARDED_KEYS.some(
-      (key) => typeof inputs[key] === 'string' || typeof inputs[key] === 'number',
-    );
+    const needsSpec = inputKeys.some((key) => inputs[key] !== undefined && !Array.isArray(inputs[key]));
     if (needsSpec) classTypes.add(classType);
   }
   const resolved = new Map<string, ComfyNodeInputSpecs>();
@@ -219,7 +244,11 @@ function writeNodeInput(
 ): boolean {
   const inputs = workflowObj[nodeId]?.inputs as Record<string, unknown> | undefined;
   if (!inputs) return false;
-  const key = keys.find((candidate) => typeof inputs[candidate] === 'string');
+  // ComfyUI DynamicCombo 的子字段以点分隔，例如 task.text；只写已有字符串字段。
+  const key = keys.find((candidate) => typeof inputs[candidate] === 'string')
+    ?? Object.keys(inputs).find((candidate) => (
+      typeof inputs[candidate] === 'string' && keys.some((name) => candidate.endsWith(`.${name}`))
+    ));
   if (!key) return false;
   inputs[key] = value;
   return true;
@@ -227,7 +256,7 @@ function writeNodeInput(
 
 /** 默认节点按类型接受的输入键：写第一个已存在且是字符串的键 */
 const DEFAULT_NODE_INPUT_KEYS: Record<WorkflowIONodeType, string[]> = {
-  prompt: ['text', 'prompt', 'string', 'value'],
+  prompt: ['text', 'prompt', 'string', 'value', 'instruction'],
   image: ['image'],
   video: ['video'],
   audio: ['audio'],
@@ -273,14 +302,8 @@ function injectPromptsIntoWorkflow(
     const resolvedValue = rawValue !== undefined ? resolveNodeReferences(rawValue) : undefined;
     const finalValue = (resolvedValue && resolvedValue.trim()) ? resolvedValue : fallbackPrompt;
 
-    const jsonNode = workflowObj[ioNodeId];
-    if (!jsonNode) continue;
-    const inputs = jsonNode.inputs as Record<string, unknown> | undefined;
-    if (!inputs) continue;
-
-    const textKey = Object.keys(inputs).find((k) => (k === 'text' || k === 'prompt'));
-    if (textKey) {
-      inputs[textKey] = finalValue;
+    if (!writeNodeInput(workflowObj, ioNodeId, DEFAULT_NODE_INPUT_KEYS.prompt, finalValue)) {
+      throw new Error(`提示词节点 #${ioNodeId} 没有可写的文本输入，请在 ComfyUI 中检查输入映射`);
     }
   }
 }
@@ -391,7 +414,7 @@ async function uploadMediaToComfyUI(
     // 远程 URL → 取回字节。http(s) 一律走 Rust 通道：WebView 对 ComfyUI /view、
     // 各家 CDN 这类第三方源没有 CORS 许可，裸 fetch 会直接 Failed to fetch。
     // asset.localhost / blob: 是 WebView 自己的资源，reqwest 拿不到，仍走原生 fetch。
-    const useNativeChannel = /^https?:\/\//i.test(mediaUrl) && !mediaUrl.includes('asset.localhost');
+    const useNativeChannel = isRemoteMediaUrl(mediaUrl);
     const response = await (useNativeChannel ? corsSafeFetch : fetch)(mediaUrl, { signal });
     if (!response.ok) {
       throw new Error(`下载${label}失败 (${response.status})`);
@@ -437,8 +460,8 @@ async function uploadMediaToComfyUI(
   return uploadResult;
 }
 
-/** 将图片注入到 ComfyUI workflow JSON 的 image 类型 IO 节点中 */
-async function injectImagesIntoWorkflow(
+/** 将显式指定的图片/视频上传并注入对应 IO 节点。 */
+async function injectExplicitMediaIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   workflowInputs: Record<string, string> | undefined,
   ioNodes: WorkflowIONode[],
@@ -452,32 +475,28 @@ async function injectImagesIntoWorkflow(
 
   const mentionedNodeIds = Object.keys(workflowInputs);
   for (const ioNodeId of mentionedNodeIds) {
-    // 只处理 image 类型的 IO 节点
-    if (typeMap.get(ioNodeId) !== 'image') continue;
+    const kind = typeMap.get(ioNodeId);
+    if (kind !== 'image' && kind !== 'video') continue;
 
     const rawValue = workflowInputs[ioNodeId];
     // 解析 @{nodeId:label} 引用，获取实际图片 URL
     const resolvedValue = rawValue !== undefined ? resolveNodeReferences(rawValue) : '';
-    if (!resolvedValue || !resolvedValue.trim()) continue;
+    if (!resolvedValue || !resolvedValue.trim() || resolvedValue.trim().startsWith('@{')) {
+      throw new Error(`${COMFY_MEDIA_LABEL[kind]}节点 #${ioNodeId} 的引用未解析，请重新选择素材`);
+    }
 
     const imageUrl = resolvedValue.trim();
 
-    // 跳过无效值（比如解析后仍然是 @{...} 占位符）
-    if (imageUrl.startsWith('@{')) continue;
-
-    // 上传图片到 ComfyUI
-    const uploadResult = await uploadMediaToComfyUI(baseUrl, imageUrl, 'image', signal);
-
-    // 写入工作流 JSON：LoadImage 节点的 inputs.image 为上传后的文件名
-    const jsonNode = workflowObj[ioNodeId];
-    if (!jsonNode) continue;
-    const inputs = jsonNode.inputs as Record<string, unknown> | undefined;
-    if (!inputs) continue;
-
-    inputs.image = uploadResult.name;
+    const inputs = workflowObj[ioNodeId]?.inputs as Record<string, unknown> | undefined;
+    const inputKey = inputs && mediaLoaderInputKey(inputs, kind);
+    if (!inputs || !inputKey) {
+      throw new Error(`${COMFY_MEDIA_LABEL[kind]}节点 #${ioNodeId} 不接受上传文件名，请改用上传型加载节点`);
+    }
+    const uploadResult = await uploadMediaToComfyUI(baseUrl, imageUrl, kind, signal);
+    inputs[inputKey] = uploadResult.subfolder ? `${uploadResult.subfolder}/${uploadResult.name}` : uploadResult.name;
     // 标准 ComfyUI LoadImage 节点还需要 upload 字段
     if (inputs.upload !== undefined) {
-      inputs.upload = 'image';
+      inputs.upload = kind;
     }
   }
 }
@@ -553,10 +572,11 @@ function mediaLoaderInputKey(
  * ComfyUI 的 autogrow 输入形如 "ref_images.ref_image_1"，带点号的键都是可选槽；
  * 顺着链路找下去，只要终点全是这种槽就能整条摘掉，否则一律保留（少一张图报错也好过删错节点）。
  */
-function pruneOptionalMediaNode(
+async function pruneOptionalMediaNode(
   workflowObj: Record<string, Record<string, unknown>>,
   startNodeId: string,
-): void {
+  baseUrl: string,
+): Promise<void> {
   const chain = new Set([startNodeId]);
   const optionalRefs: Array<[Record<string, unknown>, string]> = [];
   const queue = [startNodeId];
@@ -570,7 +590,12 @@ function pruneOptionalMediaNode(
       for (const [key, value] of Object.entries(inputs)) {
         if (!Array.isArray(value) || value[0] !== current) continue;
         consumed = true;
-        if (key.includes('.')) {
+        const classType = typeof nodeData.class_type === 'string' ? nodeData.class_type : '';
+        const specs = key.includes('.') || !classType
+          ? null
+          : await fetchNodeInputSpecs(baseUrl, classType);
+        // autogrow 插槽使用带点号的键；其他节点以 ComfyUI 的 optional 声明为准。
+        if (key.includes('.') || specs?.[key]?.optional === true) {
           optionalRefs.push([inputs, key]);
         } else if (!chain.has(nodeId)) {
           // 必填输入：只有把消费者一起摘掉才合法，继续往下判断
@@ -623,7 +648,7 @@ async function injectDefaultMediaIntoWorkflow(
       continue;
     }
     if (index >= urls.length) {
-      pruneOptionalMediaNode(workflowObj, nodeId);
+      await pruneOptionalMediaNode(workflowObj, nodeId, baseUrl);
       continue;
     }
     const uploadResult = await uploadMediaToComfyUI(baseUrl, urls[index], kind, signal);
@@ -631,6 +656,35 @@ async function injectDefaultMediaIntoWorkflow(
     if (inputs.upload !== undefined) {
       inputs.upload = kind;
     }
+  }
+}
+
+const EMPTY_MEDIA_INPUT_KEYS: Record<Exclude<WorkflowIONodeType, 'prompt'>, string[]> = {
+  image: ['image'],
+  video: ['video', 'file'],
+  audio: ['audio'],
+};
+
+/**
+ * 导入的上传节点可以把未选择文件序列化成 null/空字符串。ComfyUI 会先校验这些节点，
+ * 即使它们只接到可选参考位也会让整份 prompt 失败。提交前只清理能够证明为可选的空分支；
+ * 必填连接、独立终点和无法识别的结构均保持原样，让服务端给出真实错误。
+ */
+async function pruneUnfilledOptionalMediaBranches(
+  workflowObj: Record<string, Record<string, unknown>>,
+  ioNodes: WorkflowIONode[],
+  baseUrl: string,
+): Promise<void> {
+  for (const ioNode of ioNodes) {
+    if (ioNode.type === 'prompt') continue;
+    const inputs = workflowObj[ioNode.nodeId]?.inputs as Record<string, unknown> | undefined;
+    if (!inputs) continue;
+    const inputKey = EMPTY_MEDIA_INPUT_KEYS[ioNode.type]
+      .find((key) => Object.prototype.hasOwnProperty.call(inputs, key));
+    if (!inputKey) continue;
+    const value = inputs[inputKey];
+    if (value !== null && value !== undefined && (typeof value !== 'string' || value.trim())) continue;
+    await pruneOptionalMediaNode(workflowObj, ioNode.nodeId, baseUrl);
   }
 }
 
@@ -649,44 +703,411 @@ const RESOLUTION_SELECTOR_RATIOS: Record<string, string> = {
   '21:9': '21:9 (Ultrawide)',
 };
 
+const DIMENSION_KEY_PAIRS = [
+  ['width', 'height', 'always'],
+  ['image_width', 'image_height', 'semantic'],
+  ['target_width', 'target_height', 'semantic'],
+  ['output_width', 'output_height', 'semantic'],
+  ['latent_width', 'latent_height', 'semantic'],
+  ['video_width', 'video_height', 'semantic'],
+  ['custom_width', 'custom_height', 'custom'],
+] as const;
+
+const IMAGE_RESOLUTION_KEYS = ['resolution', 'image_size', 'size'] as const;
+const RATIO_PRESET_KEYS = ['ratio_preset'] as const;
+const IMAGE_PARAM_SPEC_KEYS = [
+  'aspect_ratio', 'megapixels', ...IMAGE_RESOLUTION_KEYS, ...RATIO_PRESET_KEYS,
+  'width', 'height', 'image_width', 'image_height', 'target_width', 'target_height',
+  'output_width', 'output_height', 'latent_width', 'latent_height',
+  'video_width', 'video_height', 'custom_width', 'custom_height',
+] as const;
+
+const DIMENSION_ALIAS_NODE = /(?:empty|latent|resolution|dimension|canvas|generate|generation|conditioning|(?:image|video).?to.?(?:image|video)|(?:text|txt).?to.?(?:image|video)|(?:t2i|i2v|t2v|v2v))/i;
+const DIMENSION_PREPROCESS_NODE = /(?:load|loader|resize|rescale|scale|crop|pad|upscale|upscaler|constrain|constraint|preprocess|preview|save|encode|decode)/i;
+
+type ComfyConnection = [string, number];
+
+interface LinkedDimensionAssignment {
+  nodeId: string;
+  inputs: Record<string, unknown>;
+  inputKey: string;
+  value: number;
+}
+
+function isComfyConnection(value: unknown): value is ComfyConnection {
+  return Array.isArray(value)
+    && value.length >= 2
+    && typeof value[0] === 'string'
+    && typeof value[1] === 'number';
+}
+
+function normalizeComfyDimension(value: number, spec?: ComfyInputSpec): number {
+  const lower = typeof spec?.min === 'number' ? Math.max(64, spec.min) : 64;
+  const upper = typeof spec?.max === 'number' ? Math.min(16_384, spec.max) : 16_384;
+  const bounded = Math.min(upper, Math.max(lower, value));
+  const step = typeof spec?.step === 'number' && Number.isFinite(spec.step) && spec.step > 0
+    ? spec.step
+    : 8;
+  const origin = typeof spec?.min === 'number' ? spec.min : 0;
+  let aligned = origin + Math.round((bounded - origin) / step) * step;
+  if (aligned < lower) aligned = origin + Math.ceil((lower - origin) / step) * step;
+  if (aligned > upper) aligned = origin + Math.floor((upper - origin) / step) * step;
+  return Math.round(Math.min(upper, Math.max(lower, aligned)));
+}
+
+function canWriteDimensionValue(value: unknown, spec: ComfyInputSpec | undefined): boolean {
+  if (typeof value === 'number' && Number.isFinite(value)) return true;
+  return typeof value === 'string'
+    && /^\d+(?:\.\d+)?$/.test(value.trim())
+    && /^(INT|FLOAT|NUMBER)$/i.test(spec?.type ?? '');
+}
+
+function dimensionNodeDescriptor(nodeData: Record<string, unknown>): string {
+  const title = (nodeData._meta as Record<string, unknown> | undefined)?.title;
+  return `${String(nodeData.class_type ?? '')} ${typeof title === 'string' ? title : ''}`;
+}
+
+/**
+ * target/custom 等别名在预处理节点里也很常见，不能只凭字段名改写。
+ * 节点名称明确表达生成尺寸，或同时暴露比例/分辨率选择器时，才认为是输出尺寸节点。
+ */
+function allowsDimensionAliases(
+  nodeData: Record<string, unknown>,
+  inputs: Record<string, unknown>,
+): boolean {
+  const descriptor = dimensionNodeDescriptor(nodeData);
+  if (DIMENSION_PREPROCESS_NODE.test(descriptor)) return false;
+  return DIMENSION_ALIAS_NODE.test(descriptor)
+    || inputs.aspect_ratio !== undefined
+    || inputs.resolution !== undefined
+    || inputs.megapixels !== undefined;
+}
+
+function usesCustomDimensions(inputs: Record<string, unknown>): boolean {
+  return [inputs.resolution, inputs.aspect_ratio]
+    .some((value) => typeof value === 'string' && /(?:custom|自定义)/i.test(value));
+}
+
+/** 只追踪明确的标量 Primitive；Reroute 只负责透明转发，绝不改写连接数组本身。 */
+function resolveLinkedDimensionPrimitive(
+  workflowObj: Record<string, Record<string, unknown>>,
+  connection: ComfyConnection,
+  visited = new Set<string>(),
+): Omit<LinkedDimensionAssignment, 'value'> | null {
+  const sourceId = connection[0];
+  if (visited.has(sourceId) || visited.size >= 8) return null;
+  visited.add(sourceId);
+  const sourceNode = workflowObj[sourceId];
+  const sourceInputs = sourceNode?.inputs as Record<string, unknown> | undefined;
+  if (!sourceNode || !sourceInputs) return null;
+  const classType = String(sourceNode.class_type ?? '');
+
+  if (/^Primitive(?:Int|Float|Number)?$/i.test(classType)) {
+    const inputKey = ['value', 'int', 'float', 'number']
+      .find((key) => (
+        typeof sourceInputs[key] === 'number' && Number.isFinite(sourceInputs[key])
+      ) || (
+        typeof sourceInputs[key] === 'string' && /^\d+(?:\.\d+)?$/.test(sourceInputs[key].trim())
+      ));
+    return inputKey ? { nodeId: sourceId, inputs: sourceInputs, inputKey } : null;
+  }
+
+  if (/reroute/i.test(classType)) {
+    const upstream = Object.values(sourceInputs).filter(isComfyConnection);
+    return upstream.length === 1
+      ? resolveLinkedDimensionPrimitive(workflowObj, upstream[0], visited)
+      : null;
+  }
+  return null;
+}
+
+function planLinkedDimension(
+  workflowObj: Record<string, Record<string, unknown>>,
+  connection: ComfyConnection,
+  value: number,
+  assignments: Map<string, LinkedDimensionAssignment>,
+  conflicts: Set<string>,
+): void {
+  const target = resolveLinkedDimensionPrimitive(workflowObj, connection);
+  if (!target) return;
+  const key = `${target.nodeId}:${target.inputKey}`;
+  const previous = assignments.get(key);
+  if (previous && previous.value !== value) conflicts.add(key);
+  else assignments.set(key, { ...target, value });
+}
+
+function applyLinkedDimensionAssignments(
+  assignments: Map<string, LinkedDimensionAssignment>,
+  conflicts: Set<string>,
+): number {
+  let applied = 0;
+  for (const [key, assignment] of assignments) {
+    if (conflicts.has(key)) continue;
+    assignment.inputs[assignment.inputKey] = assignment.value;
+    applied += 1;
+  }
+  if (conflicts.size > 0) {
+    console.warn('[comfyWorkflowService] 宽高共享同一标量节点且目标值冲突，已保留工作流原值', [...conflicts]);
+  }
+  return applied;
+}
+
+function injectDimensionPairs(
+  workflowObj: Record<string, Record<string, unknown>>,
+  nodeData: Record<string, unknown>,
+  inputs: Record<string, unknown>,
+  dims: { width: number; height: number },
+  specs: ComfyNodeInputSpecs | undefined,
+  assignments: Map<string, LinkedDimensionAssignment>,
+  conflicts: Set<string>,
+): number {
+  let matched = 0;
+  const aliasesAllowed = allowsDimensionAliases(nodeData, inputs);
+  for (const [widthKey, heightKey, policy] of DIMENSION_KEY_PAIRS) {
+    if (!(widthKey in inputs) || !(heightKey in inputs)) continue;
+    if (policy !== 'always' && !aliasesAllowed) continue;
+    if (policy === 'custom' && !usesCustomDimensions(inputs)) continue;
+    for (const [key, targetValue] of [[widthKey, dims.width], [heightKey, dims.height]] as const) {
+      const value = inputs[key];
+      const normalized = normalizeComfyDimension(targetValue, specs?.[key]);
+      if (canWriteDimensionValue(value, specs?.[key])) {
+        inputs[key] = normalized;
+        matched += 1;
+      } else if (isComfyConnection(value)) {
+        planLinkedDimension(workflowObj, value, normalized, assignments, conflicts);
+        // 实际写入数由 applyLinkedDimensionAssignments 统一统计；冲突连接不会被误报为已应用。
+      }
+    }
+  }
+  return matched;
+}
+
+function pickImageResolutionOption(
+  options: unknown[],
+  imageSize: string,
+  dims: { width: number; height: number },
+): unknown {
+  const normalizedSize = imageSize.trim().toLowerCase();
+  const exact = options.find((option): option is string => {
+    if (typeof option !== 'string') return false;
+    const normalized = option.trim().toLowerCase();
+    return normalized === normalizedSize || normalized.startsWith(`${normalizedSize} `);
+  });
+  if (exact !== undefined) return exact;
+  const labeled = pickResolutionOption(options, dims);
+  return labeled ?? pickClosestNumericOption(options, Math.min(dims.width, dims.height));
+}
+
+interface RatioPresetSelection {
+  option: string;
+  dimensions?: { width: number; height: number };
+}
+
+function parseRatioValue(label: string): number | undefined {
+  const match = /(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)/.exec(label);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? width / height : undefined;
+}
+
+function parsePresetDimensions(label: string): { width: number; height: number } | undefined {
+  const match = /(\d{2,5})\s*[x×]\s*(\d{2,5})/i.exec(label);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width >= 64 && height >= 64 ? { width, height } : undefined;
+}
+
+/**
+ * CatPixel 这类节点把比例和固定像素合并在一个 combo 里。
+ * 只从 object_info 的合法选项中挑精确比例；同一比例有多个档位时再按面积选最近项。
+ */
+function pickRatioPresetOption(
+  options: unknown[],
+  aspectRatio: string | undefined,
+  dims: { width: number; height: number },
+): RatioPresetSelection | undefined {
+  if (!aspectRatio) return undefined;
+  const targetRatio = parseRatioValue(aspectRatio);
+  if (targetRatio === undefined) return undefined;
+  const targetArea = dims.width * dims.height;
+  let best: RatioPresetSelection | undefined;
+  let bestSizeDelta = Infinity;
+
+  for (const option of options) {
+    if (typeof option !== 'string') continue;
+    const dimensions = parsePresetDimensions(option);
+    const candidateRatio = parseRatioValue(option)
+      ?? (dimensions ? dimensions.width / dimensions.height : undefined);
+    if (candidateRatio === undefined) continue;
+    const ratioDelta = Math.abs(candidateRatio - targetRatio) / targetRatio;
+    if (ratioDelta > 0.01) continue;
+    const sizeDelta = dimensions
+      ? Math.abs(Math.log((dimensions.width * dimensions.height) / targetArea))
+      : Infinity;
+    if (!best || sizeDelta < bestSizeDelta) {
+      best = { option, dimensions };
+      bestSizeDelta = sizeDelta;
+    }
+  }
+  return best;
+}
+
+function writeRatioPresetInput(
+  inputs: Record<string, unknown>,
+  dims: { width: number; height: number },
+  aspectRatio: string | undefined,
+  specs: ComfyNodeInputSpecs | undefined,
+): { matched: number; dimensions?: { width: number; height: number } } {
+  const current = inputs.ratio_preset;
+  const options = specs?.ratio_preset?.options;
+  if (typeof current !== 'string' || !options) return { matched: 0 };
+  const selected = pickRatioPresetOption(options, aspectRatio, dims);
+  if (!selected) return { matched: 0 };
+  inputs.ratio_preset = selected.option;
+  return { matched: 1, dimensions: selected.dimensions };
+}
+
+function writeImageResolutionInputs(
+  inputs: Record<string, unknown>,
+  dims: { width: number; height: number },
+  imageSize: string,
+  specs: ComfyNodeInputSpecs | undefined,
+): number {
+  let matched = 0;
+  for (const key of IMAGE_RESOLUTION_KEYS) {
+    const current = inputs[key];
+    if (current === undefined || Array.isArray(current)) continue;
+    const spec = specs?.[key];
+    let next: unknown;
+    if (spec?.options) {
+      next = pickImageResolutionOption(spec.options, imageSize, dims);
+    } else if (typeof current === 'string' && /^(?:720p|[124]k)$/i.test(current.trim())) {
+      next = imageSize;
+    } else if (typeof current === 'string' && /^\d+\s*[x×]\s*\d+$/i.test(current.trim())) {
+      next = `${dims.width}x${dims.height}`;
+    } else if (
+      key === 'resolution'
+      && typeof current === 'number'
+      && current >= 64
+    ) {
+      // 图片尺寸档位以短边定义（1K/2K/4K）；视频的 resolution 才按长边语义处理。
+      next = normalizeComfyDimension(Math.min(dims.width, dims.height), spec);
+    } else if (
+      key === 'resolution'
+      && typeof current === 'string'
+      && /^\d+(?:\.\d+)?$/.test(current.trim())
+      && /^(INT|FLOAT|NUMBER)$/i.test(spec?.type ?? '')
+    ) {
+      next = normalizeComfyDimension(Math.min(dims.width, dims.height), spec);
+    }
+    if (next !== undefined) {
+      inputs[key] = next;
+      matched += 1;
+    }
+  }
+  return matched;
+}
+
 function writeResolutionSelector(
   inputs: Record<string, unknown>,
   dims: { width: number; height: number },
   aspectRatio: string | undefined,
   specs?: ComfyNodeInputSpecs,
-): void {
-  if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels !== 'number') return;
+): number {
+  if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels !== 'number') return 0;
   // 问得到可选值就按可选值挑（能兼容表里没有的档位写法），问不到再退回内置对照表
   const options = specs?.aspect_ratio?.options;
   const label = options
     ? pickAspectRatioOption(options, aspectRatio)
     : aspectRatio ? RESOLUTION_SELECTOR_RATIOS[aspectRatio] : undefined;
-  if (label !== undefined) inputs.aspect_ratio = label;
+  let matched = 0;
+  if (label !== undefined) {
+    inputs.aspect_ratio = label;
+    matched += 1;
+  }
   const megapixels = Math.round((dims.width * dims.height) / 10_000) / 100;
   inputs.megapixels = clampToSpec(megapixels, specs?.megapixels, 0.1, 16);
+  return matched + 1;
 }
 
 /**
  * 将画布选择的尺寸/比例注入工作流。
  * 注入所有带 width/height 的节点：被 @ 的都是提示词/图片 IO 节点，按它们过滤等于什么都不注入。
  */
-function injectDimensionsIntoWorkflow(
+async function injectDimensionsIntoWorkflow(
+  baseUrl: string,
   workflowObj: Record<string, Record<string, unknown>>,
   imageSize: string,
   aspectRatio: string,
-): void {
-  const dims = mapImageDimensions(imageSize, aspectRatio);
+): Promise<{ dimensions: { width: number; height: number }; matchedInputs: number }> {
+  const mapped = mapImageDimensions(imageSize, aspectRatio);
+  const dims = {
+    width: normalizeComfyDimension(mapped.width),
+    height: normalizeComfyDimension(mapped.height),
+  };
+  const specsByClass = await resolveParamSpecs(baseUrl, workflowObj, IMAGE_PARAM_SPEC_KEYS);
+  const assignments = new Map<string, LinkedDimensionAssignment>();
+  const conflicts = new Set<string>();
+  let matchedInputs = 0;
+  let nonPresetMatchedInputs = 0;
+  let presetDimensions: { width: number; height: number } | undefined;
+  let presetDimensionsConflict = false;
+
   for (const [, nodeData] of Object.entries(workflowObj)) {
     if (!nodeData || typeof nodeData !== 'object') continue;
     const inputs = nodeData.inputs as Record<string, unknown> | undefined;
     if (!inputs) continue;
-    // 匹配包含 width 和 height 的节点（EmptyLatentImage、EmptySD3LatentImage 等）
-    if (inputs.width !== undefined && typeof inputs.width === 'number' && inputs.height !== undefined && typeof inputs.height === 'number') {
-      inputs.width = dims.width;
-      inputs.height = dims.height;
+    const classType = String(nodeData.class_type ?? '');
+    const specs = specsByClass.get(classType);
+    const dimensionPairMatches = injectDimensionPairs(
+      workflowObj, nodeData, inputs, dims, specs, assignments, conflicts,
+    );
+    matchedInputs += dimensionPairMatches;
+    nonPresetMatchedInputs += dimensionPairMatches;
+
+    const ratioPresetResult = writeRatioPresetInput(inputs, dims, aspectRatio, specs);
+    matchedInputs += ratioPresetResult.matched;
+    if (ratioPresetResult.dimensions) {
+      if (presetDimensions && (
+        presetDimensions.width !== ratioPresetResult.dimensions.width
+        || presetDimensions.height !== ratioPresetResult.dimensions.height
+      )) {
+        presetDimensionsConflict = true;
+      } else {
+        presetDimensions = ratioPresetResult.dimensions;
+      }
     }
-    writeResolutionSelector(inputs, dims, aspectRatio);
+
+    if (typeof inputs.aspect_ratio === 'string' && typeof inputs.megapixels === 'number') {
+      const selectorMatches = writeResolutionSelector(inputs, dims, aspectRatio, specs);
+      matchedInputs += selectorMatches;
+      nonPresetMatchedInputs += selectorMatches;
+    } else {
+      if (writeAspectRatio(inputs, aspectRatio, specs)) {
+        matchedInputs += 1;
+        nonPresetMatchedInputs += 1;
+      }
+    }
+    const resolutionMatches = writeImageResolutionInputs(inputs, dims, imageSize, specs);
+    matchedInputs += resolutionMatches;
+    nonPresetMatchedInputs += resolutionMatches;
   }
+
+  const linkedDimensionMatches = applyLinkedDimensionAssignments(assignments, conflicts);
+  matchedInputs += linkedDimensionMatches;
+  nonPresetMatchedInputs += linkedDimensionMatches;
+  if (matchedInputs === 0) {
+    console.warn('[comfyWorkflowService] 工作流未找到可映射的图片宽高或分辨率输入');
+  }
+  if (presetDimensionsConflict) {
+    console.warn('[comfyWorkflowService] 工作流存在多个冲突的比例预设尺寸，结果元数据保留画布目标值');
+  }
+  const effectiveDimensions = presetDimensions && !presetDimensionsConflict && nonPresetMatchedInputs === 0
+    ? presetDimensions
+    : dims;
+  return { dimensions: effectiveDimensions, matchedInputs };
 }
 
 /** 秒数节点：工作流自己按秒算帧数（PrimitiveFloat + 数学表达式），比直接写帧数更可靠 */
@@ -720,6 +1141,12 @@ const FPS_KEYS = ['fps', 'frame_rate'] as const;
 const DURATION_KEYS = ['duration', 'duration_seconds'] as const;
 /** 这些输入名要按节点声明的可选值校验才敢写，否则 ComfyUI 会判非法直接拒掉整个任务 */
 const COMBO_GUARDED_KEYS = ['aspect_ratio', 'resolution', ...DURATION_KEYS] as const;
+const VIDEO_PARAM_SPEC_KEYS = [
+  ...COMBO_GUARDED_KEYS,
+  'width', 'height', 'image_width', 'image_height', 'target_width', 'target_height',
+  'output_width', 'output_height', 'latent_width', 'latent_height', 'video_width', 'video_height',
+  'custom_width', 'custom_height',
+] as const;
 /** 处理输入素材的节点：同名参数改的是素材本身，不是出片规格 */
 const INPUT_MEDIA_CLASS = /load(video|image)|videoload|loadvideo/i;
 /** 裁剪类节点：duration 是截取长度而非出片时长 */
@@ -802,13 +1229,15 @@ function writeAspectRatio(
   inputs: Record<string, unknown>,
   ratio: string | undefined,
   specs: ComfyNodeInputSpecs | undefined,
-): void {
-  if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels === 'number') return;
+): boolean {
+  if (typeof inputs.aspect_ratio !== 'string' || typeof inputs.megapixels === 'number') return false;
   const options = specs?.aspect_ratio?.options;
   // 问不到可选值就不写：猜错一个档位写法会让整个任务被拒
-  if (!options) return;
+  if (!options) return false;
   const picked = pickAspectRatioOption(options, ratio);
-  if (picked !== undefined) inputs.aspect_ratio = picked;
+  if (picked === undefined) return false;
+  inputs.aspect_ratio = picked;
+  return true;
 }
 
 /** API 节点上的档位式 resolution；数字型的（长边像素）按数字写 */
@@ -867,6 +1296,8 @@ function injectVideoParamsIntoWorkflow(
   specsByClass: Map<string, ComfyNodeInputSpecs> = new Map(),
 ): void {
   const dims = mapVideoDimensions(videoResolution, videoRatio);
+  const assignments = new Map<string, LinkedDimensionAssignment>();
+  const conflicts = new Set<string>();
 
   // 先找秒数节点：工作流自带秒→帧换算时，帧率是它算式里的常量，再去改帧率只会让时长对不上
   let hasDurationNode = false;
@@ -883,12 +1314,9 @@ function injectVideoParamsIntoWorkflow(
     if (INPUT_MEDIA_CLASS.test(classType)) continue;
     const specs = specsByClass.get(classType);
 
-    // 注入 width/height 到 latent 或 image 节点（按所选比例换算，与图片工作流一致）
-    const isSizedNode = typeof inputs.width === 'number' && typeof inputs.height === 'number';
-    if (isSizedNode) {
-      inputs.width = dims.width;
-      inputs.height = dims.height;
-    }
+    // 注入直接宽高、受控别名或其上游 Primitive；连接数组本身始终保留。
+    const hasPrimarySizePair = inputs.width !== undefined && inputs.height !== undefined;
+    injectDimensionPairs(workflowObj, nodeData, inputs, dims, specs, assignments, conflicts);
     writeResolutionSelector(inputs, dims, videoRatio, specs);
     writeAspectRatio(inputs, videoRatio, specs);
     writeResolutionInput(inputs, dims, specs);
@@ -906,12 +1334,13 @@ function injectVideoParamsIntoWorkflow(
     }
     // Wan / Hunyuan / Mochi 的 latent 节点用 length 表示总帧数；
     // 只认带 width/height 的节点，避免误伤其他节点上同名的 length 参数
-    if (typeof inputs.length === 'number' && isSizedNode) {
+    if (typeof inputs.length === 'number' && hasPrimarySizePair) {
       inputs.length = videoFrames;
     }
 
     writeDurationInputs(inputs, classType, durationSeconds, specs);
   }
+  applyLinkedDimensionAssignments(assignments, conflicts);
 }
 
 /** 提交工作流到 ComfyUI，返回 baseUrl 和 promptId */
@@ -924,6 +1353,7 @@ async function submitComfyUIWorkflow(
   referenceAudioUrls: string[] = [],
   /** 提示词框里引用的图片/视频，用于填充工作流指定的默认 IO 节点 */
   promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
+  speech?: { settings?: AudioSpeechSettings },
 ): Promise<{ baseUrl: string; promptId: string; workflowObj: Record<string, Record<string, unknown>> }> {
   const baseUrl = getComfyUIConfig(workflowId);
 
@@ -942,9 +1372,24 @@ async function submitComfyUIWorkflow(
     throw new Error('工作流 JSON 解析失败');
   }
 
+  const speechControls = speech ? resolveAudioSpeechWorkflow(wf) : undefined;
+  if (speechControls) {
+    const explicitAudio = speechControls.referenceInputId ? workflowInputs?.[speechControls.referenceInputId] : undefined;
+    const issue = audioSpeechModeIssue(speechControls, Boolean(referenceAudioUrls.length || explicitAudio?.trim()));
+    if (issue) throw new Error(issue);
+    const nodes = useAppStore.getState().nodes ?? [];
+    prompt = stripAudioSpeechReferences(prompt, nodes);
+    workflowInputs = workflowInputs && { ...workflowInputs };
+    for (const io of wf.ioNodes ?? []) {
+      if (io.type === 'prompt' && workflowInputs?.[io.nodeId] !== undefined) {
+        workflowInputs[io.nodeId] = stripAudioSpeechReferences(workflowInputs[io.nodeId], nodes);
+      }
+    }
+  }
+
   // 收集所有 IO 节点信息
   const ioNodes = wf.ioNodes || [];
-  const ioNodeIds = ioNodes.map((io) => io.nodeId);
+  const ioNodeIds = ioNodes.filter((io) => io.type === 'prompt').map((io) => io.nodeId);
 
   // 某类型只要被 @ 过，该类型就完全按用户的赋值走，默认节点不再介入
   const mentionedTypes = new Set(
@@ -955,12 +1400,18 @@ async function submitComfyUIWorkflow(
   const defaultNodeFor = (type: WorkflowIONodeType) => (
     mentionedTypes.has(type) ? undefined : wf.defaultNodes?.[type]
   );
+  if (speechControls && mentionedTypes.has('prompt') && workflowInputs?.[speechControls.textNodeId] === undefined) {
+    throw new Error('请给当前语音工作流的正文输入赋值');
+  }
 
   // 注入提示词到 prompt 类型 IO 节点（没 @ 时优先写默认节点）
-  injectPromptsIntoWorkflow(workflowObj, workflowInputs, prompt, ioNodeIds, defaultNodeFor('prompt'));
+  injectPromptsIntoWorkflow(workflowObj, workflowInputs, prompt, ioNodeIds,
+    defaultNodeFor('prompt') ?? (!mentionedTypes.has('prompt') ? speechControls?.textNodeId : undefined));
 
-  // 注入图片到 image 类型 IO 节点（上传 → 替换文件名）
-  await injectImagesIntoWorkflow(workflowObj, workflowInputs, ioNodes, baseUrl, signal);
+  if (speechControls) applyAudioSpeechSettings(workflowObj, speechControls, speech?.settings);
+
+  // 显式图片/视频 IO 赋值（上传 → 替换对应输入文件名）
+  await injectExplicitMediaIntoWorkflow(workflowObj, workflowInputs, ioNodes, baseUrl, signal);
 
   // 没 @ 图片/视频节点时，把提示词框里引用的同类媒体送进默认节点
   const hasPromptMedia = Boolean(promptMedia.imageUrls?.length || promptMedia.videoUrls?.length);
@@ -983,6 +1434,9 @@ async function submitComfyUIWorkflow(
     signal,
     defaultNodeFor('audio'),
   );
+
+  // 空上传节点即使只服务于可选参考位，也会在 ComfyUI prompt 校验阶段先报错。
+  await pruneUnfilledOptionalMediaBranches(workflowObj, ioNodes, baseUrl);
 
   // 返回 workflowObj 让调用方注入尺寸/视频参数后再提交
   return { baseUrl, promptId: '', workflowObj };
@@ -1038,11 +1492,16 @@ async function promptComfyUIWorkflow(
   baseUrl: string,
   workflowObj: Record<string, Record<string, unknown>>,
   signal?: AbortSignal,
+  progressSession?: ComfyProgressSession,
 ): Promise<string> {
+  await progressSession?.waitUntilReady();
   const promptRes = await comfyFetch(`${baseUrl}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflowObj }),
+    body: JSON.stringify({
+      prompt: workflowObj,
+      ...(progressSession ? { client_id: progressSession.clientId } : {}),
+    }),
     signal,
   });
 
@@ -1052,6 +1511,7 @@ async function promptComfyUIWorkflow(
   }
 
   const promptResult = (await promptRes.json()) as { prompt_id?: string; error?: string };
+  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
   if (promptResult.error) {
     throw new Error(`ComfyUI 错误: ${promptResult.error}`);
   }
@@ -1059,6 +1519,7 @@ async function promptComfyUIWorkflow(
     throw new Error('ComfyUI 未返回 prompt_id');
   }
 
+  progressSession?.bindPrompt(promptResult.prompt_id);
   return promptResult.prompt_id;
 }
 
@@ -1084,15 +1545,19 @@ export async function executeComfyUIGenerate(
 ): Promise<{ url: string; width: number; height: number }> {
   const { workflowId, workflowInputs, prompt, imageSize = '2K', aspectRatio = '1:1' } = params;
   const comfyUrl = comfyBaseUrlFor(workflowId);
+  assertComfyNodeCanSubmit(params.nodeId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
     : nodeSignal ?? externalSignal;
+  const projectId = params.nodeId ? useAppStore.getState().currentProjectId : null;
+  let progressSession: ComfyProgressSession | undefined;
+  let submittedTaskId: string | undefined;
+  let retainPending = false;
 
   try {
     // 预存待续任务（在 submit 之前），确保关窗重启后能恢复
     if (params.nodeId) {
-      const projectId = useAppStore.getState().currentProjectId;
       if (projectId) {
         savePendingTask({
           nodeId: params.nodeId,
@@ -1117,10 +1582,15 @@ export async function executeComfyUIGenerate(
     );
 
     // 注入画布选择的尺寸
-    injectDimensionsIntoWorkflow(workflowObj, imageSize, aspectRatio);
+    const dimensionInjection = await injectDimensionsIntoWorkflow(baseUrl, workflowObj, imageSize, aspectRatio);
+
+    if (params.nodeId && projectId) {
+      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal });
+    }
 
     // 提交工作流
-    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal);
+    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession);
+    submittedTaskId = promptId;
 
     // 回填 promptId，标记为已提交
     if (params.nodeId) {
@@ -1128,14 +1598,22 @@ export async function executeComfyUIGenerate(
     }
 
     // 计算最终输出尺寸（用于节点显示）
-    const dims = mapImageDimensions(imageSize, aspectRatio);
+    const dims = dimensionInjection.dimensions;
 
     // 轮询等待结果
     return await pollComfyUIHistory(baseUrl, promptId, dims, signal);
+  } catch (error) {
+    if (submittedTaskId && (error instanceof ComfyPendingError || signal?.aborted)) {
+      retainPending = true;
+      if (params.nodeId && !nodeSignal?.aborted) {
+        updatePendingTask(params.nodeId, { comfyRecoveryState: 'disconnected' }, submittedTaskId);
+      }
+    }
+    throw error;
   } finally {
-    if (params.nodeId) {
-      cleanupNodePolling(params.nodeId);
-      removePendingTask(params.nodeId);
+    progressSession?.close();
+    if (params.nodeId && cleanupNodePolling(params.nodeId, nodeSignal) !== false && !retainPending) {
+      removePendingTask(params.nodeId, submittedTaskId);
     }
   }
 }
@@ -1168,15 +1646,19 @@ export async function executeComfyUIVideoGenerate(
     seedanceRatio = '16:9',
   } = params;
   const comfyUrl = comfyBaseUrlFor(workflowId);
+  assertComfyNodeCanSubmit(params.nodeId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
     : nodeSignal ?? externalSignal;
+  const projectId = params.nodeId ? useAppStore.getState().currentProjectId : null;
+  let progressSession: ComfyProgressSession | undefined;
+  let submittedTaskId: string | undefined;
+  let retainPending = false;
 
   try {
     // 预存待续任务（在 submit 之前），确保关窗重启后能恢复
     if (params.nodeId) {
-      const projectId = useAppStore.getState().currentProjectId;
       if (projectId) {
         savePendingTask({
           nodeId: params.nodeId,
@@ -1208,11 +1690,16 @@ export async function executeComfyUIVideoGenerate(
       videoFps,
       videoFrames,
       resolveVideoDurationSeconds(seedanceDuration, videoFrames, videoFps),
-      await resolveVideoParamSpecs(baseUrl, workflowObj),
+      await resolveParamSpecs(baseUrl, workflowObj, VIDEO_PARAM_SPEC_KEYS),
     );
 
+    if (params.nodeId && projectId) {
+      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal });
+    }
+
     // 提交工作流
-    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal);
+    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession);
+    submittedTaskId = promptId;
 
     // 回填 promptId，标记为已提交
     if (params.nodeId) {
@@ -1221,10 +1708,18 @@ export async function executeComfyUIVideoGenerate(
 
     // 轮询等待结果
     return await pollComfyUIHistoryForVideo(baseUrl, promptId, signal);
+  } catch (error) {
+    if (submittedTaskId && (error instanceof ComfyPendingError || signal?.aborted)) {
+      retainPending = true;
+      if (params.nodeId && !nodeSignal?.aborted) {
+        updatePendingTask(params.nodeId, { comfyRecoveryState: 'disconnected' }, submittedTaskId);
+      }
+    }
+    throw error;
   } finally {
-    if (params.nodeId) {
-      cleanupNodePolling(params.nodeId);
-      removePendingTask(params.nodeId);
+    progressSession?.close();
+    if (params.nodeId && cleanupNodePolling(params.nodeId, nodeSignal) !== false && !retainPending) {
+      removePendingTask(params.nodeId, submittedTaskId);
     }
   }
 }
@@ -1249,15 +1744,19 @@ export async function executeComfyUIAudioGenerate(
 ): Promise<{ url: string }> {
   const { workflowId, workflowInputs, prompt } = params;
   const comfyUrl = comfyBaseUrlFor(workflowId);
+  assertComfyNodeCanSubmit(params.nodeId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
     : nodeSignal ?? externalSignal;
+  const projectId = params.nodeId ? useAppStore.getState().currentProjectId : null;
+  let progressSession: ComfyProgressSession | undefined;
+  let submittedTaskId: string | undefined;
+  let retainPending = false;
 
   try {
     // 预存待续任务（在 submit 之前），确保关窗重启后能恢复
     if (params.nodeId) {
-      const projectId = useAppStore.getState().currentProjectId;
       if (projectId) {
         savePendingTask({
           nodeId: params.nodeId,
@@ -1272,10 +1771,15 @@ export async function executeComfyUIAudioGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls);
+    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls, {}, { settings: params.audioSpeechSettings });
+
+    if (params.nodeId && projectId) {
+      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal });
+    }
 
     // 提交工作流
-    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal);
+    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession);
+    submittedTaskId = promptId;
 
     // 回填 promptId，标记为已提交
     if (params.nodeId) {
@@ -1284,10 +1788,18 @@ export async function executeComfyUIAudioGenerate(
 
     // 轮询等待结果
     return await pollComfyUIHistoryForAudio(baseUrl, promptId, signal);
+  } catch (error) {
+    if (submittedTaskId && (error instanceof ComfyPendingError || signal?.aborted)) {
+      retainPending = true;
+      if (params.nodeId && !nodeSignal?.aborted) {
+        updatePendingTask(params.nodeId, { comfyRecoveryState: 'disconnected' }, submittedTaskId);
+      }
+    }
+    throw error;
   } finally {
-    if (params.nodeId) {
-      cleanupNodePolling(params.nodeId);
-      removePendingTask(params.nodeId);
+    progressSession?.close();
+    if (params.nodeId && cleanupNodePolling(params.nodeId, nodeSignal) !== false && !retainPending) {
+      removePendingTask(params.nodeId, submittedTaskId);
     }
   }
 }

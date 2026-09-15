@@ -36,9 +36,146 @@ vi.mock('../../src/services/uploadService', () => ({
 import {
   executeGeneralAsyncTask,
   generateApimartImagesBatch,
+  generateApimartVideo,
 } from '../../src/services/ai/apimartGen';
 import { buildApimartSeedanceRequest, isApimartSeedanceModel } from '../../src/services/ai/apimartVideoModels';
 import { apimartMediaProviderAdapter } from '../../src/services/ai/providers/apimartMedia';
+import { APIMART_OMNI_MODELS, getApimartSeedanceCapability } from '../../src/services/ai/apimartVideoModels';
+import { fetchProviderModelCatalog } from '../../src/services/ai/providerCatalogService';
+import { assertVideoInputConstraints } from '../../src/services/ai/videoInputValidation';
+import { buildImageCapabilityRequest } from '../../src/services/ai/mediaModelCapabilities';
+import { getMediaModelOptions } from '../../src/components/nodes/shared/defaultModels';
+
+describe('APIMart Omni 视频合同', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    pollingMocks.registerNodePolling.mockReturnValue(new AbortController().signal);
+    serviceMocks.uploadToRemote.mockResolvedValue('https://upload.example/reference.png');
+  });
+
+  it.each(APIMART_OMNI_MODELS.map((model) => model.id))('提交 %s 到视频端点并读取轮询产物', async (model) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'omni-task', status: 'submitted' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: {
+        status: 'completed', result: { videos: [{ url: ['https://cdn.example/omni.mp4'] }] },
+      } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartVideo('api-key', 'https://api.example/v1', model, 'prompt', undefined, {
+      duration: 6, resolution: '720p', ratio: '9:16',
+    })).resolves.toEqual({ url: 'https://cdn.example/omni.mp4' });
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      'https://api.example/v1/videos/generations', 'https://api.example/v1/tasks/omni-task?language=zh',
+    ]);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body).toMatchObject({ model, resolution: '720p', aspect_ratio: '9:16' });
+    if (model.endsWith('-ext')) expect(body.duration).toBe(6);
+    else expect(body).not.toHaveProperty('duration');
+    expect(body).not.toHaveProperty('generate_audio');
+  });
+
+  it('Flash 首尾帧与参考图共存，合计上限含首尾帧', () => {
+    const params = { firstFrameUrl: 'https://cdn.example/first.png', lastFrameUrl: 'https://cdn.example/last.png',
+      imageUrls: ['https://cdn.example/ref.png'], resolution: '4K', duration: 5 };
+    expect(buildApimartSeedanceRequest('gemini-omni-1.1-flash', '', params)).toEqual({
+      model: 'gemini-omni-1.1-flash', prompt: '', resolution: '4k', aspect_ratio: '16:9',
+      first_frame_image: params.firstFrameUrl, last_frame_image: params.lastFrameUrl, image_urls: params.imageUrls,
+    });
+    expect(() => buildApimartSeedanceRequest('gemini-omni-1.1-flash', '', {
+      ...params, imageUrls: Array(9).fill('https://cdn.example/ref.png'),
+    })).toThrow('合计最多 10 张');
+    expect(() => buildApimartSeedanceRequest('gemini-omni-1.1-flash', '', {
+      lastFrameUrl: params.lastFrameUrl,
+    })).toThrow('必须同时提供首帧');
+  });
+
+  it('Ext 分开首帧和参考模式；视频输入省略时长；旧 ID 映射到新模型', () => {
+    expect(buildApimartSeedanceRequest('apimart/Omni-Flash-Ext', 'prompt', {
+      firstFrameUrl: 'https://cdn.example/first.png', duration: 8,
+    })).toMatchObject({ model: 'gemini-omni-1.1-flash-ext', generation_type: 'frame', duration: 8,
+      image_urls: ['https://cdn.example/first.png'] });
+    const body = buildApimartSeedanceRequest('gemini-omni-1.1-flash-ext', 'prompt', {
+      imageUrls: Array(3).fill('https://cdn.example/ref.png'),
+      videoUrls: ['https://cdn.example/ref.mp4'], duration: 5,
+    });
+    expect(body).toMatchObject({ generation_type: 'reference', video_urls: ['https://cdn.example/ref.mp4'] });
+    expect(body).not.toHaveProperty('duration');
+    expect(body).not.toHaveProperty('aspect_ratio');
+    expect(() => buildApimartSeedanceRequest('gemini-omni-1.1-flash-ext', 'prompt', { duration: 5 })).toThrow('4 / 6 / 8 / 10');
+    expect(() => buildApimartSeedanceRequest('gemini-omni-1.1-flash-ext', 'prompt', {
+      imageUrls: Array(2).fill('https://cdn.example/ref.png'),
+    })).toThrow('1 张或 3 张');
+  });
+
+  it('Preview 限制分辨率、图片数、视频数和音频输入', () => {
+    const model = 'gemini-omni-flash-preview';
+    expect(buildApimartSeedanceRequest(model, '', { imageUrls: Array(16).fill('https://cdn.example/ref.png') }))
+      .toMatchObject({ resolution: '720p' });
+    expect(() => buildApimartSeedanceRequest(model, 'prompt', { resolution: '1080p' })).toThrow('分辨率仅支持');
+    expect(() => buildApimartSeedanceRequest(model, 'prompt', { imageUrls: Array(17).fill('https://cdn.example/ref.png') })).toThrow('最多 16 张');
+    expect(() => buildApimartSeedanceRequest(model, 'prompt', { videoUrls: ['https://cdn.example/1.mp4', 'https://cdn.example/2.mp4'] })).toThrow('1 个参考视频');
+    expect(() => buildApimartSeedanceRequest(model, 'prompt', { audioUrls: ['https://cdn.example/1.mp3'] })).toThrow('不支持参考音频');
+    expect(() => buildApimartSeedanceRequest(model, 'prompt', { ratio: '1:1' })).toThrow('16:9 / 9:16');
+  });
+
+  it('经 Adapter 上传本地首尾帧并保留参考图，复用任务失败处理', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'omni-task' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'failed', error: { message: 'Omni failed' } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const referenceMedia = [
+      { kind: 'image' as const, url: 'asset://localhost/first.png', origin: 'prompt' as const, role: 'first_frame' as const },
+      { kind: 'image' as const, url: 'https://cdn.example/last.png', origin: 'prompt' as const, role: 'last_frame' as const },
+      { kind: 'image' as const, url: 'https://cdn.example/ref.png', origin: 'prompt' as const, role: 'reference' as const },
+    ];
+    await expect(apimartMediaProviderAdapter.generateVideo?.({
+      params: { provider: 'apimart', model: 'gemini-omni-1.1-flash', prompt: 'prompt', referenceMedia },
+      prompt: 'prompt', resolveReferenceInput: async () => ({
+        prompt: 'prompt', operation: 'image-to-video', imageUrls: referenceMedia.map((ref) => ref.url),
+        videoUrls: [], audioUrls: [], references: referenceMedia,
+      }),
+    })).rejects.toThrow('Omni failed');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toMatchObject({
+      first_frame_image: 'https://upload.example/reference.png', last_frame_image: 'https://cdn.example/last.png',
+      image_urls: ['https://cdn.example/ref.png'],
+    });
+  });
+
+  it('取消 Omni 提交时传播信号并清理任务', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const request = generateApimartVideo('key', 'https://api.example/v1', 'gemini-omni-1.1-flash', 'prompt', 'node-omni', {}, controller.signal);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-omni');
+  });
+
+  it.each([
+    ['gemini-omni-1.1-flash', 11], ['gemini-omni-flash-preview', 25],
+  ] as const)('按 %s 文档限制参考视频时长', async (model, durationSeconds) => {
+    const capability = getApimartSeedanceCapability(model)!;
+    await expect(assertVideoInputConstraints({
+      prompt: 'prompt', operation: 'video-to-video', videoUrls: ['https://cdn.example/ref.mp4'], imageUrls: [], audioUrls: [],
+    }, { inputConstraints: capability.inputConstraints }, model, {
+      probeMediaMetadata: async () => ({ durationSeconds }),
+    })).rejects.toThrow('不能超过');
+  });
+
+  it('远端旧目录不使新模型消失，Gemini 视频不误判成文本', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ data: [
+      { id: 'Omni-Flash-Ext' }, { id: 'gemini-omni-1.1-flash' },
+    ] })));
+    const result = await fetchProviderModelCatalog({ providerId: 'apimart', fallbackModels: [...APIMART_OMNI_MODELS], config: {
+      name: 'APIMart', catalogId: 'apimart', apiKey: 'key', baseUrl: 'https://api.example/v1',
+    } });
+    expect(result.models.map((model) => model.id)).toEqual(APIMART_OMNI_MODELS.map((model) => model.id));
+    expect(result.models.every((model) => model.category === 'video')).toBe(true);
+  });
+});
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -53,6 +190,72 @@ describe('APIMart image polling', () => {
     vi.unstubAllGlobals();
     pollingMocks.registerNodePolling.mockReturnValue(new AbortController().signal);
     serviceMocks.uploadToRemote.mockResolvedValue('https://upload.example/reference.png');
+  });
+
+  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'])(
+    '将 %s 从媒体目录路由到原生批量接口并收集四张图片',
+    async (model) => {
+      const option = getMediaModelOptions().find((item) => item.value === `apimart/${model}`);
+      expect(option).toMatchObject({ provider: 'apimart', mediaKind: 'image' });
+      if (!option) throw new Error('缺少内置模型');
+      const imageUrls = Array.from({ length: 16 }, (_, index) => `https://ref.example/${index}.png`);
+      const outputUrls = Array.from({ length: 4 }, (_, index) => `https://img.example/${index}.png`);
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ status: 'submitted', task_id: 'gpt-25-task' }] }))
+        .mockResolvedValueOnce(jsonResponse({ code: 200, data: {
+          status: 'completed', result: { images: [{ url: outputUrls }] },
+        } }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const batch = await apimartMediaProviderAdapter.generateImage?.({
+        params: { model: option.value, provider: option.provider, prompt: '保留商品并替换背景', imageSize: '4K', aspectRatio: '16:9' },
+        prompt: '保留商品并替换背景', imageUrls, requestedCount: 4,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/images/generations');
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+        model, prompt: '保留商品并替换背景', resolution: '4k', size: '16:9', n: 4, image_urls: imageUrls,
+      });
+      expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/tasks/gpt-25-task?language=zh');
+      expect(batch).toEqual({
+        requestedCount: 4, failedCount: 0,
+        results: outputUrls.map((url) => ({ url, width: 3840, height: 2160 })),
+      });
+    },
+  );
+
+  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'])(
+    '%s 文生图保留自适应尺寸并将原生数量限制为四张',
+    (model) => {
+      const request = buildImageCapabilityRequest(`apimart/${model}`, '风景', {
+        ratio: '自适应', resolution: '2K', count: 8,
+      });
+      expect(request?.body).toEqual({ model, prompt: '风景', size: 'auto', resolution: '2k', n: 4 });
+      expect(request?.requestedCount).toBe(4);
+    },
+  );
+
+  it.each([
+    ['1K', '4:3', 1024, 768],
+    ['2K', '3:2', 2048, 1360],
+    ['4K', '1:1', 2880, 2880],
+    ['4K', '9:21', 1648, 3840],
+  ])('GPT Image 2.5 使用 %s / %s 对应的官方像素尺寸', (resolution, ratio, width, height) => {
+    expect(buildImageCapabilityRequest('gpt-image-2.5-flare', '风景', {
+      resolution: String(resolution), ratio: String(ratio),
+    })?.dimensions).toEqual({ width, height });
+  });
+
+  it('GPT Image 2.5 在提交前拒绝超过十六张参考图', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartImagesBatch(
+      'api-key', 'https://api.example.com', 'gpt-image-2.5-sunburst', '编辑',
+      '2K', '1:1', { width: 2048, height: 2048 },
+      Array.from({ length: 17 }, (_, index) => `https://ref.example/${index}.png`),
+    )).rejects.toThrow('最多支持 16 张参考图');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('stops polling immediately when the task fails', async () => {

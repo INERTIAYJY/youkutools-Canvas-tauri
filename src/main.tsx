@@ -7,6 +7,7 @@ import './index.css'
 import RootView from './RootView'
 import type { AppConfig } from './types'
 import { setLocale } from './i18n'
+import { initializeIconCache } from './services/iconCacheService'
 
 // 复用同一入口，通过 ?view= 区分窗口类型
 const searchParams = new URLSearchParams(window.location.search)
@@ -44,6 +45,7 @@ async function applyInitialChatWindowTheme() {
 }
 
 async function mountRoot() {
+  initializeIconCache()
   await applyInitialChatWindowTheme()
   const { installMcpScreenshotResponder } = await import('./services/mcp/mcpUiRuntimeService')
   void installMcpScreenshotResponder()

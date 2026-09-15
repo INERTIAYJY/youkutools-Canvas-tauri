@@ -7,6 +7,7 @@
  * 供参数面板与生成入口消费。
  */
 import type { AudioModelCapability, ImageModelCapability } from '../../types/aiTypes';
+import { getRunningHubModel } from './providers/runninghubModelManifest';
 
 /* ── 生图能力表 ── */
 
@@ -41,7 +42,44 @@ export interface ImageCapability extends ImageModelCapability {
   modelId: string;
   /** 分辨率取值风格：K（1K/2K/4K）、MP（1MP/2MP...）、none（无 resolution 字段）。 */
   resolutionStyle: ImageResolutionStyle;
+  /** 厂商公布的实际像素映射；未声明时沿用短边换算。 */
+  dimensionPresets?: Record<string, Record<string, readonly [number, number]>>;
 }
+
+// https://docs.apimart.ai/cn/api-reference/images/gpt-image-2.5/generation
+// 两个版本共用尺寸与批量合同；quality 等可选字段保持接口默认值。
+const GPT_IMAGE_25_CAPABILITY: Omit<ImageCapability, 'modelId'> = {
+  resolutions: ['1k', '2k', '4k'],
+  defaultResolution: '1k',
+  ratios: ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5', '16:9', '9:16', '2:1', '1:2', '21:9', '9:21', '3:1', '1:3'],
+  defaultRatio: '1:1',
+  resolutionStyle: 'K',
+  supportsBatch: true,
+  maxBatchCount: 4,
+  supportsImageReference: true,
+  maxImageReferences: 16,
+  supportsDataUrlReference: false,
+  dimensionPresets: {
+    '1k': {
+      '1:1': [1024, 1024], '3:2': [1536, 1024], '2:3': [1024, 1536],
+      '4:3': [1024, 768], '3:4': [768, 1024], '5:4': [1280, 1024], '4:5': [1024, 1280],
+      '16:9': [1536, 864], '9:16': [864, 1536], '2:1': [2048, 1024], '1:2': [1024, 2048],
+      '21:9': [2016, 864], '9:21': [864, 2016], '3:1': [1536, 512], '1:3': [512, 1536],
+    },
+    '2k': {
+      '1:1': [2048, 2048], '3:2': [2048, 1360], '2:3': [1360, 2048],
+      '4:3': [2048, 1536], '3:4': [1536, 2048], '5:4': [2560, 2048], '4:5': [2048, 2560],
+      '16:9': [2048, 1152], '9:16': [1152, 2048], '2:1': [2688, 1344], '1:2': [1344, 2688],
+      '21:9': [2688, 1152], '9:21': [1152, 2688], '3:1': [3072, 1024], '1:3': [1024, 3072],
+    },
+    '4k': {
+      '1:1': [2880, 2880], '3:2': [3520, 2336], '2:3': [2336, 3520],
+      '4:3': [3312, 2480], '3:4': [2480, 3312], '5:4': [3216, 2576], '4:5': [2576, 3216],
+      '16:9': [3840, 2160], '9:16': [2160, 3840], '2:1': [3840, 1920], '1:2': [1920, 3840],
+      '21:9': [3840, 1648], '9:21': [1648, 3840], '3:1': [3840, 1280], '1:3': [1280, 3840],
+    },
+  },
+};
 
 /**
  * 生图能力表。modelId 以各 Provider 文档为准；getImageCapability 用归一化 key 匹配，
@@ -87,6 +125,14 @@ const IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
   },
 
   // ── GPT-Image 系列 ──
+  'gpt-image-2.5-flare': {
+    ...GPT_IMAGE_25_CAPABILITY,
+    modelId: 'gpt-image-2.5-flare',
+  },
+  'gpt-image-2.5-sunburst': {
+    ...GPT_IMAGE_25_CAPABILITY,
+    modelId: 'gpt-image-2.5-sunburst',
+  },
   'gpt-image-1': {
     modelId: 'gpt-image-1',
     resolutions: ['1k', '2k', '4k'],
@@ -385,6 +431,18 @@ function normalizeImageModelId(model: string): string {
 }
 
 export function getImageCapability(model?: string): ImageCapability | undefined {
+  if (model && /^runninghub(?:-model)?\//.test(model)) {
+    const definition = getRunningHubModel(model, true);
+    if (!definition || definition.kind !== 'image') return undefined;
+    const resolution = definition.parameters.find((field) => field.name === 'resolution');
+    const ratio = definition.parameters.find((field) => ['aspectRatio', 'ratio'].includes(field.name));
+    const references = definition.parameters.filter((field) => field.binding === 'image');
+    return { modelId: definition.id, resolutions: resolution?.schema.enum?.map(String) ?? [], defaultResolution: String(resolution?.defaultValue ?? ''),
+      ratios: ratio?.schema.enum?.map(String) ?? [], defaultRatio: String(ratio?.defaultValue ?? ''), resolutionStyle: resolution ? 'K' : 'none',
+      supportsBatch: true, maxBatchCount: 16, supportsImageReference: references.length > 0,
+      maxImageReferences: references.length ? Math.max(...references.map((field) => field.schema.type === 'array' ? (field.schema.maxItems ?? 64) : (field.referenceIndex ?? 0) + 1)) : 0,
+      supportsDataUrlReference: true };
+  }
   return model ? IMAGE_CAPABILITIES[normalizeImageModelId(model)] : undefined;
 }
 
@@ -440,8 +498,9 @@ export function buildImageCapabilityRequest(
   const normalizedResolution = params.resolution?.toLowerCase();
   const matchedResolution = (capability.resolutions ?? []).find((item) => item.toLowerCase() === normalizedResolution);
   const resolution = matchedResolution ?? capability.defaultResolution;
-  const ratio = params.ratio && (capability.ratios ?? []).includes(params.ratio)
-    ? params.ratio
+  const requestedRatio = params.ratio === '自适应' ? 'auto' : params.ratio;
+  const ratio = requestedRatio && (capability.ratios ?? []).includes(requestedRatio)
+    ? requestedRatio
     : (capability.defaultRatio ?? '1:1');
 
   const body: Record<string, unknown> = {
@@ -458,9 +517,13 @@ export function buildImageCapabilityRequest(
     body.image_urls = imageUrls;
   }
 
-  // 结果回填尺寸：按能力表分辨率档位换算短边。
+  // 优先使用厂商公布的像素；auto 仅用方图估算布局，实际尺寸由产物加载确认。
+  const presets = capability.dimensionPresets?.[resolution ?? ''];
+  const preset = presets?.[ratio] ?? (ratio === 'auto' ? presets?.['1:1'] : undefined);
   const shortSide = shortSideFromResolution(resolution);
-  const dimensions = shortSideToDimensions(shortSide, ratio);
+  const dimensions = preset
+    ? { width: preset[0], height: preset[1] }
+    : shortSideToDimensions(shortSide, ratio);
 
   return { body, dimensions, requestedCount };
 }
@@ -483,6 +546,12 @@ const AUDIO_CAPABILITIES: Record<string, AudioModelCapability> = {
 
 /** 结构化音频能力表（含音色列表 / 是否支持音色参考），供参数面板与生成入口消费。 */
 export function getAudioCapabilityDetail(model: string): AudioModelCapability | undefined {
+  if (/^runninghub(?:-model)?\//.test(model)) {
+    const definition = getRunningHubModel(model);
+    if (!definition?.audioPurpose) return undefined;
+    return { kind: definition.audioPurpose, supportsVoiceReference: definition.parameters.some((field) => field.binding === 'audio'),
+      voices: definition.parameters.find((field) => ['voice', 'voice_id', 'speaker'].includes(field.name))?.schema.enum?.map(String) };
+  }
   return AUDIO_CAPABILITIES[normalizeImageModelId(model)];
 }
 

@@ -38,9 +38,8 @@ const nodes = {
   '生成失败': 'Generation failed',
   '已终止 ComfyUI 任务': 'ComfyUI task terminated',
   '无法终止 ComfyUI 任务': 'Cannot terminate the ComfyUI task',
-  '已停止本地等待，但{message}': 'Stopped local waiting, but {message}',
-  '描述任何你想要生成的内容，按 @ 引用素材，/呼出指令\n(Enter 生成，Shift+Enter 换行)':
-    'Describe anything you want to generate. @ to reference assets, / for commands\n(Enter to generate, Shift+Enter for a new line)',
+  '按 @ 引用素材；连线素材需 @ 后才会传给模型，仅连线不生效；\n描述想要生成的内容；\n/ 呼出指令；\n(Enter 生成，Shift+Enter 换行)':
+    '@ to reference assets; connected assets must also be @-mentioned to reach the model;\nDescribe what you want to generate;\n/ for commands;\n(Enter to generate, Shift+Enter for a new line)',
 
   // ── TextNode ──
   '粘贴文本': 'Paste text',
@@ -88,6 +87,14 @@ const nodes = {
   '生成音频中...': 'Generating audio…',
   '上传音频文件': 'Upload audio file',
   'TTS 文本转语音': 'TTS text-to-speech',
+
+  // ── 本地语音转文本（SenseVoice）──
+  '该音频没有本地文件，无法转写': 'This audio has no local file, cannot transcribe',
+  '没有识别出语音内容': 'No speech detected',
+  '{name} 转写': '{name} transcript',
+  '语音转文本完成（{seconds}秒）': 'Speech-to-text done ({seconds}s)',
+  '语音转文本失败': 'Speech-to-text failed',
+  '模型下载完成，开始转写...': 'Model downloaded, transcribing…',
 
   // ── AnimationNode ──
   '生成动画': 'Generate animation',
@@ -175,7 +182,6 @@ const nodes = {
   '用户自定义的兼容接口模型': 'User-defined compatible interface models',
   '请先在设置中配置 {name} API Key': 'Configure the {name} API key in Settings first',
   'ComfyUI 工作流': 'ComfyUI workflows',
-  '用户导入的本地工作流': 'User-imported local workflows',
   '暂无匹配的工作流，请在设置中导入': 'No matching workflows; import one in Settings',
 
   // ── ReversePromptDialog ──
@@ -341,7 +347,6 @@ const nodes = {
   '该视频没有本地文件，无法复制': 'This video has no local file, cannot copy',
   '已复制视频到剪贴板': 'Video copied to clipboard',
   '没有可反推的视频': 'No video to reverse',
-  '视频尚未加载到可读取的帧': 'Video has not loaded a readable frame yet',
   '远程视频受跨域限制，请先把视频本地化后再反推':
     'The remote video is cross-origin restricted; localize it before reversing',
   '读取视频帧失败': 'Failed to read the video frame',

@@ -1,0 +1,88 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "auk_flash_w4a8.safetensors",
+      "precision": "auto",
+      "attention": "auto"
+    },
+    "class_type": "AuKModelLoader",
+    "_meta": {
+      "title": "AuKModelLoader"
+    }
+  },
+  "4": {
+    "inputs": {
+      "instruction": "Generate speech based on the following description: \"A warm, clear female voice\". The content to speak is: \"Hello, welcome to AuK.\"",
+      "model": [
+        "1",
+        0
+      ],
+      "encoder": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "AuKInstructionEncode",
+    "_meta": {
+      "title": "AuKInstructionEncode"
+    }
+  },
+  "5": {
+    "inputs": {
+      "seconds": 3,
+      "seed": 42,
+      "steps": 32,
+      "guidance": 2,
+      "sway": -1,
+      "model": [
+        "1",
+        0
+      ],
+      "conditioning": [
+        "4",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "AuKGenerateEdit",
+    "_meta": {
+      "title": "AuKGenerateEdit"
+    }
+  },
+  "6": {
+    "inputs": {
+      "filename_prefix": "audio/AuK",
+      "format": "flac",
+      "audio": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "SaveAudioAdvanced",
+    "_meta": {
+      "title": "SaveAudioAdvanced"
+    }
+  },
+  "2": {
+    "inputs": {
+      "encoder_name": "qwen_omni_w4a8.safetensors",
+      "precision": "auto"
+    },
+    "class_type": "AuKEncoderLoader",
+    "_meta": {
+      "title": "AuKEncoderLoader"
+    }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "auk_vae.safetensors"
+    },
+    "class_type": "AuKVAELoader",
+    "_meta": {
+      "title": "AuKVAELoader"
+    }
+  }
+}

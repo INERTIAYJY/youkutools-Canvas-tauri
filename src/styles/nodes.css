@@ -14,6 +14,37 @@
   border-radius: 12PX;
 }
 
+/* Far-zoom media nodes keep the same outer box and connection anchors. */
+.canvas-node-lod-boundary {
+  display: contents;
+}
+
+.canvas-node-lod-preview {
+  background: var(--theme-surface);
+  box-shadow: inset 0 0 0 1px var(--canvas-edge);
+  border-radius: 12px;
+}
+
+.canvas-node-lod-preview.is-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.canvas-node-lod-image {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity var(--dur-fast);
+}
+
+.canvas-node-lod-image.is-ready {
+  opacity: 1;
+}
+
 /* Base Node — frosted glass card */
 .node {
   display: flex;
@@ -25,18 +56,17 @@
   border-radius: 12px;
   transition: border-color var(--transition-smooth), box-shadow var(--transition-smooth),
     transform var(--dur-fast) var(--ease-out-quart), height 0.24s var(--ease-spring);
-  /* 进场：弹簧式浮入。只用 translate（不用 scale）——scale 会改变 handle 相对父节点的
-     偏移，破坏 React Flow 对连线锚点的测量并被缓存，导致连线起止点错位。*/
+  /* 进场只淡入，不移动连线锚点；跨视口重新挂载时无需在动画结束后补测。 */
   animation: nodeIn 0.3s var(--ease-spring) backwards;
 }
 
 /* ── 节点进场 ── */
 @keyframes nodeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* ── 节点退场（由 playNodeExit 添加 .node-exiting）——向下淡出（与进场向上呼应）。
+/* ── 节点退场（由 playNodeExit 添加 .node-exiting）——向下淡出。
    节点随即被移除，位移不会造成持久的连线问题。 ── */
 .node.node-exiting {
   opacity: 0;
@@ -456,6 +486,28 @@
   z-index: 5;
 }
 
+/* 生成中遮罩浮层（节点已有内容时覆盖预览区，与图片同为 12px 圆角） */
+.generation-progress-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 20px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--theme-card) 90%, transparent);
+  color: var(--theme-text);
+  pointer-events: none;
+}
+.generation-progress-overlay .spinner {
+  width: 44px;
+  height: 44px;
+}
+
 /* 斜向扫描光带，循环掠过图像 */
 .upscale-glow-scan {
   position: absolute;
@@ -690,7 +742,11 @@
 }
 
 .image-node .node-preview.compact {
+  position: relative;
   padding: 2px;
+  /* 与节点卡片同圆角并裁剪，保证生成中遮罩等 inset-0 元素不溢出直角 */
+  overflow: hidden;
+  border-radius: inherit;
 }
 
 .video-node {
@@ -1164,10 +1220,9 @@
 
 /* 全屏视频预览（hidePanel 模式） */
 .fullscreen-video-view {
-  max-width: 92vw;
-  max-height: 92vh;
-  width: auto;
-  height: auto;
+  width: 92vw;
+  height: 92vh;
+  object-fit: contain;
   border-radius: 4px;
   background: #000;
   outline: none;

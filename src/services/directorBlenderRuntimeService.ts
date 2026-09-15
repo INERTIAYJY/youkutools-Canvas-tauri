@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import type { DirectorSceneSource } from '../types/directorOperation';
 import type {
   DirectorBlendProjectArtifact,
   DirectorFrameImageArtifact,
@@ -76,6 +77,7 @@ export interface DirectorBlenderRunInput {
   sceneReference: DirectorSceneReference;
   previousManifestReference?: DirectorResultManifestReference;
   targetFrame?: number;
+  sceneSource?: DirectorSceneSource;
 }
 
 export interface DirectorBlenderArtifactProjection {
@@ -98,8 +100,8 @@ export interface DirectorBlenderRunOptions {
 }
 
 export type DirectorBlenderAvailability =
-  | { state: 'ready' }
-  | { state: 'setup-required' }
+  | { state: 'ready'; supportsSavedScene?: boolean }
+  | { state: 'setup-required'; supportsSavedScene?: boolean }
   | { state: 'unavailable'; reason: string };
 
 interface CollectedBlenderResult {
@@ -112,9 +114,11 @@ const BLENDER_DESKTOP_ONLY_REASON = 'Blender 导演运行时仅支持 Tauri 桌�
 const BLENDER_NATIVE_CALL_FAILED = 'Blender 原生运行时调用失败';
 
 let selectedInstallation: DirectorBlenderInstallationCandidate | null = null;
+let supportsSavedScene: boolean | null = null;
 
 export function __resetDirectorBlenderRuntimeServiceForTests(): void {
   selectedInstallation = null;
+  supportsSavedScene = null;
 }
 
 function abortError(): Error {
@@ -215,7 +219,10 @@ async function discoverInstallations(): Promise<DirectorBlenderInstallationCandi
   }
   const candidates = (result as Record<string, unknown>).candidates;
   if (!Array.isArray(candidates)) throw new Error('Blender 安装发现结果格式无效');
-  return candidates.map(normalizeInstallationCandidate);
+  const normalized = candidates.map(normalizeInstallationCandidate);
+  // 旧后端没有能力字段，不能仅凭前端版本启用新增 IPC 参数。
+  supportsSavedScene = (result as Record<string, unknown>).supportsSavedScene === true;
+  return normalized;
 }
 
 function selectOnlyCandidate(
@@ -244,11 +251,14 @@ export async function chooseDirectorBlenderInstallation(): Promise<DirectorBlend
   assertDesktopRuntime();
   let selection: Awaited<ReturnType<typeof open>>;
   try {
+    const isMac = typeof navigator !== 'undefined'
+      && /mac/i.test(navigator.platform || navigator.userAgent || '');
     selection = await open({
-      title: '选择 Blender 的 blender.exe',
+      title: isMac ? '选择 Blender 应用（Blender.app）' : '选择 Blender 的 blender.exe',
       multiple: false,
       directory: false,
-      filters: [{ name: 'Blender', extensions: ['exe'] }],
+      filters: [{ name: 'Blender', extensions: [isMac ? 'app' : 'exe'] }],
+      ...(isMac ? { defaultPath: '/Applications', canCreateDirectories: false } : {}),
     });
   } catch (error) {
     throw normalizeBlenderRuntimeError(error, '无法打开 Blender 文件选择器');
@@ -267,9 +277,12 @@ export async function getDirectorBlenderAvailability(): Promise<DirectorBlenderA
   if (!isTauriEnv()) return { state: 'unavailable', reason: BLENDER_DESKTOP_ONLY_REASON };
 
   try {
-    return await detectDirectorBlenderInstallation()
-      ? { state: 'ready' }
-      : { state: 'setup-required' };
+    const installation = await detectDirectorBlenderInstallation();
+    if (supportsSavedScene === null) await discoverInstallations();
+    return {
+      state: installation ? 'ready' : 'setup-required',
+      ...(supportsSavedScene ? { supportsSavedScene: true } : {}),
+    };
   } catch (error) {
     return {
       state: 'unavailable',
@@ -279,7 +292,7 @@ export async function getDirectorBlenderAvailability(): Promise<DirectorBlenderA
 }
 
 /**
- * 选择并登记 blender.exe。绝对路径只从 Tauri 文件对话框流向用途单一的 Rust command，
+ * 选择并登记 Blender 应用。绝对路径只从 Tauri 文件对话框流向用途单一的 Rust command，
  * 不返回给节点，也不写入 IndexedDB。
  */
 export async function prepareDirectorBlenderInstallation(): Promise<DirectorBlenderInstallationCandidate> {
@@ -292,7 +305,10 @@ export async function prepareDirectorBlenderInstallation(): Promise<DirectorBlen
 function normalizeRunInput(input: DirectorBlenderRunInput): {
   sceneReference: DirectorSceneReference;
   previousManifestReference?: DirectorResultManifestReference;
+  sceneSource: DirectorSceneSource;
 } {
+  const sceneSource = input.sceneSource ?? 'director-scene';
+  if (!['director-scene', 'saved-blender'].includes(sceneSource)) throw new Error('Blender 场景来源无效');
   const sceneReference = normalizeDirectorSceneReference(input.sceneReference);
   const previousManifestReference = input.previousManifestReference === undefined
     ? undefined
@@ -307,14 +323,18 @@ function normalizeRunInput(input: DirectorBlenderRunInput): {
   }
 
   if (input.operation === 'render-frame') {
-    if (!Number.isSafeInteger(input.targetFrame) || (input.targetFrame as number) <= 0) {
-      throw new Error('Blender 当前帧必须是正安全整数');
+    if (!(sceneSource === 'saved-blender' && input.targetFrame === undefined)
+      && (!Number.isSafeInteger(input.targetFrame) || (input.targetFrame as number) < 0 || (input.targetFrame as number) > 10_000_000)) {
+      throw new Error('Blender 当前帧必须是范围内的非负安全整数');
     }
   } else if (input.targetFrame !== undefined) {
     throw new Error('只有 Blender 单帧渲染可以指定目标帧');
   }
 
-  return { sceneReference, previousManifestReference };
+  if (sceneSource === 'saved-blender' && !previousManifestReference) {
+    throw new Error('Blender 保存工程模式需要上一份已验证成果');
+  }
+  return { sceneReference, previousManifestReference, sceneSource };
 }
 
 function projectArtifact(
@@ -396,10 +416,14 @@ export async function runDirectorBlenderOperation(
   options: DirectorBlenderRunOptions = {},
 ): Promise<DirectorBlenderRunResult> {
   assertDesktopRuntime();
-  const { sceneReference, previousManifestReference } = normalizeRunInput(input);
+  const { sceneReference, previousManifestReference, sceneSource } = normalizeRunInput(input);
   if (options.signal?.aborted) throw abortError();
 
   const installation = await prepareDirectorBlenderInstallation();
+  if (sceneSource === 'saved-blender') {
+    if (supportsSavedScene === null) await discoverInstallations();
+    if (!supportsSavedScene) throw new Error('保存 Blender 工程模式需要更新并重启桌面软件');
+  }
   const projectRoot = await ensureProjectDataDir(input.projectId);
   if (!projectRoot) throw new Error('无法准备 Blender 项目目录');
 
@@ -436,6 +460,8 @@ export async function runDirectorBlenderOperation(
       request: {
         installationId: installation.installationId,
         operation: input.operation,
+        // 旧桌面后端拒绝未知字段；默认模式沿用原有 IPC 形状。
+        ...(sceneSource === 'saved-blender' ? { sceneSource } : {}),
         projectGrantId,
         projectId: input.projectId,
         directorInstanceId: input.directorInstanceId,
@@ -444,7 +470,7 @@ export async function runDirectorBlenderOperation(
         sceneSha256: sceneReference.sha256,
         previousManifestRevision: previousManifestReference?.manifestRevision ?? null,
         previousManifestSha256: previousManifestReference?.sha256 ?? null,
-        targetFrame: input.operation === 'render-frame' ? input.targetFrame : null,
+        targetFrame: input.operation === 'render-frame' ? input.targetFrame ?? null : null,
       },
     });
     jobId = status.jobId;

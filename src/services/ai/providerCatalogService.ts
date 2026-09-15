@@ -6,6 +6,7 @@
 import {
   APIMART_BASE_URL,
   BOCHA_SEARCH_BASE_URL,
+  CCCAPI_BASE_URL,
   EXA_SEARCH_BASE_URL,
   GRSAI_BASE_URL,
   RUNNINGHUB_MODEL_BASE_URL,
@@ -16,6 +17,7 @@ import {
 import type {
   ApiProviderConfig,
   AppConfig,
+  ChatApiProtocol,
   GeneralModelCategory,
   ProviderCatalogAdapter,
   ProviderModelSelection,
@@ -25,6 +27,8 @@ import { corsSafeFetch } from './httpTransport';
 import { fetchSeedlingModels, type SeedlingModelInfo } from '../seedlingService';
 import type { VideoModelCapability } from '../../types/aiTypes';
 import { baseUrlCandidates } from './providerBaseUrl';
+import { APIMART_OMNI_MODELS, isLegacyApimartOmni } from './apimartVideoModels';
+import { getChatApiHeaders, normalizeGeminiModelId, resolveChatApiProtocol } from './chatApiProtocol';
 import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
 import {
   GOOGLE_GEMINI_BASE_URL,
@@ -69,7 +73,7 @@ export interface ProviderDefinition {
   /** 内置厂商随应用发布的模型及声明式执行协议。 */
   models?: readonly ProviderModelSelection[];
   /** web-search connections provide Agent capabilities and do not expose models. */
-  kind?: 'model' | 'web-search';
+  kind?: 'model' | 'web-search' | 'workflow-api';
 }
 
 export interface ProviderCatalogResult {
@@ -94,6 +98,69 @@ const API_KEY_FIELD: ProviderCredentialField = {
   secret: true,
 };
 
+/**
+ * 未填写 API Key 时展示的目录；填写后仍以远端 /models 为准。
+ * 模型 ID 取自 CCC API 监控页 https://cccapi.cn/monitor 的 openai 渠道。
+ * inputModalities 只在与按 ID 猜模态的兜底规则不一致时才显式声明，
+ * 避免把 gpt-4 / o3-mini 这类纯文本模型误判成能吃图。
+ */
+const CCCAPI_MODEL_MANIFEST: readonly ProviderModelSelection[] = [
+  { id: 'gpt-5.6', name: 'GPT-5.6', category: 'text', provider: 'cccapi', description: 'GPT-5.6 通用文本与多模态模型' },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', category: 'text', provider: 'cccapi', description: 'GPT-5.6 Sol 文本与多模态模型' },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', category: 'text', provider: 'cccapi', description: 'GPT-5.6 Luna 文本与多模态模型' },
+  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', category: 'text', provider: 'cccapi', description: 'GPT-5.6 Terra 文本与多模态模型' },
+  { id: 'gpt-5.5', name: 'GPT-5.5', category: 'text', provider: 'cccapi', description: 'GPT-5.5 通用文本与多模态模型' },
+  { id: 'gpt-5.4', name: 'GPT-5.4', category: 'text', provider: 'cccapi', description: 'GPT-5.4 通用文本与多模态模型' },
+  { id: 'gpt-5.4-mini', name: 'GPT-5.4 mini', category: 'text', provider: 'cccapi', description: 'GPT-5.4 mini 轻量文本与多模态模型' },
+  { id: 'gpt-5.3-codex-spark', name: 'GPT-5.3 Codex Spark', category: 'text', provider: 'cccapi', description: 'GPT-5.3 Codex Spark 编码模型' },
+  { id: 'gpt-5.2', name: 'GPT-5.2', category: 'text', provider: 'cccapi', description: 'GPT-5.2 通用文本与多模态模型' },
+  { id: 'gpt-5.2-pro', name: 'GPT-5.2 Pro', category: 'text', provider: 'cccapi', description: 'GPT-5.2 Pro 高能力文本与多模态模型' },
+  { id: 'gpt-5', name: 'GPT-5', category: 'text', provider: 'cccapi', description: 'GPT-5 通用文本与多模态模型' },
+  { id: 'o4-mini', name: 'o4-mini', category: 'text', provider: 'cccapi', description: 'o4-mini 轻量推理模型，支持多模态输入' },
+  { id: 'o3', name: 'o3', category: 'text', provider: 'cccapi', description: 'o3 强推理模型，支持多模态输入' },
+  { id: 'o3-mini', name: 'o3-mini', category: 'text', provider: 'cccapi', description: 'o3-mini 轻量推理模型', inputModalities: ['text'] },
+  { id: 'gpt-4.1', name: 'GPT-4.1', category: 'text', provider: 'cccapi', description: 'GPT-4.1 通用文本与多模态模型' },
+  { id: 'gpt-4.1-mini', name: 'GPT-4.1 mini', category: 'text', provider: 'cccapi', description: 'GPT-4.1 mini 轻量文本与多模态模型' },
+  { id: 'gpt-4.1-nano', name: 'GPT-4.1 nano', category: 'text', provider: 'cccapi', description: 'GPT-4.1 nano 极轻量文本与多模态模型' },
+  { id: 'gpt-4o', name: 'GPT-4o', category: 'text', provider: 'cccapi', description: 'GPT-4o 通用文本与多模态模型' },
+  {
+    id: 'gpt-4o-mini',
+    name: 'GPT-4o mini',
+    category: 'text',
+    provider: 'cccapi',
+    description: 'OpenAI 兼容文本与多模态模型',
+    inputModalities: ['text', 'image'],
+  },
+  { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', category: 'text', provider: 'cccapi', description: 'GPT-4 Turbo 通用文本与多模态模型' },
+  { id: 'gpt-4', name: 'GPT-4', category: 'text', provider: 'cccapi', description: 'GPT-4 通用文本模型', inputModalities: ['text'] },
+  { id: 'codex-auto-review', name: 'Codex Auto Review', category: 'text', provider: 'cccapi', description: 'Codex 自动代码评审模型' },
+  {
+    id: 'gpt-image-2.5-flare',
+    name: 'GPT Image 2.5 Flare',
+    category: 'image',
+    provider: 'cccapi',
+    description: '速度优先的轻量图片模型，支持文生图与图片编辑',
+    imageReferenceRequestMode: 'edits-multipart',
+  },
+  {
+    id: 'gpt-image-2.5-sunburst',
+    name: 'GPT Image 2.5 Sunburst',
+    category: 'image',
+    provider: 'cccapi',
+    description: '质量优先的高画质图片模型，支持文生图与图片编辑',
+    imageReferenceRequestMode: 'edits-multipart',
+  },
+  {
+    id: 'gpt-image-2',
+    name: 'GPT Image 2',
+    category: 'image',
+    provider: 'cccapi',
+    description: 'OpenAI 兼容图片生成模型',
+    imageReferenceRequestMode: 'edits-multipart',
+  },
+  { id: 'gpt-image-1', name: 'GPT Image 1', category: 'image', provider: 'cccapi', description: 'OpenAI 兼容图片生成模型（上一代）' },
+];
+
 const SORA2U_HIDDEN_MODEL_IDS = [
   'seedance-2.5',
   'seedance-2.5-character',
@@ -110,6 +177,13 @@ export const WEB_SEARCH_PROVIDER_IDS: readonly WebSearchProviderId[] = [
 
 const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
+    id: 'workflow-api', name: '工作流 API', kind: 'workflow-api',
+    description: '自定义平台、工作流路径、输入参数与结果映射', badgeText: 'WF',
+    authType: 'api-key', catalogAdapter: 'local-manifest',
+    credentials: [{ ...API_KEY_FIELD, label: 'API Key / Token', required: false, placeholder: '填写平台提供的密钥' },
+      { key: 'baseUrl', label: '接口地址', required: true, placeholder: 'https://api.example.com' }],
+  },
+  {
     id: 'apimart',
     name: 'APIMart',
     description: 'OpenAI 兼容的多类型模型服务',
@@ -123,6 +197,22 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       API_KEY_FIELD,
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: APIMART_BASE_URL },
     ],
+  },
+  {
+    id: 'cccapi',
+    name: 'CCC API',
+    description: '群内大佬自建自用中转！平价对接，纯公益不赚一分钱✅，稳定、速度快、出图质量高',
+    badgeText: 'CCC',
+    authType: 'api-key',
+    catalogAdapter: 'openai-compatible',
+    defaultBaseUrl: CCCAPI_BASE_URL,
+    modelsPath: '/models',
+    allowCustomBaseUrl: false,
+    externalUrl: 'https://cccapi.cn',
+    credentials: [
+      { ...API_KEY_FIELD, placeholder: 'sk-...' },
+    ],
+    models: CCCAPI_MODEL_MANIFEST,
   },
   {
     id: 'xai',
@@ -300,6 +390,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
 
 export function isProviderModelVisible(catalogId: string | undefined, modelId: string): boolean {
   if (!catalogId) return true;
+  if (catalogId === 'apimart' && isLegacyApimartOmni(modelId)) return false;
   const definition = BUILT_IN_PROVIDER_DEFINITIONS.find((item) => item.id === catalogId);
   return !definition?.hiddenModelIds?.includes(modelId);
 }
@@ -355,17 +446,18 @@ export function resolveWebSearchProviderId(
  * 自定义接口可以有多条，加随机后缀区分。
  */
 export function createConnectionId(providerId: string): string {
-  if (providerId !== 'custom-openai') return providerId;
+  if (providerId !== 'custom-openai' && providerId !== 'workflow-api') return providerId;
   const suffix = globalThis.crypto?.randomUUID?.().slice(0, 8)
     ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  return `custom-${suffix}`;
+  return `${providerId === 'workflow-api' ? 'workflow-api' : 'custom'}-${suffix}`;
 }
 
 export function getProviderDefinition(
   providerId: string,
   config?: Pick<ApiProviderConfig, 'catalogId'>,
 ): ProviderDefinition | undefined {
-  return PROVIDER_DEFINITION_MAP.get(config?.catalogId || providerId);
+  const id = config?.catalogId || providerId;
+  return PROVIDER_DEFINITION_MAP.get(id === 'autodl-workflow' ? 'workflow-api' : id);
 }
 
 function inferModelCategory(modelId: string): GeneralModelCategory {
@@ -439,7 +531,11 @@ function parseVideoCapability(
   return Object.values(capability).some((value) => value !== undefined) ? capability : undefined;
 }
 
-function parseCatalogItem(item: unknown, providerId: string): ProviderModelSelection | null {
+function parseCatalogItem(
+  item: unknown,
+  providerId: string,
+  protocol: ChatApiProtocol,
+): ProviderModelSelection | null {
   if (typeof item === 'string') {
     const id = item.trim();
     return id ? { id, name: id, category: inferModelCategory(id), provider: providerId } : null;
@@ -447,10 +543,15 @@ function parseCatalogItem(item: unknown, providerId: string): ProviderModelSelec
   if (!item || typeof item !== 'object') return null;
 
   const record = item as Record<string, unknown>;
-  const rawId = record.id ?? record.model ?? record.model_id;
+  const rawId = record.id ?? record.model ?? record.model_id
+    ?? (protocol === 'gemini-native' ? record.name : undefined);
   if (typeof rawId !== 'string' || !rawId.trim()) return null;
-  const id = rawId.trim();
-  const rawName = record.name ?? record.display_name ?? record.displayName;
+  const id = protocol === 'gemini-native'
+    ? normalizeGeminiModelId(rawId)
+    : rawId.trim();
+  const rawName = protocol === 'gemini-native'
+    ? record.display_name ?? record.displayName
+    : record.name ?? record.display_name ?? record.displayName;
   const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : id;
   const category = inferModelCategory(id);
   const supportsImageInput = record.supports_image === true || record.supportsImage === true;
@@ -518,9 +619,10 @@ function safeCatalogError(error: unknown): string {
 async function fetchCatalogResponse(
   url: string,
   apiKey: string,
+  protocol: ChatApiProtocol,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined;
+  const headers = apiKey ? getChatApiHeaders(protocol, apiKey, false) : undefined;
   return corsSafeFetch(url, { method: 'GET', headers, signal });
 }
 
@@ -538,13 +640,14 @@ async function fetchCatalogAt(
   const response = await fetchCatalogResponse(
     url.toString(),
     config.apiKey,
+    resolveChatApiProtocol(config.chatApiProtocol),
     signal,
   );
   if (!response.ok) throw new Error(`模型列表拉取失败 (HTTP ${response.status})`);
 
   const payload: unknown = await response.json().catch(() => null);
   const models = readCatalogItems(payload)
-    .map((item) => parseCatalogItem(item, providerId))
+    .map((item) => parseCatalogItem(item, providerId, resolveChatApiProtocol(config.chatApiProtocol)))
     .filter((item): item is ProviderModelSelection => (
       item !== null && isProviderModelVisible(definition.id, item.id)
     ));
@@ -602,7 +705,10 @@ async function fetchOpenAiCompatibleCatalog(
   config: ApiProviderConfig,
   signal?: AbortSignal,
 ): Promise<{ models: ProviderModelSelection[]; baseUrl: string }> {
-  const candidates = baseUrlCandidates(config.baseUrl || definition.defaultBaseUrl);
+  const candidates = baseUrlCandidates(
+    config.baseUrl || definition.defaultBaseUrl,
+    resolveChatApiProtocol(config.chatApiProtocol),
+  );
   if (candidates.length === 0) throw new Error('请填写接口地址');
 
   let lastError: unknown;
@@ -630,6 +736,23 @@ export async function fetchProviderModelCatalog(
   const normalizedFallback = normalizeModels(fallbackModels, providerId)
     .filter((model) => isProviderModelVisible(definition.id, model.id));
 
+  if (definition.id === 'runninghub-model') {
+    const { RUNNINGHUB_MODEL_MANIFEST, RUNNINGHUB_LEGACY_MODELS, getRunningHubModel, normalizeRunningHubModelId } = await import('./providers/runninghubModelManifest');
+    const models = new Map<string, ProviderModelSelection>();
+    for (const id of Object.keys(RUNNINGHUB_LEGACY_MODELS)) {
+      const model = getRunningHubModel(id)!;
+      models.set(id, { id, name: id, provider: 'runninghub', category: model.kind, description: '兼容已有选择；按图片引用自动切换生成或编辑' });
+    }
+    for (const model of normalizedFallback) {
+      const id = normalizeRunningHubModelId(model.id);
+      if (getRunningHubModel(id)) models.set(id, { ...model, id });
+    }
+    for (const model of RUNNINGHUB_MODEL_MANIFEST) models.set(model.id, {
+      id: model.id, name: model.label, provider: 'runninghub', category: model.kind, description: model.id,
+      inputModalities: [...new Set(model.parameters.flatMap((field) => field.binding === 'prompt' ? ['text' as const] : field.mediaKind === 'image' ? ['image' as const] : []))],
+    });
+    return { models: [...models.values()], source: 'local-manifest' };
+  }
   if (definition.catalogAdapter === 'local-manifest') {
     return { models: normalizedFallback, source: 'local-manifest' };
   }
@@ -658,7 +781,20 @@ export async function fetchProviderModelCatalog(
       signal,
     );
     return {
-      models: mergeRemoteCatalogMetadata(models, normalizedFallback),
+      models: mergeRemoteCatalogMetadata(
+        definition.id === 'apimart'
+          ? [
+              ...models.map((remote) => {
+                const omni = APIMART_OMNI_MODELS.find((model) => model.id === remote.id);
+                return omni ? { ...remote, ...omni, provider: providerId } : remote;
+              }),
+              ...APIMART_OMNI_MODELS.filter((model) => normalizedFallback.some((item) => item.id === model.id)
+                && !models.some((remote) => remote.id === model.id))
+                .map((model) => ({ ...model, provider: providerId })),
+            ]
+          : models,
+        normalizedFallback,
+      ),
       source: 'remote',
       resolvedBaseUrl: baseUrl,
     };

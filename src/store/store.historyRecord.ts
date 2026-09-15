@@ -21,6 +21,9 @@ import {
 } from '../services/indexedDbService';
 import type { HistoryPageCursor, HistoryQuery } from '../services/indexedDbService';
 import { tagGeneratedProjectAssetSafely } from '../services/fs/generatedAssetTags';
+import { getAssetUrlFromPath, getProjectDataDir } from '../services/fs/core';
+import { isTransientMediaUrl, persistMediaUrlToProjectData } from '../services/fileService';
+import { exists } from '@tauri-apps/plugin-fs';
 
 const HISTORY_PAGE_SIZE = 16;
 
@@ -38,6 +41,114 @@ function matchesHistoryQuery(record: OutputHistoryEntry, query: HistoryQuery): b
   if (!search) return true;
   return [record.prompt, record.output, record.model, record.nodeLabel]
     .some((value) => value.toLowerCase().includes(search));
+}
+
+interface NormalizedHistoryRecord {
+  record: OutputHistoryEntry;
+  /** 记录是否被改写；落盘失败的改写不回写 IndexedDB。 */
+  changed: boolean;
+  failed: boolean;
+}
+
+function isPathInsideProject(filePath: string, projectDir: string): boolean {
+  const normalizedFile = filePath.replace(/\\/g, '/').toLowerCase();
+  const normalizedDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return normalizedFile.startsWith(`${normalizedDir}/`);
+}
+
+async function normalizeHistoryMediaRecord(
+  record: OutputHistoryEntry,
+  projectId: string,
+): Promise<NormalizedHistoryRecord> {
+  if (!isTransientMediaUrl(record.output) && !isTransientMediaUrl(record.mediaUrl)) {
+    return { record, changed: false, failed: false };
+  }
+  try {
+    const outputSource = typeof record.output === 'string' && isTransientMediaUrl(record.output)
+      ? record.output
+      : undefined;
+    const mediaSource = typeof record.mediaUrl === 'string' && isTransientMediaUrl(record.mediaUrl)
+      ? record.mediaUrl
+      : undefined;
+    const transientSources = [...new Set(
+      [mediaSource, outputSource].filter((value): value is string => typeof value === 'string'),
+    )];
+    const persistedBySource = new Map<string, Awaited<ReturnType<typeof persistMediaUrlToProjectData>>>();
+    const existingFilePath = typeof record.filePath === 'string' ? record.filePath : undefined;
+    const projectDir = existingFilePath ? await getProjectDataDir(projectId) : null;
+    const canReuseOwnFile = transientSources.length === 1
+      && Boolean(existingFilePath)
+      && Boolean(projectDir)
+      && isPathInsideProject(existingFilePath!, projectDir!)
+      && await exists(existingFilePath!).catch(() => false);
+    if (canReuseOwnFile && existingFilePath) {
+      const assetUrl = await getAssetUrlFromPath(existingFilePath);
+      persistedBySource.set(transientSources[0], {
+        filePath: existingFilePath,
+        mediaUrl: assetUrl,
+        sourceUrl: assetUrl,
+      });
+    } else {
+      for (const source of transientSources) {
+        persistedBySource.set(source, await persistMediaUrlToProjectData(
+          source,
+          projectId,
+          record.nodeType,
+          `${record.nodeLabel}-历史-${record.id}`,
+          { deduplicateByContent: true },
+        ));
+      }
+    }
+    const outputMedia = outputSource
+      ? persistedBySource.get(outputSource)
+      : undefined;
+    const attachedMedia = mediaSource
+      ? persistedBySource.get(mediaSource)
+      : undefined;
+    const persistedFilePath = attachedMedia?.filePath ?? outputMedia?.filePath ?? record.filePath;
+    return {
+      record: {
+        ...record,
+        output: outputMedia?.mediaUrl ?? record.output,
+        mediaUrl: attachedMedia?.mediaUrl ?? record.mediaUrl,
+        filePath: persistedFilePath,
+      },
+      changed: true,
+      failed: false,
+    };
+  } catch (error) {
+    console.warn('[输出历史] 内嵌媒体迁移失败，已清除持久化正文', {
+      projectId,
+      recordId: record.id,
+      error,
+    });
+    return {
+      record: {
+        ...record,
+        output: isTransientMediaUrl(record.output) ? '媒体未能迁移到项目目录' : record.output,
+        mediaUrl: isTransientMediaUrl(record.mediaUrl) ? undefined : record.mediaUrl,
+        status: 'error',
+      },
+      changed: true,
+      failed: true,
+    };
+  }
+}
+
+async function normalizeHistoryPage(
+  records: OutputHistoryEntry[],
+  projectId: string,
+): Promise<OutputHistoryEntry[]> {
+  const normalized: NormalizedHistoryRecord[] = [];
+  for (const record of records) {
+    normalized.push(await normalizeHistoryMediaRecord(record, projectId));
+  }
+  // 迁移失败多半是磁盘暂时不可用：把成功记录改写成 error 再回写，会永久丢掉这次生成
+  const migrated = normalized
+    .filter((entry) => entry.changed && !entry.failed)
+    .map((entry) => entry.record);
+  if (migrated.length > 0) await putHistoryEntries(migrated);
+  return normalized.map((entry) => entry.record);
 }
 
 export interface HistoryRecordSlice {
@@ -102,10 +213,11 @@ export const createHistoryRecordSlice: StateCreator<AppState, [], [], HistoryRec
         getHistoryEntriesPage(projectId, HISTORY_PAGE_SIZE, null, query),
         getHistoryEntryCount(projectId),
       ]);
+      const records = await normalizeHistoryPage(page.records as OutputHistoryEntry[], projectId);
       if (requestId !== historyLoadRequestId || get().currentProjectId !== projectId) return;
       historyCursor = page.nextCursor;
       set({
-        outputHistoryRecords: page.records as OutputHistoryEntry[],
+        outputHistoryRecords: records,
         historyProjectId: projectId,
         historyTotalCount: totalCount,
         historyHasMore: page.hasMore,
@@ -134,10 +246,11 @@ export const createHistoryRecordSlice: StateCreator<AppState, [], [], HistoryRec
     set({ historyLoading: true });
     try {
       const page = await getHistoryEntriesPage(projectId, HISTORY_PAGE_SIZE, historyCursor, query);
+      const records = await normalizeHistoryPage(page.records as OutputHistoryEntry[], projectId);
       if (requestId !== historyLoadRequestId || get().currentProjectId !== projectId) return;
       historyCursor = page.nextCursor;
       set((state) => ({
-        outputHistoryRecords: [...state.outputHistoryRecords, ...page.records] as OutputHistoryEntry[],
+        outputHistoryRecords: [...state.outputHistoryRecords, ...records],
         historyHasMore: page.hasMore,
         historyLoading: false,
       }));
@@ -168,10 +281,18 @@ export const createHistoryRecordSlice: StateCreator<AppState, [], [], HistoryRec
             'outputHistory' in (node.data as Record<string, unknown>)
           ));
 
-          await putHistoryEntries(legacyRecords.map((record) => ({
-            ...record,
-            projectId: currentProjectId,
-          })));
+          const normalizedLegacyRecords: OutputHistoryEntry[] = [];
+          for (const legacyRecord of legacyRecords) {
+            const normalized = await normalizeHistoryMediaRecord({
+              ...legacyRecord,
+              projectId: currentProjectId,
+            }, currentProjectId);
+            if (normalized.failed) {
+              throw new Error(`历史媒体 ${legacyRecord.id} 尚未完成迁移`);
+            }
+            normalizedLegacyRecords.push(normalized.record);
+          }
+          await putHistoryEntries(normalizedLegacyRecords);
           if (get().currentProjectId !== currentProjectId) {
             await get().loadHistoryFromDb();
             return;
@@ -204,14 +325,14 @@ export const createHistoryRecordSlice: StateCreator<AppState, [], [], HistoryRec
     const projectId = get().currentProjectId;
     if (!projectId) return;
     const id = `hist-${generateId()}`;
-    const record: OutputHistoryEntry = { ...entry, id, projectId };
+    const { record } = await normalizeHistoryMediaRecord({ ...entry, id, projectId }, projectId);
     // Persist to IndexedDB first, then update store
     await putHistoryEntry(record).catch((e) => console.warn('Failed to persist history entry:', e));
-    if (entry.status === 'success' && entry.filePath && entry.prompt.trim()) {
+    if (record.status === 'success' && record.filePath && record.prompt.trim()) {
       await tagGeneratedProjectAssetSafely({
-        filePath: entry.filePath,
+        filePath: record.filePath,
         projectId,
-        prompt: entry.prompt,
+        prompt: record.prompt,
       });
     }
     set((state) => {

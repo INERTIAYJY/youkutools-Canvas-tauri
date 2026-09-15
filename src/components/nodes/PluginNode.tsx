@@ -1,13 +1,10 @@
+import Select from '../shared/Select';
 import { Icon } from '@iconify/react';
 import { Handle, Position } from '@xyflow/react';
 import { memo, useMemo, useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import type { BaseNodeData } from '../../types';
-import type {
-  PluginFileGrantSummary,
-  PluginJsonValue,
-} from '../../types/plugin';
-import { authorizePluginTextFile } from '../../services/plugins/pluginFileGrantService';
+import type { PluginJsonValue } from '../../types/plugin';
 import { buildPluginModelCatalog } from '../../services/plugins/pluginModelCatalog';
 import {
   executePluginNode,
@@ -18,18 +15,6 @@ function jsonRecord(value: unknown): Record<string, PluginJsonValue> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, PluginJsonValue>
     : {};
-}
-
-function fileSummary(value: PluginJsonValue | undefined): PluginFileGrantSummary | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const record = value as Record<string, PluginJsonValue>;
-  if (typeof record.grantId !== 'string' || typeof record.displayName !== 'string') return null;
-  return {
-    grantId: record.grantId,
-    displayName: record.displayName,
-    size: typeof record.size === 'number' ? record.size : 0,
-    extension: typeof record.extension === 'string' ? record.extension : '',
-  };
 }
 
 function PluginNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
@@ -142,14 +127,14 @@ function PluginNode({ id, data, selected }: { id: string; data: BaseNodeData; se
                   onChange={(event) => setValue(field.id, event.currentTarget.value)}
                 />
               ) : field.type === 'select' ? (
-                <select
-                  className={baseClass}
+                <Select fixedMenu
+                  className="min-w-0"
                   value={typeof value === 'string' ? value : ''}
-                  onChange={(event) => setValue(field.id, event.currentTarget.value)}
+                  onChange={(selectedOptionValue) => setValue(field.id, selectedOptionValue)}
                 >
                   <option value="">{field.placeholder || '请选择'}</option>
                   {field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
+                </Select>
               ) : field.type === 'boolean' ? (
                 <input
                   className="ml-2 align-middle accent-indigo-500"
@@ -158,35 +143,17 @@ function PluginNode({ id, data, selected }: { id: string; data: BaseNodeData; se
                   onChange={(event) => setValue(field.id, event.currentTarget.checked)}
                 />
               ) : field.type === 'model' ? (
-                <select
-                  className={baseClass}
+                <Select fixedMenu
+                  className="min-w-0"
                   value={typeof value === 'string' ? value : ''}
-                  onChange={(event) => setValue(field.id, event.currentTarget.value)}
+                  onChange={(selectedOptionValue) => setValue(field.id, selectedOptionValue)}
                 >
                   <option value="">{models.length > 0 ? '选择可调用模型' : '暂无可调用模型'}</option>
                   {models
                     .filter((model) => field.modelCategories?.includes(model.category))
                     .map((model) => <option key={model.id} value={model.id}>{model.name} · {model.category}</option>)}
-                </select>
-              ) : field.type === 'file' ? (() => {
-                const file = fileSummary(value);
-                return (
-                  <button
-                    type="button"
-                    className={`${baseClass} text-left hover:bg-canvas-hover`}
-                    onClick={async () => {
-                      try {
-                        const next = await authorizePluginTextFile(available.pluginId, id);
-                        if (next) setValue(field.id, next as unknown as PluginJsonValue);
-                      } catch (error) {
-                        showToast(error instanceof Error ? error.message : '文件授权失败', 'error');
-                      }
-                    }}
-                  >
-                    {file ? `${file.displayName} · ${Math.max(1, Math.ceil(file.size / 1024))} KB` : (field.placeholder || '选择并授权文本文件')}
-                  </button>
-                );
-              })() : (
+                </Select>
+              ) : (
                 <input
                   className={baseClass}
                   type={field.type === 'number' ? 'number' : 'text'}

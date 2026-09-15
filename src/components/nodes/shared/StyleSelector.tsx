@@ -86,6 +86,7 @@ export default function StyleSelector({
   const t = useT();
   const [open, setOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
 
   // 新增表单
   const [formName, setFormName] = useState('');
@@ -95,6 +96,7 @@ export default function StyleSelector({
 
   const customStyles = useAppStore((s) => s.customStyles);
   const addCustomStyle = useAppStore((s) => s.addCustomStyle);
+  const updateCustomStyle = useAppStore((s) => s.updateCustomStyle);
   const deleteCustomStyle = useAppStore((s) => s.deleteCustomStyle);
   const storedLockedProjectStyle = useAppStore(
     useShallow((state) => {
@@ -152,7 +154,7 @@ export default function StyleSelector({
     (e: React.MouseEvent, styleId: string) => {
       e.stopPropagation();
       e.preventDefault();
-      deleteCustomStyle(styleId);
+      void deleteCustomStyle(styleId);
       // 如果当前选中了被删除的画风，清除选择
       if (selectedStyle === styleId) onChange?.('');
     },
@@ -165,8 +167,21 @@ export default function StyleSelector({
     setFormName('');
     setFormPrompt('');
     setFormThumbnail(undefined);
+    setEditingStyleId(null);
     setAddOpen(true);
   }, []);
+
+  const openEditForm = useCallback((e: React.MouseEvent, styleId: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const style = customStyles.find((item) => item.id === styleId);
+    if (!style) return;
+    setFormName(style.name);
+    setFormPrompt(style.prompt);
+    setFormThumbnail(style.thumbnail);
+    setEditingStyleId(style.id);
+    setAddOpen(true);
+  }, [customStyles]);
 
   // 选择图片文件
   const handlePickImage = useCallback(() => {
@@ -183,18 +198,21 @@ export default function StyleSelector({
     e.target.value = '';
   }, []);
 
-  // 提交新增
+  // 提交新增或编辑
   const handleAddSubmit = useCallback(() => {
     const name = formName.trim();
     if (!name) return;
-    addCustomStyle({
+    const draft = {
       nodeType,
       name,
       prompt: formPrompt.trim(),
       thumbnail: formThumbnail,
-    });
+    };
+    if (editingStyleId) void updateCustomStyle(editingStyleId, draft);
+    else void addCustomStyle(draft);
     setAddOpen(false);
-  }, [formName, formPrompt, formThumbnail, nodeType, addCustomStyle]);
+    setEditingStyleId(null);
+  }, [addCustomStyle, editingStyleId, formName, formPrompt, formThumbnail, nodeType, updateCustomStyle]);
 
   const effectiveSelectedStyle = lockedProjectStyle?.styleId ?? selectedStyle;
   const selectedName = styles.find((s) => s.id === effectiveSelectedStyle)?.name
@@ -265,6 +283,7 @@ export default function StyleSelector({
                 className="style-add-btn"
                 onClick={openAddForm}
                 data-tooltip={t('添加自定义画风')}
+                aria-label={t('添加自定义画风')}
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <line x1="12" y1="5" x2="12" y2="19" />
@@ -282,54 +301,69 @@ export default function StyleSelector({
               <div className="style-picker-empty">{t('暂无可选画风')}</div>
             )}
             {styles.map((s) => (
-              <button
+              <div
                 key={s.id}
-                type="button"
                 className={`style-card${effectiveSelectedStyle === s.id ? ' selected' : ''}${s.isCustom ? ' is-custom' : ''}`}
-                onClick={() => handleSelect(s.id)}
               >
-                <div className="style-card-img">
-                  {s.thumbnail ? (
-                    <img src={s.thumbnail} alt={s.name} />
-                  ) : (
-                    <div className="style-card-placeholder" />
+                <button
+                  type="button"
+                  className="style-card-select"
+                  onClick={() => handleSelect(s.id)}
+                >
+                  <div className="style-card-img">
+                    {s.thumbnail ? (
+                      <img src={s.thumbnail} alt={s.name} />
+                    ) : (
+                      <div className="style-card-placeholder" />
+                    )}
+                    <span className="style-card-name">{s.isCustom ? s.name : t(s.name)}</span>
+                  </div>
+                  {s.description && (
+                    <div className="style-card-desc">{s.isCustom ? s.description : t(s.description)}</div>
                   )}
-                  <span className="style-card-name">{s.isCustom ? s.name : t(s.name)}</span>
-                </div>
-                {s.description && (
-                  <div className="style-card-desc">{s.isCustom ? s.description : t(s.description)}</div>
-                )}
+                </button>
                 {s.isCustom && (
-                  <button
-                    type="button"
-                    className="style-card-delete"
-                    onClick={(e) => handleDeleteCustom(e, s.id)}
-                    data-tooltip={t('删除此画风')}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
+                  <div className="style-card-actions">
+                    <button
+                      type="button"
+                      className="style-card-action"
+                      onClick={(e) => openEditForm(e, s.id)}
+                      aria-label={t('编辑 {name}', { name: s.name })}
+                      data-tooltip={t('编辑')}
+                    >
+                      <Icon icon="lucide:pencil" className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      className="style-card-action style-card-delete"
+                      onClick={(e) => handleDeleteCustom(e, s.id)}
+                      aria-label={t('删除此画风')}
+                      data-tooltip={t('删除此画风')}
+                    >
+                      <Icon icon="lucide:trash-2" className="h-3 w-3" />
+                    </button>
+                  </div>
                 )}
-              </button>
+              </div>
             ))}
           </div>
         </ModalOverlay>,
         document.body,
       )}
 
-      {/* ── 新增自定义画风弹窗 ── */}
+      {/* ── 新增 / 编辑自定义画风弹窗 ── */}
       {createPortal(
         <ModalOverlay
           isOpen={addOpen}
           onClose={() => setAddOpen(false)}
-          ariaLabel={t('添加自定义画风')}
+          ariaLabel={editingStyleId ? t('编辑 {name}', { name: formName }) : t('添加自定义画风')}
           className="style-add-panel"
           closeOnBackdrop={false}
         >
           <div className="style-picker-header">
-            <span className="asset-picker-title">{t('添加自定义画风')}</span>
+            <span className="asset-picker-title">
+              {editingStyleId ? t('编辑 {name}', { name: formName }) : t('添加自定义画风')}
+            </span>
             <PopupCloseButton
               ariaLabel={t('关闭自定义画风编辑')}
               onClick={() => setAddOpen(false)}

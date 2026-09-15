@@ -1,6 +1,7 @@
 /**
  * 小逻摄影棚全屏面板，以 3D 控件编辑相机和灯光参数并生成可回填的提示词片段。
  */
+import Select from '../../../shared/Select';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import * as THREE from 'three';
@@ -440,8 +441,8 @@ function CameraStudioPanel({ isOpen, imageUrl, onClose, onGenerate }: CameraStud
                 <RangeControl label="画面倾斜" value={cameraState.roll} min={-45} max={45} suffix="°" onChange={(roll) => updateCamera({ roll })} />
               </div>
               <div className="camera-studio-select-grid">
-                <label><span>景别</span><select value={cameraState.distance} onChange={(event) => updateCamera({ distance: event.target.value as CameraDistance })}>{DISTANCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-                <label><span>镜头</span><select value={cameraState.lens} onChange={(event) => updateCamera({ lens: event.target.value as CameraLens })}>{LENS_OPTIONS.map((lens) => <option key={lens} value={lens}>{lens}</option>)}</select></label>
+                <label><span>景别</span><Select fixedMenu value={cameraState.distance} onChange={(selectedOptionValue) => updateCamera({ distance: selectedOptionValue as CameraDistance })}>{DISTANCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</Select></label>
+                <label><span>镜头</span><Select fixedMenu value={cameraState.lens} onChange={(selectedOptionValue) => updateCamera({ lens: selectedOptionValue as CameraLens })}>{LENS_OPTIONS.map((lens) => <option key={lens} value={lens}>{lens}</option>)}</Select></label>
               </div>
               <label className="camera-studio-toggle"><input type="checkbox" checked={cameraState.promptEnhance} onChange={(event) => updateCamera({ promptEnhance: event.target.checked })} /><span>电影感增强</span></label>
             </>

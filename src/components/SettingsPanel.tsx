@@ -146,6 +146,10 @@ function formatBytes(bytes: number): string {
 export default function SettingsPanel() {
   const t = useT();
   const locale = getLocale();
+  const saveStatus = useAppStore((s) => s.configSaveStatus);
+  const saveError = useAppStore((s) => s.configSaveError);
+  const configHydrated = useAppStore((s) => s.configHydrated);
+  const unreadSecretCount = useAppStore((s) => s.configSecretReadErrors?.length ?? 0);
   const { settingsOpen, setSettingsOpen, settingsInitialTab, setSettingsInitialTab, config, updateConfig, saveConfig, showToast } =
     useAppStore(
       useShallow((s) => ({
@@ -159,6 +163,18 @@ export default function SettingsPanel() {
         showToast: s.showToast,
       })),
     );
+  const persist = async () => {
+    try { await saveConfig(); return true; } catch { return false; }
+  };
+  const reload = async () => {
+    if (useAppStore.getState().configDirty) {
+      const { ask } = await import('@tauri-apps/plugin-dialog');
+      if (!await ask(t('重新加载会放弃当前未保存的设置，是否继续？'), {
+        title: t('重新加载设置'), kind: 'warning', okLabel: t('重新加载'), cancelLabel: t('取消'),
+      }).catch(() => false)) return;
+    }
+    await useAppStore.getState().loadConfig().catch(() => {});
+  };
   const sidebarFloating = config.sidebarFloating === true; // 默认关闭
   const configuredWindowGlassFrame = config.windowGlassFrame !== false; // 默认开启
   const performanceMode = config.performanceMode === true;
@@ -245,7 +261,7 @@ export default function SettingsPanel() {
         customBackgroundIsDark: detection.isDark,
         theme: detection.isDark ? config.theme : 'light',
       });
-      await saveConfig();
+      if (!await persist()) return;
 
       const sizeLabel = formatBytes(compression.compressedSize);
       const ratioLabel = compression.keptOriginal
@@ -275,7 +291,7 @@ export default function SettingsPanel() {
       customBackgroundIsDark: undefined,
     });
     setBgDetection(null);
-    await saveConfig();
+    if (!await persist()) return;
     showToast(t('已恢复默认背景'));
   };
 
@@ -295,6 +311,20 @@ export default function SettingsPanel() {
             onClick={() => setSettingsOpen(false)}
           />
         </div>
+        {(saveError || !configHydrated || unreadSecretCount > 0 || (saveStatus !== 'idle' && saveStatus !== 'saved')) && (
+        <div role="status" className={`ui-alert ${saveStatus === 'error' || saveStatus === 'conflict' ? 'ui-alert--danger' : 'ui-alert--info'} mx-3 my-2`} data-settings-persistence>
+          <div className="ui-alert__body flex-1">
+            {saveError ?? t(saveStatus === 'saving' ? '正在保存设置…' : saveStatus === 'dirty' ? '有未保存的设置'
+              : saveStatus === 'saved' ? '设置已保存' : configHydrated ? '设置已加载' : '设置尚未加载完成')}
+          </div>
+          {(saveStatus === 'error' || saveStatus === 'dirty') && configHydrated && (
+            <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" onClick={() => void persist()}>{t('重试保存')}</button>
+          )}
+          {(saveStatus === 'conflict' || !configHydrated || unreadSecretCount > 0) && (
+            <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" onClick={() => void reload()}>{t('重新加载')}</button>
+          )}
+        </div>
+        )}
 
         <div className="flex flex-1 min-h-0">
           <SettingsNavigation activeTab={activeTab} onSelect={selectTab} />
@@ -329,7 +359,7 @@ export default function SettingsPanel() {
                           onClick={async () => {
                             if (active) return;
                             updateConfig({ language: code });
-                            await saveConfig();
+                            if (!await persist()) return;
                           }}
                           className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
                             active
@@ -362,7 +392,7 @@ export default function SettingsPanel() {
                           onClick={async () => {
                             if (active) return;
                             updateConfig({ startupView: option.id });
-                            await saveConfig();
+                            if (!await persist()) return;
                           }}
                           className={`flex items-start gap-3 rounded-lg border p-3 text-left transition-colors ${
                             active
@@ -409,7 +439,7 @@ export default function SettingsPanel() {
                           onClick={async () => {
                             if (active) return;
                             updateConfig({ windowAspectRatio: id });
-                            await saveConfig();
+                            if (!await persist()) return;
                           }}
                           className={`flex h-9 items-center justify-center rounded-md text-xs font-medium transition-colors ${
                             active
@@ -453,7 +483,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ windowAspectLocked: !windowAspectLocked });
-                      saveConfig();
+                      void persist();
                     }}
                     aria-pressed={windowAspectLocked}
                     className={`sidebar-pref-card mt-2${windowAspectLocked ? ' is-floating' : ''}`}
@@ -498,7 +528,7 @@ export default function SettingsPanel() {
                                   canvasBackground: 'custom',
                                   theme: config.customBackgroundIsDark ? config.theme : 'light',
                                 });
-                                await saveConfig();
+                                if (!await persist()) return;
                               } else {
                                 fileInputRef.current?.click();
                               }
@@ -506,7 +536,7 @@ export default function SettingsPanel() {
                             }
                             updateConfig({ canvasBackground: value as CanvasBg, theme });
                             setBgDetection(null);
-                            await saveConfig();
+                            if (!await persist()) return;
                           }}
                           className={`flex flex-col items-center gap-1.5 p-1 rounded-lg border transition-colors ${
                             isActive
@@ -642,7 +672,7 @@ export default function SettingsPanel() {
                               value={Math.round((config.customBackgroundOpacity ?? 0.3) * 100)}
                               onChange={(e) => {
                                 updateConfig({ customBackgroundOpacity: Number(e.target.value) / 100 });
-                                saveConfig();
+                                void persist();
                               }}
                               className="flex-1 h-1 accent-indigo-500 cursor-pointer"
                             />
@@ -687,7 +717,7 @@ export default function SettingsPanel() {
                           aria-checked={active}
                           onClick={() => {
                             updateConfig({ interactionMode: opt.id });
-                            saveConfig();
+                            void persist();
                           }}
                           className={`canvas-interaction-mode-card${active ? ' is-active' : ''}`}
                         >
@@ -756,7 +786,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ customCursor: !customCursor });
-                      saveConfig();
+                      void persist();
                     }}
                     aria-pressed={customCursor}
                     className={`sidebar-pref-card${customCursor ? ' is-floating' : ''}`}
@@ -804,7 +834,7 @@ export default function SettingsPanel() {
                           aria-checked={active}
                           onClick={async () => {
                             updateConfig({ nodeToolbarMode: option.id });
-                            await saveConfig();
+                            if (!await persist()) return;
                           }}
                           className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
                             active
@@ -827,7 +857,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ canvasNoteToolbarVisible: !canvasNoteToolbarVisible });
-                      saveConfig();
+                      void persist();
                     }}
                     aria-pressed={canvasNoteToolbarVisible}
                     className={`sidebar-pref-card${canvasNoteToolbarVisible ? ' is-floating' : ''}`}
@@ -866,7 +896,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ nodeLabelVisible: !nodeLabelVisible });
-                      saveConfig();
+                      void persist();
                     }}
                     aria-pressed={nodeLabelVisible}
                     className={`sidebar-pref-card${nodeLabelVisible ? ' is-floating' : ''}`}
@@ -908,7 +938,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ windowGlassFrame: !configuredWindowGlassFrame });
-                      saveConfig();
+                      void persist();
                     }}
                     disabled={performanceMode}
                     aria-pressed={windowGlassFrame}
@@ -952,7 +982,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ performanceMode: !performanceMode });
-                      saveConfig();
+                      void persist();
                     }}
                     aria-pressed={performanceMode}
                     className={`sidebar-pref-card${performanceMode ? ' is-floating' : ''}`}
@@ -997,7 +1027,7 @@ export default function SettingsPanel() {
                     type="button"
                     onClick={() => {
                       updateConfig({ sidebarFloating: !sidebarFloating });
-                      saveConfig();
+                      void persist();
                     }}
                     aria-pressed={sidebarFloating}
                     className={`sidebar-pref-card${sidebarFloating ? ' is-floating' : ''}`}

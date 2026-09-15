@@ -10,6 +10,7 @@ import type {
   VideoGenerationReferenceInput,
 } from '../../types/aiTypes';
 import { apimartMediaProviderAdapter } from './providers/apimartMedia';
+import { runninghubMediaProviderAdapter } from './providers/runninghubMedia';
 import { seedlingMediaProviderAdapter } from './providers/seedlingMedia';
 
 export type MediaProviderCapability = 'image' | 'video' | 'audio';
@@ -18,6 +19,7 @@ export interface ImageProviderRequest {
   params: AIImageGenParams;
   prompt: string;
   imageUrls: string[];
+  referenceMedia?: import('../../types/aiTypes').MediaReference[];
   requestedCount: number;
   signal?: AbortSignal;
 }
@@ -34,6 +36,7 @@ export interface AudioProviderRequest {
   prompt: string;
   /** 连入该节点的音频（角色库绑定的声音走这条线）；能吃音色参考的 adapter 自行映射 */
   referenceAudioUrls: string[];
+  referenceMedia?: import('../../types/aiTypes').MediaReference[];
   signal?: AbortSignal;
 }
 
@@ -41,7 +44,7 @@ export interface MediaProviderAdapter {
   providerId: string;
   capabilities: readonly MediaProviderCapability[];
   generateImage?: (request: ImageProviderRequest) => Promise<BatchImageResult>;
-  generateVideo?: (request: VideoProviderRequest) => Promise<{ url: string }>;
+  generateVideo?: (request: VideoProviderRequest) => Promise<{ url: string; runninghubOutputs?: import('../../types/runninghub').RunningHubOutput[] }>;
   generateAudio?: (request: AudioProviderRequest) => Promise<AudioGenerationResult>;
 }
 
@@ -119,5 +122,6 @@ export class MediaProviderRegistry {
 
 export const mediaProviderRegistry = new MediaProviderRegistry([
   apimartMediaProviderAdapter,
+  runninghubMediaProviderAdapter,
   seedlingMediaProviderAdapter,
 ]);

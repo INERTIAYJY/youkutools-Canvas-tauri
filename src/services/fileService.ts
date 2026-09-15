@@ -3,12 +3,18 @@
  * 节点输出另存为、系统文件管理器定位。基础设施见 ./fs/core，删除域见 ./fs/trash，
  * 全局资产库见 ./fs/assetLibrary（均通过本模块统一对外导出）。
  */
-import { writeFile, readFile as tauriReadFile, stat, rename } from '@tauri-apps/plugin-fs';
+import { exists, writeFile, readFile as tauriReadFile, stat, rename } from '@tauri-apps/plugin-fs';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { isLocalMediaUrl, isRemoteMediaUrl, localMediaUrlToPath } from '../utils/mediaUrl';
 import { identifyAsset } from './fs/assetIndex';
 import { walkDirectoryFiles } from './fs/assetLibrary';
+import {
+  decodeDataUrlBytesAsync,
+  MEDIA_DATA_URL_BYTE_LIMITS,
+  sha256BytesHex,
+} from './mediaDataUrl';
 import {
   isTauriEnv,
   getMimeType,
@@ -17,8 +23,10 @@ import {
   sanitizeFileName,
   stripVerbatimPrefix,
   getConvertFileSrc,
+  getAssetUrlFromPath,
   ensureProjectDataDir,
   getProjectDataDir,
+  joinPath,
   resolveUniqueDestPath,
   buildNodeFileName,
   notifyProjectDiskChanged,
@@ -34,7 +42,13 @@ export interface FileTransferProgress {
 
 export interface FileTransferOptions {
   signal?: AbortSignal;
+  /** Agent/MCP 导入不把调用方的本地路径或原生错误写入控制台。 */
+  redactErrors?: boolean;
   onProgress?: (progress: FileTransferProgress) => void;
+  /** Data URL 按内容摘要复用确定路径，供持久化迁移重试使用。 */
+  deduplicateByContent?: boolean;
+  /** 持久化入口需要接收底层异常，再转换为不含路径、链接或凭据的错误。 */
+  throwOnError?: boolean;
 }
 
 interface NativeFileTransferResult {
@@ -52,10 +66,7 @@ export type MediaDataUrlKind = 'image' | 'video' | 'audio' | 'other';
  * 正常项目文件走原生流式拷贝，不受这些上限影响。
  */
 export const MEDIA_DATA_URL_MAX_BYTES: Readonly<Record<MediaDataUrlKind, number>> = {
-  image: 32 * 1024 * 1024,
-  video: 64 * 1024 * 1024,
-  audio: 32 * 1024 * 1024,
-  other: 8 * 1024 * 1024,
+  ...MEDIA_DATA_URL_BYTE_LIMITS,
 };
 
 /** 单次模型请求内允许同时保留的 Data URL 原始字节总量。 */
@@ -478,19 +489,15 @@ function browserOpenFile(accept: string): Promise<File | null> {
   });
 }
 
-/** 读取本地文件路径，返回 data URL（供剪贴板粘贴等场景使用） */
+/** 解析裁剪来源，本地文件使用 asset URL，远程图片按需绕过 CORS。 */
 export async function fetchImageForCrop(imageUrl: string): Promise<string> {
-  // data:/blob: 是同源 URL，asset:// / asset.localhost 是 Tauri 本地资源，不需要绕过 CORS
-  if (
-    imageUrl.startsWith('data:') ||
-    imageUrl.startsWith('blob:') ||
-    imageUrl.startsWith('asset://') ||
-    imageUrl.includes('asset.localhost')
-  ) {
+  if (isLocalMediaUrl(imageUrl)) {
+    const localPath = localMediaUrlToPath(imageUrl);
+    if (localPath && isTauriEnv()) return getAssetUrlFromPath(localPath);
     return imageUrl;
   }
   // 远程 URL：通过 Rust 端 reqwest 原生 HTTP 下载（WebView CORS 不适用）
-  if (isTauriEnv() && /^https?:\/\//i.test(imageUrl)) {
+  if (isTauriEnv() && isRemoteMediaUrl(imageUrl)) {
     try {
       const dataUrl: string = await invoke('fetch_image_data_url', { url: imageUrl });
       return dataUrl;
@@ -544,23 +551,30 @@ function readBlobAsDataUrl(blob: Blob, signal?: AbortSignal): Promise<string> {
   });
 }
 
-/** 读取本地文件路径，返回有明确内存预算的 data URL。 */
+/** 读取本地路径或媒体 URL，返回有明确内存预算的 data URL。 */
 export async function readFileToDataUrl(
   filePath: string,
   options: ReadFileToDataUrlOptions = {},
 ): Promise<string | null> {
   try {
     throwIfMediaReadAborted(options.signal);
-    // Normalize Windows backslash paths
-    const normalized = filePath.replace(/\\/g, '/');
+    const localPath = localMediaUrlToPath(filePath);
+    const readPath = localPath ?? filePath;
+    const normalized = readPath.replace(/\\/g, '/');
     const ext = normalized.split('.').pop()?.toLowerCase() || '';
     const kind = options.kind ?? inferMediaDataUrlKind(normalized);
     const label = options.label ?? MEDIA_KIND_LABELS[kind];
 
-    if (isTauriEnv()) {
+    if (isMediaDataUrl(filePath)) {
+      const bytes = await assertMediaDataUrlWithinLimitAsync(filePath, kind, label, options.signal);
+      consumeMediaDataUrlBudgetBytes(options.dataUrlBudget, bytes);
+      return filePath;
+    }
+
+    if (isTauriEnv() && (localPath !== undefined || (!isLocalMediaUrl(filePath) && !isRemoteMediaUrl(filePath)))) {
       // 授权路径可 stat 时先拒绝，避免先把整个大文件读进 WebView 内存。
       try {
-        const fileInfo = await stat(filePath);
+        const fileInfo = await stat(readPath);
         throwIfMediaReadAborted(options.signal);
         assertMediaDataUrlSize(fileInfo.size, kind, label);
         assertMediaDataUrlBudgetAvailable(options.dataUrlBudget, fileInfo.size);
@@ -571,9 +585,9 @@ export async function readFileToDataUrl(
           || error instanceof MediaDataUrlTotalTooLargeError
           || isAbortError(error)
         ) throw error;
-        // 某些 asset/file URL 无法直接 stat，读取后仍会在 Base64 转换前二次检查。
+        // stat 不可用时，授权读取后仍会在 Base64 转换前二次检查。
       }
-      const content = await tauriReadFile(filePath);
+      const content = await tauriReadFile(readPath);
       throwIfMediaReadAborted(options.signal);
       assertMediaDataUrlSize(content.byteLength, kind, label);
       assertMediaDataUrlBudgetAvailable(options.dataUrlBudget, content.byteLength);
@@ -584,8 +598,8 @@ export async function readFileToDataUrl(
       return dataUrl;
     }
 
-    // Browser fallback: try fetch for http(s) URLs, or file:// for local dev
-    const resp = await fetch(normalized, { signal: options.signal });
+    // blob 与浏览器可访问的 URL 由 WebView 读取，不把 URL 当文件路径。
+    const resp = await fetch(filePath, { signal: options.signal });
     throwIfMediaReadAborted(options.signal);
     if (!resp.ok) throw new Error(`读取本地文件失败 (${resp.status})`);
     const contentLength = Number(resp.headers.get('Content-Length'));
@@ -608,7 +622,7 @@ export async function readFileToDataUrl(
       || error instanceof MediaDataUrlHeaderTooLargeError
       || isAbortError(error)
     ) throw error;
-    console.error('readFileToDataUrl failed:', filePath, error);
+    console.error('readFileToDataUrl failed:', error);
     return null;
   }
 }
@@ -616,6 +630,19 @@ export async function readFileToDataUrl(
 // ============================================
 // Project data files — 项目媒体文件读写
 // ============================================
+
+async function resolveContentAddressedProjectPath(
+  dataDir: string,
+  fileName: string,
+  bytes: Uint8Array,
+): Promise<string> {
+  const digest = await sha256BytesHex(bytes);
+  const normalizedName = sanitizeFileName(fileName);
+  const dotIndex = normalizedName.lastIndexOf('.');
+  const stem = dotIndex > 0 ? normalizedName.slice(0, dotIndex) : normalizedName;
+  const extension = dotIndex > 0 ? normalizedName.slice(dotIndex) : '';
+  return joinPath(dataDir, `${stem}-${digest.slice(0, 20)}${extension}`);
+}
 
 /**
  * 将文件拷贝到项目数据目录，返回本地路径和 asset URL
@@ -638,7 +665,7 @@ export async function copyFileToProjectData(
     await runNativeFileTransfer('copy_file_streamed', { sourcePath, destinationPath: destPath }, options);
     notifyProjectDiskChanged();
   } catch (err) {
-    console.error('Failed to copy file to project data:', sourcePath, err);
+    if (!options?.redactErrors) console.error('Failed to copy file to project data:', sourcePath, err);
     // Don't fallback to convertFileSrc on external paths — asset protocol won't serve them
     // Return null so caller can fallback to readFile → base64 in-memory loading
     return null;
@@ -661,39 +688,39 @@ export async function saveDataUrlToProjectData(
   dataUrl: string,
   projectId: string,
   fileName: string,
+  options: Pick<FileTransferOptions, 'deduplicateByContent' | 'throwOnError'> = {},
 ): Promise<{ filePath: string; assetUrl: string } | null> {
   if (!isTauriEnv()) return null;
 
-  const dataDir = await ensureProjectDataDir(projectId);
+  const dataDir = await ensureProjectDataDir(projectId, { throwOnError: options.throwOnError });
   if (!dataDir) return null;
 
   try {
-    // Parse data URL to binary
-    const match = dataUrl.match(/^data:(.+?);base64,(.+)$/);
-    let bytes: Uint8Array;
-    if (match) {
-      const b64 = match[2];
-      const binaryStr = atob(b64);
-      bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) {
-        bytes[i] = binaryStr.charCodeAt(i);
-      }
-    } else {
-      // Non-base64 data URL: fetch and convert
-      const resp = await fetch(dataUrl);
-      const buffer = await resp.arrayBuffer();
-      bytes = new Uint8Array(buffer);
-    }
+    const kind = inferMediaDataUrlKind(dataUrl);
+    const expectedBytes = await assertMediaDataUrlWithinLimitAsync(dataUrl, kind, fileName);
+    const bytes = await decodeDataUrlBytesAsync(dataUrl, {
+      expectedBytes,
+      maxBytes: MEDIA_DATA_URL_MAX_BYTES[kind],
+      label: fileName,
+    });
 
-    const destPath = await resolveUniqueDestPath(dataDir, fileName);
-    await writeFile(destPath, bytes);
-    notifyProjectDiskChanged();
+    let destPath: string;
+    if (options.deduplicateByContent) {
+      destPath = await resolveContentAddressedProjectPath(dataDir, fileName, bytes);
+    } else {
+      destPath = await resolveUniqueDestPath(dataDir, fileName);
+    }
+    if (!options.deduplicateByContent || !await exists(destPath)) {
+      await writeFile(destPath, bytes);
+      notifyProjectDiskChanged();
+    }
 
     const convertFileSrc = await getConvertFileSrc();
     const assetUrl = convertFileSrc ? convertFileSrc(destPath) : '';
 
     return { filePath: destPath, assetUrl };
   } catch (err) {
+    if (options.throwOnError) throw err;
     console.error('Failed to save data URL to project data:', fileName, err);
     return null;
   }
@@ -707,10 +734,11 @@ export async function saveBinaryToProjectData(
   data: Uint8Array,
   projectId: string,
   fileName: string,
+  options: Pick<FileTransferOptions, 'throwOnError'> = {},
 ): Promise<{ filePath: string; assetUrl: string } | null> {
   if (!isTauriEnv()) return null;
 
-  const dataDir = await ensureProjectDataDir(projectId);
+  const dataDir = await ensureProjectDataDir(projectId, { throwOnError: options.throwOnError });
   if (!dataDir) return null;
 
   const destPath = await resolveUniqueDestPath(dataDir, fileName);
@@ -719,6 +747,7 @@ export async function saveBinaryToProjectData(
     await writeFile(destPath, data);
     notifyProjectDiskChanged();
   } catch (err) {
+    if (options.throwOnError) throw err;
     console.error('Failed to save binary to project data:', destPath, err);
     return null;
   }
@@ -727,6 +756,20 @@ export async function saveBinaryToProjectData(
   const assetUrl = convertFileSrc ? convertFileSrc(destPath) : '';
 
   return { filePath: destPath, assetUrl };
+}
+
+/**
+ * 为会自行写入结果的本地处理器（如 ONNX）分配项目目录内的唯一输出路径。
+ * 只返回路径，不预先创建文件。
+ */
+export async function resolveProjectOutputPath(
+  projectId: string,
+  fileName: string,
+): Promise<string | null> {
+  if (!isTauriEnv()) return null;
+  const dataDir = await ensureProjectDataDir(projectId);
+  if (!dataDir) return null;
+  return resolveUniqueDestPath(dataDir, sanitizeFileName(fileName));
 }
 
 /**
@@ -785,8 +828,88 @@ function guessExtension(url: string, mime: string | undefined, fallbackPrefix: s
   return '.png';
 }
 
+/** Data URL / Blob URL 只是内存载体，不能进入项目、历史或对话持久化。 */
+export function isTransientMediaUrl(url: string | undefined): boolean {
+  return Boolean(url && (/^data:/i.test(url) || /^blob:/i.test(url)));
+}
+
+export interface PersistedProjectMedia {
+  filePath?: string;
+  assetUrl?: string;
+  /** 展示用 URL；落盘成功时指向项目文件。 */
+  mediaUrl: string;
+  /** 可持久化的来源 URL；内嵌/临时 URL 会被本地 asset URL 替换。 */
+  sourceUrl: string;
+}
+
+/** 原始异常只用于本次分类，不把路径、签名 URL 或响应正文传入节点和历史。 */
+function describeMediaPersistenceFailure(error: unknown): string {
+  const message = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+  if (/forbidden path|路径未获授权|not allowed on the scope/i.test(message)) {
+    return '应用拒绝访问项目文件，请在设置中重新选择文件保存目录';
+  }
+  if (/permission denied|access is denied|拒绝访问|os error 5\b|EACCES|EPERM/i.test(message)) {
+    return '系统拒绝写入项目目录，请检查目录的写入权限';
+  }
+  if (/no space|disk.*full|磁盘.*不足|空间不足|ENOSPC|os error 112\b/i.test(message)) {
+    return '目标磁盘空间不足';
+  }
+  const httpStatus = /\bHTTP\s+(\d{3})\b/i.exec(message)?.[1];
+  if (httpStatus) return `图片或媒体下载失败（HTTP ${httpStatus}）`;
+  if (/下载请求失败|failed to fetch|network|timed?\s*out|超时/i.test(message)) {
+    return '下载媒体失败，请检查网络或媒体链接是否已失效';
+  }
+  if (/目录.*不存在|no such file|path not found|找不到指定|ENOENT|os error [23]\b/i.test(message)) {
+    return '项目目录或源文件不存在，请检查文件保存位置';
+  }
+  if (error instanceof MediaDataUrlTooLargeError || error instanceof MediaDataUrlTotalTooLargeError) {
+    return '媒体超过内存保存上限';
+  }
+  return '保存过程发生异常，请检查文件保存目录和媒体来源';
+}
+
 /**
- * 下载远程 URL 文件并保存到项目数据目录
+ * 将一次媒体生成结果收敛为可持久化的项目文件引用。
+ * 没有项目目录时（浏览器环境）无法落盘：远程 URL 仍可展示，但内嵌媒体一旦进入
+ * 持久化就是死数据，只能失败关闭。有项目目录时落盘失败同样必须失败关闭，
+ * 本地媒体落盘后把来源改为项目 asset URL，避免保留临时正文或旧目录引用。
+ */
+export async function persistMediaUrlToProjectData(
+  url: string,
+  projectId: string,
+  fallbackPrefix: string,
+  baseName?: string,
+  options?: FileTransferOptions,
+): Promise<PersistedProjectMedia> {
+  if (!isTauriEnv()) {
+    if (isTransientMediaUrl(url)) throw new Error('当前环境没有项目目录，无法保存内嵌媒体');
+    return { mediaUrl: url, sourceUrl: url };
+  }
+  let saved: Awaited<ReturnType<typeof downloadUrlAndSave>>;
+  try {
+    saved = await downloadUrlAndSave(url, projectId, fallbackPrefix, baseName, { ...options, throwOnError: true });
+  } catch (error) {
+    if (isAbortError(error) || options?.signal?.aborted) {
+      throw new DOMException('媒体保存已取消', 'AbortError');
+    }
+    // eslint-disable-next-line preserve-caught-error -- 原始异常可能包含路径、签名 URL 或凭据，不保留 cause。
+    throw new Error(`生成媒体未能写入项目目录：${describeMediaPersistenceFailure(error)}`);
+  }
+  if (!saved?.filePath || !saved.assetUrl) {
+    throw new Error('生成媒体未能写入项目目录：项目目录或本地媒体地址不可用');
+  }
+  if (isLocalMediaUrl(url)) {
+    return { ...saved, mediaUrl: saved.assetUrl, sourceUrl: saved.assetUrl };
+  }
+  return {
+    ...saved,
+    mediaUrl: saved.assetUrl,
+    sourceUrl: url,
+  };
+}
+
+/**
+ * 将媒体 URL 保存到项目数据目录：本地资源复制，远程资源下载。
  * @param baseName 可选，优先用作文件名主体（通常为节点名）；为空时从 URL 提取或用 fallbackPrefix
  * @returns { filePath, assetUrl } 或 null（失败/非 Tauri）
  */
@@ -799,11 +922,56 @@ export async function downloadUrlAndSave(
 ): Promise<{ filePath: string; assetUrl: string } | null> {
   if (!isTauriEnv()) return null;
   try {
-    // 优先用节点名命名；否则沿用从 URL 提取文件名的旧逻辑
+    throwIfMediaReadAborted(options?.signal);
+    if (isMediaDataUrl(url)) {
+      const mime = /^data:([^;,]+)/i.exec(url)?.[1];
+      const fileName = baseName && baseName.trim()
+        ? buildNodeFileName(baseName, guessExtension(url, mime, fallbackPrefix), fallbackPrefix)
+        : `${sanitizeFileName(fallbackPrefix)}-${Date.now()}${guessExtension('', mime, fallbackPrefix)}`;
+      return await saveDataUrlToProjectData(url, projectId, fileName, options);
+    }
+
+    if (/^blob:/i.test(url)) {
+      const response = await fetch(url, { signal: options?.signal });
+      if (!response.ok) throw new Error(`读取临时媒体失败：HTTP ${response.status}`);
+      const mime = response.headers.get('content-type') || undefined;
+      const kind = inferMediaDataUrlKind(mime ?? fallbackPrefix);
+      const fileName = baseName && baseName.trim()
+        ? buildNodeFileName(baseName, guessExtension(url, mime, fallbackPrefix), fallbackPrefix)
+        : `${sanitizeFileName(fallbackPrefix)}-${Date.now()}${guessExtension('', mime, fallbackPrefix)}`;
+      const contentLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(contentLength) && contentLength >= 0) {
+        assertMediaDataUrlSize(contentLength, kind, fileName);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      throwIfMediaReadAborted(options?.signal);
+      assertMediaDataUrlSize(bytes.byteLength, kind, fileName);
+      if (options?.deduplicateByContent) {
+        const dataDir = await ensureProjectDataDir(projectId, { throwOnError: options.throwOnError });
+        if (!dataDir) return null;
+        const destPath = await resolveContentAddressedProjectPath(dataDir, fileName, bytes);
+        if (!await exists(destPath)) {
+          throwIfMediaReadAborted(options?.signal);
+          await writeFile(destPath, bytes);
+          notifyProjectDiskChanged();
+        }
+        const convertFileSrc = await getConvertFileSrc();
+        return {
+          filePath: destPath,
+          assetUrl: convertFileSrc ? convertFileSrc(destPath) : '',
+        };
+      }
+      return await saveBinaryToProjectData(bytes, projectId, fileName, options);
+    }
+
+    const sourcePath = localMediaUrlToPath(url);
+    if (!sourcePath && !isRemoteMediaUrl(url)) throw new Error('不支持的媒体地址');
+    // 本地 URL 还原为授权文件路径，保留原生流式复制的取消与进度。
+    const sourceName = sourcePath?.replace(/\\/g, '/').split('/').pop();
     const fileName = baseName && baseName.trim()
-      ? buildNodeFileName(baseName, guessExtension(url, undefined, fallbackPrefix), fallbackPrefix)
-      : extractFileNameFromUrl(url, fallbackPrefix);
-    const dataDir = await ensureProjectDataDir(projectId);
+      ? buildNodeFileName(baseName, guessExtension(sourceName ?? url, undefined, fallbackPrefix), fallbackPrefix)
+      : sourceName ? sanitizeFileName(sourceName) : extractFileNameFromUrl(url, fallbackPrefix);
+    const dataDir = await ensureProjectDataDir(projectId, { throwOnError: options?.throwOnError });
     if (!dataDir) return null;
     const result = await withDownloadDestinationLock(
       dataDir,
@@ -811,8 +979,8 @@ export async function downloadUrlAndSave(
       async () => {
         const destPath = await resolveUniqueDestPath(dataDir, fileName);
         return runNativeFileTransfer(
-          'download_file_streamed',
-          { url, destinationPath: destPath },
+          sourcePath ? 'copy_file_streamed' : 'download_file_streamed',
+          sourcePath ? { sourcePath, destinationPath: destPath } : { url, destinationPath: destPath },
           options,
         );
       },
@@ -821,7 +989,8 @@ export async function downloadUrlAndSave(
     const toAssetUrl = await getConvertFileSrc();
     return { filePath: result.path, assetUrl: toAssetUrl ? toAssetUrl(result.path) : '' };
   } catch (err) {
-    console.warn('[fileService] downloadUrlAndSave failed:', url, err);
+    if (options?.throwOnError) throw err;
+    console.warn('[fileService] downloadUrlAndSave failed:', err);
     return null;
   }
 }
@@ -877,7 +1046,7 @@ export async function listProjectFiles(projectId: string): Promise<AssetFileEntr
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return [];
   // 递归：节点文件可能位于分组子文件夹内
-  const allFiles = await walkDirectoryFiles(projectDir);
+  const allFiles = await walkDirectoryFiles(projectDir, { excludedRootDirectories: ['.thumbnail'] });
   // Filter out files inside AppData / .trash subdirectories (可能嵌套在分组文件夹内)
   const files = allFiles.filter((f) => {
     const relative = f.path.substring(projectDir.length).replace(/\\/g, '/').replace(/^\//, '');

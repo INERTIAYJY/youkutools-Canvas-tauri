@@ -145,6 +145,10 @@
   display: block;
   background: var(--theme-card);
 }
+.mention-picker-card-media img.is-cropped {
+  max-width: none;
+  object-fit: fill;
+}
 .mention-picker-card-badge {
   position: absolute;
   top: 4px;

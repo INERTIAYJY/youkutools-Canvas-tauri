@@ -164,6 +164,10 @@ export interface VideoEditorProjectRecord {
   nodeIds?: string[];
   name: string;
   tracks: VideoEditorTrack[];
+  /** 自动化写入版本；人工作业必须保留，仓储拒绝过期窗口覆盖。 */
+  automationRevision?: number;
+  /** 自动化导出的默认设置；旧工程缺省时使用 1920×1080、30fps。 */
+  output?: VideoEditorCanvasSize & { frameRate: number };
   createdAt: number;
   updatedAt: number;
 }
@@ -308,6 +312,8 @@ export function needsCompositing(tracks: VideoEditorTrack[]): boolean {
   const visible = tracks.filter((track) => !track.hidden);
   const videoTracks = visible.filter((track) => track.kind === 'video');
   if (videoTracks.length > 1) return true;
+  // 独立音轨需要混入输出，不能只直通主视频而丢失配音。
+  if (visible.some((track) => track.kind === 'audio' && !track.muted && track.clips.length > 0)) return true;
 
   return visible.some((track) => track.clips.some((clip) => (
     clip.kind === 'image'

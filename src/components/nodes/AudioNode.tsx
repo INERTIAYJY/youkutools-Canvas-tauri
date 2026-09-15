@@ -10,12 +10,16 @@ import GooeyBtn from './shared/GooeyBtn';
 import { useNodeRename } from './shared/useNodeRename';
 import { useSourceFileUpload } from './shared/useSourceFileUpload';
 import AudioNodeToolbar from './shared/AudioNodeToolbar';
+import NodeToolbarShell from './shared/NodeToolbarShell';
+import { useAudioNodeAsr } from './shared/audio/useAudioNodeAsr';
+import ModelDownloadDialog from '../shared/ModelDownloadDialog';
 import { generateId, useAppStore } from '../../store/useAppStore';
 import { copyFile as copyFileToClipboard } from '../../services/clipboardService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { transcribeAudio } from '../../services/ai/transcribeAudio';
 import { textNodeHeight } from '../../utils/num';
 import { useT } from '../../i18n';
+import NodeGenerationProgress from './shared/NodeGenerationProgress';
 
 /* ── Waveform data ── */
 interface WaveformData {
@@ -170,6 +174,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const t = useT();
   const justCompleted = useCompletionFlash(data.status);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
+  const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const isSingleSelection = useAppStore((s) => s.selectedNodeIds.length <= 1);
   const isSource = data.role === 'source';
 
@@ -184,6 +189,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const waveformRef = useRef<WaveformData | null>(null);
   const animFrameRef = useRef(0);
+  const waveformPressSelectedRef = useRef<boolean | null>(null);
 
   const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴音频'));
 
@@ -261,6 +267,17 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       setIsTranscribing(false);
     }
   }, [id, t]);
+
+  // ── 本地语音转文本（SenseVoice ONNX）──
+  const {
+    isTranscribing: isAsrRunning,
+    progress: asrProgress,
+    downloadPrompt,
+    isDownloadingModel,
+    handleSpeechToText,
+    handleDownloadConfirm,
+    handleDownloadCancel,
+  } = useAudioNodeAsr({ id, data, t, updateNodeDataTransient });
 
   // ── Reset when URL changes ──
   useEffect(() => {
@@ -416,29 +433,31 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         kind="ai-audio"
         label={displayLabel}
         displayId={data.displayId as number | undefined}
-        isBeta={!isSource}
         nodeId={id}
         onRename={handleRename}
       />
       {data.audioUrl && (
-        <div className={`node-toolbar-shell ${selected && isSingleSelection ? 'is-visible' : ''}`}>
+        <NodeToolbarShell visible={selected && isSingleSelection}>
           <AudioNodeToolbar
             nodeId={id}
             isPlaying={isPlaying}
             isTranscribing={isTranscribing}
+            isAsrRunning={isAsrRunning}
+            asrProgress={asrProgress}
             onTogglePlay={togglePlay}
             onTranscribe={handleTranscribe}
+            onSpeechToText={handleSpeechToText}
             onUpload={handleUpload}
             onCopyFile={handleCopyFile}
           />
-        </div>
+        </NodeToolbarShell>
       )}
       <div
         className={`node audio-node ${selected ? 'selected' : ''} ${data.status === 'loading' || isUploading ? 'loading' : ''} ${justCompleted ? 'just-completed' : ''}`}
         style={{ minHeight: 88 }}
         onContextMenu={(e) => e.preventDefault()}
       >
-        <div className="node-preview compact">
+        <div className="node-preview compact relative">
           {isSource && (
             <button
               className="node-upload-btn"
@@ -454,7 +473,19 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             </button>
           )}
           {data.audioUrl ? (
-            <div className="audio-waveform-wrapper" onClick={togglePlay} onContextMenu={(e) => e.preventDefault()}>
+            <div
+              className="audio-waveform-wrapper"
+              onPointerDownCapture={() => { waveformPressSelectedRef.current = !!selected; }}
+              onPointerCancel={() => { waveformPressSelectedRef.current = null; }}
+              onClick={(e) => {
+                // 画布可能在 mousedown 时选中节点，需使用本次按下前的状态。
+                const wasSelected = waveformPressSelectedRef.current ?? !!selected;
+                waveformPressSelectedRef.current = null;
+                if (!wasSelected || !selected) return;
+                togglePlay(e);
+              }}
+              onContextMenu={(e) => e.preventDefault()}
+            >
               <canvas ref={canvasRef} className="audio-waveform-canvas" width={WAVEFORM_COLUMNS} height={80} />
               <audio
                 ref={audioRef}
@@ -482,10 +513,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               <span>{t('上传中...')}</span>
             </div>
           ) : data.status === 'loading' ? (
-            <div className="node-preview-loading">
-              <div className="spinner" />
-              <span>{t('生成音频中...')}</span>
-            </div>
+            <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成音频中...')} compactSpinner />
           ) : (
             <div className="node-preview-placeholder">
               {isSource ? (
@@ -504,6 +532,9 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               <span>{isSource ? t('上传音频文件') : t('TTS 文本转语音')}</span>
             </div>
           )}
+          {data.audioUrl && data.status === 'loading' && (
+            <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成音频中...')} overlay />
+          )}
         </div>
         {data.error && <NodeError nodeId={id} message={data.error} />}
         <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-audio" >
@@ -513,6 +544,14 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           <GooeyBtn className="gooey-btn-right" hue={30} />
         </Handle>
       </div>
+      {/* 语音识别模型下载弹窗（Portal → body，与超分一致） */}
+      <ModelDownloadDialog
+        type="asr"
+        showPrompt={downloadPrompt}
+        showDownloading={isDownloadingModel}
+        onConfirm={handleDownloadConfirm}
+        onCancel={handleDownloadCancel}
+      />
     </div>
   );
 }

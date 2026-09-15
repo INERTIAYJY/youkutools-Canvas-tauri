@@ -10,18 +10,18 @@ const dbMocks = vi.hoisted(() => ({
   getAllPlugins: vi.fn(),
   savePluginToDb: vi.fn(),
 }));
-const fileGrantMocks = vi.hoisted(() => ({
-  clearPluginFileGrants: vi.fn(),
+const resourceMocks = vi.hoisted(() => ({
+  clearPluginResources: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => nativeMocks);
 vi.mock('../../src/services/indexedDbService', () => dbMocks);
-vi.mock('../../src/services/plugins/pluginFileGrantService', () => fileGrantMocks);
+vi.mock('../../src/services/plugins/pluginResourceService', () => resourceMocks);
 
 import { createPluginSlice } from '../../src/store/store.plugins';
 
 const pythonManifestText = JSON.stringify({
-  apiVersion: 3,
+  apiVersion: 1,
   runtime: 'python',
   id: 'com.example.python-tool',
   name: 'Python 工具',
@@ -44,6 +44,8 @@ const pythonManifestText = JSON.stringify({
 const pythonSource = 'define_plugin({"tools": {"uppercase": lambda input_value: {"data": {"output": "ok"}}}})';
 const SOURCE_DIGEST_A = 'a'.repeat(64);
 const SOURCE_DIGEST_B = 'b'.repeat(64);
+const REVISION_DIGEST_A = 'c'.repeat(64);
+const REVISION_DIGEST_B = 'd'.repeat(64);
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -59,6 +61,7 @@ function createInstalledPluginFixture(id: string): InstalledPlugin {
   return {
     id,
     sourceDigest: SOURCE_DIGEST_A,
+    revisionDigest: REVISION_DIGEST_A,
     source: 'definePlugin({ tools: {} });',
     enabled: true,
     installedAt: 1,
@@ -77,11 +80,11 @@ function createInstalledPluginFixture(id: string): InstalledPlugin {
   };
 }
 
-function mockNativeSuccess(sourceDigest = SOURCE_DIGEST_A): void {
+function mockNativeSuccess(sourceDigest = SOURCE_DIGEST_A, revisionDigest = REVISION_DIGEST_A): void {
   nativeMocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
     if (command === 'stage_plugin_revision') {
       const manifest = args.manifest as { id: string };
-      return { pluginId: manifest.id, sourceDigest };
+      return { pluginId: manifest.id, sourceDigest, revisionDigest };
     }
     return null;
   });
@@ -109,6 +112,30 @@ beforeEach(() => {
   dbMocks.deletePluginFromDb.mockResolvedValue(undefined);
 });
 
+describe('插件由用户安装', () => {
+  it('starts with no built-in plugins', () => {
+    const { slice } = createSlice();
+
+    expect(slice.installedPlugins).toEqual([]);
+    expect(nativeMocks.invoke).not.toHaveBeenCalled();
+    expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
+  });
+
+  it('does not seed plugins when repeatedly loading an empty installation database', async () => {
+    const { slice, getState } = createSlice();
+
+    await slice.loadPlugins();
+    expect(getState().installedPlugins).toEqual([]);
+
+    await slice.loadPlugins();
+    expect(getState().installedPlugins).toEqual([]);
+    expect(dbMocks.getAllPlugins).toHaveBeenCalledTimes(2);
+    expect(nativeMocks.invoke).not.toHaveBeenCalled();
+    expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
+    expect(dbMocks.deletePluginFromDb).not.toHaveBeenCalled();
+  });
+});
+
 describe('可信 Python 插件状态边界', () => {
   it('requires explicit confirmation before installing Python code', async () => {
     const { slice, getState } = createSlice();
@@ -128,10 +155,13 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenNthCalledWith(1, 'stage_plugin_revision', {
       manifest: expect.objectContaining({ id: 'com.example.python-tool' }),
       source: pythonSource,
+      uiSource: undefined,
+      resourcePayloads: [],
     });
     expect(nativeMocks.invoke).toHaveBeenNthCalledWith(2, 'activate_plugin_revision', {
       pluginId: 'com.example.python-tool',
       sourceDigest: SOURCE_DIGEST_A,
+      revisionDigest: REVISION_DIGEST_A,
       enabled: true,
     });
   });
@@ -183,7 +213,7 @@ describe('可信 Python 插件状态边界', () => {
     } as InstalledPlugin;
     nativeMocks.invoke.mockImplementation(async (command: string) => {
       if (command === 'stage_plugin_revision') {
-        return { pluginId: previous.id, sourceDigest: SOURCE_DIGEST_B };
+        return { pluginId: previous.id, sourceDigest: SOURCE_DIGEST_B, revisionDigest: REVISION_DIGEST_B };
       }
       return null;
     });
@@ -203,6 +233,7 @@ describe('可信 Python 插件状态边界', () => {
       ['activate_plugin_revision', {
         pluginId: previous.id,
         sourceDigest: SOURCE_DIGEST_A,
+        revisionDigest: REVISION_DIGEST_A,
         enabled: true,
       }],
     ]);
@@ -228,6 +259,7 @@ describe('可信 Python 插件状态边界', () => {
         return {
           pluginId: manifest.id,
           sourceDigest: isFirst ? SOURCE_DIGEST_A : SOURCE_DIGEST_B,
+          revisionDigest: isFirst ? REVISION_DIGEST_A : REVISION_DIGEST_B,
         };
       }
       if (command === 'activate_plugin_revision') {
@@ -269,6 +301,7 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenLastCalledWith('activate_plugin_revision', {
       pluginId: secondPlugin.id,
       sourceDigest: SOURCE_DIGEST_B,
+      revisionDigest: REVISION_DIGEST_B,
       enabled: true,
     });
     expect(getState().installedPlugins).toEqual([secondPlugin]);
@@ -313,7 +346,7 @@ describe('可信 Python 插件状态边界', () => {
     vi.clearAllMocks();
     nativeMocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
       if (command === 'stage_plugin_revision') {
-        return { pluginId: previous.id, sourceDigest: SOURCE_DIGEST_B };
+        return { pluginId: previous.id, sourceDigest: SOURCE_DIGEST_B, revisionDigest: REVISION_DIGEST_B };
       }
       if (command === 'activate_plugin_revision' && args.sourceDigest === SOURCE_DIGEST_B) {
         return activation.promise;
@@ -321,7 +354,7 @@ describe('可信 Python 插件状态边界', () => {
       return null;
     });
     dbMocks.savePluginToDb.mockResolvedValue(undefined);
-    fileGrantMocks.clearPluginFileGrants.mockImplementation((pluginId: string) => {
+    resourceMocks.clearPluginResources.mockImplementation((pluginId: string) => {
       grantedPluginIds.delete(pluginId);
     });
     const { slice, getState } = createSlice([previous]);
@@ -333,7 +366,12 @@ describe('可信 Python 插件状态边界', () => {
     );
     await vi.waitFor(() => expect(nativeMocks.invoke).toHaveBeenCalledWith(
       'activate_plugin_revision',
-      { pluginId: previous.id, sourceDigest: SOURCE_DIGEST_B, enabled: true },
+      {
+        pluginId: previous.id,
+        sourceDigest: SOURCE_DIGEST_B,
+        revisionDigest: REVISION_DIGEST_B,
+        enabled: true,
+      },
     ));
 
     expect(getState().installedPlugins[0]).toMatchObject({
@@ -362,7 +400,7 @@ describe('可信 Python 插件状态边界', () => {
       events.push(command);
       if (command === 'stage_plugin_revision') {
         const manifest = args.manifest as { id: string };
-        return { pluginId: manifest.id, sourceDigest: SOURCE_DIGEST_B };
+        return { pluginId: manifest.id, sourceDigest: SOURCE_DIGEST_B, revisionDigest: REVISION_DIGEST_B };
       }
       if (command === 'activate_plugin_revision' && args.sourceDigest === SOURCE_DIGEST_B) {
         throw new Error('原生激活失败');
@@ -387,6 +425,7 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenNthCalledWith(3, 'activate_plugin_revision', {
       pluginId: previous.id,
       sourceDigest: previous.sourceDigest,
+      revisionDigest: previous.revisionDigest,
       enabled: previous.enabled,
     });
     expect(dbMocks.savePluginToDb).toHaveBeenLastCalledWith(previous);
@@ -399,7 +438,7 @@ describe('可信 Python 插件状态边界', () => {
       events.push(command);
       if (command === 'stage_plugin_revision') {
         const manifest = args.manifest as { id: string };
-        return { pluginId: manifest.id, sourceDigest: SOURCE_DIGEST_A };
+        return { pluginId: manifest.id, sourceDigest: SOURCE_DIGEST_A, revisionDigest: REVISION_DIGEST_A };
       }
       if (command === 'activate_plugin_revision') throw new Error('原生激活失败');
       return null;
@@ -435,7 +474,7 @@ describe('可信 Python 插件状态边界', () => {
     nativeMocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
       if (command === 'stage_plugin_revision') {
         const manifest = args.manifest as { id: string };
-        return { pluginId: manifest.id, sourceDigest: SOURCE_DIGEST_B };
+        return { pluginId: manifest.id, sourceDigest: SOURCE_DIGEST_B, revisionDigest: REVISION_DIGEST_B };
       }
       if (command === 'activate_plugin_revision' && args.sourceDigest === SOURCE_DIGEST_B) {
         throw new Error('原生激活失败');
@@ -482,6 +521,7 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenCalledWith('activate_plugin_revision', {
       pluginId: plugin.id,
       sourceDigest: plugin.sourceDigest,
+      revisionDigest: plugin.revisionDigest,
       enabled: true,
     });
   });
@@ -507,7 +547,7 @@ describe('可信 Python 插件状态边界', () => {
     const grantedPluginIds = new Set([plugin.id]);
     nativeMocks.invoke.mockResolvedValue(null);
     dbMocks.savePluginToDb.mockReturnValue(databaseWrite.promise);
-    fileGrantMocks.clearPluginFileGrants.mockImplementation((pluginId: string) => {
+    resourceMocks.clearPluginResources.mockImplementation((pluginId: string) => {
       grantedPluginIds.delete(pluginId);
     });
     const { slice, getState } = createSlice([plugin]);
@@ -518,7 +558,7 @@ describe('可信 Python 插件状态边界', () => {
     ));
 
     expect(getState().installedPlugins[0].enabled).toBe(false);
-    expect(fileGrantMocks.clearPluginFileGrants).toHaveBeenCalledWith(plugin.id);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledWith(plugin.id);
     expect(grantedPluginIds.has(plugin.id)).toBe(false);
 
     databaseWrite.resolve(undefined);
@@ -535,7 +575,7 @@ describe('可信 Python 插件状态边界', () => {
       }
       return null;
     });
-    fileGrantMocks.clearPluginFileGrants.mockImplementation((pluginId: string) => {
+    resourceMocks.clearPluginResources.mockImplementation((pluginId: string) => {
       grantedPluginIds.delete(pluginId);
     });
     const { slice, getState } = createSlice([plugin]);
@@ -564,7 +604,7 @@ describe('可信 Python 插件状态边界', () => {
     );
 
     expect(getState().installedPlugins[0].enabled).toBe(false);
-    expect(fileGrantMocks.clearPluginFileGrants).toHaveBeenCalledWith(plugin.id);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledWith(plugin.id);
     expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
   });
 
@@ -581,7 +621,7 @@ describe('可信 Python 插件状态边界', () => {
       ['set_plugin_registration_enabled', { pluginId: plugin.id, enabled: true }],
     ]);
     expect(getState().installedPlugins).toEqual([plugin]);
-    expect(fileGrantMocks.clearPluginFileGrants).toHaveBeenCalledTimes(1);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledTimes(1);
   });
 
   it('keeps Store state disabled when persistence and native rollback both fail', async () => {
@@ -600,20 +640,20 @@ describe('可信 Python 插件状态边界', () => {
     );
 
     expect(getState().installedPlugins[0].enabled).toBe(false);
-    expect(fileGrantMocks.clearPluginFileGrants).toHaveBeenCalledTimes(1);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledTimes(1);
   });
 
-  it('normalizes persisted pre-v3 JavaScript plugins without changing the database schema', async () => {
-    const legacy = {
-      id: 'legacy',
+  it('fails closed for persisted plugins without a complete native revision identity', async () => {
+    const incomplete = {
+      id: 'incomplete',
       enabled: true,
       installedAt: 1,
       updatedAt: 1,
       source: 'definePlugin({ tools: {} });',
       manifest: {
         apiVersion: 1,
-        id: 'legacy',
-        name: '旧插件',
+        id: 'incomplete',
+        name: '不完整插件记录',
         version: '1.0.0',
         category: 'utility',
         entry: 'main.js',
@@ -621,25 +661,19 @@ describe('可信 Python 插件状态边界', () => {
         contributes: { nodeTools: [] },
       },
     } as unknown as InstalledPlugin;
-    dbMocks.getAllPlugins.mockResolvedValue([legacy]);
+    dbMocks.getAllPlugins.mockResolvedValue([incomplete]);
     const { slice, getState } = createSlice();
 
     await slice.loadPlugins();
 
-    expect(getState().installedPlugins[0].manifest.runtime).toBe('javascript');
-    expect(getState().installedPlugins[0].sourceDigest).toBe(SOURCE_DIGEST_A);
-    expect(nativeMocks.invoke).toHaveBeenNthCalledWith(1, 'stage_plugin_revision', {
-      manifest: expect.objectContaining({ id: 'legacy', runtime: 'javascript' }),
-      source: legacy.source,
-    });
-    expect(nativeMocks.invoke).toHaveBeenNthCalledWith(2, 'activate_plugin_revision', {
-      pluginId: 'legacy',
-      sourceDigest: SOURCE_DIGEST_A,
-      enabled: true,
+    expect(getState().installedPlugins[0].enabled).toBe(false);
+    expect(nativeMocks.invoke).toHaveBeenCalledWith('set_plugin_registration_enabled', {
+      pluginId: 'incomplete',
+      enabled: false,
     });
     expect(dbMocks.savePluginToDb).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'legacy',
-      sourceDigest: SOURCE_DIGEST_A,
+      id: 'incomplete',
+      enabled: false,
     }));
   });
 
@@ -651,6 +685,7 @@ describe('可信 Python 插件状态边界', () => {
       updatedAt: 1,
       source: 'definePlugin({ tools: {} });',
       sourceDigest: SOURCE_DIGEST_A,
+      revisionDigest: REVISION_DIGEST_A,
       manifest: {
         apiVersion: 1,
         runtime: 'javascript',
@@ -673,6 +708,7 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenCalledWith('ensure_plugin_registration', {
       pluginId: installed.id,
       sourceDigest: SOURCE_DIGEST_A,
+      revisionDigest: REVISION_DIGEST_A,
       enabled: true,
     });
     expect(nativeMocks.invoke.mock.calls[0][1]).not.toHaveProperty('source');
@@ -683,6 +719,7 @@ describe('可信 Python 插件状态边界', () => {
     const first = {
       id: 'broken',
       sourceDigest: SOURCE_DIGEST_A,
+      revisionDigest: REVISION_DIGEST_A,
       source: 'first',
       enabled: true,
       installedAt: 1,
@@ -703,6 +740,7 @@ describe('可信 Python 插件状态边界', () => {
       ...first,
       id: 'healthy',
       sourceDigest: SOURCE_DIGEST_B,
+      revisionDigest: REVISION_DIGEST_B,
       source: 'second',
       manifest: { ...first.manifest, id: 'healthy', name: 'B healthy' },
     } as InstalledPlugin;
@@ -729,8 +767,26 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenCalledWith('ensure_plugin_registration', {
       pluginId: second.id,
       sourceDigest: SOURCE_DIGEST_B,
+      revisionDigest: REVISION_DIGEST_B,
       enabled: true,
     });
+  });
+
+  it('exposes registry repair when loading detects corrupt native trust data', async () => {
+    const installed = createInstalledPluginFixture('corrupt-registry-plugin');
+    dbMocks.getAllPlugins.mockResolvedValue([installed]);
+    nativeMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'ensure_plugin_registration') {
+        throw new Error('插件信任注册表损坏');
+      }
+      return null;
+    });
+    const { slice, getState } = createSlice();
+
+    await slice.loadPlugins();
+
+    expect(getState().installedPlugins[0].enabled).toBe(false);
+    expect(getState().pluginRegistryRepairRequired).toBe(true);
   });
 
   it('activates the persisted digest when re-enabling after an ensure mismatch', async () => {
@@ -738,6 +794,7 @@ describe('可信 Python 插件状态边界', () => {
       ...createInstalledPluginFixture('com.example.python-tool'),
       source: pythonSource,
       sourceDigest: SOURCE_DIGEST_B,
+      revisionDigest: REVISION_DIGEST_B,
       manifest: JSON.parse(pythonManifestText),
     } as InstalledPlugin;
     dbMocks.getAllPlugins.mockResolvedValue([persisted]);
@@ -761,6 +818,7 @@ describe('可信 Python 插件状态边界', () => {
     expect(nativeMocks.invoke).toHaveBeenCalledWith('activate_plugin_revision', {
       pluginId: persisted.id,
       sourceDigest: SOURCE_DIGEST_B,
+      revisionDigest: REVISION_DIGEST_B,
       enabled: true,
     });
     expect(nativeMocks.invoke).not.toHaveBeenCalledWith(
@@ -777,10 +835,11 @@ describe('可信 Python 插件状态边界', () => {
     const events: string[] = [];
     nativeMocks.invoke.mockImplementation(async (command: string) => { events.push(command); return null; });
     dbMocks.deletePluginFromDb.mockImplementation(async () => { events.push('db.delete'); });
-    fileGrantMocks.clearPluginFileGrants.mockImplementation(() => { events.push('grants.clear'); });
+    resourceMocks.clearPluginResources.mockImplementation(() => { events.push('grants.clear'); });
     const { slice, getState } = createSlice([{
       id: 'remove-me',
       sourceDigest: SOURCE_DIGEST_A,
+      revisionDigest: REVISION_DIGEST_A,
       source: 'source',
       enabled: true,
       installedAt: 1,
@@ -804,7 +863,7 @@ describe('可信 Python 插件状态边界', () => {
     expect(getState().installedPlugins).toHaveLength(0);
   });
 
-  it('removes Store state and clears grants before the native remove responds', async () => {
+  it('fails closed in Store and clears grants before the native remove responds', async () => {
     const plugin = createInstalledPluginFixture('deferred-native-remove');
     const nativeRemoval = createDeferred<void>();
     const grantedPluginIds = new Set([plugin.id]);
@@ -812,7 +871,7 @@ describe('可信 Python 插件状态边界', () => {
       if (command === 'remove_plugin_registration') return nativeRemoval.promise;
       return null;
     });
-    fileGrantMocks.clearPluginFileGrants.mockImplementation((pluginId: string) => {
+    resourceMocks.clearPluginResources.mockImplementation((pluginId: string) => {
       grantedPluginIds.delete(pluginId);
     });
     const { slice, getState } = createSlice([plugin]);
@@ -823,7 +882,7 @@ describe('可信 Python 插件状态边界', () => {
       { pluginId: plugin.id },
     ));
 
-    expect(getState().installedPlugins).toHaveLength(0);
+    expect(getState().installedPlugins).toEqual([{ ...plugin, enabled: false }]);
     expect(grantedPluginIds.has(plugin.id)).toBe(false);
     expect(dbMocks.deletePluginFromDb).not.toHaveBeenCalled();
 
@@ -831,18 +890,19 @@ describe('可信 Python 插件状态边界', () => {
     await deletion;
   });
 
-  it('keeps the plugin removed from Store when native removal fails ambiguously', async () => {
+  it('keeps the plugin disabled and persisted when native removal fails ambiguously', async () => {
     const plugin = createInstalledPluginFixture('failed-native-remove');
     nativeMocks.invoke.mockRejectedValue(new Error('原生删除响应丢失'));
     const { slice, getState } = createSlice([plugin]);
 
     await expect(slice.deletePlugin(plugin.id)).rejects.toThrow(
-      '插件已从当前会话移除，但原生注册删除状态未确认',
+      '插件卸载失败，原生注册删除状态未确认',
     );
 
-    expect(getState().installedPlugins).toHaveLength(0);
-    expect(fileGrantMocks.clearPluginFileGrants).toHaveBeenCalledWith(plugin.id);
+    expect(getState().installedPlugins).toEqual([{ ...plugin, enabled: false }]);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledWith(plugin.id);
     expect(dbMocks.deletePluginFromDb).not.toHaveBeenCalled();
+    expect(dbMocks.savePluginToDb).toHaveBeenCalledWith({ ...plugin, enabled: false });
   });
 
   it('clears grants and removes memory state while IndexedDB deletion is still pending', async () => {
@@ -851,22 +911,43 @@ describe('可信 Python 插件状态边界', () => {
     const databaseDeletion = createDeferred<void>();
     nativeMocks.invoke.mockResolvedValue(null);
     dbMocks.deletePluginFromDb.mockReturnValue(databaseDeletion.promise);
-    fileGrantMocks.clearPluginFileGrants.mockImplementation((pluginId: string) => {
+    resourceMocks.clearPluginResources.mockImplementation((pluginId: string) => {
       grantedPluginIds.delete(pluginId);
     });
     const { slice, getState } = createSlice([plugin]);
 
     const deletion = slice.deletePlugin(plugin.id);
     await vi.waitFor(() => expect(dbMocks.deletePluginFromDb).toHaveBeenCalledWith(plugin.id));
-    expect(fileGrantMocks.clearPluginFileGrants).toHaveBeenCalledWith(plugin.id);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledWith(plugin.id);
     expect(grantedPluginIds.has(plugin.id)).toBe(false);
-    expect(getState().installedPlugins).toHaveLength(0);
+    expect(getState().installedPlugins).toEqual([{ ...plugin, enabled: false }]);
 
     databaseDeletion.reject(new Error('IndexedDB delete failed'));
     await expect(deletion).rejects.toThrow(
-      '插件已从原生运行时和当前会话移除，但删除持久化记录失败',
+      '插件原生注册已移除，但删除安装记录失败',
     );
     expect(nativeMocks.invoke).toHaveBeenCalledWith('remove_plugin_registration', { pluginId: plugin.id });
+  });
+
+  it('repairs the native registry and persists every installed plugin as disabled', async () => {
+    const first = createInstalledPluginFixture('repair-first');
+    const second = createInstalledPluginFixture('repair-second');
+    nativeMocks.invoke.mockImplementation(async (command: string) => (
+      command === 'repair_plugin_registry' ? true : null
+    ));
+    const { slice, getState } = createSlice([first, second]);
+
+    await slice.repairPluginRegistry();
+
+    expect(nativeMocks.invoke).toHaveBeenCalledWith('repair_plugin_registry');
+    expect(getState().installedPlugins).toEqual([
+      expect.objectContaining({ id: first.id, enabled: false }),
+      expect.objectContaining({ id: second.id, enabled: false }),
+    ]);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledWith(first.id);
+    expect(resourceMocks.clearPluginResources).toHaveBeenCalledWith(second.id);
+    expect(dbMocks.savePluginToDb).toHaveBeenCalledTimes(2);
+    expect(getState().pluginRegistryRepairRequired).toBe(false);
   });
 
   it('queues toggle and delete mutations for the same plugin id', async () => {
@@ -880,7 +961,7 @@ describe('可信 Python 插件状态边界', () => {
     });
     dbMocks.savePluginToDb.mockImplementation(async () => { events.push('db.save'); });
     dbMocks.deletePluginFromDb.mockImplementation(async () => { events.push('db.delete'); });
-    fileGrantMocks.clearPluginFileGrants.mockImplementation(() => { events.push('grants.clear'); });
+    resourceMocks.clearPluginResources.mockImplementation(() => { events.push('grants.clear'); });
     const { slice, getState } = createSlice([plugin]);
 
     const toggle = slice.setPluginEnabled(plugin.id, false);

@@ -4,6 +4,7 @@
  * 预设转场靠不透明度在本地合成；这里则把「前一段尾帧 → 本段首帧」交给视频模型，
  * 生成一段真实过渡画面插进主轨。模型目录与调用都在主窗口，这里只收集参数。
  */
+import Select from '../shared/Select';
 import { memo, useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { VideoEditorModelOption } from '../../services/videoEditorWindowService';
@@ -90,10 +91,10 @@ function VideoEditorAiTransitionPanel({
 
           <label className="video-editor-inspect-slider">
             <span>{t('模型')}</span>
-            <select
+            <Select fixedMenu
               value={selectedModel?.value ?? ''}
               disabled={models.length === 0 || busy}
-              onChange={(event) => setModel(event.target.value)}
+              onChange={(selectedOptionValue) => setModel(selectedOptionValue)}
             >
               {models.length === 0 && <option value="">{t('暂无可用视频模型')}</option>}
               {models.map((option) => (
@@ -101,20 +102,20 @@ function VideoEditorAiTransitionPanel({
                   {t('{group} · {name}', { group: option.groupName, name: option.label })}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
 
           <label className="video-editor-inspect-slider">
             <span>{t('时长')}</span>
-            <select
+            <Select fixedMenu
               value={duration}
               disabled={busy}
-              onChange={(event) => setDuration(Number(event.target.value))}
+              onChange={(selectedOptionValue) => setDuration(Number(selectedOptionValue))}
             >
               {DURATION_OPTIONS.map((seconds) => (
                 <option key={seconds} value={seconds}>{seconds}s</option>
               ))}
-            </select>
+            </Select>
           </label>
 
           <div className="video-editor-ai-transition-actions">

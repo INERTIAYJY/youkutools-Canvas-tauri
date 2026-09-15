@@ -136,9 +136,63 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('directorBlenderRuntimeService', () => {
+  it('macOS 手选应用包，不再筛选 exe，且不向节点暴露路径', async () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel' });
+    mocks.open.mockResolvedValue('/Applications/Blender 4.5.app');
+    mocks.invoke.mockResolvedValue({ ...installation, source: 'user-selected' });
+    const service = await loadService();
+    await expect(service.chooseDirectorBlenderInstallation()).resolves.toMatchObject({
+      source: 'user-selected',
+    });
+    expect(mocks.open).toHaveBeenCalledWith({
+      title: '选择 Blender 应用（Blender.app）',
+      directory: false,
+      multiple: false,
+      filters: [{ name: 'Blender', extensions: ['app'] }],
+      defaultPath: '/Applications',
+      canCreateDirectories: false,
+    });
+    expect(mocks.invoke).toHaveBeenCalledWith('register_blender_installation', {
+      request: { executablePath: '/Applications/Blender 4.5.app' },
+    });
+    expect(service.getSelectedDirectorBlenderInstallation()).not.toHaveProperty('executablePath');
+  });
+
+  it('macOS 唯一安装直接使用，多个安装由用户选择，取消不会误登记', async () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel' });
+    const macInstallation = { ...installation, source: 'macos-applications' };
+    mocks.invoke.mockResolvedValueOnce({ candidates: [macInstallation] });
+    const service = await loadService();
+    await expect(service.prepareDirectorBlenderInstallation()).resolves.toEqual(macInstallation);
+    expect(mocks.open).not.toHaveBeenCalled();
+    service.__resetDirectorBlenderRuntimeServiceForTests();
+    mocks.invoke.mockResolvedValueOnce({ candidates: [macInstallation, {
+      ...macInstallation, installationId: 'blender-mac-second', displayName: 'Blender 4.5',
+    }] });
+    mocks.open.mockResolvedValue(null);
+    await expect(service.prepareDirectorBlenderInstallation()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mocks.open).toHaveBeenCalledWith(expect.objectContaining({
+      filters: [{ name: 'Blender', extensions: ['app'] }],
+    }));
+    expect(commandNames()).not.toContain('register_blender_installation');
+    expect(service.getSelectedDirectorBlenderInstallation()).toBeNull();
+  });
+
+  it('Windows 继续选择 exe 文件', async () => {
+    vi.stubGlobal('navigator', { platform: 'Win32' });
+    mocks.open.mockResolvedValue(null);
+    const service = await loadService();
+    await expect(service.chooseDirectorBlenderInstallation()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mocks.open).toHaveBeenCalledWith({
+      title: '选择 Blender 的 blender.exe', directory: false, multiple: false,
+      filters: [{ name: 'Blender', extensions: ['exe'] }],
+    });
+  });
+
   it('直接采用唯一发现候选，不打开文件选择器也不登记绝对路径', async () => {
     mocks.invoke.mockResolvedValueOnce({ candidates: [installation] });
     const service = await loadService();
@@ -346,6 +400,7 @@ describe('directorBlenderRuntimeService', () => {
     expect(startCall).toBeDefined();
     const request = (startCall?.[1] as { request: Record<string, unknown> }).request;
     expect(request.targetFrame).toBe(73);
+    expect(request).not.toHaveProperty('sceneSource');
     expect(Object.keys(request).sort()).toEqual([
       'directorInstanceId',
       'installationId',
@@ -362,6 +417,59 @@ describe('directorBlenderRuntimeService', () => {
     for (const forbidden of ['path', 'projectRoot', 'python', 'script', 'args', 'argv', 'cwd', 'env']) {
       expect(request).not.toHaveProperty(forbidden);
     }
+  });
+
+  it.each([undefined, 0, 350])('保存工程透传来源与目标帧 %s，不用旧 JSON 起始帧替代当前帧', async (targetFrame) => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case 'discover_blender_installations': return { candidates: [installation], supportsSavedScene: true };
+        case 'create_blender_project_grant': return { projectGrantId: 'grant-1' };
+        case 'start_blender_job': return jobStatus('awaiting-collection');
+        case 'collect_blender_job_result': return collectedResult({ manifestRevision: 2 });
+        case 'revoke_blender_project_grant': return undefined;
+        default: throw new Error(`unexpected command: ${command}`);
+      }
+    });
+    const service = await loadService();
+    await service.runDirectorBlenderOperation({
+      ...renderFrameInput(), targetFrame, sceneSource: 'saved-blender',
+      previousManifestReference: { ...collectedResult().manifestReference, schemaVersion: 1 },
+    });
+    expect(mocks.invoke.mock.calls.find(([command]) => command === 'start_blender_job')?.[1]).toMatchObject({
+      request: { sceneSource: 'saved-blender', targetFrame: targetFrame ?? null, previousManifestRevision: 1 },
+    });
+  });
+
+  it('在任何 IPC 前拒绝无成果的保存模式、未知来源及无界帧', async () => {
+    const service = await loadService();
+    await expect(service.runDirectorBlenderOperation({ ...renderFrameInput(), sceneSource: 'saved-blender' })).rejects.toThrow('上一份已验证成果');
+    await expect(service.runDirectorBlenderOperation({ ...renderFrameInput(), sceneSource: 'custom' as never })).rejects.toThrow('场景来源无效');
+    for (const targetFrame of [-1, 10_000_001, Number.NaN]) {
+      await expect(service.runDirectorBlenderOperation(renderFrameInput(targetFrame))).rejects.toThrow('非负安全整数');
+    }
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false, 'true'])('旧后端或无效能力声明 %s 不启动保存工程任务', async (supportsSavedScene) => {
+    mocks.invoke.mockResolvedValue({ candidates: [installation], supportsSavedScene });
+    const service = await loadService();
+    await expect(service.getDirectorBlenderAvailability()).resolves.toEqual({ state: 'ready' });
+    await expect(service.runDirectorBlenderOperation({
+      ...renderFrameInput(), sceneSource: 'saved-blender',
+      previousManifestReference: { ...collectedResult().manifestReference, schemaVersion: 1 },
+    })).rejects.toThrow('更新并重启桌面软件');
+    expect(commandNames()).toEqual(['discover_blender_installations']);
+    expect(mocks.ensureProjectDataDir).not.toHaveBeenCalled();
+  });
+
+  it('主动手选安装后仍须从原生发现接口确认保存工程能力', async () => {
+    mocks.open.mockResolvedValue('G:/Blender/blender.exe');
+    mocks.invoke.mockResolvedValueOnce(installation)
+      .mockResolvedValueOnce({ candidates: [installation], supportsSavedScene: true });
+    const service = await loadService();
+    await service.chooseDirectorBlenderInstallation();
+    await expect(service.getDirectorBlenderAvailability()).resolves.toEqual({ state: 'ready', supportsSavedScene: true });
+    expect(commandNames()).toEqual(['register_blender_installation', 'discover_blender_installations']);
   });
 
   it('Abort 会取消已启动 Job，并且始终撤销项目 grant', async () => {

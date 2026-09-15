@@ -2,9 +2,12 @@
  * settings/providerConnection/ProviderConnectionForm — 连接信息区块。
  * 负责凭证字段、OAuth 登录态、重复地址提示与「验证连接」，模型选择不在这里。
  */
+import Select from '../../shared/Select';
 import { Icon } from '@iconify/react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useT } from '../../../i18n';
+import type { ChatApiProtocol } from '../../../types';
+import { CHAT_API_PROTOCOL_LABELS } from '../../../services/ai/chatApiProtocol';
 import { normalizeBaseUrl } from '../../../services/ai/providerBaseUrl';
 import type { ProviderDefinition } from '../../../services/ai/providerCatalogService';
 import AnimatedButton from '../../shared/AnimatedButton';
@@ -16,6 +19,8 @@ interface ProviderConnectionFormProps {
   isWebSearchProvider: boolean;
   connectionName: string;
   setConnectionName: Dispatch<SetStateAction<string>>;
+  chatApiProtocol: ChatApiProtocol;
+  setChatApiProtocol: Dispatch<SetStateAction<ChatApiProtocol>>;
   apiKey: string;
   setApiKey: Dispatch<SetStateAction<string>>;
   baseUrl: string;
@@ -39,6 +44,8 @@ export default function ProviderConnectionForm({
   isWebSearchProvider,
   connectionName,
   setConnectionName,
+  chatApiProtocol,
+  setChatApiProtocol,
   apiKey,
   setApiKey,
   baseUrl,
@@ -56,13 +63,14 @@ export default function ProviderConnectionForm({
   onTestConnection,
 }: ProviderConnectionFormProps) {
   const t = useT();
+  const isWorkflowApi = definition.kind === 'workflow-api';
 
   return (
     <section className="provider-config-section">
       <div className="provider-section-heading">
         <div>
           <h4>{t('连接信息')}</h4>
-          <p>{definition.description}</p>
+          <p>{isWorkflowApi ? t(definition.description) : definition.description}</p>
         </div>
         {!editing && !isWebSearchProvider && (
           <AnimatedButton
@@ -84,7 +92,7 @@ export default function ProviderConnectionForm({
         </div>
       )}
 
-      {definition.id === 'custom-openai' && (
+      {(definition.id === 'custom-openai' || isWorkflowApi) && (
         <label className="provider-field">
           <span>{t('连接名称')}</span>
           <input
@@ -93,6 +101,28 @@ export default function ProviderConnectionForm({
             placeholder={t('例如：团队模型网关')}
             onChange={(event) => setConnectionName(event.target.value)}
           />
+        </label>
+      )}
+
+      {definition.id === 'custom-openai' && (
+        <label className="provider-field">
+          <span>{t('对话协议')}</span>
+          <Select fixedMenu
+            className="min-w-0"
+            value={chatApiProtocol}
+            onChange={(selectedOptionValue) => setChatApiProtocol(selectedOptionValue as ChatApiProtocol)}
+          >
+            {Object.entries(CHAT_API_PROTOCOL_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>{t(label)}</option>
+            ))}
+          </Select>
+          <small>
+            {chatApiProtocol === 'anthropic-compatible'
+              ? t('使用 Messages API、x-api-key 和 Anthropic 流式事件')
+              : chatApiProtocol === 'gemini-native'
+                ? t('使用原生 generateContent、x-goog-api-key 和 Gemini 内容结构')
+                : t('使用 Chat Completions、Bearer Key 和 OpenAI SSE')}
+          </small>
         </label>
       )}
 
@@ -120,11 +150,11 @@ export default function ProviderConnectionForm({
               && definition.allowCustomBaseUrl === false;
             return (
               <label key={field.key} className="provider-field">
-                <span>{field.label}{field.required ? ' *' : ''}</span>
+                <span>{definition.id === 'runninghub-model' && field.key === 'apiKey' ? '模型 API Key（企业级 / 共享）' : isWorkflowApi ? t(field.label) : field.label}{field.required && definition.id !== 'runninghub-model' ? ' *' : ''}</span>
                 <input
                   type={field.secret ? 'password' : 'text'}
                   value={value}
-                  placeholder={field.placeholder}
+                  placeholder={isWorkflowApi && field.placeholder ? t(field.placeholder) : field.placeholder}
                   readOnly={baseUrlLocked}
                   disabled={baseUrlLocked}
                   onChange={(event) => {
@@ -134,7 +164,9 @@ export default function ProviderConnectionForm({
                   onBlur={(event) => {
                     // 补协议、去尾斜杠、剥掉误贴的 /chat/completions，
                     // 让用户在保存前就看见真正会被请求的地址
-                    if (field.key === 'baseUrl') setBaseUrl(normalizeBaseUrl(event.target.value));
+                    if (field.key === 'baseUrl' && !isWorkflowApi) {
+                      setBaseUrl(normalizeBaseUrl(event.target.value, chatApiProtocol));
+                    }
                   }}
                 />
               </label>
@@ -142,23 +174,25 @@ export default function ProviderConnectionForm({
           })}
           {definition.id === 'runninghub-model' && (
             <label className="provider-field">
-              <span>{t('消费级-会员 API Key')}</span>
+              <span>{t('工作流 API Key（消费级 / 会员）')}</span>
               <input
                 type="password"
                 value={workflowApiKey}
                 placeholder={t('用于 RunningHub 工作流执行（可选）')}
                 onChange={(event) => setWorkflowApiKey(event.target.value)}
               />
+              <small>用于云工作流与 AI 应用；也可以只填写此密钥。每个云工作流可单独选择使用哪种连接。</small>
             </label>
           )}
         </div>
       )}
 
+      {isWorkflowApi && <p className="mt-2 text-xs text-canvas-text-secondary">{t('填写平台提供的密钥，鉴权方式和前缀在各工作流的调用协议中配置。')}</p>}
       {duplicateConnectionName && (
         <div className="provider-catalog-message is-warning">
           <Icon icon="mdi:content-duplicate" width="14" />
           <span>
-            {t('已有连接「{name}」使用相同接口地址。继续保存会新建第二条同网关连接；如果只是想加模型，建议回列表编辑「{name}」。', {
+            {t('已有连接「{name}」使用相同接口地址和对话协议。继续保存会新建第二条同网关连接；如果只是想加模型，建议回列表编辑「{name}」。', {
               name: duplicateConnectionName,
             })}
           </span>
@@ -191,15 +225,15 @@ export default function ProviderConnectionForm({
               className={catalogStatus === 'loading' ? 'settings-spin' : undefined}
               width="15"
             />
-            {catalogStatus === 'loading' ? t('验证中') : t('验证连接')}
+            {catalogStatus === 'loading' ? t('验证中') : isWorkflowApi ? t('检查配置') : t('验证连接')}
           </AnimatedButton>
-          {isWebSearchProvider && catalogMessage && (
+          {(isWebSearchProvider || isWorkflowApi) && catalogMessage && (
             <div className={`provider-catalog-message is-${catalogStatus} m-0 flex-1`}>
               <Icon
                 icon={catalogStatus === 'error' ? 'mdi:alert-circle-outline' : 'mdi:information-outline'}
                 width="14"
               />
-              <span>{catalogMessage}</span>
+              <span>{isWorkflowApi ? t(catalogMessage) : catalogMessage}</span>
             </div>
           )}
         </div>

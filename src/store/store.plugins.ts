@@ -2,9 +2,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
-import type { InstalledPlugin, PluginManifest } from '../types/plugin';
+import type {
+  InstalledPlugin,
+  PluginManifest,
+  PluginPackageResourcePayload,
+} from '../types/plugin';
 import { createInstalledPlugin, parsePluginBundle } from '../services/plugins/pluginManifest';
-import { clearPluginFileGrants } from '../services/plugins/pluginFileGrantService';
+import { clearPluginResources } from '../services/plugins/pluginResourceService';
 import {
   deletePluginFromDb,
   getAllPlugins,
@@ -13,12 +17,17 @@ import {
 
 export interface PluginSlice {
   installedPlugins: InstalledPlugin[];
+  pluginRegistryRepairRequired: boolean;
   installPluginBundle: (
     manifestText: string,
     source: string,
     options?: {
       trustedPythonConfirmed?: boolean;
       expectedSourceDigest?: string;
+      /** 自定义界面产物源码；manifest 声明了 ui 时必填。 */
+      uiSource?: string;
+      /** Manifest 声明的包资源字节；仅进入 Rust 私有快照。 */
+      resourcePayloads?: PluginPackageResourcePayload[];
     },
   ) => Promise<InstalledPlugin>;
   setPluginEnabled: (
@@ -27,12 +36,14 @@ export interface PluginSlice {
     options?: { trustedPythonConfirmed?: boolean },
   ) => Promise<void>;
   deletePlugin: (id: string) => Promise<void>;
+  repairPluginRegistry: () => Promise<void>;
   loadPlugins: () => Promise<void>;
 }
 
 interface StagedPluginRevision {
   pluginId: string;
   sourceDigest: string;
+  revisionDigest: string;
 }
 
 const SOURCE_DIGEST_RE = /^[0-9a-f]{64}$/u;
@@ -52,6 +63,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isPluginRegistryCorruption(error: unknown): boolean {
+  const message = errorMessage(error);
+  return message.includes('插件信任注册表损坏')
+    || message.includes('插件信任注册表及备份均损坏');
+}
+
 function normalizeSourceDigest(value: unknown, label: string): string {
   if (typeof value !== 'string') throw new Error(`${label}缺失`);
   const digest = value.toLowerCase();
@@ -59,11 +76,23 @@ function normalizeSourceDigest(value: unknown, label: string): string {
   return digest;
 }
 
+function normalizeUiIntegrity(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return normalized.startsWith('sha256-') ? normalized.slice(7) : normalized;
+}
+
 async function stagePluginRevision(
   manifest: PluginManifest,
   source: string,
+  uiSource?: string,
+  resourcePayloads: PluginPackageResourcePayload[] = [],
 ): Promise<StagedPluginRevision> {
-  const raw = await invoke<unknown>('stage_plugin_revision', { manifest, source });
+  const raw = await invoke<unknown>('stage_plugin_revision', {
+    manifest,
+    source,
+    uiSource,
+    resourcePayloads,
+  });
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('原生插件注册未返回有效结果');
   }
@@ -74,14 +103,17 @@ async function stagePluginRevision(
   return {
     pluginId: manifest.id,
     sourceDigest: normalizeSourceDigest(result.sourceDigest, '原生插件源码摘要'),
+    revisionDigest: normalizeSourceDigest(result.revisionDigest, '原生插件 revision 摘要'),
   };
 }
 
 async function activatePluginRevision(plugin: InstalledPlugin): Promise<void> {
   if (!plugin.sourceDigest) throw new Error('插件源码摘要缺失');
+  if (!plugin.revisionDigest) throw new Error('插件 revision 摘要缺失');
   await invoke('activate_plugin_revision', {
     pluginId: plugin.id,
     sourceDigest: plugin.sourceDigest,
+    revisionDigest: plugin.revisionDigest,
     enabled: plugin.enabled,
   });
 }
@@ -90,7 +122,7 @@ async function restoreNativePluginRevision(
   previous: InstalledPlugin | undefined,
   pluginId: string,
 ): Promise<void> {
-  if (previous?.sourceDigest) {
+  if (previous?.sourceDigest && previous.revisionDigest) {
     await activatePluginRevision(previous);
     return;
   }
@@ -133,18 +165,33 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
     options?: {
       trustedPythonConfirmed?: boolean;
       expectedSourceDigest?: string;
+      uiSource?: string;
+      resourcePayloads?: PluginPackageResourcePayload[];
     },
   ): Promise<InstalledPlugin> => {
     if (manifest.runtime === 'python' && options?.trustedPythonConfirmed !== true) {
       throw new Error('安装可信 Python 插件前必须确认其可访问本机资源');
     }
+    // 产物摘要由 Rust 侧逐字节核对，这里只保证声明了 ui 就一定带着产物。
+    if (manifest.ui && !options?.uiSource) {
+      throw new Error('插件声明了自定义界面，但缺少界面产物');
+    }
     const previous = get().installedPlugins.find((plugin) => plugin.id === manifest.id);
     let previousLeaseRevoked = false;
     try {
-      const staged = await stagePluginRevision(manifest, source);
+      const staged = await stagePluginRevision(
+        manifest,
+        source,
+        options?.uiSource,
+        options?.resourcePayloads,
+      );
       const plugin = {
         ...createInstalledPlugin(manifest, source, previous),
         sourceDigest: staged.sourceDigest,
+        revisionDigest: staged.revisionDigest,
+        ...(manifest.ui
+          ? { uiDigest: normalizeUiIntegrity(manifest.ui.integrity) }
+          : {}),
       };
       if (options?.expectedSourceDigest !== undefined) {
         const expected = normalizeSourceDigest(options.expectedSourceDigest, '用户确认的插件源码摘要');
@@ -160,7 +207,7 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           )),
         }));
         previousLeaseRevoked = true;
-        if (previous.sourceDigest !== plugin.sourceDigest) clearPluginFileGrants(plugin.id);
+        if (previous.revisionDigest !== plugin.revisionDigest) clearPluginResources(plugin.id);
       }
       await activatePluginRevision(plugin);
       set((state) => ({
@@ -181,7 +228,7 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           )),
         }));
         previousLeaseRevoked = true;
-        clearPluginFileGrants(manifest.id);
+        clearPluginResources(manifest.id);
       }
       try {
         await restoreNativePluginRevision(previous, manifest.id);
@@ -223,7 +270,7 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
       set((state) => ({
         installedPlugins: state.installedPlugins.map((item) => item.id === id ? updated : item),
       }));
-      clearPluginFileGrants(id);
+      clearPluginResources(id);
     }
     try {
       if (enabled) {
@@ -266,30 +313,45 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
   };
 
   const deletePluginCore = async (id: string): Promise<void> => {
-    clearPluginFileGrants(id);
+    const plugin = get().installedPlugins.find((item) => item.id === id);
+    const disabled = plugin ? { ...plugin, enabled: false } : undefined;
+    // 先撤销执行租约；两处持久化都删除成功后才隐藏列表项，避免卸载失败被误认为成功。
     set((state) => ({
-      installedPlugins: state.installedPlugins.filter((plugin) => plugin.id !== id),
+      installedPlugins: state.installedPlugins.map((item) => (
+        item.id === id && disabled ? disabled : item
+      )),
     }));
+    clearPluginResources(id);
+    let nativeRemoved = false;
     try {
       await invoke('remove_plugin_registration', { pluginId: id });
-    } catch (error) {
-      throw new Error(
-        `插件已从当前会话移除，但原生注册删除状态未确认：${errorMessage(error)}`,
-        { cause: error },
-      );
-    }
-    try {
+      nativeRemoved = true;
       await deletePluginFromDb(id);
     } catch (error) {
-      throw new Error(
-        `插件已从原生运行时和当前会话移除，但删除持久化记录失败：${errorMessage(error)}`,
-        { cause: error },
-      );
+      if (isPluginRegistryCorruption(error)) {
+        set({ pluginRegistryRepairRequired: true });
+      }
+      let message = nativeRemoved
+        ? `插件原生注册已移除，但删除安装记录失败：${errorMessage(error)}`
+        : `插件卸载失败，原生注册删除状态未确认：${errorMessage(error)}`;
+      if (disabled) {
+        message += '；插件已在当前会话停用并保留在列表中，可重试卸载';
+        try {
+          await savePluginToDb(disabled);
+        } catch (persistError) {
+          message += `；停用状态保存失败：${errorMessage(persistError)}`;
+        }
+      }
+      throw new Error(message, { cause: error });
     }
+    set((state) => ({
+      installedPlugins: state.installedPlugins.filter((item) => item.id !== id),
+    }));
   };
 
   return {
     installedPlugins: [],
+    pluginRegistryRepairRequired: false,
 
     installPluginBundle: async (manifestText, source, options) => {
       const manifest = parsePluginBundle(manifestText, source);
@@ -306,8 +368,34 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
 
     deletePlugin: async (id) => enqueuePluginMutation(id, () => deletePluginCore(id)),
 
+    repairPluginRegistry: async () => {
+      const repaired = await invoke<boolean>('repair_plugin_registry');
+      if (!repaired) {
+        set({ pluginRegistryRepairRequired: false });
+        get().showToast('插件信任注册表状态正常，无需修复');
+        return;
+      }
+      const disabledPlugins = get().installedPlugins.map((plugin) => ({
+        ...plugin,
+        enabled: false,
+        updatedAt: Date.now(),
+      }));
+      for (const plugin of disabledPlugins) clearPluginResources(plugin.id);
+      set({
+        installedPlugins: disabledPlugins,
+        pluginRegistryRepairRequired: false,
+      });
+      const results = await Promise.allSettled(disabledPlugins.map(savePluginToDb));
+      const failed = results.filter((result) => result.status === 'rejected').length;
+      if (failed > 0) {
+        throw new Error(`插件信任注册表已修复，但有 ${failed} 个插件的停用状态保存失败`);
+      }
+      get().showToast('插件信任注册表已修复；请重试卸载或重新安装插件');
+    },
+
     loadPlugins: async () => {
       const plugins: InstalledPlugin[] = [];
+      let repairRequired = false;
       for (const persisted of await getAllPlugins()) {
         let plugin: InstalledPlugin = {
           ...persisted,
@@ -317,28 +405,34 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           },
         };
         try {
-          if (plugin.sourceDigest) {
+          if (plugin.manifest.apiVersion !== 1) {
+            throw new Error('已安装插件不符合当前 API v1，请重新安装');
+          }
+          if (plugin.sourceDigest && plugin.revisionDigest) {
             plugin = {
               ...plugin,
               sourceDigest: normalizeSourceDigest(plugin.sourceDigest, '已安装插件源码摘要'),
+              revisionDigest: normalizeSourceDigest(plugin.revisionDigest, '已安装插件 revision 摘要'),
             };
             await invoke('ensure_plugin_registration', {
               pluginId: plugin.id,
               sourceDigest: plugin.sourceDigest,
+              revisionDigest: plugin.revisionDigest,
               enabled: plugin.enabled,
             });
           } else {
-            const staged = await stagePluginRevision(plugin.manifest, plugin.source);
-            plugin = { ...plugin, sourceDigest: staged.sourceDigest };
-            await savePluginToDb(plugin);
-            await activatePluginRevision(plugin);
+            throw new Error('已安装插件缺少完整 revision 摘要，请重新安装');
           }
-        } catch {
+        } catch (error) {
+          if (isPluginRegistryCorruption(error)) repairRequired = true;
           plugin = await failClosedPlugin(plugin);
         }
         plugins.push(plugin);
       }
-      set({ installedPlugins: plugins.sort((left, right) => left.manifest.name.localeCompare(right.manifest.name)) });
+      set({
+        installedPlugins: plugins.sort((left, right) => left.manifest.name.localeCompare(right.manifest.name)),
+        pluginRegistryRepairRequired: repairRequired,
+      });
     },
   };
 };

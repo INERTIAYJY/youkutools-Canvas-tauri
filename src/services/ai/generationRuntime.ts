@@ -13,12 +13,15 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import {
-  downloadUrlAndSave,
   isTauriEnv,
-  saveBinaryToProjectData,
-  saveDataUrlToProjectData,
+  isTransientMediaUrl,
+  persistMediaUrlToProjectData,
 } from '../fileService';
 import { comfyBaseUrlFor } from '../comfyServers';
+import { isRunningHubWorkflow, mediaProviderConfigId, workflowExecution, runningHubConnection } from '../workflowExecutionService';
+import { getRunningHubModel } from './providers/runninghubModelManifest';
+import { workflowApiConnection } from '../workflowApi/workflowApiAdapter';
+import { getCloudWorkflowPersistedOutput } from '../workflowExecutionService';
 import type {
   MediaGenerationIntent,
   MediaGenerationResult,
@@ -47,12 +50,6 @@ const MEDIA_LABELS: Record<MediaKind, string> = {
   image: '图片',
   video: '视频',
   audio: '音频',
-};
-
-const MEDIA_FALLBACK_EXTENSIONS: Record<MediaKind, string> = {
-  image: 'png',
-  video: 'mp4',
-  audio: 'mp3',
 };
 
 export const MEDIA_PERSIST_FAILED_MESSAGE = '产物未能写入项目目录，当前是临时地址，重启后可能失效';
@@ -105,6 +102,17 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
   }
 
   if (option.workflowId) {
+    const workflow = useAppStore.getState().workflows.find((item) => item.id === option.workflowId);
+    if (workflow?.adapterType === 'workflow-api' && workflow.workflowApi) {
+      workflowApiConnection(config.providers[workflow.workflowApi.connectionId], workflow.workflowApi);
+      const execution = workflowExecution(workflow);
+      return { configId: option.value, requestModel: execution.model, provider: execution.provider, workflowId: workflow.id };
+    }
+    if (isRunningHubWorkflow(workflow) && workflow?.runninghub) {
+      runningHubConnection(config.providers, workflow.runninghub.connectionId);
+      const execution = workflowExecution(workflow);
+      return { configId: option.value, requestModel: execution.model, provider: execution.provider, workflowId: workflow.id };
+    }
     if (!comfyBaseUrlFor(option.workflowId)) {
       throw new Error('未配置 ComfyUI 服务地址\n请在「设置 → ComfyUI」中配置');
     }
@@ -123,7 +131,7 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
     if (!config.providers.seedling?.apiKey && !config.seedlingAuth?.loggedIn) {
       throw new Error('请先配置森之灵：在「设置 → 森之灵」中填写 API Token 或完成 CLI 登录');
     }
-  } else if (!config.providers[option.provider]?.apiKey) {
+  } else if (!config.providers[mediaProviderConfigId(option.provider)]?.apiKey) {
     throw new Error(`请先配置 ${option.provider} 的 API Key`);
   }
 
@@ -142,24 +150,14 @@ async function saveGeneratedMedia(
   artifactId: string,
 ) {
   const baseName = `对话${MEDIA_LABELS[kind]}-${artifactId}`;
-  const fileName = `${baseName}.${MEDIA_FALLBACK_EXTENSIONS[kind]}`;
-  if (url.startsWith('data:')) {
-    return saveDataUrlToProjectData(url, projectId, fileName);
-  }
-  // blob: 进不了原生下载通道，先在前端取回字节再落盘
-  if (url.startsWith('blob:')) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`读取临时媒体数据失败：HTTP ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    return saveBinaryToProjectData(bytes, projectId, fileName);
-  }
-  return downloadUrlAndSave(url, projectId, MEDIA_NODE_TYPES[kind], baseName);
+  return persistMediaUrlToProjectData(url, projectId, MEDIA_NODE_TYPES[kind], baseName);
 }
 
 interface MediaPersistOutcome {
   status: MediaPersistenceStatus;
   filePath?: string;
   assetUrl?: string;
+  sourceUrl?: string;
   error?: string;
 }
 
@@ -178,7 +176,12 @@ async function persistGeneratedMedia(
   try {
     const saved = await saveGeneratedMedia(url, projectId, kind, artifactId);
     if (!saved?.filePath) return { status: 'failed', error: MEDIA_PERSIST_FAILED_MESSAGE };
-    return { status: 'saved', filePath: saved.filePath, assetUrl: saved.assetUrl };
+    return {
+      status: 'saved',
+      filePath: saved.filePath,
+      assetUrl: saved.mediaUrl,
+      sourceUrl: saved.sourceUrl,
+    };
   } catch (error) {
     return {
       status: 'failed',
@@ -200,6 +203,8 @@ export async function runMediaGeneration(
   intent: MediaGenerationIntent,
   projectId?: string | null,
   signal?: AbortSignal,
+  targetNodeId?: string,
+  runninghubTaskContext?: import('../../types/runninghub').RunningHubTaskContext,
 ): Promise<MediaGenerationResult> {
   throwIfAborted(signal);
 
@@ -223,6 +228,9 @@ export async function runMediaGeneration(
   });
 
   const model = resolveMediaModel(intent.kind, intent.modelRef);
+  if (model.provider === 'runninghubwf' && [intent.aspectRatio, intent.resolution, intent.duration].some((value) => value !== undefined)) throw new Error('请通过工作流参数设置比例、分辨率或时长');
+  if (model.provider === 'workflow-api' && useAppStore.getState().workflows.find((workflow) => workflow.id === model.workflowId)?.workflowApi?.version === 2
+    && [intent.aspectRatio, intent.resolution, intent.duration].some((value) => value !== undefined)) throw new Error('自定义工作流请通过 workflowInputs 设置参数');
   if (
     intent.kind === 'audio'
     && intent.audioPurpose
@@ -230,6 +238,17 @@ export async function runMediaGeneration(
     && intent.audioPurpose !== model.audioPurpose
   ) {
     throw new Error(`所选模型不支持${intent.audioPurpose === 'music' ? '音乐' : '语音'}生成`);
+  }
+  const runninghubModelParameters = { ...intent.runninghubModelParameters };
+  if (model.provider === 'runninghub') {
+    const definition = getRunningHubModel(model.requestModel);
+    for (const [name, value] of Object.entries({ aspectRatio: intent.aspectRatio, resolution: intent.resolution, duration: intent.duration })) {
+      if (value === undefined) continue;
+      const field = definition?.parameters.find((field) => field.name === name || (name === 'aspectRatio' && field.name === 'ratio'));
+      if (!field) throw new Error(`所选 RunningHub 操作没有 ${name} 参数，请读取模型专属参数`);
+      if (runninghubModelParameters[field.name] !== undefined && runninghubModelParameters[field.name] !== String(value)) throw new Error('通用参数与模型专属参数冲突');
+      runninghubModelParameters[field.name] = String(value);
+    }
   }
   const id = `media-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -241,17 +260,29 @@ export async function runMediaGeneration(
       imageSize: projectSettings?.generation?.imageSize || '2K',
       aspectRatio: projectSettings?.generation?.imageAspectRatio || '1:1',
       workflowId: model.workflowId,
+      workflowInputs: intent.workflowInputs, runninghubModelParameters: model.provider === 'runninghub' ? runninghubModelParameters : undefined,
+      nodeId: ['runninghubwf', 'runninghub', 'workflow-api'].includes(model.provider) ? targetNodeId : undefined,
+      runninghubTaskContext,
+
+      workflowApiTaskContext: model.provider === 'workflow-api' ? runninghubTaskContext : undefined,
     }, signal);
     throwIfAborted(signal);
-    const persisted = await persistGeneratedMedia(result.url, projectId, intent.kind, id);
+    const savedCloud = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url);
+    const persisted: MediaPersistOutcome = savedCloud ? { ...savedCloud, status: savedCloud.persistence } : await persistGeneratedMedia(result.url, projectId, intent.kind, id);
+    if (persisted.status === 'failed' && isTransientMediaUrl(result.url)) {
+      throw new Error(persisted.error || MEDIA_PERSIST_FAILED_MESSAGE);
+    }
     await tagSavedGeneratedMedia(persisted.filePath, projectId, effectivePrompt);
     throwIfAborted(signal);
     return {
       id,
       kind: intent.kind,
+      runninghubOutputs: result.runninghubOutputs,
+
+      workflowApiOutputs: result.workflowApiOutputs, workflowApiTaskId: result.workflowApiTaskId,
       deliveryMode: intent.deliveryMode,
       url: persisted.assetUrl || result.url,
-      sourceUrl: result.url,
+      sourceUrl: persisted.sourceUrl || result.url,
       filePath: persisted.filePath,
       persistence: persisted.status,
       persistError: persisted.error,
@@ -265,7 +296,7 @@ export async function runMediaGeneration(
   }
 
   if (intent.kind === 'video') {
-    const directGeneralProtocol = model.provider === 'general' && !model.workflowId;
+    const directGeneralProtocol = ((model.provider === 'general' || model.provider === 'runninghub') && !model.workflowId) || model.provider === 'workflow-api';
     const aspectRatio = intent.aspectRatio
       ?? (directGeneralProtocol ? undefined : projectSettings?.generation?.videoAspectRatio);
     const resolution = intent.resolution
@@ -282,17 +313,27 @@ export async function runMediaGeneration(
       // 工作流只认数字长边，档位换算后再传
       videoResolution: directGeneralProtocol ? undefined : videoLongSideFromLabel(resolution),
       workflowId: model.workflowId,
+      workflowInputs: intent.workflowInputs, runninghubModelParameters: model.provider === 'runninghub' ? runninghubModelParameters : undefined,
+      nodeId: ['runninghubwf', 'runninghub', 'workflow-api'].includes(model.provider) ? targetNodeId : undefined,
+      runninghubTaskContext,
+      workflowApiTaskContext: model.provider === 'workflow-api' ? runninghubTaskContext : undefined,
     }, signal);
     throwIfAborted(signal);
-    const persisted = await persistGeneratedMedia(result.url, projectId, intent.kind, id);
+    const savedCloud = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url);
+    const persisted: MediaPersistOutcome = savedCloud ? { ...savedCloud, status: savedCloud.persistence } : await persistGeneratedMedia(result.url, projectId, intent.kind, id);
+    if (persisted.status === 'failed' && isTransientMediaUrl(result.url)) {
+      throw new Error(persisted.error || MEDIA_PERSIST_FAILED_MESSAGE);
+    }
     await tagSavedGeneratedMedia(persisted.filePath, projectId, effectivePrompt);
     throwIfAborted(signal);
     return {
       id,
       kind: intent.kind,
+      runninghubOutputs: result.runninghubOutputs,
+      workflowApiOutputs: result.workflowApiOutputs, workflowApiTaskId: result.workflowApiTaskId,
       deliveryMode: intent.deliveryMode,
       url: persisted.assetUrl || result.url,
-      sourceUrl: result.url,
+      sourceUrl: persisted.sourceUrl || result.url,
       filePath: persisted.filePath,
       persistence: persisted.status,
       persistError: persisted.error,
@@ -308,6 +349,11 @@ export async function runMediaGeneration(
     model: model.requestModel,
     provider: model.provider,
     workflowId: model.workflowId,
+    workflowInputs: intent.workflowInputs, runninghubModelParameters: model.provider === 'runninghub' ? runninghubModelParameters : undefined,
+    nodeId: ['runninghubwf', 'runninghub', 'workflow-api'].includes(model.provider) ? targetNodeId : undefined,
+    runninghubTaskContext,
+
+    workflowApiTaskContext: model.provider === 'workflow-api' ? runninghubTaskContext : undefined,
   }, signal);
   throwIfAborted(signal);
   const persisted = await persistAudioGenerationResult(
@@ -320,6 +366,9 @@ export async function runMediaGeneration(
   return {
     id,
     kind: intent.kind,
+    runninghubOutputs: result.runninghubOutputs,
+
+    workflowApiOutputs: result.workflowApiOutputs, workflowApiTaskId: result.workflowApiTaskId,
     deliveryMode: intent.deliveryMode,
     url: persisted.mediaUrl,
     sourceUrl: persisted.sourceUrl || persisted.outputUrl,
@@ -362,6 +411,7 @@ export async function retryMediaArtifactPersist(
   return {
     ...artifact,
     url: persisted.assetUrl || artifact.url,
+    sourceUrl: persisted.sourceUrl || artifact.sourceUrl,
     filePath: persisted.filePath,
     persistence: 'saved',
     persistError: undefined,

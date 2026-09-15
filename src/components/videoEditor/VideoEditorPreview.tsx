@@ -7,6 +7,7 @@
  * 播放头是「时间轴坐标」，这里负责换算到当前片段的素材坐标，
  * 播到片段末尾就把播放头推进到下一段，由父组件切换活动片段。
  */
+import Select from '../shared/Select';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Icon } from '@iconify/react';
 import { computeDrawRect } from '../../services/videoCompositor';
@@ -986,11 +987,11 @@ function VideoEditorPreview({
         <div className="video-editor-transport-view">
           <label className="video-editor-preview-zoom">
             <Icon icon="lucide:search" width={13} height={13} />
-            <select
+            <Select fixedMenu
               value={previewZoom}
               aria-label={t('预览缩放')}
-              onChange={(event) => {
-                const value = event.target.value;
+              onChange={(selectedOptionValue) => {
+                const value = selectedOptionValue;
                 setPreviewZoom(value === 'fit' ? 'fit' : Number(value) as PreviewZoom);
               }}
             >
@@ -998,7 +999,7 @@ function VideoEditorPreview({
               <option value="25">25%</option>
               <option value="50">50%</option>
               <option value="100">100%</option>
-            </select>
+            </Select>
           </label>
           <button
             type="button"

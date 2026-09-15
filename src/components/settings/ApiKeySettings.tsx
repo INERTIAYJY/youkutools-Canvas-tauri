@@ -25,12 +25,15 @@ import type {
   WebSearchProviderId,
 } from '../../types';
 import AnimatedButton from '../shared/AnimatedButton';
+import ProviderBadge from '../shared/ProviderBadge';
 import { defaultModelGroups } from '../nodes/shared/defaultModels';
 import { shouldListProviderConnection } from './apiKeySettingsUtils';
 import { isSecretStoreAvailable } from '../../services/providerSecretService';
 import { testProviderConnection } from '../../services/testConnection';
+import { replaceLegacyApimartOmni } from '../../services/ai/apimartVideoModels';
 import DreaminaLoginModal from './DreaminaLoginModal';
 import ProviderConnectionDialog from './ProviderConnectionDialog';
+import { saveAutodlWorkflowTemplate, saveWorkflowApiDrafts } from '../../services/workflowApi/workflowApiConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { useT } from '../../i18n';
 
@@ -63,6 +66,8 @@ function isTauri(): boolean {
 
 export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const t = useT();
+  const unreadSecrets = useAppStore((state) => state.configSecretReadErrors);
+  const workflows = useAppStore((state) => state.workflows);
   const {
     config,
     updateConfig,
@@ -233,6 +238,15 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     for (const [connectionId, providerConfig] of Object.entries(config.providers)) {
       const catalogId = providerConfig.catalogId
         || getProviderDefinition(connectionId, providerConfig)?.id;
+      if (catalogId === 'apimart') {
+        const selectedModels = replaceLegacyApimartOmni(providerConfig.selectedModels);
+        const catalogModels = replaceLegacyApimartOmni(providerConfig.catalogModels);
+        if (selectedModels !== providerConfig.selectedModels || catalogModels !== providerConfig.catalogModels) {
+          changed = true;
+          saveProviderConfig(connectionId, { ...providerConfig, selectedModels, catalogModels });
+        }
+        continue;
+      }
       if (catalogId !== 'sora2u') continue;
       const selectedModels = providerConfig.selectedModels?.filter(
         (model) => isProviderModelVisible(catalogId, model.id),
@@ -253,7 +267,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     for (const item of providerItems) {
       const definition = getProviderDefinition(item.id, item.config);
-      if (definition?.id !== 'sora2u' || !item.config.apiKey.trim()) continue;
+      if (!definition || !['sora2u', 'apimart'].includes(definition.id) || !item.config.apiKey.trim()) continue;
       const fingerprint = `${item.id}\u0000${item.config.apiKey}\u0000${item.config.baseUrl || ''}`;
       if (balanceRefreshStartedRef.current.has(fingerprint)) continue;
       balanceRefreshStartedRef.current.add(fingerprint);
@@ -269,6 +283,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       ).then((result) => {
         const balance = result.balance;
         if (!balanceRefreshActiveRef.current || !result.success || !balance) return;
+        const latest = useAppStore.getState().config.providers[item.id];
+        if (!latest || latest.apiKey !== item.config.apiKey || latest.baseUrl !== item.config.baseUrl
+          || getProviderDefinition(item.id, latest)?.id !== definition.id) return;
         setProviderBalances((current) => ({ ...current, [item.id]: balance }));
       });
     }
@@ -385,7 +402,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const handleCopyConnection = async (connectionId: string) => {
     const providerConfig = config.providers[connectionId];
     if (!providerConfig) return;
-    const ok = await copyText(serializeConnection(providerConfig));
+    const ok = await copyText(serializeConnection(providerConfig,
+      useAppStore.getState().workflows.filter((workflow) => workflow.workflowApi?.connectionId === connectionId)));
     useAppStore.getState().showToast(
       ok ? t('连接配置已复制（不含 API Key）') : t('复制失败'),
       ok ? 'success' : 'error',
@@ -404,7 +422,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       useAppStore.getState().showToast(t('该连接类型不支持导入'), 'error');
       return;
     }
-    const newConnectionId = createConnectionId(parsed.catalogId);
+    const newConnectionId = createConnectionId(definition.id);
     if (config.providers[newConnectionId]) {
       useAppStore.getState().showToast(
         t('已存在 {name} 连接，请先删除后再导入', { name: definition.name }),
@@ -424,7 +442,14 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         provider: newConnectionId,
       })),
     });
-    await saveConfig();
+    try {
+      await saveConfig({ throwOnError: true });
+      if (parsed.workflowApiDrafts) await saveWorkflowApiDrafts(newConnectionId, parsed.workflowApiDrafts);
+      else if (parsed.workflowApi) await saveAutodlWorkflowTemplate(newConnectionId, parsed.workflowApi.defaults);
+    } catch (error) {
+      useAppStore.getState().showToast(error instanceof Error ? error.message : t('保存失败'), 'error');
+      return;
+    }
     useAppStore.getState().showToast(t('已导入连接，请补填 API Key'));
     setPendingApiKeyConnectionId(newConnectionId);
   };
@@ -447,7 +472,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const handleSaveConnection = async (
     connectionId: string,
     providerConfig: ApiProviderConfig,
-    related?: { runninghubWorkflowApiKey?: string },
+    related?: { runninghubWorkflowApiKey?: string; workflowApiDrafts?: import('../../types/workflowApi').WorkflowApiDraft[] },
   ) => {
     saveProviderConfig(connectionId, providerConfig);
     const definition = getProviderDefinition(connectionId, providerConfig);
@@ -458,32 +483,54 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         name: 'RunningHub 工作流',
         apiKey: related.runninghubWorkflowApiKey,
       });
-    } else if (related && config.providers.runninghub) {
+    } else if (related && 'runninghubWorkflowApiKey' in related && config.providers.runninghub) {
       await removeProviderConfig('runninghub');
     }
-    await saveConfig();
+    await saveConfig({ throwOnError: true });
+    if (definition?.kind === 'workflow-api') await saveWorkflowApiDrafts(connectionId, related?.workflowApiDrafts ?? []);
     closeConnectionDialog();
   };
 
   const handleRemoveConnection = async (connectionId: string) => {
-    const providerConfig = config.providers[connectionId];
-    const definition = getProviderDefinition(connectionId, providerConfig);
-    if (connectionId === 'dreamina') await handleDreaminaLogout();
-    if (definition?.kind === 'web-search') {
-      for (const searchDefinition of getWebSearchProviderDefinitions()) {
-        await removeProviderConfig(searchDefinition.id);
+    try {
+      const providerConfig = useAppStore.getState().config.providers[connectionId];
+      const definition = getProviderDefinition(connectionId, providerConfig);
+      if (connectionId === 'dreamina') await handleDreaminaLogout();
+      const connectionIds = definition?.kind === 'web-search'
+        ? getWebSearchProviderDefinitions().map((provider) => provider.id)
+        : [connectionId];
+      if (connectionId === 'runninghub-model') connectionIds.push('runninghub');
+      let cleanupFailed = false;
+      for (const id of connectionIds) {
+        try {
+          await removeProviderConfig(id);
+        } catch {
+          // Action 先移除内存配置，再清理项目引用。后者失败不能跳过配置提交。
+          // 若配置仍存在，则删除本身未完成，不能当作引用清理失败继续。
+          if (useAppStore.getState().config.providers[id]) throw new Error('连接删除失败，请重试');
+          cleanupFailed = true;
+        }
       }
-      updateConfig({ webSearchProviderId: undefined });
-    } else {
-      await removeProviderConfig(connectionId);
+      if (definition?.kind === 'web-search') updateConfig({ webSearchProviderId: undefined });
+      await saveConfig({ silent: true, throwOnError: true });
+      setPendingDeleteId(undefined);
+      useAppStore.getState().showToast(
+        cleanupFailed ? t('连接已删除，但部分项目的模型引用清理失败，请检查相关项目') : t('连接已删除'),
+        cleanupFailed ? 'error' : 'success',
+      );
+    } catch {
+      const state = useAppStore.getState();
+      state.showToast(state.configSaveError || t('连接删除失败，请重试'), 'error');
     }
-    if (connectionId === 'runninghub-model') await removeProviderConfig('runninghub');
-    setPendingDeleteId(undefined);
-    await saveConfig();
   };
 
   return (
     <div className="settings-pane">
+      {unreadSecrets?.length > 0 && (
+        <div role="status" className="ui-alert ui-alert--warning">
+          {t('部分 API Key 读取失败，原引用已保留。请在设置顶部重试加载；这与未填写 Key 不同。')}
+        </div>
+      )}
       <div className="settings-pane-heading">
         <h2 className="settings-pane-title">API Key</h2>
         <div className="flex items-center gap-1.5">
@@ -534,7 +581,10 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
               const isDreamina = definition.id === 'dreamina';
               const isRunningHub = definition.id === 'runninghub-model';
               const isWebSearchProvider = definition.kind === 'web-search';
-              const isPendingApiKey = definition.authType !== 'oauth' && !item.config.apiKey.trim();
+              const isWorkflowApi = definition.kind === 'workflow-api';
+              const connectionWorkflows = workflows.filter((workflow) => workflow.workflowApi?.connectionId === item.id);
+              const needsWorkflowKey = connectionWorkflows.some((workflow) => workflow.workflowApi?.version !== 2 || workflow.workflowApi.protocol.auth?.type !== 'none');
+              const isPendingApiKey = definition.authType !== 'oauth' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
               const hasRunningHubModelKey = isRunningHub && !!item.config.apiKey.trim();
               const hasRunningHubWorkflowKey = isRunningHub
                 && !!config.providers.runninghub?.apiKey.trim();
@@ -544,17 +594,17 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 ? t('联网搜索')
                 : definition.id === 'custom-openai'
                   ? item.config.name.trim() || definition.name
-                  : definition.name;
+                  : isWorkflowApi ? item.config.name.trim() || t(definition.name) : definition.name;
               const statusLabel = isDreamina
                 ? t('OAuth 已连接')
                 : isRunningHub
                   ? t('{count}/2 密钥已配置', { count: runningHubKeyCount })
                   : isPendingApiKey
                     ? t('待填写 API Key')
-                    : t('已连接');
+                    : isWorkflowApi ? t('已配置') : t('已连接');
               return (
-                <div key={item.id} className="provider-connection-card">
-                  <div className={`provider-badge provider-badge--${definition.id}`}>{definition.badgeText}</div>
+                <div key={item.id} className={`provider-connection-card${isRunningHub ? ' provider-connection-card--runninghub' : ''}`}>
+                  <ProviderBadge providerId={item.id} config={item.config} size="large" />
                   <div className="provider-connection-copy">
                     <div className="provider-connection-title-row">
                       <strong>{displayName}</strong>
@@ -567,19 +617,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                         </span>
                       )}
                     </div>
-                    <div className="provider-connection-meta">
-                      {isRunningHub ? (
-                        <>
-                          <span>{hasRunningHubModelKey ? t('企业级-共享已配置') : t('企业级-共享未配置')}</span>
-                          <span>{hasRunningHubWorkflowKey ? t('消费级-会员已配置') : t('消费级-会员未配置')}</span>
-                          {hasRunningHubModelKey && (
-                            <span>
-                              {selectedCount === undefined
-                                ? t('沿用内置模型目录')
-                                : t('{count} 个模型', { count: selectedCount })}
-                            </span>
-                          )}
-                        </>
+                    {!isRunningHub && <div className="provider-connection-meta">
+                      {isWorkflowApi ? (
+                        <><span>{t('自定义工作流')}</span>{summaryUrl && <span>{summaryUrl}</span>}</>
                       ) : isWebSearchProvider ? (
                         <>
                           <span>{t('当前厂商：{name}', { name: definition.name })}</span>
@@ -595,8 +635,29 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                           {summaryUrl && <span>{summaryUrl}</span>}
                         </>
                       )}
-                    </div>
+                    </div>}
                   </div>
+
+                  {isRunningHub && <div className="provider-runninghub-connections">
+                    <div className="provider-runninghub-connection">
+                      <span className="provider-runninghub-connection-state">
+                        <Icon icon={hasRunningHubModelKey ? 'mdi:check-circle-outline' : 'mdi:circle-outline'} width="14" className={hasRunningHubModelKey ? 'is-configured' : ''} />
+                        {hasRunningHubModelKey ? t('模型连接已配置') : t('模型连接未配置')}
+                      </span>
+                      {hasRunningHubModelKey && <span className="provider-runninghub-model-count">
+                        {selectedCount === undefined ? t('沿用内置模型目录') : t('{count} 个模型', { count: selectedCount })}
+                      </span>}
+                    </div>
+                    <div className="provider-runninghub-connection">
+                      <span className="provider-runninghub-connection-state">
+                        <Icon icon={hasRunningHubWorkflowKey ? 'mdi:check-circle-outline' : 'mdi:circle-outline'} width="14" className={hasRunningHubWorkflowKey ? 'is-configured' : ''} />
+                        {hasRunningHubWorkflowKey ? t('工作流连接已配置') : t('工作流连接未配置')}
+                      </span>
+                      <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost provider-runninghub-manage" onClick={() => { useAppStore.getState().setSettingsOpen(false); useAppStore.getState().setWorkflowPanelOpen(true, 'workflow'); }}>
+                        管理云工作流 <Icon icon="mdi:arrow-right" width="14" />
+                      </button>
+                    </div>
+                  </div>}
 
                   {pendingDeleteId === item.id ? (
                     <div className="provider-delete-confirm">
@@ -664,7 +725,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
             type="button"
             className="settings-save-btn"
             onClick={async () => {
-              await saveConfig();
+              try { await saveConfig(); } catch { return; }
               onClose();
             }}
           >

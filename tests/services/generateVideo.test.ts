@@ -6,6 +6,7 @@ import {
   buildGeneralVideoProtocolVariables,
   buildVolcengineVideoContent,
   buildVolcengineVideoRequestBody,
+  compileVideoReferencePrompt,
   generateVideo,
   resolveVideoGenerationOperation,
 } from '../../src/services/ai/generateVideo';
@@ -18,6 +19,10 @@ import {
 import { mediaProviderRegistry } from '../../src/services/ai/mediaProviderRegistry';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { BaseNodeData } from '../../src/types';
+import { buildDramaVoiceMentionId, emptyDramaAssetLibrary, type DramaCharacter } from '../../src/types/dramaAssets';
+import * as apimartApi from '../../src/services/ai/apimartGen';
+import * as imageUtils from '../../src/services/ai/imageUtils';
+import * as uploadService from '../../src/services/uploadService';
 import type {
   ModelExecutionProfile,
   VideoGenerationReferenceInput,
@@ -40,6 +45,179 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('角色图片与声音的最终请求对应', () => {
+  const imageA = 'data:image/png;base64,YQ==';
+  const imageB = 'data:image/png;base64,Yg==';
+  const firstFrame = 'data:image/png;base64,Zmlyc3Q=';
+  const lastFrame = 'data:image/png;base64,bGFzdA==';
+  const voiceA = 'https://cdn.example/a.wav';
+  const voiceB = 'https://cdn.example/b.wav';
+  const voice = (id: string, clip = 'voice') => `@drama{${buildDramaVoiceMentionId(id, clip)}:旧标签}`;
+  const picture = (id: string) => `@drama{${id}#portrait:旧标签}`;
+  const ref = (url: string, kind: 'image' | 'audio' = 'image', role: 'reference' | 'first_frame' | 'last_frame' = 'reference') => ({
+    kind, url, role: kind === 'audio' ? 'reference_audio' as const : role, origin: 'connection' as const,
+  });
+
+  function setCharacters(sameName = false) {
+    const characters = ['a', 'b'].map((id, index) => ({
+      id, kind: 'character', key: id, name: sameName ? '主角' : index === 0 ? '女主' : '男主',
+      referenceImages: [{ id: 'portrait', kind: 'primary', imageUrl: index === 0 ? imageA : imageB, createdAt: 0 }],
+      voiceClips: [{ id: 'voice', kind: index === 0 ? 'timbre' : 'emotion', audioUrl: index === 0 ? voiceA : voiceB,
+        transcript: '样本对白不会自动写入', createdAt: 0, updatedAt: 0 }],
+      primaryReferenceImageId: 'portrait', createdAt: 0, updatedAt: 0,
+    }) as DramaCharacter);
+    useAppStore.setState({ dramaAssets: { ...emptyDramaAssetLibrary(), characters } });
+  }
+
+  async function capture(prompt: string, referenceMedia: ReturnType<typeof ref>[] = []) {
+    let captured: VideoGenerationReferenceInput | undefined;
+    const unregister = mediaProviderRegistry.register({
+      providerId: 'test-character-bindings', capabilities: ['video'],
+      async generateVideo({ resolveReferenceInput }) {
+        captured = await resolveReferenceInput();
+        return { url: 'https://cdn.example/result.mp4' };
+      },
+    });
+    try {
+      await generateVideo({ prompt, provider: 'test-character-bindings', model: 'test', referenceMedia });
+      return captured!;
+    } finally {
+      unregister();
+    }
+  }
+
+  it('交错 @ 多个角色，按显式素材、去重与首尾帧排序后的数组建立对应', async () => {
+    setCharacters();
+    const input = await capture(`图片1是手写文字。${voice('b')} ${picture('a')} ${voice('a')} ${picture('b')} ${picture('a')}`, [
+      ref(firstFrame, 'image', 'first_frame'), ref(lastFrame, 'image', 'last_frame'), ref(imageB), ref(voiceA, 'audio'),
+    ]);
+    expect(input.imageUrls).toEqual([firstFrame, imageB, imageA, lastFrame]);
+    expect(input.audioUrls).toEqual([voiceA, voiceB]);
+    expect(input.prompt).toContain('图片1是手写文字。男主〔角色1，音频2〕 女主〔角色2，图片3〕');
+    expect(input.prompt).toContain('角色1「男主」：情绪参考：音频2；外观参考：图片2');
+    expect(input.prompt).toContain('角色2「女主」：外观参考：图片3；音色参考：音频1');
+    expect(input.prompt).not.toContain('旧标签');
+    expect(input.prompt).not.toContain('样本对白不会自动写入');
+    const variables = buildGeneralVideoProtocolVariables('test', { prompt: '', model: 'test', provider: 'general' }, input);
+    expect(variables.prompt).toBe(input.prompt);
+    expect(variables.imageUrls).toEqual(input.imageUrls);
+    expect(variables.audioUrls).toEqual(input.audioUrls);
+  });
+
+  it('同名角色保持独立，重复素材去重后仍保留两份归属', async () => {
+    setCharacters(true);
+    const state = useAppStore.getState();
+    useAppStore.setState({ dramaAssets: { ...state.dramaAssets, characters: state.dramaAssets.characters.map((character) => ({
+      ...character, referenceImages: character.referenceImages!.map((image) => ({ ...image, imageUrl: imageA })),
+    })) } });
+    const input = await capture(`${picture('a')} ${voice('b')} ${picture('b')} ${voice('a')}`);
+    expect(input.imageUrls).toEqual([imageA]);
+    expect(input.prompt).toContain('角色1「主角」：外观参考：图片1；音色参考：音频2');
+    expect(input.prompt).toContain('角色2「主角」：情绪参考：音频1；外观参考：图片1');
+  });
+
+  it('仅引用声音时不自动添加角色图片或其他声音', async () => {
+    setCharacters();
+    const input = await capture(voice('b'));
+    expect(input.imageUrls).toEqual([]);
+    expect(input.audioUrls).toEqual([voiceB]);
+    expect(input.prompt).not.toContain('女主');
+    expect(input.prompt).not.toContain('外观参考：');
+  });
+
+  it('同一角色的多张外观参考与声音合并到同一对应说明', async () => {
+    setCharacters();
+    const state = useAppStore.getState();
+    useAppStore.setState({ dramaAssets: { ...state.dramaAssets, characters: state.dramaAssets.characters.map((character) => ({
+      ...character, referenceImages: [...character.referenceImages!, {
+        id: 'side', kind: 'turnaround' as const, imageUrl: imageB, prompt: '', createdAt: 0, updatedAt: 0,
+      }],
+    })) } });
+    const input = await capture(`${picture('a')} ${voice('a')} @drama{a#side:女主侧面}`);
+    expect(input.imageUrls).toEqual([imageA, imageB]);
+    expect(input.prompt).toContain('角色1「女主」：外观参考：图片1、图片2；音色参考：音频1');
+    expect(input.prompt).not.toContain('角色2');
+  });
+
+  it('本地媒体和同一远端来源去重时，编号按实际远端数组生成', async () => {
+    const input = await resolvePromptWithMediaRefs('保留图片1', { preserveBindings: true });
+    input.segments!.push({ reference: { ...ref('local-b'), sourceUrl: 'https://cdn.example/shared.png' } });
+    const compiled = compileVideoReferencePrompt(input, [
+      { ...ref('local-a'), sourceUrl: 'https://cdn.example/shared.png' }, { ...ref('local-b'), sourceUrl: 'https://cdn.example/shared.png' },
+    ]);
+    expect(compiled).toBe('保留图片1图片1');
+    expect(compileVideoReferencePrompt(input, [ref('local-a'), ref('local-b')], { target: 'local' })).toBe('保留图片1图片2');
+  });
+
+  it('引用从最终请求中消失时拒绝编造编号', async () => {
+    setCharacters();
+    const input = await resolvePromptWithMediaRefs(picture('a'), { preserveBindings: true });
+    expect(() => compileVideoReferencePrompt(input, [])).toThrow('引用素材未进入视频请求');
+  });
+
+  it('同一角色的多段声音保留独立用途，重复引用不重复添加对应说明', async () => {
+    setCharacters();
+    const state = useAppStore.getState();
+    useAppStore.setState({ dramaAssets: { ...state.dramaAssets, characters: state.dramaAssets.characters.map((character) => ({
+      ...character, voiceClips: [...character.voiceClips!, {
+        id: 'line', kind: 'line' as const, audioUrl: 'https://cdn.example/line.wav', transcript: '样本里的话', createdAt: 0, updatedAt: 0,
+      }],
+    })) } });
+    const input = await capture(`${voice('a')} ${voice('a', 'line')} ${voice('a')}`);
+    expect(input.audioUrls).toEqual([voiceA, 'https://cdn.example/line.wav']);
+    expect(input.prompt).toContain('角色1「女主」：音色参考：音频1；台词参考：音频2');
+    expect(input.prompt.match(/音色参考：音频1/g)).toHaveLength(1);
+    expect(input.prompt).not.toContain('样本里的话');
+  });
+
+  it('角色图片同时被选作独立首帧时使用字段语义而非虚构数组编号', async () => {
+    setCharacters();
+    const input = await resolvePromptWithMediaRefs(picture('a'), { preserveBindings: true });
+    const result = compileVideoReferencePrompt(input, [ref(imageA, 'image', 'first_frame')], { imageLayout: 'frame-fields' });
+    expect(result).toContain('外观参考：首帧图片');
+    expect(result).not.toContain('图片1');
+  });
+
+  it('角色声音删除后在调用适配器提交前失败', async () => {
+    setCharacters();
+    await expect(capture(voice('a', 'removed'))).rejects.toThrow('角色音频引用已失效');
+  });
+
+  it('角色引用进入 ComfyUI 时带上对应说明，普通引用保持原行为', async () => {
+    setCharacters();
+    await generateVideo({ prompt: `${picture('a')} ${voice('a')}`, provider: 'comfyui', model: 'comfyui/test', workflowId: 'test' });
+    expect(comfyMocks.executeVideo).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: expect.stringContaining('角色1「女主」：外观参考：图片1；音色参考：音频1') }),
+      undefined, [voiceA], { imageUrls: [imageA], videoUrls: [] },
+    );
+  });
+
+  it.each(['doubao-seedance-2.0', 'MiniMax-H3'])('APIMart %s 的实际适配参数与角色编号对应', async (model) => {
+    setCharacters();
+    const state = useAppStore.getState();
+    useAppStore.setState({ config: { ...state.config, providers: { ...state.config.providers, apimart: { name: 'APIMart', apiKey: 'test-key', baseUrl: 'https://api.example' } } } });
+    const submit = vi.spyOn(apimartApi, 'generateApimartVideo').mockResolvedValue({ url: 'https://cdn.example/result.mp4' });
+    const uploadImages = vi.spyOn(imageUtils, 'resolveImageUrlArray').mockImplementation(async (urls) => urls);
+    const uploadMedia = vi.spyOn(uploadService, 'resolveMediaReferenceUrl').mockImplementation(async (url) => url);
+    try {
+      await generateVideo({ prompt: `${picture('a')} ${voice('a')}`, provider: 'apimart', model: `apimart/${model}`,
+        referenceMedia: [ref(firstFrame, 'image', 'first_frame'), ref(lastFrame, 'image', 'last_frame')],
+      });
+      const args = submit.mock.calls[0];
+      expect(args).toBeDefined();
+      if (model === 'MiniMax-H3') {
+        expect(args[5]).toMatchObject({ firstFrameUrl: firstFrame, lastFrameUrl: lastFrame, imageUrls: [imageA], audioUrls: [voiceA] });
+        expect(args[3]).toContain('外观参考：图片1；音色参考：音频1');
+      } else {
+        expect(args[5]?.imageWithRoles?.map((reference) => reference.url)).toEqual([firstFrame, lastFrame, imageA]);
+        expect(args[3]).toContain('外观参考：图片3；音色参考：音频1');
+      }
+    } finally {
+      submit.mockRestore(); uploadImages.mockRestore(); uploadMedia.mockRestore();
+    }
+  });
 });
 
 describe('video prompt media references', () => {

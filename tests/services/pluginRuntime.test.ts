@@ -1,12 +1,26 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { InstalledPlugin } from '../../src/types/plugin';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { LOCALES, setLocale } from '../../src/i18n';
+import type { InstalledPlugin, PluginInvocationResources } from '../../src/types/plugin';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   revision: 3,
   updateNodeData: vi.fn(),
   addNode: vi.fn(),
+  addNodesWithEdges: vi.fn(),
   showToast: vi.fn(),
+  saveBinaryToProjectData: vi.fn(),
+  moveToTrash: vi.fn(),
+  readDerivedResource: vi.fn(),
+  getLineArtResource: vi.fn(),
+  setLineArtResource: vi.fn(),
+  createLineArtImage: vi.fn(),
+  registerDerivedResource: vi.fn(),
+  resolveResourceHostUrl: vi.fn(),
+  extractVideoFrames: vi.fn(),
+  detectShots: vi.fn(),
+  inspectFrame: vi.fn(),
   generateText: vi.fn(),
   generateImage: vi.fn(),
   buildModelCatalog: vi.fn(() => [] as Array<Record<string, unknown>>),
@@ -25,15 +39,42 @@ vi.mock('../../src/services/ai/generateText', () => ({ generateText: mocks.gener
 vi.mock('../../src/services/ai/generateImage', () => ({ generateImage: mocks.generateImage }));
 vi.mock('../../src/services/ai/generateVideo', () => ({ generateVideo: vi.fn() }));
 vi.mock('../../src/services/ai/generateAudio', () => ({ generateAudio: vi.fn() }));
-vi.mock('../../src/services/plugins/pluginFileGrantService', () => ({ readPluginGrantedTextFile: vi.fn() }));
-vi.mock('../../src/services/fileService', () => ({ saveAgentTextOutput: vi.fn() }));
+vi.mock('../../src/services/fileService', () => ({
+  saveBinaryToProjectData: mocks.saveBinaryToProjectData,
+  moveToTrash: mocks.moveToTrash,
+}));
+vi.mock('../../src/services/plugins/pluginResourceService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/plugins/pluginResourceService')>();
+  return {
+    ...actual,
+    readPluginDerivedResourceForOutput: mocks.readDerivedResource,
+    getPluginLineArtResource: mocks.getLineArtResource,
+    setPluginLineArtResource: mocks.setLineArtResource,
+    registerPluginDerivedResource: mocks.registerDerivedResource,
+    resolvePluginResourceHostUrl: mocks.resolveResourceHostUrl,
+  };
+});
+vi.mock('../../src/services/plugins/pluginVideoFrameService', () => ({
+  extractPluginVideoFrames: mocks.extractVideoFrames,
+  detectPluginVideoShots: mocks.detectShots,
+  inspectPluginVideoFrame: mocks.inspectFrame,
+}));
+vi.mock('../../src/services/plugins/pluginImageService', () => ({
+  createPluginLineArtImage: mocks.createLineArtImage,
+}));
 
 import {
   executeNodePluginTool,
+  executePluginUiHostEffect,
   executePluginNode,
   getAvailablePluginNodes,
   getAvailableNodePluginTools,
 } from '../../src/services/plugins/pluginRuntime';
+import {
+  completeCanvasDerivation,
+  isCanvasDerivationFresh,
+  registerCanvasDerivation,
+} from '../../src/services/canvasDerivationGuard';
 
 const plugin: InstalledPlugin = {
   id: 'com.example.text',
@@ -42,6 +83,7 @@ const plugin: InstalledPlugin = {
   updatedAt: 1,
   source: 'definePlugin({ tools: {} });',
   sourceDigest: 'a'.repeat(64),
+  revisionDigest: 'b'.repeat(64),
   manifest: {
     apiVersion: 1,
     runtime: 'javascript',
@@ -71,7 +113,7 @@ const customNodePlugin: InstalledPlugin = {
   id: 'com.example.custom-node',
   manifest: {
     ...plugin.manifest,
-    apiVersion: 2,
+    apiVersion: 1,
     id: 'com.example.custom-node',
     permissions: ['node.read', 'node.write', 'models.read', 'models.invoke'],
     contributes: {
@@ -93,7 +135,7 @@ const routingPlugin: InstalledPlugin = {
   id: 'com.example.routing',
   manifest: {
     ...plugin.manifest,
-    apiVersion: 2,
+    apiVersion: 1,
     id: 'com.example.routing',
     contributes: {
       nodeTools: [],
@@ -125,7 +167,7 @@ const mediaNodePlugin: InstalledPlugin = {
   id: 'com.example.media-node',
   manifest: {
     ...plugin.manifest,
-    apiVersion: 2,
+    apiVersion: 1,
     id: 'com.example.media-node',
     permissions: ['node.read', 'node.write', 'models.read', 'models.invoke'],
     contributes: {
@@ -169,7 +211,7 @@ const pythonMediaToolPlugin: InstalledPlugin = {
   source: 'define_plugin({"tools": {}})',
   manifest: {
     ...mediaToolPlugin.manifest,
-    apiVersion: 3,
+    apiVersion: 1,
     runtime: 'python',
     entry: 'main.py',
   },
@@ -184,7 +226,7 @@ const modelToolPlugin: InstalledPlugin = {
   id: 'com.example.model-tool',
   manifest: {
     ...plugin.manifest,
-    apiVersion: 2,
+    apiVersion: 1,
     id: 'com.example.model-tool',
     permissions: ['node.read', 'node.write', 'models.read', 'models.invoke'],
     contributes: {
@@ -221,7 +263,7 @@ const pythonModelToolPlugin: InstalledPlugin = {
   source: 'define_plugin({"tools": {}})',
   manifest: {
     ...modelToolPlugin.manifest,
-    apiVersion: 3,
+    apiVersion: 1,
     runtime: 'python',
     entry: 'main.py',
     id: 'com.example.python-model-tool',
@@ -285,7 +327,20 @@ const noteToolPlugin: InstalledPlugin = {
   },
 };
 
+const outputToolPlugin: InstalledPlugin = {
+  ...plugin,
+  id: 'com.example.output-tool',
+  manifest: {
+    ...plugin.manifest,
+    id: 'com.example.output-tool',
+    permissions: ['node.read', 'node.write', 'files.output.create'],
+  },
+};
+
+afterEach(() => vi.unstubAllGlobals());
+
 beforeEach(() => {
+  setLocale('zh-CN');
   vi.clearAllMocks();
   mocks.revision = 3;
   mocks.state = {
@@ -306,10 +361,46 @@ beforeEach(() => {
     getCurrentRevision: () => mocks.revision,
     updateNodeData: mocks.updateNodeData,
     addNode: mocks.addNode,
+    addNodesWithEdges: mocks.addNodesWithEdges,
     showToast: mocks.showToast,
   };
   mocks.invoke.mockResolvedValue({ data: { output: 'after' }, message: '完成' });
   mocks.generateText.mockResolvedValue('模型结果');
+  mocks.saveBinaryToProjectData.mockReset().mockResolvedValue({
+    filePath: 'G:\\project\\plugin-output.txt',
+    assetUrl: 'asset://localhost/plugin-output.txt',
+  });
+  mocks.moveToTrash.mockResolvedValue(undefined);
+  mocks.getLineArtResource.mockReset().mockReturnValue(undefined);
+  mocks.setLineArtResource.mockReset();
+  mocks.createLineArtImage.mockReset().mockResolvedValue({
+    bytes: new Uint8Array([137, 80, 78, 71]), mediaType: 'image/png', width: 480, height: 720,
+    previewDataUrl: 'data:image/png;base64,iVBORw==',
+  });
+  mocks.readDerivedResource.mockImplementation((_context, resourceId: string) => ({
+    resource: {
+      resourceId,
+      origin: 'derived',
+      displayName: `${resourceId}.jpg`,
+      mediaType: 'image/jpeg',
+      size: 3,
+      access: 'read',
+    },
+    bytes: new Uint8Array([1, 2, 3]),
+  }));
+  mocks.resolveResourceHostUrl.mockResolvedValue('asset://localhost/video.mp4');
+  mocks.registerDerivedResource.mockImplementation((_context, resources: PluginInvocationResources, options) => {
+    const ref = {
+      resourceId: `derived-${resources.derived.length + 1}`,
+      origin: 'derived' as const,
+      displayName: options.displayName,
+      mediaType: options.mediaType,
+      size: options.bytes.byteLength,
+      access: 'read' as const,
+    };
+    resources.derived.push(ref);
+    return ref;
+  });
   mocks.buildModelCatalog.mockReturnValue(modelCatalog);
   mocks.generateImage.mockResolvedValue({ url: 'https://example.com/result.png', width: 1024, height: 1024 });
 });
@@ -329,6 +420,7 @@ describe('node plugin runtime', () => {
     expect(mocks.invoke).toHaveBeenCalledWith('execute_node_plugin_tool', expect.objectContaining({
       pluginId: plugin.id,
       sourceDigest: plugin.sourceDigest,
+      revisionDigest: plugin.revisionDigest,
       invocationId: expect.any(String),
       input: expect.objectContaining({ parameters: {} }),
     }));
@@ -337,10 +429,50 @@ describe('node plugin runtime', () => {
     expect(invocation).not.toHaveProperty('source');
   });
 
+  it.each(LOCALES)('passes the effective %s locale to tools without exposing app configuration', async (locale) => {
+    setLocale(locale);
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text', 'node-context-menu')[0];
+    await executeNodePluginTool(tool, 'node-1');
+    const input = mocks.invoke.mock.calls[0][1].input;
+    expect(input.locale).toBe(locale);
+    expect(input).not.toHaveProperty('config');
+  });
+
+  it('reuses a custom UI execution lease without revoking it after submit', async () => {
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text', 'node-context-menu')[0];
+    const guard = registerCanvasDerivation(mocks.state as never, 'node-1');
+    expect(guard).not.toBeNull();
+    const resources: PluginInvocationResources = {
+      self: [],
+      incoming: [],
+      inputs: {},
+      package: [],
+      derived: [],
+    };
+    const trustedMediaReferences = new Set<string>();
+
+    try {
+      await executeNodePluginTool(tool, 'node-1', {}, {
+        invocationId: 'ui-session-1',
+        guard: guard!,
+        resources,
+        trustedMediaReferences,
+      });
+
+      expect(mocks.invoke).toHaveBeenCalledWith('execute_node_plugin_tool', expect.objectContaining({
+        invocationId: 'ui-session-1',
+        input: expect.objectContaining({ resources }),
+      }));
+      expect(isCanvasDerivationFresh(guard!, mocks.state as never)).toBe(true);
+    } finally {
+      completeCanvasDerivation(guard!);
+    }
+  });
+
   it('fails before native invocation when the installed plugin has no registered source digest', async () => {
-    const legacyPlugin = { ...plugin, sourceDigest: undefined };
-    mocks.state = { ...mocks.state, installedPlugins: [legacyPlugin] };
-    const tool = getAvailableNodePluginTools([legacyPlugin], 'ai-text')[0];
+    const incompletePlugin = { ...plugin, sourceDigest: undefined };
+    mocks.state = { ...mocks.state, installedPlugins: [incompletePlugin] };
+    const tool = getAvailableNodePluginTools([incompletePlugin], 'ai-text')[0];
 
     await expect(executeNodePluginTool(tool, 'node-1')).rejects.toThrow('源码摘要');
     expect(mocks.invoke).not.toHaveBeenCalled();
@@ -387,6 +519,7 @@ describe('node plugin runtime', () => {
       invocationId: expect.any(String),
       input: {
         projectId: 'project-1',
+        locale: 'zh-CN',
         iteration: 0,
         parameters: { tone: 'brief' },
         node: {
@@ -395,10 +528,229 @@ describe('node plugin runtime', () => {
           data: { label: '文本', output: 'before' },
         },
         models: [],
+        resources: { self: [], incoming: [], inputs: {}, package: [], derived: [] },
+        effectResult: undefined,
       },
     }));
     expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: 'after' });
     expect(mocks.showToast).toHaveBeenCalledWith('完成');
+  });
+
+  it.each([
+    { name: '横图', width: 1280, height: 720, expireOnLoad: false },
+    { name: '竖图', width: 720, height: 1280, expireOnLoad: false },
+    { name: '方图', width: 1024, height: 1024, expireOnLoad: false },
+    { name: '读取尺寸时画布过期', width: 720, height: 1280, expireOnLoad: true },
+  ])('materializes proportional frames with guarded shotlist bindings ($name)', async ({ width, height, expireOnLoad }) => {
+    const loadedImages: string[] = [];
+    vi.stubGlobal('Image', class {
+      naturalWidth = width;
+      naturalHeight = height;
+      onload: (() => void) | null = null;
+      set src(value: string) {
+        loadedImages.push(value);
+        // 首张保持横图，验证行高取整行最大值而非只取第一张。
+        if (value.endsWith('frame-1.jpg')) {
+          this.naturalWidth = 1280;
+          this.naturalHeight = 720;
+        }
+        if (expireOnLoad) mocks.revision += 1;
+        this.onload?.();
+      }
+    });
+    const nodeSetPlugin: InstalledPlugin = {
+      ...plugin,
+      id: 'com.example.frame-review',
+      manifest: {
+        ...plugin.manifest,
+        id: 'com.example.frame-review',
+        permissions: ['node.read', 'node.write', 'files.connected.read', 'files.output.create'],
+        contributes: {
+          nodeTools: [{
+            id: 'frame-review',
+            title: '逐帧拉片',
+            placements: ['node-context-menu'],
+            nodeTypes: ['ai-video'],
+            inputFields: ['label'],
+            output: {
+              mode: 'create-node-set',
+              nodeTypes: ['ai-image', 'ai-shotlist'],
+              maxNodes: 6,
+              fields: ['label', 'imageWidth', 'imageHeight', 'frameAnalysis', 'shotlistRows'],
+            },
+          }],
+        },
+      },
+    };
+    mocks.state = {
+      ...mocks.state,
+      nodes: [{
+        id: 'video-1',
+        type: 'ai-video',
+        position: { x: 10, y: 20 },
+        parentId: 'group-1',
+        data: { label: '样片', type: 'ai-video', nodeWidth: 320 },
+      }],
+      installedPlugins: [nodeSetPlugin],
+    };
+    mocks.invoke.mockResolvedValueOnce({
+      data: {
+        nodes: [...Array.from({ length: 5 }, (_, index) => ({
+          key: `frame-${index + 1}`,
+          nodeType: 'ai-image',
+          resourceId: `derived-${index + 1}`,
+          data: {
+            label: `画面 ${index + 1}`,
+            // 故意都声明横图；展示比例必须来自保存的实际图像，而不是插件声明。
+            imageWidth: 1280,
+            imageHeight: 720,
+            frameAnalysis: { requestedTime: index + 1, actualTime: index + 0.96, shotSize: '全景' },
+          },
+        })), {
+          key: 'shotlist',
+          nodeType: 'ai-shotlist',
+          data: {
+            label: '样片 · 拉片分镜表',
+            shotlistRows: [{ id: 'shot-1', shotNo: '1', frameKey: 'frame-1', content: '建立环境',
+              frameAnalysis: { sourceVideoNodeId: 'forged', sourceVideoName: '伪造来源', shotId: 'stable-1', inPoint: 0, outPoint: 2,
+                aiOriginal: { content: 'AI 原文', confidence: 0.5 }, overrideFields: ['content'], reviewStatus: 'reviewed' } }],
+          },
+        }],
+        edges: Array.from({ length: 5 }, (_, index) => ({ sourceKey: `frame-${index + 1}`, targetKey: 'shotlist' })),
+      },
+      message: '已生成拉片节点',
+    });
+    for (let index = 1; index <= 5; index += 1) {
+      mocks.saveBinaryToProjectData.mockResolvedValueOnce({
+        filePath: `G:\\project\\frame-${index}.jpg`, assetUrl: `asset://localhost/frame-${index}.jpg`,
+      });
+    }
+    const resources: PluginInvocationResources = {
+      self: [],
+      incoming: [],
+      inputs: {},
+      package: [],
+      derived: Array.from({ length: 5 }, (_, index) => ({
+        resourceId: `derived-${index + 1}`, origin: 'derived', displayName: `frame-${index + 1}.jpg`,
+        mediaType: 'image/jpeg', size: 3, access: 'read',
+      })),
+    };
+    const guard = registerCanvasDerivation(mocks.state as never, 'video-1');
+    expect(guard).not.toBeNull();
+
+    const execution = executeNodePluginTool(
+      getAvailableNodePluginTools([nodeSetPlugin], 'ai-video')[0],
+      'video-1',
+      {},
+      {
+        invocationId: 'frame-review-invocation',
+        guard: guard!,
+        resources,
+        trustedMediaReferences: new Set(),
+      },
+    );
+
+    if (expireOnLoad) {
+      await expect(execution).rejects.toThrow('画布已变化，插件结果未写入');
+      expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+      expect(mocks.saveBinaryToProjectData).toHaveBeenCalledTimes(1);
+      expect(mocks.moveToTrash).toHaveBeenCalledWith('G:\\project\\frame-1.jpg');
+      return;
+    }
+    await execution;
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+    const [createdNodes, createdEdges] = mocks.addNodesWithEdges.mock.calls[0] as [
+      Array<{ id: string; type: string; parentId?: string; position: { x: number; y: number }; data: Record<string, unknown> }>,
+      Array<{ source: string; target: string }>,
+    ];
+    const firstFrame = createdNodes.find((node) => node.type === 'ai-image')!;
+    const shotlist = createdNodes.find((node) => node.type === 'ai-shotlist')!;
+    expect(firstFrame.data).toMatchObject({
+      imageUrl: 'asset://localhost/frame-1.jpg',
+      nodeWidth: 280,
+      nodeHeight: 159,
+      frameAnalysis: { sourceVideoNodeId: 'video-1', actualTime: 0.96 },
+    });
+    expect(loadedImages).toEqual(Array.from({ length: 5 }, (_, index) => `asset://localhost/frame-${index + 1}.jpg`));
+    const frameHeight = Math.max(120, Math.round(276 * height / width) + 4);
+    expect(createdNodes[1].data).toMatchObject({ nodeWidth: 280, nodeHeight: frameHeight });
+    expect(createdNodes.every((node) => node.parentId === 'group-1')).toBe(true);
+    expect(createdNodes[0].position).toEqual({ x: 370, y: 20 });
+    expect(createdNodes[3].position.y).toBe(20);
+    expect(createdNodes[4].position).toEqual({ x: 370, y: 20 + Math.max(280, frameHeight + 80) });
+    expect(createdNodes[5].position.y).toBe(createdNodes[4].position.y);
+    expect(createdNodes[4].position.y).toBeGreaterThan(createdNodes[1].position.y + frameHeight);
+    expect(shotlist.data).toMatchObject({
+      shotlistRows: [{
+        id: 'shot-1',
+        shotNo: '1',
+        content: '建立环境',
+        frameAnalysis: {
+          sourceVideoNodeId: 'video-1', shotId: 'stable-1', inPoint: 0, outPoint: 2,
+          aiOriginal: { content: 'AI 原文', confidence: 0.5 }, overrideFields: ['content'], reviewStatus: 'reviewed',
+        },
+        frame: {
+          nodeId: firstFrame.id,
+          kind: 'image',
+          url: 'asset://localhost/frame-1.jpg',
+          filePath: 'G:\\project\\frame-1.jpg',
+        },
+      }],
+    });
+    expect(createdEdges).toHaveLength(5);
+    expect(createdEdges).toEqual(createdNodes.filter((node) => node.type === 'ai-image').map((node) => ({
+      id: expect.any(String),
+      source: node.id,
+      target: shotlist.id,
+      sourceHandle: 'right',
+      targetHandle: 'left',
+    })));
+    expect(JSON.stringify(shotlist.data)).not.toContain('forged');
+    expect(JSON.stringify(shotlist.data)).not.toContain('伪造来源');
+    expect(mocks.showToast).toHaveBeenCalledWith('已生成拉片节点');
+  });
+
+  it('shows the entire shotlist frame without cropping its aspect ratio', () => {
+    const styles = readFileSync(new URL('../../src/styles/nodes-shotlist.css', import.meta.url), 'utf8');
+    const imageRule = styles.match(/(?:^|\n)\.shot-frame-img\s*\{([^}]*)\}/)?.[1];
+    expect(imageRule).toMatch(/object-fit:\s*contain\s*;/);
+  });
+
+  it('redacts protected fields and nested local references even from a forged descriptor', async () => {
+    mocks.state = {
+      ...mocks.state,
+      nodes: [{
+        id: 'node-1',
+        type: 'ai-text',
+        position: { x: 10, y: 20 },
+        data: {
+          label: '文本',
+          type: 'ai-text',
+          output: 'before',
+          filePath: 'G:\\project\\secret.txt',
+          note: {
+            label: '保留',
+            previewUrl: 'asset://localhost/private.png',
+            filePath: 'G:\\project\\nested-secret.txt',
+          },
+        },
+      }],
+    };
+    const available = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+    const forged = {
+      ...available,
+      tool: { ...available.tool, inputFields: ['filePath', 'note', 'output'] },
+    };
+
+    await executeNodePluginTool(forged, 'node-1');
+
+    const nativeInput = mocks.invoke.mock.calls[0][1] as {
+      input: { node: { data: Record<string, unknown> } };
+    };
+    expect(nativeInput.input.node.data).toEqual({
+      note: { label: '保留' },
+      output: 'before',
+    });
   });
 
   it('drops a result when the canvas revision changes during execution', async () => {
@@ -421,6 +773,7 @@ describe('node plugin runtime', () => {
   });
 
   it('runs a custom node through a host-controlled model effect', async () => {
+    setLocale('ja-JP');
     mocks.state = {
       ...mocks.state,
       nodes: [{
@@ -469,6 +822,8 @@ describe('node plugin runtime', () => {
       invocationId: expect.any(String),
     });
     expect(secondInvocation.invocationId).toBe(firstInvocation.invocationId);
+    expect(firstInvocation).toMatchObject({ input: { locale: 'ja-JP' } });
+    expect(secondInvocation).toMatchObject({ input: { locale: 'ja-JP' } });
     expect(firstInvocation).not.toHaveProperty('runtime');
     expect(firstInvocation).not.toHaveProperty('source');
     expect(mocks.updateNodeData).toHaveBeenCalledWith('plugin-node-1', expect.objectContaining({
@@ -634,6 +989,40 @@ describe('node plugin runtime', () => {
     }));
   });
 
+  it('does not route a custom-node edge whose target handle is missing', async () => {
+    mocks.state = {
+      ...mocks.state,
+      nodes: [{
+        id: 'text-source',
+        type: 'ai-text',
+        position: { x: 0, y: 0 },
+        data: { label: '文本来源', type: 'ai-text', output: '不应透传' },
+      }, {
+        id: 'plugin-target',
+        type: 'plugin-node',
+        position: { x: 400, y: 0 },
+        data: {
+          label: '目标节点',
+          type: 'plugin-node',
+          pluginId: routingPlugin.id,
+          pluginNodeId: 'target',
+          pluginValues: {},
+        },
+      }],
+      installedPlugins: [routingPlugin],
+      edges: [{ id: 'edge-missing-handle', source: 'text-source', target: 'plugin-target' }],
+    };
+    mocks.invoke.mockResolvedValue({ data: { outputs: { result: '完成' } } });
+    const available = getAvailablePluginNodes([routingPlugin])
+      .find((item) => item.node.id === 'target');
+
+    await executePluginNode(available!, 'plugin-target', []);
+
+    expect(mocks.invoke).toHaveBeenCalledWith('execute_node_plugin_tool', expect.objectContaining({
+      input: expect.objectContaining({ inputs: {} }),
+    }));
+  });
+
   it('rejects incompatible declared plugin port types before invoking the plugin', async () => {
     mocks.state = {
       ...mocks.state,
@@ -720,7 +1109,7 @@ describe('node plugin runtime', () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
-  it('keeps the legacy generic-value fallback for ordinary source nodes', async () => {
+  it('keeps the generic-value fallback for ordinary source nodes', async () => {
     mocks.state = {
       ...mocks.state,
       nodes: [{
@@ -834,7 +1223,7 @@ describe('node plugin runtime', () => {
   });
 
   it('allows a media URL issued by a successful host model effect', async () => {
-    const generatedUrl = 'https://example.com/result.png';
+    const generatedUrl = 'asset://localhost/generated/result.png';
     mocks.state = {
       ...mocks.state,
       nodes: [{
@@ -857,6 +1246,7 @@ describe('node plugin runtime', () => {
         effect: { type: 'model.generate', modelId: 'general/image-1', prompt: '生成图片' },
       })
       .mockResolvedValueOnce({ data: { outputs: { image: generatedUrl } } });
+    mocks.generateImage.mockResolvedValueOnce({ url: generatedUrl, width: 1024, height: 1024 });
     const available = getAvailablePluginNodes([mediaNodePlugin])[0];
 
     await executePluginNode(available, 'plugin-media', [{
@@ -887,6 +1277,25 @@ describe('node plugin runtime', () => {
 
     await expect(executeNodePluginTool(tool, 'image-node'))
       .rejects.toThrow('未经宿主授权的远程媒体引用');
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+  });
+
+  it('rejects an untrusted local asset reference from a JavaScript node tool', async () => {
+    mocks.state = {
+      ...mocks.state,
+      nodes: [{
+        id: 'image-node',
+        type: 'ai-image',
+        position: { x: 10, y: 20 },
+        data: { label: '图片', type: 'ai-image' },
+      }],
+      installedPlugins: [mediaToolPlugin],
+    };
+    mocks.invoke.mockResolvedValue({ data: { imageUrl: 'asset://localhost/private.png' } });
+    const tool = getAvailableNodePluginTools([mediaToolPlugin], 'ai-image')[0];
+
+    await expect(executeNodePluginTool(tool, 'image-node'))
+      .rejects.toThrow('未经宿主授权的本地媒体引用');
     expect(mocks.updateNodeData).not.toHaveBeenCalled();
   });
 
@@ -1138,11 +1547,394 @@ describe('node plugin runtime', () => {
       category: 'image',
     }]);
 
-    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ image_urls: [] }));
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ image_urls: [] }), undefined);
+  });
+});
+
+describe('visible frame outputs', () => {
+  function setup(representation: 'original' | 'lineart', count = 2) {
+    const outputPlugin: InstalledPlugin = {
+      ...plugin,
+      manifest: { ...plugin.manifest, permissions: ['node.read', 'node.write', 'files.connected.read', 'files.output.create'], contributes: {
+        nodeTools: [{ id: 'frames', title: '分镜', nodeTypes: ['ai-text'], placements: ['node-context-menu'], inputFields: ['label'],
+          output: { mode: 'create-node-set', nodeTypes: ['ai-image', 'ai-shotlist'], maxNodes: 25, fields: ['imageWidth', 'imageHeight', 'frameAnalysis', 'shotlistRows'] } }],
+      } },
+    };
+    mocks.state.installedPlugins = [outputPlugin];
+    const frames = Array.from({ length: count }, (_, i) => ({ key: `frame-${i}`, nodeType: 'ai-image', resourceId: `derived-${i}`, representation,
+      data: { imageWidth: 9999, imageHeight: 9999, frameAnalysis: { shotId: `shot-${i}`, actualTime: i, content: '人工修改' } } }));
+    const payload = { data: { nodes: [...frames, { key: 'sheet', nodeType: 'ai-shotlist', data: {
+      shotlistRows: frames.map((frame, i) => ({ id: `shot-${i}`, frameKey: frame.key, content: '人工修改', frameAnalysis: { actualTime: i, reviewStatus: 'reviewed' } })),
+    } }], edges: [] } };
+    mocks.invoke.mockResolvedValue(payload);
+    mocks.readDerivedResource.mockImplementation((_context, resourceId: string, view = 'original') => ({
+      resource: { resourceId, origin: 'derived', displayName: 'frame.jpg', mediaType: view === 'lineart' ? 'image/png' : 'image/jpeg', size: 4, access: 'read' },
+      bytes: new Uint8Array(view === 'lineart' ? [137, 80, 78, 71] : [255, 216, 255, 224]),
+      ...(view === 'lineart' ? { dimensions: { width: 480, height: 720 } } : {}),
+    }));
+    mocks.saveBinaryToProjectData.mockImplementation(async (_bytes, _projectId, fileName: string) => ({ filePath: `G:\\project\\${fileName}`, assetUrl: `asset://localhost/${fileName}` }));
+    vi.stubGlobal('Image', class {
+      naturalWidth = 480;
+      naturalHeight = 720;
+      onload: (() => void) | null = null;
+      set src(_value: string) { this.onload?.(); }
+    });
+    const resources: PluginInvocationResources = { self: [], incoming: [], inputs: {}, package: [], derived: frames.map((frame) => ({
+      resourceId: frame.resourceId, origin: 'derived', access: 'read', displayName: 'frame.jpg', mediaType: 'image/jpeg', size: 4,
+    })) };
+    const guard = registerCanvasDerivation(mocks.state as never, 'node-1')!;
+    const run = () => executeNodePluginTool(getAvailableNodePluginTools([outputPlugin], 'ai-text')[0], 'node-1', {}, {
+      invocationId: 'visible-output', guard, resources, trustedMediaReferences: new Set(),
+    });
+    return { run, payload, resources };
+  }
+
+  it.each(['original', 'lineart'] as const)('saves 24 actual %s images and binds the same files to shotlist rows', async (view) => {
+    const { run, resources } = setup(view, 24);
+    await run();
+    const extension = view === 'lineart' ? 'png' : 'jpg';
+    expect(mocks.saveBinaryToProjectData).toHaveBeenCalledTimes(24);
+    const expectedBytes = new Uint8Array(view === 'lineart' ? [137, 80, 78, 71] : [255, 216, 255, 224]);
+    for (let i = 0; i < 24; i++) {
+      expect(mocks.saveBinaryToProjectData).toHaveBeenNthCalledWith(i + 1, expectedBytes, 'project-1', `video-frame-frame-${i}.${extension}`);
+    }
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+    const nodes = mocks.addNodesWithEdges.mock.calls[0][0];
+    const rows = nodes[24].data.shotlistRows;
+    nodes.slice(0, 24).forEach((node: { id: string; data: Record<string, unknown> }, i: number) => {
+      expect(node.data.frameAnalysis).toMatchObject({ shotId: `shot-${i}`, actualTime: i, content: '人工修改' });
+      if (view === 'lineart') expect(node.data).toMatchObject({ imageWidth: 480, imageHeight: 720 });
+      expect(rows[i]).toMatchObject({ id: `shot-${i}`, content: '人工修改', frameAnalysis: { actualTime: i, reviewStatus: 'reviewed' },
+        frame: { nodeId: node.id, kind: 'image', url: node.data.imageUrl, filePath: node.data.filePath } });
+    });
+    expect(resources.derived.every((r) => r.mediaType === 'image/jpeg')).toBe(true);
+    expect(mocks.moveToTrash).not.toHaveBeenCalled();
+  });
+
+  it('preflights every selected variant before saving any file', async () => {
+    const { run } = setup('lineart');
+    const read = mocks.readDerivedResource.getMockImplementation()!;
+    mocks.readDerivedResource.mockImplementation((...args) => {
+      if (args[1] === 'derived-1') throw new Error('该帧尚未生成线稿');
+      return read(...args);
+    });
+    await expect(run()).rejects.toThrow('尚未生成线稿');
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+  });
+
+  it.each(['save', 'empty-url-first', 'empty-url-second', 'lease', 'commit'] as const)('recycles all written line art on %s failure', async (failure) => {
+    const { run } = setup('lineart');
+    const save = mocks.saveBinaryToProjectData.getMockImplementation()!;
+    let count = 0;
+    mocks.saveBinaryToProjectData.mockImplementation(async (...args) => {
+      count++;
+      if (failure === 'save' && count === 2) throw new Error('写入失败');
+      const saved = await save(...args);
+      if ((failure === 'empty-url-first' && count === 1) || (failure === 'empty-url-second' && count === 2)) return { ...saved, assetUrl: '' };
+      if (failure === 'lease' && count === 2) mocks.readDerivedResource.mockImplementation(() => { throw new Error('插件资源已失效'); });
+      return saved;
+    });
+    if (failure === 'commit') mocks.addNodesWithEdges.mockImplementationOnce(() => { throw new Error('画布写入失败'); });
+    await expect(run()).rejects.toThrow();
+    const expectedCount = failure === 'save' || failure === 'empty-url-first' ? 1 : 2;
+    expect(mocks.moveToTrash).toHaveBeenCalledTimes(expectedCount);
+    for (let i = 0; i < expectedCount; i++) expect(mocks.moveToTrash).toHaveBeenCalledWith(`G:\\project\\video-frame-frame-${i}.png`);
+    if (failure !== 'commit') expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+  });
+
+  it.each(['unknown', 'non-image', 'oversized-id'] as const)('rejects %s output descriptors before any write', async (invalid) => {
+    const { run, payload } = setup('lineart');
+    if (invalid === 'unknown') Object.assign(payload.data.nodes[0], { representation: 'other' });
+    if (invalid === 'non-image') Object.assign(payload.data.nodes[2], { representation: 'lineart' });
+    if (invalid === 'oversized-id') Object.assign(payload.data.nodes[0], { resourceId: 'x'.repeat(161) });
+    await expect(run()).rejects.toThrow();
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
   });
 });
 
 describe('node plugin tool model effects', () => {
+  function uiContext() {
+    return {
+      pluginId: plugin.id, projectId: 'project-1', nodeId: 'node-1', title: '拉片',
+      permissions: ['files.connected.read', 'files.output.create'] as import('../../src/types/plugin').PluginPermission[],
+      models: [], trustedMediaReferences: new Set<string>(),
+      resources: { self: [{ resourceId: 'self-video', origin: 'node-self', access: 'read', displayName: '视频', mediaType: 'video/mp4', size: 3, source: { nodeId: 'node-1' } }], incoming: [], inputs: {}, package: [], derived: [] } as PluginInvocationResources,
+      resourceReadContext: {
+        pluginId: plugin.id, sourceDigest: plugin.sourceDigest!, revisionDigest: plugin.revisionDigest!,
+        invocationId: 'ui-shots', projectId: 'project-1', nodeId: 'node-1', baseRevision: 3,
+        permissions: ['files.connected.read', 'files.output.create'] as const, state: mocks.state as never,
+      },
+    };
+  }
+
+  function lineArtContext() {
+    const context = uiContext();
+    context.resources.derived.push({ resourceId: 'frame', origin: 'derived', access: 'read', displayName: 'frame.jpg', mediaType: 'image/jpeg', size: 3 });
+    return { ...context, effect: { type: 'image.lineArt', resourceId: 'frame' } };
+  }
+
+  it('converts an authorized original once and returns only a bounded preview and representation', async () => {
+    const context = lineArtContext();
+    const first = await executePluginUiHostEffect(context);
+    expect(first).toEqual({ type: 'image.lineArt', ok: true, value: {
+      resourceId: 'frame', representation: 'lineart', width: 480, height: 720,
+      previewDataUrl: 'data:image/png;base64,iVBORw==',
+    } });
+    expect(mocks.createLineArtImage).toHaveBeenCalledWith({ bytes: new Uint8Array([1, 2, 3]), mediaType: 'image/jpeg' }, expect.objectContaining({ assertFresh: expect.any(Function) }));
+    const cached = mocks.setLineArtResource.mock.calls[0][2];
+    mocks.getLineArtResource.mockReturnValue(cached);
+    expect(await executePluginUiHostEffect(context)).toEqual(first);
+    expect(mocks.createLineArtImage).toHaveBeenCalledTimes(1);
+    expect(mocks.setLineArtResource).toHaveBeenCalledTimes(1);
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.generateText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { resourceId: '' }, { resourceId: 42 }, { resourceId: 'a'.repeat(161) },
+    { resourceId: 'frame', url: 'https://example.com/frame.png' },
+    { resourceId: 'frame', bytes: [137, 80, 78, 71] },
+  ])('rejects malformed or uploaded line-art input before processing %j', async (extra) => {
+    await expect(executePluginUiHostEffect({ ...lineArtContext(), effect: { type: 'image.lineArt', ...extra } })).rejects.toThrow('只接受');
+    expect(mocks.createLineArtImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['foreign', 'self-video'])('rejects non-derived line-art source %s', async (resourceId) => {
+    expect(await executePluginUiHostEffect({ ...lineArtContext(), effect: { type: 'image.lineArt', resourceId } }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('当前调用的派生图像') });
+    expect(mocks.getLineArtResource).not.toHaveBeenCalled();
+    expect(mocks.createLineArtImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['files.connected.read', 'files.output.create'] as const)('requires %s for line art', async (missing) => {
+    const context = lineArtContext();
+    expect(await executePluginUiHostEffect({ ...context, permissions: context.permissions.filter((p) => p !== missing) }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('权限') });
+    expect(mocks.createLineArtImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'project', 'revision', 'plugin', 'lease', 'decode'] as const)('does not cache line art after %s failure', async (failure) => {
+    const context = lineArtContext();
+    const controller = new AbortController();
+    mocks.createLineArtImage.mockImplementationOnce(async () => {
+      if (failure === 'cancel') controller.abort();
+      if (failure === 'project') mocks.state.currentProjectId = 'other';
+      if (failure === 'revision') mocks.revision += 1;
+      if (failure === 'plugin') mocks.state.installedPlugins = [{ ...plugin, enabled: false }];
+      if (failure === 'lease') mocks.setLineArtResource.mockImplementationOnce(() => { throw new Error('插件资源已失效'); });
+      if (failure === 'decode') throw new Error('图片解码失败');
+      return { bytes: new Uint8Array([137, 80, 78, 71]), mediaType: 'image/png', width: 1, height: 1, previewDataUrl: 'data:image/png;base64,iVBORw==' };
+    });
+    expect(await executePluginUiHostEffect({ ...context, signal: controller.signal })).toMatchObject({ ok: false });
+    if (failure !== 'lease') expect(mocks.setLineArtResource).not.toHaveBeenCalled();
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+  });
+
+  it('routes local shot and frame operations through self resource and rejects stale results', async () => {
+    mocks.detectShots.mockResolvedValueOnce({ shots: [{ inPoint: 0, outPoint: 1, score: 0 }], scannedFrames: 25 });
+    const result = await executePluginUiHostEffect({ ...uiContext(), effect: { type: 'video.detectShots', resourceId: 'self-video', start: 0, end: 1 } });
+    expect(result).toMatchObject({ ok: true, value: { scannedFrames: 25 } });
+    expect(mocks.detectShots).toHaveBeenCalledWith(expect.objectContaining({ url: 'asset://localhost/video.mp4' }));
+    const invalid = await executePluginUiHostEffect({ ...uiContext(), effect: { type: 'video.inspectFrame', resourceId: 'foreign', time: 0, direction: 0 } });
+    expect(invalid).toMatchObject({ ok: false });
+    expect(mocks.inspectFrame).not.toHaveBeenCalled();
+    mocks.inspectFrame.mockImplementationOnce(async () => { mocks.revision = 4; return { actualTime: 1 }; });
+    const stale = await executePluginUiHostEffect({ ...uiContext(), effect: { type: 'video.inspectFrame', resourceId: 'self-video', time: 0, direction: 1 } });
+    expect(stale).toMatchObject({ ok: false });
+  });
+
+  it('exports derived bytes without paths, and recycles output if the canvas changes while saving', async () => {
+    mocks.saveBinaryToProjectData.mockResolvedValueOnce({ filePath: 'G:\\project\\sheet.jpg', assetUrl: 'asset://sheet' });
+    const exported = await executePluginUiHostEffect({ ...uiContext(), effect: { type: 'resource.export', resourceId: 'sheet', suggestedName: 'sheet.jpg' } });
+    expect(exported).toMatchObject({ ok: true, value: { fileName: 'sheet.jpg', bytes: 3 } });
+    expect(JSON.stringify(exported)).not.toContain('G:');
+    mocks.saveBinaryToProjectData.mockImplementationOnce(async () => {
+      mocks.revision = 4; return { filePath: 'G:\\project\\stale.json', assetUrl: 'asset://stale' };
+    });
+    const stale = await executePluginUiHostEffect({ ...uiContext(), effect: { type: 'resource.createText', content: '{}', suggestedName: 'stale.json' } });
+    expect(stale).toMatchObject({ ok: false });
+    expect(mocks.moveToTrash).toHaveBeenCalledWith('G:\\project\\stale.json');
+  });
+
+  it('extracts video frames only from the current self resource and registers analysis bytes opaquely', async () => {
+    const resources: PluginInvocationResources = {
+      self: [{
+        resourceId: 'video-self',
+        origin: 'node-self',
+        displayName: 'video.mp4',
+        mediaType: 'video/mp4',
+        size: 1024,
+        access: 'read',
+        source: { nodeId: 'node-1' },
+      }],
+      incoming: [],
+      inputs: {},
+      package: [],
+      derived: [],
+    };
+    mocks.extractVideoFrames.mockResolvedValueOnce({
+      video: { duration: 5, width: 1920, height: 1080, videoCodec: 'avc1' },
+      frames: [{
+        key: 'frame-1',
+        requestedTime: 1,
+        actualTime: 0.96,
+        frameDuration: 0.04,
+        width: 1280,
+        height: 720,
+        mediaType: 'image/jpeg',
+        previewDataUrl: 'data:image/jpeg;base64,AQ==',
+        bytes: new Uint8Array([1, 2, 3]),
+      }],
+      contactSheet: {
+        mediaType: 'image/jpeg',
+        width: 360,
+        height: 233,
+        bytes: new Uint8Array([4, 5, 6]),
+      },
+    });
+
+    const result = await executePluginUiHostEffect({
+      pluginId: plugin.id,
+      projectId: 'project-1',
+      title: '逐帧拉片',
+      permissions: ['files.connected.read', 'files.output.create'],
+      nodeId: 'node-1',
+      effect: {
+        type: 'video.extractFrames',
+        resourceId: 'video-self',
+        mode: 'analysis',
+        samples: [{ key: 'frame-1', time: 1 }],
+      },
+      models: [],
+      trustedMediaReferences: new Set(),
+      resources,
+      resourceReadContext: {
+        pluginId: plugin.id,
+        sourceDigest: plugin.sourceDigest!,
+        revisionDigest: plugin.revisionDigest!,
+        invocationId: 'invoke-frames',
+        projectId: 'project-1',
+        nodeId: 'node-1',
+        baseRevision: 3,
+        permissions: ['files.connected.read', 'files.output.create'],
+        state: mocks.state as never,
+      },
+    });
+
+    expect(mocks.extractVideoFrames).toHaveBeenCalledWith(expect.objectContaining({
+      url: 'asset://localhost/video.mp4',
+      mode: 'analysis',
+      samples: [{ key: 'frame-1', time: 1 }],
+    }));
+    expect(result).toMatchObject({
+      type: 'video.extractFrames',
+      ok: true,
+      value: {
+        frames: [{ key: 'frame-1', resourceId: 'derived-1' }],
+        contactSheetResourceId: 'derived-2',
+      },
+    });
+    expect(resources.derived).toHaveLength(2);
+    expect(JSON.stringify(result)).not.toContain('1,2,3');
+  });
+
+  it('applies JavaScript media-source restrictions to every custom UI effect', async () => {
+    await expect(executePluginUiHostEffect({
+      pluginId: plugin.id,
+      projectId: 'project-1',
+      title: '自定义界面',
+      permissions: ['models.invoke'],
+      nodeId: 'node-1',
+      effect: {
+        type: 'model.generate',
+        modelId: 'image-model',
+        prompt: '处理图片',
+        imageUrls: ['https://untrusted.example/frame.png'],
+      },
+      models: [{
+        id: 'image-model',
+        name: '图像模型',
+        provider: 'general',
+        category: 'image',
+      }],
+      trustedMediaReferences: new Set(),
+    })).rejects.toThrow('未经宿主授权的远程媒体引用');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+  });
+
+  it('adds a successful custom UI model result to the current trusted media set', async () => {
+    const generatedUrl = 'asset://localhost/generated/ui-result.png';
+    const trustedMediaReferences = new Set<string>();
+    mocks.generateImage.mockResolvedValueOnce({ url: generatedUrl, width: 1024, height: 1024 });
+
+    const result = await executePluginUiHostEffect({
+      resourceReadContext: uiContext().resourceReadContext,
+      pluginId: plugin.id,
+      projectId: 'project-1',
+      title: '自定义界面',
+      permissions: ['models.invoke'],
+      nodeId: 'node-1',
+      effect: {
+        type: 'model.generate',
+        modelId: 'image-model',
+        prompt: '生成图片',
+      },
+      models: [{
+        id: 'image-model',
+        name: '图像模型',
+        provider: 'general',
+        category: 'image',
+      }],
+      trustedMediaReferences,
+    });
+
+    expect(result).toEqual({
+      type: 'model.generate',
+      ok: true,
+      value: { url: generatedUrl },
+    });
+    expect(trustedMediaReferences).toContain(generatedUrl);
+  });
+
+  it('passes media cancellation through and does not trust a model result after revocation', async () => {
+    const controller = new AbortController();
+    const context = uiContext();
+    mocks.generateImage.mockImplementationOnce(async () => {
+      controller.abort();
+      return { url: 'https://example.com/late.png' };
+    });
+    const result = await executePluginUiHostEffect({
+      ...context, permissions: ['models.invoke'], signal: controller.signal,
+      models: [{ id: 'image-model', name: '图像', provider: 'general', category: 'image' }],
+      effect: { type: 'model.generate', modelId: 'image-model', prompt: '生成' },
+    });
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.anything(), controller.signal);
+    expect(result).toMatchObject({ ok: false, error: '插件操作已取消' });
+    expect(context.trustedMediaReferences.size).toBe(0);
+  });
+
+  it.each(['abort', 'canvas'])('does not run a host effect from a late native tool result after %s', async (reason) => {
+    const controller = new AbortController();
+    const guard = registerCanvasDerivation(mocks.state as never, 'node-1')!;
+    mocks.invoke.mockImplementationOnce(async () => {
+      if (reason === 'abort') controller.abort();
+      else mocks.revision += 1;
+      return { effect: { type: 'model.generate', modelId: 'general/text-1', prompt: '迟到请求' } };
+    });
+    try {
+      await expect(executeNodePluginTool(getAvailableNodePluginTools([plugin], 'ai-text')[0], 'node-1', {}, {
+        invocationId: 'cancelled-ui', guard, resources: { self: [], incoming: [], inputs: {}, package: [], derived: [] },
+        signal: controller.signal,
+      })).rejects.toThrow(reason === 'abort' ? '已取消' : '画布已变化');
+      expect(mocks.generateText).not.toHaveBeenCalled();
+      expect(mocks.updateNodeData).not.toHaveBeenCalled();
+      expect(mocks.invoke).toHaveBeenCalledOnce();
+    } finally { completeCanvasDerivation(guard); }
+  });
+
   it('exposes the model catalog only to tools declaring models.read', async () => {
     mocks.state = { ...mocks.state, installedPlugins: [modelToolPlugin] };
     await executeNodePluginTool(getAvailableNodePluginTools([modelToolPlugin], 'ai-text')[0], 'node-1');
@@ -1180,6 +1972,38 @@ describe('node plugin tool model effects', () => {
       value: { text: '模型结果' },
     });
     expect(mocks.addNode).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates text only inside the current project and returns no local path', async () => {
+    mocks.state = { ...mocks.state, installedPlugins: [outputToolPlugin] };
+    mocks.saveBinaryToProjectData.mockResolvedValueOnce({
+      filePath: 'G:\\project\\_secret_.md',
+      assetUrl: 'asset://localhost/_secret_.md',
+    });
+    mocks.invoke
+      .mockResolvedValueOnce({
+        effect: { type: 'resource.createText', content: 'hello', suggestedName: '../secret?.md' },
+      })
+      .mockResolvedValueOnce({ data: { output: 'done' } });
+
+    await executeNodePluginTool(
+      getAvailableNodePluginTools([outputToolPlugin], 'ai-text')[0],
+      'node-1',
+    );
+
+    expect(mocks.saveBinaryToProjectData).toHaveBeenCalledWith(
+      new TextEncoder().encode('hello'),
+      'project-1',
+      '_secret_.md',
+    );
+    const second = mocks.invoke.mock.calls[1][1] as { input: { effectResult: unknown } };
+    expect(second.input.effectResult).toEqual({
+      type: 'resource.createText',
+      ok: true,
+      value: { fileName: '_secret_.md', bytes: 5 },
+    });
+    expect(JSON.stringify(second.input.effectResult)).not.toContain('G:\\project');
+    expect(JSON.stringify(second.input.effectResult)).not.toContain('asset://');
   });
 
   it('rejects unauthorized remote image references from a JavaScript node tool', async () => {

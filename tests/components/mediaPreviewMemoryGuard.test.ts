@@ -13,6 +13,7 @@ const connectedPreviewSource = readSource(
 );
 const panoramaNodeSource = readSource('../../src/components/nodes/PanoramaNode.tsx');
 const videoNodeSource = readSource('../../src/components/nodes/VideoNode.tsx');
+const videoPreviewCacheSource = readSource('../../src/components/nodes/shared/video/canvasVideoPreviewCache.ts');
 const nodesCssSource = readSource('../../src/styles/nodes.css');
 const nodesImageCssSource = readSource('../../src/styles/nodes-image.css');
 const cropCssSource = readSource('../../src/styles/crop.css');
@@ -38,6 +39,7 @@ const videoEditorWindowSource = readSource(
 const videoEditorMediaServiceSource = readSource(
   '../../src/services/videoEditorMediaService.ts',
 );
+const videoEditorBitmapSource = readSource('../../src/services/videoEditorRenderBitmap.ts');
 
 describe('media preview memory guards', () => {
   it('uses the no-backdrop preview scope and removes duplicate connected thumbnails', () => {
@@ -80,11 +82,11 @@ describe('media preview memory guards', () => {
   });
 
   it('bounds and releases video-editor image bitmaps and export surfaces', () => {
-    expect(videoEditorWindowSource).toContain('const MAX_RENDER_IMAGE_BITMAP_BYTES = 256 * 1024 * 1024;');
-    expect(videoEditorWindowSource).toMatch(
+    expect(videoEditorBitmapSource).toContain('const MAX_RENDER_IMAGE_BITMAP_BYTES = 256 * 1024 * 1024;');
+    expect(videoEditorBitmapSource).toMatch(
       /retainedBytes \+ bytes > MAX_RENDER_IMAGE_BITMAP_BYTES[\s\S]*?bitmap\.close\(\)/,
     );
-    expect(videoEditorWindowSource.match(/createBudgetedRenderBitmap\(/g)).toHaveLength(3);
+    expect(videoEditorWindowSource.match(/createBudgetedRenderBitmap\(/g)).toHaveLength(2);
     expect(videoEditorWindowSource.match(/closeRenderSourceBitmaps\(renderSources\.values\(\)\)/g)).toHaveLength(2);
     expect(videoEditorMediaServiceSource).toMatch(
       /export async function exportComposite[\s\S]*?finally \{\s*await pendingOutput\?\.cancel\(\)[\s\S]*?surface\.width = 1;\s*surface\.height = 1;/,
@@ -104,16 +106,18 @@ describe('media preview memory guards', () => {
   });
 
   it('moves video playback between one compact player and one fullscreen player', () => {
-    expect(videoNodeSource).toContain('{data.videoUrl && !isFullscreen ? (');
+    expect(videoNodeSource).toContain('{shouldMountPlayer ? (');
     expect(videoNodeSource).toContain('compactPlaybackRestoreRef.current = {');
     expect(videoNodeSource).toContain('shouldPlay: fullscreenPlaybackRef.current.wasPlaying');
     expect(videoNodeSource).toContain('releaseVideoElement(fullscreenVideo);');
-    expect(videoNodeSource).toMatch(
-      /function releaseVideoElement[\s\S]*?removeAttribute\('src'\)[\s\S]*?video\.load\(\)/,
-    );
+    expect(videoNodeSource).toContain('releaseCanvasVideo(video);');
+    expect(videoPreviewCacheSource).toMatch(/function releaseCanvasVideo[\s\S]*?removeAttribute\('src'\)[\s\S]*?video\.load\(\)/);
     expect(videoNodeSource).toMatch(/const cleanup = \(\) => \{[\s\S]*?releaseVideoElement\(video\)/);
     expect(videoNodeSource).toMatch(
       /className="fullscreen-overlay--image-preview"[\s\S]*?ref=\{setFullscreenVideoElement\}/,
+    );
+    expect(videoNodeSource).toMatch(
+      /const setFullscreenVideoElement[\s\S]*?if \(!video\) return;[\s\S]*?fullscreenVideoRef\.current = video;/,
     );
     expect(videoNodeSource).toContain('const VIDEO_FRAME_MAX_DIMENSION = 1280;');
     expect(videoNodeSource).toMatch(
@@ -148,6 +152,9 @@ describe('media preview memory guards', () => {
     expect(composerCssSource.match(/@keyframes composerRootBloom\s*\{[\s\S]*?\n\}/)?.[0]).not.toContain('filter:');
     expect(nodesCssSource).toMatch(
       /\.fullscreen-overlay--image-preview \.fullscreen-video-view\s*\{[^}]*animation:\s*none/s,
+    );
+    expect(nodesCssSource).toMatch(
+      /\.fullscreen-video-view\s*\{(?=[^}]*width:\s*92vw)(?=[^}]*height:\s*92vh)(?=[^}]*object-fit:\s*contain)[^}]*\}/s,
     );
     expect(cameraStudioCssSource).toMatch(
       /\.fullscreen-overlay\.camera-studio-overlay\s*\{[^}]*backdrop-filter:\s*none/s,

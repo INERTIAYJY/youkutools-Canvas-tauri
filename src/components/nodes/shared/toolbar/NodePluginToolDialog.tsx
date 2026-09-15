@@ -1,7 +1,18 @@
+import Select from '../../../shared/Select';
 import { Icon } from '@iconify/react';
-import { useMemo, useState, type FormEvent } from 'react';
-import type { AvailableNodePluginTool, PluginJsonValue } from '../../../../types/plugin';
+import { getLocale } from '../../../../i18n';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import pluginUiHostDocument from '../../../../../plugin-ui-host.html?raw';
+import type {
+  AvailableNodePluginTool,
+  PluginJsonValue,
+} from '../../../../types/plugin';
 import { executeNodePluginTool } from '../../../../services/plugins/pluginRuntime';
+import { openPluginUiWindow, pluginUiWindowUnavailableReason } from '../../../../services/plugins/pluginUiWindowService';
+import {
+  createPluginUiFrameSession,
+  type PluginUiFrameSession,
+} from '../../../../services/plugins/pluginUiSessionService';
 import {
   buildPluginModelCatalog,
   collectDeclaredModelCategories,
@@ -19,6 +30,46 @@ interface NodePluginToolDialogProps {
 
 type FormValue = string | boolean;
 
+interface PluginUiFrameDocument {
+  objectUrl: string;
+  src: string;
+}
+
+const PLUGIN_UI_BOOTSTRAP_MARKUP = 'src="/plugin-ui-bootstrap.js"';
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+function createPluginUiFrameDocument(sessionSrc: string): PluginUiFrameDocument {
+  const sessionUrl = new URL(sessionSrc, window.location.href);
+  const sessionParameters = sessionUrl.searchParams.toString();
+  if (!sessionParameters) throw new Error('插件界面会话参数缺失');
+
+  const bootstrapUrl = escapeHtmlAttribute(
+    new URL('/plugin-ui-bootstrap.js', window.location.href).href,
+  );
+  const documentHtml = pluginUiHostDocument.replace(
+    PLUGIN_UI_BOOTSTRAP_MARKUP,
+    `src="${bootstrapUrl}"`,
+  );
+  if (documentHtml === pluginUiHostDocument) {
+    throw new Error('插件界面宿主页无效');
+  }
+
+  const objectUrl = URL.createObjectURL(new Blob([documentHtml], {
+    type: 'text/html;charset=utf-8',
+  }));
+  return {
+    objectUrl,
+    src: `${objectUrl}#${sessionParameters}`,
+  };
+}
+
 function initialFormValues(pluginTool: AvailableNodePluginTool): Record<string, FormValue> {
   const values: Record<string, FormValue> = {};
   for (const field of pluginTool.tool.dialog?.fields ?? []) {
@@ -29,10 +80,23 @@ function initialFormValues(pluginTool: AvailableNodePluginTool): Record<string, 
   return values;
 }
 
+function initialPluginParameters(pluginTool: AvailableNodePluginTool): Record<string, PluginJsonValue> {
+  const parameters: Record<string, PluginJsonValue> = {};
+  for (const field of pluginTool.tool.dialog?.fields ?? []) {
+    if (field.defaultValue === undefined) continue;
+    if (field.type === 'boolean') parameters[field.id] = field.defaultValue === true;
+    else if (field.type === 'number') parameters[field.id] = Number(field.defaultValue);
+    else parameters[field.id] = String(field.defaultValue);
+  }
+  return parameters;
+}
+
 export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: NodePluginToolDialogProps) {
   const showToast = useAppStore((state) => state.showToast);
   const config = useAppStore((state) => state.config);
   const dialog = pluginTool.tool.dialog;
+  const supportsNativeWindow = dialog?.presentation === 'window' && Boolean(dialog.ui);
+  const windowUnavailableReason = supportsNativeWindow ? pluginUiWindowUnavailableReason() : null;
   // 只有声明 models.read 的插件才拿得到模型目录，且目录不含任何厂商凭据。
   const models = useMemo(
     () => (pluginTool.permissions.includes('models.read')
@@ -46,43 +110,160 @@ export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: No
   const [values, setValues] = useState<Record<string, FormValue>>(() => initialFormValues(pluginTool));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [openingWindow, setOpeningWindow] = useState(false);
+  const openingWindowRef = useRef(false);
+  const [frameSession, setFrameSession] = useState<PluginUiFrameSession | null>(null);
+  const [frameDocument, setFrameDocument] = useState<PluginUiFrameDocument | null>(null);
+  const [uiLoading, setUiLoading] = useState(Boolean(dialog?.ui));
+  const frameSessionRef = useRef<PluginUiFrameSession | null>(null);
+  const frameDocumentRef = useRef<PluginUiFrameDocument | null>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    frameSession?.updateTheme(config.theme);
+  }, [config.theme, frameSession]);
+
+  useEffect(() => {
+    frameSession?.updateLocale(getLocale());
+  }, [config.language, frameSession]);
+
+  useEffect(() => {
+    const exportName = dialog?.ui;
+    if (!exportName) return undefined;
+    let cancelled = false;
+    const plugin = useAppStore
+      .getState()
+      .installedPlugins.find((item) => item.id === pluginTool.pluginId);
+    if (!plugin) {
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setUiLoading(false);
+        setFrameSession(null);
+        setError('找不到已安装的插件');
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    void createPluginUiFrameSession({
+      plugin,
+      tool: pluginTool.tool,
+      nodeId,
+      exportName,
+      parameters: initialPluginParameters(pluginTool),
+      onClose: () => onCloseRef.current(),
+    }).then((session) => {
+      if (cancelled) {
+        session.dispose();
+        return;
+      }
+      let nextFrameDocument: PluginUiFrameDocument;
+      try {
+        nextFrameDocument = createPluginUiFrameDocument(session.src);
+      } catch (cause) {
+        session.dispose();
+        throw cause;
+      }
+      frameSessionRef.current = session;
+      frameDocumentRef.current = nextFrameDocument;
+      setFrameSession(session);
+      setFrameDocument(nextFrameDocument);
+      setError(null);
+      setUiLoading(false);
+    }).catch((cause) => {
+      if (cancelled) return;
+      setUiLoading(false);
+      setFrameSession(null);
+      const message = cause instanceof Error ? cause.message : '插件界面加载失败';
+      setError(message);
+      showToast(message, 'error');
+    });
+    return () => {
+      cancelled = true;
+      frameSessionRef.current?.dispose();
+      frameSessionRef.current = null;
+      if (frameDocumentRef.current) {
+        URL.revokeObjectURL(frameDocumentRef.current.objectUrl);
+        frameDocumentRef.current = null;
+      }
+    };
+  }, [dialog?.ui, nodeId, pluginTool, showToast]);
 
   if (!dialog) return null;
 
-  const close = () => {
-    if (!busy) onClose();
+  const openInWindow = async () => {
+    if (!supportsNativeWindow || !dialog.ui || windowUnavailableReason || openingWindowRef.current) return;
+    const plugin = useAppStore.getState().installedPlugins.find((item) => item.id === pluginTool.pluginId);
+    if (!plugin) {
+      showToast('找不到已安装的插件', 'error');
+      return;
+    }
+    openingWindowRef.current = true;
+    setOpeningWindow(true);
+    try {
+      // 原生会话独立持有资源；创建/聚焦成功后才回收内嵌会话，失败时保留编辑。
+      await openPluginUiWindow({
+        plugin, tool: pluginTool.tool, nodeId, exportName: dialog.ui,
+        parameters: initialPluginParameters(pluginTool),
+      });
+      frameSessionRef.current?.dispose();
+      frameSessionRef.current = null;
+      onCloseRef.current();
+    } catch (cause) {
+      showToast(cause instanceof Error ? cause.message : '插件窗口打开失败', 'error');
+    } finally {
+      openingWindowRef.current = false;
+      setOpeningWindow(false);
+    }
   };
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const close = () => {
+    if (busy) return;
+    frameSessionRef.current?.dispose();
+    onClose();
+  };
+
+  const collectParameters = (strict: boolean): Record<string, PluginJsonValue> | null => {
     const parameters: Record<string, PluginJsonValue> = {};
     for (const field of dialog.fields) {
       const value = values[field.id];
       if (field.type === 'boolean') {
-        if (field.required && value !== true) {
+        if (strict && field.required && value !== true) {
           setError(`请勾选“${field.label}”`);
-          return;
+          return null;
         }
         parameters[field.id] = value === true;
         continue;
       }
       const textValue = typeof value === 'string' ? value : '';
-      if (field.required && !textValue.trim()) {
+      if (strict && field.required && !textValue.trim()) {
         setError(`请填写“${field.label}”`);
-        return;
+        return null;
       }
       if (!textValue && !field.required) continue;
       if (field.type === 'number') {
         const numberValue = Number(textValue);
         if (!Number.isFinite(numberValue)) {
           setError(`“${field.label}”必须是有效数字`);
-          return;
+          return null;
         }
         parameters[field.id] = numberValue;
       } else {
         parameters[field.id] = textValue;
       }
     }
+    return parameters;
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    // 自定义 UI 下字段只充当初始值契约，必填校验交给插件视图自己处理。
+    const parameters = collectParameters(!dialog.ui);
+    if (!parameters) return;
 
     setError(null);
     setBusy(true);
@@ -99,6 +280,77 @@ export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: No
   };
 
   const inputClassName = 'mt-1.5 w-full rounded-lg border border-canvas-border bg-canvas-surface px-3 py-2 text-xs text-canvas-text outline-none transition-colors placeholder:text-canvas-text-muted focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/15';
+
+  if (dialog.ui) {
+    return (
+      <ModalOverlay
+        isOpen
+        onClose={close}
+        ariaLabel={dialog.title || pluginTool.tool.title}
+        className="h-[calc(100dvh-32px)] max-h-[1100px] w-[calc(100vw-32px)] max-w-[1600px] min-w-0 border-canvas-border"
+        closeOnBackdrop
+        motionPreset="quick"
+      >
+        <header className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-4 py-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
+            <Icon icon={pluginTool.tool.icon || 'lucide:blocks'} width={18} height={18} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-sm font-semibold text-canvas-text">
+              {dialog.title || pluginTool.tool.title}
+            </h2>
+            <p className="mt-0.5 truncate text-[11px] text-canvas-text-muted">
+              {pluginTool.pluginName}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {supportsNativeWindow && (
+              <button
+                type="button"
+                className="ui-btn ui-btn--ghost h-8 w-8 shrink-0 px-0"
+                aria-label="在独立窗口打开"
+                title={windowUnavailableReason || '在独立窗口打开（成功后关闭弹窗，未保存编辑不迁移）'}
+                disabled={openingWindow || Boolean(windowUnavailableReason)}
+                onClick={() => void openInWindow()}
+              >
+                <Icon
+                  icon={openingWindow ? 'lucide:loader-circle' : 'lucide:external-link'}
+                  width={16}
+                  height={16}
+                  className={openingWindow ? 'animate-spin' : undefined}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            <PopupCloseButton onClick={close} />
+          </div>
+        </header>
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto bg-canvas-surface">
+          {uiLoading && (
+            <div className="flex h-full items-center justify-center gap-2 text-xs text-canvas-text-secondary">
+              <Icon icon="lucide:loader-circle" width={16} height={16} className="animate-spin" />
+              正在加载插件界面…
+            </div>
+          )}
+          {!uiLoading && error && (
+            <div role="alert" className="m-4 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-300">
+              {error}
+            </div>
+          )}
+          {frameSession && frameDocument && !error && (
+            <iframe
+              ref={(element) => frameSession.attach(element?.contentWindow ?? null)}
+              src={frameDocument.src}
+              title={`${pluginTool.pluginName} · ${dialog.title || pluginTool.tool.title}`}
+              sandbox="allow-scripts"
+              referrerPolicy="no-referrer"
+              className="block h-full w-full min-w-0 border-0 bg-canvas-surface"
+            />
+          )}
+        </div>
+      </ModalOverlay>
+    );
+  }
 
   return (
     <ModalOverlay
@@ -169,27 +421,27 @@ export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: No
                       }}
                     />
                   ) : field.type === 'select' ? (
-                    <select
+                    <Select fixedMenu
                       value={String(values[field.id] ?? '')}
                       required={field.required}
                       disabled={busy}
-                      className={inputClassName}
-                      onChange={(event) => {
-                        const nextValue = event.currentTarget.value;
+                      className="min-w-0"
+                      onChange={(selectedOptionValue) => {
+                        const nextValue = selectedOptionValue;
                         setValues((current) => ({ ...current, [field.id]: nextValue }));
                       }}
                     >
                       <option value="">{field.placeholder || '请选择'}</option>
                       {field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                    </select>
+                    </Select>
                   ) : field.type === 'model' ? (
-                    <select
+                    <Select fixedMenu
                       value={String(values[field.id] ?? '')}
                       required={field.required}
                       disabled={busy}
-                      className={inputClassName}
-                      onChange={(event) => {
-                        const nextValue = event.currentTarget.value;
+                      className="min-w-0"
+                      onChange={(selectedOptionValue) => {
+                        const nextValue = selectedOptionValue;
                         setValues((current) => ({ ...current, [field.id]: nextValue }));
                       }}
                     >
@@ -199,7 +451,7 @@ export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: No
                       {models
                         .filter((model) => !field.modelCategories || field.modelCategories.includes(model.category))
                         .map((model) => <option key={model.id} value={model.id}>{model.name} · {model.category}</option>)}
-                    </select>
+                    </Select>
                   ) : (
                     <input
                       type={field.type === 'number' ? 'number' : 'text'}

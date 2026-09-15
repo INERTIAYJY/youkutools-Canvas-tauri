@@ -15,7 +15,7 @@ interface TestNode {
 
 interface TestStore {
   activeNodeId: string | null;
-  config: { performanceMode: boolean };
+  config: { performanceMode: boolean; providers: Record<string, never> };
   currentProjectId: string | null;
   dialogPosition?: { x: number; y: number };
   nodes: TestNode[];
@@ -24,6 +24,17 @@ interface TestStore {
   customStyles: Array<Record<string, unknown>>;
   workflows: unknown[];
   selectedNodeIds: string[];
+  comfyNodeProgress: Record<string, {
+    projectId: string;
+    nodeId: string;
+    requestId: string;
+    clientId: string;
+    stage: string;
+    value?: number;
+    max?: number;
+    percent?: number;
+    updatedAt: number;
+  }>;
   getCurrentRevision: () => number;
   setNodes: (nodes: TestNode[]) => void;
   addNode: ReturnType<typeof vi.fn>;
@@ -79,6 +90,7 @@ async function installReactHookDriver(
   vi.doMock('react', async () => {
     const actual = await vi.importActual<typeof import('react')>('react');
     let stateIndex = 0;
+    let idIndex = 0;
     return {
       ...actual,
       memo: <T,>(component: T) => component,
@@ -87,6 +99,8 @@ async function installReactHookDriver(
       useCallback: <T,>(callback: T) => callback,
       useEffect: () => undefined,
       useLayoutEffect: () => undefined,
+      useContext: () => undefined,
+      useId: () => `test-id-${++idIndex}`,
       useMemo: <T,>(factory: () => T) => factory(),
       useRef: <T,>(initialValue: T) => ({ current: initialValue }),
       useSyncExternalStore: () => 'zh-CN',
@@ -104,7 +118,7 @@ async function installReactHookDriver(
 function createStore(nodes: TestNode[], getRevision: () => number): TestStore {
   const store = {
     activeNodeId: null,
-    config: { performanceMode: false },
+    config: { performanceMode: false, providers: {} },
     currentProjectId: 'project-a',
     nodes,
     edges: [],
@@ -112,6 +126,7 @@ function createStore(nodes: TestNode[], getRevision: () => number): TestStore {
     customStyles: [{ id: 'style-project', name: 'Project style' }],
     workflows: [],
     selectedNodeIds: [],
+    comfyNodeProgress: {},
     getCurrentRevision: getRevision,
     setNodes: (nextNodes: TestNode[]) => { store.nodes = nextNodes; },
     addNode: vi.fn((node: TestNode) => { store.nodes = [...store.nodes, node]; }),
@@ -175,6 +190,31 @@ beforeEach(() => {
 });
 
 describe('critical canvas node interactions', () => {
+  it('NodeGenerationProgress renders real ComfyUI value and percent for the current project', async () => {
+    await installReactHookDriver();
+    const store = createStore([], () => 1);
+    store.comfyNodeProgress['node-1'] = {
+      projectId: 'project-a',
+      nodeId: 'node-1',
+      requestId: 'request-1',
+      clientId: 'client-1',
+      stage: 'running',
+      value: 6,
+      max: 12,
+      percent: 50,
+      updatedAt: 1,
+    };
+    installStoreMock(store);
+    const { default: NodeGenerationProgress } = await import('../../src/components/nodes/shared/NodeGenerationProgress');
+
+    const rendered = NodeGenerationProgress({ nodeId: 'node-1', fallbackLabel: '生成图像中...' });
+    const progressbar = findElement(rendered, (element) => element.props.role === 'progressbar');
+    const detail = findElement(rendered, (element) => element.props.children === '6 / 12 · 50%');
+
+    expect(progressbar.props['aria-valuenow']).toBe(50);
+    expect(detail).toBeTruthy();
+  });
+
   it('NodeContextMenu exposes character capture only when the callback is available', async () => {
     await installReactHookDriver();
     vi.stubGlobal('window', { innerWidth: 1280, innerHeight: 800 });
@@ -268,7 +308,10 @@ describe('critical canvas node interactions', () => {
       expect.objectContaining({ status: 'success' }),
     );
     expect(store.showToast).not.toHaveBeenCalledWith('裁切完成，已创建新节点');
-  });
+  },
+  // 该用例要 doMock 十余个模块并驱动 React hook，单跑约 2~3 秒；
+  // 全量并发时会被调度拖慢，默认 5s 超时不够用，这里放宽到 20s 避免偶发失败。
+  20_000);
 
   it('VideoNode does not create a frame node after its derivation becomes stale', async () => {
     let revision = 1;
@@ -313,8 +356,9 @@ describe('critical canvas node interactions', () => {
     const VideoNode = (await import('../../src/components/nodes/VideoNode')).default as unknown as (
       props: { id: string; data: Record<string, unknown>; selected: boolean },
     ) => unknown;
+    store.selectedNodeIds = ['video-source'];
     const tree = VideoNode({ id: 'video-source', data: store.nodes[0].data, selected: true });
-    const video = findElement(tree, (element) => element.type === 'video' && element.props.preload === 'metadata');
+    const video = findElement(tree, (element) => element.type === 'video' && element.props.className === 'video-preview-player compact');
     const toolbar = findElement(tree, (element) => componentName(element) === 'VideoNodeToolbarMock');
     (video.props.ref as { current: unknown }).current = {
       readyState: 2,
@@ -552,7 +596,12 @@ describe('critical canvas node interactions', () => {
       buildPanoramaPrompt: vi.fn(),
     }));
     vi.doMock('../../src/services/ai/generateAudio', () => ({ persistAudioGenerationResult: vi.fn() }));
-    vi.doMock('../../src/services/fileService', () => ({ downloadUrlAndSave: vi.fn().mockResolvedValue(null) }));
+    vi.doMock('../../src/services/fileService', () => ({
+      persistMediaUrlToProjectData: vi.fn(async (url: string) => ({
+        mediaUrl: url,
+        sourceUrl: url,
+      })),
+    }));
     vi.doMock('../../src/services/imageBatchService', () => ({ applyImageBatchResults: vi.fn() }));
     vi.doMock('../../src/services/onnxService', () => ({
       checkModelExists: vi.fn(), createCharacterDirectionGrid: vi.fn(), downloadModel: vi.fn(),
@@ -632,7 +681,7 @@ describe('critical canvas node interactions', () => {
     }));
   });
 
-  it('AINodeDialog exposes a ComfyUI stop action while the node is generating', async () => {
+  it.each(['success', 'failure', 'project-switch'])('AINodeDialog ComfyUI stop and recovery: %s', async (outcome) => {
     const store = createStore([{
       id: 'image-node',
       type: 'ai-image',
@@ -648,7 +697,21 @@ describe('critical canvas node interactions', () => {
       },
     }], () => 1);
     store.activeNodeId = 'image-node';
-    const cancelComfyUINodeTask = vi.fn().mockResolvedValue(undefined);
+    let pendingTasks = [{ nodeId: 'image-node', taskId: 'prompt-1', taskType: 'comfyui', comfyRecoveryState: undefined as string | undefined }];
+    const resumeComfyUINodeTask = vi.fn().mockResolvedValue(undefined);
+    const generateImage = vi.fn();
+    const cancelComfyUINodeTask = vi.fn(async () => {
+      if (outcome === 'failure') {
+        pendingTasks[0].comfyRecoveryState = 'cancel_pending';
+        throw new Error('HTTP 503');
+      }
+      pendingTasks = [];
+      if (outcome === 'project-switch') store.currentProjectId = 'project-b';
+    });
+    vi.doMock('../../src/services/pollManager', () => ({
+      getPendingTasksForProject: () => pendingTasks,
+      resumeComfyUINodeTask,
+    }));
 
     await installReactHookDriver();
     installStoreMock(store);
@@ -659,14 +722,19 @@ describe('critical canvas node interactions', () => {
     }));
     vi.doMock('../../src/services/aiService', () => ({
       generateText: vi.fn(),
-      generateImage: vi.fn(),
+      generateImage,
       generateImagesBatch: vi.fn(),
       generateVideo: vi.fn(),
       generateAudio: vi.fn(),
       buildPanoramaPrompt: vi.fn(),
     }));
     vi.doMock('../../src/services/ai/generateAudio', () => ({ persistAudioGenerationResult: vi.fn() }));
-    vi.doMock('../../src/services/fileService', () => ({ downloadUrlAndSave: vi.fn() }));
+    vi.doMock('../../src/services/fileService', () => ({
+      persistMediaUrlToProjectData: vi.fn(async (url: string) => ({
+        mediaUrl: url,
+        sourceUrl: url,
+      })),
+    }));
     vi.doMock('../../src/services/imageBatchService', () => ({ applyImageBatchResults: vi.fn() }));
     vi.doMock('../../src/services/onnxService', () => ({
       checkModelExists: vi.fn(), createCharacterDirectionGrid: vi.fn(), downloadModel: vi.fn(),
@@ -690,6 +758,23 @@ describe('critical canvas node interactions', () => {
     expect(promptPanel.props.onCancelGeneration).toEqual(expect.any(Function));
     (promptPanel.props.onCancelGeneration as () => void)();
     await vi.waitFor(() => expect(cancelComfyUINodeTask).toHaveBeenCalledWith('image-node'));
+    if (outcome === 'project-switch') {
+      expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
+      return;
+    }
+    if (outcome === 'failure') {
+      await vi.waitFor(() => expect(store.nodes[0].data.status).toBe('error'));
+      const recoveredTree = AINodeDialog();
+      const recoveredPanel = findElement(recoveredTree, (element) => componentName(element) === 'PromptPanelMock');
+      expect(recoveredPanel.props.canGenerate).toBe(false);
+      await (recoveredPanel.props.onSubmit as () => Promise<void>)();
+      expect(generateImage).not.toHaveBeenCalled();
+      const resume = findElement(recoveredTree, (element) => element.type === 'button' && element.props.children === '继续查询');
+      (resume.props.onClick as () => void)();
+      expect(resumeComfyUINodeTask).toHaveBeenCalledWith('image-node');
+      expect(findElement(recoveredTree, (element) => element.type === 'button' && element.props.children === '再次终止')).toBeTruthy();
+      return;
+    }
     await vi.waitFor(() => expect(store.updateNodeDataTransient).toHaveBeenCalledWith(
       'image-node',
       { status: 'idle', error: undefined },

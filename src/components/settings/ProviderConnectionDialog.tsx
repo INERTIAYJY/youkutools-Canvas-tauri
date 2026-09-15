@@ -8,10 +8,12 @@ import { Icon } from '@iconify/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
+  ChatApiProtocol,
   GeneralModelCategory,
   ImageReferenceRequestMode,
   ProviderModelSelection,
 } from '../../types';
+import { resolveChatApiProtocol } from '../../services/ai/chatApiProtocol';
 import type { VideoModelCapability } from '../../types/aiTypes';
 import {
   capCatalogModels,
@@ -33,6 +35,10 @@ import ModalOverlay from '../shared/ModalOverlay';
 import PopupCloseButton from '../shared/PopupCloseButton';
 import ProviderConnectionForm from './providerConnection/ProviderConnectionForm';
 import ProviderModelSection from './providerConnection/ProviderModelSection';
+import ProviderWorkflowSection from './providerConnection/ProviderWorkflowSection';
+import type { WorkflowApiDraft } from '../../types/workflowApi';
+import { normalizeWorkflowApiBaseUrl } from '../../services/workflowApi/autodlWorkflowManifest';
+import { editableWorkflowApiManifest, validateDeclarativeWorkflowManifest } from '../../services/workflowApi/workflowApiDefinition';
 import ProviderWebSearchPicker from './providerConnection/ProviderWebSearchPicker';
 import {
   assertProviderModelsVideoCapabilities,
@@ -69,9 +75,16 @@ export default function ProviderConnectionDialog({
   const initialLocalModels = initialDefinition ? (fallbackModels[initialDefinition.id] || []) : [];
   const [definitionId, setDefinitionId] = useState(initialDefinitionId);
   const [connectionName, setConnectionName] = useState(initialConfig?.name || initialDefinition?.name || '');
+  const [chatApiProtocol, setChatApiProtocol] = useState<ChatApiProtocol>(
+    () => resolveChatApiProtocol(initialConfig?.chatApiProtocol),
+  );
   const [apiKey, setApiKey] = useState(initialConfig?.apiKey || '');
   const [baseUrl, setBaseUrl] = useState(initialConfig?.baseUrl || initialDefinition?.defaultBaseUrl || '');
   const [workflowApiKey, setWorkflowApiKey] = useState(runninghubWorkflowApiKey);
+  const [workflowDrafts, setWorkflowDrafts] = useState<WorkflowApiDraft[]>(() =>
+    useAppStore.getState().workflows.filter((workflow) => workflow.adapterType === 'workflow-api' && workflow.workflowApi?.connectionId === connectionId)
+      .map((workflow) => ({ id: workflow.id, name: workflow.name, manifest: editableWorkflowApiManifest(workflow.workflowApi!) })));
+  const [workflowValid, setWorkflowValid] = useState(false);
   const [models, setModels] = useState<ProviderModelSelection[]>(
     mergeModels(mergeModels(initialLocalModels, initialCatalogModels), initialSelectedModels),
   );
@@ -104,6 +117,7 @@ export default function ProviderConnectionDialog({
   const definitions = getProviderDefinitions();
   const webSearchDefinitions = getWebSearchProviderDefinitions();
   const isWebSearchProvider = definition?.kind === 'web-search';
+  const isWorkflowApi = definition?.kind === 'workflow-api';
   const hasWebSearchConnection = webSearchDefinitions.some((item) =>
     Boolean(providerConfigs[item.id]?.apiKey?.trim()),
   );
@@ -115,6 +129,7 @@ export default function ProviderConnectionDialog({
       return item.id === 'tavily' && (!hasWebSearchConnection || isWebSearchProvider);
     }
     return item.id === 'custom-openai'
+      || item.kind === 'workflow-api'
       || item.id === initialDefinitionId
       || !connectedProviderIds.includes(item.id);
   });
@@ -144,23 +159,28 @@ export default function ProviderConnectionDialog({
   );
 
   /**
-   * 新建自定义连接时，若接口地址和已有连接重合，多半是忘了自己加过。
-   * Agent 那条路会按 Base URL 并进已有连接，手动添加不便直接改写用户填的模型清单，
+   * 新建自定义连接时，若接口地址和对话协议都与已有连接重合，多半是忘了自己加过。
+   * Agent 那条路会按 Base URL + 协议并进已有连接，手动添加不便直接改写用户填的模型清单，
    * 所以只提示，由用户决定是新建还是回去编辑。
    */
   const duplicateConnectionName = useMemo(() => {
     if (editing || definition?.id !== 'custom-openai') return '';
-    const target = normalizeBaseUrl(baseUrl);
+    const target = normalizeBaseUrl(baseUrl, chatApiProtocol);
     if (!target) return '';
     const match = Object.values(providerConfigs).find((item) => (
-      item.catalogId === 'custom-openai' && normalizeBaseUrl(item.baseUrl) === target
+      item.catalogId === 'custom-openai'
+      && resolveChatApiProtocol(item.chatApiProtocol) === chatApiProtocol
+      && normalizeBaseUrl(item.baseUrl, chatApiProtocol) === target
     ));
     return match?.name?.trim() || '';
-  }, [baseUrl, definition, editing, providerConfigs]);
+  }, [baseUrl, chatApiProtocol, definition, editing, providerConfigs]);
 
   const missingCredentials = useMemo(() => {
     if (!definition) return true;
+    if (definition.kind === 'workflow-api') return !baseUrl.trim();
     if (definition.authType === 'oauth') return !dreaminaLoggedIn;
+    // RunningHub 允许只用工作流 Key 建连接，此时 apiKey 为空不算缺凭据。
+    if (definition.id === 'runninghub-model') return !apiKey.trim() && !workflowApiKey.trim();
     // API Key 是否必填以目录定义为准：seedling 等厂商允许空 Token（CLI 登录态兜底）
     const apiKeyField = definition.credentials.find((field) => field.key === 'apiKey');
     const apiKeyRequired = apiKeyField?.required ?? true;
@@ -168,7 +188,8 @@ export default function ProviderConnectionDialog({
     return definition.credentials.some(
       (field) => field.required && field.key === 'baseUrl' && !baseUrl.trim(),
     );
-  }, [apiKey, baseUrl, definition, dreaminaLoggedIn]);
+  }, [apiKey, baseUrl, definition, dreaminaLoggedIn, workflowApiKey]);
+  const workflowOnlyConnection = definition?.id === 'runninghub-model' && !!workflowApiKey.trim() && !apiKey.trim();
 
   const chooseDefinition = (nextDefinition: ProviderDefinition) => {
     const savedConfig = nextDefinition.kind === 'web-search'
@@ -176,6 +197,7 @@ export default function ProviderConnectionDialog({
       : undefined;
     setDefinitionId(nextDefinition.id);
     setConnectionName(savedConfig?.name || nextDefinition.name);
+    setChatApiProtocol(resolveChatApiProtocol(savedConfig?.chatApiProtocol));
     setApiKey(savedConfig?.apiKey || '');
     setBaseUrl(savedConfig?.baseUrl || nextDefinition.defaultBaseUrl || '');
     setWorkflowApiKey('');
@@ -203,7 +225,7 @@ export default function ProviderConnectionDialog({
    * 输入框为空说明走的是厂商默认地址，没什么可更正的，也不该把默认值钉进配置。
    */
   const adoptResolvedBaseUrl = (resolved: string | undefined): string | undefined => {
-    const current = normalizeBaseUrl(baseUrl);
+    const current = normalizeBaseUrl(baseUrl, chatApiProtocol);
     if (!resolved || !current || resolved === current) return undefined;
     setBaseUrl(resolved);
     return resolved;
@@ -211,6 +233,7 @@ export default function ProviderConnectionDialog({
 
   const handleFetchModels = async () => {
     if (!definition || missingCredentials) return;
+    if (workflowOnlyConnection) { setCatalogStatus('warning'); setCatalogMessage('当前只配置工作流连接，可直接保存；获取模型目录需要模型 API Key'); return; }
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -228,6 +251,7 @@ export default function ProviderConnectionDialog({
           apiKey: apiKey.trim(),
           baseUrl: baseUrl.trim() || undefined,
           catalogId: definition.id,
+          chatApiProtocol,
         },
         fallbackModels: fallbackModels[definition.id] || [],
         signal: controller.signal,
@@ -255,7 +279,11 @@ export default function ProviderConnectionDialog({
     const store = useAppStore.getState();
     if (store.chatPanelDetached) await emitCloseChatWindow();
     store.openChatWithDraft(
-      buildRelayAssistantPrompt(connectionName.trim(), normalizeBaseUrl(baseUrl)),
+      buildRelayAssistantPrompt(
+        connectionName.trim(),
+        normalizeBaseUrl(baseUrl, chatApiProtocol),
+        chatApiProtocol,
+      ),
     );
   };
 
@@ -263,10 +291,22 @@ export default function ProviderConnectionDialog({
     if (!definition || missingCredentials) return;
     setCatalogStatus('loading');
     setCatalogMessage(t('正在验证 {name} 连接...', { name: definition.name }));
+    if (definition.id === 'runninghub-model') {
+      const checks: string[] = [];
+      let passed = true;
+      for (const [id, key, label] of [['runninghub-model', apiKey.trim(), '模型'], ['runninghub', workflowApiKey.trim(), '工作流']] as const) {
+        if (!key) continue;
+        const result = await testProviderConnection(id, key, baseUrl.trim() || undefined);
+        checks.push(`${label}连接：${result.success ? `验证成功${result.balance ? `（${result.balance}）` : ''}` : result.error || '验证失败'}`);
+        passed &&= result.success;
+      }
+      setCatalogStatus(passed ? 'ready' : 'error'); setCatalogMessage(checks.join('；')); return;
+    }
     const result = await testProviderConnection(
       definition.id,
       apiKey.trim(),
       baseUrl.trim() || undefined,
+      chatApiProtocol,
     );
     if (result.success) {
       const corrected = adoptResolvedBaseUrl(result.baseUrl);
@@ -279,7 +319,7 @@ export default function ProviderConnectionDialog({
       return;
     }
     setCatalogStatus(result.unsupported ? 'warning' : 'error');
-    setCatalogMessage(result.error || t('{name} 连接验证失败', { name: definition.name }));
+    setCatalogMessage((result.error && (isWorkflowApi ? t(result.error) : result.error)) || t('{name} 连接验证失败', { name: definition.name }));
   };
 
   const closeProtocolEditor = () => {
@@ -505,10 +545,16 @@ export default function ProviderConnectionDialog({
     if (
       !definition
       || missingCredentials
-      || (!isWebSearchProvider && selectedModels.length === 0)
+      || (!isWebSearchProvider && !isWorkflowApi && !workflowOnlyConnection && selectedModels.length === 0)
       || !protocolValid
     ) return;
     try {
+      if (isWorkflowApi) {
+        if (!baseUrl.trim() || !workflowValid || !workflowDrafts.length) throw new Error(t('请完成工作流配置'));
+        normalizeWorkflowApiBaseUrl(baseUrl, true);
+        workflowDrafts.forEach((draft) => validateDeclarativeWorkflowManifest(draft.manifest));
+        if (!apiKey.trim() && workflowDrafts.some((draft) => draft.manifest.protocol.auth?.type !== 'none')) throw new Error(t('请填写工作流 API Token'));
+      }
       assertProviderModelsVideoCapabilities(selectedModels);
     } catch (error) {
       setCatalogStatus('error');
@@ -518,7 +564,7 @@ export default function ProviderConnectionDialog({
     const nextConnectionId = isWebSearchProvider
       ? definition.id
       : connectionId || createConnectionId(definition.id);
-    const modelConfig = isWebSearchProvider
+    const modelConfig = isWebSearchProvider || isWorkflowApi
       ? {}
       : {
           selectedModels: selectedModels.map((model) => ({ ...model, provider: nextConnectionId })),
@@ -527,19 +573,21 @@ export default function ProviderConnectionDialog({
           visibleModelCategories: CATEGORY_ORDER.filter((item) => visibleModelCategories.has(item)),
           catalogUpdatedAt: Date.now(),
         };
-    await onSave(
+    try { await onSave(
       nextConnectionId,
       {
         name: connectionName.trim() || definition.name,
         apiKey: definition.authType === 'oauth' ? '' : apiKey.trim(),
-        baseUrl: normalizeBaseUrl(baseUrl) || undefined,
+        baseUrl: isWorkflowApi ? normalizeWorkflowApiBaseUrl(baseUrl, true) : normalizeBaseUrl(baseUrl, chatApiProtocol) || undefined,
         catalogId: definition.id,
+        ...(definition.id === 'custom-openai' ? { chatApiProtocol } : {}),
         ...modelConfig,
       },
       definition.id === 'runninghub-model'
         ? { runninghubWorkflowApiKey: workflowApiKey.trim() }
-        : undefined,
+        : isWorkflowApi ? { workflowApiDrafts: workflowDrafts } : undefined,
     );
+    } catch (error) { setCatalogStatus('error'); setCatalogMessage(error instanceof Error ? error.message : t('保存失败')); }
   };
 
   return createPortal(
@@ -553,7 +601,7 @@ export default function ProviderConnectionDialog({
       <header className="provider-dialog-header">
         <div>
           <span className="provider-dialog-kicker">{editing ? t('编辑连接') : t('新建连接')}</span>
-          <h3>{isWebSearchProvider ? t('联网搜索') : definition ? definition.name : t('选择 API 厂商')}</h3>
+          <h3>{isWebSearchProvider ? t('联网搜索') : definition ? isWorkflowApi ? t(definition.name) : definition.name : t('选择 API 厂商')}</h3>
         </div>
         <div className="flex items-center gap-2">
           {definition?.id === 'custom-openai' && (
@@ -582,8 +630,8 @@ export default function ProviderConnectionDialog({
               >
                 <span className={`provider-badge provider-badge--${item.id}`}>{item.badgeText}</span>
                 <span className="provider-picker-copy">
-                  <strong>{item.kind === 'web-search' ? t('联网搜索') : item.name}</strong>
-                  <small>{item.kind === 'web-search' ? t('Tavily、博查、智谱与 Exa') : item.description}</small>
+                  <strong>{item.kind === 'web-search' ? t('联网搜索') : item.kind === 'workflow-api' ? t(item.name) : item.name}</strong>
+                  <small>{item.kind === 'web-search' ? t('Tavily、博查、智谱与 Exa') : item.kind === 'workflow-api' ? t(item.description) : item.description}</small>
                 </span>
                 <Icon icon="mdi:chevron-right" width="18" />
               </button>
@@ -599,6 +647,8 @@ export default function ProviderConnectionDialog({
               isWebSearchProvider={isWebSearchProvider}
               connectionName={connectionName}
               setConnectionName={setConnectionName}
+              chatApiProtocol={chatApiProtocol}
+              setChatApiProtocol={setChatApiProtocol}
               apiKey={apiKey}
               setApiKey={setApiKey}
               baseUrl={baseUrl}
@@ -625,7 +675,8 @@ export default function ProviderConnectionDialog({
               />
             )}
 
-            {!isWebSearchProvider && (
+            {isWorkflowApi && <ProviderWorkflowSection drafts={workflowDrafts} onChange={setWorkflowDrafts} onValidityChange={setWorkflowValid} />}
+            {!isWebSearchProvider && !isWorkflowApi && (
               <ProviderModelSection
                 definition={definition}
                 models={models}
@@ -682,7 +733,7 @@ export default function ProviderConnectionDialog({
             <span>
               {isWebSearchProvider
                 ? `当前使用 ${definition.name}`
-                : selectedModels.length > 0
+                : isWorkflowApi ? t('将配置 {count} 个工作流', { count: workflowDrafts.length }) : selectedModels.length > 0
                   ? t('将启用 {count} 个模型', { count: selectedModels.length })
                   : t('至少选择一个模型')}
             </span>
@@ -695,7 +746,8 @@ export default function ProviderConnectionDialog({
                 className="provider-primary-btn"
                 disabled={
                   missingCredentials
-                  || (!isWebSearchProvider && selectedModels.length === 0)
+                  || (isWorkflowApi && !workflowValid)
+                  || (!isWebSearchProvider && !isWorkflowApi && !workflowOnlyConnection && selectedModels.length === 0)
                   || !protocolValid
                 }
                 onClick={() => void handleSave()}

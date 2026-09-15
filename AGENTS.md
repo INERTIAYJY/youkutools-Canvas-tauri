@@ -2,7 +2,7 @@
 
 > **作用**：本文件定义 AI 编码助手在本项目中的长期行为准则和当前架构边界。
 > **适用于**：代码、配置、脚本、测试和项目文档的新增、修改、删除、调试、重构与架构设计。
-> **状态来源**：Agent 分阶段进度以 `doc/对话助手-Agent能力实施方案.md` 为准；产品设计以 `doc/对话式画布助手-功能方案.md` 为准。
+> **文档入口**：先通过 [文档导航](doc/文档导航.md) 确定本次任务所属模块。内部对话助手 / Agent 的阶段进度才记录到 `doc/对话助手-Agent能力实施方案.md`，其产品设计见 `doc/对话式画布助手-功能方案.md`。
 
 ## 角色定位
 
@@ -27,7 +27,16 @@
 - 不要修改构建产物或缓存目录，例如 `dist/`、`node_modules/`、`src-tauri/target/`，除非任务明确要求打包、发布或处理这些产物。
 - 不要把 API Key、绝对路径、完整本地文件正文或完整网页正文写入日志、Agent 持久化摘要或聊天元数据。
 - Git 提交说明使用中文；可保留 `feat(agent):` 等 Conventional Commits 前缀，冒号后的说明必须使用中文。
-- 按阶段实施时，每完成一个阶段就更新 `doc/对话助手-Agent能力实施方案.md`，通过检查后再提交。
+- 按阶段实施时，更新任务所属模块的实施计划或模块文档，通过检查后再提交；不得把所有任务的完成记录统一写入 Agent 实施方案。
+
+## 文档归属与维护
+
+- `doc/文档导航.md` 是模块入口索引；先找已有模块文档、专项计划或规范，避免重复创建同主题文档。
+- `doc/对话助手-Agent能力实施方案.md` 仅管理内部对话助手、Agent Runtime、工具策略、上下文、记忆、Skill 和子智能体。插件界面、导演台、模型适配、画布、存储、MCP 传输和桌面安全各归对应模块；通过 Agent/MCP 调用某功能，不代表整项功能归 Agent 模块。
+- 模块文档保持简短，说明职责、源码入口、关键边界、验证入口和相关资料。重要行为或边界发生变化时更新；普通小修复无需机械追加完成日志。
+- 复杂阶段的范围、状态、验收缺口与回滚写入 `doc/plans/` 中对应的专项计划；跨模块任务选择一个主文档，其他模块只保留必要链接。
+- 完成记录只保留行为变化、重要决策、实际验证结论和未完成项。不把对话流水、逐次命令输出、重试过程或本机操作记录复制进长期文档；临时排查记录留在任务工作记录中。
+- `doc/history/` 为冻结历史，不追加新工作。旧方案中的文件清单或“统一更新 Agent 方案”等要求仅作为历史背景，继续任务时按当前模块归属记录。
 
 ## 技术栈概览
 
@@ -81,7 +90,7 @@ AI-Canvas-tauri/
 │   │   ├── chat/              # Agent Runtime、Registry、Policy、子智能体、上下文、记忆、历史
 │   │   │   └── tools/         # 画布、媒体、预设、联网、文件、Skill、厂商配置、短剧资产、剧集分集、记忆工具
 │   │   ├── mcp/               # MCP 控制服务、双传输 bridge 客户端、会话配置与令牌生命周期
-│   │   ├── plugins/           # 插件清单、市场、文件 grant 与执行租约
+│   │   ├── plugins/           # 插件清单、市场、不透明资源 grant、UI 会话与执行租约
 │   │   ├── fs/                # 文件基础设施、资产索引、回收站、资产库、存储健康
 │   │   ├── fileService.ts     # 文件能力统一前端入口
 │   │   ├── providerSecretService.ts # API Key、MCP 固定令牌与 Rust 凭据存储的桥接
@@ -104,20 +113,13 @@ AI-Canvas-tauri/
 │       ├── main.rs            # Rust 入口
 │       ├── lib.rs             # Tauri Builder、窗口与命令注册
 │       ├── path_policy.rs     # 原生文件命令的调用方与路径校验
-│       ├── plugin_registry.rs # 插件活动版本、源码摘要与私有快照信任注册表
-│       ├── plugin_runtime.rs  # QuickJS 与可信 Python 插件执行、超时和取消
-│       ├── blender_runtime.rs # Blender 候选、项目 grant 与 Job commands
-│       ├── blender_runtime/   # 固定资源、Job、runner、结果清单与 artifact 校验
 │       ├── secret_store.rs    # Rust 独占的本地凭据存储
-│       ├── mcp_bridge.rs      # MCP stdio loopback 与 Streamable HTTP 双传输控制桥
-│       ├── project_archive.rs # 项目归档打包与解包
-│       ├── assistant_web.rs   # 固定搜索端点与受限网页读取
-│       ├── provider_docs.rs   # 受限厂商文档读取
-│       ├── director_desk_runtime.rs # 导演台下载、校验、安装与本地协议
-│       ├── file_transfer.rs   # 可取消文件传输
-│       ├── clipboard.rs       # 系统剪贴板文件写入
-│       ├── dreamina.rs / comfyui/
-│       └── onnx/              # ONNX 主进程与 Worker 隔离
+│       ├── agent/             # AgentPackage、受限网页与厂商文档读取
+│       ├── mcp/               # stdio loopback 与 Streamable HTTP 双传输控制桥
+│       ├── plugins/           # 插件注册表、QuickJS/可信 Python runtime 与私有 UI 协议
+│       ├── files/             # 剪贴板、可取消传输与项目归档
+│       ├── media/             # Dreamina、字体、模型镜像、Sprite、ComfyUI 与 ONNX
+│       └── director/          # 轻量导演台与 Blender 固定 Job 运行时
 ├── tests/                     # Vitest 测试
 ├── doc/                       # 架构、开发、ADR、发版与功能方案
 ├── scripts/                   # Hook、版本同步、MCP 适配器等工程脚本
@@ -139,9 +141,9 @@ AI-Canvas-tauri/
 - 异步画布派生结果回写前必须经过 `canvasDerivationGuard`，防止过期结果写入已切换的项目
 - 项目切换必须同步加载项目对话、AgentTask、短剧资产、项目记忆和项目数据
 - 非持久化运行时对象，例如 `AbortController`、文件 grant 路径和窗口句柄，禁止写入 IndexedDB；MCP 固定令牌只允许进入 Rust `secret_store`，不得进入 Store 持久化
-- `InstalledPlugin.sourceDigest` 只允许为旧记录迁移而暂时缺失；插件完成加载后，没有有效原生摘要必须失败关闭
-- 插件工具或节点捕获的 `sourceDigest` 是整次调用的版本租约；每轮原生执行、宿主 effect 和最终写回前都必须复核当前启用版本
-- 插件摘要切换、停用和卸载必须先撤销前端租约并清理内存文件 grant；旧版本结果不得写入新版本状态
+- `InstalledPlugin.sourceDigest` 与 `revisionDigest` 都是已安装插件的必需执行身份；缺少任一有效原生摘要必须失败关闭，不做旧记录迁移执行
+- 插件工具、节点或 UI 会话捕获的 `revisionDigest` 是整次调用的版本租约；每轮原生执行、资源读取、宿主 effect 和最终写回前都必须复核当前启用 revision
+- 插件摘要切换、停用和卸载必须先撤销前端租约并清理调用级资源 grant；旧 revision 结果不得写入新 revision 状态
 
 ### 组件职责
 
@@ -238,6 +240,7 @@ AI-Canvas-tauri/
 本项目使用 Tauri 2（Rust 后端），不是 Electron：
 
 - Rust 后端代码在 `src-tauri/src/`：`main.rs` 是入口，`lib.rs` 负责 Builder、窗口和命令注册
+- Rust 源文件按 `agent/`、`mcp/`、`plugins/`、`files/`、`media/`、`director/` 领域归类；`lib.rs` 用显式 `#[path]` 保持既有 crate 根模块名，禁止在普通功能修改中顺手改成另一套逻辑命名空间
 - 插件包括 fs、dialog、global-shortcut、shell、drag、updater 和 process；以 `lib.rs` 为准
 - 前端文件能力统一经过 `src/services/fileService.ts` 或其 `services/fs/` 子域
 - `tauri.conf.json` 管理窗口大小、安全策略等配置
@@ -247,27 +250,30 @@ AI-Canvas-tauri/
 - 新增接收路径参数的自定义 command 必须经过 `path_policy.rs` 的调用方窗口校验和真实路径授权校验；自定义命令不走 fs 插件 scope，漏掉这一步等于任意文件读写
 - API Key 与 MCP 固定令牌只经 `secret_store.rs` 读写；`{appData}/secrets/` 在 fs scope、asset scope 和 `path_policy` 三条路径上都必须保持拒绝
 - `agent-private`、`plugin-private` 与 Blender 原生私有目录同样不得通过 fs scope、asset scope 或通用路径 command 暴露；递归读取、归档、解包和删除还必须拒绝这些私有目录的祖先
-- 插件普通执行 IPC 只接受 `pluginId + sourceDigest + toolId + invocationId + input`；`plugin_registry.rs` 是插件 ID、启用状态、活动 revision、工具归属和实际源码的执行权威，运行前必须重新读取私有快照并计算摘要；禁止重新接收 Renderer 提交的 `runtime` 或 `source`
+- 插件普通执行 IPC 只接受 `pluginId + sourceDigest + revisionDigest + toolId + invocationId + input`；`plugins/registry.rs` 是插件 ID、启用状态、活动 revision、工具归属和实际源码/资源的执行权威，运行前必须重新读取私有快照并计算摘要；禁止重新接收 Renderer 提交的 `runtime` 或 `source`
+- 插件 UI 仅由宿主管理：内嵌展示仍使用主窗口 `ModalOverlay` 内的 `<iframe sandbox="allow-scripts">`；已确认的独立展示方向为专用 Tauri WebView 直接承载 UI，无须 iframe，但必须使用独立来源/存储和最小 capability，不加载主应用入口、Store 或主应用 IndexedDB。原生窗口/页面/会话隔离未完成并通过验证前，不得开放该入口
+- 两种展示都只能按活动 revision 摘要读取私有 UI 产物，并在插件代码加载前施加严格 CSP。跨边界通信绑定真实 iframe Window 或原生登记 WebView、随机 sessionId、双摘要、项目、节点和 canvas revision；独立窗口不得使用通用事件总线冒充受信调用方，模型/文件 effect 与画布写回仍由主窗口执行
+- 应用自定义命令的注册与 `src-tauri/permissions/*.toml` 的显式 allow/deny 声明必须一致，构建失败时补齐或移除准确的声明，不自动赋权。自定义权限文件已可启用 Tauri 应用 ACL，不以是否调用 `AppManifest::commands` 判断 ACL 是否生效；窗口 capability 与命令内部调用方/路径/资源校验缺一不可
 - QuickJS 插件只拥有声明的宿主能力；可信 Python 插件拥有当前用户权限。Windows Job Object、macOS/Linux 进程组、原生确认、超时和进程树回收都只是生命周期边界，不等于 OS 沙箱
 - 插件安装或更新必须走按插件 ID 串行的 `stage → IndexedDB persist → 撤销旧租约 → activate`；已有摘要记录只做原生 registration 校验，私有快照缺失或损坏时不得回退到 Renderer 源码执行
 - Python 插件暂存、重新启用和回切上一版本必须经过原生高风险确认，Renderer 布尔值不得代替原生授权；停用、卸载和摘要切换必须取消活动 Python invocation
 - Blender 只执行应用内固定资源和固定 operation，Renderer 不得提交 executable、脚本、argv、cwd、env 或输出路径；运行包清单、内嵌资源、大小和 SHA-256 必须同步
 - Blender `open-editor` 保存返回只有在恰好生成当前活动摄影机 PNG 与 `.blend`、且 Rust 完成绑定、摘要、文件头和 Result Manifest 校验后才算成功；缺少摄影机、渲染失败或 artifact 集合异常必须失败关闭
 - Blender 结果只有在项目、导演节点、instanceId、Scene revision 和 canvas derivation guard 仍匹配时才能投影回 Store；进程退出本身不是成功证据
-- 通用 `proxy_fetch` 不能注册为 Agent 工具；Agent 网页读取必须经过 `assistant_web.rs`、厂商文档读取必须经过 `provider_docs.rs` 的协议、DNS/IP、重定向和体积校验
+- 通用 `proxy_fetch` 不能注册为 Agent 工具；Agent 网页读取必须经过 `agent/web.rs`、厂商文档读取必须经过 `agent/provider_docs.rs` 的协议、DNS/IP、重定向和体积校验
 - MCP 默认关闭；只有用户手动开启或显式启用 `mcpAutoStart` 才启动。stdio 传输只绑定 `127.0.0.1` 并通过 `scripts/ai-canvas-mcp.mjs` 适配，Streamable HTTP 在用户完成高风险传输确认后绑定 `0.0.0.0` 的 `/mcp`；两者都支持固定端口或系统随机端口
 - MCP 令牌必须是密码学随机的 256-bit 值，可轮换；固定令牌唯一允许持久化到 Rust `secret_store` 的 `mcp/token` 条目，凭据存储不可用时才退化为当前会话内存令牌。令牌不得进入普通配置、IndexedDB、Tauri Event 负载、消息或日志；stdio 通过子进程环境变量传递，HTTP 使用 Bearer 鉴权
 - Streamable HTTP 必须保留 Bearer、Host 与同源 Origin 校验、1 MiB 请求体上限和有界并发；它当前是明文 HTTP，持有令牌的客户端按自主模式执行，因此只能用于受信网络或隔离环境，不能把 Token 当作传输加密
 - stdio 与 Streamable HTTP 都固定映射为 C 自主模式，对安全矩阵中的八类 effect 不逐次审批；切换远程传输时的高风险确认是配置授权，不是工具审批，`user_choice` 仍必须等待用户作答
-- 长时间文件传输使用 `file_transfer.rs`，必须支持取消信号和进度
-- ONNX 推理使用 `onnx/worker.rs` 子进程隔离；禁止把 DirectML Session 移回主进程
+- 长时间文件传输使用 `files/transfer.rs`，必须支持取消信号和进度
+- ONNX 推理使用 `media/onnx/worker.rs` 子进程隔离；禁止把 DirectML Session 移回主进程
 - 修改 Rust 后运行与范围匹配的 `cargo test` 和 `cargo check`
 
 ### IndexedDB 与持久化
 
 - IndexedDB 当前 schema 版本为 20，并以 `src/services/indexedDb/schema.ts` 的 `DB_VERSION` 为唯一真值
 - 已持久化项目、工作流、配置、预设、历史、资产索引、风格、Skill、对话、消息、AgentTask、项目记忆、工具栏布局、元数据、全局角色、子智能体配置、视频剪辑工程、项目视觉描述和插件安装记录
-- 插件安装记录持久化在 `plugins` object store，并保存 `sourceDigest`；完整源码仍只用于管理、迁移和旧版本兼容，不能成为运行阶段的执行权威
+- 插件安装记录持久化在 `plugins` object store，并保存 `sourceDigest` 与 `revisionDigest`；完整源码只用于管理展示，不能成为运行阶段的执行权威
 - 新 object store 或索引必须提升 `DB_VERSION`，并保持旧数据可升级读取
 - 删除会话时同步清理消息和 AgentTask；删除项目时同步清理项目域数据
 - 分集是带 `parentId` 的项目记录，不新建 Store；素材目录、角色库和项目记忆按 `seriesOwnerId` 统一挂在剧集记录上，分集不得各存一份副本
@@ -305,7 +311,7 @@ AI-Canvas-tauri/
 - 每次代码改动后：确认是否有既有功能受影响（搜索引用）
 - 生成新文件前：确认同名文件是否已存在
 - 提交代码前：确认 `git status` 无意外变更
-- 阶段提交前：更新实施方案状态和完成记录，提交说明使用中文
+- 阶段提交前：按“文档归属与维护”更新对应模块计划的状态和验收结论；仅内部 Agent 阶段更新 Agent 实施方案，提交说明使用中文
 
 ### 验证命令
 

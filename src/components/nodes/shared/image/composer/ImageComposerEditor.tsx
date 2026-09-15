@@ -446,6 +446,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     const onKey = (e: KeyboardEvent) => {
       if (editingText) return;
       const t = e.target as HTMLElement | null;
+      if (t?.closest('.ui-select, [data-ui-select-portal]')) return;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       const mod = e.metaKey || e.ctrlKey;
       const stop = () => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };

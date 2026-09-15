@@ -13,7 +13,10 @@ import type {
   PluginPlacement,
   PluginRuntime,
   PluginNodeToolDialogFieldType,
+  PluginPackageResourceManifest,
+  PluginResourceAccessManifest,
   PluginToolDialogManifest,
+  PluginUIManifest,
 } from '../../types/plugin';
 
 const PLUGIN_ID_RE = /^[a-z0-9](?:[a-z0-9._-]{1,126}[a-z0-9])?$/;
@@ -25,9 +28,25 @@ const MAX_SOURCE_BYTES = 512 * 1024;
 const MAX_TOOLS = 64;
 const MAX_NODES = 32;
 const MAX_FIELDS = 64;
+const MAX_NODE_SET_NODES = 25;
 const MAX_DIALOG_FIELDS = 16;
 const MAX_DIALOG_OPTIONS = 32;
+const MAX_UI_EXPORTS = 32;
+/** 自定义界面产物：只允许插件目录内的相对 .js 路径。 */
+const UI_ENTRY_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,126}\.js$/;
+const UI_INTEGRITY_RE = /^(sha256-)?[0-9a-f]{64}$/;
+const UI_EXPORT_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const MAX_NODE_PORTS = 16;
+const MAX_PACKAGE_RESOURCES = 64;
+const MAX_PACKAGE_RESOURCE_BYTES = 16 * 1024 * 1024;
+const MAX_PACKAGE_TOTAL_BYTES = 64 * 1024 * 1024;
+const RESOURCE_PATH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
+const MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/(?:[a-z0-9][a-z0-9!#$&^_.+-]{0,63}|\*)$/;
+const RESOURCE_PERMISSIONS = new Set<PluginPermission>([
+  'files.connected.read',
+  'files.output.create',
+  'plugin.resources.read',
+]);
 
 export function normalizeGithubRepository(value: string): string {
   let url: URL;
@@ -88,19 +107,18 @@ const PERMISSIONS = new Set<PluginPermission>([
   'node.write',
   'models.read',
   'models.invoke',
-  'files.read',
-  'files.write',
+  ...RESOURCE_PERMISSIONS,
+  'ui.custom',
 ]);
-const OUTPUT_MODES = new Set<PluginNodeOutputMode>(['update-current', 'create-node']);
+const OUTPUT_MODES = new Set<PluginNodeOutputMode>(['update-current', 'create-node', 'create-node-set']);
 const CATEGORIES = new Set<PluginCategory>(['content', 'media', 'workflow', 'utility']);
 const PLACEMENTS = new Set<PluginPlacement>(['node-context-menu', 'node-toolbar']);
 const DIALOG_FIELD_TYPES = new Set<PluginNodeToolDialogFieldType>(['text', 'textarea', 'number', 'select', 'boolean', 'model']);
 const CUSTOM_NODE_FIELD_TYPES = new Set<PluginCustomNodeFieldType>([
   ...DIALOG_FIELD_TYPES,
   'model',
-  'file',
 ]);
-const PORT_TYPES = new Set<PluginNodePortType>(['text', 'image', 'video', 'audio', 'json']);
+const PORT_TYPES = new Set<PluginNodePortType>(['text', 'image', 'video', 'audio', 'json', 'resource']);
 const MODEL_CATEGORIES = new Set(['text', 'image', 'video', 'audio']);
 const FORBIDDEN_INPUT_FIELDS = new Set([
   '__proto__',
@@ -155,8 +173,104 @@ function optionalString(value: unknown, label: string, maxLength: number): strin
   return nonEmptyString(value, label, maxLength);
 }
 
+function parseResourceAccess(
+  value: unknown,
+  label: string,
+  availablePortIds?: ReadonlySet<string>,
+): PluginResourceAccessManifest | undefined {
+  if (value === undefined) return undefined;
+  const raw = objectValue(value, label);
+  if (raw.self !== undefined && typeof raw.self !== 'boolean') throw new Error(`${label}.self 必须是布尔值`);
+  if (raw.incoming !== undefined && typeof raw.incoming !== 'boolean') throw new Error(`${label}.incoming 必须是布尔值`);
+  const portIds = raw.portIds === undefined
+    ? undefined
+    : [...new Set(stringArray(raw.portIds, `${label}.portIds`, MAX_NODE_PORTS))];
+  if (!availablePortIds && portIds) throw new Error(`${label}.portIds 只适用于自定义节点`);
+  if (portIds?.some((portId) => !availablePortIds?.has(portId))) {
+    throw new Error(`${label}.portIds 包含未声明的输入端口`);
+  }
+  if (portIds && raw.incoming !== true) throw new Error(`${label}.portIds 必须与 incoming: true 一起声明`);
+  const self = raw.self === true;
+  const incoming = raw.incoming === true;
+  if (!self && !incoming) throw new Error(`${label} 至少需要启用 self 或 incoming`);
+  return { self, incoming, portIds };
+}
+
+function parsePackageResources(value: unknown): PluginPackageResourceManifest[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PACKAGE_RESOURCES) {
+    throw new Error(`resources 必须包含 1-${MAX_PACKAGE_RESOURCES} 项`);
+  }
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  let totalBytes = 0;
+  const resources = value.map((item, index) => {
+    const raw = objectValue(item, `resources[${index}]`);
+    const id = nonEmptyString(raw.id, `resources[${index}].id`, 64);
+    if (!TOOL_ID_RE.test(id)) throw new Error(`resources[${index}].id 无效`);
+    if (ids.has(id)) throw new Error(`resources 包含重复 id: ${id}`);
+    ids.add(id);
+    const path = nonEmptyString(raw.path, `resources[${index}].path`, 256).replace(/\\/g, '/');
+    if (
+      !RESOURCE_PATH_RE.test(path)
+      || path.startsWith('/')
+      || path.split('/').some((segment) => !segment || segment === '.' || segment === '..')
+    ) {
+      throw new Error(`resources[${index}].path 必须是安全的包内相对路径`);
+    }
+    if (paths.has(path.toLowerCase())) throw new Error(`resources 包含重复路径: ${path}`);
+    paths.add(path.toLowerCase());
+    const integrity = nonEmptyString(raw.integrity, `resources[${index}].integrity`, 128).toLowerCase();
+    if (!UI_INTEGRITY_RE.test(integrity)) throw new Error(`resources[${index}].integrity 必须是 sha256 摘要`);
+    const mediaType = nonEmptyString(raw.mediaType, `resources[${index}].mediaType`, 128).toLowerCase();
+    if (!MEDIA_TYPE_RE.test(mediaType)) throw new Error(`resources[${index}].mediaType 无效`);
+    if (!Number.isSafeInteger(raw.bytes) || (raw.bytes as number) <= 0 || (raw.bytes as number) > MAX_PACKAGE_RESOURCE_BYTES) {
+      throw new Error(`resources[${index}].bytes 必须在 1-${MAX_PACKAGE_RESOURCE_BYTES} 之间`);
+    }
+    totalBytes += raw.bytes as number;
+    if (totalBytes > MAX_PACKAGE_TOTAL_BYTES) throw new Error('插件包资源总大小不能超过 64 MiB');
+    return { id, path, integrity, mediaType, bytes: raw.bytes as number };
+  });
+  return resources;
+}
+
+function parsePluginUI(value: unknown): PluginUIManifest | undefined {
+  if (value === undefined) return undefined;
+  const ui = objectValue(value, 'ui');
+  const entry = nonEmptyString(ui.entry, 'ui.entry', 128);
+  if (!UI_ENTRY_RE.test(entry)) {
+    throw new Error('ui.entry 必须是插件目录内的相对 .js 路径');
+  }
+  if (entry.split('/').includes('..')) {
+    throw new Error('ui.entry 不能包含 .. 路径段');
+  }
+  const integrity = nonEmptyString(ui.integrity, 'ui.integrity', 128).toLowerCase();
+  if (!UI_INTEGRITY_RE.test(integrity)) {
+    throw new Error('ui.integrity 必须是 sha256 摘要（sha256-<hex> 或 64 位十六进制）');
+  }
+  const exportsRaw = objectValue(ui.exports, 'ui.exports');
+  const keys = Object.keys(exportsRaw);
+  if (keys.length === 0) throw new Error('ui.exports 至少要声明一个组件');
+  if (keys.length > MAX_UI_EXPORTS) throw new Error(`ui.exports 不能超过 ${MAX_UI_EXPORTS} 项`);
+  const exports: Record<string, string> = {};
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(exportsRaw, key)) continue;
+    if (!UI_EXPORT_KEY_RE.test(key)) throw new Error(`ui.exports 的键无效: ${key}`);
+    exports[key] = nonEmptyString(exportsRaw[key], `ui.exports.${key}`, 128);
+  }
+  return { entry, integrity, exports };
+}
+
 function parseToolDialog(value: unknown, toolId: string): PluginToolDialogManifest {
   const dialog = objectValue(value, `${toolId}.dialog`);
+  const ui = optionalString(dialog.ui, `${toolId}.dialog.ui`, 64);
+  const presentation = dialog.presentation;
+  if (presentation !== undefined && presentation !== 'modal' && presentation !== 'window') {
+    throw new Error(`${toolId}.dialog.presentation 只允许 modal 或 window`);
+  }
+  if (presentation === 'window' && !ui) {
+    throw new Error(`${toolId}.dialog.presentation=window 必须声明自定义 ui`);
+  }
   if (!Array.isArray(dialog.fields) || dialog.fields.length > MAX_DIALOG_FIELDS) {
     throw new Error(`${toolId}.dialog.fields 必须是数组且不能超过 ${MAX_DIALOG_FIELDS} 项`);
   }
@@ -240,6 +354,8 @@ function parseToolDialog(value: unknown, toolId: string): PluginToolDialogManife
     description: optionalString(dialog.description, `${toolId}.dialog.description`, 240),
     submitLabel: optionalString(dialog.submitLabel, `${toolId}.dialog.submitLabel`, 40),
     fields,
+    ui,
+    ...(presentation === undefined ? {} : { presentation }),
   };
 }
 
@@ -349,12 +465,32 @@ function parseCustomNodes(value: unknown): PluginCustomNodeManifest[] {
         if (port.multiple !== undefined && typeof port.multiple !== 'boolean') {
           throw new Error(`${id}.${portId}.multiple 必须是布尔值`);
         }
+        let accept: string[] | undefined;
+        if (port.accept !== undefined) {
+          if (!['image', 'video', 'audio', 'resource'].includes(type)) {
+            throw new Error(`${id}.${portId}.accept 只适用于媒体或 resource 端口`);
+          }
+          accept = [...new Set(stringArray(port.accept, `${id}.${portId}.accept`, 16).map((item) => item.toLowerCase()))];
+          if (accept.some((item) => !MEDIA_TYPE_RE.test(item))) throw new Error(`${id}.${portId}.accept 包含无效 MIME`);
+        }
+        let maxBytes: number | undefined;
+        if (port.maxBytes !== undefined) {
+          if (!['image', 'video', 'audio', 'resource'].includes(type)) {
+            throw new Error(`${id}.${portId}.maxBytes 只适用于媒体或 resource 端口`);
+          }
+          if (!Number.isSafeInteger(port.maxBytes) || (port.maxBytes as number) <= 0) {
+            throw new Error(`${id}.${portId}.maxBytes 必须是正整数`);
+          }
+          maxBytes = port.maxBytes as number;
+        }
         return {
           id: portId,
           label: nonEmptyString(port.label, `${id}.${portId}.label`, 80),
           type,
           required: port.required as boolean | undefined,
           multiple: port.multiple as boolean | undefined,
+          accept,
+          maxBytes,
         };
       });
     };
@@ -362,52 +498,59 @@ function parseCustomNodes(value: unknown): PluginCustomNodeManifest[] {
     if (!Array.isArray(node.fields) || node.fields.length > MAX_DIALOG_FIELDS) {
       throw new Error(`${id}.fields 必须是数组且不能超过 ${MAX_DIALOG_FIELDS} 项`);
     }
+    if (node.ui !== undefined) {
+      throw new Error(`${id}.ui 不受支持；Plugin API v1 自定义 UI 仅用于节点工具 dialog.ui`);
+    }
     const fields = node.fields.map((field, fieldIndex) => parseCustomNodeField(field, id, fieldIndex));
     if (new Set(fields.map((field) => field.id)).size !== fields.length) {
       throw new Error(`${id}.fields 包含重复 id`);
     }
+    const inputs = parsePorts(node.inputs, 'inputs');
     return {
       id,
       title: nonEmptyString(node.title, `${id}.title`, 80),
       description: optionalString(node.description, `${id}.description`, 240),
       icon,
-      inputs: parsePorts(node.inputs, 'inputs'),
+      inputs,
       outputs: parsePorts(node.outputs, 'outputs'),
       fields,
+      resourceAccess: parseResourceAccess(
+        node.resourceAccess,
+        `${id}.resourceAccess`,
+        new Set(inputs.map((port) => port.id)),
+      ),
     };
   });
 }
 
 function parseManifest(value: unknown): PluginManifest {
   const root = objectValue(value, 'manifest');
-  if (root.apiVersion !== 1 && root.apiVersion !== 2 && root.apiVersion !== 3) {
-    throw new Error('仅支持 apiVersion: 1、2 或 3');
-  }
+  if (root.apiVersion !== 1) throw new Error('仅支持 apiVersion: 1');
+  const apiVersion = 1 as const;
   const id = nonEmptyString(root.id, '插件 id', 128);
   if (!PLUGIN_ID_RE.test(id)) throw new Error('插件 id 只能使用小写字母、数字、点、下划线和短横线');
   const entry = nonEmptyString(root.entry, 'entry', 32);
   const runtime = (root.runtime === undefined ? 'javascript' : nonEmptyString(root.runtime, 'runtime', 16)) as PluginRuntime;
   if (runtime !== 'javascript' && runtime !== 'python') throw new Error('runtime 仅支持 javascript 或 python');
-  if (root.apiVersion === 3) {
-    if (runtime !== 'python') throw new Error('apiVersion: 3 当前仅用于可信 Python 插件');
-    if (entry !== 'main.py') throw new Error('Python 插件入口必须是 main.py');
-  } else {
-    if (runtime === 'python') throw new Error('Python 插件必须使用 apiVersion: 3');
-    if (entry !== 'main.js') throw new Error('JavaScript 插件入口必须是 main.js');
+  if ((runtime === 'javascript' && entry !== 'main.js') || (runtime === 'python' && entry !== 'main.py')) {
+    throw new Error('apiVersion: 1 的 entry 必须与 runtime 匹配');
   }
 
-  const permissions = stringArray(root.permissions, 'permissions', 8);
+  const permissions = stringArray(root.permissions, 'permissions', 16);
   if (permissions.some((permission) => !PERMISSIONS.has(permission as PluginPermission))) {
     throw new Error('插件声明了不支持的权限');
   }
   if (permissions.includes('models.invoke') && !permissions.includes('models.read')) {
     throw new Error('models.invoke 必须与 models.read 一起声明');
   }
+  const resources = parsePackageResources(root.resources);
+  if (resources && !permissions.includes('plugin.resources.read')) {
+    throw new Error('声明插件包 resources 必须包含 plugin.resources.read 权限');
+  }
   const contributes = objectValue(root.contributes, 'contributes');
   const rawNodeTools = contributes.nodeTools ?? [];
   if (!Array.isArray(rawNodeTools)) throw new Error('contributes.nodeTools 必须是数组');
   const customNodes = parseCustomNodes(contributes.nodes);
-  if (root.apiVersion === 1 && customNodes.length > 0) throw new Error('自定义节点需要 apiVersion: 2 或 3');
   if (rawNodeTools.length === 0 && customNodes.length === 0) throw new Error('插件至少需要贡献一个节点工具或自定义节点');
   if (rawNodeTools.length > MAX_TOOLS) throw new Error(`节点工具不能超过 ${MAX_TOOLS} 个`);
 
@@ -442,6 +585,7 @@ function parseManifest(value: unknown): PluginManifest {
       throw new Error(`${toolId} 使用节点工具栏入口时必须配置 icon`);
     }
     const dialog = tool.dialog === undefined ? undefined : parseToolDialog(tool.dialog, toolId);
+    const resourceAccess = parseResourceAccess(tool.resourceAccess, `${toolId}.resourceAccess`);
     if (placements.includes('node-toolbar') && !dialog) {
       throw new Error(`${toolId} 使用节点工具栏入口时必须配置 dialog`);
     }
@@ -458,6 +602,22 @@ function parseManifest(value: unknown): PluginManifest {
       ? undefined
       : nonEmptyString(output.nodeType, `${toolId}.output.nodeType`, 32) as NodeType;
     if (outputNodeType && !NODE_TYPES.has(outputNodeType)) throw new Error(`${toolId} 的输出节点类型不受支持`);
+    const outputNodeTypes = output.nodeTypes === undefined
+      ? undefined
+      : stringArray(output.nodeTypes, `${toolId}.output.nodeTypes`, MAX_NODE_SET_NODES) as NodeType[];
+    if (outputNodeTypes?.some((nodeType) => !NODE_TYPES.has(nodeType))) {
+      throw new Error(`${toolId} 的节点集包含不支持的节点类型`);
+    }
+    const maxNodes = output.maxNodes === undefined ? undefined : Number(output.maxNodes);
+    if (mode === 'create-node-set') {
+      if (outputNodeType) throw new Error(`${toolId} 的 create-node-set 不能声明 nodeType`);
+      if (!outputNodeTypes?.length) throw new Error(`${toolId} 的 create-node-set 必须声明 nodeTypes`);
+      if (!Number.isSafeInteger(maxNodes) || maxNodes! < 1 || maxNodes! > MAX_NODE_SET_NODES) {
+        throw new Error(`${toolId} 的 create-node-set maxNodes 必须在 1-${MAX_NODE_SET_NODES} 之间`);
+      }
+    } else if (outputNodeTypes !== undefined || maxNodes !== undefined) {
+      throw new Error(`${toolId} 只有 create-node-set 可以声明 nodeTypes 和 maxNodes`);
+    }
 
     return {
       id: toolId,
@@ -468,7 +628,14 @@ function parseManifest(value: unknown): PluginManifest {
       dialog,
       nodeTypes: nodeTypes as NodeType[],
       inputFields,
-      output: { mode, nodeType: outputNodeType, fields },
+      resourceAccess,
+      output: {
+        mode,
+        nodeType: outputNodeType,
+        nodeTypes: outputNodeTypes,
+        maxNodes,
+        fields,
+      },
     };
   });
 
@@ -478,14 +645,17 @@ function parseManifest(value: unknown): PluginManifest {
   if (nodeTools.length > 0 && !permissions.includes('node.write')) {
     throw new Error('节点工具插件必须声明 node.write');
   }
+  if (
+    [...nodeTools, ...customNodes].some((item) => item.resourceAccess)
+    && !permissions.includes('files.connected.read')
+  ) {
+    throw new Error('读取节点或连线文件资源必须声明 files.connected.read');
+  }
   const nodeToolUsesModelField = nodeTools.some(
     (tool) => (tool.dialog?.fields ?? []).some((field) => field.type === 'model'),
   );
   if (nodeToolUsesModelField && !permissions.includes('models.read')) {
     throw new Error('使用模型字段的节点工具必须声明 models.read');
-  }
-  if (root.apiVersion === 1 && (nodeToolUsesModelField || permissions.includes('models.invoke'))) {
-    throw new Error('节点工具调用宿主模型需要 apiVersion: 2 或 3');
   }
   if (customNodes.length > 0 && !permissions.includes('node.write')) {
     throw new Error('自定义节点插件必须声明 node.write');
@@ -496,8 +666,29 @@ function parseManifest(value: unknown): PluginManifest {
   if (customNodes.some((node) => node.fields.some((field) => field.type === 'model')) && !permissions.includes('models.read')) {
     throw new Error('使用模型字段的自定义节点必须声明 models.read');
   }
-  if (customNodes.some((node) => node.fields.some((field) => field.type === 'file')) && !permissions.includes('files.read')) {
-    throw new Error('使用文件字段的自定义节点必须声明 files.read');
+
+  // 自定义界面在主窗口 sandboxed iframe 中运行，权限与产物声明必须成对出现。
+  const ui = parsePluginUI(root.ui);
+  const uiReferences = new Set<string>();
+  for (const tool of nodeTools) {
+    if (tool.dialog?.ui) uiReferences.add(tool.dialog.ui);
+  }
+  if (uiReferences.size > 0) {
+    if (!ui) throw new Error('使用自定义界面时必须声明 manifest.ui');
+    if (!permissions.includes('ui.custom')) {
+      throw new Error('使用自定义界面的插件必须声明 ui.custom 权限');
+    }
+    for (const key of uiReferences) {
+      if (!Object.prototype.hasOwnProperty.call(ui.exports, key)) {
+        throw new Error(`自定义界面引用了 ui.exports 中未声明的组件: ${key}`);
+      }
+    }
+  }
+  if (ui && uiReferences.size === 0) {
+    throw new Error('manifest.ui 必须被至少一个节点工具 dialog.ui 引用');
+  }
+  if (ui && !permissions.includes('ui.custom')) {
+    throw new Error('声明 manifest.ui 的插件必须同时声明 ui.custom 权限');
   }
 
   const category = nonEmptyString(root.category, '插件分类', 32) as PluginCategory;
@@ -508,7 +699,7 @@ function parseManifest(value: unknown): PluginManifest {
     : normalizeGithubRepository(nonEmptyString(root.repository, 'repository', 512));
 
   return {
-    apiVersion: root.apiVersion,
+    apiVersion,
     runtime,
     id,
     name: nonEmptyString(root.name, '插件名称', 80),
@@ -522,6 +713,8 @@ function parseManifest(value: unknown): PluginManifest {
     keywords,
     entry: entry as PluginManifest['entry'],
     permissions: [...new Set(permissions)] as PluginPermission[],
+    resources,
+    ui,
     contributes: { nodeTools, nodes: customNodes },
   };
 }

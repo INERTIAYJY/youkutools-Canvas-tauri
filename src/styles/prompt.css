@@ -858,18 +858,31 @@
   border-radius: 10px;
   overflow: hidden;
   background: var(--theme-card);
-  cursor: var(--cursor-pointer, pointer);
   padding: 0;
   transition: border-color var(--transition-base), box-shadow var(--transition-base), transform var(--dur-fast) var(--ease-out-quart);
   color: inherit;
   font: inherit;
   text-align: left;
 }
+.style-card-select {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: var(--cursor-pointer, pointer);
+}
 .style-card:hover {
   border-color: var(--brand-alpha-40);
   box-shadow: 0 4px 16px var(--black-alpha-30);
 }
-.style-card:active {
+.style-card-select:active {
   transform: scale(0.97);
 }
 .style-card.selected {
@@ -961,12 +974,17 @@
   position: relative;
   border-style: dashed;
 }
-.style-card-delete {
+.style-card-actions {
   position: absolute;
   top: 4px;
   right: 4px;
-  width: 20px;
-  height: 20px;
+  display: flex;
+  gap: 4px;
+  z-index: 2;
+}
+.style-card-action {
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -975,13 +993,12 @@
   border-radius: 6px;
   color: var(--theme-text-secondary);
   cursor: var(--cursor-pointer, pointer);
-  opacity: 0;
-  transition: opacity var(--transition-base), background var(--transition-base), color var(--transition-base);
-  z-index: 2;
+  transition: background var(--transition-base), color var(--transition-base);
 }
-.style-card:hover .style-card-delete,
-.style-card-delete:focus-visible {
-  opacity: 1;
+.style-card-action:hover,
+.style-card-action:focus-visible {
+  background: var(--brand-alpha-80);
+  color: #fff;
 }
 .style-card-delete:hover {
   background: color-mix(in srgb, var(--danger) 70%, transparent);

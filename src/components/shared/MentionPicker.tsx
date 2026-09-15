@@ -6,7 +6,9 @@
  * 卡片走 onMouseDown + preventDefault，避免抢走 contenteditable 的光标。
  */
 import { Icon } from '@iconify/react';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import type { CharacterCropRect } from '../../types/dramaAssets';
+import { AVATAR_ASPECT, cropImageStyle } from '../character/characterReferencePresentation';
 
 export interface MentionPickerTab {
   id: string;
@@ -24,11 +26,14 @@ export interface MentionPickerItem {
   key: string;
   label: string;
   thumbnailUrl?: string;
+  /** 复用角色头像的归一化裁剪参数。 */
+  thumbnailCrop?: CharacterCropRect;
   /** 无缩略图时的占位图标（iconify 名） */
   icon?: string;
   /** 缩略图右上角小标，如 #3 / 自身 / 视频 */
   badge?: string;
   disabled?: boolean;
+  audioPreviewUrl?: string;
   title?: string;
   /** 供 aria-activedescendant 引用；不需要键盘导航时可省略 */
   domId?: string;
@@ -54,6 +59,7 @@ interface MentionPickerProps {
   listId?: string;
   ariaLabel?: string;
   className?: string;
+  mediaAspectRatio?: number;
 }
 
 export default function MentionPicker({
@@ -72,8 +78,51 @@ export default function MentionPicker({
   listId,
   ariaLabel,
   className = '',
+  mediaAspectRatio,
 }: MentionPickerProps) {
   const hasChipRow = !!leading || (chips?.length ?? 0) > 0;
+  const playerRef = useRef<HTMLAudioElement | null>(null);
+  const [playingKey, setPlayingKey] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState(false);
+  const previewSources = JSON.stringify(items.map((item) => [item.key, item.audioPreviewUrl]));
+
+  useEffect(() => {
+    return () => {
+      playerRef.current?.pause();
+      playerRef.current = null;
+      setPlayingKey(null);
+      setPreviewError(false);
+    };
+  }, [previewSources, activeTab]);
+
+  const togglePreview = (item: MentionPickerItem) => {
+    const previous = playerRef.current;
+    if (previous) {
+      previous.pause();
+      playerRef.current = null;
+    }
+    setPlayingKey(null);
+    setPreviewError(false);
+    if ((previous && playingKey === item.key) || !item.audioPreviewUrl) return;
+    const player = new Audio(item.audioPreviewUrl);
+    playerRef.current = player;
+    player.onended = () => {
+      if (playerRef.current === player) {
+        playerRef.current = null;
+        setPlayingKey(null);
+      }
+    };
+    const fail = () => {
+      if (playerRef.current === player) {
+        playerRef.current = null;
+        setPlayingKey(null);
+        setPreviewError(true);
+      }
+    };
+    player.onerror = fail;
+    setPlayingKey(item.key);
+    void player.play().catch(fail);
+  };
 
   return (
     <div className={`mention-picker ${className}`}>
@@ -117,6 +166,7 @@ export default function MentionPicker({
           <div className="mention-picker-empty">{emptyText}</div>
         ) : (
           items.map((item) => (
+            <div key={item.key} className="relative min-w-0" role="presentation">
             <button
               key={item.key}
               id={item.domId}
@@ -125,19 +175,21 @@ export default function MentionPicker({
               aria-selected={item.key === activeKey}
               disabled={item.disabled}
               title={item.title ?? item.label}
-              className={`mention-picker-card${item.key === activeKey ? ' active' : ''}`}
+              className={`mention-picker-card w-full${item.key === activeKey ? ' active' : ''}`}
               onMouseEnter={() => onItemHover?.(item.key)}
               onMouseDown={(e) => {
                 e.preventDefault();
                 if (!item.disabled) item.onSelect();
               }}
             >
-              <span className="mention-picker-card-media">
+              <span className="mention-picker-card-media" style={mediaAspectRatio !== undefined || item.thumbnailCrop ? { aspectRatio: mediaAspectRatio ?? AVATAR_ASPECT } : undefined}>
                 {/* 图标垫在底层：缩略图加载失败时自己隐藏，露出图标而不是空白卡 */}
                 <Icon icon={item.icon || 'mdi:vector-square'} width="26" height="26" />
                 {item.thumbnailUrl && (
                   <img
                     src={item.thumbnailUrl}
+                    className={item.thumbnailCrop ? 'is-cropped' : undefined}
+                    style={cropImageStyle(item.thumbnailCrop)}
                     alt=""
                     loading="lazy"
                     draggable={false}
@@ -148,10 +200,25 @@ export default function MentionPicker({
               </span>
               <span className="mention-picker-card-name">{item.label}</span>
             </button>
+            {item.audioPreviewUrl && (
+              <button
+                type="button"
+                className="ui-icon-btn absolute bottom-6 right-1 bg-canvas-surface text-canvas-text"
+                aria-label={`${playingKey === item.key ? '暂停试听' : '试听'}：${item.label}`}
+                title={playingKey === item.key ? '暂停试听' : '试听'}
+                disabled={item.disabled}
+                onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                onClick={(event) => { event.stopPropagation(); togglePreview(item); }}
+              >
+                <Icon icon={playingKey === item.key ? 'lucide:pause' : 'lucide:play'} width="14" height="14" />
+              </button>
+            )}
+            </div>
           ))
         )}
       </div>
 
+      {previewError && <p role="status" className="text-xs text-canvas-text-muted">声音试听失败，请重试</p>}
       {footer && <div className="mention-picker-footer">{footer}</div>}
     </div>
   );

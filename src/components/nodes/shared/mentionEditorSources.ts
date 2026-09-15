@@ -6,6 +6,7 @@
 import type { AppState } from '../../../store/useAppStore';
 import type { BaseNodeData, NodeType, StoryboardCellOverride, WorkflowIONodeType } from '../../../types';
 import { bestNodeThumb } from './mentionEditorDom';
+import { resolveDramaVoiceRef } from '../../../services/dramaAssetPrompt';
 
 export interface CanvasMentionItem {
   id: string;
@@ -125,6 +126,7 @@ export function resolveWorkflowMentionNodes(
 export function resolveDramaMentionItems(
   dramaAssets: AppState['dramaAssets'],
   query: string,
+  nodeType?: NodeType,
 ) {
   const items = [
     ...dramaAssets.characters.map((asset) => ({
@@ -134,6 +136,7 @@ export function resolveDramaMentionItems(
       imageNodeId: asset.imageNodeId,
       imageUrl: asset.imageUrl,
       referenceImages: asset.referenceImages,
+      voice: nodeType === 'ai-audio' ? resolveDramaVoiceRef(asset) : null,
     })),
     ...dramaAssets.scenes.map((asset) => ({
       id: asset.id,
@@ -142,6 +145,7 @@ export function resolveDramaMentionItems(
       imageNodeId: asset.imageNodeId,
       imageUrl: asset.imageUrl,
       referenceImages: undefined,
+      voice: null,
     })),
     ...dramaAssets.props.map((asset) => ({
       id: asset.id,
@@ -150,9 +154,11 @@ export function resolveDramaMentionItems(
       imageNodeId: asset.imageNodeId,
       imageUrl: asset.imageUrl,
       referenceImages: undefined,
+      voice: null,
     })),
   ];
-  if (!query) return items.slice(0, 20);
+  const candidates = nodeType === 'ai-audio' ? items.filter((item) => item.voice) : items;
+  if (!query) return candidates.slice(0, 20);
   const normalizedQuery = query.toLowerCase();
-  return items.filter((asset) => asset.name.toLowerCase().includes(normalizedQuery)).slice(0, 20);
+  return candidates.filter((asset) => asset.name.toLowerCase().includes(normalizedQuery)).slice(0, 20);
 }

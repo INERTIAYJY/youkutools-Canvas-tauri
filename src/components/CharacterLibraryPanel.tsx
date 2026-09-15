@@ -29,7 +29,8 @@ import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
 import Select from './shared/Select';
 import ViewportImage from './shared/ViewportImage';
-import ViewportVideo from './shared/ViewportVideo';
+import ResourceVideoPreview from './shared/ResourceVideoPreview';
+import { useResourceVideoPreview } from '../hooks/useResourceVideoPreview';
 import { useT } from '../i18n';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
@@ -267,6 +268,7 @@ export default function CharacterLibraryPanel() {
   const [dialogReferenceId, setDialogReferenceId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+  const [voiceDockState, setVoiceDockState] = useState({ context: '', expanded: false });
   // 记角色归属，切换角色时自然失效，不必在 effect 里回收状态
   const [playingVoice, setPlayingVoice] = useState<{
     characterId: string;
@@ -283,6 +285,7 @@ export default function CharacterLibraryPanel() {
   const [pendingActionMedia, setPendingActionMedia] = useState<CharacterActionMedia[]>([]);
   const [actionMediaTargetId, setActionMediaTargetId] = useState<string | null>(null);
   const [actionNodePickerTargetId, setActionNodePickerTargetId] = useState<string | null>(null);
+  const [hideActionNode, setHideActionNode] = useState(true);
   const [uploadingActionMedia, setUploadingActionMedia] = useState(false);
   const [savingAction, setSavingAction] = useState(false);
   const voicePlayerRef = useRef<HTMLAudioElement>(null);
@@ -360,9 +363,24 @@ export default function CharacterLibraryPanel() {
     [nodes],
   );
   const voiceClips = selectedCharacter?.voiceClips ?? [];
+  const voiceDockContext = `${open}:${scope}:${selectedCharacter?.id ?? ''}`;
+  const voiceDockOpen = voiceDockState.context === voiceDockContext && voiceDockState.expanded;
+  // 上下文变化时同步复位本组件状态，避免先显示上一角色的声音列表再收起。
+  if (voiceDockState.context !== voiceDockContext) {
+    setVoiceDockState({ context: voiceDockContext, expanded: false });
+    if (voicePickerOpen) setVoicePickerOpen(false);
+  }
   const visibleActions = (selectedCharacter?.actions ?? []).filter((action) => (
     actionFilter === 'all' || action.category === actionFilter
   ));
+  const videoPreview = useResourceVideoPreview(
+    JSON.stringify([open, actionLibraryOpen, scope, currentProjectId, selectedCharacter?.id, search, actionFilter, actionNodePickerTargetId]),
+    [
+      ...visibleActions.flatMap((action) => (action.media ?? []).map((media) => `action:${action.id}:${media.id}`)),
+      ...pendingActionMedia.map((media) => `pending:${media.id}`),
+      ...(actionNodePickerTargetId ? pickableActionNodes.map((node) => `node:${node.id}`) : []),
+    ],
+  );
   const playingVoiceClipId = playingVoice?.characterId === selectedCharacter?.id
     ? playingVoice?.clipId ?? null
     : null;
@@ -425,13 +443,16 @@ export default function CharacterLibraryPanel() {
   const focusNode = (nodeId: string) => {
     setOpen(false);
     setSelectedNodeIds([nodeId]);
-    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId } }));
+    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId, pulse: true } }));
   };
 
   const handleVoiceToCanvas = (clip: CharacterVoiceClip) => {
     if (!selectedCharacter) return;
     const nodeId = createAudioNodeFromCharacterVoice(scope, selectedCharacter.id, clip.id);
-    if (nodeId) focusNode(nodeId);
+    if (nodeId) {
+      setCharacterLibraryNodeHidden(nodeId, false);
+      focusNode(nodeId);
+    }
   };
 
   const handleVoiceOver = (clip: CharacterVoiceClip) => {
@@ -558,6 +579,7 @@ export default function CharacterLibraryPanel() {
       selectedCharacter.id,
       action.id,
       [media],
+      { nodeId, hideNode: hideActionNode },
     )) {
       setActionNodePickerTargetId(null);
       showToast(t('画布节点已添加到动作「{name}」', { name: action.name }));
@@ -626,7 +648,7 @@ export default function CharacterLibraryPanel() {
 
     setOpen(false);
     setSelectedNodeIds([nodeId]);
-    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId } }));
+    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId, pulse: true } }));
   };
 
   return (
@@ -726,7 +748,7 @@ export default function CharacterLibraryPanel() {
                   </div>
                 ) : null}
 
-                <section className="character-voice-dock" aria-label={t('角色声音')}>
+                {voiceDockOpen ? <section className="character-voice-dock" aria-label={t('角色声音')}>
                   <div className="character-voice-dock-head">
                     <Icon icon="lucide:audio-lines" width="14" height="14" aria-hidden="true" />
                     <span>{t('角色声音')}</span>
@@ -780,7 +802,10 @@ export default function CharacterLibraryPanel() {
                     </p>
                   ) : (
                     <div className="character-voice-chips" role="list">
-                      {voiceClips.map((clip) => (
+                      {voiceClips.map((clip) => {
+                        const voiceNode = nodes.find((node) => node.id === clip.sourceNodeId);
+                        const voiceHidden = voiceNode?.data.hiddenByCharacterLibrary === true;
+                        return (
                         <div
                           key={clip.id}
                           role="listitem"
@@ -826,33 +851,48 @@ export default function CharacterLibraryPanel() {
                             >
                               <Icon icon="lucide:mic" width="13" height="13" aria-hidden="true" />
                             </button>
-                            <button
+                            {voiceNode && !voiceHidden ? <button
                               type="button"
-                              data-tooltip={clip.sourceNodeId ? t('定位画布节点') : t('添加到画布')}
-                              aria-label={clip.sourceNodeId ? t('定位画布节点') : t('添加到画布')}
+                              data-tooltip={t('定位画布节点')}
+                              aria-label={t('定位画布节点')}
                               onClick={() => handleVoiceToCanvas(clip)}
                             >
                               <Icon
-                                icon={clip.sourceNodeId ? 'lucide:locate-fixed' : 'lucide:square-plus'}
+                                icon="lucide:locate-fixed"
                                 width="13"
                                 height="13"
                                 aria-hidden="true"
                               />
-                            </button>
+                            </button> : null}
+                            {voiceNode ? (
+                              <button
+                                type="button"
+                                data-tooltip={t(voiceHidden ? '在画布中显示' : '在画布中隐藏')}
+                                aria-label={t(voiceHidden ? '在画布中显示' : '在画布中隐藏')}
+                                onClick={() => {
+                                  if (setCharacterLibraryNodeHidden(voiceNode.id, !voiceHidden)) {
+                                    showToast(t(voiceHidden ? '节点已显示' : '节点已隐藏'));
+                                  }
+                                }}
+                              >
+                                <Icon icon={voiceHidden ? 'lucide:eye' : 'lucide:eye-off'} width="13" height="13" aria-hidden="true" />
+                              </button>
+                            ) : null}
                             <button
                               type="button"
-                              data-tooltip={t('移除该声音')}
-                              aria-label={t('移除该声音')}
+                              data-tooltip={t(clip.sourceNodeId ? '解除声音关联' : '移除该声音')}
+                              aria-label={t(clip.sourceNodeId ? '解除声音关联' : '移除该声音')}
                               onClick={() => void handleRemoveVoiceClip(clip)}
                             >
                               <Icon icon="lucide:trash-2" width="13" height="13" aria-hidden="true" />
                             </button>
                           </span>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
-                </section>
+                </section> : null}
 
                 <section className="character-library-profile" aria-label={t('当前角色')}>
                   <div className="character-library-profile-copy">
@@ -883,19 +923,19 @@ export default function CharacterLibraryPanel() {
                     ) : null}
                     <button
                       type="button"
-                      data-tooltip={t('从画布添加视角图')}
-                      aria-label={t('从画布添加视角图')}
-                      aria-expanded={pickerOpen}
-                      className={pickerOpen ? 'is-active' : ''}
+                      data-tooltip={t(voiceDockOpen ? '收起角色声音' : '展开角色声音')}
+                      aria-label={t(voiceDockOpen ? '收起角色声音' : '展开角色声音')}
+                      aria-expanded={voiceDockOpen}
+                      className={voiceDockOpen ? 'is-active' : ''}
                       onClick={() => {
-                        setVoicePickerOpen(false);
-                        setPickerOpen((open) => !open);
+                        if (voiceDockOpen) {
+                          voicePlayerRef.current?.pause();
+                          setVoicePickerOpen(false);
+                        }
+                        setVoiceDockState({ context: voiceDockContext, expanded: !voiceDockOpen });
                       }}
                     >
-                      <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
-                    </button>
-                    <button type="button" data-tooltip={t('编辑角色')} aria-label={t('编辑角色')} onClick={() => openEditor(selectedCharacter)}>
-                      <Icon icon="lucide:pencil" width="16" height="16" aria-hidden="true" />
+                      <Icon icon="lucide:audio-lines" width="16" height="16" aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -909,11 +949,27 @@ export default function CharacterLibraryPanel() {
                     </button>
                     <button
                       type="button"
+                      data-tooltip={t('从画布添加视角图')}
+                      aria-label={t('从画布添加视角图')}
+                      aria-expanded={pickerOpen}
+                      className={pickerOpen ? 'is-active' : ''}
+                      onClick={() => {
+                        setVoicePickerOpen(false);
+                        setPickerOpen((open) => !open);
+                      }}
+                    >
+                      <Icon icon="lucide:image-plus" width="16" height="16" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
                       data-tooltip={scope === 'project' ? t('复制到全局资产') : t('复制到本项目')}
                       aria-label={scope === 'project' ? t('复制到全局资产') : t('复制到本项目')}
                       onClick={() => void handleCopy()}
                     >
                       <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
+                    </button>
+                    <button type="button" data-tooltip={t('编辑角色')} aria-label={t('编辑角色')} onClick={() => openEditor(selectedCharacter)}>
+                      <Icon icon="lucide:pencil" width="16" height="16" aria-hidden="true" />
                     </button>
                     <button type="button" data-tooltip={t('删除角色')} aria-label={t('删除角色')} onClick={() => setDeleteConfirmOpen(true)}>
                       <Icon icon="lucide:trash-2" width="16" height="16" aria-hidden="true" />
@@ -1118,33 +1174,75 @@ export default function CharacterLibraryPanel() {
                           </p>
 
                           <div className="mt-3 grid grid-cols-2 gap-2">
-                            {(action.media ?? []).map((media) => (
-                              <figure key={media.id} className="group relative m-0 aspect-video overflow-hidden rounded-lg border border-canvas-border bg-canvas-surface">
-                                {media.kind !== 'video' ? (
-                                  <ViewportImage src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
-                                ) : (
-                                  <ViewportVideo src={media.url} className="size-full object-cover" controls aria-label={media.name} />
-                                )}
-                                <span className="pointer-events-none absolute bottom-1 left-1 max-w-[calc(100%-8px)] truncate rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white">
-                                  {media.name}
-                                </span>
-                                <button
-                                  type="button"
-                                  className="absolute right-1 top-1 grid size-6 place-items-center rounded-md bg-black/60 text-white transition-[transform,background-color] duration-150 ease-out hover:bg-black/80 active:scale-[.97]"
-                                  aria-label={t('移除媒体「{name}」', { name: media.name })}
-                                  onClick={async () => {
-                                    if (await removeCharacterActionMedia(
-                                      scope,
-                                      selectedCharacter.id,
-                                      action.id,
-                                      media.id,
-                                    )) showToast(t('动作媒体已移除'));
-                                  }}
-                                >
-                                  <Icon icon="lucide:x" width="12" height="12" aria-hidden="true" />
-                                </button>
-                              </figure>
-                            ))}
+                            {(action.media ?? []).map((media) => {
+                              const linkedNodes = nodes.filter((node) => node.data.characterLibraryLinks?.some((link) => (
+                                link.scope === scope && link.characterId === selectedCharacter.id
+                                && link.actionId === action.id && link.mediaId === media.id
+                              )));
+                              // 旧素材没有节点关联时，仅在媒体身份唯一匹配时提供显隐，避免误操作同图副本。
+                              const candidates = linkedNodes.length > 0 ? linkedNodes : nodes.filter((node) => (
+                                Boolean(media.assetId && node.data.assetId === media.assetId)
+                                || Boolean(media.filePath && node.data.filePath === media.filePath)
+                                || Boolean(media.url && (media.kind === 'video'
+                                  ? node.data.videoUrl === media.url
+                                  : node.data.imageUrl === media.url || node.data.thumbnailUrl === media.url))
+                              ));
+                              const mediaNode = candidates.length === 1 ? candidates[0] : undefined;
+                              const hidden = mediaNode?.data.hiddenByCharacterLibrary === true;
+                              const visibilityLabel = !mediaNode
+                                ? t('没有唯一对应的画布节点')
+                                : hidden ? t('显示画布节点') : t('在画布中隐藏');
+                              return (
+                                <figure key={media.id} className={`resource-video-tile group relative m-0 overflow-hidden rounded-lg border border-canvas-border bg-canvas-surface${media.kind === 'video' ? '' : ' aspect-video'}${videoPreview.expandedId === `action:${action.id}:${media.id}` ? ' is-expanded' : ''}`}>
+                                  {media.kind !== 'video' ? (
+                                    <ViewportImage src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
+                                  ) : (
+                                    <ResourceVideoPreview src={media.url} filePath={media.filePath} name={media.name}
+                                      expanded={videoPreview.expandedId === `action:${action.id}:${media.id}`}
+                                      onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? `action:${action.id}:${media.id}` : null)} />
+                                  )}
+                                  <span className="pointer-events-none absolute bottom-1 left-1 max-w-[calc(100%-40px)] truncate rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white">
+                                    {media.name}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="absolute right-1 top-1 grid size-6 place-items-center rounded-md bg-black/60 text-white transition-[transform,background-color] duration-150 ease-out hover:bg-black/80 active:scale-[.97]"
+                                    aria-label={t('移除媒体「{name}」', { name: media.name })}
+                                    onClick={async () => {
+                                      if (await removeCharacterActionMedia(
+                                        scope,
+                                        selectedCharacter.id,
+                                        action.id,
+                                        media.id,
+                                      )) showToast(t('动作媒体已移除'));
+                                    }}
+                                  >
+                                    <Icon icon="lucide:x" width="12" height="12" aria-hidden="true" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="ui-icon-btn ui-icon-btn--sm absolute bottom-1 right-1 border border-canvas-border bg-canvas-surface"
+                                    disabled={!mediaNode}
+                                    data-tooltip={visibilityLabel}
+                                    aria-label={visibilityLabel}
+                                    aria-pressed={Boolean(mediaNode && !hidden)}
+                                    onClick={() => {
+                                      if (!mediaNode) return;
+                                      if (hidden) {
+                                        setCharacterLibraryNodeHidden(mediaNode.id, false);
+                                      } else {
+                                        useAppStore.getState().linkNodeToCharacter(mediaNode.id, {
+                                          scope, characterId: selectedCharacter.id, actionId: action.id, mediaId: media.id,
+                                        }, true);
+                                      }
+                                      showToast(hidden ? t('节点已显示') : t('节点已隐藏'));
+                                    }}
+                                  >
+                                    <Icon icon={hidden ? 'lucide:eye' : 'lucide:eye-off'} width="13" height="13" aria-hidden="true" />
+                                  </button>
+                                </figure>
+                              );
+                            })}
                             <button
                               type="button"
                               disabled={uploadingActionMedia}
@@ -1180,6 +1278,10 @@ export default function CharacterLibraryPanel() {
                                     <Icon icon="lucide:x" width="12" height="12" aria-hidden="true" />
                                   </button>
                                 </div>
+                                <label className="character-capture-hide-option mt-2">
+                                  <input type="checkbox" checked={hideActionNode} onChange={(event) => setHideActionNode(event.target.checked)} />
+                                  <span>{t('添加后隐藏画布节点')}</span>
+                                </label>
                                 {pickableActionNodes.length === 0 ? (
                                   <div className="mt-2 flex min-h-20 flex-col items-center justify-center gap-1 rounded-md border border-dashed border-canvas-border px-3 text-center text-[10px] text-canvas-text-muted">
                                     <Icon icon="lucide:film" width="16" height="16" aria-hidden="true" />
@@ -1195,35 +1297,27 @@ export default function CharacterLibraryPanel() {
                                         || node.data.fileName
                                         || t('未命名节点');
                                       return (
-                                        <button
+                                        <div
                                           key={node.id}
-                                          type="button"
-                                          className="group min-w-0 overflow-hidden rounded-md border border-canvas-border bg-canvas-card text-left transition-[transform,border-color,background-color] duration-150 ease-out hover:border-indigo-400 hover:bg-canvas-hover active:scale-[.98]"
-                                          onClick={() => void handleBindActionNode(node.id)}
+                                          className={`resource-video-tile group min-w-0 overflow-hidden rounded-md border border-canvas-border bg-canvas-card text-left${videoPreview.expandedId === `node:${node.id}` ? ' is-expanded' : ''}`}
                                         >
-                                          <span className="block aspect-video overflow-hidden bg-canvas-bg">
+                                          <div className={`overflow-hidden bg-canvas-bg${node.data.videoUrl ? '' : ' aspect-video'}`}>
                                             {node.data.videoUrl ? (
-                                              <ViewportVideo
-                                                src={previewUrl}
-                                                className="size-full object-cover"
-                                                muted
-                                                playsInline
-                                                preload="metadata"
-                                                aria-hidden="true"
-                                              />
+                                              <ResourceVideoPreview src={previewUrl} filePath={node.data.filePath} name={label}
+                                                poster={node.data.thumbnailUrl} revision={node.data.mediaVersion}
+                                                expanded={videoPreview.expandedId === `node:${node.id}`}
+                                                onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? `node:${node.id}` : null)} />
                                             ) : (
-                                              <ViewportImage
-                                                src={previewUrl}
-                                                alt=""
-                                                className="size-full object-cover"
-                                                draggable={false}
-                                              />
+                                              <button type="button" className="size-full" onClick={() => void handleBindActionNode(node.id)} aria-label={`${label}：添加素材`}>
+                                                <ViewportImage src={previewUrl} alt="" className="size-full object-cover" draggable={false} />
+                                              </button>
                                             )}
-                                          </span>
-                                          <span className="block truncate px-2 py-1.5 text-[10px] text-canvas-text-secondary group-hover:text-canvas-text">
-                                            {label}
-                                          </span>
-                                        </button>
+                                          </div>
+                                          <button type="button" className="block w-full truncate px-2 py-1.5 text-left text-[10px] text-canvas-text-secondary hover:text-canvas-text"
+                                            aria-label={`${label}：添加素材`} onClick={() => void handleBindActionNode(node.id)}>
+                                            {node.data.videoUrl ? `添加：${label}` : label}
+                                          </button>
+                                        </div>
                                       );
                                     })}
                                   </div>
@@ -1312,11 +1406,13 @@ export default function CharacterLibraryPanel() {
                   {pendingActionMedia.length > 0 ? (
                     <div className="mt-2 grid grid-cols-2 gap-2">
                       {pendingActionMedia.map((media) => (
-                        <figure key={media.id} className="relative m-0 aspect-video overflow-hidden rounded-lg border border-canvas-border bg-canvas-surface">
+                        <figure key={media.id} className={`resource-video-tile relative m-0 overflow-hidden rounded-lg border border-canvas-border bg-canvas-surface${media.kind === 'video' ? '' : ' aspect-video'}${videoPreview.expandedId === `pending:${media.id}` ? ' is-expanded' : ''}`}>
                           {media.kind !== 'video' ? (
                             <ViewportImage src={media.url} alt={media.name} className="size-full object-cover" draggable={false} />
                           ) : (
-                            <ViewportVideo src={media.url} className="size-full object-cover" aria-label={media.name} />
+                            <ResourceVideoPreview src={media.url} filePath={media.filePath} name={media.name}
+                              expanded={videoPreview.expandedId === `pending:${media.id}`}
+                              onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? `pending:${media.id}` : null)} />
                           )}
                           <button
                             type="button"

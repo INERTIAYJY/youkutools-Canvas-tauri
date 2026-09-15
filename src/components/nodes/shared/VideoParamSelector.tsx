@@ -3,6 +3,7 @@
  * - Seedance 模型 → Seedance 参数（分辨率、宽高比、时长、有声视频）
  * - 其他 provider → 通用视频参数（像素分辨率、帧率、时长）
  */
+import Select from '../../shared/Select';
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import AnimatedButton from '../../shared/AnimatedButton';
@@ -13,6 +14,7 @@ import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
+import { AUTODL_H3_WORKFLOW } from '../../../services/workflowApi/autodlWorkflowManifest';
 import { getModelProtocolPresetVideoCapability } from '../../../services/ai/modelProtocol';
 import {
   resolveVideoDurationSeconds,
@@ -192,6 +194,8 @@ export default function VideoParamSelector({
     return state.nodes.filter((node) => sourceIds.has(node.id) && Boolean((node.data as BaseNodeData).imageUrl));
   }));
   const canvasNodes = useAppStore((state) => state.nodes);
+  const workflowApiManifest = useAppStore((state) => state.workflows.find((workflow) =>
+    workflow.id === selectedModel?.replace(/^workflow-api\//, ''))?.workflowApi);
 
   const references = videoReferences ?? [];
   const frameReferences = references.filter((item) => item.kind === 'frame');
@@ -262,9 +266,6 @@ export default function VideoParamSelector({
     ? generalModel.videoCapability
       ?? getModelProtocolPresetVideoCapability(generalModel.executionProfile)
     : undefined;
-  const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
-    || provider === 'seedling'
-    || Boolean(apimartCapability);
   const generalDisplayState = resolveGeneralVideoParameterDisplayState(generalCapability, {
     resolution: seedanceResolution,
     ratio: seedanceRatio,
@@ -272,8 +273,16 @@ export default function VideoParamSelector({
     frameRate: videoFps,
     generateAudio,
   });
+  // 原生模型和通用模型共享参数面板，但通用模型不再经过会补齐 Seedance 默认值的能力视图。
+  // 这样 capability 未声明的字段会保持未指定，不会被 UI 悄悄写成 720p / 16:9 / 24fps。
+  const workflowApiCapability: VideoModelCapability | undefined = provider === 'workflow-api' && workflowApiManifest?.version === 1
+    ? AUTODL_H3_WORKFLOW.capability : undefined;
   const nativeCapability = apimartCapability ?? volcengineCapability ?? dreaminaCapability;
-  const parameterCapability = nativeCapability ?? generalCapability;
+  const parameterCapability = nativeCapability ?? workflowApiCapability ?? generalCapability;
+  // 森之灵沿用 Seedance 风格的按秒时长 + 比例参数面板。
+  const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
+    || provider === 'seedling'
+    || Boolean(apimartCapability || workflowApiCapability);
   const generalControlSupport = resolveGeneralVideoControlSupport(generalCapability);
   // 本地工作流（ComfyUI / RunningHub）才按像素分辨率 + 帧率走；
   // 其余接口模型使用按秒表达的 API 布局；具体控件仍只由 capability 决定。
@@ -281,7 +290,6 @@ export default function VideoParamSelector({
   const usesDurationControls = isNativeSeedance || !isWorkflowProvider;
   const legacyVideoResolution = videoResolution ?? 832;
   const legacyVideoFps = videoFps ?? 24;
-  const legacyVideoFrames = videoFrames ?? 77;
   const legacySeedanceRatio = seedanceRatio ?? '16:9';
   // 非 Seedance（ComfyUI / RunningHub / 自建模型）：比例换算成 width/height 后注入请求
   const genericRatios = VIDEO_ASPECT_RATIOS.map((value) => ({ value, label: value }));
@@ -311,6 +319,7 @@ export default function VideoParamSelector({
   const referenceLimits = apimartCapability
     ?? volcengineCapability
     ?? dreaminaCapability
+    ?? workflowApiCapability
     ?? generalCapability;
   const describeLimit = (max: number | undefined, unit: string, kind: string) => {
     if (max === undefined) return '';
@@ -341,7 +350,9 @@ export default function VideoParamSelector({
     && !allowedDurations
     && (generalCapability?.minDuration === undefined || generalCapability?.maxDuration === undefined),
   );
-  const durationTooltip = allowedDurations
+  const durationTooltip = apimartCapability?.durationMode === 'without-video'
+    ? '仅支持 4 / 6 / 8 / 10 秒。使用参考视频时，此时长设置不生效，由模型决定输出时长。'
+    : allowedDurations
     ? `该模型仅支持 ${allowedDurations.join(' / ')} 秒。`
     : useUnboundedDurationInput
       ? generalCapability?.minDuration !== undefined
@@ -354,7 +365,8 @@ export default function VideoParamSelector({
     ?? (generalModel ? generalDisplayState.duration : capabilityDurationDefault)
     ?? (generalModel
       ? undefined
-      : resolveVideoDurationSeconds(undefined, legacyVideoFrames, legacyVideoFps, maxDuration));
+      // 缺少帧数时与提交层共用默认秒数，不能用临时的 77 帧显示成 3 秒。
+      : resolveVideoDurationSeconds(undefined, videoFrames, legacyVideoFps, maxDuration));
   const displayedDuration = generalModel || requestedDuration === undefined
     ? requestedDuration
     : allowedDurations
@@ -399,7 +411,9 @@ export default function VideoParamSelector({
   const showResolutionControl = isNativeSeedance || generalControlSupport.resolution;
   const showRatioControl = showSeedanceRatio && (isNativeSeedance || generalControlSupport.ratio);
   // 自定义 API 只有 capability 声明了时长语义才显示；内置 API 保留原有时长控件。
-  const showDurationControl = generalModel ? generalControlSupport.duration : true;
+  const showDurationControl = apimartCapability?.durationMode === 'automatic'
+    ? false
+    : generalModel ? generalControlSupport.duration : true;
   const showFrameRateControl = Boolean(generalModel && generalControlSupport.frameRate);
   const supportsAudio = isNativeSeedance
     ? Boolean(nativeCapability?.audioField)
@@ -462,6 +476,7 @@ export default function VideoParamSelector({
   // Close popup on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
+      if (e.target instanceof Element && e.target.closest('[data-ui-select-portal]')) return;
       if (ref.current && !ref.current.contains(e.target as Node)) closePopup();
     };
     if (open) document.addEventListener('mousedown', handler, true);
@@ -517,7 +532,7 @@ export default function VideoParamSelector({
 
         {open && (
           <div className="img-ratio-popup ui-schema-popup ui-schema-video-params-popup" style={{ display: 'block' }}>
-            {onChangeVideoReferences && (
+            {onChangeVideoReferences && provider !== 'workflow-api' && (
               <div className="img-rp-quality-area mb-2">
                 <div className="img-rp-section-label rh-video-ref-head">
                   <span>
@@ -710,6 +725,9 @@ export default function VideoParamSelector({
                 )}
 
                 {/* Seedance 时长 */}
+                {apimartCapability?.durationMode === 'automatic' && (
+                  <div className="text-xs text-canvas-text-secondary">时长由模型自动决定，可在提示词中描述节奏。</div>
+                )}
                 {(showDurationControl || (showGenerateAudio && supportsAudio)) && (
                 <div className="rh-v5-meta-panel">
                   {showDurationControl && <div className="rh-vram-adv-row">
@@ -812,18 +830,18 @@ export default function VideoParamSelector({
                           : '开启后由当前原生视频模型同时生成音频。'}>!</span>
                       </div>
                       {generalModel ? (
-                        <select
-                          className="h-7 rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text"
+                        <Select fixedMenu
+                          className="min-w-0" size="sm"
                           aria-label="视频音频策略"
                           value={generateAudio === undefined ? 'default' : generateAudio ? 'on' : 'off'}
-                          onChange={(event) => onChangeGenerateAudio?.(
-                            event.target.value === 'default' ? undefined : event.target.value === 'on',
+                          onChange={(selectedOptionValue) => onChangeGenerateAudio?.(
+                            selectedOptionValue === 'default' ? undefined : selectedOptionValue === 'on',
                           )}
                         >
                           <option value="default">模型默认</option>
                           <option value="on">生成音频</option>
                           <option value="off">不生成音频</option>
-                        </select>
+                        </Select>
                       ) : (
                         <label className="rh-toggle-switch">
                           <input

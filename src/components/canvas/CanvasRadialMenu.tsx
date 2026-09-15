@@ -3,6 +3,7 @@
  * 展示 6 个可配置槽位（ComfyUI、工作流、素材库、设置、项目库、适应画布等），
  * 支持拖拽改键（custom-url 打开自定义网页）、空白槽位，并根据视口边界自动校正弹出位置。
  */
+import Select from '../shared/Select';
 import { useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { invoke } from '@tauri-apps/api/core';
@@ -203,7 +204,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
   const saveDraft = async () => {
     const normalized = normalizeCanvasQuickActions(draft);
     updateConfig({ canvasQuickActions: normalized });
-    await saveConfig({ silent: true });
+    try { await saveConfig({ silent: true }); } catch { return; }
     showToast(t('画布圆环快捷方式已保存'));
     setEditing(false);
     onClose();
@@ -269,11 +270,11 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
               <div className="canvas-radial-editor-row" key={action.id}>
                 <span className="canvas-radial-slot-number">{index + 1}</span>
                 <Icon icon={getActionIcon(action)} width="20" />
-                <select
+                <Select fixedMenu
                   value={action.kind}
                   aria-label={t('槽位 {index}', { index: index + 1 })}
-                  onChange={(event) => updateDraft(index, {
-                    kind: event.target.value as CanvasQuickActionKind,
+                  onChange={(selectedOptionValue) => updateDraft(index, {
+                    kind: selectedOptionValue as CanvasQuickActionKind,
                     label: undefined,
                     url: undefined,
                   })}
@@ -281,7 +282,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
                   {ACTION_DEFINITIONS.map((definition) => (
                     <option key={definition.kind} value={definition.kind}>{t(definition.label)}</option>
                   ))}
-                </select>
+                </Select>
                 {action.kind === 'custom-url' && (
                   <div className="canvas-radial-custom-fields">
                     <input

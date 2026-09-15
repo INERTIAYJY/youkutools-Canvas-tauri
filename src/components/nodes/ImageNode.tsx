@@ -13,12 +13,14 @@ import type { BaseNodeData, ImageAnnotationLayer as ImageAnnotationLayerData } f
 import NodeLabel from './shared/NodeLabel';
 import GooeyBtn from './shared/GooeyBtn';
 import ImageNodeToolbar from './shared/image/ImageNodeToolbar';
+import NodeToolbarShell from './shared/NodeToolbarShell';
 import ResizeHandle from './shared/ResizeHandle';
 import FullscreenOverlay from '../shared/FullscreenOverlay';
-import ZoomableImage from '../shared/ZoomableImage';
+import CanvasImagePreview from '../shared/CanvasImagePreview';
 import NodeError from './shared/NodeError';
 import ModelDownloadDialog from '../shared/ModelDownloadDialog';
 import { computeImageNodeDimensions } from './shared/image/imageUtils';
+import CanvasPreviewImage from './shared/image/CanvasPreviewImage';
 import { useNodeRename } from './shared/useNodeRename';
 import { useSourceFileUpload } from './shared/useSourceFileUpload';
 import { useAppStore, generateId } from '../../store/useAppStore';
@@ -28,6 +30,7 @@ import { blobToDataUrl } from '../../store/store.utils';
 import { generateOutpaintImage } from '../../services/apimartService';
 import { executeGeneration } from '../../services/generationService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
+import { useCanvasNodeLodPreviewRevision, useCanvasNodeLodProtection } from '../../hooks/useCanvasNodeLod';
 import { createPresetNode } from './shared/toolbar/presetAction';
 import type { CameraStudioResult } from './shared/image/cameraStudio';
 import {
@@ -44,6 +47,7 @@ import {
 import { useImageNodeOnnxActions } from './shared/image/useImageNodeOnnxActions';
 import { useT } from '../../i18n';
 import { getImageLoadRetryDelay, isRetryableImageSource } from '../../utils/imageLoadRetry';
+import NodeGenerationProgress from './shared/NodeGenerationProgress';
 
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
@@ -118,6 +122,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
+  const previewProjectId = useAppStore((s) => s.currentProjectId);
   const isSingleSelection = useAppStore((s) => s.selectedNodeIds.length <= 1);
   const isSource = data.role === 'source';
   const nodeWidth = (data.nodeWidth as number) || 280;
@@ -170,14 +175,15 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   }>({});
   const imageRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const imageRetryRef = useRef<{ src?: string; scheduledAttempts: number }>({ scheduledAttempts: 0 });
-  const [fullscreenFailedSrc, setFullscreenFailedSrc] = useState<string | undefined>();
+  const [fullscreenProjectId, setFullscreenProjectId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mattingFailedSrc, setMattingFailedSrc] = useState<string | undefined>();
   const [annotateFailedSrc, setAnnotateFailedSrc] = useState<string | undefined>();
 
   // 文件被外部工具覆盖时只刷新本地预览，不修改节点数据或撤销历史。
-  const revisionFor = useReferencedImageRevisions([data.filePath]);
-  const previewRevision = revisionFor(data.filePath);
+  const lodPreviewRevision = useCanvasNodeLodPreviewRevision();
+  const revisionFor = useReferencedImageRevisions([lodPreviewRevision === undefined ? data.filePath : undefined]);
+  const previewRevision = lodPreviewRevision ?? revisionFor(data.filePath);
   const rawDisplaySrc = (data.imageUrl || data.thumbnailUrl) as string | undefined;
   const displaySrc = withPreviewRevision(rawDisplaySrc, previewRevision);
   const annotationLayer = data.annotationLayer;
@@ -187,7 +193,6 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const imgLoadError = imgState.src === displaySrc && !!imgState.failed;
   const imgRetrying = imgState.src === displaySrc && !!imgState.retrying;
   const imgRetryAttempt = imgState.src === displaySrc ? (imgState.retryAttempt ?? 0) : 0;
-  const fullscreenError = !!displaySrc && fullscreenFailedSrc === displaySrc;
   const mattingError = !!data.mattingMask && mattingFailedSrc === data.mattingMask;
   const annotateError = !!data.annotation && annotateFailedSrc === data.annotation;
 
@@ -771,7 +776,10 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   /* ════════════════════════════════════════════
      Fullscreen State
      ════════════════════════════════════════════ */
-  const handleOpenFullscreen = useCallback(() => setIsFullscreen(true), []);
+  const handleOpenFullscreen = useCallback(() => {
+    setFullscreenProjectId(useAppStore.getState().currentProjectId);
+    setIsFullscreen(true);
+  }, []);
   const handleCloseFullscreen = useCallback(() => setIsFullscreen(false), []);
 
   /** 重绘 — 打开 PromptPanel 对话框 */
@@ -841,6 +849,9 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     || isCameraStudio
     || isCompose;
 
+  useCanvasNodeLodProtection(id, shouldSuspendCanvasPreview || isUploading || isUpscaling
+    || isMattingRunning || imgLoadError || imgRetrying || mattingError || annotateError);
+
   return (
     <>
       <div className="node-wrapper relative" style={{ width: nodeWidth }}>
@@ -889,9 +900,13 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                     </button>
                   </div>
                 ) : (
-                  <img
+                  <CanvasPreviewImage
                     key={`${displaySrc}:${imgRetryAttempt}`}
                     src={displaySrc}
+                    nodeId={id}
+                    projectId={previewProjectId}
+                    nodeWidth={nodeWidth}
+                    nodeHeight={nodeHeight}
                     alt="Generated"
                     className={`image-preview-img compact img-reveal${imgLoaded ? ' is-loaded' : ''}`}
                     data-source-url={data.sourceUrl}
@@ -962,6 +977,9 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                 )}
                   </>
                 )}
+                {data.status === 'loading' && (
+                  <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成图像中...')} overlay />
+                )}
               </div>
             ) : isUploading ? (
               <div className="node-preview-loading">
@@ -969,10 +987,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                 <span>{t('上传中...')}</span>
               </div>
             ) : data.status === 'loading' ? (
-              <div className="node-preview-loading">
-                <div className="spinner large" />
-                <span>{t('生成图像中...')}</span>
-              </div>
+              <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成图像中...')} />
             ) : (
               isSource ? (
                 <button
@@ -1023,9 +1038,8 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           onResize={handleResize}
         />
 
-        {/* Keep the toolbar mounted to animate selection changes. */}
         {(data.imageUrl || data.thumbnailUrl) && (
-          <div className={`node-toolbar-shell ${selected && isSingleSelection ? 'is-visible' : ''}`}>
+          <NodeToolbarShell visible={selected && isSingleSelection}>
             <ImageNodeToolbar
               nodeId={id}
               onUpload={handleUpload}
@@ -1046,7 +1060,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               isUpscaling={isUpscaling}
               isSubjectMattingRunning={isMattingRunning}
             />
-          </div>
+          </NodeToolbarShell>
         )}
       </div>
 
@@ -1141,30 +1155,14 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         hidePanel
         className="fullscreen-overlay--image-preview image-node-fullscreen-overlay"
       >
-        {isFullscreen && (fullscreenError ? (
-          <div className="flex flex-col items-center justify-center gap-3 text-canvas-text-muted" style={{ height: '100vh' }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.5">
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" />
-              <polyline points="21 15 16 10 5 21" />
-            </svg>
-            <span className="text-sm">{t('图片加载失败')}</span>
-            <button
-              onClick={() => setFullscreenFailedSrc(undefined)}
-              className="text-xs px-3 py-1 rounded bg-canvas-hover hover:bg-canvas-border transition-colors"
-            >
-              {t('重新加载')}
-            </button>
-          </div>
-        ) : displaySrc ? (
-          <ZoomableImage
+        {isFullscreen && (
+          <CanvasImagePreview
+            nodeId={id}
+            openingProjectId={fullscreenProjectId}
             src={displaySrc}
-            alt={(data.label as string) || t('预览')}
-            className="fullscreen-img-view"
             onClose={handleCloseFullscreen}
-            onError={() => setFullscreenFailedSrc(displaySrc)}
           />
-        ) : null)}
+        )}
       </FullscreenOverlay>
 
       {/* ── 超分模型下载弹窗（Portal → body）── */}

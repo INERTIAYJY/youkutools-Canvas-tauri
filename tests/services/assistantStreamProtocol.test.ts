@@ -7,9 +7,12 @@ import {
 import { runAssistantPipeline } from '../../src/services/chat/assistantService';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { ModelExecutionProfile } from '../../src/types/aiTypes';
-import type { UserSkill } from '../../src/types';
+import type { ChatApiProtocol, UserSkill } from '../../src/types';
 
-const configureAssistant = (executionProfile: ModelExecutionProfile) => {
+const configureAssistant = (
+  executionProfile?: ModelExecutionProfile,
+  chatApiProtocol?: ChatApiProtocol,
+) => {
   useAppStore.setState((state) => ({
     config: {
       ...state.config,
@@ -21,6 +24,7 @@ const configureAssistant = (executionProfile: ModelExecutionProfile) => {
           apiKey: 'secret',
           baseUrl: 'https://gateway.example/v1',
           catalogId: 'custom-openai',
+          chatApiProtocol,
         },
       },
       generalModels: [{
@@ -29,7 +33,7 @@ const configureAssistant = (executionProfile: ModelExecutionProfile) => {
         modelId: 'vendor-chat',
         category: 'text',
         providerConfigId: 'custom-assistant',
-        executionProfile,
+        ...(executionProfile ? { executionProfile } : {}),
       }],
     },
   }));
@@ -41,6 +45,74 @@ beforeEach(() => {
 });
 
 describe('assistant custom protocol boundary', () => {
+  it.each([' ', ''])('preserves SSE text when data uses %j after the colon', async (space) => {
+    configureAssistant();
+    const body = `data:${space}${JSON.stringify({ choices: [{ delta: { content: '完整回复' }, finish_reason: 'stop' }] })}\n\n`;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, {
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent })).resolves.toBe('完整回复');
+    expect(onEvent).toHaveBeenCalledWith({ type: 'text.delta', delta: '完整回复' });
+  });
+
+  it.each([false, true])('emits JSON response text to message consumers (nonStream %s)', async (nonStream) => {
+    configureAssistant();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '完整回复' }, finish_reason: 'stop' }],
+    }), { headers: { 'Content-Type': 'application/json; charset=utf-8' } })));
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent, nonStream })).resolves.toBe('完整回复');
+    expect(onEvent).toHaveBeenCalledWith({ type: 'text.delta', delta: '完整回复' });
+    expect(onEvent.mock.calls.filter(([event]) => event.type === 'text.delta')).toHaveLength(1);
+  });
+
+  it.each([
+    { body: '', contentType: 'text/event-stream' },
+    { body: 'data: [DONE]\n\n', contentType: 'text/event-stream' },
+    { body: 'data: {"choices":[{"delta":{"content":"  "},"finish_reason":"stop"}]}\n\n', contentType: 'text/event-stream' },
+    { body: 'data: {"choices":[{"delta":{"reasoning_content":"internal"},"finish_reason":"length"}]}\n\n', contentType: 'text/event-stream' },
+    { body: '{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}', contentType: 'application/json' },
+  ])('rejects a response without reply text or a valid tool call: $body', async ({ body, contentType }) => {
+    configureAssistant();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': contentType } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent })).rejects.toThrow('未返回');
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', message: expect.stringContaining('未返回') }));
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'error' });
+    expect(onEvent).not.toHaveBeenCalledWith({ type: 'done', finishReason: 'stop' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['text/event-stream', 'application/json'])('surfaces HTTP 200 provider errors in %s', async (contentType) => {
+    configureAssistant();
+    const payload = JSON.stringify({ error: { message: 'Provider temporarily unavailable' } });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      contentType === 'application/json' ? payload : `data: ${payload}\n\n`,
+      { headers: { 'Content-Type': contentType } },
+    )));
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent })).rejects.toThrow('Provider temporarily unavailable');
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', message: 'Provider temporarily unavailable' }));
+  });
+
+  it.each(['openai-compatible', 'anthropic-compatible', 'gemini-native'] as const)('allows tool-only %s replies', async (protocol) => {
+    configureAssistant(undefined, protocol);
+    const payloads = {
+      'openai-compatible': { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'canvas_query', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] },
+      'anthropic-compatible': { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-1', name: 'canvas_query', input: {} } },
+      'gemini-native': { candidates: [{ content: { parts: [{ functionCall: { id: 'call-1', name: 'canvas_query', args: {} } }] }, finishReason: 'STOP' }] },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(payloads[protocol])}\n\n`, {
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '查询', onEvent })).resolves.toBe('');
+    expect(onEvent).toHaveBeenCalledWith({ type: 'tool.call.final', call: { callId: 'call-1', toolId: 'canvas_query', input: {} } });
+    expect(onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
+  });
+
   it('prefers the current project text model and falls back when it is unavailable', () => {
     configureAssistant({ preset: 'openai-chat' });
     useAppStore.setState((state) => ({
@@ -194,6 +266,109 @@ describe('assistant custom protocol boundary', () => {
       nonStream: true,
       onEvent: vi.fn(),
     })).rejects.toThrow('OpenAI SSE');
+  });
+
+  it('streams Anthropic text and tool input into normalized events with one usage event', async () => {
+    configureAssistant(undefined, 'anthropic-compatible');
+    const body = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"完成"}}',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-a","name":"canvas_query","input":{}}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"detail\\":"}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"true}"}}',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}',
+      'event: message_stop\ndata: {"type":"message_stop"}',
+    ].join('\n\n') + '\n\n';
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+
+    await expect(streamAssistantReply({
+      systemPrompt: '系统',
+      userMessage: '查询',
+      tools: [{
+        type: 'function',
+        function: { name: 'canvas_query', description: '读取', parameters: { type: 'object' } },
+      }],
+      onEvent,
+    })).resolves.toBe('完成');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://gateway.example/v1/messages');
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+      'x-api-key': 'secret',
+      'anthropic-version': '2023-06-01',
+    });
+    expect(onEvent.mock.calls.map(([event]) => event).filter((event) => event.type === 'usage')).toEqual([
+      { type: 'usage', inputTokens: 12, outputTokens: 8 },
+    ]);
+    expect(onEvent).toHaveBeenCalledWith({
+      type: 'tool.call.final',
+      call: { callId: 'call-a', toolId: 'canvas_query', input: { detail: true } },
+    });
+  });
+
+  it('surfaces an Anthropic error event instead of completing an empty response', async () => {
+    configureAssistant(undefined, 'anthropic-compatible');
+    const body = 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const onEvent = vi.fn();
+
+    await expect(streamAssistantReply({
+      systemPrompt: '',
+      userMessage: '查询',
+      onEvent,
+    })).rejects.toThrow('Overloaded');
+    expect(onEvent).toHaveBeenCalledWith({
+      type: 'error',
+      code: 'FETCH_ERROR',
+      message: 'Overloaded',
+      retryable: true,
+    });
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'error' });
+  });
+
+  it('streams Gemini text, tools and usage through the native endpoint', async () => {
+    configureAssistant(undefined, 'gemini-native');
+    const body = [
+      'data: {"candidates":[{"content":{"parts":[{"text":"你"}]}}]}',
+      'data: {"candidates":[{"content":{"parts":[{"text":"好"},{"functionCall":{"id":"call-g","name":"canvas_query","args":{"detail":true}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4}}',
+    ].join('\n\n') + '\n\n';
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+
+    await expect(streamAssistantReply({
+      systemPrompt: '系统',
+      userMessage: '查询',
+      tools: [{
+        type: 'function',
+        function: { name: 'canvas_query', description: '读取', parameters: { type: 'object' } },
+      }],
+      onEvent,
+    })).resolves.toBe('你好');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'https://gateway.example/v1/models/vendor-chat:streamGenerateContent?alt=sse',
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ 'x-goog-api-key': 'secret' });
+    expect(onEvent).toHaveBeenCalledWith({
+      type: 'tool.call.final',
+      call: { callId: 'call-g', toolId: 'canvas_query', input: { detail: true } },
+    });
+    expect(onEvent.mock.calls.map(([event]) => event).filter((event) => event.type === 'usage')).toEqual([
+      { type: 'usage', inputTokens: 9, outputTokens: 4 },
+    ]);
   });
 });
 

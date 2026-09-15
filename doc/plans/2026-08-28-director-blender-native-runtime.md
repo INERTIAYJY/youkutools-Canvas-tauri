@@ -14,6 +14,25 @@
 
 ## 1. 已锁定产品决策
 
+### 2026-09-08：稳定版本系列兼容
+
+**状态：代码适配与定向检查完成；Blender 5.2.1 后台回归通过，4.5/5.0/5.1 的真实桌面与安装包矩阵仍待验收。** 本节更新早期阶段的单一 5.2.1 版本限制，不将历史记录中的固定版本要求继续作为当前支持策略。
+
+- Windows x86_64 接受 4.5.x、5.0.x、5.1.x、5.2.x 稳定版，补丁号不限；Alpha/Beta/RC、4.4 及以前和未来未纳入系列继续拒绝。Python 启动检查、原生成果 producer 校验与内嵌清单使用同一系列集合，版本字符串按完整数字段校验，不使用前缀匹配。
+- 固定资源包升级为 1.4.0；文本资源的规范 LF 字节数和 SHA-256 同步更新。内置场景、角色和许可证保持原样，`createdWithBlenderVersion` 继续记录真实来源 5.2.1，不冒充 4.5 制作的资源。
+- EEVEE 按版本使用 `BLENDER_EEVEE_NEXT` / `BLENDER_EEVEE`；保存工程仅转换这两个已知别名，保留 Cycles、当前帧、摄影机标记、帧率和时间线。材质与世界显式启用旧版节点并补齐空树中的着色器和输出；动画曲线继续兼容 Action slots 与旧接口，PNG/视频输出兼容有无 `media_type` 的接口。
+- 不支持版本、缺少渲染/输出能力使用固定退出码与原生失败码；UI/MCP 只在 Job 绑定验证后映射固定提示，仍拒绝原始路径、日志和诊断文本进入节点错误。项目、节点实例、Scene revision/hash、成果集合和摘要校验保持有效。
+
+验证：6 文件 147 项前端定向回归、35 项 Python 纯状态测试及 42 项 Blender Rust 定向测试通过；前端类型、测试类型、目标 ESLint 与默认特性 `cargo check` 通过。Python 检查覆盖系列/补丁、预发行拒绝、清单一致性、材质空树、输出接口、曲线读取及保存工程引擎转换。未据此声明全仓测试通过。
+
+本机 Blender 5.2.1 LTS 的隔离后台检查完成内置启动文件加载、节点初始化、动画曲线读取、PNG、两帧 H.264 MP4 和 `.blend` 输出；注入的版本/能力失败分别实际返回退出码 24/25。此证据不替代其他系列的真实运行，也不替代安装包、多窗口及编辑器保存返回验收。没有安装额外 Blender、修改用户工程、打包或发布。
+
+兼容边界：内置文件为 5.2 格式，官方说明 4.5 是可读取 5.x 文件的最低系列；新版工程中的新功能仍可能无法降级完整保留。正式兼容验收应覆盖各系列最新补丁的打开、内置人物/模型导入、动画、保存返回、重新打开、单帧及视频导出。回滚恢复本批适配代码和上一固定包引用，保留用户原有 Scene/Manifest/成果文件。
+
+参考：[官方文件兼容说明](https://developer.blender.org/docs/release_notes/compatibility/)、[5.0 Python API 变更](https://developer.blender.org/docs/release_notes/5.0/python_api/)。
+
+### 初始阶段决策
+
 1. 产品目标名称锁定为“3D 镜头台”，对应现有 `ai-director` 节点，不创建新 NodeType；当前“3D 导演台”展示文案只在后续原入口改名任务中更新。
 2. 节点菜单只有一个创建入口；运行时选择发生在同一节点内部。
 3. `lightweight-web` 是长期正式免安装方案，不因 Blender 接入而降级、隐藏或淘汰。
@@ -23,6 +42,16 @@
 7. 只有用户需要精修时才打开 Blender；截图和参考视频允许以后由后台 Job 完成。
 8. Blender 内部可以使用由 Rust 第一方信任根解析、版本固定并通过哈希或签名校验的 AI Canvas 脚本，但不能形成任意 Python、Shell 或命令行入口；具体资源交付方式留到 Phase 1-C 检查点。
 
+### 2026-09-09：macOS 安装选择与原生启动
+
+- 前端根据平台选择 `blender.exe` 或 `.app`；macOS 选择器从 Applications 打开，单一候选自动使用，多候选交给用户手选，取消保持原选择。设置文案说明自动检测与本机记忆行为。
+- 新增 `blender_runtime/macos.rs`：有界扫描系统/用户 Applications、Blender 版本子目录、固定 Steam 位置和 PATH；手选应用包须经过原有目录授权，原生只解析固定 `Contents/MacOS/Blender`，校验普通文件、执行位、64 位 Mach-O / Universal slice 和应用架构，不递归扩大通用 fs scope。失效的旧安装记忆不阻断其他候选发现。
+- 新增 `blender_runtime/macos_process.rs`，共用原有 runner 的固定参数、超时/取消、私有 Job、保存返回和成果校验。macOS 使用直接子进程与专属进程组，不使用 shell 或 `open -a`，后台继续隔离 Blender/Python 环境覆盖。Windows Job Object 保持原有实现。
+- 固定资源包升级到 1.5.0，清单目标扩展至 Windows x86_64、macOS x86_64/aarch64；资源正文、大小和 SHA-256 保持一致。无依赖、数据库、capability、Tauri 安全配置变化；源码范围为安装服务、设置文案、对应服务测试、原生安装/runner/资源模块及两个新增 macOS 模块。
+- 当前 Windows 检查：前端定向回归 171 项、Rust `blender_runtime::` 46 项、Python 35 项通过；应用/测试类型、定向 ESLint、默认特性 `cargo check --lib --locked --offline` 通过。Rust 测试使用 `--no-default-features`。Windows 执行了 Mach-O 与应用包解析测试；macOS 专属原生登记、进程组测试仅已编写，未在本机运行。
+- 验收缺口：当前主机只有 Windows Rust 目标，未验证 macOS 编译、原生 `.app` 选择授权、Gatekeeper、真实打开/保存返回/视频导出及安装包。Apple Silicon/Intel 各需使用匹配架构的应用与 Blender 完成真机验收；不把模拟测试当作 Mac 验收通过。
+- 回滚仅撤销本批平台分支及恢复运行包 1.4.0；已有 Blender 工程、成果与本机私有安装选择记录不删除。
+
 ## 2. 本计划不包含
 
 - 新增 Blender 专用节点、节点菜单、Store 或下游连线类型；
@@ -31,7 +60,7 @@
 - 自动安装 Blender、修改用户 Blender 配置或覆盖用户默认工作区；
 - 执行用户、模型、插件、网页、Agent 或 MCP 提供的 Python；
 - 接收自由 executable path、argv、cwd、env、script path 或 output path；
-- 复用 Plugin API v3 可信 Python Runtime、前端 Shell capability、`open_with_app` 或 ComfyUI 启动器；
+- 复用 Plugin API v1 可信 Python Runtime、前端 Shell capability、`open_with_app` 或 ComfyUI 启动器；
 - 在未建立 Scene/Result 校验前启动 Blender；
 - 承诺 Director Scene JSON 与任意 `.blend` 无损双向转换；
 - 在同一批次猜测修复旧 Director 多媒体的跨项目 URL/path 配对。
@@ -258,7 +287,7 @@ Phase 2-A 尚未包含正式人物/道具资产库、项目模型资产化、简
 - Blender 专有数据与新 Scene revision 发生冲突时的用户提示和合并策略；
 - 不可变 revision 与孤儿 Job 文件的空间配额、识别和回收周期；
 - `.blend` artifact 的大小上限和项目整体导入导出上限；
-- macOS/Linux 的安全安装发现、签名、沙箱和进程回收差异。
+- macOS 安装包、系统权限与真实进程回收验收，以及 Linux 尚未实现的原生支持。
 
 这些问题只能在对应阶段检查点解决，不得由模型、脚本或运行时自行选择。
 

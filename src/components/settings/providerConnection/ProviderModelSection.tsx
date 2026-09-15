@@ -4,6 +4,7 @@
  * 承载模型清单的搜索 / 分类筛选 / 勾选 / 分类修正 / 协议与视频能力入口，
  * 以及自定义连接专属的文档导入与手动添加模型。
  */
+import Select from '../../shared/Select';
 import { Icon } from '@iconify/react';
 import type { Dispatch, SetStateAction } from 'react';
 import { GENERAL_MODEL_CATEGORY_LABELS } from '../../../types';
@@ -445,14 +446,14 @@ export default function ProviderModelSection({
               placeholder="显示名称（可选）"
               onChange={(event) => setManualModelName(event.target.value)}
             />
-            <select
+            <Select fixedMenu
               value={manualCategory}
-              onChange={(event) => setManualCategory(event.target.value as GeneralModelCategory)}
+              onChange={(selectedOptionValue) => setManualCategory(selectedOptionValue as GeneralModelCategory)}
             >
               {CATEGORY_ORDER.map((item) => (
                 <option key={item} value={item}>{GENERAL_MODEL_CATEGORY_LABELS[item]}</option>
               ))}
-            </select>
+            </Select>
             <AnimatedButton
               type="button"
               className="provider-icon-btn"

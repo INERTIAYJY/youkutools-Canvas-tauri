@@ -1,6 +1,7 @@
 /**
  * MCP 本地控制设置页，管理 bridge 会话、固定端口/令牌、自动开启和外部客户端配置片段。
  */
+import Select from '../shared/Select';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
@@ -14,14 +15,18 @@ import {
 import type { McpBridgeSessionInfo } from '../../types/mcp';
 import {
   buildMcpClientConfig,
-  ensureMcpSessionToken,
+  readRunningMcpToken,
+  getMcpTokenPersistence,
+  type McpTokenPersistence,
   getConfiguredMcpTransport,
   normalizeMcpPort,
   rotateMcpSessionToken,
   startConfiguredMcpBridge,
 } from '../../services/mcp/mcpSessionConfig';
 import { getMcpConnectionRequirements } from './mcpConnectionRequirements';
+import { getConfiguredMcpToolExposure } from '../../services/mcp/mcpToolCatalog';
 import { useT } from '../../i18n';
+import { StorageError } from '../../services/storageDiagnostics';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -34,24 +39,36 @@ export default function McpControlSettings() {
   })));
   const [session, setSession] = useState<McpBridgeSessionInfo | null>(null);
   const [token, setToken] = useState('');
+  const [tokenPersistence, setTokenPersistence] = useState<McpTokenPersistence | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [remoteConfirmOpen, setRemoteConfirmOpen] = useState(false);
   const portInputRef = useRef<HTMLInputElement>(null);
+  const controlRevision = useRef(0);
 
   useEffect(() => {
     if (!isTauri) return;
     let cancelled = false;
+    const revision = controlRevision.current;
     getMcpBridgeStatus()
       .then(async (status) => {
-        if (cancelled) return;
+        if (cancelled || revision !== controlRevision.current) return;
         setSession(status);
+        setToken('');
+        setTokenPersistence(null);
         // 会话已在运行（多为自动开启拉起的）时补出令牌，配置片段才能直接复制
-        if (status) setToken(await ensureMcpSessionToken());
+        if (status) {
+          const runningToken = await readRunningMcpToken(status.sessionId);
+          if (cancelled || revision !== controlRevision.current) return;
+          setToken(runningToken ?? '');
+          setTokenPersistence(getMcpTokenPersistence());
+        }
       })
-      .catch(() => {
-        if (!cancelled) setError(t('无法读取 MCP 会话状态'));
+      .catch((readError: unknown) => {
+        if (!cancelled && revision === controlRevision.current) {
+          setError(readError instanceof StorageError ? readError.message : t('无法读取 MCP 会话状态'));
+        }
       });
     return () => {
       cancelled = true;
@@ -69,15 +86,18 @@ export default function McpControlSettings() {
   };
 
   const handleStart = async () => {
+    controlRevision.current += 1;
     setLoading(true);
     setError('');
     setCopied(false);
     try {
       const started = await startConfiguredMcpBridge();
       setToken(started.token);
+      setTokenPersistence(getMcpTokenPersistence());
       setSession(started.session);
     } catch (startError) {
       setToken('');
+      setTokenPersistence(null);
       setSession(null);
       setError(startError instanceof Error ? startError.message : String(startError));
     } finally {
@@ -86,12 +106,14 @@ export default function McpControlSettings() {
   };
 
   const handleStop = async () => {
+    controlRevision.current += 1;
     setLoading(true);
     setError('');
     try {
       await stopMcpBridge();
       setSession(null);
       setToken('');
+      setTokenPersistence(null);
       setCopied(false);
     } catch (stopError) {
       setError(stopError instanceof Error ? stopError.message : String(stopError));
@@ -102,6 +124,7 @@ export default function McpControlSettings() {
 
   // 轮换令牌会作废所有已发出的客户端配置；会话在运行时顺带重启，避免新旧令牌不一致。
   const handleRotateToken = async () => {
+    controlRevision.current += 1;
     setLoading(true);
     setError('');
     setCopied(false);
@@ -109,12 +132,16 @@ export default function McpControlSettings() {
       const nextToken = await rotateMcpSessionToken();
       if (session) {
         await stopMcpBridge();
+        setSession(null);
+        setToken('');
+        setTokenPersistence(null);
         const started = await startConfiguredMcpBridge();
         setSession(started.session);
         setToken(started.token);
       } else {
         setToken(nextToken);
       }
+      setTokenPersistence(getMcpTokenPersistence());
     } catch (rotateError) {
       setError(rotateError instanceof Error ? rotateError.message : String(rotateError));
     } finally {
@@ -199,6 +226,25 @@ export default function McpControlSettings() {
           <Icon icon={session ? 'lucide:power-off' : 'lucide:power'} width="14" height="14" />
           {loading ? t('处理中') : session ? t('停止') : t('开启')}
         </AnimatedButton>
+      </div>
+
+      <div className="ui-field rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5">
+        <label className="ui-label" htmlFor="mcp-tool-exposure">{t('工具发现方式')}</label>
+        <div className="ui-select">
+          <Select fixedMenu
+            id="mcp-tool-exposure"
+            className="min-w-0"
+            aria-describedby="mcp-tool-exposure-hint"
+            value={getConfiguredMcpToolExposure(config.mcpToolExposure)}
+            disabled={loading}
+            onChange={(selectedOptionValue) => persistConfig({ mcpToolExposure: getConfiguredMcpToolExposure(selectedOptionValue) })}
+          >
+            <option value="compact">{t('按需发现（推荐）')}</option>
+            <option value="full">{t('完整工具列表')}</option>
+          </Select>
+        </div>
+        <p className="ui-hint">{t('按需模式减少初始工具说明的上下文占用；完整模式适合已支持工具延迟加载的客户端。')}</p>
+        <p id="mcp-tool-exposure-hint" className="ui-hint">{t('切换后请在 MCP 客户端刷新工具列表或重新连接；已有对话的上下文不会自动清除。')}</p>
       </div>
 
       <label className="flex items-start gap-3 rounded-md border border-canvas-border bg-canvas-card px-3 py-2.5">
@@ -294,7 +340,13 @@ export default function McpControlSettings() {
 
       {session && !token && (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-          {t('本页没有当前令牌。停止后重新开启以生成新的客户端配置。')}
+          {t('未能读取当前会话令牌。请重新打开设置页重试；已保存的令牌不会被自动替换。')}
+        </div>
+      )}
+
+      {token && tokenPersistence === 'session-only' && (
+        <div role="status" className="ui-alert ui-alert--warning" id="mcp-token-persistence">
+          {t('令牌未能保存，目前仅本次应用会话有效。关闭应用后需要重新复制客户端配置。已保存的旧令牌不会被覆盖。')}
         </div>
       )}
 
@@ -328,7 +380,9 @@ export default function McpControlSettings() {
             {clientConfig}
           </pre>
           <p className="text-[11px] text-canvas-text-muted">
-            {t('粘贴到 Claude Desktop / Cursor 等客户端的 MCP 配置中。会话未开启时客户端调用会报错，重新开启即可继续用同一份配置。')}
+            {tokenPersistence === 'persistent'
+              ? t('粘贴到 Claude Desktop / Cursor 等客户端的 MCP 配置中。会话未开启时客户端调用会报错，重新开启即可继续用同一份配置。')
+              : t('粘贴到客户端的 MCP 配置中。本次应用退出后，请重新检查并复制配置。')}
           </p>
           {session?.transport === 'streamable-http' && (
             <p className="text-[11px] text-amber-300">

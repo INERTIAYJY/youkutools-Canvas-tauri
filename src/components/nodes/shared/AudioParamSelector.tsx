@@ -3,12 +3,20 @@
  */
 import { Icon } from '@iconify/react';
 import { memo, useEffect, useRef, useState } from 'react';
-import type { AudioOutputFormat, AudioTtsVoice } from '../../../types/aiTypes';
+import type { AudioOutputFormat, AudioSpeechReference, AudioSpeechSettings, AudioSpeechWorkflowControls, AudioTtsVoice } from '../../../types/aiTypes';
 import type { AudioGenerationPurpose } from '../../../types/media';
 import AnimatedButton from '../../shared/AnimatedButton';
+import Select from '../../shared/Select';
+import { AUDIO_SPEECH_PACES, AUDIO_SPEECH_VOICES, audioSpeechModeIssue, normalizeAudioSpeechSettings } from '../../../services/ai/audioSpeechSettings';
 import { useT } from '../../../i18n';
 
 interface AudioParamSelectorProps {
+  speechControls?: AudioSpeechWorkflowControls;
+  speechSettings?: AudioSpeechSettings;
+  references?: AudioSpeechReference[];
+  onChangeSpeechSettings?: (value: AudioSpeechSettings) => void;
+  onAddReference?: () => void;
+  onRemoveReference?: (reference: AudioSpeechReference) => void;
   purpose?: AudioGenerationPurpose;
   voice?: AudioTtsVoice;
   format?: AudioOutputFormat;
@@ -41,6 +49,12 @@ const VOICES: Array<{ value: AudioTtsVoice; label: string }> = [
 const FORMATS: AudioOutputFormat[] = ['wav', 'opus', 'aac', 'flac', 'pcm'];
 
 function AudioParamSelector({
+  speechControls,
+  speechSettings,
+  references = [],
+  onChangeSpeechSettings,
+  onAddReference,
+  onRemoveReference,
   purpose,
   voice = 'alloy',
   format = 'wav',
@@ -67,6 +81,8 @@ function AudioParamSelector({
   useEffect(() => {
     if (!open) return;
     const closeOnOutsideClick = (event: MouseEvent) => {
+      // UI Kit 下拉菜单挂在 body，选择音色时仍属于当前参数面板。
+      if (event.target instanceof Element && event.target.closest('[data-ui-select-portal]')) return;
       if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
     };
     document.addEventListener('mousedown', closeOnOutsideClick, true);
@@ -84,7 +100,14 @@ function AudioParamSelector({
 
   if (!purpose) return null;
 
-  const triggerLabel = purpose === 'speech'
+  const speech = normalizeAudioSpeechSettings(speechSettings, speechControls?.duration);
+  const hasReference = references.length > 0;
+  const modeIssue = speechControls ? audioSpeechModeIssue(speechControls, hasReference) : undefined;
+  const voiceLabel = AUDIO_SPEECH_VOICES.find((item) => item.value === speech.voiceStyle)!.label;
+  const addReference = () => { setOpen(false); onAddReference?.(); };
+  const triggerLabel = speechControls
+    ? `${hasReference ? t('参考音色') : t(voiceLabel)} · ${t(AUDIO_SPEECH_PACES[speech.pace].label)} · ${speech.duration}s`
+    : purpose === 'speech'
     ? `${voice} · ${format.toUpperCase()} · ${speed}x`
     : `${musicDuration}s${musicBpm ? ` · ${musicBpm} BPM` : ''}`;
 
@@ -107,19 +130,85 @@ function AudioParamSelector({
 
         {open ? (
           <div className="img-ratio-popup ui-schema-popup ui-schema-video-params-popup block">
-            {purpose === 'speech' ? (
+            {speechControls ? (
+              <div className="flex flex-col gap-3 text-xs text-canvas-text" data-audio-speech-mode={hasReference ? 'reference' : 'text'}>
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">{t(hasReference ? '带参考语音' : '纯文本')}</span>
+                  <button type="button" className="ui-btn ui-btn--sm" onClick={addReference}>{t('+ 添加参考')}</button>
+                </div>
+                {hasReference ? (
+                  <div className="flex max-h-40 flex-col gap-2 overflow-y-auto">
+                    {references.map((reference) => (
+                      <div key={reference.key} className="ui-card shrink-0 p-2.5">
+                        <div className="flex min-w-0 items-center gap-2.5 text-left">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-canvas-hover text-canvas-text-secondary">
+                            <Icon icon="lucide:audio-lines" width={18} aria-hidden="true" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-medium leading-5" title={reference.label}>{reference.label}</div>
+                            <div className="text-[10px] leading-4 text-canvas-text-muted">
+                              {t(reference.url ? '使用此声音的音色' : '音频已失效，请替换')}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button type="button" className="ui-btn ui-btn--sm" aria-label={t('替换参考 {label}', { label: reference.label })}
+                              onClick={() => { onRemoveReference?.(reference); addReference(); }}>{t('替换')}</button>
+                            <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" title={t('移除参考')}
+                              aria-label={t('移除参考 {label}', { label: reference.label })}
+                              onClick={() => onRemoveReference?.(reference)}>
+                              <Icon icon="lucide:x" width={13} aria-hidden="true" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div>
+                    <div className="mb-2 text-canvas-text-secondary">{t('声音类型')}</div>
+                    <div className="grid grid-cols-3 gap-1.5" role="group" aria-label={t('声音类型')}>
+                      {AUDIO_SPEECH_VOICES.map((item) => (
+                        <button type="button" key={item.value} aria-pressed={speech.voiceStyle === item.value}
+                          className={`ui-btn ui-btn--sm ${speech.voiceStyle === item.value ? 'is-active' : ''}`}
+                          onClick={() => { onChangeSpeechSettings?.({ ...speech, voiceStyle: item.value }); onContinuousEditEnd?.(); }}>
+                          {t(item.label)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <label className="flex flex-col gap-2">
+                  <span className="flex justify-between"><span>{t('语速')}</span><span>{t(AUDIO_SPEECH_PACES[speech.pace].label)}</span></span>
+                  <input type="range" className="rh-duration-input" min={0} max={4} step={1} value={speech.pace}
+                    onChange={(event) => onChangeSpeechSettings?.({ ...speech, pace: Number(event.target.value) })}
+                    onPointerUp={onContinuousEditEnd} onKeyUp={onContinuousEditEnd} onBlur={onContinuousEditEnd} />
+                  <span className="flex justify-between text-canvas-text-secondary"><span>{t('慢')}</span><span>{t('正常')}</span><span>{t('快')}</span></span>
+                </label>
+                <label className="flex flex-col gap-2">
+                  <span className="flex items-center justify-between gap-2"><span>{t('生成时长（秒）')}</span>
+                    <input type="number" className="ui-input ui-input--sm w-20" min={1} max={3600} step={1} value={speech.duration}
+                      onChange={(event) => { if (event.target.value) onChangeSpeechSettings?.({ ...speech, duration: Number(event.target.value) }); }}
+                      onBlur={onContinuousEditEnd} />
+                  </span>
+                  <input type="range" className="rh-duration-input" min={1} max={Math.max(60, speech.duration)} step={1} value={speech.duration}
+                    onChange={(event) => onChangeSpeechSettings?.({ ...speech, duration: Number(event.target.value) })}
+                    onPointerUp={onContinuousEditEnd} onKeyUp={onContinuousEditEnd} onBlur={onContinuousEditEnd} />
+                </label>
+                <p className="text-canvas-text-secondary">{t('语速通过描述控制，实际效果以生成结果为准。')}</p>
+                {modeIssue ? <p role="status" className="text-canvas-text-secondary">{t(modeIssue)}</p> : null}
+              </div>
+            ) : purpose === 'speech' ? (
               <div className="rh-v5-meta-panel">
                 <label className="rh-vram-adv-row">
                   <span className="rh-vram-adv-label">{t('音色')}</span>
-                  <select
-                    className="w-full rounded-md border border-canvas-border bg-canvas-bg px-2 py-1.5 text-xs text-canvas-text outline-none focus:border-orange-400"
+                  <Select
+                    className="w-full"
+                    fixedMenu
+                    aria-label={t('音色')}
                     value={voice}
-                    onChange={(event) => onChangeVoice?.(event.target.value as AudioTtsVoice)}
-                  >
-                    {VOICES.map((item) => (
-                      <option key={item.value} value={item.value}>{item.label}</option>
-                    ))}
-                  </select>
+                    onChange={(value) => onChangeVoice?.(value)}
+                    options={VOICES}
+                  />
                 </label>
 
                 <div className="img-rp-quality-area">

@@ -1,12 +1,18 @@
 /**
  * ai/generateAudio — 音频生成入口
  */
+import { collectAudioSpeechReferences, resolveAudioSpeechWorkflow, stripAudioSpeechReferences } from './audioSpeechSettings';
 import { resolveNodeReferences } from '../nodeReferenceService';
+import { useAppStore } from '../../store/useAppStore';
+import { executeWorkflowApiMedia } from '../workflowApi/workflowApiAdapter';
+import { parseWorkflowApiFields } from '../workflowApi/workflowApiConfig';
+import { isRunningHubWorkflow, getCloudWorkflowPersistedOutput } from '../workflowExecutionService';
+import { executeRunningHubWorkflow } from './providers/runninghubWorkflow';
 import { executeComfyUIAudioGenerate } from '../comfyWorkflowService';
 import {
   createMediaDataUrlBudget,
-  downloadUrlAndSave,
   isTauriEnv,
+  persistMediaUrlToProjectData,
   saveBinaryToProjectData,
 } from '../fileService';
 import { resolveMediaReferenceUrl } from '../uploadService';
@@ -92,8 +98,10 @@ export async function persistAudioGenerationResult(
   projectId: string | null | undefined,
   label: string,
 ): Promise<PersistedAudioGenerationResult> {
+  const cloud = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url);
+  if (cloud) return cloud;
   const shouldPersist = !!projectId && isTauriEnv();
-  let saved: { filePath: string; assetUrl: string } | null = null;
+  let saved: { filePath?: string; assetUrl?: string; sourceUrl?: string } | null = null;
   let persistError: string | undefined;
   if (shouldPersist) {
     try {
@@ -103,8 +111,8 @@ export async function persistAudioGenerationResult(
             projectId!,
             buildSafeAudioFileName(label, result.format || 'wav'),
           )
-        : await downloadUrlAndSave(result.url, projectId!, 'ai-audio', label);
-      if (!saved) persistError = AUDIO_PERSIST_FAILED_MESSAGE;
+        : await persistMediaUrlToProjectData(result.url, projectId!, 'ai-audio', label);
+      if (!saved?.filePath) persistError = AUDIO_PERSIST_FAILED_MESSAGE;
     } catch (error) {
       persistError = error instanceof Error ? error.message : AUDIO_PERSIST_FAILED_MESSAGE;
     }
@@ -112,13 +120,14 @@ export async function persistAudioGenerationResult(
 
   const mediaUrl = saved?.assetUrl || result.url;
   // 只有落盘成功才回收 blob，失败时保留它，用户仍能在本次会话里重试保存
-  if (saved && result.url.startsWith('blob:')) URL.revokeObjectURL(result.url);
+  if (saved?.filePath && result.url.startsWith('blob:')) URL.revokeObjectURL(result.url);
   return {
     mediaUrl,
-    outputUrl: result.bytes ? mediaUrl : result.url,
-    sourceUrl: result.bytes ? undefined : result.url,
+    // 落盘成功后来源要改指项目文件，否则节点会把临时地址一起持久化
+    outputUrl: result.bytes ? mediaUrl : (saved?.sourceUrl ?? result.url),
+    sourceUrl: result.bytes ? undefined : (saved?.sourceUrl ?? result.url),
     filePath: saved?.filePath,
-    persistence: saved ? 'saved' : shouldPersist ? 'failed' : 'skipped',
+    persistence: saved?.filePath ? 'saved' : shouldPersist ? 'failed' : 'skipped',
     persistError,
   };
 }
@@ -128,10 +137,17 @@ export async function generateAudio(
   signal?: AbortSignal,
 ): Promise<AudioGenerationResult> {
   const { prompt: rawPrompt, model, provider } = params;
+  const state = useAppStore.getState();
+  const selectedWorkflow = params.workflowId ? state.workflows.find((item) => item.id === params.workflowId) : undefined;
+  if (resolveAudioSpeechWorkflow(selectedWorkflow)) {
+    const invalid = collectAudioSpeechReferences(rawPrompt, params.nodeId, state.nodes, state.edges,
+      state.dramaAssets, selectedWorkflow, params.workflowInputs).find((reference) => !reference.url);
+    if (invalid) throw new Error(`参考语音已失效：${invalid.label}，请重新选择`);
+  }
 
   // 解析 @{nodeId:label} 引用为对应节点的实际输出内容
-  const prompt = resolveNodeReferences(rawPrompt);
-  // @ 引用和连线统一收集；角色库绑定的声音仍通过连线进入。
+  const prompt = resolveNodeReferences(stripAudioSpeechReferences(rawPrompt, state.nodes));
+  // 参考音频通过独立媒体通道传递，不混入朗读正文。
   const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
   const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
   const references = mergeMediaReferences(mentionedMedia.references, connectedMedia.references);
@@ -140,6 +156,21 @@ export async function generateAudio(
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点
   if (params.workflowId) {
+    const workflow = useAppStore.getState().workflows.find((item) => item.id === params.workflowId);
+    if (provider === 'workflow-api' && workflow?.adapterType !== 'workflow-api') throw new Error('请先配置并选择工作流 API');
+    if (workflow?.adapterType === 'workflow-api') {
+      const result = await executeWorkflowApiMedia({ workflowId: workflow.id, nodeId: params.nodeId, taskContext: params.workflowApiTaskContext,
+        prompt, inputs: parseWorkflowApiFields(params.workflowInputs, workflow.workflowApi), references: {
+          image: getMediaReferenceUrls(references, 'image', 'local'), video: getMediaReferenceUrls(references, 'video', 'local'), audio: getMediaReferenceUrls(references, 'audio', 'local'),
+        } }, signal);
+      return { ...normalizeProtocolAudioResult(result.url), ...result };
+    }
+    if (isRunningHubWorkflow(workflow)) {
+      const outputs = await executeRunningHubWorkflow({ ...params, workflowId: params.workflowId, prompt, kind: 'audio', references: {
+        image: getMediaReferenceUrls(references, 'image', 'local'), video: getMediaReferenceUrls(references, 'video', 'local'), audio: getMediaReferenceUrls(references, 'audio', 'local'),
+      } }, signal);
+      return { ...normalizeProtocolAudioResult(outputs[0].url), runninghubOutputs: outputs };
+    }
     return executeComfyUIAudioGenerate(
       { ...params, prompt },
       signal,
@@ -147,9 +178,10 @@ export async function generateAudio(
     );
   }
 
+  if (provider === 'workflow-api') throw new Error('请先配置并选择工作流 API');
   const registeredAdapter = mediaProviderRegistry.getAudioAdapter(provider);
   if (registeredAdapter) {
-    return registeredAdapter.generateAudio({ params, prompt, referenceAudioUrls, signal });
+    return registeredAdapter.generateAudio({ params, prompt, referenceAudioUrls, referenceMedia: references, signal });
   }
 
   // ── 通用模型音频生成 ──

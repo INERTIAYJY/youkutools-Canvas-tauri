@@ -186,6 +186,9 @@ export default function ChatPanel({
     () => detached ? (detachedSnapshot?.generalModels ?? []) : generalModels,
     [detached, detachedSnapshot?.generalModels, generalModels],
   );
+  const effectiveAssistantModelGroups = detached
+    ? (detachedSnapshot?.assistantModelGroups ?? [])
+    : undefined;
   const mediaCatalogConfig = useMemo(() => ({
     providers,
     dreaminaAuth: { loggedIn: dreaminaLoggedIn },
@@ -995,6 +998,7 @@ export default function ChatPanel({
                     <ChatInput
                       assistantModelId={effectiveAssistantModelId}
                       onAssistantModelChange={handleTextModelChange}
+                      assistantModelGroups={effectiveAssistantModelGroups}
                       mediaModels={effectiveGeneralModels}
                       mediaModelOptions={mediaModelOptions}
                       mediaModelAvailability={effectiveMediaModelAvailability}

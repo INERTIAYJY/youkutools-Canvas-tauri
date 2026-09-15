@@ -93,6 +93,33 @@ export function formatDramaAssetTextBrief(asset: DramaAsset): string {
   return lines.join('\n');
 }
 
+/** 动作素材使用库内保存的内容，来源节点隐藏、删除或重新生成不改变已选素材。 */
+export function resolveDramaActionMediaRef(asset: DramaAsset | undefined, actionId: string, mediaId?: string) {
+  if (asset?.kind !== 'character' || !actionId || !mediaId) return null;
+  const action = asset.actions?.find((item) => item.id === actionId);
+  const media = action?.media?.find((item) => item.id === mediaId);
+  const url = media?.url?.trim();
+  if (!action || !media || !url) return null;
+  return {
+    ...media,
+    url,
+    label: `${asset.name} · ${action.name} · ${media.name}`,
+  };
+}
+
+/** 声音引用读取库内音频；默认优先主音色，指定片段失效时不替换为其他声音。 */
+export function resolveDramaVoiceRef(asset: DramaAsset | undefined, clipId?: string) {
+  if (asset?.kind !== 'character') return null;
+  const clips = asset.voiceClips ?? [];
+  const clip = clipId !== undefined
+    ? clips.find((item) => item.id === clipId)
+    : clips.find((item) => item.id === asset.primaryVoiceClipId && item.audioUrl?.trim())
+      ?? clips.find((item) => item.audioUrl?.trim());
+  const url = clip?.audioUrl?.trim();
+  if (!clip || !clip.id || !url) return null;
+  return { ...clip, url, label: `${asset.name} · ${clip.label?.trim() || '音频'}` };
+}
+
 /** 已绑图像节点且该节点已有图时，才视为「可引图」；指定 referenceImageId 时引用角色的那一张参考图 */
 export function resolveDramaAssetImageRef(
   asset: DramaAsset,

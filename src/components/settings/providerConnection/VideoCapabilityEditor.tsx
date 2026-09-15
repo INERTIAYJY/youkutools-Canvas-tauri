@@ -4,6 +4,7 @@
  * 这里勾选的值会直接约束画布上视频节点的可选项，所以编辑器只做「声明」：
  * 未填写的字段一律保持 undefined，绝不替用户猜测默认值。
  */
+import Select from '../../shared/Select';
 import { Icon } from '@iconify/react';
 import { useState } from 'react';
 import type { ProviderModelSelection } from '../../../types';
@@ -167,17 +168,17 @@ export default function VideoCapabilityEditor({ model, onChange, onClose }: Vide
             <span className="text-xs font-medium text-canvas-text">画面比例（可多选）</span>
             <label className="flex items-center gap-2 text-[10px] text-canvas-text-secondary">
               默认
-              <select
-                className="h-7 rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text"
+              <Select fixedMenu
+                className="min-w-0" size="sm"
                 value={capability.defaultRatio ?? ''}
-                onChange={(event) => commit({
+                onChange={(selectedOptionValue) => commit({
                   ...capability,
-                  defaultRatio: event.target.value || undefined,
+                  defaultRatio: selectedOptionValue || undefined,
                 })}
               >
                 <option value="">模型默认（未声明）</option>
                 {capability.ratios?.map((value) => <option key={value}>{value}</option>)}
-              </select>
+              </Select>
             </label>
           </div>
           <div className="flex flex-wrap gap-1.5">
@@ -198,10 +199,10 @@ export default function VideoCapabilityEditor({ model, onChange, onClose }: Vide
             <span className="text-xs font-medium text-canvas-text">分辨率（可多选）</span>
             <label className="flex items-center gap-2 text-[10px] text-canvas-text-secondary">
               默认
-              <select className="h-7 rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text" value={capability.defaultResolution ?? ''} onChange={(event) => commit({ ...capability, defaultResolution: event.target.value || undefined })}>
+              <Select fixedMenu className="min-w-0" size="sm" value={capability.defaultResolution ?? ''} onChange={(selectedOptionValue) => commit({ ...capability, defaultResolution: selectedOptionValue || undefined })}>
                 <option value="">模型默认（未声明）</option>
                 {capability.resolutions?.map((value) => <option key={value}>{value}</option>)}
-              </select>
+              </Select>
             </label>
           </div>
           <div className="flex flex-wrap gap-1.5">
@@ -221,10 +222,10 @@ export default function VideoCapabilityEditor({ model, onChange, onClose }: Vide
             <span className="text-xs font-medium text-canvas-text">帧率（可多选）</span>
             <label className="flex items-center gap-2 text-[10px] text-canvas-text-secondary">
               默认
-              <select className="h-7 rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text" value={capability.defaultFrameRate ?? ''} onChange={(event) => commit({ ...capability, defaultFrameRate: event.target.value ? Number(event.target.value) : undefined })}>
+              <Select fixedMenu className="min-w-0" size="sm" value={capability.defaultFrameRate ?? ''} onChange={(selectedOptionValue) => commit({ ...capability, defaultFrameRate: selectedOptionValue ? Number(selectedOptionValue) : undefined })}>
                 <option value="">模型默认（未声明）</option>
                 {capability.frameRates?.map((value) => <option key={value} value={value}>{value} FPS</option>)}
-              </select>
+              </Select>
             </label>
           </div>
           <div className="flex flex-wrap gap-1.5">
@@ -257,10 +258,10 @@ export default function VideoCapabilityEditor({ model, onChange, onClose }: Vide
               </span>
               <label className="ml-auto flex items-center gap-2 text-[10px] text-canvas-text-secondary">
                 默认
-                <select className="h-7 rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text" value={capability.defaultDuration ?? ''} onChange={(event) => commit({ ...capability, defaultDuration: event.target.value ? Number(event.target.value) : undefined })}>
+                <Select fixedMenu className="min-w-0" size="sm" value={capability.defaultDuration ?? ''} onChange={(selectedOptionValue) => commit({ ...capability, defaultDuration: selectedOptionValue ? Number(selectedOptionValue) : undefined })}>
                   <option value="">模型默认（未声明）</option>
                   {discreteDurations.map((value) => <option key={value} value={value}>{value}s</option>)}
-                </select>
+                </Select>
               </label>
             </div>
           ) : (
@@ -329,12 +330,12 @@ export default function VideoCapabilityEditor({ model, onChange, onClose }: Vide
               </div>
               <label className="mt-3 flex items-center justify-end gap-2 text-[10px] text-canvas-text-secondary">
                 默认时长
-                <select
-                  className="h-7 rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text"
+                <Select fixedMenu
+                  className="min-w-0" size="sm"
                   value={capability.defaultDuration ?? ''}
-                  onChange={(event) => commit({
+                  onChange={(selectedOptionValue) => commit({
                     ...capability,
-                    defaultDuration: event.target.value ? Number(event.target.value) : undefined,
+                    defaultDuration: selectedOptionValue ? Number(selectedOptionValue) : undefined,
                   })}
                 >
                   <option value="">模型默认（未声明）</option>
@@ -342,7 +343,7 @@ export default function VideoCapabilityEditor({ model, onChange, onClose }: Vide
                     { length: editorMaxDuration - editorMinDuration + 1 },
                     (_, index) => editorMinDuration + index,
                   ).map((value) => <option key={value} value={value}>{value}s</option>)}
-                </select>
+                </Select>
               </label>
             </div>
           )}

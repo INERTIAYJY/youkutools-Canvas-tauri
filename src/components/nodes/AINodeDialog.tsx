@@ -8,13 +8,14 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../../store/useAppStore';
 import { derivedNodePlacement } from '../../store/store.utils';
-import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption, ShotlistColumnKey, ShotRow } from '../../types';
-import { ANIMATION_FRAME_GRIDS, resolveShotlistColumns } from '../../types';
-import { buildShotlistGenerationPrompt, carryOverShotFrames, parseShotlistRows } from '../../services/shotlistGenerate';
-import { MAX_IMAGE_BATCH_COUNT, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
+import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption } from '../../types';
+import { ANIMATION_FRAME_GRIDS } from '../../types';
+import { generateShotlistRows } from '../../services/shotlistService';
+import { MAX_IMAGE_BATCH_COUNT, type AudioSpeechSettings, type AudioSpeechReference, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
 import { generateText, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from '../../services/aiService';
+import { removeAudioSpeechReference } from '../../services/ai/audioSpeechSettings';
 import { persistAudioGenerationResult } from '../../services/ai/generateAudio';
-import { downloadUrlAndSave } from '../../services/fileService';
+import { persistMediaUrlToProjectData } from '../../services/fileService';
 import {
   applyImageBatchResults,
   failImageBatchNodes,
@@ -40,6 +41,12 @@ import {
 import { resolveVideoSubmissionControls } from '../../services/ai/videoRequestResolver';
 import { buildGenerationCameraPrompt } from './shared/image/cameraStudio';
 import { cancelComfyUINodeTask } from '../../services/comfyWorkflowService';
+import { getPendingTasksForProject, resumeComfyUINodeTask, resumeRunningHubNodeTask, updatePendingTask, removePendingTask } from '../../services/pollManager';
+import { isCloudWorkflow, getCloudWorkflowPersistedOutput, workflowExecution } from '../../services/workflowExecutionService';
+import { completeWorkflowApiNodeTask, stopWorkflowApiNodeTask } from '../../services/workflowApi/workflowApiAdapter';
+import WorkflowApiTaskStatus from './shared/WorkflowApiTaskStatus';
+import { cancelRunningHubNodeTask, completeRunningHubNodeTask } from '../../services/ai/providers/runninghubWorkflow';
+import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../services/canvasDerivationGuard';
 import { useT } from '../../i18n';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
@@ -72,6 +79,7 @@ function AINodeDialog() {
   const previewRef = useRef<HTMLDivElement>(null);
   const cancellingNodeIdsRef = useRef(new Set<string>());
   const [isExpanded, setIsExpanded] = useState(false);
+  const [recoveryInput, setRecoveryInput] = useState({ nodeId: '', taskId: '', confirmed: false });
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
@@ -85,13 +93,28 @@ function AINodeDialog() {
     let disposed = false;
     let trackedNodeElement: HTMLElement | null = null;
 
-    const positionDialog = (anchor: { x: number; y: number }) => {
+    // 浮层与节点的纵向偏移：
+    // - 节点无内容（空预览）时上移 20px，让浮层顶部覆盖在节点底边一点，符合"贴在节点下方"的紧凑观感；
+    // - 节点已有图片/视频/音频等产物时改为下移 12px，避免浮层遮住刚生成的画面。
+    const computeVerticalOffset = (nodeHasMedia: boolean) => (nodeHasMedia ? 12 : -20);
+
+    const positionDialog = (anchor: { x: number; y: number }, nodeHasMedia: boolean) => {
+      const offsetY = computeVerticalOffset(nodeHasMedia);
       panel.style.left = `${anchor.x}px`;
-      panel.style.top = `${anchor.y - 20}px`;
+      panel.style.top = `${anchor.y + offsetY}px`;
       if (preview) {
         preview.style.left = `${anchor.x}px`;
-        preview.style.top = `${anchor.y - 10 - 42}px`;
+        preview.style.top = `${anchor.y + offsetY - 42}px`;
       }
+    };
+
+    const readNodeHasMedia = (): boolean => {
+      if (!activeNodeId) return false;
+      const latestData = useAppStore.getState().nodes.find((n) => n.id === activeNodeId)?.data as BaseNodeData | undefined;
+      return !!(
+        latestData?.imageUrl || latestData?.thumbnailUrl ||
+        latestData?.videoUrl || latestData?.audioUrl
+      );
     };
 
     const syncDialogToNode = () => {
@@ -107,7 +130,7 @@ function AINodeDialog() {
         x: nodeRect.left + nodeRect.width / 2,
         y: nodeRect.bottom,
       };
-      positionDialog(anchor);
+      positionDialog(anchor, readNodeHasMedia());
       return anchor;
     };
 
@@ -123,6 +146,8 @@ function AINodeDialog() {
         return;
       }
 
+      // 平移过程中也要按节点当前是否有内容来决定偏移，否则空节点和有内容节点之间会跳变
+      const nodeHasMediaDuringPan = readNodeHasMedia();
       requestCanvasPanBy({
         deltaX,
         deltaY,
@@ -132,7 +157,7 @@ function AINodeDialog() {
           positionDialog({
             x: startAnchor.x + progress.deltaX,
             y: startAnchor.y + progress.deltaY,
-          });
+          }, nodeHasMediaDuringPan);
         },
         onComplete: (progress) => {
           if (disposed) return;
@@ -140,7 +165,7 @@ function AINodeDialog() {
             x: startAnchor.x + progress.deltaX,
             y: startAnchor.y + progress.deltaY,
           };
-          positionDialog(finalAnchor);
+          positionDialog(finalAnchor, nodeHasMediaDuringPan);
           useAppStore.getState().openNodeDialog(activeNodeId, finalAnchor);
           releaseTransitionFrame = requestAnimationFrame(() => {
             panel.style.removeProperty('transition');
@@ -269,6 +294,8 @@ function AINodeDialog() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // 先让顶层 UI Kit 下拉处理 Escape，保留当前节点参数弹窗。
+        if (document.querySelector('[data-ui-select-portal]')) return;
         e.stopPropagation();
         if (isExpanded) {
           setIsExpanded(false);
@@ -284,11 +311,20 @@ function AINodeDialog() {
   // All hooks must be called before any early return
   const onPromptChange = useCallback(
     (value: string) => {
+      const current = useAppStore.getState().nodes.find((item) => item.id === activeNodeId)?.data;
+      if (isCloudWorkflow(useAppStore.getState().workflows.find((item) => item.id === current?.workflowId))) {
+        updateContinuousNodeData({ prompt: value }); return;
+      }
       // Extract workflow IO node assignments from the prompt string
       // Format: @wf{ioNodeId|title|type}(value content)
       // ioNodeId can contain ":" (e.g. "57:27"), fields are pipe-separated to avoid ambiguity
-      const workflowInputs: Record<string, string> = {};
+      const workflowInputs: Record<string, string> = { ...current?.workflowInputs };
       const wfRegex = /@wf\{([^|]+)\|([^|]+)\|([^|}]+)\}\(([\s\S]*?)\)/g;
+      // 芯片赋值随正文重建；下拉等面板直接写入的输入保留。
+      for (const previous of (current?.prompt ?? '').matchAll(wfRegex)) {
+        delete workflowInputs[previous[1]];
+      }
+      wfRegex.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = wfRegex.exec(value)) !== null) {
         const ioNodeId = match[1]; // Full ID (may contain ":")
@@ -297,7 +333,7 @@ function AINodeDialog() {
       }
       updateContinuousNodeData({ prompt: value, workflowInputs: Object.keys(workflowInputs).length > 0 ? workflowInputs : undefined });
     },
-    [updateContinuousNodeData]
+    [activeNodeId, updateContinuousNodeData]
   );
 
   /**
@@ -406,16 +442,16 @@ function AINodeDialog() {
         if (!isStill()) return;
         const result = await generateVideo(nodeParams);
         if (!isStill()) return;
-        const saved = submittingProjectId
-          ? await downloadUrlAndSave(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${index + 1}`).catch(() => null)
-          : null;
-        const mediaUrl = saved?.assetUrl || result.url;
+        const persisted = submittingProjectId
+          ? await persistMediaUrlToProjectData(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${index + 1}`)
+            .catch(() => ({ mediaUrl: result.url, sourceUrl: result.url, filePath: undefined }))
+          : { mediaUrl: result.url, sourceUrl: result.url, filePath: undefined };
         useAppStore.getState().updateNodeData(node.id, {
-          videoUrl: mediaUrl,
-          sourceUrl: result.url,
-          filePath: saved?.filePath,
-          thumbnailUrl: result.url,
-          output: result.url,
+          videoUrl: persisted.mediaUrl,
+          sourceUrl: persisted.sourceUrl,
+          filePath: persisted.filePath,
+          thumbnailUrl: persisted.mediaUrl,
+          output: persisted.sourceUrl,
           status: 'success',
           error: undefined,
         });
@@ -424,13 +460,13 @@ function AINodeDialog() {
           nodeLabel: `${nodeLabel}-${index + 1}`,
           timestamp: Date.now(),
           prompt: effectivePrompt,
-          output: result.url,
+          output: persisted.sourceUrl,
           nodeType: 'ai-video',
           model: nodeModel,
           provider: nodeProvider,
           status: 'success',
-          mediaUrl: result.url,
-          filePath: saved?.filePath,
+          mediaUrl: persisted.mediaUrl,
+          filePath: persisted.filePath,
           params: { videoResolution: baseParams.videoResolution, videoFps: baseParams.videoFps, videoFrames: baseParams.videoFrames, seedanceResolution: baseParams.seedanceResolution, seedanceRatio: baseParams.seedanceRatio, seedanceDuration: baseParams.seedanceDuration, generateAudio: baseParams.generateAudio },
         });
       } catch (err) {
@@ -454,8 +490,15 @@ function AINodeDialog() {
       showToast(t('节点不存在'), 'error');
       return;
     }
+    if (store.currentProjectId && getPendingTasksForProject(store.currentProjectId).some((task) => (
+      task.nodeId === activeNodeId && task.taskType === 'comfyui' && task.comfyRecoveryState
+    ))) {
+      showToast(t('该节点还有未确认结束的 ComfyUI 任务，请先继续查询或终止任务'), 'error');
+      return;
+    }
     const rawPrompt = overridePrompt ?? (latestData.prompt as string) ?? '';
-    if (!rawPrompt.trim()) {
+    const cloudWorkflow = isCloudWorkflow(store.workflows.find((item) => item.id === latestData.workflowId));
+    if (!rawPrompt.trim() && !cloudWorkflow && latestData.provider !== 'runninghub') {
       showToast(t('请输入提示词'), 'error');
       return;
     }
@@ -481,17 +524,20 @@ function AINodeDialog() {
     }
     const submittingNodeId = activeNodeId!;
     const submittingProjectId = currentProjectId;
+    const runningHubTask = cloudWorkflow || latestData.provider === 'runninghub';
+    let cloudGuard = runningHubTask ? registerCanvasDerivation(store, submittingNodeId) : null;
     const isStillCurrentSubmission = () => {
       const state = useAppStore.getState();
       return (
         state.currentProjectId === submittingProjectId
         && state.nodes.some((n) => n.id === submittingNodeId)
+        && (!runningHubTask || (!!cloudGuard && isCanvasDerivationFresh(cloudGuard, state)))
       );
     };
     updateNodeDataTransient(activeNodeId!, { status: 'loading', error: undefined });
     let batchNodeIds: string[] | undefined;
     try {
-      const batchCount = Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(latestData.batchCount) || 1)));
+      const batchCount = cloudWorkflow ? 1 : Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(latestData.batchCount) || 1)));
       if (nodeType === 'ai-image' && batchCount > 1) {
         if (postProcess) throw new Error(t('批量生成暂不支持图片后处理，请将数量设为 1'));
         const imageSize = (latestData.imageSize as string) || '2K';
@@ -501,6 +547,8 @@ function AINodeDialog() {
           count: batchCount,
           projectId: submittingProjectId,
         }).nodeIds;
+        if (cloudGuard) completeCanvasDerivation(cloudGuard);
+        cloudGuard = runningHubTask ? registerCanvasDerivation(useAppStore.getState(), submittingNodeId) : null;
         showToast(t('正在批量生成 {count} 张图片', { count: batchCount }));
         const batch = await generateImagesBatch({
           prompt: effectivePrompt,
@@ -509,13 +557,14 @@ function AINodeDialog() {
           imageSize,
           aspectRatio,
           workflowId: latestData.workflowId,
-          workflowInputs: latestData.workflowInputs,
+          workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
           nodeId: activeNodeId ?? undefined,
         }, batchCount);
         if (!isStillCurrentSubmission()) return;
         await applyImageBatchResults({
           nodeId: submittingNodeId,
           targetNodeIds: batchNodeIds,
+          isCurrent: runningHubTask ? isStillCurrentSubmission : undefined,
           batch,
           projectId: submittingProjectId,
           prompt: effectivePrompt,
@@ -542,52 +591,55 @@ function AINodeDialog() {
           imageSize,
           aspectRatio,
           workflowId: latestData.workflowId,
-          workflowInputs: latestData.workflowInputs,
+          workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
           nodeId: activeNodeId ?? undefined,
         });
         if (!isStillCurrentSubmission()) return;
         // 下载远程 URL 到本地项目目录
-        const saved = currentProjectId
-          ? await downloadUrlAndSave(result.url, currentProjectId, 'ai-image', nodeLabel).catch(() => null)
-          : null;
-        const mediaUrl = saved?.assetUrl || result.url;
+        const persisted = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (currentProjectId
+          ? await persistMediaUrlToProjectData(result.url, currentProjectId, 'ai-image', nodeLabel)
+          : { mediaUrl: result.url, sourceUrl: result.url });
+        if (runningHubTask && !isStillCurrentSubmission()) return;
+        const mediaUrl = persisted.mediaUrl;
         updateNodeData(activeNodeId!, {
           imageUrl: mediaUrl,
-          sourceUrl: result.url,
-          filePath: saved?.filePath,
-          thumbnailUrl: result.url,
-          output: result.url,
+          sourceUrl: persisted.sourceUrl,
+          filePath: persisted.filePath,
+          thumbnailUrl: mediaUrl,
+          output: persisted.sourceUrl,
           status: 'success',
           imageWidth: result.width,
           imageHeight: result.height,
           ...(isAnimation ? { aspectRatio } : {}),
         });
+        if (runningHubTask) completeRunningHubNodeTask(submittingNodeId);
+        if (result.workflowApiTaskId) completeWorkflowApiNodeTask(submittingNodeId, result.workflowApiTaskId);
         useAppStore.getState().syncDramaAssetImageFromNode?.(activeNodeId!, mediaUrl);
         recordOutputHistory(activeNodeId!, {
           nodeId: activeNodeId!,
           nodeLabel: nodeLabel,
           timestamp: Date.now(),
           prompt: effectivePrompt,
-          output: result.url,
+          output: persisted.sourceUrl,
           nodeType: isAnimation ? 'ai-animation' : 'ai-image',
           model: nodeModel,
           provider: nodeProvider,
           status: 'success',
-          mediaUrl: result.url,
-          filePath: saved?.filePath,
+          mediaUrl,
+          filePath: persisted.filePath,
           params: isAnimation
             ? { imageSize, aspectRatio, animationAction, animationFrames, grid: ANIMATION_FRAME_GRIDS[animationFrames] }
             : { imageSize, aspectRatio, cameraSettings: latestData.cameraSettings },
         });
         if (postProcess === 'character-8-direction-grid') {
-          if (!saved?.filePath) {
+          if (!persisted.filePath) {
             showToast(t('原图已生成，但未能保存到本地，无法自动生成 8 向宫格'), 'error');
           } else {
             showToast(t('图片生成完成，正在后台切图生成 8 向宫格'));
             try {
               if (!isStillCurrentSubmission()) return;
 
-              const gridResult = await createCharacterDirectionGrid(saved.filePath);
+              const gridResult = await createCharacterDirectionGrid(persisted.filePath);
               if (!isStillCurrentSubmission()) return;
 
               const store2 = useAppStore.getState();
@@ -636,20 +688,20 @@ function AINodeDialog() {
           imageSize,
           aspectRatio,
           workflowId: latestData.workflowId,
-          workflowInputs: latestData.workflowInputs,
+          workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
           nodeId: activeNodeId ?? undefined,
         });
         if (!isStillCurrentSubmission()) return;
-        const saved = currentProjectId
-          ? await downloadUrlAndSave(result.url, currentProjectId, 'ai-panorama', nodeLabel).catch(() => null)
-          : null;
-        const mediaUrl = saved?.assetUrl || result.url;
+        const persisted = currentProjectId
+          ? await persistMediaUrlToProjectData(result.url, currentProjectId, 'ai-panorama', nodeLabel)
+          : { mediaUrl: result.url, sourceUrl: result.url };
+        const mediaUrl = persisted.mediaUrl;
         updateNodeData(activeNodeId!, {
           imageUrl: mediaUrl,
-          sourceUrl: result.url,
-          filePath: saved?.filePath,
-          thumbnailUrl: result.url,
-          output: result.url,
+          sourceUrl: persisted.sourceUrl,
+          filePath: persisted.filePath,
+          thumbnailUrl: mediaUrl,
+          output: persisted.sourceUrl,
           status: 'success',
           imageWidth: result.width,
           imageHeight: result.height,
@@ -659,13 +711,13 @@ function AINodeDialog() {
           nodeLabel: nodeLabel,
           timestamp: Date.now(),
           prompt: effectivePrompt,
-          output: result.url,
+          output: persisted.sourceUrl,
           nodeType: 'ai-panorama',
           model: nodeModel,
           provider: nodeProvider,
           status: 'success',
-          mediaUrl: result.url,
-          filePath: saved?.filePath,
+          mediaUrl,
+          filePath: persisted.filePath,
           params: { imageSize, aspectRatio },
         });
         showToast(t('全景图生成完成'));
@@ -706,35 +758,39 @@ function AINodeDialog() {
           seedanceDuration,
           generateAudio,
           workflowId: latestData.workflowId,
-          workflowInputs: latestData.workflowInputs,
+          workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
           nodeId: activeNodeId ?? undefined,
         });
         if (!isStillCurrentSubmission()) return;
         // 下载远程 URL 到本地项目目录
-        const saved = currentProjectId
-          ? await downloadUrlAndSave(result.url, currentProjectId, 'ai-video', nodeLabel).catch(() => null)
-          : null;
-        const mediaUrl = saved?.assetUrl || result.url;
+        const persisted = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (currentProjectId
+          ? await persistMediaUrlToProjectData(result.url, currentProjectId, 'ai-video', nodeLabel)
+          : { mediaUrl: result.url, sourceUrl: result.url });
+        if (runningHubTask && !isStillCurrentSubmission()) return;
+        const mediaUrl = persisted.mediaUrl;
         updateNodeData(activeNodeId!, {
           videoUrl: mediaUrl,
-          sourceUrl: result.url,
-          filePath: saved?.filePath,
-          thumbnailUrl: result.url,
-          output: result.url,
+          sourceUrl: persisted.sourceUrl,
+          filePath: persisted.filePath,
+          thumbnailUrl: mediaUrl,
+          output: persisted.sourceUrl,
           status: 'success',
         });
+        if (result.workflowApiTaskId) completeWorkflowApiNodeTask(submittingNodeId, result.workflowApiTaskId);
+        if (runningHubTask) completeRunningHubNodeTask(submittingNodeId);
+        if (result.workflowApiTaskId) completeWorkflowApiNodeTask(submittingNodeId, result.workflowApiTaskId);
         recordOutputHistory(activeNodeId!, {
           nodeId: activeNodeId!,
           nodeLabel: nodeLabel,
           timestamp: Date.now(),
           prompt: effectivePrompt,
-          output: result.url,
+          output: persisted.sourceUrl,
           nodeType: 'ai-video',
           model: nodeModel,
           provider: nodeProvider,
           status: 'success',
-          mediaUrl: result.url,
-          filePath: saved?.filePath,
+          mediaUrl,
+          filePath: persisted.filePath,
           params: { videoResolution, videoFps, videoFrames, seedanceResolution, seedanceRatio, seedanceDuration, generateAudio, cameraSettings: latestData.cameraSettings },
         });
         showToast(t('视频生成完成'));
@@ -743,6 +799,7 @@ function AINodeDialog() {
           prompt: effectivePrompt,
           model: nodeModel,
           provider: nodeProvider,
+          audioSpeechSettings: latestData.audioSpeechSettings,
           audioVoice: latestData.audioVoice,
           audioFormat: latestData.audioFormat,
           audioSpeed: latestData.audioSpeed,
@@ -752,7 +809,7 @@ function AINodeDialog() {
           musicDuration: latestData.musicDuration,
           autoGenerateLyrics: latestData.autoGenerateLyrics,
           workflowId: latestData.workflowId,
-          workflowInputs: latestData.workflowInputs,
+          workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
           nodeId: activeNodeId ?? undefined,
         });
         if (!isStillCurrentSubmission()) {
@@ -760,6 +817,7 @@ function AINodeDialog() {
           return;
         }
         const persisted = await persistAudioGenerationResult(result, currentProjectId, nodeLabel);
+        if (runningHubTask && !isStillCurrentSubmission()) return;
         updateNodeData(activeNodeId!, {
           audioUrl: persisted.mediaUrl,
           sourceUrl: persisted.sourceUrl,
@@ -771,6 +829,8 @@ function AINodeDialog() {
           ...(result.lyrics ? { musicLyrics: result.lyrics } : {}),
           status: 'success',
         });
+        if (runningHubTask) completeRunningHubNodeTask(submittingNodeId);
+        if (result.workflowApiTaskId) completeWorkflowApiNodeTask(submittingNodeId, result.workflowApiTaskId);
         recordOutputHistory(activeNodeId!, {
           nodeId: activeNodeId!,
           nodeLabel: nodeLabel,
@@ -784,6 +844,7 @@ function AINodeDialog() {
           mediaUrl: persisted.mediaUrl,
           filePath: persisted.filePath,
           params: {
+            audioSpeechSettings: latestData.audioSpeechSettings,
             audioVoice: latestData.audioVoice,
             audioFormat: latestData.audioFormat,
             audioSpeed: latestData.audioSpeed,
@@ -795,32 +856,7 @@ function AINodeDialog() {
         });
         showToast(t('音频生成完成'));
       } else if (nodeType === 'ai-shotlist') {
-        // 分镜表要的是表格行不是一段文字：按当前显示的列出题，把回答解析回 shotlistRows
-        const columns = resolveShotlistColumns(latestData.shotlistColumns as ShotlistColumnKey[] | undefined);
-        const result = await generateText({
-          prompt: buildShotlistGenerationPrompt(effectivePrompt, columns),
-          model: nodeModel,
-          provider: nodeProvider,
-        });
-        if (!isStillCurrentSubmission()) return;
-        const generated = parseShotlistRows(result);
-        // 生成期间用户可能还在改表，取最新一份做画面接续，别拿 await 前的快照
-        const previousRows = (useAppStore.getState().nodes.find((n) => n.id === submittingNodeId)
-          ?.data.shotlistRows as ShotRow[] | undefined) ?? [];
-        const rows = carryOverShotFrames(previousRows, generated);
-        updateNodeData(activeNodeId!, { shotlistRows: rows, status: 'success' });
-        recordOutputHistory(activeNodeId!, {
-          nodeId: activeNodeId!,
-          nodeLabel: nodeLabel,
-          timestamp: Date.now(),
-          prompt: effectivePrompt,
-          output: result,
-          nodeType: 'ai-shotlist',
-          model: nodeModel,
-          provider: nodeProvider,
-          status: 'success',
-          params: { columns },
-        });
+        const rows = await generateShotlistRows(submittingNodeId, effectivePrompt, nodeModel, nodeProvider);
         showToast(t('已生成 {count} 个镜头', { count: rows.length }));
       } else {
         const result = await generateText({
@@ -883,25 +919,40 @@ function AINodeDialog() {
         error: msg,
       });
       showToast(msg, 'error');
+    } finally {
+      if (runningHubTask && isStillCurrentSubmission() && useAppStore.getState().nodes.find((item) => item.id === submittingNodeId)?.data.status === 'success') completeRunningHubNodeTask(submittingNodeId);
+      if (cloudGuard) completeCanvasDerivation(cloudGuard);
     }
   }, [activeNodeId, nodeType, currentProjectId, finishContinuousEdit, updateNodeData, updateNodeDataTransient, recordOutputHistory, showToast, runVideoToNewNodes, t]);
 
   const onCancelGeneration = useCallback(async () => {
     if (!activeNodeId || cancellingNodeIdsRef.current.has(activeNodeId)) return;
     const nodeId = activeNodeId;
+    const projectId = currentProjectId;
+    if (useAppStore.getState().nodes.find((item) => item.id === nodeId)?.data.provider === 'workflow-api') {
+      stopWorkflowApiNodeTask(nodeId); return;
+    }
+    const cloud = ['runninghubwf', 'runninghub'].includes(useAppStore.getState().nodes.find((item) => item.id === nodeId)?.data.provider ?? '');
+    const originalTaskId = projectId ? getPendingTasksForProject(projectId).find((task) => task.nodeId === nodeId)?.taskId : undefined;
+    const isCurrent = () => useAppStore.getState().currentProjectId === projectId
+      && useAppStore.getState().nodes.some((item) => item.id === nodeId)
+      && (!projectId || !getPendingTasksForProject(projectId).some((task) => task.nodeId === nodeId && task.taskId !== originalTaskId));
     cancellingNodeIdsRef.current.add(nodeId);
     try {
-      await cancelComfyUINodeTask(nodeId);
+      const cloudResult = cloud ? await cancelRunningHubNodeTask(nodeId) : undefined;
+      if (!cloud) await cancelComfyUINodeTask(nodeId);
+      if (!isCurrent()) return;
       updateNodeDataTransient(nodeId, { status: 'idle', error: undefined });
-      showToast(t('已终止 ComfyUI 任务'));
+      showToast(cloud ? (cloudResult === 'local-stopped' ? '已停止本地等待；已提交的任务仍在平台运行，可继续查询' : 'RunningHub 已确认任务结束') : t('已终止 ComfyUI 任务'));
     } catch (error) {
-      updateNodeDataTransient(nodeId, { status: 'idle', error: undefined });
+      if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : t('无法终止 ComfyUI 任务');
-      showToast(t('已停止本地等待，但{message}', { message }), 'error');
+      updateNodeDataTransient(nodeId, { status: 'error', error: cloud ? message : t('ComfyUI 取消尚未确认，任务已保留，可继续查询或再次终止') });
+      showToast(t('取消尚未确认，任务已保留：{message}', { message }), 'error');
     } finally {
       cancellingNodeIdsRef.current.delete(nodeId);
     }
-  }, [activeNodeId, showToast, t, updateNodeDataTransient]);
+  }, [activeNodeId, currentProjectId, showToast, t, updateNodeDataTransient]);
 
   /**
    * 「直接输出」只对产物就是文字的节点成立：媒体节点没有模型就没有素材，
@@ -937,6 +988,7 @@ function AINodeDialog() {
         model: model.value,
         provider: model.provider,
         audioPurpose: model.audioPurpose,
+        runninghubModelParameters: undefined, runninghubOutputs: undefined, runninghubStage: undefined, workflowId: undefined,
         ...(nodeType === 'ai-video' && model.provider === 'general' ? {
           videoResolution: undefined,
           videoFps: undefined,
@@ -954,9 +1006,12 @@ function AINodeDialog() {
 
   const onWorkflowSelect = useCallback(
     (workflowId: string | undefined) => {
+      const workflow = useAppStore.getState().workflows.find((item) => item.id === workflowId);
       updateNodeData(activeNodeId!, {
         workflowId,
-        ...(workflowId ? { provider: 'comfyui', model: 'comfyui/workflow', batchCount: 1, audioPurpose: undefined } : {}),
+        workflowInputs: undefined, runninghubModelParameters: undefined, runninghubOutputs: undefined, runninghubStage: undefined,
+        workflowApiOutputs: undefined, workflowApiStage: undefined,
+        ...(workflow ? { ...workflowExecution(workflow), batchCount: 1, audioPurpose: undefined } : {}),
       });
     },
     [activeNodeId, updateNodeData]
@@ -1024,6 +1079,22 @@ function AINodeDialog() {
     [activeNodeId, updateNodeData]
   );
 
+  const onChangeAudioSpeechSettings = useCallback((value: AudioSpeechSettings) => {
+    updateContinuousNodeData({ audioSpeechSettings: value });
+  }, [updateContinuousNodeData]);
+
+  const onRemoveAudioReference = useCallback((reference: AudioSpeechReference) => {
+    finishContinuousEdit();
+    const state = useAppStore.getState();
+    const current = state.nodes.find((item) => item.id === activeNodeId)?.data;
+    if (!current || !activeNodeId) return;
+    if (reference.edgeId) {
+      state.onEdgesChange([{ type: 'remove', id: reference.edgeId }]);
+    } else {
+      updateNodeData(activeNodeId, removeAudioSpeechReference(current.prompt ?? '', current.workflowInputs, reference));
+    }
+  }, [activeNodeId, finishContinuousEdit, updateNodeData]);
+
   const onChangeAudioVoice = useCallback(
     (value: AudioTtsVoice) => updateNodeData(activeNodeId!, { audioVoice: value }),
     [activeNodeId, updateNodeData],
@@ -1082,8 +1153,22 @@ function AINodeDialog() {
   // Early return must come after ALL hooks
   if (!activeNodeId || !node || !data || !nodeType) return null;
 
+  const recoverableComfyTask = currentProjectId && data.status !== 'loading'
+    ? getPendingTasksForProject(currentProjectId).find((task) => task.nodeId === activeNodeId && task.taskType === 'comfyui' && task.comfyRecoveryState)
+    : undefined;
+  const cloudTask = currentProjectId ? getPendingTasksForProject(currentProjectId).find((task) => task.nodeId === activeNodeId && ['runninghub-workflow', 'runninghub-model'].includes(task.taskType)) : undefined;
+  const workflowApiTask = currentProjectId ? getPendingTasksForProject(currentProjectId).find((task) => task.nodeId === activeNodeId && task.taskType === 'workflow-api') : undefined;
+  const cloudOutputs = data.workflowApiOutputs ?? data.runninghubOutputs;
+
   const audioPurpose = data.audioPurpose
     ?? (data.model ? findMediaModelOption(data.model)?.audioPurpose : undefined);
+
+  // 节点已有图片/视频/音频等产物时浮层下移，避免遮住画面；空节点保持原 -20px 覆盖
+  const nodeHasMedia = !!(
+    data.imageUrl || data.thumbnailUrl ||
+    data.videoUrl || data.audioUrl
+  );
+  const dialogOffsetY = nodeHasMedia ? 12 : -20;
 
   const handleInsertMention = (mentionStr: string) => {
     // 优先在编辑器的「当前光标位置」插入引用芯片（点击 float 时编辑器焦点仍在）
@@ -1108,7 +1193,7 @@ function AINodeDialog() {
           className="ai-dialog-preview-float"
           style={dialogPosition ? {
             left: `${dialogPosition.x}px`,
-            top: `${dialogPosition.y - 10 - 42}px`,
+            top: `${dialogPosition.y + dialogOffsetY - 42}px`,
             transform: 'translateX(-50%)',
           } : undefined}
         >
@@ -1133,7 +1218,7 @@ function AINodeDialog() {
         aria-label={isExpanded ? t('节点生成对话框') : undefined}
         style={isExpanded ? undefined : {
           left: dialogPosition ? `${dialogPosition.x}px` : '50%',
-          top: dialogPosition ? `${dialogPosition.y - 20}px` : '50%',
+          top: dialogPosition ? `${dialogPosition.y + dialogOffsetY}px` : '50%',
           transform: dialogPosition ? 'translateX(-50%)' : 'translate(-50%, -50%)',
         }}
         onMouseDown={(e) => e.stopPropagation()}
@@ -1183,12 +1268,52 @@ function AINodeDialog() {
             </svg>
           )}
         </button>
+        {['runninghubwf', 'runninghub'].includes(data.provider ?? '') && data.runninghubStage && <p role="status" className="px-3 py-1 text-xs text-canvas-text-secondary">RunningHub · {data.runninghubStage}</p>}
+        {data.provider === 'workflow-api' && data.workflowApiStage && <p role="status" className="px-3 py-1 text-xs text-canvas-text-secondary">AutoDL · {data.workflowApiStage}</p>}
+        {workflowApiTask && data.status !== 'loading' && <WorkflowApiTaskStatus key={`${activeNodeId}:${workflowApiTask.workflowApi?.attemptId}`} task={workflowApiTask} />}
+        {cloudTask && data.status !== 'loading' && <div className="ui-card m-2 flex flex-col gap-2 p-3 text-xs">
+          <p>{cloudTask.taskId ? `任务 ${(cloudTask.taskIds?.length ? cloudTask.taskIds : [cloudTask.taskId]).join('、')} 已保留，可以继续查询。${cloudTask.runninghubSubmissionUncertain ? '另有提交状态未知，请到平台核对后再清除恢复记录。' : ''}` : '提交状态未知。请到 RunningHub 平台核对，补充任务 ID 后继续查询。'}</p>
+          {!cloudTask.taskId && <input aria-label="RunningHub 任务 ID" className="ui-input w-full" value={recoveryInput.nodeId === activeNodeId ? recoveryInput.taskId : ''} inputMode="numeric" onChange={(event) => setRecoveryInput({ nodeId: activeNodeId, taskId: event.target.value, confirmed: false })} />}
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="ui-btn ui-btn--sm" onClick={() => {
+              if (!cloudTask.taskId) {
+                if (recoveryInput.nodeId !== activeNodeId || !/^\d{1,30}$/.test(recoveryInput.taskId.trim())) { showToast('请填写正确的任务 ID', 'error'); return; }
+                updatePendingTask(activeNodeId, { taskId: recoveryInput.taskId.trim(), taskIds: [recoveryInput.taskId.trim()], submitted: true, runninghubRecoveryState: 'disconnected', runninghubSubmissionUncertain: false }, '');
+              }
+              void resumeRunningHubNodeTask(activeNodeId).catch((error: unknown) => showToast(error instanceof Error ? error.message : '恢复查询失败', 'error'));
+            }}>继续查询 / 保存</button>
+            {cloudTask.taskId && <button type="button" className="ui-btn ui-btn--sm ui-btn--danger" onClick={() => { void onCancelGeneration(); }}>请求远端取消</button>}
+          </div>
+          <details><summary className="cursor-pointer text-canvas-text-secondary">在平台确认任务结束后解除限制</summary>
+            <label className="my-2 flex gap-2"><input type="checkbox" checked={recoveryInput.nodeId === activeNodeId && recoveryInput.confirmed} onChange={(event) => setRecoveryInput({ nodeId: activeNodeId, taskId: '', confirmed: event.target.checked })} />我已在平台确认任务未提交或已经结束</label>
+            <button type="button" className="ui-btn ui-btn--sm" disabled={recoveryInput.nodeId !== activeNodeId || !recoveryInput.confirmed} onClick={() => { removePendingTask(activeNodeId, cloudTask.taskId); updateNodeDataTransient(activeNodeId, { status: 'idle', error: undefined, runninghubStage: undefined }); setRecoveryInput({ nodeId: '', taskId: '', confirmed: false }); }}>清除本地恢复记录</button>
+          </details>
+        </div>}
+        {cloudOutputs && cloudOutputs.length > 1 && <details className="ui-card m-2 p-2 text-xs"><summary className="cursor-pointer">全部产物 · {cloudOutputs.length}</summary><div className="mt-2 flex max-h-72 flex-col gap-2 overflow-y-auto">{cloudOutputs.map((output, index) => <div key={`${output.url}:${index}`}>
+          <p className="mb-1 text-canvas-text-secondary">产物 {index + 1}{output.nodeId ? ` · 节点 ${output.nodeId}` : ''}</p>
+          {output.kind === 'image' ? <img className="max-h-48 max-w-full object-contain" src={output.url} alt={`产物 ${index + 1}`} /> : output.kind === 'video' ? <video className="max-h-48 w-full" src={output.url} controls preload="metadata" /> : <audio className="w-full" src={output.url} controls preload="metadata" />}
+        </div>)}</div></details>}
+        {recoverableComfyTask && (
+          <div className="ui-alert ui-alert--warning mx-3 mb-2 flex-wrap" role="status">
+            <span className="min-w-0 flex-1 text-xs">
+              {recoverableComfyTask.comfyRecoveryState === 'cancel_pending'
+                ? t('ComfyUI 取消尚未确认，任务已保留')
+                : t('ComfyUI 查询中断，任务已保留')}
+            </span>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="ui-btn ui-btn--sm" onClick={() => {
+                void resumeComfyUINodeTask(activeNodeId).catch(() => showToast(t('继续查询失败，任务仍保留'), 'error'));
+              }}>{t('继续查询')}</button>
+              <button type="button" className="ui-btn ui-btn--sm ui-btn--danger" onClick={() => { void onCancelGeneration(); }}>{t('再次终止')}</button>
+            </div>
+          </div>
+        )}
         <PromptPanel
           editorRef={editorApiRef}
           nodeType={nodeType}
           nodeId={activeNodeId}
           prompt={data.prompt || ''}
-          placeholder={t('描述任何你想要生成的内容，按 @ 引用素材，/呼出指令\n(Enter 生成，Shift+Enter 换行)')}
+          placeholder={t('按 @ 引用素材；连线素材需 @ 后才会传给模型，仅连线不生效；\n描述想要生成的内容；\n/ 呼出指令；\n(Enter 生成，Shift+Enter 换行)')}
           selectedModel={data.model}
           selectedProvider={data.provider}
           selectedWorkflowId={data.workflowId}
@@ -1196,14 +1321,18 @@ function AINodeDialog() {
           onAnimationActionChange={onAnimationActionChange}
           animationFrames={data.animationFrames ?? 8}
           onAnimationFramesChange={onAnimationFramesChange}
-          canGenerate={data.status !== 'loading'}
+          canGenerate={data.status !== 'loading' && !recoverableComfyTask && !cloudTask && !workflowApiTask}
           isGenerating={data.status === 'loading'}
-          onCancelGeneration={data.provider === 'comfyui' ? () => { void onCancelGeneration(); } : undefined}
+          onCancelGeneration={['comfyui', 'runninghubwf', 'runninghub', 'workflow-api'].includes(data.provider ?? '') ? () => { void onCancelGeneration(); } : undefined}
           onChange={onPromptChange}
           onContinuousEditEnd={finishContinuousEdit}
           onSubmit={onSubmit}
           onModelSelect={onModelSelect}
           onWorkflowSelect={onWorkflowSelect}
+          runninghubModelParameters={data.runninghubModelParameters}
+          onRunninghubModelParametersChange={(runninghubModelParameters) => updateNodeData(activeNodeId, { runninghubModelParameters })}
+          workflowInputs={data.workflowInputs}
+          onWorkflowInputsChange={(workflowInputs) => updateNodeData(activeNodeId, { workflowInputs })}
           onPassThrough={supportsPassThrough ? onPassThrough : undefined}
           imageSize={(data.imageSize as string) || '2K'}
           aspectRatio={(data.aspectRatio as string) || (nodeType === 'ai-panorama' ? '2:1' : '1:1')}
@@ -1233,6 +1362,9 @@ function AINodeDialog() {
           onChangeSeedanceDuration={onChangeSeedanceDuration}
           onChangeGenerateAudio={onChangeGenerateAudio}
           audioPurpose={audioPurpose}
+          audioSpeechSettings={data.audioSpeechSettings}
+          onChangeAudioSpeechSettings={onChangeAudioSpeechSettings}
+          onRemoveAudioReference={onRemoveAudioReference}
           audioVoice={data.audioVoice ?? 'alloy'}
           audioFormat={data.audioFormat ?? 'wav'}
           audioSpeed={data.audioSpeed ?? 1}

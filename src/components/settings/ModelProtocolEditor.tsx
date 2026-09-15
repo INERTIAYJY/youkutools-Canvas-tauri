@@ -1,6 +1,7 @@
 /**
  * 编辑自定义模型的请求、鉴权、轮询与响应映射协议，并在保存前执行结构校验。
  */
+import Select from '../shared/Select';
 import { Icon } from '@iconify/react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type {
@@ -35,7 +36,10 @@ import {
   type ModelProtocolResponsePreviewEntry,
   type ModelProtocolVariables,
 } from '../../services/ai/modelProtocol';
-import { getCategoryProtocolVariables } from '../../services/ai/modelProtocolVariables';
+import {
+  getCategoryProtocolVariables,
+  getProtocolVariableDescription,
+} from '../../services/ai/modelProtocolVariables';
 import PopupCloseButton from '../shared/PopupCloseButton';
 import { describeProtocolTestRunBlocker, type ProtocolChoice } from './modelProtocolTestRun';
 import { useT } from '../../i18n';
@@ -44,6 +48,8 @@ type EditorView = 'form' | 'json';
 type JsonFieldKind = 'object' | 'value';
 
 interface ModelProtocolEditorProps {
+  workflowMode?: boolean;
+  initialPreviewVariables?: ModelProtocolVariables;
   model: ProviderModelSelection;
   /** 试跑用的真实凭据与网关地址；缺任意一个就只能做本地预览。 */
   apiKey: string;
@@ -96,6 +102,12 @@ const CATEGORY_VARIABLES: Record<GeneralModelCategory, string[]> = {
   video: getCategoryProtocolVariables('video'),
   audio: getCategoryProtocolVariables('audio'),
 };
+
+const SUBMIT_TASK_ID_DESCRIPTION = '仅用于轮询请求：提交响应中解析出的任务 ID';
+
+function getVariableTooltip(variable: string): string {
+  return getProtocolVariableDescription(variable) ?? '调用时替换为节点中的实际值';
+}
 
 function createPreviewVariables(model: ProviderModelSelection): ModelProtocolVariables {
   const common = {
@@ -285,6 +297,8 @@ function createDefaultPoll(category: GeneralModelCategory): ModelProtocolPollTem
 }
 
 export default function ModelProtocolEditor({
+  workflowMode = false,
+  initialPreviewVariables,
   model,
   apiKey,
   baseUrl,
@@ -305,7 +319,7 @@ export default function ModelProtocolEditor({
   const [error, setError] = useState<string | null>(null);
   const [formRevision, setFormRevision] = useState(0);
   const [previewVariablesJson, setPreviewVariablesJson] = useState(
-    () => serializeJson(createPreviewVariables(model)),
+    () => serializeJson(initialPreviewVariables ?? createPreviewVariables(model)),
   );
   const [responseSampleJson, setResponseSampleJson] = useState(
     () => serializeJson(createResponseSample()),
@@ -575,6 +589,9 @@ export default function ModelProtocolEditor({
   };
 
   const auth = protocol.auth ?? { type: 'bearer' as const };
+  const availableVariables = workflowMode && initialPreviewVariables
+    ? Object.keys(initialPreviewVariables)
+    : CATEGORY_VARIABLES[model.category];
   const poll = protocol.poll;
   const responseResult = protocol.response.result ?? {};
   const pollResponse = poll?.response;
@@ -684,7 +701,7 @@ export default function ModelProtocolEditor({
     <section className="provider-protocol-editor is-small"       aria-label={t('{name} 调用协议', { name: model.name })}>
       <div className="provider-protocol-editor-head">
         <div>
-          <span>{t('模型调用协议')}</span>
+          <span>{t(workflowMode ? '工作流调用协议' : '模型调用协议')}</span>
           <strong>{model.name}</strong>
         </div>
         <PopupCloseButton ariaLabel={t('关闭协议设置')} onClick={onClose} />
@@ -693,25 +710,25 @@ export default function ModelProtocolEditor({
       <div className={`provider-protocol-topbar ${model.category === 'image' ? 'has-reference-mode' : ''}`}>
         <label className="provider-protocol-field">
           <span>{t('协议预设')}</span>
-          <select value={preset} onChange={(event) => changePreset(event.target.value as ProtocolChoice)}>
-            {getAvailableChoices(model.category).map((choice) => (
+          <Select fixedMenu value={preset} onChange={(selectedOptionValue) => changePreset(selectedOptionValue as ProtocolChoice)}>
+            {(workflowMode ? ['custom' as const] : getAvailableChoices(model.category)).map((choice) => (
               <option key={choice} value={choice}>{t(PRESET_LABELS[choice])}</option>
             ))}
-          </select>
+          </Select>
         </label>
-        {model.category === 'image' ? (
+        {model.category === 'image' && !workflowMode ? (
           <label className="provider-protocol-field">
             <span>{t('参考图请求')}</span>
-            <select
+            <Select fixedMenu
               value={model.imageReferenceRequestMode ?? 'generation-json-image-urls'}
-              onChange={(event) => onImageReferenceRequestModeChange(
-                event.target.value as ImageReferenceRequestMode,
+              onChange={(selectedOptionValue) => onImageReferenceRequestModeChange(
+                selectedOptionValue as ImageReferenceRequestMode,
               )}
             >
               <option value="generation-json-image-urls">{t('生成接口 JSON（image_urls）')}</option>
               <option value="generation-json-image-data-urls">{t('生成接口 JSON（image，data URL 数组）')}</option>
               <option value="edits-multipart">{t('编辑接口 Multipart（图片文件）')}</option>
-            </select>
+            </Select>
           </label>
         ) : null}
         {preset === 'custom' ? (
@@ -778,19 +795,19 @@ export default function ModelProtocolEditor({
             <div className="provider-protocol-grid is-three">
               <label className="provider-protocol-field">
                 <span>{t('执行模式')}</span>
-                <select value={protocol.mode} onChange={(event) => changeMode(event.target.value as ModelExecutionProtocol['mode'])}>
+                <Select fixedMenu value={protocol.mode} onChange={(selectedOptionValue) => changeMode(selectedOptionValue as ModelExecutionProtocol['mode'])}>
                   <option value="sync">{t('同步返回')}</option>
                   <option value="async">{t('异步轮询')}</option>
-                </select>
+                </Select>
               </label>
               <label className="provider-protocol-field">
                 <span>{t('鉴权方式')}</span>
-                <select value={auth.type} onChange={(event) => changeAuthType(event.target.value as ModelProtocolAuthType)}>
+                <Select fixedMenu value={auth.type} onChange={(selectedOptionValue) => changeAuthType(selectedOptionValue as ModelProtocolAuthType)}>
                   <option value="bearer">Bearer</option>
                   <option value="header">{t('自定义 Header')}</option>
                   <option value="query">{t('Query 参数')}</option>
                   <option value="none">{t('无需鉴权')}</option>
-                </select>
+                </Select>
               </label>
               {auth.type === 'header' || auth.type === 'query' ? (
                 <label className="provider-protocol-field">
@@ -851,10 +868,10 @@ export default function ModelProtocolEditor({
             <div className="provider-protocol-grid is-request">
               <label className="provider-protocol-field">
                 <span>{t('方法')}</span>
-                <select value={protocol.submit.method} onChange={(event) => updateSubmit({ method: event.target.value as 'GET' | 'POST' })}>
+                <Select fixedMenu value={protocol.submit.method} onChange={(selectedOptionValue) => updateSubmit({ method: selectedOptionValue as 'GET' | 'POST' })}>
                   <option value="POST">POST</option>
                   <option value="GET">GET</option>
-                </select>
+                </Select>
               </label>
               <label className="provider-protocol-field">
                 <span>{t('路径')}</span>
@@ -862,30 +879,30 @@ export default function ModelProtocolEditor({
               </label>
               <label className="provider-protocol-field">
                 <span>{t('路径基准')}</span>
-                <select value={protocol.submit.pathMode ?? 'append'} onChange={(event) => updateSubmit({ pathMode: event.target.value as 'append' | 'origin' })}>
+                <Select fixedMenu value={protocol.submit.pathMode ?? 'append'} onChange={(selectedOptionValue) => updateSubmit({ pathMode: selectedOptionValue as 'append' | 'origin' })}>
                   <option value="append">{t('连接地址')}</option>
                   <option value="origin">{t('域名根路径')}</option>
-                </select>
+                </Select>
               </label>
             </div>
             <div className="provider-protocol-grid">
               <label className="provider-protocol-field">
                 <span>{t('请求体编码')}</span>
-                <select
+                <Select fixedMenu
                   value={protocol.submit.bodyEncoding ?? 'json'}
-                  onChange={(event) => updateSubmit({
-                    bodyEncoding: event.target.value as ModelProtocolBodyEncoding,
+                  onChange={(selectedOptionValue) => updateSubmit({
+                    bodyEncoding: selectedOptionValue as ModelProtocolBodyEncoding,
                   })}
                 >
                   <option value="json">JSON</option>
                   <option value="form-urlencoded">Form URL Encoded</option>
                   <option value="multipart">Multipart Form Data</option>
-                </select>
+                </Select>
               </label>
               {model.category === 'image' || model.category === 'video' ? (
                 <label className="provider-protocol-field provider-protocol-size-insert">
                   <span>{t('插入尺寸字段')}</span>
-                  <select value="" onChange={(event) => insertSizeMapping(event.target.value)}>
+                  <Select fixedMenu value="" onChange={(selectedOptionValue) => insertSizeMapping(selectedOptionValue)}>
                     <option value="">{t('选择映射')}</option>
                     <option value="size">size: widthxheight</option>
                     <option value="dimensions">width + height</option>
@@ -893,34 +910,34 @@ export default function ModelProtocolEditor({
                     {model.category === 'video' ? <option value="video-standard">resolution + num_frames + frame_rate</option> : null}
                     {model.category === 'video' ? <option value="seedance">Seedance resolution + ratio + duration</option> : null}
                     {model.category === 'video' ? <option value="seedance-openai">Seedance resolution + aspect_ratio + duration</option> : null}
-                  </select>
+                  </Select>
                 </label>
               ) : null}
               {model.category === 'image' && protocol.submit.bodyEncoding === 'multipart' ? (
                 <label className="provider-protocol-field">
                   <span>{t('插入文件字段')}</span>
-                  <select value="" onChange={(event) => insertMultipartFile(event.target.value)}>
+                  <Select fixedMenu value="" onChange={(selectedOptionValue) => insertMultipartFile(selectedOptionValue)}>
                     <option value="">{t('选择字段')}</option>
                     <option value="image">image: imageUrls.0</option>
                     <option value="file">file: imageUrls.0</option>
                     <option value="reference_image">reference_image: imageUrls.0</option>
-                  </select>
+                  </Select>
                 </label>
               ) : null}
               {model.category === 'image' && protocol.submit.bodyEncoding !== 'multipart' ? (
                 <label className="provider-protocol-field">
                   <span>{t('插入参考图字段')}</span>
-                  <select value="" onChange={(event) => insertJsonReferenceArray(event.target.value)}>
+                  <Select fixedMenu value="" onChange={(selectedOptionValue) => insertJsonReferenceArray(selectedOptionValue)}>
                     <option value="">{t('选择字段')}</option>
                     <option value="image">image: imageUrls</option>
                     <option value="image_urls">image_urls: imageUrls</option>
-                  </select>
+                  </Select>
                 </label>
               ) : null}
               {model.category === 'video' && protocol.submit.bodyEncoding !== 'multipart' ? (
                 <label className="provider-protocol-field">
                   <span>{t('插入参考素材字段')}</span>
-                  <select value="" onChange={(event) => insertVideoReferenceField(event.target.value)}>
+                  <Select fixedMenu value="" onChange={(selectedOptionValue) => insertVideoReferenceField(selectedOptionValue)}>
                     <option value="">{t('选择字段')}</option>
                     <option value="image_urls">image_urls</option>
                     <option value="first_image">first_image</option>
@@ -932,7 +949,7 @@ export default function ModelProtocolEditor({
                     <option value="audio_urls">audio_urls</option>
                     <option value="audio_url">audio_url</option>
                     <option value="reference_audio_urls">reference_audio_urls</option>
-                  </select>
+                  </Select>
                 </label>
               ) : null}
             </div>
@@ -976,14 +993,14 @@ export default function ModelProtocolEditor({
                 <div className="provider-protocol-grid is-three">
                   <label className="provider-protocol-field">
                     <span>{t('响应类型')}</span>
-                    <select
+                    <Select fixedMenu
                       value={protocol.response.type}
-                      onChange={(event) => changeResponseType(event.target.value as ModelProtocolResponseType)}
+                      onChange={(selectedOptionValue) => changeResponseType(selectedOptionValue as ModelProtocolResponseType)}
                     >
                       <option value="json">JSON</option>
                       <option value="text">{t('原始文本')}</option>
                       <option value="binary">{t('原始二进制')}</option>
-                    </select>
+                    </Select>
                   </label>
                   {protocol.response.type === 'binary' ? (
                     <label className="provider-protocol-field">
@@ -1051,10 +1068,10 @@ export default function ModelProtocolEditor({
                   </label>
                   <label className="provider-protocol-field">
                     <span>{t('轮询方法')}</span>
-                    <select value={poll.method} onChange={(event) => updatePoll({ method: event.target.value as 'GET' | 'POST' })}>
+                    <Select fixedMenu value={poll.method} onChange={(selectedOptionValue) => updatePoll({ method: selectedOptionValue as 'GET' | 'POST' })}>
                       <option value="GET">GET</option>
                       <option value="POST">POST</option>
-                    </select>
+                    </Select>
                   </label>
                   <label className="provider-protocol-field">
                     <span>{t('轮询间隔 ms')}</span>
@@ -1062,15 +1079,15 @@ export default function ModelProtocolEditor({
                   </label>
                   <label className="provider-protocol-field">
                     <span>{t('轮询请求体编码')}</span>
-                    <select
+                    <Select fixedMenu
                       value={poll.bodyEncoding ?? 'json'}
-                      onChange={(event) => updatePoll({
-                        bodyEncoding: event.target.value as Exclude<ModelProtocolBodyEncoding, 'multipart'>,
+                      onChange={(selectedOptionValue) => updatePoll({
+                        bodyEncoding: selectedOptionValue as Exclude<ModelProtocolBodyEncoding, 'multipart'>,
                       })}
                     >
                       <option value="json">JSON</option>
                       <option value="form-urlencoded">Form URL Encoded</option>
-                    </select>
+                    </Select>
                   </label>
                 </div>
                 <div className="provider-protocol-grid is-request">
@@ -1080,10 +1097,10 @@ export default function ModelProtocolEditor({
                   </label>
                   <label className="provider-protocol-field">
                     <span>{t('路径基准')}</span>
-                    <select value={poll.pathMode ?? 'append'} onChange={(event) => updatePoll({ pathMode: event.target.value as 'append' | 'origin' })}>
+                    <Select fixedMenu value={poll.pathMode ?? 'append'} onChange={(selectedOptionValue) => updatePoll({ pathMode: selectedOptionValue as 'append' | 'origin' })}>
                       <option value="append">{t('连接地址')}</option>
                       <option value="origin">{t('域名根路径')}</option>
-                    </select>
+                    </Select>
                   </label>
                 </div>
                 <div className="provider-protocol-json-grid">
@@ -1215,16 +1232,16 @@ export default function ModelProtocolEditor({
                     <div className="provider-protocol-grid is-three">
                       <label className="provider-protocol-field">
                         <span>{t('退避策略')}</span>
-                        <select
+                        <Select fixedMenu
                           value={pollRetry.backoff}
-                          onChange={(event) => updatePollRetry({
-                            backoff: event.target.value as ModelProtocolPollRetryConfig['backoff'],
+                          onChange={(selectedOptionValue) => updatePollRetry({
+                            backoff: selectedOptionValue as ModelProtocolPollRetryConfig['backoff'],
                           })}
                         >
                           <option value="fixed">{t('固定间隔')}</option>
                           <option value="linear">{t('线性增加')}</option>
                           <option value="exponential">{t('指数增加')}</option>
-                        </select>
+                        </Select>
                       </label>
                       <label className="provider-protocol-field">
                         <span>{t('最大重试间隔 ms')}</span>
@@ -1316,10 +1333,14 @@ export default function ModelProtocolEditor({
           <details className="provider-protocol-variables">
             <summary>{t('可用变量')}</summary>
             <div>
-              {CATEGORY_VARIABLES[model.category].map((variable) => (
-                <code key={variable}>{`{{${variable}}}`}</code>
+              {availableVariables.map((variable) => (
+                <code key={variable} data-tooltip={t(getVariableTooltip(variable))}>
+                  {`{{${variable}}}`}
+                </code>
               ))}
-              {protocol.mode === 'async' ? <code>{'{{submit.task_id}}'}</code> : null}
+              {protocol.mode === 'async' ? (
+                <code data-tooltip={t(SUBMIT_TASK_ID_DESCRIPTION)}>{'{{submit.task_id}}'}</code>
+              ) : null}
             </div>
           </details>
 
@@ -1382,13 +1403,16 @@ export default function ModelProtocolEditor({
               <Icon icon="mdi:code-braces" width="13" />
               <strong>{t('可用变量')}</strong>
               <span>{t('可放入 path、query、headers 或 body，调用时会替换为节点中的实际值')}</span>
+              <span>{t('（鼠标在变量上悬浮可查看详细说明）')}</span>
             </div>
             <div className="provider-protocol-json-variable-list">
-              {CATEGORY_VARIABLES[model.category].map((variable) => (
-                <code key={variable}>{`{{${variable}}}`}</code>
+              {availableVariables.map((variable) => (
+                <code key={variable} data-tooltip={t(getVariableTooltip(variable))}>
+                  {`{{${variable}}}`}
+                </code>
               ))}
               {protocol.mode === 'async' ? (
-                <code title={t('仅用于 poll：提交响应中解析出的任务 ID')}>{'{{submit.task_id}}'}</code>
+                <code data-tooltip={t(SUBMIT_TASK_ID_DESCRIPTION)}>{'{{submit.task_id}}'}</code>
               ) : null}
             </div>
           </div>

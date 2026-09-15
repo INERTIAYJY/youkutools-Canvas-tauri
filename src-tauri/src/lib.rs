@@ -15,18 +15,37 @@ use tauri::{
 use tauri_plugin_fs::FsExt;
 use url::Url;
 
+#[path = "agent/package.rs"]
 mod agent_package;
+#[path = "agent/web.rs"]
 mod assistant_web;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+#[path = "director/blender_runtime/mod.rs"]
 mod blender_runtime;
+mod canvas_input;
+#[path = "files/clipboard.rs"]
 mod clipboard;
+#[path = "files/clipboard_read.rs"]
+mod clipboard_read;
+#[path = "media/comfyui/mod.rs"]
 mod comfyui;
+#[path = "director/desk_runtime.rs"]
 mod director_desk_runtime;
+#[path = "media/dreamina.rs"]
 mod dreamina;
+#[path = "files/transfer.rs"]
 mod file_transfer;
+#[path = "files/thumbnail_cache.rs"]
+mod thumbnail_cache;
+#[path = "media/local_fonts.rs"]
 mod local_fonts;
+#[path = "mcp/bridge.rs"]
 mod mcp_bridge;
 #[cfg(feature = "local-onnx")]
+#[path = "media/model_mirror.rs"]
+mod model_mirror;
+#[cfg(feature = "local-onnx")]
+#[path = "media/onnx/mod.rs"]
 pub mod onnx;
 #[cfg(not(feature = "local-onnx"))]
 pub mod onnx {
@@ -94,14 +113,37 @@ pub mod onnx {
     ) -> Result<String, String> {
         unsupported()
     }
+
+    #[tauri::command]
+    pub async fn speech_to_text(
+        _app: tauri::AppHandle,
+        _webview: tauri::Webview,
+        _input_path: String,
+        _model_name: String,
+        _vocab_name: String,
+        _task_id: String,
+        _language: Option<String>,
+    ) -> Result<String, String> {
+        unsupported()
+    }
 }
 mod path_policy;
+// 源文件按领域归类；crate 根模块名保持稳定，避免改变 IPC、测试与安全调用路径。
+#[path = "plugins/registry.rs"]
 mod plugin_registry;
+#[path = "plugins/runtime.rs"]
 mod plugin_runtime;
+#[path = "plugins/ui.rs"]
+mod plugin_ui;
+#[path = "plugins/window.rs"]
+mod plugin_window;
+#[path = "files/project_archive.rs"]
 mod project_archive;
+#[path = "agent/provider_docs.rs"]
 mod provider_docs;
 mod secret_store;
 mod seedling;
+#[path = "media/sprite_export.rs"]
 mod sprite_export;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -1052,6 +1094,8 @@ pub fn run() {
         .manage(mcp_bridge::McpBridgeState::default())
         .manage(path_policy::UserStorageRoot::default())
         .register_uri_scheme_protocol("director-desk", director_desk_runtime::handle_protocol)
+        .register_uri_scheme_protocol("plugin-ui", plugin_ui::handle_protocol)
+        .register_uri_scheme_protocol("plugin-window", plugin_window::handle_protocol)
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -1059,6 +1103,7 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(canvas_input::init())
         .invoke_handler(tauri::generate_handler![
             fetch_image_data_url,
             proxy_fetch,
@@ -1083,6 +1128,8 @@ pub fn run() {
             agent_package::agent_source_read_text,
             project_archive::pack_project_archive,
             project_archive::unpack_project_archive,
+            thumbnail_cache::prepare_project_thumbnail,
+            thumbnail_cache::write_project_thumbnail,
             file_transfer::copy_file_streamed,
             file_transfer::download_file_streamed,
             file_transfer::cancel_file_transfer,
@@ -1092,6 +1139,7 @@ pub fn run() {
             director_desk_runtime::remove_director_desk_runtime,
             move_to_trash,
             clipboard::copy_files_to_clipboard,
+            clipboard_read::read_canvas_clipboard,
             dreamina_login,
             dreamina::dreamina_login_start,
             dreamina::dreamina_login_runtime,
@@ -1114,6 +1162,7 @@ pub fn run() {
             onnx::check_model_exists,
             onnx::image_upscale,
             onnx::subject_matting,
+            onnx::speech_to_text,
             onnx::character_direction_grid,
             sprite_export::export_sprite_frames,
             onnx::download_onnx_model,
@@ -1145,11 +1194,18 @@ pub fn run() {
             plugin_registry::ensure_plugin_registration,
             plugin_registry::set_plugin_registration_enabled,
             plugin_registry::remove_plugin_registration,
+            plugin_registry::repair_plugin_registry,
             plugin_registry::get_plugin_registration_status,
+            plugin_registry::read_plugin_package_resource,
+            plugin_window::open_plugin_ui_window,
+            plugin_window::close_plugin_ui_window,
+            plugin_window::respond_plugin_ui_window_request,
+            plugin_window::plugin_ui_window_request,
             plugin_runtime::execute_node_plugin_tool,
             plugin_runtime::get_python_plugin_runtime_status,
         ])
         .on_window_event(|window, event| {
+            plugin_window::on_window_event(window, event);
             // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 if window.label() == "main" || window.label() == "chat-assistant" {
@@ -1209,6 +1265,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                plugin_window::revoke_all_sessions();
                 app_handle
                     .state::<blender_runtime::BlenderJobCore>()
                     .shutdown();

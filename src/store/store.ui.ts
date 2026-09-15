@@ -7,6 +7,22 @@ import type { ReversePromptRequest } from '../types';
 
 export type SettingsTab = 'general' | 'files' | 'api' | 'shortcuts' | 'comfyui' | 'storage' | 'mcp' | 'seedling' | 'plugins';
 
+export type ComfyNodeProgressStage = 'connecting' | 'queued' | 'running' | 'finalizing';
+
+export interface ComfyNodeProgress {
+  projectId: string;
+  nodeId: string;
+  requestId: string;
+  clientId: string;
+  promptId?: string;
+  stage: ComfyNodeProgressStage;
+  value?: number;
+  max?: number;
+  percent?: number;
+  executingNodeId?: string;
+  updatedAt: number;
+}
+
 export interface UISlice {
   settingsOpen: boolean;
   /** 打开设置时要激活的标签页；SettingsPanel 消费后清空 */
@@ -23,6 +39,8 @@ export interface UISlice {
   activeNodeId: string | null;
   dialogPosition: { x: number; y: number } | null;
   assetsPanelOpen: boolean;
+  /** 同一资产库的展示方式，仅用于当前界面，不持久化。 */
+  assetsPanelMode: 'modal' | 'drawer';
   characterLibraryOpen: boolean;
   /** 角色库里的动作库弹层；圆环快捷入口要能越过角色列表直接打开它 */
   characterActionLibraryOpen: boolean;
@@ -49,6 +67,8 @@ export interface UISlice {
   } | null;
   /** 反推提示词弹窗的当前请求；null 表示弹窗关闭 */
   reversePromptRequest: ReversePromptRequest | null;
+  /** 仅当前运行期使用的 ComfyUI 节点进度；不进入项目节点数据或 IndexedDB。 */
+  comfyNodeProgress: Record<string, ComfyNodeProgress>;
   setSettingsOpen: (open: boolean, tab?: SettingsTab) => void;
   setSettingsInitialTab: (tab: SettingsTab | null) => void;
   /** 打开设置的 API Key 页，并可选自动打开某连接的编辑框（填写密钥） */
@@ -65,7 +85,7 @@ export interface UISlice {
   setHelpOpen: (open: boolean) => void;
   openNodeDialog: (nodeId: string, position?: { x: number; y: number }) => void;
   closeNodeDialog: () => void;
-  setAssetsPanelOpen: (open: boolean) => void;
+  setAssetsPanelOpen: (open: boolean, mode?: UISlice['assetsPanelMode']) => void;
   setCharacterLibraryOpen: (open: boolean) => void;
   setCharacterActionLibraryOpen: (open: boolean) => void;
   setHistoryPanelOpen: (open: boolean) => void;
@@ -75,6 +95,13 @@ export interface UISlice {
   setHoveredMentionNodeId: (id: string | null) => void;
   setPendingPresetAction: (action: UISlice['pendingPresetAction']) => void;
   setReversePromptRequest: (request: ReversePromptRequest | null) => void;
+  beginComfyNodeProgress: (progress: Omit<ComfyNodeProgress, 'updatedAt'>) => void;
+  updateComfyNodeProgress: (
+    nodeId: string,
+    requestId: string,
+    patch: Partial<Omit<ComfyNodeProgress, 'projectId' | 'nodeId' | 'requestId' | 'clientId'>>,
+  ) => void;
+  clearComfyNodeProgress: (nodeId: string, requestId: string) => void;
 }
 
 export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => ({
@@ -90,6 +117,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   activeNodeId: null,
   dialogPosition: null,
   assetsPanelOpen: false,
+  assetsPanelMode: 'modal',
   characterLibraryOpen: false,
   characterActionLibraryOpen: false,
   historyPanelOpen: false,
@@ -98,6 +126,7 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   hoveredMentionNodeId: null,
   pendingPresetAction: null,
   reversePromptRequest: null,
+  comfyNodeProgress: {},
 
   setSettingsOpen: (open, tab) => set(open
     ? {
@@ -134,17 +163,18 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   setHelpOpen: (open) => set({ helpOpen: open }),
   openNodeDialog: (nodeId, position) => set({ activeNodeId: nodeId, dialogPosition: position ?? null }),
   closeNodeDialog: () => set({ activeNodeId: null, dialogPosition: null, pendingPresetAction: null }),
-  setAssetsPanelOpen: (open) => set(open
+  setAssetsPanelOpen: (open, mode = 'modal') => set(open
     ? {
         settingsOpen: false,
         assetsPanelOpen: true,
+        assetsPanelMode: mode,
         characterLibraryOpen: false,
         characterActionLibraryOpen: false,
         historyPanelOpen: false,
         dramaAssetsPanelOpen: false,
         chatOpen: false,
       }
-    : { assetsPanelOpen: false, dramaAssetsPanelOpen: false }),
+    : { assetsPanelOpen: false, assetsPanelMode: 'modal', dramaAssetsPanelOpen: false }),
   setCharacterLibraryOpen: (open) => set(open
     ? {
         settingsOpen: false,
@@ -188,4 +218,27 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   setHoveredMentionNodeId: (id) => set({ hoveredMentionNodeId: id }),
   setPendingPresetAction: (action) => set({ pendingPresetAction: action }),
   setReversePromptRequest: (request) => set({ reversePromptRequest: request }),
+  beginComfyNodeProgress: (progress) => set((state) => ({
+    comfyNodeProgress: {
+      ...state.comfyNodeProgress,
+      [progress.nodeId]: { ...progress, updatedAt: Date.now() },
+    },
+  })),
+  updateComfyNodeProgress: (nodeId, requestId, patch) => set((state) => {
+    const current = state.comfyNodeProgress[nodeId];
+    if (!current || current.requestId !== requestId) return {};
+    return {
+      comfyNodeProgress: {
+        ...state.comfyNodeProgress,
+        [nodeId]: { ...current, ...patch, updatedAt: Date.now() },
+      },
+    };
+  }),
+  clearComfyNodeProgress: (nodeId, requestId) => set((state) => {
+    const current = state.comfyNodeProgress[nodeId];
+    if (!current || current.requestId !== requestId) return {};
+    const next = { ...state.comfyNodeProgress };
+    delete next[nodeId];
+    return { comfyNodeProgress: next };
+  }),
 });

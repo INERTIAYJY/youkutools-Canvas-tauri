@@ -22,7 +22,7 @@ import {
 } from '../services/ai/animationPrompt';
 import { persistAudioGenerationResult } from '../services/ai/generateAudio';
 import { resolveVideoSubmissionControls } from '../services/ai/videoRequestResolver';
-import { downloadUrlAndSave } from '../services/fileService';
+import { persistMediaUrlToProjectData } from '../services/fileService';
 
 export interface BatchContext {
   commitToHistory: () => void;
@@ -54,6 +54,13 @@ const EXECUTABLE_NODE_TYPES = new Set<AINodeType>([
 // ── 执行单个节点 ──
 async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Promise<boolean> {
   const d = node.data!;
+  if (d.provider === 'workflow-api') {
+    const { useAppStore } = await import('../store/useAppStore');
+    if (useAppStore.getState().currentProjectId !== ctx.currentProjectId) return false;
+    const { executeGeneration } = await import('../services/generationService');
+    if (useAppStore.getState().currentProjectId !== ctx.currentProjectId) return false;
+    return (await executeGeneration(node.id)).success;
+  }
   const nt = d.type as AINodeType;
   const prompt = (d.prompt as string) || '';
 
@@ -103,16 +110,16 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         workflowInputs: d.workflowInputs,
         nodeId: node.id,
       });
-      const saved = ctx.currentProjectId
-        ? await downloadUrlAndSave(result.url, ctx.currentProjectId, 'ai-image', d.label).catch(() => null)
-        : null;
-      const mediaUrl = saved?.assetUrl || result.url;
+      const persisted = ctx.currentProjectId
+        ? await persistMediaUrlToProjectData(result.url, ctx.currentProjectId, 'ai-image', d.label)
+        : { mediaUrl: result.url, sourceUrl: result.url };
+      const mediaUrl = persisted.mediaUrl;
       ctx.updateNodeDataTransient(node.id, {
         imageUrl: mediaUrl,
-        sourceUrl: result.url,
-        filePath: saved?.filePath,
-        thumbnailUrl: result.url,
-        output: result.url,
+        sourceUrl: persisted.sourceUrl,
+        filePath: persisted.filePath,
+        thumbnailUrl: mediaUrl,
+        output: persisted.sourceUrl,
         status: 'success',
         imageWidth: result.width,
         imageHeight: result.height,
@@ -127,13 +134,13 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         nodeLabel: d.label,
         timestamp: Date.now(),
         prompt,
-        output: result.url,
+        output: persisted.sourceUrl,
         nodeType: nt,
         model: d.model!,
         provider: d.provider!,
         status: 'success',
-        mediaUrl: result.url,
-        filePath: saved?.filePath,
+        mediaUrl,
+        filePath: persisted.filePath,
         params: isAnimation
           ? {
               imageSize,
@@ -157,21 +164,21 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         workflowInputs: d.workflowInputs,
         nodeId: node.id,
       });
-      const saved = ctx.currentProjectId
-        ? await downloadUrlAndSave(
+      const persisted = ctx.currentProjectId
+        ? await persistMediaUrlToProjectData(
             result.url,
             ctx.currentProjectId,
             'ai-panorama',
             d.label,
-          ).catch(() => null)
-        : null;
-      const mediaUrl = saved?.assetUrl || result.url;
+          )
+        : { mediaUrl: result.url, sourceUrl: result.url };
+      const mediaUrl = persisted.mediaUrl;
       ctx.updateNodeDataTransient(node.id, {
         imageUrl: mediaUrl,
-        sourceUrl: result.url,
-        filePath: saved?.filePath,
-        thumbnailUrl: result.url,
-        output: result.url,
+        sourceUrl: persisted.sourceUrl,
+        filePath: persisted.filePath,
+        thumbnailUrl: mediaUrl,
+        output: persisted.sourceUrl,
         status: 'success',
         imageWidth: result.width,
         imageHeight: result.height,
@@ -181,13 +188,13 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         nodeLabel: d.label,
         timestamp: Date.now(),
         prompt,
-        output: result.url,
+        output: persisted.sourceUrl,
         nodeType: 'ai-panorama',
         model: d.model!,
         provider: d.provider!,
         status: 'success',
-        mediaUrl: result.url,
-        filePath: saved?.filePath,
+        mediaUrl,
+        filePath: persisted.filePath,
         params: { imageSize, aspectRatio },
       });
     } else if (nt === 'ai-video') {
@@ -211,16 +218,16 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         workflowInputs: d.workflowInputs,
         nodeId: node.id,
       });
-      const saved = ctx.currentProjectId
-        ? await downloadUrlAndSave(result.url, ctx.currentProjectId, 'ai-video', d.label).catch(() => null)
-        : null;
-      const mediaUrl = saved?.assetUrl || result.url;
+      const persisted = ctx.currentProjectId
+        ? await persistMediaUrlToProjectData(result.url, ctx.currentProjectId, 'ai-video', d.label)
+        : { mediaUrl: result.url, sourceUrl: result.url };
+      const mediaUrl = persisted.mediaUrl;
       ctx.updateNodeDataTransient(node.id, {
         videoUrl: mediaUrl,
-        sourceUrl: result.url,
-        filePath: saved?.filePath,
-        thumbnailUrl: result.url,
-        output: result.url,
+        sourceUrl: persisted.sourceUrl,
+        filePath: persisted.filePath,
+        thumbnailUrl: mediaUrl,
+        output: persisted.sourceUrl,
         status: 'success',
       });
       ctx.recordOutputHistory(node.id, {
@@ -228,13 +235,13 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         nodeLabel: d.label,
         timestamp: Date.now(),
         prompt,
-        output: result.url,
+        output: persisted.sourceUrl,
         nodeType: 'ai-video',
         model: d.model!,
         provider: d.provider!,
         status: 'success',
-        mediaUrl: result.url,
-        filePath: saved?.filePath,
+        mediaUrl,
+        filePath: persisted.filePath,
         params: {
           ...videoControls,
           generateAudio: d.generateAudio,
@@ -246,6 +253,7 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         prompt,
         model: d.model!,
         provider: d.provider!,
+        audioSpeechSettings: d.audioSpeechSettings,
         audioVoice: d.audioVoice,
         audioFormat: d.audioFormat,
         audioSpeed: d.audioSpeed,
@@ -283,6 +291,7 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         mediaUrl: persisted.mediaUrl,
         filePath: persisted.filePath,
         params: {
+          audioSpeechSettings: d.audioSpeechSettings,
           audioVoice: d.audioVoice,
           audioFormat: d.audioFormat,
           audioSpeed: d.audioSpeed,

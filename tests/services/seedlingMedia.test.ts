@@ -11,6 +11,7 @@ const seedlingMocks = vi.hoisted(() => ({
   waitSeedlingTask: vi.fn(),
   toSeedlingDisplayUrl: vi.fn((url: string) => url),
   uploadSeedlingResource: vi.fn(),
+  resolveSeedlingAudioDefault: vi.fn(() => false),
 }));
 
 const uploadMocks = vi.hoisted(() => ({
@@ -41,7 +42,8 @@ function buildRequest(overrides?: {
       seedanceDuration: overrides?.seedanceDuration ?? 5,
       seedanceResolution: overrides?.seedanceResolution ?? '720p',
       seedanceRatio: overrides?.seedanceRatio ?? '16:9',
-      generateAudio: overrides?.generateAudio ?? false,
+      // 省略时为 undefined：模拟「节点没有显式选择配乐」，由适配器按模型能力兜底。
+      generateAudio: overrides?.generateAudio,
     },
     prompt: overrides?.prompt ?? '测试视频',
     resolveReferenceInput: async () => ({
@@ -66,6 +68,9 @@ beforeEach(() => {
   seedlingMocks.createSeedlingVideoTask.mockReset();
   seedlingMocks.waitSeedlingTask.mockReset();
   seedlingMocks.uploadSeedlingResource.mockReset();
+  // 默认「目录里没有该模型」→ 不传 --audio；需要开启的用例单独 mockReturnValue(true)。
+  seedlingMocks.resolveSeedlingAudioDefault.mockReset();
+  seedlingMocks.resolveSeedlingAudioDefault.mockReturnValue(false);
   uploadMocks.resolveMediaReferenceUrl.mockReset();
   uploadMocks.uploadToRemote.mockReset();
   seedlingMocks.createSeedlingVideoTask.mockResolvedValue({ taskId: 10001 });
@@ -94,6 +99,31 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
       resources: [],
     });
     expect(seedlingMocks.waitSeedlingTask).toHaveBeenCalledWith(10001, undefined);
+  });
+
+  it('节点未显式选择配乐时按模型能力兜底开启（CLI --audio 默认 false）', async () => {
+    seedlingMocks.resolveSeedlingAudioDefault.mockReturnValue(true);
+    await seedlingMediaProviderAdapter.generateVideo!(buildRequest());
+    expect(seedlingMocks.resolveSeedlingAudioDefault).toHaveBeenCalledWith('quality');
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: true }),
+    );
+  });
+
+  it('节点显式关闭配乐时不开启（能力再支持也以用户选择为准）', async () => {
+    seedlingMocks.resolveSeedlingAudioDefault.mockReturnValue(true);
+    await seedlingMediaProviderAdapter.generateVideo!(buildRequest({ generateAudio: false }));
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: false }),
+    );
+  });
+
+  it('目录缺能力声明（模型未在目录中）时保持 CLI 默认，不传 --audio', async () => {
+    seedlingMocks.resolveSeedlingAudioDefault.mockReturnValue(false);
+    await seedlingMediaProviderAdapter.generateVideo!(buildRequest());
+    expect(seedlingMocks.createSeedlingVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: false }),
+    );
   });
 
   it('时长低于 4 秒时钳制到 4 秒（CLI 下限）', async () => {

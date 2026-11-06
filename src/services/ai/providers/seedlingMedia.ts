@@ -16,6 +16,7 @@ import { getMediaReferenceUrl } from '../connectedReferenceMedia';
 import { resolveMediaReferenceUrl, uploadToRemote } from '../../uploadService';
 import {
   createSeedlingVideoTask,
+  resolveSeedlingAudioDefault,
   toSeedlingDisplayUrl,
   uploadSeedlingResource,
   waitSeedlingTask,
@@ -217,13 +218,17 @@ export const seedlingMediaProviderAdapter: MediaProviderAdapter = {
       )
       : undefined;
 
+    const modelName = extractModelName(params.model, params.provider);
+    // 只有节点显式关闭配乐（false）才静音；未选择时按模型能力决定，避免画布视频无声。
+    const audio = params.generateAudio ?? resolveSeedlingAudioDefault(modelName);
+
     const { taskId } = await createSeedlingVideoTask({
       prompt: referenceInput.prompt || prompt,
-      model: extractModelName(params.model, params.provider),
+      model: modelName,
       duration,
       resolution: params.seedanceResolution,
       ratio: params.seedanceRatio,
-      audio: params.generateAudio,
+      audio,
       resources,
     });
 

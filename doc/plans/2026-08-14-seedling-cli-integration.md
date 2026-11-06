@@ -71,6 +71,7 @@
 ## 边界与已知限制
 
 - CLI 最低版本按 0.0.4 兼容设计；旧版本缺失 `task delete` 等能力时以错误信息回传。
+- 配乐：CLI `task create --audio` 默认关闭，不传就是无声视频。画布参数面板（`VideoParamSelector`）的配乐开关与分辨率/比例/时长档位取自目录 `videoCapability`；节点或 Agent 没有显式选择配乐时，按目录 `supportsAudio` 兜底开启，只有显式关闭才静音（`resolveSeedlingAudioDefault`）。
 - 模型 ID 差异：`models list` 返回 `quality` 等基础 ID，历史任务参数显示 `quality-oii` 变体；提交任务使用 `models list` 的 ID。
 - `seedling auth login` 的交互登录在应用内通过「授权链接 + 配对码」引导完成（`--no-browser --json`），登录态由 CLI 配置文件持久化。
 - 应用内下载的 CLI 与系统 CLI 读取同一 `%APPDATA%\seedling` 配置文件，登录态共享。

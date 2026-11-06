@@ -18,6 +18,7 @@ import {
   createSeedlingVideoTask,
   fetchSeedlingModels,
   fetchSeedlingTask,
+  resolveSeedlingAudioDefault,
   waitSeedlingTask,
 } from '../../seedlingService';
 
@@ -52,7 +53,8 @@ function buildCreateVideoDisplay(input: SeedlingCreateVideoInput): AgentToolDisp
   if (input.duration != null) fields.push({ label: '时长', value: `${input.duration} 秒` });
   if (input.resolution) fields.push({ label: '分辨率', value: input.resolution });
   if (input.ratio) fields.push({ label: '画面比例', value: input.ratio });
-  if (input.audio) fields.push({ label: '配乐', value: '开启' });
+  if (input.audio === false) fields.push({ label: '配乐', value: '关闭' });
+  else fields.push({ label: '配乐', value: input.audio ? '开启' : '跟随模型能力' });
   if (input.resources?.length) {
     fields.push({ label: '参考素材', value: `${input.resources.length} 个` });
   }
@@ -114,7 +116,8 @@ export function registerSeedlingAgentTools(): Array<() => void> {
         '通过 Seedling（森之灵）CLI 生成视频并等待任务完成，返回结果视频地址。',
         'model 使用 seedling_list_models 返回的模型 ID（如 quality、fast、kling）；省略时使用默认模型。',
         'duration 为 4~15 秒；resolution 支持 480p/720p/1080p；ratio 支持 16:9、9:16、1:1、4:3、3:4、21:9。',
-        'audio 为 true 时开启 AI 配乐。resources 为参考素材的 http(s) URL 列表（首尾帧按数组顺序）。',
+        'audio 省略时按模型能力决定是否带 --audio（模型支持配乐即开启），显式 false 可关闭配乐。',
+        'resources 为参考素材的 http(s) URL 列表（首尾帧按数组顺序）。',
         '属于付费媒体生成，Policy 将按当前模式决定是否需要确认。',
       ].join(''),
       inputSchema: {
@@ -127,7 +130,7 @@ export function registerSeedlingAgentTools(): Array<() => void> {
           duration: { type: 'integer', minimum: 4, maximum: 15, description: '视频时长（秒）' },
           resolution: { type: 'string', enum: SEEDLING_RESOLUTIONS, description: '分辨率档位' },
           ratio: { type: 'string', enum: SEEDLING_RATIOS, description: '画面比例' },
-          audio: { type: 'boolean', description: '是否开启 AI 配乐' },
+          audio: { type: 'boolean', description: '是否开启 AI 配乐；省略时按模型能力决定（支持则开启）' },
           resources: {
             type: 'array',
             items: { type: 'string', minLength: 1, maxLength: 2000 },
@@ -163,7 +166,8 @@ export function registerSeedlingAgentTools(): Array<() => void> {
             duration: input.duration,
             resolution: input.resolution,
             ratio: input.ratio,
-            audio: input.audio,
+            // 模型未显式指定时按目录能力兜底，避免对话生成的视频无声。
+            audio: input.audio ?? resolveSeedlingAudioDefault(input.model),
             resources: input.resources?.map((url) => url.trim()).filter(Boolean),
           });
           const task = await waitSeedlingTask(taskId, context.signal);

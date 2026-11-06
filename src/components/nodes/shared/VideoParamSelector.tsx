@@ -14,6 +14,7 @@ import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
+import { resolveSeedlingVideoCapability } from '../../../services/ai/providerCatalogService';
 import { AUTODL_H3_WORKFLOW } from '../../../services/workflowApi/autodlWorkflowManifest';
 import { getModelProtocolPresetVideoCapability } from '../../../services/ai/modelProtocol';
 import {
@@ -153,6 +154,35 @@ export interface GeneralVideoParameterDisplayState {
   generateAudio?: boolean;
 }
 
+export interface NativeVideoAudioCapability {
+  /** 该模型是否支持「生成有声视频」（支持才渲染开关）。 */
+  supported: boolean;
+  /** 节点未显式选择时开关的默认状态。 */
+  defaultOn: boolean;
+}
+
+/**
+ * 原生视频（非通用模型）的音频能力视图。
+ *
+ * APIMart / 火山 / 即梦用请求字段（audioField）表达配乐能力；森之灵（CLI）只在模型目录里
+ * 声明 supportsAudio，靠 `--audio` 开关生效。两者在这里统一成「是否支持 + 是否默认开启」，
+ * 否则森之灵节点永远不渲染配乐开关，提交时也就永远不带 `--audio`（生成的视频无声）。
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveNativeVideoAudioCapability(
+  nativeCapability: { audioField?: string; defaultAudio?: boolean } | undefined,
+  catalogCapability: VideoModelCapability | undefined,
+): NativeVideoAudioCapability {
+  if (nativeCapability) {
+    return {
+      supported: Boolean(nativeCapability.audioField),
+      defaultOn: nativeCapability.defaultAudio ?? false,
+    };
+  }
+  const supported = catalogCapability?.supportsAudio === true;
+  return { supported, defaultOn: supported };
+}
+
 /** 允许值不等于默认值；只有节点显式值或 capability 明确 default 才能显示为已选择。 */
 // eslint-disable-next-line react-refresh/only-export-components
 export function resolveGeneralVideoParameterDisplayState(
@@ -184,6 +214,8 @@ export default function VideoParamSelector({
   const [pickerFor, setPickerFor] = useState<VideoReferenceItem['kind'] | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const generalModels = useAppStore((state) => state.config.generalModels);
+  // 森之灵模型能力只在 Provider 目录里（models list 动态拉取），必须显式读取。
+  const seedlingModels = useAppStore((state) => state.config.providers?.seedling?.selectedModels);
   const projectCharacters = useAppStore((state) => state.dramaAssets.characters);
   const globalCharacters = useAppStore((state) => state.globalCharacters);
   const loadGlobalCharacters = useAppStore((state) => state.loadGlobalCharacters);
@@ -253,6 +285,14 @@ export default function VideoParamSelector({
     return resolveGeneralVideoModel(generalModels, selectedModel, provider);
   }, [generalModels, provider, selectedModel]);
 
+  // 森之灵：能力来自目录 videoCapability（分辨率/比例/时长/配乐/参考上限）。
+  const seedlingCapability = useMemo(
+    () => (provider === 'seedling'
+      ? resolveSeedlingVideoCapability(seedlingModels, selectedModel)
+      : undefined),
+    [provider, selectedModel, seedlingModels],
+  );
+
   const apimartCapability = provider === 'apimart'
     ? getApimartSeedanceCapability(selectedModel)
     : undefined;
@@ -278,7 +318,10 @@ export default function VideoParamSelector({
   const workflowApiCapability: VideoModelCapability | undefined = provider === 'workflow-api' && workflowApiManifest?.version === 1
     ? AUTODL_H3_WORKFLOW.capability : undefined;
   const nativeCapability = apimartCapability ?? volcengineCapability ?? dreaminaCapability;
-  const parameterCapability = nativeCapability ?? workflowApiCapability ?? generalCapability;
+  // 配乐能力：APIMart / 火山 / 即梦用请求字段（audioField）表达，森之灵只在目录里声明 supportsAudio
+  // 并靠 CLI 的 `--audio` 开关生效，因此两者在这里统一成「是否支持 + 是否默认开启」。
+  const nativeAudio = resolveNativeVideoAudioCapability(nativeCapability, seedlingCapability);
+  const parameterCapability = nativeCapability ?? workflowApiCapability ?? seedlingCapability ?? generalCapability;
   // 森之灵沿用 Seedance 风格的按秒时长 + 比例参数面板。
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
     || provider === 'seedling'
@@ -416,12 +459,10 @@ export default function VideoParamSelector({
     : generalModel ? generalControlSupport.duration : true;
   const showFrameRateControl = Boolean(generalModel && generalControlSupport.frameRate);
   const supportsAudio = isNativeSeedance
-    ? Boolean(nativeCapability?.audioField)
+    ? nativeAudio.supported
     : generalControlSupport.audio;
   // 音频能力必须由模型 capability 明确声明，未知能力保持关闭。
-  const displayedGenerateAudio = generateAudio
-    ?? nativeCapability?.defaultAudio
-    ?? false;
+  const displayedGenerateAudio = generateAudio ?? nativeAudio.defaultOn;
 
   useEffect(() => {
     if (!parameterCapability) return;
@@ -827,7 +868,9 @@ export default function VideoParamSelector({
                         <span>生成有声视频</span>
                         <span className="rh-tip" data-tooltip={generalModel
                           ? '模型默认表示不发送音频开关；也可以显式要求生成音频或不生成音频。'
-                          : '开启后由当前原生视频模型同时生成音频。'}>!</span>
+                          : seedlingCapability
+                            ? '开启后由森之灵生成 AI 配乐（CLI --audio，需模型支持）；关闭则不生成音频。'
+                            : '开启后由当前原生视频模型同时生成音频。'}>!</span>
                       </div>
                       {generalModel ? (
                         <Select fixedMenu

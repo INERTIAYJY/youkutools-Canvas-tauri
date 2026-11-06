@@ -8,6 +8,7 @@ import VideoParamSelector, {
   resolveGeneralVideoControlSupport,
   resolveGeneralVideoModel,
   resolveGeneralVideoParameterDisplayState,
+  resolveNativeVideoAudioCapability,
 } from '../../src/components/nodes/shared/VideoParamSelector';
 
 describe('ComfyUI 时长显示与提交一致', () => {
@@ -125,5 +126,30 @@ curl https://api.paipu.net/v1/videos \\
       frameRate: 30,
       duration: 20,
     });
+  });
+});
+
+describe('原生视频配乐能力（含森之灵目录能力）', () => {
+  it('森之灵目录声明 supportsAudio 时暴露配乐开关且默认开启', () => {
+    expect(resolveNativeVideoAudioCapability(undefined, { supportsAudio: true }))
+      .toEqual({ supported: true, defaultOn: true });
+  });
+
+  it('目录未声明配乐（或模型不在目录）时不暴露开关，也不默认开启', () => {
+    expect(resolveNativeVideoAudioCapability(undefined, { supportsAudio: false }))
+      .toEqual({ supported: false, defaultOn: false });
+    expect(resolveNativeVideoAudioCapability(undefined, undefined))
+      .toEqual({ supported: false, defaultOn: false });
+  });
+
+  it('APIMart / 火山 / 即梦仍按 audioField 与自身默认值判定，目录能力不覆盖', () => {
+    expect(resolveNativeVideoAudioCapability(
+      { audioField: 'generate_audio', defaultAudio: true },
+      { supportsAudio: false },
+    )).toEqual({ supported: true, defaultOn: true });
+    expect(resolveNativeVideoAudioCapability(
+      { defaultAudio: false },
+      { supportsAudio: true },
+    )).toEqual({ supported: false, defaultOn: false });
   });
 });

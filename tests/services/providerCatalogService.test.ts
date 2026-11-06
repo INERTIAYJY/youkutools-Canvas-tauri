@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchProviderModelCatalog,
   getProviderDefinition,
+  mapSeedlingModelCapability,
+  resolveSeedlingVideoCapability,
 } from '../../src/services/ai/providerCatalogService';
 import { SORA2U_MODEL_MANIFEST } from '../../src/services/ai/providers/sora2uModelManifest';
+import type { ProviderModelSelection } from '../../src/types';
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -327,5 +330,67 @@ describe('Sora2U 远端模型能力目录', () => {
       provider: 'sora2u',
       inputModalities: ['text', 'image'],
     });
+  });
+});
+
+describe('森之灵模型能力解析', () => {
+  it('models list 能力映射为视频能力声明（配乐 / 上限 / 时长）', () => {
+    expect(mapSeedlingModelCapability({
+      id: 'quality',
+      name: '高质量模型',
+      supportedResolutions: ['480p', '720p', '1080p'],
+      supportedRatios: ['16:9', '9:16'],
+      supportsAudio: true,
+      maxDuration: 15,
+      maxReferenceCounts: { image: 9, video: 3, audio: 3 },
+    })).toEqual({
+      resolutions: ['480p', '720p', '1080p'],
+      defaultResolution: '1080p',
+      ratios: ['16:9', '9:16'],
+      defaultRatio: '16:9',
+      minDuration: 4,
+      maxDuration: 15,
+      defaultDuration: 5,
+      supportsAudio: true,
+      maxImageReferences: 9,
+      maxVideoReferences: 3,
+      maxAudioReferences: 3,
+    });
+  });
+
+  it('目录缺 maxReferenceCounts / maxDuration 时退回 CLI 合同默认值', () => {
+    expect(mapSeedlingModelCapability({ id: 'fast', name: '快速模型' })).toMatchObject({
+      maxDuration: 15,
+      supportsAudio: false,
+      maxImageReferences: 9,
+      maxVideoReferences: 1,
+      maxAudioReferences: 1,
+    });
+  });
+
+  it('按 Seedling 前缀或无前缀的模型 ID 解析目录能力', () => {
+    const selectedModels: ProviderModelSelection[] = [{
+      id: 'quality',
+      name: '高质量模型',
+      category: 'video',
+      provider: 'seedling',
+      videoCapability: { supportsAudio: true, resolutions: ['480p', '720p', '1080p'] },
+    }];
+
+    expect(resolveSeedlingVideoCapability(selectedModels, 'seedling/quality'))
+      .toEqual({ supportsAudio: true, resolutions: ['480p', '720p', '1080p'] });
+    expect(resolveSeedlingVideoCapability(selectedModels, 'quality'))
+      .toEqual({ supportsAudio: true, resolutions: ['480p', '720p', '1080p'] });
+  });
+
+  it('模型不在目录或目录缺失时不猜测能力', () => {
+    expect(resolveSeedlingVideoCapability([], 'quality')).toBeUndefined();
+    expect(resolveSeedlingVideoCapability(undefined, 'quality')).toBeUndefined();
+    expect(resolveSeedlingVideoCapability([{
+      id: 'fast',
+      name: '快速模型',
+      category: 'video',
+      provider: 'seedling',
+    }], 'quality')).toBeUndefined();
   });
 });

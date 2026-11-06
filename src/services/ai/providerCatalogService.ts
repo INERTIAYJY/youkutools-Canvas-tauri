@@ -664,14 +664,34 @@ export function mapSeedlingModelCapability(model: SeedlingModelInfo): VideoModel
     defaultResolution: model.supportedResolutions?.[model.supportedResolutions.length - 1],
     ratios,
     defaultRatio: ratios.includes('16:9') ? '16:9' : ratios[0],
+    // CLI `task create` 的时长合同：4~15 秒，缺省 5 秒。
     minDuration: 4,
-    maxDuration: 15,
+    maxDuration: model.maxDuration ?? 15,
     defaultDuration: 5,
+    // CLI 只在显式传入 `--audio` 时生成配乐，能力由目录的 supportsAudio 声明。
     supportsAudio: model.supportsAudio === true,
-    maxImageReferences: 9,
-    maxVideoReferences: 1,
-    maxAudioReferences: 1,
+    maxImageReferences: model.maxReferenceCounts?.image ?? 9,
+    maxVideoReferences: model.maxReferenceCounts?.video ?? 1,
+    maxAudioReferences: model.maxReferenceCounts?.audio ?? 1,
   };
+}
+
+/**
+ * 从 Provider 目录解析某个 Seedling 模型的能力声明，供画布参数面板使用（配乐开关、可选档位、
+ * 参考上限）。现网 `VideoParamSelector` 的原生能力视图只覆盖 APIMart / 火山 / 即梦三张内置表，
+ * 森之灵必须走目录里的 `videoCapability`，否则配乐开关不渲染。
+ * 提交层判断是否传 `--audio` 用 `seedlingService.resolveSeedlingAudioDefault`。
+ *
+ * 目录未拉取（模型列表为空）或模型不在目录时返回 undefined，由调用方退回默认行为。
+ */
+export function resolveSeedlingVideoCapability(
+  selectedModels: readonly ProviderModelSelection[] | undefined,
+  selectedModel: string | undefined,
+): VideoModelCapability | undefined {
+  const modelId = selectedModel?.trim().replace(/^seedling\//, '');
+  if (!modelId || !selectedModels?.length) return undefined;
+  const match = selectedModels.find((model) => model.id === modelId);
+  return match?.videoCapability;
 }
 
 /** 由 `seedling models list` 的模型项构建 ProviderModelSelection 目录（video 类）。 */

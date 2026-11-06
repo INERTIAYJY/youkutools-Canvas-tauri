@@ -52,6 +52,14 @@ export interface SeedlingModelInfo {
   supportsAudio?: boolean;
   supportsReferenceGeneration?: boolean | string[];
   supportsHeadToEnd?: boolean;
+  /** 模型支持的最长时长（秒）；缺省按 CLI 的 4~15 秒合同处理。 */
+  maxDuration?: number;
+  /** 参考素材上限（`models list` 的 maxReferenceCounts）。 */
+  maxReferenceCounts?: {
+    image?: number;
+    video?: number;
+    audio?: number;
+  };
 }
 
 export interface SeedlingModelStatus {
@@ -94,6 +102,20 @@ export interface SeedlingCreateTaskInput {
 /** 读取 API Token（内存态；持久化在 Rust secret_store，这里只拿运行期明文）。 */
 export function getSeedlingApiToken(): string | undefined {
   return useAppStore.getState().config.providers?.seedling?.apiKey || undefined;
+}
+
+/**
+ * 该模型的配乐能力（目录 `models list` → `supportsAudio`）。
+ *
+ * 森之灵 CLI 的 `task create` 只在显式传入 `--audio` 时才生成 AI 配乐（`--audio` 默认 false），
+ * 所以「调用方没有显式选择」不能直接落到 false，否则画布与对话生成的视频一定无声。
+ * 目录未拉取或模型不在目录时返回 false，保持 CLI 自身的默认行为。
+ */
+export function resolveSeedlingAudioDefault(modelId: string | undefined): boolean {
+  const id = modelId?.trim().replace(/^seedling\//, '');
+  if (!id) return false;
+  const selectedModels = useAppStore.getState().config.providers?.seedling?.selectedModels;
+  return selectedModels?.find((model) => model.id === id)?.videoCapability?.supportsAudio === true;
 }
 
 async function invokeTauri<T>(

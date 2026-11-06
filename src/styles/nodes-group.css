@@ -43,6 +43,8 @@
   letter-spacing: 0.02em;
   user-select: none;
   pointer-events: auto;
+  cursor: grab;
+  z-index: 1;
 }
 
 .canvas-group-title::before {
@@ -62,12 +64,16 @@
 .canvas-group-handle {
   position: absolute;
   inset: 0;
-  cursor: grab;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
-.canvas-group-handle:active {
+.canvas-group-title:active {
   cursor: grabbing;
+}
+
+.react-flow__node-group .react-flow__resize-control,
+.react-flow__node-group .group-conn-handle {
+  pointer-events: auto;
 }
 
 .canvas-group-label-text {
@@ -257,6 +263,13 @@
   border: 1px solid var(--theme-border);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
 }
+.canvas-group-expanded-colors {
+  width: max-content;
+  left: auto;
+  right: 0;
+  transform: none;
+  z-index: 20;
+}
 .canvas-group-swatch {
   width: 14px;
   height: 14px;
@@ -326,4 +339,7 @@
 }
 .canvas-group-folder-photo:first-child {
   margin-top: 8px;
+}
+.canvas-group-folder-photo--placeholder:first-child {
+  margin-top: 0;
 }

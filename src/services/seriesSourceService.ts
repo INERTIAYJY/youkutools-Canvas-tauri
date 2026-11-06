@@ -1,3 +1,6 @@
+/**
+ * seriesSourceService — 索引、查询并按章节读取剧集原文。
+ */
 import type { SeriesSourceChapter, SeriesSourcePart, SeriesSourceReference, SeriesSourceSnapshot } from '../types/seriesSource';
 import { useAppStore } from '../store/useAppStore';
 import { seriesOwnerId } from '../store/store.utils';

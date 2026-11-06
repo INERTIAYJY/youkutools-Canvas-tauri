@@ -1,0 +1,25 @@
+[[permission]]
+identifier = "allow-comfyui-management"
+description = "Allows only scoped local ComfyUI management commands."
+commands.allow = [
+  "get_comfyui_management_snapshot",
+  "list_comfyui_versions",
+  "apply_comfyui_repository_action",
+  "list_comfyui_catalog",
+  "install_comfyui_extension",
+  "install_comfyui_dependencies",
+  "cancel_comfyui_dependencies",
+  "get_comfyui_launch_settings",
+  "save_comfyui_launch_settings",
+  "start_comfyui_managed",
+  "stop_comfyui_managed",
+  "get_comfyui_runtime_snapshot",
+  "scan_comfyui_duplicate_models",
+  "choose_comfyui_model_scan_root",
+  "cancel_comfyui_model_scan",
+  "apply_comfyui_model_deduplication",
+  "apply_comfyui_model_deduplication_batch",
+  "list_comfyui_model_dedupe_history",
+  "list_comfyui_model_dedupe_recoveries",
+  "recover_comfyui_model_dedupe",
+]

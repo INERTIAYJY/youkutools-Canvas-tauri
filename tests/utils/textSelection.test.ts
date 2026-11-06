@@ -1,3 +1,6 @@
+/**
+ * textSelection — 回归测试：isEditableTarget。
+ */
 import { describe, expect, it } from 'vitest';
 import { isEditableTarget } from '../../src/utils/textSelection';
 

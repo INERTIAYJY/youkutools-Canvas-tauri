@@ -1,7 +1,12 @@
+/**
+ * pluginRuntime — 回归测试：plugin execution cancellation and categorized budgets。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { LOCALES, setLocale } from '../../src/i18n';
-import type { InstalledPlugin, PluginInvocationResources } from '../../src/types/plugin';
+import type { InstalledPlugin, PluginInvocationResources, PluginNodeSetItem, PluginNodeSetEdge } from '../../src/types/plugin';
+import { PLUGIN_HOST } from '../../src/services/plugins/pluginHost';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -18,18 +23,28 @@ const mocks = vi.hoisted(() => ({
   createLineArtImage: vi.fn(),
   registerDerivedResource: vi.fn(),
   resolveResourceHostUrl: vi.fn(),
+  resolveMediaInputs: vi.fn(),
   extractVideoFrames: vi.fn(),
   detectShots: vi.fn(),
   inspectFrame: vi.fn(),
   generateText: vi.fn(),
   generateImage: vi.fn(),
+  queryPromptMentions: vi.fn(),
+  rewritePromptReferences: vi.fn(),
+  resolvePromptReferences: vi.fn(),
+  resolveMediaModel: vi.fn(),
+  startVideoBatch: vi.fn(),
   buildModelCatalog: vi.fn(() => [] as Array<Record<string, unknown>>),
   state: {} as Record<string, unknown>,
+  subscribers: new Set<() => void>(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 vi.mock('../../src/store/useAppStore', () => ({
-  useAppStore: { getState: () => mocks.state },
+  useAppStore: { getState: () => mocks.state, subscribe: (listener: () => void) => {
+    mocks.subscribers.add(listener);
+    return () => mocks.subscribers.delete(listener);
+  } },
 }));
 vi.mock('../../src/services/plugins/pluginModelCatalog', () => ({
   buildPluginModelCatalog: mocks.buildModelCatalog,
@@ -39,6 +54,7 @@ vi.mock('../../src/services/ai/generateText', () => ({ generateText: mocks.gener
 vi.mock('../../src/services/ai/generateImage', () => ({ generateImage: mocks.generateImage }));
 vi.mock('../../src/services/ai/generateVideo', () => ({ generateVideo: vi.fn() }));
 vi.mock('../../src/services/ai/generateAudio', () => ({ generateAudio: vi.fn() }));
+vi.mock('../../src/services/ai/generationRuntime', () => ({ resolveMediaModel: mocks.resolveMediaModel }));
 vi.mock('../../src/services/fileService', () => ({
   saveBinaryToProjectData: mocks.saveBinaryToProjectData,
   moveToTrash: mocks.moveToTrash,
@@ -52,6 +68,7 @@ vi.mock('../../src/services/plugins/pluginResourceService', async (importOrigina
     setPluginLineArtResource: mocks.setLineArtResource,
     registerPluginDerivedResource: mocks.registerDerivedResource,
     resolvePluginResourceHostUrl: mocks.resolveResourceHostUrl,
+    resolvePluginMediaWorkspaceInputs: mocks.resolveMediaInputs,
   };
 });
 vi.mock('../../src/services/plugins/pluginVideoFrameService', () => ({
@@ -62,6 +79,13 @@ vi.mock('../../src/services/plugins/pluginVideoFrameService', () => ({
 vi.mock('../../src/services/plugins/pluginImageService', () => ({
   createPluginLineArtImage: mocks.createLineArtImage,
 }));
+vi.mock('../../src/services/plugins/pluginPromptReferenceService', () => ({
+  queryPluginPromptMentions: mocks.queryPromptMentions,
+  rewritePluginPromptReferences: mocks.rewritePromptReferences,
+  resolvePluginPromptReferencesForModel: mocks.resolvePromptReferences,
+  clearPluginPromptReferences: vi.fn(),
+  clearPluginPromptReferencesForPlugin: vi.fn(),
+}));
 
 import {
   executeNodePluginTool,
@@ -69,9 +93,11 @@ import {
   executePluginNode,
   getAvailablePluginNodes,
   getAvailableNodePluginTools,
+  parsePluginVideoReplicaEffect,
 } from '../../src/services/plugins/pluginRuntime';
 import {
   completeCanvasDerivation,
+  cancelProjectCanvasDerivations,
   isCanvasDerivationFresh,
   registerCanvasDerivation,
 } from '../../src/services/canvasDerivationGuard';
@@ -218,7 +244,7 @@ const pythonMediaToolPlugin: InstalledPlugin = {
 };
 
 const modelCatalog = [
-  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', category: 'text' as const, inputModalities: ['text', 'image'] },
+  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', category: 'text' as const, inputModalities: ['text' as const, 'image' as const] },
 ];
 
 const modelToolPlugin: InstalledPlugin = {
@@ -342,7 +368,11 @@ afterEach(() => vi.unstubAllGlobals());
 beforeEach(() => {
   setLocale('zh-CN');
   vi.clearAllMocks();
+  mocks.queryPromptMentions.mockReset().mockResolvedValue({ items: [], hasMore: false });
+  mocks.rewritePromptReferences.mockReset().mockImplementation(async (text: string) => text);
+  mocks.resolvePromptReferences.mockReset().mockImplementation(async (prompt: string) => ({ prompt, imageUrls: [] }));
   mocks.revision = 3;
+  mocks.subscribers.clear();
   mocks.state = {
     currentProjectId: 'project-1',
     nodes: [{
@@ -363,9 +393,14 @@ beforeEach(() => {
     addNode: mocks.addNode,
     addNodesWithEdges: mocks.addNodesWithEdges,
     showToast: mocks.showToast,
+    startVideoBatch: mocks.startVideoBatch,
   };
   mocks.invoke.mockResolvedValue({ data: { output: 'after' }, message: '完成' });
   mocks.generateText.mockResolvedValue('模型结果');
+  mocks.startVideoBatch.mockReset().mockResolvedValue(undefined);
+  mocks.resolveMediaModel.mockReset().mockImplementation((_kind, modelId: string) => modelId.startsWith('comfyui/')
+    ? { configId: modelId, requestModel: 'comfyui/workflow', provider: 'comfyui', workflowId: modelId.slice(8) }
+    : { configId: modelId, requestModel: modelId, provider: 'general' });
   mocks.saveBinaryToProjectData.mockReset().mockResolvedValue({
     filePath: 'G:\\project\\plugin-output.txt',
     assetUrl: 'asset://localhost/plugin-output.txt',
@@ -389,6 +424,7 @@ beforeEach(() => {
     bytes: new Uint8Array([1, 2, 3]),
   }));
   mocks.resolveResourceHostUrl.mockResolvedValue('asset://localhost/video.mp4');
+  mocks.resolveMediaInputs.mockReset().mockResolvedValue([{ resourceId: 'self-video', path: 'G:\\project\\reference.mp4' }]);
   mocks.registerDerivedResource.mockImplementation((_context, resources: PluginInvocationResources, options) => {
     const ref = {
       resourceId: `derived-${resources.derived.length + 1}`,
@@ -405,7 +441,87 @@ beforeEach(() => {
   mocks.generateImage.mockResolvedValue({ url: 'https://example.com/result.png', width: 1024, height: 1024 });
 });
 
+describe('plugin execution cancellation and categorized budgets', () => {
+  const notify = () => { for (const listener of mocks.subscribers) listener(); };
+
+  it.each(['project', 'node', 'revision', 'plugin', 'guard'])('cancels an active native tool after %s changes and releases listeners', async (change) => {
+    let finish!: (value: unknown) => void;
+    mocks.invoke.mockImplementation((command) => command === 'execute_node_plugin_tool'
+      ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve());
+    const run = executeNodePluginTool(getAvailableNodePluginTools([plugin], 'ai-text')[0], 'node-1');
+    const assertion = expect(run).rejects.toThrow(/已取消|已变化|禁用/);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (change === 'project') mocks.state.currentProjectId = 'other';
+    if (change === 'node') mocks.state.nodes = [];
+    if (change === 'revision') mocks.revision += 1;
+    if (change === 'plugin') mocks.state.installedPlugins = [{ ...plugin, enabled: false }];
+    if (change === 'guard') cancelProjectCanvasDerivations('project-1');
+    notify();
+    expect(mocks.invoke).toHaveBeenCalledWith('cancel_node_plugin_tool', expect.objectContaining({ pluginId: plugin.id }));
+    finish({ data: { output: 'late' } });
+    await assertion;
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
+  it('aborts a custom node model request when its project is switched', async () => {
+    mocks.state.installedPlugins = [customNodePlugin];
+    mocks.invoke.mockResolvedValue({ effect: { type: 'model.generate', modelId: 'text-model', prompt: '测试' } });
+    let receivedSignal: AbortSignal | undefined;
+    mocks.generateText.mockImplementation(({ signal }) => {
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('取消生成')), { once: true }));
+    });
+    const run = executePluginNode(getAvailablePluginNodes([customNodePlugin])[0], 'node-1', [
+      { id: 'text-model', name: '文本', provider: 'general', category: 'text' },
+    ]);
+    const assertion = expect(run).rejects.toThrow(/已变化|已取消/);
+    await vi.waitFor(() => expect(receivedSignal).toBeDefined());
+    mocks.state.currentProjectId = 'other';
+    notify();
+    await assertion;
+    expect(receivedSignal!.aborted).toBe(true);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
+  it.each([false, true])('uses separate settings and network budgets, exceed=%s', async (exceed) => {
+    const installed: InstalledPlugin = { ...plugin, manifest: { ...plugin.manifest,
+      permissions: ['node.read', 'node.write', 'settings.read', 'network.request'],
+      network: { allowedOrigins: ['https://api.example.com'] },
+    } };
+    mocks.state.installedPlugins = [installed];
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === 'execute_plugin_host_effect') return { found: false };
+      const iteration = args.input.iteration;
+      if (iteration < 8) return { effect: { type: 'settings.get', key: 'preferences' } };
+      if (iteration < (exceed ? 17 : 10)) return { effect: { type: 'network.request', url: 'https://api.example.com' } };
+      return { data: { output: '完成' } };
+    });
+    const run = executeNodePluginTool(getAvailableNodePluginTools([installed], 'ai-text')[0], 'node-1');
+    if (exceed) {
+      await expect(run).rejects.toThrow('network 操作不能超过 8 次');
+      expect(mocks.updateNodeData).not.toHaveBeenCalled();
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_plugin_host_effect')).toHaveLength(16);
+    } else {
+      await run;
+      expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: '完成' });
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_plugin_host_effect')).toHaveLength(10);
+    }
+    expect(mocks.subscribers.size).toBe(0);
+  });
+});
+
 describe('node plugin runtime', () => {
+  it('preserves native string diagnostics as an Error without writing the node', async () => {
+    const diagnostic = '插件工具执行失败（error · 调用）：Error: E2E_ERROR [已隐藏]\n    at main.js:3:17';
+    mocks.invoke.mockRejectedValueOnce(diagnostic);
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+    await expect(executeNodePluginTool(tool, 'node-1')).rejects.toThrow(diagnostic);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
   it('shows enabled tools only on their declared node types and placements', () => {
     expect(getAvailableNodePluginTools([plugin], 'ai-text')).toHaveLength(1);
     expect(getAvailableNodePluginTools([plugin], 'ai-text', 'node-toolbar')).toHaveLength(1);
@@ -518,6 +634,7 @@ describe('node plugin runtime', () => {
       toolId: 'rewrite',
       invocationId: expect.any(String),
       input: {
+        host: PLUGIN_HOST,
         projectId: 'project-1',
         locale: 'zh-CN',
         iteration: 0,
@@ -534,6 +651,46 @@ describe('node plugin runtime', () => {
     }));
     expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: 'after' });
     expect(mocks.showToast).toHaveBeenCalledWith('完成');
+  });
+
+  it.each([
+    { name: 'long text', value: '文'.repeat(256_001), error: '字符串不能超过' },
+    { name: 'large array', value: Array.from({ length: 257 }, (_, index) => index), error: '数组不能超过' },
+    { name: 'large object', value: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`field${index}`, index])), error: '对象不能超过' },
+    { name: 'deep JSON', value: Array.from({ length: 9 }).reduce<unknown>((value) => ({ child: value }), '完整内容'), error: '嵌套深度不能超过' },
+  ])('rejects $name instead of writing a silently truncated plugin result', async ({ value, error }) => {
+    mocks.invoke.mockResolvedValueOnce({ data: { output: value } });
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+
+    await expect(executeNodePluginTool(tool, 'node-1')).rejects.toThrow(error);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.addNode).not.toHaveBeenCalled();
+    expect(mocks.showToast).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'text', value: '文'.repeat(256_000) },
+    { name: 'array', value: Array.from({ length: 256 }, (_, index) => index) },
+    { name: 'object', value: Object.fromEntries(Array.from({ length: 128 }, (_, index) => [`field${index}`, index])) },
+    { name: 'nested JSON', value: Array.from({ length: 8 }).reduce<unknown>((value) => ({ child: value }), '完整内容') },
+  ])('preserves all $name data at the supported boundary', async ({ value }) => {
+    mocks.invoke.mockResolvedValueOnce({ data: { output: value } });
+
+    await executeNodePluginTool(getAvailableNodePluginTools([plugin], 'ai-text')[0], 'node-1');
+
+    expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: value });
+  });
+
+  it.each([
+    { prompt: '文'.repeat(256_001) },
+    Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`parameter${index}`, index])),
+  ])('rejects oversized parameters before invoking plugin code', async (parameters) => {
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+
+    await expect(executeNodePluginTool(tool, 'node-1', parameters))
+      .rejects.toThrow('不能超过');
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -612,6 +769,7 @@ describe('node plugin runtime', () => {
           data: {
             label: '样片 · 拉片分镜表',
             shotlistRows: [{ id: 'shot-1', shotNo: '1', frameKey: 'frame-1', content: '建立环境',
+              video: { nodeId: 'forged-video', kind: 'video', assetId: 'forged-video-asset', filePath: 'C:/forged-video.mp4' },
               frameAnalysis: { sourceVideoNodeId: 'forged', sourceVideoName: '伪造来源', shotId: 'stable-1', inPoint: 0, outPoint: 2,
                 aiOriginal: { content: 'AI 原文', confidence: 0.5 }, overrideFields: ['content'], reviewStatus: 'reviewed' } }],
           },
@@ -706,6 +864,7 @@ describe('node plugin runtime', () => {
       targetHandle: 'left',
     })));
     expect(JSON.stringify(shotlist.data)).not.toContain('forged');
+    expect((shotlist.data.shotlistRows as Array<Record<string, unknown>>)[0]).not.toHaveProperty('video');
     expect(JSON.stringify(shotlist.data)).not.toContain('伪造来源');
     expect(mocks.showToast).toHaveBeenCalledWith('已生成拉片节点');
   });
@@ -1377,7 +1536,7 @@ describe('node plugin runtime', () => {
     expect(mocks.updateNodeData).toHaveBeenCalledWith('image-node', { imageUrl });
   });
 
-  it('rejects an untrusted nested shotlist frame URL', async () => {
+  it.each(['frame', 'video'] as const)('rejects an untrusted nested shotlist %s URL', async (binding) => {
     mocks.state = {
       ...mocks.state,
       nodes: [{
@@ -1393,7 +1552,7 @@ describe('node plugin runtime', () => {
         shotlistRows: [{
           id: 'shot-1',
           shotNo: '1',
-          frame: { nodeId: 'missing', kind: 'image', url: 'https://attacker.example/frame.png' },
+          [binding]: { nodeId: 'missing', kind: binding === 'video' ? 'video' : 'image', url: 'https://attacker.example/media' },
         }],
       },
     });
@@ -1425,6 +1584,25 @@ describe('node plugin runtime', () => {
     await executeNodePluginTool(tool, 'shotlist-node');
 
     expect(mocks.updateNodeData).toHaveBeenCalledWith('shotlist-node', { shotlistRows });
+  });
+
+  it('插件改写分镜只保留宿主已有成片身份，不能用已授权 URL 伪造其他节点绑定', async () => {
+    const video = { nodeId: 'real-video', kind: 'video', url: 'https://example.com/final.mp4', assetId: 'real-asset' };
+    mocks.state = { ...mocks.state, nodes: [{ id: 'shotlist-node', type: 'ai-shotlist', position: { x: 0, y: 0 },
+      data: { label: '分镜表', type: 'ai-shotlist', shotlistRows: [{ id: 'shot-1', shotNo: '1', video }] },
+    }], installedPlugins: [shotlistToolPlugin] };
+    const forged = { ...video, nodeId: 'forged-video', assetId: 'forged-asset' };
+    mocks.invoke.mockResolvedValue({ data: { shotlistRows: [
+      { id: 'shot-1', shotNo: '1', content: '修改文本', video: forged },
+      { id: 'shot-2', shotNo: '2', video: forged },
+    ] } });
+
+    await executeNodePluginTool(getAvailableNodePluginTools([shotlistToolPlugin], 'ai-shotlist')[0], 'shotlist-node');
+
+    expect(mocks.updateNodeData).toHaveBeenCalledWith('shotlist-node', { shotlistRows: [
+      { id: 'shot-1', shotNo: '1', content: '修改文本', video },
+      { id: 'shot-2', shotNo: '2' },
+    ] });
   });
 
   it('rejects a new remote image embedded in Markdown output', async () => {
@@ -1547,7 +1725,250 @@ describe('node plugin runtime', () => {
       category: 'image',
     }]);
 
-    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ image_urls: [] }), undefined);
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ image_urls: [] }), expect.any(AbortSignal));
+  });
+});
+
+describe('trusted Python media workspace', () => {
+  function setup(enabled = true, materialsOnly = false) {
+    const bytes = new Uint8Array([
+      0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0,
+      0, 0, 0, 8, 109, 111, 111, 118,
+      0, 0, 0, 9, 109, 100, 97, 116, 1,
+    ]);
+    const artifact = { key: 'depth', artifactId: 'plugin-artifact-random', displayName: 'depth.mp4',
+      mediaType: 'video/mp4', size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
+    const payload: { data: { nodes: PluginNodeSetItem[]; edges: PluginNodeSetEdge[] }; artifacts: Array<typeof artifact> } = {
+      data: { nodes: [{ key: 'control', nodeType: 'source-video', artifactKey: 'depth', data: { label: '深度视频' } }], edges: [] }, artifacts: [artifact],
+    };
+    const workspacePlugin: InstalledPlugin = { ...plugin, manifest: { ...plugin.manifest, apiVersion: 2,
+      runtime: 'python', entry: 'main.py', requiredCapabilities: enabled ? ['python.mediaWorkspace', 'python.executionTimeout', ...(materialsOnly ? ['video.replicaPipeline'] : [])] : [],
+      permissions: ['node.read', 'node.write', 'files.connected.read', 'files.output.create'],
+      contributes: { nodeTools: [{ id: 'controls', title: '生成控制视频', nodeTypes: ['source-video'],
+        placements: ['node-context-menu'], inputFields: ['label'], resourceAccess: { self: true },
+        ...(enabled ? { pythonExecution: { timeoutSeconds: 120, mediaWorkspace: true } } : {}),
+        output: { mode: 'create-node-set', nodeTypes: ['source-video', 'ai-shotlist'], maxNodes: 25, fields: ['label'] } }] },
+    } };
+    mocks.state.nodes = [{ id: 'node-1', type: 'source-video', position: { x: 0, y: 0 }, data: { type: 'source-video', label: '参考视频' } }];
+    mocks.state.installedPlugins = [workspacePlugin];
+    const resources: PluginInvocationResources = { self: [{ resourceId: 'self-video', origin: 'node-self', access: 'read',
+      displayName: 'reference.mp4', mediaType: 'video/mp4', size: 100, source: { nodeId: 'node-1' } }],
+      incoming: [], inputs: {}, package: [], derived: [] };
+    const guard = registerCanvasDerivation(mocks.state as never, 'node-1')!;
+    const tool = getAvailableNodePluginTools([workspacePlugin], 'source-video')[0];
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'execute_node_plugin_tool') return payload;
+      if (command === 'read_plugin_media_artifact') return Array.from(bytes);
+      return undefined;
+    });
+    mocks.saveBinaryToProjectData.mockImplementation(async (_bytes, _project, fileName: string) => ({
+      assetUrl: `asset://localhost/${fileName}`, filePath: `G:\\project\\${fileName}`,
+    }));
+    const run = (materialLayout?: NonNullable<Parameters<typeof executeNodePluginTool>[4]>['materialLayout']) => executeNodePluginTool(tool, 'node-1', {}, { invocationId: 'native-video-invoke', guard, resources }, materialsOnly ? { materialsOnly: true, materialLayout } : undefined)
+      .finally(() => completeCanvasDerivation(guard));
+    return { run, payload, bytes, tool, workspacePlugin };
+  }
+
+  it('returns committed materials and key bindings for a host pipeline without starting a video batch', async () => {
+    const { run } = setup(true, true);
+    const result = await run();
+    if (!result) throw new Error('宿主素材调用没有返回节点集合');
+    expect(result).toMatchObject({ nodes: [expect.objectContaining({ type: 'source-video' })], edges: [], nodeIdsByKey: { control: expect.any(String) } });
+    expect(result.nodeIdsByKey.control).toBe(result.nodes[0].id);
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a host material invocation without pipeline capability before saving', async () => {
+    const { run, workspacePlugin } = setup(true, true);
+    workspacePlugin.manifest.requiredCapabilities = ['python.mediaWorkspace', 'python.executionTimeout'];
+    await expect(run()).rejects.toThrow('全片任务能力');
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.moveToTrash).not.toHaveBeenCalled();
+  });
+
+  it('projects only media nodes for a host task without saving source frames or creating display-only nodes', async () => {
+    const { run, payload, tool } = setup(true, true);
+    tool.tool.output.nodeTypes!.push('source-image', 'ai-markdown');
+    payload.data.nodes.push(
+      { key: 'frame', nodeType: 'source-image', resourceId: 'derived-frame', data: { label: '原片首帧' } },
+      { key: 'shotlist', nodeType: 'ai-shotlist', data: { label: '分镜方案' } },
+      { key: 'prompts', nodeType: 'ai-markdown', data: { label: '提示词' } },
+    );
+    payload.data.edges.push({ sourceKey: 'frame', targetKey: 'shotlist' }, { sourceKey: 'shotlist', targetKey: 'control' }, { sourceKey: 'shotlist', targetKey: 'prompts' });
+    const result = await run();
+    if (!result) throw new Error('宿主素材调用没有返回节点集合');
+    expect(result).toMatchObject({ nodes: [expect.objectContaining({ type: 'source-video' })], edges: [], nodeIdsByKey: { control: expect.any(String) } });
+    expect(Object.keys(result.nodeIdsByKey)).toEqual(['control']);
+    expect(mocks.readDerivedResource).toHaveBeenCalledWith(expect.any(Object), 'derived-frame', 'original');
+    expect(mocks.saveBinaryToProjectData).toHaveBeenCalledTimes(1);
+    expect(mocks.saveBinaryToProjectData.mock.calls[0][2]).toBe('plugin-video-depth.mp4');
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+    expect(mocks.addNodesWithEdges.mock.calls[0][0]).toHaveLength(1);
+  });
+
+  it('still validates removed frame leases and graph edges before saving host materials', async () => {
+    const { run, payload, tool } = setup(true, true);
+    tool.tool.output.nodeTypes!.push('source-image');
+    payload.data.nodes.push({ key: 'frame', nodeType: 'source-image', resourceId: 'expired-frame', data: { label: '原片首帧' } });
+    mocks.readDerivedResource.mockImplementation(() => { throw new Error('插件资源授权已失效'); });
+    await expect(run()).rejects.toThrow('资源授权已失效');
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled(); expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    const next = setup(true, true);
+    next.payload.data.edges.push({ sourceKey: 'not-returned', targetKey: 'control' });
+    await expect(next.run()).rejects.toThrow('节点集连线引用无效');
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+  });
+
+  it('lays out host controls in one column using host dimensions and preserves their source group', async () => {
+    const { run, payload } = setup(true, true);
+    (mocks.state.nodes as Array<Record<string, unknown>>)[0].parentId = 'source-group';
+    payload.artifacts.push({ ...payload.artifacts[0], key: 'depth2', artifactId: 'plugin-artifact-second' });
+    payload.data.nodes.push({ key: 'control2', nodeType: 'source-video', artifactKey: 'depth2', data: { label: '第二份深度视频' } });
+    const result = await run({ position: { x: 400, y: 100 }, nodeWidth: 320, nodeHeight: 180, gap: 40 });
+    if (!result) throw new Error('宿主素材调用没有返回节点集合');
+    expect(result.nodes).toMatchObject([
+      { position: { x: 400, y: 100 }, parentId: 'source-group', data: { nodeWidth: 320, nodeHeight: 180 } },
+      { position: { x: 400, y: 320 }, parentId: 'source-group', data: { nodeWidth: 320, nodeHeight: 180 } },
+    ]);
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps ordinary plugin display nodes and their existing layout', async () => {
+    const { run, payload, tool } = setup();
+    tool.tool.output.nodeTypes!.push('ai-markdown');
+    payload.data.nodes.push({ key: 'shotlist', nodeType: 'ai-shotlist', data: { label: '分镜方案' } }, { key: 'prompts', nodeType: 'ai-markdown', data: { label: '提示词' } });
+    payload.data.edges.push({ sourceKey: 'shotlist', targetKey: 'control' }, { sourceKey: 'shotlist', targetKey: 'prompts' });
+    await run();
+    const [nodes, edges] = mocks.addNodesWithEdges.mock.calls[0];
+    expect(nodes.map((node: { type: string }) => node.type)).toEqual(['source-video', 'ai-shotlist', 'ai-markdown']);
+    expect(edges).toHaveLength(2);
+    expect(new Set(nodes.map((node: { position: { x: number } }) => node.position.x)).size).toBe(3);
+  });
+
+  it('checks every native artifact but saves only artifacts retained by the host projection', async () => {
+    const { run, payload, tool } = setup(true, true);
+    tool.tool.output.nodeTypes!.push('ai-video');
+    payload.artifacts.push({ ...payload.artifacts[0], key: 'unused', artifactId: 'plugin-artifact-unused' });
+    payload.data.nodes.push({ key: 'unused-result', nodeType: 'ai-video', artifactKey: 'unused', data: { label: '插件额外返回的成片' } });
+    const result = await run();
+    if (!result) throw new Error('宿主素材调用没有返回节点集合');
+    expect(result.nodes).toHaveLength(1);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'read_plugin_media_artifact')).toHaveLength(2);
+    expect(mocks.saveBinaryToProjectData).toHaveBeenCalledTimes(1);
+    expect(mocks.saveBinaryToProjectData.mock.calls[0][2]).toBe('plugin-video-depth.mp4');
+  });
+
+  it('rejects an invalid native artifact even when its display node would be removed', async () => {
+    const { run, payload, tool } = setup(true, true);
+    tool.tool.output.nodeTypes!.push('ai-video');
+    payload.artifacts.push({ ...payload.artifacts[0], key: 'unused', artifactId: 'plugin-artifact-unused', sha256: 'c'.repeat(64) });
+    payload.data.nodes.push({ key: 'unused-result', nodeType: 'ai-video', artifactKey: 'unused', data: { label: '插件额外返回的成片' } });
+    await expect(run()).rejects.toThrow();
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled(); expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+  });
+
+  it('prepares only host-resolved inputs, reads verified native artifacts and commits one video batch', async () => {
+    const { run, bytes } = setup();
+    await run();
+    const commands = mocks.invoke.mock.calls.map(([command]) => command);
+    expect(commands).toEqual(['prepare_plugin_media_workspace', 'execute_node_plugin_tool', 'read_plugin_media_artifact', 'release_plugin_media_workspace']);
+    const identity = { pluginId: plugin.id, sourceDigest: plugin.sourceDigest, revisionDigest: plugin.revisionDigest,
+      toolId: 'controls', invocationId: 'native-video-invoke' };
+    expect(mocks.invoke).toHaveBeenCalledWith('prepare_plugin_media_workspace', { identity,
+      inputs: [{ resourceId: 'self-video', path: 'G:\\project\\reference.mp4' }] });
+    const nativeInput = mocks.invoke.mock.calls.find(([command]) => command === 'execute_node_plugin_tool')?.[1].input;
+    expect(JSON.stringify(nativeInput)).not.toContain('G:\\project');
+    expect(nativeInput).not.toHaveProperty('nativeMedia');
+    expect(mocks.saveBinaryToProjectData).toHaveBeenCalledWith(bytes, 'project-1', 'plugin-video-depth.mp4', { throwOnError: true });
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+    expect(mocks.addNodesWithEdges.mock.calls[0][0][0]).toMatchObject({ type: 'source-video', data: {
+      videoUrl: 'asset://localhost/plugin-video-depth.mp4', filePath: 'G:\\project\\plugin-video-depth.mp4',
+      fileName: 'plugin-video-depth.mp4', relativePath: 'plugin-video-depth.mp4',
+    } });
+    expect(mocks.moveToTrash).not.toHaveBeenCalled();
+  });
+
+  it('rejects artifacts from an undeclared Python tool without using any native media bridge', async () => {
+    const { run } = setup(false);
+    await expect(run()).rejects.toThrow('获准的 Python 媒体工作区');
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(['execute_node_plugin_tool']);
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+  });
+
+  it.each(['artifact-path', 'display-path', 'key-path', 'raw-file', 'mismatch', 'oversized', 'effect', 'wrong-node', 'resource-conflict', 'protected-path'] as const)('rejects %s descriptors before reading or saving an output', async (invalid) => {
+      const { run, payload } = setup();
+      if (invalid === 'artifact-path') payload.artifacts[0].artifactId = '../depth.mp4';
+      if (invalid === 'display-path') payload.artifacts[0].displayName = 'C:\\private\\depth.mp4';
+      if (invalid === 'key-path') payload.data.nodes[0].artifactKey = '../depth';
+      if (invalid === 'raw-file') Object.assign(payload.artifacts[0], { fileName: 'depth.mp4' });
+      if (invalid === 'mismatch') payload.data.nodes[0].artifactKey = 'unknown';
+      if (invalid === 'oversized') payload.artifacts[0].size = 16 * 1024 * 1024 + 1;
+      if (invalid === 'effect') Object.assign(payload, { effect: { type: 'settings.get', key: 'prefs' } });
+      if (invalid === 'wrong-node') payload.data.nodes[0].nodeType = 'ai-shotlist';
+      if (invalid === 'resource-conflict') Object.assign(payload.data.nodes[0], { resourceId: 'derived-image' });
+      if (invalid === 'protected-path') Object.assign(payload.data.nodes[0].data, { filePath: 'C:\\private\\output.mp4' });
+      await expect(run()).rejects.toThrow();
+      expect(mocks.invoke.mock.calls.some(([command]) => command === 'read_plugin_media_artifact')).toBe(false);
+      expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+      expect(mocks.invoke).toHaveBeenCalledWith('release_plugin_media_workspace', expect.any(Object));
+    });
+
+  it.each(['bytes', 'digest', 'stale-read'] as const)('rejects %s native artifact results before writing project files', async (failure) => {
+    const { run, payload, bytes } = setup();
+    if (failure === 'digest') payload.artifacts[0].sha256 = 'c'.repeat(64);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'execute_node_plugin_tool') return payload;
+      if (command === 'read_plugin_media_artifact') {
+        if (failure === 'stale-read') mocks.revision++;
+        return failure === 'bytes' ? [256, ...Array.from(bytes).slice(1)] : Array.from(bytes);
+      }
+      return undefined;
+    });
+    await expect(run()).rejects.toThrow();
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.invoke).toHaveBeenCalledWith('release_plugin_media_workspace', expect.any(Object));
+  });
+
+  it.each(['stale-save', 'commit', 'empty-url'] as const)('recycles saved video artifacts and releases the workspace on %s', async (failure) => {
+    const { run } = setup();
+    if (failure === 'commit') mocks.addNodesWithEdges.mockImplementationOnce(() => { throw new Error('提交失败'); });
+    const save = mocks.saveBinaryToProjectData.getMockImplementation()!;
+    mocks.saveBinaryToProjectData.mockImplementation(async (...args) => {
+      const saved = await save(...args);
+      if (failure === 'stale-save') mocks.revision++;
+      return failure === 'empty-url' ? { ...saved, assetUrl: '' } : saved;
+    });
+    await expect(run()).rejects.toThrow();
+    expect(mocks.moveToTrash).toHaveBeenCalledWith('G:\\project\\plugin-video-depth.mp4');
+    expect(mocks.invoke).toHaveBeenCalledWith('release_plugin_media_workspace', expect.any(Object));
+    if (failure !== 'commit') expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+  });
+
+  it('releases a workspace after a preparation failure without executing the Python tool', async () => {
+    const { run } = setup();
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'prepare_plugin_media_workspace') throw new Error('源视频发生变化');
+      return undefined;
+    });
+    await expect(run()).rejects.toThrow('源视频发生变化');
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(['prepare_plugin_media_workspace', 'release_plugin_media_workspace']);
+  });
+
+  it('rejects more than 18 native artifacts and workspace effect proposals before saving', async () => {
+    const { run, payload } = setup();
+    const artifact = payload.artifacts[0];
+    payload.artifacts = Array.from({ length: 19 }, (_, index) => ({ ...artifact, key: `depth_${index}`, artifactId: `artifact_${index}` }));
+    payload.data.nodes = payload.artifacts.map((item, index) => ({ key: `control_${index}`, nodeType: 'source-video', artifactKey: item.key, data: { label: '深度视频' } }));
+    await expect(run()).rejects.toThrow('最多 18 项');
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    const next = setup();
+    mocks.invoke.mockImplementation(async (command: string) => command === 'execute_node_plugin_tool'
+      ? { effect: { type: 'settings.get', key: 'prefs' } } : undefined);
+    await expect(next.run()).rejects.toThrow('只接受最终节点集结果');
   });
 });
 
@@ -1674,6 +2095,158 @@ describe('node plugin tool model effects', () => {
     context.resources.derived.push({ resourceId: 'frame', origin: 'derived', access: 'read', displayName: 'frame.jpg', mediaType: 'image/jpeg', size: 3 });
     return { ...context, effect: { type: 'image.lineArt', resourceId: 'frame' } };
   }
+  const replicaStart = {
+    type: 'video.replicaJob.start', resourceId: 'self-video', modelId: 'general/video', controls: ['depth'], audioMode: 'original', transcribe: true,
+  };
+  it('parses a full-video request while preserving manual cuts and explicit speech-download intent', () => {
+    const input = { ...replicaStart, cuts: [15, 30, 45], maxSegmentSeconds: 30, downloadSpeech: true };
+    expect(parsePluginVideoReplicaEffect(input)).toEqual(input);
+    expect(parsePluginVideoReplicaEffect({ type: 'video.replicaJob.status', jobId: 'video-replica-valid' })).toEqual({ type: 'video.replicaJob.status', jobId: 'video-replica-valid' });
+  });
+  it.each([
+    { path: 'D:\\private\\video.mp4' }, { controls: ['depth', 'depth'] }, { controls: ['invalid'] },
+    { controls: [['depth']] }, { audioMode: ['original'] }, { resourceId: 1 }, { modelId: '' }, { transcribe: 'true' }, { downloadSpeech: 1 },
+    { cuts: [15, 10] }, { cuts: [15, 15] }, { cuts: [NaN] }, { cuts: Array.from({ length: 64 }, (_, index) => index + 1) },
+    { maxSegmentSeconds: 31 }, { maxSegmentSeconds: 0 }, { maxSegmentSeconds: Infinity }, { character: '文'.repeat(2001) },
+  ])('rejects malformed or undeclared replica request fields %j', (patch) => {
+    expect(() => parsePluginVideoReplicaEffect({ ...replicaStart, ...patch })).toThrow();
+  });
+  it.each(['video.replicaJob.status', 'video.replicaJob.cancel', 'video.replicaJob.restart'])('strictly validates %s task IDs and rejects extra identity fields', (type) => {
+    for (const payload of [{ type, jobId: '../foreign' }, { type, jobId: 123 }, { type, jobId: 'video-replica-valid', projectId: 'foreign' }]) {
+      expect(() => parsePluginVideoReplicaEffect(payload)).toThrow();
+    }
+  });
+  it.each([
+    replicaStart,
+    { type: 'video.replicaJob.status', jobId: 'video-replica-valid' },
+    { type: 'video.replicaJob.cancel', jobId: 'video-replica-valid' },
+    { type: 'video.replicaJob.restart', jobId: 'video-replica-valid' },
+  ])('rejects ordinary runtime execution of the broker-only %s effect', async (effect) => {
+    const result = await executePluginUiHostEffect({ ...uiContext(), effect });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('已绑定的插件界面') });
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+    expect(mocks.generateText).not.toHaveBeenCalled();
+  });
+  it('resolves selected prompt references on the host and supplies their images to analysis', async () => {
+    const context = uiContext();
+    const permissions: import('../../src/types/plugin').PluginPermission[] = ['prompt.references.read', 'models.invoke', 'models.read'];
+    mocks.resolvePromptReferences.mockResolvedValue({ prompt: '替换角色：演员甲（图片1）', imageUrls: ['data:image/png;base64,YQ=='] });
+    const result = await executePluginUiHostEffect({ ...context, permissions,
+      resourceReadContext: { ...context.resourceReadContext, permissions },
+      models: [{ id: 'gpt-4o', name: '分析模型', provider: 'openai', category: 'text' }],
+      effect: { type: 'model.generate', modelId: 'gpt-4o', prompt: '替换角色 @{plugin-ref-12345678-1234-1234-1234-123456789abc:演员甲}' } });
+    expect(result.ok).toBe(true);
+    expect(mocks.generateText).toHaveBeenCalledWith(expect.objectContaining({ prompt: '替换角色：演员甲（图片1）', imageUrls: ['data:image/png;base64,YQ=='] }));
+    expect(mocks.resolvePromptReferences).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps authorized target-character images before the source contact sheet in one analysis call', async () => {
+    const context = uiContext();
+    const permissions: import('../../src/types/plugin').PluginPermission[] = ['prompt.references.read', 'models.invoke', 'models.read'];
+    const targetImage = 'asset://localhost/target-character.png';
+    const contactSheet = 'asset://localhost/source-contact-sheet.jpg';
+    context.resources.derived.push({ resourceId: 'contact-sheet', origin: 'derived', access: 'read',
+      displayName: 'contact-sheet.jpg', mediaType: 'image/jpeg', size: 3 });
+    mocks.resolveResourceHostUrl.mockResolvedValueOnce(contactSheet);
+
+    const result = await executePluginUiHostEffect({ ...context, permissions,
+      resourceReadContext: { ...context.resourceReadContext, permissions },
+      trustedMediaReferences: new Set([targetImage]),
+      models: [{ id: 'gpt-4o', name: '分析模型', provider: 'openai', category: 'text' }],
+      effect: { type: 'model.generate', modelId: 'gpt-4o', prompt: '前图提供目标角色外观，末图提供原片动作与构图。',
+        imageUrls: [targetImage], resourceIds: ['contact-sheet'] } });
+
+    expect(result.ok).toBe(true);
+    expect(mocks.resolveResourceHostUrl).toHaveBeenCalledWith(expect.objectContaining({ invocationId: 'ui-shots' }), 'contact-sheet');
+    expect(mocks.generateText).toHaveBeenCalledTimes(1);
+    expect(mocks.generateText).toHaveBeenCalledWith(expect.objectContaining({ imageUrls: [targetImage, contactSheet] }));
+  });
+
+  it('rejects reference queries without the explicit permission before reaching the catalogue', async () => {
+    const result = await executePluginUiHostEffect({ ...uiContext(), effect: { type: 'prompt.mentions', source: 'assets' } });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('prompt.references.read') });
+    expect(mocks.queryPromptMentions).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false, undefined])('passes an optional boolean preview flag to the reference catalogue (%s)', async (preview) => {
+    const context = uiContext();
+    const controller = new AbortController();
+    mocks.queryPromptMentions.mockResolvedValue({ items: [], hasMore: false });
+    const result = await executePluginUiHostEffect({ ...context, permissions: ['prompt.references.read'], signal: controller.signal,
+      effect: { type: 'prompt.mentions', source: 'nodes', query: '演员', offset: 20, ...(preview === undefined ? {} : { preview }) } });
+    expect(result).toMatchObject({ ok: true, value: { items: [], hasMore: false } });
+    expect(mocks.queryPromptMentions).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'nodes', query: '演员', offset: 20, preview, signal: controller.signal,
+    }));
+  });
+
+  it.each(['true', 1, null, {}, []].map((preview) => ({ preview })))('rejects a non-boolean reference preview flag ($preview)', async ({ preview }) => {
+    await expect(executePluginUiHostEffect({ ...uiContext(), permissions: ['prompt.references.read'],
+      effect: { type: 'prompt.mentions', source: 'nodes', preview } })).rejects.toThrow('布尔预览');
+    expect(mocks.queryPromptMentions).not.toHaveBeenCalled();
+  });
+
+  it('rejects plugin-selected preview addresses instead of sending them to the catalogue', async () => {
+    await expect(executePluginUiHostEffect({ ...uiContext(), permissions: ['prompt.references.read'],
+      effect: { type: 'prompt.mentions', source: 'nodes', preview: true, thumbnailUrl: 'https://untrusted.example/image.png' } })).rejects.toThrow('引用查询');
+    expect(mocks.queryPromptMentions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { effect: { type: 'network.request', url: 'https://api.example.com/items' }, permission: 'network.request' },
+    { effect: { type: 'settings.get', key: 'preferences' }, permission: 'settings.read' },
+    { effect: { type: 'settings.set', key: 'preferences', value: { language: 'zh-CN' } }, permission: 'settings.write' },
+    { effect: { type: 'settings.delete', key: 'preferences' }, permission: 'settings.write' },
+  ])('denies $effect.type before native execution without $permission', async ({ effect, permission }) => {
+    const result = await executePluginUiHostEffect({ ...uiContext(), toolId: 'rewrite', effect });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining(permission) });
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it('passes only registered plugin identity to a guarded network effect', async () => {
+    const context = uiContext();
+    const effect = { type: 'network.request', url: 'https://api.example.com/items', method: 'POST', body: '{"name":"example"}' };
+    mocks.invoke.mockResolvedValueOnce({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
+    const result = await executePluginUiHostEffect({ ...context, toolId: 'rewrite', permissions: ['network.request'], effect });
+    expect(result).toMatchObject({ ok: true, value: { status: 200, body: '{"ok":true}' } });
+    expect(mocks.invoke).toHaveBeenCalledWith('execute_plugin_host_effect', {
+      identity: { pluginId: plugin.id, sourceDigest: plugin.sourceDigest, revisionDigest: plugin.revisionDigest, toolId: 'rewrite', invocationId: 'ui-shots' },
+      requestId: expect.any(String),
+      effect: { ...effect, headers: {} },
+    });
+    expect(context.trustedMediaReferences.size).toBe(0);
+  });
+
+  it.each(['cancel', 'revision'] as const)('rejects late network results after %s without retrying the request', async (change) => {
+    const controller = new AbortController();
+    mocks.invoke.mockImplementationOnce(async () => {
+      if (change === 'cancel') controller.abort();
+      else mocks.state = { ...mocks.state, installedPlugins: [{ ...plugin, revisionDigest: 'f'.repeat(64) }] };
+      return { status: 200, body: 'late' };
+    });
+    const result = await executePluginUiHostEffect({ ...uiContext(), toolId: 'rewrite', permissions: ['network.request'],
+      effect: { type: 'network.request', url: 'https://api.example.com' }, signal: controller.signal });
+    expect(result.ok).toBe(false);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_plugin_host_effect')).toHaveLength(1);
+    if (change === 'cancel') {
+      const requestId = mocks.invoke.mock.calls[0][1].requestId;
+      expect(mocks.invoke).toHaveBeenCalledWith('cancel_plugin_host_effect', { pluginId: plugin.id, requestId });
+    }
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: 'network.request', url: 'https://api.example.com', headers: { Host: 'other.example.com' } },
+    { type: 'network.request', url: 'https://api.example.com', method: 'GET', body: 'unexpected' },
+    { type: 'network.request', url: 'https://api.example.com', method: 'POST', body: '文'.repeat(32_000) },
+    { type: 'settings.set', key: '../other-plugin', value: true },
+    { type: 'resource.createText', content: '文'.repeat(256_001) },
+    { type: 'model.generate', modelId: 'gpt-4o', prompt: '文'.repeat(256_001) },
+  ])('rejects malformed or oversized effects before native IPC %j', async (effect) => {
+    await expect(executePluginUiHostEffect({ ...uiContext(), toolId: 'rewrite', effect })).rejects.toThrow();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
 
   it('converts an authorized original once and returns only a bounded preview and representation', async () => {
     const context = lineArtContext();
@@ -1931,7 +2504,8 @@ describe('node plugin tool model effects', () => {
       })).rejects.toThrow(reason === 'abort' ? '已取消' : '画布已变化');
       expect(mocks.generateText).not.toHaveBeenCalled();
       expect(mocks.updateNodeData).not.toHaveBeenCalled();
-      expect(mocks.invoke).toHaveBeenCalledOnce();
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_node_plugin_tool')).toHaveLength(1);
+      if (reason === 'abort') expect(mocks.invoke).toHaveBeenCalledWith('cancel_node_plugin_tool', { pluginId: plugin.id, invocationId: 'cancelled-ui' });
     } finally { completeCanvasDerivation(guard); }
   });
 
@@ -1972,6 +2546,30 @@ describe('node plugin tool model effects', () => {
       value: { text: '模型结果' },
     });
     expect(mocks.addNode).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a text model request when its plugin UI session is cancelled', async () => {
+    const context = uiContext();
+    const controller = new AbortController();
+    mocks.generateText.mockImplementationOnce(async ({ signal }: { signal?: AbortSignal }) => {
+      controller.abort(new Error('用户取消了文本生成'));
+      signal?.throwIfAborted();
+      return '迟到的回复';
+    });
+
+    const result = await executePluginUiHostEffect({
+      ...context,
+      permissions: ['models.read', 'models.invoke'],
+      models: modelCatalog,
+      effect: { type: 'model.generate', modelId: 'gpt-4o', prompt: '分析素材' },
+      signal: controller.signal,
+    });
+
+    expect(mocks.generateText).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal }));
+    expect(result).toMatchObject({ type: 'model.generate', ok: false, error: '用户取消了文本生成' });
+    expect(mocks.generateText).toHaveBeenCalledTimes(1);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.addNode).not.toHaveBeenCalled();
   });
 
   it('creates text only inside the current project and returns no local path', async () => {
@@ -2067,8 +2665,201 @@ describe('node plugin tool model effects', () => {
 
     await expect(
       executeNodePluginTool(getAvailableNodePluginTools([modelToolPlugin], 'ai-text')[0], 'node-1'),
-    ).rejects.toThrow('宿主操作不能超过 4 次');
+    ).rejects.toThrow('model 操作不能超过 4 次');
     expect(mocks.addNode).not.toHaveBeenCalled();
     expect(mocks.updateNodeData).not.toHaveBeenCalled();
+  });
+});
+
+describe('plugin node-set video generation', () => {
+  function setup(modelId = 'general/video') {
+    const generationPlugin: InstalledPlugin = { ...plugin, manifest: { ...plugin.manifest, apiVersion: 2,
+      requiredCapabilities: ['video.nodeSetGeneration'], permissions: ['node.read', 'node.write', 'models.read', 'models.invoke'],
+      contributes: { nodeTools: [{ id: 'replicate', title: '视频复刻', placements: ['node-context-menu'],
+        nodeTypes: ['source-video'], inputFields: ['label'], dialog: { fields: [{ id: 'videoModel', type: 'model', label: '视频模型', modelCategories: ['video'] }] },
+        output: { mode: 'create-node-set', nodeTypes: ['ai-video', 'ai-text', 'ai-image', 'source-video'], maxNodes: 25, fields: ['label', 'prompt', 'model', 'provider', 'workflowId', 'videoUrl'], generateVideos: true } }] },
+    } };
+    const payload: { data: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } } = { data: {
+      nodes: [{ key: 'video', nodeType: 'ai-video', data: { label: '镜头一', prompt: '缓慢推镜，保持人物动作' },
+        generation: { modelId, parameters: { duration: 5, aspectRatio: '16:9', resolution: '720p', videoResolution: 832, videoFps: 24, videoFrames: 121, generateAudio: false } } }], edges: [],
+    } };
+    mocks.buildModelCatalog.mockReturnValue([{ id: modelId, name: '视频模型', provider: modelId.startsWith('comfyui/') ? 'comfyui' : 'general', category: 'video' }]);
+    mocks.state = { ...mocks.state, installedPlugins: [generationPlugin], projects: [], workflows: [{ id: 'local', fileContent: '{}', category: 'ai-video' }],
+      config: { generalModels: [], providers: {}, comfyUIUrl: 'http://127.0.0.1:8188' }, videoBatchBusy: false,
+      nodes: [{ id: 'node-1', type: 'source-video', position: { x: 0, y: 0 }, data: { type: 'source-video', label: '参考视频' } }] };
+    mocks.addNodesWithEdges.mockImplementation((nodes, edges) => {
+      mocks.state.nodes = [...mocks.state.nodes as unknown[], ...nodes];
+      mocks.state.edges = [...mocks.state.edges as unknown[], ...edges];
+      mocks.revision += 1;
+      for (const subscriber of mocks.subscribers) subscriber();
+    });
+    mocks.invoke.mockResolvedValue(payload);
+    const run = () => executeNodePluginTool(getAvailableNodePluginTools([generationPlugin], 'source-video')[0], 'node-1');
+    return { run, payload, generationPlugin };
+  }
+  function addFrame(payload: { data: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } }) {
+    payload.data.nodes.push({ key: 'frame', nodeType: 'ai-image', resourceId: 'derived-frame', data: { label: '参考帧' } });
+    payload.data.edges.push({ sourceKey: 'frame', targetKey: 'video' });
+    vi.stubGlobal('Image', class {
+      naturalWidth = 1280;
+      naturalHeight = 720;
+      onload: (() => void) | null = null;
+      set src(_value: string) { this.onload?.(); }
+    });
+  }
+  it('rejects generation directives in a materials-only host call before saving references', async () => {
+    const { payload, generationPlugin } = setup();
+    generationPlugin.manifest.requiredCapabilities!.push('video.replicaPipeline');
+    addFrame(payload);
+    await expect(executeNodePluginTool(getAvailableNodePluginTools([generationPlugin], 'source-video')[0], 'node-1', {}, undefined, { materialsOnly: true })).rejects.toThrow('后台素材调用不能提交生成');
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.moveToTrash).not.toHaveBeenCalled();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+  });
+  afterEach(() => {
+    mocks.buildModelCatalog.mockReset().mockReturnValue([]);
+    mocks.addNodesWithEdges.mockReset();
+  });
+  it('rewrites host-issued references before preflight and never sends opaque tokens to the video batch', async () => {
+    const { run, payload, generationPlugin } = setup();
+    generationPlugin.manifest.requiredCapabilities!.push('prompt.mentions');
+    generationPlugin.manifest.permissions.push('prompt.references.read');
+    const opaque = '@{plugin-ref-12345678-1234-1234-1234-123456789abc:角色}';
+    (payload.data.nodes[0].data as Record<string, unknown>).prompt = `替换为 ${opaque}`;
+    (mocks.state.nodes as unknown[]).push({ id: 'ref-image', type: 'source-image', data: { type: 'source-image', imageUrl: 'asset://localhost/role.png', label: '角色' } });
+    mocks.rewritePromptReferences.mockImplementation(async (text: string) => text.replace(opaque, '@{ref-image:角色}'));
+    await run();
+    expect(mocks.addNodesWithEdges.mock.calls[0][0][0].data.prompt).toBe('替换为 @{ref-image:角色}');
+    expect(mocks.startVideoBatch).toHaveBeenCalledWith('project-1', [expect.objectContaining({ issues: [] })]);
+    expect(mocks.rewritePromptReferences).toHaveBeenCalledWith(expect.stringContaining(opaque), expect.objectContaining({ resources: expect.any(Object) }));
+  });
+  it('rejects an expired prompt reference before media persistence or batch submission', async () => {
+    const { run, payload, generationPlugin } = setup();
+    generationPlugin.manifest.requiredCapabilities!.push('prompt.mentions');
+    generationPlugin.manifest.permissions.push('prompt.references.read');
+    (payload.data.nodes[0].data as Record<string, unknown>).prompt = '@{plugin-ref-12345678-1234-1234-1234-123456789abc:角色}';
+    mocks.rewritePromptReferences.mockRejectedValue(new Error('提示词引用已删除、变更或撤销'));
+    await expect(run()).rejects.toThrow('引用已删除');
+    expect(mocks.saveBinaryToProjectData).not.toHaveBeenCalled();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+  });
+  it('places wide shotlists and materials without overlap, with generated videos in a separate right column', async () => {
+    const { run, payload, generationPlugin } = setup();
+    const output = generationPlugin.manifest.contributes.nodeTools[0].output;
+    output.nodeTypes!.push('ai-shotlist', 'ai-markdown');
+    addFrame(payload);
+    payload.data.nodes.push({ key: 'shots', nodeType: 'ai-shotlist', data: { label: '分镜表' } },
+      { key: 'prompts', nodeType: 'ai-markdown', data: { label: '提示词' } },
+      { ...payload.data.nodes[0], key: 'video2', data: { label: '镜头二', prompt: '保持运镜' } });
+    await run();
+    const nodes = mocks.addNodesWithEdges.mock.calls[0][0] as Array<{ position: { x: number; y: number }; data: { type: string; nodeWidth: number; nodeHeight: number } }>;
+    const materials = nodes.filter((node) => node.data.type !== 'ai-video');
+    const generated = nodes.filter((node) => node.data.type === 'ai-video');
+    const right = Math.max(...materials.map((node) => node.position.x + node.data.nodeWidth));
+    expect(generated.every((node) => node.position.x >= right + 80)).toBe(true);
+    expect(generated[1].position.y).toBeGreaterThanOrEqual(generated[0].position.y + generated[0].data.nodeHeight + 80);
+    for (let index = 1; index < materials.length; index++) {
+      const left = materials[index - 1];
+      const next = materials[index];
+      expect(next.position.x).toBeGreaterThanOrEqual(left.position.x + left.data.nodeWidth + 80);
+    }
+    expect(materials.find((node) => node.data.type === 'ai-shotlist')?.data.nodeWidth).toBe(720);
+  });
+  it.each(['general/video', 'comfyui/local'])('resolves %s through host identities and submits only new idle video nodes', async (modelId) => {
+    const { run } = setup(modelId);
+    // Long polling belongs to the host batch, so it cannot block the plugin's submit promise.
+    mocks.startVideoBatch.mockReturnValue(new Promise<void>(() => undefined));
+    await run();
+    const node = mocks.addNodesWithEdges.mock.calls[0][0][0];
+    expect(node.data).toMatchObject({ role: 'prompt', status: 'idle', seedanceDuration: 5, seedanceRatio: '16:9', seedanceResolution: '720p', videoResolution: 832, videoFps: 24, videoFrames: 121, generateAudio: false,
+      model: modelId.startsWith('comfyui/') ? 'comfyui/workflow' : modelId, provider: modelId.startsWith('comfyui/') ? 'comfyui' : 'general' });
+    if (modelId.startsWith('comfyui/')) expect(node.data.workflowId).toBe('local');
+    expect(node.data).not.toHaveProperty('videoUrl');
+    expect(mocks.startVideoBatch).toHaveBeenCalledWith('project-1', [expect.objectContaining({ nodeId: node.id, issues: [], existing: false })]);
+    expect(mocks.resolveMediaModel).toHaveBeenCalledWith('video', modelId);
+    expect(mocks.moveToTrash).not.toHaveBeenCalled();
+  });
+  it.each([{ duration: 0 }, { duration: 61 }, { duration: '5' }, { videoResolution: 128 }, { videoFrames: 1.5 }, { videoFps: 121 },
+    { generateAudio: 'false' }, { aspectRatio: 'arbitrary' }, { resolution: '16K' }, { provider: 'attacker' }, { workflowInputs: {} }, { path: 'D:\\private\\secret.mp4' }])('rejects unsafe video parameters %j before committing', async (parameters) => {
+    const { run, payload } = setup();
+    (payload.data.nodes[0].generation as Record<string, unknown>).parameters = parameters;
+    await expect(run()).rejects.toThrow();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+  });
+  it('captures fingerprints after the Store adds same-batch connection mentions', async () => {
+    const { run, payload } = setup();
+    addFrame(payload);
+    mocks.addNodesWithEdges.mockImplementationOnce((nodes, edges) => {
+      const frame = nodes.find((node: { data: { type: string } }) => node.data.type === 'ai-image');
+      const video = nodes.find((node: { data: { type: string } }) => node.data.type === 'ai-video');
+      video.data.prompt += ` @{${frame.id}:参考帧}`;
+      mocks.state.nodes = [...mocks.state.nodes as unknown[], ...nodes];
+      mocks.state.edges = [...mocks.state.edges as unknown[], ...edges];
+      mocks.revision += 1;
+    });
+    await run();
+    const nodes = mocks.state.nodes as Array<{ id: string; data: { type: string } }>;
+    const video = nodes.find((node) => node.data.type === 'ai-video')!;
+    const { inspectVideoNode } = await import('../../src/services/videoBatchPlanning');
+    expect(mocks.startVideoBatch).toHaveBeenCalledWith('project-1', [inspectVideoNode(video as never, mocks.state as never)]);
+  });
+  it('rejects workflow changes during media persistence and rolls back saved frames', async () => {
+    const { run, payload } = setup('comfyui/local');
+    addFrame(payload);
+    mocks.saveBinaryToProjectData.mockImplementationOnce(async () => {
+      (mocks.state.workflows as Array<Record<string, unknown>>)[0].fileContent = '{"changed":true}';
+      return { assetUrl: 'asset://localhost/frame.jpg', filePath: 'G:\\project\\frame.jpg' };
+    });
+    await expect(run()).rejects.toThrow('配置已变化');
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+    expect(mocks.moveToTrash).toHaveBeenCalledWith('G:\\project\\frame.jpg');
+  });
+  it.each(['missing-permission', 'missing-capability', 'api-one', 'disabled-output', 'wrong-node', 'foreign-identity', 'foreign-reference', 'catalog-removed', 'too-many', 'reference-text'])('rejects %s without starting a batch', async (failure) => {
+    const { run, payload, generationPlugin } = setup();
+    if (failure === 'missing-permission') generationPlugin.manifest.permissions = ['node.read', 'node.write', 'models.read'];
+    if (failure === 'missing-capability') generationPlugin.manifest.requiredCapabilities = [];
+    if (failure === 'api-one') generationPlugin.manifest.apiVersion = 1;
+    if (failure === 'disabled-output') generationPlugin.manifest.contributes.nodeTools[0].output.generateVideos = false;
+    if (failure === 'wrong-node') payload.data.nodes[0].nodeType = 'ai-text';
+    if (failure === 'foreign-identity') (payload.data.nodes[0].data as Record<string, unknown>).provider = 'attacker';
+    if (failure === 'foreign-reference') (payload.data.nodes[0].data as Record<string, unknown>).prompt = '@{foreign:video}';
+    if (failure === 'catalog-removed') mocks.buildModelCatalog.mockReturnValue([]);
+    if (failure === 'too-many') payload.data.nodes = Array.from({ length: 7 }, (_, index) => ({ ...payload.data.nodes[0], key: `video${index}` }));
+    if (failure === 'reference-text') { payload.data.nodes.push({ key: 'text', nodeType: 'ai-text', data: { prompt: '不应传入的整份分镜' } }); payload.data.edges = [{ sourceKey: 'text', targetKey: 'video' }]; }
+    await expect(run()).rejects.toThrow();
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+    expect(mocks.startVideoBatch).not.toHaveBeenCalled();
+  });
+  it('rechecks a workflow changed during preparation before commit', async () => {
+    const { run } = setup('comfyui/local');
+    let calls = 0;
+    mocks.resolveMediaModel.mockImplementation(() => {
+      if (++calls === 2) (mocks.state.workflows as Array<Record<string, unknown>>)[0].fileContent = '{"changed":true}';
+      return { configId: 'comfyui/local', requestModel: 'comfyui/workflow', provider: 'comfyui', workflowId: 'local' };
+    });
+    await expect(run()).rejects.toThrow('配置已变化');
+    expect(mocks.addNodesWithEdges).not.toHaveBeenCalled();
+  });
+  it.each(['project', 'plugin', 'model', 'batch'])('keeps committed nodes when %s prevents initial batch dispatch', async (failure) => {
+    const { run } = setup();
+    mocks.addNodesWithEdges.mockImplementationOnce((nodes, edges) => {
+      mocks.state.nodes = [...mocks.state.nodes as unknown[], ...nodes];
+      mocks.state.edges = [...mocks.state.edges as unknown[], ...edges];
+      mocks.revision += 1;
+      if (failure === 'project') mocks.state.currentProjectId = 'other-project';
+      if (failure === 'plugin') mocks.state.installedPlugins = [];
+      if (failure === 'model') mocks.buildModelCatalog.mockReturnValue([]);
+    });
+    if (failure === 'batch') mocks.startVideoBatch.mockRejectedValue(new Error('提交状态未知'));
+    await expect(run()).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(mocks.addNodesWithEdges).toHaveBeenCalledTimes(1);
+    expect(mocks.startVideoBatch).toHaveBeenCalledTimes(failure === 'batch' ? 1 : 0);
+    expect(mocks.moveToTrash).not.toHaveBeenCalled();
+    expect(mocks.showToast).toHaveBeenCalledWith(expect.stringMatching(/视频节点|视频批次/));
   });
 });

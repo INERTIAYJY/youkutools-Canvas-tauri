@@ -1,3 +1,6 @@
+/**
+ * fileServiceSkillResource — 回归测试：assertSafeSkillRelativePath。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const existsMock = vi.hoisted(() => vi.fn());

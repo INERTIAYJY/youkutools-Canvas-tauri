@@ -6,7 +6,7 @@
 import { toProjectSummaryRecord } from './projectSummary';
 
 export const DB_NAME = 'ai-canvas-db';
-export const DB_VERSION = 21;
+export const DB_VERSION = 27;
 
 export const STORE_PROJECTS = 'projects';
 export const STORE_PROJECT_SUMMARIES = 'projectSummaries';
@@ -26,10 +26,18 @@ export const STORE_PROJECT_MEMORIES = 'projectMemories';
 export const STORE_TOOLBAR_LAYOUTS = 'toolbarLayouts';
 export const STORE_METADATA = 'metadata';
 export const STORE_GLOBAL_CHARACTERS = 'globalCharacters';
+/** 人物继续保存在原表；此表仅存全局场景和道具。 */
+export const STORE_GLOBAL_DRAMA_ASSETS = 'globalDramaAssets';
 export const STORE_SUB_AGENT_PROFILES = 'subAgentProfiles';
 export const STORE_VIDEO_EDITOR_PROJECTS = 'videoEditorProjects';
 export const STORE_PROJECT_VISUAL_DESCRIPTIONS = 'projectVisualDescriptions';
 export const STORE_PLUGINS = 'plugins';
+export const STORE_APPEARANCE_THEMES = 'appearanceThemes';
+export const STORE_SHARED_ASSET_MAPPINGS = 'sharedAssetMappings';
+export const STORE_SHARED_ASSET_OUTBOX = 'sharedAssetOutbox';
+export const STORE_SHARED_ASSET_CONFLICTS = 'sharedAssetConflicts';
+export const STORE_PROJECT_EXCHANGE_STATES = 'projectExchangeStates';
+export const STORE_PROJECT_EXCHANGE_SNAPSHOTS = 'projectExchangeSnapshots';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -138,6 +146,11 @@ export function openDB(): Promise<IDBDatabase> {
         const characterStore = db.createObjectStore(STORE_GLOBAL_CHARACTERS, { keyPath: 'id' });
         characterStore.createIndex('updatedAt', 'updatedAt', { unique: false });
       }
+      if (!db.objectStoreNames.contains(STORE_GLOBAL_DRAMA_ASSETS)) {
+        const assetStore = db.createObjectStore(STORE_GLOBAL_DRAMA_ASSETS, { keyPath: 'id' });
+        assetStore.createIndex('kind', 'kind', { unique: false });
+        assetStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
       if (!db.objectStoreNames.contains(STORE_SUB_AGENT_PROFILES)) {
         const subAgentStore = db.createObjectStore(STORE_SUB_AGENT_PROFILES, { keyPath: 'id' });
         subAgentStore.createIndex('updatedAt', 'updatedAt', { unique: false });
@@ -155,6 +168,47 @@ export function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_PLUGINS)) {
         db.createObjectStore(STORE_PLUGINS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_APPEARANCE_THEMES)) {
+        db.createObjectStore(STORE_APPEARANCE_THEMES, { keyPath: 'id' });
+      }
+      // 开发期间部分实例已提前打开 v24，随后补写的同步索引不会在同版本自动创建。
+      // v25 重新进入升级事务，只补缺失表／索引，保留已有映射和未完成队列。
+      for (const name of [STORE_SHARED_ASSET_MAPPINGS, STORE_SHARED_ASSET_OUTBOX, STORE_SHARED_ASSET_CONFLICTS]) {
+        const store = db.objectStoreNames.contains(name)
+          ? request.transaction!.objectStore(name)
+          : db.createObjectStore(name, { keyPath: 'id' });
+        // 保留旧代记录，补齐缺省代次；不要把旧待办或基线迁到云端新代次。
+        const cursorRequest = store.openCursor();
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return;
+          if (cursor.value.generation === undefined) cursor.update({ ...cursor.value, generation: 'legacy' });
+          cursor.continue();
+        };
+        if (!store.indexNames.contains('ownerId')) store.createIndex('ownerId', 'ownerId', { unique: false });
+        if (name === STORE_SHARED_ASSET_OUTBOX && !store.indexNames.contains('operationId')) {
+          store.createIndex('operationId', 'operationId', { unique: true });
+        }
+        if (name === STORE_SHARED_ASSET_MAPPINGS) {
+          const scope = ['ownerId', 'connectionId', 'connectionRevision', 'libraryId', 'sharedProjectId', 'generation'];
+          for (const index of ['localIdentity', 'sharedIdentity']) {
+            if (store.indexNames.contains(index)) store.deleteIndex(index);
+          }
+          if (!store.indexNames.contains('localIdentity')) {
+            store.createIndex('localIdentity', [...scope, 'kind', 'localEntityId'], { unique: true });
+          }
+          if (!store.indexNames.contains('sharedIdentity')) {
+            store.createIndex('sharedIdentity', [...scope, 'sharedAssetId'], { unique: true });
+          }
+        }
+      }
+      // 项目包协作身份与 S3 身份独立；只加表，不推断旧项目的协作来源。
+      for (const [name, keyPath] of [[STORE_PROJECT_EXCHANGE_STATES, 'ownerId'],
+        [STORE_PROJECT_EXCHANGE_SNAPSHOTS, 'revisionId']]) {
+        const store = db.objectStoreNames.contains(name)
+          ? request.transaction!.objectStore(name) : db.createObjectStore(name, { keyPath });
+        if (!store.indexNames.contains('lineageId')) store.createIndex('lineageId', 'lineageId', { unique: false });
       }
     };
     request.onsuccess = () => {

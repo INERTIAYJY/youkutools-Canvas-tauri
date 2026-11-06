@@ -10,6 +10,7 @@
 import { Children, Fragment, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { calcAnchoredPosition } from '../../utils/popupPosition';
+import { useT } from '../../i18n';
 
 export interface SelectOption<T extends string = string> {
   value: T;
@@ -45,8 +46,17 @@ interface SelectProps<T extends string = string> extends Pick<ButtonHTMLAttribut
   id?: string;
   title?: string;
   'aria-label'?: string;
-  /** 菜单使用 fixed 定位，可突破父级 overflow:hidden 裁剪 */
+  /** 默认通过 Portal + fixed 定位避开父级裁剪；仅明确需要容器内菜单时设为 false。 */
   fixedMenu?: boolean;
+  /** 自定义模式直接在当前控件内编辑，右侧按钮仍可选择预设。 */
+  customInput?: {
+    value: string;
+    onChange: (value: string) => void;
+    placeholder?: string;
+    autoFocus?: boolean;
+    onFocus?: () => void;
+    onBlur?: () => void;
+  };
 }
 
 function readOptions(children: ReactNode): SelectOptions {
@@ -90,7 +100,7 @@ export default function Select<T extends string = string>({
   children,
   required,
   name,
-  placeholder = '请选择',
+  placeholder: customPlaceholder,
   disabled = false,
   size = 'md',
   className = '',
@@ -99,7 +109,8 @@ export default function Select<T extends string = string>({
   id,
   title,
   'aria-label': ariaLabel,
-  fixedMenu = false,
+  fixedMenu = true,
+  customInput,
   autoFocus,
   onFocus,
   onBlur,
@@ -111,9 +122,16 @@ export default function Select<T extends string = string>({
   'aria-describedby': ariaDescribedBy,
   'data-tooltip': tooltip,
 }: SelectProps<T>) {
+  const t = useT();
+  const placeholder = customPlaceholder ?? t('请选择');
   const [open, setOpen] = useState(false);
   const [invalid, setInvalid] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const restoreFocusRef = useRef(false);
+  // 菜单收起会重建键盘监听，配对释放状态需保留到本次 Esc 松开。
+  const cancelledEscapeRef = useRef(false);
+  const customEditing = !!customInput;
   const menuId = useId();
   const wrapRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -125,11 +143,38 @@ export default function Select<T extends string = string>({
   const flatOptions = resolvedOptions.flatMap((item) => (isOptionGroup(item) ? item.options : [item]));
   const selected = flatOptions.find((o) => o.value === stringValue) ?? (children ? flatOptions[0] : undefined);
 
+  useLayoutEffect(() => {
+    if (!expanded && restoreFocusRef.current) {
+      restoreFocusRef.current = false;
+      (customEditing ? inputRef.current : triggerRef.current)?.focus({ preventScroll: true });
+    }
+  }, [expanded, customEditing]);
+
   useEffect(() => {
-    if (disabled) return;
+    if (disabled) { cancelledEscapeRef.current = false; return; }
     const keydown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Escape' && cancelledEscapeRef.current) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       const target = event.target as Node;
       if (!wrapRef.current?.contains(target) && !menuRef.current?.contains(target)) return;
+      if (customEditing && target === inputRef.current && !expanded) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          setOpen(true);
+        } else if (event.key === 'Enter' || event.key === 'Escape') {
+          if (event.key === 'Escape') cancelledEscapeRef.current = true;
+          event.preventDefault();
+          inputRef.current?.blur();
+        }
+        if (!['Tab', 'F12'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's')) {
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
       if (!expanded) {
         if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(event.key)) {
           event.preventDefault();
@@ -143,8 +188,9 @@ export default function Select<T extends string = string>({
       }
       if (event.key === 'Escape' || event.key === 'Tab') {
         setOpen(false);
-        triggerRef.current?.focus({ preventScroll: true });
+        (customEditing ? inputRef.current : triggerRef.current)?.focus({ preventScroll: true });
         if (event.key === 'Escape') {
+          cancelledEscapeRef.current = true;
           event.preventDefault();
           event.stopImmediatePropagation();
         }
@@ -172,10 +218,23 @@ export default function Select<T extends string = string>({
       items[next]?.focus({ preventScroll: true });
       items[next]?.scrollIntoView({ block: 'nearest' });
     };
+    const keyup = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !cancelledEscapeRef.current) return;
+      cancelledEscapeRef.current = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    const resetEscape = () => { cancelledEscapeRef.current = false; };
     // 比父弹窗的 document 捕获监听更早处理 Escape，先关闭当前下拉。
     window.addEventListener('keydown', keydown, true);
-    return () => window.removeEventListener('keydown', keydown, true);
-  }, [disabled, expanded]);
+    window.addEventListener('keyup', keyup, true);
+    window.addEventListener('blur', resetEscape);
+    return () => {
+      window.removeEventListener('keydown', keydown, true);
+      window.removeEventListener('keyup', keyup, true);
+      window.removeEventListener('blur', resetEscape);
+    };
+  }, [disabled, expanded, customEditing]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -216,10 +275,6 @@ export default function Select<T extends string = string>({
       menu.style.left = `${position.left}px`;
     };
     updatePosition();
-    const selectedOption = menu.querySelector<HTMLElement>('[aria-selected="true"]');
-    if (selectedOption) {
-      menu.scrollTop = Math.max(0, selectedOption.offsetTop - (menu.clientHeight - selectedOption.offsetHeight) / 2);
-    }
     const observer = new ResizeObserver(updatePosition);
     observer.observe(menu);
     if (wrapRef.current) observer.observe(wrapRef.current);
@@ -232,6 +287,16 @@ export default function Select<T extends string = string>({
       menu.removeAttribute('style');
     };
   }, [expanded, fixedMenu]);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!expanded || !menu) return;
+    const option = menu.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]:not(:disabled)')
+      ?? menu.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)');
+    (option ?? menu).focus({ preventScroll: true });
+    // 只滚动菜单自身，避免 Portal 菜单聚焦时带动父弹窗或页面。
+    if (option) menu.scrollTop = Math.max(0, option.offsetTop - (menu.clientHeight - option.offsetHeight) / 2);
+  }, [expanded]);
 
   const sizeClass = size === 'sm' ? 'ui-select--sm' : size === 'lg' ? 'ui-select--lg' : '';
   const rootClass = `ui-select ui-select--custom nodrag nopan ${sizeClass} ${className}`.trim();
@@ -248,6 +313,7 @@ export default function Select<T extends string = string>({
       tabIndex={-1}
       onClick={(event) => {
         event.stopPropagation();
+        restoreFocusRef.current = true;
         onChange(option.value);
         setInvalid(false);
         setOpen(false);
@@ -262,6 +328,7 @@ export default function Select<T extends string = string>({
     <div
       className="ui-menu overscroll-contain"
       role="listbox"
+      tabIndex={-1}
       id={menuId}
       aria-label={ariaLabel}
       ref={menuRef}
@@ -284,14 +351,13 @@ export default function Select<T extends string = string>({
     </div>
   ) : null;
 
-  return (
-    <div className={rootClass} ref={wrapRef} title={title}>
+  const trigger = (
       <button
         ref={triggerRef}
-        id={id}
+        id={customEditing ? undefined : id}
         type="button"
-        className={triggerClass}
-        style={triggerStyle}
+        className={customEditing ? 'ui-input-affix rounded-r-[var(--ui-radius-md)] hover:text-canvas-text' : triggerClass}
+        style={customEditing ? undefined : triggerStyle}
         aria-haspopup="listbox"
         aria-expanded={expanded}
         aria-controls={expanded ? menuId : undefined}
@@ -299,7 +365,7 @@ export default function Select<T extends string = string>({
         aria-describedby={ariaDescribedBy}
         aria-invalid={invalid || undefined}
         data-tooltip={tooltip}
-        autoFocus={autoFocus}
+        autoFocus={customEditing ? undefined : autoFocus}
         onFocus={onFocus}
         onBlur={onBlur}
         onPointerDown={(event) => { event.stopPropagation(); onPointerDown?.(event); }}
@@ -316,7 +382,7 @@ export default function Select<T extends string = string>({
         disabled={disabled}
         onClick={(event) => { event.stopPropagation(); setOpen((v) => !v); }}
       >
-        <span className="ui-select__trigger-text">{selected?.label ?? placeholder}</span>
+        {!customEditing && <span className="ui-select__trigger-text">{selected?.label ?? placeholder}</span>}
         <svg
           className="ui-select__chevron"
           width="12"
@@ -330,6 +396,25 @@ export default function Select<T extends string = string>({
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
+  );
+
+  return (
+    <div className={rootClass} ref={wrapRef} title={title}>
+      {customInput ? (
+        <div className={`ui-input-group w-full ${size === 'sm' ? 'h-[var(--ui-control-h-sm)]' : size === 'lg' ? 'h-[var(--ui-control-h-lg)]' : 'h-[var(--ui-control-h)]'} ${disabled ? 'opacity-45' : ''}`} style={triggerStyle}>
+          <input ref={inputRef} id={id} type="text" role="combobox"
+            className={`ui-input h-full min-w-0 flex-1 ${size === 'sm' ? 'ui-input--sm' : size === 'lg' ? 'ui-input--lg' : ''}`}
+            value={customInput.value} placeholder={customInput.placeholder ?? placeholder}
+            disabled={disabled} autoFocus={customInput.autoFocus ?? autoFocus}
+            aria-label={ariaLabel} aria-expanded={expanded} aria-controls={expanded ? menuId : undefined}
+            aria-haspopup="listbox" aria-autocomplete="none" aria-describedby={ariaDescribedBy}
+            onChange={(event) => customInput.onChange(event.target.value)}
+            onFocus={() => customInput.onFocus?.()} onBlur={() => customInput.onBlur?.()}
+            onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}
+          />
+          {trigger}
+        </div>
+      ) : trigger}
       <select
         className="ui-select__native"
         value={stringValue}

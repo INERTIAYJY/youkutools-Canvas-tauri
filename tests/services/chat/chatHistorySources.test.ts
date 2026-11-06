@@ -1,3 +1,6 @@
+/**
+ * chatHistorySources — 回归测试：chat history web sources。
+ */
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatMessage } from '../../../src/types/chat';
 

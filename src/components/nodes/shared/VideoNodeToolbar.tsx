@@ -1,9 +1,9 @@
 ﻿/**
  * VideoNodeToolbar 视频节点浮动工具栏 + 编辑态支持
  */
+import { useT } from '../../../i18n';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
-import type { NodeType, BaseNodeData } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useToolbarEdit } from '../../../hooks/useToolbarEdit';
 import ToolbarEditor from './toolbar/ToolbarEditor';
@@ -13,11 +13,8 @@ import {
   getHiddenDefaultToolbarButtons,
   TOOLBAR_MORE_KEY,
 } from './toolbar/toolbarRegistry';
-import { resolvePresetAction, resolvePresetDef, createPresetNode } from './toolbar/presetAction';
-import { executeGeneration } from '../../../services/generationService';
-import { requestPresetSequence } from '../../../services/presetSequenceService';
+import { executeToolbarPreset, resolvePresetDef } from './toolbar/presetAction';
 import { useAppStore } from '../../../store/useAppStore';
-import type { Node } from '@xyflow/react';
 
 /** 截帧位置：首帧 / 播放头当前帧 / 尾帧 */
 export type CaptureFramePosition = 'first' | 'current' | 'last';
@@ -41,12 +38,12 @@ interface VideoNodeToolbarProps {
 function VideoNodeToolbar({
   nodeId, onCaptureFrame, onFullscreen, onCopyFile, onReversePrompt, onShowPrompt, isReversingPrompt,
 }: VideoNodeToolbarProps) {
+  const t = useT();
   const nodeType = 'ai-video';
   const edit = useToolbarEdit({ nodeType });
   const registry = edit.registry;
   const pluginToolbar = useNodePluginToolbar({ nodeId });
   const userPresets = useAppStore((s) => s.userPresets);
-  const addNodeWithEdge = useAppStore((s) => s.addNodeWithEdge);
 
   // ── 截帧子菜单：与图像节点的宫格菜单同一套结构与样式 ──
   const [frameMenuOpen, setFrameMenuOpen] = useState(false);
@@ -91,19 +88,9 @@ function VideoNodeToolbar({
   const handlePresetClick = useCallback(
     (key: string) => (e: React.MouseEvent) => {
       e.stopPropagation();
-      // 实时从 store 读取，避免闭包过期导致对话框内容/ @引用丢失
-      const liveNode = useAppStore.getState().nodes.find((n) => n.id === nodeId) as Node<BaseNodeData> | undefined;
-      if (!liveNode) return;
-      const livePrompt = (liveNode.data?.prompt as string) ?? '';
-      const livePresets = useAppStore.getState().userPresets;
-      if (requestPresetSequence(key, nodeType as NodeType, nodeId, livePresets)) return;
-      const resolved = resolvePresetAction(key, nodeType as NodeType, livePrompt, livePresets);
-      if (!resolved) return;
-      const { node: newNode, edge } = createPresetNode(liveNode, resolved);
-      addNodeWithEdge(newNode, edge);
-      executeGeneration(newNode.id, newNode.data.prompt, resolved.postProcess, newNode.data);
+      executeToolbarPreset(key, nodeType, nodeId);
     },
-    [nodeId, addNodeWithEdge],
+    [nodeId],
   );
 
   const actionMap: Record<string, (e: React.MouseEvent) => void> = {
@@ -122,7 +109,7 @@ function VideoNodeToolbar({
     const handler = actionMap[key];
     const isPreset = !def;
 
-    const presetDef = !def ? resolvePresetDef(key, nodeType as NodeType, userPresets) : null;
+    const presetDef = !def ? resolvePresetDef(key, nodeType, userPresets) : null;
     if (!def && !presetDef) return null;
 
     const resolvedDef = def ?? { key, label: presetDef!.label, icon: presetDef!.icon, defaultZone: '' };
@@ -145,7 +132,7 @@ function VideoNodeToolbar({
               className={`multigrid-menu nodrag${frameMenuBelow ? ' multigrid-menu--below' : ''}`}
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="multigrid-menu-title">截取哪一帧</div>
+              <div className="multigrid-menu-title">{t('截取哪一帧')}</div>
               {CAPTURE_FRAME_OPTIONS.map((option) => (
                 <button
                   key={option.position}
@@ -154,7 +141,7 @@ function VideoNodeToolbar({
                   onClick={pickFrame(option.position)}
                 >
                   <Icon icon={option.icon} width={15} height={15} />
-                  <span>{option.label}</span>
+                  <span>{t(option.label)}</span>
                 </button>
               ))}
             </div>
@@ -168,7 +155,7 @@ function VideoNodeToolbar({
       <AnimatedButton
         key={key}
         className={`ftb-btn icon-only ${isPreset ? 'act-preset' : `act-${key}`}`}
-        data-tooltip={isReversing ? '反推中...' : resolvedDef.label}
+        data-tooltip={isReversing ? t('反推中...') : resolvedDef.label}
         aria-label={resolvedDef.label}
         disabled={isReversing}
         onClick={clickHandler}

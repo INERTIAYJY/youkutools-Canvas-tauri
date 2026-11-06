@@ -1,3 +1,6 @@
+/**
+ * mentionPortals — 回归测试：MentionEditor 的 Portal 浮层识别。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   MENTION_PORTAL_CLASSES,
@@ -23,6 +26,14 @@ describe('MentionEditor 的 Portal 浮层识别', () => {
     expect(isInsideMentionPortal(elementWith(['chip-name-tip']))).toBe(true);
   });
 
+  it('挂到 body 的引用选择面板仍属于宿主浮层', () => {
+    expect(isInsideMentionPortal(elementWith(['mention-dropdown']))).toBe(true);
+  });
+
+  it('全屏引用预览内的点击不会被当作宿主浮层外部点击', () => {
+    expect(isInsideMentionPortal(elementWith(['reference-content-preview']))).toBe(true);
+  });
+
   it('画布上的普通元素不算', () => {
     expect(isInsideMentionPortal(elementWith(['react-flow__node']))).toBe(false);
   });
@@ -32,7 +43,7 @@ describe('MentionEditor 的 Portal 浮层识别', () => {
     expect(isInsideMentionPortal(undefined)).toBe(false);
   });
 
-  it('两个 Portal 类名都在清单里，漏一个就会漏放行', () => {
-    expect([...MENTION_PORTAL_CLASSES]).toEqual(['asset-picker-backdrop', 'chip-name-tip']);
+  it('所有 Portal 类名都在清单里，漏一个就会漏放行', () => {
+    expect([...MENTION_PORTAL_CLASSES]).toEqual(['asset-picker-backdrop', 'chip-name-tip', 'mention-dropdown', 'reference-content-preview']);
   });
 });

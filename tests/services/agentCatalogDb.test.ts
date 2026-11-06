@@ -1,3 +1,6 @@
+/**
+ * agentCatalogDb — 回归测试：independent Agent Catalog IndexedDB。
+ */
 import { IDBFactory } from 'fake-indexeddb';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentPackageInstallation } from '../../src/types/agentPackage';

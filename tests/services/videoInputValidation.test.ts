@@ -1,3 +1,6 @@
+/**
+ * videoInputValidation — 回归测试：通用视频提交前输入校验。
+ */
 import { describe, expect, it, vi } from 'vitest';
 import type { VideoGenerationReferenceInput, VideoModelCapability } from '../../src/types/aiTypes';
 import {

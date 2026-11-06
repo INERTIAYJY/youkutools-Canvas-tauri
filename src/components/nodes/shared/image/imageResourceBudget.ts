@@ -1,3 +1,6 @@
+/**
+ * imageResourceBudget — 限制图片编辑的尺寸、像素与工作集预算。
+ */
 const MEBIBYTE = 1024 * 1024;
 const RGBA_BYTES_PER_PIXEL = 4;
 

@@ -19,6 +19,7 @@ import { getAgentRecoveryHint } from '../../services/chat/agentErrorCodes';
 import AgentStepCard from './AgentStepCard';
 import AgentApprovalCard from './AgentApprovalCard';
 import AgentExecutionRationale from './AgentExecutionRationale';
+import { AssistantActivityMark } from './AssistantActivity';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
 import { useT } from '../../i18n';
 
@@ -36,23 +37,27 @@ export interface AgentTaskControls {
 
 interface AgentTaskTimelineProps extends AgentTaskControls {
   task: AgentTask;
+  activity?: string;
+  activityStartedAt?: number;
+  animateActivity?: boolean;
 }
 
 const STATUS_META: Record<AgentTaskStatus, { label: string; icon: string; className: string; spin?: boolean }> = {
-  queued: { label: '排队中', icon: 'mdi:clock-outline', className: 'text-slate-400' },
-  planning: { label: '规划中', icon: 'mdi:loading', className: 'text-violet-400', spin: true },
-  running: { label: '执行中', icon: 'mdi:loading', className: 'text-emerald-400', spin: true },
-  waiting_tool: { label: '调用工具', icon: 'mdi:loading', className: 'text-sky-400', spin: true },
-  waiting_approval: { label: '等待确认', icon: 'mdi:shield-alert-outline', className: 'text-amber-400' },
-  paused: { label: '已暂停', icon: 'mdi:pause-circle-outline', className: 'text-slate-400' },
-  completed: { label: '已完成', icon: 'mdi:check-circle-outline', className: 'text-emerald-400' },
-  failed: { label: '失败', icon: 'mdi:alert-circle-outline', className: 'text-red-400' },
-  stopped: { label: '已停止', icon: 'mdi:stop-circle-outline', className: 'text-slate-400' },
+  queued: { label: '排队中', icon: 'mdi:clock-outline', className: 'text-canvas-text-secondary' },
+  planning: { label: '规划中', icon: 'mdi:loading', className: 'text-brand-light', spin: true },
+  running: { label: '执行中', icon: 'mdi:loading', className: 'text-success-text', spin: true },
+  waiting_tool: { label: '调用工具', icon: 'mdi:loading', className: 'text-brand-light', spin: true },
+  waiting_approval: { label: '等待确认', icon: 'mdi:shield-alert-outline', className: 'text-warning-light' },
+  paused: { label: '已暂停', icon: 'mdi:pause-circle-outline', className: 'text-canvas-text-secondary' },
+  completed: { label: '已完成', icon: 'mdi:check-circle-outline', className: 'text-success-text' },
+  failed: { label: '失败', icon: 'mdi:alert-circle-outline', className: 'text-danger-light' },
+  stopped: { label: '已停止', icon: 'mdi:stop-circle-outline', className: 'text-canvas-text-secondary' },
 };
 
 const PAUSE_REASON_LABELS: Record<string, string> = {
   user_paused: '你已暂停',
   model_round_budget_exhausted: '已达模型轮次上限',
+  model_output_truncated: '回复达到输出上限，本轮工具未执行，可继续任务',
   tool_call_budget_exhausted: '已达工具调用上限',
   tool_result_budget_exhausted: '工具结果已达上限',
   context_budget_exhausted: '上下文接近模型上限',
@@ -71,6 +76,12 @@ const TOOL_ACTIVITY_LABELS: Record<string, string> = {
   file_list_grants: '正在查看已授权文件',
   file_read_text: '正在读取文件',
   provider_docs_read: '正在读取接口文档',
+  skill_load: '正在加载 Skill',
+  skill_read_file: '正在读取 Skill 资料',
+  mcp_tools_search: '正在发现外部 MCP 工具',
+  mcp_tools_describe: '正在读取外部 MCP 参数',
+  mcp_read_tool: '正在查询外部 MCP',
+  mcp_call_tool: '正在执行外部 MCP 操作',
 };
 
 function findActiveStep(task: AgentTask): AgentStep | undefined {
@@ -93,7 +104,8 @@ function getActivityLabel(task: AgentTask, step: AgentStep | undefined, t: (k: s
   }
   if (step?.status === 'pending') return t('准备{title}', { title: step.title });
   if (step?.status === 'running') {
-    return TOOL_ACTIVITY_LABELS[step.toolCall?.toolId ?? ''] ?? t('正在{title}', { title: step.title });
+    const label = TOOL_ACTIVITY_LABELS[step.toolCall?.toolId ?? ''];
+    return label ? t(label) : t('正在{title}', { title: step.title });
   }
   if (task.status === 'queued') return t('正在等待执行');
   if (task.status === 'planning') {
@@ -139,18 +151,13 @@ interface ControlButtonProps {
 }
 
 function ControlButton({ icon, label, onClick, tone = 'default' }: ControlButtonProps) {
-  const toneClass = tone === 'primary'
-    ? 'text-indigo-300 hover:bg-indigo-500/15'
-    : tone === 'danger'
-      ? 'text-red-400 hover:bg-red-500/10'
-      : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text';
+  const toneClass = tone === 'primary' ? 'ui-btn--primary' : tone === 'danger' ? 'ui-btn--danger' : 'ui-btn--ghost';
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label={label}
-      className={`flex min-h-8 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors
-                  focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 ${toneClass}`}
+      className={`ui-btn ui-btn--sm ${toneClass}`}
     >
       <Icon icon={icon} width="14" />
       {label}
@@ -160,6 +167,9 @@ function ControlButton({ icon, label, onClick, tone = 'default' }: ControlButton
 
 export default function AgentTaskTimeline({
   task,
+  activity,
+  activityStartedAt: overrideStartedAt,
+  animateActivity = true,
   onResolveApproval,
   mediaModelOptions,
   mediaModelAvailability,
@@ -178,9 +188,9 @@ export default function AgentTaskTimeline({
   const meta = STATUS_META[task.status];
   const isActive = ACTIVE_STATUSES.includes(task.status);
   const activeStep = findActiveStep(task);
-  const activityLabel = getActivityLabel(task, activeStep, t);
+  const activityLabel = activity === 'compressing' ? t('正在压缩上下文') : activity === 'connecting' && !activeStep ? t('正在连接模型') : getActivityLabel(task, activeStep, t);
   const activityDetail = activeStep?.toolCall?.inputSummary ?? activeStep?.approval?.summary;
-  const activityStartedAt = getActivityStartedAt(task, activeStep);
+  const activityStartedAt = activity === 'compressing' ? (overrideStartedAt ?? task.updatedAt) : getActivityStartedAt(task, activeStep);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!isActive || task.status === 'waiting_approval') return undefined;
@@ -212,11 +222,11 @@ export default function AgentTaskTimeline({
         aria-expanded={expanded}
         className="flex min-h-7 w-full items-center gap-1.5 rounded-md px-0.5 text-left transition-colors hover:bg-canvas-hover/35 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/40"
       >
-        <Icon
-          icon={meta.icon}
-          width="14"
-          className={`shrink-0 ${isActive ? 'text-canvas-text-muted' : meta.className} ${meta.spin ? 'animate-spin motion-reduce:animate-none' : ''}`}
-        />
+        {meta.spin ? (
+          <AssistantActivityMark active={animateActivity} />
+        ) : (
+          <Icon icon={meta.icon} width="14" className={`shrink-0 ${meta.className}`} aria-hidden="true" />
+        )}
         <span className="min-w-0 truncate text-[12px] font-medium text-canvas-text-secondary">
           {isActive ? activityLabel : terminalLabel}
         </span>
@@ -242,7 +252,7 @@ export default function AgentTaskTimeline({
 
       {!!task.skillBindings?.length && (
         <div className="mt-1 flex min-w-0 items-start gap-1.5 pl-5 text-[10px] leading-4 text-canvas-text-muted">
-          <Icon icon="mdi:book-check-outline" width="13" className="mt-0.5 shrink-0 text-indigo-300/80" />
+          <Icon icon="mdi:book-check-outline" width="13" className="mt-0.5 shrink-0 text-brand-light" />
           <span className="shrink-0">{t('已注入 Skill')}</span>
           <span className="min-w-0 truncate text-canvas-text-secondary">
             {task.skillBindings.map((binding) => binding.name).join('、')}
@@ -261,16 +271,16 @@ export default function AgentTaskTimeline({
       )}
 
       {task.status === 'paused' && task.pausedReason && (
-        <p className="mt-1.5 text-[11px] leading-[17px] text-amber-300/90">
+        <p className="mt-1.5 text-[11px] leading-[17px] text-warning-light">
           {task.pausedReason ? t(PAUSE_REASON_LABELS[task.pausedReason] ?? task.pausedReason) : ''}
         </p>
       )}
       {task.status === 'failed' && task.errorMessage && (
-        <p className="mt-1.5 break-words text-[11px] leading-[17px] text-red-400/90">{task.errorMessage}</p>
+        <p className="mt-1.5 break-words text-[11px] leading-[17px] text-danger-light">{task.errorMessage}</p>
       )}
       {recoveryHint && (
         <p className="mt-1 flex items-start gap-1.5 text-[11px] leading-[17px] text-canvas-text-muted">
-          <Icon icon="mdi:lightbulb-on-outline" width="13" className="mt-0.5 shrink-0 text-amber-400/80" />
+          <Icon icon="mdi:lightbulb-on-outline" width="13" className="mt-0.5 shrink-0 text-warning-light" />
           <span className="break-words">{recoveryHint.hint}</span>
         </p>
       )}
@@ -280,19 +290,8 @@ export default function AgentTaskTimeline({
           {task.steps.length > 0 && (
             <div className="mt-1 space-y-0.5">
               {task.steps.map((step) => (
-                <AgentStepCard key={step.id} step={step} />
+                <AgentStepCard key={step.id} step={step} animateActivity={animateActivity && isActive && task.status !== 'waiting_approval'} />
               ))}
-            </div>
-          )}
-
-          {/* 规划 / 整理阶段没有进行中的步骤卡片，这里补一行在下方明确显示助手当前在做什么 */}
-          {isActive && !activeStep && task.status !== 'waiting_approval' && (
-            <div className="mt-0.5 flex items-center gap-1.5 rounded-md bg-canvas-hover/25 px-2 py-1.5">
-              <Icon icon="mdi:loading" width="14" className="shrink-0 animate-spin motion-reduce:animate-none text-violet-400" />
-              <span className="min-w-0 truncate text-[12px] text-canvas-text-secondary">{activityLabel}</span>
-              <span className="ml-auto shrink-0 text-[10px] tabular-nums text-canvas-text-muted">
-                {formatElapsed(activityStartedAt, now)}
-              </span>
             </div>
           )}
 
@@ -306,7 +305,10 @@ export default function AgentTaskTimeline({
             />
           )}
 
-          {/* 控制操作 */}
+
+        </>
+      )}
+      {/* 控制操作 */}
           {!isTerminal && !isExpertTask && (
             <div className="mt-2.5 flex flex-wrap items-center gap-1 border-t border-canvas-border/60 pt-2">
               {isActive && task.status !== 'waiting_approval' && (
@@ -341,8 +343,6 @@ export default function AgentTaskTimeline({
               />
             </div>
           )}
-        </>
-      )}
     </div>
   );
 }

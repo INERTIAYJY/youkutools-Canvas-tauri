@@ -1,3 +1,6 @@
+/**
+ * agentPackage — 定义AgentPackage 清单、安装与健康状态的领域类型。
+ */
 import type { SkillManifest, UserSkill } from './index';
 
 /**

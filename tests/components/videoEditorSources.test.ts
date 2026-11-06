@@ -1,3 +1,6 @@
+/**
+ * videoEditorSources — 回归测试：video editor source cache。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   pruneVideoEditorSources,

@@ -4,6 +4,8 @@
  */
 import type { AgentMode, ProviderModelCatalogSummary } from './agent';
 
+export type ChatPanelView = 'chat' | 'list' | 'tasks';
+
 import type { NodeType } from './index';
 import type {
   CanvasMaterializationStatus,
@@ -101,6 +103,7 @@ export type FinishReason = 'stop' | 'length' | 'canceled' | 'error';
 export type AssistantStreamEvent =
   | { type: 'start'; requestId: string; modelId: string }
   | { type: 'text.delta'; delta: string }
+  | { type: 'reasoning.delta'; delta: string; source: 'openai-compatible' | 'anthropic-compatible' | 'gemini-native' }
   | { type: 'status'; phase: StreamPhase; message?: string }
   | { type: 'conversation.title'; title: string }
   | { type: 'tool.call.delta'; callId: string; delta: string }
@@ -126,6 +129,7 @@ export interface ToolResultSummary {
   toolId: string;
   status: 'success' | 'error' | 'denied';
   summary: string;
+  errorCode?: string;
   truncated: boolean;
   sources?: WebSource[];
 }
@@ -249,7 +253,20 @@ export type ChatMessageStatus =
 // 聊天消息
 // ============================================
 
+/** 待发送参考图仅保存项目内文件名和展示信息，原图不进入消息或任务。 */
+export interface ChatImageReference {
+  fileName: string;
+  label: string;
+  size: number;
+}
+
 export interface ChatMessage {
+  /** Bounded, sanitized provider-returned reasoning; transient, excluded from model history. */
+  reasoning?: string;
+  reasoningTruncated?: boolean;
+  responseError?: string;
+  activity?: 'connecting' | 'responding' | 'planning' | 'compressing';
+  activityStartedAt?: number;
   id: string;
   /** 所属会话 ID */
   conversationId: string;
@@ -343,6 +360,10 @@ export interface ChatConversation {
   archived: boolean;
   /** 当前会话的 Agent 自治模式；旧会话读取时回填 collaborative。 */
   agentMode: AgentMode;
+  /** 用户为本会话显式启用的外部 MCP 连接；默认全部关闭。 */
+  mcpServerIds?: string[];
+  /** 每次选择变化均轮换，撤销后重新勾选不能复活旧审批。 */
+  mcpSelectionRevision?: string;
   /** 上下文压缩摘要；不存在表示尚未压缩过 */
   contextSummary?: ConversationContextSummary;
   createdAt: number;

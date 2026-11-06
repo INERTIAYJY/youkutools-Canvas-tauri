@@ -1,3 +1,6 @@
+/**
+ * styleSelector — 回归测试：StyleSelector。
+ */
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

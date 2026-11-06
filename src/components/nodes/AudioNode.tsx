@@ -1,7 +1,7 @@
-﻿/**
+/**
  * AudioNode 音频节点 — 在画布上渲染音频内容，支持上传本地音频、波形可视化、连接其他节点
  */
-import { memo, useCallback, useState, useRef, useEffect } from 'react';
+import { memo, useCallback, useState, useRef, useEffect, useMemo } from 'react';
 import { Handle, Position, type Edge, type Node } from '@xyflow/react';
 import type { BaseNodeData } from '../../types';
 import NodeLabel from './shared/NodeLabel';
@@ -20,6 +20,14 @@ import { transcribeAudio } from '../../services/ai/transcribeAudio';
 import { textNodeHeight } from '../../utils/num';
 import { useT } from '../../i18n';
 import NodeGenerationProgress from './shared/NodeGenerationProgress';
+import MediaTaskStatus from './shared/MediaTaskStatus';
+import FullscreenOverlay from '../shared/FullscreenOverlay';
+import CanvasAudioPreview from '../shared/CanvasAudioPreview';
+import { useCanvasNodeLodProtection } from '../../hooks/useCanvasNodeLod';
+import { useComfyMediaSource } from '../../hooks/useComfyMediaSource';
+import { useViewportMediaSource } from '../../hooks/useViewportMediaSource';
+import { shouldLoadNativeComfyMedia } from '../../services/comfyMediaSource';
+import { corsSafeFetch } from '../../services/ai/httpTransport';
 
 /* ── Waveform data ── */
 interface WaveformData {
@@ -42,11 +50,44 @@ function getWaveformDecodeContext() {
 }
 
 async function decodeWaveform(audioUrl: string): Promise<WaveformData> {
-  const response = await fetch(audioUrl);
+  const signal = AbortSignal.timeout(15_000);
+  // 波形需要完整文件，不能读取仅供播放器 Range 请求的分段地址。
+  const response = await (shouldLoadNativeComfyMedia(audioUrl) ? corsSafeFetch : fetch)(audioUrl, { signal });
   if (!response.ok && response.status !== 0) {
+    await response.body?.cancel().catch(() => undefined);
     throw new Error(`Failed to load audio: ${response.status}`);
   }
-  const audioBuffer = await getWaveformDecodeContext().decodeAudioData(await response.arrayBuffer());
+  const maxBytes = 32 * 1024 * 1024;
+  if (Number(response.headers.get('content-length')) > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new RangeError('音频波形读取超过 32 MiB 限制');
+  }
+  const chunks: Uint8Array[] = [];
+  const reader = response.body?.getReader();
+  let total = 0;
+  if (reader) {
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) throw new RangeError('音频波形读取超过 32 MiB 限制');
+        chunks.push(value);
+      }
+    } catch (error) { await reader.cancel().catch(() => undefined); throw error; }
+    finally { reader.releaseLock(); }
+  } else {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    total = bytes.byteLength;
+    if (total > maxBytes) throw new RangeError('音频波形读取超过 32 MiB 限制');
+    chunks.push(bytes);
+  }
+  signal.throwIfAborted();
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const audioBuffer = await getWaveformDecodeContext().decodeAudioData(bytes.buffer);
   const channelData = audioBuffer.getChannelData(0);
   const step = Math.max(1, Math.floor(channelData.length / WAVEFORM_COLUMNS));
   const peaks: number[] = [];
@@ -172,6 +213,7 @@ function formatTime(seconds: number): string {
 
 function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
   const t = useT();
+  const nativeAudio = useMemo(() => shouldLoadNativeComfyMedia(data.audioUrl), [data.audioUrl]);
   const justCompleted = useCompletionFlash(data.status);
   const updateNodeData = useAppStore((s) => s.updateNodeData);
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
@@ -185,11 +227,37 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   // ── Audio playback state ──
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [requestedSource, setRequestedSource] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const resumePosition = useRef<{ source: string; time: number } | null>(null);
   const waveformRef = useRef<WaveformData | null>(null);
   const animFrameRef = useRef(0);
   const waveformPressSelectedRef = useRef<boolean | null>(null);
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const playbackAttemptRef = useRef(0);
+  const [fullscreen, setFullscreen] = useState<{ projectId: string | null; time: number; playing: boolean } | null>(null);
+  const visibleSource = useViewportMediaSource(data.audioUrl, canvasRef, { rootMargin: '160px 0px' });
+  const playbackSource = useComfyMediaSource(nativeAudio
+    ? requestedSource === data.audioUrl && visibleSource && !fullscreen ? data.audioUrl : undefined
+    : data.audioUrl, () => { setRequestedSource(null); setIsPlaying(false); });
+  useCanvasNodeLodProtection(id, isPlaying || !!fullscreen);
+  const closeFullscreen = useCallback(() => setFullscreen(null), []);
+  const openFullscreen = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearTimeout(clickTimerRef.current);
+    const audio = audioRef.current;
+    if (!audio || !data.audioUrl) return;
+    const time = audio.currentTime;
+    const playing = !audio.paused;
+    playbackAttemptRef.current += 1;
+    audio.pause();
+    setRequestedSource(null);
+    cancelAnimationFrame(animFrameRef.current);
+    setIsPlaying(false);
+    setFullscreen({ projectId: useAppStore.getState().currentProjectId, time, playing });
+  }, [data.audioUrl]);
 
   const { displayLabel, handleRename } = useNodeRename(id, data, t('粘贴音频'));
 
@@ -274,6 +342,8 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     progress: asrProgress,
     downloadPrompt,
     isDownloadingModel,
+    modelDownloadProgress,
+    modelDownloadLabel,
     handleSpeechToText,
     handleDownloadConfirm,
     handleDownloadCancel,
@@ -281,12 +351,16 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   // ── Reset when URL changes ──
   useEffect(() => {
+    playbackAttemptRef.current += 1;
+    clearTimeout(clickTimerRef.current);
     audioRef.current?.pause();
     cancelAnimationFrame(animFrameRef.current);
     waveformRef.current = null;
     const canvas = canvasRef.current;
     if (canvas) drawEmptyWaveform(canvas);
     const resetFrame = requestAnimationFrame(() => {
+      setRequestedSource(null);
+      resumePosition.current = null;
       setIsPlaying(false);
       setCurrentTime(0);
     });
@@ -335,6 +409,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         const audio = audioRef.current;
         if (audio && !audio.paused) {
           audio.pause();
+          setRequestedSource(null);
           cancelAnimationFrame(animFrameRef.current);
           renderCanvas(canvas, waveformRef.current, -1);
           setIsPlaying(false);
@@ -355,10 +430,14 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
   // ── Cleanup on unmount ──
   useEffect(() => {
+    const audio = audioRef.current;
     return () => {
+      playbackAttemptRef.current += 1;
+      clearTimeout(clickTimerRef.current);
       cancelAnimationFrame(animFrameRef.current);
+      audio?.pause();
     };
-  }, []);
+  }, [data.audioUrl]);
 
   // ── Progress animation loop ──
   const startProgressLoop = useCallback(() => {
@@ -368,6 +447,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
 
     const loop = () => {
       setCurrentTime(audio.currentTime);
+      if (resumePosition.current) resumePosition.current.time = audio.currentTime;
       const dur = audio.duration;
       const p = dur > 0 ? audio.currentTime / dur : -1;
       renderCanvas(canvas, waveformRef.current, p);
@@ -376,27 +456,72 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     animFrameRef.current = requestAnimationFrame(loop);
   }, []);
 
+  // Comfy 音频仅在用户请求播放且仍在视口时持有原生租约；暂停后记住播放位置。
+  useEffect(() => {
+    if (!nativeAudio || !requestedSource) return;
+    if (!visibleSource || fullscreen) {
+      const reset = requestAnimationFrame(() => { setRequestedSource(null); setIsPlaying(false); });
+      return () => cancelAnimationFrame(reset);
+    }
+    const audio = audioRef.current;
+    if (!audio || !playbackSource || requestedSource !== data.audioUrl) return;
+    let current = true;
+    const attempt = ++playbackAttemptRef.current;
+    const saved = resumePosition.current;
+    if (audio.getAttribute('src') !== playbackSource) { audio.src = playbackSource; audio.load(); }
+    if (saved?.source === requestedSource) audio.currentTime = saved.time;
+    resumePosition.current = { source: requestedSource, time: audio.currentTime };
+    void audio.play().then(() => {
+      if (!current || playbackAttemptRef.current !== attempt) return;
+      startProgressLoop(); setIsPlaying(true);
+    }, () => {
+      if (!current || playbackAttemptRef.current !== attempt) return;
+      setRequestedSource(null); setIsPlaying(false);
+    });
+    return () => {
+      current = false;
+      playbackAttemptRef.current += 1;
+      if (audio.getAttribute('src') === playbackSource) {
+        resumePosition.current = { source: requestedSource, time: audio.ended ? 0 : audio.currentTime };
+      }
+      audio.pause(); audio.removeAttribute('src'); audio.load();
+      cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [nativeAudio, requestedSource, visibleSource, playbackSource, data.audioUrl, fullscreen, startProgressLoop]);
+
   // ── Play / Pause toggle ──
   const togglePlay = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
       const audio = audioRef.current;
       const canvas = canvasRef.current;
-      if (!audio || !canvas) return;
+      if (!audio || !canvas || !data.audioUrl || fullscreen) return;
+      if (nativeAudio) {
+        if (requestedSource === data.audioUrl) {
+          resumePosition.current = { source: data.audioUrl, time: audio.ended ? 0 : audio.currentTime };
+          audio.pause(); cancelAnimationFrame(animFrameRef.current);
+          renderCanvas(canvas, waveformRef.current, -1); setIsPlaying(false);
+          setRequestedSource(null);
+        } else setRequestedSource(data.audioUrl);
+        return;
+      }
+      if (!playbackSource) return;
+      const attempt = ++playbackAttemptRef.current;
 
-      if (isPlaying) {
+      if (!audio.paused) {
         audio.pause();
         cancelAnimationFrame(animFrameRef.current);
         renderCanvas(canvas, waveformRef.current, -1);
         setIsPlaying(false);
       } else {
         audio.play().then(() => {
+          if (playbackAttemptRef.current !== attempt) return;
           startProgressLoop();
           setIsPlaying(true);
         }).catch(() => {});
       }
     },
-    [isPlaying, startProgressLoop],
+    [data.audioUrl, nativeAudio, requestedSource, playbackSource, fullscreen, startProgressLoop],
   );
 
   // ── Audio timeupdate (for display) ──
@@ -411,6 +536,8 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     if (canvas) renderCanvas(canvas, waveformRef.current, -1);
     setCurrentTime(0);
     setIsPlaying(false);
+    resumePosition.current = null;
+    setRequestedSource(null);
   }, []);
 
   // ── Upload handler ──
@@ -475,21 +602,26 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           {data.audioUrl ? (
             <div
               className="audio-waveform-wrapper"
+              title={t('双击打开音乐播放器')}
+              onDoubleClick={openFullscreen}
               onPointerDownCapture={() => { waveformPressSelectedRef.current = !!selected; }}
               onPointerCancel={() => { waveformPressSelectedRef.current = null; }}
               onClick={(e) => {
+                clearTimeout(clickTimerRef.current);
+                if (e.detail > 1) { e.stopPropagation(); return; }
                 // 画布可能在 mousedown 时选中节点，需使用本次按下前的状态。
                 const wasSelected = waveformPressSelectedRef.current ?? !!selected;
                 waveformPressSelectedRef.current = null;
                 if (!wasSelected || !selected) return;
-                togglePlay(e);
+                e.stopPropagation();
+                clickTimerRef.current = setTimeout(() => togglePlay(e), 250);
               }}
               onContextMenu={(e) => e.preventDefault()}
             >
               <canvas ref={canvasRef} className="audio-waveform-canvas" width={WAVEFORM_COLUMNS} height={80} />
               <audio
                 ref={audioRef}
-                src={data.audioUrl}
+                src={playbackSource}
                 data-source-url={data.sourceUrl}
                 onEnded={handleEnded}
                 onTimeUpdate={handleTimeUpdate}
@@ -513,7 +645,7 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               <span>{t('上传中...')}</span>
             </div>
           ) : data.status === 'loading' ? (
-            <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成音频中...')} compactSpinner />
+            <NodeGenerationProgress nodeId={id} fallbackLabel={t(data.mediaTaskStage === 'saving' ? '保存中' : '生成音频中...')} compactSpinner />
           ) : (
             <div className="node-preview-placeholder">
               {isSource ? (
@@ -533,8 +665,9 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             </div>
           )}
           {data.audioUrl && data.status === 'loading' && (
-            <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成音频中...')} overlay />
+            <NodeGenerationProgress nodeId={id} fallbackLabel={t(data.mediaTaskStage === 'saving' ? '保存中' : '生成音频中...')} overlay />
           )}
+          {data.mediaTaskState && data.status !== 'loading' && <MediaTaskStatus nodeId={id} overlay />}
         </div>
         {data.error && <NodeError nodeId={id} message={data.error} />}
         <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-audio" >
@@ -544,11 +677,21 @@ function AIAudioNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           <GooeyBtn className="gooey-btn-right" hue={30} />
         </Handle>
       </div>
+      <FullscreenOverlay isOpen={!!fullscreen} onClose={closeFullscreen} hidePanel unmountOnClose>
+        {fullscreen && (
+          <CanvasAudioPreview
+            nodeId={id} openingProjectId={fullscreen.projectId}
+            initialTime={fullscreen.time} initiallyPlaying={fullscreen.playing} onClose={closeFullscreen}
+          />
+        )}
+      </FullscreenOverlay>
       {/* 语音识别模型下载弹窗（Portal → body，与超分一致） */}
       <ModelDownloadDialog
         type="asr"
         showPrompt={downloadPrompt}
         showDownloading={isDownloadingModel}
+        progress={modelDownloadProgress}
+        downloadLabel={modelDownloadLabel}
         onConfirm={handleDownloadConfirm}
         onCancel={handleDownloadCancel}
       />

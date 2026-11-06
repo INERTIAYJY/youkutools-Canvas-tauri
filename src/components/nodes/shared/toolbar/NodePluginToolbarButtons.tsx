@@ -1,3 +1,6 @@
+/**
+ * NodePluginToolbarButtons — 提供节点插件工具栏界面与交互。
+ */
 import { Icon } from '@iconify/react';
 import { useCallback, useMemo, useState } from 'react';
 import { getAvailableNodePluginTools } from '../../../../services/plugins/pluginRuntime';

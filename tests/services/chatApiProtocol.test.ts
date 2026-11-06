@@ -1,3 +1,6 @@
+/**
+ * chatApiProtocol — 回归测试：chat API protocol adapter。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   buildChatApiRequest,

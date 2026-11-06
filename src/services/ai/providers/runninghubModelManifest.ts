@@ -20,6 +20,17 @@ export interface RunningHubModelDefinition {
   parameters: RunningHubModelParameter[]; audioPurpose?: 'speech' | 'music';
 }
 
+/** 字段名优先于标签和说明；说明同时提及两端时不推断角色。 */
+export function runningHubFrameRole(field: RunningHubModelParameter): 'first_frame' | 'last_frame' | undefined {
+  if (field.binding !== 'image') return undefined;
+  for (const text of [field.name, field.label, field.hint ?? '']) {
+    const first = /首帧|(?:first|start)[\s_-]*(?:frame|image)/i.test(text);
+    const last = /尾帧|(?:last|end)[\s_-]*(?:frame|image)/i.test(text);
+    if (first !== last) return first ? 'first_frame' : 'last_frame';
+  }
+  return undefined;
+}
+
 export const RUNNINGHUB_MODEL_MANIFEST: readonly RunningHubModelDefinition[] = [
   {"id":"vidu/start-end-to-video-q2-turbo","label":"Vidu-start-end-to-video-q2-turbo","kind":"video","source":"https://www.runninghub.ai/runninghub-api-doc-en/api-448184336.md","operation":"image-to-video","parameters":[{"name":"prompt","label":"提示词","schema":{"type":"string","minLength":1,"maxLength":4000},"required":true,"binding":"prompt"},{"name":"firstImageUrl","label":"首帧图片","schema":{"type":"string","format":"uri"},"required":true,"binding":"image","referenceIndex":0,"mediaKind":"image"},{"name":"lastImageUrl","label":"尾帧图片","schema":{"type":"string","format":"uri"},"required":true,"binding":"image","referenceIndex":1,"mediaKind":"image"},{"name":"duration","label":"时长（秒）","schema":{"type":"string","enum":["1","2","3","4","5","6","7","8"]},"required":true,"defaultValue":"5"},{"name":"resolution","label":"分辨率","schema":{"type":"string","enum":["540p","720p","1080p"]},"required":true,"defaultValue":"720p"},{"name":"movementAmplitude","label":"movementAmplitude","schema":{"type":"string","enum":["auto","small","medium","large"]},"required":true,"defaultValue":"auto"},{"name":"bgm","label":"bgm","schema":{"type":"boolean"},"required":true,"defaultValue":true}]},
   {"id":"vidu/start-end-to-video-q2-pro","label":"Vidu-start-end-to-video-q2-pro","kind":"video","source":"https://www.runninghub.ai/runninghub-api-doc-en/api-448184337.md","operation":"image-to-video","parameters":[{"name":"prompt","label":"提示词","schema":{"type":"string","minLength":1,"maxLength":4000},"required":true,"binding":"prompt"},{"name":"firstImageUrl","label":"首帧图片","schema":{"type":"string","format":"uri"},"required":true,"binding":"image","referenceIndex":0,"mediaKind":"image"},{"name":"lastImageUrl","label":"尾帧图片","schema":{"type":"string","format":"uri"},"required":true,"binding":"image","referenceIndex":1,"mediaKind":"image"},{"name":"duration","label":"时长（秒）","schema":{"type":"string","enum":["1","2","3","4","5","6","7","8"]},"required":true,"defaultValue":"5"},{"name":"resolution","label":"分辨率","schema":{"type":"string","enum":["540p","720p","1080p"]},"required":true,"defaultValue":"720p"},{"name":"movementAmplitude","label":"movementAmplitude","schema":{"type":"string","enum":["auto","small","medium","large"]},"required":true,"defaultValue":"auto"},{"name":"bgm","label":"bgm","schema":{"type":"boolean"},"required":true,"defaultValue":true}]},

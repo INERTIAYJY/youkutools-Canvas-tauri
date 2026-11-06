@@ -1,5 +1,9 @@
+/**
+ * httpTransport — 回归测试：CORS-safe AI HTTP transport。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { corsSafeFetch, logAiRequest } from '../../src/services/ai/httpTransport';
+import { parseResponseError } from '../../src/services/ai/httpUtils';
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -48,6 +52,178 @@ beforeEach(() => {
 });
 
 describe('CORS-safe AI HTTP transport', () => {
+  it('rejects oversized blobs before reading their bytes and releases the request slot', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const body = new Blob(['small fixture']);
+    Object.defineProperty(body, 'size', { value: 65 * 1024 * 1024 + 1 });
+    const read = vi.spyOn(body, 'arrayBuffer');
+    await expect(corsSafeFetch('https://gateway.example/upload', { method: 'POST', body })).rejects.toThrow('65 MiB');
+    expect(read).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+    mockNativeStream([Buffer.from('ok')]);
+    expect(await (await corsSafeFetch('https://gateway.example/upload', { method: 'POST', body: 'next' })).text()).toBe('ok');
+  });
+
+  it('preserves UTF-8 replacement semantics without Base64-encoding text requests', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    mockNativeStream([]);
+    await corsSafeFetch('https://gateway.example/text', { method: 'POST', body: '中文🙂\uD800' });
+    expect(invokeMock.mock.calls[0][1].req).toMatchObject({ body: null, textBody: '中文🙂\uFFFD' });
+  });
+
+  it('limits body submissions, permits cancellation while queued, and releases slots at response headers', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const channels: MockNativeStreamChannel[] = [];
+    const finish: Array<() => void> = [];
+    invokeMock.mockImplementation((_command: string, args?: MockNativeInvokeArgs) => {
+      channels.push(args!.onEvent!);
+      return new Promise<void>((resolve) => finish.push(resolve));
+    });
+    const first = corsSafeFetch('https://gateway.example/first', { method: 'POST', body: 'first' });
+    const second = corsSafeFetch('https://gateway.example/second', { method: 'POST', body: 'second' });
+    const abort = new AbortController();
+    const cancelled = corsSafeFetch('https://gateway.example/cancelled', { method: 'POST', body: 'cancelled', signal: abort.signal });
+    const rejected = expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(channels).toHaveLength(2));
+    abort.abort();
+    await rejected;
+    const third = corsSafeFetch('https://gateway.example/third', { method: 'POST', body: 'third' });
+    expect(channels).toHaveLength(2);
+    channels[0].onmessage({ event: 'meta', status: 200, headers: [] });
+    await first;
+    await vi.waitFor(() => expect(channels).toHaveLength(3));
+    channels[1].onmessage({ event: 'meta', status: 200, headers: [] });
+    channels[2].onmessage({ event: 'meta', status: 200, headers: [] });
+    channels.forEach((channel) => channel.onmessage({ event: 'done' }));
+    finish.forEach((resolve) => resolve());
+    await Promise.all([second, third]);
+    expect(invokeMock.mock.calls.map(([, args]) => args.req.url)).not.toContain('https://gateway.example/cancelled');
+  });
+
+  it('logs native error bodies without consuming them or exposing echoed credentials', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const body = JSON.stringify({ error: { message: '上游 Not Found echoed-key' }, token: 'response-secret' });
+    const bytes = Buffer.from(body);
+    mockNativeStream([bytes.subarray(0, 25), bytes.subarray(25)], {
+      status: 404, headers: [['content-type', 'application/json']],
+    });
+    const response = await corsSafeFetch('https://gateway.example/v1/chat/completions', {
+      method: 'POST', headers: { authorization: 'Bearer echoed-key' },
+    });
+    expect(await response.text()).toBe(body);
+    expect(response.status).toBe(404);
+    expect(warn).toHaveBeenCalledWith('[AI Response Error]', expect.objectContaining({
+      status: 404, contentType: 'application/json', method: 'POST',
+      body: expect.stringContaining('上游 Not Found'),
+    }));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('echoed-key');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('response-secret');
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds error logging and stays silent for successful native responses', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const body = 'x'.repeat(9000);
+    mockNativeStream([Buffer.from(body)], { status: 404 });
+    expect(await (await corsSafeFetch('https://gateway.example/test')).text()).toBe(body);
+    expect(warn).toHaveBeenCalledWith('[AI Response Error]', expect.objectContaining({
+      truncated: true, bodyBytes: 9000, body: expect.stringContaining('OMITTED'),
+    }));
+    warn.mockClear();
+    mockNativeStream([Buffer.from('ok')]);
+    expect(await (await corsSafeFetch('https://gateway.example/test')).text()).toBe('ok');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['text/html', 'text/plain'])('explains gateway 504 pages without rendering HTML (%s)', async (contentType) => {
+    const response = new Response('<html><head><title>504 Gateway Time-out</title></head><body>nginx</body></html>', {
+      status: 504, headers: { 'Content-Type': contentType },
+    });
+    const error = await parseResponseError(response, '图片生成失败 (504)').catch((cause: Error) => cause);
+    expect(error.message).toContain('网关等待上游响应超时');
+    expect(error.message).toContain('结果尚未确认');
+    expect(error.message).not.toContain('<html>');
+  });
+
+  it('preserves provider JSON diagnostics for a 504', async () => {
+    const response = new Response(JSON.stringify({ error: { message: 'request abc timed out' } }), {
+      status: 504, headers: { 'Content-Type': 'application/json' },
+    });
+    await expect(parseResponseError(response, '图片生成失败 (504)')).rejects.toThrow('request abc timed out');
+  });
+
+  it('preserves all four multipart files and their order through native encoding', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    mockNativeStream([Buffer.from('{}')]);
+    const body = new FormData();
+    for (let index = 0; index < 4; index++) {
+      body.append('image[]', new Blob([`image-${index}`], { type: 'image/png' }), `reference-${index}.png`);
+    }
+    await corsSafeFetch('https://gateway.example/images/edits', { method: 'POST', body });
+    const req = invokeMock.mock.calls[0][1].req as { body: string; headers: [string, string][] };
+    const headers = new Headers(req.headers);
+    const decoded = await new Response(Buffer.from(req.body, 'base64'), { headers }).formData();
+    const files = decoded.getAll('image[]') as File[];
+    expect(files).toHaveLength(4);
+    expect(await Promise.all(files.map((file) => file.text()))).toEqual(['image-0', 'image-1', 'image-2', 'image-3']);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves upstream failure status and permits the next request without resetting the transport', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    mockNativeStream([Buffer.from(JSON.stringify({ error: { message: 'Upstream request failed' } }))], {
+      status: 502, headers: [['content-type', 'application/json']],
+    });
+    const failed = await corsSafeFetch('https://gateway.example/images/edits', {
+      method: 'POST', body: 'first',
+    });
+    await expect(parseResponseError(failed, '图片生成失败 (502)')).rejects.toThrow('Upstream request failed（HTTP 502）');
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    mockNativeStream([Buffer.from('{"result":"ok"}')], { headers: [['content-type', 'application/json']] });
+    const next = await corsSafeFetch('https://gateway.example/images/edits', { method: 'POST', body: 'second' });
+    await expect(next.json()).resolves.toEqual({ result: 'ok' });
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('yields during large request encoding and preserves bytes across consecutive calls', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    mockNativeStream([Buffer.from('{}')]);
+    const bytes = Uint8Array.from({ length: 2 * 1024 * 1024 + 5 }, (_, index) => index % 251);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const sentBefore = invokeMock.mock.calls.length;
+      let yieldedBeforeSend = false;
+      const heartbeat = new Promise<void>((resolve) => setTimeout(() => {
+        yieldedBeforeSend = invokeMock.mock.calls.length === sentBefore;
+        resolve();
+      }, 0));
+      const response = await corsSafeFetch('https://gateway.example/upload', {
+        method: 'POST', body: bytes,
+      });
+      await heartbeat;
+      expect(yieldedBeforeSend).toBe(true);
+      await response.text();
+      const req = invokeMock.mock.calls.at(-1)![1].req as { body: string; requestId: string };
+      expect(Buffer.from(req.body, 'base64').equals(Buffer.from(bytes))).toBe(true);
+    }
+    expect(invokeMock.mock.calls[0][1].req.requestId).not.toBe(invokeMock.mock.calls[1][1].req.requestId);
+  });
+
+  it('cancels large request encoding before sending a native request', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 0);
+    try {
+      await expect(corsSafeFetch('https://gateway.example/upload', {
+        method: 'POST', body: new Uint8Array(2 * 1024 * 1024), signal: controller.signal,
+      })).rejects.toMatchObject({ name: 'AbortError' });
+      expect(invokeMock).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   it('logs readable request parameters without exposing credentials or local media', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     const formData = new FormData();
@@ -130,14 +306,16 @@ describe('CORS-safe AI HTTP transport', () => {
 
     const requestCall = invokeMock.mock.calls.find(([command]) => command === 'proxy_stream_fetch');
     const request = requestCall?.[1]?.req as {
-      body: string;
+      body: null;
+      textBody: string;
       headers: [string, string][];
       method: string;
       url: string;
     };
     expect(request.url).toBe('https://gateway.example/v1/render');
     expect(request.method).toBe('POST');
-    expect(Buffer.from(request.body, 'base64').toString('utf8')).toBe(JSON.stringify({
+    expect(request.body).toBeNull();
+    expect(request.textBody).toBe(JSON.stringify({
       prompt: '亚洲美女跳舞',
     }));
     expect(request.headers).toEqual(expect.arrayContaining([

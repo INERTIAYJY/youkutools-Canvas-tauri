@@ -1,3 +1,6 @@
+/**
+ * panoramaInternalization — 回归测试：built-in panorama distribution。
+ */
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

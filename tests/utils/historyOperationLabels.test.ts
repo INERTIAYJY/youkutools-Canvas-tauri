@@ -1,9 +1,13 @@
+/**
+ * historyOperationLabels — 回归测试：从快照差异推断操作名。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   describeCanvasChange,
   type HistorySnapshotLike,
 } from '../../src/utils/historyOperationLabels';
 import type { BaseNodeData, NodeGroup } from '../../src/types';
+import { getLocale, setLocale } from '../../src/i18n';
 
 function node(
   id: string,
@@ -23,6 +27,19 @@ function snapshot(partial: Partial<HistorySnapshotLike> = {}): HistorySnapshotLi
 }
 
 describe('从快照差异推断操作名', () => {
+  it('translates dynamic node counts and connection counts', () => {
+    const previousLocale = getLocale();
+    try {
+      setLocale('en-US');
+      expect(describeCanvasChange(snapshot(), snapshot({ nodes: [node('a'), node('b')] })).title)
+        .toBe('Added 2 Generate Image nodes');
+      expect(describeCanvasChange(snapshot(), snapshot({ edges: [{ id: 'a' }, { id: 'b' }] })).title)
+        .toBe('Added 2 connections');
+    } finally {
+      setLocale(previousLocale);
+    }
+  });
+
   it('单个新增节点用节点类型命名', () => {
     const result = describeCanvasChange(
       snapshot(),
@@ -102,6 +119,47 @@ describe('从快照差异推断操作名', () => {
       snapshot({ nodes: [beforeNode] }),
       snapshot({ nodes: [afterNode] }),
     ).title).toBe('调整节点大小');
+  });
+
+  it.each([
+    { dimensions: { width: 1000, height: 700, style: { width: 300, height: 200 }, measured: { width: 900, height: 600 } },
+      expandedSize: { width: 1000, height: 700 } },
+    { dimensions: { style: { width: 300, height: 240 }, measured: { width: 900, height: 600 } },
+      expandedSize: { width: 300, height: 240 } },
+    { dimensions: { measured: { width: 900, height: 600 } }, expandedSize: { width: 900, height: 600 } },
+    { dimensions: {}, expandedSize: { width: 320, height: 200 } },
+  ])('分组开合按展开尺寸比较，不误报内容或尺寸变化：$expandedSize', ({ dimensions, expandedSize }) => {
+    const expanded = { ...node('g1', 'group', { x: 0, y: 0 }, {
+      type: 'comment', groupId: 'g1', groupExpandedSize: { width: 500, height: 350 },
+    }), ...dimensions };
+    const collapsed = { ...expanded, width: 220, height: 152, measured: { width: 220, height: 152 },
+      style: { width: 220, height: 152 },
+      data: { ...expanded.data, groupCollapsed: true, groupExpandedSize: expandedSize },
+    };
+    const before = snapshot({ nodes: [expanded], groups: [group('g1', [])] });
+    const after = snapshot({ nodes: [collapsed], groups: before.groups });
+
+    expect(describeCanvasChange(before, after).title).toBe('画布修改');
+    expect(describeCanvasChange(after, before).title).toBe('画布修改');
+  });
+
+  it.each([false, true])('仍能识别分组实际缩放，含收起时的展开尺寸变化（原先收起：%s）', (initiallyCollapsed) => {
+    const original = node('g1', 'group', { x: 0, y: 0 }, { type: 'comment', groupId: 'g1' });
+    const beforeNode = { ...original,
+      width: initiallyCollapsed ? 220 : 1000,
+      height: initiallyCollapsed ? 152 : 700,
+      style: { width: initiallyCollapsed ? 220 : 1000, height: initiallyCollapsed ? 152 : 700 },
+      data: { ...original.data, groupCollapsed: initiallyCollapsed || undefined,
+        groupExpandedSize: { width: 1000, height: 700 } },
+    };
+    const afterNode = { ...beforeNode, width: 220, height: 152, style: { width: 220, height: 152 },
+      data: { ...original.data, groupCollapsed: true, groupExpandedSize: { width: 1200, height: 900 } },
+    };
+    const before = snapshot({ nodes: [beforeNode], groups: [group('g1', [])] });
+    const after = snapshot({ nodes: [afterNode], groups: before.groups });
+
+    expect(describeCanvasChange(before, after).title).toBe('调整节点大小');
+    expect(describeCanvasChange(after, before).title).toBe('调整节点大小');
   });
 
   it('完全相同的快照退回通用描述', () => {

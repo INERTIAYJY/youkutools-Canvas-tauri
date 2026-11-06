@@ -2,6 +2,231 @@
    Settings Panel — API Key Configuration
    ============================================ */
 
+/* 设置侧栏使用主题色的不同透明度区分选中与悬浮状态。 */
+.settings-navigation-tab {
+  color: var(--theme-text-secondary);
+}
+
+.settings-navigation-tab--active {
+  background: color-mix(in srgb, var(--brand) 24%, var(--theme-card));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 34%, transparent);
+  color: var(--brand-light);
+}
+
+.settings-navigation-tab:not(.settings-navigation-tab--active):hover {
+  background: color-mix(in srgb, var(--brand) 14%, var(--theme-card));
+  color: var(--theme-text);
+}
+
+/* Subtle dot grid pattern for canvas preview cards */
+.bg-dot-pattern {
+  background-image: radial-gradient(var(--theme-text-muted, #94a3b8) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+.bg-dot-pattern-dense {
+  background-image: radial-gradient(color-mix(in srgb, var(--theme-text-muted, #94a3b8) 45%, transparent) 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+.bg-dot-pattern-dark {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.18) 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+
+/* ============================================
+   Appearance Settings Layout & Theme Compatibility
+   ============================================ */
+
+/* 1. Modal Window Shell */
+.glass-panel.settings-modal-shell,
+.settings-modal-shell {
+  border-color: transparent;
+  box-shadow: var(--glass-shadow-panel);
+}
+[data-theme='light'] .glass-panel.settings-modal-shell,
+[data-theme='light'] .settings-modal-shell {
+  border-color: var(--theme-border);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+/* 2. Modal Header */
+.settings-modal-header {
+  background: color-mix(in srgb, var(--theme-surface) 65%, transparent);
+  border-bottom: 1px solid var(--theme-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+[data-theme='dark'] .settings-modal-header {
+  background: color-mix(in srgb, var(--theme-surface) 65%, transparent);
+  border-bottom: 1px solid var(--theme-border);
+}
+[data-theme='light'] .settings-modal-header {
+  background: color-mix(in srgb, var(--theme-surface) 90%, transparent);
+}
+.settings-modal-header-title {
+  color: var(--theme-text);
+}
+[data-theme='dark'] .settings-modal-header-title {
+  color: var(--theme-text);
+}
+
+
+/* 3. Left Sidebar Nav */
+.settings-sidebar {
+  background-color: color-mix(in srgb, var(--theme-surface) 40%, transparent);
+  border-right: 1px solid var(--theme-border);
+}
+[data-theme='light'] .settings-sidebar {
+  background-color: color-mix(in srgb, var(--theme-surface) 70%, transparent);
+}
+
+/* Sidebar Nav Buttons */
+.settings-sidebar-btn {
+  color: var(--theme-text-secondary);
+}
+.settings-sidebar-btn:hover {
+  background-color: color-mix(in srgb, var(--brand) 14%, var(--theme-card));
+  color: var(--theme-text);
+}
+.settings-sidebar-btn--active {
+  background-color: color-mix(in srgb, var(--brand) 24%, var(--theme-card));
+  color: var(--brand-light);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 34%, transparent);
+}
+[data-theme='light'] .settings-sidebar-btn--active {
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--brand) 8%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--brand) 15%, transparent);
+}
+
+.settings-sidebar-icon {
+  color: var(--theme-text-muted);
+}
+.settings-sidebar-btn:hover .settings-sidebar-icon {
+  color: var(--theme-text);
+}
+.settings-sidebar-btn--active .settings-sidebar-icon {
+  color: var(--brand-light);
+}
+
+/* Sidebar Footer */
+.settings-sidebar-footer {
+  border-top: 1px solid var(--theme-border);
+  color: var(--theme-text-muted);
+}
+
+/* Divider Lines */
+.settings-h-divider {
+  background-color: var(--theme-border);
+}
+.border-b.settings-h-divider {
+  border-bottom-color: var(--theme-border);
+  background-color: transparent;
+}
+
+/* 4. Main View Container */
+.settings-appearance-view {
+  background-color: var(--theme-surface);
+}
+
+/* 5. Header Badge & Icon */
+.settings-header-icon-box {
+  background-color: var(--brand-alpha-10);
+  border: 1px solid var(--brand-alpha-20);
+  color: var(--brand);
+}
+.settings-theme-pill {
+  background-color: var(--theme-card);
+  border: 1px solid var(--theme-border);
+  color: var(--theme-text-secondary);
+}
+
+/* 6. Section Card */
+.settings-section-card {
+  background-color: var(--theme-card);
+  border: 1px solid var(--theme-border);
+}
+.settings-section-icon-box {
+  background-color: var(--brand-alpha-10);
+  color: var(--brand);
+}
+.settings-section-title {
+  color: var(--theme-text);
+}
+.settings-section-desc {
+  color: var(--theme-text-muted);
+}
+
+/* 7. Action Button */
+.settings-action-btn {
+  background-color: var(--theme-card);
+  border: 1px solid var(--theme-border);
+  color: var(--theme-text);
+}
+.settings-action-btn:hover {
+  background-color: var(--theme-hover);
+}
+
+/* 8. Overwrite Button */
+.settings-overwrite-btn {
+  background-color: color-mix(in srgb, var(--theme-card) 60%, transparent);
+  border: 1px solid var(--theme-border);
+  color: var(--theme-text-secondary);
+}
+.settings-overwrite-btn:hover:not(:disabled) {
+  background-color: var(--theme-hover);
+}
+
+/* 11. Sub Card (e.g. ColorCardInput container) */
+.settings-sub-card {
+  background-color: var(--theme-card);
+  border: 1px solid var(--theme-border);
+}
+
+.settings-sub-card-inner {
+  background-color: var(--theme-input-bg);
+  border: 1px solid var(--theme-border);
+}
+
+/* 12. Segmented Mode Button */
+.settings-mode-btn {
+  border: 1px solid var(--theme-border);
+  color: var(--theme-text-secondary);
+}
+.settings-mode-btn:hover {
+  border-color: var(--theme-hover);
+  background-color: var(--theme-hover);
+}
+.settings-mode-btn--active {
+  border-color: var(--brand);
+  background-color: var(--brand-alpha-15);
+  color: var(--brand-light);
+  outline: 1px solid var(--brand-alpha-30);
+}
+
+/* 13. Preset Cards */
+.settings-preset-card {
+  border: 1px solid var(--theme-border);
+  background-color: var(--theme-card);
+}
+.settings-preset-card:hover {
+  border-color: color-mix(in srgb, var(--theme-border) 80%, var(--brand));
+}
+.settings-preset-card--active {
+  border: 2px solid var(--brand);
+  background-color: var(--brand-alpha-05);
+}
+
+/* 14. Badge tags inside Preset Cards */
+.settings-tag-badge {
+  background-color: var(--theme-hover);
+  border: 1px solid var(--theme-border);
+  color: var(--theme-text-muted);
+}
+
+.settings-tag-active {
+  background-color: var(--brand-alpha-15);
+  color: var(--brand-light);
+}
+
 /* ── Pane layout ── */
 .settings-pane {
   display: flex;
@@ -653,7 +878,7 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--theme-text);
   box-shadow: 0 1px 3px var(--black-alpha-40);
   transition: transform 0.42s var(--ease-spring);
 }
@@ -662,6 +887,18 @@
 }
 .sidebar-pref-card.is-floating .sidebar-pref-switch span {
   transform: translateX(16px);
+}
+[data-theme='light'] .sidebar-pref-switch {
+  background: color-mix(in srgb, var(--theme-text) 12%, transparent);
+}
+[data-theme='light'] .sidebar-pref-switch span {
+  background: var(--theme-surface);
+}
+[data-theme='light'] .sidebar-pref-card.is-floating .sidebar-pref-switch {
+  background: var(--brand);
+}
+[data-theme='light'] .sidebar-pref-card.is-floating .sidebar-pref-switch span {
+  background: var(--brand-contrast);
 }
 
 /* ============================================
@@ -929,8 +1166,8 @@
 }
 
 .provider-dialog {
-  width: min(760px, calc(100vw - 32px));
-  height: min(680px, calc(100vh - 32px));
+  width: min(900px, 90vw);
+  height: min(940px, 90vh);
   border-radius: 8px;
   background: var(--theme-surface);
 }
@@ -938,8 +1175,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 62px;
-  padding: 9px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--theme-border);
 }
 .provider-dialog-header h3 {
@@ -1076,7 +1312,7 @@
   border-radius: 6px;
   outline: none;
   color: var(--theme-text);
-  background: var(--white-alpha-04);
+  background: var(--theme-input-bg);
   font: inherit;
   font-size: 11px;
   transition: border-color var(--transition-base), background var(--transition-base);
@@ -1086,7 +1322,7 @@
 .provider-manual-fields input:focus,
 .provider-manual-fields select:focus {
   border-color: var(--border-focus);
-  background: var(--white-alpha-06);
+  background: var(--theme-input-bg);
 }
 .provider-field input:disabled {
   cursor: var(--cursor-not-allowed, not-allowed);
@@ -1211,7 +1447,7 @@
   border: 1px solid var(--theme-border);
   border-radius: 6px;
   color: var(--theme-text-muted);
-  background: var(--white-alpha-04);
+  background: var(--theme-input-bg);
 }
 .provider-search input {
   height: 30px;
@@ -1614,7 +1850,7 @@
   border-radius: 6px;
   outline: none;
   color: var(--theme-text);
-  background: var(--white-alpha-04);
+  background: var(--theme-input-bg);
   font: inherit;
   font-size: 12px;
 }
@@ -1677,6 +1913,10 @@
   color: var(--theme-text-muted);
   font-size: 12px;
   line-height: 1.4;
+}
+.provider-protocol-json-variables .ui-chip {
+  padding: 2px 6px;
+  font-size: 10px;
 }
 .provider-protocol-json-guide-title svg {
   flex: 0 0 auto;
@@ -1912,10 +2152,6 @@
 }
 
 @media (max-width: 700px) {
-  .provider-dialog {
-    width: calc(100vw - 20px);
-    height: calc(100vh - 20px);
-  }
   .provider-picker-grid,
   .provider-fields-grid {
     grid-template-columns: minmax(0, 1fr);

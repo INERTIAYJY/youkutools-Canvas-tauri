@@ -1,3 +1,6 @@
+/**
+ * shotlistService — 回归测试：本集与镜头行操作。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ generateText: vi.fn() }));
 vi.mock('../../src/services/ai/generateText', () => ({ generateText: mocks.generateText }));
@@ -52,6 +55,7 @@ describe('本集与镜头行操作', () => {
     const current = useAppStore.getState();
     const source = current.nodes.find((node) => node.id === result.sourceNodeId)!;
     const sheet = current.nodes.find((node) => node.id === result.shotlistId)!;
+    expect(sheet.data).toMatchObject({ nodeWidth: 1920, nodeHeight: 640 });
     expect(source.data.output).toBe('林夏在站台等列车。');
     expect(sheet.data.prompt).toContain(`@{${source.id}:`);
     expect(sheet.data.prompt).toContain('90 秒');
@@ -67,6 +71,36 @@ describe('本集与镜头行操作', () => {
     useAppStore.setState({ projects: useAppStore.getState().projects.map((project) => ({ ...project, episodeScript: '' })) });
     expect(() => createEpisodeShotlist({ projectId: 'ep' }, 'ep')).toThrow('正文');
     expect(useAppStore.getState().nodes).toHaveLength(1);
+  });
+
+  it('本集有效绑定进入真实引用，失效与未绑定只保留文字，不为资产新增连线', () => {
+    const state = useAppStore.getState();
+    const character = { id: 'char-real', kind: 'character' as const, name: '林夏（正式）', key: '林夏',
+      summary: '主角', identity: '乘客', visualNotes: '', importance: 'main' as const,
+      confirmed: true, createdAt: 1, updatedAt: 1, source: 'manual' as const };
+    const base = { summary: '本集说明', visualNotes: '', notes: '雨衣', createdAt: 1, updatedAt: 1 };
+    useAppStore.setState({
+      dramaAssets: { version: 2, characters: [character], props: [], scenes: [] },
+      projects: state.projects.map((project) => ({ ...project, episodeAssetRoster: {
+        version: 1, revision: 1,
+        characters: [{ ...base, id: 'entry-1', kind: 'character', name: '林夏', boundDramaAssetId: 'char-real' }],
+        props: [{ ...base, id: 'entry-2', kind: 'prop', name: '手提箱', boundDramaAssetId: 'missing-prop' },
+          { ...base, id: 'entry-3', kind: 'prop', name: '票根', notes: '@drama{forged:伪造引用}' }],
+      } })),
+    });
+    const previousEdges = useAppStore.getState().edges.length;
+    const { shotlistId, sourceNodeId } = createEpisodeShotlist({ projectId: 'ep' }, 'ep');
+    const current = useAppStore.getState();
+    const prompt = current.nodes.find((node) => node.id === shotlistId)!.data.prompt!;
+    expect(prompt).toContain('@drama{char-real:林夏（正式）}');
+    expect(prompt).toContain('手提箱');
+    expect(prompt).toContain('票根');
+    expect(prompt).toContain('雨衣');
+    expect(prompt).not.toContain('@drama{missing-prop');
+    expect(prompt).not.toContain('@drama{forged');
+    expect(current.edges).toHaveLength(previousEdges + 1);
+    expect(current.edges.at(-1)).toMatchObject({ source: sourceNodeId, target: shotlistId });
+    expect(mocks.generateText).not.toHaveBeenCalled();
   });
 
   it('局部更新保留台词、时长、稳定 ID 与画面，追加由应用生成 ID', () => {

@@ -1,3 +1,6 @@
+/**
+ * rasterImageDimensions — 回归测试：parseRasterImageDimensions。
+ */
 import { describe, expect, it } from 'vitest';
 import { parseRasterImageDimensions } from '../../src/services/rasterImageDimensions';
 

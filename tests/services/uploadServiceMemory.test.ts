@@ -1,3 +1,6 @@
+/**
+ * uploadServiceMemory — 回归测试：uploadService 内存上传治理。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -16,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   ).toString('base64')),
   consumeMediaDataUrlBudget: vi.fn(),
   invoke: vi.fn(),
+  lstat: vi.fn(),
+  fingerprintAssetImage: vi.fn(),
 }));
 
 vi.mock('../../src/store/useAppStore', () => ({
@@ -46,6 +51,8 @@ vi.mock('../../src/services/fileService', () => ({
   readFileToDataUrl: vi.fn(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ lstat: mocks.lstat }));
+vi.mock('../../src/services/fs/assetImageMetadata', () => ({ fingerprintAssetImage: mocks.fingerprintAssetImage }));
 
 import {
   UPLOAD_TIMEOUT_MS,
@@ -65,6 +72,8 @@ function responseFor(blob: Blob): Response {
 describe('uploadService 内存上传治理', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.lstat.mockRejectedValue(new Error('文件指纹不可用'));
+    mocks.fingerprintAssetImage.mockReset();
     const storage = new Map<string, string>();
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => storage.get(key) ?? null,
@@ -88,7 +97,64 @@ describe('uploadService 内存上传治理', () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
+  it('同路径同大小的素材替换后重新上传，不复用旧内容', async () => {
+    const firstDigest = '065e63ae4aaf470d85613fb7e8b57882290868d83020c3f39db0ff73c4d1b292';
+    const secondDigest = '372e37ee7c3728ee626af872eb870d91f408eeca8a6997470aa840226fc0c612';
+    let source = new Uint8Array([1, 2, 3]);
+    let digest = firstDigest;
+    mocks.lstat.mockResolvedValue({ size: 3, isFile: true, isSymlink: false });
+    mocks.fingerprintAssetImage.mockImplementation(async () => ({ digest, bytes: 3 }));
+    const fetchMock = vi.fn(async () => responseFor(new Blob([source], { type: 'image/png' })));
+    vi.stubGlobal('fetch', fetchMock);
+    let uploads = 0;
+    mocks.invoke.mockImplementation(async () => ({ status: 200,
+      body: btoa(JSON.stringify({ success: true, files: [{ url: `https://cdn.example/source-version-${++uploads}` }] })),
+    }));
+    const url = 'asset://localhost/source-version.png';
+    const provider = 'versioned-source';
+    expect(await uploadToRemote(url, provider)).toBe('https://cdn.example/source-version-1');
+    expect(await uploadToRemote(url, provider)).toBe('https://cdn.example/source-version-1');
+    source = new Uint8Array([4, 5, 6]);
+    digest = secondDigest;
+    expect(await uploadToRemote(url, provider)).toBe('https://cdn.example/source-version-2');
+    expect(uploads).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const saved = localStorage.getItem('canvas-upload-cache-v4') ?? '';
+    expect(saved).not.toContain(url);
+    expect(saved).not.toContain('/source-version.png');
+  });
+
+  it('排队后实际读到的字节与身份不一致时，在上传前失败', async () => {
+    mocks.lstat.mockResolvedValue({ size: 3, isFile: true, isSymlink: false });
+    mocks.fingerprintAssetImage.mockResolvedValue({
+      digest: '065e63ae4aaf470d85613fb7e8b57882290868d83020c3f39db0ff73c4d1b292', bytes: 3,
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => responseFor(new Blob([new Uint8Array([4, 5, 6])], { type: 'image/png' }))));
+    await expect(uploadToRemote('asset://localhost/changed-while-queued.png', 'changed-source'))
+      .rejects.toThrow('参考素材在读取期间发生变化');
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it('无法核实文件内容时不沿用路径缓存，仍使用原有读取权限', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => responseFor(new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }))));
+    let uploads = 0;
+    mocks.invoke.mockImplementation(async () => ({ status: 200,
+      body: btoa(JSON.stringify({ success: true, files: [{ url: `https://cdn.example/unverified-${++uploads}` }] })),
+    }));
+    const url = 'asset://localhost/unverified-source.png';
+    expect(await uploadToRemote(url, 'unverified-source')).toBe('https://cdn.example/unverified-1');
+    expect(await uploadToRemote(url, 'unverified-source')).toBe('https://cdn.example/unverified-2');
+    expect(localStorage.getItem('canvas-upload-cache-v4')).toBeNull();
+  });
+
   it('不同本地素材也按单并发上传，避免 multipart Base64 峰值叠加', async () => {
+    let releasePreparation: () => void = () => undefined;
+    const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    // 明确让后调用的 B 先完成身份准备，回归 CI 曾出现的合法入队顺序。
+    mocks.lstat.mockImplementation(async (path: string) => {
+      if (path.endsWith('queue-a.png')) await preparationGate;
+      throw new Error('文件指纹不可用');
+    });
     const fileBytes = new Uint8Array([1, 2, 3, 4, 5]);
     const fetchMock = vi.fn(async () => responseFor(new Blob([fileBytes], {
       type: 'image/png',
@@ -100,28 +166,46 @@ describe('uploadService 内存上传治理', () => {
       releaseFirst = resolve;
     });
     let invocation = 0;
+    let activeUploads = 0;
+    let maxActiveUploads = 0;
     mocks.invoke.mockImplementation(async () => {
-      invocation += 1;
-      if (invocation === 1) await firstGate;
-      return {
-        status: 200,
-        body: btoa(JSON.stringify({
-          success: true,
-          files: [{ url: `https://cdn.example/${invocation}.png` }],
-        })),
-      };
+      const uploadIndex = ++invocation;
+      activeUploads += 1;
+      maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+      try {
+        if (uploadIndex === 1) await firstGate;
+        return {
+          status: 200,
+          body: btoa(JSON.stringify({
+            success: true,
+            files: [{ url: `https://cdn.example/${uploadIndex}.png` }],
+          })),
+        };
+      } finally {
+        activeUploads -= 1;
+      }
     });
 
     const first = uploadToRemote('asset://localhost/queue-a.png');
     const second = uploadToRemote('asset://localhost/queue-b.png');
     await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.lstat).toHaveBeenCalledTimes(2));
+    const firstPreparation = mocks.lstat.mock.results[
+      mocks.lstat.mock.calls.findIndex(([path]) => String(path).endsWith('queue-a.png'))
+    ].value;
+    releasePreparation();
+    await expect(firstPreparation).rejects.toThrow('文件指纹不可用');
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     releaseFirst();
-    await expect(Promise.all([first, second])).resolves.toEqual([
+    // 指纹准备异步完成，不约束 A/B 谁先入队；两次上传结果与单并发边界都必须保留。
+    const results = await Promise.all([first, second]);
+    expect(results.toSorted()).toEqual([
       'https://cdn.example/1.png',
       'https://cdn.example/2.png',
     ]);
+    expect(maxActiveUploads).toBe(1);
     expect(mocks.invoke).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const firstBody = mocks.invoke.mock.calls[0]?.[1]?.req?.body as string;
@@ -211,8 +295,8 @@ describe('uploadService 内存上传治理', () => {
       };
     });
 
-    const first = uploadToRemote('asset://localhost/shared-source.png');
-    const second = uploadToRemote('asset://localhost/shared-source.png');
+    const first = uploadToRemote('data:image/png;base64,AQIE');
+    const second = uploadToRemote('data:image/png;base64,AQIE');
     await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
     release();
     await expect(Promise.all([first, second])).resolves.toEqual([
@@ -242,9 +326,9 @@ describe('uploadService 内存上传治理', () => {
 
     const controller = new AbortController();
     const cancelled = uploadToRemote(
-      'asset://localhost/shared-cancel-source.png', '', 'image', controller.signal,
+      'data:image/png;base64,BAUH', '', 'image', controller.signal,
     );
-    const survivor = uploadToRemote('asset://localhost/shared-cancel-source.png');
+    const survivor = uploadToRemote('data:image/png;base64,BAUH');
     await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
     controller.abort(new DOMException('取消单个等待者', 'AbortError'));
     await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });

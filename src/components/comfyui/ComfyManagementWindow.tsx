@@ -1,0 +1,317 @@
+/**
+ * ComfyManagementWindow — 提供ComfyUI 管理窗口界面与交互。
+ */
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Icon } from '@iconify/react';
+import { setLocale, useT } from '../../i18n';
+import { applyAppearanceTheme, installSystemAppearanceListener } from '../../services/appearance/appearanceRuntime';
+import {
+  applyComfyRepositoryAction, cancelComfyDependencies, ComfyDependencyInstallCancelledError,
+  getComfyManagementSnapshot, installComfyDependencies, installComfyExtension, listComfyCatalog,
+} from '../../services/comfyManagementService';
+import type { ComfyCatalogEntry, ComfyDependencyProgress as DependencyProgress, ComfyDownloadProgress as DownloadProgress, ComfyManagementSnapshot, ComfyRepository, ComfyRepositoryAction } from '../../types/comfyManagement';
+import ModalOverlay from '../shared/ModalOverlay';
+import Tabs from '../shared/Tabs';
+import ComfyVersionList from './ComfyVersionList';
+import ComfyLaunchSettings from './ComfyLaunchSettings';
+import ComfyDownloadProgress from './ComfyDownloadProgress';
+import ComfyDependencyProgress from './ComfyDependencyProgress';
+import ComfyModelDedupe from './ComfyModelDedupe';
+import ComfyRuntimeConsole from './ComfyRuntimeConsole';
+import { useComfyRuntime } from '../../hooks/useComfyRuntime';
+import { startManagedComfyUI, stopManagedComfyUI } from '../../services/comfyRuntimeService';
+
+type Tab = 'core' | 'extensions' | 'catalog' | 'settings' | 'models' | 'console';
+interface Confirmation { title: string; detail: string; operation: () => Promise<string> }
+const TABS = [
+  { id: 'core', label: '内核版本', icon: 'lucide:history' },
+  { id: 'extensions', label: '已装插件', icon: 'lucide:blocks' },
+  { id: 'catalog', label: '安装插件', icon: 'lucide:download' },
+  { id: 'settings', label: '常用设置', icon: 'lucide:sliders-horizontal' },
+  { id: 'models', label: '模型去重', icon: 'lucide:files' },
+  { id: 'console', label: '运行控制台', icon: 'lucide:terminal' },
+] as const;
+
+function RepositorySummary({ repository }: { repository: ComfyRepository }) {
+  const t = useT();
+  return <dl className="ui-card p-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
+    <dt className="text-canvas-text-muted">{t('远端地址')}</dt><dd className="break-all select-text">{repository.remoteUrl || t('非 Git 安装')}</dd>
+    <dt className="text-canvas-text-muted">{t('当前分支')}</dt><dd className="font-mono">{repository.branch || t('独立版本（detached HEAD）')}</dd>
+    <dt className="text-canvas-text-muted">{t('当前版本')}</dt><dd className="font-mono break-all">{repository.commit || t('暂无')}{repository.commitDate ? ` · ${repository.commitDate}` : ''}</dd>
+  </dl>;
+}
+
+export default function ComfyManagementWindow() {
+  const t = useT();
+  const [tab, setTab] = useState<Tab>('core');
+  const [modelsVisited, setModelsVisited] = useState(false);
+  const [modelsRevision, setModelsRevision] = useState(0);
+  const [snapshot, setSnapshot] = useState<ComfyManagementSnapshot | null>(null);
+  const [snapshotRevision, setSnapshotRevision] = useState(0);
+  const [busy, setBusy] = useState(() => t('读取安装信息'));
+  const [feedback, setFeedback] = useState<{ text: string; error: boolean; neutral?: boolean } | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [dependencyProgress, setDependencyProgress] = useState<DependencyProgress | null>(null);
+  const [dependencyCancelling, setDependencyCancelling] = useState(false);
+  const [search, setSearch] = useState('');
+  const [catalog, setCatalog] = useState<ComfyCatalogEntry[] | null>(null);
+  const [catalogLimit, setCatalogLimit] = useState(80);
+  const [repositoryUrl, setRepositoryUrl] = useState('');
+  const [versionRepository, setVersionRepository] = useState<ComfyRepository | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const { runtime, error: runtimeError, refresh: refreshRuntime, clearDisplay } = useComfyRuntime(!!snapshot);
+  const busyRef = useRef(true);
+  const aliveRef = useRef(true);
+  const dependencyRequest = useRef<{ requestId: string; cancelling: boolean } | null>(null);
+  const themeCleanup = useRef<() => void>(() => {});
+  const onDownloadProgress = useCallback((progress: DownloadProgress) => {
+    if (aliveRef.current) setDownloadProgress(progress);
+  }, []);
+  const onDependencyProgress = useCallback((progress: DependencyProgress) => {
+    if (aliveRef.current && dependencyRequest.current?.requestId === progress.requestId) setDependencyProgress(progress);
+  }, []);
+
+  const refreshSnapshot = useCallback((isCurrent?: () => boolean, refresh = true) => getComfyManagementSnapshot(refresh).then((next) => {
+    if (!aliveRef.current || (isCurrent && !isCurrent())) return;
+    applyAppearanceTheme(next.uiContext.appearance);
+    themeCleanup.current();
+    themeCleanup.current = installSystemAppearanceListener(() => applyAppearanceTheme(next.uiContext.appearance));
+    setLocale(next.uiContext.language);
+    document.documentElement.toggleAttribute('data-native-cursor', next.uiContext.nativeCursor);
+    setSnapshot(next);
+    if (refresh) setSnapshotRevision((value) => value + 1);
+  }), []);
+  const run = useCallback(async (label: string, operation: () => Promise<string>): Promise<boolean> => {
+    if (busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(label); setFeedback(null); setDownloadProgress(null);
+    try {
+      const message = await operation();
+      if (aliveRef.current && message) setFeedback({ text: t(message), error: false });
+      return true;
+    } catch (error) {
+      if (aliveRef.current) {
+        const cancelled = error instanceof ComfyDependencyInstallCancelledError;
+        setFeedback({ text: t(error instanceof Error ? error.message : String(error)), error: !cancelled, neutral: cancelled });
+      }
+      return false;
+    } finally {
+      busyRef.current = false;
+      if (aliveRef.current) { setBusy(''); setDownloadProgress(null); }
+    }
+  }, [t]);
+  useEffect(() => {
+    let active = true;
+    aliveRef.current = true;
+    void refreshSnapshot(() => active, false).catch((error: unknown) => {
+      if (active && aliveRef.current) setFeedback({ text: error instanceof Error ? error.message : String(error), error: true });
+    }).finally(() => {
+      if (!active || !aliveRef.current) return;
+      busyRef.current = false;
+      setBusy('');
+    });
+    return () => {
+      active = false; aliveRef.current = false; themeCleanup.current();
+      if (dependencyRequest.current) void cancelComfyDependencies(dependencyRequest.current.requestId).catch(() => {});
+    };
+  }, [refreshSnapshot]);
+
+  useEffect(() => {
+    document.title = t('ComfyUI · 设置、管理与运行控制台');
+  }, [t]);
+
+  // 原生管理写入开始时就撤销旧 scanId；操作失败也不能继续展示可替换的旧扫描。
+  const withInvalidatedModelScan = <T,>(operation: () => Promise<T>): Promise<T> => {
+    setModelsRevision((value) => value + 1);
+    return operation();
+  };
+  const installDependencies = (repositoryId: string) => withInvalidatedModelScan(async () => {
+    const requestId = `comfy-deps-${crypto.randomUUID()}`;
+    dependencyRequest.current = { requestId, cancelling: false };
+    setDependencyProgress({ requestId, stage: 'waiting' });
+    setDependencyCancelling(false);
+    try {
+      return await installComfyDependencies(repositoryId, { requestId, onProgress: onDependencyProgress });
+    } finally {
+      if (dependencyRequest.current?.requestId === requestId) {
+        dependencyRequest.current = null;
+        if (aliveRef.current) { setDependencyProgress(null); setDependencyCancelling(false); }
+      }
+    }
+  });
+  const cancelDependencyInstall = async () => {
+    const current = dependencyRequest.current;
+    if (!current || current.cancelling) return;
+    current.cancelling = true;
+    setDependencyCancelling(true);
+    try {
+      await cancelComfyDependencies(current.requestId);
+    } catch {
+      if (aliveRef.current && dependencyRequest.current?.requestId === current.requestId) {
+        current.cancelling = false;
+        setDependencyCancelling(false);
+        setFeedback({ text: t('取消请求失败，安装仍在进行，请重试取消。'), error: true });
+      }
+    }
+  };
+  const mutate = async (request: ComfyRepositoryAction) => {
+    const result = await withInvalidatedModelScan(() => applyComfyRepositoryAction(request, onDownloadProgress));
+    await refreshSnapshot();
+    setCatalog(null);
+    setVersionRepository(null);
+    return result.message;
+  };
+  const switchVersion = (repository: ComfyRepository, reference: string, title: string) => setConfirmation({
+    title: t('切换版本'),
+    detail: t('将 {name} 切换到 {version}。请先停止 ComfyUI，完成后重新启动；已有工作流可能需要兼容的新版本插件。', { name: repository.name, version: title }),
+    operation: () => mutate({ repositoryId: repository.id, action: 'switch', reference }),
+  });
+  const loadCatalog = () => run(t('读取插件目录'), async () => {
+    const next = await listComfyCatalog(onDownloadProgress);
+    if (aliveRef.current) { setCatalog(next); setCatalogLimit(80); }
+    return t('插件目录已刷新');
+  });
+  const install = (url: string, name: string) => setConfirmation({
+    title: t('安装插件'),
+    detail: t('将安装 {name}，初始状态为停用。安装后可显式安装依赖，再启用并重启 ComfyUI。仅安装你信任的插件。', { name }),
+    operation: async () => {
+      const result = await withInvalidatedModelScan(() => installComfyExtension(url, onDownloadProgress));
+      await refreshSnapshot(); setCatalog(null);
+      return result.message;
+    },
+  });
+  const updateAll = () => setConfirmation({
+    title: t('一键更新'),
+    detail: t('依次更新内核和已启用的 Git 插件。有本地修改、独立版本或更新失败时停止，已完成项会保留。请先停止 ComfyUI。'),
+    operation: () => withInvalidatedModelScan(async () => {
+      if (!snapshot) return '';
+      const repositories = [snapshot.core, ...snapshot.extensions].filter((repository): repository is ComfyRepository => !!repository && repository.isGit && repository.enabled && !repository.removed);
+      let completed = 0;
+      try {
+        for (const repository of repositories) {
+          setBusy(t('正在更新 {name}', { name: repository.name }));
+          setDownloadProgress(null);
+          await applyComfyRepositoryAction({ repositoryId: repository.id, action: 'update' }, onDownloadProgress);
+          completed += 1;
+        }
+      } catch (cause) {
+        throw new Error(t('已更新 {count} 项，后续更新停止：{reason}', { count: completed, reason: String(cause) }), { cause });
+      } finally { await refreshSnapshot(); setCatalog(null); }
+      return t('已更新 {count} 项，请重新启动 ComfyUI', { count: completed });
+    }),
+  });
+  const start = () => {
+    setTab('console');
+    setSearch('');
+    void run(t('启动 ComfyUI'), async () => {
+      try { return (await startManagedComfyUI()).message; }
+      finally { refreshRuntime(); }
+    });
+  };
+  const stop = (runId: string) => setConfirmation({
+    title: t('停止 ComfyUI'),
+    detail: t('停止此应用启动的 ComfyUI 服务，正在执行的生成任务会中断。'),
+    operation: async () => {
+      try { return await stopManagedComfyUI(runId); }
+      finally { refreshRuntime(); }
+    },
+  });
+  const filteredExtensions = snapshot?.extensions.filter((repository) => `${repository.name} ${repository.remoteUrl ?? ''}`.toLowerCase().includes(search.trim().toLowerCase())) ?? [];
+  const filteredCatalog = catalog?.filter((entry) => `${entry.name} ${entry.description}`.toLowerCase().includes(search.trim().toLowerCase())) ?? [];
+  const isInstalled = (entry: ComfyCatalogEntry) => entry.installed || !!snapshot?.extensions.some((repository) => !repository.removed && repository.remoteUrl?.replace(/\.git\/?$/, '').replace(/\/$/, '') === entry.repositoryUrl.replace(/\.git\/?$/, '').replace(/\/$/, ''));
+  const isPluginTab = tab === 'extensions' || tab === 'catalog';
+  const isListTab = isPluginTab || tab === 'models' || tab === 'console';
+  const running = runtime?.status === 'starting' || runtime?.status === 'running';
+
+  return <div className="fixed inset-0 flex flex-col bg-canvas-bg text-canvas-text">
+    <header className="shrink-0 border-b border-canvas-border bg-canvas-surface p-3 space-y-3">
+      <div className="ui-row ui-row--between"><div className="min-w-0"><h1 className="text-base font-semibold">ComfyUI {t('管理')}</h1><p className="ui-hint break-all">{snapshot?.installationName || t('本地安装管理')}</p></div>
+        <div className="ui-row">
+          <button type="button" className="ui-icon-btn ui-icon-btn--sm" aria-label={t('刷新列表')} title={t('重新读取本地安装和插件信息；外部修改后请刷新')} disabled={!!busy} onClick={() => void run(t('刷新列表'), async () => { await refreshSnapshot(); return t('安装信息已刷新'); })}><Icon icon="lucide:refresh-cw" width={16} aria-hidden="true" /></button>
+          <button type="button" className="ui-btn ui-btn--primary ui-btn--sm" disabled={!!busy || !snapshot || running} onClick={start}><Icon icon={runtime?.status === 'starting' ? 'lucide:loader-circle' : 'lucide:play'} width={14} className={runtime?.status === 'starting' ? 'animate-spin' : undefined} />{runtime?.status === 'starting' ? t('正在启动') : running ? t('运行中') : t('启动 ComfyUI')}</button>
+          <button type="button" className="ui-btn ui-btn--primary ui-btn--sm" disabled={!!busy || !snapshot?.gitAvailable} onClick={updateAll}><Icon icon="lucide:package-check" width={14} />{t('一键更新')}</button></div>
+      </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-3">
+        <Tabs<Tab> aria-label={t('ComfyUI 管理分类')} value={tab} className="min-w-0 flex-1 basis-96"
+          items={TABS.map((item) => ({ value: item.id, label: <><Icon icon={item.icon} width={15} />{t(item.label)}</>, disabled: !!busy }))}
+          onChange={(next) => { setTab(next); setSearch(''); if (next === 'models') setModelsVisited(true); if (next === 'catalog' && !catalog) void loadCatalog(); }} />
+        {isPluginTab && <div className="ml-auto flex w-80 max-w-full shrink-0 items-center gap-2">
+          <input className="ui-input ui-input--sm min-w-0 flex-1" type="search"
+            aria-label={tab === 'extensions' ? t('搜索已装插件') : t('搜索新插件')}
+            placeholder={tab === 'extensions' ? t('搜索已装插件…') : t('搜索新插件…')}
+            value={search} onChange={(event) => { setSearch(event.target.value); if (tab === 'catalog') setCatalogLimit(80); }} />
+          {tab === 'catalog' && <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm shrink-0" disabled={!!busy} onClick={() => void loadCatalog()}>{t('刷新目录')}</button>}
+        </div>}
+      </div>
+    </header>
+    <main className={`flex-1 min-h-0 min-w-0 p-3 ${isListTab ? 'flex flex-col gap-3 overflow-hidden' : 'ui-scroll space-y-3'}`} aria-busy={!!busy}>
+      <div className="shrink-0 space-y-3">
+        <div className="ui-alert ui-alert--info"><Icon icon="lucide:info" width={16} className="ui-alert__icon" /><div className="ui-alert__body">{tab === 'console' ? t('通过本应用直接启动的 ComfyUI 会在这里显示实时输出，启动参数沿用已保存的常用设置。') : tab === 'models' ? t('扫描和链接替换作用于所选范围。扫描不会修改文件；创建链接前请停止 ComfyUI 和模型下载，完成后重新启动。') : t('管理操作只作用于当前安装目录。修改版本或插件前请停止 ComfyUI，完成后重新启动。插件依赖需单独安装。')}</div></div>
+        {!!busy && !dependencyProgress && <div className="ui-row text-xs text-canvas-text-secondary" role="status"><Icon icon="lucide:loader-circle" width={14} className="animate-spin" />{busy}…</div>}
+        {!!busy && dependencyProgress && <ComfyDependencyProgress title={busy} progress={dependencyProgress}
+          cancelling={dependencyCancelling} onCancel={() => void cancelDependencyInstall()} />}
+        {!!busy && downloadProgress && <ComfyDownloadProgress progress={downloadProgress} />}
+        {feedback && <div className={`ui-alert ${feedback.neutral ? 'ui-alert--info' : feedback.error ? 'ui-alert--danger' : 'ui-alert--success'}`} role={feedback.error ? 'alert' : 'status'}>{feedback.text}</div>}
+        {!!snapshot?.warnings.length && <div className="ui-alert ui-alert--warning">
+          <Icon icon="lucide:triangle-alert" width={16} className="ui-alert__icon" />
+          <details className="ui-alert__body flex-1">
+            <summary className="cursor-pointer font-medium">{t('发现 {count} 条管理提示，点击查看', { count: snapshot.warnings.length })}</summary>
+            <ul className="mt-2 space-y-1 max-h-40 ui-scroll text-xs">{snapshot.warnings.map((warning, index) => <li key={index} className="break-words">{warning}</li>)}</ul>
+          </details>
+        </div>}
+      </div>
+      {!snapshot && !busy && <div className="ui-empty"><Icon icon="lucide:folder-search" width={28} className="ui-empty__icon" /><p className="ui-empty__title">{t('无法读取安装信息')}</p><p className="ui-empty__desc">{t('请在主窗口重新选择 ComfyUI 安装目录，再打开管理窗口。')}</p></div>}
+      {snapshot && tab === 'core' && (snapshot.core ? <>
+        <RepositorySummary repository={snapshot.core} />
+        <div className="ui-row">
+          <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy || !snapshot.core.isGit || snapshot.core.dirty || !snapshot.core.branch} onClick={() => void run(t('更新内核'), () => mutate({ repositoryId: 'core', action: 'update' }))}>{t('更新当前分支')}</button>
+          <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy} onClick={() => void run(t('安装内核依赖'), async () => (await installDependencies('core')).message)}>{t('安装内核依赖')}</button>
+        </div>
+        {snapshot.core.isGit ? <ComfyVersionList key={`${snapshot.core.id}:${snapshot.core.commit}:${snapshotRevision}`} repository={snapshot.core} busy={!!busy} onSwitch={(reference, title) => switchVersion(snapshot.core!, reference, title)} /> : <div className="ui-empty"><p className="ui-empty__title">{t('当前内核不是 Git 安装')}</p><p className="ui-empty__desc">{t('可管理自定义节点和启动设置；该安装不支持内核版本切换。')}</p></div>}
+      </> : <div className="ui-empty"><p className="ui-empty__title">{t('未找到 ComfyUI 内核')}</p></div>)}
+      {snapshot && tab === 'extensions' && <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div role="region" aria-label={t('已装插件列表')} tabIndex={0} className="min-h-0 min-w-0 flex-1 ui-scroll ui-scroll--both rounded-lg border border-canvas-border focus-visible:outline focus-visible:outline-1 focus-visible:outline-brand"><table className="ui-table"><thead className="sticky top-0 z-10 bg-canvas-surface"><tr><th>{t('启用')}</th><th>{t('插件名 / 远端地址')}</th><th>{t('当前分支')}</th><th>{t('版本 ID / 日期')}</th><th>{t('操作')}</th></tr></thead><tbody>
+          {filteredExtensions.map((repository) => <tr key={repository.id}>
+            <td>{repository.removed ? <span className="ui-badge ui-badge--outline">{t('已卸载')}</span> : <button type="button" className="ui-switch" role="switch" aria-checked={repository.enabled} aria-label={t('启用 {name}', { name: repository.name })} disabled={!!busy} onClick={() => void run(t('修改插件状态'), () => mutate({ repositoryId: repository.id, action: repository.enabled ? 'disable' : 'enable' }))} />}</td>
+            <td className="max-w-xs"><div className="font-medium break-all">{repository.name}</div><div className="text-canvas-text-muted text-[11px] truncate" title={repository.remoteUrl ?? ''}>{repository.remoteUrl || t('非 Git 安装')}</div>{repository.dirty && <span className="ui-badge ui-badge--warning mt-1">{t('有本地修改')}</span>}</td>
+            <td className="font-mono text-xs">{repository.branch || '—'}</td><td className="text-xs"><div className="font-mono">{repository.commit?.slice(0, 8) || '—'}</div><div className="text-canvas-text-muted whitespace-nowrap">{repository.commitDate || '—'}</div></td>
+            <td><div className="ui-row ui-row--tight flex-nowrap">
+              {repository.removed ? <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy} onClick={() => void run(t('恢复插件'), () => mutate({ repositoryId: repository.id, action: 'restore' }))}>{t('恢复')}</button> : <>
+                <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy || !repository.isGit || repository.dirty || !repository.branch} onClick={() => void run(t('更新插件'), () => mutate({ repositoryId: repository.id, action: 'update' }))}>{t('更新')}</button>
+                <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy || !repository.isGit} onClick={() => setVersionRepository(repository)}>{t('切换版本')}</button>
+                <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy} onClick={() => void run(t('安装依赖'), async () => (await installDependencies(repository.id)).message)}>{t('安装依赖')}</button>
+                <button type="button" className="ui-btn ui-btn--danger ui-btn--sm" disabled={!!busy} onClick={() => setConfirmation({ title: t('卸载插件'), detail: t('将 {name} 移到本安装的恢复目录，不永久删除；可在列表中恢复。请先停止 ComfyUI。', { name: repository.name }), operation: () => mutate({ repositoryId: repository.id, action: 'uninstall' }) })}>{t('卸载')}</button>
+              </>}
+            </div></td>
+          </tr>)}
+          {!filteredExtensions.length && <tr><td colSpan={5} className="text-canvas-text-muted">{t('暂无匹配插件')}</td></tr>}
+        </tbody></table></div>
+      </section>}
+      {snapshot && tab === 'catalog' && <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+        {catalog && <div role="region" aria-label={t('可安装插件列表')} tabIndex={0} className="min-h-0 min-w-0 flex-1 ui-scroll ui-scroll--both rounded-lg border border-canvas-border focus-visible:outline focus-visible:outline-1 focus-visible:outline-brand"><table className="ui-table"><thead className="sticky top-0 z-10 bg-canvas-surface"><tr><th>{t('插件名')}</th><th>{t('简介')}</th><th>{t('操作')}</th></tr></thead><tbody>
+          {filteredCatalog.slice(0, catalogLimit).map((entry) => <tr key={entry.id}><td className="max-w-xs break-words font-medium">{entry.name}</td><td className="max-w-xl"><p className="text-xs break-words">{entry.description}</p><p className="text-[11px] text-canvas-text-muted break-all mt-1">{entry.repositoryUrl}</p></td><td><button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!!busy || isInstalled(entry) || !snapshot.gitAvailable} onClick={() => install(entry.repositoryUrl, entry.name)}>{isInstalled(entry) ? t('已装') : t('安装')}</button></td></tr>)}
+          {!filteredCatalog.length && <tr><td colSpan={3}>{t('暂无匹配插件')}</td></tr>}
+        </tbody></table>{filteredCatalog.length > catalogLimit && <div className="p-2"><button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" onClick={() => setCatalogLimit((value) => value + 80)}>{t('加载更多')}</button></div>}</div>}
+        <form className="ui-card mt-auto min-w-0 shrink-0 p-2" onSubmit={(event) => { event.preventDefault(); install(repositoryUrl.trim(), repositoryUrl.trim()); }}>
+          <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+            <label htmlFor="comfy-extension-url" className="ui-label flex items-center gap-1.5 whitespace-nowrap"><Icon icon="lucide:link" width={14} />{t('扩展 URL')}</label>
+            <input id="comfy-extension-url" type="url" required className="ui-input ui-input--sm min-w-0" placeholder="https://github.com/owner/ComfyUI-extension" value={repositoryUrl} disabled={!!busy} onChange={(event) => setRepositoryUrl(event.target.value)} />
+            <button type="submit" className="ui-btn ui-btn--primary ui-btn--sm min-w-20" disabled={!!busy || !repositoryUrl.trim().startsWith('https://') || !snapshot.gitAvailable}><Icon icon="lucide:download" width={14} />{t('安装')}</button>
+          </div>
+        </form>
+      </section>}
+      {snapshot && tab === 'settings' && <ComfyLaunchSettings busy={!!busy} run={run} />}
+      {snapshot && modelsVisited && <div hidden={tab !== 'models'} inert={tab !== 'models'}
+        className={tab === 'models' ? 'flex min-h-0 min-w-0 flex-1 flex-col' : 'hidden'}>
+        <ComfyModelDedupe key={modelsRevision} active={tab === 'models'} busy={!!busy} run={run} />
+      </div>}
+      {snapshot && tab === 'console' && <ComfyRuntimeConsole runtime={runtime} error={runtimeError} busy={!!busy} onRetry={refreshRuntime} onClear={clearDisplay} onStop={stop} />}
+    </main>
+    <ModalOverlay isOpen={!!versionRepository} onClose={() => { if (!busy) setVersionRepository(null); }} ariaLabel={t('插件版本')} className="w-[calc(100%_-_24px)] max-w-5xl max-h-[85vh] bg-canvas-surface" closeOnBackdrop={!busy}>
+      {versionRepository && <><div className="ui-row ui-row--between border-b border-canvas-border p-3"><h2 className="text-sm font-semibold">{versionRepository.name} · {t('切换版本')}</h2><button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" aria-label={t('关闭')} disabled={!!busy} onClick={() => setVersionRepository(null)}><Icon icon="lucide:x" width={16} /></button></div><div className="p-3 ui-scroll space-y-3"><RepositorySummary repository={versionRepository} /><ComfyVersionList repository={versionRepository} busy={!!busy} onSwitch={(reference, title) => switchVersion(versionRepository, reference, title)} /></div></>}
+    </ModalOverlay>
+    <ModalOverlay isOpen={!!confirmation} onClose={() => setConfirmation(null)} ariaLabel={confirmation?.title || t('确认操作')} className="w-[calc(100%_-_24px)] max-w-lg bg-canvas-surface" zIndex={260}>
+      {confirmation && <div className="p-3 space-y-3"><h2 className="text-sm font-semibold">{confirmation.title}</h2><p className="text-xs text-canvas-text-secondary leading-relaxed break-words">{confirmation.detail}</p><div className="ui-row justify-end"><button type="button" className="ui-btn ui-btn--secondary" onClick={() => setConfirmation(null)}>{t('取消')}</button><button type="button" className="ui-btn ui-btn--primary" disabled={!!busy} onClick={() => { const pending = confirmation; setConfirmation(null); void run(pending.title, pending.operation); }}>{t('确认')}</button></div></div>}
+    </ModalOverlay>
+  </div>;
+}

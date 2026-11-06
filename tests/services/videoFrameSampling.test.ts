@@ -1,3 +1,6 @@
+/**
+ * videoFrameSampling — 回归测试：video editor ordered frame sampling。
+ */
 import { describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

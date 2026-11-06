@@ -1,3 +1,6 @@
+/**
+ * imageLoadRetry — 回归测试：imageLoadRetry。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   IMAGE_LOAD_RETRY_DELAYS_MS,

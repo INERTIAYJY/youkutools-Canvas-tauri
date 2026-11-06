@@ -1,3 +1,6 @@
+/**
+ * mascotExpressions — 回归测试：mascotExpressions。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   BODY_OFFSET,

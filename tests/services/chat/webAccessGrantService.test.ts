@@ -1,3 +1,6 @@
+/**
+ * webAccessGrantService — 回归测试：web access task grants。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { WebSource } from '../../../src/types/chat';
 import { readWebSession } from '../../../src/services/chat/webReadSessionService';

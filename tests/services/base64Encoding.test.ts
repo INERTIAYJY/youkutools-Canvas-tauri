@@ -1,3 +1,6 @@
+/**
+ * base64Encoding — 回归测试：分块 Base64 编码。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   arrayBufferToBase64,

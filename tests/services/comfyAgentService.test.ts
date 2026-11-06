@@ -1,9 +1,13 @@
+/**
+ * comfyAgentService — 回归测试：ComfyUI assistant server selection。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const comfyFetchMock = vi.hoisted(() => vi.fn());
 const pollComfyHistoryMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../../src/services/comfyPolling', () => ({
+vi.mock('../../src/services/comfyPolling', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/services/comfyPolling')>(),
   comfyFetch: comfyFetchMock,
   pollComfyHistory: pollComfyHistoryMock,
 }));

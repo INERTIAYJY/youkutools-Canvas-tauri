@@ -1,3 +1,6 @@
+/**
+ * nodeToolbarShell — 回归测试：node toolbar mount boundary。
+ */
 import type { HTMLAttributes, ReactElement, ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

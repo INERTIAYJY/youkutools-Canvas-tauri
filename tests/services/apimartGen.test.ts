@@ -1,12 +1,33 @@
+/**
+ * apimartGen — 回归测试：APIMart 错误凭据隔离。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const pollingMocks = vi.hoisted(() => ({
-  cleanupNodePolling: vi.fn(),
+const pollingMocks = vi.hoisted(() => {
+  const receipts = new Map<string, { projectId: string; nodeId: string; taskId: string; attemptId: string }>();
+  const removePendingTask = vi.fn((nodeId: string, _taskId?: string, _attemptId?: string) => { receipts.delete(nodeId); });
+  return {
+  receipts,
+  cleanupNodePolling: vi.fn(() => true),
+  VIDEO_POLL_MAX_DURATION_MS: 30 * 60 * 1000,
+  pauseMediaTask: vi.fn((receipt: { taskId: string }, _error?: unknown, reason?: string) => Object.assign(new Error('任务查询已暂停'),
+    { name: 'MediaTaskPausedError', taskReceipt: receipt, reason: reason ?? 'query_interrupted' })),
+  getMediaTaskReceipt: vi.fn((nodeId: string) => receipts.get(nodeId)),
   registerNodePolling: vi.fn(() => new AbortController().signal),
-  removePendingTask: vi.fn(),
-  savePendingTask: vi.fn(),
-  updatePendingTask: vi.fn(),
-}));
+  removePendingTask,
+  removeFailedMediaTask: vi.fn((receipt: { nodeId: string; taskId: string; attemptId: string }) => {
+    removePendingTask(receipt.nodeId, receipt.taskId, receipt.attemptId);
+  }),
+  savePendingTask: vi.fn((task: { nodeId: string; projectId: string; taskId: string }) => {
+    const receipt = { projectId: task.projectId, nodeId: task.nodeId, taskId: task.taskId, attemptId: 'attempt' };
+    receipts.set(task.nodeId, receipt); return receipt;
+  }),
+  updatePendingTask: vi.fn((nodeId: string, patch: { taskId?: string }) => {
+    const current = receipts.get(nodeId); if (!current) return undefined;
+    const receipt = { ...current, ...(patch.taskId === undefined ? {} : { taskId: patch.taskId }) };
+    receipts.set(nodeId, receipt); return receipt;
+  }),
+}; });
 
 const serviceMocks = vi.hoisted(() => ({
   storeState: {
@@ -35,16 +56,141 @@ vi.mock('../../src/services/uploadService', () => ({
 
 import {
   executeGeneralAsyncTask,
+  fetchApimartTask,
   generateApimartImagesBatch,
   generateApimartVideo,
 } from '../../src/services/ai/apimartGen';
 import { buildApimartSeedanceRequest, isApimartSeedanceModel } from '../../src/services/ai/apimartVideoModels';
 import { apimartMediaProviderAdapter } from '../../src/services/ai/providers/apimartMedia';
-import { APIMART_OMNI_MODELS, getApimartSeedanceCapability } from '../../src/services/ai/apimartVideoModels';
+import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, getApimartSeedanceCapability } from '../../src/services/ai/apimartVideoModels';
 import { fetchProviderModelCatalog } from '../../src/services/ai/providerCatalogService';
 import { assertVideoInputConstraints } from '../../src/services/ai/videoInputValidation';
 import { buildImageCapabilityRequest } from '../../src/services/ai/mediaModelCapabilities';
 import { getMediaModelOptions } from '../../src/components/nodes/shared/defaultModels';
+import { resolveMediaDownloadRequest } from '../../src/services/ai/mediaDownloadAccess';
+
+describe('APIMart 错误凭据隔离', () => {
+  const apiKey = 'fixture~! private/key=';
+  const echoed = () => [apiKey, encodeURIComponent(apiKey), new URLSearchParams({ key: apiKey }).toString().slice(4)].join(' | ');
+  const calls = {
+    image: (nodeId?: string) => generateApimartImagesBatch(apiKey, 'https://api.example/v1', 'gpt-image-2', 'prompt',
+      '1K', '1:1', { width: 1024, height: 1024 }, [], 1, nodeId),
+    video: (nodeId?: string) => generateApimartVideo(apiKey, 'https://api.example/v1', 'seedance-2.5', 'prompt', nodeId),
+    general: (nodeId?: string) => executeGeneralAsyncTask(apiKey, 'https://api.example/v1', 'video-model', 'prompt', 'videos', 'apimart', nodeId),
+  };
+  beforeEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); pollingMocks.receipts.clear(); });
+
+  it.each(['image', 'video', 'general'] as const)('%s 的 HTTP 拒绝先脱敏再截断，且不重发提交', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(`${'x'.repeat(197)}${apiKey}`, { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await calls[kind]('rejected-node').catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(`${'x'.repeat(197)}[RE`);
+    expect((error as Error).message).not.toContain('fixture');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(pollingMocks.removePendingTask).toHaveBeenCalledWith('rejected-node', '', 'attempt');
+  });
+
+  it.each(['image', 'video', 'general'] as const)('%s 的网络错误在进入暂停回执前脱敏，保持未知提交语义', async (kind) => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError(`Failed to fetch ${echoed()}`));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls[kind]('unknown-node')).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
+    const safeError = pollingMocks.pauseMediaTask.mock.calls[0][1] as Error;
+    expect(safeError).toBeInstanceOf(TypeError);
+    expect(safeError.message).toContain('[REDACTED]');
+    expect(safeError.message).not.toContain(apiKey);
+    expect(safeError.message).not.toContain(encodeURIComponent(apiKey));
+    expect(safeError.message).not.toContain(new URLSearchParams({ key: apiKey }).toString().slice(4));
+    expect(pollingMocks.receipts.get('unknown-node')).toMatchObject({ taskId: '', attemptId: 'attempt' });
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['image', 'video', 'general'] as const)('%s 收到明确限流拒绝时直接失败，不保留空任务', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: { code: 'rate_limit_exceeded', message: echoed() } }, 429));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls[kind]('rejected-node')).rejects.toMatchObject({ status: 429, definitiveFailure: true });
+    expect(pollingMocks.removeFailedMediaTask).toHaveBeenCalledWith({
+      projectId: 'project-1', nodeId: 'rejected-node', taskId: '', attemptId: 'attempt',
+    });
+    expect(pollingMocks.pauseMediaTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['image', 'video', 'general'] as const)('%s 的 HTTP 200 failed 响应直接失败且不查询或重发', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ status: 'failed', error: { message: echoed() } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls[kind]('failed-node')).rejects.toMatchObject({ definitiveFailure: true, message: expect.stringContaining('[REDACTED]') });
+    expect(pollingMocks.removeFailedMediaTask).toHaveBeenCalledWith(expect.objectContaining({ nodeId: 'failed-node', taskId: '', attemptId: 'attempt' }));
+    expect(pollingMocks.pauseMediaTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['image', 'video'] as const)('APIMart %s 的专有业务拒绝码直接失败', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ code: 402, message: '余额不足' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls[kind]('business-node')).rejects.toMatchObject({ definitiveFailure: true, message: '余额不足' });
+    expect(pollingMocks.removeFailedMediaTask).toHaveBeenCalledWith(expect.objectContaining({ nodeId: 'business-node', taskId: '' }));
+    expect(pollingMocks.pauseMediaTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('通用自定义接口不把未声明的数字 code 当成确定拒绝', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ code: 402, message: '自定义状态' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls.general('custom-node')).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
+    expect(pollingMocks.removeFailedMediaTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['image', 'video'] as const)('APIMart %s 的服务端业务码不证明请求未受理', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ code: 503, message: '服务暂时不可用' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls[kind]('server-node')).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
+    expect(pollingMocks.removeFailedMediaTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['image', 'video', 'general'] as const)('%s 的网关超时即使正文含 failed 也保留未知状态', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ status: 'failed', error: { code: 'invalid_request_error' } }, 504));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(calls[kind]('timeout-node')).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
+    expect(pollingMocks.removeFailedMediaTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['root', 'data'] as const)('查询器在返回 %s 终态错误对象前脱敏，不携带任意错误属性', async (shape) => {
+    const task = { status: 'failed', error: { message: echoed(), code: `code ${apiKey}`, type: 'task_failed', private: apiKey } };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(shape === 'data' ? { code: 200, data: task } : task)));
+    const result = await fetchApimartTask(apiKey, 'https://api.example/v1', 'original-task');
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'code [REDACTED]', type: 'task_failed' } });
+    expect(JSON.stringify(result.error)).not.toContain(apiKey);
+    expect(JSON.stringify(result.error)).not.toContain(encodeURIComponent(apiKey));
+    expect(result.error).not.toHaveProperty('private');
+  });
+
+  it.each(['network', 'http', 'terminal'] as const)('视频 %s 查询错误不泄露凭据，保持原任务身份与终态语义', async (kind) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'original-task' }] }));
+    if (kind === 'network') fetchMock.mockRejectedValueOnce(new TypeError(echoed()));
+    else if (kind === 'http') fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: echoed() } }, 401));
+    else fetchMock.mockResolvedValueOnce(jsonResponse({ data: { status: 'failed', error: { message: echoed() } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await calls.video('query-node').catch((value: unknown) => value);
+    if (kind === 'terminal') {
+      expect(error).toMatchObject({ name: 'PollTaskFailedError', message: expect.stringContaining('[REDACTED]') });
+      expect(pollingMocks.removePendingTask).toHaveBeenCalledWith('query-node', 'original-task', 'attempt');
+    } else {
+      expect(error).toMatchObject({ name: 'MediaTaskPausedError', taskReceipt: { taskId: 'original-task', attemptId: 'attempt' } });
+      const detail = pollingMocks.pauseMediaTask.mock.calls[0][1] as Error;
+      expect(detail.message).toContain('[REDACTED]');
+      expect(detail.message).not.toContain(apiKey);
+      expect(pollingMocks.receipts.get('query-node')).toMatchObject({ taskId: 'original-task', attemptId: 'attempt' });
+    }
+    expect((error as Error).message).not.toContain(apiKey);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('APIMart Omni 视频合同', () => {
   beforeEach(() => {
@@ -63,7 +209,8 @@ describe('APIMart Omni 视频合同', () => {
     vi.stubGlobal('fetch', fetchMock);
     await expect(generateApimartVideo('api-key', 'https://api.example/v1', model, 'prompt', undefined, {
       duration: 6, resolution: '720p', ratio: '9:16',
-    })).resolves.toEqual({ url: 'https://cdn.example/omni.mp4' });
+    })).resolves.toEqual({ url: 'https://cdn.example/omni.mp4',
+      mediaDownloadAccess: { providerConfigId: 'apimart', origin: 'https://api.example', auth: { type: 'bearer' } } });
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       'https://api.example/v1/videos/generations', 'https://api.example/v1/tasks/omni-task?language=zh',
     ]);
@@ -141,7 +288,7 @@ describe('APIMart Omni 视频合同', () => {
     });
   });
 
-  it('取消 Omni 提交时传播信号并清理任务', async () => {
+  it('取消 Omni 提交时传播信号并保留提交未知记录', async () => {
     const controller = new AbortController();
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
@@ -150,8 +297,9 @@ describe('APIMart Omni 视频合同', () => {
     const request = generateApimartVideo('key', 'https://api.example/v1', 'gemini-omni-1.1-flash', 'prompt', 'node-omni', {}, controller.signal);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     controller.abort();
-    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
-    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-omni');
+    await expect(request).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
+    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-omni', expect.any(AbortSignal));
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -177,14 +325,24 @@ describe('APIMart Omni 视频合同', () => {
   });
 });
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { 'Content-Type': 'application/json' },
   });
 }
 
 describe('APIMart image polling', () => {
+  it('Grok 官方 2.0 使用稳定响应版本和独立幂等键，保持多图参考顺序', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'grok-image' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/result.png'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const refs = ['https://cdn.example/a.png', 'https://cdn.example/b.png'];
+    await generateApimartImagesBatch('key', 'https://api.example/v1', 'grok-imagine-image-2.0', 'edit', '2K', '16:9', { width: 100, height: 100 }, refs);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-APIMart-Response-Version': '2026-07-27', 'Idempotency-Key': expect.any(String) });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model: 'grok-imagine-image-2.0', image_urls: refs, aspect_ratio: '16:9', resolution: '2k' });
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -192,7 +350,7 @@ describe('APIMart image polling', () => {
     serviceMocks.uploadToRemote.mockResolvedValue('https://upload.example/reference.png');
   });
 
-  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'])(
+  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'])(
     '将 %s 从媒体目录路由到原生批量接口并收集四张图片',
     async (model) => {
       const option = getMediaModelOptions().find((item) => item.value === `apimart/${model}`);
@@ -208,7 +366,8 @@ describe('APIMart image polling', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const batch = await apimartMediaProviderAdapter.generateImage?.({
-        params: { model: option.value, provider: option.provider, prompt: '保留商品并替换背景', imageSize: '4K', aspectRatio: '16:9' },
+        params: { model: option.value, provider: option.provider, prompt: '保留商品并替换背景',
+          imageSize: '4K', aspectRatio: '16:9', imageBackground: 'transparent' },
         prompt: '保留商品并替换背景', imageUrls, requestedCount: 4,
       });
 
@@ -216,22 +375,25 @@ describe('APIMart image polling', () => {
       expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/images/generations');
       expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
         model, prompt: '保留商品并替换背景', resolution: '4k', size: '16:9', n: 4, image_urls: imageUrls,
+        quality: 'auto', background: 'transparent', output_format: 'png',
       });
       expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/tasks/gpt-25-task?language=zh');
+      const mediaDownloadAccess = { providerConfigId: 'apimart', origin: 'https://api.example.com', auth: { type: 'bearer' } };
       expect(batch).toEqual({
-        requestedCount: 4, failedCount: 0,
-        results: outputUrls.map((url) => ({ url, width: 3840, height: 2160 })),
+        requestedCount: 4, failedCount: 0, allTasksSettled: true,
+        mediaDownloadAccess,
+        results: outputUrls.map((url) => ({ url, width: 3840, height: 2160, mediaDownloadAccess })),
       });
     },
   );
 
-  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'])(
+  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'])(
     '%s 文生图保留自适应尺寸并将原生数量限制为四张',
     (model) => {
       const request = buildImageCapabilityRequest(`apimart/${model}`, '风景', {
         ratio: '自适应', resolution: '2K', count: 8,
       });
-      expect(request?.body).toEqual({ model, prompt: '风景', size: 'auto', resolution: '2k', n: 4 });
+      expect(request?.body).toEqual({ model, prompt: '风景', size: 'auto', resolution: '2k', quality: 'auto', n: 4 });
       expect(request?.requestedCount).toBe(4);
     },
   );
@@ -247,15 +409,31 @@ describe('APIMart image polling', () => {
     })?.dimensions).toEqual({ width, height });
   });
 
-  it('GPT Image 2.5 在提交前拒绝超过十六张参考图', async () => {
+  it.each(['gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'])('%s 在提交前拒绝超过十六张参考图', async (model) => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     await expect(generateApimartImagesBatch(
-      'api-key', 'https://api.example.com', 'gpt-image-2.5-sunburst', '编辑',
+      'api-key', 'https://api.example.com', model, '编辑',
       '2K', '1:1', { width: 2048, height: 2048 },
       Array.from({ length: 17 }, (_, index) => `https://ref.example/${index}.png`),
     )).rejects.toThrow('最多支持 16 张参考图');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'])('%s 发送用户质量，默认不添加背景或格式参数，并沿原任务查询', async (model) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'gpt-26-task' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed',
+        result: { images: [{ url: ['https://cdn.example/result.png'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await generateApimartImagesBatch('gpt-26-fixture', 'https://api.example.com', model, 'portrait',
+      '2K', '9:16', { width: 1, height: 1 }, [], 1, undefined, undefined, 'max');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      model, prompt: 'portrait', n: 1, size: '9:16', resolution: '2k', quality: 'max',
+    });
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer gpt-26-fixture' });
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/tasks/gpt-26-task?language=zh');
   });
 
   it('stops polling immediately when the task fails', async () => {
@@ -377,7 +555,7 @@ describe('APIMart image polling', () => {
       taskId: 'native-task-1',
       taskIds: ['native-task-1', 'native-task-2'],
       submitted: true,
-    });
+    }, '', 'attempt');
   });
 
   it('splits multi-image requests into independent tasks when the model has no native batch support', async () => {
@@ -456,10 +634,10 @@ describe('APIMart image polling', () => {
 
     controller.abort();
 
-    await expect(generation).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(generation).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
     expect(submitSignal?.aborted).toBe(true);
-    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-1');
-    expect(pollingMocks.removePendingTask).toHaveBeenCalledWith('node-1');
+    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-1', expect.any(AbortSignal));
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
   });
 });
 
@@ -580,7 +758,7 @@ describe('APIMart video polling', () => {
 });
 
 describe('APIMart Seedance 2.5 video', () => {
-  it('clamps duration to 30s and keeps resolution within 480p/720p', () => {
+  it('supports the updated 1080p tier and 30 second duration', () => {
     expect(buildApimartSeedanceRequest(
       'doubao-seedance-2.5',
       'prompt',
@@ -588,7 +766,7 @@ describe('APIMart Seedance 2.5 video', () => {
     )).toMatchObject({
       model: 'doubao-seedance-2.5',
       duration: 30,
-      resolution: '720p',
+      resolution: '1080p',
       watermark: false,
     });
   });
@@ -688,6 +866,97 @@ describe('APIMart Seedance 2.5 video', () => {
   });
 });
 
+describe('APIMart 新视频模型', () => {
+  beforeEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); });
+
+  it.each(APIMART_UPDATED_VIDEO_MODELS.map((model) => model.id))('%s 通过 Adapter 提交视频端点并轮询', async (model) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'new-video', status: 'submitted' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed', result: { videos: [{ url: ['https://cdn.example/result.mp4'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(apimartMediaProviderAdapter.generateVideo?.({
+      params: { provider: 'apimart', model: `apimart/${model}`, prompt: 'prompt' }, prompt: 'prompt',
+      resolveReferenceInput: async () => ({ prompt: 'prompt', imageUrls: [], videoUrls: [], audioUrls: [], operation: 'text-to-video' }),
+    })).resolves.toEqual({ url: 'https://cdn.example/result.mp4',
+      mediaDownloadAccess: { providerConfigId: 'apimart', origin: 'https://api.example.com', auth: { type: 'bearer' } } });
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(['https://api.example.com/videos/generations', 'https://api.example.com/tasks/new-video?language=zh']);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model });
+  });
+
+  it('FLUX 3 映射分辨率与单个续写视频，不发送错误的 video_urls 字段', () => {
+    const request = buildApimartSeedanceRequest('flux-3-video', 'continue', { resolution: '1080p', duration: 20, videoUrls: ['https://cdn.example/source.mp4'], generateAudio: false });
+    expect(request).toMatchObject({ resolution: 'fhd', duration: 20, video_url: 'https://cdn.example/source.mp4', audio: false });
+    expect(request).not.toHaveProperty('video_urls');
+    expect(() => buildApimartSeedanceRequest('flux-3-video', 'prompt', { duration: 21 })).toThrow('时长');
+  });
+
+  it('HappyHorse 编辑省略时长与比例，1.1 拒绝视频输入', () => {
+    const request = buildApimartSeedanceRequest('happyhorse-1.0', 'edit', { videoUrls: ['https://cdn.example/source.mp4'] });
+    expect(request).toMatchObject({ video_url: 'https://cdn.example/source.mp4' });
+    expect(request).not.toHaveProperty('duration');
+    expect(request).not.toHaveProperty('aspect_ratio');
+    expect(() => buildApimartSeedanceRequest('happyhorse-1.1', 'edit', { videoUrls: ['https://cdn.example/source.mp4'] })).toThrow('参考视频');
+  });
+
+  it('Wan 3 保留普通图片参考语义与显式帧角色，拒绝混用', () => {
+    expect(buildApimartSeedanceRequest('wan3.0-video', 'prompt', { imageUrls: ['https://cdn.example/ref.png'], duration: -1 }))
+      .toMatchObject({ generation_type: 'reference', duration: -1, image_urls: ['https://cdn.example/ref.png'] });
+    expect(buildApimartSeedanceRequest('wan3.0-video-prime', 'prompt', { imageWithRoles: [{ url: 'https://cdn.example/first.png', role: 'first_frame' }] }))
+      .toMatchObject({ image_with_roles: [{ url: 'https://cdn.example/first.png', role: 'first_frame' }] });
+    expect(() => buildApimartSeedanceRequest('wan3.0-video', 'prompt', { firstFrameUrl: 'https://cdn.example/first.png', imageUrls: ['https://cdn.example/ref.png'] })).toThrow('不能同时使用');
+  });
+
+  it('Kling Turbo 只接受显式首帧，Pixverse 首尾帧只接受 5/8 秒', () => {
+    expect(() => buildApimartSeedanceRequest('kling-3.0-turbo', 'prompt', { imageUrls: ['https://cdn.example/ref.png'] })).toThrow('设置为首帧');
+    expect(buildApimartSeedanceRequest('kling-3.0-turbo', '', { firstFrameUrl: 'https://cdn.example/first.png' }))
+      .toMatchObject({ first_frame_image: 'https://cdn.example/first.png' });
+    const frames = { firstFrameUrl: 'https://cdn.example/first.png', lastFrameUrl: 'https://cdn.example/last.png' };
+    expect(() => buildApimartSeedanceRequest('pixverse-v6', 'prompt', { ...frames, duration: 6 })).toThrow('5 或 8');
+    expect(buildApimartSeedanceRequest('pixverse-v6', 'prompt', { imageUrls: ['https://cdn.example/ref.png'] }))
+      .toHaveProperty('img_references', ['https://cdn.example/ref.png']);
+  });
+
+  it('Seedance 新 ID 支持自动时长，旧 ID 保持可用', () => {
+    expect(buildApimartSeedanceRequest('seedance-2.5', 'prompt', { duration: -1, resolution: '1080p' }))
+      .toMatchObject({ model: 'seedance-2.5', duration: -1, resolution: '1080p' });
+    expect(isApimartSeedanceModel('apimart/doubao-seedance-2.5')).toBe(true);
+  });
+
+  it('新视频模型失败不重提，保留服务端错误', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'failed-task' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'failed', error: { message: '素材不合法' } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartVideo('key', 'https://api.example/v1', 'wan3.0-video', 'prompt')).rejects.toThrow('素材不合法');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('通过 Adapter 保留 Wan 3 首尾帧角色和普通图片的参考语义', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'wan-frame' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed', result: { videos: [{ url: ['https://cdn.example/result.mp4'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const referenceMedia = [
+      { kind: 'image' as const, role: 'first_frame' as const, url: 'https://cdn.example/first.png', origin: 'prompt' as const },
+      { kind: 'image' as const, role: 'last_frame' as const, url: 'https://cdn.example/last.png', origin: 'prompt' as const },
+    ];
+    await apimartMediaProviderAdapter.generateVideo?.({ params: { provider: 'apimart', model: 'apimart/wan3.0-video', prompt: 'prompt', referenceMedia }, prompt: 'prompt',
+      resolveReferenceInput: async () => ({ prompt: 'prompt', imageUrls: referenceMedia.map((ref) => ref.url), videoUrls: [], audioUrls: [], operation: 'image-to-video', references: referenceMedia }),
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).image_with_roles).toEqual([
+      { url: referenceMedia[0].url, role: 'first_frame' }, { url: referenceMedia[1].url, role: 'last_frame' },
+    ]);
+  });
+
+  it('取消新视频任务后停止轮询，不再次付费提交', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockImplementationOnce(() => { controller.abort(); return Promise.resolve(jsonResponse({ code: 200, data: [{ task_id: 'new-video' }] })); });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartVideo('key', 'https://api.example/v1', 'flux-3-video', 'prompt', undefined, {}, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('APIMart MiniMax-H3 video', () => {
   it('builds a text-to-video request with H3-specific resolution and watermark', () => {
     expect(buildApimartSeedanceRequest(
@@ -718,7 +987,7 @@ describe('APIMart MiniMax-H3 video', () => {
 
   it('supports multimodal reference (image + video + audio) for MiniMax-H3', () => {
     expect(buildApimartSeedanceRequest(
-      'MiniMax-H3-Context-IR',
+      'MiniMax-H3',
       'prompt',
       {
         imageUrls: ['https://cdn.example/char.png'],
@@ -726,7 +995,7 @@ describe('APIMart MiniMax-H3 video', () => {
         audioUrls: ['https://cdn.example/voice.mp3'],
       },
     )).toMatchObject({
-      model: 'MiniMax-H3-Context-IR',
+      model: 'MiniMax-H3',
       image_urls: ['https://cdn.example/char.png'],
       video_urls: ['https://cdn.example/motion.mp4'],
       audio_urls: ['https://cdn.example/voice.mp3'],
@@ -743,7 +1012,7 @@ describe('APIMart MiniMax-H3 video', () => {
 
   it('rejects standalone audio references for MiniMax-H3', () => {
     expect(() => buildApimartSeedanceRequest(
-      'MiniMax-H3-Regeneration',
+      'MiniMax-H3',
       'prompt',
       { audioUrls: ['https://cdn.example/voice.mp3'] },
     )).toThrow('参考音频不能单独使用');
@@ -752,11 +1021,143 @@ describe('APIMart MiniMax-H3 video', () => {
   it('normalizes MiniMax-H3 model id case-insensitively', () => {
     expect(isApimartSeedanceModel('minimax-h3')).toBe(true);
     expect(isApimartSeedanceModel('MiniMax-H3')).toBe(true);
+    // 旧配置仍保留底层兼容能力，但新目录不会再把特殊操作展示为普通视频模型。
     expect(isApimartSeedanceModel('apimart/MiniMax-H3-Regeneration')).toBe(true);
   });
 });
 
+describe('媒体任务交付回执', () => {
+  beforeEach(() => { vi.clearAllMocks(); pollingMocks.receipts.clear(); vi.unstubAllGlobals(); });
+
+  it('图片拿到结果后保留真实 ID，等待调用方保存和回填确认', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'image-delivery' }] }))
+      .mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/image.png'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await generateApimartImagesBatch('key', 'https://api.example/v1', 'gpt-image', 'prompt', '2K', '1:1',
+      { width: 2048, height: 2048 }, [], 1, 'image-node');
+    expect(result.taskReceipt).toMatchObject({ nodeId: 'image-node', taskId: 'image-delivery', attemptId: 'attempt' });
+    expect(result.results[0].taskReceipt).toEqual(result.taskReceipt);
+    const mediaDownloadAccess = { providerConfigId: 'apimart', origin: 'https://api.example', auth: { type: 'bearer' } };
+    expect(result.mediaDownloadAccess).toEqual(mediaDownloadAccess);
+    expect(result.results[0].mediaDownloadAccess).toEqual(mediaDownloadAccess);
+    expect(pollingMocks.savePendingTask).toHaveBeenCalledWith(expect.objectContaining({ mediaDownloadAccess }));
+    expect(result.allTasksSettled).toBe(true);
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(pollingMocks.updatePendingTask).toHaveBeenCalledWith('image-node', { mediaRecoveryState: 'delivery_pending' }, 'image-delivery', 'attempt');
+  });
+
+  it('批量图片保留原连接描述，外部 CDN 下载不附厂商凭据', async () => {
+    const urls = ['https://upload.apimart.ai/f/image/first.png', 'https://cdn.example/second.png'];
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'batch-delivery' }] }))
+      .mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: { images: [{ url: urls }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await generateApimartImagesBatch('private-fixture-key', 'https://api.apimart.ai/v1', 'gpt-image', 'prompt',
+      '2K', '1:1', { width: 2048, height: 2048 }, [], 2, 'image-node');
+    const mediaDownloadAccess = { providerConfigId: 'apimart', origin: 'https://api.apimart.ai', auth: { type: 'bearer' } };
+    expect(result.results.map((item) => item.mediaDownloadAccess)).toEqual([mediaDownloadAccess, mediaDownloadAccess]);
+    expect(pollingMocks.savePendingTask).toHaveBeenCalledWith(expect.objectContaining({ mediaDownloadAccess }));
+    for (const item of result.results) {
+      await expect(resolveMediaDownloadRequest(item.url, item.mediaDownloadAccess)).resolves.toEqual({ url: item.url });
+    }
+    expect(JSON.stringify(result)).not.toContain('private-fixture-key');
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('视频首次交付和待续任务保留同一下载连接身份', async () => {
+    const url = 'https://api.example/v1/videos/original/content';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'video-delivery' }] }))
+      .mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: { videos: [{ url: [url] }] } } })));
+    const result = await generateApimartVideo('private-fixture-key', 'https://api.example/v1', 'doubao-seedance-2.5', 'prompt', 'video-node');
+    const mediaDownloadAccess = { providerConfigId: 'apimart', origin: 'https://api.example', auth: { type: 'bearer' } };
+    expect(result).toMatchObject({ url, mediaDownloadAccess, taskReceipt: { taskId: 'video-delivery' } });
+    expect(pollingMocks.savePendingTask).toHaveBeenCalledWith(expect.objectContaining({ mediaDownloadAccess }));
+    expect(JSON.stringify(result)).not.toContain('private-fixture-key');
+  });
+
+  it.each(['sync', 'async'] as const)('通用 %s 结果使用真实连接 ID 和来源域名', async (mode) => {
+    const url = 'https://custom.example/result.mp4';
+    const fetchMock = mode === 'sync'
+      ? vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ url }] }))
+      : vi.fn().mockResolvedValueOnce(jsonResponse({ task_id: 'general-delivery' }))
+        .mockResolvedValueOnce(jsonResponse({ status: 'completed', result: { videos: [{ url }] } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await executeGeneralAsyncTask('private-fixture-key', 'https://custom.example/v1', 'video', 'prompt', 'videos',
+      'original-custom-connection', 'video-node');
+    const mediaDownloadAccess = { providerConfigId: 'original-custom-connection', origin: 'https://custom.example', auth: { type: 'bearer' } };
+    expect(result).toMatchObject({ url, mediaDownloadAccess });
+    expect(pollingMocks.savePendingTask).toHaveBeenCalledWith(expect.objectContaining({
+      providerConfigId: 'original-custom-connection', mediaDownloadAccess,
+    }));
+    expect(JSON.stringify(result)).not.toContain('private-fixture-key');
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('图片查询断网保留原任务，不自动重提', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'image-network' }] }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartImagesBatch('key', 'https://api.example/v1', 'gpt-image', 'prompt', '2K', '1:1',
+      { width: 2048, height: 2048 }, [], 1, 'image-node')).rejects.toMatchObject({
+      name: 'MediaTaskPausedError', taskReceipt: { taskId: 'image-network' },
+    });
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('批次中其他任务还未确认时不交付成功子集，也不清除恢复记录', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/images/generations')) return jsonResponse({ data: [{ task_id: 'ready' }, { task_id: 'disconnected' }] });
+      if (url.includes('/disconnected?')) throw new TypeError('Failed to fetch');
+      return jsonResponse({ data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/ready.png'] }] } } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartImagesBatch('key', 'https://api.example/v1', 'gpt-image', 'prompt', '2K', '1:1',
+      { width: 2048, height: 2048 }, [], 2, 'image-node')).rejects.toMatchObject({ name: 'MediaTaskPausedError' });
+    expect(pollingMocks.updatePendingTask).toHaveBeenCalledWith('image-node', expect.objectContaining({ taskIds: ['ready', 'disconnected'] }), '', 'attempt');
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/images/generations'))).toHaveLength(1);
+  });
+
+  it('一个查询断网时中止同批慢查询的本地等待，保留全部上游任务', async () => {
+    let slowSignal: AbortSignal | null | undefined;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith('/images/generations')) return Promise.resolve(jsonResponse({ data: [{ task_id: 'slow' }, { task_id: 'offline' }] }));
+      if (url.includes('/offline?')) return Promise.reject(new TypeError('Failed to fetch'));
+      slowSignal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('本地查询已中止', 'AbortError')), { once: true });
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartImagesBatch('key', 'https://api.example/v1', 'gpt-image', 'prompt', '2K', '1:1',
+      { width: 2048, height: 2048 }, [], 2, 'image-node')).rejects.toMatchObject({ name: 'MediaTaskPausedError' });
+    expect(slowSignal?.aborted).toBe(true);
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+});
+
 describe('legacy general media requests', () => {
+  it('retains a known video task on query HTTP 504 without sending another POST', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ task_id: 'slow-task' }))
+      .mockResolvedValueOnce(new Response('', { status: 504 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(executeGeneralAsyncTask('key', 'https://api.example/v1', 'video', 'prompt', 'videos', 'custom', 'node'))
+      .rejects.toMatchObject({ name: 'MediaTaskPausedError' });
+    expect(pollingMocks.updatePendingTask).toHaveBeenCalledWith('node', { taskId: 'slow-task', submitted: true }, '', 'attempt');
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('retains an APIMart task when its query times out', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'apimart-slow' }] }))
+      .mockResolvedValueOnce(new Response('', { status: 504 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartVideo('key', 'https://api.example/v1', 'wan3.0-video', 'prompt', 'node'))
+      .rejects.toMatchObject({ name: 'MediaTaskPausedError' });
+    expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -778,7 +1179,8 @@ describe('legacy general media requests', () => {
       'prompt',
       resultField,
       'general-provider',
-    )).resolves.toEqual({ url: `https://cdn.example/${resultField}` });
+    )).resolves.toEqual({ url: `https://cdn.example/${resultField}`,
+      mediaDownloadAccess: { providerConfigId: 'general-provider', origin: 'https://api.example.com', auth: { type: 'bearer' } } });
 
     expect(fetchMock).toHaveBeenCalledWith(
       `https://api.example.com/v1${endpoint}`,

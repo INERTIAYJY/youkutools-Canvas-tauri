@@ -1,3 +1,6 @@
+/**
+ * videoEditorOps — 回归测试：track-aware clip operations。
+ */
 import { describe, expect, it } from 'vitest';
 
 import {

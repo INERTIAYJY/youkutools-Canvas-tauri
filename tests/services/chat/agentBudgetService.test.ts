@@ -1,3 +1,6 @@
+/**
+ * agentBudgetService — 回归测试：agent lifetime budget。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_AGENT_TASK_BUDGET,

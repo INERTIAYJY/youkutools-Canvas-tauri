@@ -3,19 +3,25 @@
  * 节点输出另存为、系统文件管理器定位。基础设施见 ./fs/core，删除域见 ./fs/trash，
  * 全局资产库见 ./fs/assetLibrary（均通过本模块统一对外导出）。
  */
-import { exists, writeFile, readFile as tauriReadFile, stat, rename } from '@tauri-apps/plugin-fs';
+import { exists, writeFile, readFile as tauriReadFile, open as fsOpen, readDir, stat, lstat, rename, mkdir } from '@tauri-apps/plugin-fs';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isLocalMediaUrl, isRemoteMediaUrl, localMediaUrlToPath } from '../utils/mediaUrl';
-import { identifyAsset } from './fs/assetIndex';
-import { walkDirectoryFiles } from './fs/assetLibrary';
+import { shouldLoadNativeComfyImage } from './comfyImageSource';
+import { corsSafeFetch } from './ai/httpTransport';
+import { downloadGithubBytes, githubMirrorUrl } from './githubDownloadService';
+import { identifyAsset, getRelativeAssetPath } from './fs/assetIndex';
+import { readAssetTextFile } from './fs/assetTextFiles';
+import { walkDirectoryFiles, type AssetScanOptions } from './fs/assetLibrary';
+import { completeMediaRelocation, mediaFileAllocationKey, persistMediaRelocation, retiredMediaPaths, type MediaRelocation } from './indexedDb/mediaRelocations';
 import {
   decodeDataUrlBytesAsync,
   MEDIA_DATA_URL_BYTE_LIMITS,
   sha256BytesHex,
 } from './mediaDataUrl';
 import {
+  browserOpenFile,
   isTauriEnv,
   getMimeType,
   arrayBufferToBase64,
@@ -24,6 +30,7 @@ import {
   stripVerbatimPrefix,
   getConvertFileSrc,
   getAssetUrlFromPath,
+  getBaseDir,
   ensureProjectDataDir,
   getProjectDataDir,
   joinPath,
@@ -40,13 +47,25 @@ export interface FileTransferProgress {
   totalBytes: number | null;
 }
 
+export interface NodeOutputDownloadProgress {
+  transferredBytes: number;
+  totalBytes: number | null;
+  phase: 'downloading' | 'saving';
+}
+
 export interface FileTransferOptions {
+  /** 仅本次生成交付使用；原任务恢复时从当前连接重建鉴权，不保存 Key。 */
+  mediaDownloadAccess?: import('../types/aiTypes').MediaDownloadAccess;
+  /** 创作资产集中放到项目的 Library 文件夹。 */
+  projectSubdirectory?: 'Library';
   signal?: AbortSignal;
   /** Agent/MCP 导入不把调用方的本地路径或原生错误写入控制台。 */
   redactErrors?: boolean;
   onProgress?: (progress: FileTransferProgress) => void;
-  /** Data URL 按内容摘要复用确定路径，供持久化迁移重试使用。 */
+  /** 内嵌媒体按名称和内容摘要复用已有文件，供持久化迁移重试使用。 */
   deduplicateByContent?: boolean;
+  /** MCP 创建分集素材节点时复用共享项目目录中的原文件，普通节点复制不启用。 */
+  reuseExistingProjectFile?: boolean;
   /** 持久化入口需要接收底层异常，再转换为不含路径、链接或凭据的错误。 */
   throwOnError?: boolean;
 }
@@ -336,7 +355,9 @@ async function withDownloadDestinationLock<T>(
   fileName: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const lockKey = `${dataDir}\n${sanitizeFileName(fileName)}`;
+  const normalizedDir = stripVerbatimPrefix(dataDir).replace(/\\/g, '/').replace(/\/+$/, '');
+  const identity = `${normalizedDir}\n${sanitizeFileName(fileName)}`;
+  const lockKey = mediaFileAllocationKey(identity);
   const previous = downloadDestinationQueues.get(lockKey);
   const waitForTurn = previous?.catch(() => undefined) ?? Promise.resolve();
   let release: () => void = () => undefined;
@@ -361,11 +382,11 @@ function createTransferTaskId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `transfer-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function runNativeFileTransfer(
-  command: 'copy_file_streamed' | 'download_file_streamed',
-  args: Record<string, string>,
+async function runNativeFileTransfer<T = NativeFileTransferResult>(
+  command: 'copy_file_streamed' | 'download_file_streamed' | 'copy_asset_folder' | 'copy_asset_file_to_folder',
+  args: Record<string, unknown>,
   options?: FileTransferOptions,
-): Promise<NativeFileTransferResult> {
+): Promise<T> {
   const taskId = createTransferTaskId();
   let unlisten: UnlistenFn | undefined;
   let cancelRequested = false;
@@ -389,11 +410,66 @@ async function runNativeFileTransfer(
       });
     }
     options?.signal?.addEventListener('abort', cancel, { once: true });
-    return await invoke<NativeFileTransferResult>(command, { taskId, ...args });
+    if (options?.signal?.aborted) throw new DOMException('File transfer aborted', 'AbortError');
+    return await invoke<T>(command, { taskId, ...args });
   } finally {
     options?.signal?.removeEventListener('abort', cancel);
     unlisten?.();
   }
+}
+
+/** 原生流式复制到新目标；目标已存在或传输失败时不覆盖、不回退内存写入。 */
+export async function copyLocalFileStreamed(
+  sourcePath: string,
+  destinationPath: string,
+  options?: FileTransferOptions,
+): Promise<{ path: string; totalBytes: number }> {
+  if (!isTauriEnv()) throw new Error('文件复制仅支持桌面应用');
+  const result = await runNativeFileTransfer('copy_file_streamed', { sourcePath, destinationPath }, options);
+  return { path: stripVerbatimPrefix(result.path), totalBytes: result.totalBytes };
+}
+
+/** 复制真实目录；原生端负责授权、禁止覆盖、进度及取消。 */
+export async function copyAssetFolder(sourcePath: string, destinationDirectory: string, options?: FileTransferOptions): Promise<string> {
+  if (!isTauriEnv()) throw new Error('文件夹粘贴仅支持桌面应用');
+  const result = await runNativeFileTransfer('copy_asset_folder', { sourcePath, destinationDirectory }, options);
+  return result.path;
+}
+
+export interface AssetFileCopyResult {
+  path: string;
+  totalBytes: number;
+  digest: string;
+}
+
+/** 验证内容后落盘，同名自动加序号；原文件始终保留。 */
+export async function copyAssetFileToFolder(sourcePath: string, destinationDirectory: string, options?: FileTransferOptions): Promise<AssetFileCopyResult> {
+  if (!isTauriEnv()) throw new Error('文件拖放仅支持桌面应用');
+  return runNativeFileTransfer<AssetFileCopyResult>('copy_asset_file_to_folder', { sourcePath, destinationDirectory }, options);
+}
+
+/** 资产包暂存使用已有原生下载边界；调用方只提供本轮专属目录中的目标文件。 */
+export async function downloadAssetArchiveMedia(url: string, destinationPath: string, kind: 'image' | 'audio' | 'video', options?: FileTransferOptions): Promise<string> {
+  if (!isTauriEnv()) throw new Error('资产包媒体下载仅支持桌面应用');
+  const result = await runNativeFileTransfer('download_file_streamed', {
+    url, destinationPath, ...(kind === 'video' ? { expectedMediaKind: 'video' } : {}),
+  }, options);
+  return result.path;
+}
+
+/** 引用迁移成功后再次验证两份内容，才允许将源文件放入回收站。 */
+export async function finishAssetFileMove(sourcePath: string, copy: AssetFileCopyResult): Promise<void> {
+  await invoke('finish_asset_file_move', { sourcePath, destinationPath: copy.path, expectedDigest: copy.digest, expectedBytes: copy.totalBytes });
+}
+
+/** 图片信息的引用副本只写应用自有目录，复用原生受控、可取消的流式复制。 */
+export async function copyAssetImageReference(sourcePath: string, relativePath: string, expectedRoot: string, options?: FileTransferOptions): Promise<void> {
+  if (!isTauriEnv()) throw new Error('参考图保存仅支持桌面应用');
+  if (!/^asset-image-references\/[a-f0-9-]{36}\.[a-z0-9]{1,8}$/.test(relativePath)) throw new Error('参考图引用无效');
+  const root = await getBaseDir();
+  if (!root || root !== expectedRoot) throw new Error('保存目录已变化，请重试');
+  await mkdir(joinPath(root, 'asset-image-references'), { recursive: true });
+  await runNativeFileTransfer('copy_file_streamed', { sourcePath, destinationPath: joinPath(root, relativePath) }, options);
 }
 
 // ── 统一对外导出：存储、基础设施、删除域、资产库域 ──
@@ -412,6 +488,9 @@ export {
   savePreset,
   loadPresets,
   deletePreset,
+  savePresetFolder,
+  loadPresetFolders,
+  deletePresetFolder,
   saveSkill,
   loadSkills,
   deleteSkill,
@@ -425,11 +504,15 @@ export {
   type CustomStyleRecord,
 } from './storageService';
 export * from './fs/core';
+export * from './fs/mediaRead';
+export * from './fs/assetTextFiles';
 export * from './fs/assetIndex';
 export * from './fs/trash';
 export * from './fs/assetLibrary';
+export * from './fs/assetFileMove';
 export * from './fs/skillFiles';
 export * from './fs/externalEditors';
+export * from './fs/jsonFileTransfer';
 
 /**
  * 同步用户明确选择的文件目录白名单。
@@ -457,38 +540,6 @@ export async function syncAuthorizedDirectories(config: {
   }
 }
 
-/** 浏览器降级：通过 file input 读取文件 */
-function browserOpenFile(accept: string): Promise<File | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = accept;
-    input.style.display = 'none';
-    document.body.appendChild(input);
-    input.addEventListener('change', () => {
-      document.body.removeChild(input);
-      resolve(input.files?.[0] ?? null);
-    });
-    input.addEventListener('cancel', () => {
-      document.body.removeChild(input);
-      resolve(null);
-    });
-    input.click();
-    window.addEventListener(
-      'focus',
-      () => {
-        setTimeout(() => {
-          if (document.body.contains(input)) {
-            document.body.removeChild(input);
-            resolve(null);
-          }
-        }, 300);
-      },
-      { once: true }
-    );
-  });
-}
-
 /** 解析裁剪来源，本地文件使用 asset URL，远程图片按需绕过 CORS。 */
 export async function fetchImageForCrop(imageUrl: string): Promise<string> {
   if (isLocalMediaUrl(imageUrl)) {
@@ -498,10 +549,15 @@ export async function fetchImageForCrop(imageUrl: string): Promise<string> {
   }
   // 远程 URL：通过 Rust 端 reqwest 原生 HTTP 下载（WebView CORS 不适用）
   if (isTauriEnv() && isRemoteMediaUrl(imageUrl)) {
+    const requireNativeSource = shouldLoadNativeComfyImage(imageUrl);
     try {
       const dataUrl: string = await invoke('fetch_image_data_url', { url: imageUrl });
       return dataUrl;
     } catch (err) {
+      if (requireNativeSource) {
+        // 原生异常可能含地址或凭据；用固定网络异常跨过界面边界，不保留原始 cause。
+        throw new DOMException('ComfyUI 图片读取失败，请检查服务连接或访问权限后重试', 'NetworkError');
+      }
       console.warn('[fileService] fetchImageForCrop via Rust failed, fallback to original URL:', err);
       return imageUrl;
     }
@@ -598,8 +654,11 @@ export async function readFileToDataUrl(
       return dataUrl;
     }
 
-    // blob 与浏览器可访问的 URL 由 WebView 读取，不把 URL 当文件路径。
-    const resp = await fetch(filePath, { signal: options.signal });
+    // ComfyUI 取件使用原生代理；asset/blob 与其他既有来源保留原读取方式。
+    const resp = githubMirrorUrl(filePath)
+      ? new Response(await downloadGithubBytes(filePath, { signal: options.signal, maxBytes: MEDIA_DATA_URL_BYTE_LIMITS[kind] }),
+        { headers: { 'Content-Type': getMimeType(ext) } })
+      : await (shouldLoadNativeComfyImage(filePath) ? corsSafeFetch : fetch)(filePath, { signal: options.signal });
     throwIfMediaReadAborted(options.signal);
     if (!resp.ok) throw new Error(`读取本地文件失败 (${resp.status})`);
     const contentLength = Number(resp.headers.get('Content-Length'));
@@ -631,22 +690,75 @@ export async function readFileToDataUrl(
 // Project data files — 项目媒体文件读写
 // ============================================
 
-async function resolveContentAddressedProjectPath(
+/** 去重摘要只用于校验内容，不再拼到用户可见的文件名中。 */
+async function saveProjectBytes(
   dataDir: string,
   fileName: string,
   bytes: Uint8Array,
+  deduplicateByContent = false,
+  signal?: AbortSignal,
 ): Promise<string> {
-  const digest = await sha256BytesHex(bytes);
-  const normalizedName = sanitizeFileName(fileName);
-  const dotIndex = normalizedName.lastIndexOf('.');
-  const stem = dotIndex > 0 ? normalizedName.slice(0, dotIndex) : normalizedName;
-  const extension = dotIndex > 0 ? normalizedName.slice(dotIndex) : '';
-  return joinPath(dataDir, `${stem}-${digest.slice(0, 20)}${extension}`);
+  const save = async () => {
+    throwIfMediaReadAborted(signal);
+    if (deduplicateByContent) {
+      const digest = await sha256BytesHex(bytes);
+      const normalizedName = sanitizeFileName(fileName);
+      const dotIndex = normalizedName.lastIndexOf('.');
+      const stem = sanitizeFileName((dotIndex > 0 ? normalizedName.slice(0, dotIndex) : normalizedName).replace(/--[a-f0-9]{32}$/i, '')) || 'file';
+      const extension = dotIndex > 0 ? normalizedName.slice(dotIndex) : '';
+      const numberedStem = stem.replace(/_[1-9]\d*$/, '') || stem;
+      const prefix = `${mediaFileAllocationKey(dataDir)}/`;
+      const nameKey = (name: string) => mediaFileAllocationKey(`${prefix}${name}`).slice(prefix.length);
+      const base = nameKey(stem);
+      const family = nameKey(numberedStem);
+      const ext = nameKey(extension);
+      const retired = await retiredMediaPaths();
+      const entries = await readDir(dataDir);
+      for (const entry of entries) {
+        throwIfMediaReadAborted(signal);
+        if (!entry.isFile || entry.isSymlink) continue;
+        const name = nameKey(entry.name);
+        if (ext && !name.endsWith(ext)) continue;
+        const entryStem = ext ? name.slice(0, -ext.length) : name;
+        const sequence = entryStem.startsWith(`${family}_`) ? entryStem.slice(family.length + 1) : '';
+        // 同时兼容以前的内容摘要文件，但不重命名已有文件。
+        if (entryStem !== base && !/^[1-9]\d*$/.test(sequence)
+          && entryStem !== `${base}-${digest.slice(0, 20)}`) continue;
+        const path = joinPath(dataDir, entry.name);
+        if (retired.has(mediaFileAllocationKey(path))) continue;
+        let matches: boolean;
+        try {
+          const info = await lstat(path);
+          if (!info.isFile || info.isSymlink || info.size !== bytes.byteLength) continue;
+          matches = await sha256BytesHex(await tauriReadFile(path)) === digest;
+        } catch (error) {
+          // readDir 之后分组迁移可能已清理此文件；只跳过不存在，不吞权限和读取错误。
+          const message = error instanceof Error ? error.message : String(error);
+          if (/no such file|path not found|找不到指定|ENOENT|os error [23]\b/i.test(message)) continue;
+          throw error;
+        }
+        throwIfMediaReadAborted(signal);
+        if (matches) {
+          const latestRetired = await retiredMediaPaths();
+          throwIfMediaReadAborted(signal);
+          if (!latestRetired.has(mediaFileAllocationKey(path))) return path;
+        }
+      }
+    }
+    throwIfMediaReadAborted(signal);
+    const destPath = await resolveUniqueDestPath(dataDir, fileName, true);
+    throwIfMediaReadAborted(signal);
+    await writeFile(destPath, bytes, { createNew: true });
+    notifyProjectDiskChanged();
+    return destPath;
+  };
+  // 去重查询与写入属于同一临界区，并发的同内容重试也只创建一份文件。
+  return deduplicateByContent ? withDownloadDestinationLock(dataDir, fileName, save) : save();
 }
 
 /**
  * 将文件拷贝到项目数据目录，返回本地路径和 asset URL
- * 如文件已存在于目标目录则跳过拷贝
+ * 默认创建独立副本；显式启用 reuseExistingProjectFile 时可复用项目目录内原文件。
  */
 export async function copyFileToProjectData(
   sourcePath: string,
@@ -655,15 +767,33 @@ export async function copyFileToProjectData(
 ): Promise<{ filePath: string; assetUrl: string; fileName: string } | null> {
   if (!isTauriEnv()) return null;
 
-  const dataDir = await ensureProjectDataDir(projectId);
+  let dataDir = await ensureProjectDataDir(projectId);
   if (!dataDir) return null;
+  if (options?.projectSubdirectory) {
+    dataDir = joinPath(dataDir, options.projectSubdirectory);
+    await mkdir(dataDir, { recursive: true });
+  }
 
   const fileName = sourcePath.split(/[/\\]/).pop() || 'file';
-  const destPath = await resolveUniqueDestPath(dataDir, fileName);
-
+  let destPath: string;
   try {
-    await runNativeFileTransfer('copy_file_streamed', { sourcePath, destinationPath: destPath }, options);
-    notifyProjectDiskChanged();
+    const relative = options?.reuseExistingProjectFile ? getRelativeAssetPath(sourcePath, dataDir) : undefined;
+    const reuse = !!relative && relative.split('/').every((part) => !!part && !part.startsWith('.'));
+    if (reuse) {
+      throwIfMediaReadAborted(options?.signal);
+      if ((await retiredMediaPaths()).has(mediaFileAllocationKey(sourcePath))) {
+        throw new Error('素材路径已迁移，请刷新后重试');
+      }
+      // 原生端以真实路径再次核对归属，不能仅凭字符串前缀绕过目录授权。
+      const existing = await runNativeFileTransfer('copy_file_streamed', {
+        sourcePath, destinationPath: sourcePath, reuseRoot: dataDir,
+      }, options);
+      destPath = stripVerbatimPrefix(existing.path);
+    } else {
+      destPath = await resolveUniqueDestPath(dataDir, fileName, true);
+      await runNativeFileTransfer('copy_file_streamed', { sourcePath, destinationPath: destPath }, options);
+      notifyProjectDiskChanged();
+    }
   } catch (err) {
     if (!options?.redactErrors) console.error('Failed to copy file to project data:', sourcePath, err);
     // Don't fallback to convertFileSrc on external paths — asset protocol won't serve them
@@ -672,12 +802,13 @@ export async function copyFileToProjectData(
   }
 
   const convertFileSrc = await getConvertFileSrc();
+  const savedFileName = destPath.split(/[/\\]/).pop() || fileName;
   if (!convertFileSrc) {
     // If convertFileSrc unavailable, still return the path
-    return { filePath: destPath, assetUrl: '', fileName };
+    return { filePath: destPath, assetUrl: '', fileName: savedFileName };
   }
 
-  return { filePath: destPath, assetUrl: convertFileSrc(destPath), fileName };
+  return { filePath: destPath, assetUrl: convertFileSrc(destPath), fileName: savedFileName };
 }
 
 /**
@@ -704,16 +835,7 @@ export async function saveDataUrlToProjectData(
       label: fileName,
     });
 
-    let destPath: string;
-    if (options.deduplicateByContent) {
-      destPath = await resolveContentAddressedProjectPath(dataDir, fileName, bytes);
-    } else {
-      destPath = await resolveUniqueDestPath(dataDir, fileName);
-    }
-    if (!options.deduplicateByContent || !await exists(destPath)) {
-      await writeFile(destPath, bytes);
-      notifyProjectDiskChanged();
-    }
+    const destPath = await saveProjectBytes(dataDir, fileName, bytes, options.deduplicateByContent);
 
     const convertFileSrc = await getConvertFileSrc();
     const assetUrl = convertFileSrc ? convertFileSrc(destPath) : '';
@@ -741,14 +863,14 @@ export async function saveBinaryToProjectData(
   const dataDir = await ensureProjectDataDir(projectId, { throwOnError: options.throwOnError });
   if (!dataDir) return null;
 
-  const destPath = await resolveUniqueDestPath(dataDir, fileName);
-
+  let destPath: string;
   try {
-    await writeFile(destPath, data);
+    destPath = await resolveUniqueDestPath(dataDir, fileName, true);
+    await writeFile(destPath, data, { createNew: true });
     notifyProjectDiskChanged();
   } catch (err) {
     if (options.throwOnError) throw err;
-    console.error('Failed to save binary to project data:', destPath, err);
+    console.error('Failed to save binary to project data:', fileName, err);
     return null;
   }
 
@@ -769,7 +891,7 @@ export async function resolveProjectOutputPath(
   if (!isTauriEnv()) return null;
   const dataDir = await ensureProjectDataDir(projectId);
   if (!dataDir) return null;
-  return resolveUniqueDestPath(dataDir, sanitizeFileName(fileName));
+  return resolveUniqueDestPath(dataDir, sanitizeFileName(fileName), true);
 }
 
 /**
@@ -811,7 +933,12 @@ function extractFileNameFromUrl(url: string, fallbackPrefix: string): string {
 const MIME_TO_EXT: Record<string, string> = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif',
   'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
-  'audio/mpeg': '.mp3', 'audio/wav': '.wav', 'audio/ogg': '.ogg', 'audio/aac': '.aac',
+  'audio/mpeg': '.mp3', 'audio/mp3': '.mp3',
+  'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/wave': '.wav',
+  'audio/ogg': '.ogg', 'audio/aac': '.aac',
+  'audio/flac': '.flac', 'audio/x-flac': '.flac',
+  'audio/mp4': '.m4a', 'audio/x-m4a': '.m4a',
+  'audio/opus': '.opus', 'audio/x-ms-wma': '.wma',
 };
 
 /** 从 URL 路径或 MIME 推断文件扩展名（带点），都失败时按 fallbackPrefix 给默认值 */
@@ -842,30 +969,68 @@ export interface PersistedProjectMedia {
   sourceUrl: string;
 }
 
+export type MediaPersistenceFailureKind = 'http' | 'timeout' | 'network' | 'path_access' | 'permission'
+  | 'disk_space' | 'missing_file' | 'invalid_media' | 'connection_changed' | 'missing_key' | 'unknown';
+
+interface MediaPersistenceFailure {
+  kind: MediaPersistenceFailureKind;
+  message: string;
+  httpStatus?: number;
+}
+
 /** 原始异常只用于本次分类，不把路径、签名 URL 或响应正文传入节点和历史。 */
-function describeMediaPersistenceFailure(error: unknown): string {
+function describeMediaPersistenceFailure(error: unknown): MediaPersistenceFailure {
   const message = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+  if (/视频下载返回空文件/.test(message)) return { kind: 'invalid_media', message: '视频下载返回空文件，可重试下载原任务' };
+  if (/下载结果不是有效视频/.test(message)) return { kind: 'invalid_media', message: '下载结果不是有效视频，请检查输出格式或下载服务' };
+  if (/下载返回不完整的分段内容/.test(message)) return { kind: 'invalid_media', message: '下载返回了不完整的视频或媒体，可重试下载原任务' };
+  if (message === '项目目录或本地媒体地址不可用') return { kind: 'missing_file', message };
+  if (/原(?:媒体)?连接.*(?:不存在|已变化)|接口地址已变化|媒体下载地址与厂商连接不同源/.test(message)) {
+    return { kind: 'connection_changed', message: '原媒体连接或接口地址已变化，请检查原连接配置' };
+  }
+  if (/原媒体连接尚未填写 API Key|API Key.*(?:缺失|未填写)|未(?:填写|配置).*(?:API Key|密钥)/i.test(message)) {
+    return { kind: 'missing_key', message: '原媒体连接尚未填写 API Key，请补填后继续保存' };
+  }
   if (/forbidden path|路径未获授权|not allowed on the scope/i.test(message)) {
-    return '应用拒绝访问项目文件，请在设置中重新选择文件保存目录';
+    return { kind: 'path_access', message: '应用拒绝访问项目文件，请在设置中重新选择文件保存目录' };
   }
   if (/permission denied|access is denied|拒绝访问|os error 5\b|EACCES|EPERM/i.test(message)) {
-    return '系统拒绝写入项目目录，请检查目录的写入权限';
+    return { kind: 'permission', message: '系统拒绝写入项目目录，请检查目录的写入权限' };
   }
   if (/no space|disk.*full|磁盘.*不足|空间不足|ENOSPC|os error 112\b/i.test(message)) {
-    return '目标磁盘空间不足';
+    return { kind: 'disk_space', message: '目标磁盘空间不足' };
   }
   const httpStatus = /\bHTTP\s+(\d{3})\b/i.exec(message)?.[1];
-  if (httpStatus) return `图片或媒体下载失败（HTTP ${httpStatus}）`;
-  if (/下载请求失败|failed to fetch|network|timed?\s*out|超时/i.test(message)) {
-    return '下载媒体失败，请检查网络或媒体链接是否已失效';
+  if (httpStatus && Number(httpStatus) >= 400 && Number(httpStatus) <= 599) {
+    return { kind: 'http', httpStatus: Number(httpStatus), message: `图片或媒体下载失败（HTTP ${httpStatus}）` };
+  }
+  if (/timed?\s*out|timeout|超时/i.test(message)) {
+    return { kind: 'timeout', message: '下载媒体失败，请检查网络或媒体链接是否已失效' };
+  }
+  if (/下载请求失败|媒体下载连接失败|读取下载数据失败|failed to fetch|network|connection (?:reset|closed|refused)|连接.*(?:失败|中断)|读取.*中断/i.test(message)) {
+    return { kind: 'network', message: '下载媒体失败，请检查网络或媒体链接是否已失效' };
   }
   if (/目录.*不存在|no such file|path not found|找不到指定|ENOENT|os error [23]\b/i.test(message)) {
-    return '项目目录或源文件不存在，请检查文件保存位置';
+    return { kind: 'missing_file', message: '项目目录或源文件不存在，请检查文件保存位置' };
   }
   if (error instanceof MediaDataUrlTooLargeError || error instanceof MediaDataUrlTotalTooLargeError) {
-    return '媒体超过内存保存上限';
+    return { kind: 'invalid_media', message: '媒体超过内存保存上限' };
   }
-  return '保存过程发生异常，请检查文件保存目录和媒体来源';
+  return { kind: 'unknown', message: '保存过程发生异常，请检查文件保存目录和媒体来源' };
+}
+
+/** 只携带固定分类后的原因，供待恢复任务展示；不保留原生异常或 cause。 */
+export class MediaPersistenceError extends Error {
+  readonly failureKind: MediaPersistenceFailureKind;
+  readonly httpStatus?: number;
+
+  constructor(error: unknown) {
+    const failure = describeMediaPersistenceFailure(error);
+    super(`生成媒体未能写入项目目录：${failure.message}`);
+    this.name = 'MediaPersistenceError';
+    this.failureKind = failure.kind;
+    if (failure.httpStatus !== undefined) this.httpStatus = failure.httpStatus;
+  }
 }
 
 /**
@@ -892,11 +1057,11 @@ export async function persistMediaUrlToProjectData(
     if (isAbortError(error) || options?.signal?.aborted) {
       throw new DOMException('媒体保存已取消', 'AbortError');
     }
-    // eslint-disable-next-line preserve-caught-error -- 原始异常可能包含路径、签名 URL 或凭据，不保留 cause。
-    throw new Error(`生成媒体未能写入项目目录：${describeMediaPersistenceFailure(error)}`);
+    // 仅保留固定分类后的原因，不携带原始路径、链接或凭据。
+    throw new MediaPersistenceError(error);
   }
   if (!saved?.filePath || !saved.assetUrl) {
-    throw new Error('生成媒体未能写入项目目录：项目目录或本地媒体地址不可用');
+    throw new MediaPersistenceError('项目目录或本地媒体地址不可用');
   }
   if (isLocalMediaUrl(url)) {
     return { ...saved, mediaUrl: saved.assetUrl, sourceUrl: saved.assetUrl };
@@ -949,12 +1114,8 @@ export async function downloadUrlAndSave(
       if (options?.deduplicateByContent) {
         const dataDir = await ensureProjectDataDir(projectId, { throwOnError: options.throwOnError });
         if (!dataDir) return null;
-        const destPath = await resolveContentAddressedProjectPath(dataDir, fileName, bytes);
-        if (!await exists(destPath)) {
-          throwIfMediaReadAborted(options?.signal);
-          await writeFile(destPath, bytes);
-          notifyProjectDiskChanged();
-        }
+        throwIfMediaReadAborted(options?.signal);
+        const destPath = await saveProjectBytes(dataDir, fileName, bytes, true, options?.signal);
         const convertFileSrc = await getConvertFileSrc();
         return {
           filePath: destPath,
@@ -966,6 +1127,10 @@ export async function downloadUrlAndSave(
 
     const sourcePath = localMediaUrlToPath(url);
     if (!sourcePath && !isRemoteMediaUrl(url)) throw new Error('不支持的媒体地址');
+    const remoteRequest = !sourcePath && options?.mediaDownloadAccess
+      ? await (await import('./ai/mediaDownloadAccess')).resolveMediaDownloadRequest(url, options.mediaDownloadAccess)
+      : { url };
+    throwIfMediaReadAborted(options?.signal);
     // 本地 URL 还原为授权文件路径，保留原生流式复制的取消与进度。
     const sourceName = sourcePath?.replace(/\\/g, '/').split('/').pop();
     const fileName = baseName && baseName.trim()
@@ -977,10 +1142,13 @@ export async function downloadUrlAndSave(
       dataDir,
       fileName,
       async () => {
-        const destPath = await resolveUniqueDestPath(dataDir, fileName);
+        const destPath = await resolveUniqueDestPath(dataDir, fileName, true);
         return runNativeFileTransfer(
           sourcePath ? 'copy_file_streamed' : 'download_file_streamed',
-          sourcePath ? { sourcePath, destinationPath: destPath } : { url, destinationPath: destPath },
+          sourcePath ? { sourcePath, destinationPath: destPath } : {
+            ...remoteRequest, destinationPath: destPath,
+            ...(fallbackPrefix.includes('video') ? { expectedMediaKind: 'video' } : {}),
+          },
           options,
         );
       },
@@ -1028,7 +1196,7 @@ export async function renameProjectFileToLabel(
   try {
     // 就地改名：分组内的文件留在自己的子文件夹，否则会被搬回项目根目录
     const currentDir = normPath.slice(0, normPath.length - oldName.length - 1);
-    const destPath = await resolveUniqueDestPath(currentDir, newName);
+    const destPath = await resolveUniqueDestPath(currentDir, newName, true);
     await rename(filePath, destPath);
     notifyProjectDiskChanged();
     const convertFileSrc = await getConvertFileSrc();
@@ -1041,32 +1209,106 @@ export async function renameProjectFileToLabel(
   }
 }
 
+/** 磁盘改名结果；部分完成时同时返回最新位置和提醒。 */
+export interface AssetFileRenameResult {
+  file: AssetFileEntry;
+  warning?: string;
+}
+
+const assetRenameLocks = new Set<string>();
+
+/** 就地改名图片或文档；保留资产身份，引用同步失败时恢复磁盘原名。 */
+export async function renameAssetFile(
+  file: AssetFileEntry, label: string, projectId: string | undefined, roots: readonly string[],
+  onRelocated: (move: MediaRelocation) => void,
+): Promise<AssetFileRenameResult> {
+  if (!isTauriEnv() || !['image', 'text'].includes(file.category) || file.availability === 'offline') throw new Error('仅支持重命名可访问的本地图片或文本文件');
+  const path = stripVerbatimPrefix(file.path).replace(/\\/g, '/');
+  if (path.split('/').some((part) => part === '.' || part === '..' || part === '.trash')) throw new Error('文件位置无效');
+  const oldName = path.split('/').pop() ?? '';
+  const extension = oldName.lastIndexOf('.') > 0 ? oldName.slice(oldName.lastIndexOf('.')) : '';
+  let base = label.trim();
+  if (extension && base.toLowerCase().endsWith(extension.toLowerCase())) base = base.slice(0, -extension.length);
+  if (!base || /[<>:"/\\|?*]/.test(base) || Array.from(base).some((char) => char.charCodeAt(0) < 32) || /[. ]$/.test(base)
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base) || base.length + extension.length > 255) {
+    throw new Error('文件名无效，请勿使用路径、特殊字符、保留名称或过长名称');
+  }
+  const name = `${base}${extension}`;
+  if (name === oldName) return { file };
+  const newPath = `${path.slice(0, path.lastIndexOf('/') + 1)}${name}`;
+  const lockKey = /^[a-z]:\//i.test(path) ? path.toLowerCase() : path;
+  if (assetRenameLocks.has(lockKey)) throw new Error('此文件正在改名，请稍候');
+  assetRenameLocks.add(lockKey);
+  try {
+    const { getAssetIndexById, getAssetIndexByPath } = await import('./indexedDbService');
+    const { getGlobalFilesDir } = await import('./fs/assetLibrary');
+    const { fingerprintAssetImage } = await import('./fs/assetImageMetadata');
+    const indexed = file.assetId ? await getAssetIndexById(file.assetId) : await getAssetIndexByPath(path);
+    const samePath = (value: string) => /^[a-z]:\//i.test(value) ? value.toLowerCase() : value;
+    if (indexed && samePath(indexed.path.replace(/\\/g, '/')) !== samePath(path)) throw new Error('文件位置已变化，请刷新后重试');
+    const source = indexed?.source ?? file.source;
+    const ownerId = projectId ?? indexed?.projectId;
+    const root = source === 'project' && ownerId ? await getProjectDataDir(ownerId)
+      : source === 'global' ? await getGlobalFilesDir()
+      : source === 'folder' ? roots.find((candidate) => getRelativeAssetPath(path, candidate) !== undefined) : undefined;
+    const relativePath = root ? getRelativeAssetPath(newPath, root) : undefined;
+    if (!root || !relativePath || getRelativeAssetPath(path, root) === undefined) throw new Error('文件不在已登记的资产目录内');
+    // 内部 JSON 按固定路径和摘要引用，不能按普通素材的方式改名。
+    if (file.category === 'text' && source === 'project'
+      && /^(?:(?:director\/previs|ai-apps)\/[a-f0-9]{64}|director\/scenes\/[^/]+\/(?:scene-r\d+|results\/manifest-r\d+)-[a-f0-9]{64})\.json$/i.test(getRelativeAssetPath(path, root)!)) {
+      throw new Error('此文件由应用内部管理，需要保留原名；请先复制为普通文本文件再改名');
+    }
+    const info = await lstat(path);
+    if (!info.isFile || info.isSymlink) throw new Error('仅支持普通图片或文本文件');
+    if (await exists(newPath)) throw new Error('已有同名文件，请换一个名称');
+    const identity = await identifyAsset(path, { assetId: file.assetId, source: source!, rootPath: root, projectId: ownerId });
+    const content = file.category === 'text' ? await readAssetTextFile(path) : await fingerprintAssetImage(path);
+    const assetUrl = await getAssetUrlFromPath(newPath);
+    if (!assetUrl) throw new Error('无法解析改名后的文件位置');
+    const move: MediaRelocation = { oldPath: path, newPath, oldAssetUrl: file.assetUrl, assetUrl, relativePath,
+      projectId: ownerId ?? 'asset-rename', renamedFileName: name,
+      ...(source !== 'project' ? { assetMove: { assetId: identity.assetId, rootPath: root, source: source as 'global' | 'folder',
+        digest: content.digest, totalBytes: 'bytes' in content ? content.bytes : content.size, mtimeMs: info.mtime?.getTime() ?? 0 } } : {}) };
+    const next: AssetFileEntry = { ...file, assetId: identity.assetId, name, path: newPath, assetUrl, relativePath };
+    // 再次检查目标，名称冲突时不使用自动加序号或覆盖路径。
+    if (await exists(newPath)) throw new Error('已有同名文件，请换一个名称');
+    await rename(path, newPath);
+    try {
+      await persistMediaRelocation(move);
+    } catch {
+      try {
+        if (await exists(path)) throw new Error('原位置已被占用');
+        await rename(newPath, path);
+      } catch {
+        onRelocated(move);
+        notifyProjectDiskChanged();
+        return { file: next, warning: '磁盘文件已改名，但引用同步失败且无法恢复原名，请重新打开资源库检查。' };
+      }
+      throw new Error('引用同步失败，已恢复磁盘原文件名');
+    }
+    onRelocated(move);
+    notifyProjectDiskChanged();
+    try { await completeMediaRelocation(move); }
+    catch { return { file: next, warning: '文件已改名，引用已同步，但操作记录尚未完成清理。' }; }
+    return { file: next };
+  } finally { assetRenameLocks.delete(lockKey); }
+}
+
 /** 获取项目文件列表 */
-export async function listProjectFiles(projectId: string): Promise<AssetFileEntry[]> {
+export async function listProjectFiles(projectId: string, options: AssetScanOptions = {}): Promise<AssetFileEntry[]> {
+  if (options.signal?.aborted) throw new DOMException('资源扫描已取消', 'AbortError');
   const projectDir = await getProjectDataDir(projectId);
+  if (options.signal?.aborted) throw new DOMException('资源扫描已取消', 'AbortError');
   if (!projectDir) return [];
-  // 递归：节点文件可能位于分组子文件夹内
-  const allFiles = await walkDirectoryFiles(projectDir, { excludedRootDirectories: ['.thumbnail'] });
-  // Filter out files inside AppData / .trash subdirectories (可能嵌套在分组文件夹内)
-  const files = allFiles.filter((f) => {
-    const relative = f.path.substring(projectDir.length).replace(/\\/g, '/').replace(/^\//, '');
-    return !relative.split('/').slice(0, -1).some((dir) => dir === 'AppData' || dir === '.trash');
+  // 一次扫描完成项目身份识别；派生缓存与内部目录在遍历前排除，增量和最终结果保持一致。
+  const files = await walkDirectoryFiles(projectDir, {
+    ...options,
+    source: 'project',
+    projectId,
+    excludedRootDirectories: ['.thumbnail'],
+    excludedDirectories: ['AppData', '.trash', '.shared-sync'],
   });
-  return Promise.all(files.map(async (file) => {
-    const identity = await identifyAsset(file.path, {
-      rootPath: projectDir,
-      projectId,
-      source: 'project',
-      size: file.size,
-    });
-    return {
-      ...file,
-      assetId: identity.assetId,
-      relativePath: identity.relativePath,
-      source: 'project' as const,
-      availability: 'online' as const,
-    };
-  }));
+  return files;
 }
 
 export interface AgentTextFileSelection {
@@ -1084,13 +1326,15 @@ const AGENT_TEXT_EXTENSIONS = [
 /** 通过原生选择器选择 Agent 可读取的文本文件；路径只返回给授权服务，不进入模型。 */
 export async function selectAgentTextFiles(
   title = '授权当前对话读取本地文件',
+  includeImages = false,
 ): Promise<AgentTextFileSelection[]> {
   if (!isTauriEnv()) throw new Error('本地文件授权仅在 Tauri 桌面环境可用');
   const selected = await open({
     multiple: true,
     directory: false,
     title,
-    filters: [{ name: '文本与数据文件', extensions: AGENT_TEXT_EXTENSIONS }],
+    filters: [{ name: includeImages ? '图片、文本与数据文件' : '文本与数据文件',
+      extensions: includeImages ? [...AGENT_TEXT_EXTENSIONS, 'png', 'jpg', 'jpeg', 'webp'] : AGENT_TEXT_EXTENSIONS }],
   });
   if (!selected) return [];
   const paths = Array.isArray(selected) ? selected : [selected];
@@ -1098,12 +1342,30 @@ export async function selectAgentTextFiles(
   for (const path of paths.slice(0, 10)) {
     const fileName = path.split(/[/\\]/).pop() || '未命名文件';
     const extension = fileName.split('.').pop()?.toLowerCase() || '';
-    if (!AGENT_TEXT_EXTENSIONS.includes(extension)) continue;
+    if (!AGENT_TEXT_EXTENSIONS.includes(extension) && !(includeImages && /^(png|jpe?g|webp)$/.test(extension))) continue;
     const metadata = await stat(path);
     if (!metadata.isFile) continue;
     files.push({ path, fileName, size: metadata.size, extension });
   }
   return files;
+}
+
+/** 只用于原生选择器返回的图片，读取前后都限制体积并检查真实图片头。 */
+export async function readAgentSelectedImage(path: string): Promise<{ bytes: Uint8Array; extension: string }> {
+  if (!isTauriEnv()) throw new Error('图片附件仅在 Tauri 桌面环境可用');
+  const metadata = await stat(path);
+  if (!metadata.isFile || metadata.size > 8 * 1024 * 1024) throw new Error('参考图必须是 8 MB 以内的图片文件');
+  const bytes = await tauriReadFile(path);
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('参考图超过 8 MB');
+  const ascii = (offset: number, length: number) => String.fromCharCode(...bytes.subarray(offset, offset + length));
+  const extension = bytes[0] === 0x89 && ascii(1, 3) === 'PNG' ? 'png'
+    : bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'jpg'
+      : ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP' ? 'webp' : undefined;
+  const { parseRasterImageDimensions } = await import('./rasterImageDimensions');
+  const dimensions = parseRasterImageDimensions(bytes);
+  if (!extension || !dimensions) throw new Error('请选择有效的 PNG、JPEG 或 WebP 图片');
+  if (dimensions.width * dimensions.height > 16_000_000) throw new Error('参考图超过 1600 万像素，请缩小后上传');
+  return { bytes, extension };
 }
 
 /** 读取已经由授权服务复核过的路径；严格限制字节数并使用 UTF-8 解码。 */
@@ -1113,16 +1375,53 @@ export async function readAgentAuthorizedTextFile(
   signal?: AbortSignal,
 ): Promise<string> {
   if (!isTauriEnv()) throw new Error('本地文件读取仅在 Tauri 桌面环境可用');
-  if (signal?.aborted) throw new DOMException('读取已取消', 'AbortError');
-  const metadata = await stat(path);
-  if (!metadata.isFile) throw new Error('授权目标已不再是文件');
-  if (metadata.size > maxBytes) throw new Error(`文件超过 ${Math.floor(maxBytes / 1024)} KB 读取限制`);
-  const bytes = await tauriReadFile(path);
-  if (signal?.aborted) throw new DOMException('读取已取消', 'AbortError');
+  const checkAbort = () => { if (signal?.aborted) throw new DOMException('读取已取消', 'AbortError'); };
+  const tooLarge = () => new Error(`文件超过 ${Math.floor(maxBytes / 1024)} KB 读取限制`);
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    throw new Error('文件不是有效的 UTF-8 文本');
+    checkAbort();
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('文件读取限制无效');
+    const metadata = await stat(path);
+    checkAbort();
+    if (!metadata.isFile) throw new Error('授权目标已不再是文件');
+    if (metadata.size > maxBytes) throw tooLarge();
+    const file = await fsOpen(path, { read: true });
+    let content: string;
+    try {
+      checkAbort();
+      const parts: Uint8Array[] = [];
+      let total = 0;
+      let ended = false;
+      while (!ended) {
+        // 最多多读一个字节识别增长；缓冲按实际分块增长，不按调用方上限预分配。
+        const part = new Uint8Array(Math.min(64 * 1024, maxBytes - total + 1));
+        let filled = 0;
+        while (filled < part.length) {
+          checkAbort();
+          const count = await file.read(part.subarray(filled));
+          checkAbort();
+          if (count === null || count === 0) { ended = true; break; }
+          if (!Number.isSafeInteger(count) || count < 0 || count > part.length - filled) {
+            throw new Error('授权文件返回了无效读取长度');
+          }
+          filled += count;
+          total += count;
+          if (total > maxBytes) throw tooLarge();
+        }
+        if (filled) parts.push(part.subarray(0, filled));
+      }
+      const bytes = parts.length === 1 ? parts[0] : new Uint8Array(total);
+      if (parts.length > 1) {
+        let offset = 0;
+        for (const part of parts) { bytes.set(part, offset); offset += part.length; }
+      }
+      try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch { throw new Error('文件不是有效的 UTF-8 文本'); }
+    } finally { await file.close(); }
+    checkAbort();
+    return content;
+  } catch (error) {
+    checkAbort();
+    throw error;
   }
 }
 
@@ -1161,9 +1460,13 @@ export interface UploadResult {
 export async function uploadSourceFileToProject(
   accept?: string,
   projectId?: string | null,
+  projectSubdirectory?: 'Library',
 ): Promise<UploadResult & { filePath?: string } | null> {
   try {
     if (isTauriEnv()) {
+      if (projectSubdirectory && (!projectId || projectId === 'default')) {
+        throw new Error('请先保存项目，再上传创作资产');
+      }
       // '*/*' 是 MIME 通配符，不是有效扩展名；传空 filters 让 Tauri 显示所有文件
       const isWildcard = !accept || accept === '*/*' || accept.trim() === '*/*';
       const filters = isWildcard
@@ -1178,6 +1481,9 @@ export async function uploadSourceFileToProject(
       if (!filePath) return null;
 
       const fileName = filePath.split(/[\\/]/).pop() || 'file';
+      if (projectSubdirectory && !/\.(png|jpe?g|webp|gif|bmp)$/i.test(fileName)) {
+        throw new Error('请选择支持的图片文件');
+      }
 
       // Try to get file size (may fail for paths outside fs scope)
       let fileSize = 0;
@@ -1190,11 +1496,13 @@ export async function uploadSourceFileToProject(
 
       // If projectId is provided, copy to project data dir
       if (projectId && projectId !== 'default') {
-        const result = await copyFileToProjectData(filePath, projectId);
-        if (result) {
+        const result = await copyFileToProjectData(filePath, projectId, { projectSubdirectory, redactErrors: Boolean(projectSubdirectory) });
+        if (result && (!projectSubdirectory || result.assetUrl)) {
           return { dataUrl: result.assetUrl, fileName: result.fileName, fileSize, filePath: result.filePath };
         }
       }
+
+      if (projectSubdirectory) throw new Error('素材保存到 Library 失败，请重试');
 
       // Fallback: read into memory
       const ext = fileName.split('.').pop()?.toLowerCase() || '';
@@ -1202,7 +1510,7 @@ export async function uploadSourceFileToProject(
       if (fileSize > 0) assertMediaDataUrlSize(fileSize, kind, `${MEDIA_KIND_LABELS[kind]}「${fileName}」`);
       const content = await tauriReadFile(filePath);
       assertMediaDataUrlSize(content.byteLength, kind, `${MEDIA_KIND_LABELS[kind]}「${fileName}」`);
-      const base64 = arrayBufferToBase64(content.buffer);
+      const base64 = await bytePartsToBase64Async([content]);
       const mimeType = getMimeType(ext);
       return {
         dataUrl: `data:${mimeType};base64,${base64}`,
@@ -1229,7 +1537,7 @@ export async function uploadSourceFileToProject(
       fileSize: file.size,
     };
   } catch (error) {
-    console.error('Upload to project failed:', error);
+    if (!projectSubdirectory) console.error('Upload to project failed:', error);
     throw error;
   }
 }
@@ -1311,8 +1619,18 @@ function getDefaultExtension(nodeType: string): string {
   }
 }
 
+/** 音频另存为只复制原始字节，扩展名沿用本地文件，再回退到文件名、URL 或 MIME。 */
+function getAudioSaveExtension(filePath?: string, fileName?: string, mediaUrl?: string): string {
+  for (const source of [filePath, fileName, localMediaUrlToPath(mediaUrl)]) {
+    const extension = source?.split(/[\\/]/).pop()?.match(/\.[^.]+$/)?.[0];
+    if (extension) return extension.toLowerCase();
+  }
+  const mime = /^data:([^;,]+)/i.exec(mediaUrl || '')?.[1]?.toLowerCase();
+  return guessExtension(mediaUrl || '', mime, 'audio');
+}
+
 /** 根据节点类型和默认扩展名生成文件过滤器 */
-function getSaveFilter(nodeType: string): { name: string; extensions: string[] }[] {
+function getSaveFilter(nodeType: string, defaultExtension: string): { name: string; extensions: string[] }[] {
   switch (nodeType) {
     case 'ai-text':      return [{ name: '文本文件', extensions: ['txt'] }, { name: '所有文件', extensions: ['*'] }];
     case 'ai-markdown':  return [{ name: 'Markdown 文件', extensions: ['md'] }, { name: '所有文件', extensions: ['*'] }];
@@ -1322,7 +1640,7 @@ function getSaveFilter(nodeType: string): { name: string; extensions: string[] }
     case 'ai-video':
     case 'source-video': return [{ name: '视频文件', extensions: ['mp4', 'webm', 'mov'] }, { name: '所有文件', extensions: ['*'] }];
     case 'ai-audio':
-    case 'source-audio': return [{ name: '音频文件', extensions: ['mp3', 'wav', 'ogg'] }, { name: '所有文件', extensions: ['*'] }];
+    case 'source-audio': return [{ name: '音频文件', extensions: [defaultExtension.slice(1)] }, { name: '所有文件', extensions: ['*'] }];
     default:             return [{ name: '所有文件', extensions: ['*'] }];
   }
 }
@@ -1341,9 +1659,15 @@ export async function saveNodeOutputToFile(opts: {
   textOutput?: string;
   nodeType: string;
   fileName?: string;
+  signal?: AbortSignal;
+  onProgress?: (progress: NodeOutputDownloadProgress) => void;
 }): Promise<string | null> {
-  const { filePath, mediaUrl, textOutput, nodeType, fileName } = opts;
-  const defExt = getDefaultExtension(nodeType);
+  const { filePath, mediaUrl, textOutput, nodeType, fileName, signal, onProgress } = opts;
+  const nativeComfySource = shouldLoadNativeComfyImage(mediaUrl);
+  throwIfMediaReadAborted(signal);
+  const defExt = nodeType === 'ai-audio' || nodeType === 'source-audio'
+    ? getAudioSaveExtension(filePath, fileName, mediaUrl)
+    : getDefaultExtension(nodeType);
 
   if (!isTauriEnv()) {
     console.warn('[fileService] saveNodeOutputToFile: 仅 Tauri 桌面环境支持');
@@ -1358,7 +1682,7 @@ export async function saveNodeOutputToFile(opts: {
   defaultName += defExt;
 
   // Open save dialog
-  const filters = getSaveFilter(nodeType);
+  const filters = getSaveFilter(nodeType, defExt);
   const destPath = await save({
     defaultPath: defaultName,
     filters,
@@ -1367,12 +1691,32 @@ export async function saveNodeOutputToFile(opts: {
   if (!destPath) return null; // User cancelled
 
   try {
+    throwIfMediaReadAborted(signal);
+    // 新目标走独占发布；复制开始后的任何失败都不能落到可能覆盖目标的 URL 回退。
+    // 源路径已经缺失时仍保留下面的读取失败回退，已有目标沿用保存对话框的覆盖语义。
+    if (filePath && !(await exists(destPath)) && await exists(filePath)) {
+      throwIfMediaReadAborted(signal);
+      onProgress?.({ transferredBytes: 0, totalBytes: null, phase: 'saving' });
+      const result = await copyLocalFileStreamed(filePath, destPath, {
+        signal,
+        onProgress: onProgress ? ({ transferredBytes, totalBytes }) => onProgress({
+          transferredBytes, totalBytes, phase: 'saving',
+        }) : undefined,
+      });
+      throwIfMediaReadAborted(signal);
+      onProgress?.({ transferredBytes: result.totalBytes, totalBytes: result.totalBytes, phase: 'saving' });
+      return result.path;
+    }
     // 1. Media: try real file path first
     if (filePath) {
       try {
-        await writeFile(destPath, await tauriReadFile(filePath));
+        throwIfMediaReadAborted(signal);
+        const bytes = await tauriReadFile(filePath);
+        throwIfMediaReadAborted(signal);
+        await writeFile(destPath, bytes);
         return destPath;
       } catch (err) {
+        if (signal?.aborted || isAbortError(err)) throw err;
         // 源文件被移动/删除时不整体放弃，落到下面的 URL / 文本分支再试一次
         if (!mediaUrl && !textOutput) throw err;
         console.warn('[fileService] saveNodeOutputToFile: 源文件读取失败，改用节点 URL:', filePath, err);
@@ -1381,31 +1725,101 @@ export async function saveNodeOutputToFile(opts: {
 
     // 2. data: URL
     if (mediaUrl && mediaUrl.startsWith('data:')) {
-      const commaIdx = mediaUrl.indexOf(',');
-      const b64 = commaIdx > 0 ? mediaUrl.substring(commaIdx + 1) : '';
-      const binaryStr = atob(b64);
-      const bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) {
-        bytes[i] = binaryStr.charCodeAt(i);
-      }
+      const bytes = await decodeDataUrlBytesAsync(mediaUrl, { signal });
+      throwIfMediaReadAborted(signal);
       await writeFile(destPath, bytes);
       return destPath;
     }
 
-    // 3. 其余 URL（asset://localhost、http://asset.localhost、blob:、http(s)://）直接 fetch。
+    // 3. ComfyUI 与普通远程 URL 的新目标走原生流下载；覆盖与 GitHub 切源保留既有入口。
     //    节点里的 asset URL 已经是 convertFileSrc 的产物，再转一次会把整个 URL 当成路径编码进去 —
     //    Windows 的 asset URL 是 http://asset.localhost/… 走不到这一步，mac 的 asset:// 才会踩到。
     if (mediaUrl && /^(asset:|blob:|https?:)/.test(mediaUrl)) {
-      const resp = await fetch(mediaUrl);
+      const githubSource = githubMirrorUrl(mediaUrl);
+      const nativeRemoteSource = !nativeComfySource && !githubSource && isRemoteMediaUrl(mediaUrl) && !(await exists(destPath));
+      if (nativeComfySource || nativeRemoteSource) {
+        // 复用原生临时文件与提交保护；不得删除或覆盖用户已有的目标文件。
+        if (nativeComfySource && await exists(destPath)) throw new Error('目标文件已存在，请改用新文件名保存');
+        throwIfMediaReadAborted(signal);
+        onProgress?.({ transferredBytes: 0, totalBytes: null, phase: 'downloading' });
+        const result = await runNativeFileTransfer('download_file_streamed', {
+          url: mediaUrl, destinationPath: destPath,
+          ...(nativeComfySource && nodeType.includes('video') ? { expectedMediaKind: 'video' } : {}),
+        }, {
+          signal,
+          onProgress: onProgress ? ({ transferredBytes, totalBytes }) => onProgress({
+            transferredBytes, totalBytes, phase: 'downloading',
+          }) : undefined,
+        });
+        throwIfMediaReadAborted(signal);
+        onProgress?.({ transferredBytes: result.totalBytes, totalBytes: result.totalBytes, phase: 'saving' });
+        return result.path;
+      }
+      if (githubSource) {
+        const bytes = await downloadGithubBytes(mediaUrl, { signal, onProgress: (transferredBytes, totalBytes) =>
+          onProgress?.({ transferredBytes, totalBytes: totalBytes ?? null, phase: 'downloading' }) });
+        throwIfMediaReadAborted(signal);
+        onProgress?.({ transferredBytes: bytes.byteLength, totalBytes: bytes.byteLength, phase: 'saving' });
+        await writeFile(destPath, bytes);
+        return destPath;
+      }
+      const reportProgress = isRemoteMediaUrl(mediaUrl) ? onProgress : undefined;
+      reportProgress?.({ transferredBytes: 0, totalBytes: null, phase: 'downloading' });
+      throwIfMediaReadAborted(signal);
+      const resp = await fetch(mediaUrl, { signal });
       if (!resp.ok) throw new Error(`读取媒体失败：HTTP ${resp.status}`);
-      const buffer = await resp.arrayBuffer();
-      await writeFile(destPath, new Uint8Array(buffer));
+      let bytes: Uint8Array;
+      if (reportProgress) {
+        const contentLength = resp.headers.get('content-length');
+        const encoding = resp.headers.get('content-encoding');
+        // fetch 可能已解压响应，压缩传输长度不能作为已读取字节的分母。
+        let totalBytes = (!encoding || encoding.toLowerCase() === 'identity')
+          && contentLength !== null && /^\d+$/.test(contentLength)
+          && Number.isSafeInteger(Number(contentLength)) ? Number(contentLength) : null;
+        let transferredBytes = 0;
+        reportProgress({ transferredBytes, totalBytes, phase: 'downloading' });
+        const reader = resp.body?.getReader();
+        if (reader) {
+          const chunks: Uint8Array[] = [];
+          try {
+            while (true) {
+              throwIfMediaReadAborted(signal);
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              transferredBytes += value.byteLength;
+              if (totalBytes !== null && transferredBytes > totalBytes) totalBytes = null;
+              reportProgress({ transferredBytes, totalBytes, phase: 'downloading' });
+            }
+          } finally {
+            reader.releaseLock();
+          }
+          bytes = new Uint8Array(transferredBytes);
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+        } else {
+          bytes = new Uint8Array(await resp.arrayBuffer());
+          transferredBytes = bytes.byteLength;
+          if (totalBytes !== null && transferredBytes > totalBytes) totalBytes = null;
+        }
+        throwIfMediaReadAborted(signal);
+        if (totalBytes !== null && transferredBytes !== totalBytes) throw new Error('媒体下载不完整，请重试');
+        reportProgress({ transferredBytes, totalBytes, phase: 'saving' });
+      } else {
+        bytes = new Uint8Array(await resp.arrayBuffer());
+      }
+      throwIfMediaReadAborted(signal);
+      await writeFile(destPath, bytes);
       return destPath;
     }
 
     // 5. Text output (ai-text / ai-markdown)
     if (textOutput) {
       const encoder = new TextEncoder();
+      throwIfMediaReadAborted(signal);
       await writeFile(destPath, encoder.encode(textOutput));
       return destPath;
     }
@@ -1413,6 +1827,7 @@ export async function saveNodeOutputToFile(opts: {
     console.warn('[fileService] saveNodeOutputToFile: 无可保存的内容');
     return null;
   } catch (err) {
+    if (signal?.aborted) throw mediaReadAbortReason(signal);
     console.error('[fileService] saveNodeOutputToFile 失败:', err);
     throw err;
   }

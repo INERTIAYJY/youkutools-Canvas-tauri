@@ -1,3 +1,6 @@
+/**
+ * backgroundService — 回归测试：compressImageLossless resource cleanup。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { compressImageLossless } from '../../src/services/backgroundService';
 

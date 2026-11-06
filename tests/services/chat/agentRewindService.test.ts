@@ -1,3 +1,6 @@
+/**
+ * agentRewindService — 回归测试：agent task canvas rewind。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { AgentTask } from '../../../src/types/agent';
 import { rewindAgentTaskCanvas } from '../../../src/services/chat/agentRewindService';

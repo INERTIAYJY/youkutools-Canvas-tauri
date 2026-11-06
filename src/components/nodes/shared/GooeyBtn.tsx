@@ -7,9 +7,12 @@ interface GooeyBtnProps {
   className?: string;
   /** HSL hue，跟随 Handle 类型色：text=234, image=142, video=217, audio=30 */
   hue?: number;
+  ariaLabel?: string;
+  title?: string;
+  onPointerDown?: React.PointerEventHandler<HTMLButtonElement>;
 }
 
-const GooeyBtn = ({ className, hue }: GooeyBtnProps) => {
+const GooeyBtn = ({ className, hue, ariaLabel, title, onPointerDown }: GooeyBtnProps) => {
   const btnRef = useRef<HTMLButtonElement>(null);
   const filterId = `goo-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   // 缩放补偿从 Canvas 根节点继承，避免每个连接按钮订阅视口并在缩放时重渲染。
@@ -54,8 +57,12 @@ const GooeyBtn = ({ className, hue }: GooeyBtnProps) => {
       </svg>
 
       <button
+        type="button"
         ref={btnRef}
         className="gooey-btn"
+        aria-label={ariaLabel}
+        title={title}
+        onPointerDown={onPointerDown}
         style={{
           '--hue': `${hue ?? 170}deg`,
           '--gooey-filter': `url(#${filterId})`,

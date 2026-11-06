@@ -1,0 +1,121 @@
+{
+  "1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": ""
+    },
+    "_meta": {
+      "title": "① 上传方言参考音频"
+    }
+  },
+  "2": {
+    "class_type": "AILab_Qwen3ASR",
+    "inputs": {
+      "model": "Qwen/Qwen3-ASR-1.7B-hf",
+      "precision": "bf16",
+      "language": "auto",
+      "hints": "",
+      "normalize_text": false,
+      "unload_models": true,
+      "audio": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "② ASR 自动转写"
+    }
+  },
+  "3": {
+    "class_type": "FB_Qwen3TTSVoiceClone",
+    "inputs": {
+      "target_text": "今儿天气不错，咱们出去转转吧。",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "Chinese",
+      "ref_text": [
+        "2",
+        0
+      ],
+      "seed": 20260916,
+      "max_new_tokens": 1536,
+      "top_p": 0.9,
+      "top_k": 50,
+      "temperature": 0.85,
+      "repetition_penalty": 1.05,
+      "x_vector_only": false,
+      "attention": "sdpa",
+      "unload_model_after_generate": true,
+      "ref_audio": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "③ 保留方言与说话内容"
+    }
+  },
+  "4": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "filename_prefix": "audio/Qwen3-TTS-03-参考音频抽卡-支持方言",
+      "audio": [
+        "6",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "⑥ 预览并保存"
+    }
+  },
+  "5": {
+    "class_type": "FB_Qwen3TTSVoiceDesign",
+    "inputs": {
+      "text": "你好呀，我是一个活泼开朗的小朋友。今天天气真不错，我们一起出去玩吧。",
+      "instruct": "自然真实的8至10岁中国小朋友声音，音色稚嫩清亮，音调略高，咬字自然，像日常聊天，不要刻意卖萌，不要播音腔。",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "Chinese",
+      "seed": 20260916,
+      "max_new_tokens": 1536,
+      "top_p": 0.9,
+      "top_k": 50,
+      "temperature": 1,
+      "repetition_penalty": 1.05,
+      "attention": "sdpa",
+      "unload_model_after_generate": true
+    },
+    "_meta": {
+      "title": "④ 目标音色抽卡"
+    }
+  },
+  "6": {
+    "class_type": "SeedVCVoiceConversion",
+    "inputs": {
+      "timbre_strength": 1,
+      "diffusion_steps": 30,
+      "cfg_rate": 0.7,
+      "reference_seconds": 20,
+      "auto_f0_adjust": true,
+      "pitch_shift": 0,
+      "length_adjust": 1,
+      "seed": 20260916,
+      "output_gain_db": 0,
+      "peak_protection": true,
+      "peak_ceiling_db": -1,
+      "source_audio": [
+        "3",
+        0
+      ],
+      "target_voice": [
+        "5",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "⑤ Seed-VC 方言音色转换"
+    }
+  }
+}

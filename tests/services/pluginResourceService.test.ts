@@ -1,3 +1,6 @@
+/**
+ * pluginResourceService — 回归测试：pluginResourceService。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Edge, Node } from '@xyflow/react';
 import type { BaseNodeData } from '../../src/types';
@@ -29,7 +32,7 @@ vi.mock('../../src/services/fs/assetIndex', () => ({
 vi.mock('../../src/services/fs/core', () => ({
   getProjectDataDir: vi.fn(async () => 'G:\\project'),
   joinPath: (base: string, part: string) => `${base}\\${part.replace(/\//g, '\\')}`,
-  getMimeType: (extension: string) => extension === 'png' ? 'image/png' : 'text/plain',
+  getMimeType: (extension: string) => extension === 'png' ? 'image/png' : extension === 'mp4' ? 'video/mp4' : 'text/plain',
   getConvertFileSrc: mocks.getConvertFileSrc,
 }));
 vi.mock('../../src/services/fs/projectFiles', () => ({
@@ -46,10 +49,14 @@ import {
   mintPluginInvocationResources,
   readPluginDerivedResourceForOutput,
   readPluginResourceRange,
+  readPluginPlaybackRange,
   readPluginResourceText,
   registerPluginDerivedResource,
+  getPluginPlaybackResource,
+  registerPluginPlaybackResource,
   replacePluginDerivedResources,
   resolvePluginResourceHostUrl,
+  resolvePluginMediaWorkspaceInputs,
   setPluginLineArtResource,
 } from '../../src/services/plugins/pluginResourceService';
 
@@ -138,6 +145,79 @@ describe('pluginResourceService', () => {
         : { isDirectory: false, isFile: true, isSymlink: false, size: 11, mtime: new Date(1_000) }
     ));
     mocks.readFile.mockResolvedValue(new TextEncoder().encode('hello world'));
+  });
+
+  async function workspaceSetup() {
+    const { state, setRevision } = createState();
+    state.nodes[1].data = { type: 'source-video', label: '参考视频', filePath: 'G:\\project\\reference.mp4' };
+    const resources = await mintPluginInvocationResources({ pluginId: 'plugin-a', sourceDigest: SOURCE_DIGEST,
+      revisionDigest: REVISION_DIGEST, invocationId: 'invoke-1', projectId: 'project-1', nodeId: 'target',
+      baseRevision: 7, access: { self: true }, state });
+    const context = { ...readContext(state), permissions: ['files.connected.read', 'files.output.create'] as const };
+    return { state, setRevision, resources, context };
+  }
+
+  it('binds one playback preview to its source without exposing it as an output image', async () => {
+    const { resources, context } = await workspaceSetup();
+    const sourceId = resources.self[0].resourceId;
+    const preview = { bytes: new Uint8Array([1, 2, 3]), duration: 12, hasAudio: true };
+    const first = registerPluginPlaybackResource(context, sourceId, preview);
+    expect(getPluginPlaybackResource(context, sourceId)).toEqual({ resource: first, duration: 12, hasAudio: true });
+    expect(resources.derived).toEqual([]);
+    expect(() => readPluginDerivedResourceForOutput(context, first.resourceId)).toThrow();
+    const read = await readPluginPlaybackRange(context, first.resourceId, 0, 3);
+    expect(read.base64Chunks).toEqual(['AQID']);
+    await expect(readPluginPlaybackRange(context, first.resourceId, 0, 3)).rejects.toThrow('顺序');
+    const second = registerPluginPlaybackResource(context, sourceId, preview);
+    await expect(readPluginResourceRange(context, first.resourceId, 0, 1)).rejects.toThrow();
+    clearPluginInvocationResources(context.invocationId);
+    await expect(readPluginResourceRange(context, second.resourceId, 0, 1)).rejects.toThrow();
+  });
+
+  it('accepts previews above 12 MiB and rejects wrong ownership, changed source files and stale revisions', async () => {
+    const { resources, context, setRevision } = await workspaceSetup();
+    const sourceId = resources.self[0].resourceId;
+    const preview = { bytes: new Uint8Array([1]), duration: 12, hasAudio: false };
+    expect(() => registerPluginPlaybackResource(context, sourceId, { ...preview, bytes: new Uint8Array(20 * 1024 * 1024) })).not.toThrow();
+    expect(() => registerPluginPlaybackResource(context, sourceId, { ...preview, bytes: new Uint8Array() })).toThrow();
+    expect(() => registerPluginPlaybackResource({ ...context, invocationId: 'other' }, sourceId, preview)).toThrow();
+    expect(() => registerPluginPlaybackResource({ ...context, permissions: ['files.connected.read'] }, sourceId, preview)).toThrow();
+    const ref = registerPluginPlaybackResource(context, sourceId, preview);
+    mocks.lstat.mockResolvedValue({ isDirectory: false, isFile: true, isSymlink: false, size: 12, mtime: new Date(2_000) });
+    await expect(readPluginResourceRange(context, ref.resourceId, 0, 1)).rejects.toThrow();
+    setRevision(8);
+    expect(() => getPluginPlaybackResource(context, sourceId)).toThrow();
+  });
+
+  it('resolves an authorized self video path only for the native workspace bridge', async () => {
+    const { resources, context } = await workspaceSetup();
+    expect(JSON.stringify(resources)).not.toContain('G:\\project');
+    await expect(resolvePluginMediaWorkspaceInputs(context, resources)).resolves.toEqual([
+      { resourceId: resources.self[0].resourceId, path: 'G:\\project\\reference.mp4' },
+    ]);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+  });
+
+  it('rejects forged or stale native workspace inputs and rechecks the source fingerprint', async () => {
+    const { resources, context, setRevision } = await workspaceSetup();
+    await expect(resolvePluginMediaWorkspaceInputs(context, { ...resources,
+      self: [{ ...resources.self[0], resourceId: 'guessed-path' }] })).rejects.toThrow('授权不存在');
+    await expect(resolvePluginMediaWorkspaceInputs({ ...context, invocationId: 'other-invocation' }, resources)).rejects.toThrow('不属于当前调用');
+    mocks.lstat.mockImplementation(async (path: string) => path === 'G:\\project'
+      ? { isDirectory: true, isFile: false, isSymlink: false, size: 0, mtime: new Date(1_000) }
+      : { isDirectory: false, isFile: true, isSymlink: false, size: 12, mtime: new Date(1_000) });
+    await expect(resolvePluginMediaWorkspaceInputs(context, resources)).rejects.toThrow('文件已变化');
+    setRevision(8);
+    await expect(resolvePluginMediaWorkspaceInputs(context, resources)).rejects.toThrow('画布已变化');
+  });
+
+  it('rejects media workspace inputs above 256 MiB before copying or decoding bytes', async () => {
+    mocks.lstat.mockImplementation(async (path: string) => path === 'G:\\project'
+      ? { isDirectory: true, isFile: false, isSymlink: false, size: 0, mtime: new Date(1_000) }
+      : { isDirectory: false, isFile: true, isSymlink: false, size: 256 * 1024 * 1024 + 1, mtime: new Date(1_000) });
+    const { context, resources } = await workspaceSetup();
+    await expect(resolvePluginMediaWorkspaceInputs(context, resources)).rejects.toThrow('256 MiB');
+    expect(mocks.readFile).not.toHaveBeenCalled();
   });
 
   it('mints only direct incoming resources and never exposes their path', async () => {

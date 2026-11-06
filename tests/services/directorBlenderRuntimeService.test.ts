@@ -1,3 +1,6 @@
+/**
+ * directorBlenderRuntimeService — 回归测试：directorBlenderRuntimeService。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -318,6 +321,7 @@ describe('directorBlenderRuntimeService', () => {
       if (command === 'register_blender_installation') return manualInstallation;
       throw new Error(`unexpected command: ${command}`);
     });
+    vi.stubGlobal('navigator', { platform: 'Win32' });
     mocks.open.mockResolvedValue('F:\\Blender\\blender.exe');
     const service = await loadService();
 

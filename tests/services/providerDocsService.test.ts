@@ -1,3 +1,6 @@
+/**
+ * providerDocsService — 回归测试：new-api relay catalog parsing。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearWebReadSessionsForTests } from '../../src/services/chat/webReadSessionService';
 import { clearProviderModelCatalogsForTests, getProviderModelCatalog } from '../../src/services/chat/providerModelCatalogService';

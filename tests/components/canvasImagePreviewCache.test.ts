@@ -1,8 +1,13 @@
+/**
+ * canvasImagePreviewCache — 回归测试：canvas image preview cache。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import type { CanvasImagePreviewLease } from '../../src/components/nodes/shared/image/canvasImagePreviewCache';
 
 const dimensions = vi.hoisted(() => ({ width: 4096, height: 2048 }));
 const disk = vi.hoisted(() => ({ prepare: vi.fn() }));
+const native = vi.hoisted(() => ({ matches: vi.fn<(source: string | undefined) => boolean>(() => false), read: vi.fn() }));
+vi.mock('../../src/services/comfyImageSource', () => ({ shouldLoadNativeComfyImage: native.matches, readNativeComfyImageBlob: native.read }));
 vi.mock('../../src/services/fs/thumbnailCache', () => ({ prepareProjectThumbnail: disk.prepare }));
 vi.mock('../../src/services/rasterImageDimensions', () => ({
   readRasterImageDimensions: vi.fn(async () => ({ ...dimensions })),
@@ -10,11 +15,17 @@ vi.mock('../../src/services/rasterImageDimensions', () => ({
 
 type Acquire = typeof import('../../src/components/nodes/shared/image/canvasImagePreviewCache').acquireCanvasImagePreview;
 let acquire: Acquire;
+let acquireCached: typeof import('../../src/components/nodes/shared/image/canvasImagePreviewCache').acquireCachedCanvasImagePreview;
+let mode: typeof import('../../src/services/performanceModeRuntime');
 let interacting = false;
 let fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
+let headMock: ReturnType<typeof vi.fn<typeof fetch>>;
 let bitmapMock: ReturnType<typeof vi.fn<typeof createImageBitmap>>;
 let createUrl: MockInstance;
 let revokeUrl: MockInstance;
+let warnMock: MockInstance;
+let hasDrawingContext: boolean;
+let encodedPreview: Blob | null;
 let canvases: Array<{ width: number; height: number; getContext: ReturnType<typeof vi.fn>; toBlob: ReturnType<typeof vi.fn> }>;
 
 function png(animated = false): Blob {
@@ -62,18 +73,25 @@ beforeEach(async () => {
   dimensions.width = 4096;
   dimensions.height = 2048;
   disk.prepare.mockReset().mockResolvedValue(null);
+  native.matches.mockReset().mockReturnValue(false);
+  native.read.mockReset();
   canvases = [];
+  hasDrawingContext = true;
+  encodedPreview = new Blob(['preview'], { type: 'image/webp' });
   fetchMock = vi.fn<typeof fetch>(async () => new Response(png()));
+  headMock = vi.fn<typeof fetch>(async () => new Response(null, { headers: { 'content-length': '100' } }));
   bitmapMock = vi.fn<typeof createImageBitmap>(async () => ({ close: vi.fn() }) as unknown as ImageBitmap);
-  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal('fetch', (source: RequestInfo | URL, options?: RequestInit) => (
+    options?.method === 'HEAD' ? headMock(source, options) : fetchMock(source, options)
+  ));
   vi.stubGlobal('createImageBitmap', bitmapMock);
   vi.stubGlobal('document', {
     documentElement: { classList: { contains: () => interacting } },
     createElement: () => {
       const canvas = {
         width: 0, height: 0,
-        getContext: vi.fn(() => ({ drawImage: vi.fn() })),
-        toBlob: vi.fn((callback: BlobCallback) => callback(new Blob(['preview'], { type: 'image/webp' }))),
+        getContext: vi.fn(() => hasDrawingContext ? { drawImage: vi.fn() } : null),
+        toBlob: vi.fn((callback: BlobCallback) => callback(encodedPreview)),
       };
       canvases.push(canvas);
       return canvas;
@@ -82,16 +100,200 @@ beforeEach(async () => {
   let sequence = 0;
   createUrl = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:preview-${++sequence}`);
   revokeUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
-  acquire = (await import('../../src/components/nodes/shared/image/canvasImagePreviewCache')).acquireCanvasImagePreview;
+  warnMock = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  mode = await import('../../src/services/performanceModeRuntime');
+  const cache = await import('../../src/components/nodes/shared/image/canvasImagePreviewCache');
+  acquire = cache.acquireCanvasImagePreview;
+  acquireCached = cache.acquireCachedCanvasImagePreview;
 });
 
 afterEach(() => {
+  mode.syncPerformanceModeRuntime(false);
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  warnMock.mockRestore();
 });
 
 describe('canvas image preview cache', () => {
+  it.each(['small', 'animated'])('keeps a native Comfy %s image on a blob URL instead of decoding the original HTTP source', async (kind) => {
+    const source = 'http://127.0.0.1:8188/view?filename=result.png&type=output';
+    native.matches.mockImplementation((value) => value === source);
+    const blob = png(kind === 'animated');
+    native.read.mockResolvedValue(blob);
+    if (kind === 'small') { dimensions.width = 128; dimensions.height = 64; }
+    const preview = await lease(source);
+    expect(native.read).toHaveBeenCalledExactlyOnceWith(source, expect.any(AbortSignal));
+    expect(preview.src).not.toBe(source);
+    expect(createUrl).toHaveBeenCalledExactlyOnceWith(blob);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(bitmapMock).not.toHaveBeenCalled();
+    preview.release();
+  });
+  it('does not retry a rejected native Comfy read through browser fetch or a raw image URL', async () => {
+    native.matches.mockReturnValue(true);
+    native.read.mockRejectedValue(new Error('HTTP 403'));
+    const item = request('http://127.0.0.1:8188/view?filename=blocked.png');
+    await flush();
+    expect(await item.promise).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(bitmapMock).not.toHaveBeenCalled();
+    expect(createUrl).not.toHaveBeenCalled();
+  });
+  it('counts retained native encoded bytes against the idle image budget even for a small image', async () => {
+    mode.syncPerformanceModeRuntime(true);
+    native.matches.mockReturnValue(true);
+    dimensions.width = 16; dimensions.height = 16;
+    const blob = new Blob([png(), new Uint8Array(9 * 1024 * 1024)], { type: 'image/png' });
+    native.read.mockResolvedValue(blob);
+    const preview = await lease('http://127.0.0.1:8188/view?filename=small-with-metadata.png');
+    expect(revokeUrl).not.toHaveBeenCalled();
+    preview.release();
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith(preview.src);
+  });
+  it('scales large images when WebKit rejects an explicit from-image orientation', async () => {
+    dimensions.width = 1672;
+    dimensions.height = 941;
+    const close = vi.fn();
+    bitmapMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[1] as ImageBitmapOptions | undefined;
+      if (options?.imageOrientation === 'from-image') throw new TypeError('Unsupported image orientation');
+      return { close } as unknown as ImageBitmap;
+    });
+    const preview = await lease('asset://localhost/large.png', 1024);
+    expect(preview.src).toMatch(/^blob:/);
+    expect(canvases[0].getContext.mock.results[0].value.drawImage).toHaveBeenCalledWith(
+      expect.any(Object), 0, 0, 1024, 576,
+    );
+    expect(close).toHaveBeenCalledOnce();
+    preview.release();
+  });
+
+  it('reports decode errors safely and continues with the next queued image', async () => {
+    const source = 'https://example.test/private.png?token=secret';
+    bitmapMock.mockRejectedValueOnce(new TypeError(`Cannot decode ${source} from /Users/private/image.png`));
+    const failed = request(source);
+    const next = request('asset://localhost/next.png');
+    await flush();
+    expect(await failed.promise).toBeNull();
+    expect(warnMock).toHaveBeenCalledExactlyOnceWith('[CanvasImagePreviewCache] 图片预览生成失败', {
+      stage: 'decode', errorType: 'TypeError', maxEdge: 512,
+    });
+    const preview = await next.promise;
+    expect(preview?.src).toMatch(/^blob:/);
+    expect(createUrl).toHaveBeenCalledOnce();
+    preview?.release();
+  });
+
+  it.each(['draw', 'encode'] as const)('reports an empty %s result and releases graphics', async (stage) => {
+    const close = vi.fn();
+    bitmapMock.mockResolvedValueOnce({ close } as unknown as ImageBitmap);
+    if (stage === 'draw') hasDrawingContext = false;
+    else encodedPreview = null;
+    const failed = request();
+    await flush();
+    expect(await failed.promise).toBeNull();
+    expect(warnMock).toHaveBeenCalledExactlyOnceWith('[CanvasImagePreviewCache] 图片预览生成失败', {
+      stage, errorType: 'Error', maxEdge: 512,
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(canvases[0]).toMatchObject({ width: 1, height: 1 });
+    expect(createUrl).not.toHaveBeenCalled();
+  });
+
+  it('uses and persists a PNG fallback when WebP encoding is unavailable', async () => {
+    encodedPreview = png();
+    const persist = vi.fn(async () => undefined);
+    disk.prepare.mockResolvedValue({ cached: null, persist });
+    const preview = await lease();
+    expect(canvases[0].toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/webp', 0.85);
+    expect(createUrl).toHaveBeenCalledExactlyOnceWith(encodedPreview);
+    expect(persist).toHaveBeenCalledExactlyOnceWith(encodedPreview);
+    expect(warnMock).not.toHaveBeenCalled();
+    preview.release();
+  });
+
+  it('acquires only ready project and source-matching previews during interaction without starting work', async () => {
+    const abort = new AbortController();
+    const ready = acquire('asset://localhost/image.png?_refresh=1', 256, abort.signal, 'project-a');
+    await flush();
+    const original = await ready;
+    expect(original).not.toBeNull();
+    original!.release();
+    interacting = true;
+    const cached = acquireCached('asset://localhost/image.png?_refresh=1', 512, abort.signal, 'project-a');
+    expect(cached).toMatchObject({ src: original!.src, maxEdge: 256 });
+    expect(acquireCached('asset://localhost/image.png?_refresh=1', 512, abort.signal, 'project-b')).toBeNull();
+    expect(acquireCached('asset://localhost/image.png?_refresh=2', 512, abort.signal, 'project-a')).toBeNull();
+    expect(acquireCached('asset://localhost/uncached.png', 256, abort.signal, 'project-a')).toBeNull();
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(revokeUrl).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    cached!.release();
+    cached!.release();
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith(original!.src);
+  });
+
+  it('bounds total queue waiting when an earlier non-cancellable decode never completes', async () => {
+    let resolveBitmap!: (bitmap: ImageBitmap) => void;
+    const close = vi.fn();
+    bitmapMock.mockImplementationOnce(() => new Promise((resolve) => { resolveBitmap = resolve; }));
+    const stalled = request('asset://localhost/stalled.png');
+    const queued = request('asset://localhost/queued.png');
+    await flush();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await stalled.promise).toBeNull();
+    expect(await queued.promise).toBeNull();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(bitmapMock).toHaveBeenCalledOnce();
+    // 旧槽继续占用；下一次请求不得越过它启动新的不可取消解码。
+    const later = request('asset://localhost/later.png');
+    await flush();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    resolveBitmap({ close } as unknown as ImageBitmap);
+    await flush();
+    expect(close).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await later.promise).not.toBeNull();
+    later.controller.abort();
+  });
+
+  it('tightens only idle memory on a mode switch while preserving active and reusable recent previews', async () => {
+    dimensions.height = 4096;
+    const active = await lease('asset://localhost/live.png', 1024);
+    const idle: CanvasImagePreviewLease[] = [];
+    for (let index = 0; index < 3; index++) {
+      const item = await lease(`asset://localhost/idle-${index}.png`, 1024);
+      idle.push(item); item.release();
+    }
+    expect(revokeUrl).not.toHaveBeenCalled();
+    mode.syncPerformanceModeRuntime(true);
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith(idle[0].src);
+    expect(revokeUrl).not.toHaveBeenCalledWith(active.src);
+    const recent = await lease('asset://localhost/idle-2.png', 1024);
+    expect(recent.src).toBe(idle[2].src);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    recent.release(); active.release();
+  });
+
+  it('bounds small idle entries in performance mode without shortening the return-to-viewport grace period', async () => {
+    mode.syncPerformanceModeRuntime(true);
+    const active = await lease('asset://localhost/active-small.png', 64);
+    const idle: CanvasImagePreviewLease[] = [];
+    for (let index = 0; index < 33; index++) {
+      const item = await lease(`asset://localhost/small-${index}.png`, 64);
+      idle.push(item); item.release();
+    }
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith(idle[0].src);
+    expect(revokeUrl).not.toHaveBeenCalledWith(active.src);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const recent = await lease('asset://localhost/small-32.png', 64);
+    expect(recent.src).toBe(idle[32].src);
+    expect(fetchMock).toHaveBeenCalledTimes(34);
+    recent.release(); active.release();
+  });
+
   it('shows previews and continues deriving while a background disk write is pending', async () => {
     let finishWrite!: () => void;
     const writing = new Promise<void>((resolve) => { finishWrite = resolve; });
@@ -141,6 +343,31 @@ describe('canvas image preview cache', () => {
     expect((await a)?.src).not.toBe((await b)?.src);
     (await a)?.release();
     (await b)?.release();
+  });
+
+  it('waits for the project disk lookup before touching the original on every remount', async () => {
+    for (let mount = 0; mount < 2; mount++) {
+      let finish!: (result: unknown) => void;
+      disk.prepare.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+      const settled = vi.fn();
+      const pending = acquire('asset://localhost/image.png', 512, new AbortController().signal, 'project-a').then((value) => {
+        settled(value);
+        return value;
+      });
+      await flush();
+      expect(settled).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bitmapMock).not.toHaveBeenCalled();
+      finish({ cached: { blob: png(), width: 512, height: 256 }, persist: vi.fn() });
+      await flush();
+      const preview = await pending;
+      expect(preview?.src).toMatch(/^blob:/);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bitmapMock).not.toHaveBeenCalled();
+      preview?.release();
+      await vi.advanceTimersByTimeAsync(30_001);
+    }
+    expect(disk.prepare).toHaveBeenCalledTimes(2);
   });
 
   it('discards a late disk hit after cancellation without allocating a preview URL', async () => {
@@ -224,10 +451,13 @@ describe('canvas image preview cache', () => {
     expect(await item.promise).toBeNull();
     const signal = fetchMock.mock.calls[0][1]?.signal;
     expect(signal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(warnMock).not.toHaveBeenCalled();
     resolveBitmap({ close } as unknown as ImageBitmap);
     await flush();
     expect(close).toHaveBeenCalledOnce();
     expect(createUrl).not.toHaveBeenCalled();
+    expect(warnMock).not.toHaveBeenCalled();
   });
 
   it('does not abort shared work when only one waiting consumer cancels', async () => {
@@ -267,6 +497,9 @@ describe('canvas image preview cache', () => {
     await flush();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(await stalled.promise).toBeNull();
+    expect(warnMock).toHaveBeenCalledExactlyOnceWith('[CanvasImagePreviewCache] 图片预览生成失败', {
+      stage: 'decode', errorType: 'TimeoutError', maxEdge: 512,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(createUrl).not.toHaveBeenCalled();
     resolveBitmap({ close } as unknown as ImageBitmap);
@@ -314,12 +547,13 @@ describe('canvas image preview cache', () => {
     ['SVG', () => new Blob(['<svg width="4000" height="2000"/>'], { type: 'image/svg+xml' })],
     ['APNG', () => png(true)],
     ['animated WebP', () => webp(true)],
-    ['unknown bytes', () => new Blob(['not an image'], { type: 'image/png' })],
   ])('keeps %s on the original source without creating a static thumbnail', async (_, source) => {
     fetchMock.mockImplementation(async () => new Response(source()));
     const item = request();
     await flush();
-    expect(await item.promise).toBeNull();
+    const result = await item.promise;
+    expect(result?.src).toBe('asset://localhost/image.png');
+    result?.release();
     expect(bitmapMock).not.toHaveBeenCalled();
   });
 
@@ -331,16 +565,33 @@ describe('canvas image preview cache', () => {
     (await lease()).release();
   });
 
-  it('skips small images and rejects over-budget source dimensions before decode', async () => {
+  it('validates small images and rejects over-budget source dimensions before decode', async () => {
     dimensions.width = 200;
     dimensions.height = 100;
     const small = request();
     await flush();
-    expect(await small.promise).toBeNull();
+    const safe = await small.promise;
+    expect(safe?.src).toBe('asset://localhost/image.png');
+    safe?.release();
     dimensions.width = 10_000;
-    const huge = request();
+    const huge = request('asset://localhost/huge.png');
     await flush();
     expect(await huge.promise).toBeNull();
+    expect(bitmapMock).not.toHaveBeenCalled();
+  });
+
+  it('does not decode unknown dimensions and does not revoke a caller-owned original URL', async () => {
+    const { readRasterImageDimensions } = await import('../../src/services/rasterImageDimensions');
+    vi.mocked(readRasterImageDimensions).mockResolvedValueOnce(null);
+    const unknown = request('blob:unknown');
+    await flush();
+    expect(await unknown.promise).toBeNull();
+    dimensions.width = 200; dimensions.height = 100;
+    const small = await lease('blob:caller-owned');
+    expect(small.src).toBe('blob:caller-owned');
+    small.release();
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(revokeUrl).not.toHaveBeenCalledWith('blob:caller-owned');
     expect(bitmapMock).not.toHaveBeenCalled();
   });
 
@@ -385,6 +636,16 @@ describe('canvas image preview cache', () => {
     await flush();
     expect(await streamed.promise).toBeNull();
     expect(cancel).toHaveBeenCalledOnce();
+    expect(bitmapMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversized local files with HEAD before the asset protocol reads their full bodies', async () => {
+    headMock.mockResolvedValueOnce(new Response(null, { headers: { 'content-length': String(33 * 1024 * 1024) } }));
+    const item = request();
+    await flush();
+    expect(await item.promise).toBeNull();
+    expect(headMock).toHaveBeenCalledOnce();
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(bitmapMock).not.toHaveBeenCalled();
   });
 

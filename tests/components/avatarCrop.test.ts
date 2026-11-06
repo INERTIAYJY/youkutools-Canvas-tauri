@@ -1,3 +1,6 @@
+/**
+ * avatarCrop — 回归测试：avatarCropBase。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   AVATAR_ASPECT,

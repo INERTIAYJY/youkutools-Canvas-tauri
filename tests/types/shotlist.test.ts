@@ -1,3 +1,6 @@
+/**
+ * shotlist — 回归测试：分镜表行状态判定。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SHOT_DURATION,
@@ -10,6 +13,7 @@ import {
   isShotRowBlank,
   isShotRowTextOnly,
   resolveShotDuration,
+  resolveShotlistColumns,
   resolveShotTransitionKind,
 } from '../../src/types/shotlist';
 import type { ShotRow } from '../../src/types/shotlist';
@@ -37,19 +41,33 @@ describe('分镜表行状态判定', () => {
     expect(isShotRowBlank(bound)).toBe(false);
     expect(isShotRowTextOnly(bound)).toBe(false);
   });
+
+  it('只有生成视频也不是空行或纯文字行，旧列配置始终显示生成视频', () => {
+    const bound = row({ video: { nodeId: 'video', kind: 'video' } });
+    expect(isShotRowBlank(bound)).toBe(false);
+    expect(isShotRowTextOnly(bound)).toBe(false);
+    expect(resolveShotlistColumns(['frame', 'content']).slice(0, 3)).toEqual(['shotNo', 'frame', 'video']);
+    expect(createShotRow('new', 1).video).toBeUndefined();
+  });
 });
 
 describe('镜头时长解析', () => {
   it('优先用表里填的时长', () => {
-    expect(resolveShotDuration(row({ duration: 7 }))).toBe(7);
+    expect(resolveShotDuration(row({ duration: 7, video: { nodeId: 'n', kind: 'video', sourceDuration: 12 } }))).toBe(7);
   });
 
   it('视频行没填时长时回落到源片长', () => {
     const shot = row({
       duration: undefined,
-      frame: { nodeId: 'n', kind: 'video', sourceDuration: 12 },
+      video: { nodeId: 'n', kind: 'video', sourceDuration: 12 },
     });
     expect(resolveShotDuration(shot)).toBe(12);
+  });
+
+  it('参考视频的片长不会充当成片时长', () => {
+    expect(resolveShotDuration(row({ duration: undefined,
+      frame: { nodeId: 'reference', kind: 'video', sourceDuration: 30 },
+    }))).toBe(DEFAULT_SHOT_DURATION);
   });
 
   it('什么都没有时用默认停留时长', () => {
@@ -125,6 +143,17 @@ describe('画面格的候选与生成提示词', () => {
     const withThumb = [{ id: 'vid', type: 'ai-video', data: { label: '街景', thumbnailUrl: 't.png', videoUrl: 'b.mp4' } }];
     expect(collectShotFrameCandidates(withThumb, [{ source: 'vid', target: 'table' }], 'table')[0].url)
       .toBe('t.png');
+  });
+
+  it('本表派生的视频无需反接即可选用，不混入其他表的成果，也不重复收录', () => {
+    const produced = (id: string, nodeId: string) => ({ id, type: 'ai-video', data: {
+      label: id, videoUrl: `${id}.mp4`, shotlistProductionSource: { nodeId, rowId: 'row', kind: 'video' },
+    } });
+    const candidates = collectShotFrameCandidates([
+      produced('own', 'table'), produced('linked', 'table'), produced('other', 'another-table'),
+    ], [{ source: 'linked', target: 'table' }], 'table');
+    expect(candidates.map((item) => item.nodeId)).toEqual(['own', 'linked']);
+    expect(candidates[0]).toMatchObject({ kind: 'video', url: 'own.mp4' });
   });
 
   it('生成提示词用景别、运镜修饰内容，空字段不留空档', () => {

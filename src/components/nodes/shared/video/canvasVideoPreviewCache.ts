@@ -1,9 +1,12 @@
+/**
+ * canvasVideoPreviewCache — 管理画布视频就绪状态、封面与资源租约。
+ */
 import { afterVideoFramePresented } from '../../../../utils/videoSeek';
+import { releaseViewportVideoElement } from '../../../shared/viewportVideoResource';
+import { getPerformanceModeBudget, subscribePerformanceMode } from '../../../../services/performanceModeRuntime';
+import { acquireComfyMediaSource, type ComfyMediaSourceLease } from '../../../../services/comfyMediaSource';
 
 const MAX_EDGE = 640;
-const MAX_IDLE_BYTES = 32 * 1024 * 1024;
-const MAX_IDLE_ENTRIES = 64;
-const IDLE_TTL_MS = 30_000;
 const LOAD_TIMEOUT_MS = 15_000;
 
 export interface CanvasVideoPoster {
@@ -32,12 +35,16 @@ const entries = new Map<string, Entry>();
 let running = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let scheduledAt = Infinity;
+let unsubscribePerformanceMode: (() => void) | undefined;
+
+function releaseModeSubscriptionIfEmpty(): void {
+  if (entries.size !== 0) return;
+  unsubscribePerformanceMode?.();
+  unsubscribePerformanceMode = undefined;
+}
 
 export function releaseCanvasVideo(video: HTMLVideoElement | null): void {
-  if (!video) return;
-  video.pause();
-  video.removeAttribute('src');
-  video.load();
+  releaseViewportVideoElement(video);
 }
 
 function waitForMedia(
@@ -97,6 +104,7 @@ async function derive(entry: Entry): Promise<Preview | undefined> {
   const { signal } = entry.controller;
   const video = document.createElement('video');
   const canvas = document.createElement('canvas');
+  let media: ComfyMediaSourceLease | undefined;
   const abort = () => releaseCanvasVideo(video);
   signal.addEventListener('abort', abort, { once: true });
   const timeout = setTimeout(() => entry.controller.abort(), LOAD_TIMEOUT_MS);
@@ -105,7 +113,9 @@ async function derive(entry: Entry): Promise<Preview | undefined> {
     video.muted = true;
     video.playsInline = true;
     video.preload = 'auto';
-    video.src = entry.source;
+    media = await acquireComfyMediaSource(entry.source, signal);
+    signal.throwIfAborted();
+    video.src = media.src;
     await waitForMedia(video, ['loadedmetadata'], () => video.readyState >= 1, signal);
     if (video.videoWidth <= 0 || video.videoHeight <= 0) return undefined;
     const duration = Number.isFinite(video.duration) ? video.duration : 0;
@@ -139,12 +149,13 @@ async function derive(entry: Entry): Promise<Preview | undefined> {
     return { src: URL.createObjectURL(blob), width, height, duration,
       videoWidth: video.videoWidth, videoHeight: video.videoHeight, bytes: width * height * 4 };
   } catch {
-    // 远程跨域或不支持的编码保持占位图，显式播放仍直接使用原视频。
+    // 读取或解码失败保持占位；已识别 Comfy 来源不会回退浏览器直连。
     return undefined;
   } finally {
     clearTimeout(timeout);
     signal.removeEventListener('abort', abort);
     releaseCanvasVideo(video);
+    media?.release();
     canvas.width = 1;
     canvas.height = 1;
   }
@@ -153,17 +164,19 @@ async function derive(entry: Entry): Promise<Preview | undefined> {
 function discard(entry: Entry): void {
   if (entries.get(entry.source) !== entry) return;
   entries.delete(entry.source);
+  releaseModeSubscriptionIfEmpty();
   entry.controller.abort();
   if (entry.preview) URL.revokeObjectURL(entry.preview.src);
 }
 
 function prune(): void {
+  const budget = getPerformanceModeBudget();
   const idle = [...entries.values()].filter((entry) => entry.state === 'ready' && entry.users === 0)
     .sort((a, b) => a.idleSince - b.idleSince);
   let bytes = idle.reduce((total, entry) => total + (entry.preview?.bytes ?? 0), 0);
   let count = idle.length;
   for (const entry of idle) {
-    if (Date.now() - entry.idleSince < IDLE_TTL_MS && bytes <= MAX_IDLE_BYTES && count <= MAX_IDLE_ENTRIES) break;
+    if (Date.now() - entry.idleSince < budget.previewIdleMs && bytes <= budget.videoIdleBytes && count <= budget.videoIdleEntries) break;
     bytes -= entry.preview?.bytes ?? 0;
     count--;
     discard(entry);
@@ -188,7 +201,7 @@ function lease(entry: Entry): CanvasVideoPoster | null {
     entry.users--;
     entry.idleSince = Date.now();
     prune();
-    schedule(IDLE_TTL_MS);
+    schedule(getPerformanceModeBudget().previewIdleMs);
   } };
 }
 
@@ -198,7 +211,7 @@ async function pump(): Promise<void> {
   const entry = [...entries.values()].find((candidate) => candidate.state === 'queued');
   if (!entry) {
     const idle = [...entries.values()].filter((candidate) => candidate.state === 'ready' && candidate.users === 0);
-    if (idle.length > 0) schedule(Math.max(1, Math.min(...idle.map((candidate) => candidate.idleSince + IDLE_TTL_MS - Date.now()))));
+    if (idle.length > 0) schedule(Math.max(1, Math.min(...idle.map((candidate) => candidate.idleSince + getPerformanceModeBudget().previewIdleMs - Date.now()))));
     return;
   }
   if (document.documentElement.classList.contains('canvas-interacting')) { schedule(80); return; }
@@ -208,6 +221,7 @@ async function pump(): Promise<void> {
     for (const client of entry.clients) client.deliver(null);
     entry.clients.clear();
     if (entries.get(entry.source) === entry) entries.delete(entry.source);
+    releaseModeSubscriptionIfEmpty();
   };
   entry.controller.signal.addEventListener('abort', cancelClients, { once: true });
   const preview = await derive(entry);
@@ -238,6 +252,7 @@ export function acquireCanvasVideoPoster(source: string, signal: AbortSignal): P
   if (!entry) {
     entry = { source, clients: new Set(), controller: new AbortController(), state: 'queued', users: 0, idleSince: 0 };
     entries.set(source, entry);
+    unsubscribePerformanceMode ??= subscribePerformanceMode(prune);
   }
   if (entry.state === 'ready') return Promise.resolve(lease(entry));
   const target = entry;

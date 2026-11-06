@@ -1,3 +1,6 @@
+/**
+ * useCanvasLongPressRadialMenu — 回归测试：canvas long-press radial menu controller。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CANVAS_LONG_PRESS_DELAY_MS,

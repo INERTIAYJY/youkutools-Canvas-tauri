@@ -1,3 +1,6 @@
+/**
+ * storyboardGrid — 回归测试：gridBoundaries。
+ */
 import { describe, expect, it } from 'vitest';
 import { cellBackgroundStyle, gridBoundaries, remapStoryboardCells } from '../../src/utils/storyboardGrid';
 

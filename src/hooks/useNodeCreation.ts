@@ -2,6 +2,8 @@
  * useNodeCreation — 节点创建 Hook
  * 封装所有节点创建方法（文本/图片/视频/音频）、文件拖放（浏览器 + Tauri 原生）
  */
+import { t } from '../i18n';
+
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import type { Node as RFNode } from '@xyflow/react';
@@ -9,61 +11,15 @@ import { useAppStore, generateId, computeImageNodeDimensions } from '../store/us
 import { arrayBufferToBase64, copyFileToProjectData, readBinaryFile } from '../services/fileService';
 import type { BaseNodeData } from '../types';
 import { isExternalDropCaptured } from '../utils/dropCapture';
+import { nativeDropClientPosition } from '../utils/nativeDropPosition';
 import { textNodeHeight } from '../utils/num';
+import { COMFY_REFMOD_MIME } from '../utils/comfyRefmod';
+import { registerCanvasImport, registerCanvasDerivation, isCanvasDerivationFresh, completeCanvasDerivation } from '../services/canvasDerivationGuard';
+import { getPreferredNodeModel } from '../services/modelPreferenceService';
 
-// ── File type constants ──
-
-const FILE_EXT_IMAGE: readonly string[] = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'];
-const FILE_EXT_VIDEO: readonly string[] = ['mp4', 'webm', 'avi', 'mov', 'mkv'];
-const FILE_EXT_AUDIO: readonly string[] = ['mp3', 'wav', 'ogg', 'flac', 'aac'];
-const FILE_EXT_TEXT: readonly string[] = [
-  'txt', 'md', 'json', 'xml', 'csv', 'html', 'css', 'js', 'ts', 'jsx', 'tsx',
-  'yaml', 'yml', 'toml', 'ini', 'cfg', 'log', 'py', 'java', 'c', 'cpp', 'h',
-  'rs', 'go', 'rb', 'php', 'sh', 'bat', 'ps1', 'sql', 'r', 'swift', 'kt',
-];
-
-const MIME_MAP: Record<string, string> = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-  webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
-  mp4: 'video/mp4', webm: 'video/webm', avi: 'video/x-msvideo',
-  mov: 'video/quicktime', mkv: 'video/x-matroska',
-  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac', aac: 'audio/aac',
-};
-
-export { FILE_EXT_IMAGE, FILE_EXT_VIDEO, FILE_EXT_AUDIO, FILE_EXT_TEXT };
-
-// ── Model preference helper ──
-const MODEL_PREF_KEY = 'canvas-model-prefs';
-
-function loadDefaultModel(nodeType: string): { model: string; provider: string } | null {
-  try {
-    const raw = localStorage.getItem(MODEL_PREF_KEY);
-    if (!raw) return null;
-    const prefs: Record<string, string> = JSON.parse(raw);
-    // 全景图回退到生图偏好
-    const modelValue = prefs[nodeType] || (nodeType === 'ai-panorama' ? prefs['ai-image'] : undefined);
-    if (!modelValue) return null;
-    // modelValue format: "provider/modelId" → data.model stores the full value, data.provider stores the prefix
-    const slashIdx = modelValue.indexOf('/');
-    if (slashIdx === -1) return null;
-    const provider = modelValue.slice(0, slashIdx);
-    if (!provider) return null;
-    return { model: modelValue, provider };
-  } catch {
-    return null;
-  }
-}
-
-export type FileCategory = 'image' | 'video' | 'audio' | 'text';
-
-export function classifyFile(ext: string): FileCategory | null {
-  const e = ext.toLowerCase();
-  if (FILE_EXT_IMAGE.includes(e)) return 'image';
-  if (FILE_EXT_VIDEO.includes(e)) return 'video';
-  if (FILE_EXT_AUDIO.includes(e)) return 'audio';
-  if (FILE_EXT_TEXT.includes(e)) return 'text';
-  return null;
-}
+import { classifyFile, MIME_MAP } from '../utils/sourceFileType';
+export { classifyFile, FILE_EXT_IMAGE, FILE_EXT_VIDEO, FILE_EXT_AUDIO, FILE_EXT_TEXT } from '../utils/sourceFileType';
+export type { FileCategory } from '../utils/sourceFileType';
 
 function getFileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
@@ -86,7 +42,7 @@ export function useNodeCreation() {
 
   const addTextNode = useCallback(
     (position: { x: number; y: number }, opts?: { label?: string; prompt?: string; width?: number; height?: number }) => {
-      const defaultModel = loadDefaultModel('ai-text');
+      const defaultModel = getPreferredNodeModel('ai-text', useAppStore.getState());
       addNode({
         id: `node-${generateId()}`,
         type: 'ai-text',
@@ -98,7 +54,7 @@ export function useNodeCreation() {
           status: 'idle' as const,
           nodeWidth: opts?.width ?? 280,
           nodeHeight: opts?.height ?? 160,
-          ...(defaultModel ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
+          ...defaultModel,
         },
       } as RFNode<BaseNodeData>);
     },
@@ -109,7 +65,7 @@ export function useNodeCreation() {
     async (position: { x: number; y: number }, opts?: { label?: string; dataUrl?: string }) => {
       const dataUrl = opts?.dataUrl;
       const isGenerator = !dataUrl;
-      const defaultModel = isGenerator ? loadDefaultModel('ai-image') : null;
+      const defaultModel = isGenerator ? getPreferredNodeModel('ai-image', useAppStore.getState()) : null;
       const dims = dataUrl
         ? await computeImageNodeDimensions(dataUrl)
         : { nodeWidth: 280, nodeHeight: 158 };
@@ -126,7 +82,7 @@ export function useNodeCreation() {
             ? { imageUrl: dataUrl }
             : { prompt: '', aspectRatio: '16:9' as const, imageSize: '2K' as const }),
           ...dims,
-          ...(defaultModel ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
+          ...defaultModel,
         },
       } as RFNode<BaseNodeData>);
     },
@@ -137,7 +93,7 @@ export function useNodeCreation() {
     (position: { x: number; y: number }, opts?: { label?: string; dataUrl?: string }) => {
       const dataUrl = opts?.dataUrl;
       const isGenerator = !dataUrl;
-      const defaultModel = isGenerator ? loadDefaultModel('ai-video') : null;
+      const defaultModel = isGenerator ? getPreferredNodeModel('ai-video', useAppStore.getState()) : null;
       addNode({
         id: `node-${generateId()}`,
         type: 'ai-video',
@@ -150,7 +106,7 @@ export function useNodeCreation() {
           ...(dataUrl ? { videoUrl: dataUrl } : { prompt: '' }),
           nodeWidth: 280,
           nodeHeight: 160,
-          ...(defaultModel ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
+          ...defaultModel,
         },
       } as RFNode<BaseNodeData>);
     },
@@ -161,7 +117,7 @@ export function useNodeCreation() {
     (position: { x: number; y: number }, opts?: { label?: string; dataUrl?: string }) => {
       const dataUrl = opts?.dataUrl;
       const isGenerator = !dataUrl;
-      const defaultModel = isGenerator ? loadDefaultModel('ai-audio') : null;
+      const defaultModel = isGenerator ? getPreferredNodeModel('ai-audio', useAppStore.getState()) : null;
       addNode({
         id: `node-${generateId()}`,
         type: 'ai-audio',
@@ -174,7 +130,7 @@ export function useNodeCreation() {
           ...(dataUrl ? { audioUrl: dataUrl } : { prompt: '' }),
           nodeWidth: 260,
           nodeHeight: 140,
-          ...(defaultModel ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
+          ...defaultModel,
         },
       } as RFNode<BaseNodeData>);
     },
@@ -186,6 +142,7 @@ export function useNodeCreation() {
   // ===========================
 
   const onDragEnter = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
     e.preventDefault();
     e.stopPropagation();
     if (useAppStore.getState().workflowPanelOpen || isExternalDropCaptured()) return;
@@ -194,12 +151,14 @@ export function useNodeCreation() {
   }, []);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
   }, []);
 
   const onDragLeave = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
     e.preventDefault();
     e.stopPropagation();
     enterCount.current--;
@@ -211,6 +170,7 @@ export function useNodeCreation() {
 
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
+      if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
       e.preventDefault();
       e.stopPropagation();
       setIsDragOver(false);
@@ -278,9 +238,15 @@ export function useNodeCreation() {
         setIsDragOver(false);
         if (!paths?.length) return;
 
-        const scale = window.devicePixelRatio || 1;
-        const flowPos = rf.screenToFlowPosition({ x: position.x / scale, y: position.y / scale });
+        const flowPos = rf.screenToFlowPosition(nativeDropClientPosition(position));
         const store = useAppStore.getState();
+        const recordSuccessfulDrop = (path: string, nodeId: string, projectId: string) => {
+          const current = useAppStore.getState();
+          if (current.currentProjectId === projectId
+            && current.nodes.some((node) => node.id === nodeId && node.data.status === 'success')) {
+            void current.markAssetUsed({ path });
+          }
+        };
         let count = 0;
         const maxItems = 20;
 
@@ -294,145 +260,88 @@ export function useNodeCreation() {
           const offX = count * 30;
           const offY = count * 30;
 
+          if (useAppStore.getState().currentProjectId !== store.currentProjectId) break;
+          const importGuard = registerCanvasImport(useAppStore.getState());
+          if (!importGuard) break;
+          const isFresh = () => isCanvasDerivationFresh(importGuard, useAppStore.getState());
           try {
-            if (cat === 'image' || cat === 'video' || cat === 'audio') {
-              const projectId = store.currentProjectId;
-              if (projectId && projectId !== 'default') {
-                // Create node immediately with loading, copy file in background
-                if (cat === 'image') {
-                  const nodeId = `node-${generateId()}`;
-                  store.addNode({
-                    id: nodeId,
-                    type: 'ai-image',
-                    position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                    data: { label: fileName, type: 'ai-image', role: 'source', status: 'loading', nodeWidth: 280, nodeHeight: 158 },
-                  } as Parameters<typeof store.addNode>[0]);
-                  count++;
-                  void (async () => {
-                    try {
-                      const result = await copyFileToProjectData(fp, projectId);
-                      if (result && result.assetUrl) {
-                        const dims = await computeImageNodeDimensions(result.assetUrl);
-                        store.updateNodeDataTransient(nodeId, { label: result.fileName, imageUrl: result.assetUrl, filePath: result.filePath, fileName: result.fileName, status: 'success', ...dims });
-                      } else {
-                        const content = await readBinaryFile(fp);
-                        const base64 = arrayBufferToBase64(content.buffer);
-                        const mime = MIME_MAP[ext] || 'application/octet-stream';
-                        const dataUrl = `data:${mime};base64,${base64}`;
-                        const dims = await computeImageNodeDimensions(dataUrl);
-                        store.updateNodeDataTransient(nodeId, { imageUrl: dataUrl, status: 'success', ...dims });
-                      }
-                    } catch (err) {
-                      console.error(`[drop] failed for "${fp}":`, err);
-                      store.updateNodeDataTransient(nodeId, { status: 'error', error: err instanceof Error ? err.message : '拷贝失败' });
-                    }
-                  })();
-                } else if (cat === 'video') {
-                  const nodeId = `node-${generateId()}`;
-                  store.addNode({
-                    id: nodeId,
-                    type: 'ai-video',
-                    position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                    data: { label: fileName, type: 'ai-video', role: 'source', status: 'loading', nodeWidth: 280, nodeHeight: 160 },
-                  } as Parameters<typeof store.addNode>[0]);
-                  count++;
-                  void (async () => {
-                    try {
-                      const result = await copyFileToProjectData(fp, projectId);
-                      if (result && result.assetUrl) {
-                        store.updateNodeDataTransient(nodeId, { label: result.fileName, videoUrl: result.assetUrl, filePath: result.filePath, fileName: result.fileName, status: 'success' });
-                      } else {
-                        const content = await readBinaryFile(fp);
-                        const base64 = arrayBufferToBase64(content.buffer);
-                        const mime = MIME_MAP[ext] || 'application/octet-stream';
-                        const dataUrl = `data:${mime};base64,${base64}`;
-                        store.updateNodeDataTransient(nodeId, { videoUrl: dataUrl, status: 'success' });
-                      }
-                    } catch (err) {
-                      console.error(`[drop] failed for "${fp}":`, err);
-                      store.updateNodeDataTransient(nodeId, { status: 'error', error: err instanceof Error ? err.message : '拷贝失败' });
-                    }
-                  })();
-                } else {
-                  const nodeId = `node-${generateId()}`;
-                  store.addNode({
-                    id: nodeId,
-                    type: 'ai-audio',
-                    position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                    data: { label: fileName, type: 'ai-audio', role: 'source', status: 'loading', nodeWidth: 260, nodeHeight: 140 },
-                  } as Parameters<typeof store.addNode>[0]);
-                  count++;
-                  void (async () => {
-                    try {
-                      const result = await copyFileToProjectData(fp, projectId);
-                      if (result && result.assetUrl) {
-                        store.updateNodeDataTransient(nodeId, { label: result.fileName, audioUrl: result.assetUrl, filePath: result.filePath, fileName: result.fileName, status: 'success' });
-                      } else {
-                        const content = await readBinaryFile(fp);
-                        const base64 = arrayBufferToBase64(content.buffer);
-                        const mime = MIME_MAP[ext] || 'application/octet-stream';
-                        const dataUrl = `data:${mime};base64,${base64}`;
-                        store.updateNodeDataTransient(nodeId, { audioUrl: dataUrl, status: 'success' });
-                      }
-                    } catch (err) {
-                      console.error(`[drop] failed for "${fp}":`, err);
-                      store.updateNodeDataTransient(nodeId, { status: 'error', error: err instanceof Error ? err.message : '拷贝失败' });
-                    }
-                  })();
-                }
-                continue;
-              }
-
-              // Fallback: read into memory (browser mode or copy failed)
-              const content = await readBinaryFile(fp);
-              const base64 = arrayBufferToBase64(content.buffer);
-              const mime = MIME_MAP[ext] || 'application/octet-stream';
-              const dataUrl = `data:${mime};base64,${base64}`;
-
-              if (cat === 'image') {
-                const dims = await computeImageNodeDimensions(dataUrl);
-                store.addNode({
-                  id: `node-${generateId()}`,
-                  type: 'ai-image',
-                  position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                  data: { label: fileName, type: 'ai-image', role: 'source', imageUrl: dataUrl, status: 'success', fileName, ...dims },
-                } as Parameters<typeof store.addNode>[0]);
-              } else if (cat === 'video') {
-                store.addNode({
-                  id: `node-${generateId()}`,
-                  type: 'ai-video',
-                  position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                  data: { label: fileName, type: 'ai-video', role: 'source', videoUrl: dataUrl, status: 'success', fileName, nodeWidth: 280, nodeHeight: 160 },
-                } as Parameters<typeof store.addNode>[0]);
-              } else {
-                store.addNode({
-                  id: `node-${generateId()}`,
-                  type: 'ai-audio',
-                  position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                  data: { label: fileName, type: 'ai-audio', role: 'source', audioUrl: dataUrl, status: 'success', fileName, nodeWidth: 260, nodeHeight: 140 },
-                } as Parameters<typeof store.addNode>[0]);
-              }
-            } else {
-              // Text file
-              const content = await readBinaryFile(fp);
-              const text = new TextDecoder('utf-8').decode(content);
-              if (!text.trim()) continue;
-              const lines = text.split('\n').length;
-              const h = textNodeHeight(lines);
+            const projectId = store.currentProjectId;
+            if (cat !== 'text' && projectId && projectId !== 'default') {
+              // 立即显示占位节点；后台复制只允许回写原项目、原节点与原 revision。
+              const nodeId = `node-${generateId()}`;
+              const type = `ai-${cat}` as BaseNodeData['type'];
+              const field = cat === 'image' ? 'imageUrl' : cat === 'video' ? 'videoUrl' : 'audioUrl';
               store.addNode({
-                id: `node-${generateId()}`,
-                type: 'ai-text',
+                id: nodeId, type,
                 position: { x: flowPos.x + offX, y: flowPos.y + offY },
-                data: { label: fileName, type: 'ai-text', role: 'source', output: text, status: 'success', fileName, nodeWidth: 280, nodeHeight: h },
-              } as Parameters<typeof store.addNode>[0]);
+                data: { label: fileName, type, role: 'source', status: 'loading',
+                  nodeWidth: cat === 'audio' ? 260 : 280, nodeHeight: cat === 'audio' ? 140 : cat === 'image' ? 158 : 160 },
+              });
+              count++;
+              const guard = registerCanvasDerivation(useAppStore.getState(), nodeId);
+              if (!guard) continue;
+              void (async () => {
+                const canWrite = () => isCanvasDerivationFresh(guard, useAppStore.getState());
+                try {
+                  const result = await copyFileToProjectData(fp, projectId);
+                  if (!canWrite()) return;
+                  let url = result?.assetUrl;
+                  if (!url) {
+                    const content = await readBinaryFile(fp);
+                    if (!canWrite()) return;
+                    url = `data:${MIME_MAP[ext] || 'application/octet-stream'};base64,${arrayBufferToBase64(content.buffer)}`;
+                  }
+                  const dims = cat === 'image' ? await computeImageNodeDimensions(url) : {};
+                  if (!canWrite()) return;
+                  useAppStore.getState().updateNodeDataTransient(nodeId, {
+                    [field]: url, status: 'success', ...dims,
+                    ...(result?.assetUrl ? { label: result.fileName, filePath: result.filePath, fileName: result.fileName } : {}),
+                  });
+                  recordSuccessfulDrop(fp, nodeId, projectId);
+                } catch (err) {
+                  if (canWrite()) useAppStore.getState().updateNodeDataTransient(nodeId, {
+                    status: 'error', error: err instanceof Error ? err.message : '拷贝失败',
+                  });
+                } finally { completeCanvasDerivation(guard); }
+              })();
+              continue;
             }
+
+            const content = await readBinaryFile(fp);
+            if (!isFresh()) break;
+            if (cat === 'text') {
+              const isMarkdown = ext === 'md';
+              const text = new TextDecoder('utf-8').decode(content);
+              if (!isMarkdown && !text.trim()) continue;
+              const lines = text.split('\n').length;
+              const nodeType = isMarkdown ? 'ai-markdown' : 'ai-text';
+              store.addNode({
+                id: `node-${generateId()}`, type: nodeType,
+                position: { x: flowPos.x + offX, y: flowPos.y + offY },
+                data: { label: fileName, type: nodeType, role: 'source', output: text, status: 'success', fileName,
+                  nodeWidth: 280, nodeHeight: isMarkdown ? textNodeHeight(lines, 160) : textNodeHeight(lines) },
+              });
+            } else {
+              const dataUrl = `data:${MIME_MAP[ext] || 'application/octet-stream'};base64,${arrayBufferToBase64(content.buffer)}`;
+              const dims = cat === 'image' ? await computeImageNodeDimensions(dataUrl)
+                : { nodeWidth: cat === 'audio' ? 260 : 280, nodeHeight: cat === 'audio' ? 140 : 160 };
+              if (!isFresh()) break;
+              const type = `ai-${cat}` as BaseNodeData['type'];
+              store.addNode({
+                id: `node-${generateId()}`, type,
+                position: { x: flowPos.x + offX, y: flowPos.y + offY },
+                data: { label: fileName, type, role: 'source', status: 'success', fileName, ...dims,
+                  [cat === 'image' ? 'imageUrl' : cat === 'video' ? 'videoUrl' : 'audioUrl']: dataUrl },
+              });
+            }
+            if (projectId) void useAppStore.getState().markAssetUsed({ path: fp });
             count++;
-          } catch (err) {
-            console.error('Tauri drag-drop: failed to read', fp, err);
-          }
+          } catch {
+            if (isFresh()) store.showToast(t('文件读取失败'), 'error');
+          } finally { completeCanvasDerivation(importGuard); }
         }
 
-        if (count > 0) store.showToast(`已拖入 ${count} 个源节点`);
+        if (count > 0 && useAppStore.getState().currentProjectId === store.currentProjectId) store.showToast(t('已拖入 {count} 个源节点', { count }));
       };
 
       type RawPaths = { paths: string[]; position: { x: number; y: number } };

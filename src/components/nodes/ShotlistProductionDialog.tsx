@@ -1,3 +1,6 @@
+/**
+ * ShotlistProductionDialog — 提供分镜制作界面与交互。
+ */
 import { useId, useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { MAX_SHOTLIST_PRODUCTION_BATCH, prepareShotlistProduction } from '../../services/shotlistProductionService';

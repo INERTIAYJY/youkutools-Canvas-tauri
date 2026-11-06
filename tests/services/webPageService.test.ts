@@ -1,3 +1,6 @@
+/**
+ * webPageService — 回归测试：web page SPA rendering fallback。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearWebReadSessionsForTests } from '../../src/services/chat/webReadSessionService';
 import { readWebPage, shouldRenderDynamicHtml } from '../../src/services/webPageService';

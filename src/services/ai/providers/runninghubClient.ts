@@ -1,14 +1,18 @@
+/**
+ * runninghubClient — 封装 RunningHub 请求、错误与媒体上传。
+ */
 import { isLocalMediaUrl } from '../../../utils/mediaUrl';
 import type { RunningHubConnection, RunningHubMediaKind } from '../../../types/runninghub';
 import { corsSafeFetch } from '../httpTransport';
 import { assertMediaDataUrlSize } from '../../fileService';
+import { prepareReferenceImageUpload } from '../referenceImageUpload';
 
 export class RunningHubRequestError extends Error {
-  readonly code: number;
+  readonly code?: number;
   readonly httpStatus: number;
-  constructor(code: number, httpStatus: number) {
-    const detail: Record<number, string> = { 401: '鉴权失败，请检查所选连接', 402: '余额不足', 403: '无权访问该资源', 429: '请求过于频繁', 805: '任务执行失败', 807: '任务不存在或不属于此密钥', 809: '上传文件过大', 814: '个人队列已满' };
-    super(`RunningHub ${detail[code] || detail[httpStatus] || '请求失败'}（${code || httpStatus}）`);
+  constructor(code: number | undefined, httpStatus: number) {
+    const detail: Record<number, string> = { 401: '鉴权失败，请检查所选连接', 402: '余额不足', 403: '无权访问该资源', 429: '请求过于频繁', 805: '任务执行失败', 807: '任务不存在或不属于此密钥', 809: '上传文件过大', 814: '个人队列已满', 901: 'AI 应用不存在，请核对应用 ID 和所选连接的 API 站点' };
+    super(`RunningHub ${detail[code ?? -1] || detail[httpStatus] || '请求失败'}（${code === undefined ? `HTTP ${httpStatus}` : `业务码 ${code}，HTTP ${httpStatus}`}）`);
     this.code = code; this.httpStatus = httpStatus;
   }
 }
@@ -25,8 +29,8 @@ async function request(url: string, init: RequestInit): Promise<Response> {
     throw new Error('RunningHub 连接中断，请检查网络后继续查询；不要重复提交任务');
   }
 }
-async function parseResponse(response: Response, successCode = 0): Promise<Record<string, unknown>> {
-  if (!response.ok) throw new RunningHubRequestError(response.status, response.status);
+async function parseResponse(response: Response, successCodes: readonly number[] = [0]): Promise<Record<string, unknown>> {
+  if (!response.ok) throw new RunningHubRequestError(undefined, response.status);
   const text = await response.text();
   if (text.length > 1_500_000) throw new Error('RunningHub 响应超过允许大小');
   let parsed: unknown;
@@ -36,7 +40,7 @@ async function parseResponse(response: Response, successCode = 0): Promise<Recor
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('RunningHub 返回格式无效');
   const payload = parsed as Record<string, unknown>;
   if (typeof payload.code !== 'number') throw new Error('RunningHub 响应缺少状态码');
-  if (payload.code !== successCode) throw new RunningHubRequestError(payload.code, response.status);
+  if (!successCodes.includes(payload.code)) throw new RunningHubRequestError(payload.code, response.status);
   return payload;
 }
 
@@ -58,7 +62,8 @@ export async function runningHubRequest(
     ...(method === 'POST' ? { body: JSON.stringify({ ...body, apiKey: connection.apiKey }) } : {}),
     signal: requestSignal(signal),
   });
-  return parseResponse(response);
+  const submitting = path === '/task/openapi/create' || path === '/task/openapi/ai-app/run';
+  return parseResponse(response, submitting ? [0, 200] : [0]);
 }
 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -79,18 +84,30 @@ export async function uploadRunningHubMedia(
   if (!response.ok) throw new Error(`读取参考${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频'}失败`);
   if (Number(response.headers.get('content-length')) > MAX_UPLOAD_BYTES) throw new Error('参考素材超过 100 MB 限制');
   assertMediaDataUrlSize(Number(response.headers.get('content-length')) || 0, kind, 'RunningHub 参考素材');
-  const blob = await response.blob();
-  assertMediaDataUrlSize(blob.size, kind, 'RunningHub 参考素材');
-  if (!blob.size || blob.size > MAX_UPLOAD_BYTES) throw new Error('参考素材为空或超过 100 MB 限制');
-  if (blob.type && !blob.type.startsWith(`${kind}/`) && blob.type !== 'application/octet-stream') throw new Error('参考素材类型与参数不匹配');
-  const subtype = blob.type.split('/')[1]?.split(';')[0];
-  const extension = ({ jpeg: 'jpg', png: 'png', webp: 'webp', gif: 'gif', mp4: 'mp4', webm: 'webm', mpeg: 'mp3', wav: 'wav', 'x-wav': 'wav', ogg: 'ogg', flac: 'flac' } as Record<string, string>)[subtype] || ({ image: 'png', video: 'mp4', audio: 'wav' } as const)[kind];
+  const sourceBlob = await response.blob();
+  assertMediaDataUrlSize(sourceBlob.size, kind, 'RunningHub 参考素材');
+  if (!sourceBlob.size || sourceBlob.size > MAX_UPLOAD_BYTES) throw new Error('参考素材为空或超过 100 MB 限制');
+  const sourceType = sourceBlob.type.split(';')[0].trim();
+  if (sourceType && !sourceType.startsWith(`${kind}/`) && sourceType !== 'application/octet-stream') throw new Error('参考素材类型与参数不匹配');
+  const blob = kind === 'image' ? await prepareReferenceImageUpload(sourceBlob, activeSignal) : sourceBlob;
+  const mimeType = blob.type.split(';')[0].trim();
+  const mimeExtensions: Record<string, string> = {
+    'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif',
+    'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/x-msvideo': 'avi', 'video/x-matroska': 'mkv', 'video/mpeg': 'mpeg',
+    'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/ogg': 'ogg', 'audio/flac': 'flac', 'audio/x-flac': 'flac',
+    'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/aac': 'aac', 'audio/webm': 'webm',
+  };
+  const pathExtension = source.pathname.split('.').pop()?.toLowerCase();
+  const sourceExtensions = { image: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif'], video: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'mpeg'], audio: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'webm'] };
+  // 无 MIME 时保留原文件的已知后缀；未知字节不能仅改名为 PNG、MP4 或 WAV。
+  const extension = mimeExtensions[mimeType] || ((!mimeType || mimeType === 'application/octet-stream') && pathExtension && sourceExtensions[kind].includes(pathExtension) ? pathExtension : 'bin');
   const form = new FormData();
   form.append('file', blob, `reference.${extension}`);
   const uploaded = await parseResponse(await request(`${connection.baseUrl}/openapi/v2/media/upload/binary`, {
     method: 'POST', headers: { Authorization: `Bearer ${connection.apiKey}` }, body: form, signal: activeSignal,
-  }), 200);
+  }), [0, 200]);
   const data = uploaded.data as Record<string, unknown> | undefined;
-  if (!data || typeof data.filename !== 'string' || typeof data.download_url !== 'string' || !/^https?:\/\//.test(data.download_url)) throw new Error('RunningHub 上传未返回有效文件名和地址');
-  return { filename: data.filename, url: data.download_url };
+  const filename = data?.fileName ?? data?.filename;
+  if (typeof filename !== 'string' || !filename || typeof data?.download_url !== 'string' || !/^https?:\/\//.test(data.download_url)) throw new Error('RunningHub 上传未返回有效文件名和地址');
+  return { filename, url: data.download_url };
 }

@@ -1,3 +1,6 @@
+/**
+ * storageDiagnostics — 回归测试：safe storage diagnostics。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { classifyStorageError, readStorageWithRetry, reportStorageError, StorageError } from '../../src/services/storageDiagnostics';
 

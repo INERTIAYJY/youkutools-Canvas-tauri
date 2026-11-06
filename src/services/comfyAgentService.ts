@@ -13,9 +13,11 @@ import type {
 } from '../types/media';
 import { isTauriEnv, persistMediaUrlToProjectData } from './fileService';
 import { comfyFetch, pollComfyHistory } from './comfyPolling';
+import { maybeAutoReleaseComfyMemory } from './comfyMemory';
 import { resolveComfyOutputUrl, type ComfyOutputKind } from './comfyOutputs';
 import { formatComfyPromptError } from './comfyWorkflowService';
-import { extractComfyUIIONodes } from './comfyUIWindowService';
+import { extractComfyUIIONodes, sanitizeWorkflowFileName } from './comfyUIWindowService';
+import { assertComfyResponse } from './comfyQuery';
 import { listConfiguredComfyServers, resolveComfyServerSelection, type ComfyServerSelection } from './comfyServers';
 
 type ComfyWorkflow = Record<string, ComfyWorkflowNode>;
@@ -140,10 +142,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function readJson(response: Response, action: string): Promise<unknown> {
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`${action}失败（HTTP ${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`);
-  }
+  await assertComfyResponse(response, action);
   return response.json();
 }
 
@@ -449,7 +448,7 @@ async function cancelPrompt(baseUrl: string, promptId: string): Promise<void> {
 }
 
 function outputKinds(kind: MediaKind): ComfyOutputKind[] {
-  if (kind === 'video') return ['video', 'image'];
+  if (kind === 'video') return ['video'];
   if (kind === 'audio') return ['audio', 'video', 'image'];
   return ['image'];
 }
@@ -474,11 +473,6 @@ function workflowNameFrom(entry: ValidatedWorkflowEntry): string {
   const model = entry.modelNames[0]?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '').trim();
   const kind = entry.kind === 'image' ? '图像' : entry.kind === 'video' ? '视频' : '音频';
   return model ? `${model}-${kind}工作流` : `ComfyUI-${kind}工作流`;
-}
-
-function sanitizeWorkflowFileName(name: string): string {
-  const base = name.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '_') || 'comfyui-workflow';
-  return `${base.replace(/\.json$/i, '')}.json`;
 }
 
 function createSaveOffer(
@@ -595,6 +589,10 @@ export async function executeValidatedComfyUIWorkflow(args: {
       (outputs) => resolveComfyOutputUrl(entry.baseUrl, outputs, outputKinds(entry.kind)),
       args.signal,
     );
+    await maybeAutoReleaseComfyMemory(
+      entry.baseUrl,
+      useAppStore.getState().config.comfyMemoryPolicy ?? 'smart',
+    ).catch(() => {});
     if (args.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
 
     const id = `media-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -639,6 +637,11 @@ export async function executeValidatedComfyUIWorkflow(args: {
   } catch (error) {
     if (promptId && (args.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError'))) {
       await cancelPrompt(entry.baseUrl, promptId);
+    } else if (promptId) {
+      await maybeAutoReleaseComfyMemory(
+        entry.baseUrl,
+        useAppStore.getState().config.comfyMemoryPolicy ?? 'smart',
+      ).catch(() => {});
     }
     throw error;
   }

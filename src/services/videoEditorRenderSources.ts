@@ -1,3 +1,6 @@
+/**
+ * videoEditorRenderSources — 准备受控剪辑导出来源并复核来源时效。
+ */
 import { VideoEditorControlError } from "../types/videoEditorControl";
 /** 主窗口导出与验片共用的有界素材生命周期。 */
 import type { Input } from 'mediabunny';

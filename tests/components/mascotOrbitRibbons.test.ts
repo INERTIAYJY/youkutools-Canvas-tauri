@@ -1,3 +1,6 @@
+/**
+ * mascotOrbitRibbons — 回归测试：mascotOrbitRibbons。
+ */
 import { describe, expect, it } from 'vitest';
 import { Vector3 } from 'three';
 import type { Mesh } from 'three';

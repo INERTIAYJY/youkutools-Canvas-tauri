@@ -8,6 +8,8 @@ import RootView from './RootView'
 import type { AppConfig } from './types'
 import { setLocale } from './i18n'
 import { initializeIconCache } from './services/iconCacheService'
+import { applyAppearanceTheme } from './services/appearance/appearanceRuntime'
+import { getAppearanceForConfig } from './services/appearance/appearanceMigration'
 
 // 复用同一入口，通过 ?view= 区分窗口类型
 const searchParams = new URLSearchParams(window.location.search)
@@ -25,30 +27,29 @@ if (/Windows NT/i.test(navigator.userAgent)) {
 async function applyInitialChatWindowTheme() {
   if (!isChatWindow) return
 
-  let effectiveTheme: AppConfig['theme'] = 'dark'
   let nativeCursor = false
+  let config: AppConfig | null = null
   try {
     // 只要主题字段，不必为此去读凭据存储
     const { loadConfigWithoutSecrets } = await import('./services/fileService')
-    const config = await loadConfigWithoutSecrets() as AppConfig | null
-    effectiveTheme = config?.canvasBackground === 'off-white'
-      ? 'light'
-      : config?.theme === 'light' ? 'light' : 'dark'
+    config = await loadConfigWithoutSecrets() as AppConfig | null
     // 与主题同批应用，避免独立窗口先闪一帧中文
     nativeCursor = config?.customCursor === false
     setLocale(config?.language)
   } catch (error) {
     console.warn('[main] failed to load chat window theme:', error)
   }
-  document.documentElement.setAttribute('data-theme', effectiveTheme)
+  applyAppearanceTheme(config?.appearance ?? getAppearanceForConfig(config))
   document.documentElement.toggleAttribute('data-native-cursor', nativeCursor)
 }
 
 async function mountRoot() {
   initializeIconCache()
   await applyInitialChatWindowTheme()
-  const { installMcpScreenshotResponder } = await import('./services/mcp/mcpUiRuntimeService')
-  void installMcpScreenshotResponder()
+  if (view !== 'comfyui-settings') {
+    const { installMcpScreenshotResponder } = await import('./services/mcp/mcpUiRuntimeService')
+    void installMcpScreenshotResponder()
+  }
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <RootView view={view} />

@@ -1,3 +1,6 @@
+/**
+ * videoEditorConfigIsolation — 回归测试：video editor config isolation。
+ */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

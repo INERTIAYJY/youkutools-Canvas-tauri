@@ -1,9 +1,13 @@
+/**
+ * indexedDbService — 回归测试：project snapshot updates。
+ */
 import { forceCloseDatabase, IDBFactory } from 'fake-indexeddb';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const DB_NAME = 'ai-canvas-db';
 const EXPECTED_STORES = [
   'agentTasks',
+  'appearanceThemes',
   'assetIndex',
   'assetMeta',
   'assetMetaV2',
@@ -11,14 +15,20 @@ const EXPECTED_STORES = [
   'chatMessages',
   'config',
   'globalCharacters',
+  'globalDramaAssets',
   'history',
   'metadata',
   'plugins',
   'presets',
+  'projectExchangeSnapshots',
+  'projectExchangeStates',
   'projectMemories',
   'projectSummaries',
   'projectVisualDescriptions',
   'projects',
+  'sharedAssetConflicts',
+  'sharedAssetMappings',
+  'sharedAssetOutbox',
   'skills',
   'styles',
   'subAgentProfiles',
@@ -87,7 +97,120 @@ beforeEach(() => {
   vi.resetModules();
 });
 
+describe('project snapshot updates', () => {
+  it('clears only the preview for an empty canvas while keeping persisted data', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { openDB } = await import('../../src/services/indexedDb/schema');
+    await service.saveProjectToDb({ ...RECOVERY_PROJECT, snapshot: 'data:image/webp;base64,OLD' });
+
+    await expect(service.updateProjectSnapshot(RECOVERY_PROJECT.id, undefined)).resolves.toBe(true);
+
+    const db = await openDB();
+    expect(await readRecord(db, 'projects', RECOVERY_PROJECT.id)).toEqual({ ...RECOVERY_PROJECT, snapshot: undefined });
+    expect(await readRecord(db, 'projectSummaries', RECOVERY_PROJECT.id)).toMatchObject({
+      id: RECOVERY_PROJECT.id, updatedAt: RECOVERY_PROJECT.updatedAt,
+    });
+    expect(await readRecord(db, 'projectSummaries', RECOVERY_PROJECT.id)).not.toHaveProperty('snapshot');
+  });
+
+  it('patches a late snapshot onto the latest canvas and metadata without reverting other fields', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { openDB } = await import('../../src/services/indexedDb/schema');
+    await service.saveProjectToDb({ ...RECOVERY_PROJECT, snapshot: 'data:image/webp;base64,OLD' });
+    const latest = {
+      ...RECOVERY_PROJECT,
+      name: '编辑后的项目', updatedAt: 42,
+      nodes: [{ id: 'new-node', data: { output: '保存后的最新正文' } }],
+      edges: [{ id: 'new-edge', source: 'saved-node', target: 'new-node' }],
+      groups: [{ id: 'new-group', nodeIds: ['new-node'] }],
+      dramaAssets: { characters: [], scenes: [], props: [{ id: 'new-prop', name: '新道具' }] },
+      episodeScript: '最新分集剧本',
+      snapshot: 'data:image/webp;base64,CURRENT',
+    };
+    await service.saveProjectToDb(latest);
+    const snapshot = 'data:image/webp;base64,LATE';
+
+    await expect(service.updateProjectSnapshot(latest.id, snapshot)).resolves.toBe(true);
+
+    const db = await openDB();
+    expect(await readRecord(db, 'projects', latest.id)).toEqual({ ...latest, snapshot });
+    expect(await readRecord(db, 'projectSummaries', latest.id)).toMatchObject({
+      id: latest.id, name: latest.name, createdAt: latest.createdAt, updatedAt: latest.updatedAt,
+      episodeScript: latest.episodeScript, snapshot,
+    });
+    const summary = await readRecord(db, 'projectSummaries', latest.id);
+    expect(summary).not.toHaveProperty('nodes');
+    expect(summary).not.toHaveProperty('dramaAssets');
+  });
+
+  it('does not recreate a deleted project or its summary when a snapshot arrives', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { openDB } = await import('../../src/services/indexedDb/schema');
+    await service.saveProjectToDb(RECOVERY_PROJECT);
+    await service.deleteProjectFromDb(RECOVERY_PROJECT.id);
+
+    await expect(service.updateProjectSnapshot(RECOVERY_PROJECT.id, 'data:image/webp;base64,LATE'))
+      .resolves.toBe(false);
+
+    const db = await openDB();
+    expect(await readRecord(db, 'projects', RECOVERY_PROJECT.id)).toBeUndefined();
+    expect(await readRecord(db, 'projectSummaries', RECOVERY_PROJECT.id)).toBeUndefined();
+  });
+
+  it('rejects and rolls back both stores when the summary write fails', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { openDB } = await import('../../src/services/indexedDb/schema');
+    await service.saveProjectToDb(RECOVERY_PROJECT);
+    const db = await openDB();
+    const summaryBefore = await readRecord(db, 'projectSummaries', RECOVERY_PROJECT.id);
+    const objectStore = db.transaction('projectSummaries', 'readonly').objectStore('projectSummaries');
+    const prototype = Object.getPrototypeOf(objectStore) as IDBObjectStore;
+    const originalPut = prototype.put;
+    const failure = new DOMException('fixture quota exhausted', 'QuotaExceededError');
+    const put = vi.spyOn(prototype, 'put').mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      if (this.name === 'projectSummaries') throw failure;
+      return originalPut.call(this, value, key);
+    });
+    try {
+      await expect(service.updateProjectSnapshot(RECOVERY_PROJECT.id, 'data:image/webp;base64,LATE'))
+        .rejects.toBe(failure);
+    } finally {
+      put.mockRestore();
+    }
+
+    expect(await readRecord(db, 'projects', RECOVERY_PROJECT.id)).toEqual(RECOVERY_PROJECT);
+    expect(await readRecord(db, 'projectSummaries', RECOVERY_PROJECT.id)).toEqual(summaryBefore);
+  });
+
+  it('rejects oversized and non-image snapshot values before opening the database', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { PROJECT_SNAPSHOT_MAX_DATA_URL_LENGTH } = await import('../../src/services/projectSnapshotValidation');
+    const open = vi.spyOn(indexedDB, 'open');
+    for (const snapshot of ['https://example.com/snapshot.webp', 'data:text/plain;base64,AAAA',
+      `data:image/webp;base64,${'A'.repeat(PROJECT_SNAPSHOT_MAX_DATA_URL_LENGTH)}`]) {
+      await expect(service.updateProjectSnapshot(RECOVERY_PROJECT.id, snapshot)).rejects.toThrow('参数无效');
+    }
+    expect(open).not.toHaveBeenCalled();
+  });
+});
+
 describe('indexedDbService schema', () => {
+  it('全局角色排序持久化只改顺序，旧编辑保存不会覆盖新顺序', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const a = { id: 'a', kind: 'character' as const, key: 'a', name: '角色 A', identity: '', summary: '', visualNotes: '',
+      importance: 'main' as const, confirmed: false, source: 'manual' as const, createdAt: 1, updatedAt: 2 };
+    const b = { ...a, id: 'b', name: '角色 B' };
+    await service.putGlobalCharacter(a);
+    await service.putGlobalCharacter(b);
+    await service.putGlobalCharacterOrder(['b', 'a']);
+    await service.putGlobalCharacter({ ...a, name: '编辑后的 A' });
+    expect(await service.getAllGlobalCharacters()).toEqual([
+      { ...a, name: '编辑后的 A', libraryOrder: 1 }, { ...b, libraryOrder: 0 },
+    ]);
+    await expect(service.putGlobalCharacterOrder(['a', 'missing'])).rejects.toThrow();
+    expect((await service.getAllGlobalCharacters()).map((item) => item.libraryOrder)).toEqual([1, 0]);
+    await expect(service.putGlobalCharacterOrder(['a', 'a'])).rejects.toThrow('重复');
+  });
   it('uses strict durability only for configuration and toolbar writes', async () => {
     const service = await import('../../src/services/indexedDbService');
     const { openDB } = await import('../../src/services/indexedDb/schema');
@@ -98,7 +221,7 @@ describe('indexedDbService schema', () => {
     expect(transaction).toHaveBeenCalledWith('config', 'readwrite', { durability: 'strict' });
     expect(transaction).toHaveBeenCalledWith('toolbarLayouts', 'readwrite', { durability: 'strict' });
     await service.saveProjectToDb(RECOVERY_PROJECT);
-    expect(transaction.mock.calls.at(-1)).toEqual([['projects', 'projectSummaries'], 'readwrite']);
+    expect(transaction.mock.calls.at(-1)).toEqual([['projects', 'projectSummaries', 'metadata'], 'readwrite']);
   });
 
   it('falls back only when transaction options are unsupported and does not retry permission or quota failures', async () => {
@@ -262,8 +385,89 @@ describe('indexedDbService schema', () => {
     newer.close();
   });
 
-  it('creates the complete v21 schema for a fresh database', async () => {
+  it('repairs an early v24 sync schema without losing projects, config, mappings or pending operations', async () => {
+    const scope = {
+      ownerId: RECOVERY_PROJECT.id, connectionId: 'saved-connection', connectionRevision: 'connection-v1',
+      libraryId: 'shared-library', sharedProjectId: 'shared-project',
+    };
+    const mapping = {
+      ...scope, id: 'saved-mapping', kind: 'file', localEntityId: 'local-file', sharedAssetId: 'shared-file',
+      members: [], media: [], currentFileAssetId: 'local-file', acceptedRevisionId: 'revision-v1',
+      acceptedETag: 'head-v1', baselineDigest: 'a'.repeat(64), updatedAt: 3,
+    };
+    const operation = {
+      ...scope, id: 'saved-operation', operationId: 'saved-operation', mappingId: mapping.id,
+      sharedAssetId: mapping.sharedAssetId, kind: 'file', direction: 'upload', revisionId: 'revision-v2',
+      baseRevisionId: 'revision-v1', baseETag: 'head-v1', phase: 'prepared', createdAt: 4, updatedAt: 5,
+    };
+    const oldDb = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 24);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        db.createObjectStore('projects', { keyPath: 'id' });
+        db.createObjectStore('config', { keyPath: 'id' });
+        for (const name of ['sharedAssetMappings', 'sharedAssetOutbox', 'sharedAssetConflicts']) {
+          const store = db.createObjectStore(name, { keyPath: 'id' });
+          store.createIndex('ownerId', 'ownerId', { unique: false });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = oldDb.transaction(['projects', 'config', 'sharedAssetMappings', 'sharedAssetOutbox'], 'readwrite');
+      tx.objectStore('projects').put(RECOVERY_PROJECT);
+      tx.objectStore('config').put({ id: 'app-config', data: RECOVERY_CONFIG });
+      tx.objectStore('sharedAssetMappings').put(mapping);
+      tx.objectStore('sharedAssetOutbox').put(operation);
+      tx.oncomplete = () => resolve();
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+    oldDb.close();
+
+    const { openDB, DB_VERSION } = await import('../../src/services/indexedDb/schema');
+    const db = await openDB();
+    expect(DB_VERSION).toBe(27);
+    expect(db.version).toBe(27);
+    const sync = db.transaction(['sharedAssetMappings', 'sharedAssetOutbox', 'sharedAssetConflicts'], 'readonly');
+    const mappings = sync.objectStore('sharedAssetMappings');
+    const outbox = sync.objectStore('sharedAssetOutbox');
+    const conflicts = sync.objectStore('sharedAssetConflicts');
+    expect([...mappings.indexNames]).toEqual(['localIdentity', 'ownerId', 'sharedIdentity']);
+    expect([...outbox.indexNames]).toEqual(['operationId', 'ownerId']);
+    expect([...conflicts.indexNames]).toEqual(['ownerId']);
+    expect(mappings.index('localIdentity').unique).toBe(true);
+    expect(mappings.index('localIdentity').keyPath).toEqual([
+      'ownerId', 'connectionId', 'connectionRevision', 'libraryId', 'sharedProjectId', 'generation', 'kind', 'localEntityId',
+    ]);
+    expect(mappings.index('sharedIdentity').unique).toBe(true);
+    expect(mappings.index('sharedIdentity').keyPath).toEqual([
+      'ownerId', 'connectionId', 'connectionRevision', 'libraryId', 'sharedProjectId', 'generation', 'sharedAssetId',
+    ]);
+    expect(outbox.index('operationId').unique).toBe(true);
+    expect(outbox.index('operationId').keyPath).toBe('operationId');
+    const readUsingIndex = (store: string, name: string, key: IDBValidKey): Promise<unknown> => new Promise((resolve, reject) => {
+      const request = db.transaction(store, 'readonly').objectStore(store).index(name).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const sharedScope = [scope.ownerId, scope.connectionId, scope.connectionRevision, scope.libraryId, scope.sharedProjectId, 'legacy'];
+    expect(await readUsingIndex('sharedAssetMappings', 'localIdentity', [...sharedScope, mapping.kind, mapping.localEntityId])).toEqual({ ...mapping, generation: 'legacy' });
+    expect(await readUsingIndex('sharedAssetMappings', 'sharedIdentity', [...sharedScope, mapping.sharedAssetId])).toEqual({ ...mapping, generation: 'legacy' });
+    expect(await readUsingIndex('sharedAssetMappings', 'ownerId', scope.ownerId)).toEqual({ ...mapping, generation: 'legacy' });
+    expect(await readUsingIndex('sharedAssetOutbox', 'operationId', operation.operationId)).toEqual({ ...operation, generation: 'legacy' });
+    expect(await readUsingIndex('sharedAssetOutbox', 'ownerId', scope.ownerId)).toEqual({ ...operation, generation: 'legacy' });
+    expect(await readUsingIndex('sharedAssetConflicts', 'ownerId', scope.ownerId)).toBeUndefined();
+    expect(await readRecord(db, 'projects', RECOVERY_PROJECT.id)).toEqual(RECOVERY_PROJECT);
+    expect(await readRecord(db, 'config', 'app-config')).toEqual({ id: 'app-config', data: RECOVERY_CONFIG });
+    expect(await readRecord(db, 'sharedAssetMappings', mapping.id)).toEqual({ ...mapping, generation: 'legacy' });
+    expect(await readRecord(db, 'sharedAssetOutbox', operation.id)).toEqual({ ...operation, generation: 'legacy' });
+    db.close();
+  });
+
+  it('creates the complete current schema for a fresh database', async () => {
     const service = await import('../../src/services/indexedDbService');
+    const { DB_VERSION } = await import('../../src/services/indexedDb/schema');
     await service.saveProjectToDb({
       id: 'project-fresh',
       name: 'Fresh project',
@@ -274,7 +478,7 @@ describe('indexedDbService schema', () => {
     });
 
     const db = await openDatabase(DB_NAME);
-    expect(db.version).toBe(21);
+    expect(db.version).toBe(DB_VERSION);
     expect([...db.objectStoreNames]).toEqual(EXPECTED_STORES);
 
     const taskStore = db.transaction('agentTasks', 'readonly').objectStore('agentTasks');
@@ -371,7 +575,8 @@ describe('indexedDbService schema', () => {
       }),
     }));
     const upgradedDb = await openDatabase(DB_NAME);
-    expect(upgradedDb.version).toBe(21);
+    const { DB_VERSION } = await import('../../src/services/indexedDb/schema');
+    expect(upgradedDb.version).toBe(DB_VERSION);
     expect([...upgradedDb.objectStoreNames]).toEqual(EXPECTED_STORES);
     upgradedDb.close();
   });
@@ -428,5 +633,29 @@ describe('indexedDbService schema', () => {
     expect(await service.getProjectVisualDescription('project-visual', 'fingerprint'))
       .toBeUndefined();
     expect(await service.getAllProjects()).toEqual([]);
+  });
+
+  it('deletes only the selected project replica jobs while preserving other project metadata', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { openDB } = await import('../../src/services/indexedDb/schema');
+    await service.saveProjectToDb({ id: 'replica-project', name: '复刻项目', createdAt: 1, updatedAt: 1, nodes: [], edges: [] });
+    const db = await openDB();
+    const records = [
+      { id: 'video-replica-jobs:replica-project', jobs: [{ jobId: 'video-replica-current' }] },
+      { id: 'video-replica-jobs:other-project', jobs: [{ jobId: 'video-replica-other' }] },
+      { id: 'video-batches:replica-project', batches: ['batch'] },
+      { id: 'unrelated-metadata', value: { retained: true } },
+    ];
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('metadata', 'readwrite');
+      for (const record of records) transaction.objectStore('metadata').put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error);
+    });
+    await service.deleteProjectFromDb('replica-project');
+    expect(await readRecord(db, 'metadata', records[0].id)).toBeUndefined();
+    expect(await readRecord(db, 'metadata', records[2].id)).toBeUndefined();
+    expect(await readRecord(db, 'metadata', records[1].id)).toEqual(records[1]);
+    expect(await readRecord(db, 'metadata', records[3].id)).toEqual(records[3]);
   });
 });

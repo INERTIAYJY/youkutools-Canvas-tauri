@@ -1,3 +1,6 @@
+/**
+ * uiControlTools — 回归测试：MCP UI control tools。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearAgentToolRegistryForTests,

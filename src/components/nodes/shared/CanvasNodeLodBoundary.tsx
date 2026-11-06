@@ -1,3 +1,6 @@
+/**
+ * CanvasNodeLodBoundary — 提供画布节点远景保活边界界面与交互。
+ */
 import { memo, useCallback, useContext, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { NodeProps } from '@xyflow/react';
 import type { BaseNodeData } from '../../../types';

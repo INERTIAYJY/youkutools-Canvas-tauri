@@ -4,6 +4,7 @@
  */
 import type { ImagePostProcess, NodeType } from '../../../types';
 import { DRAMA_EXTRACT_MARKER } from '../../../types/dramaAssets';
+import { extractPresetTemplateVariables, renderPresetTemplate, CURRENT_PROMPT_VARIABLE, LEGACY_PROMPT_VARIABLE } from '../../../services/presetTemplateService';
 
 export interface SlashCommandItem {
   id: string;
@@ -21,6 +22,11 @@ export interface SlashCommandItem {
 }
 
 // ── 图片预设提示词 ──
+
+const CHARACTER_PORTRAIT_QUALITY_PROMPT = `Enhance the portrait while strictly preserving the subject's identity with accurate facial geometry. Do not change their expression or face shape. Only allow subtle feature cleanup without altering who they are. Keep the exact same background from the reference image. No replacements, no changes, no new objects, no layout shifts. The environment must look identical. The image must be recreated as if it was shot on a Sony Al, using an 85mm f1.4 lens, at f1.6, 1S0 100, 1/200 shutter speed cinematic shallow depth of field, perfect facial focus, and an editorial-neutral color profile. This Sony Al +85mm f1.4 setup is mandatory. The final image must clearly look like premium full-frame Sony Al quality Lighting must match the exact direction, angle, and mood of the reference photo Upgrade the lighting into a cinematic subject-focused style: soft directional light warm highlights, cool shadows, deeper contrast expanded dynamic range, micro-contrast boost, smooth gradations, and zero harsh shadows. Maintain neutral premium color tone, cinematic contrast curve, natural saturation, real skin texture (not plastic), and subtle film grain. No fake glow, no runway lighting, no oversmoothing. Render in 4K resolution, 10-bit color, cinematic editorial style premium clarity, portrait crop, and keep the original environmental vibe untouched Re-render the subject with improved realism, depth, texture, and lighting while keeping identity and background fully preserved NEGATIVE INSTRUCTIONS: No new background. No background change. No overlydramatic lghting. No face morphing. No fake glow. No flat lighting.No over-smooth skin.`;
+
+const CHARACTER_SHEET_QUALITY_PROMPT = `人物质量（仅控制渲染质感，不改变人物身份、服装结构、指定版式、裁切或背景）：${CHARACTER_PORTRAIT_QUALITY_PROMPT}
+多视图适配（优先于上段通用肖像要求）：上段“保留原背景、环境与原布局、沿用原光向、portrait crop、浅景深”不适用于本设定板，背景、版式、光线与裁切按前文逐格规则执行。头部仅出现在指定面部特写格，身体三视图均从颈根裁切，背面也不显示头部。保持自然皮肤纹理、轻微胶片颗粒与中性摄影质感；所有格子的主体均清晰对焦，不因浅景深模糊服装或四肢，不用冷暖调色改变指定背景色。相机、镜头、曝光、4K与10-bit仅作质感参考，实际生成比例、画质与模型沿用本预设及当前节点设置。`;
 
 const IMAGE_COMMANDS: SlashCommandItem[] = [
   {
@@ -49,28 +55,53 @@ const IMAGE_COMMANDS: SlashCommandItem[] = [
     id: 'character',
     title: '人设参考',
     icon: 'mdi:account',
-    description: '一键生成人物多视图 三视图、三视图加脸部、人设拆解图',
+    description: '一键生成人物三视图、双面部特写、人设解析图',
     children: [
       {
         id: 'char-three-view',
         title: '人物三视图',
         icon: 'mdi:account-multiple',
-        description: '纯正的三向视图展示',
-        promptTemplate: '生成全身三视图，右边放正视图，45度的侧视图，后视图，\n{{ 文章内容 }}',
+        description: '左侧单面部特写，右侧正侧背均为颈根以下 · 16:9',
+        promptTemplate: `生成一张16:9横版角色设定资产板，纯净白色无缝背景，明亮、清透，细节清晰克制。默认采用西幻动画电影质感；参考图或人物描述另有视觉风格时，以参考图与人物描述为准。人物身份、年龄、五官、发型和服装遵循参考图与下方描述。
+画面采用左右分区式4 View，共四个独立视图。左侧占画面宽度约40%，只有一张正面头部近景/面部特写，完整展示头部、发型与头饰，保留少量颈部和肩部；整张图恰好只有一个可见头部，且位于左侧。右侧占画面宽度约60%，横排三格等宽身体图，从左到右依次为正面、严格90度侧面、背面，三格全部只展示颈根到脚底（neck-down body crops）。
+右侧第一格（正面）：画框上沿紧贴颈根与肩部衔接处，整个头部位于画框上方之外，不出现头顶、脸部、下巴或半张脸；自然颈根、肩部、服装、手臂、腿部和双脚完整入画。
+右侧第二格（侧面）：严格90度正侧面，同样从颈根裁切至脚底，整个头部位于画框上方之外，不出现侧脸、鼻子、下巴、耳朵或头顶，不使用45度或四分之三视角。
+右侧第三格（背面）：同样只展示后颈根部到脚底，整个后脑、头顶、头部轮廓和头饰全部在画框外；背面同样不显示头部，不转头露出侧脸，完整展示后颈根、背部服装、手臂、腿部和双脚。
+右侧正面、侧面、背面统一使用相同的颈根裁切，三格共用一条水平画框上沿，肩部紧接上沿，不在颈根上方留出容纳头部的空白。这是正常人物的摄影取景裁切，不为补齐头部而缩小身体或向上延伸取景框。
+右侧三格必须是同一人物在同一高度、距离和缩放下原地转向，使用正交或弱透视、同一身体比例和自然站姿；肩线、腰线、胯线、膝线、脚踝和脚底分别水平对齐，不独立缩放、不裁脚或裙摆。四个视图的人物身份、服装、配饰、配色与材质保持一致；面部结构、服装轮廓和必要材质层次清晰，表面纹理克制，所有格子的主体清晰对焦。画面排版整齐，不添加文字、标签、标志、水印或额外视图。
+${CHARACTER_SHEET_QUALITY_PROMPT}
+人物与风格描述（提供人物内容；版式、裁切与背景按上述规则执行）：
+{{ 文章内容 }}
+输出前核对：只有左侧一个完整头部；右侧正、侧、背三格均为颈根以下，零头部；三格脚底对齐；全图统一纯白无缝背景。`,
+        aspectRatio: '16:9',
       },
       {
         id: 'char-three-view-face',
-        title: '人物三视图+脸部',
+        title: '人物三视图＋双面部特写',
         icon: 'mdi:face-man',
-        description: '带脸部特写的三视图',
-        promptTemplate: '生成全身三视图以及一张脸部特写（最左边占满三分之一的位置是上半身特写），右边三分之二放正视图，45度的侧视图，后视图，\n{{ 文章内容 }}',
+        description: '上排双面部特写，下排正侧背均为颈根以下 · 4:5',
+        promptTemplate: `生成一张4:5竖版人物设定图，严格采用上二下三的两排布局，共五个独立视图。上排两格为头肩特写，下排三格为颈根到脚底的身体取景；整张图恰好只有两个可见头部，且全部位于上排。
+版式：一条笔直的水平分隔线位于画面高度约45%处，上排占45%，下排占55%。上排左右等宽，下排三列等宽，各格独立取景、不重叠、不跨格。下排三格的上沿与这条分隔线重合，不在下排颈根上方留出容纳头部的空白。
+上排：从左到右依次为正面面部特写、侧面面部特写。两格均完整展示头顶、发型、头饰、脸部和少量颈肩；侧面必须是严格90度正侧面，不使用45度或四分之三视角。
+下排：从左到右依次为正面、严格90度侧面、背面身体图。下排三列统一从颈根裁切至脚底（neck-down body crops），画框上沿紧贴颈根与肩部衔接处，整个头部位于各自画框上方之外。这是正常人物的摄影取景裁切。
+左下正面格：只显示颈根、双肩、躯干、双臂、双腿及完整双脚；头顶、眼睛、鼻子、嘴、下巴和耳朵全部在画框外。
+中下侧面格：严格90度侧身，从颈根到脚底；侧脸、鼻尖、下巴、耳朵和整个头部全部在画框外，不转头、不露出半张脸。
+右下背面格：从后颈根部到脚底；后脑、头顶、头部轮廓和头饰全部在画框外。背面同样不显示头部，不转头露出侧脸。
+下排三列必须是同一人物在同一高度、距离和缩放下原地转向，使用正交或弱透视、自然直立站姿；肩线、腰线、胯线、膝线、脚踝和脚底分别水平对齐，身体尺度、腿长与鞋子大小一致。三列完整展示服装、手臂和双脚，不裁脚或裙摆，不为塞入头部而缩小身体，不独立缩放或自动改成从头到脚的取景。
+所有格子统一使用中性灰无缝摄影棚背景与同色地面，灰色不偏冷不偏暖；柔和均匀的漫射棚光，仅保留轻微自然接触阴影。参考图的场景、布景和环境色不带入成图。
+五个视图保持同一人物的身份、年龄、五官、脸型、发型、体型、服装、配饰、材质和配色，视觉风格遵循人物参考与描述。面部结构、服装轮廓和必要材质层次清晰，表面纹理克制；所有格子的主体清晰对焦，不使用浅景深模糊身体；不添加额外人物、视图、文字、标签、标志或水印。
+${CHARACTER_SHEET_QUALITY_PROMPT}
+人物与风格描述（提供人物内容；版式、裁切与背景按上述规则执行）：
+{{ 文章内容 }}
+输出前核对：上排两个完整头部；下排正、侧、背三格均为颈根以下，零头部；三列脚底对齐；全图统一中性灰摄影棚背景。`,
+        aspectRatio: '4:5',
       },
       {
         id: 'char-design-sheet',
         title: '人设解析图',
         icon: 'mdi:file-account-outline',
         description: '包含细节拆解的设定集',
-        promptTemplate: '生成人设解析图，包含正视图、侧视图、背视图，以及服装细节拆解、面部特征特写，排版紧凑，\n{{ 文章内容 }}',
+        promptTemplate: `生成人设解析图，包含正视图、侧视图、背视图，以及服装细节拆解、面部特征特写，排版紧凑，\n${CHARACTER_PORTRAIT_QUALITY_PROMPT}\n{{ 文章内容 }}`,
       },
       {
         id: 'char-8dir-run',
@@ -242,6 +273,32 @@ const IMAGE_COMMANDS: SlashCommandItem[] = [
 11. 表格底部增加一条补充信息区，包含：场景总设定、综合色彩色板、整体风格说明。 
 12. 最终只输出一张完整的横版故事板表格图。  
 #【用户输入】
+{{ 文章内容 }}`,
+      },
+      {
+        id: 'sb-lineart-six',
+        title: '六格线稿分镜',
+        icon: 'mdi:filmstrip',
+        description: '黑白铅笔线稿、彩色调度箭头与镜号批注 · 16:9',
+        aspectRatio: '16:9',
+        promptTemplate: `根据下方【用户输入】，生成一张专业影视分镜线稿工作图。
+
+【画布与内容】
+横向16:9，白纸底，三列两行，恰好六个大小一致的画格，按从左到右、从上到下编号01—06。按用户提供的当前片段顺序提取六个关键画格；超过六个时只画当前片段顺序中的前六个，不把整篇故事强压成六格。动作不足六格时，可细分已有动作的起手、反应、结果或观察机位，不新增事件、人物、剧情结果或台词。每格只画一个关键时刻，不通过复制同一人物表现动作过程。
+
+【黑白线稿风格】
+使用清晰的黑色铅笔线条、钢笔轮廓和少量浅灰排线，保留白纸留白。人物比例写实、场景透视准确，人物位置、手部接触和动作方向清楚。所有人物、皮肤、服装、建筑、灯光和道具只能使用黑、白、浅灰；即使参考图中有彩色服装、暖色灯光，也必须转成黑白线稿。不要彩色漫画、照片底图、照片滤镜、油画厚涂、3D渲染或大面积深色涂底。
+
+【镜号与批注】
+每格上方保留整齐的标题栏，写“镜号＋景别＋运镜”；每格另配一条简短中文批注，说明关键动作、表演或声音。文字清楚，不塞长篇说明、对白气泡或长字幕。对白仅可摘录用户原话，不改写或新增。用户已提供作品名、场次或页名时，页面顶部使用该信息作为标题；未提供时只写“六格分镜”，不猜作品名称。不要把本提示词的规则、章节标题或占位说明画进图中。
+
+【彩色调度标注】
+画面内容全部保持黑白灰，只有调度箭头与批注可以使用彩色：红色箭头＝摄影机运动；蓝色箭头＝人物移动、转身和重心变化；绿色箭头＝道具、绳索、车辆等的运动轨迹；橙色线条＝烟雾、火星、光效等效果的范围与变化；紫色文字＝表演、对白提示和音效短注。箭头少而明确，标出必要的起点、方向和终点，避开脸部和关键接触位置；它们是分镜说明，不是故事中的实体光线。底部添加简洁图例：“红：机位 / 蓝：人物 / 绿：道具 / 橙：效果”。
+
+【参考与连续性】
+遵循用户通过@指定的参考用途：分镜样图仅用于版式、线稿和标注方法，不复制其中的角色与故事；人物参考锁定外貌、年龄、发型和服装；场景参考锁定建筑、出口与空间关系；道具参考锁定同一物件的外形与数量。同一角色、衣装、人物左右位置、视线方向、手别、道具数量及已发生的状态变化保持连续，不增加重复人物或重复道具。若多个画格属于同一长镜头，注明“同一长镜头关键画格”，不要把关键姿态误画成多次切镜。不要水印、标志、额外画格或无关人物。
+
+【用户输入】
 {{ 文章内容 }}`,
       },
     ],
@@ -585,13 +642,12 @@ export function getSlashCommands(nodeType: NodeType): SlashCommandItem[] {
 }
 
 /**
- * 将当前提示词填入模板的 {{ 文章内容 }} 占位符
+ * 填充普通及高级预设共用的当前提示词占位符。
  * 如果模板不含该占位符，则将输入内容拼接到模板最上方
  */
 export function fillTemplate(template: string, currentPrompt: string): string {
-  const placeholder = '{{ 文章内容 }}';
-  if (template.includes(placeholder)) {
-    return template.replace(placeholder, currentPrompt || '');
+  if (extractPresetTemplateVariables(template).some((key) => key === CURRENT_PROMPT_VARIABLE || key === LEGACY_PROMPT_VARIABLE)) {
+    return renderPresetTemplate(template, {}, currentPrompt || '');
   }
   // 无占位符时，把用户输入放到最上方
   return currentPrompt ? `${currentPrompt}\n\n${template}` : template;

@@ -1,0 +1,37 @@
+{
+  "1": {
+    "class_type": "FB_Qwen3TTSVoiceDesign",
+    "inputs": {
+      "text": "你好，欢迎体验文生语音抽卡。每次运行都会生成略有不同的声音。",
+      "instruct": "自然真实的年轻中国女性声音，清亮温暖，语速适中，像日常聊天，不要播音腔。",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "Chinese",
+      "seed": 20260916,
+      "max_new_tokens": 1536,
+      "top_p": 0.9,
+      "top_k": 50,
+      "temperature": 1,
+      "repetition_penalty": 1.05,
+      "attention": "sdpa",
+      "unload_model_after_generate": true
+    },
+    "_meta": {
+      "title": "① 文生语音抽卡（随机音色）"
+    }
+  },
+  "2": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "filename_prefix": "audio/Qwen3-TTS-02-文生语音抽卡",
+      "audio": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "② 预览并保存"
+    }
+  }
+}

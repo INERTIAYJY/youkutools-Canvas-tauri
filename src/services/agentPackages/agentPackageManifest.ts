@@ -1,3 +1,6 @@
+/**
+ * agentPackageManifest — 解析并限制 AgentPackage 清单、入口与相对路径。
+ */
 import type {
   AgentPackageContributions,
   AgentPackageEntrypoints,

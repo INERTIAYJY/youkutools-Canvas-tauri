@@ -1,3 +1,6 @@
+/**
+ * ShotlistRevisionDialog — 提供分镜修订界面与交互。
+ */
 import { useId, useMemo, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';

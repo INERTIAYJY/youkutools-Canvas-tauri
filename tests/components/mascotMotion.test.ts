@@ -1,3 +1,6 @@
+/**
+ * mascotMotion — 回归测试：mascotMotion。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   BLINK_DURATION,

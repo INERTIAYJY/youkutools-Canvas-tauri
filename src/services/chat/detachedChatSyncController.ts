@@ -3,6 +3,10 @@
  */
 import type { Node } from '@xyflow/react';
 import { useAppStore } from '../../store/useAppStore';
+import { seriesOwnerId } from '../../store/store.utils';
+import { GENERAL_ASSISTANT_SCOPE_ID } from './assistantScope';
+import { getMcpClientOptions } from '../mcp/mcpClientService';
+import { MCP_SETTINGS_CONVERSATION_ID } from '../mcp/mcpSettingsScope';
 import type {
   ApiProviderConfig,
   BaseNodeData,
@@ -12,6 +16,7 @@ import type { AgentTask } from '../../types/agent';
 import type { ChatConversation, ChatMessage } from '../../types/chat';
 import {
   getConfiguredModelGroups,
+  getGeneralModelGroups,
   getMediaModelOptions,
   type MediaModelOption,
 } from '../../components/nodes/shared/defaultModels';
@@ -32,7 +37,6 @@ import {
   submitConversationMessage,
 } from './conversationExecutionController';
 import {
-  authorizeConversationFiles,
   clearConversationFileGrants,
   listConversationFileGrants,
   revokeFileGrant,
@@ -46,13 +50,22 @@ import {
   type ChatAction,
   type ChatStateSnapshot,
   type ChatStateSync,
+  type ChatComposerHandoff,
 } from './chatWindowService';
 import { getAssistantTextModelCandidates } from '../projectSettingsService';
 import { projectSkillPickerOptions } from './skillCatalog';
+import { normalizePromptSubmitShortcut, PROMPT_SUBMIT_SHORTCUT_OPTIONS } from '../../utils/promptSubmitShortcut';
+import {
+  attachConversationFiles, getChatImagePreviews, parseChatImageReferences,
+  prepareChatImagePreviews, subscribeChatImagePreviews,
+} from './chatImageReferenceService';
+import { cancelMainReferencePreview, handleDetachedReferencePreviewAction } from './chatReferencePreviewService';
 
 const DEFAULT_SYNC_INTERVAL_MS = 150;
 const MAX_SYNC_RETRY_DELAY_MS = 5_000;
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+// 同一空输入区连续勾选连接时，复用第一次创建且仍活动的会话，等待快照到达。
+let pendingMcpSelection: { scopeId: string; conversationId: string } | null = null;
 
 type AppState = ReturnType<typeof useAppStore.getState>;
 
@@ -68,7 +81,7 @@ interface DetachedChatSyncControllerOptions {
   emitSync?: (sync: ChatStateSync) => Promise<void>;
   initListener?: (
     onAction: (action: ChatAction) => void,
-    onDetachClosed: () => void,
+    onDetachClosed: (draft?: ChatComposerHandoff) => void,
   ) => Promise<() => void>;
   now?: () => number;
 }
@@ -81,12 +94,17 @@ interface DetachedSnapshotSource {
   currentProjectId: string | null;
   projects: AppState['projects'];
   config: AppState['config'];
+  configHydrated: boolean;
   chatPanelDetached: boolean;
   nodes: AppState['nodes'];
   dramaAssets: AppState['dramaAssets'];
   userSkills: AppState['userSkills'];
   agentPackageSkills: AppState['agentPackageSkills'];
   chatComposerLiveDraft: string;
+  chatComposerDrafts: AppState['chatComposerDrafts'];
+  chatImageDrafts: AppState['chatImageDrafts'];
+  chatPanelView: AppState['chatPanelView'];
+  workflows: AppState['workflows'];
 }
 
 let cachedAgentTaskSource: AppState['agentTasks'] | null = null;
@@ -180,11 +198,12 @@ function sameProjection(
     && previous.data.type === node.data.type
     && previous.data.displayId === node.data.displayId
     && previous.data.imageUrl === node.data.imageUrl
+    && previous.data.videoUrl === node.data.videoUrl
     && previous.data.thumbnailUrl === node.data.thumbnailUrl;
 }
 
 /**
- * 独立窗口只用节点做 @ 引用与缩略图，正文（提示词/输出/历史）不跨窗口传。
+ * 独立窗口只用节点做 @ 引用与缩略图，视频沿用已有可播放 URL，不传文件路径或正文。
  * 拖动画布每帧都会换一个 nodes 数组，但投影字段没变 —— 逐字段比过之后原样返回
  * 上一次的数组，让补丁层的 Object.is 直接短路，省掉整棵树的 JSON 比较。
  */
@@ -207,6 +226,7 @@ export function projectChatNodes(nodes: AppState['nodes']): Node<BaseNodeData>[]
             type: node.data.type,
             displayId: node.data.displayId,
             imageUrl: node.data.imageUrl,
+            videoUrl: node.data.videoUrl,
             thumbnailUrl: node.data.thumbnailUrl,
           },
         };
@@ -221,47 +241,111 @@ export function projectChatNodes(nodes: AppState['nodes']): Node<BaseNodeData>[]
   return cachedNodeProjection;
 }
 
-let cachedMediaConfig: AppState['config'] | null = null;
-let cachedMediaAvailability: Record<string, boolean> = {};
+let cachedModelConfig: AppState['config'] | null = null;
+let cachedWorkflows: AppState['workflows'] | null = null;
+let cachedModelCatalog: Pick<ChatStateSnapshot, 'assistantModelGroups' | 'mediaModelOptions' | 'mediaModelAvailability'>;
 
-/** 媒体模型清单只跟 config 走，别跟着每次消息增量重算 */
-function mediaModelAvailabilityFor(config: AppState['config']): Record<string, boolean> {
-  if (config === cachedMediaConfig) return cachedMediaAvailability;
-  cachedMediaConfig = config;
-  cachedMediaAvailability = getMediaModelAvailability(
-    getMediaModelOptions(config.generalModels ?? [], config),
-    config.generalModels ?? [],
-    config.providers,
-    !!config.dreaminaAuth?.loggedIn,
-  );
-  return cachedMediaAvailability;
+/** 两种窗口共用同一份目录；只投影选项，不把连接凭据或工作流正文交给独立窗口。 */
+export function buildChatModelCatalog(state: Pick<AppState, 'config' | 'workflows'>) {
+  const { config, workflows } = state;
+  if (config === cachedModelConfig && workflows === cachedWorkflows) return cachedModelCatalog;
+  const models = config.generalModels ?? [];
+  const mediaModelOptions = getMediaModelOptions(models, config, workflows);
+  cachedModelCatalog = {
+    assistantModelGroups: [
+      ...getConfiguredModelGroups(config, 'ai-text'),
+      ...getGeneralModelGroups(models, config, 'ai-text'),
+    ],
+    mediaModelOptions,
+    mediaModelAvailability: getMediaModelAvailability(mediaModelOptions, models, config.providers, !!config.dreaminaAuth?.loggedIn),
+  };
+  cachedModelConfig = config;
+  cachedWorkflows = workflows;
+  return cachedModelCatalog;
+}
+
+const messageImageFileNames = new WeakMap<ChatMessage, string[]>();
+let cachedImageMessages: ChatMessage[] | undefined;
+let cachedImageConversation: string | null | undefined;
+let cachedConversationImages: string[] = [];
+let cachedImageDraft = '';
+let cachedDraftImages: string[] = [];
+let cachedConversations: ChatConversation[] | undefined;
+let cachedConversationOwner: string | undefined;
+let cachedScopedConversations: ChatConversation[] = [];
+
+function conversationImageFileNames(messages: ChatMessage[], conversationId: string | null): string[] {
+  if (messages === cachedImageMessages && conversationId === cachedImageConversation) return cachedConversationImages;
+  const names: string[] = [];
+  for (const message of messages) {
+    if (message.conversationId !== conversationId) continue;
+    let files = messageImageFileNames.get(message);
+    if (!files) {
+      files = parseChatImageReferences(message.content).map((image) => image.fileName);
+      messageImageFileNames.set(message, files);
+    }
+    names.push(...files);
+  }
+  cachedImageMessages = messages;
+  cachedImageConversation = conversationId;
+  cachedConversationImages = names;
+  return names;
 }
 
 export function buildDetachedChatSnapshot(state: AppState): ChatStateSnapshot {
+  const chatScopeId = state.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID;
+  const ownerId = seriesOwnerId(state.projects, chatScopeId);
+  if (state.conversations !== cachedConversations || ownerId !== cachedConversationOwner) {
+    cachedScopedConversations = state.conversations.filter((conversation) => conversation.projectId === ownerId
+      || conversation.id === MCP_SETTINGS_CONVERSATION_ID);
+    cachedConversations = state.conversations;
+    cachedConversationOwner = ownerId;
+  }
+  const conversations = cachedScopedConversations;
+  const activeConversationId = conversations.some((conversation) => conversation.id === state.activeConversationId)
+    ? state.activeConversationId : null;
+  const composerDraft = activeConversationId ? state.chatComposerDrafts[activeConversationId] ?? ''
+    : state.activeConversationId ? '' : state.chatComposerLiveDraft;
+  const imageDrafts = activeConversationId ? state.chatImageDrafts[activeConversationId] ?? [] : [];
+  if (composerDraft !== cachedImageDraft) {
+    cachedImageDraft = composerDraft;
+    cachedDraftImages = parseChatImageReferences(composerDraft).map((image) => image.fileName);
+  }
+  const imageFileNames = [...new Set([
+    ...imageDrafts.map((image) => image.fileName),
+    ...conversationImageFileNames(state.messages, activeConversationId),
+    ...cachedDraftImages,
+  ])];
+  void prepareChatImagePreviews(chatScopeId, imageFileNames);
   const project = state.projects.find((item) => item.id === state.currentProjectId);
   return {
-    conversations: state.conversations,
-    activeConversationId: state.activeConversationId,
+    conversations,
+    activeConversationId,
     messages: state.messages,
     agentTasks: projectChatAgentTasks(state.agentTasks),
     projectId: state.currentProjectId,
     projectName: project?.name,
     generalModels: state.config.generalModels ?? [],
-    assistantModelGroups: getConfiguredModelGroups(state.config, 'ai-text'),
+    ...buildChatModelCatalog(state),
     assistantModelId: getAssistantTextModelCandidates(
       project?.settings,
       state.config.assistantModelId,
     )[0],
     assistantImageModelId: state.config.assistantImageModelId,
     assistantVideoModelId: state.config.assistantVideoModelId,
-    mediaModelAvailability: mediaModelAvailabilityFor(state.config),
-    localFileGrants: state.activeConversationId
-      ? listConversationFileGrants(state.activeConversationId)
+    localFileGrants: activeConversationId
+      ? listConversationFileGrants(activeConversationId)
       : [],
+    imageDrafts,
+    imagePreviewUrls: getChatImagePreviews(chatScopeId, imageFileNames),
     nodes: projectChatNodes(state.nodes),
     dramaAssets: state.dramaAssets,
     skillOptions: projectSkillPickerOptions(state.userSkills, state.agentPackageSkills),
-    composerDraft: state.chatComposerLiveDraft,
+    mcpClientOptions: getMcpClientOptions(state.config.mcpClientConnections ?? []),
+    composerDraft,
+    composerDrafts: state.chatComposerDrafts,
+    panelView: state.chatPanelView,
+    promptSubmitShortcut: state.configHydrated ? normalizePromptSubmitShortcut(state.config.promptSubmitShortcut) : undefined,
   };
 }
 
@@ -277,11 +361,16 @@ function detachedSnapshotSourceChanged(
     || current.currentProjectId !== previous.currentProjectId
     || current.projects !== previous.projects
     || current.config !== previous.config
+    || current.configHydrated !== previous.configHydrated
     || current.nodes !== previous.nodes
     || current.dramaAssets !== previous.dramaAssets
     || current.userSkills !== previous.userSkills
     || current.agentPackageSkills !== previous.agentPackageSkills
-    || current.chatComposerLiveDraft !== previous.chatComposerLiveDraft;
+    || current.chatComposerLiveDraft !== previous.chatComposerLiveDraft
+    || current.chatComposerDrafts !== previous.chatComposerDrafts
+    || current.chatImageDrafts !== previous.chatImageDrafts
+    || current.chatPanelView !== previous.chatPanelView
+    || current.workflows !== previous.workflows;
 }
 
 export function handleDetachedChatAction(
@@ -291,20 +380,61 @@ export function handleDetachedChatAction(
   const store = useAppStore.getState();
 
   switch (action.type) {
+    case 'preview_reference':
+    case 'cancel_reference_preview':
+      handleDetachedReferencePreviewAction(action);
+      break;
+    case 'open_mcp_client_settings':
+      store.setSettingsOpen(true, 'mcp');
+      if (isTauri) void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
+        const main = getCurrentWindow();
+        await main.show();
+        await main.unminimize();
+        await main.setFocus();
+      }).catch(() => store.showToast('请在主窗口设置中管理 MCP 连接', 'info'));
+      break;
+    case 'set_mcp_connection': {
+      const scopeId = store.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID;
+      if (action.scopeId !== scopeId) break;
+      if (!store.config.mcpClientConnections?.some((item) => item.id === action.serverId && item.enabled)) break;
+      if (action.conversationId && action.conversationId !== store.activeConversationId) break;
+      const current = store.conversations.find((item) => item.id === store.activeConversationId && !item.deletedAt
+        && item.projectId === seriesOwnerId(store.projects, scopeId));
+      if (!action.conversationId && current && (pendingMcpSelection?.scopeId !== scopeId || pendingMcpSelection.conversationId !== current.id)) break;
+      const created = !action.conversationId && !current;
+      const conversationId = action.conversationId ?? current?.id ?? store.createConversation(scopeId);
+      if (created) pendingMcpSelection = { scopeId, conversationId };
+      const conversation = useAppStore.getState().conversations.find((item) => item.id === conversationId && !item.deletedAt);
+      if (conversation?.projectId !== seriesOwnerId(store.projects, scopeId)) break;
+      if (created && action.draft !== undefined) store.setChatComposerLiveDraft(action.draft, conversationId);
+      store.setConversationMcpServer(conversationId, action.serverId, action.enabled);
+      requestSync(true);
+      break;
+    }
     case 'send_message': {
-      if (action.conversationId !== store.activeConversationId) {
-        store.setActiveConversation(action.conversationId);
+      if (!action.content.trim() && !action.imageFileNames?.length) break;
+      if (action.conversationId && !store.conversations.some((item) => item.id === action.conversationId && !item.deletedAt)) break;
+      const conversationId = action.conversationId
+        ?? store.createConversation(store.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID);
+      if (conversationId !== store.activeConversationId) {
+        store.setActiveConversation(conversationId);
       }
       const conversation = store.conversations.find(
-        (item) => item.id === action.conversationId,
+        (item) => item.id === conversationId,
       );
-      submitConversationMessage({
+      const submitted = submitConversationMessage({
         content: action.content,
-        projectId: conversation?.projectId ?? store.currentProjectId ?? '',
-        conversationId: action.conversationId,
+        ...(action.imageFileNames !== undefined ? { imageFileNames: action.imageFileNames } : {}),
+        projectId: store.currentProjectId && conversation?.projectId === seriesOwnerId(store.projects, store.currentProjectId)
+          ? store.currentProjectId : conversation?.projectId ?? store.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID,
+        conversationId,
         mode: conversation?.agentMode ?? 'collaborative',
         dispatchMode: action.dispatchMode,
       });
+      if (action.imageFileNames?.length) {
+        store.setChatComposerLiveDraft(submitted?.status === 'ignored' ? action.content : '', conversationId);
+        requestSync(true);
+      }
       break;
     }
 
@@ -314,7 +444,9 @@ export function handleDetachedChatAction(
       break;
 
     case 'create_conversation':
-      store.createConversation(action.projectId, action.title);
+      if (action.projectId === (store.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID)) {
+        store.createConversation(action.projectId, action.title);
+      }
       break;
 
     case 'rename_conversation':
@@ -344,11 +476,15 @@ export function handleDetachedChatAction(
       store.removeConversation(action.conversationId);
       break;
 
-    case 'authorize_local_files':
-      void authorizeConversationFiles(action.conversationId)
+    case 'authorize_local_files': {
+      const draft = action.draft ?? store.chatComposerLiveDraft;
+      const conversationId = action.conversationId
+        ?? store.createConversation(store.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID);
+      if (!action.conversationId && draft) store.setChatComposerLiveDraft(draft, conversationId);
+      void attachConversationFiles(conversationId)
         .then((created) => {
           store.showToast(
-            created.length > 0 ? `已授权 ${created.length} 个文件` : '未新增文件授权',
+            `已添加 ${created.images} 张参考图，授权 ${created.texts} 个文本文件${created.failed ? '；部分图片未添加，请检查格式、大小或数量上限' : ''}`,
             'info',
           );
         })
@@ -356,6 +492,11 @@ export function handleDetachedChatAction(
           error instanceof Error ? error.message : '文件授权失败',
           'error',
         ));
+      break;
+    }
+
+    case 'remove_image_attachment':
+      store.removeChatImageDrafts(action.conversationId, [action.fileName]);
       break;
 
     case 'revoke_local_file':
@@ -461,10 +602,22 @@ export function handleDetachedChatAction(
       break;
 
     case 'set_composer_draft':
-      store.setChatComposerLiveDraft(action.draft);
+      store.setChatComposerLiveDraft(action.draft, action.conversationId);
+      break;
+
+    case 'set_panel_view':
+      store.setChatPanelView(action.view);
+      break;
+
+    case 'set_prompt_submit_shortcut':
+      if (!store.configHydrated || !PROMPT_SUBMIT_SHORTCUT_OPTIONS.some((option) => option.value === action.shortcut)) break;
+      store.updateConfig({ promptSubmitShortcut: action.shortcut });
+      void store.saveConfig({ silent: true }).catch(() => {});
+      requestSync(true);
       break;
 
     case 'dock_window':
+      if (action.composerDraft) store.setChatComposerLiveDraft(action.composerDraft.draft, action.composerDraft.conversationId);
       store.setHoveredMentionNodeId(null);
       store.setChatPanelDetached(false);
       store.openChat();
@@ -499,16 +652,20 @@ export function createDetachedChatSyncController(
   let revision = 0;
   let forceSnapshotPending = false;
   let consecutiveFailures = 0;
+  let generation = 0;
   let cleanupListener: (() => void) | undefined;
   let unsubscribeStore: (() => void) | undefined;
   let unsubscribeFileGrants: (() => void) | undefined;
+  let unsubscribeImagePreviews: (() => void) | undefined;
 
   const resetSyncState = () => {
+    generation += 1;
+    // 已发出的旧帧可能还在路上，重新打开窗口时不能复用它的版本号。
+    if (inFlight) revision += 1;
     pending = false;
     immediatePending = false;
     forceSnapshotPending = false;
     lastSnapshot = null;
-    revision = 0;
     consecutiveFailures = 0;
     if (timer) clearTimeout(timer);
     timer = null;
@@ -528,6 +685,7 @@ export function createDetachedChatSyncController(
     immediatePending = false;
     inFlight = true;
     lastStartedAt = now();
+    const startedGeneration = generation;
 
     try {
       const nextSnapshot = buildDetachedChatSnapshot(state);
@@ -545,6 +703,7 @@ export function createDetachedChatSyncController(
         const baseRevision = revision;
         const nextRevision = revision + 1;
         await emitSync({ type: 'patch', baseRevision, revision: nextRevision, patch });
+        if (disposed || generation !== startedGeneration) return;
         lastSnapshot = nextSnapshot;
         revision = nextRevision;
         consecutiveFailures = 0;
@@ -554,10 +713,12 @@ export function createDetachedChatSyncController(
       const nextRevision = revision + 1;
       forceSnapshotPending = false;
       await emitSync({ type: 'snapshot', revision: nextRevision, snapshot: nextSnapshot });
+      if (disposed || generation !== startedGeneration) return;
       lastSnapshot = nextSnapshot;
       revision = nextRevision;
       consecutiveFailures = 0;
     } catch (error) {
+      if (disposed || generation !== startedGeneration) return;
       consecutiveFailures += 1;
       pending = true;
       forceSnapshotPending = true;
@@ -621,14 +782,18 @@ export function createDetachedChatSyncController(
       }
       if (!detachedSnapshotSourceChanged(state, previous)) return;
       const justDetached = !previous.chatPanelDetached;
-      sync(justDetached, justDetached);
+      const projectChanged = state.currentProjectId !== previous.currentProjectId;
+      sync(justDetached || projectChanged, justDetached || projectChanged);
     });
     unsubscribeFileGrants = subscribeFileGrants(() => sync());
+    unsubscribeImagePreviews = subscribeChatImagePreviews(() => sync());
 
     const listenerCleanup = await initListener(
       (action) => handleDetachedChatAction(action, sync),
-      () => {
+      (draft) => {
+        cancelMainReferencePreview();
         const store = useAppStore.getState();
+        if (draft) store.setChatComposerLiveDraft(draft.draft, draft.conversationId);
         store.setHoveredMentionNodeId(null);
       },
     );
@@ -644,11 +809,14 @@ export function createDetachedChatSyncController(
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
+    cancelMainReferencePreview();
     resetSyncState();
     unsubscribeStore?.();
     unsubscribeStore = undefined;
     unsubscribeFileGrants?.();
     unsubscribeFileGrants = undefined;
+    unsubscribeImagePreviews?.();
+    unsubscribeImagePreviews = undefined;
     cleanupListener?.();
     cleanupListener = undefined;
   };

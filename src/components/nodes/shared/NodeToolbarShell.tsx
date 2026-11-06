@@ -1,3 +1,6 @@
+/**
+ * NodeToolbarShell — 提供节点工具栏容器界面与交互。
+ */
 import { memo, useState, type ReactNode } from 'react';
 
 interface NodeToolbarShellProps {

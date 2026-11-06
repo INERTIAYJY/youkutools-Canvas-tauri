@@ -5,6 +5,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { MotionConfig, motion, useReducedMotion } from 'framer-motion';
+import { Bot, Check, Download, Ellipsis, TriangleAlert } from 'lucide-react';
 import Header from './components/Header';
 import Titlebar from './components/Titlebar';
 import SessionProjectTabs from './components/SessionProjectTabs';
@@ -13,20 +14,23 @@ import Sidebar from './components/Sidebar';
 import Canvas from './components/Canvas';
 import NodeMenu from './components/NodeMenu';
 import Toast from './components/Toast';
-import ProjectSwitchOverlay from './components/ProjectSwitchOverlay';
+import ProjectLibraryModal from './components/ProjectLibraryModal';
 import SplashScreen from './components/SplashScreen';
 import CanvasBackground from './components/backgrounds/CanvasBackground';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useAutoSave } from './hooks/useAutoSave';
+import { getCanvasViewportController } from './services/canvasViewportService';
 import { useReferencedImageWatcher } from './hooks/useReferencedImageWatcher';
 import { useTooltipAutoPlacement } from './hooks/useTooltipAutoPlacement';
 import { parseAspectRatio, useMainWindowSize } from './hooks/useMainWindowSize';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, type AppState } from './store/useAppStore';
 import * as fileService from './services/fileService';
-import { checkForUpdate, downloadAndInstallUpdate, type UpdateInfo } from './services/updateService';
+import { checkForUpdate, downloadAndInstallUpdate, isAppUpdateRunning, type UpdateInfo } from './services/updateService';
 import { DOWNLOAD_MASCOT_EVENT } from './components/shared/ModelDownloadDialog';
 import UpdateBubble from './components/shared/mascot/UpdateBubble';
+import HiddenFilmSet from './components/shared/mascot/HiddenFilmSet';
+import { openDetachedChatWindow } from './services/chat/chatWindowLifecycle';
 import LazyLoadBoundary, { LazyLoadFallback } from './components/shared/LazyLoadBoundary';
 import ModalOverlay from './components/shared/ModalOverlay';
 import { useMascotStatus } from './hooks/useMascotStatus';
@@ -35,8 +39,16 @@ import { useMascotDrag } from './hooks/useMascotDrag';
 // type-only：Mascot 是懒加载的，类型导入不会把它拖进主包
 import type { MascotHandle } from './components/shared/mascot/Mascot';
 import { initComfyUIWindowBridge } from './services/comfyUIWindowService';
+import { initComfyRuntimeHostSync } from './services/comfyRuntimeHostSync';
 import { invoke } from '@tauri-apps/api/core';
 import { prepareSettingsClose, resumeSettingsPersistence } from './services/configPersistenceQueue';
+import { applyNativePerformanceMode, registerPerformanceRestartHost } from './services/nativePerformanceModeService';
+import { t, useT } from './i18n';
+import { applyAppearanceTheme, installSystemAppearanceListener, resolveAppearanceMode } from './services/appearance/appearanceRuntime';
+import { getBuiltinAppearanceTheme, normalizeAppearanceTheme } from './services/appearance/appearanceDefaults';
+import { getAppearanceForConfig } from './services/appearance/appearanceMigration';
+import { installStyleGuideAppearanceSource } from './services/appearance/appearanceWindowSync';
+import { restoreAfterWebviewTermination } from './services/webviewRecoveryService';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -50,13 +62,18 @@ const AssetsPanel = lazy(() => import('./components/AssetsPanel'));
 const CharacterLibraryPanel = lazy(() => import('./components/CharacterLibraryPanel'));
 const OutputHistoryPanel = lazy(() => import('./components/OutputHistoryPanel'));
 const ChatPanel = lazy(() => import('./components/chat/ChatPanel'));
+const PresetManager = lazy(() => import('./components/nodes/shared/PresetManager'));
 const PresetRunnerDialog = lazy(() => import('./components/nodes/shared/PresetRunnerDialog'));
 const ReversePromptDialog = lazy(() => import('./components/nodes/shared/ReversePromptDialog'));
 const DirectorDeskRuntimeManager = lazy(() => import('./components/director/DirectorDeskRuntimeManager'));
+const FreeDistributionNoticeDialog = lazy(() => import('./components/FreeDistributionNoticeDialog'));
 const OnboardingDialog = lazy(() => import('./components/OnboardingDialog'));
+const CanvasEntryGuide = lazy(() => import('./components/OnboardingDialog').then((module) => ({ default: module.CanvasEntryGuide })));
 
-/** 首次启动引导只弹一次；关掉后写入本地标记。 */
-const ONBOARDING_SEEN_KEY = 'ai-canvas-onboarding-seen';
+/** 免费发行提醒独立记忆；升级后的现有用户也会看到一次。 */
+const FREE_DISTRIBUTION_NOTICE_SEEN_KEY = 'ai-canvas-free-distribution-notice-seen-v1';
+/** 画布入口引导独立于旧欢迎说明，首次进入画布时展示一次。 */
+const ONBOARDING_SEEN_KEY = 'ai-canvas-canvas-guide-seen-v1';
 
 let cachedMascotNodes: AppState['nodes'] | undefined;
 let cachedMascotLoading = false;
@@ -79,6 +96,7 @@ function useFeatureMount(active: boolean) {
 }
 
 export default function App() {
+  useT();
   const reduceMotion = useReducedMotion();
   useKeyboardShortcuts();
   useAutoSave();
@@ -102,12 +120,15 @@ export default function App() {
   const featureVisibility = useAppStore(
     useShallow((state) => ({
       settings: state.settingsOpen,
+      help: state.helpOpen,
       nodeDialog: state.activeNodeId !== null,
+      nodeDialogResetKey: JSON.stringify([state.currentProjectId, state.activeNodeId]),
       workflows: state.workflowPanelOpen,
       assets: state.assetsPanelOpen,
       characters: state.characterLibraryOpen || state.characterActionLibraryOpen,
       history: state.historyPanelOpen,
       chat: state.chatOpen || state.chatPanelDetached,
+      presetManager: state.presetManagerOpen,
       presetRunner: state.presetRunRequest !== null,
       reversePrompt: state.reversePromptRequest !== null,
     })),
@@ -119,20 +140,35 @@ export default function App() {
   const mountCharacters = useFeatureMount(featureVisibility.characters);
   const mountHistory = useFeatureMount(featureVisibility.history);
   const mountChat = useFeatureMount(featureVisibility.chat);
+  const mountPresetManager = useFeatureMount(featureVisibility.presetManager);
   const mountPresetRunner = useFeatureMount(featureVisibility.presetRunner);
   const mountReversePrompt = useFeatureMount(featureVisibility.reversePrompt);
 
   // 开屏动画状态
   const [splashDone, setSplashDone] = useState(false);
-  const [closePhase, setClosePhase] = useState<'saving' | 'closing' | null>(null);
+  const [closePhase, setClosePhase] = useState<'saving' | 'closing' | 'restarting' | null>(null);
   const closeInProgress = useRef(false);
-  // 首次启动引导（开屏动画结束后才弹）
-  const [onboardingOpen, setOnboardingOpen] = useState(
-    () => localStorage.getItem(ONBOARDING_SEEN_KEY) !== 'true',
+  const [freeDistributionNoticeOpen, setFreeDistributionNoticeOpen] = useState(
+    () => localStorage.getItem(FREE_DISTRIBUTION_NOTICE_SEEN_KEY) !== 'true',
   );
+  const acknowledgeFreeDistributionNotice = useCallback(() => {
+    localStorage.setItem(FREE_DISTRIBUTION_NOTICE_SEEN_KEY, 'true');
+    setFreeDistributionNoticeOpen(false);
+  }, []);
+  // 等待真实画布首帧就绪，启动页不弹入口引导。
+  const [onboardingOpen, setOnboardingOpen] = useState(
+    () => {
+      try { return localStorage.getItem(ONBOARDING_SEEN_KEY) !== 'true'; }
+      catch { return true; }
+    },
+  );
+  const canvasGuideOpen = useAppStore((state) => state.canvasGuideOpen);
+  const [onboardingTipsOpen, setOnboardingTipsOpen] = useState(false);
   const closeOnboarding = useCallback(() => {
-    localStorage.setItem(ONBOARDING_SEEN_KEY, 'true');
+    try { localStorage.setItem(ONBOARDING_SEEN_KEY, 'true'); }
+    catch { /* 本地标记不可写时，仍可关闭当前引导。 */ }
     setOnboardingOpen(false);
+    useAppStore.getState().setCanvasGuideOpen(false);
   }, []);
   // 下载弹窗出现时，右下角吉祥物缩小消失
   const [mascotShrink, setMascotShrink] = useState(false);
@@ -140,8 +176,44 @@ export default function App() {
   // 更新检测
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateBubbleVisible, setUpdateBubbleVisible] = useState(false);
-  const [updating, setUpdating] = useState(false);
+  const updating = useAppStore((state) => isAppUpdateRunning(state.appUpdateProgress));
+  const appUpdateMessage = useAppStore((state) => state.appUpdateProgress?.message);
+  const appUpdateVersion = useAppStore((state) => state.appUpdateProgress?.version);
+  const availableUpdateInfo = updateInfo ?? (appUpdateVersion ? { version: appUpdateVersion } : null);
   const configHydrated = useAppStore((state) => state.configHydrated);
+  const projectLoadStatus = useAppStore((state) => state.projectLoadStatus);
+  const currentProjectId = useAppStore((state) => state.currentProjectId);
+  const switchingProjectName = useAppStore((state) => state.switchingProjectName);
+  const isCreatingProject = useAppStore((state) => state.isCreatingProject);
+  const isReturningToStartPage = useAppStore((state) => state.isReturningToStartPage);
+  const [canvasReadyProjectId, setCanvasReadyProjectId] = useState<string | null>(null);
+  const [revealedProjectId, setRevealedProjectId] = useState<string | null>(null);
+  const nativePerformanceSynced = useRef(false);
+  const [projectBootReady, setProjectBootReady] = useState(false);
+  const showCanvas = projectBootReady && currentProjectId !== null;
+  const projectLoading = projectLoadStatus === 'loading' || switchingProjectName !== null || isCreatingProject || isReturningToStartPage;
+  // 启动页没有挂载画布；再次打开同一项目也必须重新等待本次首帧。
+  if (!showCanvas && (canvasReadyProjectId !== null || revealedProjectId !== null)) {
+    setCanvasReadyProjectId(null);
+    setRevealedProjectId(null);
+  }
+  const showProjectSplash = !splashDone || projectLoading || (showCanvas && revealedProjectId !== currentProjectId);
+  const splashReady = projectBootReady && !projectLoading
+    && (!showCanvas || canvasReadyProjectId === currentProjectId);
+  const completeProjectSplash = useCallback(() => {
+    setSplashDone(true);
+    setRevealedProjectId(currentProjectId);
+  }, [currentProjectId]);
+  const canvasGuideBlocked = featureVisibility.settings || featureVisibility.help || featureVisibility.nodeDialog
+    || featureVisibility.assets || featureVisibility.characters || featureVisibility.history || featureVisibility.workflows
+    || featureVisibility.presetManager || featureVisibility.presetRunner || featureVisibility.reversePrompt;
+  useEffect(() => {
+    if (!onboardingOpen || canvasGuideOpen || !showCanvas || showProjectSplash
+      || projectLoadStatus !== 'ready' || freeDistributionNoticeOpen
+      || canvasGuideBlocked) return;
+    useAppStore.getState().setCanvasGuideOpen(true);
+  }, [onboardingOpen, canvasGuideOpen, showCanvas, showProjectSplash, projectLoadStatus,
+    freeDistributionNoticeOpen, canvasGuideBlocked]);
   const mcpAutoStart = useAppStore((state) => state.config.mcpAutoStart === true);
 
   // 开屏动画结束后后台静默检查更新
@@ -179,25 +251,52 @@ export default function App() {
     void loadAgentPackages();
   }, [loadAgentPackages]);
   useEffect(() => {
-    void initFromDb().then(() => {
-      const store = useAppStore.getState();
-      if (store.config.startupView === 'project-library') {
-        store.setProjectLibraryOpen(true);
-      }
-      return migrateHistoryAndLoad();
-    });
-  }, [initFromDb, migrateHistoryAndLoad]);
-
-  // 退出期间阻止画布快捷键继续编辑；窗口原生关闭请求由下面的重入锁处理。
+    void initFromDb().then(() => setProjectBootReady(true));
+  }, [initFromDb]);
   useEffect(() => {
-    if (!closePhase) return;
+    if (projectBootReady && splashDone && projectLoadStatus === 'ready') {
+      void restoreAfterWebviewTermination();
+    }
+  }, [projectBootReady, projectLoadStatus, splashDone]);
+  useEffect(() => {
+    if (projectBootReady && currentProjectId && projectLoadStatus === 'ready') {
+      void migrateHistoryAndLoad();
+    }
+  }, [currentProjectId, migrateHistoryAndLoad, projectBootReady, projectLoadStatus]);
+
+  // 退出或保存后返回启动页期间，阻止画布快捷键继续编辑。
+  useEffect(() => {
+    if (!closePhase && !isReturningToStartPage) return;
     const blockKeyDown = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopImmediatePropagation();
     };
     window.addEventListener('keydown', blockKeyDown, true);
     return () => window.removeEventListener('keydown', blockKeyDown, true);
-  }, [closePhase]);
+  }, [closePhase, isReturningToStartPage]);
+
+  // 性能模式重启与原生关闭共用互斥锁和输入遮罩；保存编排由服务负责。
+  useEffect(() => registerPerformanceRestartHost(async (work) => {
+    if (closeInProgress.current) throw new Error('窗口正在保存，请稍后重试');
+    closeInProgress.current = true;
+    try {
+      flushSync(() => setClosePhase('restarting'));
+      // 先展示遮罩，避免保存期间继续编辑；不依赖可能被遮挡节流的 rAF。
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      await work();
+    } finally {
+      closeInProgress.current = false;
+      setClosePhase(null);
+    }
+  }), []);
+
+  useEffect(() => {
+    if (!isTauri || !splashDone || !projectBootReady || !configHydrated || projectLoadStatus !== 'ready' || nativePerformanceSynced.current) return;
+    nativePerformanceSynced.current = true;
+    void applyNativePerformanceMode().catch((error: unknown) => {
+      useAppStore.getState().showToast(t(error instanceof Error ? error.message : '图形启动设置保存失败，未重启'), 'error');
+    });
+  }, [configHydrated, projectBootReady, projectLoadStatus, splashDone]);
 
   // 保存与清理完成后再关闭窗口，全程展示反馈。
   useEffect(() => {
@@ -212,6 +311,7 @@ export default function App() {
           if (closeInProgress.current) return;
           closeInProgress.current = true;
           try {
+            getCanvasViewportController()?.rememberViewport?.();
             flushSync(() => setClosePhase('saving'));
             // 给提示一次绘制机会；窗口隐藏时 rAF 可能暂停，用计时器兜底。
             await new Promise<void>((resolve) => {
@@ -228,23 +328,24 @@ export default function App() {
             let settingsSaved = await prepareSettingsClose();
             while (!settingsSaved) {
               const { ask } = await import('@tauri-apps/plugin-dialog');
-              const retry = await ask('部分设置或工具栏布局尚未保存。是否重试保存？', {
-                title: '设置尚未保存', kind: 'warning', okLabel: '重试保存', cancelLabel: '其他选择',
+              const retry = await ask(t('部分设置或工具栏布局尚未保存。是否重试保存？'), {
+                title: t('设置尚未保存'), kind: 'warning', okLabel: t('重试保存'), cancelLabel: t('其他选择'),
               }).catch(() => false);
               if (retry) { settingsSaved = await prepareSettingsClose(true); continue; }
-              const discard = await ask('退出会放弃本次尚未保存的设置。是否仍然退出？', {
-                title: '确认放弃未保存的设置', kind: 'warning', okLabel: '放弃并退出', cancelLabel: '取消退出',
+              const discard = await ask(t('退出会放弃本次尚未保存的设置。是否仍然退出？'), {
+                title: t('确认放弃未保存的设置'), kind: 'warning', okLabel: t('放弃并退出'), cancelLabel: t('取消退出'),
               }).catch(() => false);
               if (!discard) return;
               break;
             }
             try {
-              await store.captureCurrentProjectSnapshot();
-            } catch (error) {
-              console.warn('[退出] 生成画布快照失败:', error);
-            }
-            try {
-              await store.saveCurrentProjectSilent();
+              // 正文先入队，避免已有/空预览的补丁抢在必要保存之前。
+              const savingProject = store.saveCurrentProjectSilent();
+              // 缩略图是可选预览，不能挡住必要保存或窗口退出。
+              void store.captureCurrentProjectSnapshot({ persistSnapshot: true }).catch((error) => {
+                console.warn('[退出] 生成画布快照失败:', error);
+              });
+              await savingProject;
             } catch (error) {
               console.warn('[退出] 保存失败:', error);
             }
@@ -253,10 +354,10 @@ export default function App() {
             const failure = useAppStore.getState().autoSaveFailure;
             if (failure) {
               const { ask } = await import('@tauri-apps/plugin-dialog');
-              const detail = failure.count > 1 ? `已连续失败 ${failure.count} 次。` : '';
+              const detail = failure.count > 1 ? t('已连续失败 {count} 次。', { count: failure.count }) : '';
               const quitAnyway = await ask(
-                `${detail}${failure.reason}\n\n现在退出会丢失未保存的改动。建议先取消退出，再用「导出项目」把内容备份出去。`,
-                { title: '保存失败，仍要退出吗？', kind: 'warning', okLabel: '仍然退出', cancelLabel: '取消退出' },
+                t('{detail}{reason}\n\n现在退出会丢失未保存的改动。建议先取消退出，再用「导出项目」把内容备份出去。', { detail, reason: failure.reason }),
+                { title: t('保存失败，仍要退出吗？'), kind: 'warning', okLabel: t('仍然退出'), cancelLabel: t('取消退出') },
               ).catch(() => true); // 弹不出对话框时不要把用户关在应用里
               if (!quitAnyway) return;
             }
@@ -295,13 +396,31 @@ export default function App() {
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error || '未知错误');
-        useAppStore.getState().showToast(`ComfyUI 保存桥初始化失败：${message}`, 'error');
+        useAppStore.getState().showToast(t('ComfyUI 保存桥初始化失败：{message}', { message }), 'error');
       });
     return () => {
       cancelled = true;
       dispose?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauri || !configHydrated) return;
+    let dispose: (() => void) | undefined;
+    let cancelled = false;
+    void initComfyRuntimeHostSync()
+      .then((cleanup) => {
+        if (cancelled) cleanup();
+        else dispose = cleanup;
+      })
+      .catch(() => {
+        useAppStore.getState().showToast('ComfyUI 运行状态同步未能初始化，请重新打开应用后重试', 'error');
+      });
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, [configHydrated]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -336,7 +455,7 @@ export default function App() {
     })().catch((startError) => {
       // 端口被占用等失败必须说出来，否则用户只看到「已关闭」而不知道为什么
       useAppStore.getState().showToast(
-        `MCP 自动开启失败：${startError instanceof Error ? startError.message : String(startError)}`,
+        t('MCP 自动开启失败：{message}', { message: startError instanceof Error ? startError.message : String(startError) }),
         'error',
       );
     });
@@ -347,32 +466,34 @@ export default function App() {
 
   // ── 更新相关操作 ──
   const handleUpdateNow = async () => {
-    setUpdating(true);
-    await downloadAndInstallUpdate();
-    setUpdating(false);
+    await downloadAndInstallUpdate(useAppStore.getState().setAppUpdateProgress);
   };
   const handleDismissUpdate = () => {
     setUpdateBubbleVisible(false);
   };
-  const handleMascotActivate = async () => {
+  const handleMascotActivate = async (forceDetached = false) => {
     const store = useAppStore.getState();
     // 独立窗口模式是用户选择的显示偏好；窗口关闭后再次点击应重新打开独立窗口。
-    if (store.chatPanelDetached) {
+    if (forceDetached || store.chatPanelDetached) {
+      if (!isTauri) {
+        store.showToast('独立窗口功能需要 Tauri 环境', 'info');
+        return;
+      }
       try {
-        await invoke('open_chat_window');
-      } catch {
-        store.showToast('打开独立窗口失败', 'error');
+        await openDetachedChatWindow();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : '';
+        store.showToast(detail ? t('打开独立窗口失败：{message}', { message: detail }) : t('打开独立窗口失败'), 'error');
       }
       return;
     }
-    // 内嵌面板：打开 ⇄ 关闭切换
-    store.toggleChat();
+    store.openChat();
   };
 
-  // 同步主题到 document.documentElement，供 CSS [data-theme] 选择器生效
-  // 米白色背景时自动切换为 light，其余背景使用用户手动设置的主题
+  // 同步完整外观快照到 document.documentElement，所有 CSS 组件从这里读取变量。
   const configTheme = useAppStore((s) => s.config.theme);
-  const canvasBackground = useAppStore((s) => s.config.canvasBackground);
+  const appearance = useAppStore((s) => s.config.appearance);
+  const appearancePreview = useAppStore((s) => s.appearancePreview);
   const windowGlassFrame = useAppStore((s) => s.config.windowGlassFrame);
   const performanceMode = useAppStore((s) => s.config.performanceMode === true);
   const mascotVisible = useAppStore((s) => s.config.mascotVisible);
@@ -381,14 +502,49 @@ export default function App() {
   const mascotStatus = useMascotStatus();
   // 播放句柄：窗口失焦、待审批任务等事件通过它触发一次性动画片段
   const mascotHandleRef = useRef<MascotHandle | null>(null);
-  // 下载更新时显示的是吃豆人吉祥物，生命周期片段对不上，先停掉
-  useMascotLifecycle(mascotHandleRef, Boolean(mascotVisible) && !updating);
-  const effectiveTheme = canvasBackground === 'off-white' ? 'light' : configTheme;
+  // 性能模式仅保留静态助手入口，不挂载 WebGL 吉祥物或调度生命周期动画。
+  useMascotLifecycle(mascotHandleRef, Boolean(mascotVisible) && !updating && !performanceMode);
+  const mascotFeedback = updating
+    ? t(appUpdateMessage ?? '正在下载更新')
+    : mascotLoading
+      ? t('生成中')
+      : mascotStatus === 'thinking'
+        ? t('处理中')
+        : mascotStatus === 'success'
+          ? t('已完成')
+          : mascotStatus === 'error'
+            ? t('失败')
+            : t('画布助手');
+  const StaticMascotIcon = updating
+    ? Download
+    : mascotStatus === 'success'
+      ? Check
+      : mascotStatus === 'error'
+        ? TriangleAlert
+        : mascotLoading || mascotStatus === 'thinking'
+          ? Ellipsis
+          : Bot;
+  const effectiveTheme = resolveAppearanceMode(appearance?.mode ?? configTheme);
+  const managedCanvasBackground = Boolean((appearancePreview ?? appearance)?.canvas);
   const nativeCursor = useAppStore((s) => s.config.customCursor === false);
+  useEffect(() => installStyleGuideAppearanceSource(
+    () => {
+      const state = useAppStore.getState();
+      return state.appearancePreview ?? getAppearanceForConfig(state.config);
+    },
+    (onChange) => useAppStore.subscribe((state, previous) => {
+      if (state.appearancePreview !== previous.appearancePreview
+        || state.config.appearance !== previous.config.appearance
+        || state.config.theme !== previous.config.theme) onChange();
+    }),
+  ), []);
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', effectiveTheme);
-    return () => document.documentElement.removeAttribute('data-theme');
-  }, [effectiveTheme]);
+    const theme = appearancePreview ?? (appearance
+      ? normalizeAppearanceTheme(appearance)
+      : getBuiltinAppearanceTheme(effectiveTheme === 'light' ? 'standard-light' : 'standard-dark'));
+    applyAppearanceTheme(theme);
+    return installSystemAppearanceListener(() => applyAppearanceTheme(theme));
+  }, [appearance, appearancePreview, effectiveTheme]);
 
   // 关闭自定义指针时打标记，cursors.css 据此把 --cursor-* 清空、回落系统指针
   useEffect(() => {
@@ -430,7 +586,7 @@ export default function App() {
   // 侧边栏悬浮显示开关（默认关闭）；最大化时强制非悬浮。
   // 同步到 body 属性，供 CSS 切换侧边栏停靠/悬浮位置 + 弹窗蒙层的左偏移
   const sidebarFloatingCfg = useAppStore((s) => s.config.sidebarFloating);
-  const effectiveFloating = sidebarFloatingCfg === true && !isMaximized;
+  const effectiveFloating = showCanvas && sidebarFloatingCfg === true && !isMaximized;
   const showWindowGlassFrame = windowGlassFrame !== false && !isMaximized && !performanceMode;
   useEffect(() => {
     if (!isTauri) return;
@@ -458,24 +614,31 @@ export default function App() {
       }}
     >
       {/* Content area — clip-path clips ALL descendants including fixed-position backdrops */}
-      <div className="app-box app-shell__content absolute bg-canvas-bg/[0.988] shadow-2xl overflow-hidden">
-        <div className="app-canvas-viewport absolute inset-0">
-          <CanvasBackground />
-          <Canvas />
-          <ProjectSwitchOverlay />
-        </div>
+      <div className={`app-box app-shell__content absolute ${managedCanvasBackground ? 'bg-transparent' : 'bg-canvas-bg/[0.988]'} shadow-2xl overflow-hidden`}>
+        {showCanvas ? (
+          <div className="app-canvas-viewport absolute inset-0">
+            <CanvasBackground />
+            <Canvas key={currentProjectId} onReady={setCanvasReadyProjectId} />
+          </div>
+        ) : projectBootReady ? (
+          <ProjectLibraryModal
+            isOpen
+            presentation="page"
+            onClose={() => useAppStore.getState().setProjectLibraryOpen(false)}
+          />
+        ) : <LazyLoadFallback label="项目列表" />}
         {/* Top drag region */}
         <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-10" />
-        <Header />
+        {showCanvas && <Header />}
         <Titlebar />
-        <SessionProjectTabs />
-        <NodeMenu />
+        {showCanvas && <SessionProjectTabs />}
+        {showCanvas && <NodeMenu />}
         <LazyLoadBoundary label="设置面板">
           <Suspense fallback={<LazyLoadFallback label="设置面板" />}>
             {mountSettings && <SettingsPanel />}
           </Suspense>
         </LazyLoadBoundary>
-        <LazyLoadBoundary label="节点编辑器">
+        <LazyLoadBoundary label="节点编辑器" resetKey={featureVisibility.nodeDialogResetKey}>
           <Suspense fallback={<LazyLoadFallback label="节点编辑器" />}>
             {mountNodeDialog && <AINodeDialog />}
           </Suspense>
@@ -505,6 +668,11 @@ export default function App() {
             {mountChat && <ChatPanel />}
           </Suspense>
         </LazyLoadBoundary>
+        <LazyLoadBoundary label="快捷指令管理器">
+          <Suspense fallback={<LazyLoadFallback label="快捷指令管理器" />}>
+            {mountPresetManager && <PresetManager />}
+          </Suspense>
+        </LazyLoadBoundary>
         <LazyLoadBoundary label="快捷指令运行器">
           <Suspense fallback={null}>
             {mountPresetRunner && <PresetRunnerDialog />}
@@ -518,10 +686,10 @@ export default function App() {
         <Toast />
       </div>
       {/* Sidebar — outside the overflow-hidden container so it's not clipped */}
-      <Sidebar />
+      {showCanvas && <Sidebar />}
 
       {/* 剧集栏贴窗口右缘，和侧栏一样必须放在裁剪容器外面 */}
-      <SeriesRail />
+      {showCanvas && <SeriesRail />}
 
       {/* 吉祥物 — 可拖动浮层，默认隐藏，Ctrl+Shift+M 切换 */}
       {mascotVisible && (
@@ -547,59 +715,86 @@ export default function App() {
                 animate={mascotShrink
                   ? { scale: reduceMotion ? 1 : 0.94, opacity: 0 }
                   : { scale: 1, opacity: 1 }}
-                transition={{ duration: reduceMotion ? 0.12 : 0.18, ease: [0.23, 1, 0.32, 1] }}
+                transition={{ duration: performanceMode ? 0 : reduceMotion ? 0.12 : 0.18, ease: [0.23, 1, 0.32, 1] }}
               >
-                <button
+                <HiddenFilmSet
+                  available={!performanceMode && !mascotShrink && !updating && !mascotLoading && mascotStatus === 'idle'}
+                  reduceMotion={performanceMode || Boolean(reduceMotion)}
+                  mascotHandleRef={mascotHandleRef}
+                  consumeDragClick={consumeMascotDragClick}
                   type="button"
                   className="h-full w-full cursor-grab rounded-full border-0 bg-transparent p-0 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
-                  onClick={(event) => {
-                    if (consumeMascotDragClick(event)) return;
+                  onClick={() => {
                     void handleMascotActivate();
                   }}
+                  onDoubleClick={() => {
+                    void handleMascotActivate(true);
+                  }}
                   disabled={mascotShrink}
-                  aria-label={mascotStatus === 'thinking'
-                    ? '打开画布助手，正在思考'
-                    : mascotStatus === 'success'
-                      ? '打开画布助手，任务已完成'
-                      : mascotStatus === 'error'
-                        ? '打开画布助手，任务失败'
-                        : '打开画布助手'}
-                  data-tooltip={mascotStatus === 'thinking'
-                    ? '画布助手：思考中'
-                    : mascotStatus === 'success'
-                      ? '画布助手：已完成'
-                      : mascotStatus === 'error'
-                        ? '画布助手：任务失败'
-                        : '打开画布助手'}
+                  aria-label={updating
+                    ? t('打开画布助手，{status}', { status: mascotFeedback })
+                    : mascotLoading
+                      ? t('打开画布助手，正在生成')
+                      : mascotStatus === 'thinking'
+                        ? t('打开画布助手，正在思考')
+                        : mascotStatus === 'success'
+                          ? t('打开画布助手，任务已完成')
+                          : mascotStatus === 'error'
+                            ? t('打开画布助手，任务失败')
+                            : t('打开画布助手')}
+                  data-tooltip={updating
+                    ? mascotFeedback
+                    : mascotLoading
+                      ? t('生成中')
+                      : mascotStatus === 'thinking'
+                        ? t('画布助手：思考中')
+                        : mascotStatus === 'success'
+                          ? t('画布助手：已完成')
+                          : mascotStatus === 'error'
+                            ? t('画布助手：任务失败')
+                            : t('打开画布助手')}
                 >
-                  <Suspense
-                    fallback={(
-                      <div
-                        className="flex h-full w-full items-center justify-center"
-                        role="status"
-                        aria-label="正在加载吉祥物"
-                      >
-                        <span
-                          className="h-5 w-5 animate-spin rounded-full border-2 border-canvas-border border-t-canvas-text-secondary motion-reduce:animate-none"
-                          aria-hidden="true"
-                        />
-                      </div>
-                    )}
-                  >
-                    {updating ? (
-                      <PacmanMascot />
-                    ) : (
-                      <Mascot
-                        loading={mascotLoading}
-                        status={mascotStatus}
-                        theme={effectiveTheme}
-                        reduceMotion={performanceMode || Boolean(reduceMotion)}
-                        getDragForce={getMascotDragForce}
-                        handleRef={mascotHandleRef}
+                  {performanceMode ? (
+                    <span className="ui-card flex h-full w-full flex-col items-center justify-center gap-1 p-2">
+                      <StaticMascotIcon
+                        size={32}
+                        className={mascotStatus === 'error' ? 'text-danger-light' : mascotStatus === 'success' ? 'text-success-light' : 'text-brand-light'}
+                        aria-hidden="true"
                       />
-                    )}
-                  </Suspense>
-                </button>
+                      <span role="status" aria-live="polite" className="max-w-full truncate text-xs text-canvas-text-secondary">
+                        {mascotFeedback}
+                      </span>
+                    </span>
+                  ) : (
+                    <Suspense
+                      fallback={(
+                        <div
+                          className="flex h-full w-full items-center justify-center"
+                          role="status"
+                          aria-label={t('正在加载吉祥物')}
+                        >
+                          <span
+                            className="h-5 w-5 animate-spin rounded-full border-2 border-canvas-border border-t-canvas-text-secondary motion-reduce:animate-none"
+                            aria-hidden="true"
+                          />
+                        </div>
+                      )}
+                    >
+                      {updating ? (
+                        <PacmanMascot />
+                      ) : (
+                        <Mascot
+                          loading={mascotLoading}
+                          status={mascotStatus}
+                          theme={effectiveTheme}
+                          reduceMotion={performanceMode || Boolean(reduceMotion)}
+                          getDragForce={getMascotDragForce}
+                          handleRef={mascotHandleRef}
+                        />
+                      )}
+                    </Suspense>
+                  )}
+                </HiddenFilmSet>
               </motion.div>
             </motion.div>
           </div>
@@ -607,10 +802,10 @@ export default function App() {
       )}
 
       {/* 更新聊天气泡 — 悬停在吉祥物左上方 */}
-      {updateInfo && (
+      {availableUpdateInfo && (
         <UpdateBubble
-          info={updateInfo}
-          visible={updateBubbleVisible}
+          info={availableUpdateInfo}
+          visible={updateBubbleVisible || updating}
           onUpdate={() => { handleUpdateNow(); }}
           onDismiss={handleDismissUpdate}
           updating={updating}
@@ -621,12 +816,27 @@ export default function App() {
         <DirectorDeskRuntimeManager />
       </Suspense>
 
-      {splashDone && onboardingOpen && (
+      {splashDone && freeDistributionNoticeOpen && (
+        <Suspense fallback={null}>
+          <FreeDistributionNoticeDialog onAcknowledge={acknowledgeFreeDistributionNotice} />
+        </Suspense>
+      )}
+
+      {showCanvas && projectLoadStatus === 'ready' && !showProjectSplash && !freeDistributionNoticeOpen && canvasGuideOpen && (
+        <Suspense fallback={null}>
+          <CanvasEntryGuide onClose={closeOnboarding} onOpenTips={() => {
+            closeOnboarding();
+            setOnboardingTipsOpen(true);
+          }} />
+        </Suspense>
+      )}
+
+      {showCanvas && !showProjectSplash && onboardingTipsOpen && (
         <Suspense fallback={null}>
           <OnboardingDialog
-            onClose={closeOnboarding}
+            onClose={() => setOnboardingTipsOpen(false)}
             onOpenHelp={() => {
-              closeOnboarding();
+              setOnboardingTipsOpen(false);
               useAppStore.getState().setHelpOpen(true);
             }}
           />
@@ -642,7 +852,13 @@ export default function App() {
       transition={performanceMode ? { duration: 0 } : undefined}
     >
       <>
-        {!splashDone && <SplashScreen onComplete={() => setSplashDone(true)} />}
+        {showProjectSplash && (
+          <SplashScreen
+            ready={splashReady}
+            label={isReturningToStartPage ? 'AI Canvas 正在返回启动页' : splashDone ? 'AI Canvas 正在打开项目' : 'AI Canvas 正在启动'}
+            onComplete={completeProjectSplash}
+          />
+        )}
         {appContent}
         <ModalOverlay
           isOpen={closePhase !== null}
@@ -650,7 +866,7 @@ export default function App() {
           closeOnBackdrop={false}
           motionPreset="quick"
           backdropBlur={false}
-          ariaLabel="正在关闭软件"
+          ariaLabel={t('正在关闭软件')}
           className="w-80 max-w-[calc(100vw-2rem)] p-6"
         >
           <div role="status" aria-live="polite" aria-atomic="true" className="flex flex-col items-center gap-3 text-center">
@@ -659,9 +875,9 @@ export default function App() {
               className="h-7 w-7 animate-spin rounded-full border-2 border-canvas-border border-t-canvas-text-secondary motion-reduce:animate-none"
             />
             <p className="text-sm font-medium text-canvas-text">
-              {closePhase === 'closing' ? '正在关闭…' : '正在保存，准备关闭…'}
+              {closePhase === 'restarting' ? t('正在保存并重启，应用性能模式…') : closePhase === 'closing' ? t('正在关闭…') : t('正在保存，准备关闭…')}
             </p>
-            <p className="text-xs text-canvas-text-secondary">完成后将自动退出，请稍候</p>
+            <p className="text-xs text-canvas-text-secondary">{closePhase === 'restarting' ? t('完成后将自动重新打开，请稍候') : t('完成后将自动退出，请稍候')}</p>
           </div>
         </ModalOverlay>
       </>

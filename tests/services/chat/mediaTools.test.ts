@@ -1,11 +1,20 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+/**
+ * mediaTools — 回归测试：media task recovery tools。
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../../../src/store/useAppStore';
 import { registerMediaAgentTools } from '../../../src/services/chat/tools/mediaTools';
 import {
   clearAgentToolRegistryForTests,
+  getAgentTool,
   prepareAgentToolCall,
   type AgentToolContext,
 } from '../../../src/services/chat/toolRegistry';
+import { getPendingTasksForProject, registerMediaNodeOperation, savePendingTask } from '../../../src/services/pollManager';
+import * as generationRuntime from '../../../src/services/ai/generationRuntime';
+import * as operationProgress from '../../../src/services/mcp/mcpOperationService';
+import { DEFAULT_AGENT_TASK_BUDGET, type AgentTask } from '../../../src/types/agent';
+import type { MediaGenerationResult } from '../../../src/types/media';
 
 const context: Omit<AgentToolContext, 'signal'> = {
   taskId: 'task-media',
@@ -15,6 +24,7 @@ const context: Omit<AgentToolContext, 'signal'> = {
 };
 
 beforeEach(() => {
+  localStorage.removeItem('ai_canvas_pending_tasks');
   clearAgentToolRegistryForTests();
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
@@ -42,7 +52,445 @@ beforeEach(() => {
   registerMediaAgentTools();
 });
 
+describe('keyed media operation progress', () => {
+  function keyedMedia(deliveryMode: 'chat' | 'both' = 'both') {
+    const conversationId = 'mcp-control-project-1';
+    const task: AgentTask = { id: context.taskId, projectId: context.projectId, conversationId,
+      userMessageId: 'receipt-user', mode: 'autonomous', goal: '生成媒体', status: 'running', steps: [],
+      modelRounds: 0, toolCallCount: 1, budget: { ...DEFAULT_AGENT_TASK_BUDGET }, createdAt: 1, updatedAt: 1,
+      mcpOperation: { version: 1, bindingId: 'receipt-binding', projectId: context.projectId,
+        keyDigest: 'a'.repeat(64), inputDigest: 'b'.repeat(64), toolId: 'media_generate', effect: 'media_generation',
+        phase: 'running', sequence: 1, createdAt: 1, updatedAt: 1 } };
+    useAppStore.setState({ agentTasks: [task], messages: [{ id: 'receipt-message', conversationId, role: 'assistant',
+      content: '', timestamp: 1, status: 'executing', agentTaskId: context.taskId }] });
+    const controller = new AbortController();
+    const toolContext: AgentToolContext = { ...context, conversationId, mode: 'autonomous', signal: controller.signal };
+    const input = { kind: 'image', prompt: 'private-prompt-body', modelRef: 'general/receipt-image', deliveryMode };
+    const artifact: MediaGenerationResult = { id: 'receipt-artifact', kind: 'image', deliveryMode,
+      url: 'asset://receipt-image.png', sourceUrl: 'https://private.example/original-result', persistence: 'saved',
+      prompt: input.prompt, modelId: input.modelRef, provider: 'general', createdAt: 1 };
+    return { definition: getAgentTool('media_generate')!, toolContext, controller, input, artifact };
+  }
+
+  it('durably binds node/message and local started before invoking generation, without persisting URLs or prompts', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const progress = vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockImplementation(async (_taskId, change) => {
+      if (change.mediaStage === 'started') await gate;
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockImplementation(async (_intent, _projectId, _signal, nodeId) => {
+      if (nodeId) useAppStore.getState().updateNodeDataTransient(nodeId, { status: 'loading', mediaTaskStage: 'querying' });
+      return artifact;
+    });
+    const pending = definition.execute(toolContext, input);
+    try {
+      await vi.waitFor(() => expect(progress).toHaveBeenCalledWith(context.taskId,
+        expect.objectContaining({ mediaStage: 'started', messageId: 'receipt-message', canvasNodeId: expect.any(String) })));
+      expect(generate).not.toHaveBeenCalled();
+    } finally { release(); }
+    expect(await pending).toMatchObject({ status: 'success' });
+    expect(progress.mock.calls.map(([, update]) => update.mediaStage)).toEqual(['preparing', 'started', 'generated', 'delivered']);
+    const storedFields = JSON.stringify(progress.mock.calls);
+    expect(storedFields).not.toContain(input.prompt);
+    expect(storedFields).not.toContain(artifact.sourceUrl);
+    expect(progress).toHaveBeenLastCalledWith(context.taskId, expect.objectContaining({ artifactId: artifact.id, persistence: 'saved' }));
+  });
+
+  it('cleans a placeholder and blocks generation when persisting started fails', async () => {
+    const { definition, toolContext, input } = keyedMedia();
+    const progress = vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockImplementation(async (_taskId, change) => {
+      if (change.mediaStage === 'started') throw new Error('receipt unavailable');
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration');
+    expect(await definition.execute(toolContext, input)).toMatchObject({ status: 'error', errorCode: 'AGENT_MEDIA_NOT_STARTED' });
+    expect(generate).not.toHaveBeenCalled();
+    expect(useAppStore.getState().nodes.at(-1)?.data.status).toBe('error');
+    expect(progress).toHaveBeenLastCalledWith(context.taskId, expect.objectContaining({ phase: 'failed', errorCode: 'AGENT_MEDIA_NOT_STARTED' }));
+  });
+
+  it.each(['cancel', 'project', 'revision', 'prompt', 'settings'] as const)('rechecks %s after the started persistence wait before calling generation', async (change) => {
+    const { definition, toolContext, controller, input } = keyedMedia();
+    vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockImplementation(async (_taskId, update) => {
+      if (update.mediaStage !== 'started') return;
+      if (change === 'cancel') controller.abort();
+      else if (change === 'project') useAppStore.setState({ currentProjectId: 'different-project' });
+      else if (change === 'revision') useAppStore.getState().incrementRevision();
+      else if (change === 'prompt') useAppStore.getState().updateNodeDataTransient(useAppStore.getState().nodes.at(-1)!.id, { prompt: 'new-user-draft' });
+      else useAppStore.setState((state) => ({ projects: state.projects.map((project) => ({ ...project,
+        settings: { ...project.settings, generation: { ...project.settings?.generation, imageAspectRatio: '4:3' } } })) }));
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration');
+    expect(await definition.execute(toolContext, input)).toMatchObject({ status: 'error', errorCode: 'AGENT_MEDIA_NOT_STARTED' });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the generated result when writing generated and delivered progress fails', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia();
+    vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockImplementation(async (_taskId, update) => {
+      if (update.mediaStage === 'generated' || update.mediaStage === 'delivered') throw new Error('receipt unavailable');
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue(artifact);
+    const result = await definition.execute(toolContext, input);
+    expect(result).toMatchObject({ status: 'success', errorCode: 'MCP_OPERATION_RECEIPT_UNCONFIRMED' });
+    expect(JSON.parse(result.modelContent)).toMatchObject({ artifactId: artifact.id, receiptUnconfirmed: true });
+    expect(useAppStore.getState().messages.find((message) => message.id === 'receipt-message')?.mediaResult).toEqual(artifact);
+    expect(useAppStore.getState().nodes.at(-1)?.data.artifactId).toBe(artifact.id);
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a user prompt changed during generation while retaining the generated artifact for verification', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia();
+    const progress = vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockResolvedValue(undefined);
+    vi.spyOn(generationRuntime, 'runMediaGeneration').mockImplementation(async (_intent, _projectId, _signal, nodeId) => {
+      useAppStore.getState().updateNodeDataTransient(nodeId!, { prompt: 'new-user-draft' });
+      return artifact;
+    });
+    expect(await definition.execute(toolContext, input)).toMatchObject({ status: 'success', errorCode: 'AGENT_MEDIA_DELIVERY_INCOMPLETE' });
+    expect(useAppStore.getState().nodes.at(-1)?.data.prompt).toBe('new-user-draft');
+    expect(useAppStore.getState().messages.find((message) => message.id === 'receipt-message')?.mediaResult?.id).toBe(artifact.id);
+    expect(progress).toHaveBeenLastCalledWith(context.taskId, expect.objectContaining({ phase: 'partial', artifactId: artifact.id }));
+  });
+
+  it('rejects project defaults changed during the preparing journal before creating a placeholder', async () => {
+    const { definition, toolContext, input } = keyedMedia();
+    vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockImplementation(async (_taskId, update) => {
+      if (update.mediaStage === 'preparing') useAppStore.setState((state) => ({ projects: state.projects.map((project) => ({ ...project,
+        settings: { ...project.settings, defaultModels: { image: 'general/different-model' } } })) }));
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration');
+    expect(await definition.execute(toolContext, input)).toMatchObject({ status: 'error', errorCode: 'AGENT_MEDIA_NOT_STARTED' });
+    expect(useAppStore.getState().nodes).toHaveLength(1);
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('keeps original recovery identity and a partial artifact when the canvas changes during generated persistence', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia();
+    const progress = vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockImplementation(async (_taskId, update) => {
+      if (update.mediaStage === 'generated' && !update.phase) {
+        useAppStore.getState().updateNodeDataTransient(useAppStore.getState().nodes.at(-1)!.id, { prompt: 'new-user-draft' });
+      }
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockImplementation(async (_intent, _projectId, _signal, nodeId) => {
+      const taskReceipt = savePendingTask({ projectId: context.projectId, nodeId: nodeId!, nodeType: 'ai-image',
+        provider: 'general', taskType: 'custom-protocol', taskId: 'original-paid-task', submitted: true,
+        mediaContext: { projectId: context.projectId, conversationId: toolContext.conversationId, messageId: 'receipt-message', deliveryMode: 'node+message' } });
+      return { ...artifact, taskReceipt };
+    });
+    const result = await definition.execute(toolContext, input);
+    expect(result).toMatchObject({ status: 'success', errorCode: 'AGENT_MEDIA_DELIVERY_INCOMPLETE' });
+    expect(progress).toHaveBeenLastCalledWith(context.taskId, expect.objectContaining({ phase: 'partial', mediaStage: 'generated', artifactId: artifact.id }));
+    expect(getPendingTasksForProject(context.projectId)).toContainEqual(expect.objectContaining({ taskId: 'original-paid-task' }));
+    expect(useAppStore.getState().messages.find((message) => message.id === 'receipt-message')?.mediaResult?.taskReceipt?.taskId).toBe('original-paid-task');
+    expect(useAppStore.getState().nodes.at(-1)?.data.prompt).toBe('new-user-draft');
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it('marks generated but unsaved media as partial instead of reporting a fully delivered receipt', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia();
+    const progress = vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockResolvedValue(undefined);
+    vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue({ ...artifact, persistence: 'failed' });
+    expect(await definition.execute(toolContext, input)).toMatchObject({ status: 'success' });
+    expect(progress).toHaveBeenLastCalledWith(context.taskId, expect.objectContaining({ phase: 'partial', mediaStage: 'generated', persistence: 'failed' }));
+  });
+
+  it('adds no metadata wait before ordinary no-key generation', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia('chat');
+    useAppStore.setState({ agentTasks: [] });
+    const progress = vi.spyOn(operationProgress, 'recordMcpOperationProgress');
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue(artifact);
+    const pending = definition.execute(toolContext, input);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(await pending).toMatchObject({ status: 'success' });
+    expect(progress).not.toHaveBeenCalled();
+  });
+});
+afterEach(() => { vi.restoreAllMocks(); });
+
+describe('media task recovery tools', () => {
+  it('does not advertise or run recovery while the original result is being saved', async () => {
+    const receipt = savePendingTask({ projectId: 'project-1', nodeId: 'n1', nodeType: 'ai-image', provider: 'general',
+      taskType: 'custom-protocol', taskId: 'saving-task', submitted: true, mediaRecoveryState: 'delivery_pending' });
+    const release = registerMediaNodeOperation(receipt.nodeId);
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    try {
+      const toolContext = { ...context, signal: new AbortController().signal };
+      const listed = await getAgentTool('media_pending_tasks')!.execute(toolContext, {});
+      expect(JSON.parse(listed.modelContent)).toEqual([expect.objectContaining({ taskId: receipt.taskId, canResume: false })]);
+      const definition = getAgentTool('media_resume_task')!;
+      const input = { nodeId: receipt.nodeId, taskId: receipt.taskId };
+      expect(definition.authorize?.(context, input).allowed).toBe(false);
+      expect(await definition.execute(toolContext, input)).toMatchObject({ status: 'error', errorCode: 'MEDIA_RECOVERY_STALE' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(getPendingTasksForProject('project-1')[0]).toMatchObject(receipt);
+      release();
+      const available = await getAgentTool('media_pending_tasks')!.execute(toolContext, {});
+      expect(JSON.parse(available.modelContent)[0].canResume).toBe(true);
+    } finally { release(); }
+  });
+
+  it('stops an in-flight recovery with the tool signal and retains the original task', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { ...state.config.providers,
+      recovery: { name: 'Recovery', apiKey: 'fixture-key', baseUrl: 'https://gateway.example' } } } }));
+    const receipt = savePendingTask({ projectId: 'project-1', nodeId: 'n1', nodeType: 'ai-image', provider: 'general',
+      providerConfigId: 'recovery', taskType: 'custom-protocol', taskId: 'original-task', submitted: true,
+      mediaRecoveryState: 'query_paused', protocolPoll: { method: 'GET', url: 'https://gateway.example/tasks/original-task',
+        intervalMs: 1, statusPath: 'status', successValues: ['completed'], failureValues: ['failed'], resultUrlPath: 'url' } });
+    let finish!: (response: Response) => void;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => { finish = resolve; }));
+    const controller = new AbortController();
+    const pending = getAgentTool('media_resume_task')!.execute({ ...context, signal: controller.signal },
+      { nodeId: receipt.nodeId, taskId: receipt.taskId });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    controller.abort();
+    expect(await pending).toMatchObject({ status: 'error', errorCode: 'MEDIA_RECOVERY_STOPPED' });
+    expect(getPendingTasksForProject('project-1')[0]).toMatchObject(receipt);
+    expect(useAppStore.getState().nodes[0].data.imageUrl).toBe('asset://first-frame.png');
+    finish(new Response(JSON.stringify({ status: 'completed', url: 'https://cdn.example/late.png' })));
+  });
+
+  it('lists original task identities without exposing their polling URLs', async () => {
+    savePendingTask({ projectId: 'project-1', nodeId: 'n1', nodeType: 'ai-image', provider: 'general',
+      providerConfigId: 'custom', taskType: 'custom-protocol', taskId: 'original-task', submitted: true,
+      mediaRecoveryState: 'query_paused', mediaContext: { projectId: 'project-1', messageId: 'message-1', conversationId: 'conversation-1', deliveryMode: 'message' } });
+    const definition = getAgentTool('media_pending_tasks')!;
+    const result = await definition.execute({ ...context, signal: new AbortController().signal }, {});
+    expect(result.status).toBe('success');
+    expect(JSON.parse(result.modelContent)).toEqual([expect.objectContaining({ taskId: 'original-task', nodeId: 'n1', canResume: true })]);
+    expect(result.modelContent).not.toContain('protocolPoll');
+    expect(result.modelContent).not.toContain('apiKey');
+    expect(result.modelContent).not.toContain('https://');
+  });
+
+  it('refuses to resume an unknown submission or a task from another project at authorization and execution', async () => {
+    savePendingTask({ projectId: 'project-1', nodeId: 'n1', nodeType: 'ai-image', provider: 'general',
+      taskType: 'custom-protocol', taskId: 'uncertain-task', submitted: true, mediaRecoveryState: 'submit_unknown' });
+    const definition = getAgentTool('media_resume_task')!;
+    const input = { nodeId: 'n1', taskId: 'uncertain-task' };
+    expect(definition.authorize?.(context, input).allowed).toBe(false);
+    expect(await definition.execute({ ...context, signal: new AbortController().signal }, input))
+      .toMatchObject({ status: 'error', errorCode: 'MEDIA_RECOVERY_STALE' });
+
+    savePendingTask({ projectId: 'project-1', nodeId: 'n1', nodeType: 'ai-image', provider: 'general',
+      taskType: 'custom-protocol', taskId: 'original-task', submitted: true, mediaRecoveryState: 'query_paused' });
+    const knownInput = { nodeId: 'n1', taskId: 'original-task' };
+    expect(definition.authorize?.(context, knownInput).allowed).toBe(true);
+    const otherContext = { ...context, projectId: 'other-project' };
+    expect(definition.authorize?.(otherContext, knownInput).allowed).toBe(false);
+    expect(await definition.execute({ ...otherContext, signal: new AbortController().signal }, knownInput))
+      .toMatchObject({ status: 'error', errorCode: 'MEDIA_RECOVERY_STALE' });
+    expect(definition.effect).toBe('canvas_write');
+  });
+
+  it('does not advertise or execute task types owned by dedicated recovery lifecycles', async () => {
+    const dedicatedTypes = ['runninghub', 'runninghub-workflow', 'runninghub-model', 'workflow-api'] as const;
+    dedicatedTypes.forEach((taskType) => savePendingTask({
+      projectId: 'project-1', nodeId: `node-${taskType}`, nodeType: 'ai-video', provider: taskType,
+      taskType, taskId: `task-${taskType}`, submitted: true,
+    }));
+    savePendingTask({ projectId: 'project-1', nodeId: 'node-cancelling', nodeType: 'ai-video', provider: 'comfyui',
+      taskType: 'comfyui', taskId: 'cancel-task', submitted: true, comfyRecoveryState: 'cancel_pending' });
+
+    const toolContext = { ...context, signal: new AbortController().signal };
+    const result = await getAgentTool('media_pending_tasks')!.execute(toolContext, {});
+    const listed = JSON.parse(result.modelContent) as Array<{ nodeId: string; taskId: string; canResume: boolean }>;
+    expect(listed).toHaveLength(dedicatedTypes.length + 1);
+    const definition = getAgentTool('media_resume_task')!;
+    for (const task of listed) {
+      expect(task.canResume).toBe(false);
+      const input = { nodeId: task.nodeId, taskId: task.taskId };
+      expect(definition.authorize?.(context, input).allowed).toBe(false);
+      expect(await definition.execute(toolContext, input))
+        .toMatchObject({ status: 'error', errorCode: 'MEDIA_RECOVERY_STALE' });
+    }
+  });
+});
+
 describe('media_generate display parameters', () => {
+  it('同型号的万象分组以独立模型引用选择各自连接', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: {
+      'relay-a': { name: 'A 组', catalogId: 'relayonapi', relayonGroup: 'image', apiKey: 'group-a-key', baseUrl: '' },
+      'relay-b': { name: 'B 组', catalogId: 'relayonapi', relayonGroup: 'default', apiKey: 'group-b-key', baseUrl: 'https://relayonapi.com/v1' },
+    }, generalModels: [
+      { id: 'relay-a-image', name: 'Image', modelId: 'image-2.5-flare', category: 'image', providerConfigId: 'relay-a' },
+      { id: 'relay-b-image', name: 'Image', modelId: 'image-2.5-flare', category: 'image', providerConfigId: 'relay-b' },
+    ] } }));
+    const tool = getAgentTool('media_generate')!;
+    const common = { kind: 'image', prompt: '山谷', deliveryMode: 'chat' };
+    expect(tool.authorize?.(context, { ...common, modelRef: 'general/relay-a-image' }).allowed).toBe(false);
+    expect(tool.authorize?.(context, { ...common, modelRef: 'general/relay-b-image' }).allowed).toBe(true);
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { ...state.config.providers,
+      'relay-a': { ...state.config.providers['relay-a'], baseUrl: 'https://relayonapi.com/v1' },
+    } } }));
+    useAppStore.setState({ messages: [{ id: 'relay-message', conversationId: context.conversationId,
+      role: 'assistant', content: '', timestamp: 1, status: 'executing', agentTaskId: context.taskId }] });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue({
+      id: 'relay-artifact', kind: 'image', deliveryMode: 'chat', url: 'https://cdn.example/result',
+      sourceUrl: 'https://cdn.example/result', persistence: 'skipped', prompt: '山谷', modelId: 'image-2.5-flare',
+      provider: 'general', createdAt: 1,
+    });
+    for (const id of ['relay-a-image', 'relay-b-image']) {
+      const input = { ...common, modelRef: `general/${id}` };
+      expect(tool.authorize?.(context, input).allowed).toBe(true);
+      await tool.execute({ ...context, signal: new AbortController().signal }, input);
+      expect(generate).toHaveBeenLastCalledWith(expect.objectContaining({ modelRef: `general/${id}` }),
+        context.projectId, expect.any(AbortSignal), undefined, expect.objectContaining({ messageId: 'relay-message' }));
+    }
+  });
+
+  function configureVisualModels() {
+    useAppStore.setState((state) => ({ config: { ...state.config,
+      providers: { ...state.config.providers, custom: { name: '自定义', catalogId: 'custom-openai',
+        apiKey: 'fixture-private-key', baseUrl: 'https://private.example/v1' } },
+      generalModels: [
+        { id: 'image-custom', name: '图片', modelId: 'image-x', category: 'image', providerConfigId: 'custom',
+          imageCapability: { resolutions: ['2K'], ratios: ['1:1'], qualities: ['low', 'high'], backgrounds: ['opaque', 'transparent'] } },
+        { id: 'video-custom', name: '视频', modelId: 'video-x', category: 'video', providerConfigId: 'custom',
+          videoCapability: { operations: ['text-to-video'], frameRates: [24, 30], supportsAudio: true,
+            minDuration: 4, maxDuration: 15, automaticDurationValue: -1 } },
+      ],
+    } }));
+  }
+
+  it('普通模型能力发现只返回声明的参数，不返回连接地址、协议或 Key', async () => {
+    configureVisualModels();
+    const tool = getAgentTool('media_model_parameters')!;
+    const toolContext = { ...context, signal: new AbortController().signal };
+    const image = await tool.execute(toolContext, { modelRef: 'general/image-custom' });
+    expect(JSON.parse(image.modelContent)).toMatchObject({ kind: 'image', capability: {
+      qualities: ['low', 'high'], backgrounds: ['opaque', 'transparent'],
+    } });
+    const video = await tool.execute(toolContext, { modelRef: 'general/video-custom' });
+    expect(JSON.parse(video.modelContent)).toMatchObject({ kind: 'video', capability: {
+      frameRates: [24, 30], supportsAudio: true, automaticDurationValue: -1,
+    } });
+    for (const text of [image.modelContent, video.modelContent]) {
+      expect(text).not.toContain('fixture-private-key');
+      expect(text).not.toContain('private.example');
+      expect(text).not.toContain('executionProfile');
+    }
+  });
+
+  it.each([
+    { kind: 'image', modelRef: 'general/image-custom', imageQuality: 'high', imageBackground: '' },
+    { kind: 'video', modelRef: 'general/video-custom', duration: -1, videoFps: 24, generateAudio: false },
+  ])('$kind 工具参数通过 schema 并在审批和生成时保留', async (parameters) => {
+    configureVisualModels();
+    useAppStore.setState({ messages: [{ id: 'visual-message', conversationId: context.conversationId,
+      role: 'assistant', content: '', timestamp: 1, status: 'executing', agentTaskId: context.taskId }] });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue({
+      id: 'visual-artifact', kind: parameters.kind as 'image' | 'video', deliveryMode: 'chat',
+      url: 'https://cdn.example/result', sourceUrl: 'https://cdn.example/result', persistence: 'skipped',
+      prompt: '镜头', modelId: parameters.modelRef, provider: 'general', createdAt: 1,
+    });
+    const input = { ...parameters, prompt: '镜头', deliveryMode: 'chat' };
+    const prepared = prepareAgentToolCall({ callId: 'visual', toolId: 'media_generate', input }, context);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    const tool = getAgentTool('media_generate')!;
+    expect(tool.authorize?.(context, prepared.prepared.input).allowed).toBe(true);
+    const display = tool.buildInputDisplay?.(prepared.prepared.input, context);
+    expect(display?.fields).toEqual(expect.arrayContaining(parameters.kind === 'image'
+      ? [expect.objectContaining({ label: '生成背景', value: '接口默认' })]
+      : [expect.objectContaining({ label: '生成音轨', value: '关闭' })]));
+    await tool.execute({ ...context, signal: new AbortController().signal }, prepared.prepared.input);
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining(parameters), context.projectId, expect.any(AbortSignal),
+      undefined, expect.objectContaining({ messageId: 'visual-message' }));
+  });
+
+  it('敏感参数在解析与直接执行时都被拒绝，不创建画布占位或回显原值', async () => {
+    configureVisualModels();
+    const secret = 'sk-example-secret';
+    const input = { kind: 'image', prompt: '山谷', modelRef: 'general/image-custom', deliveryMode: 'canvas', imageQuality: secret };
+    const prepared = prepareAgentToolCall({ callId: 'unsafe-visual', toolId: 'media_generate', input }, context);
+    expect(prepared.ok).toBe(false);
+    expect(JSON.stringify(prepared)).not.toContain(secret);
+    const tool = getAgentTool('media_generate')!;
+    expect(tool.authorize?.(context, input).allowed).toBe(false);
+    const result = await tool.execute({ ...context, signal: new AbortController().signal }, input);
+    expect(result).toMatchObject({ status: 'error', errorCode: 'MEDIA_PARAMETER_INVALID' });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(useAppStore.getState().nodes).toHaveLength(1);
+  });
+
+  it('继承的项目图片默认值包含路径时，也在创建占位前拒绝且不回显', async () => {
+    configureVisualModels();
+    const path = 'D:\\private\\image.png';
+    useAppStore.setState((state) => ({ projects: state.projects.map((project) => ({ ...project,
+      settings: { ...project.settings, generation: { ...project.settings?.generation, imageSize: path } },
+    })) }));
+    const input = { kind: 'image', prompt: '山谷', modelRef: 'general/image-custom', deliveryMode: 'canvas' };
+    const prepared = prepareAgentToolCall({ callId: 'unsafe-default', toolId: 'media_generate', input }, context);
+    expect(prepared.ok).toBe(false);
+    expect(JSON.stringify(prepared)).not.toContain(path);
+    const result = await getAgentTool('media_generate')!.execute({ ...context, signal: new AbortController().signal }, input);
+    expect(result).toMatchObject({ status: 'error', errorCode: 'MEDIA_PARAMETER_INVALID' });
+    expect(JSON.stringify(result)).not.toContain(path);
+    expect(useAppStore.getState().nodes).toHaveLength(1);
+  });
+
+  function configureGeneralAudio() {
+    useAppStore.setState((state) => ({ config: { ...state.config,
+      providers: { ...state.config.providers, 'libapi-audio': { name: 'LibAPI', catalogId: 'libapi',
+        apiKey: 'fixture', baseUrl: 'https://libapi.cc/v1' } },
+      generalModels: [
+        { id: 'libapi-tts', name: 'LibAPI TTS', modelId: 'speech-2.8', category: 'audio', providerConfigId: 'libapi-audio' },
+        { id: 'libapi-music', name: 'LibAPI Music', modelId: 'music', category: 'audio', providerConfigId: 'libapi-audio' },
+      ],
+    } }));
+  }
+
+  it.each(['chat', 'both'] as const)('keeps model voice and MP3 settings from the tool through %s delivery', async (deliveryMode) => {
+    configureGeneralAudio();
+    useAppStore.setState({ messages: [{ id: 'audio-message', conversationId: context.conversationId,
+      role: 'assistant', content: '', timestamp: 1, status: 'executing', agentTaskId: context.taskId }] });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue({
+      id: 'audio-artifact', kind: 'audio', deliveryMode, url: 'https://cdn.example/voice.mp3',
+      sourceUrl: 'https://cdn.example/voice.mp3', persistence: 'skipped', prompt: '欢迎回来',
+      modelId: 'general/libapi-tts', provider: 'general', audioPurpose: 'speech', createdAt: 1,
+    });
+    const input = { kind: 'audio', prompt: '欢迎回来', modelRef: 'general/libapi-tts', deliveryMode,
+      audioPurpose: 'speech', audioVoice: 'Chinese_Female_01', audioFormat: 'mp3', audioSpeed: 1.25 };
+    const definition = getAgentTool('media_generate')!;
+    expect(prepareAgentToolCall({ callId: 'libapi-speech', toolId: 'media_generate', input }, context).ok).toBe(true);
+    expect(definition.authorize?.(context, input).allowed).toBe(true);
+
+    const result = await definition.execute({ ...context, signal: new AbortController().signal }, input);
+
+    expect(result.status).toBe('success');
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining({ audioVoice: 'Chinese_Female_01',
+      audioFormat: 'mp3', audioSpeed: 1.25 }), context.projectId, expect.any(AbortSignal),
+    deliveryMode === 'both' ? expect.any(String) : undefined, expect.objectContaining({ messageId: 'audio-message', deliveryMode }));
+    if (deliveryMode === 'both') {
+      expect(useAppStore.getState().nodes.at(-1)?.data).toMatchObject({ audioPurpose: 'speech',
+        audioVoice: 'Chinese_Female_01', audioFormat: 'mp3', audioSpeed: 1.25, status: 'success' });
+    } else expect(useAppStore.getState().nodes).toHaveLength(1);
+  });
+
+  it('accepts literal music title and lyrics without using RunningHub modelParameters', () => {
+    configureGeneralAudio();
+    const input = { kind: 'audio', prompt: '轻柔民谣', modelRef: 'general/libapi-music', deliveryMode: 'chat',
+      audioPurpose: 'music', musicTitle: '回家', musicLyrics: '灯火等着我\n沿着路慢慢走' };
+    const prepared = prepareAgentToolCall({ callId: 'libapi-music', toolId: 'media_generate', input }, context);
+    expect(prepared.ok).toBe(true);
+    if (prepared.ok) {
+      expect(prepared.prepared.input).toMatchObject({ musicTitle: '回家', musicLyrics: '灯火等着我\n沿着路慢慢走' });
+      expect(prepared.prepared.input).not.toHaveProperty('modelParameters');
+    }
+    expect(getAgentTool('media_generate')!.authorize?.(context, input).allowed).toBe(true);
+  });
+
+  it('rejects invalid voice IDs and audio fields on another media kind without changing policy', () => {
+    configureGeneralAudio();
+    const tool = getAgentTool('media_generate')!;
+    const input = { kind: 'audio', prompt: '欢迎回来', modelRef: 'general/libapi-tts', deliveryMode: 'chat', audioPurpose: 'speech' };
+    for (const audioVoice of ['', ' Zephyr ', 'voice\nID', 'voice\u0085ID', 'x'.repeat(257)]) {
+      expect(tool.authorize?.(context, { ...input, audioVoice }).allowed).toBe(false);
+    }
+    expect(tool.authorize?.(context, { ...input, kind: 'image', audioVoice: 'Zephyr' }).allowed).toBe(false);
+    expect(tool.effect).toBe('media_generation');
+  });
+
   it('RunningHub 专属参数保持字符串，且不注入其他模型的视频默认值', () => {
     const id = 'minimax/h3-max-turbo/image-to-video';
     useAppStore.setState((state) => ({ config: { ...state.config, providers: { 'runninghub-model': { name: 'RH', apiKey: 'fake', selectedModels: [{ id, name: 'H3', provider: 'runninghub', category: 'video' }] } } } }));

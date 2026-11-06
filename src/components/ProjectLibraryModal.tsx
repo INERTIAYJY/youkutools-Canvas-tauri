@@ -1,12 +1,13 @@
 /**
  * 项目库弹窗，提供项目搜索、排序、创建、重命名、打开和删除等管理操作。
  */
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { motion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
+import { GENERAL_ASSISTANT_SCOPE_ID } from '../services/chat/assistantScope';
 import { listTopLevelProjects, resolveOpenTargetId, seriesOwnerId } from '../store/store.utils';
 import type { CanvasProject } from '../types';
 import * as fileService from '../services/fileService';
@@ -16,11 +17,19 @@ import PopupCloseButton from './shared/PopupCloseButton';
 import Select from './shared/Select';
 import { useT } from '../i18n';
 
+const RecentAssetsSection = lazy(() => import('./assets/RecentAssetsSection'));
+const ProjectImportDialog = lazy(() => import('./projectImport/ProjectImportDialog'));
+const ProjectImportRecoveryDialog = lazy(() => import('./projectImport/ProjectImportRecoveryDialog'));
+
 type ProjectSort = 'updated' | 'created' | 'name';
+
+const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+const isMacOSPlatform = () => typeof navigator !== 'undefined' && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
 interface ProjectLibraryModalProps {
   isOpen: boolean;
   onClose: () => void;
+  presentation?: 'modal' | 'page';
 }
 
 const projectNameCollator = new Intl.Collator('zh-CN', {
@@ -93,11 +102,15 @@ function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
   );
 }
 
-export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryModalProps) {
+export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'modal' }: ProjectLibraryModalProps) {
   const t = useT();
+  const isStartPage = presentation === 'page';
+  const isMacOS = isMacOSPlatform();
+  const resourcePageOpen = useAppStore((state) => isStartPage && state.assetsPanelOpen && state.assetsPanelMode === 'page');
+  const projectLoadStatus = useAppStore((state) => state.projectLoadStatus);
   const {
     projects, currentProjectId, createProject, renameProject, switchProject, deleteProject,
-    exportProject, importProject, duplicateProject, isCreatingProject,
+    exportProject, duplicateProject, isCreatingProject,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -107,7 +120,6 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
       switchProject: state.switchProject,
       deleteProject: state.deleteProject,
       exportProject: state.exportProject,
-      importProject: state.importProject,
       duplicateProject: state.duplicateProject,
       isCreatingProject: state.isCreatingProject,
     })),
@@ -123,10 +135,16 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   const [isDeleting, setIsDeleting] = useState(false);
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [recoveryOwnerId, setRecoveryOwnerId] = useState<string | null>(null);
   const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ project: CanvasProject; x: number; y: number } | null>(null);
+  const [isOpeningProject, setIsOpeningProject] = useState(false);
+  const projectBusy = isOpeningProject || isCreatingProject || isImporting || !!recoveryOwnerId || projectLoadStatus === 'loading';
+  const listUnavailable = projectLoadStatus === 'error' && projects.length === 0;
   const searchInputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
+  const projectGridRef = useRef<HTMLDivElement>(null);
+  const [projectGridMaxHeight, setProjectGridMaxHeight] = useState<number>();
 
   // 项目库只列顶层项目；分集在画布右侧的分集栏里管理。
   const topLevelProjects = useMemo(() => listTopLevelProjects(projects), [projects]);
@@ -150,11 +168,27 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
       });
   }, [activeProjectId, topLevelProjects, query, sort]);
 
+  useLayoutEffect(() => {
+    const grid = projectGridRef.current;
+    if (!isOpen || !isStartPage || resourcePageOpen || !grid) return;
+    // 按实际响应式行高限制两行，窗口缩放和新建卡片展开时同步更新。
+    const measure = () => {
+      const style = getComputedStyle(grid);
+      const rows = style.gridTemplateRows.split(/\s+/).slice(0, 2).map((row) => parseFloat(row)).filter(Number.isFinite);
+      const gap = parseFloat(style.rowGap) || 0;
+      setProjectGridMaxHeight(rows.length ? rows.reduce((sum, height) => sum + height, 0) + gap * (rows.length - 1) : undefined);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [isOpen, isStartPage, resourcePageOpen, visibleProjects, isCreating]);
+
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || resourcePageOpen) return;
     const focusFrame = requestAnimationFrame(() => searchInputRef.current?.focus());
     return () => cancelAnimationFrame(focusFrame);
-  }, [isOpen]);
+  }, [isOpen, resourcePageOpen]);
 
   useEffect(() => {
     if (!isCreating) return;
@@ -176,7 +210,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
   };
 
   const requestClose = () => {
-    if (isCreatingProject) return;
+    if (projectBusy) return;
     if (contextMenu) {
       setContextMenu(null);
       return;
@@ -190,19 +224,34 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
       setRenameProjectName('');
       return;
     }
-    closeLibrary();
+    if (!isStartPage) closeLibrary();
   };
 
-  const openProject = (projectId: string) => {
+  const openProject = async (projectId: string) => {
+    if (projectBusy || listUnavailable) return;
+    // 在画布中再次点当前剧集时，保留正在编辑的分集，不切回第一集。
+    if (projectId === activeProjectId && projectLoadStatus === 'ready') {
+      closeLibrary();
+      return;
+    }
     // 只有从项目库切走才重拍缩略图 —— 这里是唯一会看到缩略图的地方
-    if (projectId !== activeProjectId) switchProject(projectId, { captureSnapshot: true });
-    closeLibrary();
+    setIsOpeningProject(true);
+    try {
+      await switchProject(projectId, { captureSnapshot: !isStartPage });
+      const state = useAppStore.getState();
+      if (state.currentProjectId === resolveOpenTargetId(state.projects, projectId)
+        && state.projectLoadStatus === 'ready') closeLibrary();
+    } catch {
+      useAppStore.getState().showToast(t('项目打开失败，请重试'), 'error');
+    } finally {
+      setIsOpeningProject(false);
+    }
   };
 
   const submitNewProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = newProjectName.trim();
-    if (!name || isCreatingProject) return;
+    if (!name || projectBusy || listUnavailable) return;
     const projectId = await createProject(name);
     if (projectId) closeLibrary();
   };
@@ -266,15 +315,10 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
     }
   };
 
-  const runImportProject = async () => {
+  const runImportProject = () => {
+    if (projectBusy || listUnavailable) return;
     if (isImporting || exportingId) return;
     setIsImporting(true);
-    try {
-      const projectId = await importProject();
-      if (projectId) closeLibrary();
-    } finally {
-      setIsImporting(false);
-    }
   };
 
   const confirmDeleteProject = async () => {
@@ -302,40 +346,56 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
     project.id !== 'default' && deletableProjectCount > 1
   );
 
-  return (
-    <ModalOverlay
-      isOpen={isOpen}
-      onClose={requestClose}
-      ariaLabel={t('项目库')}
-      motionPreset="quick"
-      backdropBlur={false}
-      className="h-[min(560px,calc(100dvh-24px))] w-[min(840px,calc(100vw-24px))]"
-    >
-      <div className="flex min-h-0 flex-1 flex-col">
+  const projectHeading = (
+    <div className="flex shrink-0 items-baseline gap-2">
+      <h2 className="text-sm font-semibold text-canvas-text">{t('项目')}</h2>
+      <span className="text-[11px] tabular-nums text-canvas-text-muted">{topLevelProjects.length}</span>
+    </div>
+  );
+
+  const content = (
+      <div className="relative flex min-h-0 flex-1 select-none flex-col" aria-busy={projectBusy}>
+        {isImporting && <Suspense fallback={null}><ProjectImportDialog onClose={() => setIsImporting(false)} onImported={() => { setIsImporting(false); closeLibrary(); }} /></Suspense>}
+        {recoveryOwnerId && <Suspense fallback={null}><ProjectImportRecoveryDialog ownerId={recoveryOwnerId} onClose={() => setRecoveryOwnerId(null)} /></Suspense>}
         <header
           inert={deleteTarget ? true : undefined}
           aria-hidden={deleteTarget ? true : undefined}
-          className="shrink-0 border-b border-canvas-border px-4 py-3.5"
+          className="shrink-0 border-b border-canvas-border px-2.5 py-2"
         >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-baseline gap-2">
-                <h2 className="text-sm font-semibold text-canvas-text">{t('项目')}</h2>
-                <span className="text-[11px] tabular-nums text-canvas-text-muted">{topLevelProjects.length}</span>
-              </div>
+          {!isStartPage && (
+            <div className="flex items-center justify-between gap-3">
+              {projectHeading}
+              <PopupCloseButton ariaLabel={t('关闭项目库')} onClick={requestClose} />
             </div>
-            <PopupCloseButton ariaLabel={t('关闭项目库')} onClick={requestClose} />
-          </div>
+          )}
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <label className="relative min-w-[180px] flex-1">
+          <div className={`flex flex-wrap items-center gap-2 ${isStartPage ? '' : 'mt-3'}`}>
+            {isStartPage && projectHeading}
+            {isStartPage && (
+              <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm"
+                onClick={() => {
+                  const state = useAppStore.getState();
+                  const active = state.conversations.find((conversation) => conversation.id === state.activeConversationId);
+                  if (active && active.projectId !== GENERAL_ASSISTANT_SCOPE_ID) state.setActiveConversation(null);
+                  state.openChat();
+                  if (state.chatPanelDetached) {
+                    void import('../services/chat/chatWindowLifecycle')
+                      .then(({ openDetachedChatWindow }) => openDetachedChatWindow())
+                      .catch(() => state.showToast(t('打开独立助手窗口失败，已恢复内嵌助手'), 'error'));
+                  }
+                }}>
+                <Icon icon="lucide:message-circle" width="14" height="14" aria-hidden="true" />
+                {t('AI 助手')}
+              </button>
+            )}
+            <label className="ui-input-group w-48 max-w-full ml-auto">
               <span className="sr-only">{t('搜索项目')}</span>
               <Icon
                 icon="mdi:magnify"
-                width="17"
-                height="17"
+                width="14"
+                height="14"
                 aria-hidden="true"
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-canvas-text-muted"
+                className="pointer-events-none ml-2 shrink-0 self-center text-canvas-text-muted"
               />
               <input
                 ref={searchInputRef}
@@ -344,7 +404,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                 onChange={(event) => setQuery(event.target.value)}
                 onKeyDown={focusFirstProject}
                 placeholder={t('搜索项目')}
-                className="h-9 w-full rounded-lg border border-canvas-border bg-canvas-card pl-9 pr-3 text-xs text-canvas-text outline-none transition-colors placeholder:text-canvas-text-muted hover:border-border-secondary focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15"
+                className="ui-input ui-input--sm select-text"
               />
             </label>
 
@@ -352,16 +412,17 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               <span className="sr-only">{t('项目排序')}</span>
               <Icon
                 icon="mdi:sort-variant"
-                width="16"
-                height="16"
+                width="14"
+                height="14"
                 aria-hidden="true"
-                className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-canvas-text-muted"
+                className="pointer-events-none absolute left-2 top-1/2 z-10 -translate-y-1/2 text-canvas-text-muted"
               />
               <Select
                 value={sort}
                 onChange={(value) => setSort(value as ProjectSort)}
-                className="w-32"
-                triggerStyle={{ height: 36, paddingLeft: 36 }}
+                size="sm"
+                className="w-28"
+                triggerStyle={{ paddingLeft: 28 }}
                 fixedMenu
                 options={[
                   { value: 'updated', label: t('最近更新') },
@@ -374,14 +435,14 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
             <button
               type="button"
               onClick={() => void runImportProject()}
-              disabled={isImporting || exportingId !== null}
+              disabled={projectBusy || listUnavailable || exportingId !== null}
               data-tooltip={t('从 .aicanvas 项目包导入')}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-canvas-border bg-canvas-card px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-50"
+              className="ui-btn ui-btn--secondary ui-btn--sm"
             >
               <Icon
                 icon={isImporting ? 'mdi:loading' : 'mdi:tray-arrow-down'}
-                width="17"
-                height="17"
+                width="14"
+                height="14"
                 aria-hidden="true"
                 className={isImporting ? 'animate-spin' : undefined}
               />
@@ -391,21 +452,94 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
             <button
               type="button"
               onClick={() => setIsCreating(true)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-500 px-3 text-xs font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={isCreating}
+              className="ui-btn ui-btn--primary ui-btn--sm"
+              disabled={isCreating || projectBusy || listUnavailable}
             >
-              <Icon icon="mdi:plus" width="17" height="17" aria-hidden="true" />
+              <Icon icon="mdi:plus" width="14" height="14" aria-hidden="true" />
               {t('新建')}
             </button>
           </div>
+          {listUnavailable ? (
+            <div className="ui-alert ui-alert--warning mt-3 flex items-center justify-between gap-2" role="alert">
+              <span>{t('项目列表读取失败，请重试后再打开或新建项目')}</span>
+              <button type="button" className="ui-btn ui-btn--sm" onClick={() => void useAppStore.getState().initFromDb()}>
+                {t('重试')}
+              </button>
+            </div>
+          ) : projectBusy ? (
+            <p className="mt-2 text-xs text-canvas-text-secondary" role="status">{t('正在加载项目')}</p>
+          ) : null}
         </header>
 
         <main
           inert={deleteTarget ? true : undefined}
           aria-hidden={deleteTarget ? true : undefined}
-          className="min-h-0 flex-1 overflow-y-auto bg-canvas-bg/60 p-3"
+          className={`min-h-0 flex-1 overflow-y-auto p-3${isStartPage ? ' bg-canvas-bg/60' : ''}`}
         >
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+          <div ref={projectGridRef} style={isStartPage ? { maxHeight: projectGridMaxHeight } : undefined}
+            className={`grid gap-3 ${isStartPage
+            ? 'content-start overflow-y-auto [scrollbar-gutter:stable] grid-cols-[repeat(auto-fill,minmax(min(100%,240px),1fr))]'
+            : 'grid-cols-1 sm:grid-cols-2 md:grid-cols-3'}`}>
+            {isCreating ? (
+              <form
+                onSubmit={submitNewProject}
+                className="flex min-h-[188px] flex-col justify-between rounded-lg border border-indigo-400/40 bg-canvas-surface p-3 ring-2 ring-indigo-500/10"
+              >
+                <div className="flex flex-1 flex-col items-center justify-center gap-3">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
+                    <Icon icon="mdi:folder-plus-outline" width="21" height="21" aria-hidden="true" />
+                  </span>
+                  <label className="w-full">
+                    <span className="sr-only">{t('新项目名称')}</span>
+                    <input
+                      ref={createInputRef}
+                      value={newProjectName}
+                      onChange={(event) => setNewProjectName(event.target.value)}
+                      placeholder={t('输入项目名称')}
+                      disabled={projectBusy}
+                      className="h-9 w-full select-text rounded-md border border-canvas-border bg-canvas-card px-3 text-center text-sm text-canvas-text outline-none placeholder:text-canvas-text-muted focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsCreating(false);
+                      setNewProjectName('');
+                    }}
+                    disabled={isCreatingProject}
+                    className="h-8 rounded-md px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {t('取消')}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!newProjectName.trim() || projectBusy || listUnavailable}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-indigo-500 px-3 text-xs font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {isCreatingProject ? (
+                      <Icon icon="mdi:loading" width="15" height="15" className="animate-spin" aria-hidden="true" />
+                    ) : null}
+                    {isCreatingProject ? t('创建中') : t('创建')}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              !query.trim() ? (
+                <button
+                  type="button"
+                  onClick={() => setIsCreating(true)}
+                  disabled={projectBusy || listUnavailable}
+                  className="group flex min-h-[188px] flex-col items-center justify-center rounded-lg border border-dashed border-canvas-border bg-canvas-surface/60 text-canvas-text-muted transition-[border-color,background-color,color] duration-150 hover:border-indigo-400/40 hover:bg-canvas-surface hover:text-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60"
+                >
+                  <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-canvas-border bg-canvas-card transition-colors group-hover:border-indigo-400/30 group-hover:bg-indigo-500/10">
+                    <Icon icon="mdi:plus" width="21" height="21" aria-hidden="true" />
+                  </span>
+                  <span className="mt-3 text-xs font-medium text-canvas-text-secondary group-hover:text-indigo-400">{t('新建项目')}</span>
+                </button>
+              ) : null
+            )}
             {visibleProjects.map((project) => {
               const isCurrent = project.id === activeProjectId;
               const isEditingName = renameTargetId === project.id;
@@ -427,7 +561,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                     aria-label={t('打开项目 {name}', { name: project.name })}
                     aria-current={isCurrent ? 'page' : undefined}
                     onClick={() => openProject(project.id)}
-                    disabled={isEditingName || isRenaming}
+                    disabled={isEditingName || isRenaming || projectBusy || listUnavailable}
                     className="block w-full border-b border-canvas-border text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
                   >
                     {/* 剧集自己没有画布，缩略图取点开后会看到的那一集 */}
@@ -453,7 +587,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                             }
                           }}
                           disabled={isRenaming}
-                          className="h-8 w-full rounded-md border border-indigo-400/60 bg-canvas-card px-2 text-xs text-canvas-text outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:opacity-60"
+                          className="h-8 w-full select-text rounded-md border border-indigo-400/60 bg-canvas-card px-2 text-xs text-canvas-text outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:opacity-60"
                         />
                       </label>
                       <button
@@ -477,11 +611,12 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                       </button>
                     </form>
                   ) : (
-                    <div className="flex min-h-14 items-center">
+                    <div className="flex items-center">
                       <button
                         type="button"
-                        onClick={() => openProject(project.id)}
-                        className="min-w-0 flex-1 px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
+                        onClick={() => void openProject(project.id)}
+                        disabled={projectBusy || listUnavailable}
+                        className="min-w-0 flex-1 px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
                       >
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="truncate text-xs font-medium text-canvas-text">{project.name}</span>
@@ -555,68 +690,9 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               );
             })}
 
-            {isCreating ? (
-              <form
-                onSubmit={submitNewProject}
-                className="flex min-h-[188px] flex-col justify-between rounded-lg border border-indigo-400/40 bg-canvas-surface p-3 ring-2 ring-indigo-500/10"
-              >
-                <div className="flex flex-1 flex-col items-center justify-center gap-3">
-                  <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
-                    <Icon icon="mdi:folder-plus-outline" width="21" height="21" aria-hidden="true" />
-                  </span>
-                  <label className="w-full">
-                    <span className="sr-only">{t('新项目名称')}</span>
-                    <input
-                      ref={createInputRef}
-                      value={newProjectName}
-                      onChange={(event) => setNewProjectName(event.target.value)}
-                      placeholder={t('输入项目名称')}
-                      disabled={isCreatingProject}
-                      className="h-9 w-full rounded-md border border-canvas-border bg-canvas-card px-3 text-center text-sm text-canvas-text outline-none placeholder:text-canvas-text-muted focus:border-indigo-400/70 focus:ring-2 focus:ring-indigo-500/15 disabled:cursor-not-allowed disabled:opacity-60"
-                    />
-                  </label>
-                </div>
-                <div className="mt-3 flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsCreating(false);
-                      setNewProjectName('');
-                    }}
-                    disabled={isCreatingProject}
-                    className="h-8 rounded-md px-3 text-xs text-canvas-text-secondary transition-colors hover:bg-canvas-hover hover:text-canvas-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-border disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {t('取消')}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={!newProjectName.trim() || isCreatingProject}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-indigo-500 px-3 text-xs font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {isCreatingProject ? (
-                      <Icon icon="mdi:loading" width="15" height="15" className="animate-spin" aria-hidden="true" />
-                    ) : null}
-                    {isCreatingProject ? t('创建中') : t('创建')}
-                  </button>
-                </div>
-              </form>
-            ) : (
-              !query.trim() ? (
-                <button
-                  type="button"
-                  onClick={() => setIsCreating(true)}
-                  className="group flex min-h-[188px] flex-col items-center justify-center rounded-lg border border-dashed border-canvas-border bg-canvas-surface/60 text-canvas-text-muted transition-[border-color,background-color,color] duration-150 hover:border-indigo-400/40 hover:bg-canvas-surface hover:text-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60"
-                >
-                  <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-canvas-border bg-canvas-card transition-colors group-hover:border-indigo-400/30 group-hover:bg-indigo-500/10">
-                    <Icon icon="mdi:plus" width="21" height="21" aria-hidden="true" />
-                  </span>
-                  <span className="mt-3 text-xs font-medium text-canvas-text-secondary group-hover:text-indigo-400">{t('新建项目')}</span>
-                </button>
-              ) : null
-            )}
           </div>
 
-          {visibleProjects.length === 0 ? (
+          {visibleProjects.length === 0 && query.trim() ? (
             <div className="flex min-h-[220px] flex-col items-center justify-center text-center">
               <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-canvas-hover text-canvas-text-muted">
                 <Icon icon="mdi:folder-search-outline" width="22" height="22" aria-hidden="true" />
@@ -631,6 +707,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               </button>
             </div>
           ) : null}
+          {isStartPage && <Suspense fallback={<p className="mt-6 text-xs text-canvas-text-muted">{t('正在读取最近使用…')}</p>}><RecentAssetsSection /></Suspense>}
         </main>
 
         {contextMenu ? createPortal(
@@ -647,7 +724,7 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
               aria-label={t('项目操作')}
               style={calcFixedPosition(contextMenu.x, contextMenu.y, PROJECT_MENU_WIDTH, PROJECT_MENU_HEIGHT)}
               onMouseDown={(event) => event.stopPropagation()}
-              className="fixed w-40 overflow-hidden rounded-lg border border-canvas-border bg-canvas-card py-1 shadow-xl"
+              className="fixed w-40 select-none overflow-hidden rounded-lg border border-canvas-border bg-canvas-card py-1 shadow-xl"
             >
               <ProjectMenuItem
                 icon="mdi:folder-open-outline"
@@ -689,6 +766,8 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
                   setContextMenu(null);
                 }}
               />
+              <ProjectMenuItem icon="mdi:history" label={t('导入更新恢复点')} disabled={projectBusy}
+                onClick={() => { setRecoveryOwnerId(seriesOwnerId(projects, contextMenu.project.id)); setContextMenu(null); }} />
               {canDeleteProject(contextMenu.project) ? (
                 <>
                   <div className="my-1 border-t border-canvas-border" />
@@ -760,6 +839,54 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
           </div>
         ) : null}
       </div>
+  );
+  if (isStartPage) {
+    return isOpen ? (
+      <section
+        aria-label={t('启动页')}
+        hidden={resourcePageOpen}
+        className={`absolute inset-0 ${resourcePageOpen ? 'hidden' : 'flex'} select-none flex-col bg-canvas-bg px-2 pb-3`}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && !event.defaultPrevented) requestClose();
+        }}
+      >
+        <header
+          data-tauri-drag-region
+          inert={deleteTarget ? true : undefined}
+          aria-hidden={deleteTarget ? true : undefined}
+          className={`relative z-20 flex h-9 shrink-0 items-center justify-between gap-3 ${
+            isTauri ? isMacOS ? 'pl-24' : 'pr-[120px]' : ''
+          }`}
+        >
+          {!isMacOS && (
+            <div data-tauri-drag-region className="flex items-center gap-2">
+              <img src={`${import.meta.env.BASE_URL}favicon.svg`} alt="" draggable={false} className="h-6 w-6 shrink-0" />
+              <span data-tauri-drag-region className="text-sm font-semibold text-canvas-text">AI Canvas</span>
+            </div>
+          )}
+          <button
+            type="button"
+            className="ui-btn ui-btn--ghost ml-auto"
+            onClick={() => useAppStore.getState().setSettingsOpen(true)}
+          >
+            <Icon icon="mdi:cog-outline" width="16" height="16" aria-hidden="true" />
+            {t('设置')}
+          </button>
+        </header>
+        {content}
+      </section>
+    ) : null;
+  }
+  return (
+    <ModalOverlay
+      isOpen={isOpen}
+      onClose={requestClose}
+      ariaLabel={t('项目库')}
+      motionPreset="quick"
+      backdropBlur={false}
+      className="ui-dialog-surface h-[min(560px,calc(100dvh-24px))] w-[min(840px,calc(100vw-24px))]"
+    >
+      {content}
     </ModalOverlay>
   );
 }

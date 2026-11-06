@@ -3,11 +3,15 @@
  */
 import type { NodeType, UserPreset, BaseNodeData, GeneralModelCategory, ImagePostProcess } from '../../../../types';
 import { CATEGORY_TO_NODE_TYPES } from '../../../../types';
+import { t } from '../../../../i18n';
 import type { Node, Edge } from '@xyflow/react';
 import { getSlashCommands, fillTemplate } from '../slashCommands';
 import { generateId, useAppStore } from '../../../../store/useAppStore';
 import { derivedNodePlacement } from '../../../../store/store.utils';
 import { defaultModelGroups } from '../defaultModels';
+import { getGenerationNodeType } from '../../../../utils/nodeGeneration';
+import { executeGeneration } from '../../../../services/generationService';
+import { requestPresetSequence } from '../../../../services/presetSequenceService';
 
 /** 从 localStorage 读取模型偏好（与 ModelSelector 逻辑一致） */
 const MODEL_PREF_KEY = 'canvas-model-prefs';
@@ -20,6 +24,7 @@ function loadModelPrefs(): Record<string, string> {
 
 /** 获取有效模型：节点 data → localStorage → config generalModels → undefined */
 export function resolveEffectiveModel(nodeType: string, nodeData?: BaseNodeData): { model: string; provider: string } | null {
+  nodeType = getGenerationNodeType(nodeType as NodeType);
   // 1) 节点数据
   if (nodeData?.model && nodeData?.provider) {
     return { model: nodeData.model, provider: nodeData.provider };
@@ -78,7 +83,7 @@ export function resolvePresetDef(
     return null;
   };
   const builtin = walk(commands);
-  if (builtin) return { label: builtin.title, icon: builtin.icon };
+  if (builtin) return { label: t(builtin.title), icon: builtin.icon };
 
   const preset = userPresets.find((p) => p.id === key && p.nodeType === nodeType);
   if (preset) return { label: preset.name, icon: preset.icon || 'mdi:star' };
@@ -181,7 +186,7 @@ export function createPresetNode(
   sourceNode: { id: string; position: { x: number; y: number }; parentId?: string; data: BaseNodeData },
   resolved: ResolvedPreset,
 ): { node: Node<BaseNodeData>; edge: Edge } {
-  const nodeType = sourceNode.data.type;
+  const nodeType = getGenerationNodeType(sourceNode.data.type);
   const { nodeWidth, nodeHeight } = computeDimensionsFromAspectRatio(resolved.override?.aspectRatio, nodeType);
 
   const sourceLabel = sourceNode.data.label || sourceNode.data.fileName || sourceNode.id;
@@ -232,4 +237,18 @@ export function createPresetNode(
   };
 
   return { node, edge };
+}
+
+/** 音视频工具栏共用的预设执行入口；点击时读取最新状态，保留源节点引用。 */
+export function executeToolbarPreset(key: string, nodeType: NodeType, nodeId: string): void {
+  const state = useAppStore.getState();
+  const sourceNode = state.nodes.find((node) => node.id === nodeId);
+  if (!sourceNode) return;
+  if (requestPresetSequence(key, nodeType, nodeId, state.userPresets)) return;
+
+  const resolved = resolvePresetAction(key, nodeType, sourceNode.data.prompt ?? '', state.userPresets);
+  if (!resolved) return;
+  const { node, edge } = createPresetNode(sourceNode, resolved);
+  state.addNodeWithEdge(node, edge);
+  void executeGeneration(node.id, node.data.prompt, resolved.postProcess, node.data);
 }

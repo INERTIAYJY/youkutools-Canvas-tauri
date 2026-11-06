@@ -7,6 +7,8 @@ export interface AIGenerateParams {
   provider: string;   // provider id (e.g. 'ppio')
   /** 关联的节点 ID（用于中断恢复） */
   nodeId?: string;
+  /** 可选取消信号，仅用于当前调用，不持久化。 */
+  signal?: AbortSignal;
   /** 追加到消息末尾的图片；文本/VLM 请求统一转换为受限 Base64 data URL。 */
   imageUrls?: string[];
 }
@@ -16,6 +18,8 @@ export interface AIImageGenParams extends AIGenerateParams {
   runninghubModelParameters?: Record<string, string>;
   runninghubTaskContext?: import('./runninghub').RunningHubTaskContext;
   imageSize?: string;     // '1K' | '2K' | '4K'
+  imageQuality?: string;  // 厂商声明的生成质量，与分辨率独立
+  imageBackground?: string; // 厂商声明的图片背景；空字符串显式使用接口默认
   aspectRatio?: string;   // '1:1' | '16:9' | '9:16' | ...
   image_urls?: string[];  // 参考图片 URL（从 @图片节点 引用中提取）
   workflowId?: string;    // ComfyUI 工作流 ID（存在时走 ComfyUI 执行）
@@ -91,6 +95,10 @@ export interface ModelProtocolResultConfig {
   };
   /** 使用当前协议鉴权下载同源 URL，并将结果归一化为 data URL。 */
   fetchUrl?: boolean;
+  /** 异步任务完成后按提交任务 ID 读取二进制结果；与响应字段映射互斥。 */
+  download?: Pick<ModelProtocolRequestTemplate, 'path' | 'pathMode' | 'headers' | 'query'> & {
+    method: 'GET';
+  };
 }
 
 export interface ModelProtocolResponseConfig {
@@ -177,7 +185,7 @@ export type ModelExecutionProtocol = ModelExecutionProtocolV1 | ModelExecutionPr
 /** parser、编辑器与执行器统一使用的规范协议。 */
 export type NormalizedModelExecutionProtocol = ModelExecutionProtocolV2;
 
-export type ModelProtocolPresetId = 'openai-chat' | 'openai-image' | 'agnes-video' | 'custom';
+export type ModelProtocolPresetId = 'openai-chat' | 'anthropic-chat' | 'gemini-chat' | 'openai-image' | 'openai-gpt-image' | 'gpt-image-gateway-json' | 'google-image-native' | 'xai-image-native' | 'agnes-video' | 'custom';
 
 export interface ModelExecutionProfile {
   preset: ModelProtocolPresetId;
@@ -208,15 +216,19 @@ export interface ReferenceAudioInputConstraints {
   totalDurationSeconds?: NumericInputConstraint;
 }
 
-/** 按参考素材形态覆盖视频比例能力，避免把一个全局默认套给所有输入模式。 */
-export interface VideoInputModeCapability {
+/** 按视频操作或参考素材形态覆盖参数能力，避免把一个全局默认套给所有任务。 */
+export interface VideoParameterCapabilityOverride {
   /** 当前输入模式允许的比例；缺省时继承模型级 ratios。 */
   ratios?: string[];
   /** 当前输入模式未指定比例时的默认值；缺省时继承模型级 defaultRatio。 */
   defaultRatio?: string;
   /** 当前输入模式是否必须最终得到一个比例。 */
   requiresRatio?: boolean;
+  /** 当前任务是否只允许模型自动决定时长。 */
+  automaticDurationOnly?: boolean;
 }
+
+export type VideoInputModeCapability = VideoParameterCapabilityOverride;
 
 /**
  * 视频模型输入约束。仅声明的字段生效，适用于内置厂商和用户配置的通用接口。
@@ -251,6 +263,8 @@ export interface VideoModelCapability {
   defaultRatio?: string;
   /** 按 text/keyframe/reference/mixed 输入形态覆盖比例约束与默认值。 */
   inputModeCapabilities?: Partial<Record<VideoGenerationInputMode, VideoInputModeCapability>>;
+  /** 按 text-to-video/image-to-video/video-to-video 操作覆盖参数约束。 */
+  operationCapabilities?: Partial<Record<VideoGenerationOperation, VideoParameterCapabilityOverride>>;
   /** 可选帧率档位，如 [16, 24, 30]。 */
   frameRates?: number[];
   /** 未指定帧率时的默认值。 */
@@ -266,6 +280,8 @@ export interface VideoModelCapability {
   maxDuration?: number;
   /** 未指定时长时的默认值（秒）。 */
   defaultDuration?: number;
+  /** 模型自动决定时长时提交给接口的哨兵值，例如 Seedance 2.5 的 -1。 */
+  automaticDurationValue?: number;
   /** 是否支持生成音频（有声视频）。 */
   supportsAudio?: boolean;
   /** 是否支持纯音频参考（无图/视频）。 */
@@ -281,6 +297,8 @@ export interface VideoModelCapability {
   maxVideoReferences?: number;
   /** 参考音频数量上限。 */
   maxAudioReferences?: number;
+  /** 参考视频与音频共用的数量上限；未声明时只检查各自上限。 */
+  maxVideoAudioReferences?: number;
   /** 付费请求提交前执行的输入校验规则。 */
   inputConstraints?: VideoInputConstraints;
 }
@@ -295,6 +313,14 @@ export interface ImageModelCapability {
   resolutions?: string[];
   /** 未指定分辨率时的默认值。 */
   defaultResolution?: string;
+  /** 厂商明确支持的生成质量，如 ['auto', 'low', 'medium', 'high']；未声明时不发送。 */
+  qualities?: string[];
+  /** 未指定生成质量时的默认值，必须属于 qualities。 */
+  defaultQuality?: string;
+  /** 厂商明确支持的背景模式；未声明时不发送 background。 */
+  backgrounds?: string[];
+  /** 未指定背景模式时的默认值；缺省沿用接口默认，必须属于 backgrounds。 */
+  defaultBackground?: string;
   /** 可选宽高比，如 ['1:1', '16:9', '9:16', 'auto']。 */
   ratios?: string[];
   /** 未指定比例时的默认值。 */
@@ -313,17 +339,27 @@ export interface ImageModelCapability {
   resolutionField?: string;
   /** 是否在请求体中输出分辨率字段（部分模型如 Imagen 4.0 / Grok 无 resolution）。 */
   hasResolutionField?: boolean;
+  /** 显式尺寸映射：分辨率 → 比例 → [宽, 高]；用于要求精确像素的图片接口。 */
+  dimensionPresets?: Record<string, Record<string, readonly [number, number]>>;
 }
 
 /**
  * 音频生成模型的能力声明，用于按模型约束音色 / 输出格式 / 参考音频等。
- * APIMart 目前只有 speech（TTS）与 music（Flow Music）两类，字段对齐各自协议。
+ * 这是运行期厂商合同，不写入用户模型持久化结构；未声明的控件不代表平台支持。
  */
 export interface AudioModelCapability {
   /** 能力类型：speech = 语音合成（TTS），music = 音乐生成（Flow Music）。 */
   kind: 'speech' | 'music';
   /** 支持的音色列表（仅 speech 生效）。 */
   voices?: string[];
+  /** 预置音色选择，或用户已存在的平台音色 ID；后者不等于上传音频自动克隆。 */
+  voiceInput?: 'select' | 'id';
+  defaultVoice?: string;
+  formats?: AudioOutputFormat[];
+  defaultFormat?: AudioOutputFormat;
+  speed?: { min: number; max: number; step?: number; options?: number[]; default?: number };
+  /** 明确声明普通音乐生成能接收哪些现有控件。 */
+  musicControls?: { title?: boolean; lyrics?: boolean; bpm?: boolean; duration?: boolean; autoGenerateLyrics?: boolean };
   /** 是否支持音色参考（连入的音频作为音色克隆）。当前 APIMart 两类均不支持。 */
   supportsVoiceReference?: boolean;
 }
@@ -341,11 +377,15 @@ export interface ResolvedModelProtocolPoll {
   successValues: string[];
   failureValues: string[];
   resultUrlPath?: string;
+  /** 厂商适配器追加的明确结果路径；仅在内部任务描述中保存，不属于可编辑协议。 */
+  resultUrlFallbackPaths?: string[];
   resultTextPath?: string;
   resultBase64Path?: string;
   resultMimeType?: string;
   resultBase64Transform?: ModelProtocolResultConfig['base64Transform'];
   resultFetchUrl?: boolean;
+  /** 已绑定本次任务的下载请求，不包含 API Key 或完整提交响应。 */
+  resultDownload?: { url: string; headers?: Record<string, string> };
   errorPath?: string;
   progressPath?: string;
   intervalMs: number;
@@ -356,8 +396,41 @@ export interface ResolvedModelProtocolPoll {
 
 export const MAX_IMAGE_BATCH_COUNT = 8;
 
+/** 已提交任务的交付身份；不包含凭据、请求正文或素材路径。 */
+export interface MediaTaskReceipt {
+  projectId: string;
+  nodeId: string;
+  taskId: string;
+  attemptId?: string;
+}
+
+/** 结果下载仅持久化连接身份与鉴权方式，密钥在实际下载时读取。 */
+export interface MediaDownloadAccess {
+  providerConfigId: string;
+  origin: string;
+  auth?: ModelProtocolAuthConfig;
+}
+
+export interface MediaTaskContext {
+  projectId: string;
+  conversationId?: string;
+  messageId?: string;
+  deliveryMode?: 'node' | 'message' | 'node+message';
+  canvasNodeId?: string;
+  modelId?: string;
+  /** 原任务恢复与回填所需的媒体参数，不包含提示词或素材。 */
+  parameters?: import('./media').MediaGenerationParameters;
+}
+
+/** 保留既有数组调用约定，同时携带当次任务回执，禁止事后读取另一轮身份。 */
+export type MediaProtocolUrls = string[] & { taskReceipt?: MediaTaskReceipt; mediaDownloadAccess?: MediaDownloadAccess };
+
 export interface ImageGenerationResult {
   url: string;
+  mediaDownloadAccess?: MediaDownloadAccess;
+  taskReceipt?: MediaTaskReceipt;
+  /** 本地 ComfyUI 已完成但尚待画布交付的任务身份，仅完成同一任务时清理。 */
+  comfyTaskId?: string;
   workflowApiOutputs?: import('./workflowApi').CloudWorkflowOutput[];
   workflowApiTaskId?: string;
   runninghubOutputs?: import('./runninghub').RunningHubOutput[];
@@ -366,6 +439,10 @@ export interface ImageGenerationResult {
 }
 
 export interface BatchImageResult {
+  mediaDownloadAccess?: MediaDownloadAccess;
+  taskReceipt?: MediaTaskReceipt;
+  /** 所有远端任务均已成功或明确失败；不包括提交未知或查询中断。 */
+  allTasksSettled?: boolean;
   requestedCount: number;
   results: ImageGenerationResult[];
   failedCount: number;
@@ -401,14 +478,24 @@ export type MediaReferenceRole =
 
 /** 视频节点上手动挑选的参考图：参考帧（首/中/尾）或参考角色，来源可以是连线节点或角色库。 */
 export interface VideoReferenceItem {
-  /** 连线节点用节点 ID，角色库用 `character:<角色 ID>` */
+  /** 连线节点用节点 ID，角色库用 `character:<角色 ID>`，方舟素材用 `volcengine-asset:<Asset ID>`。 */
   id: string;
+  /** 请求实际使用的媒体地址；方舟素材固定为 `asset://<Asset ID>`。 */
   url: string;
+  /** 仅用于界面缩略图，不能代替 url 参与生成请求。 */
+  previewUrl?: string;
   label?: string;
-  /** frame = 参考帧；character = 参考角色（按普通参考图提交） */
-  kind: 'frame' | 'character';
-  role: 'first_frame' | 'last_frame' | 'reference';
+  /** frame = 参考帧；character = 参考角色；volcengine-asset = 方舟虚拟人像库素材。 */
+  kind: 'frame' | 'character' | 'volcengine-asset';
+  role: MediaReferenceRole;
+  mediaKind?: MediaReferenceKind;
   sourceNodeId?: string;
+  provider?: 'volcengine';
+  assetId?: string;
+  assetGroupId?: string;
+  assetGroupName?: string;
+  projectName?: string;
+  status?: string;
 }
 
 /**
@@ -423,6 +510,10 @@ export interface MediaReference {
   sourceNodeId?: string;
   filePath?: string;
   sourceUrl?: string;
+  provider?: 'volcengine';
+  assetId?: string;
+  assetGroupId?: string;
+  projectName?: string;
 }
 
 export interface VideoGenerationReferenceInput {
@@ -436,6 +527,11 @@ export interface VideoGenerationReferenceInput {
 }
 
 export interface AIVideoGenParams {
+  comfyH3MemoryPreset?: import('./comfyLaunch').ComfyH3MemoryOverride;
+  /** 批次预检捕获的有效 H3 策略摘要，提交前复核。 */
+  comfyH3ExpectedSettings?: string;
+  /** 仅本地 ComfyUI 使用，绑定目标服务器的 RefMod 相对文件引用。 */
+  comfyRefmods?: import('./comfyRefmod').ComfyRefmodSelection[];
   workflowApiTaskContext?: import('./workflowApi').CloudWorkflowTaskContext;
   runninghubModelParameters?: Record<string, string>;
   runninghubTaskContext?: import('./runninghub').RunningHubTaskContext;
@@ -473,6 +569,35 @@ export interface AudioSpeechSettings {
   /** 0 很慢、1 偏慢、2 正常、3 偏快、4 很快。 */
   pace?: number;
   duration?: number;
+  /** 按工作流保存用户覆盖值；没有覆盖的字段沿用工作流原值。 */
+  qwen?: Record<string, Record<string, AudioSpeechParameterValue>>;
+}
+
+export type AudioSpeechParameterValue = string | number | boolean;
+
+export interface QwenSpeechField {
+  id: string;
+  nodeId: string;
+  key: string;
+  label: string;
+  group: string;
+  value: AudioSpeechParameterValue;
+  kind: 'text' | 'number' | 'boolean' | 'select';
+  options?: string[];
+  min?: number;
+  max?: number;
+  step?: number;
+  integer?: boolean;
+  hint?: string;
+  virtual?: boolean;
+}
+
+export interface QwenSpeechControls {
+  workflowId: string;
+  mode: 'clone' | 'design' | 'reference-design';
+  fields: QwenSpeechField[];
+  designNodeId?: string;
+  conversionNodeId?: string;
 }
 
 export interface AudioSpeechReference {
@@ -490,7 +615,8 @@ export interface AudioSpeechWorkflowControls {
   textKey: string;
   generatorId: string;
   referenceInputId?: string;
-  duration: number;
+  duration?: number;
+  qwen?: QwenSpeechControls;
 }
 
 export interface AIAudioGenParams {
@@ -523,12 +649,17 @@ export interface AIAudioGenParams {
   nodeId?: string;
 }
 
-export type AudioTtsVoice = 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';
+/** 平台预置音色或用户已创建的音色 ID，由实际厂商合同校验。 */
+export type AudioTtsVoice = string;
 
-export type AudioOutputFormat = 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
+export type AudioOutputFormat = 'mp3' | 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
 
 export interface AudioGenerationResult {
   url: string;
+  mediaDownloadAccess?: MediaDownloadAccess;
+  taskReceipt?: MediaTaskReceipt;
+  /** 本地 ComfyUI 已完成但尚待画布交付的任务身份。 */
+  comfyTaskId?: string;
   workflowApiOutputs?: import('./workflowApi').CloudWorkflowOutput[];
   workflowApiTaskId?: string;
   runninghubOutputs?: import('./runninghub').RunningHubOutput[];

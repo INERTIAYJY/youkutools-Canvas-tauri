@@ -1,3 +1,6 @@
+/**
+ * contextManagerSources — 回归测试：context source metadata。
+ */
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../../../src/types/chat';
 import {

@@ -1,3 +1,6 @@
+/**
+ * agentScheduler — 回归测试：conversation agent scheduler。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   cancelScheduledAgentExecution,

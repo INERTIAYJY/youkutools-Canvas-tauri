@@ -1,3 +1,6 @@
+/**
+ * videoSeek — 回归测试：seekVideoTo。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   FRAME_PRESENT_FALLBACK_MS,

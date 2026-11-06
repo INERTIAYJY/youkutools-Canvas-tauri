@@ -1,12 +1,11 @@
 /**
  * ai/modelProtocolResponse — 声明式模型协议响应的读取与预览。
- * 按点号路径（支持 * 通配、数字下标）从响应 JSON 中抽取 URL、文本、Base64、错误、进度等字段，
+ * 按点号路径（支持 * 通配、数字下标及 [*]/[0] 写法）从响应 JSON 中抽取 URL、文本、Base64、错误、进度等字段，
  * 路径解析屏蔽 __proto__ / prototype / constructor 等危险段；并提供给协议编辑器的响应预览条目
  * （Base64 结果脱敏为字符数）。
  */
 import type { NormalizedModelExecutionProtocol, ProtocolJsonValue } from '../../types/aiTypes';
-
-const BLOCKED_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+import { BLOCKED_PATH_SEGMENTS, isRecord } from './modelProtocolShared';
 
 export interface ModelProtocolResponsePreviewEntry {
   id: string;
@@ -16,13 +15,10 @@ export interface ModelProtocolResponsePreviewEntry {
   values: string[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
 export function readModelProtocolPathValues(value: unknown, path: string): unknown[] {
   let current = [value];
-  for (const segment of path.split('.')) {
+  const normalizedPath = path.replace(/\[(\*|\d+)\]/g, '.$1');
+  for (const segment of normalizedPath.split('.')) {
     if (!segment || BLOCKED_PATH_SEGMENTS.has(segment)) return [];
     const next: unknown[] = [];
     for (const item of current) {

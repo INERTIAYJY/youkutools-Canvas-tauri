@@ -11,6 +11,7 @@ import {
   useReducedMotion,
 } from 'framer-motion';
 import { fadeFast, fadeNormal, panelMotion, springSmooth } from '../../utils/motion';
+import { useDialogFocus } from '../../hooks/useDialogFocus';
 
 export default function ModalOverlay({
   isOpen,
@@ -22,6 +23,7 @@ export default function ModalOverlay({
   draggable = false,
   motionPreset = 'spring',
   backdropBlur = true,
+  zIndex = 250,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -32,12 +34,13 @@ export default function ModalOverlay({
   draggable?: boolean;
   motionPreset?: 'spring' | 'quick';
   backdropBlur?: boolean;
+  /** Overlay stacking order. Higher values keep nested dialogs above their parent modal. */
+  zIndex?: number;
 }) {
   const reduceMotion = useReducedMotion();
   const quickMotion = motionPreset === 'quick';
   const overlayRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
   const dragControls = useDragControls();
   const dragX = useMotionValue(0);
   const dragY = useMotionValue(0);
@@ -76,9 +79,7 @@ export default function ModalOverlay({
     dragControls.start(event);
   };
 
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
+  useDialogFocus(isOpen, panelRef, onClose, { zIndex });
 
   useEffect(() => {
     if (!isOpen || !draggable) {
@@ -92,68 +93,13 @@ export default function ModalOverlay({
     return () => window.removeEventListener('resize', handleResize);
   }, [clampPanelToViewport, dragX, dragY, draggable, isOpen]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const previouslyFocused = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    const panel = panelRef.current;
-    if (!panel) return;
-
-    const getFocusableElements = () => Array.from(
-      panel.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((element) => element.getClientRects().length > 0);
-
-    const focusFrame = requestAnimationFrame(() => {
-      const firstFocusable = getFocusableElements()[0];
-      (firstFocusable ?? panel).focus();
-    });
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-
-      const focusableElements = getFocusableElements();
-      if (focusableElements.length === 0) {
-        event.preventDefault();
-        panel.focus();
-        return;
-      }
-
-      const firstFocusable = focusableElements[0];
-      const lastFocusable = focusableElements[focusableElements.length - 1];
-      const activeElement = document.activeElement;
-      if (event.shiftKey && (activeElement === firstFocusable || !panel.contains(activeElement))) {
-        event.preventDefault();
-        lastFocusable.focus();
-      } else if (!event.shiftKey && (activeElement === lastFocusable || !panel.contains(activeElement))) {
-        event.preventDefault();
-        firstFocusable.focus();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown, true);
-    return () => {
-      cancelAnimationFrame(focusFrame);
-      document.removeEventListener('keydown', handleKeyDown, true);
-      if (previouslyFocused?.isConnected) previouslyFocused.focus();
-    };
-  }, [isOpen]);
-
   return createPortal(
     <AnimatePresence>
       {isOpen && (
         <motion.div
           ref={overlayRef}
           className="fixed inset-0 z-[250] flex items-center justify-center overflow-hidden rounded-2xl"
+          style={{ zIndex }}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -162,7 +108,7 @@ export default function ModalOverlay({
           <motion.div
             data-tauri-drag-region
             aria-hidden="true"
-            className={`absolute inset-0 bg-black/50 ${backdropBlur ? 'backdrop-blur-sm' : ''}`}
+            className={`absolute inset-0 bg-black/50 ${backdropBlur ? 'appearance-modal-backdrop' : ''}`}
             initial={quickMotion ? false : { opacity: 0 }}
             animate={quickMotion ? undefined : { opacity: 1 }}
             exit={quickMotion ? undefined : { opacity: 0 }}

@@ -1,6 +1,8 @@
 /**
  * useCanvasContextMenu 画布右键菜单 Hook — 管理画布空白区域右键菜单的显示/隐藏、子菜单展开、节点添加操作
  */
+import { t } from '../i18n';
+
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import type { Node as RFNode } from '@xyflow/react';
@@ -13,28 +15,8 @@ import { cancelNodePolling } from '../services/pollManager';
 import { playNodeExit } from '../utils/nodeAnimations';
 import { createPluginNode, getAvailablePluginNodes } from '../services/plugins/pluginRuntime';
 import type { AvailablePluginNode } from '../types/plugin';
-
-// ── Model preference helper ──
-const MODEL_PREF_KEY = 'canvas-model-prefs';
-
-function loadDefaultModel(nodeType: string): { model: string; provider: string } | null {
-  try {
-    const raw = localStorage.getItem(MODEL_PREF_KEY);
-    if (!raw) return null;
-    const prefs: Record<string, string> = JSON.parse(raw);
-    // 全景图回退到生图偏好
-    const modelValue = prefs[nodeType]
-      || (nodeType === 'ai-panorama' || nodeType === 'ai-animation' ? prefs['ai-image'] : undefined);
-    if (!modelValue) return null;
-    const slashIdx = modelValue.indexOf('/');
-    if (slashIdx === -1) return null;
-    const provider = modelValue.slice(0, slashIdx);
-    if (!provider) return null;
-    return { model: modelValue, provider };
-  } catch {
-    return null;
-  }
-}
+import { collectCanvasDescendantIds } from '../utils/canvasHierarchy';
+import { getPreferredNodeModel } from '../services/modelPreferenceService';
 
 interface ContextMenuState {
   visible: boolean;
@@ -92,7 +74,14 @@ export function useCanvasContextMenu() {
   }, [menu.visible, closeMenu]);
 
   const addNodeAtCtxPos = useCallback(
-    (type: NodeType, label: string, role: 'generator' | 'source' = 'generator') => {
+    (
+      type: NodeType,
+      label: string,
+      role: 'generator' | 'source' = 'generator',
+      grid?: { rows: number; cols: number },
+    ) => {
+      if (type === 'ai-storyboard' && (!grid || !Number.isInteger(grid.rows) || !Number.isInteger(grid.cols)
+        || grid.rows < 1 || grid.cols < 1 || grid.rows > 20 || grid.cols > 20)) return;
       const pos = menu.flowPosition;
       const flowPos = reactFlowInstance.screenToFlowPosition({ x: pos.x, y: pos.y });
       const isImage = type === 'ai-image';
@@ -100,10 +89,13 @@ export function useCanvasContextMenu() {
       const isAnimation = type === 'ai-animation';
       const isDirector = type === 'ai-director';
       const isShotlist = type === 'ai-shotlist';
+      const isStoryboard = type === 'ai-storyboard';
       const isSource = role === 'source';
-      const newWidth = isShotlist ? 720 : isAnimation || isDirector ? 320 : type === 'ai-audio' ? 260 : isPanorama ? 300 : 280;
-      const newHeight = isShotlist ? 380 : isDirector ? 240 : isAnimation ? 358 : type === 'ai-audio' ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
-      const defaultModel = !isSource ? loadDefaultModel(type) : null;
+      const newWidth = isShotlist ? 720 : isStoryboard ? Math.max(280, grid!.cols * 56)
+        : isAnimation || isDirector ? 320 : type === 'ai-audio' ? 260 : isPanorama ? 300 : 280;
+      const newHeight = isShotlist ? 380 : isStoryboard ? Math.max(200, grid!.rows * 56)
+        : isDirector ? 240 : isAnimation ? 358 : type === 'ai-audio' ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
+      const defaultModel = !isSource && !isDirector ? getPreferredNodeModel(type, useAppStore.getState()) : null;
       const newNode: RFNode<BaseNodeData> = {
         id: `node-${generateId()}`,
         type,
@@ -134,7 +126,12 @@ export function useCanvasContextMenu() {
             shotlistColumns: SHOTLIST_DEFAULT_COLUMNS,
             shotlistRows: [1, 2, 3].map((no) => createShotRow(`shot-${generateId()}`, no)),
           } : {}),
-          ...(defaultModel ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
+          ...(isStoryboard ? {
+            storyboardRows: grid!.rows,
+            storyboardCols: grid!.cols,
+            storyboardExtracted: new Array<boolean>(grid!.rows * grid!.cols).fill(true),
+          } : {}),
+          ...defaultModel,
         },
       };
       addNode(newNode);
@@ -209,15 +206,7 @@ export function useCanvasContextMenu() {
     useAppStore.setState({ selectedNodeIds: [] });
 
     // Expand to include descendants of any selected group nodes
-    const expandedIds = new Set(nodeIds);
-    const q = [...nodeIds];
-    while (q.length > 0) {
-      const pid = q.shift()!;
-      state.nodes.filter((n) => n.parentId === pid).forEach((c) => {
-        expandedIds.add(c.id);
-        q.push(c.id);
-      });
-    }
+    const expandedIds = collectCanvasDescendantIds(state.nodes, nodeIds);
     const allIds = Array.from(expandedIds);
 
     // Cancel any active polling for all deleted nodes
@@ -227,11 +216,11 @@ export function useCanvasContextMenu() {
 
     // Delete associated local files
     const keepPaths = new Set(
-      state.nodes.filter((n) => !allIds.includes(n.id))
+      state.nodes.filter((n) => !expandedIds.has(n.id))
         .map((n) => (n.data as BaseNodeData).filePath)
         .filter((p): p is string => !!p),
     );
-    for (const node of state.nodes.filter((n) => allIds.includes(n.id))) {
+    for (const node of state.nodes.filter((n) => expandedIds.has(n.id))) {
       fileService.deleteNodeFile(node.data as BaseNodeData, keepPaths, state.currentProjectId).catch(() => {});
     }
 
@@ -256,8 +245,9 @@ export function useCanvasContextMenu() {
   const handleCopyNodes = useCallback(() => {
     const state = useAppStore.getState();
     if (state.selectedNodeIds.length === 0) return;
-    state.copySelectedNodes();
-    useAppStore.getState().showToast(`已复制 ${state.selectedNodeIds.length} 个节点`);
+    if (state.copySelectedNodes()) {
+      useAppStore.getState().showToast(t('已复制 {count} 个节点', { count: state.selectedNodeIds.length }));
+    }
     closeMenu();
   }, [closeMenu]);
 

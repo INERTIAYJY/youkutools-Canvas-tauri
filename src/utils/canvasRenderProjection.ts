@@ -1,3 +1,6 @@
+/**
+ * canvasRenderProjection — 维护画布节点索引与节点、连线的渲染投影。
+ */
 import type { Edge, Node, NodeChange } from '@xyflow/react';
 import type { BaseNodeData } from '../types';
 import { withCanvasEdgeLayer, withCanvasNodeLayer } from './canvasElementLayering';
@@ -22,11 +25,21 @@ export interface CanvasEdgeProjection {
 
 let indexedNodes: readonly CanvasNode[] | null = null;
 const indexedNodeById = new Map<string, CanvasNode>();
+const indexedNodeOrder = new Map<string, number>();
 const edgeProjectionCache = new WeakMap<readonly Edge[], CanvasEdgeProjection>();
+const MAX_SELECTED_EDGE_FLOW_ANIMATIONS = 12;
+
+/** 按画布坐标保守限制离屏遮罩，避免给每条边新增逐帧缩放订阅。 */
+export function canAnimateCanvasEdgeFlow(maskWidth: number, maskHeight: number): boolean {
+  return maskWidth > 0 && maskHeight > 0
+    && maskWidth <= 4096 && maskHeight <= 4096
+    && maskWidth * maskHeight <= 4 * 1024 * 1024;
+}
 
 function rebuildNodeIndex(nodes: readonly CanvasNode[]): void {
   indexedNodeById.clear();
-  for (const node of nodes) indexedNodeById.set(node.id, node);
+  indexedNodeOrder.clear();
+  nodes.forEach((node, order) => { indexedNodeById.set(node.id, node); indexedNodeOrder.set(node.id, order); });
 }
 
 /**
@@ -64,6 +77,12 @@ export function getCanvasNodeById(
 ): CanvasNode | undefined {
   ensureNodeIndex(nodes);
   return indexedNodeById.get(nodeId);
+}
+
+/** 连接候选沿用节点数组顺序，与连线添加顺序无关。 */
+export function getCanvasNodeOrder(nodes: readonly CanvasNode[], nodeId: string): number {
+  ensureNodeIndex(nodes);
+  return indexedNodeOrder.get(nodeId) ?? -1;
 }
 
 /** 项目切换到空画布时也主动同步，避免索引暂时保留上一项目的节点引用。 */
@@ -138,13 +157,13 @@ function createRenderData(data: BaseNodeData): BaseNodeData {
 }
 
 function applyCanvasNodeRenderLayout(node: CanvasNode, data: BaseNodeData): CanvasNode {
-  const renderNode = node.type === 'canvas-note'
+  const renderNode = node.type === 'canvas-note' || (node.type === 'group' && !node.data.groupCollapsed)
     ? {
         ...node,
         data,
         style: {
           ...node.style,
-          // 笔记的透明外接矩形不能遮挡下方节点；可见内容由笔记样式恢复命中。
+          // 笔记外接矩形与展开分组的空白区透传事件；内容、标题和控件自行恢复命中。
           pointerEvents: 'none' as const,
         },
       }
@@ -167,6 +186,7 @@ export function projectCanvasNodesForReactFlow(
     if (
       cached
       && hasSameNodeFieldsExceptData(cached.source, node)
+      && cached.source.data.groupCollapsed === node.data.groupCollapsed
       && hasSameRenderFallbackData(cached.renderData, node.data)
     ) {
       cached.source = node;
@@ -233,6 +253,7 @@ export function projectSelectedCanvasEdges(
   if (selectedEdgeIndexes.size === 0) return projection.layeredEdges;
 
   const selectedEdges = [...projection.layeredEdges];
+  let animatedEdges = 0;
   for (const edgeIndex of selectedEdgeIndexes) {
     const edge = projection.layeredEdges[edgeIndex];
     selectedEdges[edgeIndex] = withCanvasEdgeLayer({
@@ -240,6 +261,8 @@ export function projectSelectedCanvasEdges(
       type: 'selected-node-flow',
       data: {
         ...edge.data,
+        // 只限制渲染装饰，完整边、输入引用与剪断交互仍全部保留。
+        selectedNodeFlowAnimated: animatedEdges++ < MAX_SELECTED_EDGE_FLOW_ANIMATIONS,
         selectedNodeFlowBaseType: edge.type === 'smoothstep' || (!edge.type && smoothLine)
           ? 'smoothstep'
           : 'default',

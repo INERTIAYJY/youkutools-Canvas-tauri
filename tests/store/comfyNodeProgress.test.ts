@@ -1,3 +1,6 @@
+/**
+ * comfyNodeProgress — 回归测试：ComfyUI 节点运行时进度。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useAppStore } from '../../src/store/useAppStore';
 

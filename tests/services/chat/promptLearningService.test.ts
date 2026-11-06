@@ -1,3 +1,6 @@
+/**
+ * promptLearningService — 回归测试：prompt learning service。
+ */
 import { describe, expect, it } from 'vitest';
 import type { HistoryRecord } from '../../../src/services/indexedDbService';
 import {

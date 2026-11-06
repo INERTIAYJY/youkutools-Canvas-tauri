@@ -1,12 +1,15 @@
 ﻿/**
- * StoryboardNode 宫格分镜 — 单节点内把源图按均分网格拼接展示（多图拼接）。
+ * StoryboardNode 宫格分镜 — 展示源图裁片，或创建可拖入图片的空白宫格。
  *
- * 各格用「超尺寸源图 + 负偏移」呈现对应裁片（object-fit:fill）；分割线固定不可拖拽。
+ * 有源图时按行列裁切展示；空白格可接收画布上的图片节点。
  * 双击进入分镜编辑：可拖拽某一格到画布，生成一个「提取分镜r-c」真实裁片图像节点，
  * 原格随即变为空占位（+）。
  */
+import { t as translate, useT } from '../../i18n';
 import { memo, lazy, Suspense, useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import ViewportImage from '../shared/ViewportImage';
+import { useComfyImageSource } from '../../hooks/useComfyImageSource';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import type { Node } from '@xyflow/react';
 import type { BaseNodeData, StoryboardCellOverride } from '../../types';
@@ -33,6 +36,7 @@ const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
 const DRAG_THRESHOLD = 8;
 
 function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
+  const t = useT();
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const { screenToFlowPosition } = useReactFlow();
@@ -64,6 +68,7 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
     ...overrides.map((override) => override?.filePath),
   ]);
   const displayImageUrl = withPreviewRevision(imageUrl, revisionFor(data.filePath));
+  const hasGridContent = Boolean(displayImageUrl) || extracted.some(Boolean) || overrides.some(Boolean);
 
   // 行/列边界（含 0 和 100）：均分宫格按格数算，自定义宫格按线算
   const hRanges = useMemo(() => gridBoundaries(rows, rowPositions), [rows, rowPositions]);
@@ -104,7 +109,8 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
     return arr;
   }, [rows, cols, hRanges, vRanges]);
 
-  const backgroundImage = displayImageUrl ? `url("${displayImageUrl}")` : undefined;
+  const renderedImageUrl = useComfyImageSource(displayImageUrl);
+  const backgroundImage = renderedImageUrl ? `url("${renderedImageUrl}")` : undefined;
 
   // 取消选中即退出编辑态：派生而非用 effect 回写，避免多一轮渲染
   const editing = editRequested && !!selected;
@@ -169,7 +175,7 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
   // ── 拖出一格 → 生成「提取分镜」图像节点 ──
   const extractCell = useCallback(
     async (idx: number, clientX: number, clientY: number) => {
-      if (!displayImageUrl) return;
+      if (!displayImageUrl && !overrides[idx]) return;
       const r = Math.floor(idx / cols);
       const c = idx % cols;
       const store = useAppStore.getState();
@@ -203,6 +209,8 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
         completeCanvasDerivation(derivation);
         return;
       }
+
+      if (!displayImageUrl) return;
 
       // 立即建 loading 节点 + 标记原格已提取
       const newId = `node-${generateId()}`;
@@ -275,7 +283,7 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
         console.error('[Storyboard] 提取失败:', err);
         const shouldNotify = isCanvasDerivationFresh(derivation, useAppStore.getState());
         cancelCanvasDerivation(derivation);
-        if (shouldNotify) useAppStore.getState().showToast('提取分镜失败，请重试', 'error');
+        if (shouldNotify) useAppStore.getState().showToast(translate('提取分镜失败，请重试'), 'error');
       }
     },
     [id, displayImageUrl, cols, rows, isCustomGrid, hRanges, vRanges, extracted, overrides, revisionFor, screenToFlowPosition],
@@ -306,7 +314,7 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
     [editing, extracted, extractCell],
   );
 
-  const { displayLabel, handleRename } = useNodeRename(id, data, '宫格分镜');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('宫格分镜'));
 
   // 拖出中格子的裁片偏移（用于幽灵预览）
   const dragCell = drag != null ? cells[drag.idx] : null;
@@ -323,15 +331,15 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
       <div
         className={`node storyboard-node ${selected ? 'selected' : ''} ${editing ? 'editing' : ''}`}
         style={{ height: nodeHeight }}
-        data-tooltip={editing ? undefined : '双击进入编辑'}
+        data-tooltip={editing ? undefined : t('双击进入编辑')}
         onDoubleClick={toggleEditing}
       >
         <div className="storyboard-grid">
-          {displayImageUrl ? (
+          {hasGridContent ? (
             cells.map((cell) => {
               const override = overrides[cell.idx];
               const isEmpty = !override && extracted[cell.idx];
-              const draggable = editing && !isEmpty; // 空格不可拖出（可作拖入目标）
+              const draggable = editing && !isEmpty && Boolean(displayImageUrl || override); // 空格不可拖出（可作拖入目标）
               return (
                 <div
                   key={cell.idx}
@@ -342,7 +350,7 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
                   onPointerDown={draggable ? startCellDrag(cell.idx) : undefined}
                 >
                   {override ? (
-                    <img className="sb-cell-fill" src={withPreviewRevision(override.url, revisionFor(override.filePath))} alt="" draggable={false} />
+                    <ViewportImage eager className="sb-cell-fill" src={withPreviewRevision(override.url, revisionFor(override.filePath))} alt="" draggable={false} />
                   ) : isEmpty ? (
                     <span className="sb-cell-plus">+</span>
                   ) : null}
@@ -351,25 +359,25 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
               );
             })
           ) : (
-            <div className="storyboard-empty">无图像</div>
+            <div className="storyboard-empty">{t('无图像')}</div>
           )}
 
           {editing && displayImageUrl && (
             <button
               type="button"
               className="storyboard-lines-btn nodrag"
-              data-tooltip="调整分割线"
+              data-tooltip={t('调整分割线')}
               onClick={openLineEditor}
               onPointerDown={(e) => e.stopPropagation()}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 10h18M3 14h18M10 3v18M14 3v18" />
               </svg>
-              调线
+              {t('调线')}
             </button>
           )}
 
-          {displayImageUrl && (
+          {hasGridContent && (
             <span className="storyboard-badge">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
                 <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
@@ -415,12 +423,12 @@ function StoryboardNode({ id, data, selected }: { id: string; data: BaseNodeData
       )}
 
       {/* 拖出幽灵预览（portal 到 body，避免被画布 transform 影响定位）*/}
-      {drag && dragCell && displayImageUrl &&
+      {drag && dragCell && (displayImageUrl || overrides[drag.idx]) &&
         createPortal(
           <div className="sb-drag-ghost" style={{ left: drag.x, top: drag.y }}>
             <div className="sb-drag-ghost-clip">
               {overrides[drag.idx] ? (
-                <img src={withPreviewRevision(overrides[drag.idx]!.url, revisionFor(overrides[drag.idx]!.filePath))} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <ViewportImage eager src={withPreviewRevision(overrides[drag.idx]!.url, revisionFor(overrides[drag.idx]!.filePath))} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               ) : (
                 <div className="sb-drag-ghost-fill" style={{ ...dragCell.bg, backgroundImage }} />
               )}

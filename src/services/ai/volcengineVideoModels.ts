@@ -4,85 +4,63 @@
  * 因此能力表只承载 UI 侧的档位约束，不参与请求体映射。
  */
 import type { ApimartSeedanceCapability } from './apimartVideoModels';
+import {
+  getOfficialSeedanceCapability,
+  type SeedanceModelVariant,
+} from './seedanceModelCapabilities';
 
-const SD_2_RESOLUTIONS = ['480p', '720p'] as const;
-const SD_2_FULL_RESOLUTIONS = [...SD_2_RESOLUTIONS, '1080p', '4k'] as const;
-const SD_2_0_RATIOS = ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] as const;
-const COMMON_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const;
+function createVolcengineSeedanceCapability(
+  variant: SeedanceModelVariant,
+  modelId: string,
+): ApimartSeedanceCapability {
+  const capability = getOfficialSeedanceCapability(variant);
+  return {
+    modelId,
+    resolutions: capability.resolutions ?? [],
+    defaultResolution: capability.defaultResolution ?? capability.resolutions?.[0] ?? '720p',
+    ratios: capability.ratios ?? [],
+    defaultRatio: capability.defaultRatio ?? capability.ratios?.[0] ?? '16:9',
+    ratioField: 'aspect_ratio',
+    ...(capability.durations?.length ? { durations: capability.durations } : {}),
+    minDuration: capability.minDuration ?? 4,
+    maxDuration: capability.maxDuration ?? 15,
+    ...(capability.defaultDuration === undefined ? {} : { defaultDuration: capability.defaultDuration }),
+    ...(capability.automaticDurationValue === undefined
+      ? {}
+      : { automaticDurationValue: capability.automaticDurationValue }),
+    audioField: capability.supportsAudio ? 'generate_audio' : undefined,
+    defaultAudio: capability.supportsAudio,
+    operations: capability.operations ?? [],
+    maxImageReferences: capability.maxImageReferences ?? 0,
+    maxVideoReferences: capability.maxVideoReferences,
+    maxAudioReferences: capability.maxAudioReferences,
+    inputConstraints: capability.inputConstraints,
+    inputModeCapabilities: capability.inputModeCapabilities,
+    operationCapabilities: capability.operationCapabilities,
+  };
+}
 
 /**
  * 火山方舟 Seedance 能力表。按官方模型规格限制参数面板可选项，
  * 避免把某个版本不支持的分辨率、比例或时长提交到接口。
  */
 const VOLCENGINE_SEEDANCE_CAPABILITIES: Record<string, ApimartSeedanceCapability> = {
-  'doubao-seedance-2-0': {
-    modelId: 'doubao-seedance-2-0-260128',
-    resolutions: SD_2_FULL_RESOLUTIONS,
-    defaultResolution: '720p',
-    ratios: SD_2_0_RATIOS,
-    defaultRatio: '16:9',
-    ratioField: 'aspect_ratio',
-    minDuration: 4,
-    maxDuration: 15,
-    defaultDuration: 5,
-    audioField: 'generate_audio',
-    defaultAudio: true,
-    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
-    maxImageReferences: 9,
-    maxVideoReferences: 3,
-    maxAudioReferences: 3,
-  },
-  'doubao-seedance-2-0-fast': {
-    modelId: 'doubao-seedance-2-0-fast-260128',
-    resolutions: SD_2_RESOLUTIONS,
-    defaultResolution: '720p',
-    ratios: SD_2_0_RATIOS,
-    defaultRatio: '16:9',
-    ratioField: 'aspect_ratio',
-    minDuration: 4,
-    maxDuration: 15,
-    defaultDuration: 5,
-    audioField: 'generate_audio',
-    defaultAudio: true,
-    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
-    maxImageReferences: 9,
-    maxVideoReferences: 3,
-    maxAudioReferences: 3,
-  },
-  'doubao-seedance-2-0-mini': {
-    modelId: 'doubao-seedance-2-0-mini-260615',
-    resolutions: SD_2_RESOLUTIONS,
-    defaultResolution: '720p',
-    ratios: SD_2_0_RATIOS,
-    defaultRatio: '16:9',
-    ratioField: 'aspect_ratio',
-    minDuration: 4,
-    maxDuration: 15,
-    defaultDuration: 5,
-    audioField: 'generate_audio',
-    defaultAudio: true,
-    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
-    maxImageReferences: 9,
-    maxVideoReferences: 3,
-    maxAudioReferences: 3,
-  },
-  'doubao-seedance-2-5': {
-    modelId: 'doubao-seedance-2-5-260628',
-    resolutions: [...SD_2_RESOLUTIONS, '1080p'],
-    defaultResolution: '720p',
-    ratios: COMMON_RATIOS,
-    defaultRatio: '16:9',
-    ratioField: 'aspect_ratio',
-    minDuration: 4,
-    maxDuration: 30,
-    defaultDuration: 5,
-    audioField: 'generate_audio',
-    defaultAudio: true,
-    operations: ['text-to-video', 'image-to-video', 'video-to-video'],
-    maxImageReferences: 30,
-    maxVideoReferences: 10,
-    maxAudioReferences: 10,
-  },
+  'doubao-seedance-2-0': createVolcengineSeedanceCapability(
+    '2.0-standard',
+    'doubao-seedance-2-0-260128',
+  ),
+  'doubao-seedance-2-0-fast': createVolcengineSeedanceCapability(
+    '2.0-fast',
+    'doubao-seedance-2-0-fast-260128',
+  ),
+  'doubao-seedance-2-0-mini': createVolcengineSeedanceCapability(
+    '2.0-mini',
+    'doubao-seedance-2-0-mini-260615',
+  ),
+  'doubao-seedance-2-5': createVolcengineSeedanceCapability(
+    '2.5',
+    'doubao-seedance-2-5-260628',
+  ),
 };
 
 function normalizeVolcengineModelId(model: string): string {

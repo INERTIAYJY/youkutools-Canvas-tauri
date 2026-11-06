@@ -1,3 +1,6 @@
+/**
+ * roundedMiniMapMask — 回归测试：rounded minimap mask。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const effects = vi.hoisted(() => ({ pending: [] as Array<() => void | (() => void)> }));

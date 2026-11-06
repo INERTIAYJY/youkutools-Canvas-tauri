@@ -1,3 +1,6 @@
+/**
+ * distributionGapHandles — 回归测试：distribution gap handle screen projection。
+ */
 import type { Node as RFNode } from '@xyflow/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

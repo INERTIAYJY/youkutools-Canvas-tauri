@@ -3,6 +3,9 @@
  */
 import { motion, AnimatePresence } from 'framer-motion';
 import type { UpdateInfo } from '../../../services/updateService';
+import DownloadProgress from '../DownloadProgress';
+import { useT } from '../../../i18n';
+import { useAppStore } from '../../../store/useAppStore';
 
 interface UpdateBubbleProps {
   info: UpdateInfo;
@@ -13,6 +16,8 @@ interface UpdateBubbleProps {
 }
 
 export default function UpdateBubble({ info, visible, onUpdate, onDismiss, updating }: UpdateBubbleProps) {
+  const t = useT();
+  const progress = useAppStore((state) => state.appUpdateProgress);
   return (
     <AnimatePresence>
       {visible && (
@@ -28,26 +33,39 @@ export default function UpdateBubble({ info, visible, onUpdate, onDismiss, updat
 
           <div className="relative bg-canvas-card border border-canvas-border rounded-xl p-3 shadow-xl">
             <p className="text-sm text-canvas-text font-semibold mb-1">
-              发现新版本 v{info.version}
+              {t('发现新版本 v{version}', { version: info.version })}
             </p>
             {info.body && (
               <p className="update-bubble__body text-xs text-canvas-text-secondary mb-3">
                 {info.body}
               </p>
             )}
+            {progress?.phase === 'downloading' ? (
+              <DownloadProgress
+                downloadedBytes={progress.downloadedBytes}
+                totalBytes={progress.totalBytes}
+                label={t(progress.message)}
+                className="mb-3 mt-2"
+              />
+            ) : progress ? (
+              <p role="status" className={`mb-3 mt-2 text-xs ${progress.phase === 'error' ? 'text-danger-light' : 'text-canvas-text-secondary'}`}>
+                {t(progress.message)}
+              </p>
+            ) : null}
             <div className="flex gap-2">
               <button
                 onClick={onDismiss}
-                className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-canvas-hover text-canvas-text-secondary hover:bg-canvas-border transition-colors"
+                disabled={updating}
+                className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-canvas-hover text-canvas-text-secondary hover:bg-canvas-border disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                暂不更新
+                {t('暂不更新')}
               </button>
               <button
                 onClick={onUpdate}
                 disabled={updating}
                 className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium"
               >
-                {updating ? '正在更新...' : '立即更新'}
+                {updating ? t('正在更新...') : t('立即更新')}
               </button>
             </div>
           </div>

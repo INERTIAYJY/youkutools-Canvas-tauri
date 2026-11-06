@@ -1,3 +1,6 @@
+/**
+ * cropOperationRegistry — 登记裁剪操作并替换同一节点的旧操作。
+ */
 export interface CropOperation {
   id: number;
   isCurrent: () => boolean;

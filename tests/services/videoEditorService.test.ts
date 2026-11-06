@@ -1,3 +1,6 @@
+/**
+ * videoEditorService — 回归测试：videoEditor 数据层。
+ */
 import { IDBFactory } from 'fake-indexeddb';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

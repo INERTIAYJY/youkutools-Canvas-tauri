@@ -1,3 +1,7 @@
+/**
+ * store.plugins — 编排插件安装、持久化、启停与原生版本激活。
+ */
+import { t } from '../i18n';
 /** 用户代码插件：安装记录、启停与 IndexedDB 持久化。 */
 import { invoke } from '@tauri-apps/api/core';
 import type { StateCreator } from 'zustand';
@@ -107,7 +111,10 @@ async function stagePluginRevision(
   };
 }
 
-async function activatePluginRevision(plugin: InstalledPlugin): Promise<void> {
+async function activatePluginRevision(
+  plugin: InstalledPlugin,
+  requestDirectoryAccess = false,
+): Promise<void> {
   if (!plugin.sourceDigest) throw new Error('插件源码摘要缺失');
   if (!plugin.revisionDigest) throw new Error('插件 revision 摘要缺失');
   await invoke('activate_plugin_revision', {
@@ -115,6 +122,8 @@ async function activatePluginRevision(plugin: InstalledPlugin): Promise<void> {
     sourceDigest: plugin.sourceDigest,
     revisionDigest: plugin.revisionDigest,
     enabled: plugin.enabled,
+    // 仅显式启用可请求目录授权；安装后的激活和失败补偿不重复提示。
+    ...(requestDirectoryAccess ? { requestDirectoryAccess: true } : {}),
   });
 }
 
@@ -216,9 +225,12 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           plugin,
         ].sort((left, right) => left.manifest.name.localeCompare(right.manifest.name)),
       }));
-      get().showToast(previous ? `已更新插件「${manifest.name}」` : `已安装插件「${manifest.name}」`);
+      get().showToast(previous ? t('已更新插件「{name}」', { name: manifest.name }) : t('已安装插件「{name}」', { name: manifest.name }));
       return plugin;
     } catch (error) {
+      if (isPluginRegistryCorruption(error)) {
+        set({ pluginRegistryRepairRequired: true });
+      }
       const rollbackFailures: string[] = [];
       let nativeRollbackSucceeded = false;
       if (previous && !previous.sourceDigest && !previousLeaseRevoked) {
@@ -234,6 +246,9 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
         await restoreNativePluginRevision(previous, manifest.id);
         nativeRollbackSucceeded = true;
       } catch (rollbackError) {
+        if (isPluginRegistryCorruption(rollbackError)) {
+          set({ pluginRegistryRepairRequired: true });
+        }
         rollbackFailures.push(`恢复原生插件注册失败：${errorMessage(rollbackError)}`);
       }
       try {
@@ -274,11 +289,14 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
     }
     try {
       if (enabled) {
-        await activatePluginRevision(updated);
+        await activatePluginRevision(updated, true);
       } else {
         await invoke('set_plugin_registration_enabled', { pluginId: id, enabled: false });
       }
     } catch (error) {
+      if (isPluginRegistryCorruption(error)) {
+        set({ pluginRegistryRepairRequired: true });
+      }
       if (!enabled) {
         throw new Error(
           `插件已在当前会话停用，但原生停用状态未确认：${errorMessage(error)}`,
@@ -293,6 +311,9 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
       try {
         await invoke('set_plugin_registration_enabled', { pluginId: id, enabled: plugin.enabled });
       } catch (rollbackError) {
+        if (isPluginRegistryCorruption(rollbackError)) {
+          set({ pluginRegistryRepairRequired: true });
+        }
         throw new Error(
           `${errorMessage(error)}；恢复原生插件启停状态失败：${errorMessage(rollbackError)}`,
           { cause: rollbackError },
@@ -405,8 +426,8 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           },
         };
         try {
-          if (plugin.manifest.apiVersion !== 1) {
-            throw new Error('已安装插件不符合当前 API v1，请重新安装');
+          if (plugin.manifest.apiVersion !== 1 && plugin.manifest.apiVersion !== 2) {
+            throw new Error('已安装插件不符合当前 API v1/v2，请重新安装');
           }
           if (plugin.sourceDigest && plugin.revisionDigest) {
             plugin = {

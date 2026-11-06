@@ -1,3 +1,6 @@
+/**
+ * modelProtocolImport — 回归测试：model protocol document import。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   analyzeModelProtocolDocument,
@@ -6,6 +9,50 @@ import {
 import { buildModelProtocolRequest } from '../../src/services/ai/modelProtocol';
 
 describe('model protocol document import', () => {
+  it.each(['image[]', 'images', 'image'])('imports multipart %s files without retaining example paths', (field) => {
+    const result = analyzeModelProtocolExamples({
+      submitRequest: `curl https://gateway.example/v1/custom/images/edit
+        -H 'Authorization: Bearer sk-placeholder'
+        -F 'model=custom-image'
+        -F 'prompt=edit this'
+        -F '${field}=@/private/first.png'
+        --form '${field}=@/private/second.png'
+        --form-string 'note=@literal'`,
+      submitResponse: '{"output":{"url":"https://cdn.example/result.png"}}',
+    });
+    expect(result.imageReferenceRequestMode).toBe('edits-multipart');
+    expect(result.protocol?.submit, result.warnings.join('; ')).toMatchObject({
+      method: 'POST', bodyEncoding: 'multipart',
+      body: { [field]: { $file: '{{imageUrls}}' }, note: '@literal' },
+    });
+    expect(JSON.stringify(result)).not.toContain('/private/');
+    expect(JSON.stringify(result)).not.toContain('sk-placeholder');
+    const built = buildModelProtocolRequest({
+      baseUrl: result.baseUrl!, protocol: result.protocol!, apiKey: 'secret',
+      variables: { model: 'custom-image', prompt: 'edit', imageUrls: [
+        'data:image/png;base64,aGVsbG8=', 'data:image/jpeg;base64,d29ybGQ=',
+      ] },
+    });
+    const body = new TextDecoder().decode(built.init.body as ArrayBuffer);
+    expect(body.split(`name="${field}"; filename=`)).toHaveLength(3);
+    expect(body).toContain('hello');
+    expect(body).toContain('world');
+  });
+
+  it('rejects file fields whose semantics cannot be inferred', () => {
+    expect(() => analyzeModelProtocolExamples({
+      submitRequest: "curl https://gateway.example/images/edit -F 'mask=@/private/mask.png'",
+      submitResponse: '{"url":"https://cdn.example/result.png"}',
+    })).toThrow('无法自动映射');
+  });
+
+  it('does not silently drop unquoted multipart arguments', () => {
+    expect(() => analyzeModelProtocolExamples({
+      submitRequest: 'curl https://gateway.example/images/edit -F image=@input.png',
+      submitResponse: '{"url":"https://cdn.example/result.png"}',
+    })).toThrow('引号包裹');
+  });
+
   it('imports an async image API with data URL reference arrays', () => {
     const result = analyzeModelProtocolExamples({
       submitRequest: `

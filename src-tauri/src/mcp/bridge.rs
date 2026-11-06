@@ -25,9 +25,9 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -44,7 +44,10 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// 固定端口后同时接多个客户端（Claude Desktop、Cursor…）是常态，仍留上限防跑飞。
 const MAX_CLIENTS: usize = 4;
+const MAX_CONNECTION_REQUESTS: usize = 8;
+const MAX_SESSION_REQUESTS: usize = 16;
 const READ_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_ENDPOINT_PATH: &str = "/mcp";
 
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -75,6 +78,7 @@ pub struct McpBridgeSessionInfo {
 #[serde(rename_all = "camelCase")]
 struct McpBridgeRequestEvent {
     session_id: String,
+    // 空 ID 仅用于原生单向撤销通知，外部 parse_request 始终拒绝空 ID。
     request_id: String,
     method: String,
     params: Value,
@@ -212,7 +216,101 @@ fn write_shared_response(
     let mut stream = writer
         .lock()
         .map_err(|_| std::io::Error::other("MCP bridge 响应锁不可用"))?;
-    write_response(&mut stream, response)
+    let result = write_response(&mut stream, response);
+    if result.is_err() {
+        // 失败时可能已发出半帧；关闭双向连接，不能把后续 JSON 追加到残缺响应。
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    result
+}
+
+fn notify_frontend_cancellation(
+    app: &AppHandle,
+    info: &McpBridgeSessionInfo,
+    request_id: Option<&str>,
+) -> bool {
+    let params = match request_id {
+        Some(request_id) => serde_json::json!({ "requestId": request_id }),
+        None => serde_json::json!({ "scope": "session" }),
+    };
+    app.emit_to(
+        "main",
+        MCP_REQUEST_EVENT,
+        McpBridgeRequestEvent {
+            session_id: info.session_id.clone(),
+            request_id: String::new(),
+            method: "requests/cancel".to_string(),
+            params,
+        },
+    )
+    .is_ok()
+}
+
+fn register_pending_request(
+    pending: &Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>,
+    request_id: String,
+    sender: mpsc::SyncSender<FrontendResponse>,
+) -> Result<(), String> {
+    let mut requests = pending
+        .lock()
+        .map_err(|_| "MCP bridge 请求锁不可用".to_string())?;
+    match requests.entry(request_id) {
+        Entry::Vacant(entry) => {
+            entry.insert(sender);
+            Ok(())
+        }
+        Entry::Occupied(_) => Err("MCP bridge 请求 ID 重复".to_string()),
+    }
+}
+
+fn claim_connection_cancellation(
+    pending: &Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>,
+    cancelled: &mut HashSet<String>,
+    target: &str,
+) -> (bool, bool) {
+    let Ok(requests) = pending.lock() else {
+        return (false, false);
+    };
+    // 此集合最多保留本连接的在途请求，不为重复/未知目标创建额外任务或等待线程。
+    cancelled.retain(|id| requests.contains_key(id));
+    let known = requests.contains_key(target);
+    (known, known && cancelled.insert(target.to_string()))
+}
+
+fn remove_connection_requests(
+    pending: &Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>,
+    prefix: &str,
+) -> Vec<String> {
+    let Ok(mut requests) = pending.lock() else {
+        return Vec::new();
+    };
+    let ids: Vec<String> = requests
+        .keys()
+        .filter(|id| id.starts_with(prefix))
+        .cloned()
+        .collect();
+    for id in &ids {
+        if let Some(sender) = requests.remove(id) {
+            let _ = sender.try_send(FrontendResponse {
+                ok: false,
+                result: None,
+                error: Some("AI Canvas MCP 客户端连接已断开".to_string()),
+            });
+        }
+    }
+    ids
+}
+
+/// 轮询超时只暂停收帧；已消费字节保留到换行，避免丢失半帧或拆开 UTF-8。
+fn read_request_frame<R: BufRead>(
+    reader: &mut R,
+    frame: &mut Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
+    reader
+        .by_ref()
+        .take(MAX_FRAME_BYTES + 1 - frame.len() as u64)
+        .read_until(b'\n', frame)?;
+    Ok(std::mem::take(frame))
 }
 
 fn handle_connection(
@@ -221,27 +319,33 @@ fn handle_connection(
     info: McpBridgeSessionInfo,
     token: String,
     active: Arc<AtomicBool>,
-    connections: Arc<AtomicUsize>,
+    session_requests: Arc<AtomicUsize>,
     pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<FrontendResponse>>>>,
 ) {
-    let _connection_guard = ClientConnectionGuard(connections);
     let connection_seq = CONNECTION_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+    let connection_requests = Arc::new(AtomicUsize::new(0));
+    // Windows accept 会继承监听 socket 的非阻塞模式；连接线程使用读超时轮询。
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
+    if stream.set_write_timeout(Some(RESPONSE_WRITE_TIMEOUT)).is_err() {
+        return;
+    }
     let Ok(read_stream) = stream.try_clone() else {
         return;
     };
     let writer = Arc::new(Mutex::new(stream));
-    let _ = read_stream.set_read_timeout(Some(READ_POLL_TIMEOUT));
+    if read_stream.set_read_timeout(Some(READ_POLL_TIMEOUT)).is_err() {
+        return;
+    }
     let mut reader = BufReader::new(read_stream);
+    let mut partial_frame = Vec::new();
+    let mut cancelled_targets = HashSet::new();
 
     while active.load(Ordering::Acquire) {
-        let mut line = String::new();
-        let read_result = reader
-            .by_ref()
-            .take(MAX_FRAME_BYTES + 1)
-            .read_line(&mut line);
-        let bytes_read = match read_result {
-            Ok(0) => break,
-            Ok(bytes_read) => bytes_read as u64,
+        let frame = match read_request_frame(&mut reader, &mut partial_frame) {
+            Ok(frame) if frame.is_empty() => break,
+            Ok(frame) => frame,
             Err(error)
                 if matches!(
                     error.kind(),
@@ -252,7 +356,7 @@ fn handle_connection(
             }
             Err(_) => break,
         };
-        if bytes_read > MAX_FRAME_BYTES || !line.ends_with('\n') {
+        if frame.len() as u64 > MAX_FRAME_BYTES || !frame.ends_with(b"\n") {
             let _ = write_shared_response(
                 &writer,
                 &response_error(
@@ -263,6 +367,9 @@ fn handle_connection(
             );
             break;
         }
+        let Ok(line) = String::from_utf8(frame) else {
+            break;
+        };
 
         let raw_id = serde_json::from_str::<Value>(&line)
             .ok()
@@ -285,29 +392,70 @@ fn handle_connection(
         };
 
         let request_id = scope_request_id(&info.session_id, connection_seq, &request.id);
-        // 取消请求指向的也是同一连接内的请求键，前端直接按键取消即可。
-        let mut params = request.params;
+        let params = request.params;
         if request.method == "requests/cancel" {
-            let target = params
+            let Some(target) = params
                 .get("requestId")
                 .and_then(Value::as_str)
-                .map(|target| scope_request_id(&info.session_id, connection_seq, target));
-            if let (Some(target), Some(map)) = (target, params.as_object_mut()) {
-                map.insert("requestId".to_string(), Value::String(target));
+                .filter(|target| !target.is_empty() && target.len() <= 128)
+                .map(|target| scope_request_id(&info.session_id, connection_seq, target))
+            else {
+                let _ = write_shared_response(
+                    &writer,
+                    &response_error(request.id, "MCP_REQUEST_INVALID", "MCP 取消目标 ID 无效"),
+                );
+                continue;
+            };
+            let (known, should_notify) =
+                claim_connection_cancellation(&pending, &mut cancelled_targets, &target);
+            if should_notify && !notify_frontend_cancellation(&app, &info, Some(&target)) {
+                cancelled_targets.remove(&target);
+                let _ = write_shared_response(
+                    &writer,
+                    &response_error(
+                        request.id,
+                        "MCP_FRONTEND_UNAVAILABLE",
+                        "AI Canvas 主窗口尚未就绪",
+                    ),
+                );
+                continue;
             }
-        }
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let inserted = pending
-            .lock()
-            .map(|mut requests| requests.insert(request_id.clone(), sender).is_none())
-            .unwrap_or(false);
-        if !inserted {
+            // 控制路径先发撤销、立即应答，业务额度已满时仍可取消，不另建响应线程。
             let _ = write_shared_response(
                 &writer,
-                &response_error(request.id, "MCP_DUPLICATE_ID", "MCP bridge 请求 ID 重复"),
+                &OutgoingResponse {
+                    version: PROTOCOL_VERSION,
+                    id: request.id,
+                    ok: true,
+                    result: Some(serde_json::json!({ "cancelled": known })),
+                    error: None,
+                },
             );
             continue;
         }
+        let Some(request_slot) = try_acquire_request_slot(&session_requests, &connection_requests)
+        else {
+            let _ = write_shared_response(
+                &writer,
+                &response_error(
+                    request.id,
+                    "MCP_REQUEST_LIMIT_REACHED",
+                    format!(
+                        "MCP 请求繁忙：每连接最多 {MAX_CONNECTION_REQUESTS} 个、会话最多 {MAX_SESSION_REQUESTS} 个在途请求；可取消已有请求后重试"
+                    ),
+                ),
+            );
+            continue;
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        if let Err(message) = register_pending_request(&pending, request_id.clone(), sender) {
+            let _ = write_shared_response(
+                &writer,
+                &response_error(request.id, "MCP_DUPLICATE_ID", message),
+            );
+            continue;
+        }
+        cancelled_targets.remove(&request_id);
 
         let emitted = app.emit_to(
             "main",
@@ -335,41 +483,76 @@ fn handle_connection(
         }
         let response_writer = Arc::clone(&writer);
         let response_pending = Arc::clone(&pending);
-        let _ = thread::Builder::new()
+        let response_app = app.clone();
+        let response_info = info.clone();
+        let response_request_id = request_id.clone();
+        let response_id = request.id.clone();
+        let spawned = thread::Builder::new()
             .name("ai-canvas-mcp-response".to_string())
             .spawn(move || {
+                // 即使会话撤销移除 pending，也保留额度到写完或写超时，防慢客户端堆积线程。
+                let _request_slot = request_slot;
                 let frontend_response = receiver.recv_timeout(RESPONSE_TIMEOUT);
-                if let Ok(mut requests) = response_pending.lock() {
-                    requests.remove(&request_id);
+                if matches!(frontend_response, Err(mpsc::RecvTimeoutError::Timeout)) {
+                    notify_frontend_cancellation(
+                        &response_app,
+                        &response_info,
+                        Some(&response_request_id),
+                    );
                 }
                 let response = match frontend_response {
                     Ok(frontend) if frontend.ok => OutgoingResponse {
                         version: PROTOCOL_VERSION,
-                        id: request.id,
+                        id: response_id,
                         ok: true,
                         result: frontend.result.or(Some(Value::Null)),
                         error: None,
                     },
                     Ok(frontend) => response_error(
-                        request.id,
+                        response_id,
                         "MCP_FRONTEND_ERROR",
                         frontend
                             .error
                             .unwrap_or_else(|| "AI Canvas MCP 请求失败".to_string()),
                     ),
                     Err(mpsc::RecvTimeoutError::Timeout) => response_error(
-                        request.id,
+                        response_id,
                         "MCP_RESPONSE_TIMEOUT",
                         "AI Canvas MCP 请求等待超时",
                     ),
                     Err(mpsc::RecvTimeoutError::Disconnected) => response_error(
-                        request.id,
+                        response_id,
                         "MCP_SESSION_STOPPED",
                         "AI Canvas MCP 会话已停止",
                     ),
                 };
                 let _ = write_shared_response(&response_writer, &response);
+                if let Ok(mut requests) = response_pending.lock() {
+                    requests.remove(&response_request_id);
+                }
             });
+        if spawned.is_err() {
+            if let Ok(mut requests) = pending.lock() {
+                requests.remove(&request_id);
+            }
+            notify_frontend_cancellation(&app, &info, Some(&request_id));
+            let _ = write_shared_response(
+                &writer,
+                &response_error(
+                    request.id,
+                    "MCP_RESPONSE_UNAVAILABLE",
+                    "无法等待 MCP 工具结果，已请求取消",
+                ),
+            );
+        }
+    }
+
+    // 无锁关闭同一底层 socket，停止/断连时让仍在写响应的线程立即退出。
+    let _ = reader.get_ref().shutdown(Shutdown::Both);
+    // 只撤销这个 TCP 连接仍在等待的请求，不影响同会话中的其他客户端。
+    let connection_prefix = format!("{}:{connection_seq:x}:", info.session_id);
+    for request_id in remove_connection_requests(&pending, &connection_prefix) {
+        notify_frontend_cancellation(&app, &info, Some(&request_id));
     }
 }
 
@@ -381,6 +564,43 @@ impl Drop for ClientConnectionGuard {
     }
 }
 
+struct RequestSlotGuard {
+    session: Arc<AtomicUsize>,
+    connection: Arc<AtomicUsize>,
+}
+
+impl Drop for RequestSlotGuard {
+    fn drop(&mut self) {
+        self.connection.fetch_sub(1, Ordering::AcqRel);
+        self.session.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_request_slot(
+    session: &Arc<AtomicUsize>,
+    connection: &Arc<AtomicUsize>,
+) -> Option<RequestSlotGuard> {
+    if !try_acquire_counter(session, MAX_SESSION_REQUESTS) {
+        return None;
+    }
+    if !try_acquire_counter(connection, MAX_CONNECTION_REQUESTS) {
+        session.fetch_sub(1, Ordering::AcqRel);
+        return None;
+    }
+    Some(RequestSlotGuard {
+        session: Arc::clone(session),
+        connection: Arc::clone(connection),
+    })
+}
+
+fn try_acquire_counter(counter: &AtomicUsize, limit: usize) -> bool {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < limit).then_some(current + 1)
+        })
+        .is_ok()
+}
+
 /// 请求键要带连接号：多个客户端各自生成 ID，重名会被误判成重复请求。
 fn scope_request_id(session_id: &str, connection: u64, request_id: &str) -> String {
     format!("{session_id}:{connection:x}:{request_id}")
@@ -388,11 +608,7 @@ fn scope_request_id(session_id: &str, connection: u64, request_id: &str) -> Stri
 
 /// 占一个客户端名额；超上限时立刻退回，由调用方拒绝该连接。
 fn try_acquire_client_slot(connections: &AtomicUsize) -> bool {
-    if connections.fetch_add(1, Ordering::AcqRel) < MAX_CLIENTS {
-        return true;
-    }
-    connections.fetch_sub(1, Ordering::AcqRel);
-    false
+    try_acquire_counter(connections, MAX_CLIENTS)
 }
 
 fn forward_frontend_request(
@@ -404,14 +620,7 @@ fn forward_frontend_request(
     params: Value,
 ) -> Result<Value, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
-    let inserted = pending
-        .lock()
-        .map_err(|_| "MCP bridge 请求锁不可用".to_string())?
-        .insert(request_id.clone(), sender)
-        .is_none();
-    if !inserted {
-        return Err("MCP bridge 请求 ID 重复".to_string());
-    }
+    register_pending_request(pending, request_id.clone(), sender)?;
     if app
         .emit_to(
             "main",
@@ -433,6 +642,9 @@ fn forward_frontend_request(
     let received = receiver.recv_timeout(RESPONSE_TIMEOUT);
     if let Ok(mut requests) = pending.lock() {
         requests.remove(&request_id);
+    }
+    if matches!(received, Err(mpsc::RecvTimeoutError::Timeout)) {
+        notify_frontend_cancellation(app, info, Some(&request_id));
     }
     match received {
         Ok(response) if response.ok => Ok(response.result.unwrap_or(Value::Null)),
@@ -717,7 +929,9 @@ pub fn mcp_bridge_start(
         .map_err(|_| "MCP bridge 会话锁不可用".to_string())?
         .take();
     if let Some(previous) = previous {
+        let previous_info = previous.info.clone();
         stop_session(previous);
+        notify_frontend_cancellation(&app, &previous_info, None);
     }
     let listener = match transport {
         McpTransport::Stdio => bind_loopback(port.unwrap_or(0))?,
@@ -751,6 +965,7 @@ pub fn mcp_bridge_start(
     };
     let active = Arc::new(AtomicBool::new(true));
     let connections = Arc::new(AtomicUsize::new(0));
+    let session_requests = Arc::new(AtomicUsize::new(0));
     let pending = Arc::new(Mutex::new(HashMap::new()));
     let cancellation = CancellationToken::new();
 
@@ -794,18 +1009,20 @@ pub fn mcp_bridge_start(
                             let connection_info = thread_info.clone();
                             let connection_token = token.clone();
                             let connection_active = Arc::clone(&active);
-                            let connection_connected = Arc::clone(&connections);
+                            let connection_guard = ClientConnectionGuard(Arc::clone(&connections));
+                            let connection_requests = Arc::clone(&session_requests);
                             let connection_pending = Arc::clone(&pending);
                             let _ = thread::Builder::new()
                                 .name("ai-canvas-mcp-client".to_string())
                                 .spawn(move || {
+                                    let _connection_guard = connection_guard;
                                     handle_connection(
                                         connection_app,
                                         stream,
                                         connection_info,
                                         connection_token,
                                         connection_active,
-                                        connection_connected,
+                                        connection_requests,
                                         connection_pending,
                                     );
                                 });
@@ -868,14 +1085,16 @@ fn adapter_candidates(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> 
 }
 
 #[tauri::command]
-pub fn mcp_bridge_stop(state: State<'_, McpBridgeState>) -> Result<(), String> {
+pub fn mcp_bridge_stop(app: AppHandle, state: State<'_, McpBridgeState>) -> Result<(), String> {
     let session = state
         .session
         .lock()
         .map_err(|_| "MCP bridge 会话锁不可用".to_string())?
         .take();
     if let Some(session) = session {
+        let info = session.info.clone();
         stop_session(session);
+        notify_frontend_cancellation(&app, &info, None);
     }
     Ok(())
 }
@@ -910,7 +1129,9 @@ pub fn mcp_bridge_respond(
         .pending
         .lock()
         .map_err(|_| "MCP bridge 请求锁不可用".to_string())?
-        .remove(&response.request_id)
+        // 等待线程拥有清理权；直到响应发送结束都不能让同 ID 新请求替换这条记录。
+        .get(&response.request_id)
+        .cloned()
         .ok_or_else(|| "MCP bridge 请求不存在或已结束".to_string())?;
     sender
         .try_send(FrontendResponse {
@@ -926,6 +1147,171 @@ mod tests {
     use super::*;
 
     const TOKEN: &str = "abababababababababababababababababababababababababababababababab";
+
+    struct FragmentedReader {
+        chunks: std::collections::VecDeque<std::io::Result<std::io::Cursor<Vec<u8>>>>,
+    }
+
+    impl Read for FragmentedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                match self.chunks.front_mut() {
+                    Some(Ok(chunk)) => match chunk.read(buffer)? {
+                        0 => {
+                            self.chunks.pop_front();
+                        }
+                        count => return Ok(count),
+                    },
+                    Some(Err(_)) => {
+                        return Err(self.chunks.pop_front().unwrap().unwrap_err());
+                    }
+                    None => return Ok(0),
+                }
+            }
+        }
+    }
+
+    fn fragmented_reader(chunks: Vec<std::io::Result<Vec<u8>>>) -> BufReader<FragmentedReader> {
+        BufReader::new(FragmentedReader {
+            chunks: chunks
+                .into_iter()
+                .map(|chunk| chunk.map(std::io::Cursor::new))
+                .collect(),
+        })
+    }
+
+    fn encoded_request(id: &str, params: Value) -> Vec<u8> {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "version": 1,
+                "id": id,
+                "token": TOKEN,
+                "method": "tools/call",
+                "params": params,
+            })
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn upload_frame_preserves_bytes_across_would_block_and_timeout() {
+        let data = format!("{}==", "A".repeat(349_526));
+        let encoded = encoded_request(
+            "upload",
+            serde_json::json!({
+                "name": "file_media_upload",
+                "arguments": { "action": "append", "data": data },
+            }),
+        );
+        let split = 200_000;
+        let mut reader = fragmented_reader(vec![
+            Ok(encoded[..8_191].to_vec()),
+            Err(std::io::ErrorKind::WouldBlock.into()),
+            Ok(encoded[8_191..split].to_vec()),
+            Err(std::io::ErrorKind::TimedOut.into()),
+            Ok(encoded[split..].to_vec()),
+        ]);
+        let mut partial = Vec::new();
+
+        for (kind, length) in [
+            (std::io::ErrorKind::WouldBlock, 8_191),
+            (std::io::ErrorKind::TimedOut, split),
+        ] {
+            assert_eq!(
+                read_request_frame(&mut reader, &mut partial)
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+            assert_eq!(partial, encoded[..length]);
+        }
+        let received = read_request_frame(&mut reader, &mut partial).unwrap();
+        assert_eq!(received, encoded);
+        assert!(partial.is_empty());
+        let line = String::from_utf8(received).unwrap();
+        let request = parse_request(line.trim_end(), TOKEN).unwrap();
+        assert_eq!(
+            request.params["arguments"]["data"].as_str(),
+            Some(data.as_str())
+        );
+    }
+
+    #[test]
+    fn request_frame_decodes_utf8_only_after_the_complete_line_arrives() {
+        let encoded = encoded_request("utf8", serde_json::json!({ "name": "图片🙂" }));
+        let split = encoded
+            .windows(3)
+            .position(|bytes| bytes == "图".as_bytes())
+            .unwrap()
+            + 1;
+        let mut reader = fragmented_reader(vec![
+            Ok(encoded[..split].to_vec()),
+            Err(std::io::ErrorKind::TimedOut.into()),
+            Ok(encoded[split..].to_vec()),
+        ]);
+        let mut partial = Vec::new();
+        assert_eq!(
+            read_request_frame(&mut reader, &mut partial)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(std::str::from_utf8(&partial).is_err());
+        let received = read_request_frame(&mut reader, &mut partial).unwrap();
+        let line = String::from_utf8(received).unwrap();
+        assert_eq!(
+            parse_request(line.trim_end(), TOKEN).unwrap().params["name"],
+            "图片🙂"
+        );
+    }
+
+    #[test]
+    fn request_frame_keeps_coalesced_requests_separate() {
+        let first = encoded_request("first", serde_json::json!({}));
+        let second = encoded_request("second", serde_json::json!({}));
+        let mut reader = BufReader::new(std::io::Cursor::new(
+            [first.clone(), second.clone()].concat(),
+        ));
+        let mut partial = Vec::new();
+        assert_eq!(read_request_frame(&mut reader, &mut partial).unwrap(), first);
+        assert_eq!(read_request_frame(&mut reader, &mut partial).unwrap(), second);
+        assert!(read_request_frame(&mut reader, &mut partial)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn request_frame_limit_counts_retained_bytes_and_the_newline() {
+        let request = encoded_request("limit", serde_json::json!({}));
+        let mut encoded = vec![b' '; MAX_FRAME_BYTES as usize - request.len()];
+        encoded.extend_from_slice(&request);
+        let mut reader = BufReader::new(std::io::Cursor::new(encoded.clone()));
+        let mut partial = Vec::new();
+        let received = read_request_frame(&mut reader, &mut partial).unwrap();
+        assert_eq!(received, encoded);
+        assert_eq!(received.len() as u64, MAX_FRAME_BYTES);
+        assert!(received.ends_with(b"\n"));
+
+        let mut oversized = vec![b' '; MAX_FRAME_BYTES as usize];
+        oversized.push(b'\n');
+        let mut reader = fragmented_reader(vec![
+            Ok(oversized[..4_096].to_vec()),
+            Err(std::io::ErrorKind::TimedOut.into()),
+            Ok(oversized[4_096..].to_vec()),
+        ]);
+        assert_eq!(
+            read_request_frame(&mut reader, &mut partial)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(partial.len(), 4_096);
+        let received = read_request_frame(&mut reader, &mut partial).unwrap();
+        assert_eq!(received.len() as u64, MAX_FRAME_BYTES + 1);
+        assert!(received.ends_with(b"\n"));
+        assert!(partial.is_empty());
+    }
 
     #[test]
     fn validates_256_bit_hex_tokens() {
@@ -1011,6 +1397,26 @@ mod tests {
     }
 
     #[test]
+    fn disconnecting_only_releases_requests_from_that_connection() {
+        let (own_sender, own_receiver) = mpsc::sync_channel(1);
+        let (other_sender, other_receiver) = mpsc::sync_channel(1);
+        let pending = Mutex::new(HashMap::from([
+            ("session:a:request".to_string(), own_sender),
+            ("session:ab:request".to_string(), other_sender),
+        ]));
+
+        let cancelled = remove_connection_requests(&pending, "session:a:");
+
+        assert_eq!(cancelled, vec!["session:a:request".to_string()]);
+        assert!(!own_receiver.try_recv().unwrap().ok);
+        assert!(matches!(
+            other_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(pending.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn client_slots_are_capped_and_released() {
         let connections = Arc::new(AtomicUsize::new(0));
         for _ in 0..MAX_CLIENTS {
@@ -1023,6 +1429,130 @@ mod tests {
         // 连接结束时 guard 归还名额
         drop(ClientConnectionGuard(Arc::clone(&connections)));
         assert!(try_acquire_client_slot(&connections));
+    }
+
+    #[test]
+    fn request_slots_limit_connections_and_the_whole_session_without_leaking_rejections() {
+        let session = Arc::new(AtomicUsize::new(0));
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let third = Arc::new(AtomicUsize::new(0));
+        let mut first_slots: Vec<_> = (0..MAX_CONNECTION_REQUESTS)
+            .map(|_| try_acquire_request_slot(&session, &first).unwrap())
+            .collect();
+        assert!(try_acquire_request_slot(&session, &first).is_none());
+        assert_eq!(session.load(Ordering::Acquire), MAX_CONNECTION_REQUESTS);
+
+        let second_slots: Vec<_> = (0..MAX_CONNECTION_REQUESTS)
+            .map(|_| try_acquire_request_slot(&session, &second).unwrap())
+            .collect();
+        assert_eq!(session.load(Ordering::Acquire), MAX_SESSION_REQUESTS);
+        assert!(try_acquire_request_slot(&session, &third).is_none());
+        assert_eq!(third.load(Ordering::Acquire), 0);
+
+        drop(first_slots.pop());
+        let replacement = try_acquire_request_slot(&session, &third).unwrap();
+        drop(first_slots);
+        drop(second_slots);
+        drop(replacement);
+        assert_eq!(session.load(Ordering::Acquire), 0);
+        assert_eq!(first.load(Ordering::Acquire), 0);
+        assert_eq!(second.load(Ordering::Acquire), 0);
+        assert_eq!(third.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn receiving_a_frontend_response_does_not_release_its_response_thread_slot() {
+        let session = Arc::new(AtomicUsize::new(0));
+        let connection = Arc::new(AtomicUsize::new(0));
+        let slots: Vec<_> = (0..MAX_CONNECTION_REQUESTS)
+            .map(|_| try_acquire_request_slot(&session, &connection).unwrap())
+            .collect();
+        let pending = Mutex::new(HashMap::new());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        register_pending_request(&pending, "response-writing".to_string(), sender).unwrap();
+        let sender = pending
+            .lock()
+            .unwrap()
+            .get("response-writing")
+            .unwrap()
+            .clone();
+        sender
+            .try_send(FrontendResponse {
+                ok: true,
+                result: None,
+                error: None,
+            })
+            .unwrap();
+        assert!(receiver.try_recv().unwrap().ok);
+        // 会话停止甚至可以清掉 pending；响应线程仍占额度，不能靠空 map 绕过上限。
+        pending.lock().unwrap().clear();
+        assert!(try_acquire_request_slot(&session, &connection).is_none());
+        drop(slots);
+        assert!(try_acquire_request_slot(&session, &connection).is_some());
+    }
+
+    #[test]
+    fn duplicate_request_keeps_the_original_sender_and_response() {
+        let pending = Mutex::new(HashMap::new());
+        let (original, original_receiver) = mpsc::sync_channel(1);
+        let (duplicate, duplicate_receiver) = mpsc::sync_channel(1);
+        register_pending_request(&pending, "same-id".to_string(), original).unwrap();
+
+        assert!(register_pending_request(&pending, "same-id".to_string(), duplicate)
+            .unwrap_err()
+            .contains("重复"));
+        assert!(matches!(
+            original_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            duplicate_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        let original = pending.lock().unwrap().get("same-id").unwrap().clone();
+        original
+            .try_send(FrontendResponse {
+                ok: true,
+                result: Some(serde_json::json!({ "original": true })),
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(
+            original_receiver.try_recv().unwrap().result,
+            Some(serde_json::json!({ "original": true }))
+        );
+        // frontend 已返回也不允许同 ID 插队，直到原响应写完由等待线程清理。
+        let (replacement, _) = mpsc::sync_channel(1);
+        assert!(register_pending_request(&pending, "same-id".to_string(), replacement).is_err());
+    }
+
+    #[test]
+    fn cancellation_is_forwarded_once_only_for_a_known_connection_request() {
+        let pending = Mutex::new(HashMap::new());
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        register_pending_request(&pending, "session:a:request".to_string(), sender).unwrap();
+        let mut cancelled = HashSet::new();
+        assert_eq!(
+            claim_connection_cancellation(&pending, &mut cancelled, "session:a:request"),
+            (true, true)
+        );
+        assert_eq!(
+            claim_connection_cancellation(&pending, &mut cancelled, "session:a:request"),
+            (true, false)
+        );
+        assert_eq!(
+            claim_connection_cancellation(&pending, &mut cancelled, "session:b:request"),
+            (false, false)
+        );
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        pending.lock().unwrap().clear();
+        assert_eq!(
+            claim_connection_cancellation(&pending, &mut cancelled, "unknown"),
+            (false, false)
+        );
+        assert!(cancelled.is_empty());
     }
 
     #[test]

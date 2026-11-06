@@ -1,7 +1,13 @@
 /**
+ * agentRoundExecutor — 执行 Agent 模型轮次、工具调用与结果回传。
+ */
+import { estimateTokens } from './tokenEstimate';
+/**
  * 执行 Agent 的单个模型轮次，串联上下文、流式响应、工具提案与执行结果。
  * 任务预算、审批等待和步骤快照在此轮次边界内统一更新。
  */
+import { isMcpGlobalToolContext } from '../mcp/mcpSettingsScope';
+import { isGeneralAssistantToolContext } from './assistantScope';
 import { useAppStore } from '../../store/useAppStore';
 import { getPreparedProviderCatalogApproval, MAX_PROVIDER_MODEL_SELECTION, validateProviderModelSelection } from './providerModelCatalogService';
 import {
@@ -23,6 +29,7 @@ import type {
 import { AGENT_TERMINAL_STATUSES } from '../../types/agent';
 import type {
   AssistantStreamEvent,
+  FinishReason,
   ProposedToolCall,
   ToolResultSummary,
 } from '../../types/chat';
@@ -32,6 +39,7 @@ import {
   prepareAgentToolCall,
   type AgentToolContext,
   type AgentToolEffect,
+  type AgentToolExecutionResult,
   type PreparedAgentToolCall,
 } from './toolRegistry';
 import { evaluateAgentToolPolicy } from './policyEngine';
@@ -44,19 +52,23 @@ import {
   evaluateAgentLifetimeUsage,
 } from './agentBudgetService';
 import { drainAgentInterjections } from './agentInterjection';
+import { buildAssistantToolGuidance } from './agentPromptGuidance';
 import { addAgentTaskMetrics, appendAgentEvent } from './agentJournal';
 import {
   findSucceededDuplicateWrite,
   fingerprintToolInput,
 } from './agentCheckpointService';
 import { emitAgentLifecycleEvent } from './agentLifecycle';
+import { createSkillReadBudget } from './skillReadService';
 
 // 每次 runAgentLoop 都创建自己的 messages 数组；恢复候选跨只读轮次保留，
 // 不包含当前执行段新完成的步骤，也不写入 Store/IndexedDB。数组释放后自动回收。
 const checkpointReplayCandidates = new WeakMap<AssistantModelMessage[], Set<string>>();
+const toolGuidanceMessages = new WeakMap<AssistantModelMessage[], AssistantModelMessage>();
 
 export interface AgentRoundCallbacks {
   onTextDelta?: (delta: string) => void;
+  onReasoningDelta?: (delta: string) => void;
   onComplete?: (fullText: string) => void;
   onToolResult?: (result: ToolResultSummary) => void;
   onApprovalRequired?: (step: AgentStep) => void;
@@ -65,6 +77,8 @@ export interface AgentRoundCallbacks {
 
 export interface AgentRoundOptions {
   taskId: string;
+  /** 当前执行段指定的文本模型，不持久化到任务。 */
+  modelId?: string;
   signal: AbortSignal;
   messages: AssistantModelMessage[];
   fullText: string;
@@ -91,8 +105,47 @@ export interface ExecutedToolCall {
   summary: ToolResultSummary;
   modelContent: string;
   mcpContent?: McpContent[];
+  /** 瞬时结果交付失败，不改变工具已执行的真实状态或持久化审计。 */
+  mcpResultError?: boolean;
   /** 仅供串行编排使用；固定在工具返回时，不吸收后续回调造成的画布变化。 */
   canvasRevisionAfter?: number;
+}
+
+const MCP_TEXT_RESULT_MAX_BYTES = 512 * 1024;
+
+function preserveMcpToolContent(
+  result: AgentToolExecutionResult,
+  context: AgentToolContext,
+  effect: AgentToolEffect,
+): Pick<ExecutedToolCall, 'mcpContent' | 'mcpResultError'> {
+  if (context.conversationId !== `mcp-control-${context.projectId}` || result.mcpContent?.length) {
+    return { mcpContent: result.mcpContent };
+  }
+  const content: McpContent[] = [{ type: 'text', text: result.modelContent }];
+  if (result.truncated) {
+    content.push({ type: 'text', text: JSON.stringify({
+      truncated: true,
+      message: '工具自身仅返回部分结果，请使用其筛选、分页或续读参数继续读取。',
+    }) });
+  }
+  if (new TextEncoder().encode(JSON.stringify(content)).byteLength <= MCP_TEXT_RESULT_MAX_BYTES) {
+    return { mcpContent: content };
+  }
+  const writeSucceeded = result.status === 'success' && effect !== 'read';
+  return {
+    mcpResultError: effect === 'read',
+    mcpContent: [{ type: 'text', text: JSON.stringify({
+      code: 'MCP_RESULT_TOO_LARGE',
+      operationStatus: result.status,
+      effect,
+      resultOmitted: true,
+      truncated: true,
+      retryable: false,
+      message: writeSucceeded
+        ? '操作已执行成功，但结果超过 512 KiB 交付预算，详情已省略。请用只读查询核实，不要重复提交写入。'
+        : '工具已执行，但结果超过 512 KiB 交付预算，详情已省略。请缩小筛选范围或使用分页、续读参数读取。',
+    }) }],
+  };
 }
 
 function isAgentExecutionInactive(taskId: string, signal: AbortSignal): boolean {
@@ -344,7 +397,13 @@ export async function executePreparedToolCall(
     const executionContext = { ...context, mode: resolveAgentExecutionMode(currentTask, policyMode) };
     const policy = evaluateAgentToolPolicy(prepared.definition, prepared.input, executionContext);
     const currentStep = currentTask.steps.find((item) => item.id === step.id);
-    const reverifyReason = useAppStore.getState().currentProjectId !== context.projectId
+    const globalScopeActive = (isMcpGlobalToolContext(executionContext, prepared.definition.id)
+      && isMcpGlobalToolContext(currentTask, prepared.definition.id))
+      || (isGeneralAssistantToolContext(executionContext, prepared.definition.id)
+        && isGeneralAssistantToolContext(currentTask, prepared.definition.id)
+        && currentTask.conversationId === context.conversationId);
+    const reverifyReason = !globalScopeActive
+      && useAppStore.getState().currentProjectId !== context.projectId
       ? '目标项目已切换，已取消该工具执行'
       : policy.outcome === 'deny'
         ? policy.reason
@@ -391,7 +450,7 @@ export async function executePreparedToolCall(
       }
     }
     if (retryCount === 0) {
-      checkpointBefore = prepared.definition.effect === 'canvas_write'
+      checkpointBefore = prepared.definition.effect === 'canvas_write' && !globalScopeActive
         ? { historyIndex: useAppStore.getState().historyIndex, revision: useAppStore.getState().getCurrentRevision() }
         : undefined;
       appendAgentEvent(taskId, 'tool_start', { toolId: call.toolId, callId: call.callId, effect: prepared.definition.effect });
@@ -493,7 +552,7 @@ export async function executePreparedToolCall(
           sources: result.sources,
         },
         modelContent,
-        mcpContent: result.mcpContent,
+        ...preserveMcpToolContent(result, context, prepared.definition.effect),
         canvasRevisionAfter: result.status === 'success'
           && (prepared.definition.effect === 'canvas_write' || prepared.definition.effect === 'media_generation')
           ? revisionAfterExecution
@@ -708,6 +767,7 @@ export function resolveApprovalSelection(
 
 export async function executeAgentRound({
   taskId,
+  modelId,
   signal,
   messages,
   fullText,
@@ -730,12 +790,12 @@ export async function executeAgentRound({
   // 模型流式返回和逐个工具审批都可能耗时较久，其间用户可能下调模式；
   // 每次策略判定前重新读取当前会话模式，确保降级（如切到 B / Plan）立即生效。
   const readCurrentMode = () => resolveAgentExecutionMode(getTask(taskId));
-  const roundContext = {
+  const roundContext: Omit<AgentToolContext, 'signal'> = {
     ...contextBase,
     mode: readCurrentMode(),
     baseRevision: useAppStore.getState().getCurrentRevision(),
+
   };
-  const interjections = drainAgentInterjections(taskId);
   let checkpointReplayStepIds = checkpointReplayCandidates.get(messages);
   if (!checkpointReplayStepIds) {
     checkpointReplayStepIds = new Set((task.resumeCount ?? 0) > 0
@@ -743,21 +803,27 @@ export async function executeAgentRound({
       : []);
     checkpointReplayCandidates.set(messages, checkpointReplayStepIds);
   }
-  // 用户的新补充要求不属于恢复重放；此执行段后续轮次也不能继续按旧参数复用。
-  if (interjections.length > 0) checkpointReplayStepIds.clear();
-  for (const interjection of interjections) {
-    addAgentTaskMetrics(taskId, { interjectionCount: 1 });
-    appendAgentEvent(taskId, 'interjection_applied', {
-      interjectionId: interjection.id,
-    });
-    messages.push({
-      role: 'user',
-      content: [
-        '用户在任务执行期间补充了以下要求。请结合当前进度处理，不要重放已成功的同一请求；新的修改或重新生成按当前要求执行：',
-        interjection.text,
-      ].join('\n'),
-    });
-  }
+  const replayStepIds = checkpointReplayStepIds;
+  const applyInterjections = (previousReply?: AssistantModelMessage): boolean => {
+    const interjections = drainAgentInterjections(taskId);
+    if (interjections.length === 0) return false;
+    // 新要求不是恢复重放；前一轮回复也要带给模型，才能理解用户在修改什么。
+    replayStepIds.clear();
+    if (previousReply) messages.push(previousReply);
+    for (const interjection of interjections) {
+      addAgentTaskMetrics(taskId, { interjectionCount: 1 });
+      appendAgentEvent(taskId, 'interjection_applied', { interjectionId: interjection.id });
+      messages.push({
+        role: 'user',
+        content: [
+          '用户在任务执行期间补充了以下要求。请结合当前进度处理，不要重放已成功的同一请求；新的修改或重新生成按当前要求执行：',
+          interjection.text,
+        ].join('\n'),
+      });
+    }
+    return true;
+  };
+  applyInterjections();
 
   // 终身上限先于单段预算判定：累计 token 没有单段计数器，只能在这里逐轮复核
   const lifetime = evaluateAgentLifetimeUsage(task);
@@ -776,8 +842,19 @@ export async function executeAgentRound({
     return { outcome: 'paused', fullText, totalToolResultChars };
   }
 
+  const contextSpec = resolveAssistantContextSpec(task.projectId, modelId);
+  const tools = buildAssistantFunctionTools(roundContext);
+  const toolGuidance = buildAssistantToolGuidance(tools.map((tool) => tool.function.name), roundContext.mode, contextSpec.inputBudget);
+  let guidanceMessage = toolGuidanceMessages.get(messages);
+  if (!guidanceMessage) {
+    guidanceMessage = { role: 'system', content: toolGuidance };
+    toolGuidanceMessages.set(messages, guidanceMessage);
+    messages.unshift(guidanceMessage);
+  } else {
+    guidanceMessage.content = toolGuidance;
+  }
+
   // 每轮请求前按当前模型上限复核（工具 Observation 会持续增大上下文；模型可能中途切换）
-  const contextSpec = resolveAssistantContextSpec(task.projectId);
   if (estimateModelMessagesTokens(messages) > contextSpec.inputBudget) {
     transitionTask(taskId, 'paused', {
       pausedReason: 'context_budget_exhausted',
@@ -795,7 +872,8 @@ export async function executeAgentRound({
 
   const proposedCalls: ProposedToolCall[] = [];
   let roundText = '';
-  const tools = buildAssistantFunctionTools(roundContext);
+  const completion: { reason: FinishReason } = { reason: 'stop' };
+  let streamError: string | undefined;
   const modelStartedAt = Date.now();
   let roundInputTokens = 0;
   let roundOutputTokens = 0;
@@ -812,6 +890,7 @@ export async function executeAgentRound({
       userMessage: '',
       messages,
       projectId: task.projectId,
+      modelId,
       tools,
       signal,
       onEvent: (event: AssistantStreamEvent) => {
@@ -819,9 +898,14 @@ export async function executeAgentRound({
           roundText += event.delta;
           fullText += event.delta;
           callbacks.onTextDelta?.(event.delta);
+        } else if (event.type === 'reasoning.delta') {
+          callbacks.onReasoningDelta?.(event.delta);
         } else if (event.type === 'tool.call.final') {
           proposedCalls.push(event.call);
+        } else if (event.type === 'done') {
+          completion.reason = event.finishReason;
         } else if (event.type === 'error') {
+          streamError = event.message;
           callbacks.onError?.(event.message);
         } else if (event.type === 'usage') {
           roundInputTokens += event.inputTokens ?? 0;
@@ -853,7 +937,26 @@ export async function executeAgentRound({
   }
 
   assertAgentTaskActive(taskId, signal);
+  if (completion.reason === 'canceled') throw new DOMException('模型请求已取消', 'AbortError');
+  if (streamError || completion.reason === 'error') throw new Error(streamError || '模型请求失败');
+  if (completion.reason === 'length') {
+    // 截断时即使参数碰巧能解析，也不能认为整轮工具提案已经完整。
+    transitionTask(taskId, 'paused', {
+      pausedReason: 'model_output_truncated',
+      errorCode: 'MODEL_OUTPUT_TRUNCATED',
+      errorMessage: '模型回复达到输出上限，任务已暂停；本轮工具提案未执行，可继续任务或调整模型输出上限。',
+    });
+    return { outcome: 'paused', fullText, totalToolResultChars };
+  }
   if (proposedCalls.length === 0) {
+    // 流式回复期间可能有新要求，结束前再取一次，避免关闭缓冲时漏掉。
+    if (applyInterjections({ role: 'assistant', content: roundText })) {
+      if (roundText) {
+        fullText += '\n\n';
+        callbacks.onTextDelta?.('\n\n');
+      }
+      return { outcome: 'continue', fullText, totalToolResultChars };
+    }
     callbacks.onComplete?.(fullText);
     return { outcome: 'completed', fullText, totalToolResultChars };
   }
@@ -882,6 +985,9 @@ export async function executeAgentRound({
     })),
   });
 
+  // Measure after the assistant proposal; parallel reads reserve from the same pool.
+  roundContext.skillReadBudget = createSkillReadBudget(Math.max(0,
+    contextSpec.inputBudget - estimateModelMessagesTokens(messages) - estimateTokens(JSON.stringify(tools)) - Math.max(256, Math.min(2048, Math.floor(contextSpec.inputBudget * 0.08)))));
   const results = new Map<string, ExecutedToolCall>();
   const allowedCalls: Array<{
     call: ProposedToolCall;

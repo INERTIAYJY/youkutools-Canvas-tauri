@@ -1,3 +1,6 @@
+/**
+ * subAgentProfileService — 回归测试：内置典范。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const saveMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
@@ -5,9 +8,13 @@ const getAllMock = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 const deleteMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 vi.mock('../../../src/services/indexedDbService', () => ({
+  savePresetFolderToDb: vi.fn().mockResolvedValue(undefined),
+  loadPresetFoldersFromDb: vi.fn().mockResolvedValue([]),
+  deletePresetFolderFromDb: vi.fn().mockResolvedValue(undefined),
   saveSubAgentProfileToDb: saveMock,
   getAllSubAgentProfiles: getAllMock,
   deleteSubAgentProfileFromDb: deleteMock,
+  putGlobalCharacterOrder: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { useAppStore } from '../../../src/store/useAppStore';

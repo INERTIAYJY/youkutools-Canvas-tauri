@@ -1,10 +1,12 @@
 /**
- * SkillManager Skill 管理器 — 只读查看用户上传的 Skill，并支持删除
+ * SkillManager Skill 管理器 — 统一查看 Skill，支持删除手动上传记录
  */
+import { useT } from '../../../i18n';
 import { useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../../../store/useAppStore';
+import { isAgentPackageSkill } from '../../../types/agentPackage';
 import AnimatedButton from '../../shared/AnimatedButton';
 import PopupCloseButton from '../../shared/PopupCloseButton';
 
@@ -40,24 +42,29 @@ function formatDate(ts: number): string {
 }
 
 export default function SkillManager({ open, onClose }: SkillManagerProps) {
+  const t = useT();
   const userSkills = useAppStore((s) => s.userSkills);
+  const agentPackageSkills = useAppStore((s) => s.agentPackageSkills);
+  const skills = useMemo(() => [...userSkills, ...agentPackageSkills], [userSkills, agentPackageSkills]);
   const deleteSkill = useAppStore((s) => s.deleteSkill);
   const showToast = useAppStore((s) => s.showToast);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const activeSelectedId = selectedId ?? userSkills[0]?.id ?? null;
+  const activeSelectedId = selectedId ?? skills[0]?.id ?? null;
 
   const selectedSkill = useMemo(
-    () => userSkills.find((skill) => skill.id === activeSelectedId) ?? userSkills[0] ?? null,
-    [activeSelectedId, userSkills],
+    () => skills.find((skill) => skill.id === activeSelectedId) ?? skills[0] ?? null,
+    [activeSelectedId, skills],
   );
 
   const handleDelete = useCallback(async (id: string) => {
     const skill = userSkills.find((item) => item.id === id);
+    if (!skill) return;
     await deleteSkill(id);
-    const remaining = userSkills.filter((item) => item.id !== id);
+    const state = useAppStore.getState();
+    const remaining = [...state.userSkills, ...state.agentPackageSkills];
     setSelectedId(remaining[0]?.id ?? null);
-    showToast(`已删除 Skill「${skill?.name ?? '未命名 Skill'}」`);
-  }, [deleteSkill, showToast, userSkills]);
+    showToast(t('已删除 Skill「{name}」', { name: skill.name }));
+  }, [deleteSkill, showToast, userSkills, t]);
 
   return createPortal(
     <AnimatePresence>
@@ -85,8 +92,8 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
             >
               <div className="preset-manager-title-row">
                 <div className="preset-manager-title-group">
-                  <div className="preset-modal-title">Skill 管理</div>
-                  <div className="preset-modal-desc">查看已上传 Skill，删除不再使用的 Skill</div>
+                  <div className="preset-modal-title">{t('Skill 管理')}</div>
+                  <div className="preset-modal-desc">{t('查看 Skill 内容；包内 Skill 由智能体中心管理')}</div>
                 </div>
                 <PopupCloseButton onClick={onClose} />
               </div>
@@ -94,7 +101,7 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
               <div className="preset-manager-shell">
                 <div className="preset-manager-sidebar">
                   <div className="preset-manager-list">
-                    {userSkills.map((skill) => (
+                    {skills.map((skill) => (
                       <div
                         key={skill.id}
                         role="button"
@@ -111,25 +118,30 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
                         <span className="preset-manager-list-text">
                           <span className="preset-manager-list-title">{skill.name}</span>
                           <span className="preset-manager-list-desc">
+                            {isAgentPackageSkill(skill) ? `${skill.packageName} · ` : ''}
                             {skill.description || skill.fileName}
                           </span>
                         </span>
-                        <AnimatedButton
-                          type="button"
-                          className="preset-manager-list-delete"
-                          aria-label={`删除 ${skill.name}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleDelete(skill.id);
-                          }}
-                        >
-                          ×
-                        </AnimatedButton>
+                        {isAgentPackageSkill(skill) ? (
+                          <span className="ui-badge">{t('只读')}</span>
+                        ) : (
+                          <AnimatedButton
+                            type="button"
+                            className="preset-manager-list-delete"
+                            aria-label={t('删除 {name}', { name: skill.name })}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDelete(skill.id);
+                            }}
+                          >
+                            ×
+                          </AnimatedButton>
+                        )}
                       </div>
                     ))}
-                    {userSkills.length === 0 && (
+                    {skills.length === 0 && (
                       <div className="preset-manager-list-empty">
-                        暂无 Skill，请在 / 指令菜单上传
+                        {t('暂无 Skill，可上传文件或在智能体中心导入')}
                       </div>
                     )}
                   </div>
@@ -139,7 +151,7 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
                   {selectedSkill ? (
                     <div className="preset-manager-detail">
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">名称</span>
+                        <span className="preset-manager-label">{t('名称')}</span>
                         <input
                           className="preset-manager-input"
                           type="text"
@@ -148,43 +160,49 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
                         />
                       </label>
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">说明</span>
+                        <span className="preset-manager-label">{t('说明')}</span>
                         <input
                           className="preset-manager-input"
                           type="text"
-                          value={selectedSkill.description || '上传的只读 Skill'}
+                          value={selectedSkill.description || t('上传的只读 Skill')}
                           readOnly
                         />
                       </label>
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">来源</span>
+                        <span className="preset-manager-label">{t('来源')}</span>
                         <input
                           className="preset-manager-input"
                           type="text"
-                          value={selectedSkill.sourceType === 'folder' ? '文件夹' : '文件'}
+                          value={isAgentPackageSkill(selectedSkill)
+                            ? t('智能体：{name}', { name: selectedSkill.packageName })
+                            : selectedSkill.sourceType === 'folder' ? t('文件夹') : t('文件')}
                           readOnly
                         />
                       </label>
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">入口文件</span>
+                        <span className="preset-manager-label">{t('入口文件')}</span>
                         <input
                           className="preset-manager-input"
                           type="text"
-                          value={selectedSkill.entryFileName || selectedSkill.fileName}
+                          value={isAgentPackageSkill(selectedSkill)
+                            ? selectedSkill.entryPath
+                            : selectedSkill.entryFileName || selectedSkill.fileName}
                           readOnly
                         />
                       </label>
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">保存位置</span>
+                        <span className="preset-manager-label">{t('保存位置')}</span>
                         <input
                           className="preset-manager-input"
                           type="text"
-                          value={selectedSkill.storagePath || '-'}
+                          value={isAgentPackageSkill(selectedSkill)
+                            ? t('由智能体中心管理（只读）')
+                            : selectedSkill.storagePath || '-'}
                           readOnly
                         />
                       </label>
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">上传时间</span>
+                        <span className="preset-manager-label">{t('上传时间')}</span>
                         <input
                           className="preset-manager-input"
                           type="text"
@@ -193,7 +211,7 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
                         />
                       </label>
                       <label className="preset-manager-field">
-                        <span className="preset-manager-label">内容预览</span>
+                        <span className="preset-manager-label">{t('内容预览')}</span>
                         <textarea
                           className="preset-manager-input"
                           value={selectedSkill.content}
@@ -204,7 +222,7 @@ export default function SkillManager({ open, onClose }: SkillManagerProps) {
                     </div>
                   ) : (
                     <div className="preset-manager-detail-empty">
-                      选择左侧 Skill 查看内容
+                      {t('选择左侧 Skill 查看内容')}
                     </div>
                   )}
                 </div>

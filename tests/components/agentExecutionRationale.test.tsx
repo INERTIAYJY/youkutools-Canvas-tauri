@@ -1,3 +1,6 @@
+/**
+ * agentExecutionRationale — 回归测试：AgentExecutionRationale。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import AgentExecutionRationale from '../../src/components/chat/AgentExecutionRationale';

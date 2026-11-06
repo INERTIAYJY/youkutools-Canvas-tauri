@@ -29,6 +29,15 @@ function collector() {
 }
 
 describe('分镜表 @ 引用', () => {
+  it('整表包含音效、转场和备注，包括只填写这些字段的镜头', () => {
+    const { addImage } = collector();
+    const text = resolveShotlistMention(shotlist([
+      { id: 'r1', shotNo: '1', content: '进入走廊', audio: '脚步声', transition: '叠化', note: '先露出入口', duration: 3.5 },
+      { id: 'r2', shotNo: '2', audio: '音乐渐强', note: '保持节奏' },
+    ]), [], addImage);
+    for (const field of ['进入走廊', '3.5″', '音效/音乐：脚步声', '转场：叠化', '备注：先露出入口', '音乐渐强', '保持节奏']) expect(text).toContain(field);
+    expect(text.split('\n')).toHaveLength(2);
+  });
   it('逐行拼成「镜号 · 景别 · 运镜 · 内容 / 台词 · N″」，空行跳过', () => {
     const { addImage } = collector();
     const text = resolveShotlistMention(shotlist([

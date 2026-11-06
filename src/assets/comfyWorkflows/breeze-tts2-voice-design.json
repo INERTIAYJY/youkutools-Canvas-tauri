@@ -1,0 +1,90 @@
+{
+  "2": {
+    "inputs": {
+      "text": [
+        "4",
+        0
+      ],
+      "instruction": [
+        "5",
+        0
+      ],
+      "cfg_scale": 4,
+      "max_new_tokens": 1500,
+      "temperature": 0.9,
+      "top_k": 50,
+      "top_p": 1,
+      "repetition_penalty": 1.1,
+      "depth_temperature": 0.9,
+      "depth_top_k": 50,
+      "depth_top_p": 1,
+      "seed": 1067049144,
+      "breeze_model": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "BreezeTTS2VoiceDesign",
+    "_meta": {
+      "title": "Breeze TTS 2 Voice Design"
+    }
+  },
+  "3": {
+    "inputs": {
+      "audio": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "PreviewAudio",
+    "_meta": {
+      "title": "预览音频"
+    }
+  },
+  "4": {
+    "inputs": {
+      "value": "今儿难得不用工作，我一个人去了海边。坐在熟悉的咖啡店里，看着窗外慢慢落下的夕阳，突然觉得，偶尔什么都不做，也是一件很幸福的事情。"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "文本内容"
+    }
+  },
+  "5": {
+    "inputs": {
+      "value": "有天津口音的10岁女孩"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "音色描述"
+    }
+  },
+  "6": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "format": "flac",
+      "audio": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SaveAudioAdvanced",
+    "_meta": {
+      "title": "保存音频（高级）"
+    }
+  },
+  "7": {
+    "inputs": {
+      "model": "bf16 (best quality)",
+      "dtype": "auto",
+      "device": "auto",
+      "attention": "auto",
+      "decode_mode": "cuda_graphs",
+      "download_if_missing": true
+    },
+    "class_type": "BreezeTTS2LoadModel",
+    "_meta": {
+      "title": "Breeze TTS 2 Load Model"
+    }
+  }
+}

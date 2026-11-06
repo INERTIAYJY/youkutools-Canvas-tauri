@@ -1,3 +1,6 @@
+/**
+ * reversePrompt — 回归测试：reversePrompt。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addReversePromptTextNode,

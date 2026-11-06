@@ -1,3 +1,6 @@
+/**
+ * characterLibraryService — 回归测试：characterLibraryService。
+ */
 import { IDBFactory } from 'fake-indexeddb';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DramaCharacter } from '../../src/types/dramaAssets';

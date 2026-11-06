@@ -1,15 +1,21 @@
 /** Model-level declarative protocol runtime with resumable async polling. */
 import { useAppStore } from '../../store/useAppStore';
 import type { GeneralModelCategory, GeneralModelConfig, NodeType } from '../../types';
-import type { ProtocolJsonValue, VideoModelCapability } from '../../types/aiTypes';
+import type { MediaDownloadAccess, MediaProtocolUrls, MediaTaskReceipt, ProtocolJsonValue, VideoModelCapability } from '../../types/aiTypes';
 import {
   cleanupNodePolling,
+  captureVideoTaskGeneration,
+  pauseMediaTask,
+  MEDIA_POLL_MAX_DURATION_MS,
+  registerMediaNodeOperation,
   registerNodePolling,
-  removePendingTask,
+  removeFailedMediaTask,
   savePendingTask,
+  updatePendingTask,
 } from '../pollManager';
 import {
   collectModelProtocolForEachVariables,
+  buildModelProtocolRequest,
   collectModelProtocolTemplatePaths,
   MODEL_PROTOCOL_MAX_FOR_EACH_ITEMS,
   pollResolvedModelProtocol,
@@ -17,8 +23,18 @@ import {
   submitModelProtocol,
   type ModelProtocolVariables,
 } from './modelProtocol';
+import { isRecord } from './modelProtocolShared';
+import { getHttpResponseError } from './httpUtils';
+import { PollTaskFailedError, isPollTimeoutError } from '../pollTask';
 import { REFERENCE_PROTOCOL_VARIABLES } from './modelProtocolVariables';
 import { readModelProtocolPathValues } from './modelProtocolResponse';
+import { readGoogleImagePartsReferenceUrls } from './imageModelTemplates';
+import { assertModelProtocolResult } from './modelCapabilityValidation';
+import { getProviderPolicy, resolveProviderCatalogId } from './providerPolicies';
+import { RELAYON_VIDEO_RESULT_URL_PATHS, usesRelayonModelProtocol } from './providers/relayonModelManifest';
+import { createMediaDownloadAccess, sanitizeMediaResultUrls } from './mediaDownloadAccess';
+import { assertMinimaxQueryResponse, assertMinimaxResponse, getMinimaxMediaAccessHint, usesMinimaxModelProtocol } from './providers/minimaxModelManifest';
+import { ModelProtocolHttpError } from './modelProtocolHttp';
 
 interface RunConfiguredModelProtocolOptions {
   model: GeneralModelConfig;
@@ -38,17 +54,17 @@ const REFERENCE_MEDIA_GROUPS = [
   {
     kind: '参考图',
     example: '"images": "{{imageUrls}}"',
-    variables: ['imageWithRoles', 'firstImage', 'lastImage', 'referenceImageUrls', 'imageUrls'],
+    variables: ['seedanceContent', 'imageWithRoles', 'firstImage', 'lastImage', 'referenceImageUrls', 'imageUrls', 'googleImageParts'],
   },
   {
     kind: '参考视频',
     example: '"video_urls": "{{videoUrls}}"',
-    variables: ['videoUrls', 'referenceVideoUrl', 'referenceVideoUrls'],
+    variables: ['seedanceContent', 'videoUrls', 'referenceVideoUrl', 'referenceVideoUrls'],
   },
   {
     kind: '参考音频',
     example: '"audio_urls": "{{audioUrls}}"',
-    variables: ['audioUrls', 'audioUrl', 'referenceAudioUrls'],
+    variables: ['seedanceContent', 'audioUrls', 'audioUrl', 'referenceAudioUrls'],
   },
 ] as const;
 
@@ -61,7 +77,9 @@ const REFERENCE_DELIVERY_HINTS: Record<string, { kind: string; example: string }
 };
 
 const CONTROL_TEMPLATE_KEYS = new Set(['$whenPresent', '$forEach']);
-const GENERIC_REFERENCE_ALIAS_ROOTS = new Set(['imageWithRoles', 'referenceUrls', 'inlineReferences']);
+const GENERIC_REFERENCE_ALIAS_ROOTS = new Set([
+  'seedanceContent', 'imageWithRoles', 'referenceUrls', 'inlineReferences', 'googleImageParts',
+]);
 
 interface ReferenceDeliveryRule {
   name: string;
@@ -72,28 +90,28 @@ interface ReferenceDeliveryRule {
 const CANONICAL_REFERENCE_DELIVERY_RULES: readonly ReferenceDeliveryRule[] = [
   {
     name: 'firstImage',
-    roots: ['firstImage', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
-    collectionRoots: ['imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
+    roots: ['firstImage', 'seedanceContent', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
+    collectionRoots: ['seedanceContent', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
   },
   {
     name: 'lastImage',
-    roots: ['lastImage', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
-    collectionRoots: ['imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
+    roots: ['lastImage', 'seedanceContent', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
+    collectionRoots: ['seedanceContent', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
   },
   {
     name: 'referenceImageUrls',
-    roots: ['referenceImageUrls', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
-    collectionRoots: ['referenceImageUrls', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
+    roots: ['referenceImageUrls', 'seedanceContent', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
+    collectionRoots: ['referenceImageUrls', 'seedanceContent', 'imageWithRoles', 'imageUrls', 'referenceUrls', 'inlineReferences'],
   },
   {
     name: 'referenceVideoUrls',
-    roots: ['referenceVideoUrls', 'referenceVideoUrl', 'videoUrls', 'referenceUrls', 'inlineReferences'],
-    collectionRoots: ['referenceVideoUrls', 'videoUrls', 'referenceUrls', 'inlineReferences'],
+    roots: ['referenceVideoUrls', 'referenceVideoUrl', 'seedanceContent', 'videoUrls', 'referenceUrls', 'inlineReferences'],
+    collectionRoots: ['referenceVideoUrls', 'seedanceContent', 'videoUrls', 'referenceUrls', 'inlineReferences'],
   },
   {
     name: 'referenceAudioUrls',
-    roots: ['referenceAudioUrls', 'audioUrl', 'audioUrls', 'referenceUrls', 'inlineReferences'],
-    collectionRoots: ['referenceAudioUrls', 'audioUrls', 'referenceUrls', 'inlineReferences'],
+    roots: ['referenceAudioUrls', 'audioUrl', 'seedanceContent', 'audioUrls', 'referenceUrls', 'inlineReferences'],
+    collectionRoots: ['referenceAudioUrls', 'seedanceContent', 'audioUrls', 'referenceUrls', 'inlineReferences'],
   },
 ];
 
@@ -109,16 +127,29 @@ function readBatchCount(value: ProtocolJsonValue | undefined): number {
     : 1;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
 function readReferenceStrings(value: unknown): string[] {
   if (typeof value === 'string') return value.trim() ? [value] : [];
   if (Array.isArray(value)) return value.flatMap(readReferenceStrings);
   if (!isRecord(value)) return [];
   if (typeof value.url === 'string' && value.url.trim()) return [value.url];
   return Object.values(value).flatMap(readReferenceStrings);
+}
+
+function referenceTransportValue(name: string, value: unknown): unknown {
+  if (name === 'googleImageParts') return readGoogleImagePartsReferenceUrls(value);
+  if (name !== 'seedanceContent' || !Array.isArray(value)) return value;
+  // 类型、角色和提示词不是素材；保持原下标，让子路径与真实请求使用同一索引。
+  return value.map((item) => {
+    if (!isRecord(item)) return undefined;
+    const field = item.type;
+    return field === 'image_url' || field === 'video_url' || field === 'audio_url'
+      ? { [field]: item[field] }
+      : undefined;
+  });
+}
+
+function readProtocolReferenceStrings(name: string, value: unknown): string[] {
+  return readReferenceStrings(referenceTransportValue(name, value));
 }
 
 function containsAllValues(available: readonly string[], expected: readonly string[]): boolean {
@@ -157,7 +188,7 @@ function collectTemplateTransportUsages(
 ): TemplateTransportUsage[] {
   return collectTransportTemplatePaths(extractSubmitValue(protocolSource)).flatMap((path) => {
     const root = path.split('.')[0];
-    const sourceValue = variables[root];
+    const sourceValue = referenceTransportValue(root, variables[root]);
     if (sourceValue === undefined) return [];
     const resolved = path === root
       ? [sourceValue]
@@ -182,8 +213,8 @@ function fallbackDeliveryRule(name: string): ReferenceDeliveryRule {
   if (name === 'imageUrls') {
     return {
       name,
-      roots: ['imageUrls', 'imageWithRoles', 'referenceUrls', 'inlineReferences'],
-      collectionRoots: ['imageUrls', 'imageWithRoles', 'referenceUrls', 'inlineReferences'],
+      roots: ['imageUrls', 'imageWithRoles', 'referenceUrls', 'inlineReferences', 'googleImageParts'],
+      collectionRoots: ['imageUrls', 'imageWithRoles', 'referenceUrls', 'inlineReferences', 'googleImageParts'],
     };
   }
   if (name === 'videoUrls' || name === 'referenceVideoUrl') {
@@ -213,7 +244,7 @@ export function findUnusedReferenceVariables(
   options: { frameAliases?: boolean } = {},
 ): string[] {
   const provided = REFERENCE_PROTOCOL_VARIABLES
-    .map((name) => ({ name, values: readReferenceStrings(variables[name]) }))
+    .map((name) => ({ name, values: readProtocolReferenceStrings(name, variables[name]) }))
     .filter((item) => item.values.length > 0);
   if (provided.length === 0) return [];
 
@@ -308,9 +339,32 @@ export function findModelProtocolForEachCapabilityConflicts(
   });
 }
 
+/** 同步返回结果也保留交付身份，已有异步回执仍使用原任务。 */
+export function retainCompletedMediaResults(
+  urls: string[], access: MediaDownloadAccess, nodeId: string | undefined,
+  category: 'image' | 'video' | 'audio', batchCount = 1, existingReceipt?: MediaTaskReceipt,
+  projectId?: string | null,
+): MediaProtocolUrls {
+  let receipt = existingReceipt;
+  const store = useAppStore.getState();
+  const deliveryProjectId = projectId === undefined ? store.currentProjectId : projectId;
+  const resultUrls = sanitizeMediaResultUrls(urls, store.config.providers[access.providerConfigId]?.apiKey);
+  if (!receipt && resultUrls && nodeId && deliveryProjectId) {
+    receipt = savePendingTask({ nodeId, projectId: deliveryProjectId,
+      nodeType: NODE_TYPE_BY_CATEGORY[category], provider: 'general', providerConfigId: access.providerConfigId,
+      taskType: 'custom-protocol', taskId: `result-${crypto.randomUUID()}`, submitted: true,
+      resultUrls, mediaDownloadAccess: access, mediaRecoveryState: 'delivery_pending', batchCount,
+      ...(category === 'video' ? { videoGeneration: captureVideoTaskGeneration(nodeId) } : {}),
+    });
+  } else if (receipt) {
+    updatePendingTask(receipt.nodeId, { mediaDownloadAccess: access }, receipt.taskId, receipt.attemptId);
+  }
+  return Object.assign(urls, { mediaDownloadAccess: access, ...(receipt ? { taskReceipt: receipt } : {}) });
+}
+
 export async function runConfiguredModelProtocol(
   options: RunConfiguredModelProtocolOptions,
-): Promise<string[]> {
+): Promise<MediaProtocolUrls> {
   const protocol = resolveModelExecutionProfile(options.model.executionProfile);
   if (!protocol) throw new Error(`模型“${options.model.name}”未配置调用协议`);
   const expansionConflicts = findModelProtocolForEachCapabilityConflicts(
@@ -322,52 +376,87 @@ export async function runConfiguredModelProtocol(
   if (!provider) throw new Error(`模型“${options.model.name}”的连接配置不存在`);
   const baseUrl = provider.baseUrl?.trim() || '';
   if (!baseUrl) throw new Error(`模型“${options.model.name}”未配置接口地址`);
+  const catalogId = resolveProviderCatalogId(options.model.providerConfigId, provider);
+  const usesMinimaxProtocol = catalogId === 'minimax'
+    && usesMinimaxModelProtocol(options.model.modelId, options.model.executionProfile);
+  const validateResponse = usesMinimaxProtocol
+    ? (payload: unknown) => assertMinimaxResponse(payload, options.category === 'audio') : undefined;
+  const mediaDownloadAccess = createMediaDownloadAccess(options.model.providerConfigId, baseUrl, protocol.auth);
   assertReferenceMediaDeliverable(options.model.name, JSON.stringify(protocol), options.variables);
 
+  const projectId = useAppStore.getState().currentProjectId;
+  const videoGeneration = options.category === 'video' ? captureVideoTaskGeneration(options.nodeId) : undefined;
+  let receipt: MediaTaskReceipt | undefined;
+  const releaseOperation = options.nodeId ? registerMediaNodeOperation(options.nodeId) : undefined;
   const nodeSignal = options.nodeId ? registerNodePolling(options.nodeId) : undefined;
   const signal = nodeSignal && options.signal
     ? AbortSignal.any([nodeSignal, options.signal])
     : nodeSignal ?? options.signal;
   try {
-    const submitted = await submitModelProtocol({
-      apiKey: provider.apiKey || '',
-      baseUrl,
-      protocol,
-      variables: options.variables,
-      signal,
-    });
-    if (submitted.urls) return submitted.urls;
-    if (!submitted.poll || !submitted.taskId) throw new Error('异步调用协议未返回轮询配置');
-
-    const projectId = useAppStore.getState().currentProjectId;
-    const canPersist = !!options.nodeId && !!projectId;
-    if (canPersist) {
-      savePendingTask({
-        nodeId: options.nodeId!,
-        projectId,
-        nodeType: NODE_TYPE_BY_CATEGORY[options.category],
-        provider: 'general',
-        providerConfigId: options.model.providerConfigId,
-        taskId: submitted.taskId,
-        taskType: 'custom-protocol',
-        protocolPoll: submitted.poll,
-        batchCount: readBatchCount(options.variables.n),
-        submitted: true,
-      });
+    signal?.throwIfAborted();
+    const submitOptions = { apiKey: provider.apiKey || '', baseUrl, protocol, variables: options.variables, signal, validateResponse,
+      ...(getProviderPolicy(catalogId).submitIdempotency ? { idempotencyKey: crypto.randomUUID() } : {}),
+    };
+    // 在记录“提交中”之前完成本地构建校验，避免将输入错误误称为提交状态未知。
+    buildModelProtocolRequest(submitOptions);
+    if ((protocol.mode === 'async' || usesMinimaxProtocol && options.category === 'audio') && options.nodeId && projectId) {
+      receipt = savePendingTask({ nodeId: options.nodeId, projectId,
+        nodeType: NODE_TYPE_BY_CATEGORY[options.category], provider: 'general', providerConfigId: options.model.providerConfigId,
+        taskId: '', taskType: 'custom-protocol', submitted: false, videoGeneration,
+        mediaDownloadAccess,
+        batchCount: readBatchCount(options.variables.n) });
     }
+    const submitted = await submitModelProtocol(submitOptions);
+    if (submitted.urls) {
+      assertModelProtocolResult(options.category, submitted);
+      const resultUrls = sanitizeMediaResultUrls(submitted.urls, provider.apiKey);
+      // 同步接口已交付结果，不需要也不能重新提交生成来重试本地保存。
+      if (resultUrls && options.nodeId && projectId) {
+        const taskId = receipt?.taskId || `result-${crypto.randomUUID()}`;
+        receipt = receipt ? updatePendingTask(receipt.nodeId, { taskId, submitted: true, resultUrls,
+          mediaDownloadAccess, mediaRecoveryState: 'delivery_pending' }, receipt.taskId, receipt.attemptId)
+          : savePendingTask({ nodeId: options.nodeId, projectId, nodeType: NODE_TYPE_BY_CATEGORY[options.category],
+            provider: 'general', providerConfigId: options.model.providerConfigId, taskType: 'custom-protocol',
+            taskId, submitted: true, resultUrls, mediaDownloadAccess, videoGeneration,
+            mediaRecoveryState: 'delivery_pending', batchCount: readBatchCount(options.variables.n) });
+      }
+      return Object.assign(submitted.urls, { mediaDownloadAccess, ...(receipt ? { taskReceipt: receipt } : {}) });
+    }
+    if (!submitted.poll || !submitted.taskId) throw new Error('异步调用协议未返回轮询配置');
+    const poll = { ...submitted.poll, maxDurationMs: submitted.poll.maxDurationMs ?? MEDIA_POLL_MAX_DURATION_MS,
+      ...(catalogId === 'relayonapi' && options.category === 'video'
+        && usesRelayonModelProtocol(options.model.modelId, options.model.executionProfile)
+        ? { resultUrlFallbackPaths: [...new Set(RELAYON_VIDEO_RESULT_URL_PATHS)] } : {}),
+    };
+    if (receipt) receipt = updatePendingTask(receipt.nodeId, { taskId: submitted.taskId, protocolPoll: poll, submitted: true }, receipt.taskId, receipt.attemptId);
 
     const result = await pollResolvedModelProtocol(
-      submitted.poll,
+      poll,
       provider.apiKey || '',
       signal,
       baseUrl,
+      validateResponse ? assertMinimaxQueryResponse : undefined,
     );
+    assertModelProtocolResult(options.category, result);
     if (!result.urls) throw new Error('媒体模型任务完成但未返回结果 URL');
-    return result.urls;
-  } finally {
-    if (options.nodeId) {
-      cleanupNodePolling(options.nodeId);
-      removePendingTask(options.nodeId);
+    if (receipt) updatePendingTask(receipt.nodeId, { mediaRecoveryState: 'delivery_pending' }, receipt.taskId, receipt.attemptId);
+    // 每类媒体都在本地保存和目标回填后确认，数组携带当次身份而非读取最新节点任务。
+    return Object.assign(result.urls, { mediaDownloadAccess, ...(receipt ? { taskReceipt: receipt } : {}) });
+  } catch (error) {
+    const httpError = getHttpResponseError(error);
+    const hint = usesMinimaxProtocol && httpError ? getMinimaxMediaAccessHint(httpError.message) : undefined;
+    const failure = hint && httpError ? new ModelProtocolHttpError(httpError.status, hint,
+      httpError instanceof ModelProtocolHttpError ? httpError.retryAfterMs : undefined, httpError.definitiveFailure) : error;
+    const rejected = !receipt?.taskId && getHttpResponseError(failure)?.definitiveFailure === true;
+    if (receipt && !(failure instanceof PollTaskFailedError) && !rejected) {
+      const paused = pauseMediaTask(receipt, failure, !receipt.taskId ? 'submit_unknown'
+        : isPollTimeoutError(failure) ? 'query_timeout' : 'query_interrupted');
+      if (paused) throw paused;
     }
+    if (receipt && (failure instanceof PollTaskFailedError || rejected)) removeFailedMediaTask(receipt);
+    throw failure;
+  } finally {
+    if (options.nodeId) cleanupNodePolling(options.nodeId, nodeSignal);
+    releaseOperation?.();
   }
 }

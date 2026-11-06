@@ -1,3 +1,6 @@
+/**
+ * annotationLayer — 回归测试：ImageAnnotationLayer。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {

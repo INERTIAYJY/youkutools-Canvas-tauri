@@ -9,10 +9,13 @@
 import { parseResponseError, buildAuthHeaders } from '../httpUtils';
 import { extractModelName, normalizeSeedreamSize, parseGeneralImageResponse } from '../helpers';
 import { mapImageDimensions } from '../../aiDimensions';
+import { getImageCapability } from '../mediaModelCapabilities';
 import { runBatchTasks } from '../batchUtils';
 import type { BatchImageResult } from '../../../types/aiTypes';
 import { corsSafeFetch } from '../httpTransport';
 import { mapImageParameters } from '../imageParameterMappings';
+import { quoteVolcengineImage } from '../../billing/volcenginePricing';
+import { createBillingRun, updateBillingRun } from '../../billing/volcengineBillingService';
 
 export interface VolcengineImageParams {
   apiKey: string;
@@ -25,6 +28,7 @@ export interface VolcengineImageParams {
   imageSize: string;
   aspectRatio: string;
   imageUrls?: string[];
+  nodeId?: string;
 }
 
 export async function generateVolcengineImage(
@@ -35,16 +39,25 @@ export async function generateVolcengineImage(
 
   const modelName = extractModelName(model, provider);
   const seedreamSize = normalizeSeedreamSize(modelName, imageSize);
-  const dimensions = mapImageDimensions(seedreamSize, aspectRatio);
   const apiUrl = baseUrl.replace(/\/+$/, '') + '/images/generations';
 
-  // doubao-seedream-5-0-pro-260628 使用 WxH 格式，且不支持 sequential_image_generation
-  const isPro = modelName === 'doubao-seedream-5-0-pro-260628';
+  // Seedream 5.0 Pro 固定比例使用官方像素表；自适应只传分辨率档位。
+  // 不能把 2K 当短边直接换算，否则 16:9 会超过方舟的总像素上限。
+  const isPro = modelName.startsWith('doubao-seedream-5-0-pro');
+  const adaptiveRatio = aspectRatio === '自适应' || aspectRatio === 'auto';
+  const capability = isPro ? getImageCapability(modelName) : undefined;
+  const preset = adaptiveRatio ? undefined : capability?.dimensionPresets?.[seedreamSize]?.[aspectRatio];
+  const dimensions = preset
+    ? { width: preset[0], height: preset[1] }
+    : mapImageDimensions(seedreamSize, adaptiveRatio ? '1:1' : aspectRatio);
+  const requestSize = isPro && !adaptiveRatio
+    ? `${dimensions.width}x${dimensions.height}`
+    : seedreamSize;
 
   const requestBody = mapImageParameters('volcengine', modelName, {
     model: modelName,
     prompt,
-    imageSize: isPro ? `${dimensions.width}x${dimensions.height}` : seedreamSize,
+    imageSize: requestSize,
     referenceImageUrls: imageUrls,
   });
   if (!isPro) {
@@ -54,22 +67,38 @@ export async function generateVolcengineImage(
     requestBody.image = imageUrls;
   }
 
-  const response = await corsSafeFetch(apiUrl, {
-    method: 'POST',
-    headers: buildAuthHeaders(apiKey),
-    body: JSON.stringify(requestBody),
-    signal,
+  const quote = quoteVolcengineImage({ modelId: modelName, inputImageCount: imageUrls.length, outputCount: 1,
+    width: adaptiveRatio ? undefined : dimensions.width, height: adaptiveRatio ? undefined : dimensions.height });
+  let run = await createBillingRun({
+    nodeId: params.nodeId, modelType: 'image', modelId: modelName, prompt,
+    details: { imageSize: requestSize, aspectRatio, width: dimensions.width, height: dimensions.height, inputImageCount: imageUrls.length, outputCountRequested: 1 },
+    quote,
   });
 
-  if (!response.ok) {
-    await parseResponseError(response, `图片生成失败 (${response.status})`);
+  let explicitlyRejected = false;
+  try {
+    const response = await corsSafeFetch(apiUrl, {
+      method: 'POST', headers: buildAuthHeaders(apiKey), body: JSON.stringify(requestBody), signal,
+    });
+    explicitlyRejected = !response.ok;
+    if (!response.ok) await parseResponseError(response, `图片生成失败 (${response.status})`);
+    const json = await response.json();
+    const imageUrl = parseGeneralImageResponse(json);
+    if (!imageUrl) throw new Error('图片生成返回结果为空');
+    run = await updateBillingRun(run, {
+      status: 'succeeded', finishedAt: Date.now(), calculatedMicros: quote.amountMicros,
+      amountConfidence: quote.amountMicros === null ? 'unknown' : 'calculated',
+    });
+    return { url: imageUrl, width: dimensions.width, height: dimensions.height };
+  } catch (error) {
+    await updateBillingRun(run, {
+      status: explicitlyRejected ? 'failed' : 'unknown', finishedAt: Date.now(),
+      calculatedMicros: explicitlyRejected ? 0 : null,
+      amountConfidence: explicitlyRejected ? 'calculated' : 'unknown',
+      errorMessage: error instanceof Error ? error.message.slice(0, 500) : '图片请求失败',
+    });
+    throw error;
   }
-
-  const json = await response.json();
-  const imageUrl = parseGeneralImageResponse(json);
-  if (!imageUrl) throw new Error('图片生成返回结果为空');
-
-  return { url: imageUrl, width: dimensions.width, height: dimensions.height };
 }
 
 export async function generateVolcengineImagesBatch(

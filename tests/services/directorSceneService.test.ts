@@ -1,3 +1,6 @@
+/**
+ * directorSceneService — 回归测试：directorSceneService。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

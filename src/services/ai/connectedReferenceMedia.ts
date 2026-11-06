@@ -2,7 +2,7 @@
  * ai/connectedReferenceMedia — 收集连入某个生成节点的参考媒体。
  * 视频与音频生成共用：连线即引用，图片包含 3D 导演台截图。
  */
-import { isRemoteMediaUrl } from '../../utils/mediaUrl';
+import { isLocalMediaUrl, isRemoteMediaUrl } from '../../utils/mediaUrl';
 import { useAppStore } from '../../store/useAppStore';
 import { collectDirectorImageUrls } from '../directorDeskService';
 import type { BaseNodeData } from '../../types';
@@ -15,8 +15,9 @@ export interface ConnectedReferenceMedia {
   audioUrls: string[];
 }
 
-/** 远端模型优先复用生成结果原始公网 URL，本地工作流仍可直接读取 reference.url。 */
+/** 有本地副本就交给上传缓存处理，避免旧 sourceUrl 绕过过期重传。 */
 export function getMediaReferenceUrl(reference: MediaReference): string {
+  if (isLocalMediaUrl(reference.url)) return reference.url;
   return isRemoteMediaUrl(reference.sourceUrl) ? reference.sourceUrl.trim() : reference.url;
 }
 

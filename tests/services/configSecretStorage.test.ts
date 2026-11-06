@@ -1,3 +1,6 @@
+/**
+ * configSecretStorage — 回归测试：config persistence keeps secrets out of IndexedDB。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createStore } from 'zustand/vanilla';
 import { createHash } from 'node:crypto';

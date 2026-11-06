@@ -1,3 +1,6 @@
+/**
+ * toast — 回归测试：toast 自动消失。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../../src/store/useAppStore';
 

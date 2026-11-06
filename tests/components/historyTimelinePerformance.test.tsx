@@ -1,3 +1,6 @@
+/**
+ * historyTimelinePerformance — 回归测试：history panel subscriptions。
+ */
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HistorySnapshotLike } from '../../src/utils/historyOperationLabels';

@@ -1,3 +1,6 @@
+/**
+ * modelProtocolVariables — 回归测试：protocol variable table。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   PROTOCOL_VARIABLE_NAMES,
@@ -24,6 +27,16 @@ describe('protocol variable table', () => {
     expect(resolveProtocolFieldTemplate('size', '1024x1024', 'image')).toBe('{{size}}');
     // 同名字段按模型类别分流
     expect(resolveProtocolFieldTemplate('resolution', '2K', 'image')).toBe('{{imageSize}}');
+    expect(resolveProtocolFieldTemplate('quality', 'high', 'image')).toBe('{{imageQuality}}');
+    expect(resolveProtocolFieldTemplate('imagequality', 'max', 'image')).toBe('{{imageQuality}}');
+    expect(resolveProtocolFieldTemplate('quality', 'high', 'video')).toBeUndefined();
+    expect(getCategoryProtocolVariables('image')).toContain('imageQuality');
+    expect(getCategoryProtocolVariables('video')).not.toContain('imageQuality');
+    expect(resolveProtocolFieldTemplate('background', 'transparent', 'image')).toBe('{{imageBackground}}');
+    expect(resolveProtocolFieldTemplate('imagebackground', 'auto', 'image')).toBe('{{imageBackground}}');
+    expect(resolveProtocolFieldTemplate('background', 'transparent', 'video')).toBeUndefined();
+    expect(getCategoryProtocolVariables('image')).toContain('imageBackground');
+    expect(getCategoryProtocolVariables('video')).not.toContain('imageBackground');
     expect(resolveProtocolFieldTemplate('resolution', '720p', 'video')).toBe('{{seedanceResolution}}');
     // 类别限定优先于取值限定
     expect(resolveProtocolFieldTemplate('firstframeimage', 'https://a/1.png', 'video')).toBe('{{firstImage}}');
@@ -54,6 +67,14 @@ describe('protocol variable table', () => {
     // 运行时产出的变量必须都在总表里，否则协议模板引用时会被白名单拒绝
     const missing = Object.keys(variables).filter((name) => !PROTOCOL_VARIABLE_NAMES.has(name));
     expect(missing).toEqual([]);
+    expect(variables.seedanceContent).toEqual([
+      { type: 'text', text: 'prompt' },
+      {
+        type: 'image_url',
+        image_url: { url: 'https://cdn.example/ref.png' },
+        role: 'reference_image',
+      },
+    ]);
     // 反过来，模型设置里列给用户的可用变量必须都是运行时真的会给值的。
     // parameters 是工作流 API 声明的自定义参数，只由 RunningHub / 通用工作流等
     // 工作流路径注入，普通视频运行时不产出，因此不参与这条覆盖断言。

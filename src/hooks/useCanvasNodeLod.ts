@@ -1,3 +1,6 @@
+/**
+ * useCanvasNodeLod — 提供画布节点远景预览与保活上下文。
+ */
 import { createContext, useContext, useLayoutEffect } from 'react';
 import type { CanvasNodeLodRuntime } from '../services/canvasNodeLodRuntime';
 

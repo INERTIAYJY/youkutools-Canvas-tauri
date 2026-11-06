@@ -1,3 +1,6 @@
+/**
+ * update-director-desk-release — 更新导演台固定发布清单并核对下载产物的大小与摘要。
+ */
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';

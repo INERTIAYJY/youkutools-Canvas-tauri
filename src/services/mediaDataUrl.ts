@@ -1,3 +1,6 @@
+/**
+ * mediaDataUrl — 限制媒体 data URL 的解码体积并计算字节摘要。
+ */
 const DATA_URL_HEADER_MAX_CHARS = 4096;
 const BASE64_DECODE_CHUNK_CHARS = 256 * 1024;
 const YIELD_EVERY_CHARS = 1024 * 1024;

@@ -14,6 +14,7 @@ import { isTauriEnv } from './fs/core';
 import { invoke } from '@tauri-apps/api/core';
 import { enqueueConfigPersistence } from './configPersistenceQueue';
 import { readStorageWithRetry, reportStorageError, StorageError } from './storageDiagnostics';
+import { hydrateRunningHubAliases, isRunningHubCredentialAlias } from './runninghubSiteCredentials';
 
 /** 配置中代替明文凭据的引用前缀，便于识别与迁移。 */
 const SECRET_REF_PREFIX = 'secret:';
@@ -145,6 +146,20 @@ export async function writeAppSecret(key: string, value: string, expected?: { va
   return writeSecret(`${SECRET_REF_PREFIX}${key}`, value, expected);
 }
 
+/** 永久删除通用凭据条目；删除后只能由用户再次输入并保存来重建。 */
+export async function deleteAppSecret(key: string): Promise<boolean> {
+  const ref = `${SECRET_REF_PREFIX}${key}`;
+  const secretKey = refToKey(ref);
+  if (!secretKey || !isTauriEnv()) return false;
+  try {
+    await invokeSecret<void>('secret_delete', { key: secretKey });
+    return true;
+  } catch (error) {
+    reportStorageError('secret-delete', error);
+    return false;
+  }
+}
+
 /** 清理计划只持有原生 SHA-256 指纹，不另建明文缓存；由配置队列调用。 */
 export async function readProviderSecretFingerprint(connectionId: string): Promise<string | null> {
   if (!isTauriEnv()) return null;
@@ -209,6 +224,13 @@ export async function stripConfigSecrets(raw: unknown, previousConfig?: unknown)
     }
     const apiKey = typeof provider.apiKey === 'string' ? provider.apiKey : '';
     const { apiKey: _omitted, ...rest } = provider;
+    if (isRunningHubCredentialAlias(connectionId, provider)) {
+      const alias: ProviderSecretEntry = { ...rest, apiKey: '' };
+      delete alias.apiKeyRef;
+      delete alias.apiKeyRevision;
+      nextProviders[connectionId] = alias;
+      continue;
+    }
     if (!apiKey) {
       // 编辑器或未恢复凭据的配置快照可能不含引用，必须从已保存记录补回。
       const previousProvider = previousProviders?.[connectionId];
@@ -273,6 +295,11 @@ export async function restoreConfigSecrets(raw: unknown): Promise<SecretRestoreR
     }
     const plainKey = typeof provider.apiKey === 'string' ? provider.apiKey : '';
     const ref = typeof provider.apiKeyRef === 'string' ? provider.apiKeyRef : '';
+    if (isRunningHubCredentialAlias(connectionId, provider)) {
+      nextProviders[connectionId] = { ...provider, apiKey: '' };
+      migrated = migrated || !!plainKey || !!ref;
+      continue;
+    }
 
     if (plainKey) {
       // 旧版明文配置：迁进凭据存储，内存里继续可用
@@ -299,7 +326,7 @@ export async function restoreConfigSecrets(raw: unknown): Promise<SecretRestoreR
     }
   }
 
-  return { config: { ...config, providers: nextProviders }, migrated, missing };
+  return { config: { ...config, providers: hydrateRunningHubAliases(nextProviders) }, migrated, missing };
 }
 
 /** 配置对象里是否仍存在明文凭据（用于自检与测试）。 */

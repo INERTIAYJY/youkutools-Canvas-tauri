@@ -1,3 +1,6 @@
+/**
+ * skillPromptService — 回归测试：truncateSkillContent。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   captureExplicitSkillBindings,

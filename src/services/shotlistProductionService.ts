@@ -2,7 +2,7 @@
 import type { Edge, Node } from '@xyflow/react';
 import type { BaseNodeData, NodeType } from '../types';
 import type { ShotlistProductionKind } from '../types/shotlist';
-import { buildShotFramePrompt, formatShotRowBrief } from '../types/shotlist';
+import { buildShotFramePrompt, buildShotlistRowMentionId, formatShotRowBrief, resolveShotVideoDuration } from '../types/shotlist';
 import { generateId } from '../store/store.utils';
 import { getShotlist, type ShotlistScope } from './shotlistService';
 
@@ -47,19 +47,16 @@ export function prepareShotlistProduction(scope: ShotlistScope, nodeId: string, 
       data.prompt = row.dialogue!.trim();
       data.audioPurpose = 'speech';
     } else if (kind === 'video') {
-      data.prompt = buildShotFramePrompt(row);
-      const frame = state.nodes.find((item) => item.id === row.frame?.nodeId
-        && ['ai-image', 'source-image', 'ai-video', 'source-video'].includes(item.type ?? ''));
-      if (frame) {
-        const safeLabel = (frame.data.label || '画面').replace(/[{}:\r\n]/g, ' ').slice(0, 80);
-        data.prompt += `\n参考画面：@{${frame.id}:${safeLabel}}`;
-        connect(frame.id, targetId);
-      }
+      const label = `${sheet.data.label || '分镜表'} · 镜${row.shotNo}`.replace(/[{}:\r\n]/g, ' ').slice(0, 100);
+      data.prompt = `@{${buildShotlistRowMentionId(nodeId, row.id)}:${label}}`;
+      data.seedanceDuration = resolveShotVideoDuration(row.duration);
+      data.shotlistProductionSource = { nodeId, rowId: row.id, kind, durationSync: 'auto' };
+      connect(nodeId, targetId);
     } else {
       const briefId = `node-${generateId()}`;
       nodes.push({ id: briefId, type: 'source-text', parentId: sheet.parentId, position: { ...position }, data: {
         type: 'source-text', role: 'source', label: `${label} 镜头说明`, status: 'success',
-        output: [formatShotRowBrief(row), row.note?.trim()].filter(Boolean).join('\n'), nodeWidth: 320, nodeHeight: 220,
+        output: [formatShotRowBrief(row, sheet.data.shotlistCinematography), row.note?.trim()].filter(Boolean).join('\n'), nodeWidth: 320, nodeHeight: 220,
       } });
       position.x += 400;
       connect(briefId, targetId);
@@ -67,7 +64,8 @@ export function prepareShotlistProduction(scope: ShotlistScope, nodeId: string, 
       data.directorStatus = 'idle';
     }
     nodes.push({ id: targetId, type: data.type, parentId: sheet.parentId, position: { ...position }, data });
-    connect(targetId, nodeId);
+    // 视频消费精确镜头引用，配音通过镜头来源关联成果，均不反接到表输入。
+    if (kind === 'director') connect(nodeId, targetId);
     return { rowId: row.id, nodeId: targetId, status: 'created' as const };
   });
   if (nodes.length) {

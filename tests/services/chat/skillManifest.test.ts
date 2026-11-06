@@ -1,3 +1,6 @@
+/**
+ * skillManifest — 回归测试：skillManifest。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   parseSkillDocument,

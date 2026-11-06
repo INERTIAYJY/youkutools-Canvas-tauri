@@ -1,3 +1,6 @@
+/**
+ * mcpSessionConfig — 回归测试：MCP token persistence。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

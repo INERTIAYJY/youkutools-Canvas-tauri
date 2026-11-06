@@ -1,3 +1,6 @@
+/**
+ * comfyWorkflowEditor — 回归测试：ComfyUI 编辑器打开服务。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkflowDefinition } from '../../src/types';
 

@@ -1,3 +1,6 @@
+/**
+ * dreaminaModels — 回归测试：即梦 CLI 模型能力表。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   DREAMINA_IMAGE_MODELS,

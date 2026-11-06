@@ -1,3 +1,6 @@
+/**
+ * chatMessages — 回归测试：ChatMessages。
+ */
 import {
   Children,
   isValidElement,
@@ -47,7 +50,7 @@ vi.mock('react', async () => {
       };
       return [hooks.values[index] as T, setValue] as const;
     },
-    useSyncExternalStore: () => 'zh-CN',
+    useSyncExternalStore: <T,>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
   };
 });
 

@@ -1,3 +1,6 @@
+/**
+ * videoEditorControlService — 校验剪辑上下文并读写受控编辑工程。
+ */
 import { VideoEditorControlError } from "../types/videoEditorControl";
 /** 当前项目的剪辑控制：共享工程模型、来源绑定、原子版本比较；不打开窗口。 */
 import { useAppStore } from '../store/useAppStore';
@@ -8,7 +11,6 @@ import {
 } from './indexedDb/videoEditorRepository';
 import { listAppWindows } from './mcp/mcpUiRuntimeService';
 import { buildClip, buildDialogueTrack, buildShotClip, isEditableMediaNode, resolveShotlistTimelineRows } from './videoEditorService';
-import { isShotRowBlank } from '../types/shotlist';
 import {
   computeTimelineDuration, DEFAULT_TEXT_STYLE, relayoutSequential, VIDEO_EDITOR_SCHEMA_VERSION,
   type VideoEditorClip, type VideoEditorProjectRecord, type VideoEditorTrack,
@@ -83,10 +85,13 @@ export async function listControlledEditors(context: VideoEditorControlContext) 
 
 export function bindVideoEditorMedia(nodeId: string, kind: VideoEditorClip['kind'], audio = false) {
   const node = useAppStore.getState().nodes.find((candidate) => candidate.id === nodeId);
-  const expected = audio ? ['ai-audio', 'source-audio']
+  const expected = audio ? ['ai-audio', 'source-audio', 'ai-video', 'source-video']
     : kind === 'image' ? ['ai-image', 'source-image'] : ['ai-video', 'source-video'];
   if (!node || !expected.includes(node.type ?? '')) throw new VideoEditorControlError('素材节点不存在或类型与轨道不符');
-  const sourceUrl = audio ? node.data.audioUrl : kind === 'image' ? node.data.imageUrl : node.data.videoUrl;
+  // 音频轨可取授权视频节点内的原声；素材地址与授权仍只在宿主绑定。
+  const sourceUrl = audio
+    ? ['ai-video', 'source-video'].includes(node.type ?? '') ? node.data.videoUrl : node.data.audioUrl
+    : kind === 'image' ? node.data.imageUrl : node.data.videoUrl;
   if (!node.data.filePath && !sourceUrl) throw new VideoEditorControlError('素材节点还没有生成结果');
   return { nodeId, filePath: node.data.filePath, assetId: node.data.assetId, sourceUrl, fileName: node.data.label || '素材' };
 }
@@ -173,8 +178,8 @@ export async function createControlledEditor(context: VideoEditorControlContext,
     const node = store.nodes.find((candidate) => candidate.id === input.shotlistNodeId);
     if (node?.type !== 'ai-shotlist') throw new VideoEditorControlError('请选择当前项目的镜头表节点');
     anchorId = node.id;
-    const rows = resolveShotlistTimelineRows(node.data.shotlistRows ?? [], store.nodes).filter((row) => !isShotRowBlank(row));
-    if (!rows.length) throw new VideoEditorControlError('镜头表没有可用镜头');
+    const rows = resolveShotlistTimelineRows(node.data.shotlistRows ?? [], store.nodes);
+    if (!rows.length) throw new VideoEditorControlError('镜头表没有可推送的生成视频');
     const clips = relayoutSequential(rows.map(buildShotClip));
     const captions = input.includeDialogueCaptions ? buildDialogueTrack(rows, clips) : null;
     tracks = [{ id: 'video-1', kind: 'video', name: '主视频轨', clips }, ...(captions ? [captions] : [])];

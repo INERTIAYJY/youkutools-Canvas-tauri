@@ -1,3 +1,6 @@
+/**
+ * runninghubModelManifest — 回归测试：RunningHub 标准模型目录。
+ */
 import { describe, expect, it } from 'vitest';
 import { RUNNINGHUB_MODEL_MANIFEST, RUNNINGHUB_LEGACY_MODELS, getRunningHubModel, parseRunningHubModelParameter } from '../../src/services/ai/providers/runninghubModelManifest';
 import { defaultModelGroups, getConfiguredModelGroups } from '../../src/components/nodes/shared/defaultModels';

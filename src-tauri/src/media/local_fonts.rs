@@ -1,3 +1,6 @@
+/**
+ * local_fonts — 枚举并规范化本机可用字体名称。
+ */
 use std::collections::BTreeSet;
 use std::process::Command;
 

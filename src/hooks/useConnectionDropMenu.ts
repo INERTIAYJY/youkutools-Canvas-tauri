@@ -7,28 +7,9 @@ import type { Node as RFNode, Edge, FinalConnectionState, Connection } from '@xy
 import { useAppStore, generateId } from '../store/useAppStore';
 import { isCanvasConnectionValid } from '../store/store.nodes';
 import type { BaseNodeData, NodeType } from '../types';
+import { getPreferredNodeModel } from '../services/modelPreferenceService';
 
-// ── Model preference helper ──
-const MODEL_PREF_KEY = 'canvas-model-prefs';
-
-function loadDefaultModel(nodeType: string): { model: string; provider: string } | null {
-  try {
-    const raw = localStorage.getItem(MODEL_PREF_KEY);
-    if (!raw) return null;
-    const prefs: Record<string, string> = JSON.parse(raw);
-    // 全景图和动画节点回退到生图偏好
-    const modelValue = prefs[nodeType]
-      || (nodeType === 'ai-panorama' || nodeType === 'ai-animation' ? prefs['ai-image'] : undefined);
-    if (!modelValue) return null;
-    const slashIdx = modelValue.indexOf('/');
-    if (slashIdx === -1) return null;
-    const provider = modelValue.slice(0, slashIdx);
-    if (!provider) return null;
-    return { model: modelValue, provider };
-  } catch {
-    return null;
-  }
-}
+const SELECTION_MENU_TYPE = '__selection__';
 
 interface ConnectionMenuOption {
   label: string;
@@ -44,22 +25,33 @@ interface ConnectionMenuState {
   sourceHandleId: string | null;
   direction: ConnectionMenuDirection;
   position: { x: number; y: number };
+  previewSources?: { x: number; y: number }[];
+  sourceNodeIds?: string[];
+  projectId?: string | null;
 }
 
 const CONNECTION_MENU_MAP: Record<string, ConnectionMenuOption[]> = {
+  [SELECTION_MENU_TYPE]: [
+    { label: '生成文本', type: 'ai-text' },
+    { label: '生成图像', type: 'ai-image' },
+    { label: '生成视频', type: 'ai-video' },
+    { label: '生成音频', type: 'ai-audio' },
+    { label: '帧动画', type: 'ai-animation' },
+    { label: '生成360全景图', type: 'ai-panorama' },
+  ],
   'ai-text': [
     { label: '生成文本', type: 'ai-text' },
     { label: '生成图像', type: 'ai-image' },
     { label: '生成视频', type: 'ai-video' },
     { label: '生成音频', type: 'ai-audio' },
-    { label: '生成动画', type: 'ai-animation' },
+    { label: '帧动画', type: 'ai-animation' },
     { label: '生成360全景图', type: 'ai-panorama' },
   ],
   'ai-image': [
     { label: '生成文本', type: 'ai-text' },
     { label: '生成图像', type: 'ai-image' },
     { label: '生成视频', type: 'ai-video' },
-    { label: '生成动画', type: 'ai-animation' },
+    { label: '帧动画', type: 'ai-animation' },
     { label: '生成360全景图', type: 'ai-panorama' },
   ],
   // 角色/素材库参考图是 source-image，连线能力与 ai-image 相同
@@ -67,21 +59,28 @@ const CONNECTION_MENU_MAP: Record<string, ConnectionMenuOption[]> = {
     { label: '生成文本', type: 'ai-text' },
     { label: '生成图像', type: 'ai-image' },
     { label: '生成视频', type: 'ai-video' },
-    { label: '生成动画', type: 'ai-animation' },
+    { label: '帧动画', type: 'ai-animation' },
     { label: '生成360全景图', type: 'ai-panorama' },
   ],
   'ai-storyboard': [
     { label: '生成文本', type: 'ai-text' },
     { label: '生成图像', type: 'ai-image' },
     { label: '生成视频', type: 'ai-video' },
-    { label: '生成动画', type: 'ai-animation' },
+    { label: '帧动画', type: 'ai-animation' },
     { label: '生成360全景图', type: 'ai-panorama' },
   ],
   'ai-director': [
     { label: '生成图像', type: 'ai-image' },
     { label: '生成视频', type: 'ai-video' },
   ],
-  'ai-video': [],
+  'ai-video': [
+    { label: '生成文本', type: 'ai-text' },
+    { label: '生成视频', type: 'ai-video' },
+  ],
+  'source-video': [
+    { label: '生成文本', type: 'ai-text' },
+    { label: '生成视频', type: 'ai-video' },
+  ],
   'ai-audio': [
     { label: '生成文本', type: 'ai-text' },
     { label: '生成音频', type: 'ai-audio' },
@@ -91,8 +90,11 @@ const CONNECTION_MENU_MAP: Record<string, ConnectionMenuOption[]> = {
     { label: '生成图像', type: 'ai-image' },
   ],
   'ai-markdown': [],
-  // 分镜表的下游产物是时间轴，不是再生成一个媒体节点
-  'ai-shotlist': [],
+  'ai-shotlist': [
+    { label: '生成文本', type: 'ai-text' },
+    { label: '生成图像', type: 'ai-image' },
+    { label: '生成视频', type: 'ai-video' },
+  ],
 };
 
 const CONNECTION_NODE_LABELS: Partial<Record<NodeType, string>> = {
@@ -100,7 +102,7 @@ const CONNECTION_NODE_LABELS: Partial<Record<NodeType, string>> = {
   'ai-image': '生成图像',
   'ai-video': '生成视频',
   'ai-audio': '生成音频',
-  'ai-animation': '生成动画',
+  'ai-animation': '帧动画',
   'ai-panorama': '生成360全景图',
   'ai-storyboard': '生成分镜',
   'ai-director': '导演台',
@@ -142,6 +144,7 @@ export function getConnectionMenuOptions(
 export function useConnectionDropMenu(smoothLine: boolean) {
   const reactFlowInstance = useReactFlow();
   const addNodeWithEdge = useAppStore((s) => s.addNodeWithEdge);
+  const addNodeFromSelection = useAppStore((s) => s.addNodeFromSelection);
   const connectNodes = useAppStore((s) => s.onConnect);
   const nodes = useAppStore((s) => s.nodes);
 
@@ -158,6 +161,26 @@ export function useConnectionDropMenu(smoothLine: boolean) {
   const close = useCallback(() => {
     setMenu((s) => ({ ...s, visible: false }));
   }, []);
+
+  const openSelectionMenu = useCallback((
+    sourceNodeIds: string[],
+    projectId: string | null,
+    position: { x: number; y: number },
+    sourcePoints?: { x: number; y: number }[],
+  ) => {
+    if (sourceNodeIds.length < 2 || useAppStore.getState().currentProjectId !== projectId) return;
+    setMenu({
+      visible: true,
+      sourceNodeId: '',
+      sourceNodeType: SELECTION_MENU_TYPE,
+      sourceHandleId: 'right',
+      direction: 'output',
+      position,
+      previewSources: sourcePoints?.map((point) => reactFlowInstance.screenToFlowPosition(point)),
+      sourceNodeIds,
+      projectId,
+    });
+  }, [reactFlowInstance]);
 
   // Close on click outside or Escape
   useEffect(() => {
@@ -209,6 +232,17 @@ export function useConnectionDropMenu(smoothLine: boolean) {
       const direction = sourceHandleId === 'left' ? 'input' : 'output';
       if (!sourceType || getConnectionMenuOptions(sourceType, direction).length === 0) return;
 
+      const sourceElement = Array.from(document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]'))
+        .find((element) => element.dataset.id === fromNode.id);
+      const handleElement = sourceElement?.querySelector<HTMLElement>(`.react-flow__handle-${direction === 'input' ? 'left' : 'right'}`);
+      const handleRect = handleElement?.getBoundingClientRect();
+      const nodeRect = sourceElement?.getBoundingClientRect();
+      const sourcePoint = handleRect && handleRect.width > 0 && handleRect.height > 0
+        ? { x: handleRect.left + handleRect.width / 2, y: handleRect.top + handleRect.height / 2 }
+        : nodeRect
+          ? { x: direction === 'input' ? nodeRect.left : nodeRect.right, y: nodeRect.top + nodeRect.height / 2 }
+          : null;
+
       setMenu({
         visible: true,
         sourceNodeId: fromNode.id,
@@ -216,9 +250,10 @@ export function useConnectionDropMenu(smoothLine: boolean) {
         sourceHandleId,
         direction,
         position: clientPosition,
+        previewSources: sourcePoint ? [reactFlowInstance.screenToFlowPosition(sourcePoint)] : undefined,
       });
     },
-    [connectNodes],
+    [connectNodes, reactFlowInstance],
   );
 
   const handleSelect = useCallback(
@@ -259,7 +294,7 @@ export function useConnectionDropMenu(smoothLine: boolean) {
       const nodeY = flowPos.y - newHeight / 2;
 
       const newNodeId = `node-${generateId()}`;
-      const defaultModel = loadDefaultModel(option.type);
+      const defaultModel = isDirector ? null : getPreferredNodeModel(option.type, useAppStore.getState());
       const newNode: RFNode<BaseNodeData> = {
         id: newNodeId,
         type: option.type,
@@ -286,7 +321,7 @@ export function useConnectionDropMenu(smoothLine: boolean) {
             directorStatus: 'idle' as const,
             directorCaptureUrls: [] as string[],
           } : {}),
-          ...(defaultModel && !isDirector ? { model: defaultModel.model, provider: defaultModel.provider } : {}),
+          ...defaultModel,
         },
       };
       const edge: Edge = {
@@ -298,10 +333,14 @@ export function useConnectionDropMenu(smoothLine: boolean) {
         targetHandle: edgeSourceHandle === 'left' ? edgeSourceHandle : edgeTargetHandle,
         type: smoothLine ? 'smoothstep' : 'default',
       };
-      addNodeWithEdge(newNode, edge);
+      if (menu.sourceNodeIds) {
+        addNodeFromSelection(newNode, menu.sourceNodeIds, menu.projectId ?? null);
+      } else {
+        addNodeWithEdge(newNode, edge);
+      }
       setMenu((s) => ({ ...s, visible: false }));
     },
-    [menu, reactFlowInstance, addNodeWithEdge, smoothLine],
+    [menu, reactFlowInstance, addNodeWithEdge, addNodeFromSelection, smoothLine],
   );
 
   const sourceNode = nodes.find((n) => n.id === menu.sourceNodeId);
@@ -314,6 +353,7 @@ export function useConnectionDropMenu(smoothLine: boolean) {
     menuRef,
     sourceNode,
     handleConnectEnd,
+    openSelectionMenu,
     handleSelect,
     closeMenu: close,
     connectionMenuMap,

@@ -1,3 +1,6 @@
+/**
+ * plugin-ui-bootstrap — 为隔离插件页面提供有界的宿主通信协议。
+ */
 (() => {
   'use strict';
 
@@ -118,6 +121,7 @@
   function createProps() {
     const props = {
       surface: context.surface,
+      host: context.host,
       get theme() {
         return context.theme;
       },

@@ -1,7 +1,7 @@
 //! AI Canvas Tauri 库入口，装配插件、窗口、命令、事件与原生服务状态。
 
 use base64::Engine;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
@@ -23,6 +23,8 @@ mod assistant_web;
 #[path = "director/blender_runtime/mod.rs"]
 mod blender_runtime;
 mod canvas_input;
+mod billing;
+mod native_rendering;
 #[path = "files/clipboard.rs"]
 mod clipboard;
 #[path = "files/clipboard_read.rs"]
@@ -35,12 +37,23 @@ mod director_desk_runtime;
 mod dreamina;
 #[path = "files/transfer.rs"]
 mod file_transfer;
+#[path = "files/object_storage/mod.rs"]
+mod project_asset_storage;
+#[path = "files/github_fallback.rs"]
+mod github_fallback;
+mod app_update;
 #[path = "files/thumbnail_cache.rs"]
 mod thumbnail_cache;
+#[path = "files/theme_assets.rs"]
+mod theme_assets;
 #[path = "media/local_fonts.rs"]
 mod local_fonts;
+#[path = "media/reference_image_upload.rs"]
+mod reference_image_upload;
 #[path = "mcp/bridge.rs"]
 mod mcp_bridge;
+#[path = "mcp/client.rs"]
+mod mcp_client;
 #[cfg(feature = "local-onnx")]
 #[path = "media/model_mirror.rs"]
 mod model_mirror;
@@ -63,6 +76,16 @@ pub mod onnx {
 
     #[tauri::command]
     pub fn check_model_exists(_model_name: String) -> Result<bool, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub fn list_onnx_models(_webview: tauri::Webview) -> Result<String, String> {
+        unsupported()
+    }
+
+    #[tauri::command]
+    pub fn remove_onnx_model(_webview: tauri::Webview, _model_name: String) -> Result<(), String> {
         unsupported()
     }
 
@@ -131,24 +154,35 @@ mod path_policy;
 // 源文件按领域归类；crate 根模块名保持稳定，避免改变 IPC、测试与安全调用路径。
 #[path = "plugins/registry.rs"]
 mod plugin_registry;
+#[path = "plugins/install_permissions.rs"]
+pub mod plugin_install_permissions;
 #[path = "plugins/runtime.rs"]
 mod plugin_runtime;
+#[path = "plugins/host_effects.rs"]
+mod plugin_host_effects;
+#[path = "plugins/artifacts.rs"]
+mod plugin_artifacts;
 #[path = "plugins/ui.rs"]
 mod plugin_ui;
 #[path = "plugins/window.rs"]
 mod plugin_window;
 #[path = "files/project_archive.rs"]
 mod project_archive;
+#[path = "files/skill_archive.rs"]
+mod skill_archive;
 #[path = "agent/provider_docs.rs"]
 mod provider_docs;
 mod secret_store;
 mod seedling;
 #[path = "media/sprite_export.rs"]
 mod sprite_export;
+#[path = "media/sprite_processing.rs"]
+mod sprite_processing;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
 static CHAT_WINDOW_LOCK_OFFSET: Mutex<(i32, i32)> = Mutex::new((0, 0));
 static CHAT_WINDOW_SIZE_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
+static CHAT_WINDOW_LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PROXY_FETCH_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 const CHAT_WINDOW_DEFAULT_SIZE: (f64, f64) = (480.0, 720.0);
@@ -158,6 +192,8 @@ const PROXY_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PROXY_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const PROXY_HTTP_MAX_IDLE_PER_HOST: usize = 8;
 const PROXY_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+// 兼容既有 64 MiB 视频素材，并给 multipart 头部留出空间。
+const PROXY_REQUEST_MAX_BYTES: usize = 65 * 1024 * 1024;
 const REMOTE_IMAGE_MAX_BYTES: usize = 25 * 1024 * 1024;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -373,7 +409,7 @@ const DREAMINA_LOGIN_WATCHER: &str = r#"
 "#;
 
 /// 通用 HTTP 代理：前端通过 invoke 调用，由 Rust 端发起 HTTP 请求，彻底绕过浏览器 CORS 限制。
-/// 请求体和响应体均使用 base64 编码传输，支持 GET/POST 等任意方法。
+/// 文本请求直接传 UTF-8，二进制请求和响应分块仍兼容 base64。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyFetchRequest {
@@ -382,38 +418,122 @@ struct ProxyFetchRequest {
     method: String,
     headers: Vec<(String, String)>,
     body: Option<String>, // base64 编码的请求体
+    text_body: Option<String>,
 }
 
-type ProxyFetchCancellations = Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>;
+// 分别限制在途请求和提前到达的取消；128 项远高于正常模型与工具并发。
+const PROXY_MAX_ACTIVE_REQUESTS: usize = 128;
+const PROXY_MAX_EARLY_CANCELLATIONS: usize = 128;
+const PROXY_MAX_REQUEST_ID_BYTES: usize = 256;
+const PROXY_CANCELLATIONS_OVERFLOWED: &str =
+    "HTTP 取消登记已满；为避免已停止的请求重新发送，已暂停新请求，请重启应用后重试";
+
+#[derive(Default)]
+struct ProxyCancellationRegistry {
+    active: HashMap<String, Option<tokio::sync::oneshot::Sender<()>>>,
+    early_cancelled: HashSet<String>,
+    overflowed: bool,
+}
+
+type ProxyFetchCancellations = Mutex<ProxyCancellationRegistry>;
+
+fn is_public_proxy_download(req: &ProxyFetchRequest) -> bool {
+    if !matches!(req.method.as_str(), "GET" | "HEAD")
+        || req.body.is_some()
+        || req.text_body.is_some()
+        || !req.headers.is_empty()
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&req.url) else {
+        return false;
+    };
+    // 查询参数也可能承载任意名称的 Key，不能靠参数名猜测是否公开。
+    matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+}
+
+fn proxy_redirect_rejection(
+    target: &reqwest::Url,
+    previous: &[reqwest::Url],
+    same_origin_only: bool,
+) -> Option<&'static str> {
+    // previous 的第一项是初始地址，和 reqwest 默认行为一样允许 10 次跳转。
+    if previous.len() > 10 {
+        return Some("HTTP 重定向次数超过上限");
+    }
+    if !matches!(target.scheme(), "http" | "https")
+        || !target.username().is_empty()
+        || target.password().is_some()
+    {
+        return Some("HTTP 重定向地址不安全");
+    }
+    let (Some(origin), Some(source)) = (previous.first(), previous.last()) else {
+        return Some("HTTP 重定向缺少来源信息");
+    };
+    if source.scheme() == "https" && target.scheme() != "https" {
+        return Some("HTTP 重定向不能降低传输安全级别");
+    }
+    if same_origin_only && target.origin() != origin.origin() {
+        return Some("带凭据或非公开的 HTTP 请求不能跨来源重定向");
+    }
+    None
+}
+
+fn build_proxy_http_client(same_origin_only: bool) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("AI-Canvas/0.1")
+        .connect_timeout(PROXY_HTTP_CONNECT_TIMEOUT)
+        .pool_idle_timeout(PROXY_HTTP_POOL_IDLE_TIMEOUT)
+        .pool_max_idle_per_host(PROXY_HTTP_MAX_IDLE_PER_HOST)
+        // 自动 Referer 会夹带上一跳的查询参数，公共下载也不应自动暴露它们。
+        .referer(false)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if let Some(reason) = proxy_redirect_rejection(
+                attempt.url(), attempt.previous(), same_origin_only,
+            ) {
+                attempt.error(reason)
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
+}
 
 struct ProxyHttpState {
     client: reqwest::Client,
+    download_client: reqwest::Client,
     cancellations: ProxyFetchCancellations,
+    body_slots: tokio::sync::Semaphore,
 }
 
 impl ProxyHttpState {
     fn new() -> Result<Self, String> {
-        let client = reqwest::Client::builder()
-            .user_agent("AI-Canvas/0.1")
-            .connect_timeout(PROXY_HTTP_CONNECT_TIMEOUT)
-            .pool_idle_timeout(PROXY_HTTP_POOL_IDLE_TIMEOUT)
-            .pool_max_idle_per_host(PROXY_HTTP_MAX_IDLE_PER_HOST)
-            .build()
-            .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
-
         Ok(Self {
-            client,
-            cancellations: Mutex::new(HashMap::new()),
+            client: build_proxy_http_client(true)?,
+            download_client: build_proxy_http_client(false)?,
+            cancellations: Mutex::default(),
+            body_slots: tokio::sync::Semaphore::new(2),
         })
     }
 }
 
 fn lock_proxy_fetch_cancellations(
     cancellations: &ProxyFetchCancellations,
-) -> std::sync::MutexGuard<'_, HashMap<String, tokio::sync::oneshot::Sender<()>>> {
+) -> std::sync::MutexGuard<'_, ProxyCancellationRegistry> {
     cancellations
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn validate_proxy_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty() || request_id.len() > PROXY_MAX_REQUEST_ID_BYTES {
+        return Err("HTTP 请求 ID 无效，长度必须为 1–256 个 UTF-8 字节".into());
+    }
+    Ok(())
 }
 
 struct ProxyFetchCancellationRegistration<'a> {
@@ -427,11 +547,21 @@ impl<'a> ProxyFetchCancellationRegistration<'a> {
         request_id: String,
         sender: tokio::sync::oneshot::Sender<()>,
     ) -> Result<Self, String> {
+        validate_proxy_request_id(&request_id)?;
         let mut items = lock_proxy_fetch_cancellations(cancellations);
-        if items.contains_key(&request_id) {
-            return Err(format!("HTTP 请求 ID 重复: {request_id}"));
+        if items.active.contains_key(&request_id) {
+            return Err("HTTP 请求 ID 重复，请等待原请求结束后重试".into());
         }
-        items.insert(request_id.clone(), sender);
+        if items.early_cancelled.remove(&request_id) {
+            return Err("请求已取消".into());
+        }
+        if items.overflowed {
+            return Err(PROXY_CANCELLATIONS_OVERFLOWED.into());
+        }
+        if items.active.len() >= PROXY_MAX_ACTIVE_REQUESTS {
+            return Err("同时进行的 HTTP 请求已达 128 个，请等待已有请求结束后重试".into());
+        }
+        items.active.insert(request_id.clone(), Some(sender));
         drop(items);
 
         Ok(Self {
@@ -443,8 +573,36 @@ impl<'a> ProxyFetchCancellationRegistration<'a> {
 
 impl Drop for ProxyFetchCancellationRegistration<'_> {
     fn drop(&mut self) {
-        lock_proxy_fetch_cancellations(self.cancellations).remove(&self.request_id);
+        lock_proxy_fetch_cancellations(self.cancellations)
+            .active
+            .remove(&self.request_id);
     }
+}
+
+fn cancel_proxy_request(cancellations: &ProxyFetchCancellations, request_id: &str) -> Result<(), String> {
+    validate_proxy_request_id(request_id)?;
+    let cancellation = {
+        let mut items = lock_proxy_fetch_cancellations(cancellations);
+        if let Some(sender) = items.active.get_mut(request_id) {
+            // 取消后仍保留占位，旧请求清理前不能让同 ID 的新请求注册进来。
+            sender.take()
+        } else {
+            if items.early_cancelled.contains(request_id) {
+                return Ok(());
+            }
+            if items.overflowed || items.early_cancelled.len() >= PROXY_MAX_EARLY_CANCELLATIONS {
+                // 丢过的取消 ID 已无法还原，不能靠等待或清空 Map 重新放行。
+                items.overflowed = true;
+                return Err(PROXY_CANCELLATIONS_OVERFLOWED.into());
+            }
+            items.early_cancelled.insert(request_id.to_string());
+            return Ok(());
+        }
+    };
+    if let Some(sender) = cancellation {
+        let _ = sender.send(());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -452,11 +610,18 @@ fn cancel_proxy_fetch(
     state: tauri::State<'_, ProxyHttpState>,
     request_id: String,
 ) -> Result<(), String> {
-    let cancellation = lock_proxy_fetch_cancellations(&state.cancellations).remove(&request_id);
-    if let Some(sender) = cancellation {
-        let _ = sender.send(());
+    cancel_proxy_request(&state.cancellations, &request_id)
+}
+
+async fn run_cancellable_proxy_request<T>(
+    cancel_receiver: tokio::sync::oneshot::Receiver<()>,
+    request: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = cancel_receiver => Err("请求已取消".to_string()),
+        result = request => result,
     }
-    Ok(())
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -479,26 +644,79 @@ enum ProxyFetchStreamEvent {
     Done,
 }
 
+fn proxy_transport_error(error: reqwest::Error) -> String {
+    if error.is_redirect() {
+        return "请求失败：HTTP 重定向被安全策略拒绝，请使用同源地址或最终资源地址。若这是生成提交，请先核对服务商任务记录，不要直接重发。".into();
+    }
+    let kind = if error.is_timeout() {
+        "网络请求超时"
+    } else if error.is_connect() {
+        "无法建立网络连接"
+    } else if error.is_body() {
+        "请求体传输失败"
+    } else {
+        "发送请求或等待响应时连接失败"
+    };
+    // 只提取系统错误类别和错误码，不把 URL、查询参数或凭据写入历史。
+    let mut source = std::error::Error::source(&error);
+    let mut detail = String::new();
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            detail = format!("（{:?}，系统错误码 {:?}）", io.kind(), io.raw_os_error());
+            break;
+        }
+        source = cause.source();
+    }
+    format!("请求失败：{kind}{detail}。未收到有效 HTTP 响应，提交结果尚未确认，请先检查服务商任务记录。")
+}
+
 async fn send_proxy_request(
-    client: &reqwest::Client,
-    req: &ProxyFetchRequest,
+    state: &ProxyHttpState,
+    req: ProxyFetchRequest,
 ) -> Result<reqwest::Response, String> {
+    if req.body.is_some() && req.text_body.is_some() {
+        return Err("请求体格式重复".into());
+    }
+    let has_body = req.body.is_some() || req.text_body.is_some();
+    if req.text_body.as_ref().is_some_and(|body| body.len() > PROXY_REQUEST_MAX_BYTES)
+        || req.body.as_ref().is_some_and(|body| {
+            body.len() > PROXY_REQUEST_MAX_BYTES.div_ceil(3) * 4
+        })
+    {
+        return Err("请求内容超过 65 MiB，请减少参考素材后重试".into());
+    }
+    let _body_slot = if has_body {
+        Some(state.body_slots.acquire().await.map_err(|_| "请求队列已关闭")?)
+    } else {
+        None
+    };
     let method = reqwest::Method::from_bytes(req.method.as_bytes())
         .map_err(|e| format!("无效的 HTTP 方法: {e}"))?;
+    // Key 可以放进任意合法请求头，只有明确无调用方请求头的下载才允许跨来源。
+    let client = if is_public_proxy_download(&req) {
+        &state.download_client
+    } else {
+        &state.client
+    };
     let mut request = client.request(method, &req.url);
-    for (key, value) in &req.headers {
-        request = request.header(key.as_str(), value.as_str());
+    for (key, value) in req.headers {
+        request = request.header(key, value);
     }
-    if let Some(body) = &req.body {
+    if let Some(body) = req.text_body {
+        request = request.body(body);
+    } else if let Some(body) = req.body {
         if !body.is_empty() {
             let bytes = base64::engine::general_purpose::STANDARD
-                .decode(body)
+                .decode(&body)
                 .map_err(|e| format!("请求体 base64 解码失败: {e}"))?;
+            if bytes.len() > PROXY_REQUEST_MAX_BYTES {
+                return Err("请求内容超过 65 MiB，请减少参考素材后重试".into());
+            }
             request = request.body(bytes);
         }
     }
 
-    request.send().await.map_err(|e| format!("请求失败: {e}"))
+    request.send().await.map_err(proxy_transport_error)
 }
 
 fn ensure_content_length_within_limit(
@@ -577,7 +795,7 @@ async fn proxy_fetch(
     )?;
 
     let request = async {
-        let response = send_proxy_request(&state.client, &req).await?;
+        let response = send_proxy_request(&state, req).await?;
 
         let status = response.status().as_u16();
         let res_headers: Vec<(String, String)> = response
@@ -597,10 +815,7 @@ async fn proxy_fetch(
         })
     };
 
-    tokio::select! {
-        result = request => result,
-        _ = cancel_receiver => Err("请求已取消".to_string()),
-    }
+    run_cancellable_proxy_request(cancel_receiver, request).await
 }
 
 #[tauri::command]
@@ -621,7 +836,7 @@ async fn proxy_stream_fetch(
     )?;
 
     let request = async {
-        let mut response = send_proxy_request(&state.client, &req).await?;
+        let mut response = send_proxy_request(&state, req).await?;
         ensure_content_length_within_limit(&response, PROXY_RESPONSE_MAX_BYTES, "代理响应体")?;
         let status = response.status().as_u16();
         let headers = response
@@ -656,10 +871,7 @@ async fn proxy_stream_fetch(
         Ok(())
     };
 
-    tokio::select! {
-        result = request => result,
-        _ = cancel_receiver => Err("请求已取消".to_string()),
-    }
+    run_cancellable_proxy_request(cancel_receiver, request).await
 }
 
 /// 使用原生 HTTP 客户端下载远程图片并返回 base64 data URL（绕过 WebView CORS 限制）
@@ -668,12 +880,14 @@ async fn fetch_image_data_url(
     state: tauri::State<'_, ProxyHttpState>,
     url: String,
 ) -> Result<String, String> {
-    let response = state
-        .client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+    let response = send_proxy_request(&state, ProxyFetchRequest {
+        request_id: None,
+        url: url.clone(),
+        method: "GET".into(),
+        headers: Vec::new(),
+        body: None,
+        text_body: None,
+    }).await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -720,6 +934,234 @@ async fn fetch_image_data_url(
 #[cfg(test)]
 mod proxy_http_tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    fn test_request(url: String, method: &str) -> ProxyFetchRequest {
+        ProxyFetchRequest {
+            request_id: None, url, method: method.into(), headers: Vec::new(),
+            body: None, text_body: None,
+        }
+    }
+
+    fn read_test_request(listener: &TcpListener) -> (TcpStream, String) {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "未收到预期测试请求");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("接收测试请求失败: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+            assert!(bytes.len() < 16 * 1024, "测试请求头超过上限");
+        }
+        let headers = String::from_utf8(bytes.clone()).unwrap();
+        let body_len = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().unwrap())
+        }).unwrap_or(0);
+        assert!(body_len < 1024, "测试请求体超过上限");
+        let mut body = vec![0; body_len];
+        stream.read_exact(&mut body).unwrap();
+        bytes.extend_from_slice(&body);
+        (stream, String::from_utf8(bytes).unwrap())
+    }
+
+    fn serve_test_responses(
+        listener: TcpListener,
+        responses: Vec<String>,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        std::thread::spawn(move || responses.into_iter().map(|response| {
+            let (mut stream, request) = read_test_request(&listener);
+            stream.write_all(response.as_bytes()).unwrap();
+            request
+        }).collect())
+    }
+
+    #[test]
+    fn only_headerless_and_queryless_get_or_head_downloads_are_public() {
+        for method in ["GET", "HEAD"] {
+            let request = test_request("https://cdn.example/image.png".into(), method);
+            assert!(is_public_proxy_download(&request));
+        }
+        for url in [
+            "https://cdn.example/image.png?arbitrary-name=private-key",
+            "https://cdn.example/image.png?",
+            "https://user:secret@cdn.example/image.png",
+            "ftp://cdn.example/image.png",
+            "not a URL",
+        ] {
+            assert!(!is_public_proxy_download(&test_request(url.into(), "GET")));
+        }
+        for header in ["Authorization", "X-API-Key", "X-Goog-Api-Key", "X-Private-Token", "Accept", "Range"] {
+            let mut request = test_request("https://cdn.example/image.png".into(), "GET");
+            request.headers.push((header.into(), "private-key".into()));
+            assert!(!is_public_proxy_download(&request));
+        }
+        let mut request = test_request("https://api.example/generate".into(), "POST");
+        assert!(!is_public_proxy_download(&request));
+        request.method = "GET".into();
+        request.text_body = Some(String::new());
+        assert!(!is_public_proxy_download(&request));
+        request.text_body = None;
+        request.body = Some(String::new());
+        assert!(!is_public_proxy_download(&request));
+    }
+
+    #[test]
+    fn redirect_policy_checks_origins_downgrades_target_credentials_and_hop_limit() {
+        let origin = reqwest::Url::parse("https://api.example/start").unwrap();
+        for strict in [true, false] {
+            for target in [
+                "http://api.example/final", "file:///private/resource",
+                "https://user:secret@api.example/final",
+            ] {
+                let target = reqwest::Url::parse(target).unwrap();
+                assert!(proxy_redirect_rejection(&target, &[origin.clone()], strict).is_some());
+            }
+            let target = reqwest::Url::parse("https://api.example/final").unwrap();
+            assert!(proxy_redirect_rejection(&target, &[], strict).is_some());
+            assert!(proxy_redirect_rejection(&target, &vec![origin.clone(); 11], strict).is_some());
+            assert!(proxy_redirect_rejection(&target, &vec![origin.clone(); 10], strict).is_none());
+        }
+        for target in ["https://other.example/final", "https://api.example:444/final"] {
+            let target = reqwest::Url::parse(target).unwrap();
+            assert!(proxy_redirect_rejection(&target, &[origin.clone()], true).is_some());
+            assert!(proxy_redirect_rejection(&target, &[origin.clone()], false).is_none());
+        }
+        let default_port = reqwest::Url::parse("https://api.example:443/final").unwrap();
+        assert!(proxy_redirect_rejection(&default_port, &[origin], true).is_none());
+        let upgraded = reqwest::Url::parse("https://cdn.example/final").unwrap();
+        let insecure = reqwest::Url::parse("http://download.example/start").unwrap();
+        assert!(proxy_redirect_rejection(&upgraded, &[insecure], false).is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_headers_queries_and_post_bodies_never_reach_a_redirected_origin() {
+        let state = ProxyHttpState::new().unwrap();
+        let mut cases = Vec::new();
+        for header in ["Authorization", "X-API-Key", "X-Goog-Api-Key", "X-Private-Token", "aCcEpT", "Range"] {
+            for status in ["302 Found", "307 Temporary Redirect"] {
+                cases.push((Some(header), "GET", status, false));
+            }
+        }
+        cases.extend([(None, "GET", "302 Found", true), (None, "POST", "307 Temporary Redirect", false)]);
+        for (header, method, status, query) in cases {
+            let target = TcpListener::bind("127.0.0.1:0").unwrap();
+            target.set_nonblocking(true).unwrap();
+            let source = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut request = test_request(format!("http://{}/start", source.local_addr().unwrap()), method);
+            if let Some(header) = header { request.headers.push((header.into(), "private-key".into())); }
+            if query { request.url.push_str("?arbitrary-name=private-key"); }
+            if method == "POST" { request.text_body = Some("private request body".into()); }
+            let server = serve_test_responses(source, vec![format!(
+                "HTTP/1.1 {status}\r\nLocation: http://{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                target.local_addr().unwrap(),
+            )]);
+            let message = send_proxy_request(&state, request).await.unwrap_err();
+            assert!(message.contains("请求失败"));
+            assert!(message.contains("重定向被安全策略拒绝"));
+            assert!(!message.contains("private-key"));
+            assert!(!message.contains("127.0.0.1"));
+            assert_eq!(server.join().unwrap().len(), 1);
+            assert!(matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        }
+    }
+
+    #[tokio::test]
+    async fn public_downloads_follow_cross_origin_redirects_without_automatic_referer() {
+        let state = ProxyHttpState::new().unwrap();
+        for method in ["GET", "HEAD"] {
+            let target = TcpListener::bind("127.0.0.1:0").unwrap();
+            let source = TcpListener::bind("127.0.0.1:0").unwrap();
+            let request = test_request(format!("http://{}/start", source.local_addr().unwrap()), method);
+            let source_server = serve_test_responses(source, vec![format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                target.local_addr().unwrap(),
+            )]);
+            let target_server = serve_test_responses(target, vec![
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".into(),
+            ]);
+            let response = send_proxy_request(&state, request).await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(source_server.join().unwrap().len(), 1);
+            let requests = target_server.join().unwrap();
+            assert!(requests[0].starts_with(&format!("{method} /final ")));
+            assert!(!requests[0].to_ascii_lowercase().contains("\r\nreferer:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn same_origin_307_preserves_headers_and_post_body() {
+        let state = ProxyHttpState::new().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut request = test_request(format!("http://{}/start", listener.local_addr().unwrap()), "POST");
+        request.headers.push(("X-Private-Token".into(), "private-key".into()));
+        request.text_body = Some("private request body".into());
+        let server = serve_test_responses(listener, vec![
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".into(),
+        ]);
+        assert_eq!(send_proxy_request(&state, request).await.unwrap().status(), reqwest::StatusCode::OK);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].starts_with("POST /final "));
+        assert!(requests[1].to_ascii_lowercase().contains("\r\nx-private-token: private-key\r\n"));
+        assert!(requests[1].ends_with("private request body"));
+        assert!(!requests[1].to_ascii_lowercase().contains("\r\nreferer:"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_bodies_are_rejected_before_waiting_for_a_slot() {
+        let req: ProxyFetchRequest = serde_json::from_value(serde_json::json!({
+            "url": "http://127.0.0.1:1/", "method": "POST", "headers": [],
+            "body": "YQ==", "textBody": "文本"
+        })).unwrap();
+        let state = ProxyHttpState { body_slots: tokio::sync::Semaphore::new(0), ..ProxyHttpState::new().unwrap() };
+        let result = tokio::time::timeout(
+            Duration::from_millis(200), send_proxy_request(&state, req),
+        ).await.expect("格式错误不应排队或发送");
+        assert!(result.unwrap_err().contains("格式重复"));
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_base64_releases_its_slot_without_sending() {
+        let req: ProxyFetchRequest = serde_json::from_value(serde_json::json!({
+            "url": "http://127.0.0.1:1/", "method": "POST", "headers": [], "body": "invalid!"
+        })).unwrap();
+        assert!(req.text_body.is_none());
+        let state = ProxyHttpState { body_slots: tokio::sync::Semaphore::new(1), ..ProxyHttpState::new().unwrap() };
+        let result = send_proxy_request(&state, req).await;
+        assert!(result.unwrap_err().contains("base64"));
+        assert_eq!(state.body_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_expose_request_url_or_credentials() {
+        let error = reqwest::Client::new()
+            .get("http://user:secret@127.0.0.1:1/?api_key=private-key")
+            .header("invalid header", "value")
+            .send()
+            .await
+            .unwrap_err();
+        let message = proxy_transport_error(error);
+        assert!(message.contains("提交结果尚未确认"));
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("private-key"));
+        assert!(!message.contains("127.0.0.1"));
+    }
 
     #[test]
     fn response_size_limit_accepts_exact_limit_and_rejects_overflow() {
@@ -730,7 +1172,7 @@ mod proxy_http_tests {
 
     #[test]
     fn cancellation_registration_cleans_up_when_dropped() {
-        let cancellations = Mutex::new(HashMap::new());
+        let cancellations = Mutex::default();
         let (sender, _receiver) = tokio::sync::oneshot::channel();
 
         {
@@ -740,10 +1182,222 @@ mod proxy_http_tests {
                 sender,
             )
             .expect("应成功注册取消句柄");
-            assert!(lock_proxy_fetch_cancellations(&cancellations).contains_key("request-1"));
+            assert!(lock_proxy_fetch_cancellations(&cancellations)
+                .active
+                .contains_key("request-1"));
         }
 
-        assert!(lock_proxy_fetch_cancellations(&cancellations).is_empty());
+        assert!(lock_proxy_fetch_cancellations(&cancellations).active.is_empty());
+    }
+
+    #[test]
+    fn early_cancellation_waits_for_registration_without_expiring_or_growing_on_duplicates() {
+        let cancellations = Mutex::default();
+        cancel_proxy_request(&cancellations, "delayed-request").unwrap();
+        cancel_proxy_request(&cancellations, "delayed-request").unwrap();
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let other = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "other-request".into(),
+            sender,
+        )
+        .unwrap();
+        drop(other);
+        assert_eq!(
+            lock_proxy_fetch_cancellations(&cancellations).early_cancelled.len(),
+            1
+        );
+
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let error = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "delayed-request".into(),
+            sender,
+        )
+        .err()
+        .expect("提前取消的请求不能开始发送");
+        assert_eq!(error, "请求已取消");
+        let registry = lock_proxy_fetch_cancellations(&cancellations);
+        assert!(registry.active.is_empty());
+        assert!(registry.early_cancelled.is_empty());
+        assert!(!registry.overflowed);
+    }
+
+    #[test]
+    fn cancelled_active_id_remains_reserved_until_its_registration_drops() {
+        let cancellations = Mutex::default();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let registration = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "active-request".into(),
+            sender,
+        )
+        .unwrap();
+        cancel_proxy_request(&cancellations, "active-request").unwrap();
+        assert_eq!(receiver.try_recv(), Ok(()));
+        cancel_proxy_request(&cancellations, "active-request").unwrap();
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let error = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "active-request".into(),
+            sender,
+        )
+        .err()
+        .expect("旧请求结束前不能复用 ID");
+        assert!(error.contains("重复"));
+        assert!(lock_proxy_fetch_cancellations(&cancellations)
+            .early_cancelled
+            .is_empty());
+        drop(registration);
+        assert!(lock_proxy_fetch_cancellations(&cancellations).active.is_empty());
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let replacement = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "active-request".into(),
+            sender,
+        )
+        .unwrap();
+        drop(replacement);
+        assert!(lock_proxy_fetch_cancellations(&cancellations).active.is_empty());
+    }
+
+    #[test]
+    fn early_cancellation_overflow_fails_closed_even_after_known_ids_are_consumed() {
+        let cancellations = Mutex::default();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let active = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "active-request".into(),
+            sender,
+        )
+        .unwrap();
+        for index in 0..PROXY_MAX_EARLY_CANCELLATIONS {
+            cancel_proxy_request(&cancellations, &format!("early-{index}")).unwrap();
+        }
+        cancel_proxy_request(&cancellations, "early-0").unwrap();
+        assert!(cancel_proxy_request(&cancellations, "unrecorded-cancellation")
+            .unwrap_err()
+            .contains("重启"));
+        // 饱和后仍要接收已有请求的取消，不能因保护状态锁住停止入口。
+        cancel_proxy_request(&cancellations, "active-request").unwrap();
+        assert_eq!(receiver.try_recv(), Ok(()));
+        drop(active);
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let consumed = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "early-0".into(),
+            sender,
+        )
+        .err()
+        .expect("已记录的提前取消仍应消费");
+        assert_eq!(consumed, "请求已取消");
+        for index in 0..1024 {
+            assert!(cancel_proxy_request(&cancellations, &format!("overflow-{index}")).is_err());
+        }
+        for id in ["new-request", "unrecorded-cancellation"] {
+            let (sender, _receiver) = tokio::sync::oneshot::channel();
+            let error =
+                ProxyFetchCancellationRegistration::register(&cancellations, id.into(), sender)
+                    .err()
+                    .expect("无法还原的取消必须让后续注册保持关闭");
+            assert!(error.contains("重启"));
+        }
+        let registry = lock_proxy_fetch_cancellations(&cancellations);
+        assert!(registry.active.is_empty());
+        assert_eq!(
+            registry.early_cancelled.len(),
+            PROXY_MAX_EARLY_CANCELLATIONS - 1
+        );
+        assert!(registry.overflowed);
+    }
+
+    #[test]
+    fn active_request_limit_recovers_when_an_existing_registration_drops() {
+        let cancellations = Mutex::default();
+        let mut registrations = Vec::new();
+        for index in 0..PROXY_MAX_ACTIVE_REQUESTS {
+            let (sender, _receiver) = tokio::sync::oneshot::channel();
+            registrations.push(
+                ProxyFetchCancellationRegistration::register(
+                    &cancellations,
+                    format!("active-{index}"),
+                    sender,
+                )
+                .unwrap(),
+            );
+        }
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let error = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "over-capacity".into(),
+            sender,
+        )
+        .err()
+        .expect("在途请求必须有界");
+        assert!(error.contains("等待已有请求"));
+        drop(registrations.pop());
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        registrations.push(
+            ProxyFetchCancellationRegistration::register(
+                &cancellations,
+                "after-capacity-released".into(),
+                sender,
+            )
+            .unwrap(),
+        );
+        drop(registrations);
+        let registry = lock_proxy_fetch_cancellations(&cancellations);
+        assert!(registry.active.is_empty());
+        assert!(!registry.overflowed);
+    }
+
+    #[test]
+    fn invalid_request_ids_never_allocate_cancellation_state() {
+        let cancellations = Mutex::default();
+        for id in [
+            String::new(),
+            "a".repeat(PROXY_MAX_REQUEST_ID_BYTES + 1),
+            "中".repeat(86),
+        ] {
+            assert!(cancel_proxy_request(&cancellations, &id).is_err());
+            let (sender, _receiver) = tokio::sync::oneshot::channel();
+            assert!(
+                ProxyFetchCancellationRegistration::register(&cancellations, id, sender).is_err()
+            );
+        }
+        let boundary = format!("{}a", "中".repeat(85));
+        assert_eq!(boundary.len(), PROXY_MAX_REQUEST_ID_BYTES);
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        let valid =
+            ProxyFetchCancellationRegistration::register(&cancellations, boundary, sender).unwrap();
+        drop(valid);
+        let registry = lock_proxy_fetch_cancellations(&cancellations);
+        assert!(registry.active.is_empty());
+        assert!(registry.early_cancelled.is_empty());
+        assert!(!registry.overflowed);
+    }
+
+    #[tokio::test]
+    async fn registered_cancellation_is_checked_before_polling_the_network_request() {
+        let cancellations = Mutex::default();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let registration = ProxyFetchCancellationRegistration::register(
+            &cancellations,
+            "not-started".into(),
+            sender,
+        )
+        .unwrap();
+        cancel_proxy_request(&cancellations, "not-started").unwrap();
+        let mut polled = false;
+        let request = async {
+            polled = true;
+            Ok(())
+        };
+        let result = run_cancellable_proxy_request(receiver, request).await;
+        assert_eq!(result.unwrap_err(), "请求已取消");
+        assert!(!polled);
+        drop(registration);
+        assert!(lock_proxy_fetch_cancellations(&cancellations).active.is_empty());
     }
 }
 
@@ -782,12 +1436,23 @@ async fn open_with_app(
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("-a")
-            .arg(&launch_target)
-            .arg(&target)
-            .spawn()
-            .map_err(|e| format!("启动应用失败: {e}"))?;
+        // open 能启动不代表找到了应用；等它确认后，前端才停止尝试下一个候选。
+        let status = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new("/usr/bin/open")
+                .arg("-a")
+                .arg(launch_target)
+                .arg(target)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        })
+        .await
+        .map_err(|_| "启动应用任务失败，请重试".to_string())?
+        .map_err(|_| "无法启动应用，请检查应用安装状态".to_string())?;
+        if !status.success() {
+            return Err("应用未能打开文件，请检查应用安装状态与文件类型".to_string());
+        }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -885,13 +1550,21 @@ async fn toggle_devtools(app: tauri::AppHandle) -> Result<(), String> {
 /// 打开独立的 AI 对话助手窗口
 #[tauri::command]
 async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
-    CHAT_WINDOW_LOCKED.store(false, Ordering::Release);
-
-    // 先关闭可能残留的历史窗口
-    if let Some(old) = app.get_webview_window("chat-assistant") {
-        persist_current_chat_window_size(&old);
-        let _ = old.close();
+    let _guard = CHAT_WINDOW_LIFECYCLE_LOCK.lock().await;
+    // 复用当前窗口，保留输入、同步握手及位置锁；close 是异步事件，不能同名立即重建。
+    if let Some(window) = app.get_webview_window("chat-assistant") {
+        window
+            .unminimize()
+            .map_err(|e| format!("恢复对话窗口失败: {e}"))?;
+        window
+            .show()
+            .map_err(|e| format!("显示对话窗口失败: {e}"))?;
+        window
+            .set_focus()
+            .map_err(|e| format!("聚焦对话窗口失败: {e}"))?;
+        return Ok(());
     }
+    CHAT_WINDOW_LOCKED.store(false, Ordering::Release);
 
     #[cfg(debug_assertions)]
     let url = WebviewUrl::External(
@@ -961,6 +1634,9 @@ async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
     chat_window
         .show()
         .map_err(|e| format!("显示对话窗口失败: {e}"))?;
+    chat_window
+        .set_focus()
+        .map_err(|e| format!("聚焦对话窗口失败: {e}"))?;
 
     Ok(())
 }
@@ -968,12 +1644,21 @@ async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 关闭独立的 AI 对话助手窗口
 #[tauri::command]
 async fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
+    let _guard = CHAT_WINDOW_LIFECYCLE_LOCK.lock().await;
     CHAT_WINDOW_LOCKED.store(false, Ordering::Release);
     if let Some(window) = app.get_webview_window("chat-assistant") {
         persist_current_chat_window_size(&window);
         window
             .close()
             .map_err(|e| format!("关闭对话窗口失败: {e}"))?;
+        // 等注册表释放标签后再允许下一次打开，防止快速收回/重开命中旧窗口。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while app.get_webview_window("chat-assistant").is_some() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("对话窗口尚未完成关闭，请稍后重试".to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
     Ok(())
 }
@@ -1068,6 +1753,10 @@ async fn dreamina_login(app: tauri::AppHandle) -> Result<DreaminaLoginPayload, S
 }
 
 pub fn run() {
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    let main_window_config = native_rendering::defer_main_window(context.config_mut());
     // Windows WebView2/Chromium 渲染优化：
     // - CalculateNativeWinOcclusion：原生窗口遮挡检测。在虚拟显示适配器 / 远程桌面
     //   工具（MuMu、向日葵、Virtual Display 等）环境下常误判窗口被遮挡，从而错误节流。
@@ -1086,17 +1775,39 @@ pub fn run() {
 
     let proxy_http_state = ProxyHttpState::new().expect("初始化代理 HTTP 客户端失败");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default().on_page_load(|webview, payload| {
+        #[cfg(target_os = "macos")]
+        native_rendering::record_main_page_load(webview, payload);
+        comfyui::media_source::on_page_load(webview, payload);
+    });
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .on_web_content_process_terminate(native_rendering::recover_web_content);
+
+    builder
+        .manage(native_rendering::NativeRenderingState::default())
         .manage(proxy_http_state)
+        .manage(comfyui::management::ManagementState::default())
+        .manage(comfyui::runtime_console::ComfyUIRuntimeState::default())
+        .manage(comfyui::progress::ComfyProgressState::default())
+        .manage(comfyui::media_source::ComfyMediaState::default())
+        .manage(comfyui::installer::ComfyUIInstallerState::default())
+        .manage(comfyui::model_dedupe::ModelDedupeState::default())
         .manage(blender_runtime::BlenderRuntimeState::default())
         .manage(blender_runtime::ProjectGrantState::default())
         .manage(blender_runtime::production_blender_job_core())
         .manage(mcp_bridge::McpBridgeState::default())
+        .manage(mcp_client::McpClientState::default())
+        .manage(project_asset_storage::ObjectStorageState::default())
         .manage(path_policy::UserStorageRoot::default())
+        .manage(billing::BillingStoragePath::default())
         .register_uri_scheme_protocol("director-desk", director_desk_runtime::handle_protocol)
         .register_uri_scheme_protocol("plugin-ui", plugin_ui::handle_protocol)
         .register_uri_scheme_protocol("plugin-window", plugin_window::handle_protocol)
+        .register_uri_scheme_protocol("theme-image", theme_assets::handle_protocol)
+        .register_asynchronous_uri_scheme_protocol("comfy-media", comfyui::media_source::handle_protocol)
         .plugin(tauri_plugin_fs::init())
+        .plugin(comfyui::installation::privacy_plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
@@ -1105,7 +1816,20 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(canvas_input::init())
         .invoke_handler(tauri::generate_handler![
+            theme_assets::store_theme_image,
+            reference_image_upload::optimize_reference_png,
+            reference_image_upload::optimize_reference_jpeg,
+            billing::billing_upsert,
+            billing::billing_query,
+            billing::billing_get_by_task,
+            billing::billing_clear_preview,
+            billing::billing_clear,
+            billing::billing_export,
+            billing::billing_set_storage_path,
+            billing::billing_get_storage_path,
             fetch_image_data_url,
+            comfyui::media_source::open_comfy_media_source,
+            comfyui::media_source::close_comfy_media_source,
             proxy_fetch,
             proxy_stream_fetch,
             cancel_proxy_fetch,
@@ -1128,11 +1852,35 @@ pub fn run() {
             agent_package::agent_source_read_text,
             project_archive::pack_project_archive,
             project_archive::unpack_project_archive,
+            project_archive::inspect_project_archive_assets,
+            project_archive::publish_project_import_assets,
+            skill_archive::read_skill_archive,
             thumbnail_cache::prepare_project_thumbnail,
             thumbnail_cache::write_project_thumbnail,
             file_transfer::copy_file_streamed,
+            file_transfer::copy_asset_folder,
+            file_transfer::copy_asset_file_to_folder,
+            file_transfer::finish_asset_file_move,
             file_transfer::download_file_streamed,
+            app_update::download_app_update,
             file_transfer::cancel_file_transfer,
+            project_asset_storage::project_asset_storage_snapshot,
+            project_asset_storage::project_asset_storage_save_connection,
+            project_asset_storage::project_asset_storage_remove_connection,
+            project_asset_storage::project_asset_storage_bind_project,
+            project_asset_storage::project_asset_storage_probe_project,
+            project_asset_storage::project_asset_storage_unbind_project,
+            project_asset_storage::project_asset_storage_cancel,
+            project_asset_storage::project_asset_storage_preview_cleanup,
+            project_asset_storage::project_asset_storage_apply_cleanup,
+            project_asset_storage::project_asset_storage_preview_asset_delete,
+            project_asset_storage::project_asset_storage_apply_asset_delete,
+            project_asset_storage::project_asset_storage_list_heads,
+            project_asset_storage::project_asset_storage_prepare_publish,
+            project_asset_storage::project_asset_storage_publish_revision,
+            project_asset_storage::project_asset_storage_download_revision,
+            project_asset_storage::project_asset_storage_recover_operation,
+            project_asset_storage::project_asset_storage_acknowledge_apply,
             director_desk_runtime::director_desk_runtime_status,
             director_desk_runtime::install_director_desk_runtime,
             director_desk_runtime::cancel_director_desk_install,
@@ -1140,6 +1888,7 @@ pub fn run() {
             move_to_trash,
             clipboard::copy_files_to_clipboard,
             clipboard_read::read_canvas_clipboard,
+            clipboard_read::read_asset_folder_clipboard,
             dreamina_login,
             dreamina::dreamina_login_start,
             dreamina::dreamina_login_runtime,
@@ -1154,23 +1903,61 @@ pub fn run() {
             reveal_in_file_manager,
             toggle_devtools,
             set_main_window_native_corners,
+            native_rendering::sync_native_performance_mode,
+            native_rendering::consume_webview_recovery,
             sync_authorized_directories,
             comfyui::launch_comfyui,
+            comfyui::progress::stream_comfyui_progress,
+            comfyui::progress::cancel_comfyui_progress,
+            comfyui::runtime_console::get_comfyui_runtime_status,
+            comfyui::installation::select_comfyui_installation,
+            comfyui::installation::get_comfyui_installation,
+            comfyui::installer::get_comfyui_install_info,
+            comfyui::installer::choose_comfyui_install_target,
+            comfyui::installer::install_comfyui_portable,
+            comfyui::installer::cancel_comfyui_install,
             comfyui::open_comfyui_window,
             comfyui::complete_comfyui_workflow_save,
+            comfyui::management::open_comfyui_settings_window,
+            comfyui::management::get_comfyui_management_snapshot,
+            comfyui::management::list_comfyui_versions,
+            comfyui::management::apply_comfyui_repository_action,
+            comfyui::management::list_comfyui_catalog,
+            comfyui::management::install_comfyui_extension,
+            comfyui::management::install_comfyui_dependencies,
+            comfyui::management::cancel_comfyui_dependencies,
+            comfyui::model_dedupe::scan_comfyui_duplicate_models,
+            comfyui::model_dedupe::choose_comfyui_model_scan_root,
+            comfyui::model_dedupe::cancel_comfyui_model_scan,
+            comfyui::model_dedupe_links::apply_comfyui_model_deduplication,
+            comfyui::model_dedupe_links::apply_comfyui_model_deduplication_batch,
+            comfyui::model_dedupe_history::list_comfyui_model_dedupe_history,
+            comfyui::model_dedupe_links::list_comfyui_model_dedupe_recoveries,
+            comfyui::model_dedupe_links::recover_comfyui_model_dedupe,
+            comfyui::launch_settings::get_comfyui_launch_settings,
+            comfyui::launch_settings::save_comfyui_launch_settings,
+            comfyui::runtime_console::start_comfyui_managed,
+            comfyui::runtime_console::stop_comfyui_managed,
+            comfyui::runtime_console::get_comfyui_runtime_snapshot,
             onnx::get_models_dir,
             onnx::check_model_exists,
+            onnx::list_onnx_models,
+            onnx::remove_onnx_model,
             onnx::image_upscale,
             onnx::subject_matting,
             onnx::speech_to_text,
             onnx::character_direction_grid,
             sprite_export::export_sprite_frames,
+            sprite_processing::preview_sprite_sheet,
             onnx::download_onnx_model,
             onnx::get_onnx_gpu_status,
             mcp_bridge::mcp_bridge_start,
             mcp_bridge::mcp_bridge_stop,
             mcp_bridge::mcp_bridge_status,
             mcp_bridge::mcp_bridge_respond,
+            mcp_client::mcp_client_configure,
+            mcp_client::mcp_client_fetch,
+            mcp_client::mcp_client_cancel,
             secret_store::secret_set,
             secret_store::secret_get,
             secret_store::secret_delete,
@@ -1202,10 +1989,18 @@ pub fn run() {
             plugin_window::respond_plugin_ui_window_request,
             plugin_window::plugin_ui_window_request,
             plugin_runtime::execute_node_plugin_tool,
+            plugin_runtime::cancel_node_plugin_tool,
+            plugin_artifacts::prepare_plugin_media_workspace,
+            plugin_artifacts::read_plugin_media_artifact,
+            plugin_artifacts::release_plugin_media_workspace,
+            plugin_host_effects::execute_plugin_host_effect,
+            plugin_host_effects::cancel_plugin_host_effect,
             plugin_runtime::get_python_plugin_runtime_status,
         ])
         .on_window_event(|window, event| {
             plugin_window::on_window_event(window, event);
+            comfyui::progress::on_window_event(window, event);
+            comfyui::media_source::on_window_event(window, event);
             // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 if window.label() == "main" || window.label() == "chat-assistant" {
@@ -1246,7 +2041,9 @@ pub fn run() {
                 ));
             }
         })
-        .setup(|_app| {
+        .setup(move |_app| {
+            #[cfg(target_os = "macos")]
+            native_rendering::record_app_started(_app.handle());
             // 凭据目录只允许本进程的 secret_* 命令访问：从 fs 与 asset scope 中拒掉，
             // 否则 Renderer 能绕过命令直接读走整份凭据文件
             secret_store::deny_secret_dir_access(_app.handle());
@@ -1259,12 +2056,18 @@ pub fn run() {
                 eprintln!("[blender-runtime] {error}");
             }
 
+            #[cfg(windows)]
+            native_rendering::create_main_window(_app, main_window_config)?;
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                comfyui::progress::shutdown_progress(app_handle);
+                comfyui::installer::shutdown_installation(app_handle);
+                comfyui::runtime_console::shutdown_runtime(app_handle);
+                comfyui::media_source::shutdown(app_handle);
                 plugin_window::revoke_all_sessions();
                 app_handle
                     .state::<blender_runtime::BlenderJobCore>()

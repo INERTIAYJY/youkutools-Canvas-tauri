@@ -2,27 +2,29 @@
  * settings/providerConnection/ProviderModelSection — 启用模型区块。
  *
  * 承载模型清单的搜索 / 分类筛选 / 勾选 / 分类修正 / 协议与视频能力入口，
- * 以及自定义连接专属的文档导入与手动添加模型。
+ * 以及自定义连接专属的手动添加模型。
  */
 import Select from '../../shared/Select';
 import { Icon } from '@iconify/react';
-import type { Dispatch, SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from 'react';
 import { GENERAL_MODEL_CATEGORY_LABELS } from '../../../types';
 import type {
   GeneralModelCategory,
   ImageReferenceRequestMode,
   ProviderModelSelection,
 } from '../../../types';
-import type { VideoModelCapability } from '../../../types/aiTypes';
-import type { ModelProtocolImportResult } from '../../../services/ai/modelProtocolImport';
+import type { ImageModelCapability, VideoModelCapability } from '../../../types/aiTypes';
 import type { ProviderDefinition } from '../../../services/ai/providerCatalogService';
 import { normalizeBaseUrl } from '../../../services/ai/providerBaseUrl';
+import { createSeedanceQuickAdaptTemplate } from '../../../services/ai/seedanceModelCapabilities';
+import { createH3QuickAdaptTemplate } from '../../../services/ai/h3ModelCapabilities';
 import { useT } from '../../../i18n';
 import AnimatedButton from '../../shared/AnimatedButton';
 import ModelProtocolEditor from '../ModelProtocolEditor';
-import ProtocolImportPanel from '../ProtocolImportPanel';
 import VideoCapabilityEditor from './VideoCapabilityEditor';
-import { CATEGORY_ORDER, type CatalogStatus, type ProtocolImportSnapshot } from './providerConnectionShared';
+import ImageCapabilityEditor from './ImageCapabilityEditor';
+import { describeModelParameterGaps } from '../../../services/ai/modelCapabilityValidation';
+import { CATEGORY_ORDER, type CatalogStatus } from './providerConnectionShared';
 
 interface ProviderModelSectionProps {
   definition: ProviderDefinition;
@@ -41,12 +43,15 @@ interface ProviderModelSectionProps {
   apiKey: string;
   baseUrl: string;
   setProtocolValid: Dispatch<SetStateAction<boolean>>;
-  protocolImportOpen: boolean;
-  setProtocolImportOpen: Dispatch<SetStateAction<boolean>>;
-  protocolImportSnapshot: ProtocolImportSnapshot | null;
+  onProtocolDraftInvalidChange: (invalid: boolean) => void;
+  testSessionScope: string;
+  onOpenModelSettings: (modelId: string, kind: 'image' | 'video' | 'protocol') => Promise<boolean>;
   protocolModel: ProviderModelSelection | undefined;
+  imageCapabilityModel: ProviderModelSelection | undefined;
+  setImageCapabilityModelId: Dispatch<SetStateAction<string | null>>;
+  onUpdateImageCapability: (modelId: string, capability: ImageModelCapability) => void;
+  onApplyImageTemplate: (modelId: string, templateId: string) => void;
   videoCapabilityModel: ProviderModelSelection | undefined;
-  setProtocolModelId: Dispatch<SetStateAction<string | null>>;
   setVideoCapabilityModelId: Dispatch<SetStateAction<string | null>>;
   categoryEditModelId: string | null;
   setCategoryEditModelId: Dispatch<SetStateAction<string | null>>;
@@ -70,10 +75,8 @@ interface ProviderModelSectionProps {
     executionProfile: ProviderModelSelection['executionProfile'],
   ) => void;
   onUpdateVideoCapability: (modelId: string, capability: VideoModelCapability | undefined) => void;
-  onUpdateImageReferenceRequestMode: (modelId: string, mode: ImageReferenceRequestMode) => void;
+  onUpdateImageReferenceRequestMode: (modelId: string, mode: ImageReferenceRequestMode | undefined) => void;
   onCloseProtocolEditor: () => void;
-  onApplyProtocolImport: (result: ModelProtocolImportResult) => void;
-  onUndoProtocolImport: () => void;
   onFetchModels: () => void;
 }
 
@@ -94,12 +97,15 @@ export default function ProviderModelSection({
   apiKey,
   baseUrl,
   setProtocolValid,
-  protocolImportOpen,
-  setProtocolImportOpen,
-  protocolImportSnapshot,
+  onProtocolDraftInvalidChange,
+  testSessionScope,
+  onOpenModelSettings,
   protocolModel,
+  imageCapabilityModel,
+  setImageCapabilityModelId,
+  onUpdateImageCapability,
+  onApplyImageTemplate,
   videoCapabilityModel,
-  setProtocolModelId,
   setVideoCapabilityModelId,
   categoryEditModelId,
   setCategoryEditModelId,
@@ -122,11 +128,40 @@ export default function ProviderModelSection({
   onUpdateVideoCapability,
   onUpdateImageReferenceRequestMode,
   onCloseProtocolEditor,
-  onApplyProtocolImport,
-  onUndoProtocolImport,
   onFetchModels,
 }: ProviderModelSectionProps) {
   const t = useT();
+  const settingsRef = useRef<HTMLDivElement>(null);
+  const settingsScrollFrameRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (settingsScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(settingsScrollFrameRef.current);
+    }
+  }, []);
+
+  const scrollToSettings = useCallback(() => {
+    if (settingsScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(settingsScrollFrameRef.current);
+    }
+    // 等本次点击展开的编辑器挂载后再定位；重复点击同一模型也会重新定位。
+    settingsScrollFrameRef.current = window.requestAnimationFrame(() => {
+      settingsScrollFrameRef.current = null;
+      if (!settingsRef.current?.firstElementChild) return;
+      settingsRef.current.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+        block: 'start',
+        inline: 'nearest',
+      });
+    });
+  }, []);
+
+  const protocolSettingsId = protocolModel?.id;
+  const videoSettingsId = videoCapabilityModel?.id;
+  const imageSettingsId = imageCapabilityModel?.id;
+  useEffect(() => {
+    if (protocolSettingsId || videoSettingsId || imageSettingsId) scrollToSettings();
+  }, [protocolSettingsId, videoSettingsId, imageSettingsId, scrollToSettings]);
 
   return (
     <section className="provider-model-section">
@@ -136,29 +171,6 @@ export default function ProviderModelSection({
           <p>{t('仅勾选会在应用中使用的模型')}</p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1.5">
-          {definition.id === 'custom-openai' ? (
-            <>
-              {protocolImportSnapshot ? (
-                <AnimatedButton
-                  type="button"
-                  className="provider-text-btn h-7"
-                  onClick={onUndoProtocolImport}
-                >
-                  <Icon icon="mdi:undo-variant" width="14" />
-                  {t('撤销导入')}
-                </AnimatedButton>
-              ) : null}
-              <AnimatedButton
-                type="button"
-                className="provider-secondary-btn h-7"
-                aria-expanded={protocolImportOpen}
-                onClick={() => setProtocolImportOpen((open) => !open)}
-              >
-                <Icon icon="mdi:file-import-outline" width="14" />
-                {t('导入文档')}
-              </AnimatedButton>
-            </>
-          ) : null}
           <AnimatedButton
             type="button"
             className="provider-fetch-btn"
@@ -174,13 +186,6 @@ export default function ProviderModelSection({
           </AnimatedButton>
         </div>
       </div>
-
-      {definition.id === 'custom-openai' && protocolImportOpen ? (
-        <ProtocolImportPanel
-          onApply={onApplyProtocolImport}
-          onClose={() => setProtocolImportOpen(false)}
-        />
-      ) : null}
 
       <div className="mb-3 flex min-h-8 items-center justify-between gap-3 rounded-md border border-canvas-border bg-white/[0.03] px-2.5 py-1.5">
         <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-canvas-text-secondary">
@@ -208,7 +213,7 @@ export default function ProviderModelSection({
               }`}
               onClick={() => onToggleVisibleCategory(item)}
             >
-              {GENERAL_MODEL_CATEGORY_LABELS[item]}
+              {t(GENERAL_MODEL_CATEGORY_LABELS[item])}
             </button>
           ))}
         </div>
@@ -253,7 +258,7 @@ export default function ProviderModelSection({
                   className={`provider-category-choice is-${item} ${category === item ? 'is-active' : ''}`}
                   onClick={() => setCategory(item)}
                 >
-                  {GENERAL_MODEL_CATEGORY_LABELS[item]}
+                  {t(GENERAL_MODEL_CATEGORY_LABELS[item])}
                 </button>
               ))}
             </div>
@@ -268,7 +273,7 @@ export default function ProviderModelSection({
               />
               <span>{t('选择当前结果')}</span>
             </label>
-            <span>{selectedModels.length} 个已选</span>
+            <span>{t('已选 {count} 个模型', { count: selectedModels.length })}</span>
           </div>
 
           <div className="provider-model-list">
@@ -280,12 +285,12 @@ export default function ProviderModelSection({
                 <button
                   type="button"
                   className={`provider-model-kind is-${model.category}`}
-                  aria-label={`修改 ${model.name} 的模型分类，当前为${GENERAL_MODEL_CATEGORY_LABELS[model.category]}`}
-                  title="点击修改模型分类"
+                  aria-label={t('修改 {name} 的模型分类，当前为{category}', { name: model.name, category: t(GENERAL_MODEL_CATEGORY_LABELS[model.category]) })}
+                  title={t("点击修改模型分类")}
                   aria-expanded={categoryEditModelId === model.id}
                   onClick={() => setCategoryEditModelId((current) => current === model.id ? null : model.id)}
                 >
-                  {GENERAL_MODEL_CATEGORY_LABELS[model.category]}
+                  {t(GENERAL_MODEL_CATEGORY_LABELS[model.category])}
                 </button>
                 <label className="provider-model-select">
                   <input
@@ -296,20 +301,30 @@ export default function ProviderModelSection({
                   <span className="provider-model-copy">
                     <strong>{model.name}</strong>
                     <small>{model.id}</small>
+                    {definition.id === 'custom-openai' && describeModelParameterGaps(model) ?
+                      <small>{t(describeModelParameterGaps(model))}</small> : null}
                   </span>
                 </label>
                 {definition.id === 'custom-openai' && selectedIds.has(model.id) ? (
                   <>
+                    {model.category === 'image' ? (
+                      <AnimatedButton type="button"
+                        className={`ui-btn ui-icon-btn ui-icon-btn--sm${imageSettingsId === model.id ? ' is-active' : ''}`}
+                        aria-label={t('配置 {name} 图片参数能力', { name: model.name })} title={t("图片参数能力")}
+                        aria-pressed={imageSettingsId === model.id}
+                        onClick={() => {
+                          void onOpenModelSettings(model.id, 'image').then((opened) => { if (opened) scrollToSettings(); });
+                        }}><Icon icon="lucide:image" width="16" /></AnimatedButton>
+                    ) : null}
                     {model.category === 'video' ? (
                       <AnimatedButton
                         type="button"
-                        className={`provider-model-protocol-btn ${model.videoCapability ? 'is-configured' : ''}`}
-                        aria-label={`配置 ${model.name} 视频参数能力`}
-                        title="视频参数能力"
+                        className={`ui-btn ui-icon-btn ui-icon-btn--sm${videoSettingsId === model.id ? ' is-active' : ''}`}
+                        aria-label={t('配置 {name} 视频参数能力', { name: model.name })}
+                        title={t("视频参数能力")}
+                        aria-pressed={videoSettingsId === model.id}
                         onClick={() => {
-                          setVideoCapabilityModelId(model.id);
-                          setProtocolModelId(null);
-                          setProtocolValid(true);
+                          void onOpenModelSettings(model.id, 'video').then((opened) => { if (opened) scrollToSettings(); });
                         }}
                       >
                         <Icon icon="lucide:video" width="16" />
@@ -317,16 +332,15 @@ export default function ProviderModelSection({
                     ) : null}
                     <AnimatedButton
                       type="button"
-                      className={`provider-model-protocol-btn ${model.executionProfile ? 'is-configured' : ''}`}
-                      aria-label={`配置 ${model.name} 调用协议`}
-                      title="调用协议"
+                      className={`ui-btn ui-icon-btn ui-icon-btn--sm${protocolSettingsId === model.id ? ' is-active' : ''}`}
+                      aria-label={t('配置 {name} 调用协议', { name: model.name })}
+                      title={t("调用协议")}
+                      aria-pressed={protocolSettingsId === model.id}
                       onClick={() => {
-                        setProtocolModelId(model.id);
-                        setVideoCapabilityModelId(null);
-                        setProtocolValid(true);
+                        void onOpenModelSettings(model.id, 'protocol').then((opened) => { if (opened) scrollToSettings(); });
                       }}
                     >
-                      <Icon icon="mdi:tune-variant" width="15" />
+                      <Icon icon="lucide:sliders-horizontal" width="16" />
                     </AnimatedButton>
                   </>
                   ) : null}
@@ -334,9 +348,9 @@ export default function ProviderModelSection({
                   <div
                     className="provider-model-category-editor"
                     role="group"
-                    aria-label={`选择 ${model.name} 的模型分类`}
+                    aria-label={t('选择 {name} 的模型分类', { name: model.name })}
                   >
-                    <span className="provider-model-category-editor-title">分类</span>
+                    <span className="provider-model-category-editor-title">{t("分类")}</span>
                     {CATEGORY_ORDER.map((item) => (
                       <button
                         key={item}
@@ -348,7 +362,7 @@ export default function ProviderModelSection({
                           else onUpdateModelCategory(model.id, item);
                         }}
                       >
-                        {GENERAL_MODEL_CATEGORY_LABELS[item]}
+                        {t(GENERAL_MODEL_CATEGORY_LABELS[item])}
                       </button>
                     ))}
                     {model.category === 'text' ? (
@@ -362,15 +376,15 @@ export default function ProviderModelSection({
                               event.target.checked,
                             )}
                           />
-                          <span>支持图片输入</span>
+                          <span>{t("支持图片输入")}</span>
                         </label>
                         <label className="provider-model-context-window">
-                          <span>上下文窗口（token）</span>
+                          <span>{t("上下文窗口（token）")}</span>
                           <input
                             type="text"
                             inputMode="numeric"
                             value={model.contextWindow ?? ''}
-                            placeholder="留空则按模型 ID 推断"
+                            placeholder={t("留空则按模型 ID 推断")}
                             onChange={(event) => onUpdateModelContextWindow(
                               model.id,
                               event.target.value,
@@ -380,12 +394,12 @@ export default function ProviderModelSection({
                       </>
                     ) : null}
                     <label className="provider-model-description-editor">
-                      <span>Agent 选型说明</span>
+                      <span>{t("Agent 选型说明")}</span>
                       <textarea
                         value={model.description ?? ''}
                         maxLength={500}
                         rows={2}
-                        placeholder="例如：适合中文 OCR、角色图分析，速度快、成本低"
+                        placeholder={t("例如：适合中文 OCR、角色图分析，速度快、成本低")}
                         onChange={(event) => onUpdateModelDescription(model.id, event.target.value)}
                       />
                     </label>
@@ -393,41 +407,66 @@ export default function ProviderModelSection({
                 ) : null}
               </div>
             )) : (
-              <div className="provider-model-empty">没有匹配的模型</div>
+              <div className="provider-model-empty">{t("没有匹配的模型")}</div>
             )}
           </div>
 
-          {definition.id === 'custom-openai'
-            && videoCapabilityModel
-            && videoCapabilityModel.category === 'video'
-            && selectedIds.has(videoCapabilityModel.id) ? (
-              <VideoCapabilityEditor
-                key={videoCapabilityModel.id}
-                model={videoCapabilityModel}
-                onChange={(capability) => onUpdateVideoCapability(
-                  videoCapabilityModel.id,
-                  capability,
-                )}
-                onClose={() => setVideoCapabilityModelId(null)}
-              />
-            ) : null}
+          <div ref={settingsRef} className="scroll-mt-3">
+            {definition.id === 'custom-openai' && imageCapabilityModel?.category === 'image'
+              && selectedIds.has(imageCapabilityModel.id) ? (
+                <ImageCapabilityEditor key={imageCapabilityModel.id} model={imageCapabilityModel}
+                  onChange={(capability) => onUpdateImageCapability(imageCapabilityModel.id, capability)}
+                  onApplyTemplate={(templateId) => onApplyImageTemplate(imageCapabilityModel.id, templateId)}
+                  onClose={() => setImageCapabilityModelId(null)} />
+              ) : null}
+            {definition.id === 'custom-openai'
+              && videoCapabilityModel
+              && videoCapabilityModel.category === 'video'
+              && selectedIds.has(videoCapabilityModel.id) ? (
+                <VideoCapabilityEditor
+                  key={videoCapabilityModel.id}
+                  model={videoCapabilityModel}
+                  onChange={(capability) => onUpdateVideoCapability(
+                    videoCapabilityModel.id,
+                    capability,
+                  )}
+                  onApplySeedanceTemplate={(seedanceModel, transport) => {
+                    const template = createSeedanceQuickAdaptTemplate(seedanceModel, transport);
+                    onUpdateVideoCapability(videoCapabilityModel.id, template.capability);
+                    onUpdateModelProtocol(videoCapabilityModel.id, template.executionProfile);
+                  }}
+                  onApplyH3Template={(h3Model, transport) => {
+                    const template = createH3QuickAdaptTemplate(h3Model, transport);
+                    onUpdateVideoCapability(videoCapabilityModel.id, template.capability);
+                    onUpdateModelProtocol(videoCapabilityModel.id, template.executionProfile);
+                  }}
+                  onClose={() => setVideoCapabilityModelId(null)}
+                />
+              ) : null}
 
-          {definition.id === 'custom-openai'
-            && protocolModel
-            && selectedIds.has(protocolModel.id) ? (
-              <ModelProtocolEditor
-                key={protocolModel.id}
-                model={protocolModel}
-                apiKey={apiKey.trim()}
-                baseUrl={normalizeBaseUrl(baseUrl) || definition.defaultBaseUrl || ''}
-                onChange={(profile) => onUpdateModelProtocol(protocolModel.id, profile)}
-                onImageReferenceRequestModeChange={(mode) => (
-                  onUpdateImageReferenceRequestMode(protocolModel.id, mode)
-                )}
-                onValidityChange={setProtocolValid}
-                onClose={onCloseProtocolEditor}
-              />
-            ) : null}
+            {definition.id === 'custom-openai'
+              && protocolModel
+              && selectedIds.has(protocolModel.id) ? (
+                <ModelProtocolEditor
+                  key={protocolModel.id}
+                  model={protocolModel}
+                  inheritanceLabel={protocolModel.category === 'text'
+                    ? '跟随连接对话协议'
+                    : undefined}
+                  apiKey={apiKey.trim()}
+                  baseUrl={normalizeBaseUrl(baseUrl) || definition.defaultBaseUrl || ''}
+                  onChange={(profile) => onUpdateModelProtocol(protocolModel.id, profile)}
+                  onVideoCapabilityChange={(capability) => onUpdateVideoCapability(protocolModel.id, capability)}
+                  onImageReferenceRequestModeChange={(mode) => (
+                    onUpdateImageReferenceRequestMode(protocolModel.id, mode)
+                  )}
+                  onValidityChange={setProtocolValid}
+                  onDraftInvalidChange={onProtocolDraftInvalidChange}
+                  testSessionScope={testSessionScope}
+                  onClose={onCloseProtocolEditor}
+                />
+              ) : null}
+          </div>
         </>
       )}
 
@@ -437,13 +476,13 @@ export default function ProviderModelSection({
             <input
               type="text"
               value={manualModelId}
-              placeholder="手动输入模型 ID"
+              placeholder={t("手动输入模型 ID")}
               onChange={(event) => setManualModelId(event.target.value)}
             />
             <input
               type="text"
               value={manualModelName}
-              placeholder="显示名称（可选）"
+              placeholder={t("显示名称（可选）")}
               onChange={(event) => setManualModelName(event.target.value)}
             />
             <Select fixedMenu
@@ -451,13 +490,13 @@ export default function ProviderModelSection({
               onChange={(selectedOptionValue) => setManualCategory(selectedOptionValue as GeneralModelCategory)}
             >
               {CATEGORY_ORDER.map((item) => (
-                <option key={item} value={item}>{GENERAL_MODEL_CATEGORY_LABELS[item]}</option>
+                <option key={item} value={item}>{t(GENERAL_MODEL_CATEGORY_LABELS[item])}</option>
               ))}
             </Select>
             <AnimatedButton
               type="button"
               className="provider-icon-btn"
-              aria-label="添加手动模型"
+              aria-label={t("添加手动模型")}
               disabled={!manualModelId.trim()}
               onClick={onAddManualModel}
             >

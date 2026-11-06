@@ -1,3 +1,6 @@
+/**
+ * eslint.config — 配置 JavaScript、TypeScript 与 React 的静态检查规则。
+ */
 import js from '@eslint/js'
 import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
@@ -13,6 +16,8 @@ export default defineConfig([
     'src-tauri/target',
     'src-tauri/gen',
     'src-tauri/vendor',
+    // 独立宣传视频项目有自己的依赖和解析器，不属于主应用质量门禁。
+    'promo-video',
   ]),
   {
     files: ['**/*.{ts,tsx}'],
@@ -33,6 +38,16 @@ export default defineConfig([
         caughtErrorsIgnorePattern: '^_',
         destructuredArrayIgnorePattern: '^_',
       }],
+    },
+  },
+  {
+    // 迁入的上游组件保留原有生命周期；项目接入层仍使用完整检查。
+    files: ['src/vendor/generation-effects/**/*.{ts,tsx}'],
+    rules: {
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/refs': 'off',
+      'react-hooks/exhaustive-deps': 'off',
+      'react-refresh/only-export-components': 'off',
     },
   },
 ])

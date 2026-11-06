@@ -1,9 +1,14 @@
+/**
+ * canvasNodeLodRuntime — 管理画布节点远景展示与保活状态。
+ */
 import { CANVAS_DISPLAY_BUDGET, createCanvasDisplayScheduler, type CanvasDisplayClock } from './canvasDisplayScheduler';
+import { getPerformanceModeBudget } from './performanceModeRuntime';
 
 /** 画布会话内的显示调度；不修改节点、历史或持久化状态。 */
 export const CANVAS_NODE_LOD = {
   enter: 0.16, exit: 0.25, restorePerFrame: CANVAS_DISPLAY_BUDGET.maxPerFrame, idleMs: CANVAS_DISPLAY_BUDGET.idleMs,
 } as const;
+const PERFORMANCE_NODE_LOD = { enter: 0.55, exit: 0.65 } as const;
 interface Entry {
   id: string;
   full: boolean;
@@ -14,10 +19,13 @@ interface Entry {
   cancel?: () => void;
 }
 
-export function createCanvasNodeLodRuntime(initialZoom = 1, clock?: CanvasDisplayClock) {
-  const display = createCanvasDisplayScheduler(clock);
-  let far = initialZoom < CANVAS_NODE_LOD.enter;
-  let progressive = far;
+export function createCanvasNodeLodRuntime(initialZoom = 1, clock?: CanvasDisplayClock, performanceMode = false) {
+  const display = createCanvasDisplayScheduler(clock, getPerformanceModeBudget(performanceMode).display);
+  let thresholds = performanceMode ? PERFORMANCE_NODE_LOD : CANVAS_NODE_LOD;
+  let latestZoom = initialZoom;
+  let far = initialZoom < thresholds.enter;
+  // 低配置设备初次进入近景也经显示预算恢复，不一次挂载所有完整媒体组件。
+  let progressive = far || performanceMode;
   let interacting = false;
   let center = { x: 0, y: 0 };
   const entries = new Map<string, Entry>();
@@ -52,6 +60,12 @@ export function createCanvasNodeLodRuntime(initialZoom = 1, clock?: CanvasDispla
     if (entry.listeners.size || entry.pins.size) return;
     if (entries.get(entry.id) === entry) entries.delete(entry.id);
     entry.cancel?.();
+  }
+  function updateFar(next: boolean) {
+    if (next === far) return;
+    far = next;
+    progressive = true;
+    for (const entry of entries.values()) queue(entry);
   }
 
   return {
@@ -88,12 +102,18 @@ export function createCanvasNodeLodRuntime(initialZoom = 1, clock?: CanvasDispla
     },
     viewport(zoom: number, centerX = 0, centerY = 0) {
       if (!Number.isFinite(zoom) || zoom <= 0) return;
+      latestZoom = zoom;
       center = { x: centerX, y: centerY };
-      const next = far ? zoom < CANVAS_NODE_LOD.exit : zoom < CANVAS_NODE_LOD.enter;
-      if (next === far) return;
-      far = next;
-      progressive = true;
-      for (const entry of entries.values()) queue(entry);
+      updateFar(far ? zoom < thresholds.exit : zoom < thresholds.enter);
+    },
+    setPerformanceMode(enabled: boolean) {
+      display.setBudget(getPerformanceModeBudget(enabled).display);
+      const next = enabled ? PERFORMANCE_NODE_LOD : CANVAS_NODE_LOD;
+      if (thresholds === next) return;
+      thresholds = next;
+      if (enabled) progressive = true;
+      // 模式切换按新模式的入口阈值重新判断，不继承另一模式的滞回区间。
+      updateFar(latestZoom < thresholds.enter);
     },
     interaction(value: boolean) {
       if (interacting === value) return;

@@ -1,3 +1,6 @@
+/**
+ * i18n — 回归测试：i18n runtime。
+ */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -61,7 +64,7 @@ describe('i18n runtime', () => {
  * en-US 是基准字典，ja-JP / ko-KR 的 key 集合必须与之完全一致。
  */
 describe('locale dictionaries', () => {
-  const SRC = join(__dirname, '../../src');
+  const SOURCE_ROOTS = [join(__dirname, '../../src'), join(__dirname, '../../src-tauri/src')];
   const DICTS = { enUS, jaJP, koKR } as const;
 
   function collectSources(dir: string, out: string[] = []): string[] {
@@ -70,29 +73,34 @@ describe('locale dictionaries', () => {
       if (entry.name === 'locales') continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) collectSources(full, out);
-      else if (/\.tsx?$/.test(entry.name)) out.push(readFileSync(full, 'utf8'));
+      else if (/\.(?:tsx?|rs)$/.test(entry.name)) out.push(readFileSync(full, 'utf8'));
     }
     return out;
   }
 
+  // 全仓同步文件扫描随源码增长，单独预留 CI 文件 I/O 预算，不改变扫描或断言范围。
   it('has no entry whose Chinese source text disappeared from the codebase', () => {
-    const sources = collectSources(SRC).join('\n');
+    const sources = SOURCE_ROOTS.flatMap((root) => collectSources(root)).join('\n');
+    // 多个字典共用大量 key，每个唯一 key 只扫描一次源码，保留逐字典的完整断言。
+    const keys = new Set(Object.values(DICTS).flatMap((dict) => Object.keys(dict)));
+    // 含反斜杠或换行的 key 会被 TS 转义改写，源码原始文本与运行时字符串值不一致，
+    // 无法可靠比对，跳过这类 key 的孤儿检测。
+    const missingKeys = new Set([...keys].filter(
+      (key) => !key.includes('\\') && !key.includes('\n') && !sources.includes(key),
+    ));
     for (const [name, dict] of Object.entries(DICTS)) {
-      // 含反斜杠或换行的 key 会被 TS 转义改写，源码原始文本与运行时字符串值不一致，
-      // 无法可靠比对，跳过这类 key 的孤儿检测。
       const orphans = Object.keys(dict).filter(
-        (key) => !key.includes('\\') && !key.includes('\n') && !sources.includes(key),
+        (key) => missingKeys.has(key),
       );
       expect(orphans, `${name} 存在源码中已消失的孤儿词条`).toEqual([]);
     }
-  });
+  }, 15_000);
 
-  it('has no dictionary key that is missing from en-US', () => {
-    // en-US 是基准字典。日/韩暂缓维护，允许缺词条（回落中文），但不允许出现 en-US 没有的 key。
-    const base = new Set(Object.keys(enUS));
+  it('has the same keys in every supported dictionary', () => {
+    // 三语同步维护；新增界面词条时同时补齐英文、日文和韩文。
+    const base = Object.keys(enUS).sort();
     for (const [name, dict] of Object.entries(DICTS)) {
-      const unknown = Object.keys(dict).filter((key) => !base.has(key));
-      expect(unknown, `${name} 存在 en-US 中没有的 key`).toEqual([]);
+      expect(Object.keys(dict).sort(), `${name} 与 en-US 的 key 集合不一致`).toEqual(base);
     }
   });
 

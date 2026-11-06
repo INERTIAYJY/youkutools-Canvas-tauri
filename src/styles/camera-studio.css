@@ -1,3 +1,6 @@
+/**
+ * camera-studio — 机位工作台与摄影参数的样式定义。
+ */
 .camera-studio-overlay {
   --cs-camera-accent: var(--node-panorama-light);
   --cs-light-accent: var(--warning-light);

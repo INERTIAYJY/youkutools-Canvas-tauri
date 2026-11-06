@@ -44,7 +44,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: var(--appearance-node-radius-inner, max(0px, calc(var(--appearance-node-radius, 12px) - 2px)));
   background: var(--theme-bg);
 }
 

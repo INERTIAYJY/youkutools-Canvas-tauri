@@ -1,4 +1,5 @@
 /** MCP 专用工作流 CRUD；复用 Workflow Store 持久化。 */
+import { extractComfyUIIONodes } from '../../comfyUIWindowService';
 import { useAppStore } from '../../../store/useAppStore';
 import type { WorkflowCategory, WorkflowDefinition, WorkflowIONodeType } from '../../../types';
 import { registerAgentTool, type AgentToolExecutionResult } from '../toolRegistry';
@@ -54,12 +55,39 @@ const ioNodeSchema = {
   },
 };
 
+const defaultNodesSchema = {
+  type: 'object' as const, additionalProperties: false,
+  properties: Object.fromEntries(IO_TYPES.map((type) => [type, { type: 'string' as const, minLength: 1, maxLength: 160 }])),
+};
+
+function validateDefaultNodes(fileContent: string, ioNodes: WorkflowDefinition['ioNodes'], defaults: WorkflowDefinition['defaultNodes']): string | undefined {
+  if (!defaults) return undefined;
+  const graph = JSON.parse(fileContent) as Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
+  for (const [type, nodeId] of Object.entries(defaults)) {
+    const node = graph[nodeId];
+    const inputs = node?.inputs;
+    const keys = type === 'prompt' ? ['text', 'target_text', 'prompt', 'string', 'value', 'instruction']
+      : type === 'video' ? ['video', 'file'] : [type];
+    const writable = inputs && Object.entries(inputs).some(([key, value]) =>
+      (keys.includes(key) || (type === 'prompt' && keys.some((name) => key.endsWith(`.${name}`))))
+      && (typeof value === 'string' || (type !== 'prompt' && value == null)));
+
+    if (!IO_TYPES.includes(type as WorkflowIONodeType) || typeof nodeId !== 'string'
+      || typeof node?.class_type !== 'string' || !writable || (type !== 'prompt' && /Load.*Path/i.test(node.class_type))
+      || !ioNodes?.some((io) => io.nodeId === nodeId && io.type === type)) {
+      return `默认 ${type} 节点必须指向存在且类型匹配的 IO 输入`;
+    }
+  }
+  return undefined;
+}
+
 interface WorkflowInput {
   workflowId?: string;
   name: string;
   category: WorkflowCategory;
   fileContent: string;
   editableContent?: string;
+  defaultNodes?: WorkflowDefinition['defaultNodes'];
   ioNodes?: Array<{ nodeId: string; title: string; type: WorkflowIONodeType }>;
 }
 
@@ -84,29 +112,41 @@ export function registerWorkflowAgentTools(): Array<() => void> {
       id: 'workflow_create', title: '创建工作流', description: '从有效 ComfyUI JSON 创建并持久化工作流。', effect: 'config_write',
       inputSchema: { type: 'object', required: ['name', 'category', 'fileContent'], additionalProperties: false, properties: {
         name: { type: 'string', minLength: 1, maxLength: 160 }, category: { type: 'string', enum: CATEGORIES }, fileContent: { type: 'string', minLength: 2, maxLength: 1_500_000 }, editableContent: { type: 'string', maxLength: 1_500_000 },
-        ioNodes: { type: 'array', maxItems: 100, items: ioNodeSchema },
+        defaultNodes: defaultNodesSchema, ioNodes: { type: 'array', maxItems: 100, items: ioNodeSchema },
       } }, ...common,
       execute: async (_context, input) => {
         const invalid = validateJson(input.fileContent) || (input.editableContent ? validateJson(input.editableContent) : undefined);
         if (invalid) return error(invalid, 'WORKFLOW_INVALID');
+        const ioNodes = input.ioNodes ?? extractComfyUIIONodes(input.fileContent);
+        const defaultError = validateDefaultNodes(input.fileContent, ioNodes, input.defaultNodes);
+        if (defaultError) return error(defaultError, 'WORKFLOW_INVALID');
         const now = Date.now();
-        const workflow: WorkflowDefinition = { id: `workflow-mcp-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`, name: input.name.trim(), category: input.category, fileName: 'mcp-workflow.json', fileContent: input.fileContent, editableContent: input.editableContent, ioNodes: input.ioNodes, createdAt: now, updatedAt: now };
+        const workflow: WorkflowDefinition = { id: `workflow-mcp-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`, name: input.name.trim(), category: input.category, fileName: 'mcp-workflow.json', fileContent: input.fileContent, editableContent: input.editableContent, ioNodes, defaultNodes: input.defaultNodes, createdAt: now, updatedAt: now };
         await useAppStore.getState().addWorkflow(workflow);
         return { status: 'success', summary: `已创建工作流“${workflow.name}”`, modelContent: JSON.stringify({ workflow: publicWorkflow(workflow) }) };
       },
     }),
     registerAgentTool<Partial<WorkflowInput> & { workflowId: string }>({
-      id: 'workflow_update', title: '更新工作流', description: '更新已有工作流的名称、分类、JSON 或 IO 节点。', effect: 'config_write',
+      id: 'workflow_update', title: '更新工作流', description: '更新已有工作流的名称、分类、JSON、IO 或默认输入；defaultNodes 整体替换，省略保留、空对象清空。', effect: 'config_write',
       inputSchema: { type: 'object', required: ['workflowId'], additionalProperties: false, properties: {
-        workflowId: { type: 'string', minLength: 1, maxLength: 160 }, name: { type: 'string', minLength: 1, maxLength: 160 }, category: { type: 'string', enum: CATEGORIES }, fileContent: { type: 'string', minLength: 2, maxLength: 1_500_000 }, editableContent: { type: 'string', maxLength: 1_500_000 }, ioNodes: { type: 'array', maxItems: 100, items: ioNodeSchema },
+        workflowId: { type: 'string', minLength: 1, maxLength: 160 }, name: { type: 'string', minLength: 1, maxLength: 160 }, category: { type: 'string', enum: CATEGORIES }, fileContent: { type: 'string', minLength: 2, maxLength: 1_500_000 }, editableContent: { type: 'string', maxLength: 1_500_000 }, defaultNodes: defaultNodesSchema, ioNodes: { type: 'array', maxItems: 100, items: ioNodeSchema },
       } }, ...common,
       execute: async (_context, input) => {
         const existing = useAppStore.getState().workflows.find((item) => item.id === input.workflowId);
         if (!existing) return error('工作流不存在', 'WORKFLOW_NOT_FOUND');
-        if (existing.adapterType === 'runninghub' && (input.fileContent !== undefined || input.editableContent !== undefined || input.ioNodes !== undefined)) return error('云工作流请通过 RunningHub 导入表单编辑参数定义', 'WORKFLOW_INVALID');
+        if (existing.adapterType === 'runninghub' && (input.fileContent !== undefined || input.editableContent !== undefined || input.ioNodes !== undefined || input.defaultNodes !== undefined)) return error('云工作流请通过 RunningHub 导入表单编辑参数定义', 'WORKFLOW_INVALID');
         const invalid = (input.fileContent ? validateJson(input.fileContent) : undefined) || (input.editableContent ? validateJson(input.editableContent) : undefined);
         if (invalid) return error(invalid, 'WORKFLOW_INVALID');
+        if (existing.adapterType && existing.adapterType !== 'comfyui' && input.defaultNodes !== undefined) return error('defaultNodes 只适用于 ComfyUI 工作流', 'WORKFLOW_INVALID');
+        const fileContent = input.fileContent ?? existing.fileContent;
+        const ioNodes = input.ioNodes ?? (input.fileContent !== undefined || !existing.ioNodes ? extractComfyUIIONodes(fileContent) : existing.ioNodes);
+        const defaults = input.defaultNodes ?? existing.defaultNodes;
+        if (input.defaultNodes !== undefined || input.fileContent !== undefined || input.ioNodes !== undefined) {
+          const defaultError = validateDefaultNodes(fileContent, ioNodes, defaults);
+          if (defaultError) return error(defaultError, 'WORKFLOW_INVALID');
+        }
         const { workflowId: _workflowId, ...changes } = input;
+        if (input.fileContent !== undefined || input.defaultNodes !== undefined) changes.ioNodes = ioNodes;
         await useAppStore.getState().updateWorkflow(existing.id, { ...changes, ...(changes.name !== undefined ? { name: changes.name.trim() } : {}), updatedAt: Date.now() });
         const updated = useAppStore.getState().workflows.find((item) => item.id === existing.id)!;
         return { status: 'success', summary: `已更新工作流“${updated.name}”`, modelContent: JSON.stringify({ workflow: publicWorkflow(updated) }) };

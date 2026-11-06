@@ -1,3 +1,6 @@
+/**
+ * setup — 初始化测试用 IndexedDB、存储与公共环境。
+ */
 import 'fake-indexeddb/auto';
 import { beforeEach } from 'vitest';
 

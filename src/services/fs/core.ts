@@ -6,6 +6,9 @@
 import {
   exists,
   mkdir,
+  lstat,
+  open as fsOpen,
+  remove,
   readDir,
   readFile,
   rename,
@@ -15,12 +18,46 @@ import {
   type DebouncedWatchOptions,
   type WatchEvent,
 } from '@tauri-apps/plugin-fs';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { appDataDir, executableDir } from '@tauri-apps/api/path';
+import { mediaFileAllocationKey, retiredMediaPaths } from '../indexedDb/mediaRelocations';
 
 /** 检测是否运行在 Tauri 桌面环境中 */
 export function isTauriEnv(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+/** 浏览器降级文件选择；选择、取消与返回焦点共用一次收尾。 */
+export function browserOpenFile(accept: string): Promise<File | null> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.hidden = true;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+      input.removeEventListener('change', onChange);
+      input.removeEventListener('cancel', onCancel);
+      input.remove();
+    };
+    const finish = (file: File | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(file);
+    };
+    const onChange = () => finish(input.files?.[0] ?? null);
+    const onCancel = () => finish(null);
+    const onFocus = () => { timer = setTimeout(onChange, 300); };
+    input.addEventListener('change', onChange);
+    input.addEventListener('cancel', onCancel);
+    window.addEventListener('focus', onFocus, { once: true });
+    document.body.appendChild(input);
+    try { input.click(); } catch (error) { cleanup(); reject(error); }
+  });
 }
 
 /** 项目目录磁盘内容发生增删改时派发的事件名（由 useAutoSave 监听，触发静默保存） */
@@ -152,6 +189,111 @@ export async function readBinaryFile(filePath: string): Promise<Uint8Array<Array
   return readFile(filePath);
 }
 
+const TEXT_PREVIEW_CACHE_MAX = 300;
+const TEXT_PREVIEW_MAX_BYTES = 2048;
+const textPreviewCache = new Map<string, string>();
+const pendingTextPreviews = new Map<string, Promise<string>>();
+
+function textPreviewKey(filePath: string, size: number | undefined, maxBytes: number): string {
+  return `${filePath}:${size ?? 'unknown'}:${maxBytes}`;
+}
+
+/** 同步读取已缓存的文本预览片段（若存在） */
+export function getCachedTextPreview(filePath: string, size?: number, maxBytes = TEXT_PREVIEW_MAX_BYTES): string | undefined {
+  if (!filePath) return undefined;
+  return textPreviewCache.get(textPreviewKey(filePath, size, maxBytes));
+}
+
+/** 清理文本预览缓存（测试或重置时使用） */
+export function clearTextPreviewCache(): void {
+  textPreviewCache.clear();
+  pendingTextPreviews.clear();
+}
+
+/** 保存文本后刷新等尺寸文件的已挂载缩略内容。 */
+export const ASSET_TEXT_UPDATED_EVENT = 'asset-text-updated';
+export function invalidateTextPreview(filePath: string): void {
+  for (const key of textPreviewCache.keys()) {
+    if (key.startsWith(`${filePath}:`)) textPreviewCache.delete(key);
+  }
+  for (const key of pendingTextPreviews.keys()) {
+    if (key.startsWith(`${filePath}:`)) pendingTextPreviews.delete(key);
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(ASSET_TEXT_UPDATED_EVENT, { detail: filePath }));
+}
+
+function setPreviewCache(key: string, val: string): void {
+  if (textPreviewCache.size >= TEXT_PREVIEW_CACHE_MAX) {
+    const firstKey = textPreviewCache.keys().next().value;
+    if (firstKey) textPreviewCache.delete(firstKey);
+  }
+  textPreviewCache.set(key, val);
+}
+
+/**
+ * 读取文本文件的前若干字节（默认 2048 字节）作为预览字符串。
+ * 内存缓存避免在瀑布流滚动时频繁读取磁盘。
+ */
+export async function readTextFilePreview(
+  filePath: string,
+  size?: number,
+  maxBytes = TEXT_PREVIEW_MAX_BYTES,
+): Promise<string> {
+  if (!filePath) return '';
+  const cacheKey = textPreviewKey(filePath, size, maxBytes);
+  const cached = textPreviewCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const pending = pendingTextPreviews.get(cacheKey);
+  if (pending) return pending;
+
+  if (size === 0) {
+    setPreviewCache(cacheKey, '');
+    return '';
+  }
+
+  if (!isTauriEnv()) return '';
+
+  const request: Promise<string> = (async () => {
+    let bytes: Uint8Array | null = null;
+    if (typeof fsOpen === 'function') {
+      const file = await fsOpen(filePath, { read: true });
+      try {
+        const buf = new Uint8Array(maxBytes);
+        const n = await file.read(buf);
+        if (n && n > 0) {
+          bytes = buf.subarray(0, n);
+        } else {
+          bytes = new Uint8Array(0);
+        }
+      } finally {
+        await file.close();
+      }
+    }
+
+    // 局部读取失败就停止预览，不能为了几 KB 摘要把整个大文件搬进 WebView。
+
+    if (!bytes || bytes.length === 0) {
+      return '';
+    }
+
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    const text = decoder.decode(bytes).replace(/\uFFFD+$/, '').replace(/^\uFEFF/, '');
+    if (text.includes('\0')) {
+      return '';
+    }
+
+    return text;
+  })().then((text) => {
+    // 保存或清理会使在途请求失效；旧读取不能覆盖随后启动的新预览。
+    if (pendingTextPreviews.get(cacheKey) === request) setPreviewCache(cacheKey, text);
+    return text;
+  }).catch(() => '').finally(() => {
+    if (pendingTextPreviews.get(cacheKey) === request) pendingTextPreviews.delete(cacheKey);
+  });
+  pendingTextPreviews.set(cacheKey, request);
+  return request;
+}
+
 /** 确保二进制文件存在；已存在时不覆盖。 */
 export async function ensureBinaryFile(filePath: string, data: Uint8Array): Promise<void> {
   if (await exists(filePath)) return;
@@ -210,12 +352,14 @@ export function fileUriToPath(uri: string): string {
 }
 
 /** Characters illegal in filenames. Windows is stricter; Unix only forbids / and \0. */
-const IS_WINDOWS = typeof navigator !== 'undefined' && /win/i.test(navigator.platform || '');
+const IS_WINDOWS = typeof navigator !== 'undefined' && /^win/i.test(navigator.platform || '');
 const FILENAME_ILLEGAL_CHARS = IS_WINDOWS ? /[<>:"|?*]/g : /[/]/g;
 
 /** Sanitize a filename for the current platform */
 export function sanitizeFileName(name: string): string {
-  return name.replace(FILENAME_ILLEGAL_CHARS, '_');
+  const clean = name.replace(FILENAME_ILLEGAL_CHARS, '_');
+  // 随机后缀取消后，用户标题可能直接成为 Windows 保留设备名。
+  return IS_WINDOWS && /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(clean) ? `_${clean}` : clean;
 }
 
 /**
@@ -240,14 +384,22 @@ export function getConvertFileSrc(): ((path: string) => string) | null {
   return (isTauriEnv() ? convertFileSrc : null) as ((path: string) => string) | null;
 }
 
-/** 获取应用数据根目录（Tauri: appDataDir, 浏览器: null） */
+let cachedAppDataDir: string | undefined;
+let pendingAppDataDir: Promise<string | null> | undefined;
+
+/** 只复用当前窗口固定的系统目录；自定义根目录与项目映射仍由各入口实时解析。 */
 async function getAppDataDir(): Promise<string | null> {
   if (!isTauriEnv()) return null;
-  try {
-    return await appDataDir();
-  } catch {
-    return null;
+  if (cachedAppDataDir) return cachedAppDataDir;
+  if (!pendingAppDataDir) {
+    pendingAppDataDir = Promise.resolve().then(() => appDataDir()).then((directory) => {
+      if (directory) cachedAppDataDir = directory;
+      return directory || null;
+    }).catch(() => null).finally(() => {
+      pendingAppDataDir = undefined;
+    });
   }
+  return pendingAppDataDir;
 }
 
 /** 获取应用可执行文件所在目录（Tauri: executableDir, 浏览器: null） */
@@ -317,6 +469,12 @@ export function buildProjectFolderName(name: string, projectId: string): string 
 /** 解析项目实际使用的数据文件夹名（已注册的「项目名-短ID」，或回退到 projectId） */
 function resolveProjectFolder(projectId: string): string {
   return _projectFolders.get(projectId) ?? projectId;
+}
+
+/** 剧集和分集共用目录时，节点只拥有画布引用，不能随节点删除共享文件。 */
+export function isSharedProjectDataDir(projectId: string): boolean {
+  const folder = resolveProjectFolder(projectId);
+  return [..._projectFolders].some(([id, otherFolder]) => id !== projectId && otherFolder === folder);
 }
 
 /** 获取项目的本地数据目录路径 */
@@ -397,40 +555,110 @@ export async function renameGroupFolder(
   }
 }
 
+function isRelocatableProjectPart(part: string): boolean {
+  return !!part && !part.startsWith('.') && !/[\\/\0]/.test(part)
+    && !/^(?:appdata|agent-private|plugin-private|blender-private|secrets)$/i.test(part);
+}
+
 /**
  * 把项目目录内的文件移动到分组文件夹（groupFolder 为 null 表示移回项目根目录）。
- * 仅处理项目根目录或其一级子文件夹中的文件；外部引用文件、更深的嵌套、
- * .trash/AppData 内的文件以及已在目标目录的文件一律不动，返回 null。
+ * 入组支持普通嵌套目录；未分组的深层文件保持原目录。外部引用、隐藏/私有目录、
+ * 路径穿越、链接及已在目标目录的文件不动，返回 null。
+ * preserveSource 用于画布归档的准备阶段，引用提交后再清理旧路径；forceCopy 拆分旧共享文件。
  * @returns 新的绝对路径，未移动或失败时为 null
  */
 export async function moveProjectFileToFolder(
   filePath: string | undefined,
   projectDir: string,
   groupFolder: string | null,
+  options: { preserveSource?: boolean; forceCopy?: boolean } = {},
 ): Promise<string | null> {
   if (!isTauriEnv() || !filePath) return null;
-  const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+  const root = stripVerbatimPrefix(projectDir).replace(/\\/g, '/').replace(/\/+$/, '');
   const normalized = stripVerbatimPrefix(filePath).replace(/\\/g, '/');
   if (!normalized.startsWith(`${root}/`)) return null;
   const segments = normalized.slice(root.length + 1).split('/');
-  if (segments.length > 2) return null;
-  const currentFolder = segments.length === 2 ? segments[0] : null;
-  if (currentFolder === '.trash' || currentFolder === 'AppData') return null;
-  if (currentFolder === groupFolder) return null;
+  if (!segments.every(isRelocatableProjectPart)
+    || (groupFolder !== null && !isRelocatableProjectPart(groupFolder))
+    || (!groupFolder && segments.length > 2)) return null;
+  const currentFolder = segments.length > 1 ? segments.slice(0, -1).join('/') : null;
+  if (currentFolder === groupFolder && !options.forceCopy) return null;
 
   const fileName = segments[segments.length - 1];
   const targetDir = groupFolder ? joinPath(root, groupFolder) : root;
   try {
     // 源文件可能已被删除或随文件夹改名搬走，此时不该建目录也不该报错
     if (!(await exists(normalized))) return null;
+    let sourceParent = root;
+    for (const part of segments.slice(0, -1)) {
+      sourceParent += `/${part}`;
+      const info = await lstat(sourceParent);
+      if (!info.isDirectory || info.isSymlink) return null;
+    }
+    const sourceInfo = await lstat(normalized);
+    if (!sourceInfo.isFile || sourceInfo.isSymlink) return null;
     if (groupFolder && !(await exists(targetDir))) await mkdir(targetDir, { recursive: true });
-    const destPath = await resolveUniqueDestPath(targetDir, fileName);
-    await rename(normalized, destPath);
+    if (groupFolder) {
+      const info = await lstat(targetDir);
+      if (!info.isDirectory || info.isSymlink) return null;
+    }
+    const destPath = await resolveUniqueDestPath(targetDir, fileName, true);
+    if (options.preserveSource || options.forceCopy) await invoke('copy_file_streamed', {
+      taskId: crypto.randomUUID(), sourcePath: normalized, destinationPath: destPath,
+    });
+    else await rename(normalized, destPath);
     return destPath;
   } catch (err) {
     console.warn('[fileService] moveProjectFileToFolder failed:', normalized, '→', targetDir, err);
     return null;
   }
+}
+
+/** Finalize a committed relocation. Never recursively delete a folder or remove the destination. */
+export async function finishProjectFileRelocation(oldPath: string, newPath: string, projectDir: string): Promise<void> {
+  if (!isTauriEnv()) return;
+  const root = stripVerbatimPrefix(projectDir).replace(/\\/g, '/').replace(/\/+$/, '');
+  const source = stripVerbatimPrefix(oldPath).replace(/\\/g, '/');
+  const target = stripVerbatimPrefix(newPath).replace(/\\/g, '/');
+  const safe = (path: string) => path.startsWith(`${root}/`)
+    && path.slice(root.length + 1).split('/').every(isRelocatableProjectPart);
+  if (!safe(source) || !safe(target) || source === target) throw new Error('文件迁移清理范围无效');
+  for (const path of [source, target]) {
+    const parents = path.slice(root.length + 1).split('/').slice(0, -1);
+    let directory = root;
+    for (const part of parents) {
+      directory += `/${part}`;
+      if (path === source && !await exists(directory)) break;
+      const info = await lstat(directory);
+      if (!info.isDirectory || info.isSymlink) throw new Error('文件迁移目录已变化，停止清理');
+    }
+  }
+  const destination = await lstat(target);
+  if (!destination.isFile || destination.isSymlink) throw new Error('目标文件未就绪，保留原文件');
+  if (await exists(source)) {
+    const original = await lstat(source);
+    if (!original.isFile || original.isSymlink || original.size !== destination.size
+      || (original.mtime && destination.mtime && original.mtime > destination.mtime)) throw new Error('原文件已变化，停止清理');
+    await remove(source);
+  }
+  const parent = source.slice(0, source.lastIndexOf('/'));
+  if (parent !== root && await exists(parent)) {
+    const info = await lstat(parent);
+    if (info.isDirectory && !info.isSymlink && (await readDir(parent)).length === 0) {
+      await remove(parent); // non-recursive: newly added files make this fail safely
+    }
+  }
+  notifyProjectDiskChanged();
+}
+
+export async function removeEmptyProjectGroupFolder(projectDir: string, name: string): Promise<void> {
+  if (!isTauriEnv()) return;
+  const folder = sanitizeFolderName(name);
+  if (!folder || folder.startsWith('.') || folder === 'AppData') return;
+  const path = joinPath(projectDir, folder);
+  if (!await exists(path)) return;
+  const info = await lstat(path);
+  if (info.isDirectory && !info.isSymlink && (await readDir(path)).length === 0) await remove(path);
 }
 
 export interface ProjectDataDirRenameResult {
@@ -517,26 +745,46 @@ export async function revertProjectDataDirRename(
   }
 }
 
+// 项目输出路径也可能交给稍后才写入的原生处理器；当次会话中不重复分配这些身份。
+const allocatedMediaPaths = new Set<string>();
+
 /**
  * 在目标目录中为文件名找到不冲突的完整路径，冲突时在主名后追加 _1、_2 …
- * （exists 可能抛错，捕获后沿用当前路径）
+ * 项目媒体同时占用会话内已分配的名字与引用迁移旧路径，避免并发写入和旧引用串联。
+ * 查重失败必须终止，不能继续写入未经确认的路径。
  */
-export async function resolveUniqueDestPath(dataDir: string, fileName: string): Promise<string> {
+export async function resolveUniqueDestPath(dataDir: string, fileName: string, reserveIdentity = false): Promise<string> {
   const sanitized = sanitizeFileName(fileName);
   const dotIndex = sanitized.lastIndexOf('.');
-  const baseName = dotIndex > 0 ? sanitized.slice(0, dotIndex) : sanitized;
+  const rawBase = dotIndex > 0 ? sanitized.slice(0, dotIndex) : sanitized;
+  const baseName = reserveIdentity ? sanitizeFileName(rawBase.replace(/--[a-f0-9]{32}$/i, '')) || 'file' : rawBase;
   const ext = dotIndex > 0 ? sanitized.slice(dotIndex) : '';
-  let destPath = joinPath(dataDir, sanitized);
-  try {
-    let counter = 1;
-    while (await exists(destPath)) {
-      destPath = joinPath(dataDir, `${baseName}_${counter}${ext}`);
-      counter++;
+  const retired = reserveIdentity ? await retiredMediaPaths() : new Set<string>();
+  // 已带自动序号的文件发生冲突时继续递增，避免生成 _1_1。
+  const suffix = /^(.*)_([1-9]\d*)$/.exec(baseName);
+  const numbered = suffix && Number.isSafeInteger(Number(suffix[2])) && Number(suffix[2]) < Number.MAX_SAFE_INTEGER ? suffix : null;
+  const stem = numbered ? numbered[1] : baseName;
+  let counter = numbered ? Number(numbered[2]) + 1 : 1;
+  let destPath = joinPath(dataDir, `${baseName}${ext}`);
+  while (true) {
+    const key = mediaFileAllocationKey(destPath);
+    if (!allocatedMediaPaths.has(key) && !retired.has(key) && !await exists(destPath)
+      // exists 是异步的；等待期间可能有另一位写入方已经占用这个名字。
+      && !allocatedMediaPaths.has(key)) {
+      if (!reserveIdentity) return destPath;
+      allocatedMediaPaths.add(key);
+      try {
+        // 文件查重期间分组迁移可能刚提交日志；占位后复核，不能复用刚清空的旧位置。
+        if (!(await retiredMediaPaths()).has(key)) return destPath;
+      } catch (error) {
+        allocatedMediaPaths.delete(key);
+        throw error;
+      }
+      allocatedMediaPaths.delete(key);
     }
-  } catch {
-    // exists 抛错时沿用当前 destPath
+    destPath = joinPath(dataDir, `${stem}_${counter}${ext}`);
+    counter++;
   }
-  return destPath;
 }
 
 /**
@@ -545,8 +793,9 @@ export async function resolveUniqueDestPath(dataDir: string, fileName: string): 
  */
 export function buildNodeFileName(label: string | undefined, ext: string, fallback: string): string {
   const hasLabel = !!(label && label.trim());
-  const base = hasLabel ? sanitizeFolderName(label) : sanitizeFolderName(fallback);
+  let base = hasLabel ? sanitizeFolderName(label) : sanitizeFolderName(fallback);
   const dottedExt = ext ? (ext.startsWith('.') ? ext : `.${ext}`) : '';
+  if (dottedExt && base.toLowerCase().endsWith(dottedExt.toLowerCase())) base = base.slice(0, -dottedExt.length) || 'file';
   return `${base}${dottedExt}`;
 }
 
@@ -595,6 +844,8 @@ export interface AssetFileEntry {
   relativePath?: string;                            // 相对 source root 的位置
   assetUrl?: string;
   size: number;
+  createdAt?: number;                               // 文件系统创建时间（毫秒）；不支持或未知时缺省
+  modifiedAt?: number;                              // 文件系统修改时间（毫秒）；未知时缺省
   category: FileCategory;
   availability?: 'online' | 'offline';
   tags?: string[];                                  // 合并自 assetMeta
@@ -616,6 +867,8 @@ export async function listDirectoryFiles(dirPath: string): Promise<AssetFileEntr
         const fileStat = await stat(filePath);
         const convertFileSrc = await getConvertFileSrc();
         const fileSize = fileStat.size ?? 0;
+        const createdAt = fileStat.birthtime?.getTime();
+        const modifiedAt = fileStat.mtime?.getTime();
         const ext = `.${entry.name.split('.').pop()?.toLowerCase()}`;
         const extLower = ext.toLowerCase();
 
@@ -630,6 +883,8 @@ export async function listDirectoryFiles(dirPath: string): Promise<AssetFileEntr
           path: filePath,
           assetUrl,
           size: fileSize,
+          createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
+          modifiedAt: Number.isFinite(modifiedAt) ? modifiedAt : undefined,
           category: getFileCategory(entry.name),
         });
       } catch {

@@ -451,7 +451,7 @@ export function setDirectorNodeRuntime(nodeId: string, runtimeKind: unknown, own
   requireProject(owner, baseRevision);
   const node = requireNode(nodeId, owner);
   const runtime = resolveDirectorRuntime(runtimeKind);
-  if (!runtime.supported || !['blender', 'lightweight-web'].includes(String(runtimeKind))) {
+  if (!runtime.supported || !['blender', 'lightweight-web', 'ai-threejs'].includes(String(runtimeKind))) {
     throw new DirectorOperationError('DIRECTOR_INVALID_INPUT');
   }
   if (getActiveDirectorNodeOperation(nodeId)) throw new DirectorOperationError('DIRECTOR_BUSY');

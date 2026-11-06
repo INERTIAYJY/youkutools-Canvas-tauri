@@ -1,3 +1,6 @@
+/**
+ * seriesSourceService — 回归测试：章节索引与有界读取。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const files = vi.hoisted(() => ({ read: vi.fn(), dir: vi.fn() }));
 vi.mock('../../src/services/fileService', async (importOriginal) => ({

@@ -14,7 +14,7 @@
   width: 100%;
   overflow: hidden;
   background: var(--theme-surface, #14141c);
-   border-radius: 12px;
+  border-radius: var(--appearance-node-radius, 12px);
 }
 
 /* 单格：直接背着放大后的源图，用 background-position 露出自己那一片
@@ -85,11 +85,11 @@
 .storyboard-node.editing .sb-cell--draggable:hover .sb-cell-overlay {
   border-color: var(--brand, #8a93ff);
 }
-/* 四角 overlay 圆角：对齐父容器 .storyboard-grid 的 border-radius: 12px */
-[data-sb-corner="tl"] > .sb-cell-overlay { border-top-left-radius: 12px; }
-[data-sb-corner="tr"] > .sb-cell-overlay { border-top-right-radius: 12px; }
-[data-sb-corner="bl"] > .sb-cell-overlay { border-bottom-left-radius: 12px; }
-[data-sb-corner="br"] > .sb-cell-overlay { border-bottom-right-radius: 12px; }
+/* 四角 overlay 圆角：对齐父容器 .storyboard-grid 的 border-radius */
+[data-sb-corner="tl"] > .sb-cell-overlay { border-top-left-radius: var(--appearance-node-radius, 12px); }
+[data-sb-corner="tr"] > .sb-cell-overlay { border-top-right-radius: var(--appearance-node-radius, 12px); }
+[data-sb-corner="bl"] > .sb-cell-overlay { border-bottom-left-radius: var(--appearance-node-radius, 12px); }
+[data-sb-corner="br"] > .sb-cell-overlay { border-bottom-right-radius: var(--appearance-node-radius, 12px); }
 .sb-cell--dragging {
   opacity: 0.35;
 }

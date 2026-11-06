@@ -13,11 +13,13 @@ import type {
 import { corsSafeFetch } from './httpTransport';
 import { readModelProtocolFirstScalar, readModelProtocolUrls } from './modelProtocolResponse';
 import {
-  encodeBytesBase64,
   ensureSuccessfulRawResponse,
   fetchSameOriginResultUrls,
   normalizeBase64Result,
   readJsonResponse,
+  readBinaryModelProtocolResult,
+  redactModelProtocolError,
+  throwIfDefinitiveModelResponseFailure,
 } from './modelProtocolHttp';
 import {
   getModelProtocolPreset,
@@ -28,7 +30,6 @@ import {
   FOR_EACH_KEY,
   FOR_EACH_VARIABLE_ROOTS,
   FULL_TEMPLATE_RE,
-  MIME_TYPE_RE,
   TEMPLATE_RE,
   isRecord,
 } from './modelProtocolShared';
@@ -116,11 +117,26 @@ export function resolveModelExecutionProfile(
   profile: ModelExecutionProfile | undefined,
 ): NormalizedModelExecutionProtocol | null {
   if (!profile) return null;
+  // 原生文本预设经 chatApiProtocol 转换消息、工具与流式事件，不能按声明式 JSON 执行。
+  if (profile.preset === 'anthropic-chat' || profile.preset === 'gemini-chat') return null;
   if (profile.preset === 'custom') {
     if (!profile.protocol) throw new Error('自定义调用协议不能为空');
     return parseModelExecutionProtocol(profile.protocol);
   }
   return getModelProtocolPreset(profile.preset);
+}
+
+/** 规范化完整协议的稳定比较键；无可解析协议时返回 undefined。 */
+export function comparableProtocol(profile: ModelExecutionProfile | undefined): string | undefined {
+  try {
+    const protocol = resolveModelExecutionProfile(profile);
+    return protocol ? JSON.stringify(protocol, (_key, value: unknown) => (
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))) : value
+    )) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function submitModelProtocol(
@@ -134,23 +150,21 @@ export async function submitModelProtocol(
 
   if (protocol.mode === 'sync') {
     if (responseConfig.type === 'text') {
-      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath);
+      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
       const text = await response.text();
       if (!text) throw new Error('模型响应中未找到文本结果');
       return { text };
     }
     if (responseConfig.type === 'binary') {
-      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath);
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength === 0) throw new Error('模型响应中未找到二进制结果');
-      const responseMimeType = response.headers.get('Content-Type')?.split(';')[0]?.trim();
-      const mimeType = responseMimeType && MIME_TYPE_RE.test(responseMimeType)
-        ? responseMimeType
-        : responseConfig.result?.mimeType ?? 'application/octet-stream';
-      return { urls: [`data:${mimeType};base64,${encodeBytesBase64(bytes)}`] };
+      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
+      return { urls: [await readBinaryModelProtocolResult(response, responseConfig.result?.mimeType, options.signal)] };
     }
-    const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath);
-    options.validateResponse?.(payload);
+    const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
+    try {
+      options.validateResponse?.(payload);
+    } catch (error) {
+      throw redactModelProtocolError(error, options.apiKey);
+    }
     const resultConfig = responseConfig.result!;
     let urls = resultConfig.urlPath ? readModelProtocolUrls(payload, resultConfig.urlPath) : [];
     if (resultConfig.fetchUrl) {
@@ -172,17 +186,26 @@ export async function submitModelProtocol(
       : undefined;
     const text = textValue === undefined || textValue === null ? undefined : String(textValue);
     const mediaUrls = [...urls, ...base64Urls];
-    if (mediaUrls.length === 0 && !text) throw new Error('模型响应中未找到配置的结果');
+    if (mediaUrls.length === 0 && !text) {
+      throwIfDefinitiveModelResponseFailure(payload, response.status, responseConfig.errorPath, options.apiKey);
+      throw new Error('模型响应中未找到配置的结果');
+    }
     return {
       ...(mediaUrls.length > 0 ? { urls: mediaUrls } : {}),
       ...(text ? { text } : {}),
     };
   }
 
-  const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath);
-  options.validateResponse?.(payload);
+  const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
+  try {
+    options.validateResponse?.(payload);
+  } catch (error) {
+    throw redactModelProtocolError(error, options.apiKey);
+  }
   const taskIdValue = readModelProtocolFirstScalar(payload, responseConfig.taskIdPath!);
-  if (taskIdValue === undefined || taskIdValue === null || taskIdValue === '') {
+  if (!(typeof taskIdValue === 'string' && taskIdValue.trim())
+    && !(typeof taskIdValue === 'number' && Number.isFinite(taskIdValue))) {
+    throwIfDefinitiveModelResponseFailure(payload, response.status, responseConfig.errorPath, options.apiKey);
     throw new Error(`模型提交响应中未找到任务 ID：${responseConfig.taskIdPath}`);
   }
   const pollContext = { ...context, submit: payload };

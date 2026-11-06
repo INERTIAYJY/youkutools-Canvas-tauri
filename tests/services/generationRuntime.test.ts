@@ -1,5 +1,11 @@
+/**
+ * generationRuntime — 回归测试：media generation cancellation。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiProviderConfig, GeneralModelConfig, WorkflowDefinition } from '../../src/types';
+import type { MediaTaskContext, MediaTaskReceipt } from '../../src/types/aiTypes';
+import type { ChatMessage } from '../../src/types/chat';
+import type { PendingTask } from '../../src/services/pollManager';
 
 const mocks = vi.hoisted(() => ({
   generateImage: vi.fn(),
@@ -9,6 +15,16 @@ const mocks = vi.hoisted(() => ({
   persistMediaUrlToProjectData: vi.fn(),
   isTauriEnv: vi.fn(() => true),
   tagGeneratedProjectAssetSafely: vi.fn(),
+  bindMediaTaskContext: vi.fn<(_id: string, _context: MediaTaskContext, _observer?: (receipt: MediaTaskReceipt) => void) => () => void>(() => vi.fn()),
+  registerMediaNodeOperation: vi.fn(() => vi.fn()),
+  registerMediaMessageRecoveryHandler: vi.fn(),
+  getPendingTasksForProject: vi.fn<() => unknown[]>(() => []),
+  getMediaTaskReceipt: vi.fn(),
+  resumeMediaNodeTask: vi.fn(),
+  completeMediaNodeTask: vi.fn(),
+  pauseMediaTask: vi.fn(),
+  updatePendingTask: vi.fn(),
+  persistMessage: vi.fn(),
   storeState: {
     config: {
       generalModels: [] as GeneralModelConfig[],
@@ -20,6 +36,9 @@ const mocks = vi.hoisted(() => ({
     projects: [] as Array<Record<string, unknown>>,
     customStyles: [] as Array<Record<string, unknown>>,
     workflows: [] as WorkflowDefinition[],
+    messages: [] as ChatMessage[],
+    updateMessage: vi.fn(),
+    addMessage: vi.fn(),
   },
 }));
 
@@ -55,20 +74,38 @@ vi.mock('../../src/services/fileService', () => ({
 vi.mock('../../src/services/fs/generatedAssetTags', () => ({
   tagGeneratedProjectAssetSafely: mocks.tagGeneratedProjectAssetSafely,
 }));
+vi.mock('../../src/services/pollManager', () => ({
+  bindMediaTaskContext: mocks.bindMediaTaskContext,
+  registerMediaNodeOperation: mocks.registerMediaNodeOperation,
+  registerMediaMessageRecoveryHandler: mocks.registerMediaMessageRecoveryHandler,
+  getPendingTasksForProject: mocks.getPendingTasksForProject,
+  getMediaTaskReceipt: mocks.getMediaTaskReceipt,
+  resumeMediaNodeTask: mocks.resumeMediaNodeTask,
+  completeMediaNodeTask: mocks.completeMediaNodeTask,
+  pauseMediaTask: mocks.pauseMediaTask,
+  updatePendingTask: mocks.updatePendingTask,
+}));
+vi.mock('../../src/services/chat/chatHistoryService', () => ({ persistMessage: mocks.persistMessage }));
 
 import {
   MEDIA_PERSIST_FAILED_MESSAGE,
   retryMediaArtifactPersist,
   runMediaGeneration,
+  retryMediaMessageTask,
+  ensureMediaMessageRecoveryHandler,
 } from '../../src/services/ai/generationRuntime';
 import type { MediaGenerationResult } from '../../src/types/media';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.bindMediaTaskContext.mockReturnValue(vi.fn());
+  mocks.getPendingTasksForProject.mockReturnValue([]);
+  mocks.getMediaTaskReceipt.mockReset();
   mocks.storeState.currentProjectId = 'project-1';
   mocks.storeState.projects = [];
   mocks.storeState.customStyles = [];
   mocks.storeState.workflows = [];
+  mocks.storeState.messages = [];
   mocks.storeState.config.generalModels = [];
   mocks.storeState.config.providers = { openai: { name: 'OpenAI', apiKey: 'secret' } };
   mocks.generateImage.mockResolvedValue({ url: 'https://cdn.example/image.png', width: 1, height: 1 });
@@ -89,6 +126,15 @@ beforeEach(() => {
 });
 
 describe('media generation cancellation', () => {
+  it.each(['image', 'video'] as const)('passes %s download access and cancellation to persistence without adding it to the artifact', async (kind) => {
+    const mediaDownloadAccess = { providerConfigId: 'relay-image', origin: 'https://relayonapi.com', auth: { type: 'bearer' as const } };
+    (kind === 'image' ? mocks.generateImage : mocks.generateVideo).mockResolvedValueOnce({ url: 'https://relayonapi.com/result', mediaDownloadAccess });
+    const controller = new AbortController();
+    const artifact = await runMediaGeneration({ kind, prompt: '场景', modelRef: `openai/${kind}-model`, deliveryMode: 'chat' }, 'project-1', controller.signal);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledWith('https://relayonapi.com/result', 'project-1', `ai-${kind}`, expect.any(String),
+      { mediaDownloadAccess, signal: controller.signal });
+    expect(artifact).not.toHaveProperty('mediaDownloadAccess');
+  });
   it('云工作流按指定连接执行并传递参数，已保存产物不重复下载', async () => {
     mocks.storeState.workflows = [{ id: 'cloud-image', name: '云图像', category: 'ai-image', fileName: 'RH', fileContent: '', createdAt: 1, adapterType: 'runninghub', runninghub: { version: 1, kind: 'workflow', remoteId: '1904152026220003329', connectionId: 'runninghub', parameters: [] } }];
     mocks.storeState.config.providers = { runninghub: { name: 'RH', apiKey: 'secret' } };
@@ -119,6 +165,182 @@ describe('media generation cancellation', () => {
 });
 
 describe('media generation project settings', () => {
+  function configureVisualModels() {
+    mocks.storeState.config.providers.custom = { name: '自定义', catalogId: 'custom-openai', apiKey: 'fixture', baseUrl: 'https://gateway.example' };
+    mocks.storeState.config.generalModels = [
+      { id: 'image-model', name: '图片', modelId: 'image-x', category: 'image', providerConfigId: 'custom',
+        imageCapability: { resolutions: ['2K'], ratios: ['1:1'], qualities: ['low', 'high'], backgrounds: ['opaque', 'transparent'] } },
+      { id: 'video-model', name: '视频', modelId: 'video-x', category: 'video', providerConfigId: 'custom',
+        videoCapability: { operations: ['text-to-video'], frameRates: [24, 30], supportsAudio: true,
+          minDuration: 4, maxDuration: 15, automaticDurationValue: -1 } },
+    ];
+  }
+
+  it('图片质量和显式接口默认背景贯通生成、结果及原任务快照', async () => {
+    configureVisualModels();
+    const result = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', imageQuality: 'high', imageBackground: '' }, 'project-1', undefined, 'image-node');
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ imageQuality: 'high', imageBackground: '' }), undefined);
+    expect(result.parameters).toEqual({ resolution: '2K', aspectRatio: '1:1', imageQuality: 'high', imageBackground: '' });
+    expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('image-node', expect.objectContaining({
+      parameters: { resolution: '2K', aspectRatio: '1:1', imageQuality: 'high', imageBackground: '' },
+    }), expect.any(Function));
+  });
+
+  it('锁定模型声明的默认质量和背景，显式接口默认仍能覆盖背景默认值', async () => {
+    configureVisualModels();
+    const capability = mocks.storeState.config.generalModels[0].imageCapability!;
+    capability.defaultQuality = 'high';
+    capability.defaultBackground = 'transparent';
+    const intent = { kind: 'image' as const, prompt: '山谷', modelRef: 'general/image-model', deliveryMode: 'chat' as const };
+    const result = await runMediaGeneration(intent, 'project-1', undefined, 'image-node');
+    expect(result.parameters).toEqual({ resolution: '2K', aspectRatio: '1:1', imageQuality: 'high', imageBackground: 'transparent' });
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ imageQuality: 'high', imageBackground: 'transparent' }), undefined);
+    capability.defaultQuality = 'low';
+    capability.defaultBackground = 'opaque';
+    expect(result.parameters).toMatchObject({ imageQuality: 'high', imageBackground: 'transparent' });
+    const explicitDefault = await runMediaGeneration({ ...intent, imageBackground: '' }, 'project-1', undefined, 'image-node');
+    expect(explicitDefault.parameters).toMatchObject({ imageQuality: 'low', imageBackground: '' });
+    expect(mocks.generateImage).toHaveBeenLastCalledWith(expect.objectContaining({ imageQuality: 'low', imageBackground: '' }), undefined);
+  });
+
+  it('未声明的视频参数保留空快照，区分没有快照的旧结果', async () => {
+    configureVisualModels();
+    const result = await runMediaGeneration({ kind: 'video', prompt: '镜头', modelRef: 'general/video-model',
+      deliveryMode: 'chat' }, 'project-1', undefined, 'video-node');
+    expect(result.parameters).toEqual({});
+    expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('video-node', expect.objectContaining({ parameters: {} }), expect.any(Function));
+  });
+
+  it.each([
+    { field: 'imageQuality', value: 'sk-example-secret' },
+    { field: 'imageBackground', value: 'Bearer example-secret' },
+    { field: 'imageQuality', value: 'https://private.example/key' },
+    { field: 'imageBackground', value: 'C:\\private\\secret' },
+  ])('拒绝敏感或路径格式的 $field，不回显参数，也不提交', async ({ field, value }) => {
+    configureVisualModels();
+    const error = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', [field]: value }, 'project-1').catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('格式无效');
+    expect((error as Error).message).not.toContain(value);
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.bindMediaTaskContext).not.toHaveBeenCalled();
+  });
+
+  it('项目默认分辨率是路径时在生成前拒绝且不回显路径', async () => {
+    configureVisualModels();
+    const path = 'D:\\private\\image.png';
+    mocks.storeState.projects = [{ id: 'project-1', settings: { generation: { imageSize: path } } }];
+    const error = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat' }, 'project-1').catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('格式无效');
+    expect((error as Error).message).not.toContain(path);
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+  });
+
+  it('合法的厂商枚举、比例和小数分辨率仍可使用', async () => {
+    configureVisualModels();
+    const capability = mocks.storeState.config.generalModels[0].imageCapability!;
+    capability.qualities = ['高清（电影）'];
+    capability.resolutions = ['0.5K'];
+    capability.ratios = ['16/9'];
+    mocks.storeState.projects = [{ id: 'project-1', settings: { generation: { imageSize: '0.5K', imageAspectRatio: '16/9' } } }];
+    const result = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', imageQuality: '高清（电影）', imageBackground: '' }, 'project-1');
+    expect(result.parameters).toMatchObject({ resolution: '0.5K', aspectRatio: '16/9', imageQuality: '高清（电影）', imageBackground: '' });
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ imageSize: '0.5K', aspectRatio: '16/9', imageQuality: '高清（电影）' }), undefined);
+  });
+
+  it('图片请求锁定项目比例和分辨率，生成期间项目设置变化不会改变结果或任务快照', async () => {
+    configureVisualModels();
+    mocks.storeState.projects = [{ id: 'project-1', settings: { generation: { imageSize: '2K', imageAspectRatio: '9:16' } } }];
+    mocks.generateImage.mockImplementation(async () => {
+      mocks.storeState.projects = [{ id: 'project-1', settings: { generation: { imageSize: '4K', imageAspectRatio: '1:1' } } }];
+      return { url: 'https://cdn.example/image.png', width: 1, height: 1 };
+    });
+    const result = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', imageQuality: 'high' }, 'project-1', undefined, 'image-node');
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ imageSize: '2K', aspectRatio: '9:16', imageQuality: 'high' }), undefined);
+    expect(result.parameters).toEqual({ resolution: '2K', aspectRatio: '9:16', imageQuality: 'high' });
+    expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('image-node', expect.objectContaining({ parameters: result.parameters }), expect.any(Function));
+  });
+
+  it('视频自动时长、帧率和关闭音轨原样传递并保存在原任务快照', async () => {
+    configureVisualModels();
+    const result = await runMediaGeneration({ kind: 'video', prompt: '移动镜头', modelRef: 'general/video-model',
+      deliveryMode: 'both', aspectRatio: '9:16', resolution: '720p', duration: -1, videoFps: 24, generateAudio: false },
+    'project-1', undefined, 'video-node');
+    expect(mocks.generateVideo).toHaveBeenCalledWith(expect.objectContaining({ seedanceRatio: '9:16', seedanceResolution: '720p',
+      seedanceDuration: -1, videoFps: 24, generateAudio: false }), undefined);
+    expect(result.parameters).toEqual({ aspectRatio: '9:16', resolution: '720p', duration: -1, videoFps: 24, generateAudio: false });
+    expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('video-node', expect.objectContaining({ parameters: result.parameters }), expect.any(Function));
+  });
+
+  it('不支持的显式质量、帧率、音轨和自动时长在调用厂商前拒绝', async () => {
+    configureVisualModels();
+    await expect(runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model', deliveryMode: 'chat', imageQuality: 'max' }, 'project-1')).rejects.toThrow('质量');
+    await expect(runMediaGeneration({ kind: 'video', prompt: '镜头', modelRef: 'general/video-model', deliveryMode: 'chat', videoFps: 60 }, 'project-1')).rejects.toThrow('帧率');
+    await expect(runMediaGeneration({ kind: 'video', prompt: '镜头', modelRef: 'general/video-model', deliveryMode: 'chat', duration: -2 }, 'project-1')).rejects.toThrow('自动时长');
+    mocks.storeState.config.generalModels[1].videoCapability!.supportsAudio = false;
+    await expect(runMediaGeneration({ kind: 'video', prompt: '镜头', modelRef: 'general/video-model', deliveryMode: 'chat', generateAudio: false }, 'project-1')).rejects.toThrow('音轨');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.generateVideo).not.toHaveBeenCalled();
+  });
+
+  it('协议固定背景时拒绝接口默认选择，避免结果参数与真实请求不一致', async () => {
+    configureVisualModels();
+    mocks.storeState.config.generalModels[0].executionProfile = { preset: 'custom', protocol: {
+      version: 2, mode: 'sync', submit: { method: 'POST', path: '/images',
+        body: { model: '{{model}}', prompt: '{{prompt}}', background: 'opaque' } },
+      response: { type: 'json', result: { urlPath: 'data.0.url' } },
+    } };
+    await expect(runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', imageBackground: '' }, 'project-1')).rejects.toThrow('背景由协议固定');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.bindMediaTaskContext).not.toHaveBeenCalled();
+  });
+
+  it('passes selected general speech parameters through to the original canvas and message execution', async () => {
+    mocks.storeState.config.providers.libapi = { name: 'LibAPI', apiKey: 'fixture', baseUrl: 'https://libapi.cc/v1' };
+    mocks.storeState.config.generalModels = [{ id: 'audio-libapi', name: 'LibAPI TTS', modelId: 'speech-2.8',
+      category: 'audio', providerConfigId: 'libapi' }];
+    const context = { projectId: 'project-1', conversationId: 'speech-chat', messageId: 'speech-message', deliveryMode: 'both' as const };
+
+    await runMediaGeneration({ kind: 'audio', prompt: '欢迎回来', modelRef: 'general/audio-libapi',
+      deliveryMode: 'both', audioPurpose: 'speech', audioVoice: 'Chinese_Female_01', audioFormat: 'mp3', audioSpeed: 1.25,
+    }, 'project-1', undefined, 'audio-node', context);
+
+    expect(mocks.generateAudio).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'general', model: 'general/audio-libapi', nodeId: 'audio-node',
+      audioVoice: 'Chinese_Female_01', audioFormat: 'mp3', audioSpeed: 1.25, runninghubTaskContext: context,
+    }), undefined);
+  });
+
+  it('passes music title and literal lyrics for a message-only generation without RunningHub parameters', async () => {
+    mocks.storeState.config.providers.libapi = { name: 'LibAPI', apiKey: 'fixture', baseUrl: 'https://libapi.cc/v1' };
+    mocks.storeState.config.generalModels = [{ id: 'audio-libapi-music', name: 'LibAPI Music', modelId: 'music',
+      category: 'audio', providerConfigId: 'libapi' }];
+
+    await runMediaGeneration({ kind: 'audio', prompt: '轻柔民谣', modelRef: 'general/audio-libapi-music',
+      deliveryMode: 'chat', audioPurpose: 'music', musicTitle: '回家', musicLyrics: '灯火等着我\n沿着路慢慢走',
+    }, 'project-1');
+
+    expect(mocks.generateAudio).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'general/audio-libapi-music', musicTitle: '回家', musicLyrics: '灯火等着我\n沿着路慢慢走',
+    }), undefined);
+    expect(mocks.generateAudio.mock.calls[0][0].runninghubModelParameters).toBeUndefined();
+  });
+
+  it('rejects audio controls on image generation before calling any media provider', async () => {
+    await expect(runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'openai/image-model',
+      deliveryMode: 'chat', audioVoice: 'Zephyr',
+    }, 'project-1')).rejects.toThrow('音频参数只能用于音频生成');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.generateAudio).not.toHaveBeenCalled();
+  });
+
   it('RunningHub 使用专属参数与原节点，不注入项目的其他视频默认值', async () => {
     mocks.storeState.config.providers['runninghub-model'] = { name: 'RH', apiKey: 'fake' };
     mocks.storeState.projects = [{ id: 'project-1', settings: { generation: { videoAspectRatio: '16:9', videoResolution: '1080p', videoDuration: 10 } } }];
@@ -427,11 +649,25 @@ describe('retryMediaArtifactPersist', () => {
       'project-1',
       'ai-image',
       '对话图片-media-1',
+      { mediaDownloadAccess: undefined, signal: undefined },
     );
     expect(result.persistence).toBe('saved');
     expect(result.persistError).toBeUndefined();
     expect(result.url).toBe('asset://对话图片.png');
     expect(result.filePath).toBe('/projects/project-1/对话图片.png');
+  });
+
+  it('reuses only the exact pending receipt download access when saving the original artifact', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'tracking', taskId: 'original', attemptId: 'attempt-1' };
+    const mediaDownloadAccess = { providerConfigId: 'relay-image', origin: 'https://relayonapi.com', auth: { type: 'bearer' as const } };
+    mocks.getPendingTasksForProject.mockReturnValue([
+      { ...receipt, attemptId: 'other-attempt', mediaDownloadAccess: { ...mediaDownloadAccess, providerConfigId: 'other' } },
+      { ...receipt, mediaDownloadAccess },
+    ]);
+    await retryMediaArtifactPersist({ ...unsaved, taskReceipt: receipt }, 'project-1');
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenLastCalledWith(unsaved.sourceUrl, 'project-1', 'ai-image', '对话图片-media-1',
+      { mediaDownloadAccess, signal: undefined });
+    expect(mocks.generateImage).not.toHaveBeenCalled();
   });
 
   it('throws with the underlying reason when the retry also fails', async () => {
@@ -444,5 +680,116 @@ describe('retryMediaArtifactPersist', () => {
     mocks.isTauriEnv.mockReturnValue(false);
 
     await expect(retryMediaArtifactPersist(unsaved, 'project-1')).rejects.toThrow('浏览器模式');
+  });
+});
+
+describe('async media task identity', () => {
+  it('图片原任务恢复时沿用提交时的分辨率和比例，而不是当前项目默认', async () => {
+    const parameters = { resolution: '2K', aspectRatio: '9:16', imageQuality: 'high', imageBackground: 'transparent' };
+    const task: PendingTask = { projectId: 'project-1', nodeId: 'image-tracking', nodeType: 'ai-image',
+      provider: 'general', taskType: 'custom-protocol', submitted: true, taskId: 'image-task', attemptId: 'image-attempt',
+      mediaContext: { projectId: 'project-1', conversationId: 'conversation-1', messageId: 'message-1', deliveryMode: 'message',
+        modelId: 'general/image-model', parameters } };
+    mocks.storeState.projects = [{ id: 'project-1', settings: { generation: { imageSize: '4K', imageAspectRatio: '1:1' } } }];
+    mocks.storeState.messages = [{ id: 'message-1', conversationId: 'conversation-1', role: 'assistant',
+      content: '', timestamp: 1, status: 'done', mediaStatus: 'paused' }];
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    ensureMediaMessageRecoveryHandler();
+    const handler = mocks.registerMediaMessageRecoveryHandler.mock.calls.at(-1)![0] as
+      (savedTask: PendingTask, urls: string[]) => Promise<void>;
+    await handler(task, ['https://cdn.example/image.png']);
+    expect(mocks.storeState.updateMessage).toHaveBeenCalledWith('message-1', expect.objectContaining({
+      mediaResult: expect.objectContaining({ parameters }),
+    }));
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+  });
+
+  it('续取原任务时从任务上下文恢复媒体参数，不重新生成', async () => {
+    const mediaDownloadAccess = { providerConfigId: 'relay-video', origin: 'https://relayonapi.com', auth: { type: 'bearer' as const } };
+    const task: PendingTask = { projectId: 'project-1', nodeId: 'message-tracking', nodeType: 'ai-video',
+      provider: 'general', taskType: 'custom-protocol', submitted: true, taskId: 'original-task', attemptId: 'original-attempt',
+      mediaDownloadAccess,
+      mediaContext: { projectId: 'project-1', conversationId: 'conversation-1', messageId: 'message-1', deliveryMode: 'message',
+        modelId: 'general/video-model', parameters: { aspectRatio: '9:16', duration: -1, videoFps: 24, generateAudio: false } } };
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    mocks.storeState.messages = [{ id: 'message-1', conversationId: 'conversation-1', role: 'assistant',
+      content: '', timestamp: 1, status: 'done', mediaStatus: 'paused' }];
+    ensureMediaMessageRecoveryHandler();
+    const handler = mocks.registerMediaMessageRecoveryHandler.mock.calls.at(-1)![0] as
+      (savedTask: PendingTask, urls: string[]) => Promise<void>;
+    await handler(task, ['https://cdn.example/video.mp4']);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledWith('https://cdn.example/video.mp4', 'project-1', 'ai-video', expect.any(String),
+      { mediaDownloadAccess, signal: undefined });
+    expect(mocks.storeState.updateMessage).toHaveBeenCalledWith('message-1', expect.objectContaining({
+      mediaResult: expect.objectContaining({ parameters: { aspectRatio: '9:16', duration: -1, videoFps: 24, generateAudio: false } }),
+    }));
+    expect(mocks.generateVideo).not.toHaveBeenCalled();
+    expect(mocks.completeMediaNodeTask).toHaveBeenCalledOnce();
+  });
+
+  it('does not publish a message result when its uncancellable save finishes after cancellation', async () => {
+    const task: PendingTask = { projectId: 'project-1', nodeId: 'message-tracking', nodeType: 'ai-image',
+      provider: 'general', taskType: 'custom-protocol', submitted: true, taskId: 'original-task', attemptId: 'original-attempt',
+      mediaContext: { projectId: 'project-1', conversationId: 'conversation-1', messageId: 'message-1', deliveryMode: 'message' } };
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    mocks.storeState.messages = [{ id: 'message-1', conversationId: 'conversation-1', role: 'assistant',
+      content: '', timestamp: 1, status: 'done', mediaStatus: 'paused' }];
+    let finish!: (result: { filePath: string; mediaUrl: string; sourceUrl: string }) => void;
+    mocks.persistMediaUrlToProjectData.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    ensureMediaMessageRecoveryHandler();
+    const handler = mocks.registerMediaMessageRecoveryHandler.mock.calls.at(-1)![0] as
+      (savedTask: PendingTask, urls: string[], signal?: AbortSignal) => Promise<void>;
+    const controller = new AbortController();
+    const pending = handler(task, ['https://cdn.example/image.png'], controller.signal);
+    await vi.waitFor(() => expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledOnce());
+    controller.abort();
+    finish({ filePath: '/projects/project-1/image.png', mediaUrl: 'asset://image.png', sourceUrl: 'https://cdn.example/image.png' });
+    await expect(pending).rejects.toThrow('任务仍保留');
+    expect(mocks.storeState.updateMessage).not.toHaveBeenCalled();
+    expect(mocks.storeState.addMessage).not.toHaveBeenCalled();
+    expect(mocks.persistMessage).not.toHaveBeenCalled();
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+    expect(mocks.getPendingTasksForProject()).toEqual([task]);
+  });
+
+  it('captures the receipt from the submission observer when a provider omits it from the result', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'node-1', taskId: 'remote-video', attemptId: 'attempt-video' };
+    let observer: ((value: MediaTaskReceipt) => void) | undefined;
+    mocks.bindMediaTaskContext.mockImplementation((_id, _context, onReceipt) => { observer = onReceipt; return () => {}; });
+    mocks.generateVideo.mockImplementation(async () => { observer?.(receipt); return { url: 'https://cdn.example/video.mp4' }; });
+    mocks.getPendingTasksForProject.mockReturnValue([{ ...receipt, submitted: true }]);
+    const result = await runMediaGeneration({ kind: 'video', prompt: '移动镜头', modelRef: 'openai/video-model', deliveryMode: 'canvas' },
+      'project-1', undefined, 'node-1');
+    expect(result.taskReceipt).toEqual(receipt);
+    expect(mocks.getMediaTaskReceipt).not.toHaveBeenCalled();
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+  });
+
+  it('tracks ordinary chat image tasks and carries the exact receipt until delivery', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'tracking-1', taskId: 'remote-1', attemptId: 'attempt-1' };
+    mocks.generateImage.mockResolvedValue({ url: 'https://cdn.example/image.png', width: 1, height: 1, taskReceipt: receipt });
+    const result = await runMediaGeneration({ kind: 'image', prompt: '一只猫', modelRef: 'openai/image-model', deliveryMode: 'chat' },
+      'project-1', undefined, undefined, { projectId: 'project-1', conversationId: 'conversation-1', messageId: 'message-1', deliveryMode: 'chat' });
+    expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith(expect.stringMatching(/^media-message-message-1-/), expect.objectContaining({ messageId: 'message-1', projectId: 'project-1' }), expect.any(Function));
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ nodeId: expect.stringMatching(/^media-message-message-1-/) }), undefined);
+    expect(result.taskReceipt).toEqual(receipt);
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+  });
+
+  it('retains an async task when its result cannot be saved', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'node-1', taskId: 'remote-1', attemptId: 'attempt-1' };
+    mocks.generateImage.mockResolvedValue({ url: 'https://cdn.example/image.png', width: 1, height: 1, taskReceipt: receipt });
+    mocks.persistMediaUrlToProjectData.mockRejectedValue(new Error('磁盘不可写'));
+    const result = await runMediaGeneration({ kind: 'image', prompt: '一只猫', modelRef: 'openai/image-model', deliveryMode: 'canvas' }, 'project-1', undefined, 'node-1');
+    expect(result.persistence).toBe('failed');
+    expect(mocks.pauseMediaTask).toHaveBeenCalledWith(receipt, undefined, 'delivery_pending');
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+  });
+
+  it('does not resubmit when the original submission has no confirmed task ID', async () => {
+    mocks.getPendingTasksForProject.mockReturnValue([{ nodeId: 'tracking-1', projectId: 'project-1', taskId: '', submitted: false, mediaContext: { messageId: 'message-1' } }]);
+    await expect(retryMediaMessageTask('message-1')).rejects.toThrow('提交状态未知');
+    expect(mocks.resumeMediaNodeTask).not.toHaveBeenCalled();
+    expect(mocks.generateImage).not.toHaveBeenCalled();
   });
 });

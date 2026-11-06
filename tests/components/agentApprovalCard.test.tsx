@@ -1,3 +1,6 @@
+/**
+ * agentApprovalCard — 回归测试：AgentApprovalCard provider catalog。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentStep, ProviderModelChoice } from '../../src/types/agent';

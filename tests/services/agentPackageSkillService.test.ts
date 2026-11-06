@@ -1,3 +1,6 @@
+/**
+ * agentPackageSkillService — 回归测试：AgentPackage Skill 目录加载。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const readAgentPackageSourceTextMock = vi.hoisted(() => vi.fn());

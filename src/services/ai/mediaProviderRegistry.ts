@@ -12,6 +12,8 @@ import type {
 import { apimartMediaProviderAdapter } from './providers/apimartMedia';
 import { runninghubMediaProviderAdapter } from './providers/runninghubMedia';
 import { seedlingMediaProviderAdapter } from './providers/seedlingMedia';
+import { grsaiMediaProviderAdapter } from './providers/grsaiMedia';
+
 
 export type MediaProviderCapability = 'image' | 'video' | 'audio';
 
@@ -29,6 +31,8 @@ export interface VideoProviderRequest {
   prompt: string;
   resolveReferenceInput: () => Promise<VideoGenerationReferenceInput>;
   signal?: AbortSignal;
+  /** 参考素材准备完成后、实际付费提交前复核宿主输入与执行租约。 */
+  beforeSubmit?: () => void | Promise<void>;
 }
 
 export interface AudioProviderRequest {
@@ -124,4 +128,6 @@ export const mediaProviderRegistry = new MediaProviderRegistry([
   apimartMediaProviderAdapter,
   runninghubMediaProviderAdapter,
   seedlingMediaProviderAdapter,
+  grsaiMediaProviderAdapter,
+
 ]);

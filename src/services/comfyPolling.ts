@@ -7,18 +7,30 @@
 import { corsSafeFetch } from './ai/httpTransport';
 import { pollTask } from './pollTask';
 import type { ComfyOutputs } from './comfyOutputs';
-
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+import { withComfyQueryTimeout } from './comfyQuery';
 
 /**
  * 将 ComfyUI 直连地址替换为当前环境可访问的地址：
  * - Tauri 模式：保留原地址（走 Rust proxy_fetch）
- * - 浏览器开发模式：替换为 Vite 代理路径 /api/comfyui
+ * - 浏览器开发模式：仅本机 HTTP 8188 使用固定的 Vite 代理
+ * - 其他服务与生产 Web：保留原地址，不误转到另一台 ComfyUI
  */
 export function normalizeComfyUrl(url: string): string {
-  if (isTauri) return url;
-  // Vite dev proxy: http://127.0.0.1:8188/xxx → /api/comfyui/xxx
-  return url.replace(/^https?:\/\/127\.0\.0\.1:\d+/, '/api/comfyui');
+  if (typeof window === 'undefined'
+    || '__TAURI_INTERNALS__' in window
+    || '__TAURI__' in window
+    || !import.meta.env.DEV) return url;
+
+  try {
+    const target = new URL(url);
+    if (target.protocol !== 'http:'
+      || !['127.0.0.1', 'localhost'].includes(target.hostname)
+      || target.port !== '8188'
+      || target.username || target.password) return url;
+    return `/api/comfyui${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -54,6 +66,19 @@ function readComfyFailureMessage(entry: ComfyHistoryEntry): string | null {
   return null;
 }
 
+/**
+ * Stock ComfyUI writes history after task_done, but some gateways expose a partial
+ * history entry while encoders or output nodes are still running. When status is
+ * present, require its terminal success signal before returning a media result.
+ * Status-less entries remain supported for older ComfyUI-compatible services.
+ */
+function isComfyHistoryEntryComplete(entry: ComfyHistoryEntry): boolean {
+  const status = entry.status;
+  if (!status) return true;
+  if (typeof status.completed === 'boolean') return status.completed;
+  return status.status_str?.toLowerCase() === 'success';
+}
+
 /** 队列项形如 [优先级, prompt_id, prompt, extra_data, outputs]；问不到就当还在排队，宁可继续等 */
 async function isPromptQueued(
   baseUrl: string,
@@ -61,13 +86,16 @@ async function isPromptQueued(
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    const response = await comfyFetch(`${baseUrl}/queue`, { signal });
-    if (!response.ok) return true;
-    const queue = (await response.json()) as Record<string, unknown>;
+    const queue = await withComfyQueryTimeout(async (querySignal) => {
+      const response = await comfyFetch(`${baseUrl}/queue`, { signal: querySignal });
+      assertComfyQueryResponse(response);
+      return await response.json() as Record<string, unknown>;
+    }, signal);
     const lists = [queue.queue_running, queue.queue_pending].filter(Array.isArray) as unknown[][];
     if (lists.length === 0) return true;
     return lists.some((list) => list.some((item) => Array.isArray(item) && item[1] === promptId));
-  } catch {
+  } catch (error) {
+    if (error instanceof ComfyQueryAuthorizationError) throw error;
     return true;
   }
 }
@@ -83,6 +111,43 @@ export class ComfyPendingError extends Error {
     super(message);
     this.name = 'ComfyPendingError';
   }
+}
+
+export const COMFY_OUTPUT_UNAVAILABLE_MESSAGE = 'ComfyUI 已完成，但没有可下载的目标媒体。请检查输出类型，并使用 SaveImage、PreviewImage、SaveVideo 或 SaveAudio 等文件输出节点；仅 WebSocket 出图暂不支持取回。';
+
+/** 执行成功不等于本客户端已识别到文件；保留回执，不能冒充远端失败。 */
+export class ComfyOutputUnavailableError extends ComfyPendingError {
+  constructor() {
+    super(COMFY_OUTPUT_UNAVAILABLE_MESSAGE);
+    this.name = 'ComfyOutputUnavailableError';
+  }
+}
+
+const COMFY_QUERY_AUTHORIZATION_MESSAGES = {
+  401: 'ComfyUI 查询未授权（HTTP 401），请检查服务端鉴权配置；原任务已保留，修复后可继续查询',
+  403: 'ComfyUI 查询被拒绝（HTTP 403），请检查服务端访问权限或反向代理限制；原任务已保留，修复后可继续查询',
+} as const;
+
+/** 恢复记录仅保存固定状态码，展示时重建文案，不保留上游正文或地址。 */
+export function getComfyQueryAuthorizationMessage(status: unknown): string | undefined {
+  return status === 401 || status === 403 ? COMFY_QUERY_AUTHORIZATION_MESSAGES[status] : undefined;
+}
+
+export class ComfyQueryAuthorizationError extends ComfyPendingError {
+  readonly status: 401 | 403;
+
+  constructor(status: 401 | 403) {
+    super(COMFY_QUERY_AUTHORIZATION_MESSAGES[status]);
+    this.name = 'ComfyQueryAuthorizationError';
+    this.status = status;
+  }
+}
+
+function assertComfyQueryResponse(response: Response): void {
+  if (response.ok) return;
+  void response.body?.cancel().catch(() => undefined);
+  if (response.status === 401 || response.status === 403) throw new ComfyQueryAuthorizationError(response.status);
+  throw new Error(`HTTP ${response.status}`);
 }
 
 const TASK_GONE_MESSAGE = 'ComfyUI 上已找不到该任务（服务重启或队列被清空），请重新生成';
@@ -113,9 +178,11 @@ export async function pollComfyHistory<T>(
   return pollTask<ComfyPollState, T>({
     fetchState: async () => {
       try {
-        const response = await comfyFetch(`${baseUrl}/history/${promptId}`, { signal });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const history = (await response.json()) as Record<string, unknown>;
+        const history = await withComfyQueryTimeout(async (querySignal) => {
+          const response = await comfyFetch(`${baseUrl}/history/${promptId}`, { signal: querySignal });
+          assertComfyQueryResponse(response);
+          return await response.json() as Record<string, unknown>;
+        }, signal);
         if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
         errorRounds = 0;
         const entry = history[promptId] as ComfyHistoryEntry | undefined;
@@ -127,22 +194,25 @@ export async function pollComfyHistory<T>(
         return { gone: missingRounds >= MISSING_ROUNDS_BEFORE_FAIL };
       } catch (error) {
         if (signal?.aborted) throw error;
+        if (error instanceof ComfyQueryAuthorizationError) throw error;
         errorRounds += 1;
         // 偶发的网络抖动不该打断一个跑了几分钟的任务，连续失败才上抛
         if (errorRounds >= FETCH_ERROR_ROUNDS_BEFORE_FAIL) throw new ComfyPendingError();
         return {};
       }
     },
-    isComplete: ({ entry }) => (entry?.outputs ? extract(entry.outputs) : null),
+    isComplete: ({ entry }) => {
+      if (!entry || !isComfyHistoryEntryComplete(entry)) return null;
+      const result = entry.outputs ? extract(entry.outputs) : null;
+      // 只有明确终态才能判定输出不兼容；无 status 的旧服务继续等待。
+      if (result === null && entry.status) throw new ComfyOutputUnavailableError();
+      return result;
+    },
     isFailed: ({ entry, gone }) => {
       if (gone) return TASK_GONE_MESSAGE;
       if (!entry) return null;
       const failure = readComfyFailureMessage(entry);
       if (failure) return failure;
-      if (entry.status?.completed === true) {
-        const result = entry.outputs ? extract(entry.outputs) : null;
-        if (result === null) return 'ComfyUI 执行完成但未返回目标媒体';
-      }
       return null;
     },
     interval: 3000,

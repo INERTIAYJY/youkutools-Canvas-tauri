@@ -30,6 +30,7 @@ import { blobToDataUrl } from '../../store/store.utils';
 import { generateOutpaintImage } from '../../services/apimartService';
 import { executeGeneration } from '../../services/generationService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
+import { flushPendingAutoSave } from '../../hooks/useAutoSave';
 import { useCanvasNodeLodPreviewRevision, useCanvasNodeLodProtection } from '../../hooks/useCanvasNodeLod';
 import { createPresetNode } from './shared/toolbar/presetAction';
 import type { CameraStudioResult } from './shared/image/cameraStudio';
@@ -48,6 +49,7 @@ import { useImageNodeOnnxActions } from './shared/image/useImageNodeOnnxActions'
 import { useT } from '../../i18n';
 import { getImageLoadRetryDelay, isRetryableImageSource } from '../../utils/imageLoadRetry';
 import NodeGenerationProgress from './shared/NodeGenerationProgress';
+import MediaTaskStatus from './shared/MediaTaskStatus';
 
 const MattingEditor = lazy(() => import('./shared/image/MattingEditor'));
 const CustomGridEditor = lazy(() => import('./shared/image/CustomGridEditor'));
@@ -55,6 +57,8 @@ const ExpandEditor = lazy(() => import('./shared/image/ExpandEditor'));
 const CropEditor = lazy(() => import('./shared/image/CropEditor'));
 const ImageComposerEditor = lazy(() => import('./shared/image/composer/ImageComposerEditor'));
 const CameraStudioPanel = lazy(() => import('./shared/image/CameraStudioPanel'));
+const fullscreenRequests: { pending?: CanvasDerivationGuard } = import.meta.hot?.data.imageFullscreenRequests ?? {};
+if (import.meta.hot) import.meta.hot.data.imageFullscreenRequests = fullscreenRequests;
 
 const loadImageEditorRuntime = () => import('@tenney95/xiaoluo-image-editor');
 
@@ -776,10 +780,54 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   /* ════════════════════════════════════════════
      Fullscreen State
      ════════════════════════════════════════════ */
-  const handleOpenFullscreen = useCallback(() => {
-    setFullscreenProjectId(useAppStore.getState().currentProjectId);
-    setIsFullscreen(true);
+  const fullscreenOpeningRef = useRef<CanvasDerivationGuard | null>(null);
+  useEffect(() => () => {
+    if (fullscreenOpeningRef.current) cancelCanvasDerivation(fullscreenOpeningRef.current);
+    if (fullscreenRequests.pending === fullscreenOpeningRef.current) fullscreenRequests.pending = undefined;
   }, []);
+  const handleOpenFullscreen = useCallback(async () => {
+    if (fullscreenOpeningRef.current || isFullscreen) return;
+    const initial = useAppStore.getState();
+    const source = initial.nodes.find((node) => node.id === id);
+    if (!initial.currentProjectId || !source || !(source.data.imageUrl || source.data.thumbnailUrl)) return;
+    const guard = registerCanvasDerivation(initial, id);
+    if (!guard) return;
+    // 不同节点可能共用同一次保存等待；只允许最后一次开图请求继续。
+    if (fullscreenRequests.pending) cancelCanvasDerivation(fullscreenRequests.pending);
+    fullscreenRequests.pending = guard;
+    fullscreenOpeningRef.current = guard;
+    const mediaFields = ['imageUrl', 'thumbnailUrl', 'filePath', 'mediaVersion'] as const;
+    const media = mediaFields.map((field) => source.data[field]);
+    const isCurrent = () => {
+      const state = useAppStore.getState();
+      const live = state.nodes.find((node) => node.id === id);
+      return !!live && fullscreenRequests.pending === guard && state.projectLoadStatus === 'ready'
+        && isCanvasDerivationFresh(guard, state)
+        && live.data.type === source.data.type
+        && mediaFields.every((field, index) => live.data[field] === media[index]);
+    };
+    const progressTimer = setTimeout(() => {
+      if (isCurrent()) useAppStore.getState().showToast(t('正在保存项目…'), 'info');
+    }, 300);
+    try {
+      // 先等已有改动提交，再给原图分配解码资源；干净画布不会因此额外截图或保存。
+      const saved = await flushPendingAutoSave(guard.projectId);
+      if (!isCurrent()) return;
+      if (!saved) {
+        useAppStore.getState().showToast(t('保存失败，编辑内容已保留'), 'error');
+        return;
+      }
+      setFullscreenProjectId(guard.projectId);
+      setIsFullscreen(true);
+    } catch {
+      if (isCurrent()) useAppStore.getState().showToast(t('保存失败，编辑内容已保留'), 'error');
+    } finally {
+      clearTimeout(progressTimer);
+      completeCanvasDerivation(guard);
+      if (fullscreenRequests.pending === guard) fullscreenRequests.pending = undefined;
+      if (fullscreenOpeningRef.current === guard) fullscreenOpeningRef.current = null;
+    }
+  }, [id, isFullscreen, t]);
   const handleCloseFullscreen = useCallback(() => setIsFullscreen(false), []);
 
   /** 重绘 — 打开 PromptPanel 对话框 */
@@ -801,9 +849,12 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       store.showToast(t('没有可用的图片'), 'error');
       return;
     }
-    const ok = await copyImageToClipboard(imageUrl);
+    const ok = await copyImageToClipboard(imageUrl, {
+      filePath: data.filePath,
+      projectId: store.currentProjectId,
+    });
     store.showToast(ok ? t('已复制图像到剪贴板') : t('复制失败'), ok ? undefined : 'error');
-  }, [data.imageUrl, data.thumbnailUrl, t]);
+  }, [data.imageUrl, data.thumbnailUrl, data.filePath, t]);
 
   const handleReversePrompt = useCallback(() => {
     const store = useAppStore.getState();
@@ -820,12 +871,14 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     upscaleProgress,
     downloadPrompt,
     isDownloadingModel,
+    modelDownloadProgress,
     handleUpscale,
     handleDownloadConfirm,
     handleDownloadCancel,
     isMattingRunning,
     mattingDownloadPrompt,
     isDownloadingMattingModel,
+    mattingDownloadProgress,
     handleSubjectMatting,
     handleMattingDownloadConfirm,
     handleMattingDownloadCancel,
@@ -871,7 +924,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               <div className="image-preview-container">
                 {shouldSuspendCanvasPreview && (
                   <div
-                    className="image-preview-suspended pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 overflow-hidden rounded-xl bg-gradient-to-br from-canvas-card via-canvas-bg to-canvas-surface text-canvas-text-muted"
+                    className="image-preview-suspended pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 overflow-hidden [border-radius:inherit] bg-gradient-to-br from-canvas-card via-canvas-bg to-canvas-surface text-canvas-text-muted"
                     aria-hidden="true"
                   >
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.25" opacity="0.42">
@@ -978,7 +1031,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                   </>
                 )}
                 {data.status === 'loading' && (
-                  <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成图像中...')} overlay />
+                  <NodeGenerationProgress nodeId={id} fallbackLabel={t(data.mediaTaskStage === 'saving' ? '保存中' : '生成图像中...')} overlay />
                 )}
               </div>
             ) : isUploading ? (
@@ -987,7 +1040,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                 <span>{t('上传中...')}</span>
               </div>
             ) : data.status === 'loading' ? (
-              <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成图像中...')} />
+              <NodeGenerationProgress nodeId={id} fallbackLabel={t(data.mediaTaskStage === 'saving' ? '保存中' : '生成图像中...')} />
             ) : (
               isSource ? (
                 <button
@@ -1016,6 +1069,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                 </div>
               )
             )}
+            {data.mediaTaskState && data.status !== 'loading' && <MediaTaskStatus nodeId={id} overlay />}
           </div>
           {data.error && <NodeError nodeId={id} message={data.error} />}
           <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-image" >
@@ -1170,6 +1224,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         type="upscale"
         showPrompt={downloadPrompt}
         showDownloading={isDownloadingModel}
+        progress={modelDownloadProgress}
         onConfirm={handleDownloadConfirm}
         onCancel={handleDownloadCancel}
       />
@@ -1179,6 +1234,7 @@ function AIImageNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         type="matting"
         showPrompt={mattingDownloadPrompt}
         showDownloading={isDownloadingMattingModel}
+        progress={mattingDownloadProgress}
         onConfirm={handleMattingDownloadConfirm}
         onCancel={handleMattingDownloadCancel}
       />

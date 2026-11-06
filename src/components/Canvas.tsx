@@ -5,7 +5,6 @@ import { lazy, Suspense, useCallback, useState, useEffect, useMemo, useRef } fro
 import { createPortal } from 'react-dom';
 import { ReactFlow,
   Background,
-  Controls,
   BackgroundVariant,
   ConnectionMode,
   SelectionMode,
@@ -15,10 +14,10 @@ import { ReactFlow,
   useViewport,
   ReactFlowProvider,
   Panel,
-  applyNodeChanges,
   type OnSelectionChangeParams,
   type NodeChange,
   type EdgeTypes,
+  type MiniMapProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import TextNode from './nodes/TextNode';
@@ -32,33 +31,42 @@ import ShotlistNode from './nodes/ShotlistNode';
 import GroupNode from './nodes/GroupNode';
 import CanvasNoteNode from './noteNodes/CanvasNoteNode';
 import PluginNode from './nodes/PluginNode';
+import AiAppNode from './nodes/AiAppNode';
 import NodeRenderBoundary from './nodes/shared/NodeRenderBoundary';
 import CanvasNodeLodBoundary from './nodes/shared/CanvasNodeLodBoundary';
 import { CanvasNodeLodContext } from '../hooks/useCanvasNodeLod';
 import { createCanvasNodeLodRuntime } from '../services/canvasNodeLodRuntime';
+import { getPerformanceModeEnabled, subscribePerformanceMode } from '../services/performanceModeRuntime';
+import { waitForCanvasFirstPaint } from '../services/canvasReadyService';
 import { isEditableTarget } from '../utils/textSelection';
 import { playNodeFocusPulse } from '../utils/nodeAnimations';
 import ConnectionMenu from './canvas/ConnectionMenu';
 import CanvasContextMenu from './canvas/CanvasContextMenu';
 import NodeContextMenu from './canvas/NodeContextMenu';
 import CanvasToolbar from './canvas/CanvasToolbar';
+import EpisodeWorkbench from './canvas/EpisodeWorkbench';
 import CanvasDrawingToolbar from './canvas/CanvasDrawingToolbar';
 import CanvasNoteStylePanel from './canvas/CanvasNoteStylePanel';
 import RoundedMiniMapMask from './canvas/RoundedMiniMapMask';
 import MiniMapNodeStats from './canvas/MiniMapNodeStats';
 import MultiSelectToolbar from './canvas/MultiSelectToolbar';
+import SelectionConnectionHandle from './canvas/SelectionConnectionNode';
 import CanvasEmptyState from './canvas/CanvasEmptyState';
 import HistoryTimelinePanel from './canvas/HistoryTimelinePanel';
 import SelectedNodeFlowEdge from './canvas/SelectedNodeFlowEdge';
+import CanvasEdgeLayer from './canvas/CanvasEdgeLayer';
+import { CanvasEdgePanePointerContext, useCanvasEdgePanePointer } from '../hooks/useCanvasEdgePanePointer';
 import CanvasRadialMenu, { CanvasLongPressIndicator } from './canvas/CanvasRadialMenu';
 import NodePluginToolDialog from './nodes/shared/toolbar/NodePluginToolDialog';
+import NodeOutputDownloadDialog from './shared/NodeOutputDownloadDialog';
 import { useConnectionDropMenu } from '../hooks/useConnectionDropMenu';
 import { useCanvasContextMenu } from '../hooks/useCanvasContextMenu';
 import { useNodeContextMenu } from '../hooks/useNodeContextMenu';
 import { useCanvasSecondaryClickMenu } from '../hooks/useCanvasSecondaryClickMenu';
 import { useCanvasLongPressRadialMenu } from '../hooks/useCanvasLongPressRadialMenu';
 import { useAppStore } from '../store/useAppStore';
-import { filterHiddenCanvasElements, isCanvasConnectionValid } from '../store/store.nodes';
+import { createFrameCoalescer } from '../utils/frameCoalescer';
+import { createNodeDuplicateDrag, filterHiddenCanvasElements, isBatchConnectableNode, isCanvasConnectionValid } from '../store/store.nodes';
 import {
   createCanvasEdgeProjection,
   createCanvasNodeProjectionCache,
@@ -73,8 +81,12 @@ import {
 import { useNodeCreation } from '../hooks/useNodeCreation';
 import { useCanvasDrawing } from '../hooks/useCanvasDrawing';
 import { useCanvasWheelZoom } from '../hooks/useCanvasWheelZoom';
+import { useCanvasViewportPreferences } from '../hooks/useCanvasViewportPreferences';
+import ViewportImage from './shared/ViewportImage';
+import { getCanvasLockedZoom, normalizeCanvasZoom } from '../utils/canvasViewportPreferences';
 import type { BaseNodeData } from '../types';
-import { SHOTLIST_FRAME_SOURCE_TYPES, STORYBOARD_CELL_SOURCE_TYPES } from '../types';
+import type { CanvasEdgeDisplayMode } from '../types/canvasEdges';
+import { isShotRowBlank, SHOTLIST_FRAME_SOURCE_TYPES, STORYBOARD_CELL_SOURCE_TYPES } from '../types';
 import type { Node as RFNode, NodeProps, NodeTypes, OnMove } from '@xyflow/react';
 import { useNodeSnap, ResizeSnapContext, type SnapLine } from '../hooks/useNodeSnap';
 import { setCanvasPointerPosition } from '../services/canvasPointerService';
@@ -146,38 +158,49 @@ const nodeTypes: NodeTypes = withNodeRenderBoundaries({
   group: GroupNode,
   'canvas-note': CanvasNoteNode,
   'plugin-node': PluginNode,
+  'ai-app': AiAppNode,
 });
 
+const sharedEdgeType = Object.assign(SelectedNodeFlowEdge, { renderLayer: CanvasEdgeLayer });
 const edgeTypes: EdgeTypes = {
+  default: sharedEdgeType,
+  smoothstep: SelectedNodeFlowEdge,
   'selected-node-flow': SelectedNodeFlowEdge,
+};
+
+// Unmount edge visuals and geometry subscriptions while keeping Flow's connection index.
+function HiddenCanvasEdges() { return null; }
+const hiddenEdgeType = Object.assign(HiddenCanvasEdges, { renderLayer: HiddenCanvasEdges });
+const hiddenEdgeTypes: EdgeTypes = {
+  default: hiddenEdgeType,
+  smoothstep: hiddenEdgeType,
+  'selected-node-flow': hiddenEdgeType,
 };
 
 // ── Stable ReactFlow props (hoisted to avoid new identities every render,
 //    which makes React Flow re-run internal effects and drop frames on drag) ──
-const FIT_VIEW_OPTIONS = { padding: 0.2, maxZoom: 1 };
 const PRO_OPTIONS = { hideAttribution: true };
 const PAN_ON_DRAG_DEFAULT = [1, 2]; // 默认交互：右键(2) + 中键(1) 拖拽平移
 const PAN_ON_DRAG_CLASSIC = [0];    // 传统交互：左键(0) 拖拽平移
 const DEFAULT_EDGE_STYLE = { stroke: 'var(--canvas-edge)', strokeWidth: 1.5 };
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
-const isMacOS = typeof navigator !== 'undefined'
-  && /Macintosh|Mac OS X/.test(navigator.userAgent);
-const shouldUseMacTrackpadPan = isTauri && isMacOS;
+const isMacDesktop = typeof window !== 'undefined' && '__TAURI__' in window
+  && typeof navigator !== 'undefined' && /Macintosh|Mac OS X/.test(navigator.userAgent);
 const easeOutCubic = (progress: number) => 1 - (1 - progress) ** 3;
 const CANVAS_INTERACTING_CLASS = 'canvas-interacting';
 type CanvasInteractionKind = 'node' | 'viewport' | 'wheel';
-const MIN_CANVAS_ZOOM = 0.1;
-const MAX_CANVAS_ZOOM = 5;
 const NODE_TOOLBAR_MIN_SCREEN_SCALE = 0.8;
 const NODE_TOOLBAR_MAX_SCREEN_SCALE = 1.25;
 const NODE_TOOLBAR_SCALE_EPSILON = 0.0005;
 const VISIBLE_NODE_TOOLBARS = '.node-toolbar-shell.is-visible .node-floating-toolbar, .node:hover .node-floating-toolbar, .node.selected .node-floating-toolbar';
 const VISIBLE_GOOEY_BUTTONS = '.react-flow__node:hover .gooey-btn-wrapper, .react-flow__node.selected .gooey-btn-wrapper, .node-handle:hover .gooey-btn-wrapper';
+const ZOOM_TARGET_STRUCTURE = '.react-flow__node, .node, .node-toolbar-shell, .node-floating-toolbar, .node-handle, .gooey-btn-wrapper';
+const ZOOM_POINTER_CONTEXT = '.node-toolbar-shell, .node-handle, .node, .react-flow__node';
 
 // ── 交互模式预设（冻结对象，避免每次 render 产生新身份，导致 React Flow 内部 effect 重跑、拖拽掉帧）──
 const DEFAULT_INTERACTION = Object.freeze({
-  panOnScroll: shouldUseMacTrackpadPan,
-  zoomOnScroll: !shouldUseMacTrackpadPan,
+  // Mac 双指滑动继续平移；普通鼠标由原生层识别后单独交给缩放 Hook。
+  panOnScroll: isMacDesktop,
+  zoomOnScroll: !isMacDesktop,
   zoomOnPinch: true,
   panOnDrag: PAN_ON_DRAG_DEFAULT,
   selectionOnDrag: true,
@@ -368,22 +391,77 @@ function SnapLinesOverlay({ lines }: { lines: SnapLine[] }) {
   );
 }
 
-function CanvasInner() {
+function CanvasGrid({ color }: { color: string }) {
+  const { zoom } = useViewport();
+  // 以常用的约 50% 视图为基准，避免固定画布间距缩小后在屏幕上过密。
+  const gap = zoom < 0.38 ? 80 : zoom < 0.62 ? 40 : zoom < 0.85 ? 30 : 20;
+  return <Background variant={BackgroundVariant.Dots} gap={gap} size={1} color={color} />;
+}
+
+function ConnectionDropPreview({
+  sources,
+  position,
+  direction,
+}: {
+  sources: { x: number; y: number }[];
+  position: { x: number; y: number };
+  direction: 'input' | 'output';
+}) {
+  const flow = useReactFlow();
+  useViewport();
+  const sign = direction === 'input' ? -1 : 1;
+
+  return (
+    <svg className="canvas-selection-connect-preview" aria-hidden="true">
+      {sources.map((source, index) => {
+        const start = flow.flowToScreenPosition(source);
+        const bend = Math.max(36, Math.abs(position.x - start.x) / 2);
+        return (
+          <path
+            key={index}
+            d={`M ${start.x} ${start.y} C ${start.x + sign * bend} ${start.y}, ${position.x - sign * bend} ${position.y}, ${position.x} ${position.y}`}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+interface CanvasProps {
+  onReady?: (projectId: string) => void;
+}
+
+function CanvasInner({ onReady }: CanvasProps) {
   const nodes = useAppStore((s) => s.nodes);
   const edges = useAppStore((s) => s.edges);
+  const renderableGraph = useMemo(
+    () => filterHiddenCanvasElements(nodes, edges),
+    [edges, nodes],
+  );
   const selectedNodeIds = useAppStore((s) => s.selectedNodeIds);
-  const onConnect = useAppStore((s) => s.onConnect);
+  const connectableSelectionCount = useMemo(() => {
+    if (selectedNodeIds.length < 2) return 0;
+    const selected = new Set(selectedNodeIds);
+    const collapsed = new Set(nodes.filter((node) => node.data.groupCollapsed).map((node) => node.id));
+    return nodes.filter((node) => selected.has(node.id) && isBatchConnectableNode(node)
+      && !(node.parentId && collapsed.has(node.parentId))).length;
+  }, [nodes, selectedNodeIds]);
+  const connectNode = useAppStore((s) => s.onConnect);
   const setEdges = useAppStore((s) => s.setEdges);
   const setSelectedNodeIds = useAppStore((s) => s.setSelectedNodeIds);
   const applyStableNodeChanges = useAppStore((s) => s.onNodesChange);
   const handleEdgesChange = useAppStore((s) => s.onEdgesChange);
   const clearGroupedSelection = useAppStore((s) => s.clearGroupedSelection);
   const settleNodeGroupingOnDragStop = useAppStore((s) => s.settleNodeGroupingOnDragStop);
-  const duplicateNode = useAppStore((s) => s.duplicateNode);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const minimapVisible = useAppStore((s) => s.minimapVisible);
   const closeNodeDialog = useAppStore((s) => s.closeNodeDialog);
   const interactionMode = useAppStore((s) => s.config.interactionMode ?? 'default');
+  const canvasBackground = useAppStore((s) => s.config.canvasBackground ?? 'default');
+  const appearance = useAppStore((s) => s.config.appearance);
+  const appearancePreview = useAppStore((s) => s.appearancePreview);
+  const defaultDarkBackgroundShade = useAppStore((s) => s.config.defaultDarkBackgroundShade ?? 20);
+  const offWhiteBackgroundColor = useAppStore((s) => s.config.offWhiteBackgroundColor ?? '#F4F6FB');
   const currentProjectId = useAppStore((s) => s.currentProjectId);
   const canvasNoteToolbarVisible = useAppStore((s) => s.config.canvasNoteToolbarVisible !== false);
   const [nodeProjectionCache] = useState(createCanvasNodeProjectionCache);
@@ -398,11 +476,42 @@ function CanvasInner() {
   }, [nodes]);
   const reactFlowInstance = useReactFlow();
   const flowStore = useStoreApi();
+  const wheelZoomCancelRef = useRef<(() => void) | null>(null);
+  const canvasRootRef = useRef<HTMLDivElement>(null);
+  const viewportPreferences = useCanvasViewportPreferences(canvasRootRef, wheelZoomCancelRef);
+  const {
+    fitView: fitCanvasView,
+    autoFit: autoFitCanvas,
+    beginUserMove,
+    endUserMove,
+    restoreInitialView,
+    markViewportReady,
+    recordViewport,
+    rememberViewport,
+  } = viewportPreferences;
+  const readyProjectRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!viewportPreferences.hydrated || !currentProjectId || readyProjectRef.current === currentProjectId
+      || !reactFlowInstance.viewportInitialized) return;
+    // 不依赖节点数组：测量写回会持续替换数组，不能反复取消、重启首帧等待。
+    return waitForCanvasFirstPaint(
+      restoreInitialView,
+      () => {
+        readyProjectRef.current = currentProjectId;
+        markViewportReady();
+        onReady?.(currentProjectId);
+      },
+    );
+  }, [currentProjectId, onReady, reactFlowInstance, restoreInitialView, markViewportReady, viewportPreferences.hydrated]);
   const lodSession = useMemo(() => ({
     projectId: currentProjectId,
-    runtime: createCanvasNodeLodRuntime(reactFlowInstance.getViewport().zoom),
+    runtime: createCanvasNodeLodRuntime(reactFlowInstance.getViewport().zoom, undefined, getPerformanceModeEnabled()),
   }), [currentProjectId, reactFlowInstance]);
   const nodeLodRuntime = lodSession.runtime;
+  useEffect(() => {
+    nodeLodRuntime.setPerformanceMode(getPerformanceModeEnabled());
+    return subscribePerformanceMode(() => nodeLodRuntime.setPerformanceMode(getPerformanceModeEnabled()));
+  }, [nodeLodRuntime]);
   useEffect(() => {
     nodeLodRuntime.activate();
     const { x, y, zoom } = reactFlowInstance.getViewport();
@@ -411,7 +520,6 @@ function CanvasInner() {
     nodeLodRuntime.interaction(activeInteractionsRef.current.size > 0);
     return () => nodeLodRuntime.deactivate();
   }, [nodeLodRuntime, reactFlowInstance, flowStore]);
-  const wheelZoomCancelRef = useRef<(() => void) | null>(null);
   const activeCanvasPanRef = useRef<{
     startX: number;
     startY: number;
@@ -419,6 +527,7 @@ function CanvasInner() {
   } | null>(null);
 
   useEffect(() => registerCanvasViewportController({
+    rememberViewport,
     getSnapshot: () => {
       const viewport = reactFlowInstance.getViewport();
       const topLeft = reactFlowInstance.screenToFlowPosition({ x: 0, y: 0 });
@@ -438,7 +547,9 @@ function CanvasInner() {
     },
     setViewport: async (viewport, duration = 0) => {
       wheelZoomCancelRef.current?.();
-      await reactFlowInstance.setViewport(viewport, { duration });
+      const config = useAppStore.getState().config;
+      const zoom = getCanvasLockedZoom(config) ?? normalizeCanvasZoom(viewport.zoom, config);
+      await reactFlowInstance.setViewport({ ...viewport, zoom }, { duration, interpolate: 'linear' });
     },
     fitView: async (options = {}) => {
       wheelZoomCancelRef.current?.();
@@ -446,14 +557,13 @@ function CanvasInner() {
       const nodes = ids
         ? reactFlowInstance.getNodes().filter((node) => ids.has(node.id))
         : undefined;
-      await reactFlowInstance.fitView({
+      await fitCanvasView({
         nodes,
         padding: options.padding ?? 0.25,
         duration: options.duration ?? 0,
       });
     },
-  }), [reactFlowInstance]);
-  const canvasRootRef = useRef<HTMLDivElement>(null);
+  }), [reactFlowInstance, fitCanvasView, rememberViewport]);
   const activeInteractionsRef = useRef(new Set<CanvasInteractionKind>());
   const interactionReleaseFramesRef = useRef<Record<CanvasInteractionKind, number>>({
     node: 0,
@@ -466,13 +576,17 @@ function CanvasInner() {
   const latestCanvasZoomRef = useRef(Number.NaN);
   const localToolbarsRef = useRef(new Set<HTMLElement>());
   const localGooeyButtonsRef = useRef(new Set<HTMLElement>());
+  const cachedZoomTargetsRef = useRef(new WeakSet<Set<HTMLElement>>());
   const zoomTargetsObserverRef = useRef<MutationObserver | null>(null);
+  const zoomTargetsRefreshFrameRef = useRef(0);
 
   const clearLocalZoomCompensation = useCallback(() => {
     localToolbarsRef.current.forEach((element) => element.style.removeProperty('--toolbar-zoom-compensation'));
     localGooeyButtonsRef.current.forEach((element) => element.style.removeProperty('--gooey-inv-zoom'));
     localToolbarsRef.current.clear();
     localGooeyButtonsRef.current.clear();
+    cachedZoomTargetsRef.current.delete(localToolbarsRef.current);
+    cachedZoomTargetsRef.current.delete(localGooeyButtonsRef.current);
   }, []);
 
   const updateNodeZoomCompensation = useCallback((zoom: number, refreshTargets = false) => {
@@ -491,7 +605,12 @@ function CanvasInner() {
       // 普通平移无需查找控件；缩放只改控件自身，避免根变量让整个媒体子树重算样式。
       if (!refreshTargets && zoom === previousZoom) return;
       const updateLocal = (selector: string, elements: Set<HTMLElement>, property: string, value: number) => {
-        canvasRoot.querySelectorAll<HTMLElement>(selector).forEach((element) => elements.add(element));
+        // 所有模式只在首次使用、挂载/可见状态变化时搜索；空结果也缓存。
+        // 交互中继续更新已淡出的控件，避免退场期间缩放补偿跳变。
+        if (refreshTargets || !cachedZoomTargetsRef.current.has(elements)) {
+          canvasRoot.querySelectorAll<HTMLElement>(selector).forEach((element) => elements.add(element));
+          cachedZoomTargetsRef.current.add(elements);
+        }
         const text = String(value);
         elements.forEach((element) => {
           if (!canvasRoot.contains(element)) {
@@ -525,17 +644,30 @@ function CanvasInner() {
   }, [clearLocalZoomCompensation]);
 
   const refreshLocalZoomTargets = useCallback(() => {
-    if (activeInteractionsRef.current.size > 0) {
-      updateNodeZoomCompensation(latestCanvasZoomRef.current, true);
-    }
+    if (activeInteractionsRef.current.size === 0) return;
+    if (zoomTargetsRefreshFrameRef.current) return;
+    // 同帧的节点挂载、选中变化与指针穿越共用一次查询，不在每个子元素事件中扫描。
+    zoomTargetsRefreshFrameRef.current = requestAnimationFrame(() => {
+      zoomTargetsRefreshFrameRef.current = 0;
+      if (activeInteractionsRef.current.size > 0) updateNodeZoomCompensation(latestCanvasZoomRef.current, true);
+    });
   }, [updateNodeZoomCompensation]);
 
+  const handleZoomTargetPointer = useCallback((event: PointerEvent) => {
+    const target = event.target instanceof Element ? event.target.closest(ZOOM_POINTER_CONTEXT) : null;
+    const previous = event.relatedTarget instanceof Element ? event.relatedTarget.closest(ZOOM_POINTER_CONTEXT) : null;
+    if (target === previous) return;
+    refreshLocalZoomTargets();
+  }, [refreshLocalZoomTargets]);
+
   const stopObservingZoomTargets = useCallback(() => {
+    if (zoomTargetsRefreshFrameRef.current) cancelAnimationFrame(zoomTargetsRefreshFrameRef.current);
+    zoomTargetsRefreshFrameRef.current = 0;
     zoomTargetsObserverRef.current?.disconnect();
     zoomTargetsObserverRef.current = null;
-    canvasRootRef.current?.removeEventListener('pointerover', refreshLocalZoomTargets);
-    canvasRootRef.current?.removeEventListener('pointerout', refreshLocalZoomTargets);
-  }, [refreshLocalZoomTargets]);
+    canvasRootRef.current?.removeEventListener('pointerover', handleZoomTargetPointer);
+    canvasRootRef.current?.removeEventListener('pointerout', handleZoomTargetPointer);
+  }, [handleZoomTargetPointer]);
 
   useEffect(() => {
     updateNodeZoomCompensation(reactFlowInstance.getViewport().zoom);
@@ -553,22 +685,29 @@ function CanvasInner() {
       if (canvasRoot) {
         // 只在交互期间监听挂载/选中与 hover；不读取布局，也不监听自身的 style 写入。
         const observer = new MutationObserver((records) => {
-          if (records.some((record) => record.type === 'childList'
-            || (record.target instanceof Element && record.target.matches('.react-flow__node, .node, .node-toolbar-shell')))) {
+          if (records.some((record) => {
+            if (record.type === 'attributes') {
+              return record.target instanceof Element && record.target.matches('.react-flow__node, .node, .node-toolbar-shell');
+            }
+            // 图片加载、文本/图标更新不影响可见工具栏目标；只处理相关结构的新增与移除。
+            const affectsTargets = (node: Node) => node instanceof Element
+              && (node.matches(ZOOM_TARGET_STRUCTURE) || node.querySelector(ZOOM_TARGET_STRUCTURE) !== null);
+            return Array.from(record.addedNodes).some(affectsTargets) || Array.from(record.removedNodes).some(affectsTargets);
+          })) {
             refreshLocalZoomTargets();
           }
         });
         zoomTargetsObserverRef.current = observer;
         observer.observe(canvasRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
-        canvasRoot.addEventListener('pointerover', refreshLocalZoomTargets, { passive: true });
-        canvasRoot.addEventListener('pointerout', refreshLocalZoomTargets, { passive: true });
+        canvasRoot.addEventListener('pointerover', handleZoomTargetPointer, { passive: true });
+        canvasRoot.addEventListener('pointerout', handleZoomTargetPointer, { passive: true });
       }
     } else {
       stopObservingZoomTargets();
       updateNodeZoomCompensation(reactFlowInstance.getViewport().zoom);
     }
     document.documentElement.classList.toggle(CANVAS_INTERACTING_CLASS, interacting);
-  }, [nodeLodRuntime, reactFlowInstance, refreshLocalZoomTargets, stopObservingZoomTargets, updateNodeZoomCompensation]);
+  }, [handleZoomTargetPointer, nodeLodRuntime, reactFlowInstance, refreshLocalZoomTargets, stopObservingZoomTargets, updateNodeZoomCompensation]);
 
   const beginCanvasInteraction = useCallback((kind: CanvasInteractionKind) => {
     const pendingFrame = interactionReleaseFramesRef.current[kind];
@@ -619,20 +758,36 @@ function CanvasInner() {
     document.documentElement.classList.remove(CANVAS_INTERACTING_CLASS);
   }, [clearLocalZoomCompensation, stopObservingZoomTargets]);
 
-  const handleCanvasViewportMoveStart = useCallback<OnMove>(() => {
+  const handleCanvasViewportMoveStart = useCallback<OnMove>((event) => {
+    if (event) beginUserMove();
     beginCanvasInteraction('viewport');
-  }, [beginCanvasInteraction]);
+  }, [beginCanvasInteraction, beginUserMove]);
 
   const handleCanvasViewportMoveEnd = useCallback<OnMove>(() => {
     if (activeInteractionsRef.current.has('wheel')) {
       setCanvasInteraction('viewport', false);
       return;
     }
+    endUserMove();
+    rememberViewport();
     endCanvasInteraction('viewport');
-  }, [endCanvasInteraction, setCanvasInteraction]);
+  }, [endCanvasInteraction, endUserMove, rememberViewport, setCanvasInteraction]);
 
   const handleCanvasViewportMove = useCallback<OnMove>((_, viewport) => {
     const { width, height } = flowStore.getState();
+    const config = useAppStore.getState().config;
+    const zoom = getCanvasLockedZoom(config) ?? normalizeCanvasZoom(viewport.zoom, config);
+    if (zoom !== viewport.zoom) {
+      // 配置可能在旧镜头动画或手势进行中变化；以画布中心纠正迟到的越界视口。
+      const ratio = zoom / viewport.zoom;
+      void reactFlowInstance.setViewport({
+        x: width / 2 + (viewport.x - width / 2) * ratio,
+        y: height / 2 + (viewport.y - height / 2) * ratio,
+        zoom,
+      });
+      return;
+    }
+    recordViewport(viewport, { width, height });
     nodeLodRuntime.viewport(viewport.zoom, (width / 2 - viewport.x) / viewport.zoom, (height / 2 - viewport.y) / viewport.zoom);
     updateNodeZoomCompensation(viewport.zoom);
     const activePan = activeCanvasPanRef.current;
@@ -641,25 +796,30 @@ function CanvasInner() {
       deltaX: viewport.x - activePan.startX,
       deltaY: viewport.y - activePan.startY,
     });
-  }, [flowStore, nodeLodRuntime, updateNodeZoomCompensation]);
+  }, [flowStore, nodeLodRuntime, reactFlowInstance, recordViewport, updateNodeZoomCompensation]);
 
-  const handleWheelZoomStart = useCallback(() => beginCanvasInteraction('wheel'), [beginCanvasInteraction]);
+  const handleWheelZoomStart = useCallback(() => {
+    beginUserMove();
+    beginCanvasInteraction('wheel');
+  }, [beginCanvasInteraction, beginUserMove]);
   const handleWheelZoomEnd = useCallback((interrupted: boolean) => {
+    endUserMove();
+    rememberViewport();
     if (interrupted) setCanvasInteraction('wheel', false);
     else endCanvasInteraction('wheel');
-  }, [endCanvasInteraction, setCanvasInteraction]);
+  }, [endCanvasInteraction, endUserMove, rememberViewport, setCanvasInteraction]);
   useCanvasWheelZoom({
     rootRef: canvasRootRef,
     cancelRef: wheelZoomCancelRef,
-    enabled: interactionMode === 'default',
-    nativeMouseWheel: shouldUseMacTrackpadPan,
+    enabled: interactionMode === 'default' && !viewportPreferences.locked,
+    nativeMouseWheel: isMacDesktop,
     projectId: currentProjectId,
     getViewport: reactFlowInstance.getViewport,
     setViewport: reactFlowInstance.setViewport,
     onStart: handleWheelZoomStart,
     onEnd: handleWheelZoomEnd,
-    minZoom: MIN_CANVAS_ZOOM,
-    maxZoom: MAX_CANVAS_ZOOM,
+    minZoom: viewportPreferences.minZoom,
+    maxZoom: viewportPreferences.maxZoom,
   });
 
   const {
@@ -697,11 +857,6 @@ function CanvasInner() {
   }, [activeDrawingTool, canvasNoteToolbarVisible, chooseDrawingTool]);
 
   const drawingActive = activeDrawingTool !== 'select';
-  const {
-    position: radialMenuPosition,
-    holdPosition: radialMenuHoldPosition,
-    close: closeRadialMenu,
-  } = useCanvasLongPressRadialMenu(canvasRootRef, !drawingActive);
   const drawingInteraction = useMemo(() => ({
     ...interaction,
     ...(drawingActive ? {
@@ -715,9 +870,31 @@ function CanvasInner() {
 
   // ── UI toggles (persisted to localStorage) ──
   const [showGrid, setShowGrid] = useState(() => localStorage.getItem('canvas-showGrid') !== 'false');
-  const [smoothLine, setSmoothLine] = useState(() => localStorage.getItem('canvas-smoothLine') !== 'false');
+  const darkShade = Math.min(58, Math.max(0, defaultDarkBackgroundShade));
+  const lightColor = /^#[0-9a-f]{6}$/i.test(offWhiteBackgroundColor) ? offWhiteBackgroundColor : '#F4F6FB';
+  const lightDotColor = `rgb(${[1, 3, 5].map((start) => (
+    Math.max(0, parseInt(lightColor.slice(start, start + 2), 16) - 72)
+  )).join(' ')})`;
+  const appearanceCanvas = (appearancePreview ?? appearance)?.canvas;
+  const gridDotColor = appearanceCanvas?.gridColor ?? (canvasBackground === 'default'
+    ? `rgb(${darkShade + 68} ${darkShade + 68} ${darkShade + 84})`
+    : canvasBackground === 'off-white' ? lightDotColor : 'var(--theme-hover)');
+  const appearanceGridVisible = appearanceCanvas?.gridVisible ?? true;
+  const [edgeDisplayMode, setEdgeDisplayMode] = useState<CanvasEdgeDisplayMode>(() => {
+    const saved = localStorage.getItem('canvas-edgeDisplayMode');
+    if (saved === 'orthogonal' || saved === 'curved' || saved === 'hidden') return saved;
+    return localStorage.getItem('canvas-smoothLine') === 'false' ? 'curved' : 'orthogonal';
+  });
+  const smoothLine = edgeDisplayMode === 'orthogonal';
+  const edgePanePointer = useCanvasEdgePanePointer(!drawingActive && edgeDisplayMode !== 'hidden');
+  const {
+    position: radialMenuPosition,
+    holdPosition: radialMenuHoldPosition,
+    close: closeRadialMenu,
+  } = useCanvasLongPressRadialMenu(canvasRootRef, !drawingActive, edgePanePointer.isEdgeAtPoint);
 
   useEffect(() => { localStorage.setItem('canvas-showGrid', String(showGrid)); }, [showGrid]);
+  useEffect(() => { localStorage.setItem('canvas-edgeDisplayMode', edgeDisplayMode); }, [edgeDisplayMode]);
   useEffect(() => { localStorage.setItem('canvas-smoothLine', String(smoothLine)); }, [smoothLine]);
 
   // Sync existing edges when line type changes
@@ -749,6 +926,21 @@ function CanvasInner() {
   }, [closeNodeDialog]);
 
   const toggleGrid = useCallback(() => setShowGrid((v) => !v), []);
+  const toggleLine = useCallback(() => {
+    setEdgeDisplayMode((mode) => mode === 'orthogonal' ? 'curved'
+      : mode === 'curved' ? 'hidden' : 'orthogonal');
+  }, []);
+  const handleMiniMapClick = useCallback<NonNullable<MiniMapProps['onClick']>>((event, position) => {
+    const state = useAppStore.getState();
+    if (event.button !== 0 || !state.configHydrated || state.currentProjectId !== currentProjectId
+      || !reactFlowInstance.viewportInitialized) return;
+    wheelZoomCancelRef.current?.();
+    beginUserMove();
+    // 小地图已返回画布坐标；显式保留倍率，避免 setCenter 默认放大。
+    void reactFlowInstance.setCenter(position.x, position.y, {
+      zoom: reactFlowInstance.getZoom(),
+    }).finally(endUserMove);
+  }, [beginUserMove, currentProjectId, endUserMove, reactFlowInstance]);
 
   // ── Connection drop menu ──
   const {
@@ -758,6 +950,7 @@ function CanvasInner() {
     handleSelect: handleConnectionMenuSelect,
     connectionMenuMap,
     sourceNode,
+    openSelectionMenu,
   } = useConnectionDropMenu(smoothLine);
 
   // ── Node context menu ──
@@ -770,6 +963,8 @@ function CanvasInner() {
     handleCopyText,
     handleCutText,
     handleDuplicate,
+    handleRename,
+    showRename,
     handleToggleLock,
     isNodeLocked,
     handleConvertImage,
@@ -782,6 +977,7 @@ function CanvasInner() {
     showInFolder,
     handleSaveAs,
     showSaveAs,
+    cancelSaveAsDownload,
     handleOpenInPS,
     showOpenInPS,
     handleEditVideo,
@@ -856,16 +1052,23 @@ function CanvasInner() {
 
   // ── Fit view event (project switch / F key) ──
   useEffect(() => {
-    const handler = () => {
+    let frame = 0;
+    const handler = (event: Event) => {
       wheelZoomCancelRef.current?.();
       // Wait one frame for React to finish rendering new nodes/edges
-      requestAnimationFrame(() => {
-        void reactFlowInstance.fitView(FIT_VIEW_OPTIONS);
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const source = (event as CustomEvent<{ source?: string }>).detail?.source;
+        if (source === 'user') autoFitCanvas();
+        else void restoreInitialView();
       });
     };
     window.addEventListener('canvas-fit-view', handler);
-    return () => window.removeEventListener('canvas-fit-view', handler);
-  }, [reactFlowInstance]);
+    return () => {
+      window.removeEventListener('canvas-fit-view', handler);
+      cancelAnimationFrame(frame);
+    };
+  }, [autoFitCanvas, restoreInitialView]);
 
   // ── Keep anchored overlays visible by panning the whole canvas ──
   useEffect(() => {
@@ -935,7 +1138,7 @@ function CanvasInner() {
           if (targetNodes.length === 0) return;
           const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
           const duration = reduceMotion ? 0 : (options?.duration ?? 420);
-          void reactFlowInstance.fitView({
+          void fitCanvasView({
             nodes: targetNodes,
             padding: options?.padding ?? (targetNodes.length === 1 ? 0.45 : 0.3),
             minZoom: targetNodes.length > 6 ? 0.18 : 0.28,
@@ -979,7 +1182,7 @@ function CanvasInner() {
       for (const frameId of scheduledFrames) cancelAnimationFrame(frameId);
       for (const timerId of scheduledTimers) window.clearTimeout(timerId);
     };
-  }, [reactFlowInstance]);
+  }, [reactFlowInstance, fitCanvasView]);
 
   // ── Node click → AI dialog ──
   const openNodeDialog = useAppStore((s) => s.openNodeDialog);
@@ -1041,24 +1244,22 @@ function CanvasInner() {
         return;
       }
 
-      // 对话框已开启时直接切到被点击的节点：已有产物的节点也一视同仁，不必再按空格。
-      // 这里读 getState() 而非订阅 activeNodeId，避免对话框开关导致 onNodeClick 反复重建。
-      const isDialogOpen = useAppStore.getState().activeNodeId !== null;
-      if (isDialogOpen) {
-        openDialogForNode(liveNode);
+      // 帧动画单击只选中，双击由节点打开编辑器；生成通过节点按钮或空格键进入。
+      if (liveNode.data?.type === 'ai-animation') {
+        closeNodeDialog();
         return;
       }
 
-      // 对话框未开启：已有产物的节点与源节点保持「不自动弹窗」，需要空格键唤起。
-      const isSilentOnFirstClick =
+      // 已有内容的节点单击只选中，即使之前已有对话框；按空格或显式生成按钮再打开。
+      const isSilentOnClick =
         liveNode.data?.role === 'source' ||
         (liveNode.data?.type === 'ai-text' && liveNode.data?.output) ||
         (liveNode.data?.type === 'ai-image' && liveNode.data?.imageUrl) ||
-        (liveNode.data?.type === 'ai-animation' && liveNode.data?.imageUrl) ||
         (liveNode.data?.type === 'ai-panorama' && liveNode.data?.imageUrl) ||
         (liveNode.data?.type === 'ai-video' && liveNode.data?.videoUrl) ||
-        (liveNode.data?.type === 'ai-audio' && liveNode.data?.audioUrl);
-      if (isSilentOnFirstClick) {
+        (liveNode.data?.type === 'ai-audio' && liveNode.data?.audioUrl) ||
+        (liveNode.data?.type === 'ai-shotlist' && liveNode.data.shotlistRows?.some((row) => !isShotRowBlank(row)));
+      if (isSilentOnClick) {
         closeNodeDialog();
         return;
       }
@@ -1071,6 +1272,10 @@ function CanvasInner() {
   // ── Selection sync ──
   const onSelectionChange = useCallback(
     (changes: OnSelectionChangeParams) => {
+      // 框选及项目恢复也可能选中边，隐藏时始终保留节点选区、取消不可见的边选区。
+      if (edgeDisplayMode === 'hidden' && changes.edges.length) {
+        handleEdgesChange(changes.edges.map((edge) => ({ id: edge.id, type: 'select', selected: false })));
+      }
       const sel = changes.nodes;
       const nonGroup = sel.filter((n) => n.type !== 'group');
       // 框选忽略分组节点：与其它节点一同被选中时，store 选区剔除分组（删除/分组不波及容器）；
@@ -1078,7 +1283,7 @@ function CanvasInner() {
       const next = nonGroup.length > 0 ? nonGroup : sel;
       setSelectedNodeIds(next.map((n) => n.id));
     },
-    [setSelectedNodeIds],
+    [edgeDisplayMode, handleEdgesChange, setSelectedNodeIds],
   );
 
   // 框选结束后：若分组节点与其它节点一同被框中，取消分组节点的选中，避免随后被一起拖动
@@ -1103,18 +1308,20 @@ function CanvasInner() {
     [onResizeStart, applyResizeSnap, onResizeStop],
   );
 
-  // 按住 Ctrl/⌘ 开始拖拽 → 在原位复制一个节点（拖动的仍是原节点，等于"拖出一个副本"）
+  const duplicateDrag = useRef<ReturnType<typeof createNodeDuplicateDrag> | null>(null);
+
+  // Alt 拖出副本，兼容已有 Ctrl/⌘ 手势；原节点及其引用留在原位。
   const handleNodeDragStart = useCallback(
     (evt: React.MouseEvent, node: RFNode<BaseNodeData>) => {
       const liveNode = hydrateCanvasNodeData(node, useAppStore.getState().nodes);
       beginCanvasInteraction('node');
       if (liveNode.type === 'canvas-note') commitToHistory();
-      if ((evt.ctrlKey || evt.metaKey) && liveNode.type !== 'group') {
-        duplicateNode(liveNode.id);
-      }
       onNodeDragStart(evt, liveNode);
+      duplicateDrag.current = (evt.altKey || evt.ctrlKey || evt.metaKey) && liveNode.type !== 'group'
+        ? createNodeDuplicateDrag(useAppStore.getState, liveNode.id)
+        : null;
     },
-    [beginCanvasInteraction, commitToHistory, duplicateNode, onNodeDragStart],
+    [beginCanvasInteraction, commitToHistory, onNodeDragStart],
   );
 
   // 仅在线型切换时重建，避免每帧新对象触发 React Flow 内部更新
@@ -1127,10 +1334,6 @@ function CanvasInner() {
     [smoothLine],
   );
 
-  const renderableGraph = useMemo(
-    () => filterHiddenCanvasElements(nodes, edges),
-    [edges, nodes],
-  );
   const renderedCanvasNodes = useMemo(() => {
     const projected = projectCanvasNodesForReactFlow(
       renderableGraph.nodes,
@@ -1153,13 +1356,8 @@ function CanvasInner() {
     (changes: NodeChange<RFNode<BaseNodeData>>[]) => {
       const currentNodes = useAppStore.getState().nodes;
       const hydratedChanges = hydrateCanvasNodeChanges(changes, currentNodes);
-      const lockedNodeIds = new Set(
-        currentNodes
-          .filter((node) => node.draggable === false)
-          .map((node) => node.id),
-      );
       const unlockedChanges = hydratedChanges.filter(
-        (change) => change.type !== 'position' || !lockedNodeIds.has(change.id),
+        (change) => change.type !== 'position' || getCanvasNodeById(currentNodes, change.id)?.draggable !== false,
       );
       if (unlockedChanges.length === 0) return;
 
@@ -1180,7 +1378,7 @@ function CanvasInner() {
           const draggedIds = new Set(
             draggingPosChanges.flatMap((change) => change.type === 'position' ? [change.id] : []),
           );
-          snapped = hydratedChanges.map((change) => {
+          snapped = unlockedChanges.map((change) => {
             if (change.type !== 'position' || !change.position || !draggedIds.has(change.id)) return change;
             return {
               ...change,
@@ -1193,20 +1391,9 @@ function CanvasInner() {
         }
       }
 
-      // Detect group node removals — convert to ungroup
-      const removedIds = snapped
-        .filter((c) => c.type === 'remove')
-        .map((c) => c.id);
+      if (duplicateDrag.current) snapped = duplicateDrag.current.mapChanges(snapped);
 
-      // 快速路径：纯拖拽/选择变更（无删除）—— 用函数式更新，始终基于最新
-      // store.nodes，避免快速拖动时闭包 nodes 过期导致的抖动卡顿。
-      if (removedIds.length === 0) {
-        useAppStore.setState((s) => ({
-          nodes: applyNodeChanges(snapped, s.nodes) as RFNode<BaseNodeData>[],
-        }));
-        return;
-      }
-
+      // Store Action 基于最新节点应用位移，并统一处理分组删除。
       applyStableNodeChanges(snapped);
     },
     [applySnap, applyStableNodeChanges],
@@ -1256,16 +1443,15 @@ function CanvasInner() {
    */
   const findShotlistDropHit = useCallback((
     node: RFNode,
-    clientX: number,
-    clientY: number,
+    stack: readonly Element[],
   ): HTMLElement | null => {
     if (!SHOTLIST_FRAME_SOURCE_TYPES.includes(node.type ?? '')) return null;
-    const stack = document.elementsFromPoint(clientX, clientY);
     for (const el of stack) {
       const shotlist = el.closest<HTMLElement>('.shotlist-node');
       if (!shotlist) continue;
       if (shotlist.closest(`.react-flow__node[data-id="${node.id}"]`)) continue;
-      const cell = el.closest<HTMLElement>('[data-shot-frame-row]');
+      const cell = el.closest<HTMLElement>('[data-shot-frame-row], [data-shot-video-row]');
+      if (cell?.dataset.shotVideoRow && node.type !== 'ai-video' && node.type !== 'source-video') return null;
       return cell?.closest('.shotlist-node') === shotlist ? cell : null;
     }
     return null;
@@ -1274,11 +1460,9 @@ function CanvasInner() {
   // 按鼠标位置命中宫格节点与真实空格，兼容缩放和非均匀自定义宫格。
   const findStoryboardDropHit = useCallback((
     node: RFNode,
-    clientX: number,
-    clientY: number,
+    stack: readonly Element[],
   ): { storyboard: HTMLElement; emptyCell: HTMLElement | null } | null => {
     if (!STORYBOARD_CELL_SOURCE_TYPES.includes(node.type ?? '')) return null;
-    const stack = document.elementsFromPoint(clientX, clientY);
     for (const el of stack) {
       const storyboard = el.closest<HTMLElement>('.storyboard-node');
       if (!storyboard) continue;
@@ -1293,15 +1477,24 @@ function CanvasInner() {
     return null;
   }, []);
 
-  const handleNodeDrag = useCallback(
-    (e: React.MouseEvent, node: RFNode) => {
+  const updateDragPreview = useCallback(
+    ({ clientX, clientY, node: draggedNode, projectId }: { clientX: number; clientY: number; node: RFNode; projectId: string | null }) => {
+      const state = useAppStore.getState();
+      if (state.currentProjectId !== projectId || !getCanvasNodeById(state.nodes, draggedNode.id)) return;
+      let node = draggedNode;
+      if (duplicateDrag.current?.sourceId === node.id) {
+        const clone = duplicateDrag.current.getNode();
+        if (!clone) return;
+        node = clone;
+      }
       const liveNode = hydrateCanvasNodeData(
         node as RFNode<BaseNodeData>,
         useAppStore.getState().nodes,
       );
+      const stack = node.type === 'group' ? [] : document.elementsFromPoint(clientX, clientY);
       const folder = node.type === 'group'
         ? null
-        : document.elementsFromPoint(e.clientX, e.clientY)
+        : stack
           .map((el) => el.closest<HTMLElement>('.canvas-group-folder'))
           .find((el): el is HTMLElement => el != null) ?? null;
       if (folder !== folderDropTarget.current) {
@@ -1315,7 +1508,7 @@ function CanvasInner() {
         }
       }
 
-      const hit = findStoryboardDropHit(node, e.clientX, e.clientY);
+      const hit = findStoryboardDropHit(node, stack);
       const cell = hit?.emptyCell ?? null;
       if (cell !== sbDropTarget.current) {
         clearSbDropTarget();
@@ -1324,7 +1517,7 @@ function CanvasInner() {
       // 进入宫格节点后隐藏真实节点；空格上倾斜表示可放置，占用区域保持水平。
       const url = (liveNode.data?.imageUrl || liveNode.data?.thumbnailUrl) as string | undefined;
       if (hit && url) {
-        setDropGhost({ url, x: e.clientX, y: e.clientY, canDrop: cell != null });
+        setDropGhost({ url, x: clientX, y: clientY, canDrop: cell != null });
         if (ghostNodeId.current !== node.id) {
           clearGhostNodeHidden();
           document.querySelector(`.react-flow__node[data-id="${node.id}"]`)?.classList.add('sb-drop-hidden');
@@ -1336,7 +1529,7 @@ function CanvasInner() {
       }
 
       // 分镜表画面格：只做高亮，不隐藏被拖的节点——绑定后它仍要留在画布上
-      const frameCell = findShotlistDropHit(node, e.clientX, e.clientY);
+      const frameCell = findShotlistDropHit(node, stack);
       if (frameCell !== shotlistDropTarget.current) {
         clearShotlistDropTarget();
         if (frameCell) {
@@ -1348,26 +1541,66 @@ function CanvasInner() {
     [findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, findShotlistDropHit, clearShotlistDropTarget, clearFolderDropTarget],
   );
 
+  const dragPreview = useMemo(() => createFrameCoalescer<() => void>((preview) => preview()), []);
+  const handleNodeDrag = useCallback((event: React.MouseEvent, node: RFNode) => {
+    const input = { clientX: event.clientX, clientY: event.clientY, node,
+      projectId: useAppStore.getState().currentProjectId };
+    dragPreview.schedule(() => updateDragPreview(input));
+  }, [dragPreview, updateDragPreview]);
+  useEffect(() => {
+    const reset = () => {
+      dragPreview.cancel();
+      clearSbDropTarget(); clearShotlistDropTarget(); clearFolderDropTarget(); clearGhostNodeHidden();
+      setDropGhost(null);
+    };
+    window.addEventListener('blur', reset);
+    return () => { window.removeEventListener('blur', reset); reset(); };
+  }, [currentProjectId, dragPreview, clearSbDropTarget, clearShotlistDropTarget, clearFolderDropTarget, clearGhostNodeHidden]);
+
   // ── Auto group/ungroup on drag stop ──
   const handleNodeDragStop = useCallback(
-    (event: React.MouseEvent, node: RFNode) => {
-      const liveNode = hydrateCanvasNodeData(
-        node as RFNode<BaseNodeData>,
-        useAppStore.getState().nodes,
-      );
+    (event: React.MouseEvent, node: RFNode, draggedNodes: RFNode[]) => {
+      dragPreview.cancel();
       endCanvasInteraction('node');
-      const cell = findStoryboardDropHit(node, event.clientX, event.clientY)?.emptyCell ?? null;
-      const frameCell = findShotlistDropHit(node, event.clientX, event.clientY);
+      const stack = document.elementsFromPoint(event.clientX, event.clientY);
+      const cell = findStoryboardDropHit(node, stack)?.emptyCell ?? null;
+      const frameCell = findShotlistDropHit(node, stack);
       clearSbDropTarget();
       clearShotlistDropTarget();
       clearFolderDropTarget();
       setDropGhost(null);
       clearGhostNodeHidden();
+      const duplication = duplicateDrag.current;
+      if (duplication?.sourceId === node.id) {
+        duplicateDrag.current = null;
+        onNodeDragStop();
+        void duplication.finish().then((clone) => {
+          if (!clone) return;
+          const shotlistId = frameCell?.closest('.react-flow__node')?.getAttribute('data-id');
+          const rowId = frameCell?.dataset.shotVideoRow ?? frameCell?.dataset.shotFrameRow;
+          if (shotlistId && rowId) {
+            const state = useAppStore.getState();
+            if (frameCell?.dataset.shotVideoRow) state.bindShotlistVideo(shotlistId, rowId, clone.id);
+            else state.bindShotlistFrame(shotlistId, rowId, clone.id);
+            return;
+          }
+          const sbId = cell?.closest('.react-flow__node')?.getAttribute('data-id');
+          const idx = Number(cell?.dataset.sbCellIdx);
+          if (sbId && !Number.isNaN(idx)) {
+            useAppStore.getState().fillStoryboardCell(sbId, idx, clone.id);
+            return;
+          }
+          settleNodeGroupingOnDragStop(clone);
+        });
+        return;
+      }
       if (frameCell) {
         const shotlistId = frameCell.closest('.react-flow__node')?.getAttribute('data-id');
-        const rowId = frameCell.dataset.shotFrameRow;
+        const rowId = frameCell.dataset.shotVideoRow ?? frameCell.dataset.shotFrameRow;
         if (shotlistId && shotlistId !== node.id && rowId) {
-          useAppStore.getState().bindShotlistFrame(shotlistId, rowId, node.id);
+          const state = useAppStore.getState();
+          if (frameCell.dataset.shotVideoRow) state.bindShotlistVideo(shotlistId, rowId, node.id);
+          else state.bindShotlistFrame(shotlistId, rowId, node.id);
           onNodeDragStop();
           return;
         }
@@ -1381,18 +1614,22 @@ function CanvasInner() {
           return;
         }
       }
-      settleNodeGroupingOnDragStop(liveNode);
+      const currentNodes = useAppStore.getState().nodes;
+      settleNodeGroupingOnDragStop(draggedNodes.map((dragged) => hydrateCanvasNodeData(
+        dragged as RFNode<BaseNodeData>, currentNodes,
+      )));
       onNodeDragStop();
     },
-    [onNodeDragStop, settleNodeGroupingOnDragStop, findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, endCanvasInteraction, findShotlistDropHit, clearShotlistDropTarget, clearFolderDropTarget],
+    [dragPreview, onNodeDragStop, settleNodeGroupingOnDragStop, findStoryboardDropHit, clearSbDropTarget, clearGhostNodeHidden, endCanvasInteraction, findShotlistDropHit, clearShotlistDropTarget, clearFolderDropTarget],
   );
 
   return (
     <CanvasNodeLodContext.Provider value={nodeLodRuntime}>
     <ResizeSnapContext.Provider value={resizeSnapApi}>
+    <CanvasEdgePanePointerContext.Provider value={edgePanePointer.bridge}>
     <div
       ref={canvasRootRef}
-      className={`absolute inset-0 canvas-drawing-root is-tool-${activeDrawingTool}`}
+      className={`absolute inset-0 canvas-drawing-root is-interaction-${interactionMode} is-tool-${activeDrawingTool}${connectableSelectionCount > 1 ? ' is-multi-selected' : ''}`}
       onPointerDownCapture={handleDrawingPointerDown}
       onPointerMoveCapture={handleDrawingPointerMove}
       onPointerUpCapture={handleDrawingPointerUp}
@@ -1400,7 +1637,7 @@ function CanvasInner() {
       <ReactFlow
         nodes={renderedCanvasNodes}
         edges={renderedEdges}
-        onConnect={onConnect}
+        onConnect={connectNode}
         onConnectEnd={handleConnectEnd}
         isValidConnection={isCanvasConnectionValid}
         onNodeClick={onNodeClick}
@@ -1413,18 +1650,24 @@ function CanvasInner() {
         onNodesChange={handleNodesChange}
         onEdgesChange={handleEdgesChange}
         nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
+        edgeTypes={edgeDisplayMode === 'hidden' ? hiddenEdgeTypes : edgeTypes}
         zIndexMode="manual"
         connectionMode={ConnectionMode.Loose}
         connectionRadius={64}
         onlyRenderVisibleElements
-        fitView
-        fitViewOptions={FIT_VIEW_OPTIONS}
-        minZoom={MIN_CANVAS_ZOOM}
-        maxZoom={MAX_CANVAS_ZOOM}
+        fitView={viewportPreferences.initialFit}
+        defaultViewport={viewportPreferences.defaultViewport}
+        fitViewOptions={viewportPreferences.initialFitOptions}
+        minZoom={viewportPreferences.minZoom}
+        maxZoom={viewportPreferences.maxZoom}
         defaultEdgeOptions={defaultEdgeOptions}
         proOptions={PRO_OPTIONS}
         {...drawingInteraction}
+        {...edgePanePointer.handlers}
+        zoomOnScroll={!viewportPreferences.locked && interaction.zoomOnScroll}
+        zoomOnPinch={!viewportPreferences.locked}
+        zoomOnDoubleClick={!viewportPreferences.locked && interactionMode !== 'classic'}
+        zoomActivationKeyCode={viewportPreferences.locked ? null : interactionMode === 'classic' ? 'Control' : 'Meta'}
         onContextMenu={(e) => e.preventDefault()}
         onMove={handleCanvasViewportMove}
         onMoveStart={handleCanvasViewportMoveStart}
@@ -1441,29 +1684,16 @@ function CanvasInner() {
         {snapLines.length > 0 && <SnapLinesOverlay lines={snapLines} />}
 
         {/* Grid background */}
-        {showGrid && (
-          <Background
-            variant={BackgroundVariant.Dots}
-            gap={20}
-            size={1}
-            color="var(--theme-hover)"
-          />
-        )}
+        {showGrid && appearanceGridVisible && <CanvasGrid color={gridDotColor} />}
 
 
         {/* Mini Map — interactive navigator, toggle with M key */}
         {minimapVisible && (
           <>
-            <MiniMapNodeStats />
+            <MiniMapNodeStats onClick={handleMiniMapClick} />
             <RoundedMiniMapMask />
           </>
         )}
-
-        {/* Canvas Controls */}
-        <Controls
-          className="canvas-controls !bg-canvas-card !border-canvas-border !shadow-lg !rounded-xl overflow-hidden"
-          showInteractive={false}
-        />
 
         {/* 操作记录 — 撤销 / 还原 + 可回溯的操作列表 */}
         <Panel position="top-right" className="canvas-history-slot">
@@ -1474,6 +1704,7 @@ function CanvasInner() {
           <Panel position="bottom-left" className="canvas-drawing-toolbar-slot canvas-drawing-ui">
             <CanvasDrawingToolbar
               activeTool={activeDrawingTool}
+              interactionMode={interactionMode}
               imageReady={Boolean(pendingImage)}
               onSelectTool={chooseDrawingTool}
             />
@@ -1502,9 +1733,17 @@ function CanvasInner() {
         <Panel position="bottom-right" className="flex items-center gap-2">
           <CanvasToolbar
             showGrid={showGrid}
-            smoothLine={smoothLine}
+            edgeDisplayMode={edgeDisplayMode}
             onToggleGrid={toggleGrid}
-            onToggleLine={() => setSmoothLine((v) => !v)}
+            onToggleLine={toggleLine}
+            mode={viewportPreferences.mode}
+            disabled={!viewportPreferences.hydrated}
+            minZoom={viewportPreferences.minZoom}
+            maxZoom={viewportPreferences.maxZoom}
+            onAutoFit={autoFitCanvas}
+            onZoomChange={viewportPreferences.setZoom}
+            onStepZoom={viewportPreferences.stepZoom}
+            onToggleLock={viewportPreferences.toggleLock}
           />
         </Panel>
 
@@ -1520,6 +1759,17 @@ function CanvasInner() {
         )}
 
       </ReactFlow>
+      <EpisodeWorkbench key={currentProjectId} />
+
+      <SelectionConnectionHandle rootRef={canvasRootRef} onBlankDrop={openSelectionMenu} />
+
+      {connectionMenu.visible && connectionMenu.previewSources?.length ? (
+        <ConnectionDropPreview
+          sources={connectionMenu.previewSources}
+          position={connectionMenu.position}
+          direction={connectionMenu.direction}
+        />
+      ) : null}
 
       {radialMenuHoldPosition && (
         <CanvasLongPressIndicator position={radialMenuHoldPosition} />
@@ -1535,13 +1785,14 @@ function CanvasInner() {
         sourceNodeType={connectionMenu.sourceNodeType}
         direction={connectionMenu.direction}
         sourceNode={sourceNode}
+        selectionCount={connectionMenu.sourceNodeIds?.length}
         menuRef={connectionMenuRef}
         onSelect={handleConnectionMenuSelect}
         connectionMenuMap={connectionMenuMap}
       />
 
-      {/* Context menu */}
-      <CanvasContextMenu
+      {/* 挂到 body，避免画布的 contain: paint 将右键菜单压在节点对话框下方。 */}
+      {createPortal(<CanvasContextMenu
         visible={ctxMenu.visible}
         position={ctxMenu.position}
         hoverMenu={ctxMenu.hoverMenu}
@@ -1561,10 +1812,10 @@ function CanvasInner() {
         onOpenProjectDir={handleCtxOpenProjectDir}
         onShowSubmenu={showSubmenu}
         onHideSubmenu={hideSubmenu}
-      />
+      />, document.body)}
 
       {/* Node context menu */}
-      <NodeContextMenu
+      {createPortal(<NodeContextMenu
         visible={nodeCtxMenu.visible}
         position={nodeCtxMenu.position}
         menuRef={nodeCtxMenuRef}
@@ -1574,6 +1825,7 @@ function CanvasInner() {
         onCopyText={handleCopyText}
         onCutText={handleCutText}
         onDuplicate={handleDuplicate}
+        onRename={showRename ? handleRename : undefined}
         onToggleLock={handleToggleLock}
         isLocked={isNodeLocked}
         onConvertImage={showImageConversion ? handleConvertImage : undefined}
@@ -1593,7 +1845,9 @@ function CanvasInner() {
         copyMediaLabel={copyMediaLabel}
         pluginTools={pluginTools}
         onPluginTool={handlePluginTool}
-      />
+      />, document.body)}
+
+      <NodeOutputDownloadDialog onCancel={cancelSaveAsDownload} />
 
       {pendingPluginTool ? (
         <NodePluginToolDialog
@@ -1625,20 +1879,21 @@ function CanvasInner() {
         style={{ left: dropGhost.x, top: dropGhost.y }}
       >
         <div className="sb-drag-ghost-clip">
-          <img src={dropGhost.url} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          <ViewportImage eager src={dropGhost.url} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
         </div>
       </div>,
       document.body,
     )}
+    </CanvasEdgePanePointerContext.Provider>
     </ResizeSnapContext.Provider>
     </CanvasNodeLodContext.Provider>
   );
 }
 
-export default function Canvas() {
+export default function Canvas({ onReady }: CanvasProps) {
   return (
     <ReactFlowProvider>
-      <CanvasInner />
+      <CanvasInner onReady={onReady} />
     </ReactFlowProvider>
   );
 }

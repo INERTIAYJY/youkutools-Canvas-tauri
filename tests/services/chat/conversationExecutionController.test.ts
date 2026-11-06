@@ -1,3 +1,6 @@
+/**
+ * conversationExecutionController — 回归测试：ordinary conversation media recovery。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentScheduleResult, ConversationAgentExecution } from '../../../src/services/chat/agentScheduler';
 
@@ -19,6 +22,14 @@ const interjectionMocks = vi.hoisted(() => ({
   enqueue: vi.fn(() => true),
 }));
 
+const mediaRuntimeMocks = vi.hoisted(() => ({ generate: vi.fn(), complete: vi.fn() }));
+const mediaHistoryMocks = vi.hoisted(() => ({ persist: vi.fn() }));
+vi.mock('../../../src/services/ai/generationRuntime', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/services/ai/generationRuntime')>(),
+  runMediaGeneration: mediaRuntimeMocks.generate,
+  completeMediaMessageDelivery: mediaRuntimeMocks.complete,
+}));
+
 vi.mock('../../../src/services/chat/agentScheduler', () => ({
   getActiveConversationAgentTaskId: () => schedulerMocks.activeTaskId,
   scheduleConversationAgentExecution: schedulerMocks.schedule,
@@ -34,12 +45,22 @@ vi.mock('../../../src/services/chat/tools', () => ({
   ensureAgentToolsRegistered: vi.fn(),
 }));
 
+// 本组验证调度与响应状态；历史读取固定为空，避免相同会话 ID 的异步落盘污染后续用例。
+vi.mock('../../../src/services/chat/chatHistoryService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/services/chat/chatHistoryService')>(),
+  loadMessages: vi.fn(async () => ({ messages: [], total: 0 })),
+  persistMessage: mediaHistoryMocks.persist,
+}));
+
 import {
   resumeAgentTaskExecution,
   submitConversationMessage,
+  triggerMediaGeneration,
 } from '../../../src/services/chat/conversationExecutionController';
 import { useAppStore } from '../../../src/store/useAppStore';
 import { DEFAULT_AGENT_TASK_BUDGET, type AgentTask } from '../../../src/types/agent';
+import { GENERAL_ASSISTANT_SCOPE_ID, isGeneralAssistantTool } from '../../../src/services/chat/assistantScope';
+import { getPendingTasksForProject, MediaTaskPausedError, savePendingTask } from '../../../src/services/pollManager';
 
 function arrangeConversation(): void {
   useAppStore.setState(useAppStore.getInitialState(), true);
@@ -64,6 +85,11 @@ function arrangeConversation(): void {
 }
 
 beforeEach(() => {
+  localStorage.removeItem('ai_canvas_pending_tasks');
+  mediaRuntimeMocks.generate.mockReset();
+  mediaRuntimeMocks.complete.mockReset();
+  mediaHistoryMocks.persist.mockReset();
+  mediaHistoryMocks.persist.mockResolvedValue(undefined);
   arrangeConversation();
   schedulerMocks.activeTaskId = undefined;
   schedulerMocks.scheduledTaskIds.clear();
@@ -80,12 +106,155 @@ beforeEach(() => {
   interjectionMocks.enqueue.mockReturnValue(true);
 });
 
+describe('ordinary conversation media recovery', () => {
+  it('passes message context to ordinary providers and acknowledges only after message delivery', async () => {
+    const artifact = { id: 'artifact-1', kind: 'image', deliveryMode: 'chat', url: 'asset://saved.png', sourceUrl: 'https://cdn.test/image.png',
+      persistence: 'saved', prompt: '猫', provider: 'general', modelId: 'general/image', createdAt: 1,
+      taskReceipt: { projectId: 'project-1', nodeId: 'tracking-1', taskId: 'remote-1', attemptId: 'attempt-1' } };
+    mediaRuntimeMocks.generate.mockResolvedValue(artifact);
+    useAppStore.getState().addMessage({ id: 'media-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done' });
+    await triggerMediaGeneration('media-message', { kind: 'image', prompt: '猫', modelRef: 'general/image', deliveryMode: 'chat' });
+    expect(mediaRuntimeMocks.generate).toHaveBeenCalledWith(expect.anything(), 'project-1', undefined, undefined,
+      expect.objectContaining({ projectId: 'project-1', messageId: 'media-message', conversationId: 'conversation-1' }));
+    expect(useAppStore.getState().messages.find((message) => message.id === 'media-message')?.mediaResult).toEqual(artifact);
+    expect(mediaRuntimeMocks.complete).toHaveBeenCalledWith('media-message', artifact, true);
+  });
+
+  it('shows a paused original task instead of reporting generation failure', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'tracking-1', taskId: 'remote-1', attemptId: 'attempt-1' };
+    mediaRuntimeMocks.generate.mockRejectedValue(new MediaTaskPausedError(receipt, 'query_timeout'));
+    useAppStore.getState().addMessage({ id: 'media-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done' });
+    await triggerMediaGeneration('media-message', { kind: 'image', prompt: '猫', modelRef: 'general/image', deliveryMode: 'chat' });
+    expect(useAppStore.getState().messages.find((message) => message.id === 'media-message')?.mediaStatus).toBe('paused');
+    expect(mediaRuntimeMocks.complete).not.toHaveBeenCalled();
+  });
+
+  it.each(['chat', 'both'] as const)('completes a RunningHub %s task only after its message is saved', async (deliveryMode) => {
+    const artifact = { id: 'runninghub-artifact', kind: 'image', deliveryMode, url: 'asset://saved.png', sourceUrl: 'https://cdn.test/image.png',
+      filePath: 'saved.png', persistence: 'saved', prompt: '猫', provider: 'runninghubwf', modelId: 'runninghubwf/image', createdAt: 1 };
+    let trackingId = '';
+    mediaRuntimeMocks.generate.mockImplementation(async (_intent, _projectId, _signal, targetNodeId, taskContext) => {
+      trackingId = targetNodeId ?? 'runninghub-message-media-message';
+      savePendingTask({ projectId: 'project-1', nodeId: trackingId, nodeType: 'ai-image', provider: 'runninghubwf',
+        taskType: 'runninghub-workflow', taskId: 'runninghub-original', submitted: true,
+        runninghubRecoveryState: 'save_pending', runninghubMessage: taskContext });
+      return artifact;
+    });
+    let finishSave!: () => void;
+    const saved = new Promise<void>((resolve) => { finishSave = resolve; });
+    mediaHistoryMocks.persist.mockImplementation((message) => message.mediaResult?.id === artifact.id ? saved : Promise.resolve());
+    useAppStore.getState().addMessage({ id: 'media-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done' });
+    const generation = triggerMediaGeneration('media-message', { kind: 'image', prompt: '猫', modelRef: 'runninghubwf/image', deliveryMode });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getPendingTasksForProject('project-1')).toHaveLength(1);
+    if (deliveryMode === 'both') expect(useAppStore.getState().nodes.find((node) => node.id === trackingId)?.data.imageUrl).toBe(artifact.url);
+    finishSave();
+    await generation;
+    expect(getPendingTasksForProject('project-1')).toEqual([]);
+  });
+
+  it('retains a RunningHub task when saving its completed message fails', async () => {
+    const artifact = { id: 'runninghub-artifact', kind: 'image', deliveryMode: 'chat', url: 'asset://saved.png', sourceUrl: 'https://cdn.test/image.png',
+      filePath: 'saved.png', persistence: 'saved', prompt: '猫', provider: 'runninghubwf', modelId: 'runninghubwf/image', createdAt: 1 };
+    mediaRuntimeMocks.generate.mockImplementation(async (_intent, _projectId, _signal, _targetNodeId, taskContext) => {
+      savePendingTask({ projectId: 'project-1', nodeId: 'runninghub-message-media-message', nodeType: 'ai-image', provider: 'runninghubwf',
+        taskType: 'runninghub-workflow', taskId: 'runninghub-original', submitted: true,
+        runninghubRecoveryState: 'save_pending', runninghubMessage: taskContext });
+      return artifact;
+    });
+    mediaHistoryMocks.persist.mockImplementation((message) => message.mediaResult?.id === artifact.id
+      ? Promise.reject(new Error('message save failed')) : Promise.resolve());
+    useAppStore.getState().addMessage({ id: 'media-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done' });
+    await triggerMediaGeneration('media-message', { kind: 'image', prompt: '猫', modelRef: 'runninghubwf/image', deliveryMode: 'chat' });
+    expect(getPendingTasksForProject('project-1')).toEqual([expect.objectContaining({ taskId: 'runninghub-original', runninghubRecoveryState: 'save_pending' })]);
+  });
+});
+
 describe('conversation execution controller', () => {
+  it('binds a general request to application scope and caps its tools', () => {
+    useAppStore.setState({ currentProjectId: null, projects: [], conversations: [], activeConversationId: null });
+    const conversationId = useAppStore.getState().createConversation(GENERAL_ASSISTANT_SCOPE_ID);
+    useAppStore.setState({ currentProjectId: 'newly-opened-project' });
+    const result = submitConversationMessage({ content: '帮我拟一份学习计划', conversationId, projectId: 'newly-opened-project' });
+    if (result.status !== 'started') throw new Error('Expected a general conversation task');
+    const task = useAppStore.getState().agentTasks.find((item) => item.id === result.taskId)!;
+    expect(task.projectId).toBe(GENERAL_ASSISTANT_SCOPE_ID);
+    expect(task.toolAllowlist).toContain('file_read_text');
+    expect(task.toolAllowlist?.every(isGeneralAssistantTool)).toBe(true);
+    expect(task.toolAllowlist).not.toContain('media_generate');
+    expect(useAppStore.getState().projects).toEqual([]);
+  });
+
+  it.each(['plan', 'collaborative', 'autonomous'] as const)(
+    'fails an unhandled request without a model in %s mode instead of reporting completion', async (mode) => {
+      useAppStore.setState((state) => ({
+        conversations: state.conversations.map((conversation) => ({ ...conversation, agentMode: mode })),
+      }));
+      let execution: ConversationAgentExecution | undefined;
+      schedulerMocks.schedule.mockImplementation((scheduled) => {
+        execution = scheduled as ConversationAgentExecution;
+        return { state: 'started', position: 0 };
+      });
+      const result = submitConversationMessage({
+        content: '请检查接口文档并调用 provider_config_preview 生成配置草稿。',
+        conversationId: 'conversation-1', mode,
+      });
+      if (result.status !== 'started') throw new Error('Expected a scheduled request');
+      execution!.onStart?.();
+      await execution!.run();
+      const state = useAppStore.getState();
+      expect(state.agentTasks.find((task) => task.id === result.taskId)?.status).toBe('failed');
+      const reply = state.messages.find((message) => message.id === result.assistantMessageId)!;
+      expect(reply).toMatchObject({ status: 'error', finishReason: 'error' });
+      expect(reply.content).toContain('文本模型');
+      expect(reply.content).not.toContain('不太确定');
+      expect(state.nodes).toEqual([]);
+    },
+  );
+
+  it('retains image drafts when a long interjection would truncate the image reference', () => {
+    const fileName = 'chat-ref-11111111-1111-4111-8111-111111111111.png';
+    useAppStore.getState().addChatImageDraft('conversation-1', { fileName, label: '图', size: 4 });
+    expect(submitConversationMessage({ content: 'x'.repeat(8_000), conversationId: 'conversation-1',
+      imageFileNames: [fileName], dispatchMode: 'interject' })).toEqual({ status: 'ignored' });
+    expect(useAppStore.getState().chatImageDrafts['conversation-1']).toHaveLength(1);
+    expect(interjectionMocks.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('submits an image-only message with a durable reference and consumes only its own pending images', () => {
+    const fileName = 'chat-ref-11111111-1111-4111-8111-111111111111.png';
+    const otherFile = 'chat-ref-22222222-2222-4222-8222-222222222222.jpg';
+    useAppStore.getState().addChatImageDraft('conversation-1', { fileName, label: '角色.png', size: 4 });
+    useAppStore.getState().addChatImageDraft('conversation-other', { fileName: otherFile, label: 'Other', size: 4 });
+    const result = submitConversationMessage({ content: '', conversationId: 'conversation-1', imageFileNames: [fileName] });
+    expect(result.status).toBe('started');
+    const state = useAppStore.getState();
+    expect(state.messages[0].content).toBe(`@image{${fileName}|${encodeURIComponent('角色.png')}}`);
+    expect(state.agentTasks[0].goal).toBe(state.messages[0].content);
+    expect(state.chatImageDrafts['conversation-1']).toEqual([]);
+    expect(state.chatImageDrafts['conversation-other']).toHaveLength(1);
+    expect(JSON.stringify([state.messages, state.agentTasks])).not.toContain('base64');
+    expect(schedulerMocks.schedule).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an attachment from another conversation before creating messages or tasks', () => {
+    const fileName = 'chat-ref-22222222-2222-4222-8222-222222222222.jpg';
+    useAppStore.getState().addChatImageDraft('conversation-other', { fileName, label: 'Other', size: 4 });
+    expect(submitConversationMessage({ content: '看看', conversationId: 'conversation-1', imageFileNames: [fileName] }))
+      .toEqual({ status: 'ignored' });
+    expect(useAppStore.getState().messages).toEqual([]);
+    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(useAppStore.getState().chatImageDrafts['conversation-other']).toHaveLength(1);
+  });
+
   it.each([
     { body: 'data: [DONE]\n\n', contentType: 'text/event-stream', status: 'failed', messageStatus: 'error', text: '未返回' },
     { body: 'data: {"error":{"message":"Provider unavailable"}}\n\n', contentType: 'text/event-stream', status: 'failed', messageStatus: 'error', text: 'Provider unavailable' },
     { body: '{"choices":[{"message":{"content":"已收到你的要求"},"finish_reason":"stop"}]}', contentType: 'application/json', status: 'completed', messageStatus: 'done', text: '已收到你的要求' },
     { body: 'data:{"choices":[{"delta":{"content":"已收到你的要求"},"finish_reason":"stop"}]}\n\n', contentType: 'text/event-stream', status: 'completed', messageStatus: 'done', text: '已收到你的要求' },
+    { body: 'data:{"choices":[{"delta":{"content":"尚未完成的回复"},"finish_reason":"length"}]}\n\n', contentType: 'text/event-stream', status: 'paused', messageStatus: 'partial', text: '尚未完成的回复' },
+    { body: 'data:{"choices":[{"delta":{"reasoning_content":"api_key=secret-only C:\\\\private\\\\file inspect"}}]}\n\ndata:{"choices":[{"delta":{"content":"已经收到的正文"}}]}\n\ndata:{"error":{"message":"network interrupted"}}\n\n', contentType: 'text/event-stream', status: 'failed', messageStatus: 'error', text: '已经收到的正文' },
   ])('keeps a visible final message for $body', async ({ body, contentType, status, messageStatus, text }) => {
     useAppStore.setState((state) => ({
       config: {
@@ -115,6 +284,17 @@ describe('conversation execution controller', () => {
       content: expect.stringContaining(text),
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    if (body.includes('network interrupted')) {
+      const reply = state.messages.find((message) => message.id === result.assistantMessageId)!;
+      expect(reply.responseError).toContain('network interrupted');
+      expect(reply.reasoning).toContain('[已脱敏凭据]');
+      expect(reply.reasoning).not.toContain('secret-only');
+      expect(reply.reasoning).not.toContain('C:');
+    }
+    if (status === 'paused') {
+      expect(state.agentTasks.find((task) => task.id === result.taskId)?.pausedReason).toBe('model_output_truncated');
+      expect(state.messages.find((message) => message.id === result.assistantMessageId)?.finishReason).toBe('length');
+    }
   });
 
   it('creates the message pair and schedules one Agent task', () => {

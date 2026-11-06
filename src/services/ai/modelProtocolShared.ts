@@ -5,7 +5,7 @@
  * 让「协议校验」「模板渲染」「请求构建」三处不会各自漂移。
  */
 import { PROTOCOL_VARIABLE_NAMES } from './modelProtocolVariables';
-import type { ModelProtocolAuthConfig } from '../../types/aiTypes';
+import type { ModelProtocolAuthConfig, ProtocolJsonValue } from '../../types/aiTypes';
 
 export const TEMPLATE_RE = /{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-]+)*)\s*}}/g;
 export const FULL_TEMPLATE_RE = /^{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-]+)*)\s*}}$/;
@@ -47,6 +47,9 @@ export const DEFAULT_MAX_QUERY_RETRIES = 3;
 export const DEFAULT_MAX_RETRY_DELAY_MS = 60000;
 export const MIME_TYPE_RE = /^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*\/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*$/;
 
+/** 只检查对象形状；已知 JSON 保留成员类型，unknown 不升级为 JSON。 */
+export function isRecord(value: ProtocolJsonValue | undefined): value is Record<string, ProtocolJsonValue>;
+export function isRecord(value: unknown): value is Record<string, unknown>;
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }

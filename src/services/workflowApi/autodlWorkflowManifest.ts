@@ -1,3 +1,6 @@
+/**
+ * autodlWorkflowManifest — 定义 AutoDL H3 工作流合同与默认输入映射。
+ */
 import type { VideoModelCapability } from '../../types/aiTypes';
 import type { LegacyWorkflowApiManifest, WorkflowApiManifest } from '../../types/workflowApi';
 import { validateDeclarativeWorkflowManifest } from './workflowApiDefinition';

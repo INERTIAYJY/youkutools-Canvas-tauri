@@ -1,3 +1,6 @@
+/**
+ * directorBlenderRuntimeService — 编排 Blender 安装发现、原生 Job 与结果回填。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { DirectorSceneSource } from '../types/directorOperation';

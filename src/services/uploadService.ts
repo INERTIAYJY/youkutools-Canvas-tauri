@@ -4,15 +4,18 @@
  *
  * 上传策略：
  *  - provider === 'apimart' → APIMart /uploads/images（需 API Key）
- *  - 其他所有 provider  → uguu.se 免费图床（无需 API Key，直接返回无轮询）
+ *  - ToAPIs 连接 → 当前站点 /uploads/{images,videos,audios}（仅使用该连接 Key）
+ *  - LibAPI 连接 → /v1/files（仅使用该连接 Key）
+ *  - MiniMax 官方连接 → /v1/files/upload（返回当前连接的 mm_file 素材引用）
+ *  - 其他 provider → uguu.se 免费图床（无需 API Key，直接返回无轮询）
  *
  * 缓存策略：
  *  - 内存缓存：同一进程内即时复用
  *  - localStorage 持久化缓存：跨进程/Session 复用，2.5 小时过期后自动重传
  */
-import { isLocalMediaUrl, isRemoteMediaUrl, localMediaUrlToPath } from '../utils/mediaUrl';
+import { isLocalMediaUrl, isRemoteMediaUrl, isTauriAssetUrl, localMediaUrlToPath } from '../utils/mediaUrl';
 import { useAppStore } from '../store/useAppStore';
-import { APIMART_BASE_URL } from '../constants/api';
+import { APIMART_BASE_URL, LIBAPI_BASE_URL, TOAPIS_API_SITES, TOAPIS_BASE_URL } from '../constants/api';
 import { bytePartsToBase64Async, getAssetUrlFromPath, isTauriEnv } from './fs/core';
 import {
   assertMediaDataUrlSize,
@@ -24,6 +27,14 @@ import {
   type MediaDataUrlKind,
 } from './fileService';
 import { invoke } from '@tauri-apps/api/core';
+import { lstat } from '@tauri-apps/plugin-fs';
+import { prepareReferenceImageUpload, prepareApimartImageUpload } from './ai/referenceImageUpload';
+import { corsSafeFetch } from './ai/httpTransport';
+import { getProviderPolicy, resolveProviderCatalogId } from './ai/providerPolicies';
+import { sha256BytesHex } from './mediaDataUrl';
+import { redactModelProtocolError, redactModelProtocolErrorText } from './ai/modelProtocolHttp';
+import { assertMinimaxResponse, resolveMinimaxBaseUrl } from './ai/providers/minimaxModelManifest';
+import type { ApiProviderConfig } from '../types';
 
 const DEFAULT_UPLOAD_BASE = APIMART_BASE_URL;
 
@@ -34,7 +45,7 @@ const UGUU_UPLOAD_URL = 'https://uguu.se/upload';
 const UPLOAD_TTL_MS = 150 * 60 * 1000;
 
 /** localStorage key */
-const CACHE_STORAGE_KEY = 'canvas-upload-cache-v3';
+const CACHE_STORAGE_KEY = 'canvas-upload-cache-v4';
 
 /** 包含排队时间；到期会中止 fetch 或调用 Rust cancel_proxy_fetch。 */
 export const UPLOAD_TIMEOUT_MS = 120_000;
@@ -44,6 +55,41 @@ export const UPLOAD_TIMEOUT_MS = 120_000;
 interface CacheEntry {
   remoteUrl: string;
   uploadedAt: number;
+}
+
+interface UploadIdentity {
+  key: string;
+  cacheable: boolean;
+  source?: { digest: string; bytes: number };
+}
+
+type UploadConnection = Readonly<Pick<ApiProviderConfig, 'catalogId' | 'baseUrl' | 'apiKey'>>;
+
+function captureUploadConnection(provider: string): UploadConnection {
+  const connection = useAppStore.getState().config.providers[provider];
+  return { catalogId: connection?.catalogId, baseUrl: connection?.baseUrl, apiKey: connection?.apiKey?.trim() ?? '' };
+}
+
+function assertUploadConnection(provider: string, expected: UploadConnection): void {
+  const current = captureUploadConnection(provider);
+  if (current.catalogId !== expected.catalogId || current.baseUrl !== expected.baseUrl || current.apiKey !== expected.apiKey) {
+    throw new Error('参考素材上传期间连接配置已变化，请重新发起');
+  }
+}
+
+/** 与现有文件指纹使用相同的固定块链，核对真正读取的上传副本。 */
+async function fingerprintUploadBlob(blob: Blob, signal?: AbortSignal): Promise<string> {
+  let previous = await sha256BytesHex(new TextEncoder().encode('asset-image-sha256-chain-v1'));
+  for (let offset = 0; offset < blob.size; offset += 256 * 1024) {
+    signal?.throwIfAborted();
+    const chunk = new Uint8Array(await blob.slice(offset, offset + 256 * 1024).arrayBuffer());
+    const input = new Uint8Array(32 + chunk.length);
+    input.set(Uint8Array.from(previous.match(/../g)!, (hex) => parseInt(hex, 16)));
+    input.set(chunk, 32);
+    previous = await sha256BytesHex(input);
+  }
+  signal?.throwIfAborted();
+  return sha256BytesHex(new TextEncoder().encode(`${previous}:${blob.size}`));
 }
 
 function loadPersistentCache(): Record<string, CacheEntry> {
@@ -79,10 +125,32 @@ async function cacheKey(
   url: string,
   provider: string,
   kind: MediaDataUrlKind,
+  connection: UploadConnection,
   signal?: AbortSignal,
-): Promise<string> {
-  const scope = `${provider || 'default'}:${kind}`;
-  if (!isMediaDataUrl(url)) return `${scope}:${url}`;
+): Promise<UploadIdentity> {
+  // 只持久化单向摘要；换站点或换 Key 后不能沿用另一连接的上传结果。
+  const connectionDigest = await sha256BytesHex(new TextEncoder().encode(JSON.stringify([
+    'native-lossless-v1', provider, connection.catalogId ?? '', connection.baseUrl ?? '', connection.apiKey,
+  ])));
+  signal?.throwIfAborted();
+  const scope = `${provider || 'default'}:${kind}:${connectionDigest}`;
+  if (!isMediaDataUrl(url)) {
+    const path = localMediaUrlToPath(url);
+    if (path && isTauriEnv()) {
+      try {
+        const info = await lstat(path);
+        assertMediaDataUrlSize(info.size, kind, mediaKindLabel(kind));
+        const { fingerprintAssetImage } = await import('./fs/assetImageMetadata');
+        const source = await fingerprintAssetImage(path, signal);
+        signal?.throwIfAborted();
+        return { key: `${scope}:file:${source.bytes}:${source.digest}`, source, cacheable: true };
+      } catch {
+        signal?.throwIfAborted();
+        // 现有权限读不到指纹时仍可沿用原素材读取入口，但不猜测缓存身份。
+      }
+    }
+    return { key: `${scope}:uncached:${crypto.randomUUID()}`, cacheable: false };
+  }
   // 两个不同种子的 32 位散列 + 完整长度，避免旧版单一 32 位 hash 碰撞；
   // 不把 header/payload 原文放入 Map 和 localStorage，避免额外持有 Data URL 副本。
   let first = 0x811c9dc5;
@@ -99,7 +167,7 @@ async function cacheKey(
     }
   }
   if (signal?.aborted) throw abortReason(signal);
-  return `${scope}:data:${url.length}:${first >>> 0}:${second >>> 0}`;
+  return { key: `${scope}:data:${url.length}:${first >>> 0}:${second >>> 0}`, cacheable: true };
 }
 
 /** 内存缓存使用短 key，避免把大型 data URL 持有到进程退出。 */
@@ -294,6 +362,20 @@ async function dataUrlToBlob(
   return { blob: new Blob(parts, { type: mime }), ext: mime.split('/')[1] || 'png' };
 }
 
+/** 内联图片也复用上传压缩；分块编解码，未转换时保留原 data URL。 */
+export async function prepareReferenceImageDataUrl(dataUrl: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
+  if (!/^data:image\/(?:png|jpeg|jpg)(?:;[^,]*)?;base64,/i.test(dataUrl)) return dataUrl;
+  await assertMediaDataUrlWithinLimitAsync(dataUrl, 'image', '参考图', signal);
+  const { blob } = await dataUrlToBlob(dataUrl, signal);
+  const prepared = await prepareReferenceImageUpload(blob, signal);
+  if (prepared === blob) return dataUrl;
+  const bytes = new Uint8Array(await prepared.arrayBuffer());
+  const encoded = await bytePartsToBase64Async([bytes], signal);
+  signal?.throwIfAborted();
+  return `data:${prepared.type};base64,${encoded}`;
+}
+
 /** fetch URL → Blob（Tauri asset protocol 的本地 URL 可通过 fetch 获取） */
 async function fetchUrlToBlob(
   url: string,
@@ -301,11 +383,13 @@ async function fetchUrlToBlob(
   label: string,
   signal?: AbortSignal,
 ): Promise<{ blob: Blob; ext: string }> {
-  const localPath = localMediaUrlToPath(url);
+  // 已有 asset URL 与界面使用同一地址，保留协议、编码和查询参数；仅 file URL 需要转换。
+  const localPath = isTauriAssetUrl(url) ? undefined : localMediaUrlToPath(url);
   const readUrl = localPath && isTauriEnv() ? await getAssetUrlFromPath(localPath) : url;
   const response = await fetch(readUrl, { signal });
   if (!response.ok) {
-    throw new Error(`获取本地${label}失败 (${response.status})`);
+    const hint = response.status === 404 ? '，参考素材已失效或文件不可访问，请重新选择或导入素材' : '';
+    throw new Error(`获取本地${label}失败 (${response.status})${hint}`);
   }
   const contentLength = Number(response.headers.get('Content-Length'));
   if (Number.isFinite(contentLength) && contentLength >= 0) {
@@ -324,42 +408,277 @@ async function urlToBlob(
   kind: MediaDataUrlKind,
   label = mediaKindLabel(kind),
   signal?: AbortSignal,
+  expectedSource?: UploadIdentity['source'],
+  prepareImage = true,
 ): Promise<{ blob: Blob; ext: string }> {
-  return isMediaDataUrl(url)
+  const source = await (isMediaDataUrl(url)
     ? dataUrlToBlob(url, signal)
-    : fetchUrlToBlob(url, kind, label, signal);
+    : fetchUrlToBlob(url, kind, label, signal));
+  if (expectedSource && (source.blob.size !== expectedSource.bytes
+    || await fingerprintUploadBlob(source.blob, signal) !== expectedSource.digest)) {
+    throw new Error('参考素材在读取期间发生变化，请重新上传');
+  }
+  signal?.throwIfAborted();
+  const blob = kind === 'image' && prepareImage ? await prepareReferenceImageUpload(source.blob, signal) : source.blob;
+  return blob === source.blob ? source : { blob, ext: blob.type === 'image/png' ? 'png' : blob.type === 'image/jpeg' ? 'jpg' : source.ext };
+}
+
+/** ToAPIs 不回退到其他连接凭据或公共图床；同一 Key 的两站由用户显式选择。 */
+async function uploadToToapis(url: string, connection: UploadConnection, kind: MediaDataUrlKind, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
+  const apiKey = connection?.apiKey?.trim();
+  if (!apiKey) throw new Error('ToAPIs 参考素材上传失败：请在「设置 → API Key → ToAPIs」填写当前连接的 Key');
+  const baseUrl = (connection.baseUrl || TOAPIS_BASE_URL).trim().replace(/\/+$/, '');
+  if (!TOAPIS_API_SITES.some((site) => site.baseUrl === baseUrl)) {
+    throw new Error('ToAPIs 上传站点无效，请在「设置 → API Key → ToAPIs → API 站点」重新选择国内站或国际站');
+  }
+  const { blob, ext } = await urlToBlob(url, kind, undefined, signal, source);
+  const limit = (kind === 'image' ? 10 : 50) * 1024 * 1024;
+  if (blob.size > limit) throw new Error(`ToAPIs ${mediaKindLabel(kind)}单个文件不能超过 ${kind === 'image' ? 10 : 50} MB`);
+  const allowed = kind === 'image' ? ['jpg', 'jpeg', 'png', 'webp', 'gif']
+    : kind === 'video' ? ['mp4', 'webm', 'mov', 'quicktime'] : ['mp3', 'mpeg', 'wav', 'x-wav', 'm4a', 'mp4', 'x-m4a'];
+  const extension = ext.toLowerCase().split(';')[0];
+  if (!allowed.includes(extension)) throw new Error(`ToAPIs ${mediaKindLabel(kind)}格式不支持，请改用${kind === 'image' ? ' JPG / PNG / WebP / GIF' : kind === 'video' ? ' MP4 / WebM / MOV' : ' MP3 / WAV / M4A'}`);
+  const form = new FormData();
+  const filenameExt = extension === 'quicktime' ? 'mov' : extension === 'mpeg' ? 'mp3' : extension === 'x-wav' ? 'wav' : extension === 'x-m4a' || kind === 'audio' && extension === 'mp4' ? 'm4a' : extension;
+  form.append('file', blob, `reference.${filenameExt}`);
+  form.append('purpose', 'generation');
+  const response = await corsSafeFetch(`${baseUrl}/uploads/${kind === 'image' ? 'images' : kind === 'video' ? 'videos' : 'audios'}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
+  });
+  signal?.throwIfAborted();
+  if (!response.ok) throw new Error(`ToAPIs ${mediaKindLabel(kind)}上传失败（HTTP ${response.status}），请检查当前站点、Key 权限与文件限制`);
+  const result = await response.json().catch(() => {
+    throw new Error(`ToAPIs ${mediaKindLabel(kind)}上传返回了无效 JSON`);
+  }) as { success?: boolean; data?: { url?: unknown } };
+  if (result.success !== true || typeof result.data?.url !== 'string' || !isRemoteMediaUrl(result.data.url)) {
+    throw new Error(`ToAPIs ${mediaKindLabel(kind)}上传未返回有效公网 URL`);
+  }
+  return result.data.url;
+}
+
+/** 只读完整、有界的错误 JSON；网页和任意服务端文案都不带回日志或界面。 */
+async function readLibapiUploadFailure(response: Response, signal?: AbortSignal): Promise<{ codes: string[]; html: boolean }> {
+  signal?.throwIfAborted();
+  const empty = { codes: [] as string[], html: (response.headers.get('Content-Type') ?? '').toLowerCase().includes('html') };
+  const maxBytes = 8 * 1024;
+  if (empty.html || Number(response.headers.get('Content-Length')) > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    signal?.throwIfAborted();
+    return empty;
+  }
+
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    reader = response.body?.getReader();
+  } catch {
+    signal?.throwIfAborted();
+    return empty;
+  }
+  if (!reader) return empty;
+  const cancel = () => { void reader?.cancel().catch(() => undefined); };
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      if (size + value.byteLength > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return empty;
+      }
+      chunks.push(value);
+      size += value.byteLength;
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const text = new TextDecoder().decode(bytes).trim();
+    if (/^<(?:!doctype\s+html|html\b)/iu.test(text)) return { codes: [], html: true };
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return empty;
+    const root = parsed as Record<string, unknown>;
+    const error = root.error && typeof root.error === 'object' && !Array.isArray(root.error)
+      ? root.error as Record<string, unknown> : root;
+    return { codes: [error.code, root.code, error.type, root.type].filter((code): code is string => typeof code === 'string'), html: false };
+  } catch {
+    await reader.cancel().catch(() => undefined);
+    signal?.throwIfAborted();
+    return empty;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
+
+async function libapiUploadError(response: Response, apiKey: string, kind: MediaDataUrlKind, signal?: AbortSignal): Promise<Error> {
+  const { codes, html } = await readLibapiUploadFailure(response, signal);
+  signal?.throwIfAborted();
+  // 具体 code 优先，只有它不能识别时才参考较宽泛的 type。
+  const code = codes.find((value) => [
+    'api_key_inactive', 'insufficient_permissions', 'content_policy_violation',
+    'model_not_allowed', 'model_not_available_for_api_key', 'api_key_quota_exceeded', 'insufficient_funds',
+  ].includes(value));
+  let hint = '服务端未接受上传，请核对当前连接与参考素材，或联系 LibAPI 核查。';
+  if (response.status === 401) {
+    hint = '当前连接的 Key 未通过认证，请核对是否填写完整、有效或已过期。';
+  } else if (response.status === 403) {
+    if (code === 'api_key_inactive') {
+      hint = '当前连接的 Key 已停用、删除或撤销，请到 LibAPI 控制台「API 密钥」恢复或更换 Key。';
+    } else if (code === 'insufficient_permissions') {
+      hint = '当前 Key 权限不足，请到 LibAPI 控制台「API 密钥」核对并开启「文件」权限；模型权限与文件权限分别配置。';
+    } else if (code === 'content_policy_violation') {
+      hint = '参考素材被 LibAPI 的安全策略拒绝，请调整素材或联系平台核查。';
+    } else if (code === 'model_not_allowed') {
+      hint = '当前 Key 的模型访问范围受限，请核对这把 Key 的可用模型。';
+    } else if (code === 'model_not_available_for_api_key') {
+      hint = '当前接口或模型未向 API Key 开放，请按 LibAPI 文档选择可用接口。';
+    } else {
+      hint = html
+        ? '上传返回了访问拒绝页面，可能受网关或访问策略限制，请联系 LibAPI 核查。'
+        : '服务端拒绝上传，但未提供可识别的原因；请先核对当前 Key 的「文件」权限，已开启则联系 LibAPI 核查。';
+    }
+  } else if (response.status === 402) {
+    hint = code === 'api_key_quota_exceeded'
+      ? '当前 Key 的总额度已用完，请到 LibAPI 控制台核对或调整这把 Key 的额度。'
+      : '账户或 Key 额度受限，请到 LibAPI 核对账户余额及当前 Key 额度。';
+  } else if (response.status === 413) {
+    hint = '文件或请求体超过服务端大小限制；LibAPI 单文件上限为 50 MB，请压缩或更换素材。';
+  } else if (response.status === 400) {
+    hint = '上传参数或素材不被接受，请核对文件格式、内容与接口要求。';
+  } else if (response.status === 429) {
+    hint = '上传频率或服务容量受限，请稍后手动重试。';
+  } else if (response.status >= 500) {
+    hint = 'LibAPI 上传服务暂不可用，请稍后手动重试。';
+  }
+  // 请求 ID 方便平台定位；不让异常头把 Key、地址或自由文本带到界面。
+  const requestId = response.headers.get('X-Request-Id')?.trim();
+  const safeRequestId = requestId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/u.test(requestId)
+    && !/^(?:https?|file|asset|data|blob|wss?|ftp):/iu.test(requestId)
+    && !/^sk-/iu.test(requestId) && !requestId.includes(apiKey) && !requestId.includes(encodeURIComponent(apiKey));
+  return new Error(`LibAPI ${mediaKindLabel(kind)}上传失败（HTTP ${response.status}）：${hint}${safeRequestId ? `；请求 ID：${requestId}` : ''}`);
+}
+
+/** LibAPI 参考素材只使用当前连接上传，不借用公共图床或其他连接的 Key。 */
+async function uploadToLibapi(url: string, connection: UploadConnection, kind: MediaDataUrlKind, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
+  const apiKey = connection?.apiKey?.trim();
+  if (!apiKey) throw new Error('LibAPI 参考素材上传失败：请在「设置 → API Key → LibAPI」填写当前连接的 Key');
+  const baseUrl = (connection.baseUrl || LIBAPI_BASE_URL).trim().replace(/\/+$/, '');
+  if (baseUrl !== LIBAPI_BASE_URL) throw new Error('LibAPI 上传地址无效，请在「设置 → API Key → LibAPI」恢复官方接口地址');
+  const { blob, ext } = await urlToBlob(url, kind, undefined, signal, source);
+  if (blob.size > 50 * 1024 * 1024) throw new Error('LibAPI 单个上传文件不能超过 50 MB；模型自身的素材限制仍需分别满足');
+  const extension = ext.toLowerCase().split(';')[0];
+  const aliases: Record<string, string> = { jpeg: 'jpg', quicktime: 'mov', mpeg: 'mp3', 'x-wav': 'wav', 'x-m4a': 'm4a' };
+  const filenameExt = kind === 'audio' && extension === 'mp4' ? 'm4a' : aliases[extension] ?? extension;
+  const allowed = kind === 'image' ? ['jpg', 'png', 'webp', 'gif', 'heic']
+    : kind === 'video' ? ['mp4', 'webm', 'mov'] : kind === 'audio' ? ['mp3', 'wav', 'm4a'] : [];
+  if (!allowed.includes(filenameExt)) throw new Error(`LibAPI ${mediaKindLabel(kind)}格式不支持，请按厂商文档转换文件格式后重试`);
+  const form = new FormData();
+  form.append('file', blob, `reference.${filenameExt}`);
+  const response = await corsSafeFetch(`${baseUrl}/files`, {
+    method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
+  });
+  signal?.throwIfAborted();
+  if (!response.ok) throw await libapiUploadError(response, apiKey, kind, signal);
+  const result = await response.json().catch(() => {
+    signal?.throwIfAborted();
+    throw new Error('LibAPI 上传返回了无效 JSON');
+  }) as { url?: unknown } | null;
+  signal?.throwIfAborted();
+  if (typeof result?.url !== 'string' || !isRemoteMediaUrl(result.url)) {
+    throw new Error('LibAPI 上传未返回有效公网 URL，本次尚未提交生成请求；请重试上传');
+  }
+  return result.url;
+}
+
+/** 官方文件 ID 为 int64；在 JSON 数值转为 Number 前保留其原始十进制值。 */
+async function readMinimaxUploadResponse(response: Response, signal?: AbortSignal): Promise<unknown> {
+  const limit = 16 * 1024;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('MiniMax 上传响应为空');
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener('abort', cancel, { once: true });
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let text = '';
+  let bytes = 0;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const chunk = await reader.read();
+      signal?.throwIfAborted();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > limit) throw new Error('MiniMax 上传响应超过大小限制');
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    text += decoder.decode();
+    // 只改完整的十进制 JSON token，不处理小数、指数或引号内的文本。
+    return JSON.parse(text.replace(/("file_id"\s*:\s*)(\d+)(?=\s*[,}])/g, '$1"$2"')) as unknown;
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    signal?.throwIfAborted();
+    if (error instanceof SyntaxError || error instanceof TypeError) throw new Error('MiniMax 上传返回了无效 JSON', { cause: error });
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
+
+/** 官方素材直传失败不回退公共图床；私有引用只交付给本次连接的 H3 请求。 */
+async function uploadToMinimax(url: string, connection: UploadConnection, kind: MediaDataUrlKind, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
+  const apiKey = connection.apiKey?.trim();
+  if (!apiKey) throw new Error('MiniMax 素材上传失败：请在「设置 → API Key → MiniMax 官方」填写当前连接的 Key');
+  const baseUrl = resolveMinimaxBaseUrl(connection.baseUrl);
+  const { blob, ext } = await urlToBlob(url, kind, undefined, signal, source);
+  const limitMb = kind === 'image' ? 30 : kind === 'video' ? 50 : kind === 'audio' ? 15 : 0;
+  if (!limitMb) throw new Error('MiniMax 官方上传仅支持图片、视频或音频参考');
+  if (!blob.size || blob.size > limitMb * 1024 * 1024) throw new Error(`MiniMax ${mediaKindLabel(kind)}必须为非空文件，单个文件不能超过 ${limitMb} MB`);
+  const mimeExtension = ext.toLowerCase().split(';')[0];
+  const pathExtension = localMediaUrlToPath(url)?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  const extension = mimeExtension === 'octet-stream' && pathExtension ? pathExtension : mimeExtension;
+  const aliases: Record<string, string> = { jpeg: 'jpg', quicktime: 'mov', mpeg: 'mp3', 'x-wav': 'wav', wave: 'wav', 'vnd.wave': 'wav' };
+  const filenameExt = aliases[extension] ?? extension;
+  const allowed = kind === 'image' ? ['jpg', 'png', 'webp', 'heic', 'heif'] : kind === 'video' ? ['mp4', 'mov'] : ['mp3', 'wav'];
+  if (!allowed.includes(filenameExt)) throw new Error(`MiniMax ${mediaKindLabel(kind)}格式不支持，请改用${kind === 'image' ? ' JPG / PNG / WebP / HEIC / HEIF' : kind === 'video' ? ' MP4 / MOV' : ' MP3 / WAV'}`);
+  const form = new FormData();
+  form.append('purpose', 'video_generation_input');
+  form.append('file', blob, `reference.${filenameExt}`);
+  const response = await corsSafeFetch(`${baseUrl}/v1/files/upload`, {
+    method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
+  });
+  const payload = await readMinimaxUploadResponse(response, signal);
+  assertMinimaxResponse(payload);
+  if (!response.ok) throw new Error(`MiniMax ${mediaKindLabel(kind)}上传失败（HTTP ${response.status}），请核对当前连接与文件限制`);
+  const result = payload as { base_resp?: { status_code?: unknown }; file?: { file_id?: unknown } } | null;
+  const fileId = result?.file?.file_id;
+  if (result?.base_resp?.status_code !== 0 || typeof fileId !== 'string' || !/^[1-9]\d{0,19}$/.test(fileId)) {
+    throw new Error('MiniMax 上传未返回有效文件 ID，本次尚未提交生成请求');
+  }
+  return `mm_file://${fileId}`;
 }
 
 // ── APIMart 上传 ──
 
-async function uploadToApimart(url: string, signal?: AbortSignal): Promise<string> {
-  const config = useAppStore.getState().config;
-  const apimartConfig = config.providers.apimart;
-  let apiKey = apimartConfig?.apiKey || '';
-  let uploadBaseUrl = (apimartConfig?.baseUrl || DEFAULT_UPLOAD_BASE).replace(/\/+$/, '');
+async function uploadToApimart(url: string, apimartConfig: UploadConnection, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
+  const apiKey = apimartConfig?.apiKey?.trim() || '';
+  const uploadBaseUrl = (apimartConfig?.baseUrl || DEFAULT_UPLOAD_BASE).trim().replace(/\/+$/, '');
 
   if (!apiKey) {
-    for (const [, providerConfig] of Object.entries(config.providers)) {
-      if (providerConfig?.apiKey) {
-        apiKey = providerConfig.apiKey;
-        if (providerConfig.baseUrl) {
-          uploadBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '');
-        }
-        break;
-      }
-    }
+    throw new Error('未配置 APIMart 的 API Key，无法上传图片\n请在「设置 → API Key → APIMart」中配置');
   }
 
-  if (!apiKey) {
-    throw new Error('未配置任何 API Key，无法上传图片\n请在「设置 → API Key」中配置');
-  }
-
-  const { blob, ext } = await urlToBlob(url, 'image', undefined, signal);
+  const original = await urlToBlob(url, 'image', undefined, signal, source, false);
+  const blob = await prepareApimartImageUpload(original.blob, signal);
+  const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/jpeg' ? 'jpg' : original.ext;
+  signal?.throwIfAborted();
 
   const formData = new FormData();
   formData.append('file', blob, `canvas-upload-${Date.now()}.${ext}`);
 
-  const resp = await fetch(`${uploadBaseUrl}/uploads/images`, {
+  const resp = await corsSafeFetch(`${uploadBaseUrl}/uploads/images`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
@@ -368,12 +687,13 @@ async function uploadToApimart(url: string, signal?: AbortSignal): Promise<strin
 
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => '');
-    throw new Error(`图片上传失败 (${resp.status}): ${errBody.slice(0, 200)}`);
+    throw new Error(`图片上传失败 (${resp.status}): ${redactModelProtocolErrorText(errBody, apiKey).slice(0, 200)}`);
   }
 
-  const result = (await resp.json()) as { url: string };
-  if (!result.url) {
-    throw new Error('图片上传失败: 未返回 url');
+  const result = (await resp.json()) as { url?: unknown };
+  signal?.throwIfAborted();
+  if (typeof result.url !== 'string' || !isRemoteMediaUrl(result.url)) {
+    throw new Error('图片上传失败: 未返回有效公网 URL');
   }
 
   return result.url;
@@ -416,8 +736,9 @@ async function uploadToUguu(
   url: string,
   kind: MediaDataUrlKind,
   signal?: AbortSignal,
+  source?: UploadIdentity['source'],
 ): Promise<string> {
-  const { blob, ext } = await urlToBlob(url, kind, undefined, signal);
+  const { blob, ext } = await urlToBlob(url, kind, undefined, signal, source);
 
   const formData = new FormData();
   formData.append('files[]', blob, `canvas-upload-${Date.now()}.${ext}`);
@@ -521,8 +842,8 @@ function setCachedUrl(key: string, remoteUrl: string) {
 /**
  * 上传单个本地文件到远端图床
  * @param url    本地文件 URL（data: / asset: / file:）
- * @param provider 提供商标识：'apimart' + 图片走 APIMart /uploads/images，其余走 uguu.se
- * @returns 公网可访问的 URL
+ * @param provider 连接身份；MiniMax / ToAPIs / LibAPI 走当前连接上传，APIMart 图片走其图床，其余走 uguu.se
+ * @returns 公网 URL；MiniMax 官方返回仅供该连接生成请求使用的 mm_file 引用
  */
 export async function uploadToRemote(
   url: string,
@@ -533,13 +854,16 @@ export async function uploadToRemote(
   if (!isLocalImageUrl(url)) return url;
   if (signal?.aborted) throw abortReason(signal);
   if (uploadQueueQuarantine) throw new UploadQueueQuarantinedError();
+  const connection = captureUploadConnection(provider);
   if (isMediaDataUrl(url)) {
     await assertMediaDataUrlWithinLimitAsync(url, kind, mediaKindLabel(kind), signal);
   }
-  const key = await cacheKey(url, provider, kind, signal);
+  const identity = await cacheKey(url, provider, kind, connection, signal);
+  assertUploadConnection(provider, connection);
+  const { key } = identity;
 
   // 查缓存（内存 → localStorage），命中且未过期则直接返回
-  const cached = getCachedUrl(key);
+  const cached = identity.cacheable ? getCachedUrl(key) : null;
   if (cached) return cached;
 
   const existing = pendingUploads.get(key);
@@ -554,21 +878,34 @@ export async function uploadToRemote(
     settled: false,
   };
   const pending = runUploadSerially(async (operationSignal) => {
+    assertUploadConnection(provider, connection);
     // 排队期间另一个调用可能已完成上传，再查一次缓存避免重复传输。
-    const queuedCached = getCachedUrl(key);
+    const queuedCached = identity.cacheable ? getCachedUrl(key) : null;
     if (queuedCached) return queuedCached;
 
-    const publicUrl = provider === 'apimart' && kind === 'image'
-      ? await uploadToApimart(url, operationSignal)
-      : await uploadToUguu(url, kind, operationSignal);
+    const upload = getProviderPolicy(resolveProviderCatalogId(provider, connection)).upload;
+    const publicUrl = upload === 'toapis'
+      ? await uploadToToapis(url, connection, kind, operationSignal, identity.source)
+      : upload === 'libapi'
+      ? await uploadToLibapi(url, connection, kind, operationSignal, identity.source)
+      : upload === 'minimax'
+      ? await uploadToMinimax(url, connection, kind, operationSignal, identity.source)
+      : provider === 'apimart' && kind === 'image'
+      ? await uploadToApimart(url, connection, operationSignal, identity.source)
+      : await uploadToUguu(url, kind, operationSignal, identity.source);
 
     // 写入双层缓存（2.5 小时有效期）
-    setCachedUrl(key, publicUrl);
+    operationSignal.throwIfAborted();
+    assertUploadConnection(provider, connection);
+    if (identity.cacheable) setCachedUrl(key, publicUrl);
     return publicUrl;
   }, controller.signal).catch((err) => {
     const sourceType = isMediaDataUrl(url) ? 'data' : url.split(':', 1)[0] || 'unknown';
-    console.error('[uploadService] Upload failed:', { sourceType, sourceLength: url.length, provider }, err);
-    throw err;
+    const currentKey = captureUploadConnection(provider).apiKey;
+    const safeError = redactModelProtocolError(redactModelProtocolError(err, connection.apiKey), currentKey);
+    const reason = safeError instanceof Error ? safeError.message : typeof safeError === 'string' ? safeError : '媒体上传失败';
+    console.error('[uploadService] Upload failed:', { sourceType, sourceLength: url.length, provider, reason });
+    throw safeError instanceof Error || typeof safeError === 'string' ? safeError : new Error(reason);
   }).finally(() => {
     entry.settled = true;
     if (pendingUploads.get(key) === entry) pendingUploads.delete(key);
@@ -584,8 +921,7 @@ export async function uploadToRemote(
  *
  * 分发策略：
  *  - `dataUrl`   → 读取本地文件转 base64 data URL（general 通用协议等）
- *  - `publicUrl` → 上传图床：provider === 'apimart' 且为图片时走 APIMart /uploads/images，
- *                   其余（含 apimart 的视频/音频，以及所有非 apimart Provider）走 uguu.se
+ *  - `publicUrl` → 按当前连接上传；MiniMax 返回 mm_file，其他返回公网 URL
  *
  * @param url     原始 URL（公网原样返回；data: 按目标 mode 保留或上传）
  * @param options.provider 提供商标识，决定上传图床
@@ -616,7 +952,7 @@ export async function resolveMediaReferenceUrl(
       signal,
     );
     consumeMediaDataUrlBudgetBytes(dataUrlBudget, bytes);
-    return url;
+    return kind === 'image' ? prepareReferenceImageDataUrl(url, signal) : url;
   }
 
   if (mode === 'dataUrl') {
@@ -629,7 +965,7 @@ export async function resolveMediaReferenceUrl(
     if (!dataUrl) {
       throw new Error(`无法读取本地${kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '图片'}参考，请重新导入文件`);
     }
-    return dataUrl;
+    return kind === 'image' ? prepareReferenceImageDataUrl(dataUrl, signal) : dataUrl;
   }
 
   // APIMart 的 /uploads/images 只接受图片；uploadToRemote 会让视频/音频走通用图床，

@@ -1,3 +1,6 @@
+/**
+ * shotlistMcpIntegration — 回归测试：MCP 主窗口分镜生产链。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const media = vi.hoisted(() => ({ generate: vi.fn(), persist: vi.fn() }));
 vi.mock('../../../src/services/ai/generateImage', () => ({ generateImage: media.generate }));

@@ -1,3 +1,6 @@
+/**
+ * agentTaskSkillBindings — 回归测试：AgentTaskTimeline Skill bindings。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import AgentTaskTimeline from '../../src/components/chat/AgentTaskTimeline';

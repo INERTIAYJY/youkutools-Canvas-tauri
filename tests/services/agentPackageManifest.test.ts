@@ -1,3 +1,6 @@
+/**
+ * agentPackageManifest — 回归测试：Agent Package Manifest。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   AGENT_PACKAGE_INSTRUCTION_MAX_CHARS,

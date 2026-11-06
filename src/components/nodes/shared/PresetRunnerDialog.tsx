@@ -1,6 +1,7 @@
 /**
  * 收集高级预设运行参数，预览步骤并把确认后的执行请求交给预设序列服务。
  */
+import { useT } from '../../../i18n';
 import Select from '../../shared/Select';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -13,15 +14,17 @@ import type {
   PresetParameterValue,
   UserPreset,
 } from '../../../types';
-import { PRESET_NODE_TYPE_LABELS, getNodeTypeConfig } from '../../../types';
+import { getNodeTypeConfig } from '../../../types';
 import { useAppStore } from '../../../store/useAppStore';
 import {
+  MAX_PRESET_CONCURRENCY,
   createPresetParameterValues,
   validatePresetParameterValues,
   type PresetParameterValues,
 } from '../../../services/presetTemplateService';
 import { isAdvancedPreset, runPresetSequence } from '../../../services/presetSequenceService';
 import PopupCloseButton from '../../shared/PopupCloseButton';
+import { getPresetParameterLabel } from '../../../utils/presetParameterPresentation';
 
 const EMPTY_PARAMETERS: PresetParameterDefinition[] = [];
 // ponytail: 只记在内存，重启清空；要跨会话记住再落到 preset 里
@@ -48,6 +51,7 @@ function ParameterInput({
   value: PresetParameterValue;
   onChange: (value: PresetParameterValue) => void;
 }) {
+  const t = useT();
   if (parameter.type === 'boolean') {
     return (
       <label className="preset-runner-toggle">
@@ -59,7 +63,7 @@ function ParameterInput({
         <span className="preset-runner-toggle-track" aria-hidden="true">
           <span />
         </span>
-        <span>{value === true ? '开启' : '关闭'}</span>
+        <span>{t(value === true ? '开启' : '关闭')}</span>
       </label>
     );
   }
@@ -71,7 +75,7 @@ function ParameterInput({
         value={String(value ?? '')}
         onChange={(selectedOptionValue) => onChange(selectedOptionValue)}
       >
-        <option value="">请选择</option>
+        <option value="">{t('请选择')}</option>
         {(parameter.options ?? []).filter(Boolean).map((option) => (
           <option key={option} value={option}>{option}</option>
         ))}
@@ -84,7 +88,7 @@ function ParameterInput({
       <textarea
         className="preset-manager-input preset-runner-textarea"
         value={String(value ?? '')}
-        placeholder={'输入' + parameter.label}
+        placeholder={t('输入{label}', { label: getPresetParameterLabel(parameter, t) })}
         onChange={(event) => onChange(event.target.value)}
       />
     );
@@ -95,7 +99,7 @@ function ParameterInput({
       className="preset-manager-input"
       type={parameter.type === 'number' ? 'number' : 'text'}
       value={String(value ?? '')}
-      placeholder={'输入' + parameter.label}
+      placeholder={t('输入{label}', { label: getPresetParameterLabel(parameter, t) })}
       onChange={(event) => onChange(event.target.value)}
     />
   );
@@ -110,8 +114,10 @@ function PresetRunnerContent({
   sourceNode: Node<BaseNodeData>;
   onClose: () => void;
 }) {
+  const t = useT();
   const parameters = preset.advanced?.parameters ?? EMPTY_PARAMETERS;
   const steps = preset.advanced?.steps ?? EMPTY_STEPS;
+  const isParallel = preset.advanced?.executionMode === 'parallel';
   const [values, setValues] = useState<PresetParameterValues>(() => {
     const initial = createPresetParameterValues(parameters);
     const remembered = lastRunValues.get(preset.id);
@@ -124,8 +130,12 @@ function PresetRunnerContent({
   });
   const showToast = useAppStore((state) => state.showToast);
   const errors = useMemo(
-    () => validatePresetParameterValues(parameters, values),
-    [parameters, values],
+    () => validatePresetParameterValues(
+      parameters.map((parameter) => ({ ...parameter, label: getPresetParameterLabel(parameter, t) })),
+      values,
+      t,
+    ),
+    [parameters, values, t],
   );
 
   const handleRun = () => {
@@ -175,7 +185,7 @@ function PresetRunnerContent({
               </span>
               <div>
                 <h2 id="preset-runner-title">{preset.name}</h2>
-                <p>将从“{sourceNode.data.label || sourceNode.id}”开始顺序执行</p>
+                <p>{t(isParallel ? '将从“{name}”开始按依赖并发执行' : '将从“{name}”开始顺序执行', { name: sourceNode.data.label || sourceNode.id })}</p>
               </div>
             </div>
             <PopupCloseButton onClick={onClose} />
@@ -185,8 +195,8 @@ function PresetRunnerContent({
             {parameters.length > 0 ? (
               <section className="preset-runner-parameters" aria-labelledby="preset-runner-parameters-title">
                 <div className="preset-runner-section-heading">
-                  <h3 id="preset-runner-parameters-title">运行参数</h3>
-                  <span>{parameters.filter((parameter) => parameter.required).length} 项必填</span>
+                  <h3 id="preset-runner-parameters-title">{t('运行参数')}</h3>
+                  <span>{t('{count} 项必填', { count: parameters.filter((parameter) => parameter.required).length })}</span>
                 </div>
                 <div className="preset-runner-fields">
                   {parameters.map((parameter) => (
@@ -195,8 +205,8 @@ function PresetRunnerContent({
                       key={parameter.id}
                     >
                       <span className="preset-manager-label">
-                        {parameter.label}
-                        {parameter.required ? <em>必填</em> : null}
+                        {getPresetParameterLabel(parameter, t)}
+                        {parameter.required ? <em>{t('必填')}</em> : null}
                       </span>
                       <ParameterInput
                         parameter={parameter}
@@ -214,12 +224,15 @@ function PresetRunnerContent({
 
             <section className="preset-runner-preview" aria-labelledby="preset-runner-preview-title">
               <div className="preset-runner-section-heading">
-                <h3 id="preset-runner-preview-title">执行预览</h3>
-                <span>{steps.length} 次模型生成</span>
+                <h3 id="preset-runner-preview-title">{t('执行预览')}</h3>
+                <span>{t('{count} 次模型生成', { count: steps.length })}</span>
               </div>
+              <p className="ui-hint">{t('执行方式')} · {t(isParallel ? '按依赖并发' : '顺序执行')}</p>
               <div className="preset-runner-step-list">
                 {steps.map((step, index) => {
                   const visual = getNodeTypeConfig(step.nodeType);
+                  const reference = index === 0 || step.referenceSource === 'source'
+                    ? t('触发节点') : t('步骤 {index} 结果', { index });
                   return (
                     <div className="preset-runner-step" key={step.id}>
                       <span className={'preset-runner-step-icon ' + visual.bg + ' ' + visual.color}>
@@ -228,9 +241,9 @@ function PresetRunnerContent({
                       <span className="preset-runner-step-index">{index + 1}</span>
                       <span className="preset-runner-step-name">{step.name}</span>
                       <span className="preset-runner-step-type">
-                        {PRESET_NODE_TYPE_LABELS[step.nodeType].replace('预设', '')}
+                        {t(getNodeTypeConfig(step.nodeType).label)} · {t('参考：{source}', { source: reference })}
                       </span>
-                      {index < steps.length - 1 ? (
+                      {!isParallel && index < steps.length - 1 ? (
                         <Icon className="preset-runner-step-arrow" icon="mdi:arrow-right" width={15} height={15} />
                       ) : null}
                     </div>
@@ -239,15 +252,22 @@ function PresetRunnerContent({
               </div>
               <div className="preset-runner-notice">
                 <Icon icon="mdi:information-outline" width={16} height={16} />
-                <span>任一步失败后会停止执行；已完成节点和结果会保留。</span>
+                <span>
+                  {isParallel ? (
+                    <>
+                      {t('最多同时执行 {count} 步，引用上一步结果的步骤会等待前一步成功。', { count: MAX_PRESET_CONCURRENCY })}
+                      {' '}{t('失败后不再启动新步骤，已开始的步骤会完成，已有结果会保留。')}
+                    </>
+                  ) : t('任一步失败后会停止执行；已完成节点和结果会保留。')}
+                </span>
               </div>
             </section>
           </div>
 
           <footer className="preset-modal-actions preset-runner-actions">
-            <span>每完成一个节点记录一次生成历史</span>
+            <span>{t('每完成一个节点记录一次生成历史')}</span>
             <div>
-              <button type="button" className="preset-modal-btn-secondary" onClick={onClose}>取消</button>
+              <button type="button" className="preset-modal-btn-secondary" onClick={onClose}>{t('取消')}</button>
               <button
                 type="button"
                 className="preset-modal-btn-primary"
@@ -255,7 +275,7 @@ function PresetRunnerContent({
                 onClick={handleRun}
               >
                 <Icon icon="mdi:play" width={15} height={15} />
-                <span>开始执行 {steps.length} 步</span>
+                <span>{t('开始执行 {count} 步', { count: steps.length })}</span>
               </button>
             </div>
           </footer>

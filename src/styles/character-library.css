@@ -1,9 +1,11 @@
+/**
+ * character-library — 角色库与短剧资产的样式定义。
+ */
 .character-library-panel {
   width: min(1200px, calc(100vw - 152px));
   height: min(760px, calc(100vh - 80px));
   min-width: 720px;
   color: var(--theme-text);
-  background: color-mix(in srgb, var(--glass-panel-bg) 94%, var(--theme-surface));
   border-color: var(--theme-border);
 }
 
@@ -12,8 +14,7 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  min-height: 58px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -60,13 +61,12 @@
 }
 
 .character-button-primary {
-  /* 不写 color 会继承面板的 --theme-text：浅色主题下变成深字压深底 */
-  color: #fff;
-  background: var(--node-text);
+  color: var(--brand-contrast, #fff);
+  background: var(--brand);
 }
 
 .character-button-primary:hover {
-  background: var(--node-text-light);
+  background: var(--brand-hover);
 }
 
 .character-button-primary:disabled {
@@ -178,7 +178,7 @@
 .character-library-new:hover {
   color: var(--theme-text);
   background: var(--theme-card);
-  border-color: color-mix(in srgb, var(--node-text-light) 58%, var(--theme-border));
+  border-color: color-mix(in srgb, var(--brand-light) 58%, var(--theme-border));
 }
 
 .character-library-tabs button {
@@ -206,7 +206,7 @@
 
 .character-library-tabs button.is-active {
   color: var(--theme-text);
-  border-bottom-color: var(--node-text-light);
+  border-bottom-color: var(--brand-light);
 }
 
 .character-library-search {
@@ -223,7 +223,7 @@
 }
 
 .character-library-search:focus-within {
-  border-color: color-mix(in srgb, var(--node-text) 65%, var(--theme-border));
+  border-color: color-mix(in srgb, var(--brand) 65%, var(--theme-border));
 }
 
 .character-library-search input {
@@ -264,22 +264,16 @@
   padding: 10px;
 }
 
-/* 悬浮在形象参考右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条。
-   图片按容器高度等比缩小时四周会留 letterbox 空白，所以这里贴的是 justifiedRows
-   算出的图片框（--character-stage-*），而不是 gallery 容器边缘——否则卡片会正好
-   跨在图片与面板底色的分界线上，半深半浅。窄图下卡片保留可读宽度，允许使用
-   图片旁的留白，但始终限制在 gallery 内。 */
+/* 固定在预览区域右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条。
+   位置与尺寸只受预览容器约束，不随参考图片的尺寸或排列变化。 */
 .character-library-dock {
-  --stage-w: min(100%, var(--character-stage-width, 100%));
-  --stage-h: min(100%, var(--character-stage-height, 100%));
-  --dock-width: min(560px, max(320px, calc(var(--stage-w) - 20px)), calc(100% - 20px));
   position: absolute;
-  right: clamp(10px, calc((100% - var(--stage-w)) / 2 + 10px), calc(100% - var(--dock-width) - 10px));
-  bottom: calc((100% - var(--stage-h)) / 2 + 10px);
+  right: 10px;
+  bottom: 10px;
   z-index: 2;
   display: flex;
-  width: var(--dock-width);
-  max-height: calc(var(--stage-h) - 20px);
+  width: min(560px, calc(100% - 20px));
+  max-height: calc(100% - 20px);
   flex-direction: column;
   gap: 8px;
 }
@@ -438,7 +432,7 @@
 .character-node-picker > button:hover {
   color: var(--theme-text);
   background: var(--theme-card);
-  border-color: color-mix(in srgb, var(--node-text-light) 68%, var(--theme-border));
+  border-color: color-mix(in srgb, var(--brand-light) 68%, var(--theme-border));
 }
 
 .character-node-picker > button img {
@@ -467,14 +461,16 @@
   flex-direction: column;
 }
 
-/* 按图片宽高比分行铺满（行宽、行高由 justifiedRows 算好写在 style 上） */
+/* 参考图按预览区高度铺满一行；宽度不足时滚动，浮窗独立固定在 gallery 中。 */
 .character-reference-grid {
   display: flex;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
   gap: 8px;
 }
 
@@ -482,6 +478,7 @@
   display: flex;
   min-height: 0;
   flex: 0 0 auto;
+  margin-inline: auto;
   gap: 8px;
 }
 
@@ -502,11 +499,11 @@
 
 .character-reference-item:hover,
 .character-reference-item.is-selected {
-  border-color: color-mix(in srgb, var(--node-text-light) 68%, var(--theme-border));
+  border-color: color-mix(in srgb, var(--brand-light) 68%, var(--theme-border));
 }
 
 .character-reference-item.is-selected {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--node-text) 48%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 48%, transparent);
 }
 
 /* 格子宽高比就是图片宽高比，cover 只吸收亚像素误差，不会真的裁到内容 */
@@ -560,7 +557,6 @@
   flex: 0 0 auto;
   align-items: stretch;
   border-top: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--theme-bg) 34%, transparent);
 }
 
 .character-library-strip-label {
@@ -583,6 +579,7 @@
 }
 
 .character-library-strip-list {
+  position: relative;
   display: flex;
   min-width: 0;
   flex: 1;
@@ -592,7 +589,8 @@
   padding: 10px 12px;
 }
 
-.character-library-strip-list > button {
+.character-library-strip-list > button,
+.character-dock-floating {
   display: flex;
   width: 68px;
   flex: 0 0 auto;
@@ -604,7 +602,38 @@
   background: transparent;
   border: 1px solid transparent;
   border-radius: 7px;
-  cursor: var(--cursor-pointer, pointer);
+  cursor: var(--cursor-grab, grab);
+  user-select: none;
+  touch-action: pan-y;
+}
+
+.character-library-strip-list.is-reordering,
+.character-library-strip-list.is-reordering > button {
+  cursor: var(--cursor-grabbing, grabbing);
+}
+
+.character-library-strip-list > button.is-drag-placeholder {
+  opacity: 0.22;
+  border-style: dashed;
+  border-color: var(--theme-border);
+}
+
+.character-library-strip-list > button:focus-visible {
+  outline: 2px solid var(--brand-light);
+  outline-offset: 2px;
+}
+
+.character-dock-floating {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 270;
+  pointer-events: none;
+  color: var(--theme-text);
+  background: var(--theme-card);
+  border-color: var(--theme-border);
+  box-shadow: var(--glass-shadow-floating);
+  will-change: transform;
 }
 
 .character-library-strip-list > button:hover,
@@ -615,10 +644,11 @@
 }
 
 .character-library-strip-list > button.is-selected {
-  border-color: color-mix(in srgb, var(--node-text-light) 68%, var(--theme-border));
+  border-color: color-mix(in srgb, var(--brand-light) 68%, var(--theme-border));
 }
 
-.character-library-strip-list > button > span:last-child {
+.character-library-strip-list > button > span:last-child,
+.character-dock-floating > span:last-child {
   width: 100%;
   overflow: hidden;
   font-size: 10px;
@@ -768,7 +798,7 @@
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
-  accent-color: var(--node-text);
+  accent-color: var(--brand);
 }
 
 .character-dialog {
@@ -843,7 +873,7 @@
 .character-field input:focus,
 .character-field textarea:focus,
 .character-field select:focus {
-  border-color: color-mix(in srgb, var(--node-text) 65%, var(--theme-border));
+  border-color: color-mix(in srgb, var(--brand) 65%, var(--theme-border));
 }
 
 .character-dialog-references {
@@ -904,8 +934,8 @@
 }
 
 .character-dialog-reference-strip > button.is-selected {
-  border-color: var(--node-text-light);
-  box-shadow: inset 0 0 0 1px var(--node-text);
+  border-color: var(--brand-light);
+  box-shadow: inset 0 0 0 1px var(--brand);
 }
 
 .character-dialog-reference-strip img {
@@ -932,7 +962,7 @@
 
 .character-reference-add-empty:hover {
   color: var(--theme-text-secondary);
-  border-color: var(--node-text-light);
+  border-color: var(--brand-light);
 }
 
 .character-reference-editor {
@@ -989,8 +1019,8 @@
 }
 
 .character-reference-actions > button.is-active {
-  color: var(--node-text-light);
-  border-color: color-mix(in srgb, var(--node-text-light) 58%, var(--theme-border));
+  color: var(--brand-light);
+  border-color: color-mix(in srgb, var(--brand-light) 58%, var(--theme-border));
 }
 
 .character-reference-actions > button.is-danger:hover {
@@ -1041,7 +1071,7 @@
 
 .character-crop-controls input[type='range'] {
   width: 100%;
-  accent-color: var(--node-text);
+  accent-color: var(--brand);
 }
 
 .character-dialog-footer {

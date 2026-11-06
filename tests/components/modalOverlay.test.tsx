@@ -1,3 +1,6 @@
+/**
+ * modalOverlay — 回归测试：ModalOverlay 面板动画。
+ */
 import { describe, expect, it } from 'vitest';
 import { panelMotion } from '../../src/utils/motion';
 

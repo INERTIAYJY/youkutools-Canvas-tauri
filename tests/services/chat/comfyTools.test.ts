@@ -1,3 +1,6 @@
+/**
+ * comfyTools — 回归测试：ComfyUI assistant tools。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentTask } from '../../../src/types/agent';
 import type { AgentToolContext } from '../../../src/services/chat/toolRegistry';

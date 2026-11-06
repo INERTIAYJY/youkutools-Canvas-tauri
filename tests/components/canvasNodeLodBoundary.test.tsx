@@ -1,3 +1,6 @@
+/**
+ * canvasNodeLodBoundary — 回归测试：canvas whole-node LOD boundary。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { NodeProps } from '@xyflow/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

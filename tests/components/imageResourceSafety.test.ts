@@ -1,3 +1,6 @@
+/**
+ * imageResourceSafety — 回归测试：image editor resource budgets。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_EDITOR_OUTPUT_RGBA_BYTES,

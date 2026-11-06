@@ -3,7 +3,7 @@
  *
  * 渲染用户 / 助手 / 系统消息，含头像、状态指示器、生成图片 / 视频。
  */
-import { memo, useState } from 'react';
+import { memo, useState, useSyncExternalStore } from 'react';
 import { Icon } from '@iconify/react';
 import type { ChatMessage } from '../../types/chat';
 import type { AgentTask } from '../../types/agent';
@@ -12,12 +12,21 @@ import AgentTaskTimeline, { type AgentTaskControls } from './AgentTaskTimeline';
 import ChatReferenceText, { type ChatReferenceHandlers } from './ChatReferenceText';
 import ChatMarkdown from './ChatMarkdown';
 import SourceList from './SourceList';
+import ReasoningPanel from './ReasoningPanel';
+import AssistantActivity from './AssistantActivity';
 import { useT } from '../../i18n';
 import ViewportImage from '../shared/ViewportImage';
 import ViewportVideo from '../shared/ViewportVideo';
+import ViewportAudio from '../shared/ViewportAudio';
+import ChatImageAttachments from './ChatImageAttachments';
+import { parseChatImageReferences, stripChatImageReferences } from '../../services/chat/chatImageReferenceService';
+import { getRecoverableMessageTask } from '../../services/ai/generationRuntime';
+import { subscribeMediaTasks } from '../../services/pollManager';
+import { useAppStore } from '../../store/useAppStore';
 
 interface MessageBubbleProps extends ChatReferenceHandlers {
   message: ChatMessage;
+  imagePreviewUrls?: Record<string, string>;
   agentTask?: AgentTask;
   onAddToCanvas?: (messageId: string) => void;
   /** 产物落盘失败时重试保存；未传入则不展示重试入口。 */
@@ -36,6 +45,7 @@ function formatMessageTime(timestamp: number): string {
 
 function MessageBubble({
   message,
+  imagePreviewUrls,
   agentTask,
   onAddToCanvas,
   onRetryMediaSave,
@@ -52,6 +62,11 @@ function MessageBubble({
   const [savingMedia, setSavingMedia] = useState(false);
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+  const projectId = useAppStore((state) => state.currentProjectId);
+  const recoveryIdentity = useSyncExternalStore(subscribeMediaTasks, () => {
+    const task = getRecoverableMessageTask(message.id, projectId);
+    return task ? `${task.attemptId ?? ''}:${task.taskId}:${task.mediaRecoveryState ?? ''}:${task.mediaSubmissionUncertain ?? false}:${task.submitted}` : '';
+  }, () => '');
 
   if (isSystem) {
     return (
@@ -68,18 +83,31 @@ function MessageBubble({
   const hasImage = showMediaInChat && mediaResult?.kind === 'image';
   const hasVideo = showMediaInChat && mediaResult?.kind === 'video';
   const hasAudio = showMediaInChat && mediaResult?.kind === 'audio';
-  const isGenerating = message.mediaStatus === 'queued' || message.mediaStatus === 'generating';
+  const recoveryTask = getRecoverableMessageTask(message.id, projectId);
+  const isGenerating = (message.mediaStatus === 'queued' || message.mediaStatus === 'generating')
+    && !recoveryTask?.mediaRecoveryState;
+  const taskUnknown = message.mediaStatus === 'submit_unknown'
+    || !!recoveryTask && (!recoveryTask.taskId || !recoveryTask.submitted || !!recoveryTask.mediaSubmissionUncertain || recoveryTask.mediaRecoveryState === 'submit_unknown')
+    || !!onRetryMediaSave && message.mediaStatus === 'paused' && !recoveryTask && !mediaResult;
+  const mediaRecoverable = !isGenerating && (!!recoveryIdentity || !onRetryMediaSave && message.mediaStatus === 'paused'
+    || taskUnknown || !!mediaResult?.taskReceipt && mediaResult.persistence === 'failed');
   // 生成成功 ≠ 已保存到项目：落盘失败时 url 只是临时地址，重启后会失效
   const mediaUnsaved = !isGenerating && mediaResult?.persistence === 'failed';
   const showTimeline = !!agentTask
     && !!agentControls
     && (agentTask.steps.length > 0 || agentTask.status !== 'completed');
+  const taskCanWork = !agentTask || ['queued', 'planning', 'running', 'waiting_tool'].includes(agentTask.status);
+  const isActive = taskCanWork && ['queued', 'parsing', 'streaming'].includes(message.status);
+  const isReasoningActive = isActive && !!message.reasoning && message.status === 'streaming' && message.activity === 'planning';
+  const isCompressing = !isUser && isActive && message.activity === 'compressing';
   // 助手正在响应但任务时间线尚未建立时，先给出明确的活动状态。
   const isThinking = !isUser
     && !message.content
     && !showTimeline
     && !isGenerating
-    && ['queued', 'parsing', 'streaming'].includes(message.status);
+    && !isReasoningActive
+    && !isCompressing
+    && isActive;
   const canRegenerate = !isUser
     && !!message.content
     && !!regeneratePrompt
@@ -107,10 +135,10 @@ function MessageBubble({
   };
 
   return (
-    <div className={`chat-message-bubble group flex items-end gap-1.5 ${isUser ? 'justify-end chat-message-user' : 'justify-start chat-message-assistant'}`}>
+    <div className={`chat-message-bubble group flex items-start gap-2 ${isUser ? 'justify-end chat-message-user' : 'justify-start chat-message-assistant'}`}>
       {/* Assistant avatar */}
       {!isUser && (
-        <MascotAvatar size={20} className="chat-message-avatar chat-message-avatar-assistant shrink-0 mb-0.5" />
+        <MascotAvatar size={20} className="chat-message-avatar chat-message-avatar-assistant mt-1.5 shrink-0" />
       )}
 
       {/* 悬停时间戳（用户消息在左侧） */}
@@ -121,30 +149,24 @@ function MessageBubble({
       )}
 
       <div
-        className={`chat-message-content max-w-[88%] text-[13px] leading-relaxed
+        className={`chat-message-content min-w-0 text-[13px] leading-relaxed
                     ${isUser
-                      ? 'rounded-2xl rounded-br-sm bg-indigo-500/15 px-3.5 py-2 text-canvas-text'
-                      : 'min-w-0 px-1 py-1 text-canvas-text'
+                      ? 'max-w-[88%] rounded-2xl rounded-br-sm bg-canvas-hover/60 px-3 py-2 text-canvas-text'
+                      : 'flex-1 py-1 text-canvas-text'
                     }`}
       >
         {isThinking && (
-          <div
-            className="flex min-h-8 w-fit items-center gap-2 px-1 py-1.5 text-[12px] text-canvas-text-secondary"
-            role="status"
-            aria-live="polite"
-          >
-            <Icon
-              icon="mdi:loading"
-              width="15"
-              className="shrink-0 animate-spin text-canvas-text-muted motion-reduce:animate-none"
-            />
-            <span>{t('正在分析请求')}</span>
-          </div>
+          <AssistantActivity label={t(message.activity === 'connecting' ? '正在连接模型' : '正在分析请求')} />
         )}
+        {!isUser && message.reasoning && <ReasoningPanel content={message.reasoning} truncated={message.reasoningTruncated}
+          active={isReasoningActive} />}
+        {isCompressing && !showTimeline && <AssistantActivity label={t('正在压缩上下文')} />}
+        {!isUser && message.responseError && <div role="alert" className="ui-alert ui-alert--danger mb-2 break-words">{message.responseError}</div>}
+        {isUser && <ChatImageAttachments images={parseChatImageReferences(message.content)} previews={imagePreviewUrls} />}
         {message.content && (isUser ? (
           <div className="whitespace-pre-wrap break-words">
             <ChatReferenceText
-              value={message.content}
+              value={stripChatImageReferences(message.content)}
               compact
               onNodeActivate={onNodeActivate}
               onNodeHover={onNodeHover}
@@ -152,26 +174,26 @@ function MessageBubble({
             />
           </div>
         ) : (
-          <div className="rounded-2xl rounded-bl-sm border border-canvas-border/80 bg-canvas-card/80 px-3.5 py-2.5 text-canvas-text shadow-sm shadow-black/10 backdrop-blur-sm">
+          <div className="chat-message-answer min-w-0 text-canvas-text">
             <ChatMarkdown
               value={message.content}
               onNodeActivate={onNodeActivate}
               onNodeHover={onNodeHover}
               onModelActivate={onModelActivate}
             />
+            {isActive && message.status === 'streaming' && (!message.activity || message.activity === 'responding') && (
+              <span className="chat-message-status chat-message-status-streaming ml-1 inline-block h-3.5 w-1.5 animate-pulse rounded-full bg-canvas-text-secondary align-text-bottom motion-reduce:animate-none" aria-hidden="true" data-performance-motion="essential" />
+            )}
           </div>
         ))}
 
         {showTimeline && agentTask && agentControls && (
-          <AgentTaskTimeline task={agentTask} {...agentControls} />
+          <AgentTaskTimeline task={agentTask} {...agentControls} activity={message.activity} activityStartedAt={message.activityStartedAt} animateActivity={!isReasoningActive} />
         )}
 
         {/* ── 生成中状态 ── */}
         {isGenerating && (
-          <div className="chat-message-media-generating flex items-center gap-2 mt-2 text-[11px] text-canvas-text-muted">
-            <span className="inline-block w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-            {t('正在生成媒体内容...')}
-          </div>
+          <AssistantActivity className="chat-message-media-generating mt-2" label={t('正在生成媒体内容...')} active={taskCanWork && !showTimeline} />
         )}
 
         {/* ── 图片结果 ── */}
@@ -217,9 +239,9 @@ function MessageBubble({
               />
               {mediaResult.audioPurpose === 'music' ? t('生成的音乐') : t('生成的语音')}
             </div>
-            <audio src={mediaResult.url} controls className="h-9 w-full" preload="metadata">
+            <ViewportAudio src={mediaResult.url} controls className="h-9 w-full" preload="metadata">
               {t('您的浏览器不支持音频播放')}
-            </audio>
+            </ViewportAudio>
             {mediaResult.prompt && (
               <p className="mt-1.5 text-[11px] leading-[17px] text-canvas-text-muted">
                 {mediaResult.prompt}
@@ -227,7 +249,18 @@ function MessageBubble({
             )}
           </div>
         )}
-        {mediaUnsaved && (
+        {mediaRecoverable && (
+          <div className="ui-card mt-2 flex flex-wrap items-center gap-2 p-2 text-xs" role="status">
+            <span className="min-w-0 flex-1 text-canvas-text-secondary">
+              {taskUnknown ? t('提交状态未知，请到对应平台核对，避免重复生成。') : t('任务已保留，可继续查询或保存原结果。')}
+            </span>
+            {onRetryMediaSave && !taskUnknown ? (
+              <button type="button" className="ui-btn ui-btn--sm" disabled={savingMedia}
+                onClick={() => void retryMediaSave()}>{savingMedia ? t('处理中') : t('继续查询 / 保存')}</button>
+            ) : !onRetryMediaSave && <span className="text-canvas-text-muted">{t('请回主窗口继续处理此任务')}</span>}
+          </div>
+        )}
+        {mediaUnsaved && !mediaRecoverable && (
           <div className="chat-message-media-unsaved mt-2 flex flex-wrap items-start gap-1.5 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[11px] text-amber-300">
             <Icon icon="mdi:content-save-alert-outline" width="13" height="13" className="mt-0.5 shrink-0" />
             <span className="min-w-0 flex-1">
@@ -251,7 +284,7 @@ function MessageBubble({
             )}
           </div>
         )}
-        {message.mediaStatus === 'failed' && (
+        {message.mediaStatus === 'failed' && !mediaRecoverable && (
           <div className="chat-message-media-error flex items-start gap-1 mt-2 text-[11px] text-red-400">
             <Icon icon="mdi:alert-circle-outline" width="13" height="13" className="mt-0.5 shrink-0" />
             <span>{t('媒体生成失败：{error}', { error: message.mediaError || t('未知错误') })}</span>
@@ -269,7 +302,7 @@ function MessageBubble({
             {t('已添加到画布')}
           </div>
         )}
-        {message.canvasStatus === 'failed' && (
+        {message.canvasStatus === 'failed' && !mediaRecoverable && (
           <div className="mt-2 flex items-start gap-1 text-[11px] text-red-400">
             <Icon icon="mdi:vector-square-remove" width="13" className="mt-0.5 shrink-0" />
             <span>{t('节点创建失败：{error}', { error: message.canvasError || t('未知错误') })}</span>
@@ -291,9 +324,6 @@ function MessageBubble({
         )}
 
         {/* Status indicator */}
-        {message.status === 'streaming' && !!message.content && (
-          <span className="chat-message-status chat-message-status-streaming inline-block w-1.5 h-3.5 bg-indigo-400/80 animate-pulse ml-1 align-text-bottom rounded-full" />
-        )}
         {message.status === 'error' && (
           <div className="chat-message-status chat-message-status-error flex items-center gap-1 mt-1 text-[11px] text-red-400">
             <Icon icon="mdi:alert-circle" width="12" height="12" />

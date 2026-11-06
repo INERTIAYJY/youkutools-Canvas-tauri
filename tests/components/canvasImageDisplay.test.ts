@@ -1,9 +1,16 @@
+/**
+ * canvasImageDisplay — 回归测试：canvas image preparation。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCanvasDisplayScheduler } from '../../src/services/canvasDisplayScheduler';
 import { canvasImageTier, createCanvasImageDisplay, prepareCanvasImage, type DisplayImageLease } from '../../src/components/nodes/shared/image/canvasImageDisplay';
 
-const acquire = vi.hoisted(() => vi.fn());
-vi.mock('../../src/components/nodes/shared/image/canvasImagePreviewCache', () => ({ acquireCanvasImagePreview: acquire }));
+const { acquire, cached } = vi.hoisted(() => ({ acquire: vi.fn(), cached: vi.fn() }));
+const native = vi.hoisted(() => ({ matches: vi.fn(() => false), acquire: vi.fn() }));
+vi.mock('../../src/services/comfyImageSource', () => ({ shouldLoadNativeComfyImage: native.matches, acquireComfyImageSource: native.acquire }));
+vi.mock('../../src/components/nodes/shared/image/canvasImagePreviewCache', () => ({
+  acquireCanvasImagePreview: acquire, acquireCachedCanvasImagePreview: cached,
+}));
 
 function fixture() {
   let id = 0;
@@ -31,7 +38,7 @@ function fixture() {
   };
   return { queue, queueForImage, prepare, publish, display, update, frames, tick, settle };
 }
-beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); });
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); cached.mockReset().mockReturnValue(null); native.matches.mockReset().mockReturnValue(false); native.acquire.mockReset(); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); acquire.mockReset(); });
 
 describe('canvas image preparation', () => {
@@ -58,13 +65,20 @@ describe('canvas image preparation', () => {
     expect(complete).toHaveBeenCalledWith(lease); expect(lease.release).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
-  it('releases a failed thumbnail and decodes the original fallback', async () => {
+  it('releases a failed thumbnail without decoding the original fallback', async () => {
     const pending = images(); const release = vi.fn(); acquire.mockResolvedValue({ src: 'blob:bad', release });
     const result = prepareCanvasImage('asset://source', 512, new AbortController().signal);
+    const rejected = expect(result).rejects.toThrow('Image preparation failed');
     await vi.advanceTimersByTimeAsync(0); pending[0].onerror?.(); await vi.advanceTimersByTimeAsync(0);
-    expect(release).toHaveBeenCalledOnce(); expect(pending[1].src).toBe('asset://source');
-    pending[1].onload?.(); expect((await result).src).toBe('asset://source');
-    expect(pending[1].decode).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+    await rejected;
+    expect(release).toHaveBeenCalledOnce(); expect(pending).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('does not start image decoding when the preview is unavailable or over budget', async () => {
+    const pending = images();
+    acquire.mockResolvedValue(null);
+    await expect(prepareCanvasImage('asset://huge', 512, new AbortController().signal)).rejects.toThrow('预览暂不可用');
+    expect(pending).toHaveLength(0);
   });
   it('cancels a pending decode and returns its thumbnail lease', async () => {
     const pending = images(); const release = vi.fn(); acquire.mockResolvedValue({ src: 'blob:pending', release });
@@ -75,15 +89,132 @@ describe('canvas image preparation', () => {
     expect(release).toHaveBeenCalledOnce(); expect(pending[0].removeAttribute).toHaveBeenCalledWith('src');
     expect(vi.getTimerCount()).toBe(0);
   });
-  it('bounds a stalled original and lets the actual image expose its error or retry UI', async () => {
+  it('bounds a stalled original without scheduling a second decode', async () => {
     images(); const result = prepareCanvasImage('asset://stalled', 0, new AbortController().signal);
+    const rejected = expect(result).rejects.toThrow('Image preparation timed out');
     await vi.advanceTimersByTimeAsync(15_000);
-    expect((await result).src).toBe('asset://stalled'); expect(acquire).not.toHaveBeenCalled();
+    await rejected; expect(acquire).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it('prepares a Comfy original through a blob lease and releases failed decodes without a raw URL retry', async () => {
+    const pending = images();
+    native.matches.mockReturnValue(true);
+    const lease = { src: 'blob:comfy-original', release: vi.fn() };
+    native.acquire.mockResolvedValue(lease);
+    const source = 'http://127.0.0.1:8188/view?filename=result.png';
+    const result = prepareCanvasImage(source, 0, new AbortController().signal);
+    const rejected = expect(result).rejects.toThrow('Image preparation failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pending[0].src).toBe(lease.src);
+    pending[0].onerror?.(); await rejected;
+    expect(lease.release).toHaveBeenCalledOnce();
+    expect(pending).toHaveLength(1);
+    expect(acquire).not.toHaveBeenCalled();
   });
 });
 
 describe('canvas image display transitions', () => {
+  it('shows only an existing preview on first entry during interaction and queues a later upgrade', async () => {
+    const f = fixture();
+    const lease = { src: 'blob:cached-small', maxEdge: 256, release: vi.fn() };
+    cached.mockReturnValueOnce(lease);
+    f.queue.interaction(true);
+    f.update(.4);
+    expect(cached).toHaveBeenCalledWith('asset://source.png', 512, expect.any(AbortSignal), 'a');
+    expect(f.publish).toHaveBeenCalledExactlyOnceWith(lease);
+    await f.tick(1000);
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(lease.release).not.toHaveBeenCalled();
+    f.queue.interaction(false);
+    await f.settle();
+    expect(f.prepare.mock.lastCall?.[1]).toBe(512);
+    f.display.committed(f.publish.mock.lastCall![0]);
+    expect(lease.release).toHaveBeenCalledOnce();
+    f.display.dispose();
+  });
+
+  it('does not prepare a matching cached tier and releases it when a strict-mode effect is disposed', async () => {
+    const f = fixture();
+    const lease = { src: 'blob:cached', maxEdge: 256, release: vi.fn() };
+    cached.mockReturnValueOnce(lease);
+    f.queue.interaction(true);
+    f.update(.2);
+    expect(f.publish).toHaveBeenCalledExactlyOnceWith(lease);
+    f.display.dispose();
+    f.display.dispose();
+    await f.tick(1000);
+    expect(lease.release).toHaveBeenCalledOnce();
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it('uses a cached small preview while an initial original request still waits for the interaction queue', async () => {
+    const f = fixture();
+    const lease = { src: 'blob:cached', maxEdge: 512, release: vi.fn() };
+    cached.mockReturnValueOnce(lease);
+    f.queue.interaction(true);
+    f.update(2);
+    expect(f.publish).toHaveBeenCalledExactlyOnceWith(lease);
+    expect(f.prepare).not.toHaveBeenCalled();
+    f.queue.interaction(false);
+    await f.settle();
+    expect(f.prepare.mock.lastCall?.[1]).toBe(0);
+    f.display.dispose();
+    expect(lease.release).toHaveBeenCalledOnce();
+  });
+
+  it.each([1, 1.5, 2])('caps only performance previews at DPR %s, keeping the image until the replacement commits', async (dpr) => {
+    const f = fixture();
+    f.display.viewport(3, 1024, 768, dpr);
+    await f.settle();
+    expect(f.prepare.mock.calls[0][1]).toBe(0);
+    const originalSignal = f.prepare.mock.calls[0][2];
+    f.queue.interaction(true);
+    f.display.viewport(3, 1024, 768, dpr, true);
+    await f.tick(1000);
+    expect(f.prepare).toHaveBeenCalledOnce();
+    expect(originalSignal.aborted).toBe(false);
+    f.queue.interaction(false); await f.settle();
+    expect(f.prepare.mock.calls[1][1]).toBe(512);
+    expect(originalSignal.aborted).toBe(false);
+    f.display.committed(f.publish.mock.calls[1][0]);
+    expect(originalSignal.aborted).toBe(true);
+    // 同一模式内的大倍率往返不再请求原图，也不重复生成最高档。
+    for (const zoom of [2, 5, 1.2, 3]) f.display.viewport(zoom, 1024, 768, dpr, true);
+    await f.settle(); expect(f.prepare).toHaveBeenCalledTimes(2);
+    f.display.viewport(3, 1024, 768, dpr, false); await f.settle();
+    expect(f.prepare.mock.calls[2][1]).toBe(0);
+    f.display.dispose();
+  });
+
+  it('keeps small tiers and error fallback in performance mode, cancelling obsolete mode changes', async () => {
+    const f = fixture();
+    for (const [zoom, edge] of [[0.2, 256], [0.4, 512], [0.8, 512]]) {
+      f.display.viewport(zoom, 512, 288, 2, true); await f.settle();
+      expect(f.prepare.mock.lastCall?.[1]).toBe(edge);
+    }
+    f.display.viewport(3, 512, 288, 2, false);
+    f.display.viewport(3, 512, 288, 2, true);
+    await f.settle(); expect(f.prepare).toHaveBeenCalledTimes(2);
+    f.display.original(); await f.settle();
+    expect(f.prepare.mock.lastCall?.[1]).toBe(0);
+    f.display.dispose();
+  });
+
+  it('caps the 1024 tier as well as automatic original resolution without rejecting an explicit original request', async () => {
+    const f = fixture();
+    for (const screenEdge of [600, 1024, 1800]) {
+      f.display.viewport(1, screenEdge, 300, 1, true);
+      await f.settle();
+      expect(f.prepare.mock.lastCall?.[1]).toBe(512);
+    }
+    expect(f.prepare).toHaveBeenCalledOnce();
+    f.display.original(); await f.settle();
+    expect(f.prepare.mock.lastCall?.[1]).toBe(0);
+    f.display.viewport(1, 600, 300, 1, false); await f.settle();
+    expect(f.prepare.mock.lastCall?.[1]).toBe(1024);
+    f.display.dispose();
+  });
+
   it.each([1, 1.5, 2])('holds tiers around every boundary at DPR %s and crosses outside hysteresis', (dpr) => {
     for (const [edge, next] of [[256, 512], [512, 1024], [1024, 0]]) {
       let tier = edge;

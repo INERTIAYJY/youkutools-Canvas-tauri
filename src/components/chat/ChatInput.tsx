@@ -3,29 +3,49 @@
  *
  * 常驻对话模型选择器；媒体模型通过轻量 @model mention 按轮覆盖。
  */
-import { useRef, useEffect, useCallback, useMemo, useState } from 'react';
+import { lazy, Suspense, useRef, useEffect, useCallback, useMemo, useState, useSyncExternalStore } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Icon } from '@iconify/react';
-import { convertFileSrc } from '@tauri-apps/api/core';
-import AnimatedButton from '../shared/AnimatedButton';
+import LazyLoadBoundary from '../shared/LazyLoadBoundary';
+import SendShortcutMenu from '../shared/SendShortcutMenu';
 import ModelSelector from '../nodes/shared/ModelSelector';
 import ContextUsageIndicator from './ContextUsageIndicator';
-import ChatComposerEditor, { type ChatComposerEditorHandle } from './ChatComposerEditor';
+import ChatComposerEditor, { getChatComposerNodeIds, type ChatComposerEditorHandle, type ChatComposerReference } from './ChatComposerEditor';
+import ChatImageAttachments from './ChatImageAttachments';
+import type { ChatImageReference } from '../../types/chat';
+import { parseChatImageReferences } from '../../services/chat/chatImageReferenceService';
 import MentionPicker, { type MentionPickerItem } from '../shared/MentionPicker';
 import { resolveDramaMentionItems } from '../nodes/shared/mentionEditorSources';
-import { bestNodeThumb } from '../nodes/shared/mentionEditorDom';
-import type { BaseNodeData, GeneralModelConfig, ModelGroup, ModelOption } from '../../types';
+import { findDramaAsset, listGlobalDramaAssets, resolveDramaAssetImageRef } from '../../services/dramaAssetPrompt';
+import { buildDramaMentionId } from '../../types/dramaAssets';
+import {
+  bestNodeThumb, buildChipEl, buildDramaChipEl, buildSkillChipEl, getNodeMetaMap,
+  resolveDramaChipPresentation, syncMediaReferenceLabels,
+} from '../nodes/shared/mentionEditorDom';
+import { buildReferenceChipEl } from '../shared/referenceChipDom';
+import type { GeneralModelConfig, ModelGroup, ModelOption, PromptSubmitShortcut } from '../../types';
 import type { SkillPickerOption } from '../../types/agentPackage';
 import type { ContextUsageStat } from '../../services/chat/contextManager';
 import { useAppStore } from '../../store/useAppStore';
-import { useT } from '../../i18n';
+import { createCanvasNodeDataSelector } from '../../utils/canvasNodeDataSelector';
+import { t as translate, useT } from '../../i18n';
 import { projectSkillPickerOptions } from '../../services/chat/skillCatalog';
 import {
   type MediaModelOption,
 } from '../nodes/shared/defaultModels';
 import type { LocalFileGrantSummary } from '../../services/chat/fileGrantService';
+import { getPerformanceModeEnabled, subscribePerformanceMode } from '../../services/performanceModeRuntime';
+import { getPromptSubmitShortcutHint } from '../../utils/promptSubmitShortcut';
 
-const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const MetalFx = lazy(() => import('../nodes/shared/PolishMetalFx'));
+// 独立窗口的外观由窗口运行时投影到 DOM，不从本窗口默认 Store 配置推断。
+const getInputTheme = (): 'dark' | 'light' => document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+function subscribeInputTheme(onChange: () => void) {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  return () => observer.disconnect();
+}
+
 type ReferenceScope = 'all' | 'nodes' | 'models' | 'assets';
 type PickerTab = 'nodes' | 'assets' | 'models';
 const PICKER_TAB_ORDER: readonly PickerTab[] = ['nodes', 'assets', 'models'];
@@ -35,7 +55,7 @@ type ReferenceSuggestion =
   | { key: string; kind: 'drama'; item: DramaMentionItem }
   | { key: string; kind: 'model'; model: MediaModelOption };
 
-const DRAMA_KIND_LABELS: Record<string, string> = { character: '角色', scene: '场景', prop: '道具' };
+const DRAMA_KIND_LABELS: Record<string, string> = { character: '角色', scene: '场景', prop: '道具', weapon: '武器' };
 const TAB_NOUNS: Record<PickerTab, string> = { nodes: '节点', assets: '资产', models: '模型' };
 
 const MEDIA_KIND_LABELS: Record<string, string> = { image: '图片', video: '视频', audio: '音频' };
@@ -47,6 +67,26 @@ const MEDIA_KIND_ICONS: Record<string, string> = {
 
 const REFERENCE_SUGGESTION_LIST_ID = 'chat-reference-suggestions';
 const SKILL_SUGGESTION_LIST_ID = 'chat-skill-suggestions';
+
+// 主/独立助手复用节点胶囊；构造时读取当前镜像，避免画布更新重建输入 DOM、打断光标。
+const CHAT_REFERENCE_PRESENTATION = {
+  createElement: (reference: ChatComposerReference) => {
+    if (reference.kind === 'node') {
+      return buildChipEl(reference.id, reference.label, getNodeMetaMap(useAppStore.getState().nodes));
+    }
+    if (reference.kind === 'skill') return buildSkillChipEl(reference.id, reference.label);
+    if (reference.kind === 'drama') {
+      const presentation = resolveDramaChipPresentation(reference.id);
+      return buildDramaChipEl(reference.id, reference.label, presentation.kind, presentation.thumb);
+    }
+    return buildReferenceChipEl(document, {
+      label: reference.label,
+      kind: reference.kind === 'image' ? 'image' : 'text',
+      iconText: reference.kind === 'image' ? 'I' : 'M',
+    });
+  },
+  synchronize: (root: HTMLDivElement) => syncMediaReferenceLabels(root, getNodeMetaMap(useAppStore.getState().nodes)),
+};
 
 interface SkillPickerGroup {
   id: string;
@@ -98,20 +138,6 @@ function parseReferenceQuery(query: string): { scope: ReferenceScope; query: str
   return { scope: 'all', query };
 }
 
-function resolveNodeThumbnail(data: BaseNodeData): string | undefined {
-  if (data.imageUrl) {
-    if (data.filePath && IS_TAURI) {
-      try {
-        return convertFileSrc(data.filePath);
-      } catch {
-        return data.thumbnailUrl || data.imageUrl;
-      }
-    }
-    return data.thumbnailUrl || data.imageUrl;
-  }
-  return data.thumbnailUrl;
-}
-
 function fuzzyMatchModel(model: MediaModelOption, rawQuery: string): boolean {
   const query = rawQuery.trim().toLocaleLowerCase().replace(/\s+/g, '');
   if (!query) return true;
@@ -156,9 +182,15 @@ interface ChatInputProps {
   inputValue: string;
   onInputChange: (value: string) => void;
   onSend: () => void;
+  submitShortcut?: PromptSubmitShortcut;
+  onSubmitShortcutChange?: (value: PromptSubmitShortcut) => void;
+  shortcutSettingsDisabled?: boolean;
   hasActiveTask?: boolean;
   onInterject?: () => void;
   localFileGrants?: LocalFileGrantSummary[];
+  imageDrafts?: ChatImageReference[];
+  imagePreviewUrls?: Record<string, string>;
+  onRemoveImage?: (fileName: string) => void;
   onAuthorizeLocalFiles?: () => void;
   onRevokeLocalFile?: (grantId: string) => void;
   /** 当前会话上下文占用（估算）；无会话时为 null */
@@ -180,9 +212,15 @@ export default function ChatInput({
   inputValue,
   onInputChange,
   onSend,
+  submitShortcut = 'enter',
+  onSubmitShortcutChange,
+  shortcutSettingsDisabled = false,
   hasActiveTask = false,
   onInterject,
   localFileGrants = [],
+  imageDrafts = [],
+  imagePreviewUrls,
+  onRemoveImage,
   onAuthorizeLocalFiles,
   onRevokeLocalFile,
   contextUsage,
@@ -193,6 +231,10 @@ export default function ChatInput({
   const t = useT();
   const inputRef = useRef<ChatComposerEditorHandle>(null);
   const reduceMotion = useReducedMotion();
+  const performanceMode = useSyncExternalStore(subscribePerformanceMode, getPerformanceModeEnabled, getPerformanceModeEnabled);
+  const appearanceMode = useSyncExternalStore(subscribeInputTheme, getInputTheme, getInputTheme);
+  const [shortcutMenuAnchor, setShortcutMenuAnchor] = useState<HTMLElement | null>(null);
+  const closeShortcutMenu = useCallback(() => setShortcutMenuAnchor(null), []);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState('');
   const [pickerTab, setPickerTab] = useState<PickerTab>('nodes');
@@ -202,8 +244,25 @@ export default function ChatInput({
   const [skillQuery, setSkillQuery] = useState('');
   const [skillUploading, setSkillUploading] = useState(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
-  const canvasNodes = useAppStore((state) => state.nodes);
+  const selectPickerNodes = useMemo(() => createCanvasNodeDataSelector(
+    ['displayId', 'imageUrl', 'videoUrl', 'thumbnailUrl', 'filePath'],
+  ), []);
+  const canvasNodes = useAppStore((state) => selectPickerNodes(modelMenuOpen ? state.nodes : undefined));
+  const selectDraftNodes = useMemo(() => createCanvasNodeDataSelector(
+    ['displayId', 'imageUrl', 'videoUrl', 'thumbnailUrl', 'filePath'], getChatComposerNodeIds(inputValue),
+  ), [inputValue]);
+  const draftNodes = useAppStore((state) => selectDraftNodes(state.nodes));
   const dramaAssets = useAppStore((state) => state.dramaAssets);
+  const globalCharacters = useAppStore((state) => state.globalCharacters);
+  const globalScenes = useAppStore((state) => state.globalScenes);
+  const globalProps = useAppStore((state) => state.globalProps);
+  const globalAssets = useMemo(() => listGlobalDramaAssets({ globalCharacters, globalScenes, globalProps }),
+    [globalCharacters, globalScenes, globalProps]);
+  const hasGlobalAssetReference = inputValue.includes('@drama{global/');
+  useEffect(() => {
+    if (modelMenuOpen || hasGlobalAssetReference) void useAppStore.getState().loadGlobalDramaAssets()
+      .catch(() => useAppStore.getState().showToast(translate('全局创作资产加载失败，请重试'), 'error'));
+  }, [modelMenuOpen, hasGlobalAssetReference]);
   const userSkills = useAppStore((state) => state.userSkills);
   const agentPackageSkills = useAppStore((state) => state.agentPackageSkills);
   const uploadSkill = useAppStore((state) => state.uploadSkill);
@@ -215,8 +274,8 @@ export default function ChatInput({
   const availableSkillOptions = skillOptions ?? storeSkillOptions;
   const compatibleMediaModels = mediaModelOptions;
   const filteredMediaModels = useMemo(
-    () => compatibleMediaModels.filter((model) => fuzzyMatchModel(model, modelQuery)),
-    [compatibleMediaModels, modelQuery],
+    () => modelMenuOpen ? compatibleMediaModels.filter((model) => fuzzyMatchModel(model, modelQuery)) : [],
+    [compatibleMediaModels, modelQuery, modelMenuOpen],
   );
   const filteredCanvasNodes = useMemo(() => canvasNodes
     .filter((node) => node.type !== 'group')
@@ -241,8 +300,8 @@ export default function ChatInput({
     [groupedSkills],
   );
   const nodeDisplayIds = useMemo(
-    () => new Map(canvasNodes.map((node) => [node.id, node.data.displayId])),
-    [canvasNodes],
+    () => new Map(draftNodes.map((node) => [node.id, node.data.displayId])),
+    [draftNodes],
   );
   // 媒体模型按类型分档，作为「模型」Tab 的筛选芯片
   const mediaKindChips = useMemo(() => {
@@ -262,12 +321,12 @@ export default function ChatInput({
   );
   // 资产库（短剧人物/场景/道具），与节点提示词的 @ 用同一份数据源
   const filteredDramaAssets = useMemo(
-    () => resolveDramaMentionItems(dramaAssets, modelQuery),
-    [dramaAssets, modelQuery],
+    () => modelMenuOpen ? resolveDramaMentionItems(dramaAssets, modelQuery, undefined, globalAssets) : [],
+    [dramaAssets, globalAssets, modelQuery, modelMenuOpen],
   );
   const assetKindChips = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const item of filteredDramaAssets) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+    for (const item of filteredDramaAssets) counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
     if (counts.size === 0) return [];
     return [
       { id: 'all', label: t('全部'), count: filteredDramaAssets.length },
@@ -275,7 +334,7 @@ export default function ChatInput({
     ];
   }, [filteredDramaAssets, t]);
   const kindedDramaAssets = useMemo(
-    () => (assetKind === 'all' ? filteredDramaAssets : filteredDramaAssets.filter((a) => a.kind === assetKind)),
+    () => (assetKind === 'all' ? filteredDramaAssets : filteredDramaAssets.filter((a) => a.category === assetKind)),
     [assetKind, filteredDramaAssets],
   );
 
@@ -293,8 +352,18 @@ export default function ChatInput({
     [filteredCanvasNodes, effectiveTab],
   );
   const visibleDramaAssets = useMemo(
-    () => effectiveTab === 'assets' ? kindedDramaAssets : [],
-    [effectiveTab, kindedDramaAssets],
+    () => effectiveTab === 'assets' ? kindedDramaAssets.flatMap((item) => {
+      if (item.kind === 'character' || !item.referenceImages?.length) return [item];
+      const asset = findDramaAsset(dramaAssets, item.id, globalAssets);
+      if (!asset) return [item];
+      return item.referenceImages.flatMap((reference, index) => {
+        const image = resolveDramaAssetImageRef(asset, item.id.startsWith('global/') ? [] : canvasNodes, reference.id);
+        return image ? [{ ...item, id: buildDramaMentionId(item.id, reference.id),
+          name: `${item.name} · ${'label' in reference && reference.label || t('参考图 {number}', { number: index + 1 })}`,
+          imageNodeId: undefined, imageUrl: image.imageUrl, referenceImages: undefined }] : [];
+      });
+    }) : [],
+    [effectiveTab, kindedDramaAssets, dramaAssets, globalAssets, canvasNodes, t],
   );
   const visibleMediaModels = useMemo(
     () => effectiveTab === 'models' ? kindedMediaModels : [],
@@ -485,7 +554,9 @@ export default function ChatInput({
         key: `node:${node.id}`,
         domId: index == null ? undefined : `chat-reference-suggestion-${index}`,
         label,
-        thumbnailUrl: resolveNodeThumbnail(node.data),
+        thumbnailUrl: bestNodeThumb(node.data),
+        video: node.data.type === 'ai-video' || node.data.type === 'source-video' || node.data.videoUrl
+          ? { src: node.data.videoUrl, filePath: node.data.filePath } : undefined,
         badge: node.data.displayId != null ? `#${String(node.data.displayId)}` : undefined,
         title: `${label} · ${String(node.data.type)}`,
         onSelect: () => insertNodeMention(node.id, label, node.data.displayId),
@@ -502,8 +573,8 @@ export default function ChatInput({
         domId: index == null ? undefined : `chat-reference-suggestion-${index}`,
         label: item.name,
         thumbnailUrl,
-        icon: 'mdi:account-box-outline',
-        badge: t(DRAMA_KIND_LABELS[item.kind] ?? item.kind),
+        icon: item.category === 'weapon' ? 'lucide:swords' : item.kind === 'scene' ? 'lucide:mountain' : item.kind === 'prop' ? 'lucide:box' : 'mdi:account-box-outline',
+        badge: `${item.id.startsWith('global/') ? `${t('全局')} · ` : ''}${t(DRAMA_KIND_LABELS[item.category] ?? item.category)}`,
         title: thumbnailUrl ? t('{name}（引用参考图）', { name: item.name }) : t('{name}（引用设定文字）', { name: item.name }),
         onSelect: () => insertDramaMention(item),
       };
@@ -532,11 +603,11 @@ export default function ChatInput({
       ? `chat-skill-suggestion-${resolvedActiveSuggestionIndex}`
       : undefined;
 
-  const handleUploadSkill = useCallback(async () => {
+  const handleUploadSkill = useCallback(async (source: 'file' | 'folder') => {
     if (skillUploading) return;
     setSkillUploading(true);
     try {
-      await uploadSkill('file');
+      await uploadSkill(source);
     } catch (error) {
       showToast(error instanceof Error ? error.message : t('上传 Skill 失败'), 'error');
     } finally {
@@ -566,73 +637,92 @@ export default function ChatInput({
     return () => window.removeEventListener('chat-open-reference-menu', openModelReferences);
   }, []);
 
-  return (
-    <div className="chat-panel-input-area flex-shrink-0 px-3 pt-2">
-      <div
-        className="chat-panel-input-box relative flex flex-col bg-canvas-card border border-canvas-border
-                    rounded-[14px] transition-[border-color,box-shadow] duration-200
-                    focus-within:border-brand-light focus-within:ring-2 focus-within:ring-brand/15
-                    px-1.5 py-1.5"
-      >
-        {localFileGrants.length > 0 && (
-          <div className="mb-2 flex max-h-16 flex-wrap gap-1.5 overflow-y-auto">
-            {localFileGrants.map((grant) => (
-              <span
-                key={grant.id}
-                title={`${grant.displayName} · ${Math.ceil(grant.size / 1024)} KB`}
-                className="inline-flex items-center gap-1 rounded-full border border-canvas-border/60
-                           bg-canvas-hover/70 py-1 pl-2.5 pr-1 text-[11px] leading-none text-canvas-text-secondary"
-              >
-                <Icon icon="mdi:file-document-outline" width="12" className="shrink-0 text-canvas-text-muted/80" />
-                <span className="max-w-[100px] truncate">{grant.displayName}</span>
-                {onRevokeLocalFile && (
-                  <button
-                    type="button"
-                    aria-label={t('撤销 {name} 的读取授权', { name: grant.displayName })}
-                    onClick={() => onRevokeLocalFile(grant.id)}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-canvas-text-muted transition-colors
-                               hover:bg-red-500/15 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
-                  >
-                    <Icon icon="mdi:close" width="11" />
-                  </button>
-                )}
-              </span>
-            ))}
-          </div>
-        )}
-        <ChatComposerEditor
-          ref={inputRef}
-          value={inputValue}
-          onChange={onInputChange}
-          onSubmit={onSend}
-          nodeDisplayIds={nodeDisplayIds}
-          onMentionQueryChange={(query) => {
-            setModelMenuOpen(query != null);
-            setActiveSuggestionIndex(0);
-            const parsedQuery = parseReferenceQuery(query ?? '');
-            // @n / @a / @m 直接落到对应 Tab；关闭时归位到「节点」
-            if (query == null || parsedQuery.scope === 'nodes') setPickerTab('nodes');
-            else if (parsedQuery.scope === 'assets') setPickerTab('assets');
-            else if (parsedQuery.scope === 'models') setPickerTab('models');
-            if (query == null) { setMediaKind('all'); setAssetKind('all'); }
-            setModelQuery(parsedQuery.query);
-            if (query != null) setSkillMenuOpen(false);
-          }}
-          onSlashQueryChange={(query) => {
-            setSkillMenuOpen(query != null);
-            setActiveSuggestionIndex(0);
-            setSkillQuery(query ?? '');
-            if (query != null) setModelMenuOpen(false);
-          }}
-          onSuggestionKeyDown={handleSuggestionKeyDown}
-          suggestionListId={modelMenuOpen ? REFERENCE_SUGGESTION_LIST_ID : SKILL_SUGGESTION_LIST_ID}
-          activeSuggestionId={activeSuggestionId}
-          suggestionsOpen={modelMenuOpen || skillMenuOpen}
-          placeholder={t('输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill')}
-          disabled={disabled}
-        />
+  const inputImages = parseChatImageReferences(inputValue);
+  const images = [...new Map([...inputImages, ...imageDrafts].map((image) => [image.fileName, image])).values()];
+  const sendDisabled = (!inputValue.trim() && !images.length) || disabled;
+  const sendButton = (
+    <button type="button" disabled={sendDisabled} onClick={onSend}
+      className="ui-ai-input__icon-btn ui-ai-input__submit chat-panel-send-btn"
+      aria-haspopup="menu" aria-expanded={!!shortcutMenuAnchor}
+      aria-label={hasActiveTask ? t('将消息加入队列') : t('发送消息')}
+      title={`${hasActiveTask ? t('当前任务完成后发送') : t('发送消息')} · ${getPromptSubmitShortcutHint(submitShortcut)} · ${t('右键设置发送快捷键')}`}>
+      <Icon icon={hasActiveTask ? 'mdi:playlist-plus' : 'lucide:arrow-up'} width={16} height={16} aria-hidden="true" />
+    </button>
+  );
 
-        <div className="chat-panel-input-toolbar flex items-end justify-between gap-3">
+  return (
+    <div className="chat-panel-input-area flex-shrink-0 px-3 py-2">
+      <div className="ui-ai-input chat-panel-input-box">
+        <div className="ui-ai-input__body">
+          <ChatImageAttachments images={images} previews={imagePreviewUrls} onRemove={(fileName) => {
+            const nextValue = inputImages.filter((image) => image.fileName === fileName)
+              .reduce((text, image) => text.replaceAll(image.raw, ''), inputValue);
+            if (nextValue !== inputValue) onInputChange(nextValue);
+            onRemoveImage?.(fileName);
+          }} />
+          {localFileGrants.length > 0 && (
+            <div className="mb-2 flex max-h-16 flex-wrap gap-1.5 overflow-y-auto">
+              {localFileGrants.map((grant) => (
+                <span
+                  key={grant.id}
+                  title={`${grant.displayName} · ${Math.ceil(grant.size / 1024)} KB`}
+                  className="inline-flex items-center gap-1 rounded-full border border-canvas-border/60
+                             bg-canvas-hover/70 py-1 pl-2.5 pr-1 text-[11px] leading-none text-canvas-text-secondary"
+                >
+                  <Icon icon="mdi:file-document-outline" width="12" className="shrink-0 text-canvas-text-muted/80" />
+                  <span className="max-w-[100px] truncate">{grant.displayName}</span>
+                  {onRevokeLocalFile && (
+                    <button
+                      type="button"
+                      aria-label={t('撤销 {name} 的读取授权', { name: grant.displayName })}
+                      onClick={() => onRevokeLocalFile(grant.id)}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-canvas-text-muted transition-colors
+                                 hover:bg-red-500/15 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                    >
+                      <Icon icon="mdi:close" width="11" />
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+          <ChatComposerEditor
+            ref={inputRef}
+            value={inputValue}
+            onChange={onInputChange}
+            onSubmit={onSend}
+            canSubmitEmpty={imageDrafts.length > 0}
+            submitShortcut={submitShortcut}
+            nodeDisplayIds={nodeDisplayIds}
+            referencePresentation={CHAT_REFERENCE_PRESENTATION}
+            onMentionQueryChange={(query) => {
+              setModelMenuOpen(query != null);
+              setActiveSuggestionIndex(0);
+              const parsedQuery = parseReferenceQuery(query ?? '');
+              // @n / @a / @m 直接落到对应 Tab；关闭时归位到「节点」
+              if (query == null || parsedQuery.scope === 'nodes') setPickerTab('nodes');
+              else if (parsedQuery.scope === 'assets') setPickerTab('assets');
+              else if (parsedQuery.scope === 'models') setPickerTab('models');
+              if (query == null) { setMediaKind('all'); setAssetKind('all'); }
+              setModelQuery(parsedQuery.query);
+              if (query != null) setSkillMenuOpen(false);
+            }}
+            onSlashQueryChange={(query) => {
+              setSkillMenuOpen(query != null);
+              setActiveSuggestionIndex(0);
+              setSkillQuery(query ?? '');
+              if (query != null) setModelMenuOpen(false);
+            }}
+            onSuggestionKeyDown={handleSuggestionKeyDown}
+            suggestionListId={modelMenuOpen ? REFERENCE_SUGGESTION_LIST_ID : SKILL_SUGGESTION_LIST_ID}
+            activeSuggestionId={activeSuggestionId}
+            suggestionsOpen={modelMenuOpen || skillMenuOpen}
+            placeholder={`${t('输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill')}\n${getPromptSubmitShortcutHint(submitShortcut)}`}
+            disabled={disabled}
+          />
+        </div>
+
+        <div className="ui-ai-input__footer ui-ai-input__footer--single-row chat-panel-input-toolbar">
           <AnimatePresence>
             {modelMenuOpen && (
             <motion.div
@@ -696,22 +786,25 @@ export default function ChatInput({
                 <span>Skill</span>
                 <span className="flex items-center gap-2">
                   <span>{filteredSkills.length}</span>
-                  {allowSkillUpload && (
-                  <button
-                    type="button"
-                    disabled={skillUploading}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void handleUploadSkill();
-                    }}
-                    aria-label={t('上传 Skill')}
-                    title={t('上传 Skill 文件')}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text
-                               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 disabled:cursor-wait disabled:opacity-50"
-                  >
-                    <Icon icon={skillUploading ? 'mdi:loading' : 'mdi:plus'} width="15" className={skillUploading ? 'animate-spin' : ''} />
-                  </button>
-                  )}
+                  {allowSkillUpload && ([
+                    { source: 'folder', label: '上传 Skill 文件夹', title: '上传 Skill 文件夹', icon: 'mdi:folder-plus-outline' },
+                    { source: 'file', label: '上传 Skill 文件', title: '上传 Skill 文件（支持 .zip / .tar.gz / .tgz）', icon: 'mdi:file-plus-outline' },
+                  ] as const).map((upload) => (
+                    <button
+                      key={upload.source}
+                      type="button"
+                      disabled={skillUploading}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleUploadSkill(upload.source);
+                      }}
+                      aria-label={t(upload.label)}
+                      title={t(upload.title)}
+                      className="ui-btn ui-btn--ghost ui-btn--sm"
+                    >
+                      <Icon icon={skillUploading ? 'mdi:loading' : upload.icon} width="15" className={skillUploading ? 'animate-spin' : ''} />
+                    </button>
+                  ))}
                 </span>
               </div>
               <div className="px-1 pb-1">
@@ -760,19 +853,20 @@ export default function ChatInput({
           )}
           </AnimatePresence>
 
-          <div className="flex items-center gap-1.5 min-w-0">
-            <ModelSelector
-              nodeType="ai-text"
-              selectedModel={selectedTextModel}
-              onSelect={handleTextModelSelect}
-              configuredGroupsOverride={assistantModelGroups}
-              generalModelsOverride={mediaModels}
-              groupAvailability={modelGroupAvailability}
-            />
-          </div>
+          {/* 助手只显示实际绑定；不能借用节点历史偏好冒充已选择的对话模型。 */}
+          <ModelSelector
+            appearance="pill"
+            theme={appearanceMode}
+            nodeType="ai-text"
+            selectedModel={selectedTextModel ?? ''}
+            onSelect={handleTextModelSelect}
+            configuredGroupsOverride={assistantModelGroups}
+            generalModelsOverride={assistantModelGroups ? [] : mediaModels}
+            groupAvailability={modelGroupAvailability}
+          />
 
-          <div className="flex items-end gap-1.5 shrink-0">
-            <div className="flex items-center gap-px">
+          <div className="ui-ai-input__tools">
+            <div className="ui-ai-input__actions">
               <button
                 type="button"
                 onClick={() => {
@@ -786,16 +880,10 @@ export default function ChatInput({
                 }}
                 aria-label={t('引用画布节点或媒体模型')}
                 title={t('引用画布节点或媒体模型')}
-                className={`flex h-7 w-7 items-center justify-center rounded-md transition-[color,background-color,box-shadow]
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50
-                  ${modelMenuOpen
-                    ? 'bg-brand/15 text-brand-light'
-                    : 'text-canvas-text-secondary hover:bg-canvas-surface hover:text-canvas-text'
-                  }`}
+                className={`ui-ai-input__icon-btn${modelMenuOpen ? ' is-active' : ''}`}
               >
                 <Icon icon="mdi:at" width="14" />
               </button>
-              <span className="w-px h-3.5 bg-canvas-border/50" aria-hidden="true" />
               <button
                 type="button"
                 onClick={() => {
@@ -807,83 +895,66 @@ export default function ChatInput({
                 }}
                 aria-label={t('调用 Skill')}
                 title={t('调用 Skill')}
-                className={`flex h-7 w-7 items-center justify-center rounded-md transition-[color,background-color,box-shadow]
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50
-                  ${skillMenuOpen
-                    ? 'bg-brand/15 text-brand-light'
-                    : 'text-canvas-text-secondary hover:bg-canvas-surface hover:text-canvas-text'
-                  }`}
+                className={`ui-ai-input__icon-btn${skillMenuOpen ? ' is-active' : ''}`}
               >
                 <Icon icon="mdi:slash-forward" width="14" />
               </button>
               {onAuthorizeLocalFiles && (
-                <>
-                  <span className="w-px h-3.5 bg-canvas-border/50" aria-hidden="true" />
-                  <button
-                    type="button"
-                    onClick={onAuthorizeLocalFiles}
-                    aria-label={t('授权当前对话读取本地文件')}
-                    title={t('选择文本文件；授权仅在当前对话和本次运行期间有效')}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-secondary
-                               hover:bg-canvas-surface hover:text-canvas-text transition-[color,background-color,box-shadow]
-                               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
-                  >
-                    <Icon icon="mdi:paperclip" width="14" />
-                  </button>
-                </>
+                <button
+                  type="button"
+                  onClick={onAuthorizeLocalFiles}
+                  disabled={disabled}
+                  aria-label={t('添加图片或文本附件')}
+                  title={t('添加参考图（PNG/JPEG/WebP，单图最多 8 MB、每条消息最多 6 张），或授权读取文本文件')}
+                  className="ui-ai-input__icon-btn"
+                >
+                  <Icon icon="mdi:paperclip" width="14" />
+                </button>
               )}
             </div>
-            {inputValue.trim() && !disabled && (
-              <span className="hidden sm:inline text-[11px] text-canvas-text-muted/60 tabular-nums select-none">
-                ↵ Enter
-              </span>
-            )}
             <div className="flex h-7 w-7 items-center justify-center">
               <ContextUsageIndicator usage={contextUsage ?? null} />
             </div>
 
-            {hasActiveTask && onInterject && inputValue.trim() && !disabled && (
+            {hasActiveTask && onInterject && (inputValue.trim() || images.length > 0) && !disabled && (
               <button
                 type="button"
                 onClick={onInterject}
                 aria-label={t('调整当前任务')}
                 title={t('在下一个安全步骤调整当前任务')}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-canvas-border
-                           bg-canvas-surface text-canvas-text-secondary transition-[color,background-color,border-color]
-                           hover:border-brand/40 hover:bg-brand/10 hover:text-brand-light
-                           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300/70"
+                className="ui-ai-input__icon-btn"
               >
                 <Icon icon="mdi:source-branch-sync" width="16" height="16" />
               </button>
             )}
 
-            <AnimatedButton
-              scale={1.05}
-              disabled={!inputValue.trim() || disabled}
-              aria-label={hasActiveTask ? t('将消息加入队列') : t('发送消息')}
-              title={hasActiveTask ? t('当前任务完成后发送') : t('发送消息')}
-              className={`chat-panel-send-btn flex shrink-0 items-center justify-center h-8 w-8 rounded-full
-                          transition-[color,background-color,box-shadow,opacity,transform] duration-200 active:scale-95
-                          motion-reduce:transform-none
-                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300/70
-                          ${inputValue.trim() && !disabled
-                            ? 'bg-brand text-white hover:bg-brand-light shadow-lg shadow-brand/30'
-                            : 'bg-canvas-hover text-canvas-text-muted cursor-not-allowed'
-                          }`}
-              onClick={onSend}
-            >
-              <Icon icon={hasActiveTask ? 'mdi:playlist-plus' : 'mdi:arrow-up'} width="18" height="18" />
-            </AnimatedButton>
+            <div className="inline-flex shrink-0" onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setModelMenuOpen(false);
+              setSkillMenuOpen(false);
+              setShortcutMenuAnchor(event.currentTarget);
+            }}>
+              {performanceMode || reduceMotion ? sendButton : (
+                <LazyLoadBoundary label={t('助手发送按钮特效')} errorFallback={sendButton}>
+                  <Suspense fallback={sendButton}>
+                    <MetalFx className="ui-ai-input__send-metal" variant="circle"
+                      preset={appearanceMode === 'light' ? 'silver' : 'chromatic'} theme={appearanceMode}
+                      strength={appearanceMode === 'light' ? 0.65 : 0.81} paused={sendDisabled}
+                      normalizeHostStyles={false} innerShadow>
+                      {sendButton}
+                    </MetalFx>
+                  </Suspense>
+                </LazyLoadBoundary>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Disclaimer */}
-      <div className="flex min-h-5 items-center justify-center">
-        <p className="chat-panel-disclaimer text-[11px] text-canvas-text-muted/75">
-          {t('重要操作执行前会请求确认')}
-        </p>
-      </div>
+      {shortcutMenuAnchor && <SendShortcutMenu anchor={shortcutMenuAnchor} value={submitShortcut}
+        onChange={(shortcut) => onSubmitShortcutChange?.(shortcut)} onClose={closeShortcutMenu}
+        disabled={shortcutSettingsDisabled || !onSubmitShortcutChange} />}
     </div>
   );
 }

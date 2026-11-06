@@ -1,3 +1,6 @@
+/**
+ * useToolbarEdit — 回归测试：toolbar edit save lifecycle。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ToolbarLayout } from '../../src/types';
 import type { UseToolbarEditReturn } from '../../src/hooks/useToolbarEdit';
@@ -34,6 +37,7 @@ vi.mock('react', () => {
   },
   useCallback: <T>(fn: T, deps: readonly unknown[]) => memo(() => fn, deps),
   useMemo: memo,
+  useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
   useEffect: (fn: () => void | (() => void), deps?: readonly unknown[]) => {
     const index = harness.effectCursor++;
     const previous = harness.effects[index];

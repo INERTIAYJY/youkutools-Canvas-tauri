@@ -125,7 +125,7 @@ const GOOGLE_VEO_PROTOCOL: NormalizedModelExecutionProtocol = {
   },
 };
 
-const GOOGLE_IMAGE_PROTOCOL = googleInteractionProtocol('image');
+export const GOOGLE_IMAGE_PROTOCOL = googleInteractionProtocol('image');
 const GOOGLE_IMAGE_LITE_PROTOCOL = googleInteractionProtocol('image', '1K');
 const GOOGLE_OMNI_VIDEO_PROTOCOL = googleInteractionProtocol('video');
 

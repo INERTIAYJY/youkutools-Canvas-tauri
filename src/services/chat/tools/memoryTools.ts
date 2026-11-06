@@ -1,5 +1,5 @@
 /**
- * 注册项目记忆建议工具；候选内容经裁剪后仍须用户确认才能写入长期记忆。
+ * 注册项目记忆建议工具；候选内容裁剪后，由 Policy 按当前模式决定是否确认。
  */
 import { useAppStore } from '../../../store/useAppStore';
 import { seriesOwnerId } from '../../../store/store.utils';
@@ -20,7 +20,7 @@ const KIND_ENUM: ProjectMemoryKind[] = ['preference', 'fact', 'constraint', 'dec
 /**
  * memory_suggest — Agent 提出候选项目记忆。
  *
- * effect=memory_write，始终经 Policy 请求用户确认；确认后 execute 写入当前项目记忆。
+ * effect=memory_write，B 模式等待确认，C 模式自动执行；execute 写入当前项目记忆。
  * 只能保存简短事实，正文写入前统一脱敏并截断，禁止文件/网页全文或密钥进入长期记忆。
  */
 export function registerMemoryAgentTools(): Array<() => void> {
@@ -29,7 +29,7 @@ export function registerMemoryAgentTools(): Array<() => void> {
       id: 'memory_suggest',
       title: '保存项目记忆',
       description: [
-        '提议把一条简短的项目长期记忆保存下来，供后续对话使用。必须由用户确认后才会保存。',
+        '提议把一条简短的项目长期记忆保存下来，供后续对话使用。B 协作模式由 Policy 请求确认，C 自主模式直接保存。',
         '只在用户表达稳定偏好、确定事实、明确约束或做出决定时调用，且内容要精简成一句话。',
         '禁止把文件全文、网页正文、密钥、绝对路径或临时结果作为记忆内容。',
       ].join(''),

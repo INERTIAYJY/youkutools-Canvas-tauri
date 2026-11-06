@@ -1,4 +1,9 @@
-import { acquireCanvasImagePreview } from './canvasImagePreviewCache';
+/**
+ * canvasImageDisplay — 选择图片显示档位并通过显示队列准备来源。
+ */
+import { acquireCachedCanvasImagePreview, acquireCanvasImagePreview } from './canvasImagePreviewCache';
+import { getPerformanceModeBudget } from '../../../../services/performanceModeRuntime';
+import { acquireComfyImageSource, shouldLoadNativeComfyImage } from '../../../../services/comfyImageSource';
 
 export interface DisplayQueue {
   enqueue: (key: object, commit: () => void, delayMs?: number) => () => void;
@@ -48,19 +53,18 @@ function decodeImage(src: string, signal: AbortSignal) {
 }
 
 export async function prepareCanvasImage(source: string, edge: number, signal: AbortSignal, projectId?: string | null): Promise<DisplayImageLease> {
-  const lease = edge > 0 ? await acquireCanvasImagePreview(source, edge, signal, projectId).catch(() => null) : null;
+  const lease = edge > 0 ? await acquireCanvasImagePreview(source, edge, signal, projectId)
+    : shouldLoadNativeComfyImage(source) ? await acquireComfyImageSource(source, signal) : null;
   try {
     signal.throwIfAborted();
+    if (edge > 0 && !lease) throw new Error('图片预览暂不可用，请重试或主动打开原图');
     await decodeImage(lease?.src ?? source, signal);
     return lease ?? { src: source, release: () => {} };
-  } catch {
+  } catch (error) {
     lease?.release();
     signal.throwIfAborted();
-    // 原图失败仍交由真实 img 的 onError 展示原节点错误，保留其重试入口。
-    if (lease) {
-      try { await decodeImage(source, signal); } catch { signal.throwIfAborted(); }
-    }
-    return { src: source, release: () => {} };
+    // 预览失败不能自动改解码原图，否则预算拒绝和超时都会失效。
+    throw error;
   }
 }
 
@@ -70,6 +74,7 @@ export function createCanvasImageDisplay(options: {
   projectId?: string | null;
   queue: DisplayQueue;
   publish: (lease: DisplayImageLease) => void;
+  onError?: (error: unknown) => void;
   prepare?: typeof prepareCanvasImage;
 }) {
   const prepareKey = {};
@@ -86,6 +91,15 @@ export function createCanvasImageDisplay(options: {
     target = edge;
     abort?.();
     const version = ++generation;
+    if (!displayed && !force) {
+      // 首次入场复用现成小图，不等待交互结束；升档和原图仍由原队列调度。
+      const cached = acquireCachedCanvasImagePreview(options.source, edge || 1024, new AbortController().signal, options.projectId);
+      if (cached) {
+        held.add(cached);
+        displayed = { edge: cached.maxEdge, lease: cached };
+        options.publish(cached);
+      }
+    }
     if (!force && displayed?.edge === edge) return;
     const controller = new AbortController();
     let prepared: DisplayImageLease | undefined;
@@ -116,7 +130,9 @@ export function createCanvasImageDisplay(options: {
           displayed = { edge, lease };
           options.publish(lease);
         });
-      } catch { /* 取消或过期的准备任务不改变现有显示。 */ }
+      } catch (error) {
+        if (!stale() && !displayed) options.onError?.(error);
+      }
     }, delay);
     abort = () => {
       if (!transferred) controller.abort();
@@ -128,9 +144,12 @@ export function createCanvasImageDisplay(options: {
   }
 
   return {
-    viewport(zoom: number, width: number, height: number, pixelRatio: number) {
+    viewport(zoom: number, width: number, height: number, pixelRatio: number, performanceMode = false) {
       if (!Number.isFinite(zoom) || zoom <= 0) return;
-      request(canvasImageTier(Math.max(width, height) * zoom * pixelRatio, target));
+      const tier = canvasImageTier(Math.max(width, height) * zoom * pixelRatio, target);
+      // 只限制画布预览的自动档位；主动查看原图仍走独立入口。
+      const cap = getPerformanceModeBudget(performanceMode).imagePreviewMaxEdge;
+      request(cap > 0 ? (tier === 0 ? cap : Math.min(tier, cap)) : tier);
     },
     original() { request(0, true); },
     committed(lease: DisplayImageLease) {

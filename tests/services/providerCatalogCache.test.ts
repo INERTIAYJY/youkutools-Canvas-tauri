@@ -1,3 +1,6 @@
+/**
+ * providerCatalogCache — 回归测试：目录缓存截断。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   MAX_CACHED_CATALOG_MODELS,

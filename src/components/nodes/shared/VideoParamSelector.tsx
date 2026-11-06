@@ -4,26 +4,40 @@
  * - 其他 provider → 通用视频参数（像素分辨率、帧率、时长）
  */
 import Select from '../../shared/Select';
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { useShallow } from 'zustand/react/shallow';
+import { Icon } from '@iconify/react';
+import ComfyH3MemorySelector from './ComfyH3MemorySelector';
+import ViewportImage from '../../shared/ViewportImage';
+import VideoCharacterPicker from './VideoCharacterPicker';
+import type { MentionPickerItem } from '../../shared/MentionPicker';
+import { useT } from '../../../i18n';
+import { useState, useRef, useEffect, useMemo, useCallback, type ReactNode } from 'react';
 import AnimatedButton from '../../shared/AnimatedButton';
 import type { BaseNodeData, GeneralModelConfig } from '../../../types';
-import type { VideoModelCapability, VideoReferenceItem } from '../../../types/aiTypes';
+import type {
+  VideoGenerationInputMode,
+  VideoGenerationOperation,
+  VideoModelCapability,
+  VideoReferenceItem,
+} from '../../../types/aiTypes';
 import type { DramaCharacter } from '../../../types/dramaAssets';
-import { resolveDramaAssetImageRef } from '../../../services/dramaAssetPrompt';
+import { resolveDramaAssetImageRef, resolveDramaVoiceRef } from '../../../services/dramaAssetPrompt';
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
 import { resolveSeedlingVideoCapability } from '../../../services/ai/providerCatalogService';
+import { getGrsaiVideoCapability } from '../../../services/ai/grsaiModels';
 import { AUTODL_H3_WORKFLOW } from '../../../services/workflowApi/autodlWorkflowManifest';
 import { getModelProtocolPresetVideoCapability } from '../../../services/ai/modelProtocol';
+import { getProviderDefinition } from '../../../services/ai/providerCatalogService';
 import {
   resolveVideoDurationSeconds,
   VIDEO_ASPECT_RATIOS,
   VIDEO_DURATION_MAX_SECONDS,
   VIDEO_DURATION_MIN_SECONDS,
 } from '../../../services/aiDimensions';
-import { useAppStore } from '../../../store/useAppStore';
+import { useAppStore, type AppState } from '../../../store/useAppStore';
+import { createCanvasNodeDataSelector, type CanvasNodeDataView } from '../../../utils/canvasNodeDataSelector';
+import { getCanvasConnectedSourceNodes } from '../../../utils/canvasConnectionIndex';
 
 interface VideoParamSelectorProps {
   provider?: string;
@@ -55,6 +69,9 @@ interface VideoParamSelectorProps {
   showSeedanceRatio?: boolean;
   showGenerateAudio?: boolean;
   onContinuousEditEnd?: () => void;
+  /** 旧版云工作流的种子等额外字段，与视频参数共用浮层。 */
+  extraParameters?: ReactNode;
+  disabled?: boolean;
 }
 
 const SEEDANCE_RESOLUTIONS = [
@@ -74,7 +91,63 @@ const SEEDANCE_RATIOS = [
   { value: 'adaptive', label: '自适应' },
 ];
 
-const FRAME_ROLE_OPTIONS: Array<{ value: VideoReferenceItem['role']; label: string }> = [
+type ImageReferenceRole = 'first_frame' | 'last_frame' | 'reference';
+
+interface CharacterVideoReferenceOption {
+  id: string;
+  label: string;
+  url: string;
+  character?: DramaCharacter;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveCharacterVideoReferenceOptions(
+  characters: readonly DramaCharacter[],
+  canvasNodes: CanvasNodeDataView[],
+  scope: 'project' | 'global',
+): CharacterVideoReferenceOption[] {
+  return characters.flatMap((character) => {
+    // 全局角色不从当前项目的同 ID 节点补图；两种范围也不互相覆盖。
+    const resolved = resolveDramaAssetImageRef(character, scope === 'project' ? canvasNodes : []);
+    return resolved ? [{
+      id: `character:${scope === 'global' ? 'global/' : ''}${character.id}`,
+      label: character.name, url: resolved.imageUrl, character,
+    }] : [];
+  });
+}
+
+/** 角色主图和明确指定的主音色作为同一次选择的参考素材保存。 */
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildCharacterVideoReferences(
+  option: CharacterVideoReferenceOption,
+  provider?: string,
+): VideoReferenceItem[] {
+  const binding = provider === 'volcengine' ? option.character?.volcengineBinding : undefined;
+  const asset = binding?.imageAssetId
+    ? { assetId: binding.imageAssetId, name: binding.imageAssetName }
+    : binding?.imageAssets?.[0];
+  const image: VideoReferenceItem = asset
+    ? {
+      id: `${option.id}:volcengine:${asset.assetId}`, kind: 'character', role: 'reference',
+      url: `asset://${asset.assetId}`, previewUrl: option.url,
+      label: asset.name || option.label, provider: 'volcengine', assetId: asset.assetId,
+      projectName: binding?.projectName || 'default',
+    }
+    : {
+      id: option.id, kind: 'character', role: 'reference', url: option.url, label: option.label,
+      sourceNodeId: option.id.startsWith('character:') ? undefined : option.id,
+    };
+  const voice = option.character?.primaryVoiceClipId
+    ? resolveDramaVoiceRef(option.character, option.character.primaryVoiceClipId) : null;
+  if (!voice) return [image];
+  return [image, {
+    id: `${image.id}:voice`, kind: 'character', mediaKind: 'audio', role: 'reference_audio',
+    url: voice.url,
+    label: `${option.label} · ${voice.label || '主音色'}`,
+  }];
+}
+
+const FRAME_ROLE_OPTIONS: Array<{ value: ImageReferenceRole; label: string }> = [
   { value: 'first_frame', label: '首帧' },
   { value: 'reference', label: '中间帧' },
   { value: 'last_frame', label: '尾帧' },
@@ -140,6 +213,7 @@ export function resolveGeneralVideoControlSupport(
       || capability?.minDuration !== undefined
       || capability?.maxDuration !== undefined
       || capability?.defaultDuration !== undefined
+      || capability?.automaticDurationValue !== undefined
     ),
     frameRate: Boolean(capability?.frameRates?.length || capability?.defaultFrameRate !== undefined),
     audio: capability?.supportsAudio === true,
@@ -192,10 +266,68 @@ export function resolveGeneralVideoParameterDisplayState(
   return {
     resolution: current.resolution ?? capability?.defaultResolution,
     ratio: current.ratio ?? capability?.defaultRatio,
-    duration: current.duration ?? capability?.defaultDuration,
+    duration: current.duration
+      ?? capability?.defaultDuration
+      ?? capability?.automaticDurationValue,
     frameRate: current.frameRate ?? capability?.defaultFrameRate,
     generateAudio: current.generateAudio,
   };
+}
+
+/** 把输入形态和操作级覆盖折叠成参数面板实际应展示的能力。 */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveEffectiveVideoParameterCapability(
+  capability: VideoModelCapability | undefined,
+  inputMode: VideoGenerationInputMode,
+  operation: VideoGenerationOperation,
+): VideoModelCapability | undefined {
+  if (!capability) return undefined;
+  const inputOverride = capability.inputModeCapabilities?.[inputMode];
+  const operationOverride = capability.operationCapabilities?.[operation];
+  const automaticDurationOnly = inputOverride?.automaticDurationOnly === true
+    || operationOverride?.automaticDurationOnly === true;
+  return {
+    ...capability,
+    ratios: inputOverride?.ratios ?? operationOverride?.ratios ?? capability.ratios,
+    defaultRatio: inputOverride?.defaultRatio
+      ?? operationOverride?.defaultRatio
+      ?? capability.defaultRatio,
+    ...(automaticDurationOnly ? { defaultDuration: undefined } : {}),
+  };
+}
+
+/** 只有用户显式指定首/尾帧才进入 keyframe；普通连线图片只是参考图。 */
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveVideoParameterInputMode(
+  frameReferences: readonly (Pick<VideoReferenceItem, 'role'> & Partial<Pick<VideoReferenceItem, 'url'>>)[],
+  characterReferenceCount: number,
+  connectedCounts: { image: number; video: number; audio: number; imageUrls?: readonly string[] },
+): VideoGenerationInputMode {
+  const hasKeyframe = frameReferences.some((item) => (
+    item.role === 'first_frame' || item.role === 'last_frame'
+  ));
+  // 生成入口按 URL 合并手动角色和连线图片；界面也应排除已被指定角色的同一张图。
+  const assignedUrls = new Set(frameReferences.flatMap((item) => item.url ? [item.url.trim()] : []));
+  const hasConnectedReference = connectedCounts.imageUrls
+    ? connectedCounts.imageUrls.some((url) => !assignedUrls.has(url.trim()))
+    : connectedCounts.image > 0;
+  const hasReference = characterReferenceCount > 0
+    || frameReferences.some((item) => item.role === 'reference')
+    || hasConnectedReference
+    || connectedCounts.video > 0
+    || connectedCounts.audio > 0;
+  if (hasKeyframe && hasReference) return 'mixed';
+  if (hasKeyframe) return 'keyframe';
+  return hasReference ? 'reference' : 'text';
+}
+
+/** 来源按画布顺序返回；展示订阅另按必要媒体字段比较。 */
+// eslint-disable-next-line react-refresh/only-export-components
+export function selectConnectedVideoSourceNodes(
+  state: Pick<AppState, 'nodes' | 'edges'>,
+  nodeId: string | undefined,
+): AppState['nodes'] {
+  return getCanvasConnectedSourceNodes(state.nodes, state.edges, nodeId);
 }
 
 export default function VideoParamSelector({
@@ -207,83 +339,127 @@ export default function VideoParamSelector({
   seedanceDuration, generateAudio, generateInPlace = true, generateCount = 1,
   onChangeSeedanceResolution, onChangeSeedanceRatio,
   onChangeSeedanceDuration, onChangeGenerateAudio, onChangeGenerateInPlace, onChangeGenerateCount,
-  showSeedanceRatio = true, showGenerateAudio = true, onContinuousEditEnd,
+  showSeedanceRatio = true, showGenerateAudio = true, onContinuousEditEnd, extraParameters, disabled,
 }: VideoParamSelectorProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   // 正在展开的来源选择器：frame = 加参考帧，character = 加参考角色
-  const [pickerFor, setPickerFor] = useState<VideoReferenceItem['kind'] | null>(null);
+  const [pickerFor, setPickerFor] = useState<'frame' | 'character' | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const characterTriggerRef = useRef<HTMLButtonElement>(null);
   const generalModels = useAppStore((state) => state.config.generalModels);
   // 森之灵模型能力只在 Provider 目录里（models list 动态拉取），必须显式读取。
   const seedlingModels = useAppStore((state) => state.config.providers?.seedling?.selectedModels);
   const projectCharacters = useAppStore((state) => state.dramaAssets.characters);
   const globalCharacters = useAppStore((state) => state.globalCharacters);
   const loadGlobalCharacters = useAppStore((state) => state.loadGlobalCharacters);
-  // 连线进来的图片节点：参考帧与参考角色都能从这里挑
-  const connectedImageNodes = useAppStore(useShallow((state) => {
-    if (!nodeId) return [];
-    const sourceIds = new Set(state.edges.filter((edge) => edge.target === nodeId).map((edge) => edge.source));
-    return state.nodes.filter((node) => sourceIds.has(node.id) && Boolean((node.data as BaseNodeData).imageUrl));
-  }));
-  const canvasNodes = useAppStore((state) => state.nodes);
+  const globalCharactersLoading = useAppStore((state) => state.globalCharactersLoading);
+  // 连线摘要影响模型能力与默认参数，关闭弹层时也必须保持实时。
+  const selectConnectedData = useMemo(() => createCanvasNodeDataSelector(
+    ['imageUrl', 'videoUrl', 'audioUrl', 'thumbnailUrl', 'filePath'],
+  ), []);
+  const connectedSourceNodes = useAppStore((state) => selectConnectedData(selectConnectedVideoSourceNodes(state, nodeId)));
+  const connectedImageNodes = connectedSourceNodes.filter((node) => (
+    Boolean((node.data as BaseNodeData).imageUrl)
+  ));
+  const connectedVideoCount = connectedSourceNodes.filter((node) => (
+    Boolean((node.data as BaseNodeData).videoUrl)
+  )).length;
+  const connectedAudioCount = connectedSourceNodes.filter((node) => (
+    Boolean((node.data as BaseNodeData).audioUrl)
+  )).length;
+  const selectCharacterNodes = useMemo(() => createCanvasNodeDataSelector(
+    ['imageUrl', 'thumbnailUrl'], [...new Set(projectCharacters.flatMap((character) => [
+      character.imageNodeId, ...(character.referenceImages ?? []).map((reference) => reference.sourceNodeId),
+    ].filter((id): id is string => !!id)))],
+  ), [projectCharacters]);
+  const canvasNodes = useAppStore((state) => selectCharacterNodes(open ? state.nodes : undefined));
   const workflowApiManifest = useAppStore((state) => state.workflows.find((workflow) =>
     workflow.id === selectedModel?.replace(/^workflow-api\//, ''))?.workflowApi);
 
   const references = videoReferences ?? [];
   const frameReferences = references.filter((item) => item.kind === 'frame');
-  const characterReferences = references.filter((item) => item.kind === 'character');
+  const characterReferences = references.filter((item) => item.kind === 'character' && item.mediaKind !== 'audio');
 
-  const characterOptions = useMemo(() => {
-    const merged = [...projectCharacters, ...globalCharacters.filter(
-      (character) => !projectCharacters.some((item) => item.id === character.id),
-    )];
-    return merged.flatMap((character: DramaCharacter) => {
-      const resolved = resolveDramaAssetImageRef(character, canvasNodes);
-      return resolved ? [{ id: `character:${character.id}`, label: character.name, url: resolved.imageUrl }] : [];
-    });
-  }, [canvasNodes, globalCharacters, projectCharacters]);
+  const projectCharacterOptions = useMemo(() => (
+    open ? resolveCharacterVideoReferenceOptions(projectCharacters, canvasNodes, 'project') : []
+  ), [open, canvasNodes, projectCharacters]);
+  const globalCharacterOptions = useMemo(() => (
+    open ? resolveCharacterVideoReferenceOptions(globalCharacters, [], 'global') : []
+  ), [open, globalCharacters]);
+  const characterOptions = [...projectCharacterOptions, ...globalCharacterOptions];
 
-  const addReference = (kind: VideoReferenceItem['kind'], option: { id: string; label: string; url: string }) => {
-    setPickerFor(null);
+  const addReference = (kind: 'frame' | 'character', option: CharacterVideoReferenceOption) => {
+    if (disabled) return;
+    if (kind === 'frame') setPickerFor(null);
+    if (kind === 'character') {
+      const characterItems = buildCharacterVideoReferences(option, provider);
+      if (references.some((item) => item.id === characterItems[0].id)) return;
+      onChangeVideoReferences?.([...references, ...characterItems]);
+      return;
+    }
     if (references.some((item) => item.id === option.id && item.kind === kind)) return;
-    // 参考帧默认补上还空着的那一端，参考角色一律当普通参考图提交
-    const role: VideoReferenceItem['role'] = kind === 'character'
-      ? 'reference'
-      : frameReferences.some((item) => item.role === 'first_frame') ? 'last_frame' : 'first_frame';
+    const role: VideoReferenceItem['role'] = frameReferences.some((item) => item.role === 'first_frame')
+      ? 'last_frame' : 'first_frame';
     onChangeVideoReferences?.([...references, {
-      id: option.id,
-      kind,
-      role,
-      url: option.url,
-      label: option.label,
+      id: option.id, kind, role, url: option.url, label: option.label,
       sourceNodeId: option.id.startsWith('character:') ? undefined : option.id,
     }]);
   };
 
-  const setFrameRole = (itemId: string, role: VideoReferenceItem['role']) => {
+  const characterPickerItems = (options: CharacterVideoReferenceOption[]): MentionPickerItem[] => options.map((option) => ({
+    key: option.id, label: option.label, thumbnailUrl: option.url, icon: 'lucide:user-round',
+    title: [option.label, option.character?.identity, option.character?.summary, option.character?.visualNotes,
+      ...(option.character?.aliases ?? [])].filter(Boolean).join(' · '),
+    disabled: references.some((item) => item.id === buildCharacterVideoReferences(option, provider)[0].id),
+    onSelect: () => addReference('character', option),
+  }));
+  const closeCharacterPicker = useCallback(() => setPickerFor(null), []);
+
+  const setFrameRole = (itemId: string, role: ImageReferenceRole) => {
     onChangeVideoReferences?.(references.map((item) => {
       if (item.id === itemId) return { ...item, role };
       // 首帧、尾帧各自唯一
-      if (item.kind === 'frame' && role !== 'reference' && item.role === role) {
+      if ((item.mediaKind ?? 'image') === 'image' && role !== 'reference' && item.role === role) {
         return { ...item, role: 'reference' as const };
       }
       return item;
     }));
   };
 
-  // 关弹窗时一并收起来源选择器，下次打开从干净状态开始
-  const closePopup = () => {
-    setOpen(false);
-    setPickerFor(null);
+  const getReferencePreviewUrl = (item: VideoReferenceItem) => {
+    if (item.previewUrl || !item.url.startsWith('asset://')) return item.previewUrl || item.url;
+    const characterOptionId = item.id.split(':volcengine:')[0];
+    return characterOptions.find((option) => option.id === characterOptionId)?.url || item.url;
   };
 
+
+  // 关弹窗时一并收起来源选择器，下次打开从干净状态开始
+  const closePopup = useCallback(() => {
+    setOpen(false);
+    setPickerFor(null);
+    onContinuousEditEnd?.();
+  }, [onContinuousEditEnd, setOpen, setPickerFor]);
+
   const removeReference = (itemId: string) => {
-    onChangeVideoReferences?.(references.filter((item) => item.id !== itemId));
+    onChangeVideoReferences?.(references.filter((item) => item.id !== itemId && item.id !== `${itemId}:voice`));
   };
 
   const generalModel = useMemo(() => {
     return resolveGeneralVideoModel(generalModels, selectedModel, provider);
   }, [generalModels, provider, selectedModel]);
+  const settingsConnectionId = provider === 'general' ? generalModel?.providerConfigId : provider;
+  const settingsConnection = useAppStore((state) => (
+    settingsConnectionId ? state.config.providers[settingsConnectionId] : undefined
+  ));
+  const settingsModelId = generalModel?.providerConfigId === settingsConnectionId
+    ? generalModel?.modelId
+    : settingsConnectionId && selectedModel?.startsWith(`${settingsConnectionId}/`)
+      ? selectedModel.slice(settingsConnectionId.length + 1) : selectedModel;
+  const settingsModel = settingsConnectionId && settingsConnection
+    && getProviderDefinition(settingsConnectionId, settingsConnection)?.id === 'custom-openai'
+    ? settingsConnection.selectedModels?.find((model) => model.id === settingsModelId && model.category === 'video')
+    : undefined;
 
   // 森之灵：能力来自目录 videoCapability（分辨率/比例/时长/配乐/参考上限）。
   const seedlingCapability = useMemo(
@@ -302,31 +478,77 @@ export default function VideoParamSelector({
   const dreaminaCapability = provider === 'dreamina'
     ? getDreaminaVideoCapability(selectedModel)
     : undefined;
+  const grsaiCapability = provider === 'grsai'
+    ? getGrsaiVideoCapability(selectedModel, seedanceResolution) : undefined;
   const generalCapability = generalModel
     ? generalModel.videoCapability
       ?? getModelProtocolPresetVideoCapability(generalModel.executionProfile)
     : undefined;
-  const generalDisplayState = resolveGeneralVideoParameterDisplayState(generalCapability, {
+  // 原生模型和通用模型共享参数面板，但通用模型不再经过会补齐 Seedance 默认值的能力视图。
+  // 这样 capability 未声明的字段会保持未指定，不会被 UI 悄悄写成 720p / 16:9 / 24fps。
+  const workflowApiCapability: VideoModelCapability | undefined = provider === 'workflow-api' && workflowApiManifest?.version === 1
+    ? AUTODL_H3_WORKFLOW.capability : undefined;
+  const nativeCapability = apimartCapability ?? volcengineCapability ?? dreaminaCapability;
+  const nativeParameterCapability: VideoModelCapability | undefined = nativeCapability
+    ? {
+      ...nativeCapability,
+      operations: [...nativeCapability.operations],
+      resolutions: [...nativeCapability.resolutions],
+      ratios: [...nativeCapability.ratios],
+      supportsAudio: Boolean(nativeCapability.audioField),
+      ...('allowsAudioOnly' in nativeCapability
+        ? { supportsStandaloneAudio: nativeCapability.allowsAudioOnly }
+        : {}),
+    }
+    : undefined;
+  const baseParameterCapability = nativeParameterCapability
+    ?? grsaiCapability
+    ?? workflowApiCapability
+    ?? generalCapability;
+  const selectedInputMode = resolveVideoParameterInputMode(
+    frameReferences,
+    characterReferences.length,
+    {
+      image: connectedImageNodes.length,
+      imageUrls: connectedImageNodes.map((node) => (node.data as BaseNodeData).imageUrl!),
+      video: connectedVideoCount,
+      audio: connectedAudioCount,
+    },
+  );
+  const selectedOperation: VideoGenerationOperation = connectedVideoCount > 0
+    ? 'video-to-video'
+    : references.length > 0 || connectedImageNodes.length > 0
+      ? 'image-to-video'
+      : 'text-to-video';
+  const parameterCapability = resolveEffectiveVideoParameterCapability(
+    baseParameterCapability,
+    selectedInputMode,
+    selectedOperation,
+  );
+  const inputModeCapability = baseParameterCapability?.inputModeCapabilities?.[selectedInputMode];
+  const operationCapability = baseParameterCapability?.operationCapabilities?.[selectedOperation];
+  const automaticDurationOnly = inputModeCapability?.automaticDurationOnly === true
+    || operationCapability?.automaticDurationOnly === true;
+  const generalDisplayState = resolveGeneralVideoParameterDisplayState(parameterCapability, {
     resolution: seedanceResolution,
     ratio: seedanceRatio,
     duration: seedanceDuration,
     frameRate: videoFps,
     generateAudio,
   });
-  // 原生模型和通用模型共享参数面板，但通用模型不再经过会补齐 Seedance 默认值的能力视图。
-  // 这样 capability 未声明的字段会保持未指定，不会被 UI 悄悄写成 720p / 16:9 / 24fps。
-  const workflowApiCapability: VideoModelCapability | undefined = provider === 'workflow-api' && workflowApiManifest?.version === 1
-    ? AUTODL_H3_WORKFLOW.capability : undefined;
-  const nativeCapability = apimartCapability ?? volcengineCapability ?? dreaminaCapability;
   // 配乐能力：APIMart / 火山 / 即梦用请求字段（audioField）表达，森之灵只在目录里声明 supportsAudio
   // 并靠 CLI 的 `--audio` 开关生效，因此两者在这里统一成「是否支持 + 是否默认开启」。
   const nativeAudio = resolveNativeVideoAudioCapability(nativeCapability, seedlingCapability);
-  const parameterCapability = nativeCapability ?? workflowApiCapability ?? seedlingCapability ?? generalCapability;
   // 森之灵沿用 Seedance 风格的按秒时长 + 比例参数面板。
   const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
     || provider === 'seedling'
-    || Boolean(apimartCapability || workflowApiCapability);
-  const generalControlSupport = resolveGeneralVideoControlSupport(generalCapability);
+    || Boolean(apimartCapability || grsaiCapability || workflowApiCapability);  const generalControlSupport = resolveGeneralVideoControlSupport(generalCapability);
+  const hasParameterOverrides = [
+    ...Object.values(generalCapability?.inputModeCapabilities ?? {}),
+    ...Object.values(generalCapability?.operationCapabilities ?? {}),
+  ].some((capability) => capability?.ratios?.length || capability?.defaultRatio || capability?.automaticDurationOnly);
+  const needsParameterSettings = Boolean(settingsModel)
+    && !Object.values(generalControlSupport).some(Boolean) && !hasParameterOverrides;
   // 本地工作流（ComfyUI / RunningHub）才按像素分辨率 + 帧率走；
   // 其余接口模型使用按秒表达的 API 布局；具体控件仍只由 capability 决定。
   const isWorkflowProvider = provider === 'comfyui' || provider === 'runninghub' || !provider;
@@ -337,9 +559,7 @@ export default function VideoParamSelector({
   // 非 Seedance（ComfyUI / RunningHub / 自建模型）：比例换算成 width/height 后注入请求
   const genericRatios = VIDEO_ASPECT_RATIOS.map((value) => ({ value, label: value }));
   const showGenericRatio = showSeedanceRatio;
-  const genericRatio = genericRatios.some((item) => item.value === legacySeedanceRatio)
-    ? legacySeedanceRatio
-    : VIDEO_ASPECT_RATIOS[0];
+  const genericRatio = legacySeedanceRatio;
   const declaredResolutions = parameterCapability?.resolutions?.length
     ? parameterCapability.resolutions
     : parameterCapability?.defaultResolution
@@ -360,25 +580,31 @@ export default function VideoParamSelector({
       : genericRatios;
   // 参考素材上限只能读模型真正声明的值，不能用 UI 兼容默认值充当模型约束。
   const referenceLimits = apimartCapability
+    ?? grsaiCapability
     ?? volcengineCapability
     ?? dreaminaCapability
     ?? workflowApiCapability
     ?? generalCapability;
-  const describeLimit = (max: number | undefined, unit: string, kind: string) => {
+  const describeLimit = (max: number | undefined, kind: 'image' | 'video' | 'audio') => {
     if (max === undefined) return '';
-    return max === 0 ? `不支持${kind}` : `最多 ${max} ${unit}${kind}`;
+    const labels = {
+      image: ['不支持参考图', '最多 {count} 张参考图'],
+      video: ['不支持参考视频', '最多 {count} 个参考视频'],
+      audio: ['不支持参考音频', '最多 {count} 个参考音频'],
+    };
+    return t(labels[kind][max === 0 ? 0 : 1], { count: max });
   };
   const referenceLimitTip = referenceLimits
     ? [
-      describeLimit(referenceLimits.maxImageReferences, '张', '参考图'),
-      describeLimit(referenceLimits.maxVideoReferences, '个', '参考视频'),
-      describeLimit(referenceLimits.maxAudioReferences, '个', '参考音频'),
+      describeLimit(referenceLimits.maxImageReferences, 'image'),
+      describeLimit(referenceLimits.maxVideoReferences, 'video'),
+      describeLimit(referenceLimits.maxAudioReferences, 'audio'),
     ].filter(Boolean).join('、')
     : '';
   const durationCandidates = [
     ...(parameterCapability?.durations ?? []),
     ...(parameterCapability?.defaultDuration === undefined ? [] : [parameterCapability.defaultDuration]),
-  ];
+  ].filter((value) => value >= 0);
   const minDuration = parameterCapability?.minDuration
     ?? (durationCandidates.length ? Math.min(...durationCandidates) : VIDEO_DURATION_MIN_SECONDS);
   const maxDuration = parameterCapability?.maxDuration
@@ -387,37 +613,48 @@ export default function VideoParamSelector({
   const allowedDurations = parameterCapability?.durations?.length
     ? [...parameterCapability.durations].sort((left, right) => left - right)
     : undefined;
-  const capabilityDurationDefault = parameterCapability?.defaultDuration;
+  const automaticDurationValue = parameterCapability?.automaticDurationValue;
+  const capabilityDurationDefault = automaticDurationOnly
+    ? automaticDurationValue
+    : parameterCapability?.defaultDuration ?? automaticDurationValue;
   const useUnboundedDurationInput = Boolean(
     generalModel
     && !allowedDurations
     && (generalCapability?.minDuration === undefined || generalCapability?.maxDuration === undefined),
   );
   const durationTooltip = apimartCapability?.durationMode === 'without-video'
-    ? '仅支持 4 / 6 / 8 / 10 秒。使用参考视频时，此时长设置不生效，由模型决定输出时长。'
+    ? t('仅支持 4 / 6 / 8 / 10 秒。使用参考视频时，此时长设置不生效，由模型决定输出时长。')
     : allowedDurations
-    ? `该模型仅支持 ${allowedDurations.join(' / ')} 秒。`
+    ? t('该模型仅支持 {durations} 秒。', { durations: allowedDurations.join(' / ') })
     : useUnboundedDurationInput
       ? generalCapability?.minDuration !== undefined
-        ? `该模型仅声明最短 ${generalCapability.minDuration} 秒；未声明最长时长。`
+        ? t('该模型仅声明最短 {duration} 秒；未声明最长时长。', { duration: generalCapability.minDuration })
         : generalCapability?.maxDuration !== undefined
-          ? `该模型仅声明最长 ${generalCapability.maxDuration} 秒；未声明最短时长。`
-          : '该模型未声明固定时长范围；输入值会在提交前由 capability 和接口校验。'
-      : `整数秒，范围 ${minDuration}-${maxDuration}。值越大视频越长、耗时越高。`;
-  const requestedDuration = seedanceDuration
-    ?? (generalModel ? generalDisplayState.duration : capabilityDurationDefault)
-    ?? (generalModel
-      ? undefined
-      // 缺少帧数时与提交层共用默认秒数，不能用临时的 77 帧显示成 3 秒。
-      : resolveVideoDurationSeconds(undefined, videoFrames, legacyVideoFps, maxDuration));
-  const displayedDuration = generalModel || requestedDuration === undefined
+          ? t('该模型仅声明最长 {duration} 秒；未声明最短时长。', { duration: generalCapability.maxDuration })
+          : t('该模型未声明固定时长范围；输入值会在提交前由 capability 和接口校验。')
+      : automaticDurationOnly
+        ? t('当前参考素材形态只允许模型自动决定时长。')
+        : automaticDurationValue !== undefined
+          ? t('可选“自动”，或显式指定 {min}-{max} 秒。', { min: minDuration, max: maxDuration })
+          : t('整数秒，范围 {min}-{max}。值越大视频越长、耗时越高。', { min: minDuration, max: maxDuration });
+  const requestedDuration = automaticDurationOnly
+    ? automaticDurationValue
+    : seedanceDuration
+      ?? (generalModel ? generalDisplayState.duration : capabilityDurationDefault)
+      ?? (generalModel
+        ? undefined
+        // 缺少帧数时与提交层共用默认秒数，不能用临时的 77 帧显示成 3 秒。
+        : resolveVideoDurationSeconds(undefined, videoFrames, legacyVideoFps, maxDuration));
+  const displayedDuration = generalModel
+    || requestedDuration === undefined
+    || requestedDuration === automaticDurationValue
     ? requestedDuration
     : allowedDurations
       ? allowedDurations.reduce((best, value) => (
         Math.abs(value - requestedDuration) < Math.abs(best - requestedDuration) ? value : best
       ), allowedDurations[0])
       : Math.min(maxDuration, Math.max(minDuration, requestedDuration));
-  const durationControlValue = displayedDuration === undefined
+  const durationControlValue = displayedDuration === undefined || displayedDuration < 0
     ? allowedDurations?.[0] ?? minDuration
     : Math.min(maxDuration, Math.max(minDuration, displayedDuration));
   const displayedResolution = generalModel
@@ -425,11 +662,10 @@ export default function VideoParamSelector({
     : seedanceResolution && seedanceResolutions.some((item) => item.value === seedanceResolution)
       ? seedanceResolution
       : parameterCapability?.defaultResolution ?? seedanceResolutions[0]?.value ?? '720p';
-  const displayedRatio = generalModel
+  // 比例属于用户选择；新模型不支持时保留原值，由提交前校验提示，不能悄悄换成模型默认。
+  const displayedRatio = seedanceRatio ?? (generalModel
     ? generalDisplayState.ratio
-    : seedanceRatio && seedanceRatios.some((item) => item.value === seedanceRatio)
-      ? seedanceRatio
-      : parameterCapability?.defaultRatio ?? seedanceRatios[0]?.value ?? '16:9';
+    : parameterCapability?.defaultRatio ?? seedanceRatios[0]?.value ?? '16:9');
   const configuredFrameRates = generalCapability?.frameRates?.length
     ? [...generalCapability.frameRates].sort((left, right) => left - right)
     : generalCapability?.defaultFrameRate === undefined
@@ -463,7 +699,8 @@ export default function VideoParamSelector({
     : generalControlSupport.audio;
   // 音频能力必须由模型 capability 明确声明，未知能力保持关闭。
   const displayedGenerateAudio = generateAudio ?? nativeAudio.defaultOn;
-
+  // 原生合同缺少 audioField 只表示没有开关，不能据此断言模型不能生成音轨。
+  const explicitlyUnsupportedAudio = (generalCapability ?? grsaiCapability ?? workflowApiCapability)?.supportsAudio === false;
   useEffect(() => {
     if (!parameterCapability) return;
     if (displayedResolution !== undefined
@@ -471,15 +708,15 @@ export default function VideoParamSelector({
       && displayedResolution !== seedanceResolution) {
       onChangeSeedanceResolution?.(displayedResolution);
     }
-    if (displayedRatio !== undefined
-      && (isNativeSeedance || generalCapability?.defaultRatio !== undefined)
-      && displayedRatio !== seedanceRatio) {
-      onChangeSeedanceRatio?.(displayedRatio);
-    }
     if (displayedDuration !== undefined
-      && (isNativeSeedance || generalCapability?.defaultDuration !== undefined)
+      && (isNativeSeedance
+        || generalCapability?.defaultDuration !== undefined
+        || generalCapability?.automaticDurationValue !== undefined)
       && displayedDuration !== seedanceDuration) {
       onChangeSeedanceDuration?.(displayedDuration);
+    }
+    if (generateAudio === true && explicitlyUnsupportedAudio) {
+      onChangeGenerateAudio?.(undefined);
     }
     if (displayedFrameRate !== undefined
       && showFrameRateControl
@@ -490,20 +727,20 @@ export default function VideoParamSelector({
   }, [
     parameterCapability,
     displayedDuration,
-    displayedRatio,
     displayedResolution,
     displayedFrameRate,
     generalCapability?.defaultDuration,
+    generalCapability?.automaticDurationValue,
     generalCapability?.defaultFrameRate,
-    generalCapability?.defaultRatio,
     generalCapability?.defaultResolution,
+    explicitlyUnsupportedAudio,
+    generateAudio,
     isNativeSeedance,
     onChangeSeedanceDuration,
-    onChangeSeedanceRatio,
+    onChangeGenerateAudio,
     onChangeSeedanceResolution,
     onChangeFps,
     seedanceDuration,
-    seedanceRatio,
     seedanceResolution,
     showFrameRateControl,
     videoFps,
@@ -522,7 +759,7 @@ export default function VideoParamSelector({
     };
     if (open) document.addEventListener('mousedown', handler, true);
     return () => document.removeEventListener('mousedown', handler, true);
-  }, [open]);
+  }, [open, closePopup]);
 
   // Close popup on Escape
   useEffect(() => {
@@ -531,65 +768,81 @@ export default function VideoParamSelector({
     };
     if (open) window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [open]);
+  }, [open, closePopup]);
 
   // ── 触发按钮文案 ──
   const durationLabelParts = [
-    showResolutionControl ? displayedResolution ?? '分辨率模型默认' : '',
-    showDurationControl ? displayedDuration === undefined ? '时长模型默认' : `时长${displayedDuration}s` : '',
-    showRatioControl ? displayedRatio ?? '比例模型默认' : '',
-    showFrameRateControl ? displayedFrameRate === undefined ? '帧率模型默认' : `${displayedFrameRate}帧` : '',
+    showResolutionControl ? displayedResolution ?? t('分辨率模型默认') : '',
+    showDurationControl
+      ? displayedDuration === undefined
+        ? t('时长模型默认')
+        : displayedDuration === automaticDurationValue ? t('时长自动') : t('时长{duration}s', { duration: displayedDuration ?? '' })
+      : '',
+    showRatioControl ? displayedRatio ?? t('比例模型默认') : '',
+    showFrameRateControl ? displayedFrameRate === undefined ? t('帧率模型默认') : t('{count}帧', { count: displayedFrameRate }) : '',
     supportsAudio && generalModel
-      ? generateAudio === undefined ? '音频模型默认' : generateAudio ? '有声视频' : '无声视频'
+      ? generateAudio === undefined ? t('音频模型默认') : generateAudio ? t('有声视频') : t('无声视频')
       : '',
   ].filter(Boolean);
   const durationTriggerLabel = durationLabelParts.length > 0
     ? durationLabelParts.join(' · ')
     : supportsAudio
       ? generalModel && generateAudio === undefined
-        ? '音频模型默认'
-        : displayedGenerateAudio ? '有声视频' : '无声视频'
-      : '模型默认参数';
-  const triggerLabel = usesDurationControls
-    ? durationTriggerLabel
-    : showGenericRatio
-      ? `${genericRatio} · ${legacyVideoResolution} · 时长${displayedDuration}s`
-      : `时长${displayedDuration}s · 帧率${legacyVideoFps} · 分辨率${legacyVideoResolution}`;
+        ? t('音频模型默认')
+        : displayedGenerateAudio ? t('有声视频') : t('无声视频')
+      : t('模型默认参数');
+  const triggerLabel = needsParameterSettings
+    ? t('参数')
+    : usesDurationControls
+      ? durationTriggerLabel
+      : showGenericRatio
+        ? t('{ratio} · {resolution} · 时长{duration}s', { ratio: genericRatio, resolution: legacyVideoResolution, duration: displayedDuration ?? '' })
+        : t('时长{duration}s · 帧率{fps} · 分辨率{resolution}', { duration: displayedDuration ?? '', fps: legacyVideoFps, resolution: legacyVideoResolution });
 
-  return (
+  return (<>
     <div className="ui-schema-renderer" data-ui-schema-placement="videoParams" ref={ref}>
       <div className="ui-schema-quality-ratio-pill">
         <AnimatedButton
           type="button"
           className="img-pill-btn ui-schema-menu-trigger"
-          onClick={(e) => { e.stopPropagation(); if (open) closePopup(); else setOpen(true); }}
+          title={triggerLabel}
+          aria-label={needsParameterSettings && settingsModel ? t('{name} · 参数', { name: settingsModel.name }) : undefined}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (needsParameterSettings && settingsConnectionId && settingsModel) {
+              closePopup();
+              useAppStore.getState().openApiKeySettings(settingsConnectionId, settingsModel.id);
+              return;
+            }
+            if (open) closePopup(); else setOpen(true);
+          }}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polygon points="23 7 16 12 23 17 23 7" />
-            <rect x="1" y="5" width="15" height="14" rx="2" />
-          </svg>
+          <Icon icon="lucide:film" width={12} height={12} aria-hidden="true" />
           <span className="ui-schema-pill-label ui-schema-quality-ratio-label">{triggerLabel}</span>
         </AnimatedButton>
 
-        {open && (
-          <div className="img-ratio-popup ui-schema-popup ui-schema-video-params-popup" style={{ display: 'block' }}>
+        {open && !needsParameterSettings && (
+          <div className="img-ratio-popup ui-schema-popup ui-schema-video-params-popup" style={{ display: 'block' }}
+            data-cloud-workflow-parameters={extraParameters ? '' : undefined}>
+            <fieldset className="m-0 min-w-0 border-0 p-0" disabled={disabled}
+              onClickCapture={disabled ? (event) => { event.preventDefault(); event.stopPropagation(); } : undefined}>
             {onChangeVideoReferences && provider !== 'workflow-api' && (
               <div className="img-rp-quality-area mb-2">
                 <div className="img-rp-section-label rh-video-ref-head">
                   <span>
-                    参考帧
-                    <span className="rh-tip" data-tooltip={`可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。${referenceLimitTip ? `
-该模型：${referenceLimitTip}（连线带入的素材一并计数）。` : ''}`}>!</span>
+                    {t('参考帧')}
+                    <span className="rh-tip" data-tooltip={`${t('可选：指定某张图作为视频的首帧或尾帧，其余作为中间参考帧。不添加时按连线顺序交给模型。')}${referenceLimitTip ? `
+${t('该模型：{limits}（连线带入的素材一并计数）。', { limits: referenceLimitTip })}` : ''}`}>!</span>
                   </span>
                   <button type="button" className="rh-video-ref-add" onClick={() => setPickerFor(pickerFor === 'frame' ? null : 'frame')}>
-                    {pickerFor === 'frame' ? '取消' : '＋ 添加'}
+                    {t(pickerFor === 'frame' ? '取消' : '＋ 添加')}
                   </button>
                 </div>
                 {frameReferences.length > 0 && (
                   <div className="rh-video-frame-list">
                     {frameReferences.map((item) => (
                       <div key={item.id} className="rh-video-frame-row">
-                        <img className="rh-video-frame-thumb" src={item.url} alt={item.label || '参考帧'} title={item.label} loading="lazy" />
+                        <ViewportImage className="rh-video-frame-thumb" src={getReferencePreviewUrl(item)} alt={item.label || t('参考帧')} title={item.label} loading="lazy" />
                         <div className="img-rp-quality-segmented rh-video-frame-seg">
                           {FRAME_ROLE_OPTIONS.map((option) => (
                             <AnimatedButton
@@ -598,11 +851,11 @@ export default function VideoParamSelector({
                               className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${item.role === option.value ? 'active' : ''}`}
                               onClick={() => setFrameRole(item.id, option.value)}
                             >
-                              {option.label}
+                              {t(option.label)}
                             </AnimatedButton>
                           ))}
                         </div>
-                        <button type="button" className="rh-video-ref-remove" aria-label={`移除 ${item.label || '参考帧'}`} onClick={() => removeReference(item.id)}>✕</button>
+                        <button type="button" className="rh-video-ref-remove" aria-label={t('移除 {name}', { name: item.label || t('参考帧') })} onClick={() => removeReference(item.id)}>✕</button>
                       </div>
                     ))}
                   </div>
@@ -610,31 +863,37 @@ export default function VideoParamSelector({
 
                 <div className="img-rp-section-label rh-video-ref-head mt-2">
                   <span>
-                    参考角色
-                    <span className="rh-tip" data-tooltip="可选：从角色库或连线节点挑选角色形象，作为参考图一起提交。提示词里写到该角色名字时，会自动告诉模型这个名字对应哪张参考图。">!</span>
+                    {t('参考角色')}
+                    <span className="rh-tip" data-tooltip={t('可选：从本项目角色或全局角色中挑选角色形象，作为参考图提交。若角色设置了可用的主音色，也会携带音频作为参考；当前模型不支持参考音频时，生成前会提示。提示词中提到角色名字时，会说明它对应的参考图。')}>!</span>
                   </span>
-                  <button type="button" className="rh-video-ref-add" onClick={() => setPickerFor(pickerFor === 'character' ? null : 'character')}>
-                    {pickerFor === 'character' ? '取消' : '＋ 添加'}
+                  <button ref={characterTriggerRef} type="button" className="rh-video-ref-add"
+                    aria-haspopup="dialog" aria-expanded={pickerFor === 'character'}
+                    onClick={() => setPickerFor(pickerFor === 'character' ? null : 'character')}>
+                    {t(pickerFor === 'character' ? '取消' : '＋ 添加')}
                   </button>
                 </div>
                 {characterReferences.length > 0 && (
                   <div className="rh-video-frame-list">
                     {characterReferences.map((item) => (
                       <div key={item.id} className="rh-video-frame-row">
-                        <img className="rh-video-frame-thumb" src={item.url} alt={item.label || '参考角色'} title={item.label} loading="lazy" />
-                        <span className="rh-video-ref-name">{item.label || '参考角色'}</span>
-                        <button type="button" className="rh-video-ref-remove" aria-label={`移除 ${item.label || '参考角色'}`} onClick={() => removeReference(item.id)}>✕</button>
+                        <ViewportImage className="rh-video-frame-thumb" src={getReferencePreviewUrl(item)} alt={item.label || t('参考角色')} title={item.label} loading="lazy" />
+                        <span className="rh-video-ref-name">{item.label || t('参考角色')}</span>
+                        {references.some((reference) => reference.id === `${item.id}:voice` && reference.mediaKind === 'audio') && (
+                          <span className="shrink-0 text-[10px] text-canvas-text-muted">{t('含主音色')}</span>
+                        )}
+                        <button type="button" className="rh-video-ref-remove" aria-label={t('移除 {name}', { name: item.label || t('参考角色') })} onClick={() => removeReference(item.id)}>✕</button>
                       </div>
                     ))}
                   </div>
                 )}
 
-                {pickerFor && (() => {
-                  // 参考帧只从连线节点挑；角色库只出现在参考角色里
-                  const pickerCharacters = pickerFor === 'character' ? characterOptions : [];
-                  return (
+                {pickerFor === 'character' && !disabled && <VideoCharacterPicker anchorRef={characterTriggerRef}
+                  projectItems={characterPickerItems(projectCharacterOptions)} globalItems={characterPickerItems(globalCharacterOptions)}
+                  globalLoading={globalCharactersLoading} onReloadGlobal={() => { void loadGlobalCharacters(); }}
+                  onClose={closeCharacterPicker} />}
+                {pickerFor === 'frame' && (
                   <div className="rh-video-ref-picker">
-                    {connectedImageNodes.length > 0 && <div className="rh-video-ref-picker-label">连线节点</div>}
+                    {connectedImageNodes.length > 0 && <div className="rh-video-ref-picker-label">{t('连线节点')}</div>}
                     {connectedImageNodes.map((node) => {
                       const data = node.data as BaseNodeData;
                       return (
@@ -642,35 +901,20 @@ export default function VideoParamSelector({
                           key={node.id}
                           type="button"
                           className="rh-video-ref-option"
-                          onClick={() => addReference(pickerFor, { id: node.id, label: data.label || '参考图', url: data.imageUrl as string })}
+                          onClick={() => addReference('frame', { id: node.id, label: data.label || t('参考图'), url: data.imageUrl as string })}
                         >
-                          <img className="rh-video-frame-thumb" src={data.imageUrl} alt="" loading="lazy" />
-                          <span className="rh-video-ref-name">{data.label || '参考图'}</span>
+                          <ViewportImage className="rh-video-frame-thumb" src={data.imageUrl} alt="" loading="lazy" />
+                          <span className="rh-video-ref-name">{data.label || t('参考图')}</span>
                         </button>
                       );
                     })}
-                    {pickerCharacters.length > 0 && <div className="rh-video-ref-picker-label">角色库</div>}
-                    {pickerCharacters.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        className="rh-video-ref-option"
-                        onClick={() => addReference(pickerFor, option)}
-                      >
-                        <img className="rh-video-frame-thumb" src={option.url} alt="" loading="lazy" />
-                        <span className="rh-video-ref-name">{option.label}</span>
-                      </button>
-                    ))}
-                    {connectedImageNodes.length === 0 && pickerCharacters.length === 0 && (
+                    {connectedImageNodes.length === 0 && (
                       <div className="rh-video-ref-empty">
-                        {pickerFor === 'frame'
-                          ? '还没有可选的图片：先给视频节点连一个图片节点'
-                          : '还没有可选的角色：先连一个图片节点，或在角色库里添加角色'}
+                        {t('还没有可选的图片：先给视频节点连一个图片节点')}
                       </div>
                     )}
                   </div>
-                  );
-                })()}
+                )}
               </div>
             )}
 
@@ -679,8 +923,8 @@ export default function VideoParamSelector({
                 {/* Seedance 分辨率 */}
                 {showResolutionControl && <div className="img-rp-quality-area mb-2">
                   <div className="img-rp-section-label">
-                    分辨率
-                    <span className="rh-tip" data-tooltip="只展示模型 capability 声明支持的分辨率档位；更高分辨率通常耗时更长。">!</span>
+                    {t('分辨率')}
+                    <span className="rh-tip" data-tooltip={t('只展示模型 capability 声明支持的分辨率档位；更高分辨率通常耗时更长。')}>!</span>
                   </div>
                   <div className="img-rp-quality-segmented rh-video-resolution-seg">
                     {generalModel && generalCapability?.defaultResolution === undefined && (
@@ -689,7 +933,7 @@ export default function VideoParamSelector({
                         className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${displayedResolution === undefined ? 'active' : ''}`}
                         onClick={() => onChangeSeedanceResolution?.(undefined)}
                       >
-                        模型默认
+                        {t('模型默认')}
                       </AnimatedButton>
                     )}
                     {seedanceResolutions.map((opt) => (
@@ -708,8 +952,8 @@ export default function VideoParamSelector({
                 {showRatioControl && (
                   <div className="img-rp-quality-area mb-2">
                     <div className="img-rp-section-label">
-                      宽高比
-                      <span className="rh-tip" data-tooltip="决定输出视频的画面形状：16:9 横屏、9:16 竖屏，自适应 = 由模型智能决定。">!</span>
+                      {t('宽高比')}
+                      <span className="rh-tip" data-tooltip={t('决定输出视频的画面形状：16:9 横屏、9:16 竖屏，自适应 = 由模型智能决定。')}>!</span>
                     </div>
                     <div className="img-rp-quality-segmented rh-video-resolution-seg">
                       {generalModel && generalCapability?.defaultRatio === undefined && (
@@ -718,7 +962,7 @@ export default function VideoParamSelector({
                           className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${displayedRatio === undefined ? 'active' : ''}`}
                           onClick={() => onChangeSeedanceRatio?.(undefined)}
                         >
-                          模型默认
+                          {t('模型默认')}
                         </AnimatedButton>
                       )}
                       {seedanceRatios.map((opt) => (
@@ -728,7 +972,7 @@ export default function VideoParamSelector({
                           className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${displayedRatio === opt.value ? 'active' : ''}`}
                           onClick={() => onChangeSeedanceRatio?.(opt.value)}
                         >
-                          {opt.label}
+                          {opt.value === 'adaptive' ? t('自适应') : opt.label}
                         </AnimatedButton>
                       ))}
                     </div>
@@ -738,8 +982,8 @@ export default function VideoParamSelector({
                 {showFrameRateControl && (
                   <div className="img-rp-quality-area mb-2">
                     <div className="img-rp-section-label">
-                      帧率
-                      <span className="rh-tip" data-tooltip="仅展示该模型配置中声明支持的帧率；帧率越高运动越顺滑，但生成成本通常也更高。">!</span>
+                      {t('帧率')}
+                      <span className="rh-tip" data-tooltip={t('仅展示该模型配置中声明支持的帧率；帧率越高运动越顺滑，但生成成本通常也更高。')}>!</span>
                     </div>
                     <div className="img-rp-quality-segmented rh-video-resolution-seg">
                       {generalCapability?.defaultFrameRate === undefined && (
@@ -748,7 +992,7 @@ export default function VideoParamSelector({
                           className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${displayedFrameRate === undefined ? 'active' : ''}`}
                           onClick={() => onChangeFps?.(undefined)}
                         >
-                          模型默认
+                          {t('模型默认')}
                         </AnimatedButton>
                       )}
                       {configuredFrameRates?.map((value) => (
@@ -758,7 +1002,7 @@ export default function VideoParamSelector({
                           className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${displayedFrameRate === value ? 'active' : ''}`}
                           onClick={() => onChangeFps?.(value)}
                         >
-                          {value}帧
+                          {t('{count}帧', { count: value })}
                         </AnimatedButton>
                       ))}
                     </div>
@@ -767,62 +1011,68 @@ export default function VideoParamSelector({
 
                 {/* Seedance 时长 */}
                 {apimartCapability?.durationMode === 'automatic' && (
-                  <div className="text-xs text-canvas-text-secondary">时长由模型自动决定，可在提示词中描述节奏。</div>
+                  <div className="text-xs text-canvas-text-secondary">{t('时长由模型自动决定，可在提示词中描述节奏。')}</div>
                 )}
                 {(showDurationControl || (showGenerateAudio && supportsAudio)) && (
                 <div className="rh-v5-meta-panel">
                   {showDurationControl && <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label">
-                      <span>生成时长（秒）</span>
+                      <span>{t('生成时长（秒）')}</span>
                       <span className="rh-tip" data-tooltip={durationTooltip}>!</span>
                     </div>
-                    {generalModel && generalCapability?.defaultDuration === undefined && (
+                    {((generalModel && generalCapability?.defaultDuration === undefined
+                      && generalCapability?.automaticDurationValue === undefined) || automaticDurationValue !== undefined
+                      || (!automaticDurationOnly && allowedDurations)) && (
+                    <div className="ui-segmented ui-segmented--brand" role="group" aria-label={t('生成时长（秒）')}>
+                      {generalModel && generalCapability?.defaultDuration === undefined
+                        && generalCapability?.automaticDurationValue === undefined && (
                       <button
                         type="button"
                         aria-pressed={displayedDuration === undefined}
                         onClick={() => onChangeSeedanceDuration?.(undefined)}
-                        className={`mb-2 min-h-7 rounded-full border px-3 py-1 text-[11px] leading-4 transition-colors ${
-                          displayedDuration === undefined
-                            ? 'border-blue-400/70 bg-blue-400/15 text-blue-200'
-                            : 'border-canvas-border text-canvas-text-secondary hover:border-blue-400/40 hover:text-canvas-text'
-                        }`}
+                        className={`ui-segmented__item${displayedDuration === undefined ? ' is-active' : ''}`}
                       >
-                        模型默认
+                        {t('模型默认')}
                       </button>
                     )}
-                    {generalModel && displayedDuration === undefined && (
-                      <div className="mb-2 text-[10px] text-canvas-text-muted">
-                        当前未指定时长；选择或输入数值后才会显式提交。
-                      </div>
+                    {automaticDurationValue !== undefined && (
+                      <button
+                        type="button"
+                        aria-pressed={displayedDuration === automaticDurationValue}
+                        onClick={() => onChangeSeedanceDuration?.(automaticDurationValue)}
+                        className={`ui-segmented__item${displayedDuration === automaticDurationValue ? ' is-active' : ''}`}
+                      >
+                        {t('自动')}
+                      </button>
                     )}
-                    {allowedDurations ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {allowedDurations.map((value) => (
+                    {!automaticDurationOnly && allowedDurations?.map((value) => (
                           <button
                             key={value}
                             type="button"
                             aria-pressed={displayedDuration === value}
                             onClick={() => onChangeSeedanceDuration?.(value)}
-                            className={`min-h-7 rounded-full border px-3 py-1 text-[11px] leading-4 transition-colors ${
-                              displayedDuration === value
-                                ? 'border-blue-400/70 bg-blue-400/15 text-blue-200'
-                                : 'border-canvas-border text-canvas-text-secondary hover:border-blue-400/40 hover:text-canvas-text'
-                            }`}
+                            className={`ui-segmented__item${displayedDuration === value ? ' is-active' : ''}`}
                           >
                             {value}s
                           </button>
                         ))}
+                    </div>
+                    )}
+                    {generalModel && displayedDuration === undefined && (
+                      <div className="mb-2 text-[10px] text-canvas-text-muted">
+                        {t('当前未指定时长；选择或输入数值后才会显式提交。')}
                       </div>
-                    ) : useUnboundedDurationInput ? (
+                    )}
+                    {!automaticDurationOnly && !allowedDurations && (useUnboundedDurationInput ? (
                       <input
                         type="number"
                         className="h-8 w-full rounded-md border border-canvas-border bg-canvas-card px-2 text-[11px] text-canvas-text outline-none focus:border-blue-400/60"
-                        aria-label="生成时长（秒）"
+                        aria-label={t('生成时长（秒）')}
                         min={generalCapability?.minDuration}
                         max={generalCapability?.maxDuration}
                         step={1}
                         value={displayedDuration ?? ''}
-                        placeholder="模型默认"
+                        placeholder={t('模型默认')}
                         onChange={(event) => onChangeSeedanceDuration?.(
                           event.target.value ? Number(event.target.value) : undefined,
                         )}
@@ -856,7 +1106,7 @@ export default function VideoParamSelector({
                         ))}
                       </div>
                     </div>
-                    )}
+                    ))}
                   </div>}
 
 
@@ -865,25 +1115,24 @@ export default function VideoParamSelector({
                   <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label" style={{ justifyContent: 'space-between', width: '100%' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span>生成有声视频</span>
+                        <span>{t('生成有声视频')}</span>
                         <span className="rh-tip" data-tooltip={generalModel
-                          ? '模型默认表示不发送音频开关；也可以显式要求生成音频或不生成音频。'
+                          ? t('模型默认表示不发送音频开关；也可以显式要求生成音频或不生成音频。')
                           : seedlingCapability
-                            ? '开启后由森之灵生成 AI 配乐（CLI --audio，需模型支持）；关闭则不生成音频。'
-                            : '开启后由当前原生视频模型同时生成音频。'}>!</span>
-                      </div>
+                            ? t('开启后由森之灵生成 AI 配乐（CLI --audio，需模型支持）；关闭则不生成音频。')
+                            : t('开启后由当前原生视频模型同时生成音频。')}>!</span>                      </div>
                       {generalModel ? (
-                        <Select fixedMenu
+                        <Select fixedMenu disabled={disabled}
                           className="min-w-0" size="sm"
-                          aria-label="视频音频策略"
+                          aria-label={t('视频音频策略')}
                           value={generateAudio === undefined ? 'default' : generateAudio ? 'on' : 'off'}
                           onChange={(selectedOptionValue) => onChangeGenerateAudio?.(
                             selectedOptionValue === 'default' ? undefined : selectedOptionValue === 'on',
                           )}
                         >
-                          <option value="default">模型默认</option>
-                          <option value="on">生成音频</option>
-                          <option value="off">不生成音频</option>
+                          <option value="default">{t('模型默认')}</option>
+                          <option value="on">{t('生成音频')}</option>
+                          <option value="off">{t('不生成音频')}</option>
                         </Select>
                       ) : (
                         <label className="rh-toggle-switch">
@@ -908,8 +1157,8 @@ export default function VideoParamSelector({
                 {showGenericRatio && (
                   <div className="img-rp-quality-area mb-2">
                     <div className="img-rp-section-label">
-                      画面比例
-                      <span className="rh-tip" data-tooltip="决定输出视频的画面形状：16:9 横屏、9:16 竖屏。分辨率为长边，短边按比例换算后注入工作流的 width/height。">!</span>
+                      {t('画面比例')}
+                      <span className="rh-tip" data-tooltip={t('决定输出视频的画面形状：16:9 横屏、9:16 竖屏。分辨率为长边，短边按比例换算后注入工作流的 width/height。')}>!</span>
                     </div>
                     <div className="img-rp-quality-segmented rh-video-resolution-seg">
                       {genericRatios.map((opt) => (
@@ -929,8 +1178,8 @@ export default function VideoParamSelector({
                 {/* ComfyUI / RunningHub 分辨率 */}
                 <div className="img-rp-quality-area mb-2" data-ui-schema-field="rhVideoResolution" data-ui-schema-type="segmented" data-ui-schema-value-type="number" data-ui-schema-default="832">
                   <div className="img-rp-section-label">
-                    分辨率（长边）
-                    <span className="rh-tip" data-tooltip="画面长边像素，短边由上方比例换算。分辨率越高细节越清晰、边缘更稳定，显存占用与生成耗时也明显增加。最后一格可以填预设以外的值，例如 384。">!</span>
+                    {t('分辨率（长边）')}
+                    <span className="rh-tip" data-tooltip={t('画面长边像素，短边由上方比例换算。分辨率越高细节越清晰、边缘更稳定，显存占用与生成耗时也明显增加。最后一格可以填预设以外的值，例如 384。')}>!</span>
                   </div>
                   <div className="img-rp-quality-segmented rh-video-resolution-seg rh-res-seg-with-custom">
                     {COMBO_RESOLUTIONS.map((res) => (
@@ -948,8 +1197,8 @@ export default function VideoParamSelector({
                     <input
                       type="number"
                       className="rh-res-custom-input"
-                      aria-label="自定义长边像素"
-                      placeholder="自定义"
+                      aria-label={t('自定义长边像素')}
+                      placeholder={t('自定义')}
                       min={MIN_CUSTOM_RESOLUTION}
                       max={MAX_CUSTOM_RESOLUTION}
                       step={8}
@@ -977,8 +1226,8 @@ export default function VideoParamSelector({
                 <div className="rh-v5-meta-panel">
                   <div className="rh-vram-adv-row">
                     <div className="rh-vram-adv-label">
-                      <span>帧率</span>
-                      <span className="rh-tip" data-tooltip="帧率越高运动更顺滑、动作更连贯。但生成更慢、成本更高。常用 24 帧。">!</span>
+                      <span>{t('帧率')}</span>
+                      <span className="rh-tip" data-tooltip={t('帧率越高运动更顺滑、动作更连贯。但生成更慢、成本更高。常用 24 帧。')}>!</span>
                     </div>
                     <div className="img-rp-quality-segmented rh-adv-seg rh-v5-fps-seg">
                       {COMBO_FPS_OPTIONS.map((opt) => (
@@ -996,7 +1245,7 @@ export default function VideoParamSelector({
                             onChangeFps?.(opt.value);
                           }}
                         >
-                          {opt.label}
+                          {t('{count}帧', { count: opt.value })}
                         </AnimatedButton>
                       ))}
                     </div>
@@ -1004,8 +1253,8 @@ export default function VideoParamSelector({
 
                   <div className="rh-vram-adv-row" data-ui-schema-field="videoDuration" data-ui-schema-type="slider">
                     <div className="rh-vram-adv-label">
-                      <span>生成时长（秒）</span>
-                      <span className="rh-tip" data-tooltip={`整数秒，范围 ${minDuration}-${maxDuration}。提交时会根据帧率自动换算为模型需要的总帧数。`}>!</span>
+                      <span>{t('生成时长（秒）')}</span>
+                      <span className="rh-tip" data-tooltip={t('整数秒，范围 {min}-{max}。提交时会根据帧率自动换算为模型需要的总帧数。', { min: minDuration, max: maxDuration })}>!</span>
                     </div>
                     <div className="rh-duration-slider">
                       <div className="rh-duration-track">
@@ -1040,6 +1289,8 @@ export default function VideoParamSelector({
                 </div>
               </>
             )}
+            <ComfyH3MemorySelector nodeId={nodeId} disabled={disabled} />
+            {extraParameters}
 
             {/* 在此节点生成 — 所有视频模型通用：勾选=替换本节点旧视频；不勾选=生成到右侧新建节点 */}
             <div className="rh-vram-adv-row">
@@ -1099,9 +1350,10 @@ export default function VideoParamSelector({
                 </div>
               </div>
             )}
+            </fieldset>
           </div>
         )}
       </div>
     </div>
-  );
+  </>);
 }

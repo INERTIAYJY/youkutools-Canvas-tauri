@@ -1,3 +1,6 @@
+/**
+ * CharacterVoiceSelector — 提供角色参考音色选择界面与交互。
+ */
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';

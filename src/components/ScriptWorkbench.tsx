@@ -1,4 +1,7 @@
-import { useId, useMemo, useState } from 'react';
+/**
+ * ScriptWorkbench — 提供剧本创作工作台界面与交互。
+ */
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import type { EpisodeCreativeInfo } from '../types';
@@ -15,11 +18,17 @@ import {
 import { useT } from '../i18n';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
+import EpisodeNameDialog from './shared/EpisodeNameDialog';
 import Select from './shared/Select';
 import { createEpisodeShotlist } from '../services/shotlistService';
 import SeriesSourceBrowser from './SeriesSourceBrowser';
+import type { DramaAssetKind } from '../types/dramaAssets';
+import { commitSeriesAssetCandidates, extractSeriesAssetsFromFullScript, type SeriesAssetExtractionResult } from '../services/seriesAssetExtractionService';
+import { normalizeEpisodeAssetRoster } from '../types/episodeAssets';
+import EpisodeAssetPanel from './series/EpisodeAssetPanel';
+import AssetExtractionPreviewDialog from './series/AssetExtractionPreviewDialog';
 
-type EditorTab = 'outline' | 'script' | 'creative';
+type EditorTab = 'outline' | 'script' | 'creative' | 'characters' | 'props';
 type PendingAction = { type: 'close' } | { type: 'switch'; episodeId: string };
 
 interface CreativeDraft {
@@ -85,6 +94,16 @@ const CREATIVE_ACTION_GROUPS: Array<{
       { id: 'add-performance-cues', label: '补表演标注' },
     ],
   },
+];
+
+const SERIES_ASSET_EXTRACTION_ACTIONS: Array<{
+  kind: DramaAssetKind;
+  label: string;
+  icon: string;
+}> = [
+  { kind: 'character', label: '提取人物', icon: 'lucide:user-round-search' },
+  { kind: 'scene', label: '提取场景', icon: 'lucide:map-pinned' },
+  { kind: 'prop', label: '提取道具', icon: 'lucide:briefcase-business' },
 ];
 
 function toCreativeDraft(value: EpisodeCreativeInfo | undefined): CreativeDraft {
@@ -234,6 +253,7 @@ export default function ScriptWorkbench({
     updateEpisodeCreative,
     openChatWithDraft,
     showToast,
+    dramaAssets,
   } = useAppStore(useShallow((state) => ({
     projects: state.projects,
     currentProjectId: state.currentProjectId,
@@ -242,6 +262,7 @@ export default function ScriptWorkbench({
     updateEpisodeCreative: state.updateEpisodeCreative,
     openChatWithDraft: state.openChatWithDraft,
     showToast: state.showToast,
+    dramaAssets: state.dramaAssets,
   })));
 
   const seriesId = currentProjectId ? seriesOwnerId(projects, currentProjectId) : null;
@@ -263,7 +284,17 @@ export default function ScriptWorkbench({
   );
   const [targetEpisodeCount, setTargetEpisodeCount] = useState('24');
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [renamingEpisodeId, setRenamingEpisodeId] = useState<string | null>(null);
   const [targetDurationSec, setTargetDurationSec] = useState('90');
+  const [extractingAssetKind, setExtractingAssetKind] = useState<DramaAssetKind | null>(null);
+  const extractingAssetKindRef = useRef<DramaAssetKind | null>(null);
+  const [seriesAssetPreview, setSeriesAssetPreview] = useState<SeriesAssetExtractionResult | null>(null);
+  const extractionGeneration = useRef(0);
+  useEffect(() => () => { extractionGeneration.current += 1; }, [isOpen, currentProjectId]);
+  const episodeAssetRoster = useMemo(
+    () => normalizeEpisodeAssetRoster(currentEpisode?.episodeAssetRoster),
+    [currentEpisode?.episodeAssetRoster],
+  );
   const splitSourceAvailable = splitSource === 'script'
     ? Boolean(series?.series?.script?.trim())
     : Boolean(series?.series?.originalWork);
@@ -304,6 +335,7 @@ export default function ScriptWorkbench({
 
   const performPendingAction = (action: PendingAction) => {
     setPendingAction(null);
+    setSeriesAssetPreview(null);
     if (currentEpisode) {
       setDraftsByEpisode((current) => {
         const next = { ...current };
@@ -320,11 +352,15 @@ export default function ScriptWorkbench({
 
   const requestClose = () => {
     if (isDirty) setPendingAction({ type: 'close' });
-    else onClose();
+    else {
+      setSeriesAssetPreview(null);
+      onClose();
+    }
   };
 
   const requestEpisodeSwitch = (episodeId: string) => {
-    if (episodeId === currentEpisode?.id) return;
+    if (episodeId === currentProjectId) return;
+    setSeriesAssetPreview(null);
     if (isDirty) setPendingAction({ type: 'switch', episodeId });
     else void switchProject(episodeId);
   };
@@ -383,6 +419,29 @@ export default function ScriptWorkbench({
     showToast(t('已准备拆分草案请求，不会直接创建分集'));
   };
 
+  const extractFullScriptAssets = async (kind: DramaAssetKind, label: string) => {
+    if (!series || !currentProjectId || extractingAssetKindRef.current) return;
+    const generation = ++extractionGeneration.current;
+    extractingAssetKindRef.current = kind;
+    setExtractingAssetKind(kind);
+    try {
+      const result = await extractSeriesAssetsFromFullScript({
+        kind,
+        seriesId: series.id,
+        projectId: currentProjectId,
+      });
+      if (generation !== extractionGeneration.current) return;
+      setSeriesAssetPreview(result);
+      showToast(t('已提取 {count} 项{name}，请预览后选择入库', { count: result.count, name: label }));
+    } catch (error) {
+      if (generation !== extractionGeneration.current) return;
+      showToast(error instanceof Error ? error.message : t('全剧资产提取失败'), 'error');
+    } finally {
+      extractingAssetKindRef.current = null;
+      setExtractingAssetKind(null);
+    }
+  };
+
   const setCreative = (field: keyof CreativeDraft, value: string) => {
     if (!currentEpisode) return;
     setDraftsByEpisode((current) => {
@@ -414,8 +473,8 @@ export default function ScriptWorkbench({
       onClose={requestClose}
       ariaLabel={t('剧本创作工作台')}
       closeOnBackdrop={false}
-      className="h-[min(88vh,860px)] w-[min(1180px,calc(100vw-24px))]
-                 border-[var(--glass-ring)] bg-[var(--glass-bg)] text-canvas-text"
+      className="ui-dialog-surface h-[min(88vh,860px)] w-[min(1180px,calc(100vw-24px))]
+                 border-[var(--glass-ring)] text-canvas-text"
     >
       <div
         className="flex min-h-0 flex-1 flex-col"
@@ -426,7 +485,7 @@ export default function ScriptWorkbench({
           }
         }}
       >
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-4">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-2.5 py-2">
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-500/15 text-indigo-400">
             <Icon icon="lucide:notebook-pen" className="h-4 w-4" />
           </span>
@@ -557,25 +616,41 @@ export default function ScriptWorkbench({
               {episodes.map((episode) => {
                 const active = episode.id === currentEpisode?.id;
                 return (
-                  <button
+                  <div
                     key={episode.id}
-                    type="button"
-                    onClick={() => requestEpisodeSwitch(episode.id)}
-                    className={`min-w-32 rounded-lg border px-2.5 py-2 text-left transition-colors lg:min-w-0 ${
+                    className={`flex w-44 shrink-0 items-center gap-1 rounded-lg border p-2 text-left transition-colors lg:w-auto ${
                       active
                         ? 'border-indigo-400/40 bg-indigo-500/10'
                         : 'border-transparent hover:border-canvas-border hover:bg-canvas-hover'
                     }`}
                   >
-                    <span className="block truncate text-[11px] font-medium text-canvas-text">{episode.name}</span>
-                    <span className="mt-1 block truncate text-[10px] text-canvas-text-muted">
-                      {episode.episodeScript?.trim()
-                        ? t('正文 {count} 字', { count: episode.episodeScript.length })
-                        : episode.episodeOutline?.trim()
-                          ? t('已有大纲')
-                          : t('尚未创作')}
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => requestEpisodeSwitch(episode.id)}
+                      aria-current={active}
+                      data-tooltip={episode.name}
+                      className="min-w-0 flex-1 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+                    >
+                      <span className="block truncate text-[11px] font-medium text-canvas-text">{episode.name}</span>
+                      <span className="mt-1 block truncate text-[10px] text-canvas-text-muted">
+                        {episode.episodeScript?.trim()
+                          ? t('正文 {count} 字', { count: episode.episodeScript.length })
+                          : episode.episodeOutline?.trim()
+                            ? t('已有大纲')
+                            : t('尚未创作')}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={projectLoadStatus !== 'ready' || isSaving}
+                      onClick={() => setRenamingEpisodeId(episode.id)}
+                      aria-label={t('修改 {name} 的名称', { name: episode.name })}
+                      data-tooltip={t('修改分集名称')}
+                      className="ui-icon-btn ui-icon-btn--sm ui-icon-btn--ghost"
+                    >
+                      <Icon icon="lucide:pencil" className="h-3 w-3" />
+                    </button>
+                  </div>
                 );
               })}
               {episodes.length === 0 ? (
@@ -589,11 +664,13 @@ export default function ScriptWorkbench({
           <section className="flex min-h-0 flex-col border-border-subtle xl:border-r">
             {currentEpisode ? (
               <>
-                <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border-subtle px-3">
+                <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-1 border-b border-border-subtle px-3 py-1">
                   {([
                     ['outline', '本集大纲', 'lucide:list-tree'],
                     ['script', '本集剧本', 'lucide:scroll-text'],
                     ['creative', '创作要点', 'lucide:lightbulb'],
+                    ['characters', '本集角色', 'lucide:users-round'],
+                    ['props', '本集道具', 'lucide:package'],
                   ] as const).map(([id, label, icon]) => (
                     <button
                       key={id}
@@ -607,11 +684,26 @@ export default function ScriptWorkbench({
                     >
                       <Icon icon={icon} className="h-3.5 w-3.5" />
                       {t(label)}
+                      {id === 'characters' || id === 'props' ? (
+                        <span className="ui-badge">{id === 'characters' ? episodeAssetRoster.characters.length : episodeAssetRoster.props.length}</span>
+                      ) : null}
                     </button>
                   ))}
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-auto">
+                  {activeTab === 'characters' || activeTab === 'props' ? (
+                    currentProjectId === currentEpisode.id ? (
+                      <EpisodeAssetPanel key={`${currentEpisode.id}-${activeTab}`} episodeId={currentEpisode.id}
+                        kind={activeTab === 'characters' ? 'character' : 'prop'}
+                        onBeforeExtract={async () => !isDirty || await saveDraft()} />
+                    ) : (
+                      <div className="p-3">
+                        <button type="button" className="ui-btn ui-btn--sm ui-btn--primary"
+                          onClick={() => requestEpisodeSwitch(currentEpisode.id)}>{t('切换到本集管理资产')}</button>
+                      </div>
+                    )
+                  ) : null}
                   {activeTab === 'outline' ? (
                     <textarea
                       value={draft.outline}
@@ -773,6 +865,49 @@ export default function ScriptWorkbench({
               ) : null}
             </div>
 
+            <section className="mt-4 rounded-xl border border-canvas-border bg-canvas-card p-2.5">
+              <div className="flex items-center gap-1.5">
+                <Icon icon="lucide:scan-text" className="h-3.5 w-3.5 text-indigo-400" />
+                <h3 className="text-[10px] font-semibold text-canvas-text-secondary">{t('全剧资产提取')}</h3>
+                <span className="ml-auto rounded-full bg-indigo-500/10 px-1.5 py-0.5 text-[9px] text-indigo-300">
+                  {t('完整剧本')}
+                </span>
+              </div>
+              <p className="mt-1.5 text-[10px] leading-4 text-canvas-text-muted">
+                {series?.series?.script?.trim()
+                  ? t('读取全剧剧本，提取结果先预览，仅将所选条目加入本剧资产库。')
+                  : t('请先填写全剧剧本。')}
+              </p>
+              <div className="mt-2 grid grid-cols-3 gap-1.5">
+                {SERIES_ASSET_EXTRACTION_ACTIONS.map((action) => {
+                  const running = extractingAssetKind === action.kind;
+                  const label = t(action.label);
+                  return (
+                    <button
+                      key={action.kind}
+                      type="button"
+                      aria-busy={running}
+                      disabled={!series?.series?.script?.trim()
+                        || extractingAssetKind !== null
+                        || projectLoadStatus !== 'ready'}
+                      onClick={() => { void extractFullScriptAssets(action.kind, label); }}
+                      className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border
+                                 border-canvas-border bg-[var(--white-alpha-04)] px-1.5 py-2 text-[10px]
+                                 text-canvas-text-secondary transition-colors hover:border-indigo-400/40
+                                 hover:bg-indigo-500/10 hover:text-indigo-200 disabled:cursor-not-allowed
+                                 disabled:opacity-40"
+                    >
+                      <Icon
+                        icon={running ? 'lucide:loader-circle' : action.icon}
+                        className={`h-3.5 w-3.5 ${running ? 'animate-spin' : ''}`}
+                      />
+                      <span className="truncate">{running ? t('提取中…') : label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
             <div className="mt-4 grid gap-3">
               {CREATIVE_ACTION_GROUPS.map((group) => (
                 <section key={group.label}>
@@ -801,6 +936,23 @@ export default function ScriptWorkbench({
           </aside>
         </main>
       </div>
+      {isOpen && renamingEpisodeId && (
+        <EpisodeNameDialog episodeId={renamingEpisodeId} onClose={() => setRenamingEpisodeId(null)} />
+      )}
+      {isOpen && seriesAssetPreview && currentProjectId === seriesAssetPreview.projectId && (
+        <AssetExtractionPreviewDialog title={t('全剧资产提取预览')} items={seriesAssetPreview.assets}
+          existingItems={(() => {
+            return seriesAssetPreview.kind === 'character' ? dramaAssets.characters
+              : seriesAssetPreview.kind === 'scene' ? dramaAssets.scenes : dramaAssets.props;
+          })()}
+          confirmLabel={t('将所选条目加入本剧资产库')}
+          onClose={() => setSeriesAssetPreview(null)}
+          onConfirm={async (selectedIds) => {
+            const count = await commitSeriesAssetCandidates(seriesAssetPreview, selectedIds);
+            setSeriesAssetPreview(null);
+            showToast(t('已将 {count} 项资产加入本剧资产库', { count }));
+          }} />
+      )}
       {sourceOpen && <SeriesSourceBrowser initialPart={splitSource} onClose={() => setSourceOpen(false)}
         beforeAssistant={async () => {
           if (isDirty && !await saveDraft()) return false;

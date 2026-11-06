@@ -1,3 +1,6 @@
+/**
+ * cropOperationRegistry — 回归测试：crop operation registry。
+ */
 import { describe, expect, it } from 'vitest';
 import { beginCropOperation } from '../../src/components/nodes/shared/image/cropOperationRegistry';
 

@@ -1,3 +1,6 @@
+/**
+ * useMainWindowSize — 回归测试：window size save flushing。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fitMainWindowAspectRatio,

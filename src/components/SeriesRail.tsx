@@ -11,6 +11,7 @@ import { listEpisodes, seriesOwnerId } from '../store/store.utils';
 import { getProjectDataDir, uploadSourceFileToProject } from '../services/fileService';
 import ModalOverlay from './shared/ModalOverlay';
 import PopupCloseButton from './shared/PopupCloseButton';
+import EpisodeNameDialog from './shared/EpisodeNameDialog';
 import ProjectAssetsOverlay from './ProjectAssetsOverlay';
 import ScriptWorkbench from './ScriptWorkbench';
 import SeriesSourceBrowser from './SeriesSourceBrowser';
@@ -61,10 +62,10 @@ function TextEditorDialog({
     <ModalOverlay isOpen={isOpen} onClose={onClose} ariaLabel={title}>
       <div
         className="glass-bevel glass-bevel--panel flex h-[min(72vh,640px)] w-[min(680px,calc(100vw-32px))]
-                   flex-col overflow-hidden rounded-lg border border-[var(--glass-ring)]
+                   flex-col overflow-hidden rounded-2xl border border-[var(--glass-ring)]
                    bg-[var(--glass-bg)] text-canvas-text shadow-2xl shadow-black/40 backdrop-blur-2xl"
       >
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-4">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-2.5 py-2">
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-indigo-500/15 text-indigo-400">
             <Icon icon="lucide:scroll-text" className="h-4 w-4" />
           </span>
@@ -103,17 +104,15 @@ export default function SeriesRail() {
   const t = useT();
   const {
     projects, currentProjectId, projectLoadStatus,
-    switchProject, addEpisode, updateSeriesInfo,
-    moveEpisode, renameProject, deleteProject, showToast,
+    switchProject, updateSeriesInfo,
+    moveEpisode, deleteProject, showToast,
   } = useAppStore(useShallow((state) => ({
     projects: state.projects,
     currentProjectId: state.currentProjectId,
     projectLoadStatus: state.projectLoadStatus,
     switchProject: state.switchProject,
-    addEpisode: state.addEpisode,
     updateSeriesInfo: state.updateSeriesInfo,
     moveEpisode: state.moveEpisode,
-    renameProject: state.renameProject,
     deleteProject: state.deleteProject,
     showToast: state.showToast,
   })));
@@ -129,9 +128,7 @@ export default function SeriesRail() {
   // 打开编辑器时就把草稿装好，弹窗内部不用再和外部值同步
   const [editorDraft, setEditorDraft] = useState<string | null>(null);
   const [workbenchMode, setWorkbenchMode] = useState<'editor' | 'split' | null>(null);
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState('');
-  // 这两个都按分集 id 存：切到别的剧集后对不上任何一行，自然失效
+  const [episodeNameDialog, setEpisodeNameDialog] = useState<{ episodeId?: string } | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const seriesId = currentProjectId ? seriesOwnerId(projects, currentProjectId) : null;
@@ -179,14 +176,6 @@ export default function SeriesRail() {
     await updateSeriesInfo({ originalWork: undefined });
   });
 
-  const submitRename = async () => {
-    const target = renamingId;
-    const name = renameDraft.trim();
-    setRenamingId(null);
-    if (!target || !name) return;
-    await renameProject(target, name);
-  };
-
   return (
     <>
       <div
@@ -196,6 +185,7 @@ export default function SeriesRail() {
         <button
           type="button"
           aria-label={t('展开剧集栏（双击打开项目资产）')}
+          data-onboarding-target="series"
           data-tooltip={t('单击：展开剧集栏｜双击：打开项目资产')}
           onClick={() => {
             // 清除之前的定时器（如果有）
@@ -220,6 +210,7 @@ export default function SeriesRail() {
         />
         <aside
           aria-label={t('剧集')}
+          data-onboarding-target="series-panel"
           aria-hidden={!pinned}
           className={`glass-bevel glass-bevel--panel absolute right-2.5 top-1/2 flex max-h-full
                      w-[min(360px,calc(100vw-32px))] -translate-y-1/2 flex-col overflow-hidden
@@ -255,11 +246,11 @@ export default function SeriesRail() {
             <PopupCloseButton ariaLabel={t('收起剧集栏')} onClick={() => setPinned(false)} />
           </header>
 
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
-            <section className="grid gap-2 border-b border-border-subtle p-2">
-              <div className="flex items-start gap-2">
+          <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain [scrollbar-width:thin]">
+            <section className="grid min-w-0 grid-cols-1 gap-2 border-b border-border-subtle p-2">
+              <div className="flex min-w-0 items-start gap-2">
                 <div className="grid min-w-0 flex-1 gap-1.5">
-                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
+                  <div className="flex min-h-[var(--ui-control-h-sm)] items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
                     <Icon icon="lucide:book-open" className="h-3.5 w-3.5 shrink-0" />
                     <span className="truncate">{t('原著')}</span>
                     <button type="button" className="ui-btn ui-btn--sm" disabled={!ready || !originalWork}
@@ -298,7 +289,7 @@ export default function SeriesRail() {
                   </div>
                 </div>
                 <div className="grid min-w-0 flex-1 gap-1.5">
-                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
+                  <div className="flex min-h-[var(--ui-control-h-sm)] items-center gap-1.5 text-[11px] font-semibold text-canvas-text-secondary">
                     <Icon icon="lucide:scroll-text" className="h-3.5 w-3.5 shrink-0" />
                     <span className="truncate">{t('剧本')}</span>
                   </div>
@@ -331,7 +322,7 @@ export default function SeriesRail() {
               </button>
             </section>
 
-            <section className="grid gap-1.5 border-t border-border-subtle p-2">
+            <section className="grid min-w-0 grid-cols-1 gap-1.5 border-t border-border-subtle p-2">
               <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
                 <Icon icon="lucide:list-video" className="h-3.5 w-3.5" />
                 {t('分集')}
@@ -339,12 +330,11 @@ export default function SeriesRail() {
 
               {episodes.map((episode, index) => {
                 const isCurrent = episode.id === currentProjectId;
-                const isRenaming = renamingId === episode.id;
 
                 return (
                   <div
                     key={episode.id}
-                    className={`group/episode flex items-center gap-1 rounded-lg px-1.5 h-7 transition-colors ${
+                    className={`group/episode flex min-w-0 items-center gap-1 rounded-lg px-1.5 h-7 transition-colors ${
                       isCurrent ? 'bg-[var(--white-alpha-06)]' : 'hover:bg-canvas-hover'
                     }`}
                   >
@@ -354,38 +344,28 @@ export default function SeriesRail() {
                         isCurrent ? 'bg-indigo-400 shadow-sm shadow-indigo-500/50' : 'bg-canvas-text-muted/30'
                       }`}
                     />
-                    {isRenaming ? (
-                      <input
-                        autoFocus
-                        value={renameDraft}
-                        onChange={(event) => setRenameDraft(event.target.value)}
-                        onBlur={() => { void submitRename(); }}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') event.currentTarget.blur();
-                          if (event.key === 'Escape') setRenamingId(null);
-                        }}
-                        aria-label={t('分集名称')}
-                        className="min-w-0 flex-1 h-full rounded-md bg-canvas-bg/60 px-1.5 text-[11px] leading-none
-                                   text-canvas-text outline-none ring-1 ring-inset ring-indigo-400/50"
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={busy !== null}
-                        onClick={() => { if (!isCurrent) void switchProject(episode.id); }}
-                        onDoubleClick={() => {
-                          setRenamingId(episode.id);
-                          setRenameDraft(episode.name);
-                        }}
-                        aria-current={isCurrent}
-                        data-tooltip={t('{name}（双击改名）', { name: episode.name })}
-                        className={`min-w-0 flex-1 truncate px-1 text-left text-[11px] leading-none transition-colors ${
-                          isCurrent ? 'text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text-secondary'
-                        }`}
-                      >
-                        {episode.name}
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => { if (!isCurrent) void switchProject(episode.id); }}
+                      aria-current={isCurrent}
+                      data-tooltip={episode.name}
+                      className={`min-w-0 flex-1 truncate px-1 text-left text-[11px] leading-none transition-colors ${
+                        isCurrent ? 'text-canvas-text' : 'text-canvas-text-muted hover:text-canvas-text-secondary'
+                      }`}
+                    >
+                      {episode.name}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!ready || busy !== null}
+                      onClick={() => setEpisodeNameDialog({ episodeId: episode.id })}
+                      aria-label={t('修改 {name} 的名称', { name: episode.name })}
+                      data-tooltip={t('修改分集名称')}
+                      className="ui-icon-btn ui-icon-btn--sm ui-icon-btn--ghost"
+                    >
+                      <Icon icon="lucide:pencil" className="h-3 w-3" />
+                    </button>
 
                     <div className="flex shrink-0 items-center opacity-0 transition-opacity
                                     group-hover/episode:opacity-100 group-focus-within/episode:opacity-100">
@@ -443,15 +423,13 @@ export default function SeriesRail() {
               <button
                 type="button"
                 disabled={!ready || busy !== null}
-                onClick={() => { void runBusy('add', () => addEpisode()); }}
+                onClick={() => setEpisodeNameDialog({})}
                 className="mt-1 flex items-center justify-center gap-1.5 rounded-lg border border-dashed
                            border-canvas-border py-1.5 text-[11px] text-canvas-text-muted transition-colors
                            hover:border-indigo-400/50 hover:text-canvas-text-secondary
                            disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <Icon icon={busy === 'add' ? 'lucide:loader-2' : 'lucide:plus'}
-                  className={`h-3.5 w-3.5 ${busy === 'add' ? 'animate-spin motion-reduce:animate-none' : ''}`}
-                />
+                <Icon icon="lucide:plus" className="h-3.5 w-3.5" />
                 {episodes.length > 0 ? t('新增分集') : t('转为剧集并新增分集')}
               </button>
 
@@ -469,7 +447,7 @@ export default function SeriesRail() {
             </section>
 
             {currentEpisode?.parentId ? (
-              <section className="grid gap-2 border-t border-border-subtle p-2">
+              <section className="grid min-w-0 grid-cols-1 gap-2 border-t border-border-subtle p-2">
                 <div className="flex items-center gap-2 text-[11px] font-semibold text-canvas-text-secondary">
                   <Icon icon="lucide:notebook-pen" className="h-3.5 w-3.5" />
                   {t('本集大纲')}
@@ -477,18 +455,11 @@ export default function SeriesRail() {
                 <button
                   type="button"
                   onClick={() => setWorkbenchMode('editor')}
-                  className="flex items-center gap-2 rounded-lg border border-canvas-border bg-canvas-card
+                  className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-canvas-border bg-canvas-card
                              px-2.5 py-2 text-left transition-colors hover:bg-canvas-hover"
                 >
                   <span className="min-w-0 flex-1 truncate text-[11px] text-canvas-text-secondary">
-                    {currentEpisode.episodeOutline?.trim()
-                      || currentEpisode.episodeScript?.trim()
-                      || t('未填写，点击编辑')}
-                  </span>
-                  <span className="shrink-0 text-[10px] text-canvas-text-muted">
-                    {currentEpisode.episodeScript?.trim()
-                      ? t('正文 {count} 字', { count: currentEpisode.episodeScript.length })
-                      : t('打开工作台')}
+                    {currentEpisode.name}
                   </span>
                   <Icon icon="lucide:panel-top-open" className="h-3.5 w-3.5 shrink-0 text-canvas-text-muted" />
                 </button>
@@ -500,13 +471,19 @@ export default function SeriesRail() {
 
       <TextEditorDialog
         isOpen={editorDraft !== null}
-        title="剧本"
-        hint={`${series.name} · 整部剧共用`}
+        title={t('剧本')}
+        hint={t('{name} · 整部剧共用', { name: series.name })}
         draft={editorDraft ?? ''}
         onDraftChange={setEditorDraft}
         onClose={() => setEditorDraft(null)}
         onSave={(next) => updateSeriesInfo({ script: next })}
       />
+      {episodeNameDialog && (
+        <EpisodeNameDialog
+          episodeId={episodeNameDialog.episodeId}
+          onClose={() => setEpisodeNameDialog(null)}
+        />
+      )}
       {sourceOpen && <SeriesSourceBrowser onClose={() => setSourceOpen(false)} />}
       {workbenchMode ? (
         <ScriptWorkbench

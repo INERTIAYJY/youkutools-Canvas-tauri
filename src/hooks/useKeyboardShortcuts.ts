@@ -15,6 +15,9 @@ import type { BaseNodeData, NodeType } from '../types';
 import { SHOTLIST_DEFAULT_COLUMNS, createShotRow } from '../types';
 import { generateId } from '../store/store.utils';
 import { invoke } from '@tauri-apps/api/core';
+import { collectCanvasDescendantIds } from '../utils/canvasHierarchy';
+import { startNodeRename } from '../utils/nodeRename';
+import { getPreferredNodeModel } from '../services/modelPreferenceService';
 
 interface NodeShortcutDefinition {
   type: NodeType;
@@ -27,7 +30,7 @@ const GENERATOR_NODE_SHORTCUTS: NodeShortcutDefinition[] = [
   { type: 'ai-video', label: '生成视频' },
   { type: 'ai-audio', label: '生成音频' },
   { type: 'ai-panorama', label: '生成360全景' },
-  { type: 'ai-animation', label: '生成动画' },
+  { type: 'ai-animation', label: '帧动画' },
   { type: 'ai-director', label: '3D 导演台' },
 ];
 
@@ -39,22 +42,6 @@ const SOURCE_NODE_SHORTCUTS: NodeShortcutDefinition[] = [
   { type: 'ai-markdown', label: 'Markdown' },
   { type: 'ai-shotlist', label: '分镜表' },
 ];
-
-function loadDefaultModel(nodeType: NodeType): { model: string; provider: string } | null {
-  try {
-    const raw = localStorage.getItem('canvas-model-prefs');
-    if (!raw) return null;
-    const prefs: Record<string, string> = JSON.parse(raw);
-    const model = prefs[nodeType]
-      || (nodeType === 'ai-panorama' || nodeType === 'ai-animation' ? prefs['ai-image'] : undefined);
-    if (!model) return null;
-    const separatorIndex = model.indexOf('/');
-    if (separatorIndex <= 0) return null;
-    return { model, provider: model.slice(0, separatorIndex) };
-  } catch {
-    return null;
-  }
-}
 
 function createNodeFromNumberShortcut(shortcutIndex: number, isSource: boolean) {
   const definition = (isSource ? SOURCE_NODE_SHORTCUTS : GENERATOR_NODE_SHORTCUTS)[shortcutIndex];
@@ -70,8 +57,8 @@ function createNodeFromNumberShortcut(shortcutIndex: number, isSource: boolean) 
   const nodeRole = isSource || isDirector ? 'source' : 'generator';
   const nodeWidth = isShotlist ? 720 : isAnimation || isDirector ? 320 : isAudio ? 260 : isPanorama ? 300 : 280;
   const nodeHeight = isShotlist ? 380 : isDirector ? 240 : isAnimation ? 358 : isAudio ? 140 : isImage ? 158 : isPanorama ? 200 : type === 'ai-markdown' ? 200 : 160;
-  const defaultModel = nodeRole === 'source' ? null : loadDefaultModel(type);
   const state = useAppStore.getState();
+  const defaultModel = nodeRole === 'source' ? null : getPreferredNodeModel(type, state);
   const position = getCanvasPointerPosition();
 
   const node: RFNode<BaseNodeData> = {
@@ -122,12 +109,14 @@ export function useKeyboardShortcuts() {
       const target = e.target as HTMLElement;
       const isEditing = isEditableTarget(target);
 
-      // Tab 只在画布表面开关资产抽屉；控件、输入和其他弹层保留原生焦点导航。
+      // Tab 在画布表面开关资产抽屉；抽屉内的滚动区和控件获得焦点后仍可收起。
       if (e.key === 'Tab' && !e.defaultPrevented && !e.isComposing
-        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !isEditing) {
+        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         const state = useAppStore.getState();
         const isCanvasTarget = target === document.body || target === document.documentElement
           || !!target.closest?.('.react-flow');
+        const isDrawerTarget = state.assetsPanelOpen && state.assetsPanelMode === 'drawer'
+          && !!target.closest?.('.assets-panel--drawer');
         const isControl = !!target.closest?.(
           'button, a, input, textarea, select, [contenteditable="true"], [role="button"], [role="tab"], [role="combobox"], [role="slider"], [role="menu"], [role="listbox"], [role="dialog"]',
         );
@@ -138,7 +127,8 @@ export function useKeyboardShortcuts() {
           || !!state.reversePromptRequest || !!state.presetRunRequest
           || (state.assetsPanelOpen && state.assetsPanelMode !== 'drawer')
           || !!document.querySelector('[aria-modal="true"], dialog[open]');
-        if (isCanvasTarget && !isControl && !hasBlockingPanel && document.querySelector('.react-flow')) {
+        if (((isCanvasTarget && !isControl && !isEditing) || isDrawerTarget)
+          && !hasBlockingPanel && document.querySelector('.react-flow')) {
           e.preventDefault();
           e.stopPropagation();
           if (!e.repeat) state.setAssetsPanelOpen(!state.assetsPanelOpen, 'drawer');
@@ -164,6 +154,12 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      // 弹窗负责自己的 Escape/Tab 和编辑快捷键，捕获阶段不能先关闭父面板或操作底层画布。
+      if (document.querySelector?.('[aria-modal="true"], dialog[open]')) return;
+
+      // 编辑器内的空格、数字、撤销和删除交给控件，避免捕获阶段误操作背后的画布。
+      if (target.closest?.('.animation-editor')) return;
+
       // Ctrl+Shift+Space: 打开资源搜索窗口（Win+Space 被系统占用时的可靠备选；不与输入法冲突）
       if (e.ctrlKey && e.shiftKey && e.code === 'Space') {
         e.preventDefault();
@@ -172,6 +168,13 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      // 启动页保留应用入口快捷键，禁止创建、粘贴或撤销画布内容。
+      if (useAppStore.getState().currentProjectId === null) {
+        if (e.key === 'Escape') useAppStore.getState().setSettingsOpen(false);
+        const togglesMascot = (e.ctrlKey || e.metaKey) && e.shiftKey
+          && (e.code === 'KeyM' || e.key === 'm' || e.key === 'M');
+        if (!togglesMascot) return;
+      }
       // Space: 选中节点时弹出 AI 对话框（在 isEditing 守卫之前，防止 React Flow 内部拦截 Space 事件）
       if ((e.key === ' ' || e.code === 'Space') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !e.repeat) {
         if (!isEditing) {
@@ -204,6 +207,16 @@ export function useKeyboardShortcuts() {
       }
 
       if (isEditing) return;
+
+      // F2: rename the single selected node through the shared NodeLabel editor.
+      if (e.key === 'F2' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const state = useAppStore.getState();
+        if (state.selectedNodeIds.length === 1 && startNodeRename(state.selectedNodeIds[0])) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
 
       // 1–7: 创建内容节点；Alt+1–5: 创建源节点。节点左上角落在当前鼠标位置。
       const digitMatch = /^(?:Digit|Numpad)([1-7])$/.exec(e.code);
@@ -282,15 +295,7 @@ export function useKeyboardShortcuts() {
         useAppStore.setState({ selectedNodeIds: [] });
 
         // Expand to include descendants of any selected group nodes
-        const expandedIds = new Set(nodeIds);
-        const q = [...nodeIds];
-        while (q.length > 0) {
-          const pid = q.shift()!;
-          state.nodes.filter((n) => n.parentId === pid).forEach((c) => {
-            expandedIds.add(c.id);
-            q.push(c.id);
-          });
-        }
+        const expandedIds = collectCanvasDescendantIds(state.nodes, nodeIds);
         const allIds = Array.from(expandedIds);
 
         // Cancel any active polling for all deleted nodes
@@ -300,11 +305,11 @@ export function useKeyboardShortcuts() {
 
         // Delete associated local files —— 跳过仍被存活节点引用的共享文件（复制节点场景）
         const keepPaths = new Set(
-          state.nodes.filter((n) => !allIds.includes(n.id))
+          state.nodes.filter((n) => !expandedIds.has(n.id))
             .map((n) => (n.data as BaseNodeData).filePath)
             .filter((p): p is string => !!p),
         );
-        for (const node of state.nodes.filter((n) => allIds.includes(n.id))) {
+        for (const node of state.nodes.filter((n) => expandedIds.has(n.id))) {
           fileService.deleteNodeFile(node.data as BaseNodeData, keepPaths, state.currentProjectId).catch(() => {});
         }
 
@@ -328,7 +333,22 @@ export function useKeyboardShortcuts() {
 
       // F: Fit view
       if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        window.dispatchEvent(new CustomEvent('canvas-fit-view'));
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('canvas-fit-view', { detail: { source: 'user' } }));
+        return;
+      }
+
+      // 显示比例快捷键；编辑器、菜单与弹窗仍由上面的焦点守卫处理。
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && ['+', '=', '-', '_'].includes(e.key)) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('canvas-zoom-step', {
+          detail: { direction: e.key === '+' || e.key === '=' ? 1 : -1 },
+        }));
+        return;
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey && e.code === 'KeyL') {
+        e.preventDefault();
+        if (!e.repeat) window.dispatchEvent(new Event('canvas-toggle-zoom-lock'));
         return;
       }
 

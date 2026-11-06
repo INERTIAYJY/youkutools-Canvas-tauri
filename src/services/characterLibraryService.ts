@@ -8,15 +8,19 @@ import {
   getAssetIndexById,
   getAllGlobalCharacters,
   putGlobalCharacter,
+  putGlobalCharacterOrder,
 } from './indexedDbService';
 import type {
   CharacterAction,
   CharacterActionMedia,
   CharacterReferenceImage,
   CharacterVoiceClip,
+  DramaAssetWriteOptions,
   DramaCharacter,
 } from '../types/dramaAssets';
-import { normalizeDramaCharacter } from '../types/dramaAssets';
+import { assertDramaAssetWriteCurrent, normalizeDramaCharacter } from '../types/dramaAssets';
+import { sortCharactersForLibrary } from './characterOrder';
+import { localMediaUrlToPath } from '../utils/mediaUrl';
 import {
   getAssetUrlFromPath,
   getGlobalFilesDir,
@@ -59,8 +63,11 @@ function detachProjectAction(action: CharacterAction): CharacterAction {
 
 export function prepareGlobalCharacter(character: DramaCharacter): DramaCharacter {
   const normalized = normalizeDramaCharacter(character);
-  const detached = { ...normalized };
+  const detached = { ...normalized } as DramaCharacter & { filePath?: string };
   delete detached.imageNodeId;
+  delete detached.assetId;
+  delete detached.relativePath;
+  delete detached.filePath;
   return {
     ...detached,
     referenceImages: (normalized.referenceImages ?? []).map(detachProjectReference),
@@ -112,7 +119,7 @@ function extensionForActionMedia(media: CharacterActionMedia): string {
   return pathExtension || (media.kind === 'video' ? 'mp4' : media.kind === 'gif' ? 'gif' : 'png');
 }
 
-interface GlobalMediaInput {
+export interface GlobalMediaInput {
   id: string;
   /** 落盘文件名中的用途片段 */
   kind: string;
@@ -131,14 +138,18 @@ interface GlobalMediaResult {
 }
 
 /** 把项目内或内存中的媒体固化到全局资产目录；保存失败返回 null 由调用方决定错误文案。 */
-async function persistGlobalMedia(
+export async function persistGlobalMedia(
   characterName: string,
   media: GlobalMediaInput,
+  options: DramaAssetWriteOptions = {},
 ): Promise<GlobalMediaResult | null> {
+  assertDramaAssetWriteCurrent(options);
   const existing = media.assetId
     ? await getAssetIndexById(media.assetId)
     : undefined;
+  assertDramaAssetWriteCurrent(options);
   if (existing?.source === 'global') {
+    if (existing.status !== 'online') return null;
     return {
       assetId: media.assetId,
       relativePath: existing.relativePath,
@@ -147,7 +158,9 @@ async function persistGlobalMedia(
   }
 
   const sourcePath = media.filePath
-    ?? (media.assetId ? await resolveIndexedAssetPath(media.assetId) : null);
+    ?? (media.assetId ? await resolveIndexedAssetPath(media.assetId) : null)
+    ?? (media.url ? localMediaUrlToPath(media.url) : null);
+  assertDramaAssetWriteCurrent(options);
   const fileName = sanitizeFileName(
     `${characterName}-${media.kind}-${media.id}.${media.extension}`,
   );
@@ -162,14 +175,17 @@ async function persistGlobalMedia(
     source: sourcePath ? 'project' : undefined,
   };
   const savedPath = await saveAssetToPermanent(entry);
+  assertDramaAssetWriteCurrent(options);
   if (!savedPath) return null;
 
   const globalDir = await getGlobalFilesDir();
+  assertDramaAssetWriteCurrent(options);
   if (!globalDir) throw new Error('全局资产目录不可用');
   const identity = await identifyAsset(savedPath, {
     rootPath: globalDir,
     source: 'global',
   });
+  assertDramaAssetWriteCurrent(options);
   return {
     assetId: identity.assetId,
     relativePath: identity.relativePath,
@@ -180,6 +196,7 @@ async function persistGlobalMedia(
 async function persistGlobalReference(
   characterName: string,
   reference: CharacterReferenceImage,
+  options?: DramaAssetWriteOptions,
 ): Promise<CharacterReferenceImage> {
   const detached = detachProjectReference(reference);
   if (!isTauriEnv()) return detached;
@@ -192,7 +209,7 @@ async function persistGlobalReference(
     url: reference.imageUrl,
     extension: extensionForReference(reference),
     category: 'image',
-  });
+  }, options);
   if (!persisted) throw new Error(`角色参考图 ${reference.id} 保存失败`);
   return {
     ...detached,
@@ -205,6 +222,7 @@ async function persistGlobalReference(
 async function persistGlobalVoiceClip(
   characterName: string,
   clip: CharacterVoiceClip,
+  options?: DramaAssetWriteOptions,
 ): Promise<CharacterVoiceClip> {
   const detached = detachProjectVoiceClip(clip);
   if (!isTauriEnv()) return detached;
@@ -217,7 +235,7 @@ async function persistGlobalVoiceClip(
     url: clip.audioUrl,
     extension: extensionForVoiceClip(clip),
     category: 'audio',
-  });
+  }, options);
   if (!persisted) throw new Error(`角色声音 ${clip.id} 保存失败`);
   return {
     ...detached,
@@ -231,6 +249,7 @@ async function persistGlobalActionMedia(
   characterName: string,
   action: CharacterAction,
   media: CharacterActionMedia,
+  options?: DramaAssetWriteOptions,
 ): Promise<CharacterActionMedia> {
   const detached = detachProjectActionMedia(media);
   if (!isTauriEnv()) return detached;
@@ -243,7 +262,7 @@ async function persistGlobalActionMedia(
     url: media.url,
     extension: extensionForActionMedia(media),
     category: media.kind === 'video' ? 'video' : 'image',
-  });
+  }, options);
   if (!persisted) throw new Error(`角色动作素材 ${media.id} 保存失败`);
   return {
     ...detached,
@@ -256,48 +275,52 @@ async function persistGlobalActionMedia(
 async function persistGlobalAction(
   characterName: string,
   action: CharacterAction,
+  options?: DramaAssetWriteOptions,
 ): Promise<CharacterAction> {
   const media: CharacterActionMedia[] = [];
   for (const item of action.media ?? []) {
-    media.push(await persistGlobalActionMedia(characterName, action, item));
+    media.push(await persistGlobalActionMedia(characterName, action, item, options));
   }
   return { ...action, media };
 }
 
-async function persistGlobalMediaOfCharacter(character: DramaCharacter): Promise<DramaCharacter> {
+async function persistGlobalMediaOfCharacter(character: DramaCharacter, options?: DramaAssetWriteOptions): Promise<DramaCharacter> {
   const references: CharacterReferenceImage[] = [];
   for (const reference of character.referenceImages ?? []) {
-    references.push(await persistGlobalReference(character.name, reference));
+    references.push(await persistGlobalReference(character.name, reference, options));
   }
   const voiceClips: CharacterVoiceClip[] = [];
   for (const clip of character.voiceClips ?? []) {
-    voiceClips.push(await persistGlobalVoiceClip(character.name, clip));
+    voiceClips.push(await persistGlobalVoiceClip(character.name, clip, options));
   }
   const actions: CharacterAction[] = [];
   for (const action of character.actions ?? []) {
-    actions.push(await persistGlobalAction(character.name, action));
+    actions.push(await persistGlobalAction(character.name, action, options));
   }
   return { ...character, referenceImages: references, voiceClips, actions };
 }
 
 export async function loadGlobalCharacterCards(): Promise<DramaCharacter[]> {
   const characters = await getAllGlobalCharacters();
-  return characters
-    .map((character) => prepareGlobalCharacter(character))
-    .sort((left, right) => right.updatedAt - left.updatedAt || left.name.localeCompare(right.name));
+  return sortCharactersForLibrary(characters.map((character) => prepareGlobalCharacter(character)));
 }
 
-export async function saveGlobalCharacterCard(character: DramaCharacter): Promise<DramaCharacter> {
+export const saveGlobalCharacterOrder = putGlobalCharacterOrder;
+
+export async function saveGlobalCharacterCard(character: DramaCharacter, options?: DramaAssetWriteOptions): Promise<DramaCharacter> {
+  assertDramaAssetWriteCurrent(options);
   // 先落盘再剥离项目字段：复制到全局目录时还要用项目内共用的 filePath 作为来源
   const persisted = prepareGlobalCharacter(
-    await persistGlobalMediaOfCharacter(normalizeDramaCharacter(character)),
+    await persistGlobalMediaOfCharacter(normalizeDramaCharacter(character), options),
   );
-  await putGlobalCharacter(persisted);
+  assertDramaAssetWriteCurrent(options);
+  await putGlobalCharacter(persisted, options);
+  assertDramaAssetWriteCurrent(options);
   return persisted;
 }
 
-export async function deleteGlobalCharacterCard(id: string): Promise<void> {
-  await deleteGlobalCharacter(id);
+export async function deleteGlobalCharacterCard(id: string, options?: DramaAssetWriteOptions): Promise<void> {
+  await deleteGlobalCharacter(id, options);
 }
 
 export async function clearGlobalCharacterCards(): Promise<void> {

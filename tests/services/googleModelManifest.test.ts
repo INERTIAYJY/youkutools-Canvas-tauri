@@ -1,3 +1,6 @@
+/**
+ * googleModelManifest — 回归测试：Google Gemini 官方模型清单。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   executeModelProtocol,

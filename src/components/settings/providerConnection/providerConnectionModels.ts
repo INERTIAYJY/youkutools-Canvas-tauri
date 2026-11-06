@@ -4,13 +4,31 @@
  * 合并规则的核心：用户手动改过的分类 / 描述 / 输入模态优先于目录或 Agent 带来的值，
  * 避免每次拉取模型清单都把人工修正冲掉。
  */
-import type { ProviderModelSelection } from '../../../types';
+import type { ApiProviderConfig, ProviderModelSelection } from '../../../types';
 import type { VideoModelCapability } from '../../../types/aiTypes';
+import { assertModelCapabilityProtocol } from '../../../services/ai/modelCapabilityValidation';
 import { assertVideoModelCapability } from '../../../services/ai/videoRequestResolver';
+
+/** Fold the previous connection-level image default into selected models when editing it. */
+export function materializeLegacyImageProtocolDefault(
+  models: ProviderModelSelection[],
+  config?: Pick<ApiProviderConfig, 'imageProtocolDefault' | 'imageReferenceRequestModeDefault'>,
+): ProviderModelSelection[] {
+  if (!config?.imageProtocolDefault && !config?.imageReferenceRequestModeDefault) return models;
+  return models.map((model) => model.category === 'image'
+    ? {
+        ...model,
+        executionProfile: model.executionProfile ?? config.imageProtocolDefault,
+        imageReferenceRequestMode: model.imageReferenceRequestMode
+          ?? config.imageReferenceRequestModeDefault,
+      }
+    : model);
+}
 
 export function mergeModels(
   current: ProviderModelSelection[],
   incoming: ProviderModelSelection[],
+  options: { preferIncomingConfiguration?: boolean } = {},
 ): ProviderModelSelection[] {
   const models = new Map(current.map((model) => [model.id, model]));
   for (const model of incoming) {
@@ -21,6 +39,9 @@ export function mergeModels(
     const preserveExistingMetadata = incomingHasOnlyRawName && existingHasFriendlyName;
     // 用户手动指定过分类时，重新拉取目录或合并模型不再覆盖该分类。
     const preserveExistingCategory = Boolean(existing?.categoryManual) || preserveExistingMetadata;
+    // 编辑初始化可显式让保存值覆盖本地新模板；目录刷新仍默认保留当前编辑值。
+    const configuration = options.preferIncomingConfiguration ? model : existing;
+    const fallbackConfiguration = options.preferIncomingConfiguration ? existing : model;
     models.set(model.id, {
       ...existing,
       ...model,
@@ -35,6 +56,9 @@ export function mergeModels(
         : model.inputModalities ?? existing?.inputModalities,
       inputModalitiesManual: existing?.inputModalitiesManual ?? model.inputModalitiesManual,
       categoryManual: existing?.categoryManual ?? model.categoryManual,
+      imageCapability: configuration?.imageCapability ?? fallbackConfiguration?.imageCapability,
+      videoCapability: configuration?.videoCapability ?? fallbackConfiguration?.videoCapability,
+      executionProfile: configuration?.executionProfile ?? fallbackConfiguration?.executionProfile,
     });
   }
   return [...models.values()];
@@ -50,6 +74,15 @@ export function createEditableVideoCapability(
     ...(capability?.resolutions ? { resolutions: [...capability.resolutions] } : {}),
     ...(capability?.frameRates ? { frameRates: [...capability.frameRates] } : {}),
     ...(capability?.durations ? { durations: [...capability.durations] } : {}),
+    ...(capability?.inputModeCapabilities
+      ? { inputModeCapabilities: structuredClone(capability.inputModeCapabilities) }
+      : {}),
+    ...(capability?.operationCapabilities
+      ? { operationCapabilities: structuredClone(capability.operationCapabilities) }
+      : {}),
+    ...(capability?.inputConstraints
+      ? { inputConstraints: structuredClone(capability.inputConstraints) }
+      : {}),
   };
 }
 
@@ -66,12 +99,12 @@ export function assertProviderModelsVideoCapabilities(
   models: readonly ProviderModelSelection[],
 ): void {
   for (const model of models) {
-    if (model.category !== 'video' || !model.videoCapability) continue;
     try {
-      assertVideoModelCapability(model.videoCapability);
+      if (model.category === 'video' && model.videoCapability) assertVideoModelCapability(model.videoCapability);
+      assertModelCapabilityProtocol(model);
     } catch (error) {
       const detail = error instanceof Error ? error.message : '能力声明无效';
-      throw new Error(`视频模型“${model.name}”的能力配置无效：${detail}`, { cause: error });
+      throw new Error(`模型“${model.name}”的能力配置无效：${detail}`, { cause: error });
     }
   }
 }

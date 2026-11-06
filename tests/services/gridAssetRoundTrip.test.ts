@@ -1,3 +1,6 @@
+/**
+ * gridAssetRoundTrip — 回归测试：宫格节点与源图共用文件时的重新生成。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Node } from '@xyflow/react';
 import type { BaseNodeData } from '../../src/types';

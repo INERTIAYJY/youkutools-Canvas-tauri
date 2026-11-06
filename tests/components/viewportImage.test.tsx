@@ -1,3 +1,6 @@
+/**
+ * viewportImage — 回归测试：ViewportImage。
+ */
 import { readFileSync } from 'node:fs';
 import type { ImgHTMLAttributes, ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +12,9 @@ const hooks = vi.hoisted(() => ({
   refCursor: 0,
   effects: [] as Array<() => void | (() => void)>,
 }));
+const comfyImageSource = vi.hoisted(() => vi.fn((source?: string) => source));
+
+vi.mock('../../src/hooks/useComfyImageSource', () => ({ useComfyImageSource: comfyImageSource }));
 
 vi.mock('react', async () => {
   const actual = await vi.importActual<typeof import('react')>('react');
@@ -98,7 +104,7 @@ class FakeIntersectionObserver {
 }
 
 function renderViewportImage(
-  props: ImgHTMLAttributes<HTMLImageElement> & { src?: string; eager?: boolean; unloadDelayMs?: number },
+  props: ImgHTMLAttributes<HTMLImageElement> & { src?: string; eager?: boolean; unloadDelayMs?: number; previewMaxEdge?: number },
 ): ReactElement<ImgHTMLAttributes<HTMLImageElement>> {
   hooks.stateCursor = 0;
   hooks.refCursor = 0;
@@ -127,6 +133,7 @@ describe('ViewportImage', () => {
     hooks.refCursor = 0;
     hooks.effects = [];
     FakeIntersectionObserver.instances = [];
+    comfyImageSource.mockReset().mockImplementation((source) => source);
   });
 
   it('mounts near-viewport sources, unloads them after a delay, and releases the observer', () => {
@@ -150,6 +157,9 @@ describe('ViewportImage', () => {
     observer.emit(element, true);
     image = renderViewportImage({ src: 'asset://large-image.png', alt: 'preview', unloadDelayMs: 2_000 });
     expect(image.props.src).toBe('asset://large-image.png');
+    image.props.onLoad?.({ currentTarget: { naturalWidth: 1200, naturalHeight: 1800 } } as Parameters<NonNullable<typeof image.props.onLoad>>[0]);
+    image = renderViewportImage({ src: 'asset://large-image.png', alt: 'preview', unloadDelayMs: 2_000 });
+    expect(image.props.style?.aspectRatio).toBe('1200 / 1800');
 
     observer.emit(element, false);
     vi.advanceTimersByTime(1_999);
@@ -158,6 +168,13 @@ describe('ViewportImage', () => {
     vi.advanceTimersByTime(1);
     image = renderViewportImage({ src: 'asset://large-image.png', alt: 'preview', unloadDelayMs: 2_000 });
     expect(image.props.src).toBeUndefined();
+    expect(image.props.style?.aspectRatio).toBe('1200 / 1800');
+
+    observer.emit(element, true);
+    image = renderViewportImage({ src: 'asset://large-image.png', alt: 'preview', unloadDelayMs: 2_000 });
+    expect(image.props.src).toBe('asset://large-image.png');
+    expect(image.props.style?.aspectRatio).toBe('1200 / 1800');
+    expect(renderViewportImage({ src: 'asset://different-image.png', alt: 'new' }).props.style?.aspectRatio).toBeUndefined();
 
     if (typeof cleanup === 'function') cleanup();
     expect(observer.unobserve).toHaveBeenCalledWith(element);
@@ -179,6 +196,29 @@ describe('ViewportImage', () => {
 
     expect(image.props.src).toBe('asset://selected.png');
     expect(FakeIntersectionObserver.instances).toHaveLength(0);
+  });
+
+  it('only prepares native ComfyUI sources after the viewport gate opens', () => {
+    installFakeObserver();
+    const element = {} as Element;
+    const source = 'http://127.0.0.1:8188/view?filename=output.png&type=output';
+    comfyImageSource.mockImplementation((value) => value ? 'blob:comfy-preview' : undefined);
+    let image = renderViewportImage({ src: source });
+    expect(comfyImageSource.mock.lastCall?.[0]).toBeUndefined();
+    expect(image.props.src).toBeUndefined();
+    hooks.refs[0].current = element;
+    const cleanup = hooks.effects[0]?.();
+    FakeIntersectionObserver.instances[0].emit(element, true);
+    image = renderViewportImage({ src: source });
+    expect(comfyImageSource.mock.lastCall?.[0]).toBe(source);
+    expect(image.props.src).toBe('blob:comfy-preview');
+    if (typeof cleanup === 'function') cleanup();
+  });
+
+  it('does not prepare a second full source when a thumbnail was requested', () => {
+    const image = renderViewportImage({ src: 'http://127.0.0.1:8188/view?filename=output.png', previewMaxEdge: 256 });
+    expect(comfyImageSource.mock.lastCall?.[0]).toBeUndefined();
+    expect(image.props.src).toBeUndefined();
   });
 
   it('clears a pending unload timer when the component unmounts', () => {
@@ -203,13 +243,13 @@ describe('ViewportImage', () => {
     expect(image.props.src).toBe('asset://large-image.png');
   });
 
-  it('shares viewport observers and skips layout work for offscreen asset cards', () => {
+  it('shares viewport observers while keeping waterfall card layout independent of media unloading', () => {
     expect(viewportImageSource).toContain('useViewportMediaSource');
     expect(viewportMediaHookSource).toContain('const observerPools = new Map');
     expect(viewportMediaHookSource.match(/new IntersectionObserver/g)).toHaveLength(1);
-    expect(panelsCssSource).toMatch(
-      /\.assets-waterfall-card\s*\{(?=[^}]*content-visibility:\s*auto)(?=[^}]*contain-intrinsic-size:\s*auto 260px)[^}]*\}/s,
-    );
+    const waterfallCard = panelsCssSource.match(/\.assets-waterfall-card\s*\{[^}]*\}/s)?.[0];
+    expect(waterfallCard).toBeDefined();
+    expect(waterfallCard).not.toMatch(/content-visibility|contain-intrinsic-size/);
     expect(panelsCssSource).toMatch(
       /\.drama-asset-card\s*\{(?=[^}]*content-visibility:\s*auto)(?=[^}]*contain-intrinsic-size:\s*auto 148px)[^}]*\}/s,
     );

@@ -1,0 +1,310 @@
+{
+  "16": {
+    "inputs": {
+      "noise": [
+        "30",
+        0
+      ],
+      "guider": [
+        "36",
+        0
+      ],
+      "sampler": [
+        "20",
+        0
+      ],
+      "sigmas": [
+        "25",
+        1
+      ],
+      "latent_image": [
+        "19",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "17": {
+    "inputs": {
+      "source": [
+        "25",
+        2
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "PDD info / recipe"
+    }
+  },
+  "19": {
+    "inputs": {
+      "prompt": "subject_definitions:\n<Subject 1> is the woman in <Picture 1>, preserving her facial identity, long dark brown hair, black sheer dress, necklace, and realistic appearance.\n<Subject 2> is the small red-haired chibi demon in <Picture 1>, preserving its red eyes, black horns, pointed ears, red bat wings, curved tail, black outfit, and stylized proportions.\n<Subject 3> is the gothic interior in <Picture 1>, with arched windows, a red moon, candles, and dark red roses.\n\nsummary:\n[reference generation] A 10-second vertical fantasy scene featuring <Subject 1> holding <Subject 2> inside <Subject 3>. In one continuous shot, she strokes its hair, it looks up and opens its wings, and she draws it closer. The actions happen at natural real-time speed.\n\nretention_analysis:\n<Subject 1> (appears in [Shot 1]): fully_preserved - Preserve identity, clothing, hair, and realistic skin.\n<Subject 2> (appears in [Shot 1]): fully_preserved - Preserve character design, small scale relative to the woman, and stylized appearance.\n<Subject 3> (appears in [Shot 1]): partially_preserved - Preserve the setting and lighting; omit all poster lettering, titles, logos, and decorative typography from the reference.\n\ndetailed_description:\nA cinematic dark-fantasy scene combining a photorealistic woman with a clearly stylized chibi demon. Warm candlelight illuminates their faces while muted red moonlight outlines their hair and silhouettes.\n\n[Shot 1] A continuous vertical medium close-up frames <Subject 1> from the waist upward, with her face in the upper right and <Subject 2> held securely against the center of her chest. Her long brown hair falls over her shoulders, and the black sheer fabric drapes around her arms. The demon's red hair, curved black horns, pointed ears, small hands, folded wings, and curled tail remain clearly recognizable. Behind them, <Subject 3> stays softly out of focus, with the red moon visible through a tall arched window and candles flickering beside dark roses.\n\nDuring the first two seconds, the woman shifts her gaze from the camera down to the demon. Her supporting forearm stays beneath its body. The camera begins a small, steady push forward, keeping both faces visible. Her breathing gently moves her shoulders, and a few loose strands of hair lift in a faint indoor draft.\n\nFrom two to four seconds, she makes one clear, gentle stroke across the top of the demon's red hair, moving her fingertips between its horns toward the back of its head. Her hand completes the stroke and rests behind its shoulder. The demon responds immediately by lifting its chin and turning its red eyes toward her face.\n\nFrom four to seven seconds, the demon opens its two red bat wings outward in one smooth, distinct movement, briefly holds them open, and folds them back against its body. Its small hand grips the fabric near her collarbone. The wings remain attached to its back and pass beside her supporting arm. A light leathery flutter accompanies the movement.\n\nFrom seven to ten seconds, the woman smiles softly and draws the demon a little closer with her supporting arm. It nestles its cheek against her chest and relaxes its grip. The camera finishes its gentle push with both faces still in frame. All actions are completed at natural speed, without slow motion, repeated gestures, sudden camera moves, or cuts.\n\noverall_soundscape:\nQuiet interior ambience, faint wind near the window, soft fabric movement, a brief leathery wing flutter, and subtle breathing. No dialogue or singing.\n\nnon_diegetic_music:\nNone.",
+      "width": [
+        "29",
+        0
+      ],
+      "height": [
+        "29",
+        1
+      ],
+      "length": [
+        "37",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "24",
+        0
+      ],
+      "vae": [
+        "22",
+        0
+      ],
+      "audio_vae": [
+        "27",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "35",
+        0
+      ],
+      "ref_audios.ref_audio_0": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 参考转视频"
+    }
+  },
+  "20": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "22": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "23": {
+    "inputs": {
+      "samples": [
+        "16",
+        0
+      ],
+      "vae": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码（音频）"
+    }
+  },
+  "24": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "25": {
+    "inputs": {
+      "pdd_file": "MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+      "nfe": "8",
+      "lora_strength": 1,
+      "head_strength": 1,
+      "on_off_grid": "error",
+      "partition": "",
+      "enabled": true,
+      "partition_check": "error",
+      "model": [
+        "32",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3PDDAccApply",
+    "_meta": {
+      "title": "MiniMax H3 PDD Acc LoRA (Apply)"
+    }
+  },
+  "26": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "color_space": "sRGB",
+      "codec": "none",
+      "images": [
+        "33",
+        0
+      ],
+      "audio": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "创建视频"
+    }
+  },
+  "27": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "28": {
+    "inputs": {
+      "audio": "1 (1).wav"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "参考音频（音色与风格）"
+    }
+  },
+  "29": {
+    "inputs": {
+      "aspect_ratio": "9:16 (Portrait Widescreen)",
+      "megapixels": 0.7,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Resolution Selector (Size)"
+    }
+  },
+  "30": {
+    "inputs": {
+      "noise_seed": 1117044591506318
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "31": {
+    "inputs": {
+      "filename_prefix": "video/pdd_acc",
+      "format": "mp4",
+      "format.codec": "auto",
+      "codec": "auto",
+      "video": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "保存视频"
+    }
+  },
+  "32": {
+    "inputs": {
+      "shift_video": 12,
+      "shift_audio": 3,
+      "model": [
+        "34",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "MiniMax H3 Sigma Shift"
+    }
+  },
+  "33": {
+    "inputs": {
+      "samples": [
+        "16",
+        0
+      ],
+      "vae": [
+        "22",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "34": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "35": {
+    "inputs": {
+      "image": "a392a841-e40d-454a-9de1-3df882878814.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "36": {
+    "inputs": {
+      "model": [
+        "25",
+        0
+      ],
+      "conditioning": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "37": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "38",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "秒数转换为 H3 帧数"
+    }
+  },
+  "38": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 8
+    },
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  }
+}

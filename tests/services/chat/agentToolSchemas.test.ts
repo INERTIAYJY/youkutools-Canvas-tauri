@@ -1,3 +1,6 @@
+/**
+ * agentToolSchemas — 回归测试：validateAgentToolInput。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   validateAgentToolInput,

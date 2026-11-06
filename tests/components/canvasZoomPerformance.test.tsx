@@ -1,3 +1,6 @@
+/**
+ * canvasZoomPerformance — 回归测试：canvas connection button zoom。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import GooeyBtn from '../../src/components/nodes/shared/GooeyBtn';

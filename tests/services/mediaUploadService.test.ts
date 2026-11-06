@@ -1,3 +1,6 @@
+/**
+ * mediaUploadService — 回归测试：MCP streamed media upload。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { useAppStore } from '../../src/store/useAppStore';

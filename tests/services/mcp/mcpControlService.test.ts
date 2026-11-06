@@ -1,6 +1,10 @@
+/**
+ * mcpControlService — 回归测试：MCP on-demand discovery。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   handleMcpBridgeRequest,
+  initMcpControlService,
   listMcpTools,
 } from '../../../src/services/mcp/mcpControlService';
 import {
@@ -19,12 +23,21 @@ import type {
 } from '../../../src/types/agentPackage';
 import * as directorRuntime from '../../../src/services/directorRuntimeRegistry';
 import * as mediaUploads from '../../../src/services/mediaUploadService';
+import * as mediaDownloads from '../../../src/services/mediaDownloadService';
 import * as directorScenes from '../../../src/services/directorSceneService';
 import { createDefaultDirectorScene } from '../../../src/services/directorBlenderRuntimeService';
 import { buildDirectorSceneRelativePath } from '../../../src/services/directorSceneSchema';
 import { resetDirectorNodeOperationsForTests } from '../../../src/services/directorNodeOperationService';
 import type { AgentToolDefinition } from '../../../src/services/chat/toolRegistry';
 import type { McpToolCallResult, McpToolCatalogResult } from '../../../src/types/mcp';
+import { resolveAgentApproval } from '../../../src/services/chat/agentTaskControl';
+import { MCP_SETTINGS_CONVERSATION_ID, MCP_SETTINGS_SCOPE_ID } from '../../../src/services/mcp/mcpSettingsScope';
+import * as chatHistory from '../../../src/services/chat/chatHistoryService';
+import * as mcpBridge from '../../../src/services/mcp/mcpBridgeService';
+import { MCP_CATALOG_MAX_BYTES } from '../../../src/services/mcp/mcpToolCatalog';
+
+const { getChatWindow } = vi.hoisted(() => ({ getChatWindow: vi.fn() }));
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: { getByLabel: getChatWindow } }));
 
 function packageSkill(partial: Partial<AgentPackageSkill> = {}): AgentPackageSkill {
   return {
@@ -94,6 +107,7 @@ function packageInstallation(
 }
 
 beforeEach(() => {
+  getChatWindow.mockReset();
   resetAgentToolsRegistrationForTests();
   clearAgentToolRegistryForTests();
   useAppStore.setState(useAppStore.getInitialState(), true);
@@ -127,6 +141,26 @@ function catalogResult(result: McpToolCallResult): McpToolCatalogResult {
   return JSON.parse(content.text) as McpToolCatalogResult;
 }
 
+function capabilityOverview(description: string): string {
+  const endMarker = '工具简介目录结束。';
+  const end = description.indexOf(endMarker);
+  expect(end).toBeGreaterThanOrEqual(0);
+  return description.slice(0, end + endMarker.length);
+}
+
+function capabilityEntries(overview: string): Array<{ name: string; title: string; availability: string }> {
+  const entries: Array<{ name: string; title: string; availability: string }> = [];
+  let availability = '';
+  for (const line of overview.split('\n')) {
+    const group = /^(当前可发现|需打开项目或满足上下文条件)（\d+ 项）$/.exec(line);
+    if (group) { availability = group[1]; continue; }
+    if (!availability || !line.includes(' | ') || line.startsWith('name | ')) continue;
+    const [name, title] = line.split(' | ');
+    entries.push({ name, title, availability });
+  }
+  return entries;
+}
+
 function registerDispatchProbe(partial: Partial<AgentToolDefinition> = {}) {
   const execute = vi.fn(async () => ({ status: 'success' as const, summary: '测试成功', modelContent: '{"done":true}' }));
   registerAgentTool({
@@ -139,6 +173,34 @@ function registerDispatchProbe(partial: Partial<AgentToolDefinition> = {}) {
 }
 
 describe('MCP on-demand discovery', () => {
+  it('restores the global audit and repairs interrupted tasks once before listening', async () => {
+    const repairTasks = vi.fn(async () => ['old-task']);
+    const repairMessages = vi.fn(async () => undefined);
+    useAppStore.setState({ currentProjectId: null,
+      repairInterruptedAgentTasksForProject: repairTasks, repairInterruptedForProject: repairMessages });
+    const saved = { id: MCP_SETTINGS_CONVERSATION_ID, projectId: MCP_SETTINGS_SCOPE_ID,
+      title: 'MCP 全局模型设置', titleSource: 'user' as const, pinned: true, archived: false, agentMode: 'autonomous' as const,
+      createdAt: 1, updatedAt: 2, messageCount: 4 };
+    const load = vi.spyOn(chatHistory, 'loadProjectConversations').mockResolvedValue([saved]);
+    const unlisten = vi.fn();
+    const listen = vi.spyOn(mcpBridge, 'listenForMcpBridgeRequests').mockImplementation(async () => {
+      expect(repairTasks).toHaveBeenCalledWith(MCP_SETTINGS_SCOPE_ID);
+      expect(useAppStore.getState().conversations).toContainEqual(saved);
+      return unlisten;
+    });
+    const cleanups: Array<() => void> = [];
+    try {
+      cleanups.push(await initMcpControlService(), await initMcpControlService());
+      expect(repairTasks).toHaveBeenCalledOnce();
+      expect(repairMessages).toHaveBeenCalledOnce();
+      expect(load).toHaveBeenCalledWith(MCP_SETTINGS_SCOPE_ID);
+      expect(useAppStore.getState().currentProjectId).toBeNull();
+    } finally {
+      cleanups.forEach((cleanup) => cleanup());
+      listen.mockRestore(); load.mockRestore();
+    }
+  });
+
   it('exposes image uploads only to MCP and omits uploaded bytes from messages and task audit', async () => {
     vi.stubGlobal('window', { __TAURI__: {} });
     const data = Buffer.from('private-image-byte-marker-for-upload-audit').toString('base64');
@@ -163,15 +225,297 @@ describe('MCP on-demand discovery', () => {
     expect((await listMcpTools()).at(-1)?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false });
     useAppStore.setState({ currentProjectId: null });
     expect((await listMcpTools()).map((tool) => tool.name)).toEqual(names);
-    expect(await mcpCall('tools_search', {})).toMatchObject({ isError: true });
-    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+    expect(await mcpCall('tools_search', {})).toMatchObject({ isError: false });
+    expect(useAppStore.getState().agentTasks[0].projectId).toBe(MCP_SETTINGS_SCOPE_ID);
+  });
+
+  it('discovers provider settings and project creation and navigation without a project, including full exposure', async () => {
+    useAppStore.setState({ currentProjectId: null, configHydrated: true });
+    const listed = await listMcpTools('full');
+    expect(listed.some((tool) => tool.name === 'provider_config_preview')).toBe(true);
+    expect(listed.map((tool) => tool.name)).toEqual(expect.arrayContaining(['project_list', 'project_get', 'project_create', 'project_open', 'project_switch']));
+    expect(listed.map((tool) => tool.name)).toEqual(expect.arrayContaining(['tools_search', 'tools_describe', 'tools_call']));
+    expect(listed.filter((tool) => !['tools_search', 'tools_describe', 'tools_call'].includes(tool.name))
+      .every((tool) => tool.name.startsWith('provider_') || ['project_list', 'project_get', 'project_create', 'project_open', 'project_switch'].includes(tool.name))).toBe(true);
+    expect(await mcpCall('tools_describe', { names: ['canvas_query'] })).toMatchObject({ isError: true });
+    expect(await mcpCall('tools_describe', { names: ['project_delete'] })).toMatchObject({ isError: true });
+    const navigation = catalogResult(await mcpCall('tools_search', { category: 'project', detail: 'schema' }, 'startup-project-search'));
+    expect(navigation.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['project_list', 'project_create', 'project_open', 'project_switch']));
+  });
+
+  it('shows canvas capabilities in the startup compact overview without granting their search or execution', async () => {
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready' });
+    const cached = await listMcpTools('compact');
+    const search = cached.find((tool) => tool.name === 'tools_search')!;
+    const describe = cached.find((tool) => tool.name === 'tools_describe')!;
+    const call = cached.find((tool) => tool.name === 'tools_call')!;
+    expect(cached.map((tool) => tool.name)).toEqual(['tools_search', 'tools_describe', 'tools_call']);
+    const overview = capabilityOverview(search.description);
+    const entries = capabilityEntries(overview);
+    expect(entries).toEqual(expect.arrayContaining(['canvas_query', 'canvas_update_nodes'].map((name) =>
+      expect.objectContaining({ name, availability: expect.stringContaining('需打开项目') }))));
+    expect(overview).not.toMatch(/"inputSchema"\s*:|"properties"\s*:/);
+    expect(new TextEncoder().encode(JSON.stringify(overview)).byteLength).toBeLessThanOrEqual(MCP_CATALOG_MAX_BYTES);
+    const recoverySteps = [
+      'tools_describe({"names":["project_list","project_open"]})',
+      'tools_call({"name":"project_list","arguments":{}})',
+      'tools_call({"name":"project_open","arguments":{"projectId":"<项目条目的id>"}})',
+      'tools_describe({"names":["canvas_query"]})',
+      'tools_call({"name":"canvas_query","arguments":{}})',
+    ];
+    let previousStep = -1;
+    for (const step of recoverySteps) {
+      const position = overview.indexOf(step);
+      expect(position).toBeGreaterThan(previousStep);
+      previousStep = position;
+    }
+    expect(overview).toContain('不要混入');
+    expect(overview).toContain('project_get 读取项目资料不等于已打开画布');
+
+    // 项目元数据可读不等于画布已打开，简介也不扩大真实目录白名单。
+    expect(await mcpCall('project_get', { projectId: 'project-mcp' }, 'startup-overview-project')).toMatchObject({ isError: false });
+    expect(useAppStore.getState().currentProjectId).toBeNull();
+    const unavailable = catalogResult(await mcpCall(search.name, { category: 'canvas' }, 'startup-overview-search'));
+    expect(unavailable.tools).toEqual([]);
+    const mixed = await mcpCall(describe.name, { names: ['project_list', 'project_open', 'canvas_query'] }, 'startup-overview-describe');
+    expect(mixed).toMatchObject({ isError: true });
+    for (const guidance of ['未打开项目', 'project_list', 'project_open']) {
+      expect(unavailable.hint).toContain(guidance);
+      expect(mixed.summary).toContain(guidance);
+    }
+    for (const name of ['canvas_query', 'canvas_update_nodes']) {
+      expect(await mcpCall(call.name, { name, arguments: {} }, `startup-overview-${name}`)).toMatchObject({ isError: true });
+    }
+  });
+
+  it('rediscovers canvas parameters after project_open through the three entrypoints cached on startup', async () => {
+    const switchProject = vi.fn(async (id: string) => {
+      useAppStore.setState({ currentProjectId: id, projectLoadStatus: 'ready' });
+      return id;
+    });
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready', switchProject });
+    const cached = await listMcpTools('compact');
+    const search = cached.find((tool) => tool.name === 'tools_search')!;
+    const describe = cached.find((tool) => tool.name === 'tools_describe')!;
+    const call = cached.find((tool) => tool.name === 'tools_call')!;
+
+    const navigation = catalogResult(await mcpCall(describe.name, { names: ['project_list', 'project_open'] }, 'cached-compact-navigation'));
+    expect(navigation.tools.map((tool) => tool.name)).toEqual(['project_list', 'project_open']);
+    expect(navigation.tools.every((tool) => tool.inputSchema?.type === 'object')).toBe(true);
+    const listed = await mcpCall(call.name, { name: 'project_list', arguments: {} }, 'cached-compact-list');
+    expect(listed.isError).toBe(false);
+    const projects = JSON.parse((listed.content[0] as { text: string }).text) as { projects: Array<{ id: string }> };
+    const target = projects.projects.find((project) => project.id === 'project-mcp');
+    expect(target).toBeDefined();
+    expect(useAppStore.getState().currentProjectId).toBeNull();
+    expect(await mcpCall(call.name, { name: 'project_open', arguments: { projectId: target!.id } }, 'cached-compact-open'))
+      .toMatchObject({ isError: false });
+    expect(switchProject).toHaveBeenCalledOnce();
+    const found = catalogResult(await mcpCall(search.name, { query: 'canvas_query', detail: 'schema', limit: 1 }, 'cached-compact-search'));
+    expect(found.tools[0]).toMatchObject({ name: 'canvas_query', inputSchema: { type: 'object' } });
+    const described = catalogResult(await mcpCall(describe.name, { names: ['canvas_query', 'canvas_update_nodes'] }, 'cached-compact-describe'));
+    expect(described.tools.map((tool) => tool.name)).toEqual(['canvas_query', 'canvas_update_nodes']);
+    expect(described.tools.every((tool) => tool.inputSchema?.type === 'object')).toBe(true);
+    expect(useAppStore.getState().agentTasks.at(-1)?.projectId).toBe('project-mcp');
+    expect(useAppStore.getState().agentTasks.at(-1)?.toolAllowlist).toBeUndefined();
+  });
+
+  it('keeps startup full-mode entrypoints usable for current-project canvas calls without refreshing tools/list', async () => {
+    const switchProject = vi.fn(async (id: string) => {
+      useAppStore.setState({ currentProjectId: id, projectLoadStatus: 'ready' });
+      return id;
+    });
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready', switchProject });
+    const cached = await listMcpTools('full');
+    expect(cached.map((tool) => tool.name)).toEqual(expect.arrayContaining(['tools_search', 'tools_describe', 'tools_call']));
+    expect(cached.some((tool) => tool.name === 'canvas_query' || tool.name === 'canvas_update_nodes')).toBe(false);
+    const call = cached.find((tool) => tool.name === 'tools_call')!;
+    expect(await mcpCall(call.name, { name: 'project_open', arguments: { projectId: 'project-mcp' } }, 'cached-full-open'))
+      .toMatchObject({ isError: false });
+
+    const nodes = useAppStore.getState().nodes;
+    const execution = await import('../../../src/services/chat/agentToolExecution');
+    const execute = vi.spyOn(execution, 'executeRegisteredAgentToolCall').mockImplementation(async ({ taskId, call: proposed }) => {
+      const task = useAppStore.getState().agentTasks.find((item) => item.id === taskId);
+      expect(task).toMatchObject({ projectId: 'project-mcp', conversationId: 'mcp-control-project-mcp' });
+      expect(task?.toolAllowlist).toBeUndefined();
+      return { summary: { callId: proposed.callId, toolId: proposed.toolId, status: 'success' as const, summary: '已转交工具', truncated: false },
+        modelContent: '已转交工具' };
+    });
+    const calls = [
+      { name: 'canvas_query', arguments: { detail: true, limit: 1 } },
+      { name: 'canvas_update_nodes', arguments: { nodeIds: ['existing-node'], label: '镜头名称', x: 240 } },
+    ];
+    try {
+      for (const input of calls) {
+        expect(await mcpCall(call.name, input, `cached-full-${input.name}`)).toMatchObject({ isError: false });
+      }
+      expect(execute.mock.calls.map(([options]) => ({ name: options.call.toolId, arguments: options.call.input }))).toEqual(calls);
+      expect(execute.mock.calls.every(([options]) => options.policyMode === 'autonomous')).toBe(true);
+      expect(useAppStore.getState().nodes).toBe(nodes);
+    } finally {
+      execute.mockRestore();
+    }
+  });
+
+  it.each([
+    { entrypoint: 'direct', currentProjectId: null },
+    { entrypoint: 'tools_call', currentProjectId: null },
+    { entrypoint: 'tools_call', currentProjectId: 'project-mcp' },
+  ])('creates through global audit with $entrypoint and current project $currentProjectId', async ({ entrypoint, currentProjectId }) => {
+    const createProject = vi.fn(async (name?: string) => {
+      const project = { id: 'startup-created', name: name ?? '自动项目', createdAt: 1, updatedAt: 1,
+        dataFolder: 'private-project-folder', snapshot: 'data:image/png;base64,private' };
+      useAppStore.setState((state) => ({ projects: [...state.projects, project], currentProjectId: project.id }));
+      return project.id;
+    });
+    useAppStore.setState({ currentProjectId, projectLoadStatus: 'ready', createProject, projectLibraryOpen: true });
+    const result = entrypoint === 'direct'
+      ? await mcpCall('project_create', { name: '  启动页项目  ' }, 'startup-create')
+      : await mcpCall('tools_call', { name: 'project_create', arguments: { name: '  启动页项目  ' } }, 'startup-create');
+    expect(result.isError).toBe(false);
+    expect(createProject).toHaveBeenCalledOnce();
+    expect(createProject).toHaveBeenCalledWith('启动页项目', { signal: expect.any(AbortSignal) });
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
+      id: 'startup-created', name: '启动页项目', currentProjectId: 'startup-created',
+    });
+    expect(useAppStore.getState().projectLibraryOpen).toBe(false);
+    const task = useAppStore.getState().agentTasks[0];
+    expect(task).toMatchObject({ projectId: MCP_SETTINGS_SCOPE_ID, conversationId: MCP_SETTINGS_CONVERSATION_ID,
+      mode: 'autonomous', status: 'completed' });
+    expect(task.steps[0]?.toolCall?.canvasCheckpoint).toBeUndefined();
+    expect(JSON.stringify([result, useAppStore.getState().agentTasks, useAppStore.getState().messages]))
+      .not.toMatch(/private-project-folder|base64/);
+    expect(await mcpCall('canvas_query', {}, 'after-create-query')).toMatchObject({ isError: false });
+    expect(useAppStore.getState().agentTasks.at(-1)?.projectId).toBe('startup-created');
+  });
+
+  it('lists, opens and switches projects from startup through global audit tasks', async () => {
+    const switchProject = vi.fn(async (id: string) => {
+      useAppStore.setState({ currentProjectId: id, projectName: id, projectLoadStatus: 'ready' });
+      return id;
+    });
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready', switchProject, projects: [
+      { id: 'project-a', name: '重名项目', createdAt: 1, updatedAt: 1 },
+      { id: 'project-b', name: '重名项目', createdAt: 2, updatedAt: 2 },
+    ] });
+    const first = await mcpCall('tools_call', { name: 'project_list', arguments: {} }, 'startup-list');
+    expect(first.isError).toBe(false);
+    expect(JSON.parse((first.content[0] as { text: string }).text)).toMatchObject({ currentProjectId: null,
+      projects: [{ id: 'project-a', name: '重名项目' }, { id: 'project-b', name: '重名项目' }] });
+    const opened = await mcpCall('tools_call', { name: 'project_open', arguments: { projectId: 'project-a' } }, 'startup-open');
+    expect(opened.isError).toBe(false);
+    const switched = await mcpCall('project_switch', { projectId: 'project-b' }, 'project-switch');
+    expect(switched.isError).toBe(false);
+    expect(JSON.parse((switched.content[0] as { text: string }).text)).toMatchObject({ previousProjectId: 'project-a', currentProjectId: 'project-b' });
+    const repeated = await mcpCall('project_open', { projectId: 'project-b' }, 'project-repeat');
+    expect(JSON.parse((repeated.content[0] as { text: string }).text)).toMatchObject({ alreadyOpen: true });
+    expect(switchProject).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().agentTasks).toHaveLength(4);
+    expect(useAppStore.getState().agentTasks.every((task) => task.projectId === MCP_SETTINGS_SCOPE_ID
+      && task.conversationId === MCP_SETTINGS_CONVERSATION_ID && task.status === 'completed')).toBe(true);
+    expect((await listMcpTools('full')).some((tool) => tool.name === 'canvas_query')).toBe(true);
+    expect(await mcpCall('canvas_query', {}, 'after-open-query')).toMatchObject({ isError: false });
+    expect(useAppStore.getState().agentTasks.at(-1)?.projectId).toBe('project-b');
+  });
+
+  it('returns project pages above the generic result limit without leaking them into audit', async () => {
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready', projects: Array.from({ length: 100 }, (_, index) => ({
+      id: `project-${index}`, name: `project-list-private-marker-${index}` + '名'.repeat(210), createdAt: 1, updatedAt: 2,
+      dataFolder: 'secret-folder', snapshot: 'data:image/png;base64,secret',
+    })) });
+    const result = await mcpCall('project_list', { limit: 100 }, 'large-project-list');
+    expect(result.isError).toBe(false);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.length).toBeGreaterThan(20_000);
+    expect(JSON.parse(text)).toMatchObject({ total: 100, returned: 100, hasMore: false });
+    expect(text).not.toContain('secret-folder');
+    expect(text).not.toContain('base64');
+    expect(JSON.stringify([useAppStore.getState().agentTasks, useAppStore.getState().messages])).not.toContain('project-list-private-marker');
+  });
+
+  it('reports failed project loads and rejects unavailable navigation parameters', async () => {
+    const switchProject = vi.fn(async () => undefined);
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready', switchProject });
+    expect(await mcpCall('project_open', { projectId: 'project-mcp' }, 'failed-open')).toMatchObject({ isError: true });
+    expect(await mcpCall('project_switch', { projectId: 'missing' }, 'missing-open')).toMatchObject({ isError: true });
+    expect(await mcpCall('project_open', { projectId: 'project-mcp', toolAllowlist: ['canvas_query'] }, 'invalid-open'))
+      .toMatchObject({ isError: true });
+    expect(switchProject).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().currentProjectId).toBeNull();
+  });
+
+  it('rejects overlapping navigation and preserves cancellation on the original request', async () => {
+    let finishSwitch: (() => void) | undefined;
+    const switchProject = vi.fn(async () => {
+      useAppStore.setState({ switchingProjectName: 'MCP project' });
+      await new Promise<void>((resolve) => { finishSwitch = resolve; });
+      useAppStore.setState({ switchingProjectName: null });
+      return undefined;
+    });
+    useAppStore.setState({ currentProjectId: null, projectLoadStatus: 'ready', switchProject });
+    const pending = mcpCall('tools_call', { name: 'project_open', arguments: { projectId: 'project-mcp' } }, 'pending-project-open');
+    try {
+      await vi.waitFor(() => expect(switchProject).toHaveBeenCalledOnce());
+      expect(await mcpCall('project_switch', { projectId: 'project-mcp' }, 'overlapping-open')).toMatchObject({ isError: true, summary: expect.stringContaining('等待') });
+      expect(await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-project-open', method: 'requests/cancel',
+        params: { requestId: 'pending-project-open' } })).toEqual({ cancelled: true });
+    } finally {
+      finishSwitch?.();
+      expect(await pending).toMatchObject({ isError: true });
+    }
+    expect(useAppStore.getState().currentProjectId).toBeNull();
+    expect(switchProject).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().agentTasks.find((task) => task.steps[0]?.toolCall?.callId === 'pending-project-open')?.status).toBe('stopped');
+  });
+
+  it('previews and saves global image settings across project changes through the audited runtime', async () => {
+    const saveConfig = vi.fn(async () => undefined);
+    useAppStore.setState({ currentProjectId: null, configHydrated: true, saveConfig });
+    const preview = await mcpCall('tools_call', { name: 'provider_config_preview', arguments: {
+      connectionName: 'Global Images', baseUrl: 'https://gateway.example/v1', models: [{
+        modelId: 'global-image', category: 'image', protocolSource: 'declarative',
+        imageCapability: { resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'], supportsBatch: false, supportsImageReference: false },
+        executionProtocol: { version: 2, mode: 'sync', auth: { type: 'bearer' },
+          submit: { method: 'POST', path: '/images/generations', body: { model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}' } },
+          response: { type: 'json', result: { urlPath: 'data.0.url' } } },
+      }],
+    } }, 'global-preview');
+    expect(preview.isError).toBe(false);
+    const text = preview.content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+    const draftId = /draftId: (provider-draft-[\w-]+)/.exec(text)?.[1];
+    expect(draftId).toBeTruthy();
+    useAppStore.setState({ currentProjectId: 'another-project' });
+    expect(await mcpCall('tools_call', { name: 'provider_config_apply', arguments: { draftId } }, 'global-apply')).toMatchObject({ isError: false });
+    expect(saveConfig).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().config.generalModels?.[0].imageCapability?.resolutions).toEqual(['1K']);
+    expect(useAppStore.getState().agentTasks.every((task) => task.projectId === MCP_SETTINGS_SCOPE_ID)).toBe(true);
+    expect(useAppStore.getState().currentProjectId).toBe('another-project');
+  });
+
+  it('opens the global choice card without a project and accepts the user after switching projects', async () => {
+    useAppStore.setState({ currentProjectId: null, chatOpen: false });
+    const pending = mcpCall('tools_call', { name: 'provider_models_select', arguments: {
+      models: [{ id: 'image', name: 'Image', category: 'image' }],
+    } }, 'global-choice');
+    try {
+      await vi.waitFor(() => expect(useAppStore.getState().agentTasks[0]?.status).toBe('waiting_approval'));
+      expect(useAppStore.getState()).toMatchObject({ chatOpen: true, activeConversationId: MCP_SETTINGS_CONVERSATION_ID });
+      const approval = useAppStore.getState().agentTasks[0].steps[0].approval!;
+      useAppStore.setState({ currentProjectId: 'another-project' });
+      expect(resolveAgentApproval(approval.id, { approved: true, inputValues: { selectedModelIds: ['image'] } })).toBe(true);
+      expect(await pending).toMatchObject({ isError: false });
+    } finally {
+      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-global-choice', method: 'requests/cancel', params: { requestId: 'global-choice' } });
+      await pending;
+    }
   });
 
   it('honors the saved exposure mode and keeps internal assistant tools unchanged', async () => {
     const store = useAppStore.getState();
     store.updateConfig({ mcpToolExposure: 'full' });
     expect((await listMcpTools()).some((tool) => tool.name === 'canvas_query')).toBe(true);
-    expect((await listMcpTools()).some((tool) => tool.name === 'tools_search')).toBe(false);
+    expect((await listMcpTools()).map((tool) => tool.name)).toEqual(expect.arrayContaining(['tools_search', 'tools_describe', 'tools_call']));
     store.updateConfig({ mcpToolExposure: 'compact' });
     const listed = await handleMcpBridgeRequest({ sessionId: 's', requestId: 'list', method: 'tools/list', params: { exposure: 'full' } }) as { tools: unknown[] };
     expect(listed.tools).toHaveLength(3);
@@ -218,11 +562,60 @@ describe('MCP on-demand discovery', () => {
     const result = await mcpCall('tools_call', { name: 'mcp_dispatch_probe', arguments: { value: 'yes' } });
     expect(result).toMatchObject({ isError: false });
     expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-mcp' }), { value: 'yes' });
     const tasks = useAppStore.getState().agentTasks;
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({ toolCallCount: 1, status: 'completed', steps: [expect.objectContaining({ toolCall: expect.objectContaining({ toolId: 'mcp_dispatch_probe', effect: 'config_write' }) })] });
     expect(tasks[0].goal).toContain('分发测试');
     expect(tasks[0].goal).not.toContain('tools_call');
+  });
+
+  it.each(['project', 'revision', 'project-only'] as const)('rejects a stale %s precondition before creating an execution task', async (change) => {
+    const execute = registerDispatchProbe();
+    const revision = useAppStore.getState().getCurrentRevision();
+    if (change === 'revision') useAppStore.getState().incrementRevision();
+    else useAppStore.setState({ currentProjectId: 'other-project' });
+    const createTask = vi.spyOn(useAppStore.getState(), 'createAgentTask');
+    try {
+      const result = await mcpCall('tools_call', { name: 'mcp_dispatch_probe', arguments: { value: 'must-not-execute' },
+        expectedProjectId: 'project-mcp', ...(change !== 'project-only' ? { expectedRevision: revision } : {}),
+      }, `stale-context-${change}`);
+      expect(result.isError).toBe(true);
+      const block = result.content[0];
+      if (block.type !== 'text') throw new Error('Expected context conflict text');
+      expect(JSON.parse(block.text)).toMatchObject({ errorCode: 'MCP_CONTEXT_CHANGED', retryable: false,
+        current: { projectId: useAppStore.getState().currentProjectId, revision: useAppStore.getState().getCurrentRevision() } });
+      expect(createTask).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(useAppStore.getState().agentTasks).toHaveLength(0);
+      expect(useAppStore.getState().messages).toHaveLength(0);
+    } finally {
+      createTask.mockRestore();
+    }
+  });
+
+  it.each([false, true])('forwards matching context metadata separately from real arguments (revision=%s)', async (withRevision) => {
+    const execute = registerDispatchProbe();
+    const execution = await import('../../../src/services/chat/agentToolExecution');
+    const shared = vi.spyOn(execution, 'executeRegisteredAgentToolCall');
+    const args = { value: 'business-only' };
+    const revision = useAppStore.getState().getCurrentRevision();
+    try {
+      const result = await mcpCall('tools_call', { name: 'mcp_dispatch_probe', arguments: args,
+        expectedProjectId: 'project-mcp', ...(withRevision ? { expectedRevision: revision } : {}),
+      }, `matching-context-${withRevision}`);
+      expect(result.isError).toBe(false);
+      expect(shared).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        expectedContext: { projectId: 'project-mcp', baseRevision: withRevision ? revision : undefined },
+        call: expect.objectContaining({ toolId: 'mcp_dispatch_probe', input: { value: 'business-only' } }),
+      }));
+      expect(execute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ projectId: 'project-mcp', baseRevision: revision }), { value: 'business-only' });
+      expect(args).toEqual({ value: 'business-only' });
+      expect(useAppStore.getState().agentTasks).toHaveLength(1);
+      expect(useAppStore.getState().agentTasks[0].status).toBe('completed');
+    } finally {
+      shared.mockRestore();
+    }
   });
 
   it('applies the target schema and current authorization after earlier discovery', async () => {
@@ -261,11 +654,16 @@ describe('MCP on-demand discovery', () => {
   });
 
   it('keeps user_choice waiting and cancels it through the original request ID', async () => {
+    useAppStore.setState({ chatOpen: false, chatPanelView: 'tasks', activeConversationId: 'other-chat' });
     const execute = registerDispatchProbe({ effect: 'user_choice' });
     const pending = mcpCall('tools_call', { name: 'mcp_dispatch_probe', arguments: { value: 'ok' } }, 'session:choice');
     try {
       await vi.waitFor(() => expect(useAppStore.getState().agentTasks[0]?.status).toBe('waiting_approval'));
+      expect(useAppStore.getState()).toMatchObject({
+        chatOpen: true, chatPanelView: 'chat', activeConversationId: 'mcp-control-project-mcp',
+      });
       expect(execute).not.toHaveBeenCalled();
+      expect(getChatWindow).not.toHaveBeenCalled();
     } finally {
       await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-choice', method: 'requests/cancel', params: { requestId: 'session:choice' } });
       await pending;
@@ -273,6 +671,69 @@ describe('MCP on-demand discovery', () => {
     expect(useAppStore.getState().agentTasks).toHaveLength(1);
     expect(useAppStore.getState().agentTasks[0].status).toBe('stopped');
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('reveals an existing detached assistant for user_choice without recreating it', async () => {
+    const detached = { unminimize: vi.fn().mockResolvedValue(undefined), show: vi.fn().mockResolvedValue(undefined), setFocus: vi.fn().mockResolvedValue(undefined) };
+    getChatWindow.mockResolvedValue(detached);
+    useAppStore.setState({ chatOpen: false, chatPanelDetached: true, chatPanelView: 'list' });
+    const execute = registerDispatchProbe({ effect: 'user_choice' });
+    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:detached-choice');
+    try {
+      await vi.waitFor(() => expect(detached.setFocus).toHaveBeenCalledOnce());
+      expect(getChatWindow).toHaveBeenCalledWith('chat-assistant');
+      expect(detached.unminimize).toHaveBeenCalledOnce();
+      expect(detached.show).toHaveBeenCalledOnce();
+      expect(useAppStore.getState()).toMatchObject({
+        chatPanelDetached: true, chatPanelView: 'chat', activeConversationId: 'mcp-control-project-mcp',
+      });
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-detached-choice', method: 'requests/cancel', params: { requestId: 'session:detached-choice' } });
+      await pending;
+    }
+  });
+
+  it('falls back to the main panel if the detached assistant is unavailable', async () => {
+    getChatWindow.mockResolvedValue(null);
+    useAppStore.setState({ chatOpen: false, chatPanelDetached: true });
+    registerDispatchProbe({ effect: 'user_choice' });
+    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:missing-choice');
+    try {
+      await vi.waitFor(() => expect(useAppStore.getState().chatPanelDetached).toBe(false));
+      expect(useAppStore.getState()).toMatchObject({ chatOpen: true, chatPanelView: 'chat' });
+    } finally {
+      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-missing-choice', method: 'requests/cancel', params: { requestId: 'session:missing-choice' } });
+      await pending;
+    }
+  });
+
+  it('does not focus a detached assistant after the user switches projects', async () => {
+    let resolveWindow!: (value: { unminimize: ReturnType<typeof vi.fn> }) => void;
+    getChatWindow.mockReturnValue(new Promise((resolve) => { resolveWindow = resolve; }));
+    useAppStore.setState({ chatPanelDetached: true });
+    registerDispatchProbe({ effect: 'user_choice' });
+    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:stale-choice');
+    const detached = { unminimize: vi.fn() };
+    try {
+      await vi.waitFor(() => expect(getChatWindow).toHaveBeenCalledOnce());
+      useAppStore.setState({ currentProjectId: 'other-project', activeConversationId: 'other-chat', chatOpen: false });
+      resolveWindow(detached);
+      await Promise.resolve();
+      expect(detached.unminimize).not.toHaveBeenCalled();
+      expect(useAppStore.getState()).toMatchObject({ chatOpen: false, activeConversationId: 'other-chat' });
+    } finally {
+      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-stale-choice', method: 'requests/cancel', params: { requestId: 'session:stale-choice' } });
+      await pending;
+    }
+  });
+
+  it('keeps background calls from opening or switching the assistant', async () => {
+    useAppStore.setState({ chatOpen: false, chatPanelView: 'tasks', activeConversationId: 'other-chat' });
+    registerDispatchProbe({ effect: 'read' });
+    expect(await mcpCall('mcp_dispatch_probe', { value: 'ok' })).toMatchObject({ isError: false });
+    expect(useAppStore.getState()).toMatchObject({ chatOpen: false, chatPanelView: 'tasks', activeConversationId: 'other-chat' });
+    expect(getChatWindow).not.toHaveBeenCalled();
   });
 
   it('forwards cancellation to an executing target', async () => {
@@ -294,14 +755,86 @@ describe('MCP on-demand discovery', () => {
     expect(useAppStore.getState().agentTasks[0].status).toBe('stopped');
   });
 
-  it.each([null, [], { name: 'tools_call', arguments: {} }, { name: 'tools_search', arguments: {} }, { name: 'canvas_query', arguments: [] }])('rejects invalid or recursive envelopes without starting a task: %j', async (input) => {
+  it('cancels during tool registration before a task exists', async () => {
+    const execute = registerDispatchProbe();
+    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'cancel-before-registration');
+    const rejected = expect(pending).rejects.toThrow('已取消');
+
+    expect(await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'early-cancel',
+      method: 'requests/cancel', params: { requestId: 'cancel-before-registration' } })).toEqual({ cancelled: true });
+
+    await rejected;
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('remembers an early cancellation only for its own session and for a bounded time', async () => {
+    const execute = registerDispatchProbe();
+    const cancelledId = 'cancelled-before-arrival';
+    await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-before-arrival',
+      method: 'requests/cancel', params: { requestId: cancelledId } });
+    await expect(mcpCall('mcp_dispatch_probe', { value: 'ok' }, cancelledId)).rejects.toThrow('已取消');
+    expect(execute).not.toHaveBeenCalled();
+    expect(await handleMcpBridgeRequest({ sessionId: 'another-session', requestId: cancelledId,
+      method: 'tools/call', params: { name: 'mcp_dispatch_probe', arguments: { value: 'ok' } } })).toMatchObject({ isError: false });
+
+    const later = Date.now() + 16 * 60 * 1_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
+    try {
+      expect(await mcpCall('mcp_dispatch_probe', { value: 'ok' }, cancelledId)).toMatchObject({ isError: false });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('only accepts native session revocation and keeps a replacement session usable', async () => {
+    let receivedSignal: AbortSignal | undefined;
+    registerDispatchProbe({ execute: (context) => {
+      if (receivedSignal) return Promise.resolve({ status: 'success' as const, summary: '新会话成功', modelContent: '新会话成功' });
+      receivedSignal = context.signal;
+      return new Promise((_resolve, reject) => {
+        context.signal.addEventListener('abort', () => reject(new DOMException('Stopped', 'AbortError')), { once: true });
+      });
+    } });
+    const request = { sessionId: 'session-to-revoke', requestId: 'same-request', method: 'tools/call' as const,
+      params: { name: 'mcp_dispatch_probe', arguments: { value: 'ok' } } };
+    const pending = handleMcpBridgeRequest(request);
+    try {
+      await vi.waitFor(() => expect(receivedSignal).toBeDefined());
+      expect(await handleMcpBridgeRequest({ sessionId: request.sessionId, requestId: 'client-cancel',
+        method: 'requests/cancel', params: { scope: 'session' } })).toEqual({ cancelled: false });
+      expect(receivedSignal?.aborted).toBe(false);
+    } finally {
+      await handleMcpBridgeRequest({ sessionId: request.sessionId, requestId: '',
+        method: 'requests/cancel', params: { scope: 'session' } });
+      await pending;
+    }
+    expect(receivedSignal?.aborted).toBe(true);
+    await expect(handleMcpBridgeRequest({ ...request, requestId: 'late-request' })).rejects.toThrow('已取消');
+    expect(await handleMcpBridgeRequest({ ...request, sessionId: 'replacement-session' })).toMatchObject({ isError: false });
+  });
+
+  it.each([null, [], { name: 'tools_call', arguments: {} }, { name: 'tools_search', arguments: {} }, { name: 'canvas_query', arguments: [] },
+    { name: 'canvas_query', arguments: {}, expectedRevision: 0 }])('rejects invalid or recursive envelopes without starting a task: %j', async (input) => {
     expect(await mcpCall('tools_call', input)).toMatchObject({ isError: true });
     expect(useAppStore.getState().agentTasks).toHaveLength(0);
   });
 
   it('measures the catalog reduction and an actual search/describe/call read flow', async () => {
-    const full = JSON.stringify({ tools: await listMcpTools('full') });
-    const compact = JSON.stringify({ tools: await listMcpTools() });
+    const schemaMarker = 'overview-schema-private-marker';
+    registerDispatchProbe({ id: 'zz_capability_tail_probe', title: '简介末尾能力', description: '末尾完整简介标记',
+      inputSchema: { type: 'object', properties: { value: { type: 'string', description: schemaMarker } } } });
+    const fullTools = await listMcpTools('full');
+    const compactTools = await listMcpTools();
+    const full = JSON.stringify({ tools: fullTools });
+    const compact = JSON.stringify({ tools: compactTools });
+    const overview = capabilityOverview(compactTools.find((tool) => tool.name === 'tools_search')!.description);
+    const entries = capabilityEntries(overview);
+    expect(entries.map((entry) => entry.name).sort()).toEqual(fullTools
+      .filter((tool) => !['tools_search', 'tools_describe', 'tools_call'].includes(tool.name)).map((tool) => tool.name).sort());
+    expect(entries.at(-1)).toMatchObject({ name: 'zz_capability_tail_probe', title: '简介末尾能力' });
+    expect(overview).not.toContain(schemaMarker);
+    expect(overview).not.toMatch(/"inputSchema"\s*:|"properties"\s*:/);
     const search = await mcpCall('tools_search', { query: 'canvas_query', detail: 'schema', limit: 1 }, 'search');
     const selected = catalogResult(search).tools[0];
     expect(selected.name).toBe('canvas_query');
@@ -309,13 +842,62 @@ describe('MCP on-demand discovery', () => {
     const result = await mcpCall('tools_call', { name: selected.name, arguments: {} }, 'execute');
     expect(result.isError).toBe(false);
     const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
-    expect(bytes(compact)).toBeLessThan(bytes(full) * 0.2);
-    expect(bytes(compact + JSON.stringify(search))).toBeLessThan(bytes(full));
+    expect(bytes(compact)).toBeLessThan(bytes(full));
+    expect(bytes(JSON.stringify(overview))).toBeLessThanOrEqual(MCP_CATALOG_MAX_BYTES);
     process.stdout.write(`MCP catalog bytes: ${JSON.stringify({ fullTools: JSON.parse(full).tools.length, full: bytes(full), compact: bytes(compact), search: bytes(JSON.stringify(search)), result: bytes(JSON.stringify(result)) })}\n`);
   });
 });
 
 describe('MCP control service', () => {
+  it.each(['direct', 'envelope'])('returns complete large canvas details through MCP: %s', async (route) => {
+    const prompt = 'private-canvas-detail-marker'.repeat(15).slice(0, 400);
+    useAppStore.setState({ nodes: Array.from({ length: 50 }, (_, index) => ({
+      id: `detail-${index}`, type: 'ai-text', position: { x: index * 20, y: 0 },
+      data: { type: 'ai-text' as const, label: `Detail ${index}`, prompt, output: prompt, status: 'success' as const },
+    })) });
+
+    const args = { detail: true, limit: 50 };
+    const result = await mcpCall(route === 'direct' ? 'canvas_query' : 'tools_call',
+      route === 'direct' ? args : { name: 'canvas_query', arguments: args }, `large-canvas-${route}`);
+
+    expect(result.isError).toBe(false);
+    const content = result.content[0];
+    if (content.type !== 'text') throw new Error('Expected canvas detail text');
+    expect(content.text.length).toBeGreaterThan(20_000);
+    const detail = JSON.parse(content.text);
+    expect(detail.nodes).toHaveLength(50);
+    expect(detail.nodes[49]).toMatchObject({ id: 'detail-49', prompt: { text: prompt, truncated: false } });
+    expect(JSON.stringify([useAppStore.getState().messages, useAppStore.getState().agentTasks]))
+      .not.toContain('private-canvas-detail-marker');
+  });
+
+  it.each([
+    { route: 'direct', effect: 'read' as const },
+    { route: 'envelope', effect: 'read' as const },
+    { route: 'direct', effect: 'file_write' as const },
+    { route: 'envelope', effect: 'file_write' as const },
+  ])('distinguishes result delivery errors from completed writes: $route / $effect', async ({ route, effect }) => {
+    const execute = vi.fn(async () => ({
+      status: 'success' as const, summary: 'operation complete', modelContent: 'x'.repeat(600_000),
+    }));
+    registerAgentTool({ id: 'mcp_large_result_test', title: 'Large result', description: 'Result delivery test', effect,
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} }, execute });
+
+    const result = await mcpCall(route === 'direct' ? 'mcp_large_result_test' : 'tools_call',
+      route === 'direct' ? {} : { name: 'mcp_large_result_test', arguments: {} }, `oversized-${route}-${effect}`);
+
+    expect(result.isError).toBe(effect === 'read');
+    const content = result.content[0];
+    if (content.type !== 'text') throw new Error('Expected result delivery text');
+    expect(JSON.parse(content.text)).toMatchObject({
+      code: 'MCP_RESULT_TOO_LARGE', operationStatus: 'success', resultOmitted: true, retryable: false,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().agentTasks.at(-1)).toMatchObject({
+      status: 'completed', steps: [expect.objectContaining({ status: 'succeeded' })],
+    });
+  });
+
   it('discovers available Registry tools with their local schemas', async () => {
     const tools = await listMcpTools('full');
     expect(tools.some((tool) => tool.name === 'canvas_query')).toBe(true);
@@ -652,6 +1234,37 @@ describe('MCP control service', () => {
     expect(JSON.stringify(useAppStore.getState().agentTasks)).not.toContain('YWJj');
   });
 
+  it.each(['direct', 'envelope'])('returns original file bytes only through transient MCP content: %s', async (route) => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const data = Buffer.from('original-media-payload'.repeat(2000)).toString('base64');
+    const chunk = { downloadId: 'private-download-handle', nodeId: 'media-node', state: 'open' as const,
+      fileName: '原始视频.mp4', mimeType: 'video/mp4', totalBytes: 44_000, chunkBytes: 262144,
+      expiresAt: 1_000_000, offset: 0, bytesRead: 44_000, nextOffset: 44_000, eof: true,
+      encoding: 'base64' as const, data, checksumAlgorithm: 'sha256' as const, checksum: 'a'.repeat(64) };
+    const execute = vi.spyOn(mediaDownloads, 'executeMediaDownload').mockResolvedValue(chunk);
+    try {
+      expect((await listMcpTools('full')).some((tool) => tool.name === 'file_media_download')).toBe(true);
+      const ordinaryTools = buildAssistantFunctionTools({ taskId: 'ordinary', projectId: 'project-mcp',
+        conversationId: 'conv-ordinary', mode: 'autonomous' });
+      expect(ordinaryTools.some((tool) => tool.function.name === 'file_media_download')).toBe(false);
+      const args = { action: 'read', downloadId: chunk.downloadId, offset: 0 };
+      const result = await mcpCall(route === 'direct' ? 'file_media_download' : 'tools_call',
+        route === 'direct' ? args : { name: 'file_media_download', arguments: args }, `download-${route}`);
+      expect(execute).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-mcp',
+        conversationId: 'mcp-control-project-mcp' }), args);
+      expect(result).toMatchObject({ isError: false, summary: '已返回原文件字节块' });
+      expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(chunk) }]);
+      const persisted = JSON.stringify([useAppStore.getState().messages, useAppStore.getState().agentTasks]);
+      expect(persisted).not.toContain(data);
+      expect(persisted).not.toContain(chunk.downloadId);
+      expect(persisted).not.toContain(chunk.checksum);
+      execute.mockClear();
+      const invalid = await mcpCall('file_media_download', { action: 'begin', nodeId: 'media-node', path: '/not-a-node-file' });
+      expect(invalid.isError).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+    } finally { execute.mockRestore(); vi.unstubAllGlobals(); }
+  });
+
   it('returns configured built-in, custom and workflow models without private config', async () => {
     useAppStore.setState((state) => ({
       config: {
@@ -793,5 +1406,137 @@ describe('MCP control service', () => {
     });
     expect(result).toMatchObject({ isError: true });
     expect(useAppStore.getState().agentTasks).toHaveLength(0);
+  });
+});
+
+describe('MCP keyed operation receipts', () => {
+  function project(id: string) {
+    useAppStore.setState({ currentProjectId: id, projects: [{ id, name: id, createdAt: 1, updatedAt: 1 }] });
+  }
+  function operation(result: McpToolCallResult) {
+    for (const content of [...result.content].reverse()) {
+      if (content.type !== 'text') continue;
+      try { const parsed = JSON.parse(content.text); if (parsed.operation) return parsed.operation; } catch { /* plain business text */ }
+    }
+    throw new Error('Missing operation receipt');
+  }
+
+  it('executes a keyed write once and returns its durable receipt after the write changed revision', async () => {
+    project('receipt-control-once');
+    const execute = vi.fn<AgentToolDefinition['execute']>(async () => {
+      useAppStore.getState().incrementRevision();
+      return { status: 'success' as const, summary: '写入完成', modelContent: '{"privateBusinessMarker":"original-only-result"}' };
+    });
+    registerDispatchProbe({ id: 'canvas_receipt_once', effect: 'canvas_write', execute });
+    const revision = useAppStore.getState().getCurrentRevision();
+    const envelope = { name: 'canvas_receipt_once', arguments: { value: 'value-only-in-arguments' },
+      operationKey: 'same-intent', expectedProjectId: 'receipt-control-once', expectedRevision: revision };
+    const first = await mcpCall('tools_call', envelope, 'receipt-once:first');
+    expect(first.isError).toBe(false);
+    expect(first.content[0]).toMatchObject({ type: 'text', text: '{"privateBusinessMarker":"original-only-result"}' });
+    const receipt = operation(first);
+    expect(receipt).toMatchObject({ status: 'succeeded', retryable: false, resultAvailable: false });
+    const replay = await mcpCall('tools_call', envelope, 'receipt-once:replay');
+    expect(replay.isError).toBe(false);
+    expect(operation(replay)).toMatchObject({ operationId: receipt.operationId, taskId: receipt.taskId, status: 'succeeded' });
+    expect(JSON.stringify(replay)).not.toContain('original-only-result');
+    const operationApi = await import('../../../src/services/mcp/mcpOperationService');
+    const staleLookup = vi.spyOn(operationApi, 'readMcpOperation').mockResolvedValueOnce(null);
+    try {
+      const racedReplay = await mcpCall('tools_call', envelope, 'receipt-once:raced-replay');
+      expect(operation(racedReplay)).toMatchObject({ operationId: receipt.operationId, status: 'succeeded' });
+    } finally { staleLookup.mockRestore(); }
+    expect(execute).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().agentTasks).toHaveLength(1);
+    expect(JSON.stringify(useAppStore.getState().agentTasks)).not.toContain('original-only-result');
+    const query = await mcpCall('mcp_operation_get', { operationId: receipt.operationId }, 'receipt-once:query');
+    expect(query.isError).toBe(false);
+    expect(operation(query).taskId).toBe(receipt.taskId);
+    expect(execute.mock.calls[0]?.[1]).not.toHaveProperty('operationKey');
+  });
+
+  it('returns a running receipt for a concurrent duplicate without attaching its cancellation to the owner', async () => {
+    project('receipt-control-running');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let ownerSignal: AbortSignal | undefined;
+    const execute = vi.fn<AgentToolDefinition['execute']>(async (context) => {
+      ownerSignal = context.signal;
+      await gate;
+      return { status: 'success' as const, summary: '已完成', modelContent: '{"done":true}' };
+    });
+    registerDispatchProbe({ id: 'canvas_receipt_running', effect: 'canvas_write', execute });
+    const envelope = { name: 'canvas_receipt_running', arguments: { value: 'ok' }, operationKey: 'in-flight-intent' };
+    const owner = mcpCall('tools_call', envelope, 'receipt-running:owner');
+    try {
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+      const duplicate = await mcpCall('tools_call', envelope, 'receipt-running:duplicate');
+      expect(operation(duplicate).status).toBe('running');
+      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'receipt-running:cancel-duplicate',
+        method: 'requests/cancel', params: { requestId: 'receipt-running:duplicate' } });
+      expect(ownerSignal?.aborted).toBe(false);
+    } finally { release(); await owner; }
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('rejects mismatched arguments and a different active project without executing or exposing the old receipt', async () => {
+    project('receipt-control-conflict');
+    const execute = registerDispatchProbe({ id: 'canvas_receipt_conflict', effect: 'canvas_write' });
+    const envelope = { name: 'canvas_receipt_conflict', arguments: { value: 'first' }, operationKey: 'fixed-intent',
+      expectedProjectId: 'receipt-control-conflict' };
+    const first = await mcpCall('tools_call', envelope, 'receipt-conflict:first');
+    const changed = await mcpCall('tools_call', { ...envelope, arguments: { value: 'changed' } }, 'receipt-conflict:changed');
+    expect(changed.isError).toBe(true);
+    expect(JSON.stringify(changed)).toContain('MCP_OPERATION_KEY_CONFLICT');
+    useAppStore.setState({ currentProjectId: 'another-receipt-project' });
+    const otherProject = await mcpCall('tools_call', envelope, 'receipt-conflict:other-project');
+    expect(otherProject.isError).toBe(true);
+    expect(JSON.stringify(otherProject)).toContain('MCP_CONTEXT_CHANGED');
+    expect(JSON.stringify(otherProject)).not.toContain(operation(first).operationId);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when its claim cannot persist and does not support keys on read or config tools', async () => {
+    project('receipt-control-claim-failure');
+    const execute = registerDispatchProbe({ id: 'canvas_receipt_claim_failure', effect: 'canvas_write' });
+    const db = await import('../../../src/services/indexedDbService');
+    const claim = vi.spyOn(db, 'claimMcpAgentTask').mockRejectedValueOnce(new Error('simulated operation persistence failure'));
+    try {
+      const failed = await mcpCall('tools_call', { name: 'canvas_receipt_claim_failure', arguments: { value: 'ok' },
+        operationKey: 'must-not-start' }, 'receipt-failure:write');
+      expect(failed.isError).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+      expect(useAppStore.getState().agentTasks).toEqual([]);
+    } finally { claim.mockRestore(); }
+    const conflictingClaim = vi.spyOn(db, 'claimMcpAgentTask').mockRejectedValueOnce(new Error('MCP_OPERATION_KEY_CONFLICT'));
+    try {
+      const conflict = await mcpCall('tools_call', { name: 'canvas_receipt_claim_failure', arguments: { value: 'other' },
+        operationKey: 'raced-conflict' }, 'receipt-failure:conflict');
+      expect(conflict.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('"errorCode":"MCP_OPERATION_KEY_CONFLICT"') });
+    } finally { conflictingClaim.mockRestore(); }
+    registerDispatchProbe({ id: 'receipt_config_probe', effect: 'config_write' });
+    for (const name of ['canvas_query', 'receipt_config_probe']) {
+      const result = await mcpCall('tools_call', { name, arguments: name === 'canvas_query' ? {} : { value: 'private-input' },
+        operationKey: 'not-for-this-effect' }, `receipt-failure:${name}`);
+      expect(result.isError).toBe(true);
+    }
+    expect(useAppStore.getState().agentTasks).toEqual([]);
+  });
+
+  it('keeps the key reserved after deleting its task and exposes only a scoped unknown receipt', async () => {
+    project('receipt-control-deleted');
+    const execute = registerDispatchProbe({ id: 'canvas_receipt_deleted', effect: 'canvas_write' });
+    const envelope = { name: 'canvas_receipt_deleted', arguments: { value: 'ok' }, operationKey: 'deleted-task-intent' };
+    const first = await mcpCall('tools_call', envelope, 'receipt-deleted:first');
+    const prior = operation(first);
+    useAppStore.getState().removeAgentTask(prior.taskId);
+    const db = await import('../../../src/services/indexedDbService');
+    await db.deleteAgentTask(prior.taskId);
+    const replay = await mcpCall('tools_call', envelope, 'receipt-deleted:replay');
+    expect(operation(replay)).toMatchObject({ status: 'unknown', resultAvailable: false, retryable: false });
+    expect(operation(replay).sequence).toBeGreaterThan(prior.sequence);
+    expect(execute).toHaveBeenCalledOnce();
+    const query = await mcpCall('mcp_operation_get', { operationKey: envelope.operationKey }, 'receipt-deleted:query');
+    expect(operation(query).status).toBe('unknown');
   });
 });

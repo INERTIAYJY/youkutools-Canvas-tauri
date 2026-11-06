@@ -1,6 +1,6 @@
 /**
  * settings/providerConnection/providerConnectionShared — 厂商连接弹窗的常量、类型与共用助手。
- * 分类顺序、能力预设、厂商控制台链接、导入快照结构集中在这里，供弹窗与各子区块共用。
+ * 分类顺序、能力预设、厂商控制台链接集中在这里，供弹窗与各子区块共用。
  */
 import type {
   ApiProviderConfig,
@@ -9,6 +9,8 @@ import type {
   ProviderModelSelection,
 } from '../../../types';
 import { CHAT_API_PROTOCOL_LABELS } from '../../../services/ai/chatApiProtocol';
+import { RUNNINGHUB_API_SITES } from '../../../constants/api';
+import type { RunningHubSiteKeyDrafts } from '../../../types/runninghub';
 
 export const CATEGORY_ORDER: GeneralModelCategory[] = ['text', 'image', 'video', 'audio'];
 export const VIDEO_RATIO_PRESETS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'adaptive'];
@@ -20,7 +22,7 @@ export const VIDEO_DURATION_RANGE_MAX = 3600;
 export const PROVIDER_LINKS: Record<string, string> = {
   apimart: 'https://apimart.ai/register?aff=ZnmCKm',
   volcengine: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
-  'runninghub-model': 'https://www.runninghub.cn?inviteCode=iadc40jt',
+  'runninghub-model': RUNNINGHUB_API_SITES[0].consoleUrl,
   grsai: 'https://grsai.com/zh/dashboard/api-keys',
   dreamina: 'https://jimeng.jianying.com/ai-tool/home/',
   tavily: 'https://app.tavily.com',
@@ -64,22 +66,12 @@ export function buildRelayAssistantPrompt(
 
 export type CatalogStatus = 'idle' | 'loading' | 'ready' | 'warning' | 'error';
 
-export interface ProtocolImportSnapshot {
-  baseUrl: string;
-  models: ProviderModelSelection[];
-  selectedIds: Set<string>;
-  visibleModelCategories: Set<GeneralModelCategory>;
-  category: GeneralModelCategory | 'all';
-  protocolModelId: string | null;
-  protocolValid: boolean;
-  catalogStatus: CatalogStatus;
-  catalogMessage: string;
-}
-
 export interface ProviderConnectionDialogProps {
   isOpen: boolean;
   connectionId?: string;
   initialConfig?: ApiProviderConfig;
+  /** 打开连接时直接展开这个已启用模型的参数编辑器。 */
+  initialModelId?: string;
   providerConfigs: Record<string, ApiProviderConfig>;
   connectedProviderIds: string[];
   fallbackModels: Record<string, ProviderModelSelection[]>;
@@ -91,7 +83,7 @@ export interface ProviderConnectionDialogProps {
   onSave: (
     connectionId: string,
     config: ApiProviderConfig,
-    related?: { runninghubWorkflowApiKey?: string; workflowApiDrafts?: import('../../../types/workflowApi').WorkflowApiDraft[] },
+    related?: { runninghubWorkflowApiKey?: string; runninghubSiteKeys?: RunningHubSiteKeyDrafts; workflowApiDrafts?: import('../../../types/workflowApi').WorkflowApiDraft[] },
   ) => Promise<void>;
 }
 

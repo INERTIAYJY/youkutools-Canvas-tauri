@@ -3,9 +3,34 @@
  * 详见 doc/plans/2026-07-20-drama-asset-extract-schema.md
  */
 
+import type { ComfyRefmodSelection } from './comfyRefmod';
+import { normalizeCharacterRefmods } from '../utils/comfyRefmod';
+
 export type DramaAssetKind = 'character' | 'scene' | 'prop';
+/** 展示分类独立于持久化类型；武器复用道具的媒体与存储协议。 */
+export type DramaAssetCategory = DramaAssetKind | 'weapon';
+export const MAX_CHARACTER_WEAPONS = 64;
 export type DramaAssetImportance = 'main' | 'supporting' | 'minor';
 export type DramaAssetSource = 'ai' | 'manual' | 'merge';
+
+export interface CharacterLibraryOpenRequest {
+  scope: 'project' | 'global';
+  characterId?: string;
+  section?: 'voice' | 'action';
+  /** 从资源库打开时保留当前资源库作为弹层背景。 */
+  origin?: 'assets';
+}
+
+/** 仅用于本轮异步保存的取消与上下文校验，不进入持久化记录。 */
+export interface DramaAssetWriteOptions {
+  signal?: AbortSignal;
+  assertCurrent?: () => void;
+}
+
+export function assertDramaAssetWriteCurrent(options: DramaAssetWriteOptions = {}): void {
+  if (options.signal?.aborted) throw new Error('资产保存已取消');
+  options.assertCurrent?.();
+}
 
 export type CharacterReferenceKind =
   | 'primary'
@@ -67,6 +92,26 @@ export interface CharacterReferenceImage {
   updatedAt: number;
 }
 
+/** 场景 / 道具的独立参考图；标题可标注时段、角度或细节。 */
+export interface DramaAssetReferenceImage {
+  id: string;
+  label: string;
+  prompt: string;
+  assetId?: string;
+  /** 全局文件身份即使索引暂缺也不能改按项目目录或旧 URL 解析。 */
+  assetSource?: 'global';
+  relativePath?: string;
+  /** 仅运行期使用，持久化时收敛为受管文件身份。 */
+  filePath?: string;
+  imageUrl?: string;
+  /** 仅项目内可保留来源节点。 */
+  sourceNodeId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const MAX_DRAMA_REFERENCE_IMAGES = 32;
+
 /** 角色声音片段：上传的音频文件或画布音频节点的产物。 */
 export interface CharacterVoiceClip {
   id: string;
@@ -86,6 +131,17 @@ export interface CharacterVoiceClip {
   durationSec?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 可选的火山方舟虚拟人像绑定；只保存 Asset ID，不保存 AK/SK 或签名信息。 */
+export interface VolcengineCharacterBinding {
+  projectName: string;
+  /** 同一角色只能绑定一个审核通过的视觉资产。 */
+  imageAssetId?: string;
+  /** @deprecated 旧版多资产数据，仅用于读取时取第一项，不再写入。 */
+  imageAssets?: Array<{ assetId: string; name?: string; status?: string }>;
+  imageAssetName?: string;
+  imageAssetStatus?: string;
 }
 
 /** 单个动作可绑定多份静态图片、GIF 或视频素材。 */
@@ -128,6 +184,12 @@ export interface DramaAssetBase {
   appearances?: string[];
   imageNodeId?: string;
   imageUrl?: string;
+  /** 项目主图的受管文件身份；全局主图沿用 imageAssetId/imageRelativePath。 */
+  assetId?: string;
+  relativePath?: string;
+  /** 全局场景、道具主图的稳定文件身份，不依赖项目节点。 */
+  imageAssetId?: string;
+  imageRelativePath?: string;
   confirmed: boolean;
   createdAt: number;
   updatedAt: number;
@@ -135,6 +197,8 @@ export interface DramaAssetBase {
 }
 
 export interface DramaCharacter extends DramaAssetBase {
+  /** 角色库中的手动顺序；缺省时沿用最近修改排序。 */
+  libraryOrder?: number;
   kind: 'character';
   aliases?: string[];
   identity: string;
@@ -152,12 +216,19 @@ export interface DramaCharacter extends DramaAssetBase {
   voiceClips?: CharacterVoiceClip[];
   /** 主音色片段 id，配音与音色参考默认取它 */
   primaryVoiceClipId?: string;
+  volcengineBinding?: VolcengineCharacterBinding;
+  /** ComfyUI 角色参考包；仅绑定文件身份，不携带工作流槽位。 */
+  refmods?: ComfyRefmodSelection[];
   /** 与角色绑定的动作库。 */
   actions?: CharacterAction[];
+  /** 同一作用域资产库中的武器卡片 ID，不是媒体索引 ID。 */
+  weaponIds?: string[];
 }
 
 export interface DramaScene extends DramaAssetBase {
   kind: 'scene';
+  referenceImages?: DramaAssetReferenceImage[];
+  primaryReferenceImageId?: string;
   placeType?: string;
   timeOfDay?: string;
   atmosphere?: string;
@@ -166,6 +237,9 @@ export interface DramaScene extends DramaAssetBase {
 
 export interface DramaProp extends DramaAssetBase {
   kind: 'prop';
+  propType?: 'weapon';
+  referenceImages?: DramaAssetReferenceImage[];
+  primaryReferenceImageId?: string;
   ownerName?: string;
   category?: string;
   significance?: string;
@@ -203,6 +277,18 @@ export const DRAMA_ASSET_KIND_LABEL: Record<DramaAssetKind, string> = {
   scene: '场景',
   prop: '道具',
 };
+
+export const DRAMA_ASSET_CATEGORY_LABEL: Record<DramaAssetCategory, string> = {
+  ...DRAMA_ASSET_KIND_LABEL,
+  weapon: '武器',
+};
+
+/** 单卡加载只规范身份，不依据尚未落地的关联卡片裁剪绑定。 */
+export function normalizeCharacterWeaponIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((id): id is string => typeof id === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)))].slice(0, MAX_CHARACTER_WEAPONS);
+}
 
 /** 提示词中的标记，生成完成后用于识别并格式化输出 */
 export const DRAMA_EXTRACT_MARKER: Record<DramaAssetKind, string> = {
@@ -489,6 +575,8 @@ export function normalizeDramaCharacter(character: DramaCharacter): DramaCharact
     voiceClips,
     primaryVoiceClipId,
     actions,
+    refmods: normalizeCharacterRefmods(character.refmods),
+    ...(character.weaponIds !== undefined ? { weaponIds: normalizeCharacterWeaponIds(character.weaponIds) } : {}),
   };
 }
 
@@ -499,8 +587,8 @@ export function normalizeDramaAssetLibrary(value: unknown): DramaAssetLibrary {
   const characters = Array.isArray(library.characters)
     ? (library.characters as DramaCharacter[]).map(normalizeDramaCharacter)
     : [];
-  const scenes = Array.isArray(library.scenes) ? library.scenes as DramaScene[] : [];
-  const props = Array.isArray(library.props) ? library.props as DramaProp[] : [];
+  const scenes = Array.isArray(library.scenes) ? (library.scenes as DramaScene[]).map((asset) => normalizeDramaVisualAsset(asset)) : [];
+  const props = Array.isArray(library.props) ? (library.props as DramaProp[]).map((asset) => normalizeDramaVisualAsset(asset)) : [];
   return {
     version: 2,
     lastExtract: asRecord(library.lastExtract)
@@ -511,6 +599,69 @@ export function normalizeDramaAssetLibrary(value: unknown): DramaAssetLibrary {
     scenes,
     props,
   };
+}
+
+/** 旧单主图只在尚无多图字段时迁入；删除全部参考图不会再次复活旧主图。 */
+export function normalizeDramaVisualAsset<T extends DramaScene | DramaProp>(asset: T): T {
+  const fallbackTime = asset.updatedAt || asset.createdAt;
+  const seen = new Set<string>();
+  const referenceImages = (Array.isArray(asset.referenceImages) ? asset.referenceImages : [])
+    .slice(0, MAX_DRAMA_REFERENCE_IMAGES)
+    .flatMap((value, index) => {
+      const reference = asRecord(value);
+      if (!reference) return [];
+      const id = typeof reference.id === 'string' && reference.id.trim() ? reference.id : `ref-${asset.id}-${index}`;
+      if (seen.has(id)) return [];
+      seen.add(id);
+      const text = (key: string) => typeof reference[key] === 'string' ? reference[key] as string : undefined;
+      const assetId = text('assetId');
+      const clearedSource = reference.assetSource === undefined && Object.prototype.hasOwnProperty.call(reference, 'assetSource');
+      const globalSource = reference.assetSource === 'global'
+        || (!clearedSource && !!asset.imageAssetId && asset.imageAssetId === assetId);
+      return [{ id, label: text('label') ?? '', prompt: text('prompt') ?? '',
+        assetId, ...(globalSource ? { assetSource: 'global' as const }
+          : clearedSource ? { assetSource: undefined } : {}),
+        relativePath: text('relativePath'), filePath: text('filePath'),
+        imageUrl: text('imageUrl'), sourceNodeId: text('sourceNodeId'),
+        createdAt: finiteNumber(reference.createdAt, fallbackTime), updatedAt: finiteNumber(reference.updatedAt, fallbackTime) }];
+    });
+  if (asset.referenceImages === undefined && (asset.imageUrl || asset.imageNodeId || asset.assetId || asset.imageAssetId || asset.relativePath)) {
+    referenceImages.push({ id: `legacy-${asset.id}`, label: '', prompt: '',
+      imageUrl: asset.imageUrl, sourceNodeId: asset.imageNodeId,
+      assetId: asset.imageAssetId || asset.assetId, relativePath: asset.imageRelativePath || asset.relativePath,
+      ...(asset.imageAssetId ? { assetSource: 'global' as const } : {}),
+      filePath: (asset as T & { filePath?: string }).filePath,
+      createdAt: asset.createdAt, updatedAt: asset.updatedAt });
+  }
+  const primaryReferenceImageId = referenceImages.some((reference) => reference.id === asset.primaryReferenceImageId)
+    ? asset.primaryReferenceImageId : referenceImages[0]?.id;
+  return { ...asset, referenceImages, primaryReferenceImageId,
+    ...(asset.kind === 'prop' ? { propType: asset.propType === 'weapon' ? 'weapon' : undefined } : {}) };
+}
+
+/** 主图是指定参考图的兼容投影；明确清空后同时移除旧单图身份。 */
+export function syncDramaVisualAssetPrimary<T extends DramaScene | DramaProp>(asset: T, global = false): T {
+  const normalized = normalizeDramaVisualAsset(asset);
+  const referenceImages = global ? normalized.referenceImages?.map((reference) => ({ ...reference,
+    ...(reference.assetId ? { assetSource: 'global' as const } : {}),
+  })) : normalized.referenceImages;
+  const primary = referenceImages?.find((reference) => reference.id === normalized.primaryReferenceImageId);
+  const globalPrimary = global || primary?.assetSource === 'global';
+  const result: T = { ...normalized, referenceImages,
+    imageUrl: primary?.imageUrl, imageNodeId: globalPrimary ? undefined : primary?.sourceNodeId,
+    assetId: globalPrimary ? undefined : primary?.assetId,
+    relativePath: globalPrimary ? undefined : primary?.relativePath,
+    filePath: globalPrimary ? undefined : primary?.filePath,
+    imageAssetId: globalPrimary ? primary?.assetId : undefined,
+    imageRelativePath: globalPrimary ? primary?.relativePath : undefined,
+  };
+  if (globalPrimary) {
+    delete result.imageNodeId;
+    delete result.assetId;
+    delete result.relativePath;
+    Reflect.deleteProperty(result, 'filePath');
+  }
+  return result;
 }
 
 export function formatDramaMention(id: string, name: string): string {

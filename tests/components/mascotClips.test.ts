@@ -1,3 +1,6 @@
+/**
+ * mascotClips — 回归测试：mascotClips。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   MASCOT_CLIPS,

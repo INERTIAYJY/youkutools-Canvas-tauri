@@ -1,3 +1,6 @@
+/**
+ * videoRequestResolver — 回归测试：resolveVideoSubmissionControls。
+ */
 import { describe, expect, it } from 'vitest';
 import type {
   AIVideoGenParams,
@@ -28,9 +31,26 @@ describe('resolveVideoSubmissionControls', () => {
     });
   });
 
-  it('keeps legacy defaults and duration normalization for built-in/workflow paths', () => {
+  it.each([19, 30, -1, undefined])('defers official duration %s to model-aware normalization', (duration) => {
     expect(resolveVideoSubmissionControls({
       provider: 'volcengine',
+      seedanceDuration: duration,
+    })).toMatchObject({ seedanceDuration: duration, videoFrames: undefined });
+  });
+
+  it('preserves legacy frames only when no explicit official duration exists', () => {
+    expect(resolveVideoSubmissionControls({ provider: 'volcengine', videoFrames: 721 }))
+      .toMatchObject({ seedanceDuration: undefined, videoFrames: 721 });
+    expect(resolveVideoSubmissionControls({ provider: 'volcengine', videoFrames: 721, seedanceDuration: -1 }))
+      .toMatchObject({ seedanceDuration: -1, videoFrames: undefined });
+  });
+
+  it.each([
+    { provider: 'volcengine', workflowId: 'local-workflow' },
+    { provider: 'comfyui' },
+  ])('keeps legacy defaults and duration normalization for workflow paths: %o', (route) => {
+    expect(resolveVideoSubmissionControls({
+      ...route,
       seedanceDuration: 30,
     })).toEqual({
       videoResolution: 832,
@@ -214,6 +234,24 @@ describe('resolveCanonicalVideoRequest', () => {
     });
   });
 
+  it('does not project ordinary reference images into first or last frame compatibility fields', () => {
+    const result = resolveCanonicalVideoRequest(params(), {
+      references: [
+        reference('image', 'https://assets.example/reference-1.png'),
+        reference('image', 'https://assets.example/reference-2.png'),
+      ],
+    });
+
+    expect(toResolvedVideoCompatibilityValues(result)).toMatchObject({
+      imageUrls: [
+        'https://assets.example/reference-1.png',
+        'https://assets.example/reference-2.png',
+      ],
+    });
+    expect(toResolvedVideoCompatibilityValues(result)).not.toHaveProperty('firstImageUrl');
+    expect(toResolvedVideoCompatibilityValues(result)).not.toHaveProperty('lastImageUrl');
+  });
+
   it('uses exact dimensions declared as a resolution preset without treating them as a ratio', () => {
     const result = resolveCanonicalVideoRequest(params({ seedanceResolution: '1280x720' }), {
       capability: {
@@ -301,6 +339,72 @@ describe('resolveCanonicalVideoRequest', () => {
       }),
       'UNSUPPORTED_ASPECT_RATIO',
     );
+  });
+
+  it('uses the declared automatic duration sentinel as the model default', () => {
+    const result = resolveCanonicalVideoRequest(params(), {
+      capability: {
+        minDuration: 4,
+        maxDuration: 30,
+        automaticDurationValue: -1,
+      },
+    });
+
+    expect(result.output.durationSeconds).toBe(-1);
+    expect(result.sources.durationSeconds).toBe('capability-default');
+  });
+
+  it('applies operation overrides for Seedance-style video editing', () => {
+    const capability: VideoModelCapability = {
+      ratios: ['16:9', 'adaptive'],
+      defaultRatio: 'adaptive',
+      minDuration: 4,
+      maxDuration: 30,
+      automaticDurationValue: -1,
+      operationCapabilities: {
+        'video-to-video': {
+          ratios: ['adaptive'],
+          defaultRatio: 'adaptive',
+          automaticDurationOnly: true,
+        },
+      },
+    };
+    const references = [reference('video', 'https://assets.example/edit.mp4')];
+
+    const result = resolveCanonicalVideoRequest(params(), { capability, references });
+    expect(result.output).toMatchObject({ aspectRatio: 'adaptive', durationSeconds: -1 });
+
+    expectResolutionError(
+      () => resolveCanonicalVideoRequest(params({ seedanceRatio: '16:9' }), {
+        capability,
+        references,
+      }),
+      'UNSUPPORTED_ASPECT_RATIO',
+    );
+    expectResolutionError(
+      () => resolveCanonicalVideoRequest(params({ seedanceDuration: 8 }), {
+        capability,
+        references,
+      }),
+      'UNSUPPORTED_DURATION',
+    );
+  });
+
+  it('applies input-mode overrides to Seedance-style keyframe generation', () => {
+    const result = resolveCanonicalVideoRequest(params(), {
+      capability: {
+        ratios: ['16:9', 'adaptive'],
+        defaultRatio: 'adaptive',
+        automaticDurationValue: -1,
+        inputModeCapabilities: {
+          keyframe: { ratios: ['adaptive'], defaultRatio: 'adaptive' },
+        },
+      },
+      references: [reference('image', 'https://assets.example/first.png', 'first_frame')],
+    });
+
+    expect(result.output.aspectRatio).toBe('adaptive');
+    expect(result.output.durationSeconds).toBe(-1);
   });
 
   it.each([
@@ -435,6 +539,17 @@ describe('resolveCanonicalVideoRequest', () => {
           defaultRatio: '16:9',
           inputModeCapabilities: {
             keyframe: { ratios: ['adaptive'] },
+          },
+        },
+      }),
+      'INVALID_CAPABILITY',
+    );
+
+    expectResolutionError(
+      () => resolveCanonicalVideoRequest(params(), {
+        capability: {
+          operationCapabilities: {
+            'video-to-video': { automaticDurationOnly: true },
           },
         },
       }),

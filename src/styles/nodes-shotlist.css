@@ -9,6 +9,36 @@
   padding: 0;
 }
 
+/* 全屏沿用同一张编辑表；层级低于制作、补图等宿主弹窗。 */
+.fullscreen-overlay.shotlist-fullscreen {
+  z-index: 200;
+}
+
+.shotlist-fullscreen .fullscreen-panel {
+  height: 92vh;
+}
+
+.fullscreen-body.shotlist-fullscreen-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.shotlist-fullscreen .shotlist-table {
+  font-size: var(--ui-font-input);
+}
+
+.shotlist-fullscreen .shot-input {
+  font-size: var(--ui-font-input);
+}
+
+.shotlist-fullscreen .shotlist-toolbar,
+.shotlist-fullscreen .shotlist-table th {
+  cursor: var(--cursor-default, default);
+}
+
 /* ── 顶部工具条 ── */
 /* 表体被输入框占满，拖不动节点，因此这条工具带兼作拖拽手柄 */
 .shotlist-toolbar {
@@ -81,33 +111,7 @@
 
 /* ── 列显隐菜单 ── */
 .shotlist-column-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 30;
-  min-width: 118px;
-  padding: 4px;
-  border-radius: 8px;
-  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
-  background: var(--theme-surface, #14141c);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  max-height: 210px;
-  overflow-y: auto;
-}
-
-.shotlist-column-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  font-size: 11px;
-  border-radius: 5px;
-  color: var(--theme-text, rgba(255, 255, 255, 0.85));
-  cursor: var(--cursor-pointer, pointer);
-}
-
-.shotlist-column-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  max-height: min(70vh, 480px);
 }
 
 /* ── 表体 ── */
@@ -118,10 +122,31 @@
 }
 
 .shotlist-table {
+  display: block;
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
-  table-layout: fixed;
+}
+
+.shotlist-table thead,
+.shotlist-table tbody {
+  display: block;
+}
+
+.shotlist-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.shotlist-table tr {
+  display: grid;
+  grid-template-columns: var(--shotlist-columns);
+}
+
+.shotlist-table th,
+.shotlist-table td {
+  min-width: 0;
 }
 
 .shotlist-table th {
@@ -140,14 +165,50 @@
   user-select: none;
 }
 
+.shotlist-column-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.shotlist-column-resize::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  right: 2px;
+  width: 2px;
+  border-radius: var(--ui-radius-sm);
+  background: var(--theme-border);
+}
+
+.shotlist-column-resize:hover::after,
+.shotlist-column-resize:focus-visible::after {
+  background: var(--brand);
+}
+
 .shotlist-table thead:active th {
   cursor: grabbing;
 }
 
 .shotlist-table td {
+  display: flex;
+  align-items: center;
   padding: 3px 5px;
   vertical-align: middle;
   border-bottom: 1px solid var(--theme-border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.shotlist-table td > * {
+  width: 100%;
+  min-width: 0;
 }
 
 .shotlist-table td.shot-col-grip,
@@ -159,18 +220,12 @@
   opacity: 0.45;
 }
 
-/* 列宽：内容与台词吃掉剩余空间，其余按内容定宽 */
+/* 排序、时长与操作固定宽度，其他列按比例分配剩余空间。 */
 .shot-col-grip { width: 26px; }
-.shot-col-actions { width: calc(var(--ui-control-h-sm) * 3 + 28px); }
+.shot-col-actions { width: 106px; }
 .shotlist-table th.shot-col-actions { text-align: center; }
-.shot-col-shotNo { width: 48px; }
-.shot-col-frame { width: 84px; }
-.shot-col-shotSize,
-.shot-col-camera,
-.shot-col-transition { width: 68px; }
-.shot-col-duration { width: 56px; }
-.shot-col-audio,
-.shot-col-note { width: 96px; }
+.shotlist-table .shot-col-shotNo { width: 48px; text-align: center; }
+.shot-col-duration { width: 84px; }
 
 .shot-grip {
   display: inline-flex;
@@ -187,37 +242,21 @@
 
 .shot-grip:active { cursor: grabbing; }
 
-/* ── 单元格输入 ── */
-.shot-input {
-  width: 100%;
-  padding: 3px 4px;
-  font-size: 11px;
-  line-height: 1.4;
-  border-radius: 4px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--theme-text, rgba(255, 255, 255, 0.9));
-  outline: none;
+/* 单元格视觉由 UI Kit 管理，这里只保留表格布局。 */
+.shot-input--text {
+  min-height: 52px;
   resize: none;
 }
 
-.shot-input:hover {
-  border-color: var(--theme-border, rgba(255, 255, 255, 0.12));
+.shot-content-editor {
+  font-size: var(--ui-font-input);
 }
 
-.shot-input:focus {
-  border-color: rgba(251, 191, 36, 0.55);
-  background: rgba(251, 191, 36, 0.06);
-}
-
-.shot-input--no,
-.shot-input--duration {
-  font-variant-numeric: tabular-nums;
-}
-
-.shot-input--text {
-  min-height: 34px;
-  font-family: inherit;
+.shot-content-editor .prompt-editor {
+  min-height: 52px;
+  max-height: 52px;
+  padding: 8px 10px;
+  font-size: inherit;
 }
 
 /* ── 画面格 ── */
@@ -329,6 +368,41 @@ button.shot-frame:hover {
 .shot-frame:hover .shot-frame-unbind,
 .shot-frame:hover .shot-frame-pick {
   display: flex;
+}
+
+.shot-video > .resource-video-preview {
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  border-radius: inherit;
+}
+.shot-video .resource-video-play,
+.shot-video .shot-frame-unbind {
+  width: var(--ui-control-h-sm);
+  height: var(--ui-control-h-sm);
+  background: transparent;
+  color: var(--theme-text);
+  border: 0;
+  box-shadow: none;
+}
+.shot-video .resource-video-play svg,
+.shot-video .shot-frame-unbind svg {
+  width: 14px;
+  height: 14px;
+}
+.shot-video .shot-frame-unbind {
+  z-index: 2;
+  display: flex;
+  top: 0;
+  right: 0;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 2px;
+  color: var(--danger-light);
+}
+.shot-video .shot-frame-unbind:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
 }
 
 /* ── 画面挑选浮层（Portal 到 body，固定定位）── */

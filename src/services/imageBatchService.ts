@@ -9,10 +9,15 @@ import { generateId } from '../store/store.utils';
 import { useAppStore } from '../store/useAppStore';
 import { persistMediaUrlToProjectData, type PersistedProjectMedia } from './fileService';
 import { runBatchTasks } from './ai/batchUtils';
-import { getRunningHubPersistedOutput } from './ai/providers/runninghubWorkflow';
+import { completeRunningHubNodeTask, getRunningHubPersistedOutput } from './ai/providers/runninghubWorkflow';
+import { completeComfyNodeTask, completeMediaNodeTask, pauseMediaTask } from './pollManager';
 
 interface ApplyImageBatchParams {
+  model?: string;
+  provider?: string;
+  silent?: boolean;
   isCurrent?: () => boolean;
+  signal?: AbortSignal;
   nodeId: string;
   /** 提交请求前创建的目标节点；恢复旧任务时可缺省，由 batchGroupId 自动找回。 */
   targetNodeIds?: string[];
@@ -20,10 +25,13 @@ interface ApplyImageBatchParams {
   projectId: string | null | undefined;
   prompt: string;
   imageSize: string;
+  imageQuality?: string;
+  imageBackground?: string;
   aspectRatio: string;
 }
 
 interface PrepareImageBatchParams {
+  commitHistory?: boolean;
   nodeId: string;
   count: number;
   projectId: string | null | undefined;
@@ -35,6 +43,7 @@ export interface PreparedImageBatchNodes {
 }
 
 interface SavedBatchItem {
+  index: number;
   result: ImageGenerationResult;
   persisted: PersistedProjectMedia;
 }
@@ -65,6 +74,7 @@ function emptyImageOutput(): Partial<BaseNodeData> {
  * 数量包含源节点：选择 4 时保留源节点，并在其右侧立即创建 3 个加载节点。
  */
 export function prepareImageBatchNodes({
+  commitHistory = true,
   nodeId,
   count,
   projectId,
@@ -101,7 +111,7 @@ export function prepareImageBatchNodes({
     } as Node<BaseNodeData>;
   });
 
-  store.commitToHistory();
+  if (commitHistory) store.commitToHistory();
   store.updateNodeDataTransient(nodeId, {
     batchGroupId,
     status: 'loading',
@@ -155,15 +165,22 @@ function resolveBatchTargetNodeIds(
 
 /** Save and materialize a batch while keeping node placement and history consistent. */
 export async function applyImageBatchResults({
+  model,
+  provider,
+  silent = false,
   nodeId,
   targetNodeIds,
   batch,
   projectId,
   prompt,
   imageSize,
+  imageQuality,
+  imageBackground,
   aspectRatio,
   isCurrent,
-}: ApplyImageBatchParams): Promise<void> {
+  signal,
+}: ApplyImageBatchParams): Promise<boolean> {
+  signal?.throwIfAborted();
   if (isCurrent && !isCurrent()) throw new Error('画布已变化，批量产物已保留');
   if (batch.results.length === 0) throw new Error('批量图片生成未返回可用结果');
 
@@ -171,20 +188,31 @@ export async function applyImageBatchResults({
   const sourceNode = initialStore.nodes.find((node) => node.id === nodeId) as Node<BaseNodeData> | undefined;
   if (!sourceNode) throw new Error('生成节点不存在');
   const sourceData = sourceNode.data;
+  if (batch.results.some((result) => result.taskReceipt)) initialStore.updateNodeDataTransient(nodeId, { mediaTaskStage: 'saving' });
 
+  let firstSaveError: unknown;
   const savedBatch = await runBatchTasks(batch.results.length, 3, async (index): Promise<SavedBatchItem> => {
+    signal?.throwIfAborted();
     const result = batch.results[index];
-    const persisted = getRunningHubPersistedOutput(result.runninghubOutputs, result.url) ?? (projectId
-      ? await persistMediaUrlToProjectData(
-          result.url,
-          projectId,
-          'ai-image',
-          `${sourceData.label}-${index + 1}`,
-        )
-      : { mediaUrl: result.url, sourceUrl: result.url });
-    return { result, persisted };
+    try {
+      const persisted = getRunningHubPersistedOutput(result.runninghubOutputs, result.url) ?? (projectId
+        ? await persistMediaUrlToProjectData(
+            result.url,
+            projectId,
+            'ai-image',
+            `${sourceData.label}-${index + 1}`,
+            { mediaDownloadAccess: result.mediaDownloadAccess, ...(signal ? { signal } : {}) },
+          )
+        : { mediaUrl: result.url, sourceUrl: result.url });
+      signal?.throwIfAborted();
+      return { index, result, persisted };
+    } catch (error) {
+      firstSaveError ??= error;
+      throw error;
+    }
   });
 
+  signal?.throwIfAborted();
   let store = useAppStore.getState();
   if (isCurrent && !isCurrent()) throw new Error('画布已变化，批量产物已保留');
   let liveSource = store.nodes.find((node) => node.id === nodeId) as Node<BaseNodeData> | undefined;
@@ -204,8 +232,9 @@ export async function applyImageBatchResults({
 
   const items = savedBatch.results;
   const liveNodeIds = new Set(store.nodes.map((node) => node.id));
-  items.forEach((item, index) => {
-    const targetNodeId = resolvedTargetNodeIds[index];
+  const deliveredIndexes = new Set<number>();
+  items.forEach((item) => {
+    const targetNodeId = resolvedTargetNodeIds[item.index];
     if (!targetNodeId || !liveNodeIds.has(targetNodeId)) return;
     store.updateNodeDataTransient(targetNodeId, {
       imageUrl: item.persisted.mediaUrl,
@@ -224,18 +253,22 @@ export async function applyImageBatchResults({
       imageWidth: item.result.width,
       imageHeight: item.result.height,
     });
+    deliveredIndexes.add(item.index);
   });
 
-  resolvedTargetNodeIds.slice(items.length).forEach((targetNodeId) => {
-    if (liveNodeIds.has(targetNodeId)) {
+  resolvedTargetNodeIds.forEach((targetNodeId, index) => {
+    if (!deliveredIndexes.has(index) && liveNodeIds.has(targetNodeId)) {
       store.updateNodeDataTransient(targetNodeId, {
         status: 'error',
-        error: MISSING_BATCH_RESULT_ERROR,
+        error: batch.results[index] ? '图片已生成，但未能保存到项目；请继续保存原结果'
+          : batch.allTasksSettled ? '上游任务已结束，该图片生成失败或未返回结果' : MISSING_BATCH_RESULT_ERROR,
+        ...(batch.allTasksSettled && !batch.results[index] ? { mediaTaskState: undefined, mediaTaskStage: undefined } : {}),
       });
     }
   });
 
-  await Promise.all(items.map((item, index) => {
+  await Promise.all(items.map((item) => {
+    const index = item.index;
     const targetNodeId = resolvedTargetNodeIds[index];
     if (!targetNodeId || !liveNodeIds.has(targetNodeId)) return Promise.resolve();
     return store.recordOutputHistory(targetNodeId, {
@@ -245,20 +278,37 @@ export async function applyImageBatchResults({
       prompt,
       output: item.persisted.sourceUrl,
       nodeType: 'ai-image',
-      model: (sourceData.model as string) || '',
-      provider: (sourceData.provider as string) || '',
+      model: model ?? sourceData.model ?? '',
+      provider: provider ?? sourceData.provider ?? '',
       status: 'success',
       mediaUrl: item.persisted.mediaUrl,
       filePath: item.persisted.filePath,
-      params: { imageSize, aspectRatio, batchCount: batch.requestedCount, batchIndex: index + 1 },
+      params: { imageSize, imageQuality, imageBackground, aspectRatio, batchCount: batch.requestedCount, batchIndex: index + 1 },
     });
   }));
 
-  const failedCount = Math.max(batch.failedCount, batch.requestedCount - items.length);
-  store.showToast(
+  signal?.throwIfAborted();
+  // 聚合任务的任一产物仍待保存或回填时，不能用一张成功图清掉整批远端身份。
+  const remoteComplete = batch.allTasksSettled === true
+    || (batch.failedCount === 0 && batch.results.length >= batch.requestedCount);
+  const deliveryComplete = remoteComplete && savedBatch.failedCount === 0
+    && deliveredIndexes.size === batch.results.length;
+  for (const result of batch.results) {
+    if (result.taskReceipt) {
+      if (deliveryComplete) completeMediaNodeTask(result.taskReceipt);
+      else pauseMediaTask(result.taskReceipt, firstSaveError, 'delivery_pending');
+    }
+    if (deliveryComplete && result.comfyTaskId) completeComfyNodeTask(nodeId, result.comfyTaskId);
+  }
+  if (deliveryComplete && !batch.results.some((result) => result.taskReceipt)
+    && ['runninghub', 'runninghubwf'].includes(provider ?? sourceData.provider ?? '')) completeRunningHubNodeTask(nodeId);
+
+  const failedCount = Math.max(batch.failedCount, batch.requestedCount - deliveredIndexes.size);
+  if (!silent) store.showToast(
     failedCount > 0
       ? `批量生成完成：成功 ${items.length}/${batch.requestedCount} 张`
       : `批量生成完成：共 ${items.length} 张`,
     failedCount > 0 ? 'error' : 'success',
   );
+  return deliveryComplete;
 }

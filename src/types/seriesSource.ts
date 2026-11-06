@@ -1,3 +1,6 @@
+/**
+ * seriesSource — 定义剧集原文快照、章节与引用的领域类型。
+ */
 export type SeriesSourcePart = 'original' | 'script';
 
 export interface SeriesSourceChapter {

@@ -1,3 +1,6 @@
+/**
+ * mediaDataUrl — 回归测试：mediaDataUrl。
+ */
 import { describe, expect, it } from 'vitest';
 import { decodeDataUrlBytesAsync, sha256BytesHex } from '../../src/services/mediaDataUrl';
 

@@ -10,6 +10,12 @@
 
 本项目是 Tauri + React + React Flow 画布、多厂商 AI 模型、工作流与对话 Agent 平台。写代码时不能只追求当前需求跑通，必须维护配置化、可扩展、安全和可恢复的产品边界。
 
+## 本机 Hindsight 记忆入口
+
+- Codex 的长期记忆使用已配置的 `hindsight` MCP，按需启动 Windows 原生服务；故障时先读 `F:\.hindsight\记忆库使用说明.md`。这是助手跨会话记忆，不是 AI Canvas 产品功能。
+- 本项目召回和写入使用 `project:ai-canvas-tauri` 标签，全局偏好使用 `scope:global`；先核对当前指令和源码，再使用历史背景。只保存必要、脱敏且可追溯的稳定事实，同步提炼完成后才确认写入成功。
+- 2026-10-19 已迁移可恢复的 Cognee 知识并删除旧安装，不再启动 Cognee。原始资料、乱码记录及源码图谱的校验归档和恢复边界见 `F:\.hindsight\migrations\20261019-cognee\迁移说明.md`。
+
 ## 最高优先级规则
 
 - 不要编造文件、路径、函数、配置、接口、运行结果或测试结果。
@@ -20,14 +26,24 @@
 - 优先小步收敛修改，禁止无关重构。
 - 若把握不足，不要直接改代码；先说明已知事实、不确定点、拟修改文件和风险点。
 - 除非用户明确要求，否则不要改 `README.md`。
-- 修改后必须运行与改动范围匹配的检查；不能运行时必须说明原因和剩余风险。
+- 修改后默认不自行测试或运行验证命令；提供与改动范围匹配的测试步骤，由用户验收。提交时不自动执行全量质检；用户要求推送时自动执行完整前端 CI（`npm run ci`），通过后才推送；此范围之外的测试或检查仍需用户明确要求，详见“测试与验收执行规则”。
+- 功能测试与验收以 Tauri 桌面端为主；Web 端目前主要用于演示，只做必要的展示和基础交互验证。涉及原生能力、持久化、窗口、文件与隔离运行时的功能，应优先在桌面端验证，不以 Web 测试结果代替桌面验收。
 - 不要声称通过了未实际运行的命令。
 - 修改前先查看 `git status --short`，识别用户或其他任务已有改动；禁止覆盖、回滚、格式化无关改动。
 - 本地仓库是唯一修改场所：禁止把本地分支推送到远端（push）；远端有新提交时及时 `git fetch` 并合并同步到本地，保持本地与远端进度一致。
 - 不要修改构建产物或缓存目录，例如 `dist/`、`node_modules/`、`src-tauri/target/`，除非任务明确要求打包、发布或处理这些产物。
 - 不要把 API Key、绝对路径、完整本地文件正文或完整网页正文写入日志、Agent 持久化摘要或聊天元数据。
 - Git 提交说明使用中文；可保留 `feat(agent):` 等 Conventional Commits 前缀，冒号后的说明必须使用中文。
-- 按阶段实施时，更新任务所属模块的实施计划或模块文档，通过检查后再提交；不得把所有任务的完成记录统一写入 Agent 实施方案。
+- 按阶段实施时，更新任务所属模块的实施计划或模块文档，如实区分“已实现”“待用户验证”和“已验证”；不得把未测试的改动标为验收通过，也不得把所有任务的完成记录统一写入 Agent 实施方案。
+
+## 测试与验收执行规则
+
+- 默认由用户测试。助手写完代码后不自行运行自动化测试、lint、类型检查、构建、性能基准或浏览器/Tauri 实机验收，包括 Vitest、ESLint、TypeScript、`npm run check`、`cargo test` 和 `cargo check`；用户要求推送时的完整前端 CI 按下述推送规则自动执行。
+- 只有用户明确要求“你来测试”“运行检查”“构建/打包”等对应操作时，助手才执行授权范围内的命令或交互验证。“实现”“修复”“优化”本身不构成测试授权；“提交代码”“提交一下”等仅提交请求不自动授权测试或质检；“推送”“提交并推送”等包含推送的请求自动授权完整前端 CI（`npm run ci`：全仓 ESLint、应用与测试类型检查、全量 Vitest、生产构建），不自动授权 Rust 检查、性能基准或桌面交互验收。其他任务的测试授权不自动延续到当前任务。
+- 完成改动后提供可操作的测试步骤：前置条件、操作入口与顺序、各步预期结果，以及与本次改动相关的异常场景和回归项；需要命令时写明运行目录与准确命令，供用户执行。功能验收仍优先使用 Tauri 桌面端。
+- 未运行测试时明确写明“本次未运行测试，待用户验收”。用户要求助手测试后，只报告实际执行的命令、结果和剩余缺口，不推断其他检查已通过。
+- 代码阅读、调用链与引用搜索、`git status`、`git diff`、差异空白检查和 UTF-8 编码确认属于必要静态核对，可自行进行；不得借静态核对启动应用或运行上述验证工具。
+- 本节覆盖本仓库其他文档及 Skill 中默认自动测试的要求。每次推送前必须先通过与 `.github/workflows/ci.yml` 的 `Frontend quality` 一致的 `npm run ci`，不得以定向 ESLint 或局部测试代替；只提交不推送时不执行该门禁。由 `scripts/pre-push` 执行，通过后完成推送，无需再次向用户确认；钩子已覆盖时不重复单独运行。检查失败时阻止推送，定位并修复相关问题，重新通过后才推送；修复可先在本地提交。不得跳过、削弱或绕过推送门禁，不擅自修改依赖。若钩子另有超出上述前端 CI 的检查，仍须获得对应授权。本地操作系统与 GitHub runner 可能不同，本地通过不等于远程已通过。
 
 ## 文档归属与维护
 
@@ -55,7 +71,8 @@
 | 对话 Agent | 会话级 Plan/B/C 模式 + Tool Registry + Policy Engine | 多轮规划、工具调用、确认、子智能体、后台任务、上下文与项目记忆 |
 | 外部控制 | @modelcontextprotocol/sdk + Rust 双传输 bridge | 默认关闭、可显式配置自动开启；本机 stdio 与高风险 Streamable HTTP 复用同一套工具、Policy 和审计 |
 | 凭据存储 | Rust `secret_store` | API Key 与 MCP 固定令牌只落 `{appData}/secrets/`，不进普通配置或 IndexedDB |
-| 本地持久化 | IndexedDB v20（以 `src/services/indexedDb/schema.ts` 的 `DB_VERSION` 为准） | 项目、对话、消息、AgentTask、插件、全局角色、子智能体配置、项目记忆等 |
+| 本地持久化 | IndexedDB v22（以 `src/services/indexedDb/schema.ts` 的 `DB_VERSION` 为准） | 项目与摘要、对话、消息、AgentTask、插件、角色、项目记忆、外观预设和视频批次等 |
+| 本地用量账本 | Rust `billing` + SQLite | 火山方舟图片/视频节点的调用与价格快照；金额置信度与官方账单区分，Excel 导出默认脱敏 |
 | 包管理 | npm | 版本以 `package.json` 和 `src-tauri/Cargo.toml` 为准，禁止在规则中写死 |
 
 ## 项目目录结构
@@ -71,7 +88,7 @@ AI-Canvas-tauri/
 │   │   ├── Header.tsx / Sidebar.tsx / NodeMenu.tsx / Titlebar.tsx
 │   │   ├── SettingsPanel.tsx / AssetsPanel.tsx / WorkflowPanel.tsx
 │   │   ├── ProjectLibraryModal.tsx / SessionProjectTabs.tsx / ProjectSettingsPopover.tsx
-│   │   ├── SeriesRail.tsx / ProjectAssetsOverlay.tsx / ProjectSwitchOverlay.tsx
+│   │   ├── SeriesRail.tsx / ProjectAssetsOverlay.tsx
 │   │   ├── CharacterLibraryPanel.tsx / CharacterAssetDialog.tsx / DramaAssetsPanel.tsx
 │   │   ├── HelpCenterDialog.tsx / HelpMentionDemo.tsx / OnboardingDialog.tsx
 │   │   ├── canvas/            # 画布菜单、工具栏、绘图工具栏、多选、分布、操作记录
@@ -91,6 +108,8 @@ AI-Canvas-tauri/
 │   │   │   └── tools/         # 画布、媒体、预设、联网、文件、Skill、厂商配置、短剧资产、剧集分集、记忆工具
 │   │   ├── mcp/               # MCP 控制服务、双传输 bridge 客户端、会话配置与令牌生命周期
 │   │   ├── plugins/           # 插件清单、市场、不透明资源 grant、UI 会话与执行租约
+│   │   ├── appearance/        # 完整外观预设、旧配置迁移与多窗口 CSS 变量运行时
+│   │   ├── billing/           # 方舟节点用量与价格快照的原生账本桥接
 │   │   ├── fs/                # 文件基础设施、资产索引、回收站、资产库、存储健康
 │   │   ├── fileService.ts     # 文件能力统一前端入口
 │   │   ├── providerSecretService.ts # API Key、MCP 固定令牌与 Rust 凭据存储的桥接
@@ -100,6 +119,8 @@ AI-Canvas-tauri/
 │   │   ├── useAppStore.ts     # Zustand slice 聚合入口；slice 清单以该文件为准
 │   │   ├── store.plugins.ts   # 插件安装、迁移、启停、卸载与原生注册编排
 │   │   ├── store.agentPackages.ts # 全局 AgentPackage 目录状态
+│   │   ├── store.appearance.ts # 外观编辑、预设与持久化
+│   │   ├── store.videoBatch.ts # 视频物料预检、串行提交与恢复状态
 │   │   └── store.*.ts         # 节点、项目、历史、聊天、Agent、记忆、子智能体等 slice
 │   └── types/
 │       ├── index.ts           # 通用画布、配置与模型类型
@@ -131,7 +152,7 @@ AI-Canvas-tauri/
 
 ### 状态管理
 
-`src/store/useAppStore.ts` 是全局状态聚合入口。当前聚合 21 个 slice；清单以该文件的 `AppState` 和组合调用为准，覆盖节点、历史、项目、聊天、Agent、AgentPackage、插件、记忆、子智能体、短剧资产、工具栏、配置、工作流、Skill 和 UI 状态。
+`src/store/useAppStore.ts` 是全局状态聚合入口。当前聚合 23 个 slice；清单以该文件的 `AppState` 和组合调用为准，覆盖节点、历史、项目、聊天、Agent、AgentPackage、插件、记忆、子智能体、短剧资产、工具栏、配置、工作流、Skill、视频批次、外观和 UI 状态。
 
 - 所有共享状态变更必须通过 Store Action，禁止组件直接修改 Store 对象
 - 新状态先选择现有 slice；只有职责独立且存在多项 Action 时才新增 slice
@@ -144,6 +165,7 @@ AI-Canvas-tauri/
 - `InstalledPlugin.sourceDigest` 与 `revisionDigest` 都是已安装插件的必需执行身份；缺少任一有效原生摘要必须失败关闭，不做旧记录迁移执行
 - 插件工具、节点或 UI 会话捕获的 `revisionDigest` 是整次调用的版本租约；每轮原生执行、资源读取、宿主 effect 和最终写回前都必须复核当前启用 revision
 - 插件摘要切换、停用和卸载必须先撤销前端租约并清理调用级资源 grant；旧 revision 结果不得写入新 revision 状态
+- 视频批次通过 `store.videoBatch.ts` 和既有预检/Runner 提交；执行前复核物料指纹与项目，提交后状态不确定不能自动重投，运行时对象不持久化
 
 ### 组件职责
 
@@ -154,6 +176,7 @@ AI-Canvas-tauri/
 - `components/chat/ChatPanel.tsx`：对话容器、主窗口与独立窗口路由，不实现具体工具协议
 - `components/chat/AgentTaskTimeline.tsx`：任务和步骤控制；状态变更必须调用 Agent Runtime
 - `components/settings/`：配置 UI；API Key 与 MCP 固定令牌只经 `providerSecretService.ts` 交给 Rust 凭据存储，不得进入普通配置、IndexedDB、消息或操作日志
+- `SessionProjectTabs.tsx` 与 `canvas/HistoryTimelinePanel.tsx`：项目栏和操作记录的悬浮入口；提示线颜色与透明度分别声明，复用动效变量并支持减少动态效果；收起状态保持紧凑命中区，隐藏历史不扫描整张画布
 - `HelpCenterDialog.tsx` / `OnboardingDialog.tsx`：面向用户的说明文案集中在这里，两者都懒加载；帮助弹窗的开关是 `store.ui.ts` 的 `helpOpen`，不要退回组件局部 state
 - 帮助内的操作演示复用真实组件与真实 DOM 构造器（如 `MentionPicker`、`buildWorkflowChipEl`），禁止另写一套仿真样式，避免演示与实际界面漂移
 - 复杂组件优先拆分子组件，通过 `React.memo` 或稳定 selector 降低画布重渲染
@@ -201,19 +224,23 @@ AI-Canvas-tauri/
 - `chatWindowService.ts` 定义主窗口与独立窗口协议；主窗口 Store 是唯一写入源
 - 新的独立窗口操作必须先扩展 `ChatAction` 或 `ChatStateSnapshot`
 - 切换会话或项目时，后台任务消息不能写入当前错误会话
+- 双窗口的模型目录、会话草稿和当前视图沿用版本化快照/补丁；关窗或收回交接最后一次编辑，不为展示方式切换重启任务，不向独立窗口传递凭据或完整配置
+- 续聊只注入同项目、同会话的脱敏历史工具结果；上下文裁剪保留完整近期轮次。模型 `length` 结束保留 partial 回复并暂停，本轮工具提案不得执行
 - MCP 请求同样由主窗口 `mcpControlService.ts` 单点处理，Rust bridge 只负责传输、端口、鉴权、请求关联和无令牌事件转发
 
 ### 样式规则
 
+- 编写界面与样式时，**必须优先去 UI Kit（`src/styles/ui-kit.css` 与 `src/components/styleGuide/` 样式预览窗口）中查找**已有的公用类、度量刻度与结构模板，禁止随意手写或另造一套
 - 业务样式优先使用 Tailwind class，禁止新增 `!important`、硬编码颜色值、内联 `style.cssText`
 - 视觉状态优先通过 class 切换，不要用内联样式承载业务规则
 - 复用 `tailwind.config.js` 中定义的 `canvas-*` 颜色 token（暗色基线）：
   - `bg` (`#0a0a0f`)、`surface` (`#14141c`)、`card` (`#1a1a26`)、`border` (`#2a2a3a`)、`hover` (`#252535`)
   - 文本：`text` (`#e8e8ed`)、`text-secondary` (`#8888a0`)、`text-muted` (`#7d7d91`)
-- 浅色主题是低饱和马卡龙配色，统一由 `src/styles/base.css` 中的 `[data-theme='light']` 覆盖；新增可见面板必须同时确认两种主题
+- 深浅主题的基础变量位于 `src/styles/base.css`；用户完整外观快照由 `services/appearance/appearanceRuntime.ts` 应用，多窗口沿用同一运行时。旧 `theme/canvasBackground/customBackground*` 用于迁移与兼容镜像，不另造外观编辑入口；新增可见面板必须同时确认两种主题
 - `src/index.css` 只做入口聚合；React Flow 样式覆盖统一放在 `src/styles/reactflow.css`，新增功能样式在 `src/styles/` 新建 partial 并在入口 `@import`
 - 新增节点类型时，Header 区域使用对应语义色：文本=indigo、图像=green、视频=blue、音频=orange、全景=cyan
-- 公用控件（按钮、输入框、卡片、下拉、开关、徽标、提示条、表格等）优先复用 `src/styles/ui-kit.css` 里的 `ui-*` 类，不要另造一套；写新界面前先看一遍它们的命名与变体
+- 公用控件（按钮、输入框、卡片、下拉、开关、徽标、提示条、表格、布局辅助等）优先复用 `src/styles/ui-kit.css` 里的 `ui-*` 类，不要另造一套；写新界面前先看一遍它们的命名与变体
+- 内边距规范：统一优先使用 Tailwind `p-2`（8px · 紧凑/子卡片/列表项）或 `p-3`（12px · 默认容器/面板/卡片），避免使用过大 padding
 - 新增或修改 `ui-*` 类时继续只引用 `base.css` 的 CSS 变量，并在样式预览窗口补一个样例
 - 样式预览窗口（UI Kit 一览，含可复制类名）由「关于 → 连点 logo 4 次」打开；入口工具是 `src/utils/styleGuideWindow.ts`，内容在 `src/components/styleGuide/`
 
@@ -251,7 +278,7 @@ AI-Canvas-tauri/
 - API Key 与 MCP 固定令牌只经 `secret_store.rs` 读写；`{appData}/secrets/` 在 fs scope、asset scope 和 `path_policy` 三条路径上都必须保持拒绝
 - `agent-private`、`plugin-private` 与 Blender 原生私有目录同样不得通过 fs scope、asset scope 或通用路径 command 暴露；递归读取、归档、解包和删除还必须拒绝这些私有目录的祖先
 - 插件普通执行 IPC 只接受 `pluginId + sourceDigest + revisionDigest + toolId + invocationId + input`；`plugins/registry.rs` 是插件 ID、启用状态、活动 revision、工具归属和实际源码/资源的执行权威，运行前必须重新读取私有快照并计算摘要；禁止重新接收 Renderer 提交的 `runtime` 或 `source`
-- 插件 UI 仅由宿主管理：内嵌展示仍使用主窗口 `ModalOverlay` 内的 `<iframe sandbox="allow-scripts">`；已确认的独立展示方向为专用 Tauri WebView 直接承载 UI，无须 iframe，但必须使用独立来源/存储和最小 capability，不加载主应用入口、Store 或主应用 IndexedDB。原生窗口/页面/会话隔离未完成并通过验证前，不得开放该入口
+- 插件 UI 仅由宿主管理：内嵌展示使用主窗口 `ModalOverlay` 内的 `<iframe sandbox="allow-scripts">`；独立展示由 `plugins/window.rs` 管理专用 Tauri WebView 与会话私有 profile，使用独立来源/存储和最小 capability，不加载主应用入口、Store 或主应用 IndexedDB。后续修改仍须验证原生窗口/页面/会话隔离，不能扩展为普通主应用窗口
 - 两种展示都只能按活动 revision 摘要读取私有 UI 产物，并在插件代码加载前施加严格 CSP。跨边界通信绑定真实 iframe Window 或原生登记 WebView、随机 sessionId、双摘要、项目、节点和 canvas revision；独立窗口不得使用通用事件总线冒充受信调用方，模型/文件 effect 与画布写回仍由主窗口执行
 - 应用自定义命令的注册与 `src-tauri/permissions/*.toml` 的显式 allow/deny 声明必须一致，构建失败时补齐或移除准确的声明，不自动赋权。自定义权限文件已可启用 Tauri 应用 ACL，不以是否调用 `AppManifest::commands` 判断 ACL 是否生效；窗口 capability 与命令内部调用方/路径/资源校验缺一不可
 - QuickJS 插件只拥有声明的宿主能力；可信 Python 插件拥有当前用户权限。Windows Job Object、macOS/Linux 进程组、原生确认、超时和进程树回收都只是生命周期边界，不等于 OS 沙箱
@@ -260,6 +287,8 @@ AI-Canvas-tauri/
 - Blender 只执行应用内固定资源和固定 operation，Renderer 不得提交 executable、脚本、argv、cwd、env 或输出路径；运行包清单、内嵌资源、大小和 SHA-256 必须同步
 - Blender `open-editor` 保存返回只有在恰好生成当前活动摄影机 PNG 与 `.blend`、且 Rust 完成绑定、摘要、文件头和 Result Manifest 校验后才算成功；缺少摄影机、渲染失败或 artifact 集合异常必须失败关闭
 - Blender 结果只有在项目、导演节点、instanceId、Scene revision 和 canvas derivation guard 仍匹配时才能投影回 Store；进程退出本身不是成功证据
+- 同一 `ai-director` 支持 `lightweight-web`、`blender` 与 `ai-threejs` 三种固定运行时。AI 预演只接收白名单 JSON，场景通过不可变项目文件引用保存；模型不得提供或执行 JS、网页、脚本或原生命令。MCP 场景读写沿用工具 Policy、项目与派生结果守卫，不能冒充 Blender Scene/Manifest
+- AgentPackage 的归档 PAX 元数据不作为可执行或可落盘文件；局部 PAX 解析后的实际路径仍须经过解包路径校验，链接和特殊项失败关闭，不能为兼容导入取消大小、路径与私有目录保护
 - 通用 `proxy_fetch` 不能注册为 Agent 工具；Agent 网页读取必须经过 `agent/web.rs`、厂商文档读取必须经过 `agent/provider_docs.rs` 的协议、DNS/IP、重定向和体积校验
 - MCP 默认关闭；只有用户手动开启或显式启用 `mcpAutoStart` 才启动。stdio 传输只绑定 `127.0.0.1` 并通过 `scripts/ai-canvas-mcp.mjs` 适配，Streamable HTTP 在用户完成高风险传输确认后绑定 `0.0.0.0` 的 `/mcp`；两者都支持固定端口或系统随机端口
 - MCP 令牌必须是密码学随机的 256-bit 值，可轮换；固定令牌唯一允许持久化到 Rust `secret_store` 的 `mcp/token` 条目，凭据存储不可用时才退化为当前会话内存令牌。令牌不得进入普通配置、IndexedDB、Tauri Event 负载、消息或日志；stdio 通过子进程环境变量传递，HTTP 使用 Bearer 鉴权
@@ -267,13 +296,14 @@ AI-Canvas-tauri/
 - stdio 与 Streamable HTTP 都固定映射为 C 自主模式，对安全矩阵中的八类 effect 不逐次审批；切换远程传输时的高风险确认是配置授权，不是工具审批，`user_choice` 仍必须等待用户作答
 - 长时间文件传输使用 `files/transfer.rs`，必须支持取消信号和进度
 - ONNX 推理使用 `media/onnx/worker.rs` 子进程隔离；禁止把 DirectML Session 移回主进程
-- 修改 Rust 后运行与范围匹配的 `cargo test` 和 `cargo check`
+- Rust 改动的测试步骤应包含与范围匹配的 `cargo test` 和 `cargo check`；仅在用户明确要求助手执行测试/检查时运行
 
 ### IndexedDB 与持久化
 
-- IndexedDB 当前 schema 版本为 20，并以 `src/services/indexedDb/schema.ts` 的 `DB_VERSION` 为唯一真值
+- IndexedDB 当前 schema 版本为 22，并以 `src/services/indexedDb/schema.ts` 的 `DB_VERSION` 为唯一真值
 - 已持久化项目、工作流、配置、预设、历史、资产索引、风格、Skill、对话、消息、AgentTask、项目记忆、工具栏布局、元数据、全局角色、子智能体配置、视频剪辑工程、项目视觉描述和插件安装记录
 - 插件安装记录持久化在 `plugins` object store，并保存 `sourceDigest` 与 `revisionDigest`；完整源码只用于管理展示，不能成为运行阶段的执行权威
+- `appearanceThemes` 保存用户完整外观预设；视频批次保存在 `metadata` 的项目域记录，不另建 object store。方舟用量账本由 Rust SQLite 管理，不迁入项目 IndexedDB；导出默认脱敏，金额保留估算/核算/未知置信度
 - 新 object store 或索引必须提升 `DB_VERSION`，并保持旧数据可升级读取
 - 删除会话时同步清理消息和 AgentTask；删除项目时同步清理项目域数据
 - 分集是带 `parentId` 的项目记录，不新建 Store；素材目录、角色库和项目记忆按 `seriesOwnerId` 统一挂在剧集记录上，分集不得各存一份副本
@@ -297,7 +327,7 @@ AI-Canvas-tauri/
 |---|---|---|
 | 任务类型为「架构收敛」 | 确认改动范围、影响面、回滚方案 | 架构改动不可逆，必须用户首肯 |
 | 涉及删除文件 | 确认文件无其他引用，列出影响范围 | 避免意外删除关键文件 |
-| 单次改动超过 3 个文件 | 展示文件清单和改动摘要 | 大面积改动需用户审核方向 |
+| 单次改动排除测试文件和多语言词条文件后，仍超过 3 个文件 | 展示完整文件清单和改动摘要 | 测试和多语言文件不计入阈值；触发时仍列出全部改动，供用户审核方向 |
 | 需要新增依赖（npm/cargo） | 说明新增原因和替代方案 | 依赖引入影响构建和体积 |
 | 修改 `tauri.conf.json` 安全配置 | 逐项说明修改内容 | 安全配置不可放松 |
 | 把握不足或存在多个可选方案 | 列出方案对比，推荐其一并说明理由 | 宁可多问一步也不要猜 |
@@ -305,29 +335,30 @@ AI-Canvas-tauri/
 
 如果用户已经确认书面阶段方案，且实际范围没有超出方案，则不必为同一批次的文件数量重复请求确认。新增依赖、删除文件、修改安全配置或扩大权限仍必须单独确认。
 
-验证类检查点（自动执行，无需用户确认）：
+静态核对检查点（可自行执行，不运行测试或验证工具）：
 
-- 每次文件修改后：检查是否引入 linter 错误
+- 每次文件修改后：阅读差异，确认改动范围、文本编码和明显语法问题；用户要求推送时由推送钩子执行完整前端 CI，仅提交不触发该门禁，其他验证按授权范围执行
 - 每次代码改动后：确认是否有既有功能受影响（搜索引用）
 - 生成新文件前：确认同名文件是否已存在
 - 提交代码前：确认 `git status` 无意外变更
-- 阶段提交前：按“文档归属与维护”更新对应模块计划的状态和验收结论；仅内部 Agent 阶段更新 Agent 实施方案，提交说明使用中文
+- 阶段提交前：按“文档归属与维护”更新对应模块计划的状态、测试步骤和实际验收结论；未测试时标记待用户验证。仅内部 Agent 阶段更新 Agent 实施方案，提交说明使用中文
 
 ### 验证命令
 
-按改动范围选择检查：
+以下命令供用户手动执行；助手按明确授权的范围运行，其中用户要求推送时自动执行完整前端 CI（`npm run ci`），仅提交不自动执行：
 
 - 前端类型：`npm run typecheck`
 - 改动文件 lint：`npx eslint <files...>`
 - 定向测试：`npx vitest run tests/<path>.test.ts`
 - 全量检查：`npm run check`（lint + 类型 + 测试类型 + 测试）
+- 推送门禁：`npm run ci`（全量检查 + 生产构建，与 `Frontend quality` 对齐）
 - 前端生产构建：`npx vite build --outDir <系统临时目录>`
 - Rust 检查：在 `src-tauri/` 运行 `cargo check --lib`
 - Rust 定向测试：`cargo test <module>::tests --lib`
 - 差异检查：`git diff --check`
 - 编码检查：使用严格 UTF-8 解码，并扫描常见乱码字符
 
-当前全仓 `npm run lint` 可能被 ESLint 10 与解析器的既有兼容问题阻断，错误为 `scopeManager.addGlobals is not a function`。遇到该错误时必须记录，并继续运行改动文件的定向 ESLint。不要修改依赖来掩盖该问题，除非任务明确要求修复工具链。
+全仓 lint 是推送与 CI 的必过门禁，构建产物、原生生成目录和 vendor 按现有 ESLint 配置排除。若遇到工具链错误，应定位并如实报告，不得退回局部检查后宣称完整门禁通过，也不得修改依赖来掩盖问题。
 
 ## 异常与边界条件
 

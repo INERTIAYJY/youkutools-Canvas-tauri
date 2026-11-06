@@ -1,4 +1,4 @@
-﻿/* ============================================
+/* ============================================
    Text Node — compact output, edit, wordcount, toolbar, fullscreen
    ============================================ */
 
@@ -13,7 +13,7 @@
   word-break: break-word;
   padding: 4px;
   cursor: var(--cursor-text, text);
-  border-radius: 4px;
+  border-radius: var(--appearance-node-radius-inner, max(0px, calc(var(--appearance-node-radius, 12px) - 4px)));
   transition: background var(--transition-base), box-shadow var(--transition-base);
 }
 
@@ -32,7 +32,7 @@
   color: var(--theme-text);
   background: var(--theme-bg);
   border: 1px solid var(--node-text);
-  border-radius: 8px;
+  border-radius: var(--appearance-node-radius-inner, max(0px, calc(var(--appearance-node-radius, 12px) - 4px)));
   resize: none;
   outline: none;
   white-space: pre-wrap;

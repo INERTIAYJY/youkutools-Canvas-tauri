@@ -78,6 +78,18 @@ function emptyCanvas(id: string, name: string) {
   return { id, name, createdAt: 1, updatedAt: 1, nodes: [], edges: [], groups: [] };
 }
 
+/** 重新加载必须返回已保存的完整记录，不能让固定假数据抹掉分集归属。 */
+function mockPersistedProjects(records: SavedRecord[]) {
+  const persisted = new Map(records.map((record) => [record.id, structuredClone(record)]));
+  fileMocks.saveProject.mockImplementation(async (record: SavedRecord) => {
+    persisted.set(record.id, structuredClone(record));
+    return record.id;
+  });
+  fileMocks.loadProjectData.mockImplementation(async (projectId: string) => (
+    structuredClone(persisted.get(projectId) ?? null)
+  ));
+}
+
 beforeEach(() => {
   vi.stubGlobal('window', { dispatchEvent: vi.fn() });
   vi.stubGlobal('CustomEvent', class TestCustomEvent {
@@ -123,11 +135,11 @@ describe('新增分集', () => {
       groups: [],
       dramaAssets,
     });
-    fileMocks.loadProjectData.mockImplementation(async (projectId: string) => (
-      projectId === 'project-a'
-        ? { ...emptyCanvas('project-a', '月球列车'), dataFolder: '月球列车-projecta' }
-        : emptyCanvas(projectId, '第 2 集')
-    ));
+    mockPersistedProjects([{
+      ...emptyCanvas('project-a', '月球列车'),
+      dataFolder: '月球列车-projecta',
+      dramaAssets,
+    }]);
 
     const episodeId = await useAppStore.getState().addEpisode();
 
@@ -248,15 +260,17 @@ describe('分集切换', () => {
       groups: [],
       dramaAssets,
     });
-    fileMocks.loadProjectData.mockImplementation(async (projectId: string) => ({
-      ...emptyCanvas(projectId, projectId),
-      nodes: [{
-        id: `${projectId}-node`,
+    mockPersistedProjects(useAppStore.getState().projects.map((project) => ({
+      ...emptyCanvas(project.id, project.name),
+      ...project,
+      nodes: project.parentId ? [{
+        id: `${project.id}-node`,
         type: 'ai-text',
         position: { x: 0, y: 0 },
-        data: { label: projectId, type: 'ai-text' },
-      }],
-    }));
+        data: { label: project.id, type: 'ai-text' },
+      }] : [],
+      dramaAssets: project.id === 'series' ? dramaAssets : undefined,
+    })));
 
     await useAppStore.getState().switchProject('ep-2');
 
@@ -268,11 +282,24 @@ describe('分集切换', () => {
     // 记忆按剧集加载
     expect(state.loadProjectMemoriesForProject).toHaveBeenCalledWith('series');
 
+    // 切换前已把共享库保存到剧集；同一份库再次保存时应复用成功基线。
+    const switchingRecords = fileMocks.saveProject.mock.calls.map((call) => call[0]);
+    expect(switchingRecords.find((record) => record.id === 'series')).toMatchObject({ dramaAssets });
     fileMocks.saveProject.mockClear();
     await useAppStore.getState().saveCurrentProjectSilent();
     const records = fileMocks.saveProject.mock.calls.map((call) => call[0]);
-    expect(records.find((record) => record.id === 'ep-2')?.dramaAssets).toBeUndefined();
-    expect(records.find((record) => record.id === 'series')).toMatchObject({ dramaAssets });
+    const episodeRecord = records.find((record) => record.id === 'ep-2');
+    expect(episodeRecord).toBeDefined();
+    expect(episodeRecord?.dramaAssets).toBeUndefined();
+    expect(records.find((record) => record.id === 'series')).toBeUndefined();
+
+    // 修改共享库后必须再次落盘，不能让去重跳过真实更新。
+    const changedLibrary = library('林夏与列车长');
+    useAppStore.setState({ dramaAssets: changedLibrary });
+    fileMocks.saveProject.mockClear();
+    await useAppStore.getState().saveCurrentProjectSilent();
+    const changedRecords = fileMocks.saveProject.mock.calls.map((call) => call[0]);
+    expect(changedRecords.find((record) => record.id === 'series')).toMatchObject({ dramaAssets: changedLibrary });
   });
 
   it('打开剧集项目等于打开它的第一集', async () => {

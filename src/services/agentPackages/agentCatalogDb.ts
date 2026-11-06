@@ -1,3 +1,6 @@
+/**
+ * agentCatalogDb — 管理全局 AgentPackage 安装目录数据库。
+ */
 import type { AgentPackageInstallation } from '../../types/agentPackage';
 
 export const AGENT_CATALOG_DB_NAME = 'ai-canvas-agent-catalog';

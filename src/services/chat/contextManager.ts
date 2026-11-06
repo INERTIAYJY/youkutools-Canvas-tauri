@@ -33,8 +33,10 @@ import { rankProjectMemories } from './memoryRetrieval';
 import { buildLearnedPromptContext } from './promptLearningService';
 import { estimateTokens } from './tokenEstimate';
 import { getAssistantTextModelCandidates } from '../projectSettingsService';
+import { findHistoryCutIndex, historyMessageContent, messageContentWithSources } from './contextTranscript';
 
 export { estimateTokens };
+export { messageContentWithSources };
 
 // ============================================
 // 阈值
@@ -87,11 +89,11 @@ export interface AssistantContextSpec extends TextModelContextSpec {
 }
 
 /** 解析当前配置的助手文本模型的上下文规格；未配置时返回保守默认规格。 */
-export function resolveAssistantContextSpec(projectId?: string): AssistantContextSpec {
+export function resolveAssistantContextSpec(projectId?: string, modelId?: string): AssistantContextSpec {
   const state = useAppStore.getState();
   const config = state.config;
   const project = state.projects.find((item) => item.id === (projectId ?? state.currentProjectId));
-  const candidates = getAssistantTextModelCandidates(
+  const candidates = modelId !== undefined ? [modelId] : getAssistantTextModelCandidates(
     project?.settings,
     config.assistantModelId,
   );
@@ -143,24 +145,29 @@ const SYSTEM_PROMPT_OVERHEAD_ESTIMATE = 1_200;
 
 type UsageMessage = Pick<ChatMessage, 'role' | 'content' | 'status' | 'timestamp' | 'sources'>;
 
-/**
- * 将消息携带的来源元数据补充到模型上下文。
- * 只保留引用编号、标题和 URL，避免跨轮重复注入搜索摘要或网页正文。
- */
-export function messageContentWithSources(
-  message: Pick<ChatMessage, 'content' | 'sources'>,
-): string {
-  if (!message.sources?.length) return message.content;
-  const sourceLines = message.sources.map((source) => [
-    `[${source.citationId ?? 'S?'}] ${source.title}`,
-    source.url,
-  ].join('\n'));
-  return [
-    message.content,
-    '',
-    '可追溯来源：',
-    ...sourceLines,
-  ].join('\n');
+// 消息离开内存后缓存也会释放；只缓存这条消息的贡献，摘要和模型预算仍按本次参数计算。
+const conversationUsageCache = new WeakMap<UsageMessage, {
+  content: string;
+  sources: Pick<NonNullable<UsageMessage['sources']>[number], 'citationId' | 'title' | 'url'>[];
+  tokens: number;
+}>();
+
+function estimateUsageMessageTokens(message: UsageMessage): number {
+  const cached = conversationUsageCache.get(message);
+  const sources = message.sources;
+  // 来源可能在原数组里补齐，比较实际参与拼接的字段，不只比较数组引用。
+  if (cached?.content === message.content && cached.sources.length === (sources?.length ?? 0)
+    && cached.sources.every((source, index) => source.citationId === sources![index].citationId
+      && source.title === sources![index].title && source.url === sources![index].url)) {
+    return cached.tokens;
+  }
+  const tokens = PER_MESSAGE_OVERHEAD + estimateTokens(messageContentWithSources(message));
+  conversationUsageCache.set(message, {
+    content: message.content,
+    sources: sources?.map(({ citationId, title, url }) => ({ citationId, title, url })) ?? [],
+    tokens,
+  });
+  return tokens;
 }
 
 /**
@@ -179,7 +186,7 @@ export function estimateConversationUsage(
     if (message.role !== 'user' && message.role !== 'assistant') continue;
     if (!message.content) continue;
     if (contextSummary && message.timestamp <= contextSummary.coveredUntilTimestamp) continue;
-    estimatedTokens += PER_MESSAGE_OVERHEAD + estimateTokens(messageContentWithSources(message));
+    estimatedTokens += estimateUsageMessageTokens(message);
   }
   return {
     estimatedTokens,
@@ -274,7 +281,7 @@ function selectHistoryMessages(
     (message.role === 'user' || message.role === 'assistant')
     && !!message.content
     && !excludeIds.has(message.id)
-    && !['error', 'interrupted', 'canceled'].includes(message.status)
+    && ['done', 'partial', 'clarifying', 'preview'].includes(message.status)
     && (!summary || message.timestamp > summary.coveredUntilTimestamp));
 }
 
@@ -315,18 +322,19 @@ function buildMessages(
   const userTokens = PER_MESSAGE_OVERHEAD + estimateTokens(userMessage);
   const fixedTokens = systemTokens + memoryTokens + summaryTokens + userTokens;
 
-  // 最新消息优先，从新到旧填充预算
-  const included: ChatMessage[] = [];
+  // 按完整轮次保留连续的最近历史，不跳过大消息后再塞入更早的小消息。
   let historyTokens = 0;
-  let rawHistoryTokens = 0;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const tokens = PER_MESSAGE_OVERHEAD + estimateTokens(messageContentWithSources(history[i]));
-    rawHistoryTokens += tokens;
-    if (fixedTokens + historyTokens + tokens <= inputBudget) {
-      included.unshift(history[i]);
-      historyTokens += tokens;
-    }
+  const costs = history.map((message) => PER_MESSAGE_OVERHEAD + estimateTokens(message.content));
+  const rawHistoryTokens = costs.reduce((sum, cost) => sum + cost, 0);
+  let firstIncluded = history.length;
+  while (firstIncluded > 0) {
+    const start = findHistoryCutIndex(history.slice(0, firstIncluded), 1);
+    const tokens = costs.slice(start, firstIncluded).reduce((sum, cost) => sum + cost, 0);
+    if (fixedTokens + historyTokens + tokens > inputBudget) break;
+    historyTokens += tokens;
+    firstIncluded = start;
   }
+  const included = history.slice(firstIncluded);
 
   const messages: AssistantModelMessage[] = [
     ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
@@ -334,7 +342,7 @@ function buildMessages(
     ...(summaryContent ? [{ role: 'system' as const, content: summaryContent }] : []),
     ...included.map((message) => ({
       role: message.role as 'user' | 'assistant',
-      content: messageContentWithSources(message),
+      content: message.content,
     })),
     { role: 'user' as const, content: userMessage },
   ];
@@ -372,7 +380,18 @@ export async function assembleAgentContext(
     learnedPromptBlock,
   ].filter(Boolean).join('\n\n');
 
-  const { messages: persisted } = persistedResult;
+  const tasks = useAppStore.getState().agentTasks.filter((task) =>
+    task.conversationId === conversationId && task.projectId === projectId);
+  // 上一轮可能仍在节流落盘；同会话的最新内存消息也要进入追问上下文。
+  const persisted = [...new Map([
+    ...persistedResult.messages.filter((message) => message.conversationId === conversationId),
+    ...useAppStore.getState().messages.filter((message) => message.conversationId === conversationId),
+  ].map((message) => [message.id, message])).values()]
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((message) => ({
+      ...message,
+      content: historyMessageContent(message, tasks.find((task) => task.id === message.agentTaskId)),
+    }));
   let summary = getConversationSummary(conversationId);
   let history = selectHistoryMessages(persisted, excludeIds, summary);
   let result = buildMessages(systemPrompt, memoryBlock, summary, history, userMessage, spec.inputBudget);
@@ -383,6 +402,7 @@ export async function assembleAgentContext(
     // 请求前强制压缩：失败时不发送超限请求，由调用方暂停任务
     try {
       const compressed = await compressConversationContext(conversationId, {
+        projectId,
         excludeMessageIds: options.excludeMessageIds,
         signal,
       });
@@ -402,6 +422,7 @@ export async function assembleAgentContext(
   } else if (rawRatio >= PRECOMPRESS_RATIO) {
     // 后台预压缩，不阻塞本次请求
     void compressConversationContext(conversationId, {
+      projectId,
       excludeMessageIds: options.excludeMessageIds,
     }).catch(() => { /* 预压缩失败不影响本次请求，下次达到 90% 时再强制压缩 */ });
   }

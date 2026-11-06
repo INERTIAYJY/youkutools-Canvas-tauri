@@ -1,3 +1,6 @@
+/**
+ * seriesCreativeService — 回归测试：seriesCreativeService。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   analyzeEpisodeScript,

@@ -1,12 +1,17 @@
-import { isRemoteMediaUrl } from '../../../utils/mediaUrl';
+/**
+ * runninghubWorkflow — 执行 RunningHub 工作流并解析、保存产物。
+ */
 import { useAppStore } from '../../../store/useAppStore';
 import type { RunningHubConnection, RunningHubMediaKind, RunningHubOutput, RunningHubWorkflowManifest } from '../../../types/runninghub';
-import { runningHubFieldValue, runningHubParameterKey, validateRunningHubManifest, isRecord } from '../../runninghubWorkflowService';
+import { resolveRunningHubParameters, runningHubFieldValue, runningHubParameterKey, validateRunningHubManifest, isRecord } from '../../runninghubWorkflowService';
 import { runningHubConnection, isRunningHubWorkflow, saveCloudWorkflowOutputs, getCloudWorkflowPersistedOutput } from '../../workflowExecutionService';
+import { runningHubSiteId } from '../../runninghubSiteCredentials';
 import { runningHubRequest, uploadRunningHubMedia, RunningHubRequestError } from './runninghubClient';
 import { pollTask } from '../../pollTask';
 import { cancelNodePolling, cleanupNodePolling, getPendingTasksForProject, registerNodePolling, removePendingTask, savePendingTask, updatePendingTask } from '../../pollManager';
 import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../canvasDerivationGuard';
+import { resolveRunningHubInputRouting, splitRunningHubPrompt, type RunningHubInputRouting } from './runninghubWorkflowInputs';
+import { resolveWorkflowSeed } from '../../workflowSeed';
 
 export class RunningHubTaskFailed extends Error {}
 export type RunningHubReferences = Partial<Record<RunningHubMediaKind, string[]>>;
@@ -27,30 +32,53 @@ export async function buildRunningHubInputs(
   inputs: Record<string, string> = {},
   references: RunningHubReferences = {},
   signal?: AbortSignal,
+  routing?: RunningHubInputRouting,
 ) {
   validateRunningHubManifest(manifest);
-  const mapped = new Set(manifest.parameters.map(runningHubParameterKey));
+  const parameters = resolveRunningHubParameters(manifest.parameters);
+  const mapped = new Set(parameters.map(runningHubParameterKey));
   if (Object.keys(inputs).some((key) => !mapped.has(key))) throw new Error('工作流参数已变化，请重新选择工作流并检查参数');
-  // 所有纯参数先校验，避免在可发现的字段错误之前上传素材。
-  const values = manifest.parameters.map((field) => ({ field, value: field.source === 'value'
-    ? runningHubFieldValue(field, inputs[runningHubParameterKey(field)]) : field.defaultValue }));
+  // 提交前检查本轮输入；导入示例只用于普通参数，不代替提示词或未选择的素材。
+  const values = parameters.map((field) => {
+    const key = runningHubParameterKey(field);
+    const binding = routing?.bindings.get(key);
+    const type = field.source === 'value' ? (!field.sourceExplicit ? field.inputType : undefined) : field.source;
+    if (field.source === 'value' && (!binding || !type)
+      && !(type && routing?.nodeMode && routing.defaults?.[type] === key && !routing.mentionedTypes.has(type))) {
+      const value = resolveWorkflowSeed({ ...field, name: field.fieldName, label: `C#${field.nodeId} · ${field.label}` }, inputs[key]);
+      return { field, value: runningHubFieldValue(field, value === undefined ? undefined : String(value)), mediaSource: undefined };
+    }
+    if (binding) return { field, ...binding };
+    if (!type) throw new Error('工作流输入类型不支持');
+    const suppress = routing?.mentionedTypes.has(type)
+      || (routing?.nodeMode && routing.defaults?.[type] !== key);
+    if (suppress) return { field, value: '', mediaSource: undefined };
+    if (type === 'prompt') {
+      if (field.required && !prompt.trim()) throw new Error(`请填写${field.label}`);
+      return { field, value: prompt, mediaSource: undefined };
+    }
+    const mediaSource = routing?.nodeMode
+      ? references[type]?.[0]
+      : references[type]?.[field.referenceIndex ?? 0];
+    if (routing?.nodeMode && (references[type]?.length ?? 0) > 1) throw new Error(`默认 ${type} 输入只能接收一份素材，请用 @ 分别指定输入节点`);
+    if (field.required && !mediaSource) throw new Error(`请提供${field.label}对应的参考素材`);
+    return { field, value: '', mediaSource };
+  });
+  for (const { field, value, mediaSource } of values) {
+    if (field.required && !mediaSource && (value === '' || (field.source !== 'value' && typeof value === 'string' && !value.trim()))) {
+      throw new Error(`请填写${field.label}`);
+    }
+  }
   const uploaded = new Map<string, Awaited<ReturnType<typeof uploadRunningHubMedia>>>();
   const result = [];
-  for (const { field, value } of values) {
+  for (const { field, value, mediaSource } of values) {
     signal?.throwIfAborted();
     let fieldValue = value;
-    if (field.source === 'prompt') fieldValue = prompt;
-    else if (field.source !== 'value') {
-      const source = inputs[runningHubParameterKey(field)] || references[field.source]?.[field.referenceIndex ?? 0];
-      if (source) {
-        if (field.mediaFormat === 'url' && isRemoteMediaUrl(source)) fieldValue = source;
-        else {
-          const cacheKey = `${field.source}:${source}`;
-          let upload = uploaded.get(cacheKey);
-          if (!upload) { upload = await uploadRunningHubMedia(connection, source, field.source, signal); uploaded.set(cacheKey, upload); }
-          fieldValue = field.mediaFormat === 'url' ? upload.url : upload.filename;
-        }
-      } else if (!value || field.required) throw new Error(`请提供${field.label}对应的参考素材`);
+    if (field.source !== 'value' && field.source !== 'prompt' && mediaSource) {
+      const cacheKey = `${field.source}:${mediaSource}`;
+      let upload = uploaded.get(cacheKey);
+      if (!upload) { upload = await uploadRunningHubMedia(connection, mediaSource, field.source, signal); uploaded.set(cacheKey, upload); }
+      fieldValue = field.mediaFormat === 'url' ? upload.url : upload.filename;
     }
     if (field.required && fieldValue === '') throw new Error(`请填写${field.label}`);
     result.push({ nodeId: field.nodeId, fieldName: field.fieldName, fieldValue });
@@ -105,7 +133,9 @@ export async function queryRunningHubWorkflow(
 
 export async function executeRunningHubWorkflow(params: {
   workflowId: string; prompt: string; kind: RunningHubMediaKind; nodeId?: string;
+  rawWorkflowPrompt?: string;
   workflowInputs?: Record<string, string>; references?: RunningHubReferences;
+  beforeSubmit?: () => void | Promise<void>;
   runninghubTaskContext?: import('../../../types/runninghub').RunningHubTaskContext;
 }, externalSignal?: AbortSignal): Promise<RunningHubOutput[]> {
   const store = useAppStore.getState();
@@ -131,10 +161,14 @@ export async function executeRunningHubWorkflow(params: {
   try {
     stage('上传素材');
     if (!fresh()) throw new Error('当前项目或对话已变化，未提交任务');
-    const nodeInfoList = await buildRunningHubInputs(connection, manifest, params.prompt, params.workflowInputs, params.references, signal);
+    const routing = await resolveRunningHubInputRouting(workflow, params.rawWorkflowPrompt ?? params.prompt, params.workflowInputs, signal);
+    if (!fresh()) throw new Error('当前项目或对话已变化，未提交任务');
+    const cleanPrompt = splitRunningHubPrompt(params.prompt).prompt;
+    const nodeInfoList = await buildRunningHubInputs(connection, manifest, cleanPrompt, params.workflowInputs, params.references, signal, routing);
+    if (params.beforeSubmit) await params.beforeSubmit();
     if (!fresh()) throw new Error('画布已变化，请重新生成');
     stage('提交任务');
-    if (trackingId && projectId) savePendingTask({ nodeId: trackingId, projectId, nodeType: workflow.category, provider: 'runninghubwf', providerConfigId: manifest.connectionId, taskType: 'runninghub-workflow', taskId: '', submitted: false, runninghubRecoveryState: 'submit_unknown', runninghubOutputNodeIds: manifest.outputNodeIds, runninghubWorkflowId: workflow.id, runninghubMessage: context });
+    if (trackingId && projectId) savePendingTask({ nodeId: trackingId, projectId, nodeType: workflow.category, provider: 'runninghubwf', providerConfigId: manifest.connectionId, taskType: 'runninghub-workflow', taskId: '', submitted: false, runninghubSite: runningHubSiteId(connection.baseUrl), runninghubRecoveryState: 'submit_unknown', runninghubOutputNodeIds: manifest.outputNodeIds, runninghubWorkflowId: workflow.id, runninghubMessage: context });
     submitting = true;
     const response = await runningHubRequest(connection, manifest.kind === 'app' ? '/task/openapi/ai-app/run' : '/task/openapi/create', {
       [manifest.kind === 'app' ? 'webappId' : 'workflowId']: manifest.remoteId,
@@ -176,7 +210,7 @@ export async function cancelRunningHubNodeTask(nodeId: string): Promise<'cancell
   if (!task || task.taskType === 'runninghub-model') return 'local-stopped';
   if (!task.taskId) throw new Error('提交状态未知，请先到 RunningHub 平台确认任务');
   updatePendingTask(nodeId, { runninghubRecoveryState: 'cancel_pending' }, task.taskId);
-  const connection = runningHubConnection(store.config.providers, task.providerConfigId === 'runninghub-model' ? 'runninghub-model' : 'runninghub');
+  const connection = runningHubConnection(store.config.providers, task.providerConfigId === 'runninghub-model' ? 'runninghub-model' : 'runninghub', task.runninghubSite);
   await runningHubRequest(connection, '/task/openapi/cancel', { taskId: task.taskId });
   const status = await runningHubRequest(connection, '/task/openapi/status', { taskId: task.taskId });
   if (['FAILED', 'CANCELED', 'CANCELLED'].includes(String(status.data).toUpperCase())) {

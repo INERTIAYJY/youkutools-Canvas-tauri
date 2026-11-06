@@ -1,3 +1,6 @@
+/**
+ * toSeedanceCapabilityView — 回归测试：toSeedanceCapabilityView — 通用视频模型能力声明适配。
+ */
 import { describe, expect, it } from 'vitest';
 import { toSeedanceCapabilityView } from '../../src/services/ai/apimartVideoModels';
 import type { VideoModelCapability } from '../../src/types/aiTypes';

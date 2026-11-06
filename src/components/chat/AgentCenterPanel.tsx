@@ -3,7 +3,7 @@
  *
  * 默认助手始终可用；外部智能体上传失败只在本面板提示，不改变聊天、画布或项目状态。
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { useAppStore } from '../../store/useAppStore';
 import type {
@@ -35,10 +35,10 @@ const HEALTH_LABELS: Record<AgentPackageHealth, string> = {
 };
 
 const HEALTH_CLASSES: Record<AgentPackageHealth, string> = {
-  ready: 'bg-emerald-400/10 text-emerald-300',
-  degraded: 'bg-amber-400/10 text-amber-300',
-  invalid: 'bg-red-400/10 text-red-300',
-  missing: 'bg-red-400/10 text-red-300',
+  ready: 'ui-badge--success',
+  degraded: 'ui-badge--warning',
+  invalid: 'ui-badge--danger',
+  missing: 'ui-badge--danger',
 };
 
 function formatBytes(bytes: number): string {
@@ -52,6 +52,59 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+interface OutlineEntry {
+  name: string;
+  path: string;
+  children: Map<string, OutlineEntry>;
+}
+
+function buildOutline(paths: string[]): OutlineEntry[] {
+  const root = new Map<string, OutlineEntry>();
+  for (const path of paths) {
+    const segments = path.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
+    let children = root;
+    segments.forEach((name, index) => {
+      let entry = children.get(name);
+      if (!entry) {
+        entry = { name, path: segments.slice(0, index + 1).join('/'), children: new Map() };
+        children.set(name, entry);
+      }
+      children = entry.children;
+    });
+  }
+  return [...root.values()];
+}
+
+function OutlineItems({ entries }: { entries: OutlineEntry[] }) {
+  return (
+    <ul className="min-w-0 space-y-1">
+      {entries.map((entry) => {
+        const children = [...entry.children.values()];
+        const isSkill = children.length === 1 && children[0].name.toLowerCase() === 'skill.md';
+        return (
+          <li key={entry.path} className="min-w-0">
+            {children.length > 0 && !isSkill ? (
+              <details open className="min-w-0">
+                <summary className="cursor-pointer rounded py-1 text-[11px] font-medium text-canvas-text-secondary hover:bg-canvas-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand">
+                  <span className="break-all">{entry.name}</span>
+                </summary>
+                <div className="ml-1 border-l border-canvas-border pl-2">
+                  <OutlineItems entries={children} />
+                </div>
+              </details>
+            ) : (
+              <div className="flex min-w-0 items-start gap-1.5 rounded py-1 text-[11px] leading-4">
+                <Icon icon={isSkill || entry.name.toLowerCase() === 'skill.md' ? 'lucide:sparkles' : 'lucide:file-text'} width="13" className="mt-0.5 shrink-0 text-canvas-text-muted" />
+                <span className="min-w-0 break-all text-canvas-text-secondary">{entry.name}</span>
+              </div>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 export function AgentPackageCard({
@@ -71,76 +124,18 @@ export function AgentPackageCard({
 }) {
   const t = useT();
   const name = installation.manifest.name || installation.source.displayName;
+  const outline = useMemo(() => buildOutline(installation.entrypoints), [installation.entrypoints]);
   return (
-    <article className="rounded-xl border border-canvas-border bg-canvas-card p-3">
-      <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-300">
-          <Icon icon="lucide:bot" width="18" height="18" />
+    <article className="ui-card p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-canvas-surface text-brand">
+          <Icon icon="lucide:bot" width="16" height="16" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <h4 className="truncate text-sm font-medium text-canvas-text">{name}</h4>
-            <span className="rounded bg-canvas-surface px-1.5 py-0.5 text-[10px] text-canvas-text-muted">
-              v{installation.manifest.version}
-            </span>
-            <span className={`rounded px-1.5 py-0.5 text-[10px] ${HEALTH_CLASSES[installation.health]}`}>
-              {t(HEALTH_LABELS[installation.health])}
-            </span>
-          </div>
-          {installation.manifest.description && (
-            <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-canvas-text-secondary">
-              {installation.manifest.description}
-            </p>
-          )}
-          <p className="mt-1.5 text-[10px] leading-4 text-canvas-text-muted">
-            {installation.source.sourceType === 'folder' ? t('链接文件夹') : t('托管压缩包')}
-            {' · '}{t('{count} 个 Skill', { count: installation.skillCount })}
-            {' · '}{t('{count} 个文件', { count: installation.fileCount })}
-            {' · '}{formatBytes(installation.totalBytes)}
-          </p>
-          {installation.warnings.length > 0 && (
-            <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/5 px-2.5 py-2 text-[10px] leading-4 text-amber-200">
-              <div className="mb-1 flex items-center gap-1 font-medium">
-                <Icon icon="mdi:alert-outline" width="12" />
-                {t('{count} 条预检提醒', { count: installation.warnings.length })}
-              </div>
-              <ul className="list-disc space-y-0.5 pl-4">
-                {installation.warnings.slice(0, 3).map((warning, index) => (
-                  <li key={`${installation.id}-warning-${index}`} className="break-words">{warning}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {allowInstall && (
-            <div className="mt-2 flex items-start justify-between gap-3 rounded-lg border border-canvas-border bg-canvas-surface px-2.5 py-2">
-              <div className="min-w-0">
-                <p className="text-[11px] font-medium text-canvas-text-secondary">{t('MCP 只读')}</p>
-                <p className="mt-0.5 text-[10px] leading-4 text-canvas-text-muted">
-                  {t('仅允许 MCP 客户端列出、加载和读取该智能体中的 Skill，不会执行包内脚本。')}
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={installation.enabled && installation.mcpSkillReadEnabled}
-                aria-label={installation.mcpSkillReadEnabled
-                  ? t('禁止 MCP 读取智能体 {name} 的 Skill', { name })
-                  : t('允许 MCP 读取智能体 {name} 的 Skill', { name })}
-                disabled={busy || !installation.enabled}
-                onClick={onToggleMcpSkillRead}
-                className={`shrink-0 rounded-md px-2 py-1 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                  installation.enabled && installation.mcpSkillReadEnabled
-                    ? 'bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/15'
-                    : 'bg-canvas-card text-canvas-text-muted hover:bg-canvas-hover'
-                }`}
-              >
-                {t(installation.enabled && installation.mcpSkillReadEnabled ? '已允许' : '未允许')}
-              </button>
-            </div>
-          )}
+          <h4 className="break-words text-sm font-medium text-canvas-text [overflow-wrap:anywhere]">{name}</h4>
         </div>
         {allowInstall && (
-          <div className="flex shrink-0 flex-col items-end gap-1">
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             <button
               type="button"
               role="switch"
@@ -150,11 +145,7 @@ export function AgentPackageCard({
                 : t('启用智能体 {name}', { name })}
               disabled={busy}
               onClick={onToggle}
-              className={`rounded-md px-2 py-1 text-[11px] transition-colors disabled:cursor-wait disabled:opacity-50 ${
-                installation.enabled
-                  ? 'bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15'
-                  : 'bg-canvas-surface text-canvas-text-muted hover:bg-canvas-hover'
-              }`}
+              className={`ui-btn ui-btn--ghost ui-btn--sm ${installation.enabled ? 'is-active' : ''}`}
             >
               {t(installation.enabled ? '已启用' : '已停用')}
             </button>
@@ -163,14 +154,80 @@ export function AgentPackageCard({
               disabled={busy}
               onClick={onRemove}
               aria-label={t('移除智能体 {name}', { name })}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-canvas-text-muted transition-colors
-                         hover:bg-red-400/10 hover:text-red-300 disabled:cursor-wait disabled:opacity-50"
+              className="ui-btn ui-btn--ghost ui-btn--sm"
             >
               <Icon icon="mdi:trash-can-outline" width="14" />
             </button>
           </div>
         )}
       </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <span className="ui-badge">v{installation.manifest.version}</span>
+        <span className={`ui-badge ${HEALTH_CLASSES[installation.health]}`}>
+          {t(HEALTH_LABELS[installation.health])}
+        </span>
+      </div>
+      {installation.manifest.description && (
+        <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-canvas-text-secondary">
+          {installation.manifest.description}
+        </p>
+      )}
+      <p className="mt-1.5 text-[10px] leading-4 text-canvas-text-muted">
+        {installation.source.sourceType === 'folder' ? t('链接文件夹') : t('托管压缩包')}
+        {' · '}{t('{count} 个 Skill', { count: installation.skillCount })}
+        {' · '}{t('{count} 个文件', { count: installation.fileCount })}
+        {' · '}{formatBytes(installation.totalBytes)}
+      </p>
+      {installation.warnings.length > 0 && (
+        <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/5 px-2.5 py-2 text-[10px] leading-4 text-amber-200">
+          <div className="mb-1 flex items-center gap-1 font-medium">
+            <Icon icon="mdi:alert-outline" width="12" />
+            {t('{count} 条预检提醒', { count: installation.warnings.length })}
+          </div>
+          <ul className="list-disc space-y-0.5 pl-4">
+            {installation.warnings.slice(0, 3).map((warning, index) => (
+              <li key={`${installation.id}-warning-${index}`} className="break-words">{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {allowInstall && (
+        <div className="mt-2 flex items-start justify-between gap-3 rounded-lg border border-canvas-border bg-canvas-surface px-2.5 py-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-medium text-canvas-text-secondary">{t('MCP 只读')}</p>
+            <p className="mt-0.5 text-[10px] leading-4 text-canvas-text-muted">
+              {t('仅允许 MCP 客户端列出、加载和读取该智能体中的 Skill，不会执行包内脚本。')}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={installation.enabled && installation.mcpSkillReadEnabled}
+            aria-label={installation.mcpSkillReadEnabled
+              ? t('禁止 MCP 读取智能体 {name} 的 Skill', { name })
+              : t('允许 MCP 读取智能体 {name} 的 Skill', { name })}
+            disabled={busy || !installation.enabled}
+            onClick={onToggleMcpSkillRead}
+            className={`ui-btn ui-btn--ghost ui-btn--sm shrink-0 ${
+              installation.enabled && installation.mcpSkillReadEnabled
+                ? 'is-active'
+                : ''
+            }`}
+          >
+            {t(installation.enabled && installation.mcpSkillReadEnabled ? '已允许' : '未允许')}
+          </button>
+        </div>
+      )}
+      <details className="group/outline mt-3 min-w-0 border-t border-canvas-border pt-2">
+        <summary className="flex cursor-pointer list-none items-center gap-2 rounded py-1 text-xs font-medium text-canvas-text-secondary hover:bg-canvas-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand [&::-webkit-details-marker]:hidden">
+          <Icon icon="lucide:chevron-right" width="14" className="shrink-0 transition-transform group-open/outline:rotate-90" />
+          {t('智能体大纲')}
+        </summary>
+        <p className="my-2 text-[10px] leading-4 text-canvas-text-muted">{t('按安装时识别的入口与 Skill 目录展示。')}</p>
+        {outline.length > 0 ? <OutlineItems entries={outline} /> : (
+          <p className="py-2 text-[11px] text-canvas-text-muted">{t('暂无内容')}</p>
+        )}
+      </details>
     </article>
   );
 }
@@ -255,7 +312,7 @@ export default function AgentCenterPanel({ onClose, allowInstall = false }: Agen
   const removePackage = async (installation: AgentPackageInstallation) => {
     if (!allowInstall || busyKey) return;
     const name = installation.manifest.name || installation.source.displayName;
-    if (!(await confirmAction(t('确定从软件中移除智能体「{name}」？外部文件不会被删除。', { name }), { title: '移除智能体' }))) return;
+    if (!(await confirmAction(t('确定从软件中移除智能体「{name}」？外部文件不会被删除。', { name }), { title: t('移除智能体') }))) return;
     setBusyKey(`remove:${installation.id}`);
     setLocalError('');
     try {
@@ -291,7 +348,7 @@ export default function AgentCenterPanel({ onClose, allowInstall = false }: Agen
 
   return (
     <div className="absolute inset-0 z-10 flex flex-col bg-canvas-bg">
-      <div className="flex items-center justify-between border-b border-canvas-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-canvas-border px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <Icon icon="lucide:bot" width="16" className="shrink-0 text-brand" />
           <span className="truncate text-sm font-medium text-canvas-text">{t('智能体中心')}</span>

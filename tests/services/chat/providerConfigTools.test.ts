@@ -1,3 +1,6 @@
+/**
+ * providerConfigTools — 回归测试：provider config agent tools。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fileMocks = vi.hoisted(() => ({
@@ -143,6 +146,93 @@ afterEach(() => {
 });
 
 describe('provider config agent tools', () => {
+  it('exposes image capability parameters in the same import schema as video models', () => {
+    const model = previewInput().models[0];
+    const prepared = prepareAgentToolCall({ callId: 'image-parameters', toolId: 'provider_config_preview', input: {
+      ...previewInput(), models: [{ ...model, imageCapability: { resolutions: ['1K'], defaultResolution: '1K',
+        ratios: ['1:1'], defaultRatio: '1:1', supportsBatch: false, supportsImageReference: false } }],
+    } }, context);
+    expect(prepared.ok).toBe(true);
+    expect(getAgentTool('provider_config_preview')?.description).toContain('每个选中模型');
+  });
+  it('accepts image quality, background and dimensions in the MCP preview schema', () => {
+    const model = previewInput().models[0];
+    const input = { ...previewInput(), models: [{ ...model, imageCapability: {
+      resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'], defaultRatio: '1:1',
+      qualities: ['low', 'high'], defaultQuality: 'high', backgrounds: ['opaque', 'transparent'],
+      defaultBackground: 'opaque', hasResolutionField: true, resolutionField: 'size',
+      dimensionPresets: { '1K': { '1:1': [1024, 1024] } },
+    } }] };
+    expect(prepareAgentToolCall({ callId: 'image-options', toolId: 'provider_config_preview', input }, context).ok).toBe(true);
+    expect(getAgentTool('provider_config_preview')?.description).toContain('defaultQuality');
+  });
+  it('previews and saves a partial image capability update without losing the existing model parameters', async () => {
+    const protocol: ModelExecutionProtocol = { version: 2, mode: 'sync', auth: { type: 'bearer' },
+      submit: { method: 'POST', path: '/images/generations', body: {
+        model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}', quality: '{{imageQuality}}',
+        background: '{{imageBackground}}', output_format: 'png',
+      } }, response: { type: 'json', result: { urlPath: 'data.0.url' } } };
+    const previous = { id: 'image-pro', name: 'Image Pro', category: 'image' as const, provider: 'custom-existing',
+      executionProfile: { preset: 'custom' as const, protocol },
+      imageCapability: { resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'], defaultRatio: '1:1',
+        dimensionPresets: { '1K': { '1:1': [1024, 1024] as [number, number] } } } };
+    useAppStore.getState().saveProviderConfig('custom-existing', { name: 'Existing Relay', apiKey: 'saved-fixture',
+      baseUrl: 'https://gateway.example.com/v1', catalogId: 'custom-openai', selectedModels: [previous], catalogModels: [previous] });
+    const input: ProviderConfigDraftInput = { connectionId: 'custom-existing', connectionName: 'Existing Relay',
+      baseUrl: 'https://gateway.example.com/v1', models: [{ modelId: 'image-pro', category: 'image',
+        protocolSource: 'declarative', executionProtocol: protocol,
+        imageCapability: { qualities: ['low', 'high'], defaultQuality: 'high',
+          backgrounds: ['opaque', 'transparent'], defaultBackground: 'opaque' } }] };
+    expect(prepareAgentToolCall({ callId: 'partial-preview', toolId: 'provider_config_preview', input }, context).ok).toBe(true);
+    const preview = await getAgentTool('provider_config_preview')!.execute(context, input);
+    expect(preview.status).toBe('success');
+    expect(preview.modelContent).not.toContain('落点检查失败');
+    const result = await getAgentTool('provider_config_apply')!.execute(context, { draftId: readDraftId(preview.modelContent) });
+    expect(result.status).toBe('success');
+    const saved = useAppStore.getState().config.providers['custom-existing'];
+    expect(saved.apiKey).toBe('saved-fixture');
+    for (const model of [saved.selectedModels![0], saved.catalogModels![0]]) {
+      expect(model.imageCapability).toMatchObject({ resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'],
+        dimensionPresets: { '1K': { '1:1': [1024, 1024] } }, qualities: ['low', 'high'], defaultQuality: 'high',
+        backgrounds: ['opaque', 'transparent'] });
+    }
+    expect(previous.imageCapability).not.toHaveProperty('qualities');
+  });
+  it('does not tell MCP to save when the merged capabilities conflict with the replacement protocol', async () => {
+    const body = { model: '{{model}}', prompt: '{{prompt}}', quality: '{{imageQuality}}' };
+    const protocol: ModelExecutionProtocol = { version: 2, mode: 'sync',
+      submit: { method: 'POST', path: '/images/generations', body },
+      response: { type: 'json', result: { urlPath: 'data.0.url' } } };
+    const previous = { id: 'image-pro', name: 'Image Pro', category: 'image' as const, provider: 'custom-existing',
+      imageCapability: { qualities: ['low', 'high'] }, executionProfile: { preset: 'custom' as const, protocol } };
+    useAppStore.getState().saveProviderConfig('custom-existing', { name: 'Existing Relay', apiKey: 'saved-fixture',
+      baseUrl: 'https://gateway.example.com/v1', catalogId: 'custom-openai', selectedModels: [previous] });
+    const fixed = structuredClone(protocol);
+    fixed.submit.body = { model: '{{model}}', prompt: '{{prompt}}', quality: 'high' };
+    const preview = await getAgentTool('provider_config_preview')!.execute(context, { connectionId: 'custom-existing',
+      connectionName: 'Existing Relay', baseUrl: 'https://gateway.example.com/v1', models: [{
+        modelId: 'image-pro', category: 'image', protocolSource: 'declarative', executionProtocol: fixed,
+      }] });
+    expect(preview.modelContent).toContain('落点检查失败');
+    expect(preview.modelContent).toContain('草稿不能保存');
+    expect(preview.modelContent).not.toContain('请立即调用');
+    const result = await getAgentTool('provider_config_apply')!.execute(context, { draftId: readDraftId(preview.modelContent) });
+    expect(result.status).toBe('error');
+    expect(useAppStore.getState().config.providers['custom-existing'].selectedModels).toEqual([previous]);
+  });
+  it.each(['plan', 'collaborative', 'autonomous'] as const)('keeps preview instructions aligned with %s policy', async (mode) => {
+    const preview = await getAgentTool('provider_config_preview')!.execute({ ...context, mode }, previewInput());
+    expect(preview.status).toBe('success');
+    if (mode === 'plan') {
+      expect(preview.modelContent).toContain('不得调用保存工具');
+      expect(preview.modelContent).not.toContain('请立即调用');
+    } else {
+      expect(preview.modelContent).toContain('若本轮开放 provider_config_apply');
+      expect(preview.modelContent).toContain('C 自主模式直接保存');
+    }
+    expect(fileMocks.saveConfig).not.toHaveBeenCalled();
+  });
+
   it('reports partial document reads without logging page text and continues from the original entry', async () => {
     const entryUrl = 'https://docs.example.com/start';
     useAppStore.setState({ agentTasks: [{
@@ -384,6 +474,9 @@ describe('provider config agent tools', () => {
       defaultFrameRate: expect.any(Object),
       allowFrameAndReferenceMix: expect.any(Object),
       inputModeCapabilities: expect.any(Object),
+      operationCapabilities: expect.any(Object),
+      automaticDurationValue: expect.any(Object),
+      maxVideoAudioReferences: expect.any(Object),
       inputConstraints: expect.any(Object),
     }));
     expect(capabilitySchema?.required).toEqual(['operations']);
@@ -420,8 +513,11 @@ describe('provider config agent tools', () => {
             requiresReference: true,
             ratios: ['16:9'],
             inputModeCapabilities: {
-              keyframe: { ratios: ['16:9'], defaultRatio: '16:9', requiresRatio: true },
+              keyframe: { ratios: ['16:9'], defaultRatio: '16:9', requiresRatio: true, automaticDurationOnly: true },
             },
+            operationCapabilities: { 'video-to-video': { ratios: ['16:9'], automaticDurationOnly: true } },
+            automaticDurationValue: -1,
+            maxVideoAudioReferences: 3,
             frameRates: [24, 30],
             defaultFrameRate: 24,
             allowFrameAndReferenceMix: false,
@@ -443,6 +539,66 @@ describe('provider config agent tools', () => {
       },
     }, context);
     expect(prepared).toMatchObject({ ok: true });
+  });
+
+  it('rejects unknown operation fields and positive automatic-duration values at the tool schema', () => {
+    const invalidOperation = declarativePreviewInput();
+    invalidOperation.models[0].videoCapability = { operations: ['text-to-video'],
+      operationCapabilities: { 'unsupported-operation': { ratios: ['16:9'] } } as never };
+    expect(prepareAgentToolCall({ callId: 'invalid-operation', toolId: 'provider_config_preview', input: invalidOperation }, context).ok).toBe(false);
+    const invalidDuration = declarativePreviewInput();
+    invalidDuration.models[0].videoCapability = { operations: ['text-to-video'], automaticDurationValue: 1 };
+    expect(prepareAgentToolCall({ callId: 'invalid-duration', toolId: 'provider_config_preview', input: invalidDuration }, context).ok).toBe(false);
+  });
+
+  it('exposes verified Seedance templates to assistant and MCP callers', () => {
+    const tool = getAgentTool('provider_config_preview')!;
+    const modelSchema = tool.inputSchema.properties?.models.items;
+    const templateSchema = modelSchema?.properties?.templateId;
+
+    expect(templateSchema).toMatchObject({
+      type: 'string',
+      enum: expect.arrayContaining([
+        '2.0-standard:volcengine',
+        '2.0-fast:apimart',
+        '2.5:lec',
+      ]),
+    });
+    expect(tool.description).toContain('Seedance 2.0/2.5');
+    expect(prepareAgentToolCall({
+      callId: 'call-seedance-template-preview',
+      toolId: 'provider_config_preview',
+      input: {
+        connectionName: 'Lec Seedance',
+        baseUrl: 'https://api.paipu.net',
+        models: [{ modelId: 'lec-gt-seedance-2-5-720p', templateId: '2.5:lec' }],
+      },
+    }, context)).toMatchObject({ ok: true });
+  });
+
+  it('exposes verified MiniMax H3 templates to assistant and MCP callers', () => {
+    const tool = getAgentTool('provider_config_preview')!;
+    const modelSchema = tool.inputSchema.properties?.models.items;
+    const templateSchema = modelSchema?.properties?.templateId;
+
+    expect(templateSchema).toMatchObject({
+      type: 'string',
+      enum: expect.arrayContaining([
+        'h3-standard:minimax',
+        'h3-standard:apimart',
+        'h3-max:aiping',
+      ]),
+    });
+    expect(tool.description).toContain('MiniMax H3/H3-Max');
+    expect(prepareAgentToolCall({
+      callId: 'call-h3-template-preview',
+      toolId: 'provider_config_preview',
+      input: {
+        connectionName: 'AI Ping H3',
+        baseUrl: 'https://api.aiping.cn',
+        models: [{ modelId: 'MiniMax-H3-Max', templateId: 'h3-max:aiping' }],
+      },
+    }, context)).toMatchObject({ ok: true });
   });
 
   it('exposes and executes the declarative protocol input without request examples', async () => {

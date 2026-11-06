@@ -1,3 +1,6 @@
+/**
+ * directorDeskWindowService — 回归测试：directorDeskWindowService。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const tauriMocks = vi.hoisted(() => ({

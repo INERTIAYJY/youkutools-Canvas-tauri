@@ -1,7 +1,17 @@
 /* Excalidraw-inspired canvas note controls. See doc/licenses/excalidraw-MIT.txt. */
+/* Xiaolai v3.126: https://github.com/lxgw/kose-font/releases/tag/v3.126
+   Full glyph set, converted to WOFF2; copyright and OFL: public/licenses/Xiaolai-OFL.txt. */
+@font-face {
+  font-family: 'Xiaolai';
+  src: url('/fonts/Xiaolai-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 .react-flow__panel.canvas-drawing-toolbar-slot.bottom.left {
   bottom: 0;
-  left: 50px;
+  left: 0;
   z-index: 40;
 }
 
@@ -10,12 +20,13 @@
   align-items: center;
   gap: 3px;
   padding: 4px;
-  max-width: calc(100vw - 80px);
+  max-width: calc(100vw - 32px);
   overflow-x: auto;
   border: 1px solid transparent;
   border-radius: 14px;
   background:
-    linear-gradient(var(--floating-surface-bg), var(--floating-surface-bg)) padding-box,
+    var(--appearance-panel-drawingToolbar-image, var(--appearance-surface-image, none)) padding-box,
+    linear-gradient(var(--appearance-panel-drawingToolbar-bg, var(--floating-surface-bg)), var(--appearance-panel-drawingToolbar-bg, var(--floating-surface-bg))) padding-box,
     var(--glass-bevel-border) border-box;
   box-shadow: var(--glass-shadow-floating);
   backdrop-filter: blur(var(--glass-blur-lg));
@@ -409,7 +420,7 @@
 @media (max-width: 900px) {
   .react-flow__panel.canvas-drawing-toolbar-slot.bottom.left {
     bottom: 52px;
-    max-width: calc(100vw - 80px);
+    max-width: calc(100vw - 32px);
   }
 
   .react-flow__panel.canvas-note-style-panel-slot.top.left {

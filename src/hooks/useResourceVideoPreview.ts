@@ -1,3 +1,6 @@
+/**
+ * useResourceVideoPreview — 管理资源视频浮层的来源与展示位置。
+ */
 import { useCallback, useState } from 'react';
 import { getConvertFileSrc } from '../services/fileService';
 

@@ -1,3 +1,6 @@
+/**
+ * directorSceneSchema — 回归测试：directorSceneSchema。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   DIRECTOR_SCENE_MAX_BYTES,

@@ -1,3 +1,6 @@
+/**
+ * assetNodeConnection — 解析资产卡片的真实节点端口并提交画布连线。
+ */
 import type { Connection } from '@xyflow/react';
 import type { BaseNodeData } from '../types';
 import type { InstalledPlugin } from '../types/plugin';

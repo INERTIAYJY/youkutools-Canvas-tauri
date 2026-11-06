@@ -1,3 +1,6 @@
+/**
+ * window-bootstrap — 初始化原生插件窗口与宿主之间的会话通信。
+ */
 (() => {
   'use strict';
 
@@ -69,6 +72,7 @@
   function createProps() {
     return Object.freeze({
       surface: context.surface,
+      host: context.host,
       get theme() { return context.theme; },
       get locale() { return context.locale; },
       node: context.node,

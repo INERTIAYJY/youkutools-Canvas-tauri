@@ -1,3 +1,6 @@
+/**
+ * dramaMentionPick — 回归测试：显式全局角色引用。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DRAMA_MENTION_MERGE_ALL,
@@ -7,7 +10,7 @@ import {
   emptyDramaAssetLibrary,
   parseDramaMentionId,
 } from '../../src/types/dramaAssets';
-import { resolveDramaActionMediaRef, resolveDramaAssetImageRef, resolveDramaVoiceRef } from '../../src/services/dramaAssetPrompt';
+import { findDramaAsset, resolveDramaActionMediaRef, resolveDramaAssetImageRef, resolveDramaVoiceRef } from '../../src/services/dramaAssetPrompt';
 import type { DramaCharacter } from '../../src/types/dramaAssets';
 import { useAppStore } from '../../src/store/useAppStore';
 import { collectPromptNodeMediaUrls, resolvePromptToChatContent, resolvePromptWithImageRefs, resolvePromptWithMediaRefs } from '../../src/services/ai/promptResolver';
@@ -32,6 +35,41 @@ function character(): DramaCharacter {
     ],
   } as DramaCharacter;
 }
+
+describe('显式全局角色引用', () => {
+  beforeEach(() => useAppStore.setState(useAppStore.getInitialState(), true));
+  it('keeps project and global identities separate even when their raw IDs match', () => {
+    const project = { ...character(), name: '项目角色' };
+    const global = { ...character(), name: '全局角色' };
+    const library = { ...emptyDramaAssetLibrary(), characters: [project] };
+    expect(findDramaAsset(library, 'char_1', [global])?.name).toBe('项目角色');
+    expect(findDramaAsset(library, 'global/char_1', [global])).toMatchObject({ id: 'global/char_1', name: '全局角色' });
+    expect(findDramaAsset(library, 'global/char_1')).toBeUndefined();
+    expect(findDramaAsset(emptyDramaAssetLibrary(), 'char_1', [global])).toBeUndefined();
+  });
+  it('resolves global appearance references through text and video prompt parsers', async () => {
+    const url = 'data:image/png;base64,Z2xvYmFs';
+    const global = { ...character(), referenceImages: [{ ...character().referenceImages![1], imageUrl: url }] };
+    useAppStore.setState({ globalCharacters: [global] });
+    const token = `@drama{${buildDramaMentionId('global/char_1', 'ref-side')}:全局角色}`;
+    const chat = await resolvePromptToChatContent(token);
+    expect(chat.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image_url', image_url: { url } })]));
+    const video = await resolvePromptWithMediaRefs(token, { preserveBindings: true });
+    expect(video.imageUrls).toEqual([url]);
+    const binding = video.segments!.find((segment) => typeof segment !== 'string');
+    expect(binding?.character?.id).toBe('global/char_1');
+  });
+  it('resolves a global description without leaking another project asset with the same ID', async () => {
+    const global = { ...character(), referenceImages: [], imageUrl: undefined, summary: '全局人物设定' };
+    useAppStore.setState({ globalCharacters: [global], dramaAssets: { ...emptyDramaAssetLibrary(), characters: [{ ...global, summary: '无关项目正文' }] } });
+    const chat = await resolvePromptToChatContent('@drama{global/char_1:全局角色}');
+    expect(chat.textContent).toContain('全局人物设定');
+    expect(chat.textContent).not.toContain('无关项目正文');
+    const workflowPrompt = resolveNodeReferences('@drama{global/char_1:全局角色}');
+    expect(workflowPrompt).toContain('全局人物设定');
+    expect(workflowPrompt).not.toContain('无关项目正文');
+  });
+});
 
 describe('@drama 选图后缀', () => {
   it('不带后缀时保持原样', () => {
@@ -68,8 +106,8 @@ describe('resolveDramaAssetImageRef 指定参考图', () => {
     expect(resolveDramaAssetImageRef(character(), [], 'ref-side')?.imageUrl).toBe('side.png');
   });
 
-  it('指定的参考图不存在时回落到主视觉，而不是没有图', () => {
-    expect(resolveDramaAssetImageRef(character(), [], 'ref-gone')?.imageUrl).toBe('front.png');
+  it('指定的参考图不存在时不替换为主视觉', () => {
+    expect(resolveDramaAssetImageRef(character(), [], 'ref-gone')).toBeNull();
   });
 });
 
@@ -251,7 +289,7 @@ describe('音频节点的角色声音引用', () => {
     useAppStore.setState({ dramaAssets: { ...emptyDramaAssetLibrary(), characters: [voiceCharacter()] } });
   });
 
-  it('音频候选先过滤再截取，只有图片、声音描述或空音频的角色不出现', () => {
+  it('音频候选只保留有可用声音的角色，只有图片、声音描述或空音频的角色不出现', () => {
     const silent = Array.from({ length: 21 }, (_, index) => ({
       ...character(), id: `silent-${index}`, voiceNotes: '温柔女声',
       voiceClips: [{ id: 'empty', kind: 'timbre' as const, audioUrl: ' ', transcript: '', createdAt: 0, updatedAt: 0 }],
@@ -262,15 +300,17 @@ describe('音频节点的角色声音引用', () => {
     expect(items[0]).toMatchObject({ id: 'char_1', kind: 'character', voice: { id: 'primary', url: voiceUrl } });
     expect(resolveDramaMentionItems(library, '林小', 'ai-audio')).toHaveLength(1);
     expect(resolveDramaMentionItems(library, '不存在', 'ai-audio')).toEqual([]);
-    expect(resolveDramaMentionItems(library, '', 'ai-image')).toHaveLength(20);
+    expect(resolveDramaMentionItems(library, '', 'ai-image')).toHaveLength(22);
     expect(resolveDramaMentionItems({ ...library, characters: silent }, '', 'ai-audio')).toEqual([]);
   });
 
   it('场景和道具只在原来的非音频选择器中出现', () => {
+    const visual = character();
+    const referenceImages = visual.referenceImages?.map(({ kind: _kind, ...reference }) => ({ ...reference, label: '' }));
     const library = {
       ...emptyDramaAssetLibrary(), characters: [voiceCharacter()],
-      scenes: [{ ...character(), id: 'scene', kind: 'scene' as const }],
-      props: [{ ...character(), id: 'prop', kind: 'prop' as const }],
+      scenes: [{ ...visual, id: 'scene', kind: 'scene' as const, referenceImages }],
+      props: [{ ...visual, id: 'prop', kind: 'prop' as const, referenceImages }],
     };
     expect(resolveDramaMentionItems(library, '', 'ai-audio').map((item) => item.id)).toEqual(['char_1']);
     expect(resolveDramaMentionItems(library, '').map((item) => item.id)).toEqual(['char_1', 'scene', 'prop']);

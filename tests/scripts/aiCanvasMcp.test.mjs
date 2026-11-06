@@ -1,3 +1,6 @@
+/**
+ * aiCanvasMcp — 回归测试：AI Canvas MCP stdio adapter。
+ */
 import net from 'node:net';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -126,5 +129,20 @@ describe('AI Canvas MCP stdio adapter', () => {
       isError: true,
       content: [{ type: 'text', text: '操作被用户拒绝' }],
     });
+  });
+
+  it('sends one cancellation when its local deadline expires without retrying the call', async () => {
+    const frames = [];
+    const client = new LoopbackClient({ port: 43123, token: TOKEN, timeoutMs: 5 });
+    client.socket = { destroyed: false, write: (frame) => { frames.push(JSON.parse(frame)); }, destroy() {} };
+    try {
+      await expect(client.request('tools/call', { name: 'slow-tool', arguments: {} })).rejects.toThrow('等待超时');
+      expect(frames).toHaveLength(2);
+      expect(frames[0].method).toBe('tools/call');
+      expect(frames[1]).toMatchObject({ method: 'requests/cancel', params: { requestId: frames[0].id } });
+      expect(client.pending.size).toBe(0);
+    } finally {
+      client.close();
+    }
   });
 });

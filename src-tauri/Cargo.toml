@@ -1,11 +1,17 @@
 [package]
 name = "ai-canvas-tauri"
-version = "0.9.11"
+version = "0.10.28"
 edition = "2021"
 
 [lib]
 name = "ai_canvas_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# 保留未变化 crate 的编译结果；不保存体积较大的 crate 内部增量中间文件。
+# test 继承 dev；debug = 1 保留基本调试信息，不生成完整类型和变量信息。
+[profile.dev]
+incremental = false
+debug = 1
 
 [features]
 default = ["local-onnx"]
@@ -33,19 +39,36 @@ tauri-plugin-process = "2"
 trash = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust_xlsxwriter = "0.80"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
+# 进度只由原生读取，避免 Renderer WebSocket 的 Origin 与 mixed-content 限制。
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "=0.3.32"
 axum = "0.8"
 rmcp = { version = "3.1.4", default-features = false, features = ["server", "transport-streamable-http-server"] }
 tower = { version = "0.5", features = ["limit"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+# Project-scoped S3 only; a custom HTTP connector disables redirects and automatic retries.
+object_store = { version = "=0.12.4", default-features = false, features = ["aws"] }
 base64 = "0.22"
 fs2 = "0.4"
 flate2 = "1"
 sha2 = "0.10"
+# ComfyUI 模型去重复用 Czkawka 完整文件散列；关闭可选格式功能，不启用其缓存或写入工具。
+czkawka_core = { version = "=10.0.0", default-features = false }
+file-id = "=0.2.3"
 tar = "0.4"
+# Skill ZIP 导入复用锁文件中的版本，仅启用常用的 Deflate 解压。
+zip = { version = "=2.4.2", default-features = false, features = ["deflate-flate2"] }
+sevenz-rust = { version = "=0.6.1", default-features = false }
 image = "0.25"
+# 参考 PNG 只做无损重编码，不启用命令行、并行或 Zopfli 功能。
+oxipng = { version = "=10.2.1", default-features = false }
+# JPEG 直接优化原始 DCT 系数；使用内置源码静态编译，不依赖系统动态库。
+turbojpeg-sys = { version = "=1.2.0", default-features = false, features = ["cmake"] }
 rquickjs = "0.12.2"
 # 本地语音转文本：解码 mp3 / wav / m4a / flac / ogg。默认已含 wav、flac、ogg、vorbis、pcm
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4"] }
@@ -73,7 +96,11 @@ windows = { version = "0.58", features = [
   "Win32_System_Memory",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
   "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_UI_Shell",
+  "Win32_System_Com",
   "Win32_Foundation",
 ] }
 

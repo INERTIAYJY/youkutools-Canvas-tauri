@@ -1,3 +1,6 @@
+/**
+ * build-mcp-adapter — 打包桌面端内置的 MCP stdio 适配器。
+ */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

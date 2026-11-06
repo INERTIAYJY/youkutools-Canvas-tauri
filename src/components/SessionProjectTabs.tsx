@@ -10,6 +10,7 @@ import { useAppStore } from '../store/useAppStore';
 import { seriesOwnerId } from '../store/store.utils';
 import type { CanvasProject } from '../types';
 import ProjectSettingsPopover from './ProjectSettingsPopover';
+import { useT } from '../i18n';
 
 const MAX_SESSION_PROJECTS = 5;
 const SESSION_PROJECT_IDS_KEY = 'canvas-session-project-ids';
@@ -36,6 +37,7 @@ function saveSessionProjectIds(ids: string[]): void {
 }
 
 export default function SessionProjectTabs() {
+  const t = useT();
   const { projects, currentProjectId, switchProject } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -117,28 +119,20 @@ export default function SessionProjectTabs() {
 
   return (
     <div
-      className="group/session fixed left-1/2 top-3 z-[150] max-w-[min(72vw,640px)]
+      className="session-project-tabs group/session fixed left-1/2 top-3 z-[150] max-w-[min(72vw,640px)]
                  -translate-x-1/2 select-none sm:max-w-[min(52vw,640px)]"
+      data-settings-open={settingsOpen ? 'true' : 'false'}
     >
       <span
         aria-hidden="true"
-        className={`pointer-events-none absolute left-1/2 top-1 h-0.5 w-8 -translate-x-1/2
-                    rounded-full bg-canvas-text-muted/35 transition-opacity duration-150 ${
-                      settingsOpen
-                        ? 'opacity-0'
-                        : 'group-hover/session:opacity-0 group-focus-within/session:opacity-0'
-                    }`}
+        data-onboarding-target="projects"
+        className="session-project-hint pointer-events-none absolute left-1/2 top-1 h-0.5 w-8
+                   rounded-full bg-canvas-text-muted"
       />
       <nav
-        aria-label="最近打开的项目"
-        className={`app-header max-w-full rounded-2xl border border-canvas-border bg-canvas-surface/60 p-1
-                    shadow-lg shadow-black/30 backdrop-blur-xl
-                    transition-[transform,opacity] duration-200 ease-out will-change-transform
-                    motion-reduce:transition-opacity ${
-                      settingsOpen
-                        ? 'translate-y-0 opacity-100 pointer-events-auto'
-                        : '-translate-y-[calc(100%+0.5rem)] opacity-0 pointer-events-none group-hover/session:translate-y-0 group-hover/session:opacity-100 group-hover/session:pointer-events-auto group-focus-within/session:translate-y-0 group-focus-within/session:opacity-100 group-focus-within/session:pointer-events-auto'
-                    }`}
+            aria-label={t('最近打开的项目')}
+        className="session-project-nav app-header max-w-full rounded-2xl border border-canvas-border bg-canvas-surface/60 p-1
+                   shadow-lg shadow-black/30 backdrop-blur-xl"
       >
         <div
           ref={tabListRef}
@@ -210,10 +204,10 @@ export default function SessionProjectTabs() {
                   <motion.button
                     ref={settingsButtonRef}
                     type="button"
-                    aria-label="打开当前项目设置"
+                  aria-label={t('打开当前项目设置')}
                     aria-expanded={settingsOpen}
                     aria-controls="project-settings-popover"
-                    data-tooltip="项目设置"
+                  data-tooltip={t('项目设置')}
                     disabled={switchingProjectId !== null}
                     initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}

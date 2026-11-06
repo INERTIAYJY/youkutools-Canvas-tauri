@@ -1,3 +1,6 @@
+/**
+ * cameraStudio — 回归测试：XiaoLuo camera studio prompt。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CAMERA_STATE,

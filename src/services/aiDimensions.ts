@@ -31,20 +31,22 @@ export function normalizeVideoDurationSeconds(
 export function videoFramesFromDuration(
   durationSeconds: number | undefined,
   fps: number | undefined,
+  maxSeconds: number = VIDEO_DURATION_MAX_SECONDS,
 ): number {
-  return normalizeVideoDurationSeconds(durationSeconds) * normalizeVideoFps(fps) + 1;
+  return normalizeVideoDurationSeconds(durationSeconds, maxSeconds) * normalizeVideoFps(fps) + 1;
 }
 
 /** 将旧节点保存的总帧数反算为最接近的整数秒。 */
 export function videoDurationFromFrames(
   frameCount: number | undefined,
   fps: number | undefined,
+  maxSeconds: number = VIDEO_DURATION_MAX_SECONDS,
 ): number {
   if (!Number.isFinite(frameCount) || Number(frameCount) <= 0) {
     return DEFAULT_VIDEO_DURATION_SECONDS;
   }
   const duration = (Math.round(Number(frameCount)) - 1) / normalizeVideoFps(fps);
-  return normalizeVideoDurationSeconds(duration);
+  return normalizeVideoDurationSeconds(duration, maxSeconds);
 }
 
 /** 优先使用新秒数字段；旧节点缺失该字段时由总帧数兼容反算。maxSeconds 可覆盖通用 15s 上限。 */
@@ -56,7 +58,7 @@ export function resolveVideoDurationSeconds(
 ): number {
   return Number.isFinite(durationSeconds)
     ? normalizeVideoDurationSeconds(durationSeconds, maxSeconds)
-    : videoDurationFromFrames(frameCount, fps);
+    : videoDurationFromFrames(frameCount, fps, maxSeconds);
 }
 
 /** 把 480p/720p 这类档位换算成长边像素，供只认数字长边的本地工作流使用。 */

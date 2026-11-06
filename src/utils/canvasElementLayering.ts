@@ -1,3 +1,6 @@
+/**
+ * canvasElementLayering — 为画布节点与连线设置一致的渲染层级。
+ */
 import type { Edge, Node } from '@xyflow/react';
 
 export const CANVAS_EDGE_Z_INDEX = 0;

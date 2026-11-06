@@ -1,3 +1,6 @@
+/**
+ * agentInterjection — 回归测试：agent interjection buffer。
+ */
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   closeAgentInterjectionBuffer,

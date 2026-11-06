@@ -238,7 +238,13 @@ export function buildDreaminaVideoParams(
   if (isFramePair) {
     return { ...base, kind: 'frames2video', first: firstFrame.url, last: lastFrame.url };
   }
-  if (videos.length > 0 || audios.length > 0 || images.length > 1) {
+  if (firstFrame && images.length === 1 && videos.length === 0 && audios.length === 0) {
+    return { ...base, kind: 'image2video', image: firstFrame.url };
+  }
+  if (firstFrame || lastFrame) {
+    throw new Error('即梦首尾帧模式需要单独的首帧或一组首尾帧，不能仅提供尾帧或混用其他参考素材；请调整参考角色');
+  }
+  if (videos.length > 0 || audios.length > 0 || images.length > 0) {
     return {
       ...base,
       kind: 'multimodal2video',
@@ -247,9 +253,6 @@ export function buildDreaminaVideoParams(
       videos: videos.map((item) => item.url),
       audios: audios.map((item) => item.url),
     };
-  }
-  if (images.length === 1) {
-    return { ...base, kind: 'image2video', image: images[0].url };
   }
   return { ...base, kind: 'text2video', ratio };
 }
@@ -263,6 +266,7 @@ export async function generateDreaminaVideo(opts: {
   ratio?: string;
   duration?: number;
   resolution?: string;
+  beforeSubmit?: () => void | Promise<void>;
 }, externalSignal?: AbortSignal): Promise<{ url: string }> {
   const nodeSignal = opts.nodeId ? registerNodePolling(opts.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
@@ -270,6 +274,7 @@ export async function generateDreaminaVideo(opts: {
     : nodeSignal ?? externalSignal;
   try {
     const params = buildDreaminaVideoParams(opts);
+    if (opts.beforeSubmit) await opts.beforeSubmit();
 
     // 预存待续任务（在 invoke 之前），确保关窗重启后能恢复
     if (opts.nodeId) {

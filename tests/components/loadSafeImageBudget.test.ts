@@ -1,3 +1,6 @@
+/**
+ * loadSafeImageBudget — 回归测试：loadSafeImage pre-decode guard。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadSafeImage } from '../../src/components/nodes/shared/image/imageUtils';
 

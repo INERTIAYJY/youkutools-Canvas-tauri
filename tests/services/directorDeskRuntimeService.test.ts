@@ -1,3 +1,6 @@
+/**
+ * directorDeskRuntimeService — 回归测试：directorDeskRuntimeService。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

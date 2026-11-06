@@ -1,3 +1,6 @@
+/**
+ * videoEditorInspectionService — 探测受控剪辑媒体并按限定时间抽帧。
+ */
 import { VideoEditorControlError } from "../types/videoEditorControl";
 /** MCP 验片仅按当前画布节点取素材，帧图只作为瞬时富内容返回。 */
 import { useAppStore } from '../store/useAppStore';

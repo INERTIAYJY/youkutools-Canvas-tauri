@@ -1,4 +1,7 @@
-﻿@tailwind base;
+/**
+ * base — 基础主题变量、字体与全局重置的样式定义。
+ */
+@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
@@ -13,14 +16,23 @@
   color-scheme: dark;
 
   /* Theme Layer / 主题层 ── */
+  /* 外框用独立的玻璃色，避免跟着面板底色变成实心边条。 */
+  --window-glass-rgb: 255 255 255;
+  --window-glass-tint: rgb(var(--window-glass-rgb) / 0.20);
+
   --theme-bg: #0a0a0f;
+  /* 开屏遮罩在自定义透明背景下仍须遮住未就绪的画布。 */
+  --splash-base-bg: #0a0a0f;
   --theme-surface: #14141c;
+  --dialog-surface-bg: var(--theme-surface);
+  --appearance-surface-image: none;
   --theme-card: #1a1a26;
   --theme-border: #2a2a3a;
   --theme-hover: #252535;
   --theme-text: #dddde4;
   --theme-text-secondary: #8888a0;
   --theme-text-muted: #7d7d91;
+  --theme-input-bg: rgba(0, 0, 0, 0.25);
   --canvas-edge: #33334a;
 
   /* Brand (Indigo) / 品牌色（靛蓝）── */
@@ -28,6 +40,7 @@
   --brand-light: #818cf8;
   --brand-hover: #818cf8;
   --brand-pale: #a5b4fc;
+  --brand-contrast: #ffffff;
   --brand-alpha-04: rgba(99, 102, 241, 0.04);
   --brand-alpha-05: rgba(99, 102, 241, 0.05);
   --brand-alpha-08: rgba(99, 102, 241, 0.08);
@@ -37,6 +50,26 @@
   --brand-alpha-20: rgba(99, 102, 241, 0.20);
   --brand-alpha-25: rgba(99, 102, 241, 0.25);
   --brand-alpha-30: rgba(99, 102, 241, 0.30);
+
+  /* Button component tokens / 按钮令牌；默认配色随主题，自定义由外观运行时覆盖。 */
+  --button-radius: 7px;
+  --button-radius-sm: 6px;
+  --button-radius-lg: 12px;
+  --button-border-width: 1px;
+  --button-bg: var(--white-alpha-04);
+  --button-hover-bg: var(--white-alpha-08);
+  --button-text: var(--theme-text);
+  --button-border: var(--white-alpha-08);
+  --button-hover-border: var(--white-alpha-12);
+  --button-secondary-bg: var(--theme-surface);
+  --button-secondary-hover-bg: var(--theme-hover);
+  --button-secondary-border: var(--theme-border);
+  --button-secondary-hover-border: var(--border-secondary);
+  --button-primary-bg: var(--brand);
+  --button-primary-hover-bg: var(--brand-hover);
+  --button-primary-text: var(--brand-contrast);
+  --button-primary-border: color-mix(in srgb, var(--brand) 80%, var(--theme-text));
+  --button-primary-hover-border: var(--brand-hover);
 
   /* Node Type Colors / 节点类型颜色 ── */
   --node-text: #6366f1;
@@ -275,21 +308,24 @@
   color-scheme: light;
 
   /* Theme Layer / 主题层 ── */
-  --theme-bg: #F4F6FB;
+  --theme-bg: #EEF2F7;
+  --splash-base-bg: #EEF2F7;
   --theme-surface: #FFFFFF;
-  --theme-card: #F8FAFD;
-  --theme-border: #E4E8F2;
-  --theme-hover: #EEF1F8;
-  --theme-text: #33364D;
-  --theme-text-secondary: #6E7488;
-  --theme-text-muted: #767D92;
-  --canvas-edge: #B1B1B7;
+  --theme-card: #F7F9FC;
+  --theme-border: #C7D0DF;
+  --theme-hover: #E5EAF2;
+  --theme-text: #252A38;
+  --theme-text-secondary: #4F5A6E;
+  --theme-text-muted: #657084;
+  --theme-input-bg: #FFFFFF;
+  --canvas-edge: #71809A;
 
   /* Brand — macaron periwinkle / 品牌色 — 马卡龙紫罗兰 ── */
-  --brand: #7280E4;
-  --brand-light: #5A69D4;
-  --brand-hover: #5F6DD8;
-  --brand-pale: #4F5ECB;
+  --brand: #5368D6;
+  --brand-light: #4053C0;
+  --brand-hover: #475BCB;
+  --brand-pale: #3D50B8;
+  --brand-contrast: #ffffff;
 
   /* Node type colors — macaron / 节点类型颜色 — 马卡龙 ── */
   --node-text: #7280E4;
@@ -429,15 +465,15 @@
   --white-alpha-15: rgba(51, 54, 77, 0.14);
 
   /* Border Variants / 边框变体 ── */
-  --separator-color: rgba(51, 54, 77, 0.12);
-  --border-subtle: rgba(51, 54, 77, 0.06);
-  --border-secondary: #DCE1EE;
-  --border-focus: rgba(114, 128, 228, 0.45);
+  --separator-color: rgba(37, 42, 56, 0.18);
+  --border-subtle: rgba(37, 42, 56, 0.12);
+  --border-secondary: #C7D0DF;
+  --border-focus: rgba(83, 104, 214, 0.52);
 
   /* Scrollbar / 滚动条 ── */
-  --scrollbar-thumb: #CBD1E0;
-  --scrollbar-thumb-hover: #B0B7CB;
-  --scrollbar-thumb-active: #949CB3;
+  --scrollbar-thumb: #B3BDCE;
+  --scrollbar-thumb-hover: #8996AA;
+  --scrollbar-thumb-active: #71809A;
 
   /* Glass / Frosted Surface / 毛玻璃表面 ── */
   --glass-bg: rgba(255, 255, 255, 0.95);
@@ -446,6 +482,7 @@
   --glass-panel-bg: rgba(252, 253, 255, 0.86);
   --glass-ring: rgba(51, 54, 77, 0.10);
   --glass-ring-strong: rgba(51, 54, 77, 0.06);
+  --floating-surface-bg: color-mix(in srgb, var(--theme-surface) 70%, transparent);
   --minimap-mask: color-mix(in srgb, var(--theme-text) 14%, transparent);
   --glass-bevel-border: linear-gradient(
     160deg,
@@ -472,34 +509,59 @@
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+   Theme-aware opacity utilities / 跟随主题的透明度工具类
+   Tailwind cannot emit opacity variants for colors backed by a plain CSS
+   variable (for example `bg-brand/15`). Define the variants here so they work
+   in dark, light, system, and imported themes alike.
+   ════════════════════════════════════════════════════════════════════════ */
+.text-canvas-text\/90 { color: color-mix(in srgb, var(--theme-text) 90%, transparent); }
+.text-canvas-text-secondary\/80 { color: color-mix(in srgb, var(--theme-text-secondary) 80%, transparent); }
+.bg-canvas-bg\/60 { background-color: color-mix(in srgb, var(--theme-bg) 60%, transparent); }
+.bg-canvas-surface\/60 { background-color: color-mix(in srgb, var(--theme-surface) 60%, transparent); }
+.bg-canvas-surface\/80 { background-color: color-mix(in srgb, var(--theme-surface) 80%, transparent); }
+.bg-canvas-surface\/95 { background-color: color-mix(in srgb, var(--theme-surface) 95%, transparent); }
+.bg-canvas-card\/80 { background-color: color-mix(in srgb, var(--theme-card) 80%, transparent); }
+.bg-canvas-card\/95 { background-color: color-mix(in srgb, var(--theme-card) 95%, transparent); }
+.bg-canvas-hover\/80 { background-color: color-mix(in srgb, var(--theme-hover) 80%, transparent); }
+.bg-canvas-text-muted\/60 { background-color: color-mix(in srgb, var(--theme-text-muted) 60%, transparent); }
+.bg-brand\/10 { background-color: var(--brand-alpha-10); }
+.bg-brand\/15 { background-color: var(--brand-alpha-15); }
+.border-brand\/30 { border-color: var(--brand-alpha-30); }
+.border-brand\/40 { border-color: color-mix(in srgb, var(--brand) 40%, transparent); }
+.border-brand-light\/50 { border-color: color-mix(in srgb, var(--brand-light) 50%, transparent); }
+.border-canvas-border\/80 { border-color: color-mix(in srgb, var(--theme-border) 80%, transparent); }
+.ring-brand\/15 { --tw-ring-color: var(--brand-alpha-15); }
+.shadow-brand\/30 { --tw-shadow-color: var(--brand-alpha-30); }
+
+/* ════════════════════════════════════════════════════════════════════════
    Light Theme — Tailwind Class Overrides / 浅色主题 — Tailwind 类覆盖
    Tailwind resolves colors at build time; override generated utility classes here.
    Tailwind 在构建时解析颜色，此处覆盖生成的工具类。
    ════════════════════════════════════════════════════════════════════════ */
-[data-theme='light'] .text-canvas-text { color: #33364D; }
-[data-theme='light'] .text-canvas-text\/90 { color: rgb(51 54 77 / 0.9); }
-[data-theme='light'] .focus\:text-canvas-text\/90:focus { color: rgb(51 54 77 / 0.9); }
-[data-theme='light'] .text-canvas-text-secondary { color: #6E7488; }
-[data-theme='light'] .text-canvas-text-secondary\/80 { color: rgb(110 116 136 / 0.8); }
-[data-theme='light'] .text-canvas-text-muted { color: #767D92; }
+[data-theme='light'] .text-canvas-text { color: var(--theme-text); }
+[data-theme='light'] .text-canvas-text\/90 { color: color-mix(in srgb, var(--theme-text) 90%, transparent); }
+[data-theme='light'] .focus\:text-canvas-text\/90:focus { color: color-mix(in srgb, var(--theme-text) 90%, transparent); }
+[data-theme='light'] .text-canvas-text-secondary { color: var(--theme-text-secondary); }
+[data-theme='light'] .text-canvas-text-secondary\/80 { color: color-mix(in srgb, var(--theme-text-secondary) 80%, transparent); }
+[data-theme='light'] .text-canvas-text-muted { color: var(--theme-text-muted); }
 [data-theme='light'] .hover\:text-canvas-text:hover { color: var(--theme-text); }
 [data-theme='light'] .hover\:text-canvas-text-secondary:hover { color: var(--theme-text-secondary); }
 
-[data-theme='light'] .bg-canvas-bg { background-color: #F4F6FB; }
-[data-theme='light'] .bg-canvas-bg\/60 { background-color: rgb(244 246 251 / 0.6); }
+[data-theme='light'] .bg-canvas-bg { background-color: var(--theme-bg); }
+[data-theme='light'] .bg-canvas-bg\/60 { background-color: color-mix(in srgb, var(--theme-bg) 60%, transparent); }
 /* app-box 在浅色主题下背景透明，由 CanvasBackground 的米白层负责 */
 [data-theme='light'] .app-box { background-color: transparent; }
-[data-theme='light'] .bg-canvas-surface { background-color: #FFFFFF; }
-[data-theme='light'] .bg-canvas-surface\/60 { background-color: rgb(255 255 255 / 0.6); }
-[data-theme='light'] .bg-canvas-surface\/80 { background-color: rgb(255 255 255 / 0.8); }
-[data-theme='light'] .bg-canvas-surface\/95 { background-color: rgb(255 255 255 / 0.95); }
-[data-theme='light'] .bg-canvas-card { background-color: #F8FAFD; }
-[data-theme='light'] .bg-canvas-card\/80 { background-color: rgb(248 250 253 / 0.8); }
-[data-theme='light'] .bg-canvas-card\/95 { background-color: rgb(248 250 253 / 0.95); }
-[data-theme='light'] .bg-canvas-hover { background-color: #EEF1F8; }
+[data-theme='light'] .bg-canvas-surface { background-color: var(--theme-surface); }
+[data-theme='light'] .bg-canvas-surface\/60 { background-color: color-mix(in srgb, var(--theme-surface) 60%, transparent); }
+[data-theme='light'] .bg-canvas-surface\/80 { background-color: color-mix(in srgb, var(--theme-surface) 80%, transparent); }
+[data-theme='light'] .bg-canvas-surface\/95 { background-color: color-mix(in srgb, var(--theme-surface) 95%, transparent); }
+[data-theme='light'] .bg-canvas-card { background-color: var(--theme-card); }
+[data-theme='light'] .bg-canvas-card\/80 { background-color: color-mix(in srgb, var(--theme-card) 80%, transparent); }
+[data-theme='light'] .bg-canvas-card\/95 { background-color: color-mix(in srgb, var(--theme-card) 95%, transparent); }
+[data-theme='light'] .bg-canvas-hover { background-color: var(--theme-hover); }
 [data-theme='light'] .hover\:bg-canvas-border:hover { background-color: var(--theme-border); }
 [data-theme='light'] .hover\:bg-canvas-card:hover { background-color: var(--theme-card); }
-[data-theme='light'] .hover\:bg-canvas-hover:hover { background-color: #EEF1F8; }
+[data-theme='light'] .hover\:bg-canvas-hover:hover { background-color: var(--theme-hover); }
 [data-theme='light'] .hover\:bg-canvas-hover\/80:hover {
   background-color: color-mix(in srgb, var(--theme-hover) 80%, transparent);
 }
@@ -509,9 +571,9 @@
   background-color: color-mix(in srgb, var(--theme-text-muted) 60%, transparent);
 }
 
-[data-theme='light'] .border-canvas-border { border-color: #E4E8F2; }
-[data-theme='light'] .border-border-subtle { border-color: rgba(51, 54, 77, 0.06); }
-[data-theme='light'] .border-border-secondary { border-color: #DCE1EE; }
+[data-theme='light'] .border-canvas-border { border-color: var(--theme-border); }
+[data-theme='light'] .border-border-subtle { border-color: var(--border-subtle); }
+[data-theme='light'] .border-border-secondary { border-color: var(--border-secondary); }
 [data-theme='light'] .hover\:border-canvas-border\/80:hover {
   border-color: color-mix(in srgb, var(--theme-border) 80%, transparent);
 }
@@ -520,9 +582,9 @@
   border-color: var(--theme-text-secondary);
 }
 
-[data-theme='light'] .shadow-canvas-border { --tw-shadow-color: #E4E8F2; }
-[data-theme='light'] .ring-canvas-border { --tw-ring-color: #E4E8F2; }
-[data-theme='light'] .divide-canvas-border { --tw-divide-opacity: 1; border-color: rgb(228 232 242 / var(--tw-divide-opacity, 1)); }
+[data-theme='light'] .shadow-canvas-border { --tw-shadow-color: var(--theme-border); }
+[data-theme='light'] .ring-canvas-border { --tw-ring-color: var(--theme-border); }
+[data-theme='light'] .divide-canvas-border { --tw-divide-opacity: 1; border-color: var(--theme-border); }
 
 /* Accent utilities resolve to dark-theme hexes at build time; re-point them at the
    macaron tokens so the light theme stays in one palette.
@@ -765,18 +827,17 @@ body {
   -webkit-overflow-scrolling: auto;
 }
 
-/* 主窗口玻璃外框：真实留出 5px 透明带，内外高光分别勾勒窗口与内容边缘。 */
+/* 主窗口玻璃外框：留出 5px 透明磨砂带，不加内外轮廓高光。 */
 .app-shell {
   --app-shell-inset: 0px;
   /* 内置聊天助手面板尺寸；操作记录浮层按此让位 */
-  --chat-panel-width: 400px;
+  --chat-panel-width: 480px;
   --chat-panel-inset: 12px;
   --app-shell-content-radius: 16px;
   isolation: isolate;
 }
 
-.app-shell::before,
-.app-shell::after {
+.app-shell::before {
   position: absolute;
   pointer-events: none;
   content: '';
@@ -787,32 +848,20 @@ body {
 .app-shell::before {
   z-index: 0;
   inset: 0;
-  border: 1px solid var(--glass-ring);
+  padding: 5px;
   border-radius: 16px;
-  background:
-    linear-gradient(
-      145deg,
-      var(--glass-ring) 0%,
-      var(--white-alpha-04) 34%,
-      color-mix(in srgb, var(--brand) 18%, transparent) 68%,
-      var(--white-alpha-08) 100%
-    ),
-    var(--floating-surface-bg);
-  box-shadow:
-    inset 0 0 0 1px var(--white-alpha-08),
-    inset 0 0 0 4px var(--white-alpha-03),
-    0 18px 48px var(--black-alpha-30);
-  /* 避免画布变化时对整窗执行背景模糊；5px 色带仍由渐变和双层高光塑造。 */
-}
-
-.app-shell::after {
-  z-index: 2;
-  inset: 4px;
-  border: 1px solid var(--glass-ring-strong);
-  border-radius: 12px;
-  box-shadow:
-    inset 0 1px 0 var(--white-alpha-10),
-    0 0 10px var(--white-alpha-06);
+  background: var(--window-glass-tint);
+  /* 只露出 5px 外框的磨砂层，中间挖空，不给应用内容叠一层玻璃。 */
+  -webkit-mask:
+    linear-gradient(rgb(var(--window-glass-rgb)) 0 0) content-box,
+    linear-gradient(rgb(var(--window-glass-rgb)) 0 0);
+  mask:
+    linear-gradient(rgb(var(--window-glass-rgb)) 0 0) content-box,
+    linear-gradient(rgb(var(--window-glass-rgb)) 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  -webkit-backdrop-filter: blur(12px) saturate(115%);
+  backdrop-filter: blur(12px) saturate(115%);
 }
 
 .app-shell--glass-frame {
@@ -820,9 +869,13 @@ body {
   --app-shell-content-radius: 12px;
 }
 
-.app-shell--glass-frame::before,
-.app-shell--glass-frame::after {
+.app-shell--glass-frame::before {
   opacity: 1;
+}
+
+/* 浅色下稍微加强玻璃底色，仍然透出窗口后面的颜色。 */
+[data-theme='light'] .app-shell {
+  --window-glass-tint: rgb(var(--window-glass-rgb) / 0.26);
 }
 
 .app-shell__content {
@@ -897,6 +950,7 @@ html[data-performance-mode] body[data-tauri-window] {
 
 body[data-tauri-window] > :is(
   .fixed.inset-0,
+  .ai-dialog-expanded-backdrop,
   .assets-panel-backdrop,
   .matting-overlay,
   .point-edit-overlay,
@@ -931,9 +985,14 @@ body[data-tauri-window] .app-shell__content > :is(
 }
 
 /* 展开蒙层是 button，显式的 100% 尺寸会抵消右侧和底部 inset。 */
+body[data-tauri-window] > .ai-dialog-expanded-backdrop,
 body[data-tauri-window] .app-shell__content > .ai-dialog-expanded-backdrop {
   width: auto;
   height: auto;
+}
+/* 节点放大遮罩覆盖悬浮导航预留区，仅保留窗口玻璃外框。 */
+body[data-tauri-window][data-sidebar-floating] > .ai-dialog-expanded-backdrop {
+  left: var(--window-overlay-right);
 }
 
 /* PointEdit 通过 portal 挂载到 body，蒙层视觉与项目内置图片工具保持一致。 */
@@ -995,8 +1054,8 @@ textarea:focus {
   outline: none;
 }
 
-/* Native selects keep their platform popup, while the closed control matches the app UI. */
-select:not([multiple]):not([size]) {
+/* Native selects keep their platform popup; custom Select's hidden native fallback stays hidden. */
+select:not(.ui-select__native):not([multiple]):not([size]) {
   -webkit-appearance: none;
   appearance: none;
   padding-inline-end: 30px;
@@ -1013,7 +1072,7 @@ select:not([multiple]):not([size]) {
   text-overflow: ellipsis;
 }
 
-select:not([multiple]):not([size]):disabled {
+select:not(.ui-select__native):not([multiple]):not([size]):disabled {
   cursor: var(--cursor-not-allowed, not-allowed);
   opacity: 0.55;
 }
@@ -1034,7 +1093,7 @@ select option:disabled {
 }
 
 @media (forced-colors: active) {
-  select:not([multiple]):not([size]) {
+  select:not(.ui-select__native):not([multiple]):not([size]) {
     -webkit-appearance: auto;
     appearance: auto;
     padding-inline-end: revert;
@@ -1133,11 +1192,17 @@ select option:disabled {
    Reduced Motion — accessibility / 减少动效 — 无障碍
    ════════════════════════════════════════════════════════════════════════ */
 @media (prefers-reduced-motion: reduce) {
-  *,
+  /* 保留加载指示器的旋转，避免等待状态看起来像卡住。 */
+  *:not(.animate-spin):not([class*='spinner']),
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  *,
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
@@ -1148,12 +1213,22 @@ select option:disabled {
   }
 }
 
+.app-header {
+  --canvas-panel-bg: var(--appearance-panel-projectBar-bg, var(--floating-surface-bg));
+  --canvas-panel-image: var(--appearance-panel-projectBar-image, var(--appearance-surface-image, none));
+}
+.footer-toolbar {
+  --canvas-panel-bg: var(--appearance-panel-viewportToolbar-bg, var(--floating-surface-bg));
+  --canvas-panel-image: var(--appearance-panel-viewportToolbar-image, var(--appearance-surface-image, none));
+}
 .app-header,
+.episode-workbench,
 .footer-toolbar {
   padding: 4px;
   border-color: transparent;
   background:
-    linear-gradient(var(--floating-surface-bg), var(--floating-surface-bg)) padding-box,
+    var(--canvas-panel-image, var(--appearance-surface-image, none)) padding-box,
+    linear-gradient(var(--canvas-panel-bg, var(--floating-surface-bg)), var(--canvas-panel-bg, var(--floating-surface-bg))) padding-box,
     var(--glass-bevel-border) border-box;
   box-shadow: var(--glass-shadow-floating, var(--tw-shadow));
 }

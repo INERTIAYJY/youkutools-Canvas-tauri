@@ -1,13 +1,19 @@
+/**
+ * assistantStreamProtocol — 回归测试：assistant custom protocol boundary。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildAssistantSystemPrompt,
   resolveAssistantModel,
   streamAssistantReply,
 } from '../../src/services/ai/assistantStream';
-import { runAssistantPipeline } from '../../src/services/chat/assistantService';
+import { runAssistantPipeline, runStreamingPipeline } from '../../src/services/chat/assistantService';
+import { parseRules } from '../../src/services/chat/rulesEngine';
+import { GENERAL_ASSISTANT_SCOPE_ID } from '../../src/services/chat/assistantScope';
 import { useAppStore } from '../../src/store/useAppStore';
 import type { ModelExecutionProfile } from '../../src/types/aiTypes';
 import type { ChatApiProtocol, UserSkill } from '../../src/types';
+import { buildAssistantToolGuidance } from '../../src/services/chat/agentPromptGuidance';
 
 const configureAssistant = (
   executionProfile?: ModelExecutionProfile,
@@ -45,6 +51,186 @@ beforeEach(() => {
 });
 
 describe('assistant custom protocol boundary', () => {
+  it.each(['http', 'json', 'sse'] as const)('redacts credentials before emitting or throwing %s errors', async (mode) => {
+    configureAssistant();
+    const apiKey = 'assistant~! private/key=';
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: {
+      ...state.config.providers, 'custom-assistant': { ...state.config.providers['custom-assistant'], apiKey },
+    } } }));
+    const encoded = encodeURIComponent(apiKey);
+    const form = new URLSearchParams({ key: apiKey }).toString().slice(4);
+    const detail = `Invalid key ${apiKey}; encoded ${encoded}; query ${form}; permission denied`;
+    const payload = { error: { message: detail } };
+    const response = mode === 'sse'
+      ? new Response(`data: ${JSON.stringify(payload)}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } })
+      : new Response(JSON.stringify(payload), { status: mode === 'http' ? 401 : 200,
+        headers: { 'Content-Type': 'application/json' } });
+    const fetchMock = vi.fn().mockResolvedValueOnce(response);
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+    const error = await streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent,
+      nonStream: mode === 'http' }).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('[REDACTED]');
+    const errors = onEvent.mock.calls.map(([event]) => event).filter((event) => event.type === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+    for (const secret of [apiKey, encoded, form]) {
+      expect((error as Error).stack).not.toContain(secret);
+      expect(JSON.stringify(errors)).not.toContain(secret);
+    }
+    expect((error as Error).cause).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not send an already cancelled text request', async () => {
+    configureAssistant();
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', signal: controller.signal,
+      onEvent: vi.fn() })).rejects.toThrow('请求已取消');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('discards JSON text and tools cancelled during body reading with nonStream=%s', async (nonStream) => {
+    configureAssistant();
+    const controller = new AbortController();
+    let finishBody!: (value: unknown) => void;
+    const response = new Response(null, { headers: { 'Content-Type': 'application/json' } });
+    const readBody = vi.spyOn(response, 'json').mockImplementation(() => new Promise((resolve) => { finishBody = resolve; }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(response);
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+    const pending = streamAssistantReply({ systemPrompt: '', userMessage: '你好', nonStream, signal: controller.signal, onEvent });
+    await vi.waitFor(() => expect(readBody).toHaveBeenCalledOnce());
+    controller.abort(nonStream ? new Error('secret must not survive cancellation') : null);
+    finishBody({ choices: [{ message: { content: 'late reply', reasoning_content: 'late reasoning', tool_calls: [{
+      id: 'late-call', type: 'function', function: { name: 'canvas_query', arguments: '{}' },
+    }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    const error = await pending.catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ message: '请求已取消' });
+    expect((error as Error).cause).toBeUndefined();
+    expect((error as Error).stack).not.toContain('secret');
+    expect(onEvent.mock.calls.map(([event]) => event.type)).toEqual(['start', 'done']);
+    expect(onEvent).toHaveBeenLastCalledWith({ type: 'done', finishReason: 'canceled' });
+    expect(useAppStore.getState().activeRequestAbort).toBeNull();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses the explicitly selected text model without changing the assistant default', async () => {
+    configureAssistant();
+    useAppStore.setState((state) => ({ config: { ...state.config, generalModels: [
+      ...(state.config.generalModels ?? []),
+      { id: 'polish-text', name: '润色模型', modelId: 'polish-model', category: 'text', providerConfigId: 'custom-assistant' },
+    ] } }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '润色完成' }, finish_reason: 'stop' }],
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await streamAssistantReply({ systemPrompt: '', userMessage: '润色', modelId: 'general/polish-text', nonStream: true, onEvent: vi.fn() });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe('polish-model');
+    expect(useAppStore.getState().config.assistantModelId).toBe('assistant-model');
+    fetchMock.mockClear();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '润色', modelId: 'general/missing', onEvent: vi.fn() }))
+      .rejects.toThrow('所选文本模型已不可用');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('expands explicit text, video and audio node references before sending a text-only request', async () => {
+    configureAssistant();
+    useAppStore.setState({ currentProjectId: 'project-1', nodes: [
+      { id: 'script', type: 'source-text', position: { x: 0, y: 0 }, data: { type: 'source-text', label: '剧本', output: '人物在窗前停步。' } },
+      { id: 'clip', type: 'source-video', position: { x: 0, y: 0 }, data: { type: 'source-video', label: '视频', videoUrl: 'https://media.example/clip.mp4' } },
+      { id: 'audio', type: 'source-audio', position: { x: 0, y: 0 }, data: { type: 'source-audio', label: '音频', audioUrl: 'https://media.example/audio.mp3' } },
+    ] });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '润色完成' }, finish_reason: 'stop' }],
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await streamAssistantReply({
+      systemPrompt: '', projectId: 'project-1', nonStream: true, tools: [], onEvent: vi.fn(),
+      userMessage: '参考 @{script:剧本} @{clip:视频} @{audio:音频}；原文 ⟦REF_original_0⟧',
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages).toEqual([{
+      role: 'user', content: '参考 人物在窗前停步。 https://media.example/clip.mp4 https://media.example/audio.mp3；原文 ⟦REF_original_0⟧',
+    }]);
+    expect(body.tools).toBeUndefined();
+  });
+
+  it('builds a general prompt without borrowing the open canvas or requesting a project for ordinary chat', () => {
+    useAppStore.setState({ currentProjectId: 'other-project', nodes: [{ id: 'private-node', type: 'ai-text',
+      position: { x: 0, y: 0 }, data: { type: 'ai-text', label: '另一个项目的私有内容', status: 'idle' } }] });
+    const prompt = buildAssistantSystemPrompt({ projectId: GENERAL_ASSISTANT_SCOPE_ID,
+      agentTools: true, includeToolGuidance: false });
+    expect(prompt).toContain('通用 AI 助手');
+    expect(prompt).toContain('普通问答和写作不需要创建或打开项目');
+    expect(prompt).not.toContain('节点列表');
+    expect(prompt).not.toContain('另一个项目的私有内容');
+    expect(prompt).not.toContain('1-2 句');
+  });
+
+  it('streams identical CCC models with the selected group Key and never borrows another group Key', async () => {
+    for (const group of ['pro', 'discount']) {
+      useAppStore.getState().saveProviderConfig(`cccapi-${group}`, {
+        name: 'CCC', catalogId: 'cccapi', cccGroup: group, apiKey: `${group}-fixture`, baseUrl: 'https://cccapi.cn/v1',
+        selectedModels: [{ id: 'gpt-5', name: 'GPT', category: 'text', provider: `cccapi-${group}`, executionProfile: { preset: 'openai-chat' } }],
+      });
+    }
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(
+      'data: {"choices":[{"delta":{"content":"回复"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    for (const model of useAppStore.getState().config.generalModels!) {
+      useAppStore.getState().updateConfig({ assistantModelId: model.id });
+      await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent: vi.fn() })).resolves.toBe('回复');
+      const init = fetchMock.mock.calls.at(-1)![1];
+      expect(init.headers).toMatchObject({ Authorization: `Bearer ${useAppStore.getState().config.providers[model.providerConfigId].apiKey}` });
+      expect(JSON.parse(init.body).model).toBe('gpt-5');
+    }
+    useAppStore.getState().setProviderKey('cccapi-discount', '');
+    fetchMock.mockClear();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent: vi.fn() })).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it.each([
+    {
+      preset: 'anthropic-chat' as const,
+      expectedUrl: 'https://gateway.example/v1/messages',
+      expectedHeader: 'x-api-key',
+      body: 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Claude 回复"}}\n\n',
+      expectedText: 'Claude 回复',
+    },
+    {
+      preset: 'gemini-chat' as const,
+      expectedUrl: 'https://gateway.example/v1/models/vendor-chat:streamGenerateContent?alt=sse',
+      expectedHeader: 'x-goog-api-key',
+      body: 'data: {"candidates":[{"content":{"parts":[{"text":"Gemini 回复"}]},"finishReason":"STOP"}]}\n\n',
+      expectedText: 'Gemini 回复',
+    },
+  ])('streams a $preset model through its native adapter despite an OpenAI connection default', async ({
+    preset, expectedUrl, expectedHeader, body, expectedText,
+  }) => {
+    configureAssistant({ preset }, 'openai-compatible');
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(body, {
+      status: 200, headers: { 'Content-Type': 'text/event-stream' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent }))
+      .resolves.toBe(expectedText);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(expectedUrl);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ [expectedHeader]: 'secret' });
+    expect(onEvent).toHaveBeenCalledWith({ type: 'text.delta', delta: expectedText });
+  });
+
   it.each([' ', ''])('preserves SSE text when data uses %j after the colon', async (space) => {
     configureAssistant();
     const body = `data:${space}${JSON.stringify({ choices: [{ delta: { content: '完整回复' }, finish_reason: 'stop' }] })}\n\n`;
@@ -193,6 +379,63 @@ describe('assistant custom protocol boundary', () => {
     expect(result.reply).not.toContain('当前画布共有');
   });
 
+  it.each([
+    '请检查接口文档，然后调用 provider_config_preview 和 provider_config_apply 保存配置。不要只回复字段说明。',
+    '删除失败节点的规则先不要执行，请解释影响范围。',
+    '查看图片节点的参数定义，整理成一份接入方案。',
+  ])('reports the missing model before keyword-based help for %s', async (content) => {
+    const result = await runAssistantPipeline(content, 'conversation-1');
+    expect(result.errorCode).toBe('ASSISTANT_MODEL_UNAVAILABLE');
+    expect(result.reply).toContain('本次请求尚未处理');
+    expect(result.reply).not.toContain('不太确定');
+    expect(result.commandExecuted).toBe(false);
+  });
+
+  it('reports a missing model as a stream error instead of completing canned help', async () => {
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    await runStreamingPipeline('请检查接口文档并保存配置', 'conversation-1', {
+      onTextDelta: vi.fn(), onComplete, onError,
+    });
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('未选择可用的对话文本模型'));
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it('sends the entire long task to the selected model without executing its command prefix', async () => {
+    configureAssistant();
+    const content = '选中 3 号节点后先分析接口文档，再调用 provider_config_preview 生成草稿；不要提前执行画布操作。';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      'data: {"choices":[{"delta":{"content":"已收到完整任务"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    await runStreamingPipeline(content, 'conversation-1', {
+      onTextDelta: vi.fn(), onComplete, onError,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages).toContainEqual({ role: 'user', content });
+    expect(onComplete).toHaveBeenCalledWith('已收到完整任务', [], undefined);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it.each(['选中 3 号节点', '删除失败节点。', '查看图片节点？', '撤销！'])(
+    'keeps a complete local command available: %s', (content) => {
+      expect(parseRules(content).hasHighConfidence).toBe(true);
+    },
+  );
+
+  it.each([
+    '选中 3 号节点并阅读接口文档',
+    '删除失败节点前先解释方案，不要执行',
+    '查看图片节点的接口参数，禁止操作画布',
+    '选中 3 号节点\n这句话只是文档中的示例，不要执行。',
+  ])('does not execute a partial local command from %s', (content) => {
+    expect(parseRules(content).intents).toEqual([]);
+  });
+
   it('uses an explicitly OpenAI SSE compatible custom endpoint', async () => {
     configureAssistant({
       preset: 'custom',
@@ -236,6 +479,53 @@ describe('assistant custom protocol boundary', () => {
       ],
       stream: false,
     });
+  });
+
+  it.each([
+    { provided: false, image: false }, { provided: true, image: false },
+    { provided: false, image: true }, { provided: true, image: true },
+  ])('reuses the last prepared user content for custom prompt and messages (provided $provided, image $image)', async ({ provided, image }) => {
+    configureAssistant({
+      preset: 'custom',
+      protocol: {
+        version: 1, mode: 'sync', streamFormat: 'openai-sse',
+        submit: { method: 'POST', path: '/chat/', body: { prompt: '{{prompt}}', messages: '{{messages}}' } },
+        resultTextPath: 'choices.0.message.content',
+      },
+    });
+    useAppStore.setState((state) => ({
+      currentProjectId: 'project-1',
+      nodes: [
+        { id: 'script', type: 'source-text', position: { x: 0, y: 0 }, data: { type: 'source-text', label: '剧本', output: '人物停步。@{nested:保留嵌套标记}' } },
+        { id: 'nested', type: 'source-text', position: { x: 0, y: 0 }, data: { type: 'source-text', label: '嵌套', output: '不应重复展开' } },
+        { id: 'image', type: 'ai-image', position: { x: 0, y: 0 }, data: { type: 'ai-image', label: '参考图', imageUrl: 'data:image/png;base64,QUJDRA==' } },
+      ],
+      config: { ...state.config, generalModels: state.config.generalModels?.map((model) => ({ ...model, inputModalities: ['text', 'image'] as Array<'text' | 'image'> })) },
+    }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '完成' }, finish_reason: 'stop' }],
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const current = image ? '参考 @{image:参考图}' : '参考 @{script:剧本}；原文 ⟦REF_original_0⟧';
+
+    await streamAssistantReply({
+      systemPrompt: '系统', userMessage: provided ? '未使用的入口字段' : current,
+      messages: provided ? [
+        { role: 'system', content: '系统' }, { role: 'user', content: '上一轮要求' },
+        { role: 'assistant', content: '上一轮回复' }, { role: 'user', content: current },
+      ] : undefined,
+      projectId: 'project-1', nonStream: true, tools: [], onEvent: vi.fn(),
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const expected = image ? [
+      { type: 'text', text: '参考 图片1' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
+    ] : '参考 人物停步。@{nested:保留嵌套标记}；原文 ⟦REF_original_0⟧';
+    expect(body.prompt).toEqual(expected);
+    expect(body.messages.at(-1)).toEqual({ role: 'user', content: expected });
+    expect(JSON.stringify(body)).not.toContain('不应重复展开');
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('uses the current provider credential after key rotation', () => {
@@ -372,6 +662,54 @@ describe('assistant custom protocol boundary', () => {
   });
 });
 
+describe('Agent 工具说明与执行策略', () => {
+  it('只说明本轮开放的工具，不注入禁用工具的规则和索引', () => {
+    const prompt = buildAssistantToolGuidance(['file_read_text'], 'plan');
+    expect(prompt).toContain('Plan 规划模式');
+    expect(prompt).toContain('file_read_text');
+    for (const name of ['media_generate', 'canvas_create_nodes', 'provider_config_apply', 'file_list_grants', 'skill_load', '可用子智能体']) {
+      expect(prompt).not.toContain(name);
+    }
+    expect(prompt).toContain('不可信资料');
+  });
+
+  it('没有工具时仍可完整回答普通问题，且不产生任何工具专用说明', () => {
+    const prompt = buildAssistantToolGuidance([], 'autonomous');
+    expect(prompt).toContain('直接给出完整答案');
+    expect(prompt).not.toContain('media_generate');
+    expect(prompt).not.toContain('可用 Skill');
+    expect(prompt).not.toContain('可用子智能体');
+  });
+
+  it.each(['collaborative', 'autonomous'] as const)('媒体和配置说明服从 %s 模式', (mode) => {
+    const prompt = buildAssistantToolGuidance(['media_generate', 'provider_config_preview', 'provider_config_apply', 'memory_suggest'], mode);
+    expect(prompt).toContain('必须在同一 Agent 任务中立即调用 provider_config_apply');
+    expect(prompt).toContain('user_choice 必须等待用户作答');
+    if (mode === 'autonomous') {
+      expect(prompt).toContain('由本地 Policy 自动执行');
+      expect(prompt).toContain('解析项目默认模型或自动路由');
+      expect(prompt).not.toContain('由本地审批卡让用户选择');
+      expect(prompt).not.toContain('自动暂停并展示 API 配置审批卡');
+      expect(prompt).not.toContain('每次都要确认');
+    } else {
+      expect(prompt).toContain('由本地 Policy 请求确认');
+      expect(prompt).toContain('由本地审批卡让用户选择');
+      expect(prompt).toContain('自动暂停并展示 API 配置审批卡');
+    }
+  });
+
+  it('预览工具无法执行配置时不要求调用未开放的 apply 工具', () => {
+    expect(buildAssistantToolGuidance(['provider_config_preview'], 'plan')).not.toContain('provider_config_apply');
+  });
+
+  it('Runtime 的初始上下文省略工具说明，避免与后续轮次重复或冲突', () => {
+    const prompt = buildAssistantSystemPrompt({ agentTools: true, includeToolGuidance: false });
+    expect(prompt).toContain('通用 AI 助手');
+    expect(prompt).not.toContain('media_generate');
+    expect(prompt).not.toContain('provider_config_apply');
+  });
+});
+
 describe('buildAssistantSystemPrompt 的 Skill 索引', () => {
   const skill = (partial: Partial<UserSkill> = {}): UserSkill => ({
     id: 'skill-1',
@@ -469,7 +807,13 @@ describe('buildAssistantSystemPrompt 的厂商配置审批时序', () => {
     expect(prompt).not.toContain('只有用户确认后才能调用 provider_config_apply');
   });
 
-  it('sends an explicitly referenced image as Base64 content to a vision model', async () => {
+  it.each([
+    { modelId: 'vendor-chat', builtin: false, declared: true },
+    { modelId: 'deepseek-flash', builtin: false, declared: false },
+    { modelId: 'deepseek-v4.1-flash', builtin: false, declared: false },
+    { modelId: 'deepseek-flash', builtin: true, declared: false },
+    { modelId: 'deepseek-v4.1-flash', builtin: true, declared: false },
+  ])('sends referenced Base64 images directly to $modelId (builtin=$builtin, declared=$declared)', async ({ modelId, builtin, declared }) => {
     configureAssistant({ preset: 'openai-chat' });
     useAppStore.setState((state) => ({
       currentProjectId: 'project-vision',
@@ -486,9 +830,17 @@ describe('buildAssistantSystemPrompt 的厂商配置审批时序', () => {
       }],
       config: {
         ...state.config,
-        generalModels: (state.config.generalModels ?? []).map((model) => ({
+        assistantModelId: builtin ? `apimart/${modelId}` : 'assistant-model',
+        providers: builtin ? {
+          apimart: {
+            name: 'APIMart', apiKey: 'secret', baseUrl: 'https://gateway.example/v1',
+            selectedModels: [{ id: modelId, name: modelId, category: 'text', provider: 'apimart' }],
+          },
+        } : state.config.providers,
+        generalModels: builtin ? [] : (state.config.generalModels ?? []).map((model) => ({
           ...model,
-          inputModalities: ['text', 'image'] as Array<'text' | 'image'>,
+          modelId,
+          ...(declared ? { inputModalities: ['text', 'image'] as Array<'text' | 'image'> } : {}),
         })),
       },
     }));
@@ -505,10 +857,32 @@ describe('buildAssistantSystemPrompt 的厂商配置审批时序', () => {
       onEvent: vi.fn(),
     });
 
+    expect(resolveAssistantModel('project-vision')?.supportsVision).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.model).toBe(modelId);
     expect(body.messages[1].content).toEqual([
       { type: 'text', text: '分析 图片1' },
       { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
     ]);
+  });
+
+  it.each([false, true])('keeps explicit DeepSeek text-only input when builtin=%s', (builtin) => {
+    configureAssistant();
+    useAppStore.setState((state) => ({ config: {
+      ...state.config,
+      assistantModelId: builtin ? 'apimart/deepseek-flash' : 'assistant-model',
+      providers: builtin ? {
+        apimart: {
+          name: 'APIMart', apiKey: 'secret', baseUrl: 'https://gateway.example/v1',
+          selectedModels: [{ id: 'deepseek-flash', name: 'DeepSeek', category: 'text', provider: 'apimart', inputModalities: ['text'] }],
+        },
+      } : state.config.providers,
+      generalModels: builtin ? [] : (state.config.generalModels ?? []).map((model) => ({
+        ...model, modelId: 'deepseek-flash', inputModalities: ['text'] as Array<'text' | 'image'>,
+      })),
+    } }));
+
+    expect(resolveAssistantModel()?.supportsVision).toBe(false);
   });
 });

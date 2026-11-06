@@ -1,3 +1,6 @@
+/**
+ * agentPackages — 回归测试：Agent Package Store。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppState } from '../../src/store/useAppStore';
 import type {

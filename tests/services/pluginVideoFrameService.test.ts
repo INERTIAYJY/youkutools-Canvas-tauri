@@ -1,3 +1,6 @@
+/**
+ * pluginVideoFrameService — 回归测试：pluginVideoFrameService request boundaries。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const media = vi.hoisted(() => ({ open: vi.fn(), probe: vi.fn(), extract: vi.fn(), iterate: vi.fn(), dispose: vi.fn() }));

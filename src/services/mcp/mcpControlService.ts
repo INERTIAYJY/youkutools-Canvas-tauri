@@ -1,13 +1,21 @@
 /**
+ * mcpControlService — 将 MCP 请求映射到主窗口工具、策略与审计任务。
+ */
+import { clearSkillReadTask } from '../chat/skillReadService';
+import { clearSkillCatalogTask } from '../chat/skillCatalog';
+/**
  * MCP 前端控制层，将本地 bridge 请求映射到受 Policy 约束的 Agent 工具和专用审计任务。
  */
 import { useAppStore } from '../../store/useAppStore';
+import type { CreateAgentTaskInput } from '../../store/store.agent';
 import type { ChatConversation, ChatMessage } from '../../types/chat';
+import type { AgentStep, AgentTask, McpOperationIdentity, McpOperationReceipt } from '../../types/agent';
 import type {
   McpBridgeRequestEvent,
   McpToolCallResult,
   McpToolDescriptor,
   McpToolExposure,
+  McpToolCallEnvelope,
 } from '../../types/mcp';
 import {
   runAgentTask,
@@ -24,6 +32,7 @@ import {
   respondToMcpBridge,
 } from './mcpBridgeService';
 import {
+  buildMcpToolOverview,
   decodeMcpToolCallEnvelope,
   getConfiguredMcpToolExposure,
   isMcpDiscoveryTool,
@@ -32,6 +41,20 @@ import {
   MCP_DISCOVERY_TOOL_NAMES,
   toMcpToolDescriptor,
 } from './mcpToolCatalog';
+
+import {
+  isMcpGlobalTool,
+  isMcpSettingsContext,
+  isMcpSettingsTool,
+  MCP_GLOBAL_TOOL_NAMES,
+  MCP_PROJECT_NAVIGATION_TOOL_NAMES,
+  MCP_SETTINGS_CONVERSATION_ID,
+  MCP_SETTINGS_SCOPE_ID,
+  MCP_SETTINGS_TOOL_NAMES,
+} from './mcpSettingsScope';
+import {
+  claimMcpOperation, finishMcpOperation, identifyMcpOperation, readMcpOperation, startMcpOperation,
+} from './mcpOperationService';
 
 const MCP_CONVERSATION_TITLE = 'MCP 控制';
 const MCP_EXECUTION_MODE = 'autonomous' as const;
@@ -44,7 +67,61 @@ const MCP_EXECUTION_MODE = 'autonomous' as const;
  */
 export const MCP_TOOL_DISCOVERY_TASK_ID = 'mcp-tool-discovery';
 
-const activeRequestTasks = new Map<string, string>();
+interface ActiveMcpRequest {
+  sessionId: string;
+  taskId?: string;
+  cancelled: boolean;
+}
+
+const activeRequestTasks = new Map<string, ActiveMcpRequest>();
+// 取消可能先于工具注册/原请求到达；在途记录独立保留标记，墓碑只覆盖迟到请求。
+const cancellationTtlMs = 15 * 60 * 1_000;
+const cancelledRequests = new Map<string, number>();
+const cancelledSessions = new Map<string, number>();
+const maxCancelledRequests = 512;
+const maxCancelledSessions = 64;
+let settingsAuditInitialization: Promise<void> | undefined;
+
+function requestKey(sessionId: string, requestId: string): string {
+  return JSON.stringify([sessionId, requestId]);
+}
+
+function pruneCancellations(entries: Map<string, number>): void {
+  const now = Date.now();
+  for (const [key, expiresAt] of entries) {
+    if (expiresAt <= now) entries.delete(key);
+  }
+}
+
+function rememberCancellation(entries: Map<string, number>, key: string, limit: number): void {
+  pruneCancellations(entries);
+  entries.delete(key);
+  entries.set(key, Date.now() + cancellationTtlMs);
+  while (entries.size > limit) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    entries.delete(oldest);
+  }
+}
+
+function assertMcpRequestActive(request: McpBridgeRequestEvent, active: ActiveMcpRequest): void {
+  pruneCancellations(cancelledRequests);
+  pruneCancellations(cancelledSessions);
+  if (active.cancelled || cancelledRequests.has(requestKey(request.sessionId, request.requestId))
+    || cancelledSessions.has(request.sessionId)) {
+    active.cancelled = true;
+    throw new Error('MCP 请求已取消；已提交的操作仍需核对实际状态。');
+  }
+}
+
+function cancelActiveRequest(active: ActiveMcpRequest): void {
+  active.cancelled = true;
+  if (!active.taskId) return;
+  const task = useAppStore.getState().agentTasks.find((item) => item.id === active.taskId);
+  // 取消只中止尚在运行/等待的阶段，不把已完成的外部副作用改写成已撤销。
+  if (!task || ['completed', 'failed', 'stopped'].includes(task.status)) return;
+  stopAgentTask(active.taskId);
+}
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -86,7 +163,7 @@ export function ensureMcpControlConversation(
   const conversation: ChatConversation = {
     id,
     projectId,
-    title: MCP_CONVERSATION_TITLE,
+    title: projectId === MCP_SETTINGS_SCOPE_ID ? 'MCP 全局控制' : MCP_CONVERSATION_TITLE,
     titleSource: 'user',
     pinned: true,
     archived: false,
@@ -99,15 +176,24 @@ export function ensureMcpControlConversation(
   return conversation;
 }
 
-function getCurrentMcpContext(): {
+function getCurrentMcpContext(toolName?: string): {
   projectId: string;
   conversation: ChatConversation;
+  toolAllowlist?: string[];
 } | null {
-  const projectId = useAppStore.getState().currentProjectId;
-  if (!projectId) return null;
+  const activeProject = useAppStore.getState().currentProjectId;
+  const globalControl = !activeProject
+    ? !toolName || isMcpGlobalTool(toolName)
+    : Boolean(toolName && isMcpGlobalTool(toolName) && !isMcpDiscoveryTool(toolName));
+  if (!activeProject && !globalControl) return null;
+  const projectId = globalControl ? MCP_SETTINGS_SCOPE_ID : activeProject!;
+  const toolAllowlist = !toolName || isMcpDiscoveryTool(toolName)
+    ? MCP_GLOBAL_TOOL_NAMES
+    : isMcpSettingsTool(toolName) ? MCP_SETTINGS_TOOL_NAMES : MCP_PROJECT_NAVIGATION_TOOL_NAMES;
   return {
     projectId,
     conversation: ensureMcpControlConversation(projectId),
+    ...(globalControl ? { toolAllowlist: [...toolAllowlist] } : {}),
   };
 }
 
@@ -115,52 +201,169 @@ export async function listMcpTools(
   exposure: McpToolExposure = getConfiguredMcpToolExposure(useAppStore.getState().config.mcpToolExposure),
 ): Promise<McpToolDescriptor[]> {
   await ensureToolsRegistered();
-  if (exposure === 'compact') {
-    // 即使项目尚未加载也保持三个入口可发现，避免客户端缓存空目录。
-    return [
-      ...MCP_DISCOVERY_TOOL_NAMES.map((name) => {
-        const definition = getAgentTool(name);
-        if (!definition) throw new Error('MCP 发现工具未注册');
-        return {
-          ...toMcpToolDescriptor(definition),
-          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        };
-      }),
-      MCP_CALL_DESCRIPTOR,
-    ];
-  }
+  const store = useAppStore.getState();
+  const projectId = store.currentProjectId ?? MCP_SETTINGS_SCOPE_ID;
+  const discoveryContext = {
+    taskId: MCP_TOOL_DISCOVERY_TASK_ID,
+    projectId,
+    conversationId: `mcp-control-${projectId}`,
+    mode: MCP_EXECUTION_MODE,
+    baseRevision: store.getCurrentRevision(),
+    ...(!store.currentProjectId ? { toolAllowlist: [...MCP_GLOBAL_TOOL_NAMES] } : {}),
+  };
+  // 两种模式都保留稳定入口，客户端缓存启动页目录后仍能重新发现当前项目能力。
+  const discovery: McpToolDescriptor[] = [
+    ...MCP_DISCOVERY_TOOL_NAMES.map((name) => {
+      const definition = getAgentTool(name);
+      if (!definition) throw new Error('MCP 发现工具未注册');
+      const descriptor = toMcpToolDescriptor(definition);
+      return {
+        ...descriptor,
+        ...(exposure === 'compact' && name === 'tools_search'
+          ? { description: `${buildMcpToolOverview(discoveryContext)}\n\n${descriptor.description}` } : {}),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      };
+    }),
+    MCP_CALL_DESCRIPTOR,
+  ];
+  if (exposure === 'compact') return discovery;
   const current = getCurrentMcpContext();
-  if (!current) return [];
-  return getAvailableAgentTools({
+  if (!current) return discovery;
+  const tools = getAvailableAgentTools({
     taskId: MCP_TOOL_DISCOVERY_TASK_ID,
     projectId: current.projectId,
     conversationId: current.conversation.id,
     mode: MCP_EXECUTION_MODE,
     baseRevision: useAppStore.getState().getCurrentRevision(),
+    toolAllowlist: current.toolAllowlist,
   }).filter((definition) => !isMcpDiscoveryTool(definition.id)).map(toMcpToolDescriptor);
+  return [...discovery, ...tools];
 }
 
 function addAuditMessage(message: ChatMessage): void {
   useAppStore.getState().addMessage(message);
 }
 
+function revealMcpUserChoice(projectId: string, conversationId: string, step: AgentStep): void {
+  const store = useAppStore.getState();
+  const settingsChoice = projectId === MCP_SETTINGS_SCOPE_ID && conversationId === `mcp-control-${MCP_SETTINGS_SCOPE_ID}`
+    && store.agentTasks.some((task) => task.id === step.taskId && isMcpSettingsContext(task));
+  if (step.approval?.kind !== 'user_choice' || (!settingsChoice && store.currentProjectId !== projectId)) return;
+
+  store.setActiveConversation(conversationId);
+  store.setChatPanelView('chat');
+  store.openChat();
+  if (!store.chatPanelDetached) return;
+
+  const isCurrentChoice = () => {
+    const current = useAppStore.getState();
+    return (settingsChoice || current.currentProjectId === projectId)
+      && current.activeConversationId === conversationId
+      && current.agentTasks.some((task) => task.id === step.taskId
+        && task.status === 'waiting_approval'
+        && task.steps.some((item) => item.id === step.id && item.approval?.status === 'pending'));
+  };
+  // 沿用独立窗口与主窗口的状态同步，不重建窗口或丢弃正在编辑的草稿。
+  void (async () => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    const detached = await WebviewWindow.getByLabel('chat-assistant');
+    if (!isCurrentChoice()) return;
+    if (!detached) throw new Error('助手窗口不可用');
+    await detached.unminimize();
+    if (!isCurrentChoice()) return;
+    await detached.show();
+    if (!isCurrentChoice()) return;
+    await detached.setFocus();
+  })().catch(() => {
+    if (!isCurrentChoice()) return;
+    const current = useAppStore.getState();
+    current.setChatPanelDetached(false);
+    current.openChat();
+  });
+}
+
 async function callMcpTool(
   request: McpBridgeRequestEvent,
+  active: ActiveMcpRequest,
+  expectation?: Pick<McpToolCallEnvelope, 'expectedProjectId' | 'expectedRevision' | 'operationKey'>,
 ): Promise<McpToolCallResult> {
   await ensureToolsRegistered();
-  const current = getCurrentMcpContext();
+  assertMcpRequestActive(request, active);
+  const expectedProjectId = expectation?.expectedProjectId;
+  const expectedRevision = expectation?.expectedRevision;
+  const operationKey = expectation?.operationKey;
+  const contextChanged = (includeRevision = true) => {
+    const state = useAppStore.getState();
+    return (expectedProjectId !== undefined && state.currentProjectId !== expectedProjectId)
+      || (includeRevision && expectedRevision !== undefined && state.getCurrentRevision() !== expectedRevision);
+  };
+  const contextError = (): McpToolCallResult => {
+    const readState = useAppStore.getState();
+    const summary = '读取后项目或画布版本已变化，未创建执行任务；请重新读取后规划，不要自动重投写入';
+    return {
+      isError: true, summary,
+      content: [{ type: 'text', text: JSON.stringify({
+        errorCode: 'MCP_CONTEXT_CHANGED', summary, retryable: false,
+        current: { projectId: readState.currentProjectId, revision: readState.getCurrentRevision() },
+      }) }],
+    };
+  };
+  // 已存在的同项目操作只是读取回执；原写入已推进 revision，不能因此阻止核实旧 key。
+  if (contextChanged(operationKey === undefined)) return contextError();
+  const name = typeof request.params.name === 'string' ? request.params.name : '';
+  const current = getCurrentMcpContext(name);
   if (!current) {
     return {
       isError: true,
-      summary: '当前没有已加载项目，无法调用 AI Canvas 工具',
-      content: [{ type: 'text', text: '当前没有已加载项目，无法调用 AI Canvas 工具' }],
+      summary: '该工具需要打开项目；请用 project_create 创建项目，或用 project_list 读取列表后通过 project_open 或 project_switch 打开项目。启动页也可管理厂商和模型设置。',
+      content: [{ type: 'text', text: '该工具需要打开项目；请用 project_create 创建项目，或用 project_list 读取列表后通过 project_open 或 project_switch 打开项目。启动页也可管理厂商和模型设置。' }],
     };
   }
-  const name = typeof request.params.name === 'string' ? request.params.name : '';
   const input = request.params.arguments && typeof request.params.arguments === 'object'
     ? request.params.arguments
     : {};
   const definition = getAgentTool(name);
+  let operationIdentity: McpOperationIdentity | undefined;
+  const replay = (operation: McpOperationReceipt): McpToolCallResult => ({
+    isError: ['partial', 'failed', 'unknown'].includes(operation.status),
+    summary: `已读取原操作回执：${operation.status}；没有再次执行工具`,
+    content: [{ type: 'text', text: JSON.stringify({ replayed: true, operation }) }],
+  });
+  if (operationKey !== undefined) {
+    try {
+      if (!definition || current.projectId === MCP_SETTINGS_SCOPE_ID) throw new Error('operationKey 仅支持当前项目的画布写入和媒体生成');
+      operationIdentity = await identifyMcpOperation({ projectId: current.projectId, toolId: name,
+        effect: definition.effect, arguments: input, operationKey });
+      assertMcpRequestActive(request, active);
+      if (contextChanged(false)) return contextError();
+      const prior = await readMcpOperation(operationIdentity);
+      assertMcpRequestActive(request, active);
+      if (contextChanged(false)) return contextError();
+      if (prior) return replay(prior);
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : 'MCP 操作身份无法确认，未执行工具';
+      return { isError: true, summary, content: [{ type: 'text', text: JSON.stringify({
+        errorCode: summary === 'MCP_OPERATION_KEY_CONFLICT' ? summary : 'MCP_OPERATION_NOT_STARTED', summary, retryable: false,
+      }) }] };
+    }
+  }
+  if (contextChanged()) {
+    // 原owner可能在首次lookup后已完成写入；旧revision不能遮住此时已存在的原key。
+    if (operationIdentity && !contextChanged(false)) {
+      try {
+        const prior = await readMcpOperation(operationIdentity);
+        assertMcpRequestActive(request, active);
+        if (contextChanged(false)) return contextError();
+        if (prior) return replay(prior);
+      } catch (error) {
+        const summary = error instanceof Error ? error.message : 'MCP 操作身份无法确认，未执行工具';
+        return { isError: true, summary, content: [{ type: 'text', text: JSON.stringify({
+          errorCode: summary === 'MCP_OPERATION_KEY_CONFLICT' ? summary : 'MCP_OPERATION_NOT_STARTED', summary, retryable: false,
+        }) }] };
+      }
+    }
+    return contextError();
+  }
   const title = (definition?.title ?? name) || '未知工具';
   let inputSummary = '参数将在本地 schema 校验';
   if (definition?.summarizeInput) {
@@ -176,26 +379,38 @@ async function callMcpTool(
   const now = Date.now();
   const userMessageId = createId('mcp-user');
   const assistantMessageId = createId('mcp-assistant');
-  addAuditMessage({
-    id: userMessageId,
-    conversationId: current.conversation.id,
-    role: 'user',
-    content: `MCP 请求：${title}\n${inputSummary}`,
-    timestamp: now,
-    status: 'done',
-  });
-  const task = store.createAgentTask({
+  const taskInput: CreateAgentTaskInput = {
     projectId: current.projectId,
     conversationId: current.conversation.id,
     userMessageId,
     mode: MCP_EXECUTION_MODE,
     goal: `MCP 请求：${title}。${inputSummary}`,
+    toolAllowlist: current.toolAllowlist,
     budget: {
       maxModelRounds: 1,
       maxToolCalls: 1,
       maxParallelReadTools: 1,
     },
-  });
+  };
+  let task: AgentTask;
+  if (operationIdentity) {
+    try {
+      const claim = await claimMcpOperation(operationIdentity, taskInput, () => {
+        assertMcpRequestActive(request, active);
+        if (contextChanged() || useAppStore.getState().currentProjectId !== current.projectId) throw new Error('MCP_CONTEXT_CHANGED');
+      });
+      if (!claim.claimed) return replay(claim.receipt);
+      if (!claim.task) throw new Error('MCP 操作占位没有任务，不能执行');
+      task = claim.task;
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : 'MCP 操作占位未持久化，未开始执行';
+      return { isError: true, summary, content: [{ type: 'text', text: JSON.stringify({
+        errorCode: summary === 'MCP_OPERATION_KEY_CONFLICT' ? summary : 'MCP_OPERATION_CLAIM_FAILED', summary, retryable: false,
+      }) }] };
+    }
+  } else task = store.createAgentTask(taskInput);
+  addAuditMessage({ id: userMessageId, conversationId: current.conversation.id, role: 'user',
+    content: `MCP 请求：${title}\n${inputSummary}`, timestamp: now, status: 'done' });
   addAuditMessage({
     id: assistantMessageId,
     conversationId: current.conversation.id,
@@ -205,7 +420,7 @@ async function callMcpTool(
     status: 'executing',
     agentTaskId: task.id,
   });
-  activeRequestTasks.set(request.requestId, task.id);
+  active.taskId = task.id;
 
   let executionResult: Awaited<ReturnType<
     typeof import('../chat/agentToolExecution')['executeRegisteredAgentToolCall']
@@ -213,6 +428,13 @@ async function callMcpTool(
   try {
     const finalTask = await runAgentTask(task.id, async (signal) => {
       const { executeRegisteredAgentToolCall } = await import('../chat/agentToolExecution');
+      assertMcpRequestActive(request, active);
+      if (operationIdentity) {
+        if (contextChanged() || useAppStore.getState().currentProjectId !== current.projectId) throw new Error('MCP_CONTEXT_CHANGED');
+        await startMcpOperation(task.id);
+        assertMcpRequestActive(request, active);
+        if (contextChanged() || useAppStore.getState().currentProjectId !== current.projectId) throw new Error('MCP_CONTEXT_CHANGED');
+      }
       executionResult = await executeRegisteredAgentToolCall({
         taskId: task.id,
         call: {
@@ -224,13 +446,17 @@ async function callMcpTool(
         transitionTask: transitionAgentTask,
         waitForApproval: waitForAgentApproval,
         policyMode: MCP_EXECUTION_MODE,
+        ...(expectedProjectId !== undefined || operationIdentity ? {
+          expectedContext: { projectId: expectedProjectId ?? operationIdentity!.projectId, baseRevision: expectedRevision },
+        } : {}),
+        onApprovalRequired: (step) => revealMcpUserChoice(current.projectId, current.conversation.id, step),
       });
       return executionResult.summary.status === 'success' ? 'completed' : 'failed';
     });
     const summary = executionResult?.summary.summary
       ?? finalTask.errorMessage
       ?? 'MCP 工具调用未返回结果';
-    const isError = executionResult?.summary.status !== 'success';
+    const isError = executionResult?.summary.status !== 'success' || executionResult?.mcpResultError === true;
     // 工具业务失败仍是一次成功送达的结构化 MCP 响应：任务和步骤保留 failed，
     // 但审计消息不应再误报为网络/模型“响应失败”。只有执行链没有产出结果时才标 error。
     const responseReceived = executionResult !== undefined;
@@ -239,30 +465,65 @@ async function callMcpTool(
       content: summary,
       status: responseReceived ? 'done' : 'error',
     });
+    let operation: McpOperationReceipt | null = null;
+    if (operationIdentity) {
+      try {
+        operation = await finishMcpOperation(task.id, { status: executionResult?.summary.status === 'success' ? 'success' : 'error',
+          knownNoEffect: executionResult?.summary.status === 'denied', errorCode: executionResult?.summary.errorCode });
+      } catch {
+        // 业务可能已经成功，保存回执失败也不能重投；尽量返回已持久化的旧状态。
+        operation = await readMcpOperation(operationIdentity).catch(() => null);
+      }
+    }
+    const content = executionResult?.mcpContent?.length ? executionResult.mcpContent
+      : [{ type: 'text' as const, text: executionResult?.modelContent ?? summary }];
     return {
       isError,
       summary,
-      content: executionResult?.mcpContent?.length
-        ? executionResult.mcpContent
-        : [{
-            type: 'text',
-            text: executionResult?.modelContent ?? summary,
-          }],
+      content: operation ? [...content, { type: 'text', text: JSON.stringify({ operation }) }]
+        : operationIdentity ? [...content, { type: 'text', text: JSON.stringify({ operation: {
+          operationId: operationIdentity.bindingId, taskId: task.id, status: 'unknown', resultAvailable: false,
+          retryable: false, requiresReadVerification: true, nextAction: '回执暂不可读，先只读核实；不要用新 key 重投',
+        } }) }] : content,
     };
+  } catch (error) {
+    if (!operationIdentity) throw error;
+    const operation = await finishMcpOperation(task.id, { status: 'error', errorCode: 'MCP_OPERATION_INTERRUPTED' })
+      .catch(() => readMcpOperation(operationIdentity!)).catch(() => null);
+    return { isError: true, summary: '原操作结果未完整确认，请读取操作回执，勿重投', content: [{ type: 'text',
+      text: JSON.stringify({ errorCode: 'MCP_OPERATION_INTERRUPTED', retryable: false,
+        operation: operation ?? { operationId: operationIdentity.bindingId, taskId: task.id, status: 'unknown', retryable: false } }) }] };
   } finally {
-    activeRequestTasks.delete(request.requestId);
+    clearSkillReadTask(task.id);
+    clearSkillCatalogTask(task.id);
   }
 }
 
 function cancelMcpRequest(request: McpBridgeRequestEvent): { cancelled: boolean } {
+  // 空 ID 仅由原生发出单向生命周期通知；客户端入口拒绝空 ID，不能借 scope 撤销其他连接。
+  if (request.requestId === '' && request.params.scope === 'session') {
+    rememberCancellation(cancelledSessions, request.sessionId, maxCancelledSessions);
+    for (const active of activeRequestTasks.values()) {
+      if (active.sessionId !== request.sessionId) continue;
+      try {
+        cancelActiveRequest(active);
+      } catch {
+        // 单个任务的终态竞态不能阻止同会话的其他请求收到撤销。
+      }
+    }
+    return { cancelled: true };
+  }
   // bridge 已把目标 ID 换成同一连接内的请求键，这里按键直接取消。
   const target = typeof request.params.requestId === 'string'
     ? request.params.requestId
     : '';
-  const taskId = activeRequestTasks.get(target);
-  if (!taskId) return { cancelled: false };
+  if (!target || target.length > 512) return { cancelled: false };
+  const key = requestKey(request.sessionId, target);
+  rememberCancellation(cancelledRequests, key, maxCancelledRequests);
+  const active = activeRequestTasks.get(key);
+  if (!active) return { cancelled: false };
   try {
-    stopAgentTask(taskId);
+    cancelActiveRequest(active);
     return { cancelled: true };
   } catch {
     return { cancelled: false };
@@ -275,19 +536,29 @@ export async function handleMcpBridgeRequest(
   switch (request.method) {
     case 'tools/list':
       return { tools: await listMcpTools() };
-    case 'tools/call':
-      if (request.params.name === MCP_CALL_TOOL_NAME) {
-        let envelope;
-        try {
-          envelope = decodeMcpToolCallEnvelope(request.params.arguments);
-        } catch (error) {
-          const summary = error instanceof Error ? error.message : 'MCP 调用信封无效';
-          return { isError: true, summary, content: [{ type: 'text', text: summary }] };
+    case 'tools/call': {
+      const key = requestKey(request.sessionId, request.requestId);
+      if (activeRequestTasks.has(key)) throw new Error('MCP 请求 ID 重复');
+      const active: ActiveMcpRequest = { sessionId: request.sessionId, cancelled: false };
+      activeRequestTasks.set(key, active);
+      try {
+        assertMcpRequestActive(request, active);
+        if (request.params.name === MCP_CALL_TOOL_NAME) {
+          let envelope;
+          try {
+            envelope = decodeMcpToolCallEnvelope(request.params.arguments);
+          } catch (error) {
+            const summary = error instanceof Error ? error.message : 'MCP 调用信封无效';
+            return { isError: true, summary, content: [{ type: 'text', text: summary }] };
+          }
+          // 只解包一次，保留原 requestId 的取消关联。校验、effect 和审计均属于真实工具。
+          return await callMcpTool({ ...request, params: { name: envelope.name, arguments: envelope.arguments } }, active, envelope);
         }
-        // 只解包一次，保留原 requestId 的取消关联。校验、effect 和审计均属于真实工具。
-        return callMcpTool({ ...request, params: { name: envelope.name, arguments: envelope.arguments } });
+        return await callMcpTool(request, active);
+      } finally {
+        activeRequestTasks.delete(key);
       }
-      return callMcpTool(request);
+    }
     case 'requests/cancel':
       return cancelMcpRequest(request);
     default:
@@ -296,9 +567,26 @@ export async function handleMcpBridgeRequest(
 }
 
 export async function initMcpControlService(): Promise<() => void> {
+  // 全局审计域不在 CanvasProject 清单中，启动时单独复用既有中断修复。
+  // 同一应用会话只修复一次，监听器重挂载不能暂停正在运行的请求。
+  settingsAuditInitialization ??= (async () => {
+    const store = useAppStore.getState();
+    await store.repairInterruptedAgentTasksForProject(MCP_SETTINGS_SCOPE_ID);
+    await store.repairInterruptedForProject(MCP_SETTINGS_SCOPE_ID);
+    const { loadProjectConversations } = await import('../chat/chatHistoryService');
+    const saved = await loadProjectConversations(MCP_SETTINGS_SCOPE_ID).catch(() => []);
+    const conversation = saved.find((item) => item.id === MCP_SETTINGS_CONVERSATION_ID);
+    if (conversation && !useAppStore.getState().conversations.some((item) => item.id === conversation.id)) {
+      const current = useAppStore.getState();
+      current.setConversations([...current.conversations, conversation]);
+    }
+  })();
+  await settingsAuditInitialization;
   const unlisten = await listenForMcpBridgeRequests(async (request) => {
     try {
       const result = await handleMcpBridgeRequest(request);
+      // 原生生命周期通知不登记 pending，也不需要回传响应。
+      if (request.method === 'requests/cancel' && request.requestId === '') return;
       await respondToMcpBridge({
         sessionId: request.sessionId,
         requestId: request.requestId,
@@ -318,13 +606,15 @@ export async function initMcpControlService(): Promise<() => void> {
   });
   return () => {
     unlisten();
-    for (const taskId of activeRequestTasks.values()) {
+    for (const active of activeRequestTasks.values()) {
       try {
-        stopAgentTask(taskId);
+        cancelActiveRequest(active);
       } catch {
         // 任务可能已经结束。
       }
     }
     activeRequestTasks.clear();
+    cancelledRequests.clear();
+    cancelledSessions.clear();
   };
 }

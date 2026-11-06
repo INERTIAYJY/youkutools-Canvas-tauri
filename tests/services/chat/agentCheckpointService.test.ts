@@ -1,3 +1,6 @@
+/**
+ * agentCheckpointService — 回归测试：agent canvas checkpoints。
+ */
 import { describe, expect, it } from 'vitest';
 import type { AgentCanvasCheckpoint, AgentStep, AgentTask } from '../../../src/types/agent';
 import {

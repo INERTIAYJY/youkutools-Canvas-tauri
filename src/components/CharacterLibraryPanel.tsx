@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
+import { Swords } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { generateId, useAppStore } from '../store/useAppStore';
 import { isEligibleCharacterVoiceNode } from '../store/store.dramaAssets';
@@ -34,6 +35,9 @@ import { useResourceVideoPreview } from '../hooks/useResourceVideoPreview';
 import { useT } from '../i18n';
 import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
+import CharacterDock from './character/CharacterDock';
+import CharacterWeaponDialog from './character/CharacterWeaponDialog';
+import { sortCharactersForLibrary } from '../services/characterOrder';
 import type { ReferenceStageBox } from './character/CharacterReferenceGallery';
 import {
   CHARACTER_VOICE_KIND_LABELS,
@@ -42,6 +46,9 @@ import {
   voiceClipTitle,
 } from './character/characterReferencePresentation';
 import { readAudioDuration } from './character/characterVoiceMedia';
+import { acquireComfyMediaSource } from '../services/comfyMediaSource';
+import { copyDramaAssetSelection } from '../services/dramaAssetBatchCopy';
+import { configValuesEqual } from '../services/configPatch';
 
 type CharacterLibraryScope = 'project' | 'global';
 
@@ -195,6 +202,7 @@ export default function CharacterLibraryPanel() {
   const t = useT();
   const {
     open,
+    openRequest,
     actionLibraryOpen,
     setActionLibraryOpen,
     setOpen,
@@ -202,6 +210,7 @@ export default function CharacterLibraryPanel() {
     globalCharacters,
     globalCharactersLoading,
     loadGlobalCharacters,
+    reorderCharacters,
     copyCharacterToGlobal,
     copyGlobalCharacterToProject,
     deleteDramaAsset,
@@ -224,6 +233,7 @@ export default function CharacterLibraryPanel() {
   } = useAppStore(
     useShallow((state) => ({
       open: state.characterLibraryOpen,
+      openRequest: state.characterLibraryRequest,
       setOpen: state.setCharacterLibraryOpen,
       actionLibraryOpen: state.characterActionLibraryOpen,
       setActionLibraryOpen: state.setCharacterActionLibraryOpen,
@@ -231,6 +241,7 @@ export default function CharacterLibraryPanel() {
       globalCharacters: state.globalCharacters,
       globalCharactersLoading: state.globalCharactersLoading,
       loadGlobalCharacters: state.loadGlobalCharacters,
+      reorderCharacters: state.reorderCharacters,
       copyCharacterToGlobal: state.copyCharacterToGlobal,
       copyGlobalCharacterToProject: state.copyGlobalCharacterToProject,
       deleteDramaAsset: state.deleteDramaAsset,
@@ -277,6 +288,10 @@ export default function CharacterLibraryPanel() {
   const [bindingVoice, setBindingVoice] = useState(false);
   const [captureNodeId, setCaptureNodeId] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [weaponTarget, setWeaponTarget] = useState<{ scope: CharacterLibraryScope; id: string; projectId: string | null } | null>(null);
+  const [weaponCopyBusy, setWeaponCopyBusy] = useState(false);
+  const weaponCopyPending = useRef(false);
+  const copyViewVersion = useRef(0);
   const [actionCategory, setActionCategory] = useState<CharacterActionCategory>('standing');
   const [actionFilter, setActionFilter] = useState<CharacterActionCategory | 'all'>('all');
   const [actionName, setActionName] = useState('');
@@ -289,7 +304,36 @@ export default function CharacterLibraryPanel() {
   const [uploadingActionMedia, setUploadingActionMedia] = useState(false);
   const [savingAction, setSavingAction] = useState(false);
   const voicePlayerRef = useRef<HTMLAudioElement>(null);
+  const voicePlaybackRef = useRef<{
+    clipId: string;
+    player: HTMLAudioElement;
+    controller: AbortController;
+    release?: () => void;
+  } | null>(null);
+  const stopVoicePlayback = useCallback(() => {
+    const playback = voicePlaybackRef.current;
+    voicePlaybackRef.current = null;
+    const player = playback?.player ?? voicePlayerRef.current;
+    player?.pause();
+    player?.removeAttribute('src');
+    player?.load();
+    playback?.controller.abort();
+    playback?.release?.();
+  }, []);
   const actionMediaInputRef = useRef<HTMLInputElement>(null);
+
+  // 资源库分类可直接定位同一份全局人物、声音或动作，不另建角色状态。
+  useEffect(() => {
+    if (!open || !openRequest) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setScope(openRequest.scope);
+    setSelectedCharacterId(openRequest.characterId ?? null);
+    setSelectedReferenceId(null);
+    setSearch('');
+    if (openRequest.section === 'voice') {
+      setVoiceDockState({ context: `${open}:${openRequest.scope}:${openRequest.characterId ?? ''}`, expanded: true });
+    }
+  }, [open, openRequest]);
 
   useEffect(() => {
     if (open || actionLibraryOpen) void loadGlobalCharacters();
@@ -302,20 +346,20 @@ export default function CharacterLibraryPanel() {
   const sourceCharacters = scope === 'project' ? projectCharacters : globalCharacters;
   const characters = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return [...sourceCharacters]
+    return sortCharactersForLibrary(sourceCharacters)
       .filter((character) => !query || [
         character.name,
         character.summary,
         character.identity,
         character.storyRole,
         character.visualNotes,
-      ].some((value) => value?.toLowerCase().includes(query)))
-      .sort((left, right) => right.updatedAt - left.updatedAt || left.name.localeCompare(right.name));
+      ].some((value) => value?.toLowerCase().includes(query)));
   }, [search, sourceCharacters]);
 
   const selectedCharacter = characters.find(
     (character) => character.id === selectedCharacterId,
   ) ?? characters[0] ?? null;
+  useEffect(() => () => { copyViewVersion.current += 1; }, [open, scope, currentProjectId, selectedCharacter?.id]);
   const effectiveReferenceId = selectedCharacter?.referenceImages?.some(
     (reference) => reference.id === selectedReferenceId,
   )
@@ -326,6 +370,33 @@ export default function CharacterLibraryPanel() {
   const selectedReference = selectedCharacter?.referenceImages?.find(
     (reference) => reference.id === effectiveReferenceId,
   ) ?? null;
+  const reorderReferences = useCallback(async (ids: string[]) => {
+    const state = useAppStore.getState();
+    if (!open || !selectedCharacter || state.currentProjectId !== currentProjectId
+      || !state.characterLibraryOpen || state.isCreatingProject || state.isReturningToStartPage
+      || state.switchingProjectName !== null || (scope === 'project' && (!currentProjectId || state.projectLoadStatus !== 'ready'))) return false;
+    const character = (scope === 'project' ? state.dramaAssets.characters : state.globalCharacters)
+      .find((item) => item.id === selectedCharacter.id);
+    const references = character?.referenceImages;
+    if (!character || !references || references !== selectedCharacter.referenceImages
+      || ids.length !== references.length || new Set(ids).size !== ids.length
+      || ids.some((id) => !references.some((reference) => reference.id === id))) return false;
+    const version = copyViewVersion.current;
+    return state.saveCharacterCard(scope, {
+      ...character,
+      referenceImages: ids.flatMap((id) => references.find((reference) => reference.id === id) ?? []),
+      primaryReferenceImageId: character.primaryReferenceImageId ?? references[0]?.id,
+      avatarReferenceImageId: character.avatarReferenceImageId ?? references.find((reference) => reference.kind === 'avatar')?.id,
+      updatedAt: Date.now(),
+    }, {
+      assertCurrent: () => {
+        const current = useAppStore.getState();
+        if (copyViewVersion.current !== version || !current.characterLibraryOpen || current.currentProjectId !== currentProjectId
+          || current.isCreatingProject || current.isReturningToStartPage || current.switchingProjectName !== null
+          || (scope === 'project' && current.projectLoadStatus !== 'ready')) throw new Error(t('角色素材保存失败'));
+      },
+    });
+  }, [open, selectedCharacter, currentProjectId, scope, t]);
   const sourceNode = useMemo(() => {
     if (!selectedCharacter || !selectedReference) return null;
     return nodes.find((node) => (
@@ -386,28 +457,43 @@ export default function CharacterLibraryPanel() {
     : null;
 
   // 切换角色或关闭面板时停止试听，避免声音跟着上一个角色继续播
-  useEffect(() => {
-    voicePlayerRef.current?.pause();
-  }, [open, scope, selectedCharacter?.id]);
+  useEffect(() => stopVoicePlayback, [open, scope, selectedCharacter?.id, stopVoicePlayback]);
 
   const switchScope = (nextScope: CharacterLibraryScope) => {
+    setWeaponTarget(null);
     setScope(nextScope);
     setSelectedCharacterId(null);
     setSelectedReferenceId(null);
     setVoicePickerOpen(false);
   };
 
-  const toggleVoicePlayback = (clip: CharacterVoiceClip) => {
+  const toggleVoicePlayback = async (clip: CharacterVoiceClip) => {
     const player = voicePlayerRef.current;
     if (!player || !clip.audioUrl || !selectedCharacter) return;
-    if (playingVoiceClipId === clip.id) {
-      player.pause();
+    if (voicePlaybackRef.current?.clipId === clip.id) {
+      stopVoicePlayback();
+      setPlayingVoice(null);
       return;
     }
-    player.src = clip.audioUrl;
-    void player.play()
-      .then(() => setPlayingVoice({ characterId: selectedCharacter.id, clipId: clip.id }))
-      .catch(() => showToast(t('音频播放失败'), 'error'));
+    stopVoicePlayback();
+    setPlayingVoice(null);
+    const playback = { clipId: clip.id, player, controller: new AbortController(), release: undefined as (() => void) | undefined };
+    voicePlaybackRef.current = playback;
+    try {
+      const lease = await acquireComfyMediaSource(clip.audioUrl, playback.controller.signal);
+      if (playback.controller.signal.aborted || voicePlaybackRef.current !== playback || voicePlayerRef.current !== player) {
+        lease.release();
+        return;
+      }
+      playback.release = lease.release;
+      player.src = lease.src;
+      await player.play();
+      if (voicePlaybackRef.current === playback) setPlayingVoice({ characterId: selectedCharacter.id, clipId: clip.id });
+    } catch {
+      if (playback.controller.signal.aborted || voicePlaybackRef.current !== playback) return;
+      stopVoicePlayback();
+      showToast(t('音频播放失败'), 'error');
+    }
   };
 
   const handleBindVoiceNode = async (nodeId: string) => {
@@ -434,13 +520,14 @@ export default function CharacterLibraryPanel() {
 
   const handleRemoveVoiceClip = async (clip: CharacterVoiceClip) => {
     if (!selectedCharacter) return;
-    if (playingVoiceClipId === clip.id) voicePlayerRef.current?.pause();
+    if (voicePlaybackRef.current?.clipId === clip.id) { stopVoicePlayback(); setPlayingVoice(null); }
     if (await removeCharacterVoiceClip(scope, selectedCharacter.id, clip.id)) {
       showToast(t('已移除该声音'));
     }
   };
 
   const focusNode = (nodeId: string) => {
+    if (openRequest?.origin === 'assets') useAppStore.getState().setAssetsPanelOpen(false);
     setOpen(false);
     setSelectedNodeIds([nodeId]);
     window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId, pulse: true } }));
@@ -599,6 +686,37 @@ export default function CharacterLibraryPanel() {
 
   const handleCopy = async () => {
     if (!selectedCharacter) return;
+    if (selectedCharacter.weaponIds?.length) {
+      if (weaponCopyPending.current) return;
+      weaponCopyPending.current = true;
+      setWeaponCopyBusy(true);
+      const version = copyViewVersion.current;
+      const state = useAppStore.getState();
+      const before = new Set((scope === 'project' ? state.globalCharacters : state.dramaAssets.characters).map((character) => character.id));
+      const assertCurrent = () => {
+        const latest = useAppStore.getState();
+        const source = (scope === 'project' ? latest.dramaAssets.characters : latest.globalCharacters).find((character) => character.id === selectedCharacter.id);
+        if (latest.currentProjectId !== currentProjectId || !latest.characterLibraryOpen || copyViewVersion.current !== version
+          || !configValuesEqual(source, selectedCharacter)) throw new Error(t('角色或项目已变化，请重新选择武器'));
+      };
+      try {
+        if (scope === 'global') await state.loadGlobalDramaAssets();
+        assertCurrent();
+        await copyDramaAssetSelection(scope, [{ kind: 'character', id: selectedCharacter.id }], { assertCurrent });
+        assertCurrent();
+        const latest = useAppStore.getState();
+        if (latest.currentProjectId !== currentProjectId) return;
+        const copied = (scope === 'project' ? latest.globalCharacters : latest.dramaAssets.characters).filter((character) => !before.has(character.id));
+        if (copied.length !== 1) throw new Error(t('复制失败，请重试'));
+        setWeaponTarget(null);
+        setScope(scope === 'project' ? 'global' : 'project');
+        setSelectedCharacterId(copied[0].id);
+        setSelectedReferenceId(null);
+        showToast(t(scope === 'project' ? '已复制到全局资产' : '已复制到本项目'));
+      } catch (error) { showToast(error instanceof Error ? error.message : t('复制失败，请重试'), 'error'); }
+      finally { weaponCopyPending.current = false; setWeaponCopyBusy(false); }
+      return;
+    }
     if (scope === 'project') {
       const copiedId = await copyCharacterToGlobal(selectedCharacter.id);
       if (!copiedId) return;
@@ -646,9 +764,7 @@ export default function CharacterLibraryPanel() {
     }
     if (!nodeId) return;
 
-    setOpen(false);
-    setSelectedNodeIds([nodeId]);
-    window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId, pulse: true } }));
+    focusNode(nodeId);
   };
 
   return (
@@ -657,7 +773,7 @@ export default function CharacterLibraryPanel() {
         isOpen={open}
         onClose={() => setOpen(false)}
         ariaLabel={t('角色库')}
-        className="character-library-panel"
+        className="character-library-panel ui-dialog-surface"
       >
         <div className="character-library-toolbar">
           <div className="character-library-tabs" role="tablist" aria-label={t('角色保存范围')}>
@@ -718,10 +834,12 @@ export default function CharacterLibraryPanel() {
               } as CSSProperties : undefined}
             >
               <CharacterReferenceGallery
+                key={`${currentProjectId}:${scope}:${selectedCharacter.id}`}
                 references={selectedCharacter.referenceImages ?? []}
                 selectedId={effectiveReferenceId}
                 onSelect={setSelectedReferenceId}
                 onEdit={(referenceId) => openEditor(selectedCharacter, referenceId)}
+                onReorder={reorderReferences}
                 onStageResize={handleStageResize}
               />
 
@@ -818,7 +936,7 @@ export default function CharacterLibraryPanel() {
                             className="character-voice-play"
                             aria-label={playingVoiceClipId === clip.id ? t('暂停试听') : t('试听')}
                             disabled={!clip.audioUrl}
-                            onClick={() => toggleVoicePlayback(clip)}
+                            onClick={() => void toggleVoicePlayback(clip)}
                           >
                             <Icon
                               icon={playingVoiceClipId === clip.id ? 'lucide:pause' : 'lucide:play'}
@@ -830,7 +948,7 @@ export default function CharacterLibraryPanel() {
                           <span className="character-voice-chip-copy">
                             <strong>{voiceClipTitle(clip)}</strong>
                             <span>
-                              {CHARACTER_VOICE_KIND_LABELS[clip.kind]} · {formatVoiceDuration(clip.durationSec)}
+                              {t(CHARACTER_VOICE_KIND_LABELS[clip.kind])} · {formatVoiceDuration(clip.durationSec)}
                             </span>
                           </span>
                           <span className="character-voice-chip-actions">
@@ -904,6 +1022,10 @@ export default function CharacterLibraryPanel() {
                     <p>{selectedCharacter.summary || selectedCharacter.visualNotes || t('尚未填写角色简介')}</p>
                   </div>
                   <div className="character-library-profile-actions">
+                    <button type="button" data-tooltip={t('绑定角色武器')} aria-label={t('绑定角色武器')}
+                      onClick={() => setWeaponTarget({ scope, id: selectedCharacter.id, projectId: currentProjectId })}>
+                      <Swords width="16" height="16" aria-hidden="true" />
+                    </button>
                     {selectedReference ? (
                       <button type="button" data-tooltip={canvasActionLabel} aria-label={canvasActionLabel} onClick={handleCanvasAction}>
                         <Icon icon={canvasActionIcon} width="16" height="16" aria-hidden="true" />
@@ -929,7 +1051,7 @@ export default function CharacterLibraryPanel() {
                       className={voiceDockOpen ? 'is-active' : ''}
                       onClick={() => {
                         if (voiceDockOpen) {
-                          voicePlayerRef.current?.pause();
+                          stopVoicePlayback();
                           setVoicePickerOpen(false);
                         }
                         setVoiceDockState({ context: voiceDockContext, expanded: !voiceDockOpen });
@@ -964,6 +1086,7 @@ export default function CharacterLibraryPanel() {
                       type="button"
                       data-tooltip={scope === 'project' ? t('复制到全局资产') : t('复制到本项目')}
                       aria-label={scope === 'project' ? t('复制到全局资产') : t('复制到本项目')}
+                      disabled={weaponCopyBusy}
                       onClick={() => void handleCopy()}
                     >
                       <Icon icon="lucide:copy-plus" width="16" height="16" aria-hidden="true" />
@@ -981,8 +1104,16 @@ export default function CharacterLibraryPanel() {
               <audio
                 ref={voicePlayerRef}
                 className="sr-only"
-                onPause={() => setPlayingVoice(null)}
-                onEnded={() => setPlayingVoice(null)}
+                onPause={(event) => {
+                  if (event.currentTarget.paused && voicePlaybackRef.current?.release) stopVoicePlayback();
+                  setPlayingVoice(null);
+                }}
+                onEnded={() => { stopVoicePlayback(); setPlayingVoice(null); }}
+                onError={(event) => {
+                  if (!event.currentTarget.error || !voicePlaybackRef.current) return;
+                  stopVoicePlayback(); setPlayingVoice(null);
+                  showToast(t('音频播放失败'), 'error');
+                }}
               />
             </section>
           ) : (
@@ -990,7 +1121,7 @@ export default function CharacterLibraryPanel() {
               <Icon icon="lucide:contact-round" width="34" height="34" aria-hidden="true" />
               <h3>{search ? t('没有匹配的角色') : t('这里还没有角色')}</h3>
               {!search ? (
-                <button type="button" className="character-button-primary mt-3 text-white" onClick={() => openEditor(null)}>
+                <button type="button" className="character-button-primary mt-3" onClick={() => openEditor(null)}>
                   <Icon icon="lucide:plus" width="15" height="15" aria-hidden="true" />
                   {t('新建角色')}
                 </button>
@@ -1004,25 +1135,30 @@ export default function CharacterLibraryPanel() {
             <span>{scope === 'project' ? t('本项目角色') : t('全局角色')}</span>
             <strong>{characters.length}</strong>
           </div>
-          <div className="character-library-strip-list" role="list">
-            {characters.map((character) => (
-              <button
-                key={character.id}
-                type="button"
-                role="listitem"
-                className={character.id === selectedCharacter?.id ? 'is-selected' : ''}
-                onClick={() => {
-                  setSelectedCharacterId(character.id);
-                  setSelectedReferenceId(null);
-                }}
-              >
-                <CharacterAvatar character={character} />
-                <span>{character.name}</span>
-              </button>
-            ))}
-          </div>
+          <CharacterDock
+            key={JSON.stringify([open, currentProjectId, scope, search,
+              characters.map(({ id, updatedAt }) => [id, updatedAt]).sort()])}
+            characters={characters}
+            selectedId={selectedCharacter?.id}
+            renderAvatar={(character) => <CharacterAvatar character={character} />}
+            onSelect={(id) => {
+              setWeaponTarget(null);
+              setSelectedCharacterId(id);
+              setSelectedReferenceId(null);
+            }}
+            onReorder={async (ids) => {
+              // 尚未点击过角色时，也保持当前预览，不随首项换位而跳到其他角色。
+              if (selectedCharacter) setSelectedCharacterId(selectedCharacter.id);
+              return reorderCharacters(scope, ids, currentProjectId);
+            }}
+          />
         </footer>
       </ModalOverlay>
+
+      {open && weaponTarget && weaponTarget.scope === scope && weaponTarget.id === selectedCharacter?.id
+        && weaponTarget.projectId === currentProjectId && <CharacterWeaponDialog
+          key={`${scope}:${currentProjectId}:${weaponTarget.id}`} scope={scope} characterId={weaponTarget.id}
+          onClose={() => setWeaponTarget(null)} />}
 
       {dialogOpen ? createPortal(
         <CharacterAssetDialog
@@ -1077,11 +1213,11 @@ export default function CharacterLibraryPanel() {
           isOpen={actionLibraryOpen}
           onClose={closeActionLibrary}
           ariaLabel={t('「{name}」的动作库', { name: selectedCharacter.name })}
-          className="h-[min(820px,calc(100vh-32px))] w-[min(1180px,calc(100vw-32px))] border-canvas-border bg-canvas-surface text-canvas-text"
+          className="ui-dialog-surface h-[min(820px,calc(100vh-32px))] w-[min(1180px,calc(100vw-32px))] border-canvas-border text-canvas-text"
           motionPreset="quick"
         >
-          <header className="flex items-center gap-3 border-b border-canvas-border px-5 py-4">
-            <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-canvas-border bg-canvas-card text-indigo-400">
+          <header className="flex items-center gap-3 border-b border-canvas-border px-2.5 py-2">
+            <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-canvas-border bg-canvas-card text-brand-light">
               <Icon icon="lucide:accessibility" width="19" height="19" aria-hidden="true" />
             </span>
             <div className="min-w-0 flex-1">
@@ -1143,17 +1279,17 @@ export default function CharacterLibraryPanel() {
                       const category = CHARACTER_ACTION_CATEGORIES.find((item) => item.id === action.category);
                       const categoryLabel = action.category === 'custom' && action.customCategory
                         ? action.customCategory
-                        : category?.label ?? '自定义';
+                        : t(category?.label ?? '自定义');
                       return (
                         <article key={action.id} className="character-action-card flex min-w-0 flex-col rounded-xl border border-canvas-border bg-canvas-card p-3 shadow-sm">
                           <div className="flex items-start gap-2">
-                            <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-canvas-border bg-canvas-surface text-indigo-400">
+                            <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-canvas-border bg-canvas-surface text-brand-light">
                               <Icon icon={category?.icon ?? 'lucide:shapes'} width="15" height="15" aria-hidden="true" />
                             </span>
                             <div className="min-w-0 flex-1">
                               <h3 className="truncate text-xs font-semibold">{action.name}</h3>
                               <span className="mt-1 inline-flex rounded-md border border-canvas-border px-1.5 py-0.5 text-[10px] text-canvas-text-secondary">
-                                {t(categoryLabel)}
+                                {categoryLabel}
                               </span>
                             </div>
                             <button
@@ -1201,12 +1337,12 @@ export default function CharacterLibraryPanel() {
                                       expanded={videoPreview.expandedId === `action:${action.id}:${media.id}`}
                                       onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? `action:${action.id}:${media.id}` : null)} />
                                   )}
-                                  <span className="pointer-events-none absolute bottom-1 left-1 max-w-[calc(100%-40px)] truncate rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white">
+                                  <span className="pointer-events-none absolute bottom-1 left-1 max-w-[calc(100%-40px)] truncate rounded bg-[color:color-mix(in_srgb,var(--theme-bg)_78%,transparent)] px-1.5 py-0.5 text-[9px] text-canvas-text">
                                     {media.name}
                                   </span>
                                   <button
                                     type="button"
-                                    className="absolute right-1 top-1 grid size-6 place-items-center rounded-md bg-black/60 text-white transition-[transform,background-color] duration-150 ease-out hover:bg-black/80 active:scale-[.97]"
+                                    className="absolute right-1 top-1 grid size-6 place-items-center rounded-md bg-[color:color-mix(in_srgb,var(--theme-bg)_78%,transparent)] text-canvas-text transition-[transform,background-color] duration-150 ease-out hover:bg-[color:color-mix(in_srgb,var(--theme-bg)_92%,transparent)] active:scale-[.97]"
                                     aria-label={t('移除媒体「{name}」', { name: media.name })}
                                     onClick={async () => {
                                       if (await removeCharacterActionMedia(
@@ -1246,7 +1382,7 @@ export default function CharacterLibraryPanel() {
                             <button
                               type="button"
                               disabled={uploadingActionMedia}
-                              className="flex aspect-video min-h-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-canvas-border text-[10px] text-canvas-text-muted transition-[transform,color,background-color,border-color] duration-150 ease-out hover:border-indigo-400 hover:bg-canvas-surface hover:text-canvas-text active:scale-[.98] disabled:opacity-50"
+                              className="flex aspect-video min-h-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-canvas-border text-[10px] text-canvas-text-muted transition-[transform,color,background-color,border-color] duration-150 ease-out hover:border-brand-light hover:bg-canvas-surface hover:text-canvas-text active:scale-[.98] disabled:opacity-50"
                               onClick={() => openActionMediaPicker(action.id)}
                             >
                               <Icon icon="lucide:upload" width="16" height="16" aria-hidden="true" />
@@ -1255,7 +1391,7 @@ export default function CharacterLibraryPanel() {
                             <button
                               type="button"
                               aria-expanded={actionNodePickerTargetId === action.id}
-                              className="flex aspect-video min-h-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-canvas-border text-[10px] text-canvas-text-muted transition-[transform,color,background-color,border-color] duration-150 ease-out hover:border-indigo-400 hover:bg-canvas-surface hover:text-canvas-text active:scale-[.98]"
+                              className="flex aspect-video min-h-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-canvas-border text-[10px] text-canvas-text-muted transition-[transform,color,background-color,border-color] duration-150 ease-out hover:border-brand-light hover:bg-canvas-surface hover:text-canvas-text active:scale-[.98]"
                               onClick={() => setActionNodePickerTargetId((current) => (
                                 current === action.id ? null : action.id
                               ))}
@@ -1308,14 +1444,14 @@ export default function CharacterLibraryPanel() {
                                                 expanded={videoPreview.expandedId === `node:${node.id}`}
                                                 onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? `node:${node.id}` : null)} />
                                             ) : (
-                                              <button type="button" className="size-full" onClick={() => void handleBindActionNode(node.id)} aria-label={`${label}：添加素材`}>
+                                              <button type="button" className="size-full" onClick={() => void handleBindActionNode(node.id)} aria-label={t('{label}：添加素材', { label })}>
                                                 <ViewportImage src={previewUrl} alt="" className="size-full object-cover" draggable={false} />
                                               </button>
                                             )}
                                           </div>
                                           <button type="button" className="block w-full truncate px-2 py-1.5 text-left text-[10px] text-canvas-text-secondary hover:text-canvas-text"
-                                            aria-label={`${label}：添加素材`} onClick={() => void handleBindActionNode(node.id)}>
-                                            {node.data.videoUrl ? `添加：${label}` : label}
+                                            aria-label={t('{label}：添加素材', { label })} onClick={() => void handleBindActionNode(node.id)}>
+                                            {node.data.videoUrl ? t('添加：{label}', { label }) : label}
                                           </button>
                                         </div>
                                       );
@@ -1342,7 +1478,7 @@ export default function CharacterLibraryPanel() {
             >
               <div className="min-h-0 flex-1 overflow-y-auto p-4">
                 <div className="flex items-center gap-2">
-                  <span className="grid size-8 place-items-center rounded-lg bg-indigo-500 text-white">
+                  <span className="grid size-8 place-items-center rounded-lg bg-brand text-[var(--brand-contrast)]">
                     <Icon icon="lucide:plus" width="15" height="15" aria-hidden="true" />
                   </span>
                   <div>
@@ -1372,7 +1508,7 @@ export default function CharacterLibraryPanel() {
                       value={customActionCategory}
                       onChange={(event) => setCustomActionCategory(event.target.value)}
                       placeholder={t('例如：武术、特殊技能')}
-                      className="h-9 rounded-lg border border-canvas-border bg-canvas-surface px-3 text-xs text-canvas-text outline-none transition-[border-color] duration-150 focus:border-indigo-400"
+                      className="h-9 rounded-lg border border-canvas-border bg-canvas-surface px-3 text-xs text-canvas-text outline-none transition-[border-color] duration-150 focus:border-brand-light"
                     />
                   </label>
                 ) : null}
@@ -1383,7 +1519,7 @@ export default function CharacterLibraryPanel() {
                     value={actionName}
                     onChange={(event) => setActionName(event.target.value)}
                     placeholder={t('例如：警戒站姿')}
-                    className="h-9 rounded-lg border border-canvas-border bg-canvas-surface px-3 text-xs text-canvas-text outline-none transition-[border-color] duration-150 focus:border-indigo-400"
+                    className="h-9 rounded-lg border border-canvas-border bg-canvas-surface px-3 text-xs text-canvas-text outline-none transition-[border-color] duration-150 focus:border-brand-light"
                   />
                 </label>
 
@@ -1394,7 +1530,7 @@ export default function CharacterLibraryPanel() {
                     onChange={(event) => setActionPrompt(event.target.value)}
                     placeholder={t('描述姿势、重心、手部动作和运动方向…')}
                     rows={4}
-                    className="resize-none rounded-lg border border-canvas-border bg-canvas-surface px-3 py-2 text-xs leading-5 text-canvas-text outline-none transition-[border-color] duration-150 focus:border-indigo-400"
+                    className="resize-none rounded-lg border border-canvas-border bg-canvas-surface px-3 py-2 text-xs leading-5 text-canvas-text outline-none transition-[border-color] duration-150 focus:border-brand-light"
                   />
                 </label>
 
@@ -1416,7 +1552,7 @@ export default function CharacterLibraryPanel() {
                           )}
                           <button
                             type="button"
-                            className="absolute right-1 top-1 grid size-6 place-items-center rounded-md bg-black/60 text-white transition-transform duration-150 ease-out active:scale-[.97]"
+                            className="absolute right-1 top-1 grid size-6 place-items-center rounded-md bg-[color:color-mix(in_srgb,var(--theme-bg)_78%,transparent)] text-canvas-text transition-transform duration-150 ease-out active:scale-[.97]"
                             aria-label={t('移除待添加媒体「{name}」', { name: media.name })}
                             onClick={() => setPendingActionMedia((current) => current.filter((item) => item.id !== media.id))}
                           >
@@ -1429,7 +1565,7 @@ export default function CharacterLibraryPanel() {
                   <button
                     type="button"
                     disabled={uploadingActionMedia}
-                    className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-canvas-border bg-canvas-surface px-3 py-3 text-[10px] text-canvas-text-secondary transition-[transform,color,border-color] duration-150 ease-out hover:border-indigo-400 hover:text-canvas-text active:scale-[.98] disabled:opacity-50"
+                    className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-canvas-border bg-canvas-surface px-3 py-3 text-[10px] text-canvas-text-secondary transition-[transform,color,border-color] duration-150 ease-out hover:border-brand-light hover:text-canvas-text active:scale-[.98] disabled:opacity-50"
                     onClick={() => openActionMediaPicker(null)}
                   >
                     <Icon icon={uploadingActionMedia ? 'lucide:loader-circle' : 'lucide:upload'} className={uploadingActionMedia ? 'animate-spin' : ''} width="14" height="14" aria-hidden="true" />
@@ -1442,7 +1578,7 @@ export default function CharacterLibraryPanel() {
                 <button
                   type="submit"
                   disabled={!actionName.trim() || savingAction || uploadingActionMedia}
-                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 text-xs font-medium text-white transition-[transform,opacity,background-color] duration-150 ease-out hover:bg-indigo-400 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-[var(--brand-contrast)] transition-[transform,opacity,background-color] duration-150 ease-out hover:bg-brand-hover active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Icon icon={savingAction ? 'lucide:loader-circle' : 'lucide:plus'} className={savingAction ? 'animate-spin' : ''} width="14" height="14" aria-hidden="true" />
                   {savingAction ? t('正在保存…') : t('添加到动作库')}

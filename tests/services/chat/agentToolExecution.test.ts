@@ -1,7 +1,11 @@
+/**
+ * agentToolExecution — 回归测试：shared Agent tool execution for MCP。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentApprovalResolution, AgentMode, AgentTask } from '../../../src/types/agent';
 import {
   executeRegisteredAgentToolCall,
+  type RegisteredAgentToolCallOptions,
 } from '../../../src/services/chat/agentToolExecution';
 import {
   clearAgentToolRegistryForTests,
@@ -14,6 +18,7 @@ import {
   waitForAgentApproval,
 } from '../../../src/services/chat/agentTaskControl';
 import { useAppStore } from '../../../src/store/useAppStore';
+import { GENERAL_ASSISTANT_SCOPE_ID } from '../../../src/services/chat/assistantScope';
 import { registerProviderConfigAgentTools } from '../../../src/services/chat/tools/providerConfigTools';
 import { getAgentTool } from '../../../src/services/chat/toolRegistry';
 import { clearProviderModelCatalogsForTests, clearProviderModelCatalogsForTask, createProviderModelCatalog } from '../../../src/services/chat/providerModelCatalogService';
@@ -82,13 +87,16 @@ function registerBoundaryTool(overrides: Partial<AgentToolDefinition> = {}) {
 function executeBoundaryTool(options: {
   signal?: AbortSignal;
   policyMode?: AgentMode;
+  expectedContext?: RegisteredAgentToolCallOptions['expectedContext'];
+  input?: Record<string, unknown>;
   waitForApproval?: () => Promise<AgentApprovalResolution>;
 } = {}) {
   return executeRegisteredAgentToolCall({
     taskId: 'mcp-task-1',
-    call: { callId: 'boundary-call', toolId: 'boundary_test', input: {} },
+    call: { callId: 'boundary-call', toolId: 'boundary_test', input: options.input ?? {} },
     signal: options.signal ?? new AbortController().signal,
     policyMode: options.policyMode,
+    expectedContext: options.expectedContext,
     transitionTask: transitionAgentTask,
     waitForApproval: options.waitForApproval ?? vi.fn(async () => ({ approved: true })),
   });
@@ -99,6 +107,189 @@ function setBoundaryMode(mode: AgentMode) {
 }
 
 describe('shared Agent tool execution for MCP', () => {
+  it.each(['project', 'revision'] as const)('rejects a changed %s during dynamic executor loading before counting or executing the call', async (change) => {
+    const execute = registerBoundaryTool();
+    transitionAgentTask('mcp-task-1', 'planning');
+    const state = useAppStore.getState();
+    const expectedContext = { projectId: 'project-1', baseRevision: state.getCurrentRevision() };
+    const previousCount = state.agentTasks[0].toolCallCount;
+
+    // executeRegisteredAgentToolCall 先等待动态 import；同步切换发生在其恢复之前。
+    const pending = executeBoundaryTool({ expectedContext });
+    expect(execute).not.toHaveBeenCalled();
+    if (change === 'project') useAppStore.setState({ currentProjectId: 'project-2' });
+    else useAppStore.getState().incrementRevision();
+    const result = await pending;
+
+    expect(result.summary).toMatchObject({
+      callId: 'boundary-call', toolId: 'boundary_test', status: 'denied', errorCode: 'TOOL_CONTEXT_CHANGED',
+    });
+    expect(JSON.parse(result.modelContent)).toMatchObject({ errorCode: 'TOOL_CONTEXT_CHANGED', retryable: false });
+    expect(result.summary.summary).toContain('不要自动重投写入');
+    expect(execute).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0].toolCallCount).toBe(previousCount);
+    expect(useAppStore.getState().agentTasks[0].steps).toEqual([]);
+  });
+
+  it('passes a matching expected context and the original input to the business executor', async () => {
+    const execute = registerBoundaryTool({ inputSchema: {
+      type: 'object', required: ['value'], additionalProperties: false,
+      properties: { value: { type: 'string' } },
+    } });
+    transitionAgentTask('mcp-task-1', 'planning');
+    useAppStore.getState().incrementRevision();
+    const expectedContext = { projectId: 'project-1', baseRevision: useAppStore.getState().getCurrentRevision() };
+    const input = { value: '原始参数😀' };
+
+    const result = await executeBoundaryTool({ expectedContext, input });
+
+    expect(result.summary.status).toBe('success');
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      ...expectedContext, taskId: 'mcp-task-1', conversationId: 'mcp-control-project-1',
+    }), input);
+    expect(input).toEqual({ value: '原始参数😀' });
+    expect(useAppStore.getState().agentTasks[0].toolCallCount).toBe(1);
+  });
+
+  it('retains current-revision behavior for callers without expected-context metadata', async () => {
+    const execute = registerBoundaryTool();
+    transitionAgentTask('mcp-task-1', 'planning');
+
+    const pending = executeBoundaryTool();
+    useAppStore.getState().incrementRevision();
+    const currentRevision = useAppStore.getState().getCurrentRevision();
+    const result = await pending;
+
+    expect(result.summary.status).toBe('success');
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-1', baseRevision: currentRevision }), {});
+    expect(useAppStore.getState().agentTasks[0].toolCallCount).toBe(1);
+  });
+
+  it('returns complete MCP JSON above the model limit without persisting its body', async () => {
+    const body = JSON.stringify({ nodes: [{ prompt: 'complete-mcp-body-marker'.repeat(1200) }] });
+    registerBoundaryTool({ effect: 'read', execute: async () => ({
+      status: 'success', summary: 'read complete', modelContent: body,
+    }) });
+    transitionAgentTask('mcp-task-1', 'planning');
+
+    const result = await executeBoundaryTool();
+
+    expect(result.modelContent).toHaveLength(20_000);
+    expect(result.summary.truncated).toBe(true);
+    expect(result.mcpContent).toEqual([{ type: 'text', text: body }]);
+    expect(JSON.parse((result.mcpContent![0] as { text: string }).text)).toEqual(JSON.parse(body));
+    expect(JSON.stringify({ tasks: useAppStore.getState().agentTasks, messages: useAppStore.getState().messages }))
+      .not.toContain('complete-mcp-body-marker');
+  });
+
+  it('keeps ordinary assistant results bounded by the model limit', async () => {
+    useAppStore.setState((state) => ({
+      activeConversationId: 'ordinary-conversation',
+      conversations: [{ ...state.conversations[0], id: 'ordinary-conversation' }],
+      agentTasks: [{ ...state.agentTasks[0], conversationId: 'ordinary-conversation' }],
+    }));
+    registerBoundaryTool({ effect: 'read', execute: async () => ({
+      status: 'success', summary: 'read complete', modelContent: 'x'.repeat(21_000),
+    }) });
+    transitionAgentTask('mcp-task-1', 'planning');
+
+    const result = await executeBoundaryTool();
+
+    expect(result.modelContent).toHaveLength(20_000);
+    expect(result.mcpContent).toBeUndefined();
+    expect(result.mcpResultError).toBeUndefined();
+  });
+
+  it('marks truncation performed by the tool separately from the model text limit', async () => {
+    const body = JSON.stringify({ items: ['first page'], nextCursor: 'next' });
+    registerBoundaryTool({ effect: 'read', execute: async () => ({
+      status: 'success', summary: 'partial read', modelContent: body, truncated: true,
+    }) });
+    transitionAgentTask('mcp-task-1', 'planning');
+
+    const result = await executeBoundaryTool();
+
+    expect(result.mcpContent?.[0]).toEqual({ type: 'text', text: body });
+    expect(JSON.parse((result.mcpContent![1] as { text: string }).text)).toMatchObject({ truncated: true });
+    expect(result.mcpResultError).toBeUndefined();
+  });
+
+  it.each([
+    { kind: 'UTF-8 bytes', body: '界'.repeat(180_000) },
+    { kind: 'JSON escapes', body: '\n'.repeat(263_000) },
+  ])('rejects oversized serialized MCP text without splitting JSON ($kind)', async ({ body }) => {
+    expect(body.length).toBeLessThan(512 * 1024);
+    registerBoundaryTool({ effect: 'read', execute: async () => ({
+      status: 'success', summary: 'read complete', modelContent: body,
+    }) });
+    transitionAgentTask('mcp-task-1', 'planning');
+
+    const result = await executeBoundaryTool();
+
+    expect(result.mcpResultError).toBe(true);
+    expect(result.summary.status).toBe('success');
+    expect(JSON.parse((result.mcpContent![0] as { text: string }).text)).toMatchObject({
+      code: 'MCP_RESULT_TOO_LARGE', operationStatus: 'success', resultOmitted: true, retryable: false,
+    });
+    expect(JSON.stringify(result.mcpContent).length).toBeLessThan(1000);
+  });
+
+  it('preserves successful writes when their result exceeds the MCP delivery budget', async () => {
+    const write = vi.fn(async () => ({
+      status: 'success' as const, summary: 'write complete', modelContent: 'x'.repeat(600_000),
+    }));
+    registerBoundaryTool({ effect: 'file_write', execute: write });
+
+    const task = await runAgentTask('mcp-task-1', async (signal) => {
+      const result = await executeBoundaryTool({ signal });
+      expect(result.summary.status).toBe('success');
+      expect(result.mcpResultError).toBe(false);
+      const omitted = JSON.parse((result.mcpContent![0] as { text: string }).text);
+      expect(omitted).toMatchObject({ operationStatus: 'success', resultOmitted: true, retryable: false });
+      expect(omitted.message).toContain('不要重复提交写入');
+      return 'completed';
+    });
+
+    expect(write).toHaveBeenCalledOnce();
+    expect(task.status).toBe('completed');
+    expect(task.steps[0].status).toBe('succeeded');
+    expect(task.steps[0].toolCall?.resultSummary).toBe('write complete');
+  });
+
+  it('preserves existing rich MCP content without applying the ordinary text budget', async () => {
+    const content = [{ type: 'image' as const, mimeType: 'image/jpeg' as const, data: 'Y'.repeat(600_000) }];
+    registerBoundaryTool({ effect: 'read', execute: async () => ({
+      status: 'success', summary: 'image complete', modelContent: 'image complete', mcpContent: content,
+    }) });
+    transitionAgentTask('mcp-task-1', 'planning');
+
+    const result = await executeBoundaryTool();
+
+    expect(result.mcpContent).toBe(content);
+    expect(result.mcpResultError).toBeUndefined();
+  });
+
+  it.each([false, true])('rechecks general tool access after approval; revoked=%s', async (revoked) => {
+    const task = { ...createTask(), projectId: GENERAL_ASSISTANT_SCOPE_ID,
+      conversationId: 'conv-general', toolAllowlist: ['file_write_text'], mode: 'collaborative' as const };
+    useAppStore.setState((state) => ({ currentProjectId: null, agentTasks: [task],
+      conversations: [{ ...state.conversations[0], id: task.conversationId, projectId: task.projectId, agentMode: task.mode }] }));
+    const execute = registerBoundaryTool({ id: 'file_write_text', effect: 'file_write' });
+    transitionAgentTask(task.id, 'planning');
+    const wait = vi.fn(async () => {
+      useAppStore.setState({ currentProjectId: 'other-project' });
+      if (revoked) useAppStore.getState().updateAgentTask(task.id, { toolAllowlist: [] });
+      return { approved: true };
+    });
+    const result = await executeRegisteredAgentToolCall({ taskId: task.id,
+      call: { callId: 'general-save', toolId: 'file_write_text', input: {} },
+      signal: new AbortController().signal, transitionTask: transitionAgentTask, waitForApproval: wait });
+    expect(wait).toHaveBeenCalledOnce();
+    expect(result.summary.status).toBe(revoked ? 'denied' : 'success');
+    expect(execute).toHaveBeenCalledTimes(revoked ? 0 : 1);
+  });
+
   function arrangeProviderSelection(catalog: boolean) {
     registerProviderConfigAgentTools();
     const options = Array.from({ length: catalog ? 1000 : 20 }, (_, index) => ({ id: `model-${index}`, name: `Model ${index}`, category: 'text' as const }));

@@ -1,4 +1,8 @@
+/**
+ * assetNodeConnection — 回归测试：侧栏节点真实连线。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('../../src/hooks/useComfyMediaSource', () => ({ useComfyMediaSource: (source?: string) => source }));
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import type { AppState } from '../../src/store/useAppStore';
 import type { BaseNodeData } from '../../src/types';
@@ -12,6 +16,8 @@ const driver = vi.hoisted(() => ({
 }));
 vi.mock('react', async () => ({
   ...await vi.importActual<typeof import('react')>('react'),
+  useSyncExternalStore: <T,>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
+  useCallback: <T,>(callback: T) => callback,
   memo: <T,>(value: T) => value,
   useMemo: <T,>(factory: () => T) => factory(),
   useState: <T,>(initial: T) => {
@@ -232,12 +238,18 @@ describe('节点内容卡片', () => {
     expect(releaseNew).toHaveBeenCalledTimes(1);
   });
   it('不需派生缩略图的小图仍显示原图，原图加载失败后显示占位', async () => {
+    driver.image.mockResolvedValueOnce({ src: 'small.png', release: vi.fn() });
     const data = node('a', { imageUrl: 'small.png' }).data;
     render(data); await Promise.resolve();
     const image = elements(render(data), 'img')[0];
     expect(image.props.src).toBe('small.png');
     expect(image.props.loading).toBe('lazy');
     (image.props.onError as () => void)();
+    expect(elements(render(data), 'img')).toHaveLength(0);
+  });
+  it('预算拒绝或派生失败时保留占位，不自动解码原图', async () => {
+    const data = node('a', { imageUrl: 'huge.png' }).data;
+    render(data); await Promise.resolve();
     expect(elements(render(data), 'img')).toHaveLength(0);
   });
   it('视频委托共享资源预览，传递封面并保留真实端口', () => {

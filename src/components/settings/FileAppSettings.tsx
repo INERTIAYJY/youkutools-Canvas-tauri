@@ -21,7 +21,10 @@ import {
   type DirectorBlenderInstallationCandidate,
 } from '../../services/directorBlenderRuntimeService';
 import AnimatedButton from '../shared/AnimatedButton';
-import { useT } from '../../i18n';
+import { t as translate, useT } from '../../i18n';
+
+const isMacOS = typeof navigator !== 'undefined'
+  && (/mac/i.test(navigator.platform || '') || /Macintosh|Mac OS X/.test(navigator.userAgent || ''));
 
 interface ExternalEditorRow {
   id: string;
@@ -100,7 +103,7 @@ export default function FileAppSettings({ active }: { active: boolean }) {
       .catch((error) => {
         if (cancelled) return;
         setBlenderInstallation(null);
-        setBlenderError(error instanceof Error ? error.message : 'Blender 安装检测失败');
+        setBlenderError(error instanceof Error ? error.message : translate('Blender 安装检测失败'));
       })
       .finally(() => {
         if (!cancelled) setBlenderLoading(false);
@@ -129,12 +132,20 @@ export default function FileAppSettings({ active }: { active: boolean }) {
     title: string,
     name: string,
     patch: (path: string) => Record<string, string>,
+    currentPath?: string,
   ) => {
     try {
+      const isMacPath = (p: string) => p.startsWith('/') || p.startsWith('~');
+      const defaultPath = isMacOS
+        ? (currentPath?.trim() && isMacPath(currentPath.trim()) ? currentPath.trim() : '/Applications')
+        : (currentPath?.trim() || undefined);
+
       const selected = await openDialog({
         multiple: false,
         title,
-        filters: [{ name, extensions: ['exe', 'app'] }],
+        filters: [{ name, extensions: [isMacOS ? 'app' : 'exe'] }],
+        defaultPath,
+        ...(isMacOS ? { canCreateDirectories: false } : {}),
       });
       if (selected && typeof selected === 'string') {
         updateConfig(patch(selected));
@@ -152,7 +163,7 @@ export default function FileAppSettings({ active }: { active: boolean }) {
       setBlenderInstallation(await chooseDirectorBlenderInstallation());
     } catch (error) {
       if (!(error instanceof Error && error.name === 'AbortError')) {
-        setBlenderError(error instanceof Error ? error.message : 'Blender 选择失败');
+        setBlenderError(error instanceof Error ? error.message : t('Blender 选择失败'));
       }
     } finally {
       setBlenderLoading(false);
@@ -166,27 +177,42 @@ export default function FileAppSettings({ active }: { active: boolean }) {
       label: 'Photoshop',
       path: config.photoshopPath,
       description: t('用于图片节点的「在 PS 中打开」'),
-      onChoose: () => chooseApplication(t('选择 Photoshop.exe'), 'Photoshop', (photoshopPath) => ({ photoshopPath })),
+      onChoose: () => chooseApplication(
+        isMacOS ? t('选择 Photoshop.app') : t('选择 Photoshop.exe'),
+        'Photoshop',
+        (photoshopPath) => ({ photoshopPath }),
+        config.photoshopPath,
+      ),
     },
     {
       id: 'jianying',
       label: '剪映专业版',
       path: config.jianyingPath,
       description: t('用于视频节点的「在剪映中打开」'),
-      onChoose: () => chooseApplication(t('选择剪映专业版'), '剪映专业版', (jianyingPath) => ({ jianyingPath })),
+      onChoose: () => chooseApplication(
+        t('选择剪映专业版'),
+        '剪映专业版',
+        (jianyingPath) => ({ jianyingPath }),
+        config.jianyingPath,
+      ),
     },
     {
       id: 'premiere',
       label: 'Adobe Premiere Pro',
       path: config.premierePath,
       description: t('用于视频节点的「在 PR 中打开」'),
-      onChoose: () => chooseApplication(t('选择 Adobe Premiere Pro'), 'Adobe Premiere Pro', (premierePath) => ({ premierePath })),
+      onChoose: () => chooseApplication(
+        t('选择 Adobe Premiere Pro'),
+        'Adobe Premiere Pro',
+        (premierePath) => ({ premierePath }),
+        config.premierePath,
+      ),
     },
   ];
 
   return (
     <div className="space-y-4">
-      <div>
+      <div data-onboarding-target="storage">
         <h3 className="text-sm font-medium text-canvas-text mb-2">{t('文件保存位置')}</h3>
         <div className="bg-canvas-card border border-canvas-border rounded-lg p-2">
           <div className="mb-3">

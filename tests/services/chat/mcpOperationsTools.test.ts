@@ -1,3 +1,6 @@
+/**
+ * mcpOperationsTools — 回归测试：MCP operation domains。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSeriesAgentTools } from '../../../src/services/chat/tools/seriesTools';
 import { registerDramaAssetAgentTools } from '../../../src/services/chat/tools/dramaAssetTools';

@@ -103,12 +103,14 @@ export const PROTOCOL_VARIABLES: readonly ProtocolVariableSpec[] = [
   },
   {
     name: 'imageSize', supplied: IMAGE,
-    fields: ['imagesize', 'quality'],
+    fields: ['imagesize'],
     rules: [
       { key: 'resolution', categories: IMAGE },
       { key: 'imageresolution', categories: IMAGE },
     ],
   },
+  { name: 'imageQuality', supplied: IMAGE, fields: ['quality', 'imagequality'] },
+  { name: 'imageBackground', supplied: IMAGE, fields: ['background', 'imagebackground'] },
   // 非图片模型的 resolution 走视频档位（'720p' 这类），图片模型由上面的规则先接走
   {
     name: 'seedanceResolution', supplied: VIDEO,
@@ -164,6 +166,11 @@ export const PROTOCOL_VARIABLES: readonly ProtocolVariableSpec[] = [
     categories: VIDEO,
     // Seedance 2.x 的带角色参考图数组 [{ url, role }]，整体由运行时变量替换
     fields: ['imagewithroles', 'imageswithroles', 'imageroles'],
+  },
+  {
+    name: 'seedanceContent', supplied: VIDEO,
+    reference: true,
+    categories: VIDEO,
   },
   {
     name: 'firstImage', supplied: VIDEO,
@@ -226,6 +233,9 @@ export const PROTOCOL_VARIABLES: readonly ProtocolVariableSpec[] = [
     fields: ['references', 'inlinereferences'],
   },
 
+  // Google 原生图片块由运行时准备；不把通用 parts 字段自动猜成图片请求。
+  { name: 'googleImageParts', supplied: IMAGE, reference: true, categories: IMAGE },
+
   // 运行时提供但没有对应请求字段名的别名变量，仍允许模板直接引用
   { name: 'batchCount', supplied: MEDIA },
   { name: 'frames', supplied: VIDEO },
@@ -260,7 +270,9 @@ const PROTOCOL_VARIABLE_DESCRIPTIONS: Readonly<Record<string, string>> = {
   toolChoice: '对话模型的工具选择策略',
   size: '输出宽高尺寸字符串，如 1280x720',
   aspectRatio: '输出宽高比，如 16:9',
-  imageSize: '图片分辨率或质量档位，如 2K',
+  imageSize: '图片分辨率档位，如 2K',
+  imageQuality: '已声明的图片生成质量，如 auto、medium；未选择且未声明默认值时省略',
+  imageBackground: '已声明的图片背景模式，如 transparent；接口默认时省略，与图片格式支持一同按渠道文档配置',
   seedanceResolution: '视频分辨率档位，如 720p',
   width: '输出宽度（像素）',
   height: '输出高度（像素）',
@@ -276,6 +288,7 @@ const PROTOCOL_VARIABLE_DESCRIPTIONS: Readonly<Record<string, string>> = {
   musicTitle: '音乐生成使用的歌曲标题',
   musicBpm: '音乐速度（每分钟节拍数）',
   imageWithRoles: '带角色的参考图数组，元素包含 url 和 role',
+  seedanceContent: '火山 Seedance 原生 content 数组，包含提示词及带类型和角色的参考素材',
   firstImage: '视频首帧图片 URL',
   lastImage: '视频尾帧图片 URL',
   referenceImageUrls: '普通参考图 URL 数组（不含首尾帧）',
@@ -286,6 +299,7 @@ const PROTOCOL_VARIABLE_DESCRIPTIONS: Readonly<Record<string, string>> = {
   audioUrl: '第一条输入音频 URL',
   referenceAudioUrls: '参考音频 URL 数组',
   imageUrls: '输入或参考图片 URL 数组',
+  googleImageParts: 'Google 原生图片 parts：提示词与 Base64 inlineData 参考图，由运行时完整生成',
   referenceUrls: '所有 HTTP(S) 参考素材 URL 数组',
   inlineReferences: '所有 data: 内联参考素材数组',
   batchCount: '批量生成数量，与 n 的值相同',

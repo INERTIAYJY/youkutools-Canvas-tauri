@@ -1,17 +1,22 @@
+/**
+ * canvasImagePreviewCache — 管理画布图片预览缓存与资源租约。
+ */
 import { readRasterImageDimensions } from '../../../../services/rasterImageDimensions';
 import { prepareProjectThumbnail } from '../../../../services/fs/thumbnailCache';
 import { assertEditorSourceBudget } from './imageResourceBudget';
+import { getPerformanceModeBudget, subscribePerformanceMode } from '../../../../services/performanceModeRuntime';
+import { isTauriAssetUrl } from '../../../../utils/mediaUrl';
+import { readNativeComfyImageBlob, shouldLoadNativeComfyImage } from '../../../../services/comfyImageSource';
 
 const MAX_ENCODED_BYTES = 32 * 1024 * 1024;
-const MAX_IDLE_RGBA_BYTES = 32 * 1024 * 1024;
-const MAX_IDLE_ENTRIES = 128;
-const IDLE_TTL_MS = 30_000;
 const INTERACTION_POLL_MS = 80;
 const DERIVATION_TIMEOUT_MS = 10_000;
+const PREVIEW_WAIT_TIMEOUT_MS = 15_000;
 const entries = new Map<string, Entry>();
 let running = false;
 let pumpTimer: ReturnType<typeof setTimeout> | undefined;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+let unsubscribePerformanceMode: (() => void) | undefined;
 
 export interface CanvasImagePreviewLease {
   src: string;
@@ -21,6 +26,7 @@ export interface CanvasImagePreviewLease {
 interface Client {
   resolve?: (value: CanvasImagePreviewLease | null) => void;
   release: () => void;
+  waitTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface Preview {
@@ -40,10 +46,45 @@ interface Entry {
   idleSince: number;
 }
 
+function resolveClient(client: Client, lease: CanvasImagePreviewLease | null): void {
+  if (client.waitTimer !== undefined) clearTimeout(client.waitTimer);
+  client.waitTimer = undefined;
+  client.resolve?.(lease);
+  client.resolve = undefined;
+}
+
+function addClient(current: Entry, signal: AbortSignal, resolve?: Client['resolve']): Client {
+  let released = false;
+  const client: Client = {
+    resolve,
+    release: () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener('abort', client.release);
+      current.clients.delete(client);
+      resolveClient(client, null);
+      if (current.clients.size !== 0) return;
+      if (current.state === 'ready') {
+        current.idleSince = Date.now();
+        pruneIdle();
+      } else discard(current);
+    },
+  };
+  current.clients.add(client);
+  signal.addEventListener('abort', client.release, { once: true });
+  // 包含排队时间；超时仅释放消费者，不能提前腾出不可取消的解码/编码槽。
+  if (resolve) client.waitTimer = setTimeout(client.release, PREVIEW_WAIT_TIMEOUT_MS);
+  return client;
+}
+
 function discard(entry: Entry): void {
   if (entries.get(entry.key) === entry) entries.delete(entry.key);
+  if (entries.size === 0) {
+    unsubscribePerformanceMode?.();
+    unsubscribePerformanceMode = undefined;
+  }
   entry.controller.abort();
-  if (entry.preview) URL.revokeObjectURL(entry.preview.src);
+  if (entry.preview && entry.preview.src !== entry.source) URL.revokeObjectURL(entry.preview.src);
   entry.preview = undefined;
 }
 
@@ -51,18 +92,19 @@ function pruneIdle(): void {
   if (expiryTimer !== undefined) clearTimeout(expiryTimer);
   expiryTimer = undefined;
   const now = Date.now();
+  const budget = getPerformanceModeBudget();
   const idle = [...entries.values()]
     .filter((entry) => entry.state === 'ready' && entry.clients.size === 0)
     .sort((a, b) => a.idleSince - b.idleSince);
   let bytes = idle.reduce((total, entry) => total + (entry.preview?.rgbaBytes ?? 0), 0);
   let count = idle.length;
   for (const entry of idle) {
-    if (now - entry.idleSince >= IDLE_TTL_MS || bytes > MAX_IDLE_RGBA_BYTES || count > MAX_IDLE_ENTRIES) {
+    if (now - entry.idleSince >= budget.previewIdleMs || bytes > budget.imageIdleBytes || count > budget.imageIdleEntries) {
       bytes -= entry.preview?.rgbaBytes ?? 0;
       count--;
       discard(entry);
     } else {
-      expiryTimer = setTimeout(pruneIdle, Math.max(1, IDLE_TTL_MS - (now - entry.idleSince)));
+      expiryTimer = setTimeout(pruneIdle, Math.max(1, budget.previewIdleMs - (now - entry.idleSince)));
       break;
     }
   }
@@ -104,6 +146,15 @@ async function isStaticRaster(blob: Blob): Promise<boolean> {
 }
 
 async function readBoundedBlob(source: string, signal: AbortSignal): Promise<Blob> {
+  if (shouldLoadNativeComfyImage(source)) return readNativeComfyImageBlob(source, signal);
+  if (isTauriAssetUrl(source)) {
+    // asset 的非 Range GET 会在原生侧整文件读取，先用 HEAD 挡住明显超限的本地文件。
+    const head = await fetch(source, { method: 'HEAD', signal });
+    if (!head.ok) throw new Error('Preview source unavailable');
+    if (Number(head.headers.get('content-length')) > MAX_ENCODED_BYTES) {
+      throw new RangeError('Preview source exceeds byte budget');
+    }
+  }
   const response = await fetch(source, { signal });
   if (!response.ok) throw new Error('Preview source unavailable');
   const declaredSize = Number(response.headers.get('content-length'));
@@ -142,11 +193,16 @@ async function readBoundedBlob(source: string, signal: AbortSignal): Promise<Blo
 async function derive(entry: Entry): Promise<Preview | null> {
   let bitmap: ImageBitmap | undefined;
   let canvas: HTMLCanvasElement | undefined;
+  let stage = 'cache';
   const signal = entry.controller.signal;
+  const warn = (errorType: string) => console.warn('[CanvasImagePreviewCache] 图片预览生成失败', {
+    stage, errorType, maxEdge: entry.maxEdge,
+  });
   const timeout = setTimeout(() => {
+    if (signal.aborted) return;
+    warn('TimeoutError');
     entry.controller.abort();
-    // Decode/encode have no abort API: let consumers fall back now, but keep the
-    // serial worker occupied until late graphics can be disposed in finally.
+    // 解码/编码无法中止：先结束等待，串行槽仍等 finally 回收资源，不能另开原图解码。
     for (const client of [...entry.clients]) client.release();
   }, DERIVATION_TIMEOUT_MS);
   try {
@@ -156,35 +212,52 @@ async function derive(entry: Entry): Promise<Preview | null> {
       const { blob, width, height } = disk.cached;
       return { src: URL.createObjectURL(blob), rgbaBytes: width * height * 4 };
     }
+    stage = 'read-source';
+    const nativeComfyImage = shouldLoadNativeComfyImage(entry.source);
     const blob = await readBoundedBlob(entry.source, signal);
-    if (!await isStaticRaster(blob)) return null;
+    stage = 'dimensions';
     const dimensions = await readRasterImageDimensions(blob);
-    if (!dimensions) return null;
-    assertEditorSourceBudget(dimensions.width, dimensions.height, '画布预览');
+    if (!dimensions) throw new Error('Preview dimensions unavailable');
+    const estimate = assertEditorSourceBudget(dimensions.width, dimensions.height, '画布预览');
     const edge = Math.max(dimensions.width, dimensions.height);
-    if (edge <= entry.maxEdge) return null;
+    // 小图和动图也先检查编码大小及像素预算；只有确认安全后才允许直接显示。
+    if (edge <= entry.maxEdge || !await isStaticRaster(blob)) {
+      // Comfy 原图 Blob 由缓存持有，编码字节也必须占用闲置内存预算。
+      return { src: nativeComfyImage ? URL.createObjectURL(blob) : entry.source,
+        rgbaBytes: estimate.bytes + (nativeComfyImage ? blob.size : 0) };
+    }
     const width = Math.max(1, Math.round(dimensions.width * entry.maxEdge / edge));
     const height = Math.max(1, Math.round(dimensions.height * entry.maxEdge / edge));
     signal.throwIfAborted();
+    stage = 'decode';
+    // 方向沿用浏览器默认值，兼容不接受 from-image 选项的 WebKit。
     bitmap = await createImageBitmap(blob, {
       resizeWidth: width,
       resizeHeight: height,
       resizeQuality: 'high',
-      imageOrientation: 'from-image',
     });
     signal.throwIfAborted();
+    stage = 'draw';
     canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext('2d');
-    if (!context) return null;
+    if (!context) throw new Error('Preview drawing context unavailable');
     context.drawImage(bitmap, 0, 0, width, height);
+    stage = 'encode';
     const previewBlob = await new Promise<Blob | null>((resolve) => canvas!.toBlob(resolve, 'image/webp', 0.85));
     signal.throwIfAborted();
+    if (!previewBlob) throw new Error('Preview encoding failed');
     // 先展示内存预览，写盘由文件服务的有界串行队列处理。
-    if (previewBlob) void disk?.persist(previewBlob);
-    return previewBlob ? { src: URL.createObjectURL(previewBlob), rgbaBytes: width * height * 4 } : null;
-  } catch {
+    void disk?.persist(previewBlob);
+    return { src: URL.createObjectURL(previewBlob), rgbaBytes: width * height * 4 };
+  } catch (error) {
+    if (!signal.aborted) {
+      // 只记录固定阶段和错误分类，避免异常属性带出图片地址或本地路径。
+      warn(error instanceof TypeError ? 'TypeError'
+        : error instanceof RangeError ? 'RangeError'
+          : error instanceof Error ? 'Error' : 'UnknownError');
+    }
     return null;
   } finally {
     clearTimeout(timeout);
@@ -211,8 +284,7 @@ async function pump(): Promise<void> {
   if (preview && entry.clients.size > 0 && !entry.controller.signal.aborted) {
     entry.state = 'ready';
     for (const client of entry.clients) {
-      client.resolve?.({ src: preview.src, release: client.release });
-      client.resolve = undefined;
+      resolveClient(client, { src: preview.src, release: client.release });
     }
   } else {
     for (const client of [...entry.clients]) client.release();
@@ -220,6 +292,25 @@ async function pump(): Promise<void> {
   }
   running = false;
   schedulePump();
+}
+
+/** 仅领取当前项目、完整来源的已就绪小图；不读取磁盘、不启动派生。 */
+export function acquireCachedCanvasImagePreview(
+  source: string,
+  maxEdge: number,
+  signal: AbortSignal,
+  projectId?: string | null,
+): (CanvasImagePreviewLease & { maxEdge: number }) | null {
+  if (signal.aborted || !Number.isFinite(maxEdge) || maxEdge <= 0) return null;
+  pruneIdle();
+  // 画布只有三档，不在每个入场节点上扫描整份缓存。
+  const current = [1024, 512, 256]
+    .filter((edge) => edge <= maxEdge)
+    .map((edge) => entries.get(JSON.stringify([projectId ?? null, source, edge])))
+    .find((entry) => entry?.state === 'ready' && entry.preview && !entry.controller.signal.aborted);
+  if (!current?.preview) return null;
+  const client = addClient(current, signal);
+  return { src: current.preview.src, maxEdge: current.maxEdge, release: client.release };
 }
 
 /** Shared bounded memory previews, backed by project disk cache when available. */
@@ -242,33 +333,13 @@ export function acquireCanvasImagePreview(
       controller: new AbortController(), idleSince: 0,
     };
     entries.set(key, entry);
+    unsubscribePerformanceMode ??= subscribePerformanceMode(pruneIdle);
   }
   const current = entry;
   return new Promise((resolve) => {
-    let released = false;
-    const client: Client = {
-      resolve,
-      release: () => {
-        if (released) return;
-        released = true;
-        signal.removeEventListener('abort', client.release);
-        current.clients.delete(client);
-        client.resolve?.(null);
-        client.resolve = undefined;
-        if (current.clients.size !== 0) return;
-        if (current.state === 'ready') {
-          current.idleSince = Date.now();
-          pruneIdle();
-        } else {
-          discard(current);
-        }
-      },
-    };
-    current.clients.add(client);
-    signal.addEventListener('abort', client.release, { once: true });
+    const client = addClient(current, signal, resolve);
     if (current.preview) {
-      resolve({ src: current.preview.src, release: client.release });
-      client.resolve = undefined;
+      resolveClient(client, { src: current.preview.src, release: client.release });
     } else {
       schedulePump();
     }

@@ -1,3 +1,6 @@
+/**
+ * mascotEyeShader — 回归测试：eyeDistanceAt。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   EYE_LID_HALF_THICKNESS,

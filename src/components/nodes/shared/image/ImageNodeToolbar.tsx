@@ -1,6 +1,7 @@
 /**
  * ImageNodeToolbar 图像节点浮动工具栏 + 编辑态支持
  */
+import { useT } from '../../../../i18n';
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { NodeType, BaseNodeData } from '../../../../types';
@@ -51,6 +52,7 @@ function ImageNodeToolbar({
   onAnnotate, onUpscale, onRepaint, onCopyFile, onReversePrompt,
   isUpscaling, isSubjectMattingRunning,
 }: ImageNodeToolbarProps) {
+  const t = useT();
   const nodeType = 'ai-image';
   const edit = useToolbarEdit({ nodeType });
   const registry = edit.registry;
@@ -59,6 +61,36 @@ function ImageNodeToolbar({
     dialog: pluginDialog,
   } = useNodePluginToolbar({ nodeId: _nodeId });
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const compressionRunning = useRef(false);
+  const showToast = useAppStore((state) => state.showToast);
+
+  const handleLosslessCompress = useCallback(async () => {
+    if (compressionRunning.current) return;
+    const projectId = useAppStore.getState().currentProjectId;
+    const isCurrentProject = () => useAppStore.getState().currentProjectId === projectId;
+    compressionRunning.current = true;
+    setIsCompressing(true);
+    try {
+      const { compressImageNode } = await import('../../../../services/imageLosslessCompression');
+      if (!isCurrentProject()) return;
+      const result = await compressImageNode(_nodeId);
+      if (!isCurrentProject()) return;
+      if (result.status === 'unchanged') {
+        showToast(t('图片无需进一步无损压缩，未创建副本'));
+      } else {
+        const percent = ((result.originalBytes - result.compressedBytes) / result.originalBytes * 100).toFixed(1);
+        showToast(t('已创建无损压缩副本，体积减少 {percent}%', { percent }));
+      }
+    } catch (error) {
+      if (!isCurrentProject()) return;
+      if (error instanceof Error && error.name === 'AbortError') return;
+      showToast(t(error instanceof Error ? error.message : '图片无损压缩失败'), 'error');
+    } finally {
+      compressionRunning.current = false;
+      setIsCompressing(false);
+    }
+  }, [_nodeId, showToast, t]);
 
   // ── 宫格子菜单 ──
   const [gridMenuOpen, setGridMenuOpen] = useState(false);
@@ -192,6 +224,22 @@ function ImageNodeToolbar({
         </AnimatedButton>
       );
     }
+    if (key === 'losslessCompress' && def) {
+      return (
+        <AnimatedButton
+          key={key}
+          className="ftb-btn icon-only act-losslessCompress"
+          data-tooltip={t(isCompressing ? '无损压缩中...' : '无损压缩')}
+          aria-label={t('无损压缩')}
+          aria-busy={isCompressing}
+          disabled={isCompressing}
+          onClick={(event) => { event.stopPropagation(); void handleLosslessCompress(); }}
+        >
+          <Icon icon={isCompressing ? 'mdi:loading' : def.icon} className={isCompressing ? 'animate-spin' : undefined} width={14} height={14} />
+        </AnimatedButton>
+      );
+    }
+
     if (!def || !handler) return null;
 
     if (key === 'upscale') {
@@ -199,8 +247,8 @@ function ImageNodeToolbar({
         <AnimatedButton
           key={key}
           className="ftb-btn icon-only act-hd"
-          data-tooltip={isUpscaling ? '超分处理中...' : '高清超分'}
-          aria-label="高清超分"
+          data-tooltip={t(isUpscaling ? '超分处理中...' : '高清超分')}
+          aria-label={t('高清超分')}
           disabled={isUpscaling}
           onClick={actionMap[key]}
         >
@@ -214,8 +262,8 @@ function ImageNodeToolbar({
         <AnimatedButton
           key={key}
           className="ftb-btn icon-only act-auto-subject"
-          data-tooltip={isSubjectMattingRunning ? '主体识别中...' : '自动识别主体'}
-          aria-label="自动识别主体"
+          data-tooltip={t(isSubjectMattingRunning ? '主体识别中...' : '自动识别主体')}
+          aria-label={t('自动识别主体')}
           disabled={isSubjectMattingRunning}
           onClick={actionMap[key]}
         >
@@ -229,8 +277,8 @@ function ImageNodeToolbar({
         <div key={key} className="multigrid-wrap" ref={gridWrapRef}>
           <AnimatedButton
             className="ftb-btn icon-only act-multigrid"
-            data-tooltip="宫格裁切"
-            aria-label="宫格裁切"
+            data-tooltip={t('宫格裁切')}
+            aria-label={t('宫格裁切')}
             onClick={toggleGridMenu}
           >
             <Icon icon={def.icon} width={14} height={14} />
@@ -241,15 +289,15 @@ function ImageNodeToolbar({
               className={`multigrid-menu nodrag${gridMenuBelow ? ' multigrid-menu--below' : ''}`}
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="multigrid-menu-title">选择宫格</div>
+              <div className="multigrid-menu-title">{t('选择宫格')}</div>
               {GRID_PRESETS.map((side) => (
                 <button key={side} type="button" className="multigrid-menu-item" onClick={pickGrid(side)}>
-                  <span>{side * side}宫格</span>
+                  <span>{t('{count}宫格', { count: side * side })}</span>
                 </button>
               ))}
               <div className="multigrid-menu-divider" />
               <button type="button" className="multigrid-menu-item multigrid-menu-item--custom" onClick={pickCustom}>
-                <span>自定义裁切</span>
+                <span>{t('自定义裁切')}</span>
               </button>
             </div>
           )}
@@ -261,14 +309,14 @@ function ImageNodeToolbar({
       <AnimatedButton
         key={key}
         className={`ftb-btn icon-only act-${key}`}
-        data-tooltip={def.label}
-        aria-label={def.label}
+        data-tooltip={t(def.label)}
+        aria-label={t(def.label)}
         onClick={actionMap[key]}
       >
         <Icon icon={def.icon} width={14} height={14} />
       </AnimatedButton>
     );
-  }, [registry, actionMap, isUpscaling, isSubjectMattingRunning, toggleGridMenu, gridMenuOpen, gridMenuBelow, pickGrid, pickCustom, handlePresetClick, renderPluginButton, userPresets]);
+  }, [registry, actionMap, handleLosslessCompress, isCompressing, isUpscaling, isSubjectMattingRunning, toggleGridMenu, gridMenuOpen, gridMenuBelow, pickGrid, pickCustom, handlePresetClick, renderPluginButton, userPresets, t]);
 
   // ── 编辑态 ──
   if (edit.isEditing) {

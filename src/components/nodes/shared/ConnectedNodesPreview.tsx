@@ -1,24 +1,38 @@
 ﻿/**
  * ConnectedNodesPreview — 已连线节点内容缩略图条
- * 显示在 PromptPanel 上方，展示所有 predecessor 节点的输出缩略图，
+ * 紧凑提示词对话框使用左上角圆弧扇形，其他宿主保留内联缩略图条，
  * 点击可快速 @提及 对应节点。
  *
  * 宫格分镜节点特殊处理：缩略图条中只显示一张主图，hover 后在上方弹出按宫格
  * 位置排列的各格 Sprite 缩略图网格，点击某格引用对应格子。
  */
-import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
+import { useMemo, useState, useCallback, useRef, useEffect, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
+import closeCircleIcon from '../../../assets/close-circle.svg';
 import { useAppStore } from '../../../store/useAppStore';
 import type { BaseNodeData, StoryboardCellOverride } from '../../../types';
 import { useT } from '../../../i18n';
+import { calcAnchoredPosition } from '../../../utils/popupPosition';
 import FullscreenOverlay from '../../shared/FullscreenOverlay';
+import VideoThumbnail from '../../shared/VideoThumbnail';
+import ViewportImage from '../../shared/ViewportImage';
+import VideoPlayer from '../../shared/VideoPlayer';
+import ViewportAudio from '../../shared/ViewportAudio';
+import { useComfyImageSource } from '../../../hooks/useComfyImageSource';
+import { resolveVideoThumbnailPoster } from '../../shared/videoThumbnailSource';
 import {
   calculateDockOffset,
+  calculateReferenceFan,
+  CONNECTED_PREVIEW_THUMB_SIZE,
   createConnectedPreviewLongPressController,
+  getConnectedPreviewEdgeIds,
 } from './connectedNodesPreviewInteractions';
+
+const IMAGE_HOVER_PREVIEW_DELAY_MS = 500;
+const REFERENCE_ARC_CENTER_RATIO = 36 / 44;
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 function localAssetUrl(filePath?: string): string | undefined {
@@ -30,6 +44,7 @@ interface ConnectedNodesPreviewProps {
   nodeId?: string;
   onInsertMention?: (mentionStr: string) => void;
   hoverEmphasis?: 'default' | 'expanded';
+  presentation?: 'strip' | 'corner';
 }
 
 const OUTPUT_TYPE_ICON: Record<string, string> = {
@@ -55,6 +70,7 @@ interface FullscreenPreviewItem {
   outputType: string;
   mediaUrl?: string;
   thumbnailUrl?: string;
+  filePath?: string;
   previewText?: string;
 }
 
@@ -62,13 +78,26 @@ export default function ConnectedNodesPreview({
   nodeId,
   onInsertMention,
   hoverEmphasis = 'default',
+  presentation = 'strip',
 }: ConnectedNodesPreviewProps) {
   const t = useT();
+  const isCorner = presentation === 'corner';
+  const fanId = useId();
+  const arcMaterialClipId = `${fanId}-arc-material`;
+  const arcHighlightId = `${fanId}-arc-highlight`;
+  const arcRefractionId = `${fanId}-arc-refraction`;
+  const fanRootRef = useRef<HTMLDivElement>(null);
+  const fanTriggerRef = useRef<HTMLButtonElement>(null);
+  const fanArcRef = useRef<SVGSVGElement>(null);
+  const fanCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [fanOpen, setFanOpen] = useState(false);
+  const [fanLayout, setFanLayout] = useState(() => calculateReferenceFan({ x: 0, y: 0 }, { width: 320, height: 640 }, 0));
   // 只订阅画布数据：对话框打开期间的聊天流式、轮询进度等无关变更不再触发重渲染
   const { nodes, edges } = useAppStore(
     useShallow((s) => ({ nodes: s.nodes, edges: s.edges })),
   );
   const hoveredMentionNodeId = useAppStore((s) => s.hoveredMentionNodeId);
+  const currentProjectId = useAppStore((s) => s.currentProjectId);
   const [fullscreenPreview, setFullscreenPreview] = useState<FullscreenPreviewItem | null>(null);
   const [suppressClickNodeId, setSuppressClickNodeId] = useState<string | null>(null);
   const closeFullscreenPreview = useCallback(() => {
@@ -80,6 +109,33 @@ export default function ConnectedNodesPreview({
   const [sbPopupId, setSbPopupId] = useState<string | null>(null);
   const [sbThumbRect, setSbThumbRect] = useState<DOMRect | null>(null);
   const sbCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const imageHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoveredImageElement = useRef<HTMLElement | null>(null);
+  const [imageHoverPreview, setImageHoverPreview] = useState<{
+    id: string;
+    rect: DOMRect;
+  } | null>(null);
+
+  const clearImageHoverPreview = useCallback(() => {
+    if (imageHoverTimer.current !== null) clearTimeout(imageHoverTimer.current);
+    imageHoverTimer.current = null;
+    hoveredImageElement.current = null;
+    setImageHoverPreview(null);
+  }, []);
+
+  const startImageHoverPreview = useCallback((element: HTMLElement, id: string) => {
+    clearImageHoverPreview();
+    hoveredImageElement.current = element;
+    imageHoverTimer.current = setTimeout(() => {
+      imageHoverTimer.current = null;
+      if (hoveredImageElement.current !== element || !element.isConnected) return;
+      setImageHoverPreview({ id, rect: element.getBoundingClientRect() });
+    }, IMAGE_HOVER_PREVIEW_DELAY_MS);
+  }, [clearImageHoverPreview]);
+
+  useEffect(() => () => {
+    if (imageHoverTimer.current !== null) clearTimeout(imageHoverTimer.current);
+  }, []);
 
   const clearPopupDelayed = useCallback(() => {
     sbCloseTimer.current = setTimeout(() => setSbPopupId(null), 120);
@@ -91,22 +147,9 @@ export default function ConnectedNodesPreview({
 
   const connectedNodes = useMemo(() => {
     if (!nodeId) return [];
-    const me = nodes.find((n) => n.id === nodeId);
-    const rawSourceIds = new Set(edges.filter((e) => e.target === nodeId).map((e) => e.source));
-    if (me?.parentId) {
-      edges.filter((e) => e.target === me.parentId).forEach((e) => rawSourceIds.add(e.source));
-    }
-    const sourceIds = new Set<string>();
-    for (const sid of rawSourceIds) {
-      const sn = nodes.find((n) => n.id === sid);
-      if (sn?.type === 'group') {
-        nodes.filter((n) => n.parentId === sid).forEach((c) => sourceIds.add(c.id));
-      } else {
-        sourceIds.add(sid);
-      }
-    }
+    const edgeIdsBySource = getConnectedPreviewEdgeIds(nodes, edges, nodeId);
     return nodes
-      .filter((n) => n.id !== nodeId && n.type !== 'group' && sourceIds.has(n.id))
+      .filter((n) => n.id !== nodeId && n.type !== 'group' && edgeIdsBySource.has(n.id))
       .map((n) => {
         const data = n.data as BaseNodeData;
         // 分镜表没有 output/媒体，落到 text 分支就只剩一个「T」，和文本节点分不开
@@ -119,12 +162,14 @@ export default function ConnectedNodesPreview({
           : undefined;
         const outputType = isShotlist
           ? 'shotlist'
+          : data.type === 'ai-video' || data.type === 'source-video' || n.type === 'ai-video' || n.type === 'source-video'
+          ? 'video'
           : (data.imageUrl || directorThumb)
           ? 'image' : data.videoUrl ? 'video' : data.audioUrl ? 'audio' : 'text';
         const thumbnailUrl = outputType === 'image'
           ? (localAssetUrl(data.filePath as string | undefined) || (data.thumbnailUrl as string) || data.imageUrl || directorThumb || undefined)
           : outputType === 'video'
-          ? ((data.thumbnailUrl as string) || undefined) : undefined;
+          ? resolveVideoThumbnailPoster(data.thumbnailUrl, data.videoUrl, data.filePath) : undefined;
         const previewText = data.output ? String(data.output) : undefined;
         const textSnippet = outputType === 'text' && previewText
           ? previewText.slice(0, 50) : undefined;
@@ -184,6 +229,7 @@ export default function ConnectedNodesPreview({
 
         return {
           id: n.id,
+          edgeIds: edgeIdsBySource.get(n.id) ?? [],
           label: data.label || t('节点'),
           displayId: data.displayId,
           outputType,
@@ -191,6 +237,7 @@ export default function ConnectedNodesPreview({
           textSnippet,
           previewText,
           mediaUrl,
+          filePath: outputType === 'video' ? data.filePath : undefined,
           shotCount,
           hasOutput: isShotlist ? shotCount > 0 : !!data.output,
           nodeType: data.type,
@@ -215,10 +262,103 @@ export default function ConnectedNodesPreview({
   ));
   useEffect(() => () => longPressController.dispose(), [longPressController]);
 
+  const updateFanLayout = useCallback(() => {
+    const rect = fanTriggerRef.current?.getBoundingClientRect();
+    const arcRect = fanArcRef.current?.getBoundingClientRect();
+    if (!rect || !arcRect) return;
+    const anchor = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    setFanLayout(calculateReferenceFan(
+      anchor,
+      { width: window.innerWidth, height: window.innerHeight },
+      connectedNodes.length,
+      {
+        x: arcRect.left + arcRect.width * REFERENCE_ARC_CENTER_RATIO - anchor.x,
+        y: arcRect.top + arcRect.height * REFERENCE_ARC_CENTER_RATIO - anchor.y,
+      },
+    ));
+  }, [connectedNodes.length]);
+  const cancelFanClose = useCallback(() => {
+    if (fanCloseTimer.current !== null) clearTimeout(fanCloseTimer.current);
+    fanCloseTimer.current = null;
+  }, []);
+  const closeFan = useCallback(() => {
+    cancelFanClose();
+    setFanOpen(false);
+    setHoverIndex(null);
+    clearImageHoverPreview();
+    cancelCloseTimer();
+    setSbPopupId(null);
+    longPressController.cancel();
+  }, [cancelFanClose, clearImageHoverPreview, cancelCloseTimer, longPressController]);
+  const openFan = () => {
+    cancelFanClose();
+    updateFanLayout();
+    setFanOpen(true);
+  };
+  const delayFanClose = useCallback(() => {
+    cancelFanClose();
+    if (fanRootRef.current?.querySelector(':focus-visible')) return;
+    fanCloseTimer.current = setTimeout(closeFan, 220);
+  }, [cancelFanClose, closeFan]);
+  useEffect(() => () => cancelFanClose(), [cancelFanClose]);
+  useEffect(() => {
+    if (!isCorner || !fanOpen) return;
+    updateFanLayout();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || fullscreenPreview) return;
+      event.preventDefault();
+      event.stopPropagation();
+      fanTriggerRef.current?.focus();
+      closeFan();
+    };
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (fanRootRef.current?.contains(target) || target?.closest('.sb-cell-anchor, .fullscreen-overlay')) return;
+      closeFan();
+    };
+    window.addEventListener('keydown', escape);
+    window.addEventListener('pointerdown', outside, true);
+    window.addEventListener('resize', updateFanLayout);
+    window.addEventListener('scroll', closeFan, true);
+    return () => {
+      window.removeEventListener('keydown', escape);
+      window.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('resize', updateFanLayout);
+      window.removeEventListener('scroll', closeFan, true);
+    };
+  }, [isCorner, fanOpen, fullscreenPreview, closeFan, updateFanLayout]);
+
+  const handleClick = useCallback((nodeId: string, label: string) => {
+    onInsertMention?.(`@{${nodeId}:${label}}`);
+    if (isCorner) closeFan();
+  }, [onInsertMention, isCorner, closeFan]);
+  const handleStoryboardEnter = useCallback(() => {
+    cancelCloseTimer();
+    cancelFanClose();
+  }, [cancelCloseTimer, cancelFanClose]);
+  const handleStoryboardLeave = useCallback(() => {
+    setSbPopupId(null);
+    if (isCorner) delayFanClose();
+  }, [isCorner, delayFanClose]);
+  const handleStoryboardClick = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const { mentionId, mentionLabel } = event.currentTarget.dataset;
+    if (mentionId && mentionLabel) handleClick(mentionId, mentionLabel);
+  }, [handleClick]);
+
+  const storyboardSource = useComfyImageSource(connectedNodes.find((node) => node.id === sbPopupId)?.thumbnailUrl);
+
   if (connectedNodes.length === 0) return null;
 
-  const handleClick = (nodeId: string, label: string) => {
-    onInsertMention?.(`@{${nodeId}:${label}}`);
+  const handleDisconnect = (edgeIds: string[]) => {
+    const state = useAppStore.getState();
+    if (state.currentProjectId !== currentProjectId || !nodeId) return;
+    const liveEdgeIds = new Set(state.edges.map((edge) => edge.id));
+    const removals = edgeIds.filter((id) => liveEdgeIds.has(id)).map((id) => ({
+      type: 'remove' as const,
+      id,
+    }));
+    if (removals.length > 0) state.onEdgesChange(removals);
   };
 
   const externalIndex = hoveredMentionNodeId
@@ -245,11 +385,54 @@ export default function ConnectedNodesPreview({
   };
 
   return (
-    <div className="connected-nodes-float">
+    <div
+      ref={fanRootRef}
+      className={`connected-nodes-float${isCorner ? ' connected-reference-corner' : ''}${fanOpen ? ' is-open' : ''}`}
+      data-reference-preview-open={isCorner && fanOpen ? '' : undefined}
+      onMouseEnter={isCorner ? () => { if (window.matchMedia('(hover: hover)').matches) openFan(); } : undefined}
+      onMouseLeave={isCorner ? delayFanClose : undefined}
+      onFocusCapture={isCorner ? (event) => { if (event.target.matches(':focus-visible')) openFan(); } : undefined}
+      onBlurCapture={isCorner ? (event) => {
+        if (!event.currentTarget.contains(event.relatedTarget) && !event.currentTarget.matches(':hover')) delayFanClose();
+      } : undefined}
+    >
+      {isCorner && (
+        <button
+          ref={fanTriggerRef}
+          type="button"
+          className="connected-reference-arc"
+          aria-label={t('引用素材')}
+          aria-expanded={fanOpen}
+          aria-controls={fanId}
+          onClick={openFan}
+        >
+          <span className="connected-reference-arc-material" style={{ clipPath: `url(#${arcMaterialClipId})` }} aria-hidden="true" />
+          <svg ref={fanArcRef} className="connected-reference-arc-shape" viewBox="0 0 44 44" aria-hidden="true" focusable="false">
+            <defs>
+              {/* 32px 视口中的 8px 厚度圆头弧面，跨度 95°，用于裁切玻璃背景。 */}
+              <clipPath id={arcMaterialClipId} clipPathUnits="objectBoundingBox">
+                <path d="M 2.0324 37.4831 A 34 34 0 0 1 37.4831 2.0324 A 5.5 5.5 0 0 1 37.0032 13.0219 A 23 23 0 0 0 13.0219 37.0032 A 5.5 5.5 0 0 1 2.0324 37.4831 Z" transform={`scale(${1 / 44})`} />
+              </clipPath>
+              <linearGradient id={arcHighlightId} gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="44" y2="44">
+                <stop className="connected-reference-arc-highlight" offset="0%" stopOpacity="0" />
+                <stop className="connected-reference-arc-highlight" offset="26%" />
+                <stop className="connected-reference-arc-highlight" offset="58%" stopOpacity="0" />
+              </linearGradient>
+              <linearGradient id={arcRefractionId} gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="44" y2="44">
+                <stop className="connected-reference-arc-refraction" offset="29%" stopOpacity="0" />
+                <stop className="connected-reference-arc-refraction" offset="43%" />
+                <stop className="connected-reference-arc-refraction" offset="62%" stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            <path className="connected-reference-arc-reflection" d="M 2.8441 37.4476 A 33.1875 33.1875 0 0 1 37.4476 2.8441" stroke={`url(#${arcHighlightId})`} />
+            <path className="connected-reference-arc-reflection" d="M 12.2102 37.0387 A 23.8125 23.8125 0 0 1 37.0387 12.2102" stroke={`url(#${arcRefractionId})`} />
+          </svg>
+        </button>
+      )}
       {fullscreenPreview === null && (
-        <div className="connected-nodes-strip">
+        <div id={fanId} className={`connected-nodes-strip${isCorner ? ' connected-reference-fan' : ''}`} aria-hidden={isCorner && !fanOpen ? true : undefined}>
         {connectedNodes.map((node, idx) => {
-          const scale = getDockScale(idx);
+          const scale = isCorner ? 1 : getDockScale(idx);
           const x = getDockX(idx);
           const isHovered = effectiveHover === idx;
           const isStoryboard = node.nodeType === 'ai-storyboard';
@@ -259,57 +442,85 @@ export default function ConnectedNodesPreview({
           const tooltipAction = canFullscreen
             ? `${t('点击引用')} · ${t('长按全屏显示')}`
             : t('点击引用');
+          const Thumb = isCorner ? 'div' : motion.div;
+          const position = fanLayout.items[idx];
 
           return (
-          <motion.button
+          <Thumb
             key={node.id}
-            type="button"
-            className={`connected-node-thumb ${!node.hasOutput ? 'thumb-idle' : ''} thumb-${node.outputType}${isStoryboard ? ' thumb-storyboard' : ''}${isShotlist ? ' thumb-shotlist' : ''}${isExpandedEmphasis ? ' origin-bottom' : ''}`}
-            data-tooltip={`${tooltipLabel} — ${tooltipAction}`}
-            data-tooltip-label={`${tooltipLabel} —`}
-            data-tooltip-action={tooltipAction}
-            onClick={() => {
-              if (suppressClickNodeId === node.id) {
-                setSuppressClickNodeId(null);
-                return;
-              }
-              handleClick(node.id, node.label);
-            }}
-            onHoverStart={() => onHoverStart(idx)}
-            onHoverEnd={onHoverEnd}
-            onPointerDown={(event) => {
-              if (!canFullscreen) return;
-              if (longPressController.start(node, event)) {
-                event.currentTarget.setPointerCapture(event.pointerId);
+            className={`connected-node-thumb ${!node.hasOutput ? 'thumb-idle' : ''} thumb-${node.outputType}${isStoryboard ? ' thumb-storyboard' : ''}${isShotlist ? ' thumb-shotlist' : ''}${isExpandedEmphasis ? ' origin-bottom' : ''}${isCorner ? ' connected-reference-fan-card' : ''}${isHovered ? ' is-highlighted' : ''}`}
+            style={isCorner && position ? { '--fan-x': `${position.x}px`, '--fan-y': `${position.y}px`, '--fan-rotation': `${position.rotate}deg` } as React.CSSProperties : undefined}
+            onMouseEnter={(e) => {
+              onHoverStart(idx);
+              if (isStoryboard && node.sbCells) {
+                cancelCloseTimer();
+                setSbPopupId(node.id);
+                setSbThumbRect(e.currentTarget.getBoundingClientRect());
+              } else if (node.outputType === 'image' && node.thumbnailUrl) {
+                startImageHoverPreview(e.currentTarget, node.id);
               }
             }}
-            onPointerMove={(event) => longPressController.move(event)}
-            onPointerUp={(event) => {
-              longPressController.end(event.pointerId);
-              window.setTimeout(() => {
-                setSuppressClickNodeId((current) => current === node.id ? null : current);
-              }, 0);
+            onMouseLeave={() => {
+              onHoverEnd();
+              clearImageHoverPreview();
+              if (isStoryboard) clearPopupDelayed();
             }}
-            onPointerCancel={(event) => longPressController.end(event.pointerId)}
-            onLostPointerCapture={longPressController.cancel}
-            onContextMenu={(event) => { if (canFullscreen) event.preventDefault(); }}
-            onMouseEnter={(e) => { if (isStoryboard) { cancelCloseTimer(); setSbPopupId(node.id); setSbThumbRect(e.currentTarget.getBoundingClientRect()); } }}
-            onMouseLeave={() => { if (isStoryboard) clearPopupDelayed(); }}
-            animate={{
+            {...(!isCorner ? { animate: {
               scale, x, y: isHovered && !isExpandedEmphasis ? -4 : 0,
               opacity: isHovered ? 1 : 0.85,
               boxShadow: isHovered ? `0 6px 20px rgba(99,102,241,0.25), 0 0 0 2px rgba(99,102,241,0.35)` : `0 0 0 0px rgba(99,102,241,0)`,
               borderColor: isHovered ? 'rgba(99,102,241,0.6)' : 'rgba(195,195,202,0.33)',
-            }}
-            whileTap={{ scale: scale * 0.92 }}
-            transition={{ type: 'spring', stiffness: 350, damping: 20, mass: 0.7 }}
+            }, whileTap: { scale: scale * 0.92 }, transition: { type: 'spring' as const, stiffness: 350, damping: 20, mass: 0.7 } } : {})}
           >
+            <button
+              type="button"
+              className="connected-node-action"
+              tabIndex={isCorner && !fanOpen ? -1 : undefined}
+              onFocus={(event) => {
+                if (!isCorner || !event.currentTarget.matches(':focus-visible')) return;
+                onHoverStart(idx);
+                if (isStoryboard && node.sbCells) {
+                  cancelCloseTimer();
+                  setSbPopupId(node.id);
+                  setSbThumbRect(event.currentTarget.getBoundingClientRect());
+                }
+              }}
+              data-tooltip={node.outputType === 'image' && node.thumbnailUrl && !node.sbCells ? undefined : `${tooltipLabel} — ${tooltipAction}`}
+              data-tooltip-label={node.outputType === 'image' && node.thumbnailUrl && !node.sbCells ? undefined : `${tooltipLabel} —`}
+              data-tooltip-action={node.outputType === 'image' && node.thumbnailUrl && !node.sbCells ? undefined : tooltipAction}
+              aria-label={`${tooltipLabel} — ${tooltipAction}`}
+              onClick={() => {
+                if (suppressClickNodeId === node.id) {
+                  setSuppressClickNodeId(null);
+                  return;
+                }
+                handleClick(node.id, node.label);
+              }}
+              onPointerDown={(event) => {
+                clearImageHoverPreview();
+                if (!canFullscreen) return;
+                if (longPressController.start(node, event)) {
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                }
+              }}
+              onPointerMove={(event) => longPressController.move(event)}
+              onPointerUp={(event) => {
+                longPressController.end(event.pointerId);
+                window.setTimeout(() => {
+                  setSuppressClickNodeId((current) => current === node.id ? null : current);
+                }, 0);
+              }}
+              onPointerCancel={(event) => longPressController.end(event.pointerId)}
+              onLostPointerCapture={longPressController.cancel}
+              onContextMenu={(event) => { if (canFullscreen) event.preventDefault(); }}
+            >
             {/* 缩略图内容 */}
             {node.outputType === 'image' && node.thumbnailUrl ? (
-              <img src={node.thumbnailUrl} alt={node.label} className="thumb-img" loading="lazy" />
-            ) : node.outputType === 'video' && node.thumbnailUrl ? (
+              <ViewportImage src={node.thumbnailUrl} alt={node.label} className="thumb-img" loading="lazy" />
+            ) : node.outputType === 'video' ? (
               <div className="thumb-video-wrap">
-                <img src={node.thumbnailUrl} alt={node.label} className="thumb-img" loading="lazy" />
+                <VideoThumbnail src={node.mediaUrl} filePath={node.filePath} poster={node.thumbnailUrl}
+                  name={node.label} alt={node.label} className="thumb-img object-cover" />
                 <span className="thumb-play-icon">▶</span>
               </div>
             ) : node.outputType === 'text' && node.textSnippet ? (
@@ -331,9 +542,65 @@ export default function ConnectedNodesPreview({
             {node.status === 'loading' && (
               <div className="thumb-loading"><span className="thumb-spinner" /></div>
             )}
-          </motion.button>
+            </button>
+            <motion.button
+              type="button"
+              className="connected-node-disconnect"
+              tabIndex={isCorner && !fanOpen ? -1 : undefined}
+              aria-label={`${t('断开上游连线')}：${node.label}`}
+              animate={{ scale: 1 / scale }}
+              transition={{ type: 'spring', stiffness: 350, damping: 20, mass: 0.7 }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                clearImageHoverPreview();
+                cancelCloseTimer();
+                setSbPopupId(null);
+                handleDisconnect(node.edgeIds);
+              }}
+            >
+              <img src={closeCircleIcon} alt="" aria-hidden="true" />
+            </motion.button>
+          </Thumb>
         )})}
         </div>
+      )}
+
+      {createPortal(
+        <AnimatePresence>
+          {fullscreenPreview === null && imageHoverPreview && (() => {
+            const previewNode = connectedNodes.find((node) => node.id === imageHoverPreview.id);
+            if (!previewNode?.thumbnailUrl) return null;
+            const { rect } = imageHoverPreview;
+            const width = Math.max(32, Math.min(264, window.innerWidth - 24, rect.top - 20));
+            const center = Math.min(
+              Math.max(rect.left + rect.width / 2, width / 2 + 12),
+              window.innerWidth - width / 2 - 12,
+            );
+            return (
+              <div
+                className="connected-image-preview-anchor"
+                style={{ left: center, top: rect.top - 8, width, height: width }}
+              >
+                <motion.div
+                  key={previewNode.id}
+                  className="connected-image-preview"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <ViewportImage
+                    src={previewNode.mediaUrl || previewNode.thumbnailUrl}
+                    alt={previewNode.label}
+                  />
+                </motion.div>
+              </div>
+            );
+          })()}
+        </AnimatePresence>,
+        document.body,
       )}
 
       {/* 宫格弹出浮层 — Portal 到 body */}
@@ -344,15 +611,23 @@ export default function ConnectedNodesPreview({
             if (!sbNode?.sbCells) return null;
             const rect = sbThumbRect;
             // 外层 div 负责定位（translate 不受 framer-motion 干扰），内层 motion.div 只管动效
+            const popupWidth = Math.min((sbNode.sbCols ?? 3) * 59 + 17, window.innerWidth - 24);
+            const popupCols = sbNode.sbCols ?? 3;
+            const popupRows = sbNode.sbRows ?? 3;
+            const popupCellSize = (popupWidth - 22 - (popupCols - 1) * 5) / popupCols;
+            const popupHeight = popupCellSize * popupRows + (popupRows - 1) * 5 + 22;
+            const cornerPosition = rect && isCorner ? calcAnchoredPosition(rect, popupWidth, popupHeight, 8, 12) : null;
             const anchorStyle: React.CSSProperties = rect
-              ? { left: `${rect.left + rect.width / 2}px`, top: `${rect.top - 8}px`, transform: 'translate(-50%, -100%)' }
+              ? cornerPosition ? { left: cornerPosition.left, top: cornerPosition.top }
+                : { left: `${rect.left + rect.width / 2}px`, top: `${rect.top - 8}px`, transform: 'translate(-50%, -100%)' }
               : { bottom: 72, left: '50%', transform: 'translateX(-50%)' };
 
             return (
-              <div className="sb-cell-anchor" style={anchorStyle} onMouseEnter={cancelCloseTimer} onMouseLeave={() => { setSbPopupId(null); }}>
+              <div className="sb-cell-anchor" style={anchorStyle} onMouseEnter={handleStoryboardEnter} onMouseLeave={handleStoryboardLeave}>
                 <motion.div
                   key={`sb-popup-${sbPopupId}`}
-                  className="sb-cell-popup"
+                  className={`sb-cell-popup${isCorner ? ' connected-reference-storyboard' : ''}`}
+                  style={isCorner ? { width: popupWidth } : undefined}
                   initial={{ opacity: 0, y: 4, scale: 0.96 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 4, scale: 0.96 }}
@@ -365,15 +640,17 @@ export default function ConnectedNodesPreview({
                       type="button"
                       className="sb-cell-item"
                       title={`${sbNode.label} · ${cell.label}`}
-                      onClick={(e) => { e.stopPropagation(); handleClick(cell.mentionId, `${sbNode.label} · ${cell.label}`); }}
+                      data-mention-id={cell.mentionId}
+                      data-mention-label={`${sbNode.label} · ${cell.label}`}
+                      onClick={handleStoryboardClick}
                     >
                       {cell.overrideUrl ? (
-                        <img src={cell.overrideUrl} alt={cell.label} className="sb-cell-img" />
+                        <ViewportImage src={cell.overrideUrl} alt={cell.label} className="sb-cell-img" />
                       ) : sbNode.thumbnailUrl ? (
                         <div
                           className="sb-cell-sprite"
                           style={{
-                            backgroundImage: `url(${sbNode.thumbnailUrl})`,
+                            backgroundImage: storyboardSource ? `url(${storyboardSource})` : undefined,
                             ...cell.bgStyle,
                           }}
                         />
@@ -401,36 +678,34 @@ export default function ConnectedNodesPreview({
       >
         {fullscreenPreview && (
           <div
+            data-tauri-drag-region
             className="fixed inset-0 flex flex-col items-center justify-center gap-4 px-10 py-12"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden rounded-2xl">
+            <div data-tauri-drag-region className="flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden rounded-2xl">
               {fullscreenPreview.outputType === 'image' && (fullscreenPreview.mediaUrl || fullscreenPreview.thumbnailUrl) ? (
-                <img
+                <ViewportImage
                   src={fullscreenPreview.mediaUrl || fullscreenPreview.thumbnailUrl}
                   alt={fullscreenPreview.label}
                   className="max-h-full max-w-full select-none rounded-2xl object-contain shadow-2xl"
                   draggable={false}
                 />
               ) : fullscreenPreview.outputType === 'video' && fullscreenPreview.mediaUrl ? (
-                <video
+                <VideoPlayer
                   src={fullscreenPreview.mediaUrl}
+                  poster={fullscreenPreview.thumbnailUrl}
+                  name={fullscreenPreview.label}
                   className="max-h-full max-w-full rounded-2xl bg-black shadow-2xl"
-                  controls
                   autoPlay
                 />
               ) : fullscreenPreview.outputType === 'audio' && fullscreenPreview.mediaUrl ? (
                 <div className="flex w-full max-w-xl flex-col items-center gap-5 rounded-2xl border border-canvas-border bg-canvas-surface/90 p-8 shadow-2xl backdrop-blur-xl">
                   <span className="text-5xl" aria-hidden="true">🎵</span>
-                  <audio src={fullscreenPreview.mediaUrl} className="w-full" controls autoPlay />
+                  <ViewportAudio src={fullscreenPreview.mediaUrl} className="w-full" controls autoPlay eager />
                 </div>
               ) : fullscreenPreview.outputType === 'video' && fullscreenPreview.thumbnailUrl ? (
-                <img
-                  src={fullscreenPreview.thumbnailUrl}
-                  alt={fullscreenPreview.label}
-                  className="max-h-full max-w-full select-none rounded-2xl object-contain shadow-2xl"
-                  draggable={false}
-                />
+                <VideoThumbnail poster={fullscreenPreview.thumbnailUrl} name={fullscreenPreview.label} alt={fullscreenPreview.label}
+                  className="h-full w-full select-none rounded-2xl object-contain shadow-2xl" />
               ) : (
                 <div className="max-h-full w-full max-w-3xl overflow-y-auto rounded-2xl border border-canvas-border bg-canvas-surface/90 p-6 text-sm leading-7 text-canvas-text shadow-2xl backdrop-blur-xl">
                   {fullscreenPreview.previewText || t('暂无可预览内容')}
@@ -475,15 +750,33 @@ export default function ConnectedNodesPreview({
         .connected-nodes-strip::-webkit-scrollbar-thumb { background: var(--theme-border); border-radius: 8px; }
         .connected-node-thumb {
           flex-shrink: 0;
-          width: 38px; height: 38px;
+          width: ${CONNECTED_PREVIEW_THUMB_SIZE}px; height: ${CONNECTED_PREVIEW_THUMB_SIZE}px;
           border-radius: 8px;
           border: 2px solid rgba(195,195,202,0.33);
           background: var(--theme-surface);
-          cursor: var(--cursor-pointer, pointer);
-          display: flex; align-items: center; justify-content: center;
           overflow: hidden; position: relative; padding: 0;
         }
-        .connected-node-thumb[data-tooltip]:hover { overflow: visible; }
+        .connected-node-action {
+          display: flex; align-items: center; justify-content: center;
+          width: 100%; height: 100%; padding: 0; border: 0;
+          background: transparent;
+          cursor: var(--cursor-pointer, pointer);
+        }
+        .connected-node-disconnect {
+          position: absolute; top: 1px; right: 1px; z-index: 3;
+          display: flex; align-items: center; justify-content: center;
+          width: 20px; height: 20px; padding: 0;
+          border: 0; border-radius: 4px;
+          background: transparent;
+          cursor: var(--cursor-pointer, pointer);
+          opacity: 0; pointer-events: none;
+          transform-origin: top right;
+        }
+        .connected-node-thumb:hover .connected-node-disconnect,
+        .connected-node-thumb:focus-within .connected-node-disconnect {
+          opacity: 1; pointer-events: auto;
+        }
+        .connected-node-disconnect img { width: 18px; height: 18px; display: block; }
         .connected-node-thumb.thumb-storyboard { border-color: rgba(244,114,182,0.45); }
         /* 分镜表：沿用节点自身的琥珀色，和文本节点区分开 */
         .connected-node-thumb.thumb-shotlist {
@@ -492,6 +785,22 @@ export default function ConnectedNodesPreview({
         }
         .thumb-img {
           width: 100%; height: 100%; object-fit: cover; border-radius: 6px;
+        }
+        .connected-image-preview-anchor {
+          position: fixed;
+          z-index: 10050;
+          transform: translate(-50%, -100%);
+          pointer-events: none;
+        }
+        .connected-image-preview {
+          width: 100%; height: 100%;
+          border-radius: 8px;
+          overflow: hidden;
+          box-shadow: 0 8px 24px var(--black-alpha-50);
+        }
+        .connected-image-preview img {
+          display: block;
+          width: 100%; height: 100%; object-fit: cover;
         }
         .thumb-video-wrap {
           position: relative; width: 100%; height: 100%;

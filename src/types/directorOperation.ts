@@ -1,3 +1,6 @@
+/**
+ * directorOperation — 定义导演台操作、场景身份与运行时快照的领域类型。
+ */
 import type { DirectorRuntimeKind } from './directorScene';
 import type {
   DirectorBlenderJobStatus,

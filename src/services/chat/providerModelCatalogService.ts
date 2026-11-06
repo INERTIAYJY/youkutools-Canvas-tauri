@@ -1,3 +1,6 @@
+/**
+ * providerModelCatalogService — 管理助手可用厂商模型目录的缓存与分页。
+ */
 import type { AgentApprovalInputRequest, ProviderModelCatalogSummary, ProviderModelChoice } from '../../types/agent';
 import type { WebReadAccessScope } from '../../types/chat';
 import { webReadScopeKey } from './webReadSessionService';

@@ -1,7 +1,12 @@
+/**
+ * projectSummary — 将项目记录转换为列表用摘要。
+ */
 import type { EpisodeCreativeInfo, ProjectSeriesInfo, ProjectSettings } from '../../types';
+import { normalizeEpisodeAssetRoster, type EpisodeAssetRoster } from '../../types/episodeAssets';
 
 /** 项目列表所需的轻量记录；禁止放入画布节点、连线、历史或角色库。 */
 export interface ProjectSummaryRecord {
+  exchangeEpoch?: number;
   id: string;
   name: string;
   createdAt: number;
@@ -14,6 +19,7 @@ export interface ProjectSummaryRecord {
   episodeOutline?: string;
   episodeScript?: string;
   episodeCreative?: EpisodeCreativeInfo;
+  episodeAssetRoster?: EpisodeAssetRoster;
   series?: ProjectSeriesInfo;
 }
 
@@ -53,6 +59,7 @@ export function toProjectSummaryRecord(record: unknown): ProjectSummaryRecord | 
     createdAt,
     updatedAt: finiteNumber(source.updatedAt, createdAt),
   };
+  if (typeof source.exchangeEpoch === 'number') summary.exchangeEpoch = source.exchangeEpoch;
   if (typeof source.snapshot === 'string') summary.snapshot = source.snapshot;
   if (typeof source.dataFolder === 'string') summary.dataFolder = source.dataFolder;
   const settings = sanitizeProjectSettings(source.settings);
@@ -65,6 +72,9 @@ export function toProjectSummaryRecord(record: unknown): ProjectSummaryRecord | 
   if (typeof source.episodeScript === 'string') summary.episodeScript = source.episodeScript;
   if (source.episodeCreative && typeof source.episodeCreative === 'object') {
     summary.episodeCreative = source.episodeCreative as EpisodeCreativeInfo;
+  }
+  if (summary.parentId && source.episodeAssetRoster !== undefined) {
+    summary.episodeAssetRoster = normalizeEpisodeAssetRoster(source.episodeAssetRoster);
   }
   if (source.series && typeof source.series === 'object') {
     summary.series = source.series as ProjectSeriesInfo;

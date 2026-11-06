@@ -11,6 +11,8 @@ import type {
   NormalizedModelExecutionProtocol,
   VideoModelCapability,
 } from '../../types/aiTypes';
+import { GOOGLE_IMAGE_PROTOCOL } from './providers/googleModelManifest';
+import { XAI_IMAGE_PROTOCOL } from './providers/xaiModelManifest';
 
 const OPENAI_CHAT_PROTOCOL: NormalizedModelExecutionProtocol = {
   version: 2,
@@ -44,7 +46,51 @@ const OPENAI_IMAGE_PROTOCOL: NormalizedModelExecutionProtocol = {
       model: '{{model}}',
       prompt: '{{prompt}}',
       size: '{{size}}',
+      quality: '{{imageQuality}}',
+      background: '{{imageBackground}}',
       extra_body: { response_format: 'url' },
+    },
+  },
+  response: {
+    type: 'json',
+    result: { urlPath: 'data.*.url' },
+    errorPath: 'error.message',
+  },
+};
+
+/** 官方 Images API：结果默认可返回 b64_json，编辑请求由标准 multipart 路径处理。 */
+const OPENAI_GPT_IMAGE_PROTOCOL: NormalizedModelExecutionProtocol = {
+  version: 2,
+  mode: 'sync',
+  submit: {
+    method: 'POST',
+    path: '/images/generations',
+    body: { model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}', quality: '{{imageQuality}}',
+      background: '{{imageBackground}}', n: '{{n}}' },
+  },
+  response: {
+    type: 'json',
+    result: { urlPath: 'data.*.url', base64Path: 'data.*.b64_json', mimeType: 'image/png' },
+    errorPath: 'error.message',
+  },
+};
+
+/** 常见 GPT-Image 中转合同：生成端点通过 JSON images 接收参考图。 */
+const GPT_IMAGE_GATEWAY_JSON_PROTOCOL: NormalizedModelExecutionProtocol = {
+  version: 2,
+  mode: 'sync',
+  submit: {
+    method: 'POST',
+    path: '/images/generations',
+    body: {
+      model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}', n: '{{n}}',
+      quality: '{{imageQuality}}',
+      background: '{{imageBackground}}',
+      images: Array.from({ length: 8 }, (_, index) => ({
+        $whenPresent: `{{imageUrls.${index}}}`,
+        $value: `{{imageUrls.${index}}}`,
+      })),
+      response_format: 'url',
     },
   },
   response: {
@@ -112,9 +158,13 @@ function cloneProtocol(protocol: NormalizedModelExecutionProtocol): NormalizedMo
 }
 
 export function getModelProtocolPreset(
-  preset: Exclude<ModelProtocolPresetId, 'custom'>,
+  preset: Exclude<ModelProtocolPresetId, 'custom' | 'anthropic-chat' | 'gemini-chat'>,
 ): NormalizedModelExecutionProtocol {
   if (preset === 'openai-chat') return cloneProtocol(OPENAI_CHAT_PROTOCOL);
+  if (preset === 'openai-gpt-image') return cloneProtocol(OPENAI_GPT_IMAGE_PROTOCOL);
+  if (preset === 'gpt-image-gateway-json') return cloneProtocol(GPT_IMAGE_GATEWAY_JSON_PROTOCOL);
+  if (preset === 'google-image-native') return cloneProtocol(GOOGLE_IMAGE_PROTOCOL);
+  if (preset === 'xai-image-native') return cloneProtocol(XAI_IMAGE_PROTOCOL);
   if (preset === 'agnes-video') return cloneProtocol(AGNES_VIDEO_PROTOCOL);
   return cloneProtocol(OPENAI_IMAGE_PROTOCOL);
 }

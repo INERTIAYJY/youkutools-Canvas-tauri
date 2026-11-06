@@ -1,3 +1,6 @@
+/**
+ * videoEditorInspection — 回归测试：媒体检查与解码生命周期。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VideoEditorProjectRecord } from '../../src/types/videoEditor';
 const mocks = vi.hoisted(() => ({

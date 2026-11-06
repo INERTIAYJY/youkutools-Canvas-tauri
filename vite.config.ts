@@ -1,9 +1,17 @@
+/**
+ * vite.config — 配置前端构建、开发服务与画布连线适配插件。
+ */
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import {
+  CANVAS_EDGE_LAYER_OPTIMIZE_INCLUDE,
+  canvasEdgeLayerPlugin,
+} from "./scripts/viteCanvasEdgeLayer";
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
+    canvasEdgeLayerPlugin(),
     react(),
   ],
   clearScreen: false,
@@ -25,7 +33,8 @@ export default defineConfig({
       },
       '/api/comfyui': {
         target: 'http://127.0.0.1:8188',
-        changeOrigin: true,
+        // HTTP 与 WebSocket 一致，保留同源 Host/Origin，兼容 ComfyUI 默认来源校验。
+        changeOrigin: false,
         rewrite: (path) => path.replace(/^\/api\/comfyui/, ''),
       },
     },
@@ -41,5 +50,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     entries: ["index.html", "plugin-ui-host.html"],
+    exclude: ["@xyflow/react"],
+    include: CANVAS_EDGE_LAYER_OPTIMIZE_INCLUDE,
   },
 });

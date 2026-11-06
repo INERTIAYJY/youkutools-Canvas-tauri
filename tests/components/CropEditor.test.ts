@@ -1,3 +1,6 @@
+/**
+ * CropEditor — 回归测试：makeContainedCenteredCrop。
+ */
 import { describe, expect, it } from 'vitest';
 import { makeContainedCenteredCrop } from '../../src/components/nodes/shared/image/cropUtils';
 

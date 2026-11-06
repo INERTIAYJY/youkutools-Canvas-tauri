@@ -1,3 +1,6 @@
+/**
+ * projectFiles — 校验项目相对引用并读写不可变项目文件。
+ */
 import {
   exists,
   lstat,
@@ -90,7 +93,8 @@ async function sha256OwnedBytes(bytes: Uint8Array<ArrayBuffer>): Promise<string>
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+/** 按字节视图比较内容，不包含文件访问、哈希或场景绑定。 */
+export function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false;
   for (let index = 0; index < left.byteLength; index += 1) {
     if (left[index] !== right[index]) return false;
@@ -288,4 +292,24 @@ export async function readVerifiedProjectFileByHash(input: {
     data: await readVerifiedFromRoot(root, reference),
     reference,
   };
+}
+
+/** 读取已绑定的项目素材，先检查目录和大小，再把字节交给调用方。 */
+export async function readBoundedProjectFile(input: {
+  projectId: string;
+  relativePath: string;
+  maxBytes: number;
+}): Promise<Uint8Array> {
+  const relativePath = assertSafeProjectRelativePath(input.relativePath);
+  if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes <= 0) fail('项目文件大小上限无效');
+  const root = await getCheckedProjectRoot(input.projectId);
+  await checkExistingParents(root, relativePath);
+  const target = joinPath(root, relativePath);
+  const info = await checkedInfo(target, relativePath, 'file');
+  if (!Number.isSafeInteger(info.size) || info.size <= 0 || info.size > input.maxBytes) {
+    fail('项目素材超过读取上限');
+  }
+  const data = await readFile(target);
+  if (data.byteLength !== info.size || data.byteLength > input.maxBytes) fail('项目素材在读取期间发生变化');
+  return data;
 }

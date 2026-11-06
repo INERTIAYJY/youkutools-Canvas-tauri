@@ -5,7 +5,7 @@
  */
 import Select from '../shared/Select';
 import { useMemo, useState } from 'react';
-import { Icon } from '@iconify/react';
+import { Icon, type IconifyIcon } from '@iconify/react';
 import { invoke } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';
@@ -14,19 +14,26 @@ import type {
   CanvasQuickActionKind,
 } from '../../types';
 import type { CanvasRadialMenuPosition } from '../../hooks/useCanvasLongPressRadialMenu';
-import { useT } from '../../i18n';
+import PopupCloseButton from '../shared/PopupCloseButton';
+import { t, useT } from '../../i18n';
 
 const SLOT_COUNT = 6;
 const MENU_VIEWPORT_PADDING = 122;
 
+const COMFYUI_ICON: IconifyIcon = {
+  width: 18,
+  height: 18,
+  body: '<path d="M14.8193 0.600586C15.1248 0.600586 15.3296 0.70893 15.459 0.881836C15.5914 1.05888 15.6471 1.33774 15.5527 1.66895L14.8037 4.30176C14.7063 4.64386 14.4729 4.97024 14.1641 5.21191C13.8544 5.45415 13.496 5.58984 13.1699 5.58984H13.1689L9.5791 5.59668H7.90625C7.52654 5.59668 7.19496 5.84986 7.09082 6.21289L5.69434 11.0889C5.63007 11.3133 5.66134 11.5534 5.77734 11.7529L5.83203 11.8359C5.99177 12.0491 6.24252 12.1758 6.50977 12.1758H6.51074L8.88281 12.1709H11.4971C11.7643 12.171 11.9541 12.254 12.084 12.3906L12.1357 12.4521C12.2685 12.6295 12.3249 12.9089 12.2305 13.2402L11.4805 15.8721C11.383 16.2144 11.1498 16.5415 10.8408 16.7832C10.5314 17.0252 10.1736 17.161 9.84766 17.1611H9.84668L6.25684 17.168H3.64258C3.33762 17.1679 3.13349 17.0588 3.00391 16.8857C2.87135 16.7087 2.81482 16.43 2.90918 16.0986L3.39551 14.3887C3.46841 14.1327 3.41794 13.8576 3.25879 13.6445V13.6436C3.09901 13.4303 2.84745 13.3037 2.58008 13.3037H1.18066C0.875088 13.3037 0.670398 13.1953 0.541016 13.0225C0.408483 12.8451 0.351891 12.5655 0.446289 12.2344L2.11914 6.38965L2.30371 5.74707V5.74609C2.40139 5.40341 2.63456 5.07671 2.94336 4.83496C3.25302 4.59258 3.61143 4.45705 3.9375 4.45703H5.6123C5.94484 4.45703 6.24083 4.26316 6.37891 3.9707L6.42773 3.83984L6.98145 1.89551C7.07894 1.55317 7.31212 1.22614 7.62109 0.984375C7.93074 0.742127 8.2892 0.606445 8.61523 0.606445H8.61621L12.1982 0.600586H14.8193Z" fill="currentColor"/>',
+};
+
 interface ActionDefinition {
   kind: CanvasQuickActionKind;
   label: string;
-  icon: string;
+  icon: string | IconifyIcon;
 }
 
 const ACTION_DEFINITIONS: ActionDefinition[] = [
-  { kind: 'comfyui', label: 'ComfyUI', icon: 'solar:magic-stick-3-bold-duotone' },
+  { kind: 'comfyui', label: 'ComfyUI', icon: COMFYUI_ICON },
   { kind: 'workflows', label: '工作流', icon: 'solar:diagram-up-bold-duotone' },
   { kind: 'assets', label: '素材库', icon: 'solar:gallery-wide-bold-duotone' },
   { kind: 'settings', label: '设置', icon: 'solar:settings-bold-duotone' },
@@ -66,7 +73,7 @@ function getActionLabel(action: CanvasQuickAction): string {
   return action.label?.trim() || DEFINITION_BY_KIND.get(action.kind)?.label || '快捷动作';
 }
 
-function getActionIcon(action: CanvasQuickAction): string {
+function getActionIcon(action: CanvasQuickAction): string | IconifyIcon {
   return DEFINITION_BY_KIND.get(action.kind)?.icon || 'solar:widget-2-bold-duotone';
 }
 
@@ -80,14 +87,14 @@ function clampMenuPosition(position: CanvasRadialMenuPosition): CanvasRadialMenu
 async function openExternalUrl(url: string): Promise<void> {
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('仅支持 http/https 网页地址');
+    throw new Error(t('仅支持 http/https 网页地址'));
   }
   try {
     const { open } = await import('@tauri-apps/plugin-shell');
     await open(parsed.toString());
   } catch {
     const opened = window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
-    if (!opened) throw new Error('无法打开网页');
+    if (!opened) throw new Error(t('无法打开网页'));
   }
 }
 
@@ -176,7 +183,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
           setCharacterActionLibraryOpen(true);
           break;
         case 'fit-view':
-          window.dispatchEvent(new Event('canvas-fit-view'));
+          window.dispatchEvent(new CustomEvent('canvas-fit-view', { detail: { source: 'user' } }));
           break;
         case 'custom-url':
           if (!action.url?.trim()) throw new Error(t('请先填写网页地址'));
@@ -260,9 +267,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
               <h2 id="canvas-radial-editor-title">{t('自定义画布圆环')}</h2>
               <p>{t('为 6 个槽位分配常用入口，空白画布长按即可呼出。')}</p>
             </div>
-            <button type="button" aria-label={t('关闭')} onClick={() => setEditing(false)}>
-              <Icon icon="solar:close-circle-linear" width="22" />
-            </button>
+            <PopupCloseButton ariaLabel={t('关闭')} onClick={() => setEditing(false)} />
           </div>
 
           <div className="canvas-radial-editor-list">

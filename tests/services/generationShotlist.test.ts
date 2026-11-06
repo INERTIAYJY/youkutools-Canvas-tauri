@@ -1,3 +1,6 @@
+/**
+ * generationShotlist — 回归测试：通用节点执行采用项目文本模型，生成镜头行而不是普通 output 文本。
+ */
 import { beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ generateText: vi.fn() }));
 vi.mock('../../src/services/ai/generateText', () => ({ generateText: mocks.generateText }));

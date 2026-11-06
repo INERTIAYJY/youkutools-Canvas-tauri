@@ -1,3 +1,6 @@
+/**
+ * popupPosition — 回归测试：popupPosition 视口边缘校正。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { calcAnchoredPosition, calcFixedPosition } from '../../src/utils/popupPosition';
 

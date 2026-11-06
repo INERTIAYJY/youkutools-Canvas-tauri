@@ -1,3 +1,6 @@
+/**
+ * mcpConnectionRequirements — 生成本机与 HTTP MCP 连接所需的说明。
+ */
 import type { McpTransport } from '../../types/mcp';
 
 export const MCP_CONNECTION_REQUIREMENTS = [

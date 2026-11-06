@@ -1,3 +1,6 @@
+/**
+ * videoEditorTimeline — 回归测试：relayoutSequential。
+ */
 import { describe, expect, it } from 'vitest';
 
 import {

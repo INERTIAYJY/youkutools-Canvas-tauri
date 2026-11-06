@@ -1,9 +1,13 @@
+/**
+ * pluginUiSessionService — 回归测试：pluginUiSessionService。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LOCALES, setLocale } from '../../src/i18n';
 import type {
   InstalledPlugin,
   PluginInvocationResources,
   PluginNodeToolManifest,
+  PluginVideoReplicaJobSummary,
 } from '../../src/types/plugin';
 
 const mocks = vi.hoisted(() => ({
@@ -17,6 +21,12 @@ const mocks = vi.hoisted(() => ({
   collectMedia: vi.fn(),
   executeTool: vi.fn(),
   executeEffect: vi.fn(),
+  parseReplicaEffect: vi.fn(),
+  startReplicaJob: vi.fn(),
+  findReplicaJob: vi.fn(),
+  getReplicaJob: vi.fn(),
+  getReplicaUi: vi.fn(),
+  cancelReplicaJob: vi.fn(),
   messageHandler: undefined as ((event: MessageEvent) => void) | undefined,
 }));
 
@@ -49,6 +59,14 @@ vi.mock('../../src/services/plugins/pluginRuntime', () => ({
   collectTrustedNodeMediaReferences: mocks.collectMedia,
   executeNodePluginTool: mocks.executeTool,
   executePluginUiHostEffect: mocks.executeEffect,
+  parsePluginVideoReplicaEffect: mocks.parseReplicaEffect,
+}));
+vi.mock('../../src/services/plugins/pluginVideoReplicaJobService', () => ({
+  startPluginVideoReplicaJob: mocks.startReplicaJob,
+  findPluginVideoReplicaJob: mocks.findReplicaJob,
+  getPluginVideoReplicaJob: mocks.getReplicaJob,
+  getPluginVideoReplicaJobUiParameters: mocks.getReplicaUi,
+  cancelPluginVideoReplicaJob: mocks.cancelReplicaJob,
 }));
 
 import { createPluginUiFrameSession, createPluginUiNativeSession } from '../../src/services/plugins/pluginUiSessionService';
@@ -110,6 +128,17 @@ const plugin: InstalledPlugin = {
   },
 };
 
+const replicaPlugin: InstalledPlugin = {
+  ...plugin,
+  manifest: { ...plugin.manifest, apiVersion: 2, runtime: 'python', entry: 'main.py', requiredCapabilities: ['video.replicaPipeline'] },
+};
+const replicaSummary: PluginVideoReplicaJobSummary = {
+  jobId: 'video-replica-test-1', projectId: 'project-1', pluginId: plugin.id, nodeId: 'target',
+  sourceDigest: SOURCE_DIGEST, revisionDigest: REVISION_DIGEST, modelId: 'general/video',
+  status: 'queued', stage: '等待全片复刻', totalSegments: 2, completedSegments: 0, progress: 0,
+  createdAt: 1, updatedAt: 1, segmentNodeIds: [],
+};
+
 function request(sessionId: string, requestId: string, kind: string, payload: unknown = null) {
   return {
     channel: 'ai-canvas-plugin-ui-v1',
@@ -139,6 +168,10 @@ describe('pluginUiSessionService', () => {
     plugin, tool, nodeId: 'target', exportName: 'dialog', onClose,
   });
   const notify = () => { for (const listener of mocks.subscribers) listener(); };
+  const replicaNative = (onClose = vi.fn()) => {
+    mocks.getState().installedPlugins = [replicaPlugin];
+    return createPluginUiNativeSession({ plugin: replicaPlugin, tool, nodeId: 'target', exportName: 'dialog', onClose });
+  };
 
   it.each(LOCALES)('returns the current %s locale through the bound context', async (locale) => {
     const session = await native();
@@ -160,6 +193,10 @@ describe('pluginUiSessionService', () => {
     }
     expect(mocks.executeEffect).not.toHaveBeenCalled();
     expect(await session.request('context', null)).toMatchObject({ ok: true, value: { surface: 'tool-dialog', theme: 'light', resources } });
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: {
+      host: { apiVersions: [1, 2], capabilities: expect.arrayContaining(['javascript.async', 'invocation.cancel']),
+        limits: { tool: { total: 32, model: 4 } } },
+    } });
     session.dispose();
     expect(await session.request('effect', {})).toMatchObject({ ok: false });
     expect(mocks.executeEffect).not.toHaveBeenCalled();
@@ -257,6 +294,285 @@ describe('pluginUiSessionService', () => {
     session.finishRequest();
     expect(session.isActive()).toBe(false);
   });
+  it.each([
+    { value: '文'.repeat(256_001), error: '字符串不能超过' },
+    { value: Array.from({ length: 257 }, (_, index) => index), error: '数组不能超过' },
+    { value: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`key${index}`, index])), error: '对象不能超过' },
+    { value: Array.from({ length: 9 }).reduce<unknown>((value) => ({ child: value }), '完整内容'), error: '嵌套深度不能超过' },
+  ])('keeps existing parameters intact when an oversized UI edit or submit is rejected ($error)', async ({ value, error }) => {
+    const session = await createPluginUiNativeSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters: { prompt: 'initial' }, onClose: vi.fn() });
+    expect(await session.request('set-parameters', { prompt: value })).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+    expect(await session.request('submit', { data: { prompt: value } })).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: { parameters: { prompt: 'initial' } } });
+    expect(mocks.executeTool).not.toHaveBeenCalled();
+    session.dispose();
+  });
+  it('rejects initial UI overflow and releases the canvas guard', async () => {
+    await expect(createPluginUiNativeSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters: { prompt: '文'.repeat(256_001) }, onClose: vi.fn() })).rejects.toThrow('字符串不能超过');
+    expect(mocks.mintResources).not.toHaveBeenCalled();
+    expect(mocks.completeCanvasDerivation).toHaveBeenCalled();
+  });
+  it('rejects merged parameter overflow even when each patch is within its own limit', async () => {
+    const parameters = Object.fromEntries(Array.from({ length: 128 }, (_, index) => [`field${index}`, index]));
+    const session = await createPluginUiNativeSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters, onClose: vi.fn() });
+    expect(await session.request('set-parameters', { extra: true })).toMatchObject({ ok: false, error: expect.stringContaining('对象不能超过') });
+    expect(await session.request('submit', { data: { extra: true } })).toMatchObject({ ok: false, error: expect.stringContaining('对象不能超过') });
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: { parameters } });
+    expect(mocks.executeTool).not.toHaveBeenCalled();
+    session.dispose();
+  });
+  it('accepts submitted data at the depth boundary without counting the transport envelope', async () => {
+    const value = Array.from({ length: 7 }).reduce<unknown>((value) => ({ child: value }), '完整内容');
+    const session = await native();
+    expect(await session.request('submit', { data: { prompt: value } })).toMatchObject({ ok: true });
+    expect(mocks.executeTool).toHaveBeenCalledWith(expect.anything(), 'target', expect.objectContaining({ prompt: value }), expect.anything());
+    session.dispose();
+  });
+  it('limits settings and network effects independently of paid model calls', async () => {
+    const session = await native();
+    for (let i = 0; i < 64; i++) expect(await session.request('effect', { type: 'settings.get', key: 'preferences' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'settings.get', key: 'preferences' })).toMatchObject({ ok: false, error: expect.stringContaining('64') });
+    for (let i = 0; i < 16; i++) expect(await session.request('effect', { type: 'network.request', url: 'https://api.example.com' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'network.request' })).toMatchObject({ ok: false, error: expect.stringContaining('16') });
+    for (let i = 0; i < 4; i++) expect(await session.request('effect', { type: 'model.generate' })).toMatchObject({ ok: true });
+    expect(mocks.executeEffect).toHaveBeenCalledWith(expect.objectContaining({ toolId: tool.id }));
+    session.dispose();
+  });
+
+  it('transfers start to a bound observer and survives its own canvas writes', async () => {
+    const onClose = vi.fn();
+    const session = await replicaNative(onClose);
+    const start = { type: 'video.replicaJob.start', resourceId: 'source-video', modelId: 'general/video', controls: ['depth'], audioMode: 'original', transcribe: true };
+    expect(await session.request('effect', start)).toMatchObject({ ok: true, value: { type: start.type, ok: true, value: replicaSummary } });
+    expect(mocks.startReplicaJob).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'project-1', pluginId: plugin.id, nodeId: 'target', sourceDigest: SOURCE_DIGEST, revisionDigest: REVISION_DIGEST,
+      resources, resourceReadContext: expect.objectContaining({ invocationId: session.binding.sessionId }), signal: expect.any(AbortSignal),
+    }), start);
+    expect(mocks.executeEffect).not.toHaveBeenCalled();
+    expect(mocks.clearResources).toHaveBeenCalledWith(session.binding.sessionId);
+    expect(mocks.completeCanvasDerivation).toHaveBeenCalled();
+    mocks.isCanvasDerivationFresh.mockReturnValue(false);
+    notify();
+    expect(session.isActive()).toBe(true);
+    const latest = { ...replicaSummary, status: 'generating' as const, stage: '第 1 段', progress: 25 };
+    mocks.getReplicaJob.mockResolvedValue(latest);
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: {
+      parameters: { replicaJob: latest }, resources: { self: [], incoming: [], inputs: {}, package: [], derived: [] },
+    } });
+    expect(onClose).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it('keeps the ordinary session when speech-model preparation is required', async () => {
+    mocks.startReplicaJob.mockResolvedValue({ speechModelsRequired: true });
+    const session = await replicaNative();
+    expect(await session.request('effect', { type: 'video.replicaJob.start' })).toMatchObject({ ok: true, value: { value: { speechModelsRequired: true } } });
+    expect(mocks.clearResources).not.toHaveBeenCalled();
+    expect(await session.request('set-parameters', { prompt: '继续准备' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: false, error: expect.stringContaining('绑定') });
+    expect(mocks.getReplicaJob).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it('rejects foreign task IDs and all writes in an observation session', async () => {
+    const session = await replicaNative();
+    await session.request('effect', { type: 'video.replicaJob.start' });
+    for (const type of ['video.replicaJob.status', 'video.replicaJob.cancel', 'video.replicaJob.restart']) {
+      expect(await session.request('effect', { type, jobId: 'another-job' })).toMatchObject({ ok: false, error: expect.stringContaining('绑定') });
+    }
+    for (const type of ['model.generate', 'resource.readRange', 'video.replicaJob.start']) {
+      expect(await session.request('effect', { type })).toMatchObject({ ok: false, error: expect.stringContaining('仅观察') });
+    }
+    expect(await session.request('set-parameters', { prompt: 'overwrite' })).toMatchObject({ ok: false, error: expect.stringContaining('仅观察') });
+    expect(await session.request('submit', { data: {} })).toMatchObject({ ok: false, error: expect.stringContaining('仅观察') });
+    expect(mocks.executeEffect).not.toHaveBeenCalled();
+    expect(mocks.executeTool).not.toHaveBeenCalled();
+    expect(mocks.getReplicaJob).not.toHaveBeenCalled();
+    expect(mocks.cancelReplicaJob).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it('closes observation without cancelling the independent background job', async () => {
+    const onClose = vi.fn();
+    const session = await replicaNative(onClose);
+    await session.request('effect', { type: 'video.replicaJob.start' });
+    expect(await session.request('close', null)).toMatchObject({ ok: true });
+    session.finishRequest();
+    await Promise.resolve();
+    expect(session.isActive()).toBe(false);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(mocks.cancelReplicaJob).not.toHaveBeenCalled();
+  });
+
+  it.each(['failed', 'cancelled', 'succeeded'] as const)('restarts a confirmed %s job through a fresh entry after replying, without minting on the old binding', async (status) => {
+    mocks.getState().installedPlugins = [replicaPlugin];
+    const onClose = vi.fn(); const onRestart = vi.fn();
+    const session = await createPluginUiNativeSession({ plugin: replicaPlugin, tool, nodeId: 'target', exportName: 'dialog', onClose, onRestart });
+    await session.request('effect', { type: 'video.replicaJob.start' });
+    mocks.getReplicaJob.mockResolvedValue({ ...replicaSummary, status });
+    expect(await session.request('effect', { type: 'video.replicaJob.restart', jobId: replicaSummary.jobId }))
+      .toMatchObject({ ok: true, value: { type: 'video.replicaJob.restart', ok: true, value: { status } } });
+    expect(onRestart).not.toHaveBeenCalled(); expect(session.isActive()).toBe(true);
+    expect(mocks.mintResources).toHaveBeenCalledTimes(1); expect(mocks.startReplicaJob).toHaveBeenCalledTimes(1);
+    session.finishRequest(); await Promise.resolve();
+    expect(session.isActive()).toBe(false); expect(onRestart).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled(); expect(mocks.cancelReplicaJob).not.toHaveBeenCalled();
+    expect(mocks.clearResources).toHaveBeenCalledWith(session.binding.sessionId);
+  });
+
+  it.each(['preparing', 'generating', 'paused', 'unknown'] as const)('does not restart %s tasks even if the UI reports a failure', async (status) => {
+    mocks.getState().installedPlugins = [replicaPlugin];
+    const onRestart = vi.fn();
+    const session = await createPluginUiNativeSession({ plugin: replicaPlugin, tool, nodeId: 'target', exportName: 'dialog', onClose: vi.fn(), onRestart });
+    await session.request('effect', { type: 'video.replicaJob.start' });
+    mocks.getReplicaJob.mockResolvedValue({ ...replicaSummary, status });
+    expect(await session.request('effect', { type: 'video.replicaJob.restart', jobId: replicaSummary.jobId }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('尚未确认结束') });
+    session.finishRequest(); await Promise.resolve();
+    expect(session.isActive()).toBe(true); expect(onRestart).not.toHaveBeenCalled();
+    expect(mocks.startReplicaJob).toHaveBeenCalledTimes(1); session.dispose();
+  });
+
+  it('only injects the editable restart marker for a host-authorized fresh terminal session', async () => {
+    mocks.getState().installedPlugins = [replicaPlugin];
+    mocks.findReplicaJob.mockResolvedValue({ ...replicaSummary, status: 'failed' });
+    const options = { plugin: replicaPlugin, tool, nodeId: 'target', exportName: 'dialog', onClose: vi.fn(), parameters: { replicaRestart: true } };
+    const ordinary = await createPluginUiNativeSession(options);
+    const context = await ordinary.request('context', null);
+    expect(JSON.stringify(context)).not.toContain('replicaRestart'); ordinary.dispose();
+    const restarted = await createPluginUiNativeSession({ ...options, startNewReplica: true });
+    expect(await restarted.request('context', null)).toMatchObject({ ok: true, value: { parameters: { replicaRestart: true, replicaLastJob: { status: 'failed' } }, resources } });
+    expect(restarted.binding.sessionId).not.toBe(ordinary.binding.sessionId);
+    expect(mocks.startReplicaJob).not.toHaveBeenCalled(); restarted.dispose();
+  });
+
+  it('recovers the same task when reopened without minting new media grants', async () => {
+    mocks.findReplicaJob.mockResolvedValue({ ...replicaSummary, status: 'paused', stage: '待核对' });
+    const session = await replicaNative();
+    expect(mocks.mintResources).not.toHaveBeenCalled();
+    expect(mocks.findReplicaJob).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-1', pluginId: plugin.id, nodeId: 'target', revisionDigest: REVISION_DIGEST }));
+    expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: true, value: { value: replicaSummary } });
+    expect(mocks.startReplicaJob).not.toHaveBeenCalled();
+    expect(await session.request('submit', {})).toMatchObject({ ok: false });
+    session.dispose();
+  });
+
+  it('restores display data with an active observer and keeps progress queries bound to its original job', async () => {
+    mocks.findReplicaJob.mockResolvedValue(replicaSummary);
+    const replicaUi = { version: 1, scene: '微调背景', duration: 29.188, frames: [{ format: 'jpeg', base64: 'AAAA', actualTime: 0 }] };
+    mocks.getReplicaUi.mockResolvedValue({ replicaUi });
+    const session = await replicaNative();
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: {
+      parameters: { replicaJob: replicaSummary, replicaUi }, resources: { self: [], incoming: [], derived: [] },
+    } });
+    expect(mocks.mintResources).not.toHaveBeenCalled();
+    expect(await session.request('effect', { type: 'model.generate' })).toMatchObject({ ok: false });
+    expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId }))
+      .toMatchObject({ ok: true, value: { value: replicaSummary } });
+    expect(mocks.startReplicaJob).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it('recovers a task finished while the window was closed and mints a fresh session for an explicit new task', async () => {
+    const finished = { ...replicaSummary, status: 'failed', error: '视觉分析失败' };
+    mocks.findReplicaJob.mockResolvedValue(finished);
+    mocks.getReplicaUi.mockResolvedValue({ replicaUi: { version: 1, scene: '原要求', duration: 29.188 } });
+    const session = await replicaNative();
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: {
+      parameters: { replicaLastJob: finished, replicaUi: { scene: '原要求' } }, resources,
+    } });
+    expect(mocks.mintResources).toHaveBeenCalledTimes(1);
+    expect(mocks.startReplicaJob).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it('does not resurrect an observer after a delayed lookup crosses a project switch', async () => {
+    let finish!: (value: PluginVideoReplicaJobSummary) => void;
+    mocks.findReplicaJob.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = replicaNative();
+    await vi.waitFor(() => expect(mocks.findReplicaJob).toHaveBeenCalledTimes(1));
+    mocks.getState().currentProjectId = 'project-2';
+    notify();
+    mocks.getState().currentProjectId = 'project-1';
+    finish(replicaSummary);
+    await expect(pending).rejects.toThrow('关闭');
+    expect(mocks.mintResources).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
+  it('keeps an observer bound to its real iframe window', async () => {
+    mocks.getState().installedPlugins = [replicaPlugin];
+    const session = await createPluginUiFrameSession({ plugin: replicaPlugin, tool, nodeId: 'target', exportName: 'dialog', onClose: vi.fn() });
+    const frame = { postMessage: vi.fn() } as unknown as Window;
+    session.attach(frame);
+    mocks.messageHandler?.({ data: request(session.sessionId, 'start', 'effect', { type: 'video.replicaJob.start' }), source: frame } as MessageEvent);
+    await vi.waitFor(() => expect(frame.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'start', ok: true }), '*'));
+    mocks.messageHandler?.({ data: request(session.sessionId, 'spoof-status', 'effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId }), source: {} } as MessageEvent);
+    await Promise.resolve();
+    expect(mocks.getReplicaJob).not.toHaveBeenCalled();
+    mocks.messageHandler?.({ data: request(session.sessionId, 'status', 'effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId }), source: frame } as MessageEvent);
+    await vi.waitFor(() => expect(mocks.getReplicaJob).toHaveBeenCalledTimes(1));
+    session.dispose();
+  });
+
+  it('does not replace its bound task with a different summary returned during observation', async () => {
+    const session = await replicaNative();
+    await session.request('effect', { type: 'video.replicaJob.start' });
+    mocks.getReplicaJob.mockResolvedValue({ ...replicaSummary, jobId: 'video-replica-foreign' });
+    expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: false, error: expect.stringContaining('不匹配') });
+    expect(await session.request('effect', { type: 'video.replicaJob.cancel', jobId: 'video-replica-foreign' })).toMatchObject({ ok: false, error: expect.stringContaining('绑定') });
+    expect(mocks.cancelReplicaJob).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it.each(['project', 'node', 'disabled', 'source', 'revision', 'ui'])('revokes an observer on %s identity changes', async (change) => {
+    mocks.findReplicaJob.mockResolvedValue(replicaSummary);
+    const onClose = vi.fn();
+    const session = await replicaNative(onClose);
+    const state = mocks.getState();
+    if (change === 'project') state.currentProjectId = 'project-2';
+    else if (change === 'node') state.nodes = [];
+    else state.installedPlugins = [{ ...replicaPlugin, ...({
+      disabled: { enabled: false }, source: { sourceDigest: 'd'.repeat(64) },
+      revision: { revisionDigest: 'd'.repeat(64) }, ui: { uiDigest: 'd'.repeat(64) },
+    }[change]) }];
+    notify();
+    expect(session.isActive()).toBe(false);
+    await Promise.resolve();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(mocks.cancelReplicaJob).not.toHaveBeenCalled();
+  });
+
+  it('throttles status reads, permits immediate cancel, and uses a separate bounded query budget', async () => {
+    const session = await replicaNative();
+    await session.request('effect', { type: 'video.replicaJob.start' });
+    let now = 1000;
+    const time = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: true });
+      expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: false, error: expect.stringContaining('250') });
+      expect(await session.request('effect', { type: 'video.replicaJob.cancel', jobId: replicaSummary.jobId })).toMatchObject({ ok: true });
+      for (let index = 0; index < 2046; index += 1) {
+        now += 250;
+        expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: true });
+      }
+      now += 250;
+      expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId })).toMatchObject({ ok: false, error: expect.stringContaining('2048') });
+      expect(await session.request('context', null)).toMatchObject({ ok: true });
+      expect(await session.request('close', null)).toMatchObject({ ok: true });
+    } finally {
+      time.mockRestore();
+      session.dispose();
+    }
+  });
+  it('bounds mention queries independently of paid model calls', async () => {
+    const session = await native();
+    for (let i = 0; i < 96; i++) expect(await session.request('effect', { type: 'prompt.mentions', source: 'nodes' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'prompt.mentions', source: 'nodes' })).toMatchObject({ ok: false, error: expect.stringContaining('96') });
+    for (let i = 0; i < 4; i++) expect(await session.request('effect', { type: 'model.generate' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'model.generate' })).toMatchObject({ ok: false });
+    session.dispose();
+  });
   it('keeps local media, exports and paid effects in separate bounded budgets', async () => {
     const session = await createPluginUiFrameSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters: {}, onClose: vi.fn() });
     const frame = { postMessage: vi.fn() } as unknown as Window;
@@ -288,6 +604,20 @@ describe('pluginUiSessionService', () => {
       expect(await session.request('effect', { type: 'image.lineArt', resourceId: `frame-${i}` })).toMatchObject({ ok: true });
     }
     expect(await session.request('effect', { type: 'resource.export' })).toMatchObject({ ok: true });
+    session.dispose();
+  });
+  it('allows sequential playback pages beyond ordinary request budgets and bounds failed preview reads', async () => {
+    const session = await native();
+    mocks.executeEffect.mockResolvedValue({ type: 'video.readPlayback', ok: true, value: { bytes: 1, base64: 'AA==' } });
+    for (let offset = 0; offset < 220; offset++) {
+      expect(await session.request('effect', { type: 'video.readPlayback', resourceId: 'preview', offset, length: 1 })).toMatchObject({ ok: true });
+    }
+    expect(await session.request('effect', { type: 'model.generate' })).toMatchObject({ ok: true });
+    mocks.executeEffect.mockResolvedValue({ type: 'video.readPlayback', ok: false, error: 'invalid preview' });
+    for (let i = 0; i < 4; i++) {
+      expect(await session.request('effect', { type: 'video.readPlayback', resourceId: 'preview', offset: 0, length: 1 })).toMatchObject({ value: { ok: false } });
+    }
+    expect(await session.request('effect', { type: 'video.readPlayback', resourceId: 'preview', offset: 0, length: 1 })).toMatchObject({ ok: false });
     session.dispose();
   });
   it('rejects invalid read lengths and enforces the cumulative byte limit even on failed reads', async () => {
@@ -348,6 +678,12 @@ describe('pluginUiSessionService', () => {
     mocks.collectMedia.mockReturnValue(new Set(['https://example.com/frame.png']));
     mocks.executeEffect.mockResolvedValue({ type: 'resource.readText', ok: true, value: { content: 'ok' } });
     mocks.executeTool.mockResolvedValue(undefined);
+    mocks.parseReplicaEffect.mockImplementation((value) => value);
+    mocks.startReplicaJob.mockResolvedValue(replicaSummary);
+    mocks.findReplicaJob.mockResolvedValue(undefined);
+    mocks.getReplicaJob.mockResolvedValue(replicaSummary);
+    mocks.getReplicaUi.mockResolvedValue({});
+    mocks.cancelReplicaJob.mockResolvedValue({ ...replicaSummary, status: 'cancelled', stage: '已取消' });
   });
 
   it('binds requests to the iframe window, exposes opaque resources, and revokes on submit', async () => {

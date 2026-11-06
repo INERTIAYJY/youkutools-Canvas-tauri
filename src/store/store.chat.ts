@@ -2,11 +2,15 @@
  * Chat Slice — 对话助手状态管理
  * 管理聊天面板开关、会话列表、消息流、操作日志和 revision 计数
  */
+import { MCP_SETTINGS_CONVERSATION_ID } from '../services/mcp/mcpSettingsScope';
+import { GENERAL_ASSISTANT_SCOPE_ID } from '../services/chat/assistantScope';
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
 import type {
   ChatConversation,
+  ChatImageReference,
   ChatMessage,
+  ChatPanelView,
   OperationLog,
 } from '../types/chat';
 import { AGENT_TERMINAL_STATUSES } from '../types/agent';
@@ -75,6 +79,12 @@ export interface ChatSlice {
   chatComposerDraft: string | null;
   /** 输入框当前草稿，内嵌浮窗与独立窗口切换时接力用。 */
   chatComposerLiveDraft: string;
+  /** 只在运行期间保存，换窗口和换会话都从这里接续。 */
+  chatComposerDrafts: Record<string, string>;
+  chatImageDrafts: Record<string, ChatImageReference[]>;
+  addChatImageDraft: (conversationId: string, image: ChatImageReference) => void;
+  removeChatImageDrafts: (conversationId: string, fileNames: string[]) => void;
+  chatPanelView: ChatPanelView;
 
   // ── 会话状态 ──
   conversations: ChatConversation[];
@@ -103,12 +113,14 @@ export interface ChatSlice {
   closeChat: () => void;
   toggleChat: () => void;
   setChatPanelDetached: (detached: boolean) => void;
-  setChatComposerLiveDraft: (draft: string) => void;
+  setChatComposerLiveDraft: (draft: string, conversationId?: string | null) => void;
+  setChatPanelView: (view: ChatPanelView) => void;
 
   // ── Conversation Actions ──
   setConversations: (conversations: ChatConversation[]) => void;
   addConversation: (conversation: ChatConversation) => void;
   updateConversation: (id: string, partial: Partial<ChatConversation>) => void;
+  setConversationMcpServer: (id: string, serverId: string, enabled: boolean) => void;
   removeConversation: (id: string) => void;
   setActiveConversation: (id: string | null) => void;
   /** 在当前项目创建空会话 */
@@ -181,6 +193,11 @@ function retainBackgroundTaskMessages(state: AppState, targetConversationId?: st
   );
 }
 
+function isConversationInCurrentChatScope(state: AppState, conversation: ChatConversation): boolean {
+  const ownerId = seriesOwnerId(state.projects, state.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID);
+  return conversation.projectId === ownerId || conversation.id === MCP_SETTINGS_CONVERSATION_ID;
+}
+
 function resolveMessageProjectId(state: AppState, conversationId: string): string | null {
   return state.conversations.find((conversation) => conversation.id === conversationId)?.projectId
     ?? state.agentTasks.find((task) => task.conversationId === conversationId)?.projectId
@@ -233,6 +250,18 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
   chatPanelDetached: false,
   chatComposerDraft: null,
   chatComposerLiveDraft: '',
+  chatComposerDrafts: {},
+  chatImageDrafts: {},
+  addChatImageDraft: (conversationId, image) => set((state) => ({
+    chatImageDrafts: { ...state.chatImageDrafts, [conversationId]: [
+      ...(state.chatImageDrafts[conversationId] ?? []).filter((item) => item.fileName !== image.fileName), image,
+    ] },
+  })),
+  removeChatImageDrafts: (conversationId, fileNames) => set((state) => ({
+    chatImageDrafts: { ...state.chatImageDrafts,
+      [conversationId]: (state.chatImageDrafts[conversationId] ?? []).filter((item) => !fileNames.includes(item.fileName)) },
+  })),
+  chatPanelView: 'chat',
 
   // ── 会话初始状态 ──
   conversations: [],
@@ -286,13 +315,35 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
       })),
   setChatPanelDetached: (detached) => set({ chatPanelDetached: detached }),
 
-  setChatComposerLiveDraft: (draft) => set({ chatComposerLiveDraft: draft }),
+  setChatComposerLiveDraft: (draft, conversationId = get().activeConversationId) => set((state) => {
+    if (!conversationId) return { chatComposerLiveDraft: draft };
+    if (!state.conversations.some((conversation) => conversation.id === conversationId)) return {};
+    const drafts = { ...state.chatComposerDrafts };
+    if (draft) drafts[conversationId] = draft;
+    else delete drafts[conversationId];
+    return {
+      chatComposerDrafts: drafts,
+      chatComposerLiveDraft: conversationId === state.activeConversationId ? draft : state.chatComposerLiveDraft,
+    };
+  }),
+  setChatPanelView: (view) => set({ chatPanelView: view }),
 
   // ==========================================
   // Conversation Actions
   // ==========================================
 
   setConversations: (conversations) => set({ conversations }),
+  setConversationMcpServer: (id, serverId, enabled) => {
+    const state = get();
+    const conversation = state.conversations.find((item) => item.id === id && !item.deletedAt && item.id.startsWith('conv-'));
+    const connection = state.config.mcpClientConnections?.find((item) => item.id === serverId && item.enabled);
+    const ownerId = seriesOwnerId(state.projects, state.currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID);
+    if (!conversation || id !== state.activeConversationId || conversation.projectId !== ownerId
+      || (enabled && (!connection || Object.keys(connection.tools).length === 0))) return;
+    const selected = new Set(conversation.mcpServerIds ?? []);
+    if (enabled) selected.add(serverId); else selected.delete(serverId);
+    state.updateConversation(id, { mcpServerIds: [...selected], mcpSelectionRevision: crypto.randomUUID() });
+  },
 
   addConversation: (conversation) => {
     set((s) => ({ conversations: [...s.conversations, conversation] }));
@@ -329,6 +380,9 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
       }
       return {
         conversations: s.conversations.filter((c) => c.id !== id),
+        chatComposerDrafts: Object.fromEntries(Object.entries(s.chatComposerDrafts).filter(([key]) => key !== id)),
+        chatImageDrafts: Object.fromEntries(Object.entries(s.chatImageDrafts).filter(([key]) => key !== id)),
+        chatComposerLiveDraft: s.activeConversationId === id ? '' : s.chatComposerLiveDraft,
         activeConversationId:
           s.activeConversationId === id ? null : s.activeConversationId,
       };
@@ -338,11 +392,11 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
   setActiveConversation: (id) => {
     if (id) {
       const state = get();
-      const projectId = state.conversations.find((conversation) => conversation.id === id)?.projectId
-        ?? (state.currentProjectId ? seriesOwnerId(state.projects, state.currentProjectId) : null);
-      if (projectId) persistActiveConversation(projectId, id);
+      const conversation = state.conversations.find((item) => item.id === id);
+      if (!conversation || !isConversationInCurrentChatScope(state, conversation)) return;
+      persistActiveConversation(conversation.projectId, id);
     }
-    set({ activeConversationId: id });
+    set({ activeConversationId: id, chatComposerLiveDraft: id ? get().chatComposerDrafts[id] ?? '' : '' });
   },
 
   createConversation: (projectId, title) => {
@@ -365,6 +419,7 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
     set((s) => ({
       conversations: [...s.conversations, conversation],
       activeConversationId: id,
+      chatComposerLiveDraft: '',
     }));
     persistActiveConversation(ownerId, id);
     persistConv(conversation);
@@ -376,22 +431,56 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
   // ==========================================
 
   loadConversationsForProject: async (projectId) => {
+    if ((get().currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID) !== projectId) return;
+    const ownerId = seriesOwnerId(get().projects, projectId);
+    // 先切换展示作用域，再读取历史；慢读取或失败都不能把旧项目继续当作活动对话。
+    set((state) => {
+      const conversations = state.conversations.filter((conversation) => conversation.projectId === ownerId
+        || conversation.id === MCP_SETTINGS_CONVERSATION_ID);
+      const activeId = conversations.find((conversation) => conversation.id === state.activeConversationId)?.id ?? null;
+      return {
+        conversations,
+        activeConversationId: activeId,
+        chatComposerLiveDraft: activeId ? state.chatComposerLiveDraft
+          : projectId === GENERAL_ASSISTANT_SCOPE_ID && !state.activeConversationId ? state.chatComposerLiveDraft : '',
+        messages: [
+          ...retainBackgroundTaskMessages(state, activeId ?? undefined),
+          ...state.messages.filter((message) => message.conversationId === activeId),
+        ],
+        operationLogs: [],
+      };
+    });
     try {
       // 会话按剧集项目归属：分集共用剧集的会话（seriesOwnerId 对普通项目是恒等）
-      const ownerId = seriesOwnerId(get().projects, projectId);
-      const conversations = await chatHistoryService.loadProjectConversations(ownerId);
-      if (get().currentProjectId !== projectId) return;
+      const persistedConversations = await chatHistoryService.loadProjectConversations(ownerId);
+      // 列表加载期间用户可能已新建或编辑会话，内存中的最新记录优先。
+      const projectConversations = [...new Map([
+        ...persistedConversations,
+        ...get().conversations.filter((conversation) => conversation.projectId === ownerId),
+      ].map((conversation) => [conversation.id, conversation])).values()];
+      const settingsConversations = get().conversations.filter((conversation) => conversation.id === MCP_SETTINGS_CONVERSATION_ID);
+      const conversations = [...settingsConversations, ...projectConversations];
+      if ((get().currentProjectId ?? GENERAL_ASSISTANT_SCOPE_ID) !== projectId) return;
       const persistedId = readPersistedActiveConversation(ownerId);
-      const restoredConversation = conversations.find((conversation) =>
-        conversation.id === persistedId) ?? conversations[0];
+      const settingsActive = get().activeConversationId === MCP_SETTINGS_CONVERSATION_ID;
+      const hasUnboundDraft = projectId === GENERAL_ASSISTANT_SCOPE_ID
+        && !get().activeConversationId && !!get().chatComposerLiveDraft;
+      const restoredConversation = hasUnboundDraft ? undefined : ((settingsActive ? settingsConversations[0] : undefined)
+        ?? projectConversations.find((conversation) => conversation.id === get().activeConversationId)
+        ?? projectConversations.find((conversation) => conversation.id === persistedId) ?? projectConversations[0]);
       set((state) => ({
         conversations,
         activeConversationId: restoredConversation?.id ?? null,
-        messages: retainBackgroundTaskMessages(state),
+        chatComposerLiveDraft: restoredConversation ? state.chatComposerDrafts[restoredConversation.id] ?? ''
+          : projectId === GENERAL_ASSISTANT_SCOPE_ID ? state.chatComposerLiveDraft : '',
+        messages: [
+          ...retainBackgroundTaskMessages(state, restoredConversation?.id),
+          ...state.messages.filter((message) => message.conversationId === restoredConversation?.id),
+        ],
         operationLogs: [],
       }));
       if (restoredConversation) {
-        persistActiveConversation(ownerId, restoredConversation.id);
+        if (!settingsActive) persistActiveConversation(ownerId, restoredConversation.id);
         await get().loadConversationMessages(restoredConversation.id);
       }
     } catch (e) {
@@ -403,11 +492,17 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
     try {
       const { messages } = await chatHistoryService.loadMessages(conversationId, 0, 200);
       // 只保留当前展示的 conversationId 的消息（时序上切换后仍然可能收到旧异步结果）
-      if (get().activeConversationId !== conversationId) return;
+      const current = get();
+      const conversation = current.conversations.find((item) => item.id === conversationId);
+      if (current.activeConversationId !== conversationId || !conversation
+        || !isConversationInCurrentChatScope(current, conversation)) return;
       set((state) => ({
         messages: [
           ...retainBackgroundTaskMessages(state, conversationId),
-          ...messages,
+          ...[...new Map([
+            ...messages,
+            ...state.messages.filter((message) => message.conversationId === conversationId),
+          ].map((message) => [message.id, message])).values()].sort((a, b) => a.timestamp - b.timestamp),
         ],
       }));
     } catch (e) {

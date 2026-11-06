@@ -2,6 +2,21 @@
  * 新手引导
  */
 const onboarding = {
+  'AI Canvas 免费发行提醒': 'AI Canvas free distribution notice',
+  '重要提醒': 'Important notice',
+  'AI Canvas 完全免费': 'AI Canvas is completely free',
+  '请勿为软件、入群资格或使用授权向第三方付款':
+    'Do not pay third parties for the software, group access or a usage license',
+  'AI Canvas 本体完全免费，项目方从未授权任何个人或账号收费售卖软件、入群资格或使用授权。':
+    'AI Canvas itself is completely free. The project has never authorized any person or account to charge for the software, group access or a usage license.',
+  '如果你已经付费': 'If you have already paid',
+  '如果你是通过抖音账号“XiaoA灵洞”（抖音号：XiaoA250908）付费获得本画布，该收费并非本项目官方行为。请立即保存聊天记录、付款凭证等证据，并通过抖音平台投诉举报、申请退款。':
+    'If you paid to obtain this canvas through the Douyin account “XiaoA灵洞” (Douyin ID: XiaoA250908), that charge was not made by this project. Save your chat history, payment receipt and other evidence, then report it and request a refund through Douyin.',
+  '请勿继续向任何第三方支付软件费、入群费或授权费。':
+    'Do not make any further software, group-access or license payments to a third party.',
+  '说明：模型 API、云端算力等第三方服务可能自行收费，这些费用与画布软件售价无关。':
+    'Note: third-party services such as model APIs and cloud compute may charge their own fees. Those charges are separate from the canvas software itself.',
+  '我知道了，继续使用': 'I understand, continue',
   'AI Canvas 新手引导': 'AI Canvas onboarding',
   '欢迎使用 AI Canvas': 'Welcome to AI Canvas',
   '花两分钟看完，能少走很多弯路': 'Spend two minutes here to avoid a lot of detours',
@@ -71,8 +86,6 @@ const onboarding = {
     'There are zoom controls at the bottom-right of the canvas for fine-tuning the display scale.',
   '开始生成前，记得先在“设置 > API Key”配置好模型服务，否则节点里的模型会是不可用状态。':
     'Before generating, remember to configure your model providers in Settings > API Key, otherwise the models in nodes will be unavailable.',
-  '本引导只在首次启动时出现，之后可从侧边栏头像菜单的「帮助」再次查看完整说明。':
-    'This onboarding only appears on first launch. You can revisit the full guide later via "Help" in the sidebar avatar menu.',
   '先自己逛逛': 'Explore on my own',
   '按场景整理的完整说明：画布导航、节点连线、AI 生成、快捷指令、资产与设置':
     'Complete guide organized by scenario: canvas navigation, node connections, AI generation, quick commands, assets and settings.',

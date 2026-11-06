@@ -1,3 +1,6 @@
+/**
+ * mascotSpring — 回归测试：mascotSpring。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   SPRING_PRESETS,

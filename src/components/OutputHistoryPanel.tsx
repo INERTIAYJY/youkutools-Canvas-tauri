@@ -9,19 +9,24 @@
  * - 固定状态下 Esc 只收起面板，不关闭；未固定时点击遮罩或 Esc 直接关闭；
  * - 无论是否固定，都可以用标题栏的折叠按钮手动收起 / 展开面板主体。
  */
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect, useSyncExternalStore } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
 import type { OutputHistoryEntry } from '../types';
 import { NODE_TYPE_CONFIG } from '../types';
+import { matchesHistoryQuery } from '../utils/historyQuery';
 import AnimatedButton from './shared/AnimatedButton';
 import PopupCloseButton from './shared/PopupCloseButton';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { isTauriEnv, saveAgentTextOutput } from '../services/fileService';
 import ResourceVideoPreview from './shared/ResourceVideoPreview';
+import ViewportImage from './shared/ViewportImage';
 import { useResourceVideoPreview } from '../hooks/useResourceVideoPreview';
+import { getLocale, t, useT } from '../i18n';
+import { historyMediaTaskReceipt, isHistoryMediaDownloadPending, isUnresolvedHistoryDownload, sameHistoryMediaTask } from '../services/historyMediaRecovery';
+import { getPendingTasksForProject, subscribeMediaTasks } from '../services/pollManager';
 
 const EASE = [0.16, 1, 0.3, 1] as const;
 type FilterType = 'all' | 'ai-text' | 'ai-image' | 'ai-video' | 'ai-audio';
@@ -39,16 +44,17 @@ const FILTER_OPTIONS: { key: FilterType; label: string }[] = [
 function formatRelativeTime(ts: number): string {
   const now = Date.now();
   const diff = now - ts;
-  if (diff < 60_000) return '刚刚';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  if (diff < 60_000) return t('刚刚');
+  const relative = new Intl.RelativeTimeFormat(getLocale());
+  if (diff < 3_600_000) return relative.format(-Math.floor(diff / 60_000), 'minute');
+  if (diff < 86_400_000) return relative.format(-Math.floor(diff / 3_600_000), 'hour');
+  if (diff < 604_800_000) return relative.format(-Math.floor(diff / 86_400_000), 'day');
   const d = new Date(ts);
   const nowDate = new Date();
-  if (d.getFullYear() === nowDate.getFullYear()) {
-    return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  }
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return d.toLocaleString(getLocale(), {
+    year: d.getFullYear() === nowDate.getFullYear() ? undefined : 'numeric',
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
 }
 
 function truncate(str: string, max: number): string {
@@ -87,7 +93,7 @@ function HistoryThumbnail({
   if (!src) return null;
 
   return (
-    <img
+    <ViewportImage
       src={src}
       alt=""
       loading="lazy"
@@ -99,17 +105,33 @@ function HistoryThumbnail({
   );
 }
 
-/**
- * CompactHistoryRow — 固定面板右下角小窗里的精简记录行：
- * 一行缩略图 + 模型/时间 + 一行提示词，点击整行即定位节点，悬停出现删除。
- */
-function CompactHistoryRow({
+/** 普通历史与固定小窗共用同一套下载动作及禁用状态。 */
+export function HistoryDownloadActions({ entry, busy, exists, available = true, onRetry, onAbandon }: {
+  entry: OutputHistoryEntry; busy: boolean; exists: boolean;
+  available?: boolean;
+  onRetry: (entry: OutputHistoryEntry) => void; onAbandon: (entry: OutputHistoryEntry) => void;
+}) {
+  useT();
+  return <div className="flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+    <button type="button" className="ui-btn ui-btn--primary ui-btn--sm" disabled={busy || !entry.recoveryTask || !exists || !available}
+      onClick={() => onRetry(entry)}>{busy ? t('下载中…') : t('重新下载')}</button>
+    <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={busy || !entry.recoveryTask}
+      title={t('只放弃本地下载恢复，不删除文件或取消远端任务')} onClick={() => onAbandon(entry)}>{t('放弃')}</button>
+  </div>;
+}
+
+/** 固定面板的精简记录行；待下载项始终保留恢复动作。 */
+export function CompactHistoryRow({
   entry,
   exists,
   onLocate,
   onDelete,
   videoExpanded,
   onVideoExpandedChange,
+  recoveryBusy,
+  onRetry,
+  onAbandon,
+  recoveryAvailable,
 }: {
   entry: OutputHistoryEntry;
   exists: boolean;
@@ -117,10 +139,16 @@ function CompactHistoryRow({
   onDelete: (entry: OutputHistoryEntry) => void;
   videoExpanded: boolean;
   onVideoExpandedChange: (expanded: boolean) => void;
+  recoveryBusy: boolean;
+  onRetry: (entry: OutputHistoryEntry) => void;
+  onAbandon: (entry: OutputHistoryEntry) => void;
+  recoveryAvailable: boolean;
 }) {
+  useT();
   const typeCfg = NODE_TYPE_CONFIG[entry.nodeType];
-  const isError = entry.status === 'error';
-  const hasThumb = entry.nodeType === 'ai-image' && !isError && Boolean(entry.mediaUrl || entry.filePath);
+  const pending = isUnresolvedHistoryDownload(entry);
+  const isError = entry.status === 'error' && !pending;
+  const hasThumb = entry.nodeType === 'ai-image' && entry.status === 'success' && Boolean(entry.mediaUrl || entry.filePath);
 
   return (
     <div
@@ -138,8 +166,9 @@ function CompactHistoryRow({
                     isError ? 'border-red-500/20' : 'border-canvas-border hover:border-canvas-border/80'
                   }`}
     >
-      {entry.nodeType === 'ai-video' && !isError && (entry.mediaUrl || entry.filePath) ? (
+      {entry.nodeType === 'ai-video' && entry.status === 'success' && (entry.mediaUrl || entry.filePath) ? (
         <ResourceVideoPreview src={entry.mediaUrl} filePath={entry.filePath} name={entry.nodeLabel} className="resource-video-compact"
+          historyRecord={entry} projectId={entry.projectId}
           expanded={videoExpanded} onExpandedChange={onVideoExpandedChange} />
       ) : hasThumb ? (
         <HistoryThumbnail mediaUrl={entry.mediaUrl} filePath={entry.filePath} className="w-9 h-9" />
@@ -157,7 +186,9 @@ function CompactHistoryRow({
           <span className="min-w-0 truncate text-[10px] text-canvas-text-muted">
             {entry.provider}/{entry.model}
           </span>
-          {isError && <span className="shrink-0 text-[10px] font-medium text-red-400">失败</span>}
+          {isError && <span className="shrink-0 text-[10px] font-medium text-red-400">{t('失败')}</span>}
+          {pending && <span className="ui-badge ui-badge--warning shrink-0">{t('待下载')}</span>}
+          {entry.status === 'abandoned' && <span className="ui-badge shrink-0">{t('已放弃下载')}</span>}
           <span className="ml-auto shrink-0 text-[10px] text-canvas-text-muted tabular-nums">
             {formatRelativeTime(entry.timestamp)}
           </span>
@@ -170,13 +201,17 @@ function CompactHistoryRow({
             exists ? 'text-indigo-400' : 'text-canvas-text-muted line-through'
           }`}
         >
-          {exists ? `#${entry.nodeLabel}` : '节点已删除'}
+          {exists ? `#${entry.nodeLabel}` : t('节点已删除')}
         </span>
+        {pending && <div className="mt-1">
+          <HistoryDownloadActions entry={entry} busy={recoveryBusy} exists={exists} available={recoveryAvailable} onRetry={onRetry} onAbandon={onAbandon} />
+          {!recoveryAvailable && <p className="ui-hint mt-1">{t('无法确认原下载任务，请前往节点继续保存')}</p>}
+        </div>}
       </div>
       <button
         type="button"
-        aria-label="查看节点"
-        data-tooltip="查看节点"
+        aria-label={t('查看节点')}
+        data-tooltip={t('查看节点')}
         className="shrink-0 self-start rounded px-1.5 py-0.5 text-[10px] text-indigo-400
                    transition-colors hover:bg-indigo-500/10 hover:text-indigo-300"
         onClick={(e) => {
@@ -184,12 +219,12 @@ function CompactHistoryRow({
           onLocate(entry);
         }}
       >
-        查看节点
+        {t('查看节点')}
       </button>
-      <button
+      {(!pending || !entry.recoveryTask) && <button
         type="button"
-        aria-label="删除"
-        data-tooltip="删除"
+        aria-label={t('删除')}
+        data-tooltip={t('删除')}
         className="shrink-0 self-start rounded p-1 text-canvas-text-muted opacity-0 transition-[opacity,color,background-color]
                    hover:bg-red-500/10 hover:text-red-400 focus-visible:opacity-100 group-hover:opacity-100"
         onClick={(e) => {
@@ -198,12 +233,13 @@ function CompactHistoryRow({
         }}
       >
         <Icon icon="mdi:delete-outline" width="14" height="14" aria-hidden="true" />
-      </button>
+      </button>}
     </div>
   );
 }
 
 export default function OutputHistoryPanel() {
+  useT();
   const {
     outputHistoryRecords,
     historyTotalCount,
@@ -222,6 +258,9 @@ export default function OutputHistoryPanel() {
     historyPinned,
     updateConfig,
     saveConfig,
+    historyDownloadBusyIds,
+    retryHistoryDownload,
+    abandonHistoryDownload,
   } = useAppStore(
     useShallow((s) => ({
       outputHistoryRecords: s.outputHistoryRecords,
@@ -241,10 +280,18 @@ export default function OutputHistoryPanel() {
       historyPinned: !!s.config.outputHistoryPinned,
       updateConfig: s.updateConfig,
       saveConfig: s.saveConfig,
+      historyDownloadBusyIds: s.historyDownloadBusyIds,
+      retryHistoryDownload: s.retryHistoryDownload,
+      abandonHistoryDownload: s.abandonHistoryDownload,
     })),
   );
 
   const [filter, setFilter] = useState<FilterType>('all');
+  const recoverySnapshot = useSyncExternalStore(subscribeMediaTasks,
+    useCallback(() => JSON.stringify(historyPanelOpen && currentProjectId ? getPendingTasksForProject(currentProjectId)
+      .filter(isHistoryMediaDownloadPending).map(historyMediaTaskReceipt) : []), [currentProjectId, historyPanelOpen]), () => '[]');
+  const recoveryTasks = useMemo(() => JSON.parse(recoverySnapshot) as ReturnType<typeof historyMediaTaskReceipt>[], [recoverySnapshot]);
+  const recoveryAvailable = (entry: OutputHistoryEntry) => recoveryTasks.some((task) => sameHistoryMediaTask(entry.recoveryTask, task));
   const [search, setSearch] = useState('');
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
@@ -297,22 +344,9 @@ export default function OutputHistoryPanel() {
 
   // Filter + search
   const filteredEntries = useMemo(() => {
-    let list = historyProjectId === currentProjectId ? outputHistoryRecords : [];
-    if (filter !== 'all') {
-      list = list.filter((e) => e.nodeType === filter);
-    }
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      list = list.filter(
-        (e) =>
-          e.prompt.toLowerCase().includes(q) ||
-          e.output.toLowerCase().includes(q) ||
-          e.model.toLowerCase().includes(q) ||
-          e.nodeLabel.toLowerCase().includes(q),
-      );
-    }
-    return list;
-  }, [currentProjectId, filter, historyProjectId, outputHistoryRecords, search]);
+    if (historyProjectId !== currentProjectId) return [];
+    return outputHistoryRecords.filter((entry) => matchesHistoryQuery(entry, historyQuery));
+  }, [currentProjectId, historyProjectId, outputHistoryRecords, historyQuery]);
   const videoPreview = useResourceVideoPreview(JSON.stringify([historyPanelOpen, historyPinned, collapsed, currentProjectId, filter, search]), filteredEntries.map((entry) => entry.id));
 
   useEffect(() => {
@@ -346,17 +380,33 @@ export default function OutputHistoryPanel() {
     [deleteHistoryEntry],
   );
 
+  const handleRetryDownload = useCallback((entry: OutputHistoryEntry) => {
+    void retryHistoryDownload(entry.id).catch(() => {
+      if (useAppStore.getState().currentProjectId !== entry.projectId) return;
+      const retained = getPendingTasksForProject(entry.projectId).some((task) => isHistoryMediaDownloadPending(task)
+        && sameHistoryMediaTask(entry.recoveryTask, historyMediaTaskReceipt(task)));
+      showToast(t(retained ? '下载尚未完成，原任务已保留，可再次重新下载' : '无法确认原下载任务，请前往节点继续保存'), 'error');
+    });
+  }, [retryHistoryDownload, showToast]);
+  const handleAbandonDownload = useCallback((entry: OutputHistoryEntry) => {
+    void abandonHistoryDownload(entry.id).then(() => {
+      if (useAppStore.getState().currentProjectId === entry.projectId) showToast(t('已放弃下载'));
+    }).catch(() => {
+      if (useAppStore.getState().currentProjectId === entry.projectId) showToast(t('无法放弃下载，请确认原任务未在处理中后重试'), 'error');
+    });
+  }, [abandonHistoryDownload, showToast]);
+
   const handleClearAll = useCallback(() => {
     clearAllHistory();
     setConfirmClear(false);
-    showToast('已清空全部历史记录');
+    showToast(t('已清空全部历史记录'));
   }, [clearAllHistory, showToast]);
 
   const handleLocateNode = useCallback(
     (entry: OutputHistoryEntry) => {
       const node = useAppStore.getState().nodes.find((n) => n.id === entry.nodeId);
       if (!node) {
-        showToast('节点已不存在', 'error');
+        showToast(t('节点已不存在'), 'error');
         return;
       }
       // Dispatch event for canvas to fit view to node（带一次放大回弹脉冲）
@@ -382,9 +432,9 @@ export default function OutputHistoryPanel() {
     async (entry: OutputHistoryEntry) => {
       try {
         await navigator.clipboard.writeText(entry.output);
-        showToast('已复制输出内容');
+        showToast(t('已复制输出内容'));
       } catch {
-        showToast('复制失败', 'error');
+        showToast(t('复制失败'), 'error');
       }
     },
     [showToast],
@@ -407,9 +457,9 @@ export default function OutputHistoryPanel() {
       const fileName = `ai-output-history-${new Date().toISOString().slice(0, 10)}.json`;
       // Tauri 里 <a download> 不会弹保存对话框，文件悄悄落到「下载」目录，得走原生对话框
       if (isTauriEnv()) {
-        const saved = await saveAgentTextOutput(json, fileName, '导出历史记录');
+        const saved = await saveAgentTextOutput(json, fileName, t('导出历史记录'));
         if (!saved) return; // 用户取消
-        showToast(`已导出历史记录到 ${saved.fileName}`);
+        showToast(t('已导出历史记录到 {name}', { name: saved.fileName }));
         return;
       }
       const blob = new Blob([json], { type: 'application/json' });
@@ -419,9 +469,9 @@ export default function OutputHistoryPanel() {
       a.download = fileName;
       a.click();
       URL.revokeObjectURL(url);
-      showToast('已导出历史记录');
+      showToast(t('已导出历史记录'));
     } catch {
-      showToast('导出历史记录失败', 'error');
+      showToast(t('导出历史记录失败'), 'error');
     }
   }, [getHistoryForExport, historyQuery, showToast]);
 
@@ -451,7 +501,7 @@ export default function OutputHistoryPanel() {
           {/* Bottom Sheet — 固定时缩成右下角小窗（避开底部工具栏），否则保持底部抽屉 */}
           <motion.div
             data-resource-video-boundary
-            className={`z-[250] flex flex-col glass-panel shadow-2xl overflow-hidden ${
+            className={`z-[250] flex flex-col glass-panel ui-dialog-surface shadow-2xl overflow-hidden ${
               historyPinned
                 ? 'fixed bottom-14 right-3 w-[360px] max-h-[min(60vh,520px)] border rounded-2xl'
                 : 'fixed inset-x-0 bottom-0 mx-auto w-full max-w-[720px] max-h-[75vh] border border-b-0 rounded-t-2xl'
@@ -469,23 +519,23 @@ export default function OutputHistoryPanel() {
                   <circle cx="12" cy="12" r="10" />
                   <polyline points="12 6 12 12 16 14" />
                 </svg>
-                <h2 className="text-sm font-semibold text-canvas-text">输出历史</h2>
-                <span className="text-[11px] text-canvas-text-muted">共 {historyTotalCount} 条</span>
+                <h2 className="text-sm font-semibold text-canvas-text">{t('输出历史')}</h2>
+                <span className="text-[11px] text-canvas-text-muted">{t('共 {count} 条', { count: historyTotalCount })}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 {/* 固定面板：跳转节点不再关闭面板 */}
                 <label
                   className="flex items-center gap-1.5 cursor-pointer select-none"
-                  data-tooltip={historyPinned ? '取消固定' : '固定后面板常驻，跳转节点不关闭'}
+                  data-tooltip={historyPinned ? t('取消固定') : t('固定后面板常驻，跳转节点不关闭')}
                 >
                   <span className={`text-[11px] transition-colors ${historyPinned ? 'text-indigo-400' : 'text-canvas-text-muted'}`}>
-                    固定面板
+                    {t('固定面板')}
                   </span>
                   <button
                     type="button"
                     role="switch"
                     aria-checked={historyPinned}
-                    aria-label="固定面板"
+                    aria-label={t('固定面板')}
                     className="ui-switch"
                     onClick={togglePinned}
                   />
@@ -495,9 +545,9 @@ export default function OutputHistoryPanel() {
                   type="button"
                   className="flex h-8 w-8 items-center justify-center rounded-lg text-canvas-text-muted
                              hover:bg-canvas-hover hover:text-canvas-text transition-colors"
-                  aria-label={collapsed ? '展开面板' : '收起面板'}
+                  aria-label={collapsed ? t('展开面板') : t('收起面板')}
                   aria-expanded={!collapsed}
-                  data-tooltip={collapsed ? '展开' : '收起'}
+                  data-tooltip={collapsed ? t('展开') : t('收起')}
                   onClick={() => setCollapsed((value) => !value)}
                 >
                   <Icon icon={collapsed ? 'mdi:chevron-up' : 'mdi:chevron-down'} width="18" aria-hidden="true" />
@@ -530,7 +580,7 @@ export default function OutputHistoryPanel() {
                     listRef.current?.scrollTo({ top: 0 });
                   }}
                 >
-                  {label}
+                  {t(label)}
                 </button>
               ))}
               {/* 固定小窗里不放搜索框，保持精简 */}
@@ -556,7 +606,7 @@ export default function OutputHistoryPanel() {
                     setSearch(e.target.value);
                     listRef.current?.scrollTo({ top: 0 });
                   }}
-                  placeholder="搜索提示词、输出内容或模型..."
+                  placeholder={t('搜索提示词、输出内容或模型...')}
                   className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-canvas-bg border border-canvas-border
                              text-[12px] text-canvas-text placeholder:text-canvas-text-muted
                              focus:outline-none focus:border-indigo-500/50 transition-colors"
@@ -591,10 +641,10 @@ export default function OutputHistoryPanel() {
                   </svg>
                   <p className="text-[12px]">
                     {historyLoading
-                      ? '正在加载历史记录...'
+                      ? t('正在加载历史记录...')
                       : historyTotalCount === 0
-                        ? '暂无生成记录，开始第一次生成后会自动记录'
-                        : '没有匹配的记录'}
+                        ? t('暂无生成记录，开始第一次生成后会自动记录')
+                        : t('没有匹配的记录')}
                   </p>
                 </div>
               ) : (
@@ -611,6 +661,7 @@ export default function OutputHistoryPanel() {
                           onDelete={handleDeleteEntry}
                           videoExpanded={videoPreview.expandedId === entry.id}
                           onVideoExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? entry.id : null)}
+                          recoveryBusy={historyDownloadBusyIds.includes(entry.id)} recoveryAvailable={recoveryAvailable(entry)} onRetry={handleRetryDownload} onAbandon={handleAbandonDownload}
                         />
                       );
                     }
@@ -618,7 +669,8 @@ export default function OutputHistoryPanel() {
                     const exists = nodeExists(entry.nodeId);
                     const isText = entry.nodeType === 'ai-text';
                     const isImage = entry.nodeType === 'ai-image';
-                    const isError = entry.status === 'error';
+                    const pending = isUnresolvedHistoryDownload(entry);
+                    const isError = entry.status === 'error' && !pending;
                     const typeCfg = NODE_TYPE_CONFIG[entry.nodeType];
 
                     return (
@@ -645,18 +697,19 @@ export default function OutputHistoryPanel() {
                           </span>
 
                           {/* Model */}
-                          <span className="text-[10px] text-canvas-text-muted bg-canvas-hover px-1.5 py-0.5 rounded">
+                          <span className="min-w-0 truncate text-[10px] text-canvas-text-muted bg-canvas-hover px-1.5 py-0.5 rounded">
                             {entry.provider}/{entry.model}
                           </span>
 
                           {/* Status */}
-                          <span
+                          {pending ? <span className="ui-badge ui-badge--warning">{t('生成已完成，待下载')}</span>
+                            : entry.status === 'abandoned' ? <span className="ui-badge">{t('已放弃下载')}</span> : <span
                             className={`text-[10px] font-medium ${
                               isError ? 'text-red-400' : 'text-green-400'
                             }`}
                           >
-                            {isError ? '❌ 失败' : '✅ 成功'}
-                          </span>
+                            {isError ? t('❌ 失败') : t('✅ 成功')}
+                          </span>}
 
                           <div className="flex-1" />
 
@@ -671,7 +724,7 @@ export default function OutputHistoryPanel() {
                                 : 'text-canvas-text-muted line-through cursor-default'
                             }`}
                           >
-                            {exists ? `#${entry.nodeLabel}` : '节点已删除'}
+                            {exists ? `#${entry.nodeLabel}` : t('节点已删除')}
                           </button>
 
                           {/* Time */}
@@ -687,13 +740,13 @@ export default function OutputHistoryPanel() {
                             className="w-full text-left text-[11px] text-canvas-text-secondary leading-relaxed hover:text-canvas-text transition-colors"
                             onClick={() => toggleExpand(entry.id)}
                           >
-                            <span className="text-canvas-text-muted">提示词：</span>
+                            <span className="text-canvas-text-muted">{t('提示词：')}</span>
                             {isExpanded ? entry.prompt : truncate(entry.prompt, 80)}
                           </button>
                         </div>
 
                         {/* Output preview */}
-                        {!isError && (
+                        {entry.status === 'success' && (
                           <div className="px-3.5 pb-2">
                             {isText ? (
                               <div className="rounded-lg bg-canvas-bg/60 px-3 py-2 max-h-24 overflow-y-auto text-[11px] text-canvas-text-secondary leading-relaxed">
@@ -704,6 +757,7 @@ export default function OutputHistoryPanel() {
                                 {/* Image thumbnail — local file first, online URL fallback */}
                                 {entry.nodeType === 'ai-video' && (entry.mediaUrl || entry.filePath) && (
                                   <ResourceVideoPreview src={entry.mediaUrl} filePath={entry.filePath} name={entry.nodeLabel}
+                                    historyRecord={entry} projectId={entry.projectId}
                                     expanded={videoPreview.expandedId === entry.id}
                                     onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? entry.id : null)} />
                                 )}
@@ -717,15 +771,15 @@ export default function OutputHistoryPanel() {
                                   {/* Online URL */}
                                   {entry.mediaUrl && (
                                     <div className="flex items-center gap-1.5">
-                                      <span className="text-[10px] text-canvas-text-muted shrink-0">线上：</span>
+                                      <span className="text-[10px] text-canvas-text-muted shrink-0">{t('线上：')}</span>
                                       <span className="text-[10px] text-canvas-text-secondary truncate">{entry.mediaUrl}</span>
                                       <button
                                         type="button"
                                         className="shrink-0 w-4 h-4 rounded text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover flex items-center justify-center transition-colors"
                                         onClick={() => {
                                           navigator.clipboard.writeText(entry.mediaUrl!).then(
-                                            () => showToast('已复制线上地址'),
-                                            () => showToast('复制失败', 'error'),
+                                            () => showToast(t('已复制线上地址')),
+                                            () => showToast(t('复制失败'), 'error'),
                                           );
                                         }}
                                       >
@@ -739,15 +793,15 @@ export default function OutputHistoryPanel() {
                                   {/* Local file path */}
                                   {entry.filePath && (
                                     <div className="flex items-center gap-1.5">
-                                      <span className="text-[10px] text-canvas-text-muted shrink-0">本地：</span>
+                                      <span className="text-[10px] text-canvas-text-muted shrink-0">{t('本地：')}</span>
                                       <span className="text-[10px] text-canvas-text-secondary truncate font-mono">{entry.filePath}</span>
                                       <button
                                         type="button"
                                         className="shrink-0 w-4 h-4 rounded text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover flex items-center justify-center transition-colors"
                                         onClick={() => {
                                           navigator.clipboard.writeText(entry.filePath!).then(
-                                            () => showToast('已复制本地路径'),
-                                            () => showToast('复制失败', 'error'),
+                                            () => showToast(t('已复制本地路径')),
+                                            () => showToast(t('复制失败'), 'error'),
                                           );
                                         }}
                                       >
@@ -761,7 +815,7 @@ export default function OutputHistoryPanel() {
                                   {/* Fallback: output text */}
                                   {!entry.mediaUrl && !entry.filePath && (
                                     <span className="text-[10px] text-canvas-text-muted">
-                                      {entry.output || '无预览'}
+                                      {entry.output || t('无预览')}
                                     </span>
                                   )}
                                   {/* Params */}
@@ -777,22 +831,25 @@ export default function OutputHistoryPanel() {
                         )}
 
                         {/* Error message */}
-                        {isError && entry.error && (
+                        {(isError || pending) && entry.error && (
                           <div className="px-3.5 pb-2">
-                            <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-1.5 text-[11px] text-red-400">
+                            <div className={`ui-alert ${pending ? 'ui-alert--warning' : 'ui-alert--danger'} text-xs`}>
                               {entry.error}
                             </div>
+                            {pending && !recoveryAvailable(entry) && <p className="ui-hint mt-1">{t('无法确认原下载任务，请前往节点继续保存')}</p>}
                           </div>
                         )}
 
                         {/* Actions */}
-                        <div className="flex items-center gap-1 px-3.5 pb-3">
+                        <div className="flex flex-wrap items-center gap-1 px-3.5 pb-3">
+                          {pending && <HistoryDownloadActions entry={entry} busy={historyDownloadBusyIds.includes(entry.id)} exists={exists}
+                            available={recoveryAvailable(entry)} onRetry={handleRetryDownload} onAbandon={handleAbandonDownload} />}
                           {!isError && isText && (
                             <AnimatedButton
                               className="text-[10px] px-2 py-1 rounded-md text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover transition-colors"
                               onClick={() => handleCopy(entry)}
                             >
-                              复制输出
+                              {t('复制输出')}
                             </AnimatedButton>
                           )}
                           {!isError && (
@@ -800,16 +857,16 @@ export default function OutputHistoryPanel() {
                               className="text-[10px] px-2 py-1 rounded-md text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover transition-colors"
                               onClick={() => handleLocateNode(entry)}
                             >
-                              查看节点
+                              {t('查看节点')}
                             </AnimatedButton>
                           )}
                           <div className="flex-1" />
-                          <AnimatedButton
+                          {(!pending || !entry.recoveryTask) && <AnimatedButton
                             className="text-[10px] px-2 py-1 rounded-md text-canvas-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
                             onClick={() => handleDeleteEntry(entry)}
                           >
-                            删除
-                          </AnimatedButton>
+                            {t('删除')}
+                          </AnimatedButton>}
                         </div>
                       </motion.div>
                     );
@@ -826,18 +883,18 @@ export default function OutputHistoryPanel() {
               <div className="flex items-center justify-between px-3 py-3 border-t border-canvas-border shrink-0 bg-canvas-surface/80">
                 {confirmClear ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-canvas-text-secondary">确认清空全部历史？</span>
+                    <span className="text-[11px] text-canvas-text-secondary">{t('确认清空全部历史？')}</span>
                     <AnimatedButton
                       className="text-[11px] px-2.5 py-1 rounded-md bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
                       onClick={handleClearAll}
                     >
-                      确认清空
+                      {t('确认清空')}
                     </AnimatedButton>
                     <AnimatedButton
                       className="text-[11px] px-2.5 py-1 rounded-md text-canvas-text-muted hover:text-canvas-text hover:bg-canvas-hover transition-colors"
                       onClick={() => setConfirmClear(false)}
                     >
-                      取消
+                      {t('取消')}
                     </AnimatedButton>
                   </div>
                 ) : (
@@ -845,7 +902,7 @@ export default function OutputHistoryPanel() {
                     className="text-[11px] px-2.5 py-1 rounded-md text-canvas-text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
                     onClick={() => setConfirmClear(true)}
                   >
-                    清空全部历史
+                    {t('清空全部历史')}
                   </AnimatedButton>
                 )}
                 <AnimatedButton
@@ -853,7 +910,7 @@ export default function OutputHistoryPanel() {
                   onClick={handleExport}
                   disabled={filteredEntries.length === 0}
                 >
-                  导出 JSON
+                  {t('导出 JSON')}
                 </AnimatedButton>
               </div>
             )}

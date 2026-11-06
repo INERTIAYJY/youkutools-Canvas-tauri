@@ -1,0 +1,512 @@
+{
+  "16": {
+    "inputs": {
+      "noise": [
+        "30",
+        0
+      ],
+      "guider": [
+        "36",
+        0
+      ],
+      "sampler": [
+        "20",
+        0
+      ],
+      "sigmas": [
+        "25",
+        1
+      ],
+      "latent_image": [
+        "19",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "17": {
+    "inputs": {
+      "source": [
+        "25",
+        2
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "PDD info / recipe"
+    }
+  },
+  "19": {
+    "inputs": {
+      "prompt": "提示词",
+      "width": [
+        "29",
+        0
+      ],
+      "height": [
+        "29",
+        1
+      ],
+      "length": [
+        "37",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "24",
+        0
+      ],
+      "vae": [
+        "22",
+        0
+      ],
+      "audio_vae": [
+        "27",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "101",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "102",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "103",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "104",
+        0
+      ],
+      "ref_images.ref_image_4": [
+        "105",
+        0
+      ],
+      "ref_images.ref_image_5": [
+        "106",
+        0
+      ],
+      "ref_images.ref_image_6": [
+        "107",
+        0
+      ],
+      "ref_images.ref_image_7": [
+        "108",
+        0
+      ],
+      "ref_images.ref_image_8": [
+        "109",
+        0
+      ],
+      "ref_videos.ref_video_0": [
+        "201",
+        0
+      ],
+      "ref_videos.ref_video_1": [
+        "202",
+        0
+      ],
+      "ref_videos.ref_video_2": [
+        "203",
+        0
+      ],
+      "ref_audios.ref_audio_0": [
+        "301",
+        0
+      ],
+      "ref_audios.ref_audio_1": [
+        "302",
+        0
+      ],
+      "ref_audios.ref_audio_2": [
+        "303",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "生成提示词（素材可不传；混合总数≤12）"
+    }
+  },
+  "20": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "22": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "23": {
+    "inputs": {
+      "samples": [
+        "16",
+        0
+      ],
+      "vae": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码（音频）"
+    }
+  },
+  "24": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "25": {
+    "inputs": {
+      "pdd_file": "MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+      "nfe": "8",
+      "lora_strength": 1,
+      "head_strength": 1,
+      "on_off_grid": "error",
+      "partition": "",
+      "enabled": true,
+      "partition_check": "error",
+      "model": [
+        "32",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3PDDAccApply",
+    "_meta": {
+      "title": "MiniMax H3 PDD Acc LoRA (Apply)"
+    }
+  },
+  "26": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "color_space": "sRGB",
+      "codec": "none",
+      "images": [
+        "33",
+        0
+      ],
+      "audio": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "创建视频"
+    }
+  },
+  "27": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "29": {
+    "inputs": {
+      "aspect_ratio": "9:16 (Portrait Widescreen)",
+      "megapixels": 0.7,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Resolution Selector (Size)"
+    }
+  },
+  "30": {
+    "inputs": {
+      "noise_seed": 1117044591506318
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "31": {
+    "inputs": {
+      "filename_prefix": "video/h3_pdd_optional",
+      "format": "mp4",
+      "format.codec": "auto",
+      "codec": "auto",
+      "video": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "保存视频"
+    }
+  },
+  "32": {
+    "inputs": {
+      "shift_video": 12,
+      "shift_audio": 3,
+      "model": [
+        "34",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "MiniMax H3 Sigma Shift"
+    }
+  },
+  "33": {
+    "inputs": {
+      "samples": [
+        "900",
+        0
+      ],
+      "vae": [
+        "22",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "34": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "36": {
+    "inputs": {
+      "model": [
+        "25",
+        0
+      ],
+      "conditioning": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "37": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "38",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "秒数转换为 H3 帧数"
+    }
+  },
+  "38": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 8
+    },
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "900": {
+    "inputs": {
+      "value": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "FL_UnloadAllModels",
+    "_meta": {
+      "title": "采样后卸载模型（视频解码前）"
+    }
+  },
+  "101": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片01（可选）"
+    }
+  },
+  "102": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片02（可选）"
+    }
+  },
+  "103": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片03（可选）"
+    }
+  },
+  "104": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片04（可选）"
+    }
+  },
+  "105": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片05（可选）"
+    }
+  },
+  "106": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片06（可选）"
+    }
+  },
+  "107": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片07（可选）"
+    }
+  },
+  "108": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片08（可选）"
+    }
+  },
+  "109": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": ""
+    },
+    "_meta": {
+      "title": "图片09（可选）"
+    }
+  },
+  "201": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "",
+      "force_rate": 24,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "H3"
+    },
+    "_meta": {
+      "title": "视频01（可选；2–15秒，同类合计≤15秒）"
+    }
+  },
+  "202": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "",
+      "force_rate": 24,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "H3"
+    },
+    "_meta": {
+      "title": "视频02（可选；2–15秒，同类合计≤15秒）"
+    }
+  },
+  "203": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "",
+      "force_rate": 24,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "H3"
+    },
+    "_meta": {
+      "title": "视频03（可选；2–15秒，同类合计≤15秒）"
+    }
+  },
+  "301": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": ""
+    },
+    "_meta": {
+      "title": "音频01（可选；2–15秒，同类合计≤15秒）"
+    }
+  },
+  "302": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": ""
+    },
+    "_meta": {
+      "title": "音频02（可选；2–15秒，同类合计≤15秒）"
+    }
+  },
+  "303": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": ""
+    },
+    "_meta": {
+      "title": "音频03（可选；2–15秒，同类合计≤15秒）"
+    }
+  }
+}

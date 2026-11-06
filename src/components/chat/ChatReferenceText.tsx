@@ -1,9 +1,10 @@
 /**
  * 解析并渲染消息中的节点、模型、Skill 和快捷指令引用，提供定位画布与查看详情交互。
  */
+import { useEffect, useRef, type MouseEvent } from 'react';
 import { Icon } from '@iconify/react';
 import { useAppStore, type AppState } from '../../store/useAppStore';
-import { useT } from '../../i18n';
+import { t as translate, useT } from '../../i18n';
 
 type ReferenceTokenKind = 'node' | 'model' | 'skill' | 'drama' | 'slash';
 
@@ -98,11 +99,11 @@ function parseReferenceTokens(
     const label = kind === 'node'
       ? match[2]
       : kind === 'model'
-        ? match[4] || '模型'
+        ? match[4] || translate('模型')
       : kind === 'skill'
         ? decodeLabel(match[6]) || 'Skill'
       : kind === 'drama'
-        ? match[8] || '资产'
+        ? match[8] || translate('资产')
         : raw.slice(1);
     const id = kind === 'node'
       ? match[1]
@@ -135,11 +136,11 @@ const INPUT_TOKEN_CLASSES: Record<ReferenceTokenKind, string> = {
 };
 
 const COMPACT_TOKEN_CLASSES: Record<ReferenceTokenKind, string> = {
-  node: 'border-indigo-400/25 bg-indigo-400/10 text-indigo-100',
-  model: 'border-sky-400/25 bg-sky-400/10 text-sky-100',
-  skill: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
-  drama: 'border-violet-400/25 bg-violet-400/10 text-violet-100',
-  slash: 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100',
+  node: 'border-indigo-400/25 bg-indigo-400/10 text-canvas-text',
+  model: 'border-sky-400/25 bg-sky-400/10 text-canvas-text',
+  skill: 'border-emerald-400/25 bg-emerald-400/10 text-canvas-text',
+  drama: 'border-violet-400/25 bg-violet-400/10 text-canvas-text',
+  slash: 'border-emerald-400/20 bg-emerald-400/10 text-canvas-text',
 };
 
 const ACCENT_CLASSES: Record<ReferenceTokenKind, string> = {
@@ -156,6 +157,21 @@ interface CompactTokenProps extends ChatReferenceHandlers {
   onMissingNode: () => void;
 }
 
+function referenceAttributes(token: ReferenceToken) {
+  return {
+    'data-chat-reference': token.kind === 'slash' ? undefined : token.kind,
+    'data-chat-reference-raw': token.kind === 'slash' ? undefined : token.raw,
+    'data-ref-id': token.kind === 'node' ? token.id : undefined,
+    'data-ref-label': token.kind === 'node' ? token.label : undefined,
+    'data-drama-id': token.kind === 'drama' ? token.id : undefined,
+    'data-drama-label': token.kind === 'drama' ? token.label : undefined,
+    'data-skill-id': token.kind === 'skill' ? token.id : undefined,
+    'data-skill-name': token.kind === 'skill' ? token.label : undefined,
+    'data-model-ref-id': token.kind === 'model' ? token.id : undefined,
+    'data-model-ref-label': token.kind === 'model' ? token.label : undefined,
+  };
+}
+
 function CompactToken({
   token,
   missing = false,
@@ -165,6 +181,10 @@ function CompactToken({
   onModelActivate,
 }: CompactTokenProps) {
   const t = useT();
+  const modelClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (modelClickTimer.current !== null) clearTimeout(modelClickTimer.current);
+  }, []);
   const label = token.kind === 'skill' || token.kind === 'slash' ? `/${token.label}` : token.label;
   const interactive = token.kind === 'node' || token.kind === 'model';
   const activate = () => {
@@ -174,6 +194,20 @@ function CompactToken({
     }
     if (token.kind === 'model' && token.id) onModelActivate?.(token.id);
   };
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+    if (token.kind !== 'model' || event.detail === 0) {
+      activate();
+      return;
+    }
+    if (modelClickTimer.current !== null) clearTimeout(modelClickTimer.current);
+    modelClickTimer.current = null;
+    if (event.detail > 1) return;
+    // 第二次 click 早于 dblclick，先取消单击菜单，双击留给统一引用预览入口。
+    modelClickTimer.current = setTimeout(() => {
+      modelClickTimer.current = null;
+      activate();
+    }, 300);
+  };
   const content = (
     <>
       <span
@@ -182,7 +216,7 @@ function CompactToken({
       />
       <span className="truncate">{label || '/'}</span>
       {token.kind === 'node' && token.displayId != null && (
-        <span className="ml-1.5 shrink-0 border-l border-indigo-300/20 pl-1.5 text-[0.84em] font-semibold tabular-nums text-indigo-200/65">
+        <span className="ml-1.5 shrink-0 border-l border-indigo-300/20 pl-1.5 text-[0.84em] font-semibold tabular-nums text-canvas-text-secondary">
           #{token.displayId}
         </span>
       )}
@@ -194,7 +228,8 @@ function CompactToken({
     return (
       <button
         type="button"
-        onClick={activate}
+        {...referenceAttributes(token)}
+        onClick={handleClick}
         onMouseEnter={() => token.kind === 'node' && !missing && token.id && onNodeHover?.(token.id)}
         onMouseLeave={() => token.kind === 'node' && onNodeHover?.(null)}
         aria-label={missing
@@ -206,7 +241,7 @@ function CompactToken({
         className={`mx-0.5 inline-flex max-w-full items-center rounded-[7px] border px-2 py-1 align-middle text-[0.92em] font-medium leading-none shadow-sm transition-[border-color,background-color,color,transform]
           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 active:scale-[0.98]
           ${missing
-            ? 'border-red-400/25 bg-red-400/10 text-red-200/80'
+            ? 'border-red-400/25 bg-red-400/10 text-canvas-text'
             : `${COMPACT_TOKEN_CLASSES[token.kind]} hover:border-current hover:bg-canvas-hover/80`}`}
       >
         {content}
@@ -216,6 +251,9 @@ function CompactToken({
 
   return (
     <span
+      {...referenceAttributes(token)}
+      role={token.kind === 'slash' ? undefined : 'button'}
+      tabIndex={token.kind === 'slash' ? undefined : 0}
       className={`mx-0.5 inline-flex max-w-full items-center rounded-[7px] border px-2 py-1 align-middle text-[0.92em] font-medium leading-none shadow-sm ${COMPACT_TOKEN_CLASSES[token.kind]}`}
     >
       {content}
@@ -271,6 +309,9 @@ export default function ChatReferenceText({
       : (
           <span
             key={`${token.start}-${token.raw}`}
+            {...referenceAttributes(token)}
+            role={token.kind === 'slash' ? undefined : 'button'}
+            tabIndex={token.kind === 'slash' ? undefined : 0}
             className={INPUT_TOKEN_CLASSES[token.kind]}
           >
             {token.raw}

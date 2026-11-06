@@ -11,6 +11,7 @@ import type {
 } from '../../types/agent';
 import { useAppStore } from '../../store/useAppStore';
 import { useT } from '../../i18n';
+import VideoThumbnail from '../shared/VideoThumbnail';
 
 interface AgentToolDetailsProps {
   input?: AgentToolDisplaySnapshot;
@@ -82,7 +83,7 @@ export default function AgentToolDetails({
               <dl className="space-y-0.5">
                 {input.fields.map((field, index) => (
                   <div key={`${field.label}-${index}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
-                    <dt className="text-canvas-text-muted">{field.label}</dt>
+                    <dt className="text-canvas-text-muted">{t(field.label)}</dt>
                     <dd className="min-w-0 break-words text-canvas-text-secondary">
                       {formatValue(field.value, t)}
                       {field.source && (
@@ -108,12 +109,18 @@ export default function AgentToolDetails({
                   const preview = node && reference.mediaKind === 'image'
                     ? node.data.imageUrl || node.data.thumbnailUrl
                     : node?.data.thumbnailUrl;
+                  const video = reference.mediaKind === 'video'
+                    || node?.data.type === 'ai-video' || node?.data.type === 'source-video';
                   return (
                     <div
                       key={`${reference.kind}-${reference.id}-${index}`}
                       className="flex min-w-0 items-center gap-1.5 rounded border border-canvas-border bg-canvas-surface/60 p-1.5"
                     >
-                      {preview ? (
+                      {video ? (
+                        <VideoThumbnail src={node?.data.videoUrl} filePath={node?.data.filePath}
+                          poster={node?.data.thumbnailUrl} name={reference.label} alt=""
+                          className="block h-9 w-9 shrink-0 overflow-hidden rounded object-cover" />
+                      ) : preview ? (
                         <img
                           src={preview}
                           alt=""
@@ -156,7 +163,7 @@ export default function AgentToolDetails({
                     {entity.subtitle && <p className="text-canvas-text-muted">{entity.subtitle}</p>}
                     {entity.fields?.map((field, fieldIndex) => (
                       <p key={`${field.label}-${fieldIndex}`} className="text-canvas-text-muted">
-                        {field.label}：<span className="text-canvas-text-secondary">{formatValue(field.value, t)}</span>
+                        {t(field.label)}：<span className="text-canvas-text-secondary">{formatValue(field.value, t)}</span>
                       </p>
                     ))}
                     {entity.preview && (
@@ -177,7 +184,7 @@ export default function AgentToolDetails({
                 {changes.map((change, index) => (
                   <div key={`${change.targetId}-${change.field}-${index}`} className="rounded border border-canvas-border bg-canvas-surface/60 px-2 py-1.5">
                     <p className="truncate text-canvas-text-secondary">
-                      {change.targetLabel || change.targetId} · {change.field}
+                      {change.targetLabel || change.targetId} · {t(change.field)}
                     </p>
                     <p className="break-words text-canvas-text-muted">
                       {formatValue(change.before, t)}
@@ -196,7 +203,7 @@ export default function AgentToolDetails({
               <dl className="space-y-0.5">
                 {result.fields.map((field, index) => (
                   <div key={`${field.label}-${index}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
-                    <dt className="text-canvas-text-muted">{field.label}</dt>
+                    <dt className="text-canvas-text-muted">{t(field.label)}</dt>
                     <dd className="break-words text-canvas-text-secondary">{formatValue(field.value, t)}</dd>
                   </div>
                 ))}

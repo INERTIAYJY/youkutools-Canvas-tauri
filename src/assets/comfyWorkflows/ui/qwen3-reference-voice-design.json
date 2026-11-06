@@ -1,0 +1,892 @@
+{
+  "id": "qwen3-tts-03-reference-dialect-voice-lottery",
+  "revision": 0,
+  "last_node_id": 7,
+  "last_link_id": 6,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadAudio",
+      "pos": [
+        80,
+        160
+      ],
+      "size": [
+        300,
+        150
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "COMBO",
+          "widget": {
+            "name": "audio"
+          },
+          "link": null
+        },
+        {
+          "label": "audioUI",
+          "name": "audioUI",
+          "type": "AUDIO_UI",
+          "widget": {
+            "name": "audioUI"
+          },
+          "link": null
+        },
+        {
+          "label": "upload",
+          "name": "upload",
+          "type": "AUDIOUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "AUDIO",
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            1,
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "Node name for S&R": "LoadAudio",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "audio": true,
+            "audioUI": true,
+            "upload": true
+          }
+        }
+      },
+      "widgets_values": [
+        "",
+        null,
+        null
+      ],
+      "title": "① 上传方言参考音频"
+    },
+    {
+      "id": 2,
+      "type": "AILab_Qwen3ASR",
+      "pos": [
+        460,
+        160
+      ],
+      "size": [
+        350,
+        250
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "TEXT",
+          "type": "STRING",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-QwenASR",
+        "ver": "b4a72ce9edff506f1659c059891da8d98b73284b",
+        "Node name for S&R": "AILab_Qwen3ASR",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "Qwen/Qwen3-ASR-1.7B-hf",
+        "bf16",
+        "auto",
+        "",
+        false,
+        true
+      ],
+      "widgets_values_named": {
+        "model": "Qwen/Qwen3-ASR-1.7B-hf",
+        "precision": "bf16",
+        "language": "auto",
+        "hints": "",
+        "normalize_text": false,
+        "unload_models": true
+      },
+      "color": "#151c19",
+      "bgcolor": "#444d49",
+      "title": "② ASR 自动转写"
+    },
+    {
+      "id": 3,
+      "type": "FB_Qwen3TTSVoiceClone",
+      "pos": [
+        900,
+        80
+      ],
+      "size": [
+        430,
+        650
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "ref_audio",
+          "name": "ref_audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 3
+        },
+        {
+          "label": "voice_clone_prompt",
+          "name": "voice_clone_prompt",
+          "shape": 7,
+          "type": "VOICE_CLONE_PROMPT",
+          "link": null
+        },
+        {
+          "label": "target_text",
+          "name": "target_text",
+          "type": "STRING",
+          "widget": {
+            "name": "target_text"
+          },
+          "link": null
+        },
+        {
+          "label": "model_choice",
+          "name": "model_choice",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_choice"
+          },
+          "link": null
+        },
+        {
+          "label": "device",
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        },
+        {
+          "label": "precision",
+          "name": "precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "precision"
+          },
+          "link": null
+        },
+        {
+          "label": "language",
+          "name": "language",
+          "type": "COMBO",
+          "widget": {
+            "name": "language"
+          },
+          "link": null
+        },
+        {
+          "label": "ref_text",
+          "name": "ref_text",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "ref_text"
+          },
+          "link": 2
+        },
+        {
+          "label": "seed",
+          "name": "seed",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "label": "max_new_tokens",
+          "name": "max_new_tokens",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "max_new_tokens"
+          },
+          "link": null
+        },
+        {
+          "label": "top_p",
+          "name": "top_p",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "top_p"
+          },
+          "link": null
+        },
+        {
+          "label": "top_k",
+          "name": "top_k",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "top_k"
+          },
+          "link": null
+        },
+        {
+          "label": "temperature",
+          "name": "temperature",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "temperature"
+          },
+          "link": null
+        },
+        {
+          "label": "repetition_penalty",
+          "name": "repetition_penalty",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "repetition_penalty"
+          },
+          "link": null
+        },
+        {
+          "label": "x_vector_only",
+          "name": "x_vector_only",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "x_vector_only"
+          },
+          "link": null
+        },
+        {
+          "label": "attention",
+          "name": "attention",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "attention"
+          },
+          "link": null
+        },
+        {
+          "label": "unload_model_after_generate",
+          "name": "unload_model_after_generate",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "unload_model_after_generate"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "qwen3-tts-comfyui",
+        "ver": "c7db6c2eb0f269d358c53bb71688dc95de4f7d07",
+        "Node name for S&R": "FB_Qwen3TTSVoiceClone"
+      },
+      "widgets_values": [
+        "今儿天气不错，咱们出去转转吧。",
+        "1.7B",
+        "auto",
+        "bf16",
+        "Chinese",
+        "",
+        20260916,
+        "fixed",
+        1536,
+        0.9,
+        50,
+        0.85,
+        1.05,
+        false,
+        "sdpa",
+        true
+      ],
+      "title": "③ 保留方言与说话内容"
+    },
+    {
+      "id": 4,
+      "type": "SaveAudio",
+      "pos": [
+        2070,
+        500
+      ],
+      "size": [
+        410,
+        130
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 6
+        },
+        {
+          "label": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "label": "audioUI",
+          "name": "audioUI",
+          "type": "AUDIO_UI",
+          "widget": {
+            "name": "audioUI"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "Node name for S&R": "SaveAudio",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "filename_prefix": true,
+            "audioUI": true
+          }
+        }
+      },
+      "widgets_values": [
+        "audio/Qwen3-TTS-03-参考音频抽卡-支持方言"
+      ],
+      "title": "⑥ 预览并保存"
+    },
+    {
+      "id": 5,
+      "type": "FB_Qwen3TTSVoiceDesign",
+      "pos": [
+        900,
+        830
+      ],
+      "size": [
+        500,
+        760
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "text",
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": null
+        },
+        {
+          "label": "instruct",
+          "name": "instruct",
+          "type": "STRING",
+          "widget": {
+            "name": "instruct"
+          },
+          "link": null
+        },
+        {
+          "label": "model_choice",
+          "name": "model_choice",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_choice"
+          },
+          "link": null
+        },
+        {
+          "label": "device",
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        },
+        {
+          "label": "precision",
+          "name": "precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "precision"
+          },
+          "link": null
+        },
+        {
+          "label": "language",
+          "name": "language",
+          "type": "COMBO",
+          "widget": {
+            "name": "language"
+          },
+          "link": null
+        },
+        {
+          "label": "seed",
+          "name": "seed",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "label": "max_new_tokens",
+          "name": "max_new_tokens",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "max_new_tokens"
+          },
+          "link": null
+        },
+        {
+          "label": "top_p",
+          "name": "top_p",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "top_p"
+          },
+          "link": null
+        },
+        {
+          "label": "top_k",
+          "name": "top_k",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "top_k"
+          },
+          "link": null
+        },
+        {
+          "label": "temperature",
+          "name": "temperature",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "temperature"
+          },
+          "link": null
+        },
+        {
+          "label": "repetition_penalty",
+          "name": "repetition_penalty",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "repetition_penalty"
+          },
+          "link": null
+        },
+        {
+          "label": "attention",
+          "name": "attention",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "attention"
+          },
+          "link": null
+        },
+        {
+          "label": "unload_model_after_generate",
+          "name": "unload_model_after_generate",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "unload_model_after_generate"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "Node name for S&R": "FB_Qwen3TTSVoiceDesign",
+        "cnr_id": "qwen3-tts-comfyui",
+        "ver": "c7db6c2eb0f269d358c53bb71688dc95de4f7d07",
+        "aux_id": "flybirdxx/ComfyUI-Qwen-TTS",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "你好呀，我是一个活泼开朗的小朋友。今天天气真不错，我们一起出去玩吧。",
+        "自然真实的8至10岁中国小朋友声音，音色稚嫩清亮，音调略高，咬字自然，像日常聊天，不要刻意卖萌，不要播音腔。",
+        "1.7B",
+        "auto",
+        "bf16",
+        "Chinese",
+        20260916,
+        "randomize",
+        1536,
+        0.9,
+        50,
+        1,
+        1.05,
+        "sdpa",
+        true
+      ],
+      "title": "④ 目标音色抽卡"
+    },
+    {
+      "id": 6,
+      "type": "SeedVCVoiceConversion",
+      "pos": [
+        1510,
+        360
+      ],
+      "size": [
+        450,
+        650
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source_audio",
+          "type": "AUDIO",
+          "link": 4
+        },
+        {
+          "name": "target_voice",
+          "type": "AUDIO",
+          "link": 5
+        },
+        {
+          "name": "timbre_strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "timbre_strength"
+          },
+          "link": null
+        },
+        {
+          "name": "diffusion_steps",
+          "type": "INT",
+          "widget": {
+            "name": "diffusion_steps"
+          },
+          "link": null
+        },
+        {
+          "name": "cfg_rate",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg_rate"
+          },
+          "link": null
+        },
+        {
+          "name": "reference_seconds",
+          "type": "FLOAT",
+          "widget": {
+            "name": "reference_seconds"
+          },
+          "link": null
+        },
+        {
+          "name": "auto_f0_adjust",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "auto_f0_adjust"
+          },
+          "link": null
+        },
+        {
+          "name": "pitch_shift",
+          "type": "INT",
+          "widget": {
+            "name": "pitch_shift"
+          },
+          "link": null
+        },
+        {
+          "name": "length_adjust",
+          "type": "FLOAT",
+          "widget": {
+            "name": "length_adjust"
+          },
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "output_gain_db",
+          "type": "FLOAT",
+          "widget": {
+            "name": "output_gain_db"
+          },
+          "link": null
+        },
+        {
+          "name": "peak_protection",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "peak_protection"
+          },
+          "link": null
+        },
+        {
+          "name": "peak_ceiling_db",
+          "type": "FLOAT",
+          "widget": {
+            "name": "peak_ceiling_db"
+          },
+          "link": null
+        },
+        {
+          "name": "model",
+          "type": "SEEDVC_MODEL",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "⑤ Seed-VC 方言音色转换",
+      "properties": {
+        "Node name for S&R": "SeedVCVoiceConversion"
+      },
+      "widgets_values": [
+        1,
+        30,
+        0.7,
+        20,
+        true,
+        0,
+        1,
+        20260916,
+        0,
+        true,
+        -1
+      ]
+    },
+    {
+      "id": 7,
+      "type": "Note",
+      "pos": [
+        80,
+        550
+      ],
+      "size": [
+        730,
+        490
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Note"
+      },
+      "widgets_values": [
+        "用途：保留参考音频的方言口音、用词习惯和节奏，同时把音色抽成儿童、男性、女性或其他新声音。\n\n流程：\n1. 上传天津话、粤语或其他方言的单人参考音频。\n2. 在“保留方言与说话内容”的 target_text 中填写最终台词；想要明显方言效果，台词最好使用对应方言用词。\n3. “目标音色抽卡”的 text 只是生成目标音色用的校准台词，不是最终输出内容。\n4. 修改 instruct 描述目标年龄、性别和音色；seed 为 randomize，每次运行会抽取不同音色。\n5. Seed-VC 将方言版本的 source_audio 转换成抽到的目标音色。\n\n跨年龄/性别建议保持 auto_f0_adjust=true。声音过尖或过低时，关闭 auto_f0_adjust，再将 pitch_shift 在 -3～+4 之间微调。\n抽到满意音色后，把 VoiceDesign 的 seed 改成 fixed。"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "AUDIO"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      7,
+      "STRING"
+    ],
+    [
+      3,
+      1,
+      0,
+      3,
+      0,
+      "AUDIO"
+    ],
+    [
+      4,
+      3,
+      0,
+      6,
+      0,
+      "AUDIO"
+    ],
+    [
+      5,
+      5,
+      0,
+      6,
+      1,
+      "AUDIO"
+    ],
+    [
+      6,
+      6,
+      0,
+      4,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "天津话源音频生成",
+      "bounding": [
+        60,
+        80,
+        1420,
+        760
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "提示词设计目标音色",
+      "bounding": [
+        960,
+        830,
+        590,
+        870
+      ],
+      "color": "#8c6c3f",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Seed-VC 音色转换",
+      "bounding": [
+        1500,
+        180,
+        970,
+        1250
+      ],
+      "color": "#6a4c93",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.65,
+      "offset": [
+        0,
+        0
+      ]
+    },
+    "workflow-name": "03-参考音频抽卡-支持方言"
+  },
+  "version": 0.4
+}
+

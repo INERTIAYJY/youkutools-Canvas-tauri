@@ -1,3 +1,6 @@
+/**
+ * SeriesSourceBrowser — 提供剧集原文与章节浏览界面与交互。
+ */
 import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { seriesOwnerId } from '../store/store.utils';

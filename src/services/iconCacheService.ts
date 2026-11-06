@@ -1,3 +1,6 @@
+/**
+ * iconCacheService — 初始化并恢复 Iconify 图标缓存。
+ */
 import { _api, addCollection, getIcon, type IconifyJSON } from '@iconify/react';
 
 // 独立于项目数据，按图标保存，避免多个窗口覆盖彼此的缓存；无时间过期。

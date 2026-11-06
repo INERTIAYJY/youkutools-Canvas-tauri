@@ -1,3 +1,6 @@
+/**
+ * agentExecutionRationale — 回归测试：buildAgentExecutionRationale。
+ */
 import { describe, expect, it } from 'vitest';
 import { buildAgentExecutionRationale } from '../../../src/services/chat/agentExecutionRationale';
 import type { AgentEvent, AgentTask } from '../../../src/types/agent';

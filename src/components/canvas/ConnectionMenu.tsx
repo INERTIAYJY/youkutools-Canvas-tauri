@@ -23,6 +23,7 @@ interface ConnectionMenuProps {
   sourceNodeType: string;
   direction: ConnectionMenuDirection;
   sourceNode: RFNode<BaseNodeData> | undefined;
+  selectionCount?: number;
   menuRef: React.RefObject<HTMLDivElement | null>;
   onSelect: (option: ConnectionMenuOption) => void;
   connectionMenuMap: Record<string, ConnectionMenuOption[]>;
@@ -46,6 +47,7 @@ function ConnectionMenu({
   sourceNodeType,
   direction,
   sourceNode,
+  selectionCount,
   menuRef,
   onSelect,
   connectionMenuMap,
@@ -80,7 +82,7 @@ function ConnectionMenu({
           {direction === 'input' ? t('创建上游输入') : t('引用该节点生成')}
         </div>
         <div className="text-xs text-canvas-text-secondary truncate">
-          {sourceNode?.data?.label ?? t('节点')}
+          {selectionCount ? `已选 ${selectionCount} 个节点` : sourceNode?.data?.label ?? t('节点')}
         </div>
       </div>
 

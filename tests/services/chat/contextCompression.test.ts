@@ -1,3 +1,6 @@
+/**
+ * contextCompression — 回归测试：conversation context compression validation。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   SUMMARY_REQUIRED_SECTIONS,

@@ -1,3 +1,6 @@
+/**
+ * nodePluginToolDialog — 回归测试：plugin dialog window button。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ReactElement } from 'react';
 import type { AvailableNodePluginTool } from '../../src/types/plugin';
@@ -12,6 +15,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock('react', async (original) => ({
   ...await original<typeof import('react')>(),
   useMemo: <T,>(factory: () => T) => factory(),
+  useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
+  useCallback: <T,>(callback: T) => callback,
   useEffect: (effect: () => void | (() => void)) => { hooks.effects.push(effect); },
   useRef: <T,>(value: T) => {
     const index = hooks.index++;
@@ -21,7 +26,9 @@ vi.mock('react', async (original) => ({
   useState: <T,>(initial: T | (() => T)) => {
     const index = hooks.index++;
     if (!(index in hooks.values)) hooks.values[index] = typeof initial === 'function' ? (initial as () => T)() : initial;
-    return [hooks.values[index], (value: T) => { hooks.values[index] = value; }];
+    return [hooks.values[index], (value: T | ((previous: T) => T)) => {
+      hooks.values[index] = typeof value === 'function' ? (value as (previous: T) => T)(hooks.values[index] as T) : value;
+    }];
   },
 }));
 vi.mock('../../src/store/useAppStore', () => ({
@@ -129,6 +136,32 @@ describe('plugin dialog window button', () => {
     expect(mocks.frame).toHaveBeenCalledOnce();
   });
 
+  it('authorizes only the bootstrap nonce in an opaque frame and retains the private bundle and network restrictions', async () => {
+    const documents: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      documents.push(blob as Blob);
+      return `blob:http://localhost/${documents.length}`;
+    });
+    try {
+      await mount();
+      const first = await documents[0].text();
+      const nonce = first.match(/nonce="([a-f\d]{32})"/u)?.[1];
+      expect(nonce).toBeDefined();
+      expect(first).toContain(`script-src 'nonce-${nonce}' http://plugin-ui.localhost plugin-ui:;`);
+      expect(first).toContain(`nonce="${nonce}" src="http://localhost/plugin-ui-bootstrap.js"`);
+      expect(first).not.toContain("script-src 'self'");
+      expect(first).not.toContain("script-src 'unsafe-inline'");
+      expect(first).toContain("connect-src 'none'");
+      expect(elements(render()).find((item) => item.type === 'iframe')!.props.sandbox).toBe('allow-scripts');
+      cleanup.forEach((dispose) => dispose());
+      hooks.values = [];
+      await mount();
+      expect(await documents[1].text()).not.toContain(`nonce="${nonce}"`);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('keeps the editor after open failure and allows another attempt', async () => {
     await mount();
     mocks.open.mockRejectedValueOnce(new Error('原生创建失败'));
@@ -139,6 +172,28 @@ describe('plugin dialog window button', () => {
     expect(elements(render()).some((item) => item.type === 'iframe')).toBe(true);
     clickWindowButton();
     await vi.waitFor(() => expect(mocks.open).toHaveBeenCalledTimes(2));
+  });
+
+  it('rebuilds an iframe session after host-authorized restart without closing the dialog or reusing the old document', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    try {
+      await mount();
+      const oldFrame = elements(render()).find((item) => item.type === 'iframe')!;
+      const restart = mocks.frame.mock.calls[0][0].onRestart;
+      expect(mocks.frame.mock.calls[0][0].startNewReplica).toBe(false);
+      restart();
+      expect(mocks.close).not.toHaveBeenCalled();
+      expect(elements(render()).some((item) => item.type === 'iframe')).toBe(false);
+      cleanup.forEach((dispose) => dispose());
+      expect(mocks.dispose).toHaveBeenCalledOnce(); expect(revoke).toHaveBeenCalledOnce();
+      await mount();
+      expect(mocks.frame).toHaveBeenCalledTimes(2);
+      expect(mocks.frame.mock.calls[1][0]).toMatchObject({ startNewReplica: true, nodeId: 'video-1', exportName: 'review' });
+      expect(elements(render()).find((item) => item.type === 'iframe')!.props.src).not.toBe(oldFrame.props.src);
+      expect(mocks.close).not.toHaveBeenCalled(); expect(mocks.open).not.toHaveBeenCalled();
+      restart();
+      expect(elements(render()).some((item) => item.type === 'iframe')).toBe(true);
+    } finally { revoke.mockRestore(); }
   });
 
   it('disables unsupported desktop presentation and does not call native code', async () => {

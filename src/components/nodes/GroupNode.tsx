@@ -5,7 +5,7 @@
  * 拖拽分组时 React Flow 自动同步所有子节点位置，无卡顿。
  * 支持拖拽右下角调整大小。
  */
-import { useRef, useState, useCallback } from 'react';
+import { memo, useRef, useState, useCallback, useEffect } from 'react';
 import { NodeResizer, Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import { Icon } from '@iconify/react';
@@ -14,7 +14,9 @@ import { GROUP_COLOR_PALETTE } from '../../types';
 import { useNodeLocked } from '../../hooks/useNodeLocked';
 import AnimatedButton from '../shared/AnimatedButton';
 import { batchExecuteNodes, type BatchContext } from '../../utils/batchExecute';
+import { getGroupChildImageKey, type GroupCoverItem } from '../../utils/groupChildImageKey';
 import { useT } from '../../i18n';
+import ViewportImage from '../shared/ViewportImage';
 
 interface GroupNodeData {
   groupId: string;
@@ -38,45 +40,77 @@ function getGroupChildCount(nodes: AppState['nodes'], groupId: string) {
   return counts.get(groupId) ?? 0;
 }
 
-/** 从 childImageKey 抽 2-3 张图作为封面；仅在状态迁移时调用，保证渲染纯函数 */
-function pickCoverImages(childImageKey: string): string[] {
-  const urls = childImageKey ? childImageKey.split('|') : [];
-  if (urls.length === 0) return [];
-  const pool = [...urls];
-  const picked: string[] = [];
-  const count = Math.min(pool.length, urls.length >= 3 ? 3 : 2);
+/** 从封面索引抽 2-3 项；视频只提供图标，不把其媒体地址交给 img。 */
+function pickCovers(childImageKey: string): GroupCoverItem[] {
+  const pool: GroupCoverItem[] = childImageKey ? JSON.parse(childImageKey) : [];
+  const picked: GroupCoverItem[] = [];
+  const count = Math.min(pool.length, 3);
   for (let i = 0; i < count; i++) {
     picked.push(...pool.splice(Math.floor(Math.random() * pool.length), 1));
   }
   return picked;
 }
 
-export default function GroupNode({ id, data, selected }: NodeProps) {
+function GroupCoverPhoto({ cover, fan }: { cover: GroupCoverItem; fan: number }) {
+  const [failedUrl, setFailedUrl] = useState<string>();
+  const imageUrl = cover.kind === 'image' ? cover.url : undefined;
+  const showImage = imageUrl && imageUrl !== failedUrl;
+  return (
+    <div
+      className={`canvas-group-folder-photo overflow-hidden bg-canvas-card${showImage ? '' : ' canvas-group-folder-photo--placeholder flex items-start justify-center text-canvas-text-muted'}`}
+      style={{ '--fan': fan } as React.CSSProperties}
+    >
+      {showImage ? (
+        <ViewportImage src={imageUrl} alt="" draggable={false} className="h-full w-full object-cover"
+          onError={() => setFailedUrl(imageUrl)} />
+      ) : (
+        <Icon icon={cover.kind === 'video' ? 'mdi:video-outline' : 'mdi:image-outline'}
+          width={20} height={20} className="mt-0.5" aria-hidden="true" />
+      )}
+    </div>
+  );
+}
+
+function GroupNode({ id, data, selected }: NodeProps) {
   const t = useT();
   const { groupId, color, label, groupCollapsed } = data as unknown as GroupNodeData;
   const renameGroup = useAppStore((s) => s.renameGroup);
   const toggleGroupCollapsed = useAppStore((s) => s.toggleGroupCollapsed);
   const setGroupColor = useAppStore((s) => s.setGroupColor);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
+  const settleGroupMembersOnResizeEnd = useAppStore((s) => s.settleGroupMembersOnResizeEnd);
   const childCount = useAppStore((s) => getGroupChildCount(s.nodes, id));
   // 锁定的分组同样禁止缩放
   const isNodeLocked = useNodeLocked(id);
   const editingRef = useRef(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [showColors, setShowColors] = useState(false);
+  const colorButtonRef = useRef<HTMLButtonElement>(null);
+  const colorPaletteRef = useRef<HTMLDivElement>(null);
+  const handleResizeEnd = useCallback(() => {
+    settleGroupMembersOnResizeEnd(id);
+  }, [id, settleGroupMembersOnResizeEnd]);
+
+  useEffect(() => {
+    if (!showColors) return;
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (colorButtonRef.current?.contains(target) || colorPaletteRef.current?.contains(target)) return;
+      setShowColors(false);
+    };
+    document.addEventListener('pointerdown', handleOutsidePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handleOutsidePointerDown, true);
+  }, [showColors]);
+
   // 订阅成字符串，避免每次渲染返回新数组
-  const childImageKey = useAppStore((s) => s.nodes
-    .filter((n) => n.parentId === id)
-    .map((n) => (n.data.thumbnailUrl || n.data.imageUrl) as string | undefined)
-    .filter(Boolean)
-    .join('|'));
-  // 组内图片随机抽 2-3 张当封面；组内图片变化时重抽
-  const [coverImages, setCoverImages] = useState<string[]>(() => pickCoverImages(childImageKey));
+  const childImageKey = useAppStore((s) => getGroupChildImageKey(s.nodes, id));
+  // 组内媒体随机抽 2-3 项当封面；候选变化时重抽
+  const [covers, setCovers] = useState<GroupCoverItem[]>(() => pickCovers(childImageKey));
   const [coverKey, setCoverKey] = useState(childImageKey);
   if (coverKey !== childImageKey) {
-    // 组内图片集合变化时重抽；随机只在状态迁移时发生，保持渲染纯函数
+    // 组内封面候选变化时重抽；随机只在状态迁移时发生，保持渲染纯函数
     setCoverKey(childImageKey);
-    setCoverImages(pickCoverImages(childImageKey));
+    setCovers(pickCovers(childImageKey));
   }
 
   const executeGroupBatch = useCallback(async () => {
@@ -85,8 +119,6 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
     const allEdges = state.edges;
     const {
       commitToHistory: commitBatchToHistory,
-      updateNodeDataTransient,
-      recordOutputHistory,
       showToast,
       currentProjectId,
     } = state;
@@ -98,22 +130,51 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
     setBatchRunning(true);
     const ctx: BatchContext = {
       commitToHistory: commitBatchToHistory,
-      updateNodeDataTransient,
-      recordOutputHistory,
       currentProjectId,
     };
-    const { ok, fail } = await batchExecuteNodes(childIds, allNodes, allEdges, ctx);
+    const { ok, fail, skipped } = await batchExecuteNodes(childIds, allNodes, allEdges, ctx);
     setBatchRunning(false);
+    if (useAppStore.getState().currentProjectId !== currentProjectId) return;
 
     const parts: string[] = [];
     if (ok > 0) parts.push(t('{count} 个成功', { count: ok }));
     if (fail > 0) parts.push(t('{count} 个失败', { count: fail }));
+    if (skipped > 0) parts.push(`已跳过 ${skipped} 个（输入或画布已变化）`);
     if (parts.length > 0) {
       showToast(t('分组批量生成完成：{result}', { result: parts.join('，') }), fail > 0 ? 'error' : undefined);
     }
   }, [id, t]);
 
   const folderStyle = { '--group-color': color } as React.CSSProperties;
+  const colorButton = (
+    <AnimatedButton
+      ref={colorButtonRef}
+      data-tooltip={t('分组颜色')}
+      aria-label={t('分组颜色')}
+      aria-expanded={showColors}
+      onClick={() => setShowColors((value) => !value)}
+      className="canvas-group-folder-btn nodrag"
+    >
+      <Icon icon="material-symbols:palette-outline" width={16} height={16} />
+    </AnimatedButton>
+  );
+  const colorPalette = showColors && (
+    <div ref={colorPaletteRef}
+      className={`canvas-group-folder-colors nodrag nowheel${groupCollapsed ? '' : ' canvas-group-expanded-colors'}`}
+      role="group" aria-label={t('分组颜色')}>
+      {GROUP_COLOR_PALETTE.map((swatch) => (
+        <button
+          key={swatch}
+          type="button"
+          aria-label={swatch}
+          aria-pressed={swatch === color}
+          className={`canvas-group-swatch${swatch === color ? ' is-active' : ''}`}
+          style={{ background: swatch }}
+          onClick={() => setGroupColor(groupId, swatch)}
+        />
+      ))}
+    </div>
+  );
 
   if (groupCollapsed) {
     return (
@@ -127,17 +188,10 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
           }}
         >
           <div className="canvas-group-folder-tab" />
-          {coverImages.length > 0 ? (
+          {covers.length > 0 ? (
             <div className="canvas-group-folder-photos">
-              {coverImages.map((url, i) => (
-                <img
-                  key={url}
-                  src={url}
-                  alt=""
-                  draggable={false}
-                  className="canvas-group-folder-photo"
-                  style={{ '--fan': i - (coverImages.length - 1) / 2 } as React.CSSProperties}
-                />
+              {covers.map((cover, i) => (
+                <GroupCoverPhoto key={cover.id} cover={cover} fan={i - (covers.length - 1) / 2} />
               ))}
             </div>
           ) : (
@@ -156,29 +210,10 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
             </div>
             <div className="canvas-group-folder-bottom">
               <span className="canvas-group-folder-name">{label}</span>
-              <AnimatedButton
-                data-tooltip={t('分组颜色')}
-                onClick={() => setShowColors((v) => !v)}
-                className="canvas-group-folder-btn nodrag"
-              >
-                <Icon icon="material-symbols:palette-outline" width={16} height={16} />
-              </AnimatedButton>
+              {colorButton}
             </div>
           </div>
-          {showColors && (
-            <div className="canvas-group-folder-colors nodrag">
-              {GROUP_COLOR_PALETTE.map((swatch) => (
-                <button
-                  key={swatch}
-                  type="button"
-                  aria-label={swatch}
-                  className={`canvas-group-swatch${swatch === color ? ' is-active' : ''}`}
-                  style={{ background: swatch }}
-                  onClick={() => setGroupColor(groupId, swatch)}
-                />
-              ))}
-            </div>
-          )}
+          {colorPalette}
         </div>
 
         <Handle type="source" position={Position.Left} id="left" className="group-conn-handle" style={{ background: color, borderColor: color }} />
@@ -194,7 +229,7 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
         minWidth={200}
         minHeight={120}
         onResizeStart={commitToHistory}
-        onResizeEnd={commitToHistory}
+        onResizeEnd={handleResizeEnd}
         handleStyle={{
           width: 10,
           height: 10,
@@ -244,17 +279,23 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
           >
             <Icon icon="material-symbols:folder-rounded" width={14} height={14} />
           </AnimatedButton>
-          <span className="canvas-group-count">{t('{count} 节点', { count: childCount })}</span>
-          {selected && (
-            <AnimatedButton
-              data-tooltip={t('批量生成')}
-              disabled={batchRunning}
-              onClick={executeGroupBatch}
-              className="w-5 h-5 rounded flex items-center justify-center ml-1 transition-colors hover:text-green-300 hover:bg-green-500/15 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <Icon icon="material-symbols:play-arrow-rounded" width={16} height={16} />
-            </AnimatedButton>
-          )}
+          <div className="ml-auto flex items-center gap-2">
+            <div className="relative">
+              {colorButton}
+              {colorPalette}
+            </div>
+            <span className="canvas-group-count">{t('{count} 节点', { count: childCount })}</span>
+            {selected && (
+              <AnimatedButton
+                data-tooltip={t('批量生成')}
+                disabled={batchRunning}
+                onClick={executeGroupBatch}
+                className="w-5 h-5 rounded flex items-center justify-center ml-1 transition-colors hover:text-green-300 hover:bg-green-500/15 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <Icon icon="material-symbols:play-arrow-rounded" width={16} height={16} />
+              </AnimatedButton>
+            )}
+          </div>
         </div>
 
         {/* Group visual box — fills the group body area */}
@@ -290,3 +331,5 @@ export default function GroupNode({ id, data, selected }: NodeProps) {
     </>
   );
 }
+
+export default memo(GroupNode);

@@ -11,9 +11,11 @@ import type {
   ProjectSettings,
 } from '../types';
 import {
+  CCCAPI_BASE_URL,
   GRSAI_BASE_URL,
   GRSAI_GLOBAL_BASE_URL,
   GRSAI_LEGACY_BASE_URL,
+  LIBAPI_BASE_URL,
 } from '../constants/api';
 import * as fileService from '../services/fileService';
 import {
@@ -24,19 +26,33 @@ import {
 import { setLocale } from '../i18n';
 import { applyConfigPatch, ConfigConflictError, configValuesEqual, configWithoutSecrets, createConfigPatch } from '../services/configPatch';
 import { areSettingsMutationsFrozen, registerSettingsPersistence } from '../services/configPersistenceQueue';
+import { getCanvasZoomRange, MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM, normalizeCanvasZoom } from '../utils/canvasViewportPreferences';
+import { getBuiltinAppearanceTheme, normalizeAppearanceTheme } from '../services/appearance/appearanceDefaults';
+import { migrateLegacyAppearance } from '../services/appearance/appearanceMigration';
+import { syncPerformanceModeRuntime } from '../services/performanceModeRuntime';
+import { hydrateRunningHubAliases, isRunningHubCredentialAlias } from '../services/runninghubSiteCredentials';
+import { normalizeComfyRefmodAssets } from '../utils/comfyRefmod';
+import { getProviderPolicy } from '../services/ai/providerPolicies';
 
 const defaultConfig: AppConfig = {
   providers: {},
   theme: 'dark',
+  appearance: getBuiltinAppearanceTheme('standard-dark'),
   canvasBackground: 'default',
   comfyUIUrl: 'http://127.0.0.1:8188',
   comfyUIPath: '',
+  comfyMemoryPolicy: 'smart',
   generalModels: [],
   mascotVisible: false,
   interactionMode: 'default',
+  canvasViewportMode: 'auto',
+  canvasViewportZoom: 1,
+  canvasViewportMinZoom: MIN_CANVAS_ZOOM,
+  canvasViewportMaxZoom: MAX_CANVAS_ZOOM,
   nodeToolbarMode: 'icons',
   nodeLabelVisible: true,
-  startupView: 'last-project',
+  startupView: 'project-library',
+  mcpPort: 27149,
   performanceMode: false,
   // language 不给默认值：未设置时按系统语言判定
 };
@@ -54,6 +70,7 @@ function syncNodeLabelVisible(visible: AppConfig['nodeLabelVisible']): void {
 }
 
 function syncPerformanceMode(enabled: AppConfig['performanceMode']): void {
+  syncPerformanceModeRuntime(enabled === true);
   if (typeof document === 'undefined') return;
   document.documentElement.toggleAttribute('data-performance-mode', enabled === true);
 }
@@ -109,14 +126,12 @@ function createGeneralModelId(providerConfigId: string, modelId: string): string
   return `provider-${safeProviderId}-${(hash >>> 0).toString(36)}`;
 }
 
-const GENERAL_MODEL_CATALOG_IDS = new Set(['custom-openai', 'cccapi', 'xai', 'google', 'sora2u']);
-
 function syncProviderModels(
   generalModels: GeneralModelConfig[],
   providerConfigId: string,
   config: ApiProviderConfig,
 ): GeneralModelConfig[] {
-  if (!GENERAL_MODEL_CATALOG_IDS.has(config.catalogId ?? '') || config.selectedModels === undefined) {
+  if (!getProviderPolicy(config.catalogId).syncGeneralModels || config.selectedModels === undefined) {
     return generalModels;
   }
 
@@ -141,6 +156,7 @@ function syncProviderModels(
       imageReferenceRequestMode: model.imageReferenceRequestMode
         ?? existing?.imageReferenceRequestMode,
       videoCapability: model.videoCapability,
+      imageCapability: model.imageCapability ?? existing?.imageCapability,
     } satisfies GeneralModelConfig;
   });
   return [...otherModels, ...selectedModels];
@@ -162,11 +178,17 @@ function collectRemovedModelReferences(
     providerIds.add('runninghub');
     providerPrefixes.add('runninghub/');
   }
-  if (!isWorkflowOnlyProvider && provider?.catalogId && provider.catalogId !== 'custom-openai') {
+  const isGroupedProvider = provider?.catalogId === 'cccapi'
+    || provider?.catalogId === 'relayonapi'
+    || (providerConfigId === 'relayonapi' && !provider?.catalogId);
+  if (!isWorkflowOnlyProvider && provider?.catalogId
+    && provider.catalogId !== 'custom-openai' && !isGroupedProvider) {
     providerIds.add(provider.catalogId);
     providerPrefixes.add(`${provider.catalogId}/`);
   }
   for (const model of isWorkflowOnlyProvider ? [] : (provider?.selectedModels ?? [])) {
+    // 分组目录中的 provider 可能来自旧缓存；删除只影响当前连接的模型身份。
+    if (isGroupedProvider) continue;
     providerIds.add(model.provider);
     providerPrefixes.add(`${model.provider}/`);
   }
@@ -275,6 +297,7 @@ function sanitizeGeneralModel(
     executionProfile: model.executionProfile,
     imageReferenceRequestMode: model.imageReferenceRequestMode,
     videoCapability: model.videoCapability,
+    imageCapability: model.imageCapability,
   };
 }
 
@@ -283,6 +306,11 @@ function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
   const normalizedProviders = Object.fromEntries(
     Object.entries(config.providers).map(([providerId, provider]) => {
       const normalizedBaseUrl = provider.baseUrl?.trim().replace(/\/+$/, '');
+      const isCcc = provider.catalogId === 'cccapi' || (!provider.catalogId && providerId === 'cccapi');
+      if (isCcc && !normalizedBaseUrl) {
+        providerUrlsChanged = true;
+        return [providerId, { ...provider, baseUrl: CCCAPI_BASE_URL }];
+      }
       const isGrsai = providerId === 'grsai' || provider.catalogId === 'grsai';
       const isLegacyGrsaiUrl = normalizedBaseUrl === GRSAI_LEGACY_BASE_URL
         || normalizedBaseUrl === `${GRSAI_LEGACY_BASE_URL}/v1`
@@ -358,8 +386,15 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
     const next = typeof partial === 'function' ? partial(state) : partial;
     if (!next.config || next.config === state.config) return next;
     const secretChanges = { ...state.configSecretChanges };
-    const providers = { ...next.config.providers };
+    const providers = hydrateRunningHubAliases(next.config.providers);
     for (const [id, provider] of Object.entries(providers)) {
+      if (isRunningHubCredentialAlias(id, provider)) {
+        providers[id] = { ...provider };
+        delete providers[id].apiKeyRef;
+        Reflect.deleteProperty(providers[id], 'apiKeyRevision');
+        delete secretChanges[id];
+        continue;
+      }
       if (provider.apiKey !== state.config.providers[id]?.apiKey && provider.apiKey) secretChanges[id] = crypto.randomUUID();
       if (!provider.apiKeyRef && state.config.providers[id]?.apiKeyRef) {
         providers[id] = { ...provider, apiKeyRef: state.config.providers[id].apiKeyRef };
@@ -402,7 +437,17 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
 
   updateConfig: (partial) => {
     if (areSettingsMutationsFrozen()) return;
-    set((state) => ({ config: { ...state.config, ...partial } }));
+    set((state) => {
+      const config = { ...state.config, ...partial };
+      if ('comfyRefmodAssets' in partial) config.comfyRefmodAssets = normalizeComfyRefmodAssets(partial.comfyRefmodAssets);
+      if ('canvasViewportMinZoom' in partial || 'canvasViewportMaxZoom' in partial || 'canvasViewportZoom' in partial) {
+        const { minZoom, maxZoom } = getCanvasZoomRange(config);
+        config.canvasViewportMinZoom = minZoom;
+        config.canvasViewportMaxZoom = maxZoom;
+        config.canvasViewportZoom = normalizeCanvasZoom(config.canvasViewportZoom, config);
+      }
+      return { config };
+    });
     if ('baseDataDir' in partial && partial.baseDataDir !== undefined) {
       setBaseDataDir(partial.baseDataDir);
     }
@@ -462,18 +507,23 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
       },
     })),
 
-  saveProviderConfig: (providerName, cfg) =>
+  saveProviderConfig: (providerName, cfg) => {
+    // 声明式任务恢复读取连接保存的地址；分享省略默认地址时也保留完整执行身份。
+    const nextConfig = cfg.catalogId === 'libapi' || (!cfg.catalogId && providerName === 'libapi')
+      ? { ...cfg, baseUrl: cfg.baseUrl?.trim() || LIBAPI_BASE_URL }
+      : cfg;
     set((state) => ({
       config: {
         ...state.config,
-        providers: { ...state.config.providers, [providerName]: cfg },
+        providers: { ...state.config.providers, [providerName]: nextConfig },
         generalModels: syncProviderModels(
           state.config.generalModels ?? [],
           providerName,
-          cfg,
+          nextConfig,
         ),
       },
-    })),
+    }));
+  },
 
   removeProviderConfig: async (providerName) => {
     if (areSettingsMutationsFrozen()) return;
@@ -636,6 +686,7 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
           else if (!sameCredential && provider.apiKeyRef && !hasLaterEdit) unread.add(id);
           if (changedHere && nextSecrets[id] === secretChanges[id]) delete nextSecrets[id];
         }
+        merged.providers = hydrateRunningHubAliases(merged.providers);
         const dirty = Object.keys(nextSecrets).length > 0 || !configValuesEqual(configWithoutSecrets(merged), ordinary);
         rawSet({ config: merged, configPersistedBaseline: configWithoutSecrets(committed), configEditBaseline: ordinary,
           configSecretChanges: nextSecrets, configSecretReadErrors: [...unread], configDirty: dirty });
@@ -646,6 +697,12 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
         setBaseDataDir(merged.baseDataDir);
         await syncAuthorizedDirectories(merged);
         directoriesSynced = true;
+        try {
+          await import('../services/billing/volcengineBillingService')
+            .then(({ syncBillingStoragePath }) => syncBillingStoragePath(merged));
+        } catch {
+          get().showToast('设置已保存，但火山方舟账本目录未能同步，原账本已保留；请检查目录权限或同名账本冲突', 'error');
+        }
         if (committedFailure !== undefined) throw committedFailure;
         if (unstored.length) throw new Error('配置已保存，但凭据存储不可用，API Key 仅本次会话有效');
         rawSet({ configSaveStatus: get().configDirty ? 'dirty' : 'saved', configSaveError: null });
@@ -690,8 +747,16 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
       // eslint-disable-next-line preserve-caught-error -- 原始错误可能含凭据或路径，不保留 cause。
       throw new Error(message);
     }
-    const saved = loaded.config;
-    const cfg = saved ? migrateLegacyGeneralModels({ ...defaultConfig, ...migrateLegacyPerformanceMode(saved as AppConfig) }) : { ...defaultConfig };
+    const saved = loaded.config as AppConfig | null;
+    const cfg = saved
+      ? (() => {
+          const merged = migrateLegacyGeneralModels({ ...defaultConfig, ...migrateLegacyPerformanceMode(saved as AppConfig) });
+          if (merged.comfyRefmodAssets !== undefined) merged.comfyRefmodAssets = normalizeComfyRefmodAssets(merged.comfyRefmodAssets);
+          return { ...merged, appearance: saved.appearance
+            ? normalizeAppearanceTheme(merged.appearance)
+            : migrateLegacyAppearance(merged) };
+        })()
+      : { ...defaultConfig };
     const ordinary = configWithoutSecrets(cfg);
     // 显式重新加载采用磁盘值；加载期间的新编辑单独重放，不能被迟到结果清掉。
     const latest = get();
@@ -709,6 +774,7 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
         : unread.includes(id) && sameRef ? oldProvider?.apiKey ?? '' : cfg.providers[id]?.apiKey ?? '';
       if (edited && latest.configSecretChanges[id]) nextSecrets[id] = latest.configSecretChanges[id];
     }
+    merged.providers = hydrateRunningHubAliases(merged.providers);
     const dirty = pending.length > 0 || Object.keys(nextSecrets).length > 0;
     rawSet({ config: merged, configHydrated: true, configEditBaseline: ordinary,
       configPersistedBaseline: configWithoutSecrets(loaded.persistedConfig ?? saved),
@@ -727,6 +793,12 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
     try {
       setBaseDataDir(merged.baseDataDir);
       await syncAuthorizedDirectories(merged);
+      try {
+        await import('../services/billing/volcengineBillingService')
+          .then(({ syncBillingStoragePath }) => syncBillingStoragePath(merged));
+      } catch {
+        get().showToast('火山方舟账本目录未能同步，原账本已保留；请检查保存根目录或单独设置的账本目录', 'error');
+      }
     } catch {
       get().showToast('配置已加载，但文件目录授权同步失败', 'error');
     }

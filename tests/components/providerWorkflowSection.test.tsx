@@ -1,3 +1,6 @@
+/**
+ * providerWorkflowSection — 回归测试：工作流模板表单。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import ProviderWorkflowSection from '../../src/components/settings/providerConnection/ProviderWorkflowSection';

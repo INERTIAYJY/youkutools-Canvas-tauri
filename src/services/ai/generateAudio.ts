@@ -3,11 +3,13 @@
  */
 import { collectAudioSpeechReferences, resolveAudioSpeechWorkflow, stripAudioSpeechReferences } from './audioSpeechSettings';
 import { resolveNodeReferences } from '../nodeReferenceService';
+import { loadGlobalDramaAssetsForPrompt } from '../dramaAssetPrompt';
 import { useAppStore } from '../../store/useAppStore';
 import { executeWorkflowApiMedia } from '../workflowApi/workflowApiAdapter';
 import { parseWorkflowApiFields } from '../workflowApi/workflowApiConfig';
 import { isRunningHubWorkflow, getCloudWorkflowPersistedOutput } from '../workflowExecutionService';
 import { executeRunningHubWorkflow } from './providers/runninghubWorkflow';
+import { splitRunningHubPrompt } from './providers/runninghubWorkflowInputs';
 import { executeComfyUIAudioGenerate } from '../comfyWorkflowService';
 import {
   createMediaDataUrlBudget,
@@ -19,6 +21,7 @@ import { resolveMediaReferenceUrl } from '../uploadService';
 import type { AIAudioGenParams, AudioGenerationResult, MediaReference } from '../../types/aiTypes';
 import type { MediaPersistenceStatus } from '../../types/media';
 import { resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
+import { resolveProviderCatalogId } from './providerPolicies';
 import {
   collectConnectedReferenceMedia,
   getMediaReferenceUrl,
@@ -26,11 +29,16 @@ import {
   mergeMediaReferences,
   warnIfTooManyReferences,
 } from './connectedReferenceMedia';
-import { collectPromptNodeMediaUrls } from './promptResolver';
+import { collectPromptNodeMediaUrls, resolvePromptWithMediaRefs } from './promptResolver';
+import { compileVideoReferencePrompt } from './referencePrompt';
+import { getRunningHubModel } from './providers/runninghubModelManifest';
 import { executeGeneralAsyncTask } from './apimartGen';
-import { runConfiguredModelProtocol } from './modelProtocolRuntime';
+import { retainCompletedMediaResults, runConfiguredModelProtocol } from './modelProtocolRuntime';
+import { createMediaDownloadAccess } from './mediaDownloadAccess';
 import { mediaProviderRegistry } from './mediaProviderRegistry';
 import { mapAudioParameters } from './audioParameterMappings';
+import { libapiAudioVariables, usesLibapiModelProtocol } from './providers/libapiModelManifest';
+import { minimaxAudioVariables, resolveMinimaxBaseUrl, resolveMinimaxExecutionProfile, usesMinimaxModelProtocol } from './providers/minimaxModelManifest';
 
 export interface PersistedAudioGenerationResult {
   mediaUrl: string;
@@ -90,14 +98,16 @@ function buildSafeAudioFileName(label: string, format: string): string {
 
 /**
  * 把同步 TTS 二进制或异步远程音频统一保存为节点可持久化的结果。
- * 落盘失败不会抛出，但会如实记在 persistence/persistError 上：调用方必须区分
+ * 落盘失败不会抛出（取消除外），但会如实记在 persistence/persistError 上：调用方必须区分
  * 「生成成功」和「已保存到项目」，否则临时地址失效后产物就打不开了。
  */
 export async function persistAudioGenerationResult(
   result: AudioGenerationResult,
   projectId: string | null | undefined,
   label: string,
+  signal?: AbortSignal,
 ): Promise<PersistedAudioGenerationResult> {
+  signal?.throwIfAborted();
   const cloud = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url);
   if (cloud) return cloud;
   const shouldPersist = !!projectId && isTauriEnv();
@@ -111,12 +121,17 @@ export async function persistAudioGenerationResult(
             projectId!,
             buildSafeAudioFileName(label, result.format || 'wav'),
           )
-        : await persistMediaUrlToProjectData(result.url, projectId!, 'ai-audio', label);
+        : await persistMediaUrlToProjectData(result.url, projectId!, 'ai-audio', label,
+          result.mediaDownloadAccess || signal ? { ...(result.mediaDownloadAccess ? { mediaDownloadAccess: result.mediaDownloadAccess } : {}),
+            ...(signal ? { signal } : {}) } : undefined);
       if (!saved?.filePath) persistError = AUDIO_PERSIST_FAILED_MESSAGE;
     } catch (error) {
+      if (signal?.aborted) throw error;
       persistError = error instanceof Error ? error.message : AUDIO_PERSIST_FAILED_MESSAGE;
     }
   }
+  // 二进制写入开始后无法撤销；只阻止取消后的交付，不删除已写入的项目文件。
+  signal?.throwIfAborted();
 
   const mediaUrl = saved?.assetUrl || result.url;
   // 只有落盘成功才回收 blob，失败时保留它，用户仍能在本次会话里重试保存
@@ -136,22 +151,40 @@ export async function generateAudio(
   params: AIAudioGenParams,
   signal?: AbortSignal,
 ): Promise<AudioGenerationResult> {
-  const { prompt: rawPrompt, model, provider } = params;
+  const { model, provider } = params;
+  let rawPrompt = params.prompt;
+  const rawWorkflowPrompt = rawPrompt;
   const state = useAppStore.getState();
+  const globalAssets = await loadGlobalDramaAssetsForPrompt(`${rawPrompt}\n${JSON.stringify(params.workflowInputs ?? {})}`, state);
+  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+  if (useAppStore.getState().currentProjectId !== state.currentProjectId) throw new Error('项目已切换，请重新生成音频');
   const selectedWorkflow = params.workflowId ? state.workflows.find((item) => item.id === params.workflowId) : undefined;
+  if (isRunningHubWorkflow(selectedWorkflow)) rawPrompt = splitRunningHubPrompt(rawWorkflowPrompt).prompt;
   if (resolveAudioSpeechWorkflow(selectedWorkflow)) {
     const invalid = collectAudioSpeechReferences(rawPrompt, params.nodeId, state.nodes, state.edges,
-      state.dramaAssets, selectedWorkflow, params.workflowInputs).find((reference) => !reference.url);
+      state.dramaAssets, selectedWorkflow, params.workflowInputs, globalAssets).find((reference) => !reference.url);
     if (invalid) throw new Error(`参考语音已失效：${invalid.label}，请重新选择`);
   }
 
-  // 解析 @{nodeId:label} 引用为对应节点的实际输出内容
-  const prompt = resolveNodeReferences(stripAudioSpeechReferences(rawPrompt, state.nodes));
+  const isRunningHub = params.workflowId ? isRunningHubWorkflow(selectedWorkflow) : provider === 'runninghub';
+  const runninghubMedia = isRunningHub ? await resolvePromptWithMediaRefs(rawPrompt, { preserveBindings: true }) : undefined;
   // 参考音频通过独立媒体通道传递，不混入朗读正文。
-  const mentionedMedia = collectPromptNodeMediaUrls(rawPrompt);
+  const mentionedMedia = runninghubMedia ?? collectPromptNodeMediaUrls(rawPrompt, globalAssets);
   const connectedMedia = collectConnectedReferenceMedia(params.nodeId);
-  const references = mergeMediaReferences(mentionedMedia.references, connectedMedia.references);
-  const referenceAudioUrls = getMediaReferenceUrls(references, 'audio');
+  const connectedReferences = runninghubMedia ? connectedMedia.references.map((reference) => {
+    const local = runninghubMedia.references.find((candidate) => candidate.kind === 'image' && reference.kind === 'image'
+      && candidate.sourceNodeId === reference.sourceNodeId && candidate.sourceNodeId
+      && state.nodes.find((node) => node.id === candidate.sourceNodeId)?.data.imageUrl === reference.url);
+    return local ? { ...reference, url: local.url } : reference;
+  }) : connectedMedia.references;
+  const references = mergeMediaReferences(mentionedMedia.references, connectedReferences);
+  // 只有明确的音乐合同使用素材编号；语音及未声明用途的工作流不能朗读素材标记或角色说明。
+  const runninghubMusic = !params.workflowId && provider === 'runninghub' && getRunningHubModel(model)?.audioPurpose === 'music';
+  const prompt = runninghubMedia ? runninghubMusic
+    ? compileVideoReferencePrompt(runninghubMedia, references, { target: 'local' })
+    : stripAudioSpeechReferences(runninghubMedia.segments?.filter((segment): segment is string => typeof segment === 'string').join('') ?? '', state.nodes)
+    : resolveNodeReferences(stripAudioSpeechReferences(rawPrompt, state.nodes), globalAssets);
+  const referenceAudioUrls = getMediaReferenceUrls(references, 'audio', runninghubMedia ? 'local' : 'remote');
   warnIfTooManyReferences({ audio: referenceAudioUrls.length });
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点
@@ -166,15 +199,17 @@ export async function generateAudio(
       return { ...normalizeProtocolAudioResult(result.url), ...result };
     }
     if (isRunningHubWorkflow(workflow)) {
-      const outputs = await executeRunningHubWorkflow({ ...params, workflowId: params.workflowId, prompt, kind: 'audio', references: {
+      const outputs = await executeRunningHubWorkflow({ ...params, workflowId: params.workflowId, rawWorkflowPrompt, prompt, kind: 'audio', references: {
         image: getMediaReferenceUrls(references, 'image', 'local'), video: getMediaReferenceUrls(references, 'video', 'local'), audio: getMediaReferenceUrls(references, 'audio', 'local'),
       } }, signal);
       return { ...normalizeProtocolAudioResult(outputs[0].url), runninghubOutputs: outputs };
     }
+    const comfyReferences = mergeMediaReferences((await resolvePromptWithMediaRefs(rawPrompt)).references, connectedMedia.references);
     return executeComfyUIAudioGenerate(
       { ...params, prompt },
       signal,
-      getMediaReferenceUrls(references, 'audio', 'local'),
+      getMediaReferenceUrls(comfyReferences, 'audio', 'local'),
+      { imageUrls: getMediaReferenceUrls(comfyReferences, 'image', 'local'), videoUrls: getMediaReferenceUrls(comfyReferences, 'video', 'local') },
     );
   }
 
@@ -186,12 +221,45 @@ export async function generateAudio(
 
   // ── 通用模型音频生成 ──
   if (provider === 'general') {
-    const gm = resolveGeneralModel(model);
+    let gm = resolveGeneralModel(model);
     if (!gm) throw new Error('未找到该通用模型配置\n请在「设置 → API Key」中检查');
     const connection = resolveGeneralModelConnection(model);
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
+    const catalogId = connection.definition?.id ?? resolveProviderCatalogId(connection.providerConfigId, connection.provider);
+    if (catalogId === 'minimax') gm = { ...gm, executionProfile: resolveMinimaxExecutionProfile(gm.modelId, gm.executionProfile) };
     if (gm.executionProfile) {
+      const isLibapi = catalogId === 'libapi';
+      const usesLibapiProtocol = isLibapi && usesLibapiModelProtocol(gm.modelId, gm.executionProfile);
+      const usesMinimaxProtocol = catalogId === 'minimax' && usesMinimaxModelProtocol(gm.modelId, gm.executionProfile);
+      if (usesMinimaxProtocol) resolveMinimaxBaseUrl(connection.baseUrl);
+      if (usesLibapiProtocol || usesMinimaxProtocol) {
+        // 旧语音收集器只收视频／音频节点；完整解析还覆盖无连线图片、资产及角色素材引用。
+        const hasReferences = references.length || (await resolvePromptWithMediaRefs(rawPrompt, { preserveBindings: true })).references.length;
+        if (hasReferences) {
+          if (usesMinimaxProtocol) throw new Error('MiniMax 当前语音合成不接收参考素材；请填写已有音色 ID，声音克隆需先在官方平台完成。本次尚未提交生成请求');
+          throw new Error('LibAPI 当前语音与音乐生成不接受参考素材；声音克隆需先在平台创建音色 ID，再填写到语音参数。本次尚未提交生成请求');
+        }
+      }
+      if (usesLibapiProtocol && params.autoGenerateLyrics) {
+        throw new Error('LibAPI 音乐由模型直接生成歌词，请关闭「自动生成歌词」的单独步骤，或填写自定义歌词。本次尚未提交生成请求');
+      }
+      // 已核对合同先验证参数，避免无效音色或素材被上传后才发现请求不能执行。
+      const variables = {
+        model: gm.modelId,
+        prompt,
+        audioVoice: params.audioVoice,
+        audioFormat: params.audioFormat,
+        audioSpeed: params.audioSpeed,
+        duration: params.musicDuration,
+        musicTitle: params.musicTitle,
+        musicLyrics: params.musicLyrics,
+        musicBpm: params.musicBpm,
+        n: 1,
+        batchCount: 1,
+      };
+      const effectiveVariables = usesLibapiProtocol ? libapiAudioVariables(gm.modelId, variables)
+        : usesMinimaxProtocol ? minimaxAudioVariables(gm.modelId, variables) : variables;
       const protocolAudioUrls = await resolveGeneralAudioReferenceUrls(references, signal);
       const urls = await runConfiguredModelProtocol({
         model: gm,
@@ -199,27 +267,18 @@ export async function generateAudio(
         nodeId: params.nodeId,
         signal,
         variables: {
-          model: gm.modelId,
-          prompt,
-          audioVoice: params.audioVoice,
-          audioFormat: params.audioFormat,
-          audioSpeed: params.audioSpeed,
-          duration: params.musicDuration,
-          musicTitle: params.musicTitle,
-          musicLyrics: params.musicLyrics,
-          musicBpm: params.musicBpm,
+          ...effectiveVariables,
           audioUrls: protocolAudioUrls,
           audioUrl: protocolAudioUrls[0],
           referenceAudioUrls: protocolAudioUrls,
-          n: 1,
-          batchCount: 1,
         },
       });
       const url = urls[0];
       if (!url) throw new Error('音频生成完成但未返回结果');
-      return normalizeProtocolAudioResult(url);
+      return { ...normalizeProtocolAudioResult(url), ...(urls.taskReceipt ? { taskReceipt: urls.taskReceipt } : {}),
+        ...(urls.mediaDownloadAccess ? { mediaDownloadAccess: urls.mediaDownloadAccess } : {}) };
     }
-    return executeGeneralAsyncTask(
+    const result = await executeGeneralAsyncTask(
       connection.apiKey,
       connection.baseUrl,
       gm.modelId,
@@ -234,6 +293,9 @@ export async function generateAudio(
         batchCount: 1,
       }),
     );
+    const access = createMediaDownloadAccess(connection.providerConfigId, connection.baseUrl, { type: 'bearer' });
+    const urls = retainCompletedMediaResults([result.url], access, params.nodeId, 'audio', 1, result.taskReceipt, state.currentProjectId);
+    return { ...result, mediaDownloadAccess: access, ...(urls.taskReceipt ? { taskReceipt: urls.taskReceipt } : {}) };
   }
 
   // 无 workflowId 时暂不支持直接调用 API，提示配置

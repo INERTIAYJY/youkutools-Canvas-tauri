@@ -1,3 +1,6 @@
+/**
+ * chatWindowListener — 回归测试：initMainWindowListener。
+ */
 import { describe, expect, it, vi } from 'vitest';
 
 const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
@@ -12,12 +15,26 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => undefined),
 }));
 
+import { emit } from '@tauri-apps/api/event';
+
 import {
   CHAT_ACTION_EVENT,
+  CHAT_CLOSE_REQUEST,
+  emitCloseRequest,
   initMainWindowListener,
 } from '../../../src/services/chat/chatWindowService';
 
 describe('initMainWindowListener', () => {
+  it('carries the last composer edit with the close request', async () => {
+    const onClose = vi.fn();
+    const dispose = await initMainWindowListener(vi.fn(), onClose);
+    const composerDraft = { conversationId: 'conversation-1', draft: '还没来得及防抖的输入' };
+    await emitCloseRequest(composerDraft);
+    expect(emit).toHaveBeenCalledWith(CHAT_CLOSE_REQUEST, { composerDraft });
+    for (const handler of listeners.get(CHAT_CLOSE_REQUEST) ?? []) handler({ payload: { composerDraft } });
+    expect(onClose).toHaveBeenCalledWith(composerDraft);
+    dispose();
+  });
   it('re-registers after a disposed mount (StrictMode double-invoke)', async () => {
     // 第一次挂载：注册后立即被 cleanup 掉，模拟 StrictMode 的 mount → cleanup
     const staleAction = vi.fn();

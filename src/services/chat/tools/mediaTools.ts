@@ -7,12 +7,16 @@ import { isRunningHubWorkflow, isCloudWorkflow, mediaProviderConfigId, workflowE
 import { AUTODL_H3_WORKFLOW, validateWorkflowApiManifest, resolveWorkflowApiInputValues } from '../../workflowApi/autodlWorkflowManifest';
 import { completeWorkflowApiNodeTask, workflowApiConnection } from '../../workflowApi/workflowApiAdapter';
 import { getRunningHubModel, parseRunningHubModelParameter } from '../../ai/providers/runninghubModelManifest';
-import { runningHubParameterKey } from '../../runninghubWorkflowService';
+import { resolveImageParameterCapability } from '../../ai/mediaModelCapabilities';
+import { assertSafeMediaParameterStrings } from '../../ai/modelCapabilityValidation';
+import { resolveVideoModelCapability } from '../../ai/videoModelCapabilityResolver';
+import { resolveRunningHubParameters, runningHubParameterKey } from '../../runninghubWorkflowService';
 import { completeRunningHubNodeTask } from '../../ai/providers/runninghubWorkflow';
 import type {
   AudioGenerationPurpose,
   MediaDeliveryMode,
   MediaGenerationIntent,
+  MediaGenerationResult,
   MediaKind,
 } from '../../../types/media';
 import {
@@ -23,7 +27,13 @@ import {
   extractModelMention,
   MEDIA_PERSIST_FAILED_MESSAGE,
   runMediaGeneration,
+  completeMediaMessageDelivery,
+  ensureMediaMessageRecoveryHandler,
 } from '../../ai/generationRuntime';
+import { canResumeMediaTask, getPendingTasksForProject, isMediaTaskPausedError, resumeMediaNodeTask } from '../../pollManager';
+import { completeCanvasDerivation, isCanvasDerivationFresh } from '../../canvasDerivationGuard';
+import { recordMcpOperationProgress } from '../../mcp/mcpOperationService';
+import { generationInputSnapshot } from '../canvasNodeVersion';
 import type { AgentToolDisplaySnapshot } from '../../../types/agent';
 import {
   registerAgentTool,
@@ -37,7 +47,8 @@ import {
   type MediaPlaceholderLifecycle,
 } from '../mediaPlaceholderLifecycle';
 
-interface GenerateMediaInput {
+interface GenerateMediaInput extends Pick<MediaGenerationIntent, 'audioVoice' | 'audioFormat' | 'audioSpeed' | 'musicTitle' | 'musicLyrics'
+  | 'imageQuality' | 'imageBackground' | 'videoFps' | 'generateAudio'> {
   kind: MediaKind;
   prompt: string;
   modelRef?: string;
@@ -51,11 +62,36 @@ interface GenerateMediaInput {
 }
 
 const MEDIA_PROMPT_DISPLAY_LIMIT = 1_000;
+const AUDIO_FORMATS = ['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm'];
+const LEGACY_AUDIO_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+
+function hasAudioSettings(input: GenerateMediaInput): boolean {
+  return [input.audioVoice, input.audioFormat, input.audioSpeed, input.musicTitle, input.musicLyrics]
+    .some((value) => value !== undefined);
+}
+
+/** MCP 在创建占位节点前检查用户值及将要继承的图片默认值。 */
+function assertSafeMediaToolParameters(input: GenerateMediaInput, projectId: string): void {
+  assertSafeMediaParameterStrings(input);
+  if (input.kind !== 'image') return;
+  const store = useAppStore.getState();
+  const settings = store.projects.find((project) => project.id === projectId)?.settings?.generation;
+  const option = input.modelRef ? findMediaModelOption(input.modelRef, store.config.generalModels ?? [], store.config, store.workflows) : undefined;
+  const capability = option && !option.workflowId && option.provider !== 'runninghub'
+    ? resolveImageParameterCapability(option.value, option.provider, store.config) : undefined;
+  assertSafeMediaParameterStrings({
+    resolution: settings?.imageSize || undefined,
+    aspectRatio: settings?.imageAspectRatio || undefined,
+    imageQuality: input.imageQuality ?? capability?.defaultQuality,
+    imageBackground: input.imageBackground ?? capability?.defaultBackground,
+  });
+}
 
 function resolveMediaToolInput(
   input: GenerateMediaInput,
   context: { projectId: string; mode: string },
 ): GenerateMediaInput {
+  assertSafeMediaToolParameters(input, context.projectId);
   const store = useAppStore.getState();
   const projectSettings = store.projects.find(
     (project) => project.id === context.projectId,
@@ -80,6 +116,7 @@ function resolveMediaToolInput(
     ...input,
     ...(modelRef ? { modelRef } : {}),
   };
+  assertSafeMediaToolParameters(resolved, context.projectId);
   if (input.kind !== 'video') return resolved;
   const selectedModel = modelRef
     ? findMediaModelOption(
@@ -93,12 +130,14 @@ function resolveMediaToolInput(
   // 保存的 16:9、1080p、10 秒等偏好。用户本轮显式传入的值已经保留在 resolved 中。
   if (selectedModel?.provider === 'general' && !selectedModel.workflowId) return resolved;
   if (selectedModel && ['runninghubwf', 'runninghub', 'workflow-api'].includes(selectedModel.provider)) return resolved;
-  return {
+  const withProjectDefaults = {
     ...resolved,
     aspectRatio: input.aspectRatio ?? projectSettings?.generation?.videoAspectRatio,
     resolution: input.resolution ?? projectSettings?.generation?.videoResolution,
     duration: input.duration ?? projectSettings?.generation?.videoDuration,
   };
+  assertSafeMediaToolParameters(withProjectDefaults, context.projectId);
+  return withProjectDefaults;
 }
 
 function nodeMediaKind(nodeId: string): MediaKind | undefined {
@@ -159,10 +198,23 @@ function buildMediaInputDisplay(input: GenerateMediaInput): AgentToolDisplaySnap
       },
       {
         label: '时长',
-        value: input.duration ? `${input.duration} 秒` : '模型默认',
-        source: input.duration ? 'resolved' : 'model_default',
+        value: input.duration !== undefined ? input.duration < 0 ? '自动' : `${input.duration} 秒` : '模型默认',
+        source: input.duration !== undefined ? 'resolved' : 'model_default',
       },
     );
+    if (input.videoFps !== undefined) fields.push({ label: '帧率', value: `${input.videoFps} FPS` });
+    if (input.generateAudio !== undefined) fields.push({ label: '生成音轨', value: input.generateAudio ? '开启' : '关闭' });
+  }
+  if (input.kind === 'image') {
+    if (input.imageQuality !== undefined) fields.push({ label: '生成质量', value: input.imageQuality });
+    if (input.imageBackground !== undefined) fields.push({ label: '生成背景', value: input.imageBackground || '接口默认' });
+  }
+  if (input.kind === 'audio') {
+    if (input.audioVoice !== undefined) fields.push({ label: '音色', value: input.audioVoice });
+    if (input.audioFormat !== undefined) fields.push({ label: '音频格式', value: input.audioFormat });
+    if (input.audioSpeed !== undefined) fields.push({ label: '语速倍率', value: String(input.audioSpeed) });
+    if (input.musicTitle !== undefined) fields.push({ label: '音乐标题', value: input.musicTitle });
+    if (input.musicLyrics !== undefined) fields.push({ label: '歌词', value: input.musicLyrics.slice(0, MEDIA_PROMPT_DISPLAY_LIMIT) });
   }
   return {
     fields,
@@ -178,17 +230,91 @@ function getAssistantMessageId(taskId: string): string | undefined {
 
 export function registerMediaAgentTools(): Array<() => void> {
   return [
+    registerAgentTool<Record<string, never>>({
+      id: 'media_pending_tasks', title: '查看待恢复媒体任务', effect: 'read',
+      description: '列出当前项目已保留的媒体任务身份和阶段，不返回凭据、文件路径、请求正文或媒体地址。canResume=true 时可用 media_resume_task 续取，其余任务沿用原专用恢复入口；不能重新调用 media_generate。',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      authorize: (context) => ({ allowed: context.projectId === useAppStore.getState().currentProjectId, reason: '只能读取当前项目的待恢复任务' }),
+      execute: async (context) => ({ status: 'success', summary: '已读取待恢复媒体任务', modelContent: JSON.stringify(
+        getPendingTasksForProject(context.projectId).map((task) => ({ nodeId: task.nodeId, taskId: task.taskId,
+          provider: task.provider, category: task.nodeType, stage: task.mediaRecoveryState ?? task.videoRecoveryState ?? 'querying',
+          messageId: task.mediaContext?.messageId, conversationId: task.mediaContext?.conversationId,
+          canResume: canResumeMediaTask(task) })),
+      ) }),
+    }),
+    registerAgentTool<{ nodeId: string; taskId: string }>({
+      id: 'media_resume_task', title: '续取原媒体任务', effect: 'canvas_write',
+      description: '查询并保存已经提交的原媒体任务，不重新提交生成。必须使用 media_pending_tasks 中 canResume=true 的当前项目 nodeId 和 taskId；没有任务 ID 时须先到平台核对。对话任务须打开原对话。',
+      inputSchema: { type: 'object', required: ['nodeId', 'taskId'], additionalProperties: false,
+        properties: { nodeId: { type: 'string', minLength: 1, maxLength: 300 }, taskId: { type: 'string', minLength: 1, maxLength: 256 } } },
+      authorize: (context, input) => ({ allowed: context.projectId === useAppStore.getState().currentProjectId
+        && getPendingTasksForProject(context.projectId).some((task) => task.nodeId === input.nodeId && task.taskId === input.taskId
+          && canResumeMediaTask(task)),
+      reason: '只能续取当前项目已保存的同一个媒体任务' }),
+      execute: async (context, input) => {
+        if (context.signal.aborted) return { status: 'error', summary: '已停止本次等待', modelContent: '未重新提交生成，也未取消远端任务。', errorCode: 'MEDIA_RECOVERY_STOPPED' };
+        const original = getPendingTasksForProject(context.projectId).find((task) => task.nodeId === input.nodeId && task.taskId === input.taskId
+          && canResumeMediaTask(task));
+        if (useAppStore.getState().currentProjectId !== context.projectId || !original) {
+          return { status: 'error', summary: '原任务身份已变化', modelContent: '请重新读取待恢复任务列表，不会续查同节点的新任务。', errorCode: 'MEDIA_RECOVERY_STALE' };
+        }
+        try {
+          ensureMediaMessageRecoveryHandler();
+          await resumeMediaNodeTask(input.nodeId, context.signal);
+        } catch (error) {
+          if (context.signal.aborted) return { status: 'error', summary: '已停止本次等待',
+            modelContent: '未重新提交生成，也未取消远端任务。', errorCode: 'MEDIA_RECOVERY_STOPPED' };
+          const state = useAppStore.getState();
+          const message = state.messages.find((item) => item.id === original.mediaContext?.messageId
+            && item.conversationId === original.mediaContext?.conversationId);
+          const pending = getPendingTasksForProject(context.projectId).some((task) => task.nodeId === original.nodeId
+            && task.taskId === original.taskId && task.attemptId === original.attemptId);
+          const detail = error instanceof Error ? error.message : '原任务未返回可交付结果';
+          if (state.currentProjectId === context.projectId && message && !pending
+            && (!message.mediaResult || message.mediaResult.taskReceipt?.taskId === original.taskId
+              && message.mediaResult.taskReceipt.attemptId === original.attemptId)) {
+            state.updateMessage(message.id, { mediaStatus: 'failed', mediaError: detail });
+          }
+          return { status: 'error', summary: detail, modelContent: detail, errorCode: 'MEDIA_RECOVERY_FAILED' };
+        }
+        if (context.signal.aborted) return { status: 'error', summary: '已停止本次等待',
+          modelContent: '未重新提交生成，也未取消远端任务。', errorCode: 'MEDIA_RECOVERY_STOPPED' };
+        const pending = getPendingTasksForProject(context.projectId).some((task) => task.nodeId === input.nodeId && task.taskId === input.taskId);
+        return { status: pending ? 'error' : 'success', summary: pending ? '原任务仍保留，查询或保存尚未完成' : '原任务已取回并交付',
+          modelContent: pending ? '任务仍保留；请核对原项目、对话及连接后继续查询，不要重新提交生成。' : '已查询并保存原任务结果，没有重新提交生成。',
+          ...(pending ? { errorCode: 'MEDIA_RECOVERY_PENDING' } : {}) };
+      },
+    }),
     registerAgentTool<{ modelRef: string }>({
       id: 'media_model_parameters', title: '读取模型专属参数', effect: 'read',
-      description: '读取当前可选 RunningHub 标准模型的操作、输入媒体、必填字段、默认值和限制。通过 media_generate.modelParameters 提交专属参数；首尾帧、编辑或动作控制需选择对应操作。',
+      description: '读取当前可选图片、视频模型的参数能力；RunningHub 返回专属参数，工作流使用 media_workflow_parameters。未声明的选项不代表支持。',
       inputSchema: { type: 'object', required: ['modelRef'], additionalProperties: false, properties: { modelRef: { type: 'string', minLength: 1, maxLength: 240 } } },
       authorize: (context) => ({ allowed: context.projectId === useAppStore.getState().currentProjectId, reason: '只能读取当前项目可用的模型' }),
       execute: async (_context, input) => {
         const store = useAppStore.getState();
         const option = findMediaModelOption(input.modelRef, store.config.generalModels ?? [], store.config, store.workflows);
-        const model = option?.provider === 'runninghub' ? getRunningHubModel(input.modelRef, true) : undefined;
-        if (!model) return { status: 'error', summary: '未找到可用的 RunningHub 标准模型', modelContent: '先在模型管理中启用所需操作', errorCode: 'RUNNINGHUB_MODEL_NOT_FOUND' };
-        return { status: 'success', summary: `已读取 ${model.label} 参数`, modelContent: JSON.stringify(model) };
+        if (option?.provider === 'runninghub') {
+          const model = getRunningHubModel(input.modelRef, true);
+          if (model) return { status: 'success', summary: `已读取 ${model.label} 参数`, modelContent: JSON.stringify(model) };
+        }
+        if (!option || option.workflowId || !['image', 'video'].includes(option.mediaKind)) {
+          return { status: 'error', summary: '未找到可用的图片或视频模型', modelContent: '请先启用模型；工作流使用 media_workflow_parameters', errorCode: 'MEDIA_MODEL_NOT_FOUND' };
+        }
+        const image = option.mediaKind === 'image' ? resolveImageParameterCapability(option.value, option.provider, store.config) : undefined;
+        const video = option.mediaKind === 'video' ? resolveVideoModelCapability(option.value, store.config) : undefined;
+        const capability = image ? {
+          resolutions: image.resolutions, defaultResolution: image.defaultResolution,
+          ratios: image.ratios, defaultRatio: image.defaultRatio,
+          qualities: image.qualities, defaultQuality: image.defaultQuality,
+          backgrounds: image.backgrounds, defaultBackground: image.defaultBackground,
+          backgroundIsFixed: image.backgroundIsFixed,
+          supportsBatch: image.supportsBatch, maxBatchCount: image.maxBatchCount,
+          supportsImageReference: image.supportsImageReference, maxImageReferences: image.maxImageReferences,
+        } : video;
+        return { status: 'success', summary: `已读取 ${option.label} 参数`, modelContent: JSON.stringify({
+          modelRef: option.value, kind: option.mediaKind, capability: capability ?? null,
+          note: '仅展示已声明的能力；缺省表示待确认。',
+        }) };
       },
     }),
     registerAgentTool<{ modelRef: string }>({
@@ -217,7 +343,10 @@ export function registerMediaAgentTools(): Array<() => void> {
           }) };
         }
         if (!isRunningHubWorkflow(workflow) || !workflow?.runninghub) return { status: 'error', summary: '未找到已保存的云工作流', modelContent: '请先在工作流管理中导入 RunningHub 工作流或 AI 应用', errorCode: 'RUNNINGHUB_WORKFLOW_NOT_FOUND' };
-        return { status: 'success', summary: `已读取 ${workflow.name} 的参数`, modelContent: JSON.stringify({ workflowId: workflow.id, outputType: workflow.category, parameters: workflow.runninghub.parameters.map((field) => ({ ...field, defaultValue: typeof field.defaultValue === 'string' ? field.defaultValue.slice(0, 1200) : field.defaultValue })) }) };
+        return { status: 'success', summary: `已读取 ${workflow.name} 的参数`, modelContent: JSON.stringify({ workflowId: workflow.id, outputType: workflow.category,
+          parameters: resolveRunningHubParameters(workflow.runninghub.parameters).map((field) => ({ ...field, defaultValue: typeof field.defaultValue === 'string' ? field.defaultValue.slice(0, 1200) : field.defaultValue })),
+          usage: 'workflowInputs 仅设置 source=value 的参数。主提示词使用本次 prompt，图片、视频和音频在 prompt 中显式引用，按各类型顺序绑定；不要传导入示例中的提示词或文件名。',
+        }) };
       },
     }),
     registerAgentTool<GenerateMediaInput>({
@@ -229,8 +358,11 @@ export function registerMediaAgentTools(): Array<() => void> {
         '若项目已设置该类型默认模型则直接使用；自主模式开启自动路由后，可依据模型能力与用户自定义说明选择。',
         '图片 prompt 可以原样包含用户提供的 @{nodeId:label} 或 @asset{path} 引用，',
         '运行时会自动解析为参考图输入；无需先读取节点原 prompt，也不要要求用户重新描述图片。',
-        '视频可显式传入 aspectRatio、resolution 和 duration；自定义 API 省略时由模型 capability / 接口默认值决定，内置模型与工作流才锁定项目默认值。',
+        '图片可按模型能力传入 imageQuality、imageBackground（空字符串表示接口默认）；视频可传 aspectRatio、resolution、duration、videoFps、generateAudio。自动时长只允许该模型声明的负数值。',
+        '自定义 API 省略视频参数时由模型 capability / 接口默认值决定，内置模型与工作流才锁定项目默认值。',
+        '音频可显式传 audioVoice、audioFormat、audioSpeed，音乐可传 musicTitle 和 musicLyrics；音色使用所选模型公布的真实 ID，省略时沿用模型默认。RunningHub 与工作流仍使用各自参数。',
         '协作模式由 Policy 请求确认，自主模式直接执行。deliveryMode 控制结果显示在对话、画布或两者。',
+        'MCP付费调用建议在 tools_call 信封同级传 operationKey（不要放 arguments）；started 仅表示进入本地生成调用，不证明服务商已受理。回执 partial/unknown 时只读核实并续取原媒体任务，不能换 key 重投。',
       ].join(''),
       inputSchema: {
         type: 'object',
@@ -259,6 +391,15 @@ export function registerMediaAgentTools(): Array<() => void> {
           },
           deliveryMode: { type: 'string', enum: ['chat', 'canvas', 'both'] },
           audioPurpose: { type: 'string', enum: ['music', 'speech'] },
+          audioVoice: { type: 'string', minLength: 1, maxLength: 256, description: '所选语音模型公布的音色 ID，不含控制字符。' },
+          audioFormat: { type: 'string', enum: AUDIO_FORMATS },
+          audioSpeed: { type: 'number', minimum: 0.25, maximum: 4 },
+          musicTitle: { type: 'string', maxLength: 120 },
+          musicLyrics: { type: 'string', maxLength: 8000 },
+          imageQuality: { type: 'string', minLength: 1, maxLength: 64, description: '图片生成质量，必须由所选模型明确声明。' },
+          imageBackground: { type: 'string', maxLength: 64, description: '图片背景；空字符串表示接口默认。' },
+          videoFps: { type: 'number', minimum: 1, maximum: 240, description: '视频帧率，必须由所选模型明确声明。' },
+          generateAudio: { type: 'boolean', description: '是否生成视频音轨；仅用于明确支持开关的模型。' },
           aspectRatio: {
             type: 'string',
             minLength: 1,
@@ -272,10 +413,9 @@ export function registerMediaAgentTools(): Array<() => void> {
             description: '视频分辨率档位；用户明确指定时传入，合法值由所选模型 capability 校验。',
           },
           duration: {
-            type: 'integer',
-            minimum: 1,
+            type: 'number',
             maximum: 3600,
-            description: '视频时长，单位秒；用户明确指定时传入，模型范围由 capability 在提交前校验。',
+            description: '视频时长，单位秒；负数仅允许所选模型声明的自动时长值。',
           },
         },
       },
@@ -283,6 +423,32 @@ export function registerMediaAgentTools(): Array<() => void> {
       resolveInput: resolveMediaToolInput,
       authorize: (context, input) => {
         const store = useAppStore.getState();
+        try { assertSafeMediaToolParameters(input, context.projectId); } catch {
+          return { allowed: false, reason: '媒体参数格式无效，请使用所选模型声明的参数值' };
+        }
+        if (hasAudioSettings(input) && input.kind !== 'audio') {
+          return { allowed: false, reason: '音频参数只能用于音频生成' };
+        }
+        if (input.kind !== 'image' && (input.imageQuality !== undefined || input.imageBackground !== undefined)) {
+          return { allowed: false, reason: '图片质量和背景只能用于图片生成' };
+        }
+        if (input.kind !== 'video' && (input.videoFps !== undefined || input.generateAudio !== undefined)) {
+          return { allowed: false, reason: '帧率和生成音轨只能用于视频生成' };
+        }
+        if (input.audioVoice !== undefined && (typeof input.audioVoice !== 'string' || !input.audioVoice.trim()
+          || input.audioVoice !== input.audioVoice.trim() || input.audioVoice.length > 256
+          || Array.from(input.audioVoice).some((character) => {
+            const code = character.charCodeAt(0);
+            return code < 32 || (code >= 127 && code <= 159);
+          }))) {
+          return { allowed: false, reason: 'audioVoice 必须是 1–256 字符且不含控制字符的音色 ID' };
+        }
+        if (input.audioPurpose === 'speech' && (input.musicTitle !== undefined || input.musicLyrics !== undefined)) {
+          return { allowed: false, reason: '音乐标题和歌词只能用于音乐生成' };
+        }
+        if (input.audioPurpose === 'music' && (input.audioVoice !== undefined || input.audioFormat !== undefined || input.audioSpeed !== undefined)) {
+          return { allowed: false, reason: '音色、格式和语速参数只能用于语音生成' };
+        }
         const task = store.agentTasks.find((item) => item.id === context.taskId);
         const mentionedModel = task ? extractModelMention(task.goal) : undefined;
         if (mentionedModel && mentionedModel !== input.modelRef) {
@@ -300,6 +466,16 @@ export function registerMediaAgentTools(): Array<() => void> {
           );
           if (!option || option.mediaKind !== input.kind) {
             return { allowed: false, reason: '所选模型与本次媒体类型不兼容' };
+          }
+          if (hasAudioSettings(input) && (option.workflowId || option.provider === 'runninghub')) {
+            return { allowed: false, reason: 'RunningHub 和工作流使用自己的参数，请通过 modelParameters 或 workflowInputs 设置音频参数' };
+          }
+          if ((option.workflowId || option.provider === 'runninghub')
+            && [input.imageQuality, input.imageBackground, input.videoFps, input.generateAudio].some((value) => value !== undefined)) {
+            return { allowed: false, reason: 'RunningHub 和工作流使用自己的参数定义，请通过 modelParameters 或 workflowInputs 设置参数' };
+          }
+          if (input.audioVoice !== undefined && option.provider !== 'general' && !LEGACY_AUDIO_VOICES.includes(input.audioVoice)) {
+            return { allowed: false, reason: '所选模型不支持该音色，请使用当前厂商公布的音色' };
           }
           if (input.modelParameters?.length) {
             const model = option.provider === 'runninghub' ? getRunningHubModel(input.modelRef, true) : undefined;
@@ -322,8 +498,12 @@ export function registerMediaAgentTools(): Array<() => void> {
             } else if (workflow?.adapterType === 'workflow-api') {
               try { validateWorkflowApiManifest(workflow.workflowApi); workflowApiConnection(store.config.providers[workflow.workflowApi.connectionId], workflow.workflowApi); }
               catch (error) { return { allowed: false, reason: error instanceof Error ? error.message : '工作流连接无效' }; }
-            } else if (!comfyBaseUrlFor(option.workflowId)) {
-              return { allowed: false, reason: '请先在设置里配置 ComfyUI 服务地址' };
+            } else {
+              try {
+                if (!comfyBaseUrlFor(option.workflowId)) return { allowed: false, reason: '请先在设置里配置 ComfyUI 服务地址' };
+              } catch (error) {
+                return { allowed: false, reason: error instanceof Error ? error.message : 'ComfyUI 服务器配置无效' };
+              }
             }
           } else if (option.provider === 'general') {
             const generalModel = (store.config.generalModels ?? []).find(
@@ -386,6 +566,9 @@ export function registerMediaAgentTools(): Array<() => void> {
       buildInputDisplay: buildMediaInputDisplay,
       execute: async (context, input): Promise<AgentToolExecutionResult> => {
         const store = useAppStore.getState();
+        try { assertSafeMediaToolParameters(input, context.projectId); } catch {
+          return { status: 'error', summary: '媒体参数格式无效', modelContent: '请使用所选模型声明的参数值', errorCode: 'MEDIA_PARAMETER_INVALID' };
+        }
         if (!input.modelRef) {
           return {
             status: 'error',
@@ -423,31 +606,79 @@ export function registerMediaAgentTools(): Array<() => void> {
           modelRef: input.modelRef,
           deliveryMode: input.deliveryMode,
           audioPurpose: input.audioPurpose,
+          audioVoice: input.audioVoice,
+          audioFormat: input.audioFormat,
+          audioSpeed: input.audioSpeed,
+          musicTitle: input.musicTitle,
+          musicLyrics: input.musicLyrics,
           aspectRatio: input.aspectRatio,
           resolution: input.resolution,
           duration: input.duration,
+          imageQuality: input.imageQuality,
+          imageBackground: input.imageBackground,
+          videoFps: input.videoFps,
+          generateAudio: input.generateAudio,
           runninghubModelParameters: input.modelParameters ? Object.fromEntries(input.modelParameters.map((field) => [field.name, field.value])) : undefined,
           workflowInputs: input.workflowInputs ? Object.fromEntries(input.workflowInputs.map((field) => [runningHubParameterKey(field), field.value])) : undefined,
         };
         const needsCanvas = input.deliveryMode === 'canvas' || input.deliveryMode === 'both';
+        const tracksOperation = Boolean(store.agentTasks?.some((task) => task.id === context.taskId && task.mcpOperation));
+        const initialRevision = store.getCurrentRevision();
+        const initialProjectSettings = JSON.stringify(store.projects.find((project) => project.id === context.projectId)?.settings);
         let targetNodeId: string | undefined;
         let placeholderLifecycle: MediaPlaceholderLifecycle | null = null;
-        if (needsCanvas) {
-          targetNodeId = store.createMediaPlaceholder(intent);
-          const cloud = store.workflows?.find((workflow) => isCloudWorkflow(workflow) && workflowExecution(workflow).model === input.modelRef);
-          if (!cloud && input.modelRef && getRunningHubModel(input.modelRef)) store.updateNodeDataTransient(targetNodeId, { provider: 'runninghub', model: input.modelRef, runninghubModelParameters: intent.runninghubModelParameters });
-          if (cloud) store.updateNodeDataTransient(targetNodeId, { ...workflowExecution(cloud), workflowInputs: intent.workflowInputs });
-          placeholderLifecycle = registerMediaPlaceholderLifecycle(targetNodeId);
-        }
-        store.updateMessage(assistantMessageId, {
-          mediaStatus: 'queued',
-          mediaError: undefined,
-          canvasStatus: needsCanvas ? 'pending' : 'none',
-          canvasNodeId: targetNodeId,
-          canvasError: undefined,
-        });
-
+        let enteredGeneration = false;
+        let generatedArtifact: MediaGenerationResult | undefined;
+        let deliveredToCanvas = false;
+        let receiptUnconfirmed = false;
+        let placeholderDataBeforeWait: unknown;
+        let placeholderGenerationInput: string | undefined;
+        const assertOperationFresh = (checkWaitData = true) => {
+          if (context.signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+          const current = useAppStore.getState();
+          const placeholder = targetNodeId ? current.nodes.find((node) => node.id === targetNodeId) : undefined;
+          if (current.currentProjectId !== context.projectId
+            || JSON.stringify(current.projects.find((project) => project.id === context.projectId)?.settings) !== initialProjectSettings
+            || !current.messages.some((message) => message.id === assistantMessageId && message.conversationId === context.conversationId)
+            || !current.agentTasks?.some((task) => task.id === context.taskId && task.mcpOperation
+              && !['paused', 'stopped', 'failed', 'completed'].includes(task.status))
+            || (targetNodeId !== undefined && !placeholderLifecycle)
+            || (targetNodeId !== undefined && checkWaitData && placeholder?.data !== placeholderDataBeforeWait)
+            || (placeholder && generationInputSnapshot(placeholder.data,
+              current.projects.find((project) => project.id === context.projectId)?.settings) !== placeholderGenerationInput)
+            || (placeholderLifecycle ? !isCanvasDerivationFresh(placeholderLifecycle.guard, current)
+              : needsCanvas && current.getCurrentRevision() !== initialRevision)) {
+            throw new Error('媒体操作的项目、消息或画布租约已变化，请只读核实');
+          }
+        };
         try {
+          if (tracksOperation) {
+            // 占位本身也是写入；先留下消息身份，不能在持久化失败后继续创建或提交。
+            await recordMcpOperationProgress(context.taskId, { mediaStage: 'preparing', messageId: assistantMessageId, persistence: 'pending' });
+            assertOperationFresh();
+          }
+          if (needsCanvas) {
+            const current = useAppStore.getState();
+            targetNodeId = current.createMediaPlaceholder(intent);
+            const cloud = current.workflows?.find((workflow) => isCloudWorkflow(workflow) && workflowExecution(workflow).model === input.modelRef);
+            if (!cloud && input.modelRef && getRunningHubModel(input.modelRef)) current.updateNodeDataTransient(targetNodeId, { provider: 'runninghub', model: input.modelRef, runninghubModelParameters: intent.runninghubModelParameters });
+            if (cloud) current.updateNodeDataTransient(targetNodeId, { ...workflowExecution(cloud), workflowInputs: intent.workflowInputs });
+            placeholderLifecycle = registerMediaPlaceholderLifecycle(targetNodeId);
+            const placeholder = useAppStore.getState().nodes.find((node) => node.id === targetNodeId);
+            placeholderGenerationInput = placeholder && generationInputSnapshot(placeholder.data,
+              useAppStore.getState().projects.find((project) => project.id === context.projectId)?.settings);
+          }
+          store.updateMessage(assistantMessageId, {
+            mediaStatus: 'queued', mediaError: undefined, canvasStatus: needsCanvas ? 'pending' : 'none',
+            canvasNodeId: targetNodeId, canvasError: undefined,
+          });
+          if (tracksOperation) {
+            placeholderDataBeforeWait = targetNodeId ? useAppStore.getState().nodes.find((node) => node.id === targetNodeId)?.data : undefined;
+            await recordMcpOperationProgress(context.taskId, { mediaStage: 'started', messageId: assistantMessageId,
+              ...(targetNodeId ? { canvasNodeId: targetNodeId } : {}) });
+            assertOperationFresh();
+          }
+          enteredGeneration = true;
           useAppStore.getState().updateMessage(assistantMessageId, {
             mediaStatus: 'generating',
           });
@@ -458,6 +689,17 @@ export function registerMediaAgentTools(): Array<() => void> {
             targetNodeId,
             { projectId: context.projectId, conversationId: context.conversationId, messageId: assistantMessageId, deliveryMode: input.deliveryMode },
           );
+          generatedArtifact = result;
+          if (tracksOperation) {
+            // Provider运行态可变化；原始可编辑输入必须仍与进入调用前一致。
+            assertOperationFresh(false);
+            placeholderDataBeforeWait = targetNodeId ? useAppStore.getState().nodes.find((node) => node.id === targetNodeId)?.data : undefined;
+            try {
+              await recordMcpOperationProgress(context.taskId, { mediaStage: 'generated', artifactId: result.id, persistence: result.persistence });
+            } catch { receiptUnconfirmed = true; }
+            // 新的持久化await期间也可能取消或切项目；已生成的产物交给下方partial分支保留。
+            assertOperationFresh();
+          }
           if (context.signal.aborted) {
             throw new DOMException('请求已取消', 'AbortError');
           }
@@ -465,6 +707,7 @@ export function registerMediaAgentTools(): Array<() => void> {
           const nodeCreated = placeholderLifecycle
             ? settleMediaPlaceholderLifecycle(placeholderLifecycle, result)
             : targetNodeId ? currentStore.settleMediaPlaceholder(targetNodeId, result) : false;
+          deliveredToCanvas = nodeCreated;
           if (nodeCreated && targetNodeId && ['runninghubwf', 'runninghub'].includes(result.provider)) {
             currentStore.updateNodeDataTransient(targetNodeId, { runninghubOutputs: result.runninghubOutputs });
             completeRunningHubNodeTask(targetNodeId);
@@ -479,6 +722,7 @@ export function registerMediaAgentTools(): Array<() => void> {
               ? MEDIA_PLACEHOLDER_STALE_ERROR
               : undefined,
           });
+          await completeMediaMessageDelivery(assistantMessageId, result, !targetNodeId || nodeCreated);
           if (!targetNodeId && ['runninghubwf', 'runninghub'].includes(result.provider)) completeRunningHubNodeTask(`runninghub-message-${assistantMessageId}`);
           if (result.workflowApiTaskId && (!targetNodeId || nodeCreated)) {
             if (targetNodeId) currentStore.updateNodeDataTransient(targetNodeId, { workflowApiOutputs: result.workflowApiOutputs });
@@ -486,6 +730,19 @@ export function registerMediaAgentTools(): Array<() => void> {
           }
           // 落盘失败时产物只有临时地址，必须让用户和模型都看到，而不是报告纯成功
           const unsaved = result.persistence === 'failed';
+          const deliveryPending = Boolean(result.taskReceipt && getPendingTasksForProject(context.projectId).some((task) =>
+            task.nodeId === result.taskReceipt!.nodeId && task.taskId === result.taskReceipt!.taskId
+              && task.attemptId === result.taskReceipt!.attemptId));
+          const deliveryIncomplete = unsaved || Boolean(targetNodeId && !nodeCreated) || deliveryPending
+            || (tracksOperation && (context.signal.aborted || useAppStore.getState().currentProjectId !== context.projectId));
+          if (tracksOperation) {
+            try {
+              await recordMcpOperationProgress(context.taskId, { mediaStage: deliveryIncomplete ? 'generated' : 'delivered',
+                artifactId: result.id, persistence: result.persistence,
+                ...(deliveryIncomplete ? { phase: 'partial', errorCode: 'AGENT_MEDIA_DELIVERY_INCOMPLETE' } : {}) });
+              receiptUnconfirmed = false;
+            } catch { receiptUnconfirmed = true; }
+          }
           if (unsaved) {
             currentStore.showToast(
               `媒体已生成，但未保存到项目：${result.persistError || MEDIA_PERSIST_FAILED_MESSAGE}`,
@@ -494,7 +751,10 @@ export function registerMediaAgentTools(): Array<() => void> {
           }
           return {
             status: 'success',
-            summary: unsaved ? '媒体内容已生成，但未能保存到项目目录' : '媒体内容已生成',
+            summary: unsaved ? '媒体内容已生成，但未能保存到项目目录'
+              : deliveryIncomplete ? '媒体内容已生成，部分交付尚未完成，请核对原任务'
+                : receiptUnconfirmed ? '媒体内容已生成，操作回执尚未确认，请只读核实' : '媒体内容已生成',
+            ...(receiptUnconfirmed ? { errorCode: 'MCP_OPERATION_RECEIPT_UNCONFIRMED' } : {}),
             modelContent: JSON.stringify({
               artifactId: result.id,
               kind: result.kind,
@@ -503,6 +763,7 @@ export function registerMediaAgentTools(): Array<() => void> {
               canvasNodeId: targetNodeId,
               persistence: result.persistence,
               persistError: result.persistError,
+              ...(tracksOperation ? { deliveryPending: deliveryIncomplete, receiptUnconfirmed } : {}),
             }),
             display: {
               fields: [
@@ -517,28 +778,54 @@ export function registerMediaAgentTools(): Array<() => void> {
             },
           };
         } catch (error) {
+          if (tracksOperation && generatedArtifact) {
+            // 生成后的取消、租约变化或回执异常不能抹掉产物，也不能清除原媒体恢复身份。
+            const current = useAppStore.getState();
+            if (placeholderLifecycle && !deliveredToCanvas) failMediaPlaceholderLifecycle(placeholderLifecycle, MEDIA_PLACEHOLDER_STALE_ERROR);
+            if (current.currentProjectId === context.projectId && current.messages.some((message) =>
+              message.id === assistantMessageId && message.conversationId === context.conversationId)) {
+              current.updateMessage(assistantMessageId, { mediaResult: generatedArtifact, mediaStatus: 'succeeded',
+                canvasStatus: targetNodeId ? deliveredToCanvas ? 'created' : 'failed' : 'none', canvasNodeId: targetNodeId,
+                canvasError: targetNodeId && !deliveredToCanvas ? MEDIA_PLACEHOLDER_STALE_ERROR : undefined });
+            }
+            await completeMediaMessageDelivery(assistantMessageId, generatedArtifact, false);
+            await recordMcpOperationProgress(context.taskId, { phase: 'partial', mediaStage: 'generated',
+              artifactId: generatedArtifact.id, persistence: generatedArtifact.persistence, errorCode: 'AGENT_MEDIA_DELIVERY_INCOMPLETE' }).catch(() => undefined);
+            return { status: 'success', summary: '媒体已生成，交付未完整确认；请核对原产物或续取原任务，不要重新生成',
+              errorCode: 'AGENT_MEDIA_DELIVERY_INCOMPLETE', modelContent: JSON.stringify({ artifactId: generatedArtifact.id,
+                canvasNodeId: targetNodeId, persistence: generatedArtifact.persistence, deliveryPending: true, retryable: false }) };
+          }
+          const recoverable = isMediaTaskPausedError(error);
+          const submissionUnknown = recoverable && 'reason' in error && error.reason === 'submit_unknown';
           const stopped = context.signal.aborted
             || (error instanceof DOMException && error.name === 'AbortError');
-          const message = stopped
+          const message = tracksOperation && !enteredGeneration
+            ? '媒体生成未开始；操作回执、项目或取消状态已变化，请只读核实原 key'
+            : stopped
             ? '已停止本地跟踪；供应商未确认远端取消，任务可能继续并产生费用'
             : error instanceof Error ? error.message : '未知错误';
           const currentStore = useAppStore.getState();
-          if (placeholderLifecycle) failMediaPlaceholderLifecycle(placeholderLifecycle, message);
+          if (placeholderLifecycle && recoverable) completeCanvasDerivation(placeholderLifecycle.guard);
+          else if (placeholderLifecycle) failMediaPlaceholderLifecycle(placeholderLifecycle, message);
           else if (targetNodeId) currentStore.failMediaPlaceholder(targetNodeId, message);
           currentStore.updateMessage(assistantMessageId, {
-            mediaStatus: 'failed',
+            mediaStatus: submissionUnknown ? 'submit_unknown' : recoverable ? 'paused' : 'failed',
             mediaError: message,
             canvasStatus: targetNodeId ? 'failed' : 'none',
             canvasNodeId: targetNodeId,
             canvasError: targetNodeId ? message : undefined,
           });
+          if (tracksOperation) await recordMcpOperationProgress(context.taskId, {
+            phase: enteredGeneration ? 'unknown' : 'failed',
+            errorCode: enteredGeneration ? 'AGENT_MEDIA_RESULT_UNCONFIRMED' : 'AGENT_MEDIA_NOT_STARTED',
+          }).catch(() => undefined);
           return {
             status: 'error',
-            summary: stopped ? message : `媒体生成失败：${message}`,
-            modelContent: stopped ? message : `媒体生成失败：${message}`,
-            errorCode: stopped
+            summary: recoverable ? '媒体任务已保留，可继续查询原任务' : stopped ? message : `媒体生成失败：${message}`,
+            modelContent: recoverable ? `${message}；不要再次调用 media_generate，可通过 media_pending_tasks 和 media_resume_task 续取原任务。` : stopped ? message : `媒体生成失败：${message}`,
+            errorCode: tracksOperation && !enteredGeneration ? 'AGENT_MEDIA_NOT_STARTED' : stopped
               ? 'AGENT_MEDIA_TRACKING_STOPPED'
-              : 'AGENT_MEDIA_GENERATION_FAILED',
+              : recoverable ? 'AGENT_MEDIA_RECOVERY_PENDING' : 'AGENT_MEDIA_GENERATION_FAILED',
           };
         }
       },

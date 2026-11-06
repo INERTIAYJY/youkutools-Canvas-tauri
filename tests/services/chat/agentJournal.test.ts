@@ -1,3 +1,6 @@
+/**
+ * agentJournal — 回归测试：agent journal。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useAppStore } from '../../../src/store/useAppStore';
 import {

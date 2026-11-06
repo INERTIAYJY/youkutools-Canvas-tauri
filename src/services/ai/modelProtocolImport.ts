@@ -10,6 +10,7 @@ import type {
   ProtocolJsonValue,
 } from '../../types/aiTypes';
 import { validateModelExecutionProtocol } from './modelProtocol';
+import { BLOCKED_PATH_SEGMENTS as BLOCKED_LITERAL_KEYS, isRecord } from './modelProtocolShared';
 import {
   IMAGE_ARRAY_FIELDS,
   IMAGE_SINGLE_FIELDS,
@@ -100,7 +101,6 @@ const FULL_PROTOCOL_TEMPLATE_RE = /^{{\s*([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_-
 const REFERENCE_PROTOCOL_VARIABLE_ROOTS = new Set(REFERENCE_PROTOCOL_VARIABLES);
 const URL_VALUE_RE = /^(?:https?:\/\/|data:[^;,]+;base64,)/i;
 const GENERATE_CONTENT_PATH_RE = /\/models\/[^/]+:generateContent\/?$/i;
-const BLOCKED_LITERAL_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const REVIEW_REQUIRED_WARNING_PREFIX = '需要人工确认：';
 
 class LooseLiteralParser {
@@ -241,10 +241,6 @@ class LooseLiteralParser {
       break;
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, ProtocolJsonValue> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function unique<T>(values: T[]): T[] {
@@ -447,7 +443,35 @@ function parseCurlRequests(source: string): ParsedRequest[] {
     const urlMatch = /https?:\/\/[^\s'"\\]+/.exec(segment);
     if (!urlMatch) return [];
     const bodyMatch = /(?:^|\s)(?:-d|--data(?:-raw)?|--data-binary)\s+(["'])([\s\S]*?)\1/.exec(segment);
-    const body = bodyMatch ? parseLooseLiteral(bodyMatch[2]) : undefined;
+    const formEntries = [...segment.matchAll(/(?:^|\s)(-F|--form|--form-string)\s+(["'])([\s\S]*?)\2/g)];
+    const formOptionCount = [...segment.matchAll(/(?:^|\s)(?:-F\S*|--form(?:-string)?(?:=\S*)?)(?=\s|$)/g)].length;
+    if (formOptionCount !== formEntries.length) {
+      throw new Error('multipart 示例请将每个表单参数写为 -F 或 --form 后跟引号包裹的 name=value');
+    }
+    const formBody: Record<string, ProtocolJsonValue> = Object.create(null);
+    for (const entry of formEntries) {
+      const separator = entry[3].indexOf('=');
+      if (separator <= 0) throw new Error('multipart 示例字段必须使用 name=value 格式');
+      const key = entry[3].slice(0, separator);
+      const value = entry[3].slice(separator + 1);
+      if (BLOCKED_LITERAL_KEYS.has(key)) throw new Error('multipart 示例包含不安全字段名');
+      if (entry[1] !== '--form-string' && /^[<@]/.test(value)) {
+        const normalized = normalizedKey(key);
+        if (!value.startsWith('@') || ![...IMAGE_ARRAY_FIELDS, ...IMAGE_SINGLE_FIELDS].includes(normalized)) {
+          throw new Error('multipart 示例包含无法自动映射的文件字段，请在自定义协议中手动配置 $file');
+        }
+        // 只记录文件字段语义，不保留或读取文档里的本地路径。
+        const repeated = Object.hasOwn(formBody, key);
+        formBody[key] = { $file: key.endsWith('[]') || repeated || IMAGE_ARRAY_FIELDS.includes(normalized)
+          ? '{{imageUrls}}' : '{{imageUrls.0}}' };
+      } else {
+        const previous = formBody[key];
+        formBody[key] = previous === undefined ? value
+          : Array.isArray(previous) ? [...previous, value] : [previous, value];
+      }
+    }
+    if (formEntries.length > 0 && bodyMatch) throw new Error('请求示例不能同时使用 JSON 请求体和 multipart 表单');
+    const body = formEntries.length > 0 ? formBody : bodyMatch ? parseLooseLiteral(bodyMatch[2]) : undefined;
     const bodyRange = bodyMatch && bodyMatch.index >= 0
       ? { start: bodyMatch.index + bodyMatch[0].indexOf(bodyMatch[2]), end: bodyMatch.index + bodyMatch[0].indexOf(bodyMatch[2]) + bodyMatch[2].length }
       : undefined;
@@ -458,7 +482,10 @@ function parseCurlRequests(source: string): ParsedRequest[] {
     }
     const explicitMethod = /(?:-X|--request)\s+(GET|POST)/i.exec(segment)?.[1];
     const method = String(explicitMethod || (body === undefined ? 'GET' : 'POST')).toUpperCase() as ModelProtocolHttpMethod;
-    const responses = findStrictJsonValues(segment, bodyRange ? [bodyRange] : []);
+    const responses = findStrictJsonValues(segment, [
+      ...(bodyRange ? [bodyRange] : []),
+      ...formEntries.map((entry) => ({ start: entry.index, end: entry.index + entry[0].length })),
+    ]);
     return [{
       start,
       url: urlMatch[0],
@@ -466,7 +493,7 @@ function parseCurlRequests(source: string): ParsedRequest[] {
       headers,
       query: {},
       body,
-      bodyEncoding: inferBodyEncoding(headers, body),
+      bodyEncoding: formEntries.length > 0 ? 'multipart' as const : inferBodyEncoding(headers, body),
       response: responses[0]?.value,
       format: 'curl' as const,
     }];
@@ -661,6 +688,13 @@ function mapBodyValue(
   warnings: string[],
 ): ProtocolJsonValue {
   const normalized = normalizedKey(key);
+  if (isRecord(value) && Object.hasOwn(value, '$file')) {
+    const fileTemplate = typeof value.$file === 'string' && /^\{\{imageUrls(?:\.\d+)?\}\}$/.test(value.$file)
+      ? value.$file
+      : resolveProtocolFieldTemplate(normalized, Array.isArray(value.$file) ? [] : '', category);
+    if (!fileTemplate) throw new Error('multipart 文件字段无法映射到参考图，请手动配置 $file');
+    return { $file: fileTemplate };
+  }
   if (MEDIA_URL_WRAPPER_FIELDS.has(normalized) && isRecord(value)) {
     const urlEntry = Object.entries(value).find(([nestedKey]) => normalizedKey(nestedKey) === 'url');
     if (urlEntry && typeof urlEntry[1] === 'string') {
@@ -840,11 +874,15 @@ function inferImageReferenceRequestMode(
   if (category !== 'image' || !isRecord(request.body)) return undefined;
   for (const [key, value] of Object.entries(request.body)) {
     const normalized = normalizedKey(key);
+    if (request.bodyEncoding === 'multipart' && isRecord(value) && Object.hasOwn(value, '$file')) {
+      return 'edits-multipart';
+    }
     if (IMAGE_ARRAY_FIELDS.includes(normalized)) {
+      if (request.bodyEncoding === 'multipart') continue;
       return 'generation-json-image-urls';
     }
     if (!IMAGE_SINGLE_FIELDS.includes(normalized)) continue;
-    if (request.bodyEncoding === 'multipart') return 'edits-multipart';
+    if (request.bodyEncoding === 'multipart') continue;
     const values = Array.isArray(value) ? value : [value];
     if (values.some((item) => typeof item === 'string' && /^data:image\//i.test(item.trim()))) {
       return 'generation-json-image-data-urls';

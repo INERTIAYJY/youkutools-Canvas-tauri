@@ -1,3 +1,6 @@
+/**
+ * webReadSessionService — 管理网页读取会话的范围、缓存与过期清理。
+ */
 import type { WebPageResult, WebReadAccessScope, WebReadContinuation, WebReadDocument, WebReadSection } from '../../types/chat';
 
 export const WEB_READ_SESSION_TTL_MS = 10 * 60_000;

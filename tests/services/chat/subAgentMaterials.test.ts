@@ -1,3 +1,6 @@
+/**
+ * subAgentMaterials — 回归测试：sanitizeDomainText。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useAppStore } from '../../../src/store/useAppStore';
 import {

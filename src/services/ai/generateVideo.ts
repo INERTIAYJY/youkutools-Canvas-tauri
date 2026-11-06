@@ -1,15 +1,19 @@
 /**
  * ai/generateVideo — 视频生成入口
  */
-import { isRemoteMediaUrl } from '../../utils/mediaUrl';
+import { isLocalMediaUrl, isRemoteMediaUrl } from '../../utils/mediaUrl';
+import { resolveComfyRefmodMentionInputs } from '../../utils/comfyRefmodMention';
+import { videoInputData, videoInputFingerprint } from '../videoBatchPlanning';
 import { useAppStore } from '../../store/useAppStore';
 import { isRunningHubWorkflow } from '../workflowExecutionService';
 import { executeRunningHubWorkflow } from './providers/runninghubWorkflow';
+import { splitRunningHubPrompt, resolveRunningHubInputRouting } from './providers/runninghubWorkflowInputs';
 import { executeWorkflowApi } from '../workflowApi/workflowApiAdapter';
 import { parseWorkflowApiFields } from '../workflowApi/workflowApiConfig';
 import { getPendingTasksForProject } from '../pollManager';
 import { DEFAULT_BASE_URLS } from '../../constants/api';
-import { resolveNodeReferences } from '../nodeReferenceService';
+import { resolveNodeReferencesAsync } from '../nodeReferenceService';
+import { expandShotlistRowMentions } from '../shotlistPromptService';
 import { generateDreaminaVideo } from '../dreaminaService';
 import { executeComfyUIVideoGenerate } from '../comfyWorkflowService';
 import type { BaseNodeData } from '../../types';
@@ -21,9 +25,13 @@ import type {
   VideoGenerationOperation,
   VideoGenerationReferenceInput,
   VideoModelCapability,
+  MediaTaskReceipt,
+  MediaDownloadAccess,
 } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
-import { resolvePromptWithMediaRefs, type PromptCharacterBinding, type PromptMediaReferences } from './promptResolver';
+import { getProviderPolicy, resolveProviderCatalogId } from './providerPolicies';
+import { resolvePromptWithMediaRefs } from './promptResolver';
+import { compileVideoReferencePrompt } from './referencePrompt';
 import {
   collectConnectedReferenceMedia,
   getMediaReferenceUrl,
@@ -32,7 +40,7 @@ import {
   warnIfTooManyReferences,
 } from './connectedReferenceMedia';
 import { getApimartSeedanceCapability, type ApimartSeedanceCapability } from './apimartVideoModels';
-import { pollTask } from '../pollTask';
+import { pollVolcengineVideoTask } from './providers/volcengineVideoQuery';
 import { runConfiguredModelProtocol } from './modelProtocolRuntime';
 import {
   getModelProtocolPresetVideoCapability,
@@ -46,10 +54,12 @@ import {
   resolveVideoDurationSeconds,
   videoFramesFromDuration,
 } from '../aiDimensions';
-import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling } from '../pollManager';
+import { savePendingTask, updatePendingTask, removePendingTask, registerNodePolling, cleanupNodePolling, pauseMediaTask, VIDEO_POLL_MAX_DURATION_MS } from '../pollManager';
 import { corsSafeFetch } from './httpTransport';
 import { resolveImageUrlArray } from './imageUtils';
+import { mapSequentially, resolveImageUrlsSequentially } from './referenceMediaPreparation';
 import { resolveMediaReferenceUrl } from '../uploadService';
+import { relayonVideoVariables, usesRelayonModelProtocol } from './providers/relayonModelManifest';
 import {
   createMediaDataUrlBudget,
   type MediaDataUrlBudget,
@@ -66,31 +76,17 @@ import {
   toResolvedVideoCompatibilityValues,
   type CanonicalVideoRequest,
 } from './videoRequestResolver';
+import { getAsset } from './providers/volcengineAssetLibrary';
+import { readAppSecret } from '../providerSecretService';
+import { quoteVolcengineVideo } from '../billing/volcenginePricing';
+import { createBillingRun, updateBillingRun } from '../billing/volcengineBillingService';
+import { assertToapisVideoInput, toapisVideoVariables } from './providers/toapisModelManifest';
+import { assertLibapiVideoInput, libapiVideoVariables, usesLibapiModelProtocol } from './providers/libapiModelManifest';
+import { aigcsiVideoVariables, usesAigcsiModelProtocol } from './providers/aigcsiModelManifest';
+import { withSora2uReferenceLimits } from './providers/sora2uModelManifest';
+import { minimaxVideoVariables, resolveMinimaxBaseUrl, resolveMinimaxExecutionProfile, usesMinimaxModelProtocol } from './providers/minimaxModelManifest';
 
-async function mapSequentially<T, R>(
-  items: readonly T[],
-  mapper: (item: T, index: number) => Promise<R>,
-  signal?: AbortSignal,
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let index = 0; index < items.length; index += 1) {
-    if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
-    results.push(await mapper(items[index], index));
-  }
-  return results;
-}
-
-function resolveImageUrlsSequentially(
-  urls: readonly string[],
-  provider: string,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  return mapSequentially(
-    urls,
-    async (url) => (await resolveImageUrlArray([url], provider, signal))[0],
-    signal,
-  );
-}
+export { compileVideoReferencePrompt } from './referencePrompt';
 
 export function resolveVideoGenerationOperation(
   imageUrls: readonly string[],
@@ -108,14 +104,27 @@ export function resolveVideoNodeReferences(nodeId: string | undefined): VideoRef
   return (node?.data as BaseNodeData | undefined)?.videoReferences ?? [];
 }
 
-function toMediaReferences(items: readonly VideoReferenceItem[]): MediaReference[] {
-  return items.map((item) => ({
-    kind: 'image' as const,
-    url: item.url,
-    origin: 'connection' as const,
-    role: item.role,
-    sourceNodeId: item.sourceNodeId,
-  }));
+function toMediaReferences(items: readonly VideoReferenceItem[], provider?: string): MediaReference[] {
+  return items.map((item) => {
+    // 方舟绑定同时保留普通角色预览图；切换到其他厂商时自动回退到普通图片，
+    // 避免把只对方舟有效的 asset:// 地址发送给其他 Provider。
+    const useVolcengineAsset = provider === 'volcengine' || !item.provider || !item.assetId;
+    const url = !useVolcengineAsset && item.previewUrl ? item.previewUrl : item.url;
+    return {
+      kind: item.mediaKind ?? 'image',
+      url,
+      origin: 'connection' as const,
+    // 方舟虚拟人像始终是角色参考，不能被旧节点数据中的帧角色字段带入首/尾帧语义。
+      role: item.provider === 'volcengine' && item.kind === 'volcengine-asset'
+      ? item.mediaKind === 'audio' ? 'reference_audio' as const : item.mediaKind === 'video' ? 'reference' as const : 'reference' as const
+      : item.role,
+      sourceNodeId: item.sourceNodeId,
+      provider: useVolcengineAsset ? item.provider : undefined,
+      assetId: useVolcengineAsset ? item.assetId : undefined,
+      assetGroupId: useVolcengineAsset ? item.assetGroupId : undefined,
+      projectName: useVolcengineAsset ? item.projectName : undefined,
+    };
+  });
 }
 
 function hasManualFrameRoles(items: readonly { role: string }[]): boolean {
@@ -146,72 +155,28 @@ function mentionedCharacterName(prompt: string, label: string): string | undefin
     .find((part) => prompt.includes(part));
 }
 
-const CHARACTER_REFERENCE_USAGE: Record<PromptCharacterBinding['usage'], string> = {
-  appearance: '外观参考', action: '动作参考', timbre: '音色参考',
-  line: '台词参考', emotion: '情绪参考', other: '声音参考',
-};
-
-/** 只编译 @ 产生的位置；角色归属独立于媒体去重，以最终传参顺序为准。 */
-export function compileVideoReferencePrompt(
-  input: PromptMediaReferences,
+function annotateVolcengineCharacterBindings(
+  prompt: string,
+  nodeItems: readonly VideoReferenceItem[],
   references: readonly MediaReference[],
-  options: { target?: 'remote' | 'local'; imageLayout?: 'frames-first' | 'frame-fields' } = {},
 ): string {
-  if (!input.segments) return input.prompt;
-  const urlOf = (reference: MediaReference) => options.target === 'local'
-    ? reference.url.trim() : getMediaReferenceUrl(reference).trim();
-  const frame = (reference: MediaReference) => reference.kind === 'image'
-    && (reference.role === 'first_frame' || reference.role === 'last_frame');
-  const ordered = options.imageLayout === 'frames-first'
-    ? [...references.filter(frame), ...references.filter((reference) => !frame(reference))]
-    : options.imageLayout === 'frame-fields' ? references.filter((reference) => !frame(reference)) : references;
-  const urls = (kind: MediaReference['kind']) => [...new Set(ordered.filter((reference) => reference.kind === kind).map(urlOf))];
-  const indexes = { image: urls('image'), video: urls('video'), audio: urls('audio') };
-  const characters = new Map<string, { alias: string; name: string; usages: Map<string, Set<string>> }>();
-  const prompt = input.segments.map((segment) => {
-    if (typeof segment === 'string') return segment;
-    const source = segment.reference;
-    // 先用本地媒体身份找到去重后的条目，再使用该条目最终选定的远端或本地 URL。
-    const reference = references.find((candidate) => candidate.kind === source.kind && candidate.url.trim() === source.url.trim())
-      ?? references.find((candidate) => candidate.kind === source.kind && urlOf(candidate) === urlOf(source));
-    if (!reference) throw new Error('引用素材未进入视频请求，请重新选择素材');
-    const index = indexes[reference.kind].indexOf(urlOf(reference));
-    const label = options.imageLayout === 'frame-fields' && frame(reference)
-      ? reference.role === 'first_frame' ? '首帧图片' : '尾帧图片'
-      : index >= 0 ? `${reference.kind === 'image' ? '图片' : reference.kind === 'video' ? '视频' : '音频'}${index + 1}` : undefined;
-    if (!label) throw new Error('引用素材编号与视频参数不一致');
-    if (!segment.character) return label;
-    const binding = segment.character;
-    let character = characters.get(binding.id);
-    if (!character) {
-      character = {
-        alias: `角色${characters.size + 1}`,
-        name: binding.name.replace(/[\r\n\t]+/g, ' ').trim() || '未命名角色',
-        usages: new Map(),
-      };
-      characters.set(binding.id, character);
-    }
-    const usage = CHARACTER_REFERENCE_USAGE[binding.usage];
-    const labels = character.usages.get(usage) ?? new Set<string>();
-    labels.add(label);
-    character.usages.set(usage, labels);
-    return `${character.name}〔${character.alias}，${label}〕`;
-  }).join('').trim();
-  if (characters.size === 0) return prompt;
-  const notes = [...characters.values()].map((character) => {
-    const usages = [...character.usages].map(([usage, labels]) => `${usage}：${[...labels].join('、')}`);
-    return `- ${character.alias}「${character.name}」：${usages.join('；')}。`;
-  });
-  const hasVoice = [...characters.values()].some((character) =>
-    [...character.usages.keys()].some((usage) => ['音色参考', '台词参考', '情绪参考', '声音参考'].includes(usage)),
-  );
-  return `${prompt}\n\n角色参考对应：\n${notes.join('\n')}\n各角色的外观、动作和声音按以上对应关系使用，避免互换。`
-    + (hasVoice ? '\n音色和情绪样本中的台词不自动作为本次对白；对白内容以正文的明确要求为准。' : '');
+  const notes = nodeItems
+    .filter((item) => item.provider === 'volcengine' && item.kind === 'character' && item.mediaKind !== 'audio' && item.assetId)
+    .flatMap((character) => {
+      const voice = nodeItems.find((item) => item.id === `${character.id}:voice` && item.mediaKind === 'audio');
+      if (!voice) return [];
+      const imageReference = references.find((reference) => reference.assetId === character.assetId);
+      const audioReference = references.find((reference) => reference.assetId === voice.assetId);
+      if (!imageReference || !audioReference) return [];
+      const imageIndex = references.filter((reference) => reference.kind === 'image').indexOf(imageReference) + 1;
+      const audioIndex = references.filter((reference) => reference.kind === 'audio').indexOf(audioReference) + 1;
+      return imageIndex > 0 && audioIndex > 0 ? [`图片${imageIndex}中的角色使用音频${audioIndex}的声音，并保持口型与音频同步`] : [];
+    });
+  return notes.length > 0 ? `${prompt}\n\n（角色绑定：${[...new Set(notes)].join('；')}。）` : prompt;
 }
 
 function assignVideoReferenceRoles(references: readonly MediaReference[]): MediaReference[] {
-  // 手动挑过参考帧：保留指派，其余降为普通参考图，并按 首帧 → 中间 → 尾帧 重排
-  // （APIMart / 即梦 / 通用协议都只看图片顺序判断首尾帧）
+  // 只有用户明确挑选的参考帧才保留首/尾帧语义，并按 首帧 → 参考图 → 尾帧 重排。
   if (hasManualFrameRoles(references)) {
     const rank = (role: MediaReferenceRole) => (role === 'first_frame' ? 0 : role === 'last_frame' ? 2 : 1);
     return references
@@ -221,15 +186,9 @@ function assignVideoReferenceRoles(references: readonly MediaReference[]): Media
       }))
       .sort((a, b) => rank(a.role) - rank(b.role));
   }
-  const imageIndexes = references.flatMap((reference, index) => (
-    reference.kind === 'image' ? [index] : []
-  ));
-  const firstImageIndex = imageIndexes[0];
-  const lastImageIndex = imageIndexes.length > 1 ? imageIndexes[imageIndexes.length - 1] : undefined;
-  return references.map((reference, index) => {
+  // 连线图片和普通 @ 图片默认都是参考图，不能再按图片顺序偷偷推断首尾帧。
+  return references.map((reference) => {
     if (reference.kind === 'audio') return { ...reference, role: 'reference_audio' };
-    if (index === firstImageIndex) return { ...reference, role: 'first_frame' };
-    if (index === lastImageIndex) return { ...reference, role: 'last_frame' };
     return { ...reference, role: 'reference' };
   });
 }
@@ -239,12 +198,13 @@ async function resolveGeneralProtocolMediaUrls(
   kind: 'video' | 'audio',
   budget: MediaDataUrlBudget,
   signal?: AbortSignal,
+  publicUrlProvider?: string,
 ): Promise<string[]> {
   return mapSequentially(references.filter((reference) => reference.kind === kind), async (reference) => {
     const url = getMediaReferenceUrl(reference);
-    // 通用协议模型需要 data URL（base64）；公网 / data: 原样返回
+    // 仅要求公网素材的厂商使用所属连接上传；其他通用协议继续沿用 data URL。
     return resolveMediaReferenceUrl(url, {
-      mode: 'dataUrl', kind, signal, dataUrlBudget: budget,
+      mode: publicUrlProvider ? 'publicUrl' : 'dataUrl', provider: publicUrlProvider, kind, signal, dataUrlBudget: budget,
     });
   }, signal);
 }
@@ -267,24 +227,38 @@ async function resolveVideoReferenceInput(
   nodeId: string | undefined,
   /** 调用方直接给定的参考媒体；排在最前，保证首/尾帧角色按调用方的顺序分配 */
   explicitReferences: readonly MediaReference[] = [],
-  options: { preserveDeclaredRoles?: boolean; target?: 'remote' | 'local'; apimartModel?: string; legacyPrompt?: string } = {},
+  options: { promptFirst?: boolean; preserveDeclaredRoles?: boolean; sortKeyframes?: boolean; target?: 'remote' | 'local'; apimartModel?: string; legacyPrompt?: string; provider?: string; suppressWarning?: boolean } = {},
 ): Promise<VideoGenerationReferenceInput> {
-  const promptInput = await resolvePromptWithMediaRefs(rawPrompt, { preserveBindings: true });
+  const cameraSettings = useAppStore.getState().nodes.find((node) => node.id === nodeId)?.data.cameraSettings;
+  const promptInput = await resolvePromptWithMediaRefs(rawPrompt, { preserveBindings: true, cameraSettings });
   const connected = collectConnectedReferenceMedia(nodeId);
   const nodeItems = resolveVideoNodeReferences(nodeId);
-  const collectedReferences = mergeMediaReferences(
+  // RH 先按来源节点归一本地副本，再去重，避免共享原图的其他节点提前被删掉。
+  const canonicalReference = (reference: MediaReference): MediaReference => {
+    if (options.provider !== 'runninghub' || reference.kind !== 'image' || !reference.sourceNodeId) return reference;
+    const local = promptInput.references.find((candidate) => candidate.kind === 'image'
+      && candidate.sourceNodeId === reference.sourceNodeId
+      && (candidate.sourceUrl === reference.url
+        || useAppStore.getState().nodes.find((node) => node.id === candidate.sourceNodeId)?.data.imageUrl === reference.url));
+    return local ? { ...reference, url: local.url } : reference;
+  };
+  const regularReferences = mergeMediaReferences(
     // 节点上手动挑的参考帧/参考角色排在连线与提示词引用之前，重复的图按它们的角色去重
-    mergeMediaReferences(explicitReferences, toMediaReferences(nodeItems)),
-    mergeMediaReferences(promptInput.references, connected.references),
+    mergeMediaReferences(explicitReferences.map(canonicalReference), toMediaReferences(nodeItems, options.provider).map(canonicalReference)),
+    mergeMediaReferences(promptInput.references, connected.references.map(canonicalReference)),
   );
-  // 通用声明式协议必须保留用户/连线给出的角色：普通 reference 图片不能
-  // 被全局规则偷偷改成 first_frame，否则 MetaSo 一类接口会把互斥模式混在一起。
-  // 内置 Provider 暂时保留原有“按图片顺序推断首尾帧”的兼容行为。
-  const references = options.preserveDeclaredRoles
-    ? collectedReferences.map((reference) => reference.kind === 'audio'
+  const collectedReferences = options.promptFirst
+    ? mergeMediaReferences(promptInput.references, regularReferences) : regularReferences;
+  // 先按最终传参顺序排好首尾帧，后面的图片编号和角色说明才能对上。
+  const orderedReferences = options.sortKeyframes && hasManualFrameRoles(collectedReferences)
+    ? assignVideoReferenceRoles(collectedReferences) : collectedReferences;
+  // 普通 reference 图片不能被偷偷改成 first_frame；内置 Provider 也只接受用户
+  // 明确指定的首/尾帧角色，连线与 @ 图片默认保持普通参考语义。
+  const references = options.preserveDeclaredRoles || options.promptFirst
+    ? orderedReferences.map((reference) => reference.kind === 'audio'
       ? { ...reference, role: 'reference_audio' as const }
       : reference)
-    : assignVideoReferenceRoles(collectedReferences);
+    : assignVideoReferenceRoles(orderedReferences);
   const imageUrls = getMediaReferenceUrls(references, 'image');
   const videoUrls = getMediaReferenceUrls(references, 'video');
   const audioUrls = getMediaReferenceUrls(references, 'audio');
@@ -300,19 +274,64 @@ async function resolveVideoReferenceInput(
   const isFrame = (reference: MediaReference) => reference.role === 'first_frame' || reference.role === 'last_frame';
   const noteReferences = imageLayout === 'frame-fields' ? references.filter((reference) => !isFrame(reference))
     : imageLayout === 'frames-first' ? [...references.filter(isFrame), ...references.filter((reference) => !isFrame(reference))] : references;
-  warnIfTooManyReferences({
+  if (!options.suppressWarning) warnIfTooManyReferences({
     image: imageUrls.length,
     video: videoUrls.length,
     audio: audioUrls.length,
   });
   return {
-    prompt: annotateCharacterReferences(compiledPrompt, nodeItems, getMediaReferenceUrls(noteReferences, 'image', options.target)),
+    prompt: annotateVolcengineCharacterBindings(
+      annotateCharacterReferences(compiledPrompt, nodeItems, getMediaReferenceUrls(noteReferences, 'image', options.target)),
+      nodeItems,
+      references,
+    ),
     imageUrls,
     videoUrls,
     audioUrls,
     operation: resolveVideoGenerationOperation(imageUrls, videoUrls),
     references,
   };
+}
+
+/** Read-only preflight: resolve real inputs without uploading or submitting a task. */
+export async function hasVideoReferenceContent(params: AIVideoGenParams): Promise<boolean> {
+  const state = useAppStore.getState();
+  const options = { durationSeconds: params.seedanceDuration, cameraSettings: state.nodes.find((node) => node.id === params.nodeId)?.data.cameraSettings };
+  const expandedInputs = params.workflowInputs && Object.fromEntries(Object.entries(params.workflowInputs)
+    .map(([key, value]) => [key, expandShotlistRowMentions(value, state.nodes, options)]));
+  const input = resolveComfyRefmodMentionInputs({
+    prompt: expandShotlistRowMentions(params.prompt, state.nodes, options),
+    workflowInputs: expandedInputs,
+    manual: params.comfyRefmods,
+  });
+  // RefMod is a deliberate character reference even when no image is attached.
+  if (input.comfyRefmods.length) return true;
+  const workflow = state.workflows.find((item) => item.id === params.workflowId);
+  const referencePrompt = workflow?.adapterType === 'runninghub' ? splitRunningHubPrompt(input.prompt).prompt : input.prompt;
+  const referenceInput = await resolveVideoReferenceInput(referencePrompt, params.nodeId, params.referenceMedia ?? [], {
+    provider: params.provider, target: 'local', preserveDeclaredRoles: true, suppressWarning: true,
+  });
+  if (referenceInput.references?.length) return true;
+
+  // ComfyUI explicit media slots are resolved separately from the main prompt.
+  // RH 的定向素材不混入正文，单独检查其已声明的输入槽。
+  if (workflow?.adapterType === 'runninghub') {
+    const routing = await resolveRunningHubInputRouting(workflow, input.prompt, input.workflowInputs);
+    return [...routing.bindings.values()].some((binding) => !!binding.mediaSource);
+  }
+  if (!workflow || (workflow.adapterType && workflow.adapterType !== 'comfyui')) return false;
+  for (const io of workflow.ioNodes ?? []) {
+    if (!['image', 'video', 'audio'].includes(io.type)) continue;
+    const raw = input.workflowInputs?.[io.nodeId];
+    if (raw === undefined || !raw.trim()) continue;
+    const media = await resolveVideoReferenceInput(raw, undefined, [], {
+      target: 'local', preserveDeclaredRoles: true, suppressWarning: true, provider: params.provider,
+    });
+    if (media.references?.length) return true;
+    const url = (await resolveNodeReferencesAsync(raw)).trim();
+    if (isLocalMediaUrl(url) || isRemoteMediaUrl(url)) return true;
+  }
+  return false;
 }
 
 function assertVideoOperationSupported(
@@ -360,15 +379,12 @@ function referencesFromLegacyInput(
   referenceInput: VideoGenerationReferenceInput,
 ): MediaReference[] {
   if (referenceInput.references?.length) return referenceInput.references;
-  const imageReferences = referenceInput.imageUrls.map((url, index) => ({
+  const imageReferences = referenceInput.imageUrls.map((url) => ({
     kind: 'image' as const,
     url,
     origin: 'connection' as const,
-    role: index === 0
-      ? ('first_frame' as const)
-      : index === referenceInput.imageUrls.length - 1
-        ? ('last_frame' as const)
-        : ('reference' as const),
+    // 旧调用方没有角色数组时只能按普通参考图处理；首尾帧必须由调用方明确声明。
+    role: 'reference' as const,
   }));
   return [
     ...imageReferences,
@@ -449,6 +465,26 @@ export function buildCanonicalVideoProtocolVariables(
         : 'reference_image',
     }));
   const imageWithRoles = roleImages.length > 0 ? roleImages : undefined;
+  const seedanceContent = [
+    { type: 'text', text: request.prompt },
+    ...request.references.images.map((reference) => ({
+      type: 'image_url',
+      image_url: { url: reference.url },
+      role: reference.role === 'first_frame' || reference.role === 'last_frame'
+        ? reference.role
+        : 'reference_image',
+    })),
+    ...request.references.videos.map((reference) => ({
+      type: 'video_url',
+      video_url: { url: reference.url },
+      role: 'reference_video',
+    })),
+    ...request.references.audios.map((reference) => ({
+      type: 'audio_url',
+      audio_url: { url: reference.url },
+      role: 'reference_audio',
+    })),
+  ];
   const combinedReferences = [
     ...compatibility.imageUrls,
     ...compatibility.videoUrls,
@@ -484,6 +520,7 @@ export function buildCanonicalVideoProtocolVariables(
     firstImage,
     lastImage,
     imageWithRoles,
+    seedanceContent,
     referenceImageUrls,
     videoUrls,
     referenceVideoUrl: videoUrls?.[0],
@@ -501,40 +538,104 @@ export function buildCanonicalVideoProtocolVariables(
 export async function generateVideo(
   params: AIVideoGenParams,
   signal?: AbortSignal,
-): Promise<{ url: string; runninghubOutputs?: import('../../types/runninghub').RunningHubOutput[];
+  /** 宿主任务在素材准备完成后、实际提交前复核运行时租约。 */
+  beforeSubmit?: () => void | Promise<void>,
+): Promise<{ url: string; taskReceipt?: MediaTaskReceipt; mediaDownloadAccess?: MediaDownloadAccess; comfyTaskId?: string; runninghubOutputs?: import('../../types/runninghub').RunningHubOutput[];
   workflowApiOutputs?: import('../../types/workflowApi').CloudWorkflowOutput[]; workflowApiTaskId?: string }> {
   // 内置 Provider 与本地工作流暂时保持旧归一化；通用模型交给 capability-aware
   // canonical resolver，避免在读到模型的 30 秒能力前先被全局 15 秒上限截断。
   if (params.provider !== 'workflow-api' && (!['general', 'runninghub'].includes(params.provider) || params.workflowId)) {
     const videoFps = normalizeVideoFps(params.videoFps);
-    const seedanceDuration = resolveVideoDurationSeconds(
-      params.seedanceDuration,
-      params.videoFrames,
-      videoFps,
-    );
+    const volcengineCapability = params.provider === 'volcengine'
+      ? getVolcengineSeedanceCapability(params.model)
+      : undefined;
+    const maxDuration = volcengineCapability?.maxDuration;
+    const preservesAutomaticDuration = volcengineCapability?.automaticDurationValue !== undefined
+      && (params.seedanceDuration === volcengineCapability.automaticDurationValue
+        || (params.seedanceDuration === undefined && params.videoFrames === undefined));
+    const seedanceDuration = preservesAutomaticDuration
+      ? params.seedanceDuration
+      : resolveVideoDurationSeconds(params.seedanceDuration, params.videoFrames, videoFps, maxDuration);
     params = {
       ...params,
       videoFps,
       seedanceDuration,
-      videoFrames: videoFramesFromDuration(seedanceDuration, videoFps),
+      videoFrames: seedanceDuration === undefined || seedanceDuration < 0
+        ? params.videoFrames
+        : videoFramesFromDuration(seedanceDuration, videoFps, maxDuration),
     };
   }
-  const { prompt: rawPrompt, model, provider } = params;
-
+  const { model, provider } = params;
+  // 镜头行与所有 IO 文本先展开，再统一提取本地模型引用，避免 token 进入媒体上传或其他厂商。
+  const cameraState = useAppStore.getState();
+  const shotOptions = { durationSeconds: params.seedanceDuration, cameraSettings: cameraState.nodes.find((node) => node.id === params.nodeId)?.data.cameraSettings };
+  const expandedPrompt = expandShotlistRowMentions(params.prompt, cameraState.nodes, shotOptions);
+  const expandedInputs = params.workflowInputs && Object.fromEntries(Object.entries(params.workflowInputs)
+    .map(([key, value]) => [key, typeof value === 'string'
+      ? expandShotlistRowMentions(value, cameraState.nodes, shotOptions) : value]));
+  const refmodInputs = resolveComfyRefmodMentionInputs({ prompt: expandedPrompt, workflowInputs: expandedInputs, manual: params.comfyRefmods });
+  let rawPrompt = refmodInputs.prompt;
+  const rawWorkflowPrompt = rawPrompt;
+  if (isRunningHubWorkflow(useAppStore.getState().workflows.find((workflow) => workflow.id === params.workflowId))) {
+    rawPrompt = splitRunningHubPrompt(rawWorkflowPrompt).prompt;
+  }
+  params = { ...params, prompt: rawPrompt,
+    ...(expandedInputs ? { workflowInputs: refmodInputs.workflowInputs } : {}),
+    ...(refmodInputs.comfyRefmods.length ? { comfyRefmods: refmodInputs.comfyRefmods } : {}),
+  };
+  if (`${rawPrompt}\n${JSON.stringify(params.workflowInputs ?? {})}`.includes('@drama{global/')) {
+    const owner = useAppStore.getState();
+    await owner.loadGlobalDramaAssets();
+    if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    if (useAppStore.getState().currentProjectId !== owner.currentProjectId) throw new Error('项目已切换，请重新生成视频');
+  }
+  if (params.comfyRefmods?.length) {
+    const captured = useAppStore.getState();
+    const workflow = captured.workflows.find((item) => item.id === params.workflowId);
+    if (!workflow || (workflow.adapterType && workflow.adapterType !== 'comfyui')) {
+      throw new Error('RefMod 仅能用于本地 ComfyUI 工作流，请切换工作流或移除 RefMod');
+    }
+    if (params.comfyRefmods.some((ref) => ref.workflowId !== undefined && ref.workflowId !== workflow.id)) {
+      throw new Error('ComfyUI 角色引用属于其他工作流，请删除后重新 @ 选择');
+    }
+    const capturedNodeId = params.nodeId;
+    const capturedNode = captured.nodes.find((node) => node.id === capturedNodeId);
+    const projectId = captured.currentProjectId;
+    if (!capturedNode || capturedNode.type !== 'ai-video' || capturedNode.data.role === 'source' || !projectId
+      || videoInputData(capturedNode, captured).workflowId !== params.workflowId) {
+      throw new Error('ComfyUI 角色引用需要项目中的视频生成节点，请先选择本地视频工作流');
+    }
+    const revision = captured.getCurrentRevision();
+    const fingerprint = videoInputFingerprint(capturedNode, captured);
+    const previousBeforeSubmit = beforeSubmit;
+    beforeSubmit = async () => {
+      await previousBeforeSubmit?.();
+      const current = useAppStore.getState();
+      const node = current.nodes.find((item) => item.id === capturedNodeId);
+      if (current.currentProjectId !== projectId || current.getCurrentRevision() !== revision || !node
+        || node.type !== 'ai-video' || node.data.role === 'source'
+        || videoInputFingerprint(node, current) !== fingerprint) {
+        throw new Error('项目、视频节点或角色引用已变化，请重新生成');
+      }
+    };
+  }
   // 解析 @{nodeId:label} 引用为对应节点的实际输出内容
-  const prompt = resolveNodeReferences(rawPrompt);
+  const prompt = await resolveNodeReferencesAsync(rawPrompt);
 
   // ComfyUI 工作流执行路径：连线音频兜底填充工作流的 audio IO 节点（唇形同步等）
   if (params.workflowId) {
     const workflow = useAppStore.getState().workflows.find((item) => item.id === params.workflowId);
+    const runninghubWorkflow = isRunningHubWorkflow(workflow);
     const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? [], {
-      preserveDeclaredRoles: provider === 'workflow-api', target: 'local',
-      legacyPrompt: workflow?.adapterType === 'workflow-api' ? undefined : prompt,
+      promptFirst: !workflow?.adapterType || workflow.adapterType === 'comfyui',
+      preserveDeclaredRoles: provider === 'workflow-api' || runninghubWorkflow, target: 'local',
+      provider: runninghubWorkflow ? 'runninghub' : provider,
+      legacyPrompt: workflow?.adapterType === 'workflow-api' || runninghubWorkflow ? undefined : prompt,
     });
     const references = referenceInput.references ?? [];
     const videoUrls = getMediaReferenceUrls(references, 'video', 'local');
     if (workflow?.adapterType === 'workflow-api') {
-      const outputs = await executeWorkflowApi({ workflowId: params.workflowId, nodeId: params.nodeId,
+      const outputs = await executeWorkflowApi({ workflowId: params.workflowId, nodeId: params.nodeId, beforeSubmit,
         taskContext: params.workflowApiTaskContext, prompt: referenceInput.prompt, inputs: {
           ...parseWorkflowApiFields(params.workflowInputs, workflow.workflowApi),
           ...(workflow.workflowApi?.version === 2 || params.seedanceDuration === undefined ? {} : { duration: params.seedanceDuration }),
@@ -551,18 +652,12 @@ export async function generateVideo(
     }
     if (provider === 'workflow-api' || (workflow?.adapterType && !['comfyui', 'runninghub'].includes(workflow.adapterType))) throw new Error('工作流定义缺失或执行类型不支持');
     if (isRunningHubWorkflow(workflow)) {
-      const outputs = await executeRunningHubWorkflow({ ...params, workflowId: params.workflowId, prompt: referenceInput.prompt, kind: 'video', references: {
+      const outputs = await executeRunningHubWorkflow({ ...params, workflowId: params.workflowId, rawWorkflowPrompt, beforeSubmit, prompt: referenceInput.prompt, kind: 'video', references: {
         image: getMediaReferenceUrls(references, 'image', 'local'), video: videoUrls, audio: getMediaReferenceUrls(references, 'audio', 'local'),
       } }, signal);
       return { url: outputs[0].url, runninghubOutputs: outputs };
     }
-    // 视频引用只有落到某个 video IO 节点才有意义：要么被 @ 了，要么工作流指定了默认视频节点
-    const hasVideoTarget = Boolean(workflow?.defaultNodes?.video)
-      || (workflow?.ioNodes ?? []).some((io) => io.type === 'video' && params.workflowInputs?.[io.nodeId]);
-    if (videoUrls.length > 0 && !hasVideoTarget) {
-      throw new Error('该 ComfyUI 工作流没有可接收视频的 IO 节点，请在工作流管理里指定默认视频节点或移除视频引用');
-    }
-    return executeComfyUIVideoGenerate(
+    const comfyArgs = [
       { ...params, prompt: referenceInput.prompt },
       signal,
       getMediaReferenceUrls(references, 'audio', 'local'),
@@ -570,7 +665,10 @@ export async function generateVideo(
         imageUrls: getMediaReferenceUrls(references, 'image', 'local'),
         videoUrls,
       },
-    );
+    ] as const;
+    return beforeSubmit
+      ? executeComfyUIVideoGenerate(...comfyArgs, beforeSubmit)
+      : executeComfyUIVideoGenerate(...comfyArgs);
   }
 
   if (provider === 'workflow-api') throw new Error('请先配置并选择工作流 API');
@@ -582,21 +680,25 @@ export async function generateVideo(
       resolveReferenceInput: async () => {
         return resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? [], {
           target: provider === 'runninghub' ? 'local' : 'remote',
+          preserveDeclaredRoles: provider === 'runninghub',
+          provider,
           apimartModel: provider === 'apimart' ? extractModelName(model, provider) : undefined,
         });
       },
       signal,
+      beforeSubmit,
     });
   }
 
   // 即梦视频：按参考素材自动路由文生、图生、首尾帧或全模态 CLI 子命令
   if (provider === 'dreamina') {
-    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? [], { provider });
     const dreaminaPrompt = referenceInput.prompt;
     if (!dreaminaPrompt.trim()) throw new Error('提示词不能为空');
     const capability = getDreaminaVideoCapability(model);
     assertVideoReferenceLimits(referenceInput, capability, '即梦当前视频模型');
     return generateDreaminaVideo({
+      beforeSubmit,
       prompt: dreaminaPrompt,
       model,
       references: referenceInput.references ?? [],
@@ -620,9 +722,34 @@ export async function generateVideo(
       throw new Error('未配置 火山方舟 的服务地址\n请在「设置 → API Key」中添加');
     }
     const modelName = extractModelName(model, provider);
-    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? []);
+    const referenceInput = await resolveVideoReferenceInput(rawPrompt, params.nodeId, params.referenceMedia ?? [], { provider });
+    const assetReferences = (referenceInput.references ?? []).filter((reference) => reference.provider === 'volcengine');
     const isSeedance25 = isVolcengineSeedance25Model(modelName);
     const capability = getVolcengineSeedanceCapability(modelName);
+    if (assetReferences.length > 0 && !capability) {
+      throw new Error('火山方舟虚拟人像库素材仅支持 Seedance 2.0 和 Seedance 2.5 模型');
+    }
+    const projectName = providerConfig?.assetLibrary?.projectName?.trim() || 'default';
+    const invalidProjectReference = assetReferences.find((reference) => reference.projectName !== projectName);
+    if (invalidProjectReference) {
+      throw new Error(`方舟素材“${invalidProjectReference.assetId || '未知素材'}”属于项目 ${invalidProjectReference.projectName || '未知'}，当前连接项目为 ${projectName}`);
+    }
+    if (assetReferences.length > 0) {
+      const library = providerConfig?.assetLibrary;
+      if (!library?.enabled) throw new Error('请先在火山方舟编辑连接中启用虚拟人像库');
+      const secretName = (value: string | undefined, fallback: string) => value?.startsWith('secret:') ? value.slice(7) : value || fallback;
+      const [accessKeyId, secretAccessKey] = await Promise.all([
+        readAppSecret(secretName(library.accessKeyIdRef, 'provider/volcengine/asset-library/access-key')),
+        readAppSecret(secretName(library.secretAccessKeyRef, 'provider/volcengine/asset-library/secret-key')),
+      ]);
+      if (!accessKeyId || !secretAccessKey) throw new Error('请先保存虚拟人像库 AK/SK');
+      const assetOptions = { accessKeyId, secretAccessKey, projectName, region: library.region || 'cn-beijing', baseUrl: library.apiBaseUrl, signal };
+      for (const reference of assetReferences) {
+        if (!reference.assetId) throw new Error('方舟虚拟人像素材缺少 Asset ID，请重新选择');
+        const detail = await getAsset(assetOptions, reference.assetId);
+        if (detail.status !== 'Active') throw new Error(`方舟素材“${detail.name || reference.assetId}”当前状态为 ${detail.status}，仅 Active 素材可用于生成`);
+      }
+    }
     if (capability) {
       assertVideoReferenceLimits(referenceInput, capability, '火山方舟当前视频模型');
     }
@@ -631,7 +758,7 @@ export async function generateVideo(
     }
     const resolvedPrompt = referenceInput.prompt;
     const requestReferences = (referenceInput.references ?? [])
-      .filter((reference) => isSeedance25 || reference.kind === 'image');
+      .filter((reference) => isSeedance25 || reference.kind !== 'video');
     if (!resolvedPrompt.trim() && requestReferences.length === 0) {
       throw new Error('提示词不能为空');
     }
@@ -640,6 +767,12 @@ export async function generateVideo(
       ...resolveVideoNodeReferences(params.nodeId),
     ]);
     const remoteReferences = await mapSequentially(requestReferences, async (reference) => {
+      if (reference.provider === 'volcengine') {
+        if (!reference.assetId || reference.url !== `asset://${reference.assetId}`) {
+          throw new Error('方舟虚拟人像素材引用无效，请从素材库重新选择');
+        }
+        return reference;
+      }
       const sourceUrl = getMediaReferenceUrl(reference);
       const url = reference.kind === 'image'
         ? (await resolveImageUrlArray([sourceUrl], 'volcengine', signal))[0]
@@ -660,23 +793,38 @@ export async function generateVideo(
       preserveFrameRoles,
       params,
       signal,
+      beforeSubmit,
     );
   }
 
   // ── 通用模型视频生成 ──
   if (provider === 'general') {
-    const gm = resolveGeneralModel(model);
+    let gm = resolveGeneralModel(model);
     if (!gm) throw new Error('未找到该通用模型配置\n请在「设置 → API Key」中检查');
     const connection = resolveGeneralModelConnection(model);
     if (!connection) throw new Error(`通用模型 "${gm.name}" 的连接配置不存在`);
     if (!connection.baseUrl) throw new Error(`通用模型 "${gm.name}" 未配置接口地址`);
-    const videoCapability = gm.videoCapability
+    const catalogId = connection.definition?.id ?? resolveProviderCatalogId(connection.providerConfigId, connection.provider);
+    if (catalogId === 'minimax') gm = { ...gm, executionProfile: resolveMinimaxExecutionProfile(gm.modelId, gm.executionProfile) };
+    const usesMinimaxProtocol = catalogId === 'minimax' && usesMinimaxModelProtocol(gm.modelId, gm.executionProfile);
+    if (usesMinimaxProtocol) resolveMinimaxBaseUrl(connection.baseUrl);
+    const isToapis = catalogId === 'toapis';
+    const isLibapi = catalogId === 'libapi';
+    const usesRelayonProtocol = catalogId === 'relayonapi' && usesRelayonModelProtocol(gm.modelId, gm.executionProfile);
+    const usesAigcsiProtocol = catalogId === 'aigc-si' && usesAigcsiModelProtocol(gm.modelId, gm.executionProfile);
+    const policy = getProviderPolicy(catalogId);
+    const publicUrlProvider = policy.upload || (usesRelayonProtocol && policy.referenceTransport === 'public-url')
+      ? connection.providerConfigId : undefined;
+    const usesLibapiProtocol = isLibapi && usesLibapiModelProtocol(gm.modelId, gm.executionProfile);
+    const configuredVideoCapability = gm.videoCapability
       ?? getModelProtocolPresetVideoCapability(gm.executionProfile);
+    const videoCapability = catalogId === 'sora2u'
+      ? withSora2uReferenceLimits(gm.modelId, configuredVideoCapability) : configuredVideoCapability;
     const referenceInput = await resolveVideoReferenceInput(
       rawPrompt,
       params.nodeId,
       params.referenceMedia ?? [],
-      { preserveDeclaredRoles: true },
+      { preserveDeclaredRoles: true, sortKeyframes: usesLibapiProtocol, provider },
     );
     const canonicalParams = {
       ...params,
@@ -685,10 +833,31 @@ export async function generateVideo(
     };
     const originalReferences = referenceInput.references ?? referencesFromLegacyInput(referenceInput);
     // 所有能力和组合错误都必须在素材上传或付费提交前失败。
-    resolveCanonicalVideoRequest(canonicalParams, {
+    const preflight = resolveCanonicalVideoRequest(canonicalParams, {
       references: originalReferences,
       capability: videoCapability,
     });
+    if (isToapis) assertToapisVideoInput(preflight);
+    if (usesLibapiProtocol) assertLibapiVideoInput(preflight);
+    if (usesAigcsiProtocol) aigcsiVideoVariables(buildCanonicalVideoProtocolVariables(preflight));
+    if (usesRelayonProtocol) {
+      // 先检查素材角色与组合，避免上传完成后才发现内置合同接不住首尾帧。
+      relayonVideoVariables(gm.modelId, buildCanonicalVideoProtocolVariables(preflight));
+    }
+    if (usesMinimaxProtocol) {
+      minimaxVideoVariables(preflight, buildCanonicalVideoProtocolVariables(preflight));
+    }
+    if (policy.upload === 'minimax') {
+      if (originalReferences.some((reference) => /^mm_file:/i.test(reference.url))) {
+        throw new Error('MiniMax 私有文件引用只用于当前连接的上传结果，请重新引用本地素材后生成');
+      }
+      if (originalReferences.some((reference) => isRemoteMediaUrl(getMediaReferenceUrl(reference))
+        && !/^https:\/\//i.test(getMediaReferenceUrl(reference)))) {
+        throw new Error('MiniMax 公网参考素材必须使用 HTTPS 地址，或重新导入本地素材直传官方');
+      }
+      // 私有文件 ID 无法由浏览器探测；在官方上传之前校验原素材，后续只替换传输地址。
+      await assertVideoInputConstraints(referenceInput, videoCapability, gm.name, { signal });
+    }
     if (resolveModelExecutionProfile(gm.executionProfile)) {
       const dataUrlBudget = createMediaDataUrlBudget('本次视频模型参考媒体');
       const remoteImageUrls = await resolveImageUrlsSequentially(
@@ -697,16 +866,19 @@ export async function generateVideo(
         signal,
       );
       const videoUrls = await resolveGeneralProtocolMediaUrls(
-        originalReferences, 'video', dataUrlBudget, signal,
+        originalReferences, 'video', dataUrlBudget, signal, publicUrlProvider,
       );
       const audioUrls = await resolveGeneralProtocolMediaUrls(
-        originalReferences, 'audio', dataUrlBudget, signal,
+        originalReferences, 'audio', dataUrlBudget, signal, publicUrlProvider,
       );
       const remoteReferences = replaceReferenceUrls(originalReferences, {
         image: remoteImageUrls,
         video: videoUrls,
         audio: audioUrls,
       });
+      if (usesRelayonProtocol && remoteReferences.some((reference) => !/^https:\/\//i.test(reference.url))) {
+        throw new Error('RelayOnAPI 视频 JSON 参考素材必须是可访问的 HTTPS 地址，请检查素材链接或公共上传结果');
+      }
       const canonicalRequest = resolveCanonicalVideoRequest(canonicalParams, {
         references: remoteReferences,
         capability: videoCapability,
@@ -720,27 +892,46 @@ export async function generateVideo(
         videoUrls: compatibility.videoUrls,
         audioUrls: compatibility.audioUrls,
       };
-      await assertVideoInputConstraints(
-        resolvedReferenceInput,
-        videoCapability,
-        gm.name,
-        { signal },
-      );
+      if (policy.upload !== 'minimax') {
+        await assertVideoInputConstraints(resolvedReferenceInput, videoCapability, gm.name, { signal });
+      }
+      if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
+      if (beforeSubmit) await beforeSubmit();
+      if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
       const urls = await runConfiguredModelProtocol({
         model: gm,
         category: 'video',
         nodeId: params.nodeId,
         signal,
-        variables: buildCanonicalVideoProtocolVariables(canonicalRequest),
+        variables: isToapis ? toapisVideoVariables(canonicalRequest, buildCanonicalVideoProtocolVariables(canonicalRequest))
+          : usesLibapiProtocol ? libapiVideoVariables(canonicalRequest, buildCanonicalVideoProtocolVariables(canonicalRequest))
+            : usesRelayonProtocol ? relayonVideoVariables(gm.modelId, buildCanonicalVideoProtocolVariables(canonicalRequest))
+              : usesAigcsiProtocol ? aigcsiVideoVariables(buildCanonicalVideoProtocolVariables(canonicalRequest))
+                : usesMinimaxProtocol ? minimaxVideoVariables(canonicalRequest, buildCanonicalVideoProtocolVariables(canonicalRequest))
+                : buildCanonicalVideoProtocolVariables(canonicalRequest),
       });
       const url = urls[0];
       if (!url) throw new Error('视频生成完成但未返回结果');
-      return { url };
+      return { url, ...(urls.taskReceipt ? { taskReceipt: urls.taskReceipt } : {}),
+        ...(urls.mediaDownloadAccess ? { mediaDownloadAccess: urls.mediaDownloadAccess } : {}) };
     }
-    throw new Error(
-      `视频模型“${gm.name}”未配置可执行的提交/轮询协议，请在自定义 API 设置中重新导入并确认接口文档。`
-      + '系统不会再猜测 /videos/generations 等通用视频端点。',
-    );
+    const connectionName = connection.provider.name.trim() || connection.providerConfigId;
+    const preset = gm.executionProfile?.preset;
+    const textPreset = preset === 'anthropic-chat'
+      ? 'Anthropic Messages'
+      : preset === 'gemini-chat' ? 'Google Gemini generateContent' : undefined;
+    const reason = textPreset
+      ? `“协议预设”误选为文本对话协议“${textPreset}”，不能用于视频生成。`
+      : '尚未配置“模型调用协议”；仅添加模型或填写参数能力不会生成调用协议。';
+    throw new Error([
+      textPreset ? '视频生成已拦截：调用协议类型不适用。' : '视频生成已拦截：模型调用协议未配置。',
+      `连接：${connectionName}`,
+      `模型：${gm.name}（模型 ID：${gm.modelId}）`,
+      `原因：${reason}`,
+      `修改位置：设置 → API Key → 编辑“${connectionName}” → 启用模型 → 此模型右侧“调用协议”（滑杆图标）。`,
+      '处理：选择“高级自定义 JSON”，按渠道文档配置提交请求和结果解析；异步接口还需配置任务 ID 与轮询。也可在“视频参数能力”中应用匹配渠道的模板。',
+      '最后点击“保存更改”，再重试生成。本次尚未提交视频生成请求。',
+    ].join('\n'));
   }
 
   // 无 workflowId 时暂不支持直接调用 API，提示配置
@@ -757,8 +948,14 @@ async function generateVolcengineVideo(
   preserveFrameRoles: boolean,
   params: AIVideoGenParams,
   externalSignal?: AbortSignal,
-): Promise<{ url: string }> {
+  beforeSubmit?: () => void | Promise<void>,
+): Promise<{ url: string; taskReceipt?: MediaTaskReceipt }> {
   const nodeId = params.nodeId;
+  let billingRun: Awaited<ReturnType<typeof createBillingRun>> = null;
+  let receipt: MediaTaskReceipt | undefined;
+  let requestSent = false;
+  let remoteFailed = false;
+  let remoteCancelled = false;
   const nodeSignal = nodeId ? registerNodePolling(nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
@@ -769,7 +966,7 @@ async function generateVolcengineVideo(
     if (nodeId) {
       const projectId = useAppStore.getState().currentProjectId;
       if (projectId) {
-        savePendingTask({
+        receipt = savePendingTask({
           nodeId,
           projectId,
           nodeType: 'ai-video',
@@ -789,9 +986,31 @@ async function generateVolcengineVideo(
       preserveFrameRoles,
       params,
     );
+    const durationSeconds = Number(requestBody.duration ?? -1);
+    const resolution = String(requestBody.resolution ?? '720p');
+    const ratio = String(requestBody.ratio ?? '16:9');
+    const hasInputVideo = references.some((item) => item.kind === 'video');
+    const quote = quoteVolcengineVideo({
+      modelId: modelName, durationSeconds, resolution, ratio,
+      fps: params.videoFps, inputVideoSeconds: hasInputVideo ? 1 : undefined,
+    });
+    billingRun = await createBillingRun({
+      nodeId, modelType: 'video', modelId: modelName, prompt,
+      details: {
+        referenceType: hasInputVideo ? 'video-reference'
+          : references.some((item) => item.role === 'first_frame' || item.role === 'last_frame') ? 'frame-reference'
+            : references.length ? 'multimodal-reference' : 'text-to-video',
+        referenceCount: references.length,
+        durationSeconds, resolution, ratio, fps: params.videoFps ?? null,
+      }, quote,
+    });
 
     // 提交任务
     const apiUrl = `${baseUrl}/contents/generations/tasks`;
+    if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
+    if (beforeSubmit) await beforeSubmit();
+    if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
+    requestSent = true;
     const submitResp = await corsSafeFetch(apiUrl, {
       method: 'POST',
       headers: {
@@ -803,6 +1022,7 @@ async function generateVolcengineVideo(
     });
 
     if (!submitResp.ok) {
+      remoteFailed = submitResp.status < 500 && ![408, 429].includes(submitResp.status);
       const errBody = await submitResp.text().catch(() => '');
       let errorMsg = `提交失败 (${submitResp.status})`;
       try {
@@ -822,46 +1042,50 @@ async function generateVolcengineVideo(
 
     // 回填 taskId
     if (nodeId) {
-      updatePendingTask(nodeId, { taskId, submitted: true });
+      receipt = updatePendingTask(nodeId, { taskId, submitted: true }, receipt?.taskId, receipt?.attemptId) ?? receipt;
     }
+    billingRun = await updateBillingRun(billingRun, { status: 'running', taskId });
 
     // 轮询
-    return await pollTask<Record<string, unknown>, { url: string }>({
-      fetchState: async () => {
-        const pollResp = await corsSafeFetch(`${baseUrl}/contents/generations/tasks/${taskId}`, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-          signal,
-        });
-        if (!pollResp.ok) throw new Error(`HTTP ${pollResp.status}`);
-        return (await pollResp.json()) as Record<string, unknown>;
+    const completed = await pollVolcengineVideoTask({
+      apiKey, baseUrl, taskId, signal, maxDuration: VIDEO_POLL_MAX_DURATION_MS,
+      onFailed: (status) => {
+        remoteFailed = true;
+        remoteCancelled = status === 'cancelled';
       },
-      isComplete: (raw) => {
-        const status = raw.status as string;
-        if (status === 'succeeded') {
-          const c = raw.content as Record<string, unknown> | undefined;
-          const videoUrl = c?.video_url as string | undefined;
-          if (videoUrl) return { url: videoUrl };
-          throw new Error('任务完成但未返回视频地址');
-        }
-        return null;
-      },
-      isFailed: (raw) => {
-        const status = raw.status as string;
-        if (status === 'failed' || status === 'cancelled') {
-          const err = raw.error as { message?: string } | undefined;
-          return `任务失败: ${err?.message || status}`;
-        }
-        return null;
-      },
-      interval: 3000,
-      signal,
     });
 
-  } finally {
-    if (nodeId) {
-      cleanupNodePolling(nodeId);
-      removePendingTask(nodeId);
+    const measured = completed.completionTokens === undefined ? null : quoteVolcengineVideo({
+      modelId: modelName, durationSeconds, resolution, ratio,
+      inputVideoSeconds: hasInputVideo ? 1 : undefined,
+      completionTokens: completed.completionTokens,
+    }).amountMicros;
+    billingRun = await updateBillingRun(billingRun, {
+      status: 'succeeded', finishedAt: Date.now(), calculatedMicros: measured,
+      amountConfidence: measured === null ? 'unknown' : 'usage',
+      inputJson: JSON.stringify({ ...JSON.parse(billingRun?.inputJson || '{}'), completionTokens: completed.completionTokens ?? null }),
+    });
+    if (receipt) receipt = updatePendingTask(receipt.nodeId, { mediaRecoveryState: 'delivery_pending' }, receipt.taskId, receipt.attemptId) ?? receipt;
+    return { url: completed.url, ...(receipt ? { taskReceipt: receipt } : {}) };
+
+  } catch (error) {
+    await updateBillingRun(billingRun, {
+      status: remoteCancelled ? 'cancelled' : remoteFailed || !requestSent ? 'failed' : 'unknown', finishedAt: Date.now(),
+      calculatedMicros: remoteFailed || !requestSent ? 0 : null,
+      amountConfidence: remoteFailed || !requestSent ? 'calculated' : 'unknown',
+      errorMessage: error instanceof Error ? error.message.slice(0, 500) : '视频请求失败',
+    });
+    if (receipt) {
+      if (remoteFailed || !requestSent) {
+        removePendingTask(receipt.nodeId, receipt.taskId, receipt.attemptId);
+      } else {
+        const paused = pauseMediaTask(receipt, error, receipt.taskId ? undefined : 'submit_unknown');
+        if (paused) throw paused;
+      }
     }
+    throw error;
+  } finally {
+    if (nodeId) cleanupNodePolling(nodeId, nodeSignal);
   }
 }
 
@@ -917,6 +1141,7 @@ export function buildVolcengineVideoRequestBody(
   params: VolcengineVideoRequestParams,
 ): Record<string, unknown> {
   const isSeedance25 = isVolcengineSeedance25Model(modelName);
+  const capability = getVolcengineSeedanceCapability(modelName);
   const hasFrame = preserveFrameRoles && references.some((reference) => (
     reference.kind === 'image'
     && (reference.role === 'first_frame' || reference.role === 'last_frame')
@@ -930,11 +1155,14 @@ export function buildVolcengineVideoRequestBody(
 
   const ratio = isSeedance25 && (hasFrame || hasReferenceVideo)
     ? 'adaptive'
-    : params.seedanceRatio || '16:9';
+    : params.seedanceRatio || capability?.defaultRatio || '16:9';
   const duration = isSeedance25 && hasReferenceVideo
-    ? -1
-    : params.seedanceDuration ?? 5;
-  const resolution = params.seedanceResolution || '720p';
+    ? capability?.automaticDurationValue ?? -1
+    : params.seedanceDuration
+      ?? capability?.defaultDuration
+      ?? capability?.automaticDurationValue
+      ?? 5;
+  const resolution = params.seedanceResolution || capability?.defaultResolution || '720p';
   const requestBody = mapVideoParameters('volcengine', modelName, {
     model: modelName,
     aspectRatio: ratio,

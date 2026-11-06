@@ -1,3 +1,6 @@
+/**
+ * mediaPreviewMemoryGuard — 回归测试：media preview memory guards。
+ */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -57,7 +60,7 @@ describe('media preview memory guards', () => {
 
   it('serializes composer imports and invalidates deferred editor work on close', () => {
     expect(useComposerSource).toContain('const enqueueImageOperation = useCallback');
-    expect(composerEditorSource).toContain("addImageLayer(imageUrl, '底图', (img) => {");
+    expect(composerEditorSource).toContain("addImageLayer(imageUrl, translate('底图'), (img) => {");
     expect(composerEditorSource).toContain('const enqueueImageImport = useCallback');
     expect(composerEditorSource).toContain('imageImportQueueRef.current');
     expect(composerEditorSource).toContain('cancelAnimationFrame(exportFrameRef.current)');
@@ -106,15 +109,15 @@ describe('media preview memory guards', () => {
   });
 
   it('moves video playback between one compact player and one fullscreen player', () => {
-    expect(videoNodeSource).toContain('{shouldMountPlayer ? (');
+    expect(videoNodeSource).toContain('active={shouldMountPlayer}');
     expect(videoNodeSource).toContain('compactPlaybackRestoreRef.current = {');
     expect(videoNodeSource).toContain('shouldPlay: fullscreenPlaybackRef.current.wasPlaying');
     expect(videoNodeSource).toContain('releaseVideoElement(fullscreenVideo);');
     expect(videoNodeSource).toContain('releaseCanvasVideo(video);');
-    expect(videoPreviewCacheSource).toMatch(/function releaseCanvasVideo[\s\S]*?removeAttribute\('src'\)[\s\S]*?video\.load\(\)/);
+    expect(videoPreviewCacheSource).toContain('releaseViewportVideoElement(video);');
     expect(videoNodeSource).toMatch(/const cleanup = \(\) => \{[\s\S]*?releaseVideoElement\(video\)/);
     expect(videoNodeSource).toMatch(
-      /className="fullscreen-overlay--image-preview"[\s\S]*?ref=\{setFullscreenVideoElement\}/,
+      /className="fullscreen-overlay--image-preview"[\s\S]*?mediaRef=\{setFullscreenVideoElement\}/,
     );
     expect(videoNodeSource).toMatch(
       /const setFullscreenVideoElement[\s\S]*?if \(!video\) return;[\s\S]*?fullscreenVideoRef\.current = video;/,

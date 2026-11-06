@@ -1,17 +1,20 @@
 /**
  * VideoNode 视频节点 — 在画布上渲染视频内容，支持上传本地视频、播放控制、连接其他节点
  */
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, memo, useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { Handle, Position } from '@xyflow/react';
 import { isRemoteMediaUrl } from '../../utils/mediaUrl';
 import { getCanvasNodeById } from '../../utils/canvasRenderProjection';
+import { videoNodeDimensionsForAspectRatio } from '../../utils/nodeBounds';
 import type { BaseNodeData } from '../../types';
 import NodeLabel from './shared/NodeLabel';
 import NodeError from './shared/NodeError';
 import GooeyBtn from './shared/GooeyBtn';
 import ResizeHandle from './shared/ResizeHandle';
-import VideoNodeControls from './shared/VideoNodeControls';
+import VideoPlayer from '../shared/VideoPlayer';
+import ViewportImage from '../shared/ViewportImage';
+import { acquireComfyMediaSource } from '../../services/comfyMediaSource';
 import VideoNodeToolbar, { type CaptureFramePosition } from './shared/VideoNodeToolbar';
 import NodeToolbarShell from './shared/NodeToolbarShell';
 import {
@@ -29,6 +32,7 @@ import { seekVideoTo } from '../../utils/videoSeek';
 import { downloadUrlAndSave, saveDataUrlToProjectData, buildNodeFileName } from '../../services/fileService';
 import { copyFile as copyFileToClipboard } from '../../services/clipboardService';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
+import { getPerformanceModeBudget } from '../../services/performanceModeRuntime';
 import { useCanvasNodeLodProtection } from '../../hooks/useCanvasNodeLod';
 import {
   cancelCanvasDerivation,
@@ -51,6 +55,12 @@ import {
 } from '../../services/videoEditorAiTransitionService';
 import { useT } from '../../i18n';
 import NodeGenerationProgress from './shared/NodeGenerationProgress';
+import VideoTaskStatus from './shared/VideoTaskStatus';
+import { COMFY_REFMOD_MIME } from '../../utils/comfyRefmod';
+import { readComfyRefmodDragPayload } from '../../utils/comfyRefmodDrag';
+import { appendRefmodsToVideoNode } from '../../services/comfyRefmodNodeService';
+import { useComfyRefmodBindingRequest } from '../../hooks/useComfyRefmodBindingRequest';
+const ComfyRefmodBindingDialog = lazy(() => import('./shared/ComfyRefmodBindingDialog'));
 
 const DEFAULT_VIDEO_NODE_WIDTH = 280;
 const DEFAULT_VIDEO_NODE_HEIGHT = 158;
@@ -84,6 +94,24 @@ function computeVideoNodeDimensions(videoWidth: number, videoHeight: number): { 
     nodeWidth: Math.round(videoWidth * scale),
     nodeHeight: Math.round(videoHeight * scale),
   };
+}
+
+function fitVideoNodeToShortSide(
+  videoWidth: number,
+  videoHeight: number,
+  nodeWidth?: number,
+  nodeHeight?: number,
+): { nodeWidth: number; nodeHeight: number } {
+  const fallback = computeVideoNodeDimensions(videoWidth, videoHeight);
+  if (videoWidth <= 0 || videoHeight <= 0) return fallback;
+  if (videoWidth <= videoHeight) {
+    const width = Math.max(VIDEO_NODE_MIN_WIDTH,
+      nodeWidth && Number.isFinite(nodeWidth) && nodeWidth > 0 ? nodeWidth : fallback.nodeWidth);
+    return { nodeWidth: width, nodeHeight: Math.round(width * videoHeight / videoWidth) };
+  }
+  const height = Math.max(VIDEO_NODE_MIN_HEIGHT, Math.ceil(VIDEO_NODE_MIN_WIDTH * videoHeight / videoWidth),
+    nodeHeight && Number.isFinite(nodeHeight) && nodeHeight > 0 ? nodeHeight : fallback.nodeHeight);
+  return { nodeWidth: Math.round(height * videoWidth / videoHeight), nodeHeight: height };
 }
 
 async function captureVideoFrame(
@@ -157,66 +185,70 @@ function restoreVideoTime(video: HTMLVideoElement, time: number): void {
   if (video.readyState > 0) video.currentTime = time;
 }
 
-function captureFrameFromVideoUrl(url: string, currentTime: number): Promise<{ dataUrl: string; width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    let settled = false;
-    let captureStarted = false;
-    let timer = 0;
-    const cleanup = () => {
-      window.clearTimeout(timer);
-      releaseVideoElement(video);
-    };
-    const fail = (error: unknown) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    const done = () => {
-      if (settled || captureStarted) return;
-      captureStarted = true;
-      void captureVideoFrame(video).then(
-        (frame) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(frame);
-        },
-        (error) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(error);
-        },
-      );
-    };
+async function captureFrameFromVideoUrl(url: string, currentTime: number): Promise<{ dataUrl: string; width: number; height: number }> {
+  const lease = await acquireComfyMediaSource(url, AbortSignal.timeout(15_000));
+  try {
+    return await new Promise<{ dataUrl: string; width: number; height: number }>((resolve, reject) => {
+      const video = document.createElement('video');
+      let settled = false;
+      let captureStarted = false;
+      let timer = 0;
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        releaseVideoElement(video);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const done = () => {
+        if (settled || captureStarted) return;
+        captureStarted = true;
+        void captureVideoFrame(video).then(
+          (frame) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(frame);
+          },
+          (error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+          },
+        );
+      };
 
-    timer = window.setTimeout(() => fail(new Error('本地视频加载超时')), 15000);
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = 'auto';
-    video.addEventListener('error', () => fail(new Error('本地视频加载失败')), { once: true });
-    video.addEventListener('loadedmetadata', () => {
-      const duration = Number.isFinite(video.duration) ? video.duration : 0;
-      const targetTime = duration > 0
-        ? Math.min(Math.max(currentTime, 0), Math.max(duration - 0.01, 0))
-        : 0;
+      timer = window.setTimeout(() => fail(new Error('本地视频加载超时')), 15000);
+      video.crossOrigin = 'anonymous';
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      video.addEventListener('error', () => fail(new Error('本地视频加载失败')), { once: true });
+      video.addEventListener('loadedmetadata', () => {
+        const duration = Number.isFinite(video.duration) ? video.duration : 0;
+        const targetTime = duration > 0
+          ? Math.min(Math.max(currentTime, 0), Math.max(duration - 0.01, 0))
+          : 0;
 
-      if (Math.abs(video.currentTime - targetTime) < 0.01) {
-        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-          done();
-        } else {
-          video.addEventListener('loadeddata', done, { once: true });
+        if (Math.abs(video.currentTime - targetTime) < 0.01) {
+          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+            done();
+          } else {
+            video.addEventListener('loadeddata', done, { once: true });
+          }
+          return;
         }
-        return;
-      }
 
-      video.addEventListener('seeked', done, { once: true });
-      video.currentTime = targetTime;
-    }, { once: true });
-    video.src = url;
-  });
+        video.addEventListener('seeked', done, { once: true });
+        video.currentTime = targetTime;
+      }, { once: true });
+      video.src = lease.src;
+    });
+  } finally { lease.release(); }
 }
 
 function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
@@ -245,52 +277,101 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const openNodeDialog = useAppStore((s) => s.openNodeDialog);
   const isSingleSelection = useAppStore((s) => s.selectedNodeIds.length <= 1);
-  const isSoleSelectedNode = useAppStore((s) => s.selectedNodeIds.length === 1 && s.selectedNodeIds[0] === id);
   const projectId = useAppStore((s) => s.currentProjectId);
+  const [refmodDragOver, setRefmodDragOver] = useState(false);
+  const refmodBinding = useComfyRefmodBindingRequest(projectId);
+  const handleRefmodDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(COMFY_REFMOD_MIME)) return;
+    event.preventDefault(); event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    setRefmodDragOver(true);
+  }, []);
+  const handleRefmodDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(COMFY_REFMOD_MIME)) return;
+    event.preventDefault(); event.stopPropagation(); setRefmodDragOver(false);
+    const payload = event.dataTransfer.getData(COMFY_REFMOD_MIME);
+    void (async () => {
+      try {
+        const references = readComfyRefmodDragPayload(payload);
+        await appendRefmodsToVideoNode(id, references, projectId, refmodBinding.requestMapping);
+        useAppStore.getState().showToast('参考包已添加，可在 @ → ComfyUI → ComfyUI 角色中查看手工绑定。', 'success');
+      } catch (error) {
+        useAppStore.getState().showToast(error instanceof Error ? error.message : '添加参考包失败', 'error');
+      }
+    })();
+  }, [id, projectId, refmodBinding.requestMapping]);
   const isSource = data.role === 'source';
   const fallbackDimensions = computeVideoNodeDimensions(data.videoWidth ?? 0, data.videoHeight ?? 0);
-  const nodeWidth = data.nodeWidth ?? fallbackDimensions.nodeWidth;
-  const nodeHeight = data.nodeHeight ?? fallbackDimensions.nodeHeight;
+  // 旧项目可能保存了横屏框尺寸；空节点展示跟随当前比例，成片继续使用真实媒体尺寸。
+  const emptyDimensions = !isSource && !data.videoUrl && !data.thumbnailUrl
+    ? videoNodeDimensionsForAspectRatio(data.seedanceRatio, data.nodeWidth ?? fallbackDimensions.nodeWidth)
+    : null;
+  const nodeWidth = emptyDimensions?.nodeWidth ?? data.nodeWidth ?? fallbackDimensions.nodeWidth;
+  const nodeHeight = emptyDimensions?.nodeHeight ?? data.nodeHeight ?? fallbackDimensions.nodeHeight;
   const source = data.videoUrl;
   if (generatedCover && (generatedCover.source !== source || generatedCover.projectId !== projectId)) {
     setGeneratedCover(null);
   }
   const shouldMountPlayer = !!source && !isFullscreen
-    && ((!!selected && isSoleSelectedNode) || activatedSource === source || playingSource === source);
+    && (activatedSource === source || playingSource === source);
   // 既有生成结果会把视频本身写入 thumbnailUrl，不能把它当作图片封面。
   const suppliedCover = typeof data.thumbnailUrl === 'string'
     && data.thumbnailUrl !== source && data.thumbnailUrl !== data.sourceUrl
     && data.thumbnailUrl !== failedCover ? data.thumbnailUrl : null;
 
   useEffect(() => {
-    if (!source || suppliedCover || isFullscreen) return;
+    if (!source || suppliedCover || isFullscreen || shouldMountPlayer) return;
     const controller = new AbortController();
-    const derivation = registerCanvasDerivation(useAppStore.getState(), id);
     let current = true;
-    void acquireCanvasVideoPoster(source, controller.signal).then((poster) => {
-      if (!current) { poster?.release(); return; }
-      if (poster) {
-        heldPosters.current.add(poster.release);
-        setGeneratedCover({ ...poster, source, projectId });
-        const state = useAppStore.getState();
-        const liveData = getCanvasNodeById(state.nodes, id)?.data;
-        if (derivation && isCanvasDerivationFresh(derivation, state) && liveData?.videoUrl === source
-          && (liveData.videoWidth !== poster.videoWidth || liveData.videoHeight !== poster.videoHeight
-            || liveData.nodeWidth == null || liveData.nodeHeight == null)) {
-          state.updateNodeDataTransient(id, {
-            videoWidth: poster.videoWidth, videoHeight: poster.videoHeight,
-            ...computeVideoNodeDimensions(poster.videoWidth, poster.videoHeight),
-          });
+    let retries = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingDerivation: ReturnType<typeof registerCanvasDerivation> = null;
+    const requestPoster = () => {
+      if (!current || controller.signal.aborted) return;
+      const derivation = registerCanvasDerivation(useAppStore.getState(), id);
+      pendingDerivation = derivation;
+      void acquireCanvasVideoPoster(source, controller.signal).then((poster) => {
+        if (!current) { poster?.release(); return; }
+        if (poster) {
+          heldPosters.current.add(poster.release);
+          setGeneratedCover({ ...poster, source, projectId });
+          const state = useAppStore.getState();
+          const liveData = getCanvasNodeById(state.nodes, id)?.data;
+          // 封面读取期间可能又缩放了节点；按最新尺寸重建派生守卫，而不是丢掉这次比例校正。
+          const writeDerivation = derivation && isCanvasDerivationFresh(derivation, state)
+            ? derivation : state.currentProjectId === projectId && liveData?.videoUrl === source
+              ? registerCanvasDerivation(state, id) : null;
+          const fittedDimensions = liveData && fitVideoNodeToShortSide(
+            poster.videoWidth, poster.videoHeight, liveData.nodeWidth, liveData.nodeHeight,
+          );
+          if (writeDerivation && isCanvasDerivationFresh(writeDerivation, state) && liveData?.videoUrl === source
+            && (liveData.videoWidth !== poster.videoWidth || liveData.videoHeight !== poster.videoHeight
+              || liveData.nodeWidth !== fittedDimensions?.nodeWidth
+              || liveData.nodeHeight !== fittedDimensions?.nodeHeight)) {
+            state.updateNodeDataTransient(id, {
+              videoWidth: poster.videoWidth, videoHeight: poster.videoHeight,
+              ...fittedDimensions,
+            });
+          }
+          if (writeDerivation && writeDerivation !== derivation) completeCanvasDerivation(writeDerivation);
         }
-      }
-      if (derivation) completeCanvasDerivation(derivation);
-    });
+        if (derivation) completeCanvasDerivation(derivation);
+        pendingDerivation = null;
+        // 等失败缓存过期再重试，最多补两次；保持共享队列的单解码器和失败冷却。
+        if (!poster && retries < 2) {
+          retries++;
+          retryTimer = setTimeout(requestPoster, getPerformanceModeBudget().previewIdleMs + 50);
+        }
+      });
+    };
+    requestPoster();
     return () => {
       current = false;
+      clearTimeout(retryTimer);
       controller.abort();
-      if (derivation) cancelCanvasDerivation(derivation);
+      if (pendingDerivation) cancelCanvasDerivation(pendingDerivation);
     };
-  }, [source, suppliedCover, projectId, isFullscreen, id]);
+  }, [source, suppliedCover, projectId, isFullscreen, shouldMountPlayer, id]);
 
   useEffect(() => () => {
     if (generatedCover) {
@@ -314,10 +395,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     const video = shouldMountPlayer ? videoRef.current : null;
     const operations = pendingVideoOperations.current;
     // StrictMode 的额外 cleanup 会清除 src；setup 必须恢复同一 DOM 的当前来源。
-    if (video && source && video.getAttribute('src') !== source) {
-      video.src = source;
-      video.load();
-    }
+    // VideoPlayer 独占显示源；这里仅保留原来源对应的播放状态。
     const previousPlayback = compactPlaybackRestoreRef.current;
     if (video && previousPlayback && previousPlayback.source === source) {
       if (typeof previousPlayback.volume === 'number') video.volume = previousPlayback.volume;
@@ -334,6 +412,17 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     };
   }, [shouldMountPlayer, source, projectId]);
 
+  const setCompactVideoElement = useCallback((video: HTMLVideoElement | null) => {
+    const previous = videoRef.current;
+    if (!video && previous && source && previous.readyState > 0) {
+      compactPlaybackRestoreRef.current = {
+        source, currentTime: previous.ended ? 0 : previous.currentTime, shouldPlay: false,
+        volume: previous.volume, muted: previous.muted,
+      };
+    }
+    videoRef.current = video;
+  }, [source]);
+
   const activateCompactVideo = useCallback(() => {
     if (!source || isFullscreen) return null;
     // 点击回调内同步挂载，随后的 play() 仍属于用户手势，兼容 WebKit。
@@ -341,10 +430,19 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     return videoRef.current;
   }, [source, isFullscreen]);
 
-  const requestPlayback = useCallback(() => {
-    const video = activateCompactVideo();
-    if (video) void video.play().catch(() => setActivatedSource(null));
-  }, [activateCompactVideo]);
+  const handleVolumeChange = useCallback((volume: number, muted: boolean) => {
+    if (!source) return;
+    const previous = compactPlaybackRestoreRef.current;
+    const saved = previous?.source === source ? previous : null;
+    const video = videoRef.current;
+    compactPlaybackRestoreRef.current = {
+      source,
+      currentTime: video && video.readyState > 0 ? video.currentTime : saved?.currentTime ?? 0,
+      shouldPlay: saved?.shouldPlay ?? false,
+      volume,
+      muted,
+    };
+  }, [source]);
 
   const handleResize = useCallback(
     (newWidth: number, newHeight: number) => {
@@ -357,14 +455,21 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     const video = event.currentTarget;
     const videoWidth = video.videoWidth;
     const videoHeight = video.videoHeight;
+    const state = useAppStore.getState();
+    const liveData = getCanvasNodeById(state.nodes, id)?.data;
+    if (state.currentProjectId !== projectId || !liveData || liveData.videoUrl !== data.videoUrl) return;
     if (videoWidth > 0 && videoHeight > 0) {
-      const mediaDimensionsChanged = data.videoWidth !== videoWidth || data.videoHeight !== videoHeight;
-      const nodeDimensionsMissing = data.nodeWidth == null || data.nodeHeight == null;
-      if (mediaDimensionsChanged || nodeDimensionsMissing) {
+      const fittedDimensions = fitVideoNodeToShortSide(
+        videoWidth, videoHeight, liveData.nodeWidth, liveData.nodeHeight,
+      );
+      const mediaDimensionsChanged = liveData.videoWidth !== videoWidth || liveData.videoHeight !== videoHeight;
+      const nodeDimensionsChanged = liveData.nodeWidth !== fittedDimensions.nodeWidth
+        || liveData.nodeHeight !== fittedDimensions.nodeHeight;
+      if (mediaDimensionsChanged || nodeDimensionsChanged) {
         updateNodeDataTransient(id, {
           videoWidth,
           videoHeight,
-          ...computeVideoNodeDimensions(videoWidth, videoHeight),
+          ...fittedDimensions,
         });
       }
     }
@@ -383,12 +488,9 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       return;
     }
   }, [
-    data.nodeHeight,
-    data.nodeWidth,
-    data.videoHeight,
     data.videoUrl,
-    data.videoWidth,
     id,
+    projectId,
     updateNodeDataTransient,
   ]);
 
@@ -770,6 +872,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     } finally {
       pendingVideoOperations.current.delete(controller);
       cancelCanvasDerivation(derivation);
+      if (pendingVideoOperations.current.size === 0 && videoRef.current === video && video.paused) setActivatedSource(null);
     }
   }, [activateCompactVideo, data.sourceUrl, data.videoUrl, displayLabel, id, nodeWidth, t]);
 
@@ -827,6 +930,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
       pendingVideoOperations.current.delete(controller);
       completeCanvasDerivation(derivation);
       setIsReversingPrompt(false);
+      if (pendingVideoOperations.current.size === 0 && videoRef.current === video && video.paused) setActivatedSource(null);
     }
   }, [activateCompactVideo, data.videoUrl, id, t]);
 
@@ -834,7 +938,13 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     || isUploading || isReversingPrompt || !!failedCover);
 
   return (
-    <div className="node-wrapper relative" style={{ width: nodeWidth }}>
+    <div className={`node-wrapper relative ${refmodDragOver ? 'rounded-xl ring-2 ring-brand' : ''}`} style={{ width: nodeWidth }}
+      onDragEnter={handleRefmodDragOver} onDragOver={handleRefmodDragOver} onDrop={handleRefmodDrop}
+      onDragLeave={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes(COMFY_REFMOD_MIME)) return;
+        event.stopPropagation();
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setRefmodDragOver(false);
+      }}>
       <NodeLabel
         kind="ai-video"
         label={displayLabel}
@@ -860,39 +970,36 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         style={{ height: nodeHeight }}
       >
         <div className={`node-preview compact${data.videoUrl || data.thumbnailUrl ? ' has-media' : ''}`}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)
+              && (!videoRef.current || videoRef.current.paused) && pendingVideoOperations.current.size === 0) setActivatedSource(null);
+          }}
           onDoubleClick={(event) => { event.stopPropagation(); handleOpenFullscreen(); }}>
-          {shouldMountPlayer ? (
-            <video
-              ref={videoRef}
+          {data.videoUrl ? (
+            <VideoPlayer
+              key={`${projectId}:${data.videoUrl}`}
+              mediaRef={setCompactVideoElement}
               src={data.videoUrl}
-              className="video-preview-player compact"
+              name={displayLabel}
+              compact
+              active={shouldMountPlayer}
+              poster={initialCoverUrl ?? undefined}
+              durationHint={generatedCover && generatedCover.source === source ? generatedCover.duration
+                : typeof data.videoDuration === 'number' ? data.videoDuration : 0}
               crossOrigin="anonymous"
-              playsInline
-              preload="auto"
               onLoadedMetadata={handleLoadedMetadata}
               onPlay={() => { dismissInitialCover(); setPlayingSource(source ?? null); }}
               onPause={() => { setPlayingSource(null); setActivatedSource(null); }}
+              onVolumeChange={handleVolumeChange}
               onEnded={() => { setPlayingSource(null); setActivatedSource(null); }}
-              onDoubleClick={(e) => { e.stopPropagation(); handleOpenFullscreen(); }}
-              data-source-url={data.sourceUrl}
+              onPosterError={() => { if (suppliedCover) setFailedCover(suppliedCover); }}
+              onRequestPlayback={activateCompactVideo}
+              onError={dismissInitialCover}
+              onRequestSeek={() => { dismissInitialCover(); activateCompactVideo(); }}
+              onFullscreen={handleOpenFullscreen}
             />
-          ) : data.videoUrl && initialCoverUrl ? (
-            <img
-              src={initialCoverUrl}
-              alt=""
-              className="video-node-poster"
-              draggable={false}
-              onError={() => { if (suppliedCover) setFailedCover(suppliedCover); }}
-            />
-          ) : data.videoUrl ? (
-            <div className="node-preview-placeholder" aria-hidden="true">
-              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-                <polygon points="23 7 16 12 23 17 23 7" />
-                <rect x="1" y="5" width="15" height="14" rx="2" />
-              </svg>
-            </div>
           ) : data.thumbnailUrl ? (
-            <img
+            <ViewportImage
               src={data.thumbnailUrl}
               alt="Video thumbnail"
               className="video-node-poster"
@@ -904,7 +1011,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               <span>{t('上传中...')}</span>
             </div>
           ) : data.status === 'loading' ? (
-            <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成视频中...')} />
+            <NodeGenerationProgress nodeId={id} fallbackLabel={t(data.mediaTaskStage === 'saving' ? '保存中' : '生成视频中...')} />
           ) : (
             isSource ? (
               <button
@@ -933,23 +1040,13 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
             )
           )}
           {(data.videoUrl || data.thumbnailUrl) && data.status === 'loading' && (
-            <NodeGenerationProgress nodeId={id} fallbackLabel={t('生成视频中...')} overlay />
+            <NodeGenerationProgress nodeId={id} fallbackLabel={t(data.mediaTaskStage === 'saving' ? '保存中' : '生成视频中...')} overlay />
           )}
           {shouldMountPlayer && showInitialCover && (
-            <img src={initialCoverUrl} alt="" className="video-node-initial-cover" draggable={false}
+            <ViewportImage src={initialCoverUrl} alt="" className="video-node-initial-cover" draggable={false}
               onError={() => { if (suppliedCover) setFailedCover(suppliedCover); }} />
           )}
-          {data.videoUrl && !isFullscreen && (
-            <VideoNodeControls
-              videoRef={videoRef}
-              source={data.videoUrl}
-              onInteract={dismissInitialCover}
-              active={shouldMountPlayer}
-              durationHint={generatedCover && generatedCover.source === source ? generatedCover.duration
-                : typeof data.videoDuration === 'number' ? data.videoDuration : 0}
-              onRequestPlayback={requestPlayback}
-            />
-          )}
+          {(data.mediaTaskState || data.videoTaskState === 'paused') && data.status !== 'loading' && <VideoTaskStatus nodeId={id} overlay />}
         </div>
         {data.error && <NodeError nodeId={id} message={data.error} />}
         <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-video" >
@@ -972,6 +1069,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         onResize={handleResize}
       />
 
+      {refmodBinding.request && <Suspense fallback={null}><ComfyRefmodBindingDialog key={refmodBinding.requestId} request={refmodBinding.request} onApply={refmodBinding.apply} onClose={refmodBinding.close} /></Suspense>}
       {/* 全屏预览 */}
       <FullscreenOverlay
         isOpen={isFullscreen}
@@ -980,25 +1078,29 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         title={(data.label as string) || t('视频预览')}
         className="fullscreen-overlay--image-preview"
       >
-        {isFullscreen && (data.videoUrl ? (
-          <video
-            ref={setFullscreenVideoElement}
-            src={data.videoUrl}
-            className="fullscreen-video-view"
-            controls
-            autoPlay
-            playsInline
-            crossOrigin="anonymous"
-            data-source-url={data.sourceUrl}
-            onLoadedMetadata={handleFullscreenLoadedMetadata}
-          />
-        ) : data.thumbnailUrl ? (
-          <img
-            src={data.thumbnailUrl}
-            alt="Video thumbnail"
-            className="fullscreen-img-view"
-          />
-        ) : null)}
+        <div data-tauri-drag-region className="flex h-full w-full items-center justify-center bg-canvas-bg">
+          {isFullscreen && (data.videoUrl ? (
+            <div className="h-[92vh] w-[92vw] min-h-0 min-w-0 rounded bg-canvas-bg">
+              <VideoPlayer
+                mediaRef={setFullscreenVideoElement}
+                src={data.videoUrl}
+                poster={initialCoverUrl ?? undefined}
+                name={displayLabel}
+                className="pt-3"
+                autoPlay
+                crossOrigin="anonymous"
+                onLoadedMetadata={handleFullscreenLoadedMetadata}
+                onEscape={handleCloseFullscreen}
+              />
+            </div>
+          ) : data.thumbnailUrl ? (
+            <ViewportImage
+              src={data.thumbnailUrl}
+              alt="Video thumbnail"
+              className="fullscreen-img-view"
+            />
+          ) : null)}
+        </div>
       </FullscreenOverlay>
     </div>
   );

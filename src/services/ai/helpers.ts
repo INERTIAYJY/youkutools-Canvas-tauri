@@ -3,6 +3,7 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import type { ApiProviderConfig, GeneralModelConfig } from '../../types';
+import { getProviderDefinition, type ProviderDefinition } from './providerCatalogService';
 
 /** 去掉 model value 中的 provider/ 前缀，得到实际的模型名 */
 export function extractModelName(modelValue: string, provider: string): string {
@@ -39,7 +40,7 @@ export function formatImageSizeForModel(
  * 各模型支持的画质范围不同，未支持的分辨率自动降级到最接近的有效值
  */
 const SEEDREAM_SIZE_SUPPORT: Record<string, string[]> = {
-  'doubao-seedream-5-0-pro': ['1K', '2K'],
+  'doubao-seedream-5-0-pro': ['1K', '1.5K', '2K'],
   'doubao-seedream-5-0-lite': ['2K', '3K', '4K'],
   'doubao-seedream-4-5': ['2K', '4K'],
   'doubao-seedream-4-0': ['1K', '2K', '4K'],
@@ -53,7 +54,7 @@ export function normalizeSeedreamSize(modelName: string, requestedSize: string):
 
   // 将 UI 画质字符串转换为像素短边用于比较
   const numeric = (s: string) => {
-    const map: Record<string, number> = { '720p': 720, '1K': 1024, '2K': 2048, '3K': 3072, '4K': 4096 };
+    const map: Record<string, number> = { '720p': 720, '1K': 1024, '1.5K': 1536, '2K': 2048, '3K': 3072, '4K': 4096 };
     return map[s] ?? 2048;
   };
   const target = numeric(requestedSize);
@@ -81,11 +82,12 @@ export interface ResolvedGeneralModelConnection {
   model: GeneralModelConfig;
   providerConfigId: string;
   provider: ApiProviderConfig;
+  definition?: ProviderDefinition;
   apiKey: string;
   baseUrl: string;
 }
 
-/** 通过模型引用解析当前连接，密钥和地址始终以 config.providers 为准。 */
+/** 通过模型引用解析当前连接；地址缺省时沿用内置厂商定义，密钥只取该连接。 */
 export function resolveGeneralModelConnection(
   modelValue: string,
 ): ResolvedGeneralModelConnection | undefined {
@@ -95,12 +97,14 @@ export function resolveGeneralModelConnection(
   if (!model?.providerConfigId) return undefined;
   const provider = config.providers[model.providerConfigId];
   if (!provider) return undefined;
+  const definition = getProviderDefinition(model.providerConfigId, provider);
   return {
     model,
     providerConfigId: model.providerConfigId,
     provider,
+    definition,
     apiKey: provider.apiKey || '',
-    baseUrl: provider.baseUrl?.trim() || '',
+    baseUrl: provider.baseUrl?.trim() || definition?.defaultBaseUrl || '',
   };
 }
 

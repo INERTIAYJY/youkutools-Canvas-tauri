@@ -2,25 +2,26 @@
  * 应用主侧栏，集中承载节点创建、项目入口、功能面板切换、更新状态与快捷操作。
  */
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { getVersion } from '@tauri-apps/api/app';
+import { useAppVersion } from '../hooks/useAppVersion';
 import { createPortal } from 'react-dom';
 import type { JSX } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, computeImageNodeDimensions, generateId } from '../store/useAppStore';
+import { useAppStore, generateId } from '../store/useAppStore';
 import { countUnreadDramaAssets } from '../store/store.dramaAssets';
 import ModalOverlay from './shared/ModalOverlay';
 import type { NodeType } from '../types';
 import { NODE_TYPE_CONFIG } from '../types';
-import { uploadSourceFileToProject } from '../services/fileService';
+import { importSourceFileToCanvas } from '../services/sourceFileImportService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
-import { classifyFile } from '../hooks/useNodeCreation';
-import { checkForUpdate, downloadAndInstallUpdate } from '../services/updateService';
+import { getPreferredNodeModel } from '../services/modelPreferenceService';
+import { checkForUpdate, downloadAndInstallUpdate, isAppUpdateRunning } from '../services/updateService';
+import DownloadProgress from './shared/DownloadProgress';
 import AnimatedButton from './shared/AnimatedButton';
 import LazyLoadBoundary, { LazyLoadFallback } from './shared/LazyLoadBoundary';
 import ProjectLibraryModal from './ProjectLibraryModal';
-import { invoke } from '@tauri-apps/api/core';
+import { openDetachedChatWindow } from '../services/chat/chatWindowLifecycle';
 import { useT } from '../i18n';
 import { openStyleGuideWindow } from '../utils/styleGuideWindow';
 import {
@@ -79,7 +80,7 @@ const generationItems: {
   },
   {
     type: 'ai-animation',
-    label: '生成动画',
+    label: '帧动画',
     sub: '2D 角色逐帧动画',
     icon: <Icon icon={NODE_TYPE_CONFIG['ai-animation'].icon} width="18" height="18" />,
   },
@@ -117,12 +118,11 @@ function NodePicker({
   onLeave: () => void;
 }) {
   const t = useT();
-  const { nodePickerOpen, closeNodePicker, addNode, currentProjectId, showToast, installedPlugins } = useAppStore(
+  const { nodePickerOpen, closeNodePicker, addNode, showToast, installedPlugins } = useAppStore(
     useShallow((s) => ({
       nodePickerOpen: s.nodePickerOpen,
       closeNodePicker: s.closeNodePicker,
       addNode: s.addNode,
-      currentProjectId: s.currentProjectId,
       showToast: s.showToast,
       installedPlugins: s.installedPlugins,
     })),
@@ -163,26 +163,7 @@ function NodePicker({
       nodeData.directorStatus = 'idle';
       nodeData.directorCaptureUrls = [];
     }
-    // Auto-fill default model from localStorage preference
-    // 全景图节点回退到生图节点偏好
-    try {
-      const raw = localStorage.getItem('canvas-model-prefs');
-      if (raw) {
-        const prefs: Record<string, string> = JSON.parse(raw);
-        const modelValue = prefs[type]
-          || (type === 'ai-panorama' || type === 'ai-animation' ? prefs['ai-image'] : undefined);
-        if (modelValue) {
-          const slashIdx = modelValue.indexOf('/');
-          if (slashIdx !== -1) {
-            const provider = modelValue.slice(0, slashIdx);
-            if (provider) {
-              nodeData.model = modelValue;
-              nodeData.provider = provider;
-            }
-          }
-        }
-      }
-    } catch { /* ignore */ }
+    if (!isDirector) Object.assign(nodeData, getPreferredNodeModel(type, useAppStore.getState()));
     const pos = getCanvasPointerPosition();
     addNode({
       id: `node-${generateId()}`,
@@ -196,52 +177,7 @@ function NodePicker({
   const handleUploadFile = async () => {
     closeNodePicker();
     try {
-      const result = await uploadSourceFileToProject('*/*', currentProjectId);
-      if (!result) return;
-
-      const ext = result.fileName.split('.').pop()?.toLowerCase() || '';
-      const category = classifyFile(ext);
-
-      if (!category) {
-        showToast(t('不支持的文件类型'), 'error');
-        return;
-      }
-
-      const pos = getCanvasPointerPosition();
-      const typeMap: Record<string, { type: NodeType; label: string; field: string }> = {
-        image: { type: 'ai-image', label: result.fileName, field: 'imageUrl' },
-        video: { type: 'ai-video', label: result.fileName, field: 'videoUrl' },
-        audio: { type: 'ai-audio', label: result.fileName, field: 'audioUrl' },
-        text: { type: 'ai-text', label: result.fileName, field: 'output' },
-      };
-      const info = typeMap[category];
-
-      const nodeData: Record<string, unknown> = {
-        label: info.label,
-        type: info.type,
-        role: 'source',
-        status: 'success',
-        fileName: result.fileName,
-        nodeWidth: info.type === 'ai-audio' ? 260 : 280,
-        nodeHeight: 160,
-        [info.field]: result.dataUrl,
-        ...(result.filePath ? { filePath: result.filePath } : {}),
-        ...(info.field === 'output' ? { prompt: '' } : {}),
-      };
-
-      if (category === 'image' && result.dataUrl) {
-        try {
-          const dims = await computeImageNodeDimensions(result.dataUrl);
-          Object.assign(nodeData, dims);
-        } catch { /* ignore */ }
-      }
-
-      addNode({
-        id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        type: info.type,
-        position: pos,
-        data: nodeData,
-      } as never);
+      await importSourceFileToCanvas(getCanvasPointerPosition());
     } catch (err) {
       const msg = err instanceof Error ? err.message : t('上传失败');
       showToast(msg, 'error');
@@ -352,10 +288,12 @@ function AvatarMenu() {
   /** 「关于」里连点 logo 的计数与重置计时器；纯交互状态，不参与渲染所以用 ref */
   const logoTapsRef = useRef(0);
   const logoTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [appVersion, setAppVersion] = useState('0.1.0');
+  const appVersion = useAppVersion();
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'no-update' | 'available' | 'updating' | 'error'>('idle');
   const [updateMsg, setUpdateMsg] = useState('');
   const [updateVersion, setUpdateVersion] = useState('');
+  const appUpdateProgress = useAppStore((state) => state.appUpdateProgress);
+  const updating = isAppUpdateRunning(appUpdateProgress);
 
   const handleCheckUpdate = async () => {
     setUpdateStatus('checking');
@@ -379,16 +317,11 @@ function AvatarMenu() {
   const handleDownloadUpdate = async () => {
     setUpdateStatus('updating');
     setUpdateMsg(t('正在下载更新...'));
-    const ok = await downloadAndInstallUpdate();
-    if (!ok) {
-      setUpdateStatus('error');
-      setUpdateMsg(t('下载失败，请稍后重试'));
-    }
+    const ok = await downloadAndInstallUpdate(useAppStore.getState().setAppUpdateProgress);
+    const progress = useAppStore.getState().appUpdateProgress;
+    setUpdateStatus(ok || progress?.phase === 'no-update' ? 'no-update' : 'error');
+    setUpdateMsg(t(progress?.message ?? '下载失败，请稍后重试'));
   };
-
-  useEffect(() => {
-    getVersion().then(setAppVersion).catch(() => {});
-  }, []);
 
   // 连点 logo 达到阈值时打开样式预览窗口；超过间隔没有下一次点击就重新计数
   const handleLogoClick = useCallback(() => {
@@ -513,14 +446,14 @@ function AvatarMenu() {
               className="flex h-12 w-12 shrink-0 cursor-pointer items-center justify-center rounded-xl bg-indigo-500/20 transition-transform active:scale-95"
               aria-label={t('AI Canvas')}
             >
-              <img src="/icons.svg" alt="" />
+              <img src={`${import.meta.env.BASE_URL}icons.svg`} alt="" />
             </button>
             <div>
               <h2 className="text-lg font-semibold text-canvas-text">AI Canvas</h2>
               <p className="text-xs text-canvas-text-secondary">v{appVersion} · {t('开发预览版')}</p>
               <button
                 onClick={updateStatus === 'available' ? handleDownloadUpdate : handleCheckUpdate}
-                disabled={updateStatus === 'checking' || updateStatus === 'updating'}
+                disabled={updateStatus === 'checking' || updateStatus === 'updating' || updating}
                 className="mt-1 inline-flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 disabled:text-canvas-text-muted transition-colors"
               >
                 {updateStatus === 'checking' ? (
@@ -528,10 +461,10 @@ function AvatarMenu() {
                     <Icon icon="svg-spinners:90-ring" width="12" height="12" />
                     {t('检查中...')}
                   </>
-                ) : updateStatus === 'updating' ? (
+                ) : updateStatus === 'updating' || updating ? (
                   <>
                     <Icon icon="svg-spinners:90-ring" width="12" height="12" />
-                    {t('下载中...')}
+                    {t(appUpdateProgress?.message ?? '下载中...')}
                   </>
                 ) : updateStatus === 'no-update' && updateMsg ? (
                   updateMsg
@@ -545,6 +478,18 @@ function AvatarMenu() {
               </button>
             </div>
           </div>
+
+          {appUpdateProgress?.phase === 'downloading' ? (
+            <DownloadProgress
+              downloadedBytes={appUpdateProgress.downloadedBytes}
+              totalBytes={appUpdateProgress.totalBytes}
+              label={t(appUpdateProgress.message)}
+            />
+          ) : appUpdateProgress ? (
+            <p role="status" className={`text-xs ${appUpdateProgress.phase === 'error' ? 'text-danger-light' : 'text-canvas-text-secondary'}`}>
+              {t(appUpdateProgress.message)}
+            </p>
+          ) : null}
 
           {/* Description */}
           <p className="text-sm text-canvas-text-secondary leading-relaxed">
@@ -650,16 +595,18 @@ function LogoMenu() {
     })),
   );
 
-  const openProjectLibrary = () => {
-    setProjectLibraryOpen(true);
-    window.setTimeout(async () => {
+  useEffect(() => {
+    if (!projectLibraryOpen) return;
+    const projectId = useAppStore.getState().currentProjectId;
+    if (!projectId) return;
+    const timer = window.setTimeout(() => {
       const store = useAppStore.getState();
-      const capturedProjectId = await store.captureCurrentProjectSnapshot();
-      if (capturedProjectId && useAppStore.getState().currentProjectId === capturedProjectId) {
-        await useAppStore.getState().saveCurrentProjectSilent();
-      }
+      if (!store.projectLibraryOpen || store.currentProjectId !== projectId) return;
+      void store.captureCurrentProjectSnapshot({ persistSnapshot: true })
+        .catch((error) => console.warn('[项目库] 更新预览失败:', error));
     }, 220);
-  };
+    return () => window.clearTimeout(timer);
+  }, [projectLibraryOpen]);
 
   return (
     <>
@@ -669,7 +616,7 @@ function LogoMenu() {
         data-tooltip={t('画布 / 项目')}
         aria-haspopup="dialog"
         aria-expanded={projectLibraryOpen}
-        onClick={openProjectLibrary}
+        onClick={() => setProjectLibraryOpen(true)}
       >
         <svg className="ico-normal" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path fillRule="evenodd" d="M3 4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zm0 14a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zM18 3a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1zm-1 8a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1zm-6-1a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1zm-8 1a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zm8-8a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1zm-1 15a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1zm8-1a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1z" clipRule="evenodd" />
@@ -805,9 +752,10 @@ export default function Sidebar() {
           if (store.chatPanelDetached) {
             // 保留独立显示偏好：窗口被关闭后，再次点击仍打开独立窗口。
             try {
-              await invoke('open_chat_window');
-            } catch {
-              store.showToast(t('打开独立窗口失败'), 'error');
+              await openDetachedChatWindow();
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : '';
+              store.showToast(`${t('打开独立窗口失败')}${detail ? `：${detail}` : ''}`, 'error');
             }
           } else {
             store.toggleChat();
@@ -832,7 +780,7 @@ export default function Sidebar() {
           <path d="M4 18l1 1 2-2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <span className="task-center-tooltip">
-          <span>任务</span>
+          <span>{t('任务')}</span>
           <span className="task-center-tooltip-beta">beta</span>
         </span>
       </button> */}

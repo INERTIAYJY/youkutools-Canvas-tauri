@@ -25,7 +25,12 @@ function findSelectedNodeAtPoint(clientX: number, clientY: number): string | nul
     document.querySelectorAll<HTMLElement>('.react-flow__node.selected'),
   );
   const hit = selected.find((candidate) => {
-    const rect = candidate.getBoundingClientRect();
+    // 展开分组的内部是画布空白；几何回查不能重新把它吞成分组菜单。
+    const target = candidate.querySelector<HTMLElement>('.canvas-group-node-wrapper')
+      ? candidate.querySelector<HTMLElement>('.canvas-group-title')
+      : candidate;
+    if (!target) return false;
+    const rect = target.getBoundingClientRect();
     return clientX >= rect.left && clientX <= rect.right
       && clientY >= rect.top && clientY <= rect.bottom;
   });
@@ -65,6 +70,8 @@ export function useCanvasSecondaryClickMenu({
 
       const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
       if (!element) return;
+      // 可编辑引用胶囊由编辑器处理；避免 pointerup 先打开画布/节点菜单。
+      if (element.closest('.prompt-editor .prompt-chip, .mention-dropdown')) return;
 
       const nodeElement = element.closest('.react-flow__node');
       if (nodeElement) {

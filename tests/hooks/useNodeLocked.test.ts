@@ -1,3 +1,6 @@
+/**
+ * useNodeLocked — 回归测试：shared node lock lookup。
+ */
 import type { Node } from '@xyflow/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { BaseNodeData } from '../../src/types';

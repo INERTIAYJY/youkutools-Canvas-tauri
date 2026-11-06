@@ -1,3 +1,6 @@
+/**
+ * sora2uModelManifest — 回归测试：Sora2U 内置模型清单。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   pollResolvedModelProtocol,

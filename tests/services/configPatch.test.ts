@@ -1,3 +1,6 @@
+/**
+ * configPatch — 回归测试：configuration three-way merge。
+ */
 import { describe, expect, it } from 'vitest';
 import { applyConfigPatch, ConfigConflictError, configWithoutSecrets, createConfigPatch } from '../../src/services/configPatch';
 

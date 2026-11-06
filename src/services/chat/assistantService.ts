@@ -73,6 +73,8 @@ export interface PipelineResult {
   commandResults: CommandResult[];
   /** 使用的解析来源 */
   parseSource: 'rule' | 'llm' | 'help';
+  /** 本地兜底未能处理请求，调用方不得将其标记为成功完成。 */
+  errorCode?: 'ASSISTANT_MODEL_UNAVAILABLE';
   /** 等待用户在消息卡片中确认的破坏性命令 */
   pendingIntents?: CommandIntent[];
 }
@@ -154,6 +156,20 @@ export async function runAssistantPipeline(
     };
   }
 
+  // 未命中完整本地指令时，先报告模型不可用，避免正文关键词掩盖真正原因。
+  if (!resolveAssistantModel(resolvedProjectId)) {
+    return {
+      reply: [
+        '未选择可用的对话文本模型，本次请求尚未处理。',
+        '请在输入框下方的模型选择器中选择一个已配置的文本模型后重试；如果已选择，请检查对应厂商连接和模型配置是否仍然可用。',
+      ].join('\n'),
+      commandExecuted: false,
+      commandResults: [],
+      parseSource: 'help',
+      errorCode: 'ASSISTANT_MODEL_UNAVAILABLE',
+    };
+  }
+
   // Step 3: 无高置信度匹配 → 生成帮助回复
   const isCommandish = isLikelyCommand(userMessage);
   const canvasContext = buildCanvasContext(resolvedProjectId);
@@ -170,18 +186,6 @@ export async function runAssistantPipeline(
         '· "撤销" / "重做" — 撤销或恢复操作',
         '',
         '当前画布：' + canvasContext.totalNodes + ' 个节点，' + canvasContext.totalEdges + ' 条连线',
-      ].join('\n'),
-      commandExecuted: false,
-      commandResults: [],
-      parseSource: 'help',
-    };
-  }
-
-  if (!resolveAssistantModel(resolvedProjectId)) {
-    return {
-      reply: [
-        '未选择可用的对话文本模型。',
-        '请在输入框下方的模型选择器中选择一个已配置的文本模型后重试。',
       ].join('\n'),
       commandExecuted: false,
       commandResults: [],
@@ -213,6 +217,7 @@ export async function runAssistantPipeline(
 export interface StreamingPipelineCallbacks {
   /** 每次接收文本增量 */
   onTextDelta: (delta: string) => void;
+  onReasoningDelta?: (delta: string) => void;
   /** 流结束，传入完整文本和执行结果 */
   onComplete: (fullText: string, results: CommandResult[], pendingIntents?: CommandIntent[]) => void;
   /** 出错 */
@@ -286,6 +291,10 @@ export async function runStreamingPipeline(
   if (!resolveAssistantModel(resolvedProjectId)) {
     // 无模型 → 回退到本地管线
     const result = await runAssistantPipeline(userMessage, conversationId, resolvedProjectId);
+    if (result.errorCode) {
+      callbacks.onError(result.reply);
+      return;
+    }
     callbacks.onComplete(result.reply, result.commandResults, result.pendingIntents);
     return;
   }
@@ -315,6 +324,9 @@ export async function runStreamingPipeline(
           case 'text.delta':
             fullContent += event.delta;
             callbacks.onTextDelta(event.delta);
+            break;
+          case 'reasoning.delta':
+            callbacks.onReasoningDelta?.(event.delta);
             break;
           case 'error':
             callbacks.onError(event.message);

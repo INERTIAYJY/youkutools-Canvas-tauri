@@ -1,3 +1,6 @@
+/**
+ * generatedAssetTags — 回归测试：extractGeneratedAssetTags。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

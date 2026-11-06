@@ -1,3 +1,6 @@
+/**
+ * pluginImageService — 回归测试：rgbaToLineArt。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPluginLineArtImage, rgbaToLineArt } from '../../src/services/plugins/pluginImageService';
 

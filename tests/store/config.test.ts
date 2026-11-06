@@ -1,7 +1,11 @@
+/**
+ * config — 回归测试：config hydration guard。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../src/types';
 import type { ConfigSaveOptions, LoadedConfig } from '../../src/services/storageService';
 import { ConfigConflictError, configWithoutSecrets } from '../../src/services/configPatch';
+import { cloneAppearanceTheme, getBuiltinAppearanceTheme } from '../../src/services/appearance/appearanceDefaults';
 
 const fileMocks = vi.hoisted(() => {
   const loadConfig = vi.fn();
@@ -46,6 +50,195 @@ beforeEach(() => {
 });
 
 describe('config hydration guard', () => {
+  it.each(['custom-openai', 'cccapi', 'xai', 'google', 'sora2u', 'toapis', 'libapi'])(
+    '%s 的声明式模型同步保留稳定身份、连接隔离及取消勾选语义', (catalogId) => {
+      useAppStore.setState((state) => ({ config: { ...state.config,
+        generalModels: [{ id: 'unrelated-model', name: '其他连接', modelId: 'same-model', category: 'text', providerConfigId: 'other' }],
+      } }));
+      const providerConfigId = `${catalogId}-connection`;
+      const selected = { id: 'same-model', name: '初始名称', category: 'text' as const, provider: providerConfigId,
+        executionProfile: { preset: 'openai-chat' as const } };
+      useAppStore.getState().saveProviderConfig(providerConfigId, { name: '测试连接', catalogId, apiKey: 'fixture', selectedModels: [selected] });
+      const first = useAppStore.getState().config.generalModels!.find((model) => model.providerConfigId === providerConfigId)!;
+      expect(first).toMatchObject({ modelId: selected.id, providerConfigId, executionProfile: selected.executionProfile });
+      useAppStore.getState().saveProviderConfig(providerConfigId, { name: '测试连接', catalogId, apiKey: 'fixture',
+        selectedModels: [{ ...selected, name: '更新名称' }] });
+      expect(useAppStore.getState().config.generalModels!.find((model) => model.providerConfigId === providerConfigId))
+        .toMatchObject({ id: first.id, name: '更新名称' });
+      useAppStore.getState().saveProviderConfig(providerConfigId, { name: '测试连接', catalogId, apiKey: 'fixture', selectedModels: [] });
+      expect(useAppStore.getState().config.generalModels).toEqual([
+        expect.objectContaining({ id: 'unrelated-model', providerConfigId: 'other' }),
+      ]);
+    },
+  );
+
+  it.each([undefined, 'unknown-relay', 'apimart', 'grsai', 'dreamina', 'runninghub-model'])(
+    'catalogId 为 %s 时不把选中目录误同步成声明式通用模型', (catalogId) => {
+      const existing = { id: 'existing-model', name: '已有配置', modelId: 'kept', category: 'text' as const, providerConfigId: 'libapi' };
+      useAppStore.setState((state) => ({ config: { ...state.config, generalModels: [existing] } }));
+      useAppStore.getState().saveProviderConfig('libapi', { name: '测试连接', catalogId, apiKey: 'fixture',
+        selectedModels: [{ id: 'replacement', name: '不能替换', category: 'text', provider: 'libapi' }] });
+      expect(useAppStore.getState().config.generalModels).toEqual([existing]);
+    },
+  );
+
+  it('keeps each image model capability through provider synchronization and reload', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {} });
+    await useAppStore.getState().loadConfig();
+    const capability = { resolutions: ['1K', '2K'], defaultResolution: '1K', ratios: ['1:1'], supportsBatch: false };
+    useAppStore.getState().saveProviderConfig('custom-images', { name: 'Images', apiKey: '', catalogId: 'custom-openai',
+      selectedModels: [{ id: 'image-a', name: 'Image A', category: 'image', provider: 'custom-images', imageCapability: capability }] });
+    expect(useAppStore.getState().config.generalModels?.[0].imageCapability).toEqual(capability);
+    await useAppStore.getState().saveConfig({ silent: true });
+    const saved = fileMocks.saveConfig.mock.calls.at(-1)?.[0] as AppConfig;
+    fileMocks.loadConfig.mockResolvedValue(saved);
+    useAppStore.setState(useAppStore.getInitialState(), true);
+    await useAppStore.getState().loadConfig();
+    expect(useAppStore.getState().config.generalModels?.[0].imageCapability).toEqual(capability);
+  });
+  it.each(['enter', 'shift-enter', 'ctrl-enter', 'alt-enter'] as const)('发送快捷键 %s 通过现有配置保存并在重新加载后恢复', async (shortcut) => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {}, theme: 'dark' });
+    await useAppStore.getState().loadConfig();
+    expect(useAppStore.getState().config.promptSubmitShortcut).toBeUndefined();
+    useAppStore.getState().updateConfig({ promptSubmitShortcut: shortcut });
+    expect(useAppStore.getState().configDirty).toBe(true);
+    await useAppStore.getState().saveConfig({ silent: true });
+    const saved = fileMocks.saveConfig.mock.calls.at(-1)?.[0] as AppConfig;
+    expect(saved.promptSubmitShortcut).toBe(shortcut);
+    fileMocks.loadConfig.mockResolvedValue(saved);
+    useAppStore.setState(useAppStore.getInitialState(), true);
+    await useAppStore.getState().loadConfig();
+    expect(useAppStore.getState().config.promptSubmitShortcut).toBe(shortcut);
+  });
+
+  it('repairs missing CCC addresses on load while retaining custom addresses, group Keys and model identities', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {
+      cccapi: { name: 'CCC', apiKey: 'legacy-fixture' },
+      'cccapi-pro': { name: 'CCC Pro', catalogId: 'cccapi', cccGroup: 'GPT-特价Pro', apiKey: 'pro-fixture', baseUrl: '   ' },
+      'cccapi-custom': { name: 'CCC Custom', catalogId: 'cccapi', cccGroup: 'GPT-Pro分组', apiKey: 'custom-fixture', baseUrl: 'https://custom.example/v1' },
+      'cccapi-lookalike': { name: '自定义', catalogId: 'custom-openai', apiKey: '', baseUrl: '' },
+    }, generalModels: [{ id: 'ccc-pro-text', name: 'GPT-5.6 Sol', modelId: 'gpt-5.6-sol', category: 'text', providerConfigId: 'cccapi-pro' }] });
+    await useAppStore.getState().loadConfig();
+    const { providers, generalModels } = useAppStore.getState().config;
+    expect(providers.cccapi).toMatchObject({ apiKey: 'legacy-fixture', baseUrl: 'https://cccapi.cn/v1' });
+    expect(providers['cccapi-pro']).toMatchObject({ apiKey: 'pro-fixture', cccGroup: 'GPT-特价Pro', baseUrl: 'https://cccapi.cn/v1' });
+    expect(providers['cccapi-custom']).toMatchObject({ apiKey: 'custom-fixture', baseUrl: 'https://custom.example/v1' });
+    expect(providers['cccapi-lookalike'].baseUrl).toBe('');
+    expect(generalModels).toEqual([expect.objectContaining({ id: 'ccc-pro-text', modelId: 'gpt-5.6-sol', providerConfigId: 'cccapi-pro' })]);
+  });
+
+  it('saves multiple CCC group credentials and model bindings in one configuration snapshot', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {} });
+    await useAppStore.getState().loadConfig();
+    for (const [id, group, modelId] of [
+      ['cccapi-banana', '🍌香蕉（官k）', 'nano-banana-pro'],
+      ['cccapi-stable', 'CCC生图稳定', 'gpt-image-2'],
+    ]) useAppStore.getState().saveProviderConfig(id, {
+      name: 'CCC', catalogId: 'cccapi', cccGroup: group, apiKey: `${id}-fixture`,
+      selectedModels: [{ id: modelId, name: modelId, category: 'image', provider: id }],
+    });
+    await useAppStore.getState().saveConfig({ throwOnError: true });
+    expect(fileMocks.saveConfig).toHaveBeenCalledTimes(1);
+    const saved = fileMocks.saveConfig.mock.calls[0][0] as AppConfig;
+    expect(saved.providers['cccapi-banana'].apiKey).toBe('cccapi-banana-fixture');
+    expect(saved.providers['cccapi-stable'].apiKey).toBe('cccapi-stable-fixture');
+    expect(saved.providers['cccapi-banana'].baseUrl).toBe('https://cccapi.cn/v1');
+    expect(saved.providers['cccapi-stable'].baseUrl).toBe('https://cccapi.cn/v1');
+    expect(saved.generalModels).toEqual(expect.arrayContaining([
+      expect.objectContaining({ modelId: 'nano-banana-pro', providerConfigId: 'cccapi-banana' }),
+      expect.objectContaining({ modelId: 'gpt-image-2', providerConfigId: 'cccapi-stable' }),
+    ]));
+    const identities = saved.generalModels!.map((model) => model.id);
+    fileMocks.loadConfig.mockResolvedValue(saved);
+    await useAppStore.getState().loadConfig();
+    expect(useAppStore.getState().config.generalModels!.map((model) => model.id)).toEqual(identities);
+    expect(useAppStore.getState().config.providers['cccapi-banana'].apiKey).toBe('cccapi-banana-fixture');
+    expect(useAppStore.getState().config.providers['cccapi-stable'].apiKey).toBe('cccapi-stable-fixture');
+  });
+  it('keeps CCC group model identities stable and removes only the selected connection references', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: {} } }));
+    for (const id of ['cccapi', 'cccapi-free', 'cccapi-stable']) {
+      useAppStore.getState().saveProviderConfig(id, { name: 'CCC', catalogId: 'cccapi', apiKey: `${id}-fixture`,
+        ...(id !== 'cccapi' ? { cccGroup: id } : {}),
+        // 模拟旧目录中仍使用根 provider 的缓存，删除分组不能伤及根连接。
+        selectedModels: [{ id: 'gpt-image-2', name: 'Image', category: 'image', provider: 'cccapi' }],
+      });
+    }
+    const before = useAppStore.getState().config.generalModels!;
+    expect(new Set(before.map((model) => model.id)).size).toBe(3);
+    const stable = before.find((model) => model.providerConfigId === 'cccapi-stable')!;
+    const free = before.find((model) => model.providerConfigId === 'cccapi-free')!;
+    useAppStore.getState().saveProviderConfig('cccapi-stable', useAppStore.getState().config.providers['cccapi-stable']);
+    expect(useAppStore.getState().config.generalModels!.find((model) => model.providerConfigId === 'cccapi-stable')!.id).toBe(stable.id);
+    useAppStore.getState().updateConfig({ assistantImageModelId: `general/${stable.id}` });
+    useAppStore.setState({ nodes: [
+      { id: 'legacy', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'cccapi', model: 'cccapi/gpt-image-2' } },
+      { id: 'stable', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'general', model: `general/${stable.id}` } },
+      { id: 'free', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'general', model: `general/${free.id}` } },
+    ] });
+    await useAppStore.getState().removeProviderConfig('cccapi-free');
+    const state = useAppStore.getState();
+    expect(state.config.generalModels!.map((model) => model.providerConfigId)).toEqual(['cccapi', 'cccapi-stable']);
+    expect(state.config.providers['cccapi-stable'].apiKey).toBe('cccapi-stable-fixture');
+    expect(state.config.assistantImageModelId).toBe(`general/${stable.id}`);
+    expect(state.nodes.map((node) => node.data.model)).toEqual(['cccapi/gpt-image-2', `general/${stable.id}`, undefined]);
+  });
+  it('removes only the chosen Relay group and reserves legacy aliases for the root connection', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: {}, generalModels: [] } }));
+    for (const [id, group] of [['relayonapi', undefined], ['relay-image', 'image'], ['relay-video', 'video']] as const) {
+      useAppStore.getState().saveProviderConfig(id, { name: '万象', catalogId: 'relayonapi', relayonGroup: group,
+        apiKey: `${id}-fixture`, selectedModels: [{ id: 'image-2.5-flare', name: 'Image', category: 'image', provider: 'relayonapi' }] });
+    }
+    const models = useAppStore.getState().config.generalModels!;
+    expect(new Set(models.map((model) => model.id)).size).toBe(3);
+    const image = models.find((model) => model.providerConfigId === 'relay-image')!;
+    const video = models.find((model) => model.providerConfigId === 'relay-video')!;
+    useAppStore.getState().updateConfig({ assistantImageModelId: `general/${video.id}` });
+    useAppStore.setState({ nodes: [
+      { id: 'legacy', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'relayonapi', model: 'relayonapi/image-2.5-flare' } },
+      { id: 'image', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'general', model: `general/${image.id}` } },
+      { id: 'video', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'general', model: `general/${video.id}` } },
+    ] });
+    await useAppStore.getState().removeProviderConfig('relay-image');
+    let state = useAppStore.getState();
+    expect(state.config.generalModels!.map((model) => model.providerConfigId)).toEqual(['relayonapi', 'relay-video']);
+    expect(state.config.assistantImageModelId).toBe(`general/${video.id}`);
+    expect(state.nodes.map((node) => node.data.model)).toEqual(['relayonapi/image-2.5-flare', undefined, `general/${video.id}`]);
+    await useAppStore.getState().removeProviderConfig('relayonapi');
+    state = useAppStore.getState();
+    expect(state.config.generalModels!.map((model) => model.providerConfigId)).toEqual(['relay-video']);
+    expect(state.config.assistantImageModelId).toBe(`general/${video.id}`);
+    expect(state.nodes.map((node) => node.data.model)).toEqual([undefined, undefined, `general/${video.id}`]);
+  });
+  it('persists an activated appearance before reporting the save as complete', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {} });
+    await useAppStore.getState().loadConfig();
+    const theme = getBuiltinAppearanceTheme('standard-light');
+    await useAppStore.getState().activateAppearanceTheme(theme);
+    expect(fileMocks.saveConfig).toHaveBeenCalledOnce();
+    expect(fileMocks.saveConfig.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ appearance: theme }));
+    expect(useAppStore.getState()).toMatchObject({ configDirty: false, configSaveStatus: 'saved' });
+  });
+
+  it('does not mutate a saved custom preset during ordinary appearance edits', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {} });
+    await useAppStore.getState().loadConfig();
+    const preset = cloneAppearanceTheme(getBuiltinAppearanceTheme('standard-dark'), 'theme-fixture', '自定义预设');
+    useAppStore.setState({ appearanceThemes: [preset] });
+    await useAppStore.getState().activateAppearanceTheme({ ...preset, ui: { ...preset.ui, accent: '#be4b78' } });
+    expect(useAppStore.getState().appearanceThemes[0]).toEqual(preset);
+    expect(useAppStore.getState().config.appearance?.ui.accent).toBe('#be4b78');
+  });
+
+  it('keeps appearance changes dirty when persistence fails', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {} });
+    await useAppStore.getState().loadConfig();
+    fileMocks.saveConfig.mockRejectedValueOnce(new Error('fixture-private'));
+    await expect(useAppStore.getState().activateAppearanceTheme(getBuiltinAppearanceTheme('standard-light')))
+      .rejects.toThrow('设置保存失败');
+    expect(useAppStore.getState()).toMatchObject({ configDirty: true, configSaveStatus: 'error' });
+  });
+
   it('keeps failed edits dirty and clears the error only after a successful retry', async () => {
     fileMocks.loadConfig.mockResolvedValue({ theme: 'dark', providers: {} });
     await useAppStore.getState().loadConfig();
@@ -197,20 +390,20 @@ describe('config hydration guard', () => {
     }));
   });
 
-  it('defaults to the last project and preserves the project library startup preference', async () => {
-    expect(useAppStore.getState().config.startupView).toBe('last-project');
+  it('defaults to the project library and preserves the last-project startup preference', async () => {
+    expect(useAppStore.getState().config.startupView).toBe('project-library');
     fileMocks.loadConfig.mockResolvedValue({
       providers: {},
       theme: 'dark',
-      startupView: 'project-library',
+      startupView: 'last-project',
     });
 
     await useAppStore.getState().loadConfig();
     await useAppStore.getState().saveConfig({ silent: true });
 
-    expect(useAppStore.getState().config.startupView).toBe('project-library');
+    expect(useAppStore.getState().config.startupView).toBe('last-project');
     expect(fileMocks.saveConfig.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
-      startupView: 'project-library',
+      startupView: 'last-project',
     }));
   });
 
@@ -478,6 +671,39 @@ describe('config hydration guard', () => {
     expect(model).not.toHaveProperty('apiKey');
     expect(model).not.toHaveProperty('openaiUrl');
     expect(model).not.toHaveProperty('anthropicUrl');
+  });
+
+  it('keeps each image model protocol independent in a custom connection', () => {
+    useAppStore.getState().saveProviderConfig('image-gateway', {
+      name: '图片网关', apiKey: 'fixture-key', baseUrl: 'https://gateway.example/v1',
+      catalogId: 'custom-openai',
+      selectedModels: [
+        { id: 'image-a', name: '图片 A', category: 'image', provider: 'image-gateway',
+          executionProfile: { preset: 'gpt-image-gateway-json' } },
+        { id: 'image-b', name: '图片 B', category: 'image', provider: 'image-gateway',
+          executionProfile: { preset: 'openai-gpt-image' } },
+        { id: 'text-a', name: '文本 A', category: 'text', provider: 'image-gateway' },
+      ],
+    });
+    const models = useAppStore.getState().config.generalModels ?? [];
+    expect(models.find((model) => model.modelId === 'image-a')?.executionProfile?.preset)
+      .toBe('gpt-image-gateway-json');
+    expect(models.find((model) => model.modelId === 'image-b')?.executionProfile?.preset)
+      .toBe('openai-gpt-image');
+    expect(models.find((model) => model.modelId === 'text-a')?.executionProfile).toBeUndefined();
+    expect(useAppStore.getState().config.providers['image-gateway'].selectedModels?.[0]?.executionProfile?.preset)
+      .toBe('gpt-image-gateway-json');
+
+    useAppStore.getState().saveProviderConfig('image-gateway', {
+      ...useAppStore.getState().config.providers['image-gateway'],
+      selectedModels: useAppStore.getState().config.providers['image-gateway'].selectedModels?.map(
+        (model) => model.id === 'image-a' ? { ...model, executionProfile: undefined } : model,
+      ),
+    });
+    const resetModels = useAppStore.getState().config.generalModels ?? [];
+    expect(resetModels.find((model) => model.modelId === 'image-a')?.executionProfile).toBeUndefined();
+    expect(resetModels.find((model) => model.modelId === 'image-b')?.executionProfile?.preset)
+      .toBe('openai-gpt-image');
   });
 
   it('syncs editable video capabilities into the unified model runtime', async () => {

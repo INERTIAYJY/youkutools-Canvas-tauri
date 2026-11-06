@@ -1,3 +1,6 @@
+/**
+ * directorSceneSchema — 校验导演场景、结果清单与资源绑定合同。
+ */
 import type {
   DirectorCamera,
   DirectorCameraKeyframe,
@@ -6,7 +9,7 @@ import type {
   DirectorResultArtifact,
   DirectorResultManifest,
   DirectorResultManifestReference,
-  DirectorRuntimeKind,
+  DirectorResultProducer,
   DirectorScene,
   DirectorSceneEntity,
   DirectorSceneReference,
@@ -712,7 +715,7 @@ export function normalizeDirectorResultManifest(value: unknown): DirectorResultM
   const sceneId = identifier(raw.sceneId, 'sceneId');
   const producerRaw = objectValue(raw.producer, 'producer');
   assertKnownKeys(producerRaw, PRODUCER_KEYS, 'producer');
-  const runtime = enumValue<DirectorRuntimeKind>(
+  const runtime = enumValue<DirectorResultProducer['runtime']>(
     producerRaw.runtime,
     ['lightweight-web', 'blender'],
     'producer.runtime',

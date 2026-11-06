@@ -7,18 +7,21 @@
  *
  * 与裁切/扩图一致：onStart() 即时建 loading 节点，onSave(dataUrl, meta) 回填结果。
  */
+import { t as translate, useT } from '../../../../../i18n';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Konva from 'konva';
 import { Stage, Layer as KLayer, Rect, Line, Transformer } from 'react-konva';
 import FullscreenOverlay from '../../../../shared/FullscreenOverlay';
-import { setExternalDropCaptured } from '../../../../../utils/dropCapture';
+import { isExternalDropCaptured, setExternalDropCaptured } from '../../../../../utils/dropCapture';
 import { useAppStore } from '../../../../../store/useAppStore';
 import {
   fetchImageForCrop,
   saveBinaryToProjectData,
   saveDataUrlToProjectData,
 } from '../../../../../services/fileService';
-import { subjectMatting, checkModelExists, downloadModel } from '../../../../../services/onnxService';
+import { subjectMatting, checkModelExists } from '../../../../../services/onnxService';
+import { useModelDownload } from '../../../../../hooks/useModelDownload';
+import DownloadProgress from '../../../../shared/DownloadProgress';
 import { clamp } from '../../../../../utils/num';
 import ImageEditorZoomControls from '../ImageEditorZoomControls';
 import { useComposer } from './useComposer';
@@ -89,7 +92,7 @@ async function saveComposerSourceToProject(source: string, projectId: string) {
     );
   }
   const response = await fetch(resolvedSource);
-  if (!response.ok) throw new Error(`图片读取失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(translate('图片读取失败：HTTP {status}', { status: response.status }));
   const blob = await response.blob();
   return saveBinaryToProjectData(
     new Uint8Array(await blob.arrayBuffer()),
@@ -99,7 +102,10 @@ async function saveComposerSourceToProject(source: string, projectId: string) {
 }
 
 export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose, onStart, onSave }: ImageComposerEditorProps) {
+  const t = useT();
   const cmp = useComposer();
+  const modelDownload = useModelDownload();
+  const { download: downloadMattingModel, cancel: cancelModelDownload } = modelDownload;
   const {
     layers, selectedId, setSelectedId, selectedLayer, canvas, updateCanvas,
     updateLayer, removeLayer, duplicateLayer, reorderLayer, addImageLayer, addImageFileLayer, replaceImageLayer,
@@ -191,7 +197,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
       });
     imageImportQueueRef.current = queued.catch((error) => {
       if (notifyFailure && isCurrent()) {
-        useAppStore.getState().showToast(errMessage(error, '图片导入失败'), 'error');
+        useAppStore.getState().showToast(translate(errMessage(error, '图片导入失败')), 'error');
       }
     });
     return queued;
@@ -242,7 +248,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     if (!isOpen || seededRef.current || stageSize.w === 0 || !imageUrl) return;
     seededRef.current = true;
     void enqueueImageImport(async (isCurrent) => {
-      await addImageLayer(imageUrl, '底图', (img) => {
+      await addImageLayer(imageUrl, translate('底图'), (img) => {
         if (!isCurrent()) throw new Error('编辑器已关闭');
         const W = Math.min(img.naturalWidth, MAX_SEED);
         const H = Math.round((img.naturalHeight / img.naturalWidth) * W);
@@ -270,6 +276,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
 
   /* ── 关闭时复位 ── */
   const handleClose = useCallback(() => {
+    cancelModelDownload();
     editorEpochRef.current += 1;
     if (exportFrameRef.current !== null) {
       cancelAnimationFrame(exportFrameRef.current);
@@ -282,17 +289,18 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     exportingRef.current = false;
     resourceIssuesRef.current.clear();
     onClose();
-  }, [reset, onClose, setDraftPoints]);
+  }, [cancelModelDownload, reset, onClose, setDraftPoints]);
 
   useEffect(() => {
     if (isOpen) return;
+    cancelModelDownload();
     editorEpochRef.current += 1;
     if (exportFrameRef.current !== null) {
       cancelAnimationFrame(exportFrameRef.current);
       exportFrameRef.current = null;
     }
     exportingRef.current = false;
-  }, [isOpen]);
+  }, [isOpen, cancelModelDownload]);
 
   useEffect(() => () => {
     editorEpochRef.current += 1;
@@ -508,7 +516,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
       e.preventDefault();
       void enqueueImageImport(async (isCurrent) => {
         if (!isCurrent()) return;
-        await addImageFileLayer(file, '粘贴图片');
+        await addImageFileLayer(file, translate('粘贴图片'));
       }).catch(() => {});
     };
     window.addEventListener('paste', onPaste);
@@ -544,32 +552,51 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
   // Tauri 桌面端：原生 drag-drop 事件（独占，避免画布在弹层后建节点）
   useEffect(() => {
     if (!isOpen || !('__TAURI_INTERNALS__' in window)) return;
+    const previouslyCaptured = isExternalDropCaptured();
     setExternalDropCaptured(true);
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
+    const unlisten: Array<() => void> = [];
+    let lastDrop = { signature: '', time: 0 };
+    const handle = async (payload: { type: string; paths?: string[] }) => {
+      if (cancelled) return;
+      const { type, paths } = payload;
+      if (type === 'enter') { setIsDragOver(!!paths?.some((path) => IMAGE_EXT.test(path))); return; }
+      if (type === 'over') return;
+      setIsDragOver(false);
+      if (type !== 'drop' || !paths?.length) return;
+      const signature = JSON.stringify(paths);
+      if (lastDrop.signature === signature && Date.now() - lastDrop.time < 400) return;
+      lastDrop = { signature, time: Date.now() };
+      for (const fp of paths) {
+        if (cancelled) return;
+        if (!IMAGE_EXT.test(fp)) continue;
+        await enqueueImageImport(async (isCurrent) => {
+          if (!isCurrent()) return;
+          const src = convertFileSrc(fp);
+          await addImageLayer(src, fp.split(/[\\/]/).pop() || '图片');
+        }).catch(() => { /* 单个文件失败不阻断其余 */ });
+      }
+    };
     (async () => {
       const { listen } = await import('@tauri-apps/api/event');
-      const ul = await listen<{ type: string; paths: string[] }>('tauri://drag-drop', async (event) => {
-        const { type, paths } = event.payload;
-        if (type === 'enter' || type === 'over') { setIsDragOver(true); return; }
-        if (type === 'leave' || type === 'cancelled') { setIsDragOver(false); return; }
-        setIsDragOver(false);
-        for (const fp of paths ?? []) {
-          if (!IMAGE_EXT.test(fp)) continue;
-          await enqueueImageImport(async (isCurrent) => {
-            if (!isCurrent()) return;
-            const src = convertFileSrc(fp);
-            await addImageLayer(src, fp.split(/[\\/]/).pop() || '图片');
-          }).catch(() => { /* 单个文件失败不阻断其余 */ });
-        }
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+      if (cancelled) return;
+      const webviewRelease = await getCurrentWebview().onDragDropEvent(({ payload }) => handle(payload));
+      if (cancelled) { webviewRelease(); return; }
+      unlisten.push(webviewRelease);
+      // 同进程资源窗口的原生文件拖拽可能只投递窗口通道；两路 drop 按文件去重。
+      const release = await listen<{ paths: string[] }>('tauri://drag-drop', ({ payload }) => {
+        return handle({ ...payload, type: 'drop' });
       });
-      if (cancelled) ul();
-      else unlisten = ul;
-    })();
+      if (cancelled) release();
+      else unlisten.push(release);
+    })().catch(() => {
+      if (!cancelled) useAppStore.getState().showToast(translate('拖放接收不可用，请点击上传图片按钮'), 'error');
+    });
     return () => {
       cancelled = true;
-      unlisten?.();
-      setExternalDropCaptured(false);
+      unlisten.forEach((release) => release());
+      setExternalDropCaptured(previouslyCaptured);
       setIsDragOver(false);
     };
   }, [isOpen, addImageLayer, enqueueImageImport]);
@@ -580,39 +607,45 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
   const handleMatteSubject = useCallback(async () => {
     const layer = selectedLayer;
     if (!layer || layer.type !== 'image') return;
+    const editorEpoch = editorEpochRef.current;
+    const isCurrent = () => editorEpochRef.current === editorEpoch;
     const store = useAppStore.getState();
     if (!('__TAURI_INTERNALS__' in window)) {
-      store.showToast('主体识别仅桌面端可用', 'error');
+      store.showToast(translate('主体识别仅桌面端可用'), 'error');
       return;
     }
     const projectId = store.currentProjectId;
     if (!projectId || projectId === 'default') {
-      store.showToast('请先在项目中使用主体识别', 'error');
+      store.showToast(translate('请先在项目中使用主体识别'), 'error');
       return;
     }
 
     setMattingLayerId(layer.id);
     try {
-      if (!(await checkModelExists(MATTING_MODEL))) {
-        store.showToast('正在下载主体识别模型…');
-        await downloadModel(MATTING_MODEL);
+      const hasModel = await checkModelExists(MATTING_MODEL);
+      if (!isCurrent()) return;
+      if (!hasModel) {
+        if (!(await downloadMattingModel([MATTING_MODEL]))) return;
       }
+      if (!isCurrent()) return;
       // 1. 落地图层图片为输入文件
       const saved = await saveComposerSourceToProject(layer.src, projectId);
+      if (!isCurrent()) return;
       if (!saved) throw new Error('无法写入临时文件');
       // 2. 抠主体
       const outputPath = `${saved.filePath.replace(/\.[^.]+$/, '')}_subject.png`;
       const result = await subjectMatting(saved.filePath, outputPath, MATTING_MODEL, `composer-matting-${Date.now()}`);
+      if (!isCurrent()) return;
       // 3. 载回并原位替换图层图片
       const resultSrc = convertFileSrc(result.subject_path);
       await replaceImageLayer(layer.id, resultSrc);
-      store.showToast(`主体识别完成 (${result.input_size})`);
+      store.showToast(translate('主体识别完成 ({size})', { size: result.input_size }));
     } catch (err) {
-      store.showToast(errMessage(err, '主体识别失败'), 'error');
+      if (isCurrent()) store.showToast(translate(errMessage(err, '主体识别失败')), 'error');
     } finally {
       setMattingLayerId(null);
     }
-  }, [replaceImageLayer, selectedLayer]);
+  }, [downloadMattingModel, replaceImageLayer, selectedLayer]);
 
   /* ── 导出：临时复位相机 + 舞台尺寸=画布，导出原生分辨率透明 PNG ── */
   const handleExport = useCallback(() => {
@@ -620,7 +653,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
     if (!stage || layers.length === 0 || exportingRef.current) return;
     const resourceIssue = resourceIssuesRef.current.values().next().value;
     if (resourceIssue) {
-      useAppStore.getState().showToast(`${resourceIssue}；请处理后再导出`, 'error');
+      useAppStore.getState().showToast(translate('{error}；请处理后再导出', { error: translate(resourceIssue) }), 'error');
       return;
     }
     const budgetError = getEditorCanvasBudgetError(canvas.width, canvas.height, '合成导出');
@@ -697,7 +730,7 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
         if (!isCurrentExport()) return;
         if (exportError || !dataUrl) {
           console.error('[Composer] export failed:', exportError);
-          useAppStore.getState().showToast(errMessage(exportError, '合成导出失败，请重试'), 'error');
+          useAppStore.getState().showToast(translate(errMessage(exportError, '合成导出失败，请重试')), 'error');
           return;
         }
 
@@ -721,8 +754,8 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
   }), [canvas.width, canvas.height]);
 
   return (
-    <FullscreenOverlay isOpen={isOpen} onClose={handleClose} title="多图编辑" hidePanel className="composer-overlay">
-      <div className={`composer-root${sideCollapsed ? ' side-collapsed' : ''}`} onClick={(e) => e.stopPropagation()}>
+    <FullscreenOverlay isOpen={isOpen} onClose={handleClose} title={t('多图编辑')} hidePanel className="composer-overlay">
+      <div data-tauri-drag-region className={`composer-root${sideCollapsed ? ' side-collapsed' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="composer-toolbar-dock">
           <ComposerToolbar
             composer={cmp}
@@ -740,7 +773,23 @@ export default function ImageComposerEditor({ isOpen, nodeId, imageUrl, onClose,
           />
         </div>
 
-        <div className="composer-body">
+        {modelDownload.isDownloading && (
+          <div className="ui-card mx-3 mb-2 shrink-0 p-2">
+            <div className="flex items-center gap-3">
+              <DownloadProgress
+                downloadedBytes={modelDownload.progress?.transferredBytes ?? 0}
+                totalBytes={modelDownload.progress?.totalBytes ?? undefined}
+                label={t('正在下载主体识别模型...')}
+                className="min-w-0 flex-1"
+              />
+              <button type="button" className="ui-btn ui-btn--sm" onClick={cancelModelDownload}>
+                {t('取消下载')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div data-tauri-drag-region className="composer-body">
           <div
             className={`composer-stage-wrap${isDragOver ? ' drag-over' : ''}${tool !== 'select' ? ' drawing' : ''}`}
             ref={stageWrapRef}

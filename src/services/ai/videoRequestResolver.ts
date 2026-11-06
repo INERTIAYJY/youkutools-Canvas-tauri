@@ -12,6 +12,7 @@ import type {
   VideoGenerationInputMode,
   VideoGenerationOperation,
   VideoModelCapability,
+  VideoParameterCapabilityOverride,
 } from '../../types/aiTypes';
 import {
   DEFAULT_VIDEO_DURATION_SECONDS,
@@ -61,7 +62,10 @@ export function resolveVideoSubmissionControls(
   }
 
   const videoFps = options.videoFps || DEFAULT_VIDEO_FPS;
-  const seedanceDuration = resolveVideoDurationSeconds(
+  // 火山直连在 generateVideo 中按具体模型归一化；这里不能提前套用 15 秒上限，
+  // 也不能把自动值 -1 或未指定时长转换为通用默认值。工作流仍保持旧规则。
+  const deferDurationResolution = options.provider === 'volcengine' && !options.workflowId;
+  const seedanceDuration = deferDurationResolution ? options.seedanceDuration : resolveVideoDurationSeconds(
     options.seedanceDuration,
     options.videoFrames,
     videoFps,
@@ -69,7 +73,9 @@ export function resolveVideoSubmissionControls(
   return {
     videoResolution: options.videoResolution || LEGACY_VIDEO_RESOLUTION,
     videoFps,
-    videoFrames: videoFramesFromDuration(seedanceDuration, videoFps),
+    videoFrames: deferDurationResolution
+      ? (seedanceDuration === undefined ? options.videoFrames : undefined)
+      : videoFramesFromDuration(seedanceDuration, videoFps),
     seedanceResolution: options.seedanceResolution || LEGACY_VIDEO_RESOLUTION_PRESET,
     seedanceRatio: options.seedanceRatio || LEGACY_VIDEO_ASPECT_RATIO,
     seedanceDuration,
@@ -202,7 +208,7 @@ export interface ResolvedVideoCompatibilityValues {
   durationSeconds: number;
   requestedFrameRate: number;
   /** Existing local workflows use an inclusive first-frame count (duration * fps + 1). */
-  frameCount: number;
+  frameCount?: number;
   generateAudio?: boolean;
   candidateCount: 1;
 }
@@ -309,6 +315,17 @@ export function assertVideoModelCapability(capability: VideoModelCapability | un
     }
   }
   if (
+    capability.automaticDurationValue !== undefined
+    && (!Number.isFinite(capability.automaticDurationValue) || capability.automaticDurationValue >= 0)
+  ) {
+    fail(
+      'INVALID_CAPABILITY',
+      '模型能力 automaticDurationValue 必须是小于 0 的有限数值',
+      'automaticDurationValue',
+      { value: capability.automaticDurationValue },
+    );
+  }
+  if (
     capability.minDuration !== undefined
     && capability.maxDuration !== undefined
     && capability.minDuration > capability.maxDuration
@@ -338,6 +355,7 @@ export function assertVideoModelCapability(capability: VideoModelCapability | un
     ['maxImageReferences', capability.maxImageReferences],
     ['maxVideoReferences', capability.maxVideoReferences],
     ['maxAudioReferences', capability.maxAudioReferences],
+    ['maxVideoAudioReferences', capability.maxVideoAudioReferences],
   ];
   for (const [field, value] of referenceLimits) {
     if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
@@ -368,54 +386,85 @@ export function assertVideoModelCapability(capability: VideoModelCapability | un
   assertCapabilityDefault('defaultRatio', capability.defaultRatio, capability.ratios);
   assertCapabilityDefault('defaultFrameRate', capability.defaultFrameRate, capability.frameRates);
 
-  for (const [mode, rawModeCapability] of Object.entries(capability.inputModeCapabilities ?? {})) {
-    if (!VIDEO_INPUT_MODES.has(mode as VideoGenerationInputMode)) {
-      fail('INVALID_CAPABILITY', `模型能力 inputModeCapabilities 包含无效输入模式 ${mode}`, 'inputModeCapabilities');
-    }
-    if (!rawModeCapability || typeof rawModeCapability !== 'object' || Array.isArray(rawModeCapability)) {
-      fail('INVALID_CAPABILITY', `模型能力 inputModeCapabilities.${mode} 必须是对象`, `inputModeCapabilities.${mode}`);
-    }
-    const modeCapability = rawModeCapability;
-    if (modeCapability.ratios) {
-      if (modeCapability.ratios.length === 0 || modeCapability.ratios.some((ratio) => (
-        typeof ratio !== 'string' || ratio.trim().length === 0
-      ))) {
+  const assertParameterOverrides = (
+    field: string,
+    values: Partial<Record<string, VideoParameterCapabilityOverride>> | undefined,
+    allowed: ReadonlySet<string>,
+  ) => {
+    for (const [mode, modeCapability] of Object.entries(values ?? {})) {
+      if (!allowed.has(mode)) {
+        fail('INVALID_CAPABILITY', `模型能力 ${field} 包含无效键 ${mode}`, field);
+      }
+      if (!modeCapability || typeof modeCapability !== 'object' || Array.isArray(modeCapability)) {
+        fail('INVALID_CAPABILITY', `模型能力 ${field}.${mode} 必须是对象`, `${field}.${mode}`);
+      }
+      if (modeCapability.ratios) {
+        if (modeCapability.ratios.length === 0 || modeCapability.ratios.some((ratio) => (
+          typeof ratio !== 'string' || ratio.trim().length === 0
+        ))) {
+          fail(
+            'INVALID_CAPABILITY',
+            `模型能力 ${field}.${mode}.ratios 必须是非空字符串数组`,
+            `${field}.${mode}.ratios`,
+          );
+        }
+        if (capability.ratios?.length
+          && modeCapability.ratios.some((ratio) => !capability.ratios!.includes(ratio))) {
+          fail(
+            'INVALID_CAPABILITY',
+            `模型能力 ${field}.${mode}.ratios 必须是模型级 ratios 的子集`,
+            `${field}.${mode}.ratios`,
+          );
+        }
+      }
+      if (modeCapability.defaultRatio !== undefined && !modeCapability.defaultRatio.trim()) {
         fail(
           'INVALID_CAPABILITY',
-          `模型能力 inputModeCapabilities.${mode}.ratios 必须是非空字符串数组`,
-          `inputModeCapabilities.${mode}.ratios`,
+          `模型能力 ${field}.${mode}.defaultRatio 不能为空`,
+          `${field}.${mode}.defaultRatio`,
         );
       }
-      if (capability.ratios?.length && modeCapability.ratios.some((ratio) => !capability.ratios!.includes(ratio))) {
+      const effectiveRatios = modeCapability.ratios ?? capability.ratios;
+      const effectiveDefaultRatio = modeCapability.defaultRatio ?? capability.defaultRatio;
+      assertCapabilityDefault(
+        `${field}.${mode}.defaultRatio`,
+        effectiveDefaultRatio,
+        effectiveRatios,
+      );
+      if (modeCapability.requiresRatio !== undefined && typeof modeCapability.requiresRatio !== 'boolean') {
         fail(
           'INVALID_CAPABILITY',
-          `模型能力 inputModeCapabilities.${mode}.ratios 必须是模型级 ratios 的子集`,
-          `inputModeCapabilities.${mode}.ratios`,
+          `模型能力 ${field}.${mode}.requiresRatio 必须是布尔值`,
+          `${field}.${mode}.requiresRatio`,
+        );
+      }
+      if (modeCapability.automaticDurationOnly !== undefined
+        && typeof modeCapability.automaticDurationOnly !== 'boolean') {
+        fail(
+          'INVALID_CAPABILITY',
+          `模型能力 ${field}.${mode}.automaticDurationOnly 必须是布尔值`,
+          `${field}.${mode}.automaticDurationOnly`,
+        );
+      }
+      if (modeCapability.automaticDurationOnly && capability.automaticDurationValue === undefined) {
+        fail(
+          'INVALID_CAPABILITY',
+          `模型能力 ${field}.${mode} 要求自动时长，但未声明 automaticDurationValue`,
+          `${field}.${mode}.automaticDurationOnly`,
         );
       }
     }
-    if (modeCapability.defaultRatio !== undefined && !modeCapability.defaultRatio.trim()) {
-      fail(
-        'INVALID_CAPABILITY',
-        `模型能力 inputModeCapabilities.${mode}.defaultRatio 不能为空`,
-        `inputModeCapabilities.${mode}.defaultRatio`,
-      );
-    }
-    const effectiveRatios = modeCapability.ratios ?? capability.ratios;
-    const effectiveDefaultRatio = modeCapability.defaultRatio ?? capability.defaultRatio;
-    assertCapabilityDefault(
-      `inputModeCapabilities.${mode}.defaultRatio`,
-      effectiveDefaultRatio,
-      effectiveRatios,
-    );
-    if (modeCapability.requiresRatio !== undefined && typeof modeCapability.requiresRatio !== 'boolean') {
-      fail(
-        'INVALID_CAPABILITY',
-        `模型能力 inputModeCapabilities.${mode}.requiresRatio 必须是布尔值`,
-        `inputModeCapabilities.${mode}.requiresRatio`,
-      );
-    }
-  }
+  };
+  assertParameterOverrides(
+    'inputModeCapabilities',
+    capability.inputModeCapabilities,
+    VIDEO_INPUT_MODES,
+  );
+  assertParameterOverrides(
+    'operationCapabilities',
+    capability.operationCapabilities,
+    VIDEO_OPERATIONS,
+  );
 
   if (capability.defaultDuration !== undefined) {
     const defaultDuration = capability.defaultDuration;
@@ -589,6 +638,7 @@ function assertReferenceCapabilities(
     ['参考图', references.counts.image, capability.maxImageReferences],
     ['参考视频', references.counts.video, capability.maxVideoReferences],
     ['参考音频', references.counts.audio, capability.maxAudioReferences],
+    ['参考视频和音频（合计）', references.counts.video + references.counts.audio, capability.maxVideoAudioReferences],
   ];
   for (const [label, count, maximum] of limits) {
     if (maximum === undefined || count <= maximum) continue;
@@ -714,10 +764,26 @@ function resolveDuration(
   frameCount: number | null,
   frameRate: ResolvedValue<number>,
   capability: VideoModelCapability | undefined,
+  automaticDurationOnly = false,
 ): ResolvedValue<number> {
   if (requestedDuration !== undefined) {
+    if (requestedDuration === capability?.automaticDurationValue) {
+      return { value: requestedDuration, source: 'request' };
+    }
+    if (automaticDurationOnly) {
+      fail(
+        'UNSUPPORTED_DURATION',
+        '当前视频操作只支持由模型自动决定时长',
+        'durationSeconds',
+        { value: requestedDuration, automatic: capability?.automaticDurationValue },
+      );
+    }
     assertPositiveFinite(requestedDuration, 'durationSeconds');
     return { value: requestedDuration, source: 'request' };
+  }
+
+  if (automaticDurationOnly && capability?.automaticDurationValue !== undefined) {
+    return { value: capability.automaticDurationValue, source: 'capability-default' };
   }
 
   if (frameCount !== null) {
@@ -736,6 +802,9 @@ function resolveDuration(
   if (capability?.defaultDuration !== undefined) {
     return { value: capability.defaultDuration, source: 'capability-default' };
   }
+  if (capability?.automaticDurationValue !== undefined) {
+    return { value: capability.automaticDurationValue, source: 'capability-default' };
+  }
 
   return { value: DEFAULT_VIDEO_DURATION_SECONDS, source: 'compatibility-default' };
 }
@@ -748,6 +817,7 @@ function assertDurationSupported(
 ): void {
   if (source === 'compatibility-default') return;
   if (!capability) return;
+  if (duration === capability.automaticDurationValue) return;
   if (capability.durations?.length && !capability.durations.includes(duration)) {
     fail(
       'UNSUPPORTED_DURATION',
@@ -863,9 +933,12 @@ export function resolveCanonicalVideoRequest(
   }
 
   const inputModeCapability = capability?.inputModeCapabilities?.[inputMode];
+  const operationCapability = capability?.operationCapabilities?.[operation];
   const aspectRatio = resolveOptionalString(
     params.seedanceRatio,
-    inputModeCapability?.defaultRatio ?? capability?.defaultRatio,
+    inputModeCapability?.defaultRatio
+      ?? operationCapability?.defaultRatio
+      ?? capability?.defaultRatio,
   );
   const resolutionPreset = resolveOptionalString(
     params.seedanceResolution,
@@ -873,7 +946,7 @@ export function resolveCanonicalVideoRequest(
   );
   assertAllowedString(
     aspectRatio.value,
-    inputModeCapability?.ratios ?? capability?.ratios,
+    inputModeCapability?.ratios ?? operationCapability?.ratios ?? capability?.ratios,
     'UNSUPPORTED_ASPECT_RATIO',
     'aspectRatio',
     '宽高比',
@@ -902,6 +975,8 @@ export function resolveCanonicalVideoRequest(
     frameCount.value,
     frameRate,
     capability,
+    inputModeCapability?.automaticDurationOnly === true
+      || operationCapability?.automaticDurationOnly === true,
   );
   if (frameCount.source === 'request' && duration.source === 'request') {
     const expectedFrameCount = Math.round(duration.value * frameRate.value) + 1;
@@ -971,14 +1046,13 @@ export function toResolvedVideoCompatibilityValues(
   const audioUrls = request.references.audios.map((reference) => reference.url);
   const firstRoleImage = request.references.images.find((item) => item.role === 'first_frame');
   const lastRoleImage = request.references.images.find((item) => item.role === 'last_frame');
-  const firstImageUrl = (firstRoleImage ?? request.references.images[0])?.url;
-  const lastFallback = request.references.images.length > 1
-    ? request.references.images[request.references.images.length - 1]
+  // 兼容字段也必须保留角色语义：普通参考图不能因为排列在第一张/最后一张
+  // 就被下游协议误判为首帧或尾帧。
+  const firstImageUrl = firstRoleImage?.url;
+  const lastImageUrl = lastRoleImage?.url;
+  const generatedFrameCount = request.output.durationSeconds > 0
+    ? Math.round(request.output.durationSeconds * request.output.requestedFrameRate) + 1
     : undefined;
-  const lastImageUrl = (lastRoleImage ?? lastFallback)?.url;
-  const generatedFrameCount = Math.round(
-    request.output.durationSeconds * request.output.requestedFrameRate,
-  ) + 1;
 
   return {
     prompt: request.prompt,

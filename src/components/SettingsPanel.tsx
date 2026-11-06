@@ -1,7 +1,7 @@
 /**
  * SettingsPanel 设置面板 — 模态弹窗，管理常规、文件与应用、API Key、快捷键、ComfyUI 等设置
  */
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import '../styles/settings.css';
 import { useShallow } from 'zustand/react/shallow';
@@ -12,13 +12,16 @@ import PopupCloseButton from './shared/PopupCloseButton';
 import ApiKeySettings from './settings/ApiKeySettings';
 import StorageHealthCenter from './settings/StorageHealthCenter';
 import DirectorDeskStorageManager from './settings/DirectorDeskStorageManager';
-import McpControlSettings from './settings/McpControlSettings';
+import OnnxModelStorageManager from './settings/OnnxModelStorageManager';
+import McpSettings from './settings/McpSettings';
 import SettingsNavigation from './settings/SettingsNavigation';
 import ShortcutSettings from './settings/ShortcutSettings';
+import CanvasZoomRangeSettings from './settings/CanvasZoomRangeSettings';
 import ComfyUISettings from './settings/ComfyUISettings';
 import SeedlingSettings from './settings/SeedlingSettings';
 import FileAppSettings from './settings/FileAppSettings';
 import PluginSettings from './settings/PluginSettings';
+import AppearanceSettings from './settings/AppearanceSettings';
 import { BACKGROUND_OPTIONS } from './backgrounds/backgroundOptions';
 import { detectBackgroundBrightness, compressImageLossless } from '../services/backgroundService';
 import type {
@@ -32,6 +35,10 @@ import type { BackgroundDetection } from '../services/backgroundService';
 
 import type { SettingsTab } from '../store/store.ui';
 import { LOCALES, LOCALE_LABELS, getLocale, useT } from '../i18n';
+import { applyNativePerformanceMode, isNativePerformanceModeSupported } from '../services/nativePerformanceModeService';
+import { applyMainWindowWorkArea } from '../services/mainWindowBoundsService';
+
+const SharedAssetStorageSettings = lazy(() => import('./settings/SharedAssetStorageSettings'));
 
 /** 窗口尺寸预设：每种比例给紧凑 / 标准 / 大屏三档主流尺寸 */
 const WINDOW_ASPECT_OPTIONS: {
@@ -43,6 +50,9 @@ const WINDOW_ASPECT_OPTIONS: {
   { id: '4:3',   presets: [{ w: 1024, h: 768, label: '紧凑' }, { w: 1280, h: 960, label: '标准' }, { w: 1440, h: 1080, label: '大屏' }] },
 ];
 
+const DARK_SHADE_PRESETS = [0, 15, 20, 33, 58] as const;
+const OFF_WHITE_PRESETS = ['#FFFFFF', '#FAFBFD', '#F4F6FB', '#ECEFF5', '#E4E9F2'] as const;
+
 /** 把主窗口设成指定逻辑尺寸；超出当前显示器可视范围时等比缩小，避免窗口大到没法操作 */
 async function applyWindowSize(width: number, height: number): Promise<void> {
   try {
@@ -51,18 +61,24 @@ async function applyWindowSize(width: number, height: number): Promise<void> {
     if (await win.isFullscreen()) await win.setFullscreen(false);
     if (await win.isMaximized()) await win.unmaximize();
 
-    let w = width;
-    let h = height;
     const monitor = await currentMonitor();
-    if (monitor) {
-      const maxW = monitor.size.width / monitor.scaleFactor - 40;
-      const maxH = monitor.size.height / monitor.scaleFactor - 80;
-      const scale = Math.min(1, maxW / w, maxH / h);
-      w = Math.round(w * scale);
-      h = Math.round(h * scale);
+    if (monitor && /Macintosh|Mac OS X/.test(navigator.userAgent)) {
+      await applyMainWindowWorkArea(win, monitor, {
+        size: { width, height }, ratio: width / height, center: true,
+      });
+    } else {
+      let w = width;
+      let h = height;
+      if (monitor) {
+        const maxW = monitor.size.width / monitor.scaleFactor - 40;
+        const maxH = monitor.size.height / monitor.scaleFactor - 80;
+        const scale = Math.min(1, maxW / w, maxH / h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      await win.setSize(new LogicalSize(w, h));
+      await win.center();
     }
-    await win.setSize(new LogicalSize(w, h));
-    await win.center();
   } catch (error) {
     // 权限没配全时 Tauri 会直接 reject，静默 catch 会让人以为按钮没反应
     console.warn('[窗口尺寸] 设置失败:', error);
@@ -134,8 +150,6 @@ const STARTUP_VIEW_OPTIONS: {
   },
 ];
 
-const IS_MAC = typeof navigator !== 'undefined' && /Macintosh|Mac OS X/.test(navigator.userAgent);
-
 /** 格式化字节为可读大小 */
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -178,9 +192,18 @@ export default function SettingsPanel() {
   const sidebarFloating = config.sidebarFloating === true; // 默认关闭
   const configuredWindowGlassFrame = config.windowGlassFrame !== false; // 默认开启
   const performanceMode = config.performanceMode === true;
+  const [performanceApplying, setPerformanceApplying] = useState(false);
+  const applyPerformanceMode = async (enabled: boolean) => {
+    setPerformanceApplying(true);
+    try {
+      await applyNativePerformanceMode(enabled);
+      if (!enabled && isNativePerformanceModeSupported()) showToast(t('已关闭性能模式，原生图形设置将在下次启动时恢复'));
+    } catch (error) {
+      showToast(t(error instanceof Error ? error.message : '图形启动设置保存失败，未重启'), 'error');
+    } finally { setPerformanceApplying(false); }
+  };
   const windowAspectRatio = config.windowAspectRatio ?? '16:9';
   const windowAspectLocked = config.windowAspectLocked === true;
-  const customCursor = config.customCursor !== false; // 默认开启
   // 当前窗口实际尺寸 —— 用来给尺寸预设标出选中态
   const [currentWindowSize, setCurrentWindowSize] = useState<{ w: number; h: number } | null>(null);
   useEffect(() => {
@@ -208,13 +231,31 @@ export default function SettingsPanel() {
   const nodeToolbarMode = config.nodeToolbarMode ?? 'icons';
   const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
   const canvasNoteToolbarVisible = config.canvasNoteToolbarVisible !== false; // 默认开启
-  const startupView = config.startupView ?? 'last-project';
+  const autoMentionOnConnect = config.autoMentionOnConnect !== false;
+  const startupView = config.startupView ?? 'project-library';
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');
   const [bgUploading, setBgUploading] = useState(false);
   const [bgDetection, setBgDetection] = useState<BackgroundDetection | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const darkShade = Math.min(58, Math.max(0, config.defaultDarkBackgroundShade ?? 20));
+  const darkDotColor = `rgb(${darkShade + 68} ${darkShade + 68} ${darkShade + 84})`;
+  const offWhiteColor = config.offWhiteBackgroundColor ?? '#F4F6FB';
+  // Legacy background controls remain in source only for migration reference; the new appearance page owns this UI.
+  const legacyBackgroundUiEnabled = false;
+  const applyDarkShade = (shade: number) => {
+    if (shade === darkShade && (config.canvasBackground ?? 'default') === 'default') return;
+    updateConfig({ canvasBackground: 'default', theme: 'dark', defaultDarkBackgroundShade: shade });
+    setBgDetection(null);
+    void persist();
+  };
+  const applyOffWhiteColor = (color: string) => {
+    if (color === offWhiteColor && config.canvasBackground === 'off-white') return;
+    updateConfig({ canvasBackground: 'off-white', theme: 'light', offWhiteBackgroundColor: color });
+    setBgDetection(null);
+    void persist();
+  };
 
   // 外部（如 Agent 保存厂商配置后）请求的标签页在渲染期直接生效，不用 effect 回写 state；
   // 用户手动切换即视为消费掉该请求（关闭面板时 store 也会清空它）
@@ -300,18 +341,18 @@ export default function SettingsPanel() {
       isOpen={settingsOpen}
       onClose={() => setSettingsOpen(false)}
       ariaLabel={t('设置')}
-      className="w-[640px] h-[80vh]"
+      className="w-[min(900px,90vw)] h-[90vh] max-h-[940px] rounded-2xl settings-modal-shell ui-dialog-surface border ring-1 ring-black/5 shadow-2xl"
       closeOnBackdrop={false}
     >
         {/* Header */}
-        <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-canvas-border">
-          <h2 className="text-base font-semibold text-canvas-text">{t('设置')}</h2>
+        <div className="flex items-center justify-between px-2.5 py-2 bg-canvas-surface border-b border-canvas-border settings-modal-header select-none shrink-0 z-20">
+          <h2 className="text-[17px] font-semibold text-canvas-text settings-modal-header-title tracking-tight leading-none">{t('设置')}</h2>
           <PopupCloseButton
             ariaLabel={t('关闭设置')}
             onClick={() => setSettingsOpen(false)}
           />
         </div>
-        {(saveError || !configHydrated || unreadSecretCount > 0 || (saveStatus !== 'idle' && saveStatus !== 'saved')) && (
+        {(saveError || !configHydrated || unreadSecretCount > 0 || (activeTab !== 'appearance' && saveStatus !== 'idle' && saveStatus !== 'saved')) && (
         <div role="status" className={`ui-alert ${saveStatus === 'error' || saveStatus === 'conflict' ? 'ui-alert--danger' : 'ui-alert--info'} mx-3 my-2`} data-settings-persistence>
           <div className="ui-alert__body flex-1">
             {saveError ?? t(saveStatus === 'saving' ? '正在保存设置…' : saveStatus === 'dirty' ? '有未保存的设置'
@@ -330,7 +371,7 @@ export default function SettingsPanel() {
           <SettingsNavigation activeTab={activeTab} onSelect={selectTab} />
 
           {/* Content */}
-          <div className="settings-content flex-1 overflow-y-auto overflow-x-hidden p-3">
+          <div className={`settings-content flex-1 overflow-y-auto overflow-x-hidden ${activeTab === 'appearance' ? 'p-0' : 'p-4 sm:p-6'}`}>
             {activeTab === 'api' && (
               <ApiKeySettings onClose={() => setSettingsOpen(false)} />
             )}
@@ -338,6 +379,8 @@ export default function SettingsPanel() {
             {activeTab === 'comfyui' && <ComfyUISettings />}
 
             {activeTab === 'seedling' && <SeedlingSettings />}
+            {activeTab === 'appearance' && <AppearanceSettings />}
+
 
             {activeTab === 'general' && (
               <div className="space-y-4">
@@ -363,7 +406,7 @@ export default function SettingsPanel() {
                           }}
                           className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
                             active
-                              ? 'bg-indigo-500/15 text-indigo-400 shadow-sm'
+                              ? 'bg-brand/15 text-brand-light shadow-sm'
                               : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text'
                           }`}
                         >
@@ -396,13 +439,13 @@ export default function SettingsPanel() {
                           }}
                           className={`flex items-start gap-3 rounded-lg border p-3 text-left transition-colors ${
                             active
-                              ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
+                              ? 'border-brand bg-brand/10 text-brand-light'
                               : 'border-canvas-border bg-canvas-card text-canvas-text-secondary hover:border-canvas-hover'
                           }`}
                         >
                           <span
                             className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                              active ? 'bg-indigo-500/15' : 'bg-canvas-surface'
+                              active ? 'bg-brand/15' : 'bg-canvas-surface'
                             }`}
                             aria-hidden="true"
                           >
@@ -443,7 +486,7 @@ export default function SettingsPanel() {
                           }}
                           className={`flex h-9 items-center justify-center rounded-md text-xs font-medium transition-colors ${
                             active
-                              ? 'bg-indigo-500/15 text-indigo-400 shadow-sm'
+                              ? 'bg-brand/15 text-brand-light shadow-sm'
                               : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text'
                           }`}
                         >
@@ -468,12 +511,12 @@ export default function SettingsPanel() {
                           onClick={() => { void applyWindowSize(w, h); }}
                           className={`flex flex-col items-center gap-0.5 rounded-lg border px-2 py-2 transition-colors ${
                             active
-                              ? 'border-indigo-500 bg-indigo-500/10'
+                              ? 'border-brand bg-brand/10'
                               : 'border-canvas-border bg-canvas-card hover:border-canvas-hover'
                           }`}
                         >
-                          <span className={`text-xs font-medium ${active ? 'text-indigo-400' : 'text-canvas-text'}`}>{w} × {h}</span>
-                          <span className={`text-[11px] ${active ? 'text-indigo-400/70' : 'text-canvas-text-muted'}`}>{t(label)}</span>
+                          <span className={`text-xs font-medium ${active ? 'text-brand-light' : 'text-canvas-text'}`}>{w} × {h}</span>
+                          <span className={`text-[11px] ${active ? 'text-brand-light/70' : 'text-canvas-text-muted'}`}>{t(label)}</span>
                         </AnimatedButton>
                       );
                     })}
@@ -490,7 +533,7 @@ export default function SettingsPanel() {
                   >
                     <span
                       className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                        windowAspectLocked ? 'bg-indigo-500/15 text-indigo-400' : 'bg-canvas-surface text-canvas-text-secondary'
+                        windowAspectLocked ? 'bg-brand/15 text-brand-light' : 'bg-canvas-surface text-canvas-text-secondary'
                       }`}
                       aria-hidden="true"
                     >
@@ -512,15 +555,16 @@ export default function SettingsPanel() {
                   </button>
                 </section>
 
-                {/* 画布背景主题 */}
+                {legacyBackgroundUiEnabled && (<>
+                {/* 旧版画布背景入口由外观页接管，保留迁移逻辑但不再展示。 */}
                 <div>
                   <h3 className="text-sm font-medium text-canvas-text mb-2">{t('画布背景')}</h3>
                   <div className="grid grid-cols-3 gap-2">
                     {BACKGROUND_OPTIONS.map(({ value, label, theme }) => {
                       const isActive = (config.canvasBackground || 'default') === value;
                       return (
+                        <div key={value} className="relative rounded-lg focus-within:ring-2 focus-within:ring-brand-light">
                         <AnimatedButton
-                          key={value}
                           onClick={async () => {
                             if (value === 'custom') {
                               if (config.customBackgroundUrl) {
@@ -538,38 +582,42 @@ export default function SettingsPanel() {
                             setBgDetection(null);
                             if (!await persist()) return;
                           }}
-                          className={`flex flex-col items-center gap-1.5 p-1 rounded-lg border transition-colors ${
+                          className={`flex h-full w-full flex-col items-center gap-1.5 p-1 rounded-lg border transition-colors ${
                             isActive
-                              ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
+                              ? 'border-brand bg-brand/10 text-brand-light'
                               : 'border-canvas-border bg-canvas-card text-canvas-text-secondary hover:border-canvas-hover'
                           }`}
                         >
                           {/* 预览缩略图 */}
-                          <div className={`w-full h-12 rounded overflow-hidden border border-canvas-border flex items-center justify-center ${
+                          <div className={`relative w-full h-12 rounded overflow-hidden border border-canvas-border flex items-center justify-center ${
                             value === 'default'
-                              ? 'bg-[#0a0a1a]'
+                              ? ''
                               : value === 'solar-system'
-                              ? 'bg-gradient-to-br from-[#0a0a1a] via-[#1a1030] to-[#0a1020]'
+                              ? 'bg-[#000000]'
                               : value === 'nebula'
                               ? 'bg-gradient-to-b from-[#0a0514] via-[#14081e] to-[#0a0514]'
                               : value === 'off-white'
-                              ? 'bg-[#F4F6FB]'
+                              ? ''
                               : value === 'frosted-glass'
                               ? 'canvas-bg-frosted-preview'
                               : value === 'custom'
                               ? (config.customBackgroundUrl
                                 ? ''
                                 : 'bg-canvas-surface')
-                              : 'bg-black'
+                              : 'bg-canvas-bg'
                           }`}
                           style={
-                            value === 'custom' && config.customBackgroundUrl
-                              ? { backgroundImage: `url(${config.customBackgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-                              : undefined
+                            value === 'default'
+                              ? { backgroundColor: `rgb(${darkShade} ${darkShade} ${darkShade})` }
+                              : value === 'off-white'
+                                ? { backgroundColor: offWhiteColor }
+                              : value === 'custom' && config.customBackgroundUrl
+                                ? { backgroundImage: `url(${config.customBackgroundUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+                                : undefined
                           }>
                             {value === 'default' && (
                               <div className="w-full h-full" style={{
-                                backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.08) 1px, transparent 1px)',
+                                backgroundImage: `radial-gradient(circle, ${darkDotColor} 1px, transparent 1px)`,
                                 backgroundSize: '8px 8px',
                               }} />
                             )}
@@ -596,7 +644,7 @@ export default function SettingsPanel() {
                             )}
                             {value === 'off-white' && (
                               <div className="w-full h-full" style={{
-                                backgroundImage: 'radial-gradient(circle, rgba(0,0,0,0.06) 1px, transparent 1px)',
+                                backgroundImage: 'radial-gradient(circle, rgba(51,54,77,0.22) 1px, transparent 1px)',
                                 backgroundSize: '8px 8px',
                               }} />
                             )}
@@ -612,6 +660,46 @@ export default function SettingsPanel() {
                           </div>
                           <span className="text-[11px] font-medium">{t(label)}</span>
                         </AnimatedButton>
+                        {value === 'default' && (
+                          <div className="absolute inset-x-2 top-7 flex justify-between gap-1">
+                            {DARK_SHADE_PRESETS.map((shade) => {
+                              const hex = `#${shade.toString(16).padStart(2, '0').repeat(3).toUpperCase()}`;
+                              return (
+                                <button
+                                  key={shade}
+                                  type="button"
+                                  title={hex}
+                                  aria-label={hex}
+                                  aria-pressed={isActive && darkShade === shade}
+                                  onClick={() => applyDarkShade(shade)}
+                                  className={`h-5 w-5 shrink-0 rounded border border-canvas-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-light ${
+                                    isActive && darkShade === shade ? 'ring-2 ring-brand-light' : ''
+                                  }`}
+                                  style={{ backgroundColor: hex }}
+                                />
+                              );
+                            })}
+                          </div>
+                        )}
+                        {value === 'off-white' && (
+                          <div className="absolute inset-x-2 top-7 flex justify-between gap-1">
+                            {OFF_WHITE_PRESETS.map((color) => (
+                              <button
+                                key={color}
+                                type="button"
+                                title={color}
+                                aria-label={color}
+                                aria-pressed={isActive && offWhiteColor === color}
+                                onClick={() => applyOffWhiteColor(color)}
+                                className={`h-5 w-5 shrink-0 rounded border border-canvas-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-light ${
+                                  isActive && offWhiteColor === color ? 'ring-2 ring-brand-light' : ''
+                                }`}
+                                style={{ backgroundColor: color }}
+                              />
+                            ))}
+                          </div>
+                        )}
+                        </div>
                       );
                     })}
                   </div>
@@ -651,12 +739,12 @@ export default function SettingsPanel() {
                           <div className="flex items-center gap-2">
                             <div
                               className={`w-2 h-2 rounded-full shrink-0 ${
-                                bgDetection ? (bgDetection.isDark ? 'bg-indigo-400' : 'bg-amber-400') : 'bg-canvas-border'
+                                bgDetection ? (bgDetection?.isDark ? 'bg-brand-light' : 'bg-amber-400') : 'bg-canvas-border'
                               }`}
                             />
                             <span className="text-[11px] text-canvas-text-secondary">
                               {bgDetection
-                                ? t('已识别为{tone}背景（亮度: {brightness}/255）', { tone: bgDetection.isDark ? t('深色') : t('浅色'), brightness: bgDetection.brightness })
+                                ? t('已识别为{tone}背景（亮度: {brightness}/255）', { tone: bgDetection?.isDark ? t('深色') : t('浅色'), brightness: bgDetection?.brightness ?? 0 })
                                 : config.customBackgroundIsDark !== undefined
                                   ? t('已识别为{tone}背景', { tone: config.customBackgroundIsDark ? t('深色') : t('浅色') })
                                   : t('未检测')}
@@ -674,7 +762,8 @@ export default function SettingsPanel() {
                                 updateConfig({ customBackgroundOpacity: Number(e.target.value) / 100 });
                                 void persist();
                               }}
-                              className="flex-1 h-1 accent-indigo-500 cursor-pointer"
+                              className="flex-1 h-1 cursor-pointer"
+                              style={{ accentColor: 'var(--brand)' }}
                             />
                             <span className="text-[11px] text-canvas-text-secondary w-8 text-right tabular-nums">
                               {Math.round((config.customBackgroundOpacity ?? 0.3) * 100)}%
@@ -695,8 +784,9 @@ export default function SettingsPanel() {
                   />
                 </div>
 
-                {/* 画布交互模式（macOS 使用系统原生手势，隐藏此设置） */}
-                {!IS_MAC && (
+                </>)}
+
+                {/* Mac 也能切换模式，鼠标和触摸板按各自习惯选择。 */}
                 <section className="canvas-interaction-settings">
                   <div className="canvas-interaction-heading">
                     <div>
@@ -777,44 +867,8 @@ export default function SettingsPanel() {
                     </div>
                   </div>
                 </section>
-                )}
 
-                {/* 鼠标指针 */}
-                <section>
-                  <h3 className="mb-2 text-sm font-medium text-canvas-text">{t('鼠标指针')}</h3>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      updateConfig({ customCursor: !customCursor });
-                      void persist();
-                    }}
-                    aria-pressed={customCursor}
-                    className={`sidebar-pref-card${customCursor ? ' is-floating' : ''}`}
-                  >
-                    <span
-                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                        customCursor ? 'bg-indigo-500/15 text-indigo-400' : 'bg-canvas-surface text-canvas-text-secondary'
-                      }`}
-                      aria-hidden="true"
-                    >
-                      <Icon icon="mdi:cursor-default-outline" width="16" height="16" />
-                    </span>
-
-                    <div className="sidebar-pref-text">
-                      <div className="sidebar-pref-title">{t('自定义指针样式')}</div>
-                      <div className="sidebar-pref-desc">
-                        {customCursor
-                          ? t('使用内置指针，跟随明暗主题自动切换黑白')
-                          : t('使用系统默认指针')}
-                      </div>
-                    </div>
-
-                    <div className="sidebar-pref-switch" aria-hidden="true">
-                      <span />
-                    </div>
-                  </button>
-
-                </section>
+                <CanvasZoomRangeSettings onPersist={persist} />
 
                 {/* 节点顶部工具栏显示方式 */}
                 <section>
@@ -838,7 +892,7 @@ export default function SettingsPanel() {
                           }}
                           className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
                             active
-                              ? 'bg-indigo-500/15 text-indigo-400 shadow-sm'
+                              ? 'bg-brand/15 text-brand-light shadow-sm'
                               : 'text-canvas-text-secondary hover:bg-canvas-hover hover:text-canvas-text'
                           }`}
                         >
@@ -868,7 +922,7 @@ export default function SettingsPanel() {
                           canvasNoteToolbarVisible ? 'opacity-100' : 'opacity-30'
                         }`}
                       >
-                        <span className="h-3 w-3 rounded-[3px] bg-indigo-400/60" />
+                        <span className="h-3 w-3 rounded-[3px] bg-brand/60" />
                         <span className="h-3 w-3 rounded-[3px] border border-canvas-text-muted" />
                         <span className="h-3 w-3 rounded-full border border-canvas-text-muted" />
                       </div>
@@ -888,6 +942,47 @@ export default function SettingsPanel() {
                     </div>
                   </button>
                 </div>
+
+                <section>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('素材引用')}</h3>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-labelledby="auto-mention-on-connect-label"
+                    aria-describedby="auto-mention-on-connect-desc"
+                    aria-checked={autoMentionOnConnect}
+                    className={`sidebar-pref-card${autoMentionOnConnect ? ' is-floating' : ''}`}
+                    onClick={() => {
+                      updateConfig({ autoMentionOnConnect: !autoMentionOnConnect });
+                      void persist();
+                    }}
+                  >
+                    <div className="sidebar-pref-window flex items-center justify-center gap-1 p-1.5" aria-hidden="true">
+                      <span className="flex h-5 w-4 shrink-0 items-center justify-center rounded-[3px] border border-canvas-border bg-canvas-bg text-canvas-text-muted">
+                        <Icon icon="mdi:image-outline" width="12" height="12" />
+                      </span>
+                      <span className="flex w-3 shrink-0 items-center text-canvas-text-muted">
+                        <span className="h-px flex-1 bg-canvas-text-muted" />
+                        <span className="text-[9px] leading-none">▸</span>
+                      </span>
+                      <span className="flex h-8 w-9 shrink-0 flex-col justify-center gap-1 rounded-[4px] border border-canvas-border bg-canvas-bg p-1">
+                        <span className={`rounded-sm bg-indigo-500/15 px-0.5 text-[7px] leading-[10px] text-indigo-400 transition-opacity motion-reduce:transition-none ${autoMentionOnConnect ? 'opacity-100' : 'opacity-0'}`}>
+                          @{t('素材')}
+                        </span>
+                        <span className="h-0.5 w-4 rounded-full bg-canvas-text-muted/40" />
+                      </span>
+                    </div>
+
+                    <div className="sidebar-pref-text">
+                      <div id="auto-mention-on-connect-label" className="sidebar-pref-title">{t('连线后自动 @ 素材')}</div>
+                      <div id="auto-mention-on-connect-desc" className="sidebar-pref-desc">{t('新建连线时，将上游素材追加到生成节点的提示词中，已有引用不会重复添加。')}</div>
+                    </div>
+
+                    <div className="sidebar-pref-switch" aria-hidden="true">
+                      <span />
+                    </div>
+                  </button>
+                </section>
 
                 {/* 节点标题（node-label）是否显示 */}
                 <div>
@@ -909,7 +1004,7 @@ export default function SettingsPanel() {
                             nodeLabelVisible ? 'opacity-100' : 'opacity-0'
                           }`}
                         >
-                          <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-indigo-400/70" />
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-[2px] bg-brand/70" />
                           <span className="h-1 flex-1 rounded-full bg-canvas-border" />
                         </div>
                         <div className="h-7 w-full rounded-[5px] border border-canvas-border bg-canvas-bg" />
@@ -953,7 +1048,7 @@ export default function SettingsPanel() {
                           windowGlassFrame ? 'inset-[5px] rounded-[5px]' : 'inset-0 rounded-[8px]'
                         }`}
                       >
-                        <span className="h-6 w-1.5 shrink-0 rounded-sm bg-indigo-400/35" />
+                        <span className="h-6 w-1.5 shrink-0 rounded-sm bg-brand/35" />
                         <span className="h-1 flex-1 rounded-full bg-canvas-border" />
                       </div>
                     </div>
@@ -980,10 +1075,9 @@ export default function SettingsPanel() {
                   <h3 className="text-sm font-medium text-canvas-text mb-2">{t('图形与性能')}</h3>
                   <button
                     type="button"
-                    onClick={() => {
-                      updateConfig({ performanceMode: !performanceMode });
-                      void persist();
-                    }}
+                    onClick={() => { void applyPerformanceMode(!performanceMode); }}
+                    disabled={!configHydrated || performanceApplying}
+                    aria-busy={performanceApplying}
                     aria-pressed={performanceMode}
                     className={`sidebar-pref-card${performanceMode ? ' is-floating' : ''}`}
                   >
@@ -996,7 +1090,7 @@ export default function SettingsPanel() {
                         }`}
                       >
                         <span className="block h-1 w-2/3 rounded-full bg-canvas-text-muted/50" />
-                        <span className="mt-1.5 block h-3 rounded-[3px] bg-indigo-500/20" />
+                        <span className="mt-1.5 block h-3 rounded-[3px] bg-brand/20" />
                       </div>
                     </div>
 
@@ -1004,12 +1098,12 @@ export default function SettingsPanel() {
                       <div className="flex flex-wrap items-center gap-1.5">
                         <div className="sidebar-pref-title">{t('性能模式')}</div>
                         <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium leading-none text-amber-300">
-                          {t('卡顿或页面显示不全时开启')}
+                          {t('低配置省内存，界面闪烁时可开启')}
                         </span>
                       </div>
                       <div className="sidebar-pref-desc">
                         {performanceMode
-                          ? t('已关闭毛玻璃、自定义圆角、玻璃外框和装饰动画，保留 Windows 默认圆角')
+                          ? t('使用轻量媒体预览和较小缓存，释放离屏媒体；关闭图片与动态背景、3D 吉祥物和装饰动画')
                           : t('保留完整视觉效果与界面动画')}
                       </div>
                     </div>
@@ -1018,6 +1112,17 @@ export default function SettingsPanel() {
                       <span />
                     </div>
                   </button>
+                  <div className="mt-2 text-xs text-canvas-text-secondary">
+                    {t('关闭后恢复原有背景与视觉设置，原图与生成内容不变。')}
+                  </div>
+                  {isNativePerformanceModeSupported() && (
+                    <div className="mt-2 text-xs text-canvas-text-secondary">
+                      {t('开启后将保存并自动重启，正在运行的任务会中断；关闭后下次启动恢复原生图形设置。')}
+                      {performanceMode && <button type="button" className="ui-btn ui-btn--sm ml-2" disabled={performanceApplying} onClick={() => { void applyPerformanceMode(true); }}>
+                        {t('重新应用')}
+                      </button>}
+                    </div>
+                  )}
                 </div>
 
                 {/* 侧边栏是否悬浮显示 */}
@@ -1065,10 +1170,12 @@ export default function SettingsPanel() {
               <>
                 <StorageHealthCenter />
                 <DirectorDeskStorageManager />
+                <OnnxModelStorageManager />
+                <Suspense fallback={<p role="status" className="ui-hint">{t('正在加载项目云同步设置…')}</p>}><SharedAssetStorageSettings /></Suspense>
               </>
             )}
 
-            {activeTab === 'mcp' && <McpControlSettings />}
+            {activeTab === 'mcp' && <McpSettings />}
 
             {activeTab === 'plugins' && <PluginSettings />}
           </div>

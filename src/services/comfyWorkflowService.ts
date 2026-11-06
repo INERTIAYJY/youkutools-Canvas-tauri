@@ -4,47 +4,68 @@
  * Handles workflow JSON mutation, image upload, submission, and result polling.
  */
 import { applyAudioSpeechSettings, audioSpeechModeIssue, resolveAudioSpeechWorkflow, stripAudioSpeechReferences } from './ai/audioSpeechSettings';
+import { extractComfyUIIONodes } from './comfyUIWindowService';
 import { isRemoteMediaUrl } from '../utils/mediaUrl';
 import { useAppStore } from '../store/useAppStore';
 import { comfyBaseUrlFor } from './comfyServers';
-import type { WorkflowIONode, WorkflowIONodeType } from '../types';
-import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams, AudioSpeechSettings } from '../types/aiTypes';
+import type { WorkflowDefinition, WorkflowIONode, WorkflowIONodeType } from '../types';
+import type { AIAudioGenParams, AIImageGenParams, AIVideoGenParams, AudioSpeechSettings, MediaTaskReceipt } from '../types/aiTypes';
 import { mapImageDimensions, mapVideoDimensions, resolveVideoDurationSeconds } from './aiDimensions';
-import { resolveNodeReferences } from './nodeReferenceService';
+import { resolveNodeReferencesAsync } from './nodeReferenceService';
 import {
   cancelNodePolling,
   cleanupNodePolling,
   getPendingTasksForProject,
+  pauseMediaTask,
+  pauseVideoNodeTask,
   registerNodePolling,
   removePendingTask,
   savePendingTask,
   updatePendingTask,
 } from './pollManager';
-import { ComfyPendingError, comfyFetch, pollComfyHistory } from './comfyPolling';
+import { ComfyOutputUnavailableError, ComfyPendingError, ComfyQueryAuthorizationError, comfyFetch, pollComfyHistory } from './comfyPolling';
+import { assertComfyResponse, withComfyQueryTimeout } from './comfyQuery';
 import { corsSafeFetch } from './ai/httpTransport';
-import { resolveComfyOutputUrl } from './comfyOutputs';
+import { resolveComfyOutputUrl, type ComfyOutputFile } from './comfyOutputs';
 import { createComfyProgressSession, type ComfyProgressSession } from './comfyProgress';
+import { maybeAutoReleaseComfyMemory } from './comfyMemory';
+import { applyComfyRefmodsToWorkflow, assertComfyRefmodSubmissionFresh, assertComfyRefmodSubmissionTargetFresh } from './comfyRefmodWorkflow';
+import type { ComfyRefmodSelection } from '../types/comfyRefmod';
+import { videoInputData, videoInputFingerprint } from './videoBatchPlanning';
+import { applyComfyH3Memory } from './comfyH3Memory';
+import type { ComfyInputSpec } from '../types/comfyWorkflow';
+import { applyComfyWorkflowParameterOverrides, prepareComfyWorkflowParameterOverrides, splitComfyWorkflowInputs } from './comfyWorkflowParameters';
+import { parseRasterImageDimensions } from './rasterImageDimensions';
+import { inferComfyPromptRoles } from './comfyPromptRoles';
+import { comfyComboOptions } from './comfyInputSpecs';
 
 /** ComfyUI 已注册的节点类型；同一次会话里短暂缓存，装完插件重开也能很快看到变化 */
 let nodeClassCache: { baseUrl: string; classes: Set<string>; fetchedAt: number } | null = null;
 const NODE_CLASS_CACHE_TTL = 30_000;
+
+async function applyConfiguredComfyMemoryPolicy(baseUrl: string): Promise<void> {
+  const policy = useAppStore.getState().config.comfyMemoryPolicy ?? 'smart';
+  if (policy === 'smart') return;
+  try {
+    await maybeAutoReleaseComfyMemory(baseUrl, policy);
+  } catch (error) {
+    console.warn(
+      '[ComfyUI] 自动释放资源失败',
+      error instanceof Error ? error.message : '未知错误',
+    );
+  }
+}
 
 function queueContainsPrompt(queue: unknown, promptId: string): boolean {
   return Array.isArray(queue)
     && queue.some((item) => Array.isArray(item) && item[1] === promptId);
 }
 
-async function assertComfyResponse(response: Response, action: string): Promise<void> {
-  if (response.ok) return;
-  const detail = await response.text().catch(() => '');
-  throw new Error(`${action}失败（HTTP ${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`);
-}
-
 /**
  * 终止一个节点当前提交给 ComfyUI 的任务。
- * 新版 ComfyUI 使用原子的 job cancel API；旧版回退到队列查询后再做定向删除/中断。
+ * 只有确认任务不在队列才结束本地记录；旧版不支持定向中断时只停止本地等待。
  */
-export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
+export async function cancelComfyUINodeTask(nodeId: string): Promise<'remote-ended' | 'local-stopped'> {
   const currentProjectId = useAppStore.getState().currentProjectId;
   const task = currentProjectId
     ? getPendingTasksForProject(currentProjectId).find((item) => (
@@ -52,59 +73,77 @@ export async function cancelComfyUINodeTask(nodeId: string): Promise<void> {
     ))
     : undefined;
 
+  if (task?.mediaSubmissionUncertain || task?.mediaRecoveryState === 'submit_unknown') {
+    cancelNodePolling(nodeId, true);
+    pauseMediaTask(task, undefined, 'submit_unknown');
+    return 'local-stopped';
+  }
   if (!task?.submitted || !task.taskId || !task.baseUrl) {
     cancelNodePolling(nodeId);
-    return;
+    return 'remote-ended';
   }
   // 标记后再中止本地等待；远端取消失败时仍可重试，不能丢失任务身份。
-  updatePendingTask(nodeId, { comfyRecoveryState: 'cancel_pending' }, task.taskId);
+  updatePendingTask(nodeId, { comfyRecoveryState: 'cancel_pending' }, task.taskId, task.attemptId);
   cancelNodePolling(nodeId, true);
 
   const baseUrl = task.baseUrl.replace(/\/+$/, '');
   const promptId = task.taskId;
-  const directResponse = await comfyFetch(
-    `${baseUrl}/api/jobs/${encodeURIComponent(promptId)}/cancel`,
-    { method: 'POST' },
-  );
+  const directResponse = await withComfyQueryTimeout((signal) => comfyFetch(
+    `${baseUrl}/api/jobs/${encodeURIComponent(promptId)}/cancel`, { method: 'POST', signal },
+  ));
   if (directResponse.status !== 404) {
     await assertComfyResponse(directResponse, '终止 ComfyUI 任务');
-    removePendingTask(nodeId, promptId);
-    return;
   }
+  void directResponse.body?.cancel().catch(() => undefined);
 
-  // 兼容尚未提供 /api/jobs/:id/cancel 的 ComfyUI 版本。
-  const queueResponse = await comfyFetch(`${baseUrl}/queue`);
-  await assertComfyResponse(queueResponse, '读取 ComfyUI 队列');
-  const queue = (await queueResponse.json()) as Record<string, unknown>;
+  const readQueue = () => withComfyQueryTimeout(async (signal) => {
+    const queueResponse = await comfyFetch(`${baseUrl}/queue`, { signal });
+    await assertComfyResponse(queueResponse, '读取 ComfyUI 队列');
+    const queue = await queueResponse.json() as Record<string, unknown>;
+    if (!Array.isArray(queue.queue_pending) || !Array.isArray(queue.queue_running)) throw new Error('无法确认 ComfyUI 任务是否已经结束');
+    return queue;
+  });
+  let queue = await readQueue();
   if (queueContainsPrompt(queue.queue_pending, promptId)) {
-    const deleteResponse = await comfyFetch(`${baseUrl}/queue`, {
+    const deleteResponse = await withComfyQueryTimeout((signal) => comfyFetch(`${baseUrl}/queue`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ delete: [promptId] }),
-    });
+      signal,
+    }));
     await assertComfyResponse(deleteResponse, '移除 ComfyUI 排队任务');
-    removePendingTask(nodeId, promptId);
-    return;
+    // 排队项可能在删除前已经开始运行；HTTP 200 并不确认取消了目标任务。
+    queue = await readQueue();
   }
-  if (queueContainsPrompt(queue.queue_running, promptId)) {
-    const interruptResponse = await comfyFetch(`${baseUrl}/interrupt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt_id: promptId }),
-    });
-    await assertComfyResponse(interruptResponse, '中断 ComfyUI 运行任务');
+  if (queueContainsPrompt(queue.queue_running, promptId) || queueContainsPrompt(queue.queue_pending, promptId)) {
+    // 旧版 /interrupt 忽略 prompt_id，查询后全局中断会误停刚开始的其他任务。
+    updatePendingTask(nodeId, { comfyRecoveryState: 'disconnected' }, promptId, task.attemptId);
+    pauseMediaTask(task, undefined, 'query_interrupted');
+    return 'local-stopped';
   }
-  removePendingTask(nodeId, promptId);
+  removePendingTask(nodeId, promptId, task.attemptId);
+  return 'remote-ended';
 }
 
 function assertComfyNodeCanSubmit(nodeId?: string): void {
   const projectId = useAppStore.getState().currentProjectId;
   if (!nodeId || !projectId) return;
   if (getPendingTasksForProject(projectId).some((task) => (
-    task.nodeId === nodeId && task.taskType === 'comfyui' && task.submitted && task.comfyRecoveryState
+    task.nodeId === nodeId && task.taskType === 'comfyui'
+      && (task.submitted || task.mediaSubmissionUncertain || task.mediaRecoveryState === 'submit_unknown')
   ))) {
-    throw new Error('该节点还有未确认结束的 ComfyUI 任务，请先继续查询或终止任务');
+    throw new Error('该节点还有未交付或未确认结束的 ComfyUI 任务，请先继续查询或终止任务');
   }
+}
+
+/** POST 已发出而未拿到回执时，只能暂停核对，不能清理后允许重投。 */
+function interruptedComfySubmission(receipt: MediaTaskReceipt | undefined, submittedTaskId: string | undefined) {
+  if (!receipt) return;
+  const task = getPendingTasksForProject(receipt.projectId).find((item) => item.nodeId === receipt.nodeId
+    && item.attemptId === receipt.attemptId && item.taskType === 'comfyui');
+  if (task?.mediaSubmissionUncertain) return { receipt: task, reason: 'submit_unknown' as const };
+  // ID 已落盘后，进度绑定等同步回调仍可能抛错；不能由调用方尚未接到返回值而清掉回执。
+  if (!submittedTaskId && task?.submitted && task.taskId) return { receipt: task, reason: 'query_interrupted' as const };
 }
 
 async function fetchComfyNodeClasses(baseUrl: string): Promise<Set<string> | null> {
@@ -123,19 +162,11 @@ async function fetchComfyNodeClasses(baseUrl: string): Promise<Set<string> | nul
 }
 
 /** 节点某个输入的声明：combo 的可选值 + 数值范围，用来决定敢不敢写、写多少 */
-interface ComfyInputSpec {
-  options?: unknown[];
-  type?: string;
-  optional?: boolean;
-  min?: number;
-  max?: number;
-  step?: number;
-}
 type ComfyNodeInputSpecs = Record<string, ComfyInputSpec>;
 
 const nodeInputSpecCache = new Map<string, { fetchedAt: number; specs: Promise<ComfyNodeInputSpecs | null> }>();
 
-/** /object_info/{class} 的输入声明形如 { name: [type, config] }，combo 的 type 本身就是可选值数组 */
+/** /object_info/{class} 兼容旧选项数组与显式 COMBO.options，保留其他字段的原声明。 */
 function parseNodeInputSpecs(payload: unknown, classType: string): ComfyNodeInputSpecs | null {
   const groups = (payload as Record<string, { input?: Record<string, Record<string, unknown>> }> | null)
     ?.[classType]?.input;
@@ -146,12 +177,13 @@ function parseNodeInputSpecs(payload: unknown, classType: string): ComfyNodeInpu
       if (!Array.isArray(declaration)) continue;
       const [type, config] = declaration as [unknown, Record<string, unknown> | undefined];
       specs[name] = {
-        options: Array.isArray(type) ? type : undefined,
+        options: comfyComboOptions(declaration),
         type: typeof type === 'string' ? type : undefined,
         optional: group === 'optional',
         min: typeof config?.min === 'number' ? config.min : undefined,
         max: typeof config?.max === 'number' ? config.max : undefined,
         step: typeof config?.step === 'number' ? config.step : undefined,
+        multiline: typeof config?.multiline === 'boolean' ? config.multiline : undefined,
       };
     }
   }
@@ -159,21 +191,29 @@ function parseNodeInputSpecs(payload: unknown, classType: string): ComfyNodeInpu
 }
 
 /** 单个节点类型的输入声明；问不到就返回 null，调用方按「不敢写」处理 */
-async function fetchNodeInputSpecs(baseUrl: string, classType: string): Promise<ComfyNodeInputSpecs | null> {
+export async function fetchNodeInputSpecs(baseUrl: string, classType: string, fresh = false, signal?: AbortSignal): Promise<ComfyNodeInputSpecs | null> {
+  signal?.throwIfAborted();
   const key = `${baseUrl}::${classType}`;
   const cached = nodeInputSpecCache.get(key);
-  if (cached && Date.now() - cached.fetchedAt < NODE_CLASS_CACHE_TTL) return cached.specs;
-  const specs = (async () => {
+  if (!fresh && cached && Date.now() - cached.fetchedAt < NODE_CLASS_CACHE_TTL) return cached.specs;
+  const specs: Promise<ComfyNodeInputSpecs | null> = (async () => {
     try {
-      const response = await comfyFetch(`${baseUrl}/object_info/${encodeURIComponent(classType)}`);
-      if (!response.ok) return null;
-      return parseNodeInputSpecs(await response.json(), classType);
-    } catch {
+      return await withComfyQueryTimeout(async (signal) => {
+        const response = await comfyFetch(`${baseUrl}/object_info/${encodeURIComponent(classType)}`, { signal });
+        if (!response.ok) { void response.body?.cancel().catch(() => undefined); return null; }
+        return parseNodeInputSpecs(await response.json(), classType);
+      }, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return null;
     }
   })();
-  nodeInputSpecCache.set(key, { fetchedAt: Date.now(), specs });
-  return specs;
+  // 生成任务的可取消请求不能成为 UI 共用的在途请求；完成后才共享其成功结果。
+  if (!signal) nodeInputSpecCache.set(key, { fetchedAt: Date.now(), specs });
+  const result = await specs;
+  signal?.throwIfAborted();
+  if (signal && result) nodeInputSpecCache.set(key, { fetchedAt: Date.now(), specs: Promise.resolve(result) });
+  return result;
 }
 
 /**
@@ -256,28 +296,31 @@ function writeNodeInput(
 
 /** 默认节点按类型接受的输入键：写第一个已存在且是字符串的键 */
 const DEFAULT_NODE_INPUT_KEYS: Record<WorkflowIONodeType, string[]> = {
-  prompt: ['text', 'prompt', 'string', 'value', 'instruction'],
+  prompt: ['text', 'target_text', 'prompt', 'string', 'value', 'instruction'],
   image: ['image'],
   video: ['video'],
   audio: ['audio'],
 };
 
 /** 将提示词注入到 ComfyUI workflow JSON 的 prompt 类型 IO 节点中 */
-function injectPromptsIntoWorkflow(
+async function injectPromptsIntoWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   workflowInputs: Record<string, string> | undefined,
   fallbackPrompt: string,
   ioNodeIds: string[],
   /** 用户没 @ 任何 prompt 节点时，提示词写入这个节点，跳过下面的占位符猜测 */
   defaultPromptNodeId?: string,
-): void {
+): Promise<void> {
   if (defaultPromptNodeId) {
     writeNodeInput(workflowObj, defaultPromptNodeId, DEFAULT_NODE_INPUT_KEYS.prompt, fallbackPrompt);
     return;
   }
   if (!workflowInputs || Object.keys(workflowInputs).length === 0) {
+    const roles = inferComfyPromptRoles(workflowObj);
     // 没有 explicit IO 赋值时，遍历所有文本节点做兜底替换
-    for (const [, nodeData] of Object.entries(workflowObj)) {
+    for (const [nodeId, nodeData] of Object.entries(workflowObj)) {
+      // 未选默认输入时也不能把已确认的负面／共用条件当作正面占位符。
+      if (roles.get(nodeId) === 'negative' || roles.get(nodeId) === 'mixed') continue;
       if (!nodeData || typeof nodeData !== 'object') continue;
       const inputs = nodeData.inputs as Record<string, unknown> | undefined;
       if (!inputs) continue;
@@ -299,7 +342,7 @@ function injectPromptsIntoWorkflow(
     if (!ioNodeIds.includes(ioNodeId)) continue;
 
     const rawValue = workflowInputs[ioNodeId];
-    const resolvedValue = rawValue !== undefined ? resolveNodeReferences(rawValue) : undefined;
+    const resolvedValue = rawValue !== undefined ? await resolveNodeReferencesAsync(rawValue) : undefined;
     const finalValue = (resolvedValue && resolvedValue.trim()) ? resolvedValue : fallbackPrompt;
 
     if (!writeNodeInput(workflowObj, ioNodeId, DEFAULT_NODE_INPUT_KEYS.prompt, finalValue)) {
@@ -460,111 +503,70 @@ async function uploadMediaToComfyUI(
   return uploadResult;
 }
 
-/** 将显式指定的图片/视频上传并注入对应 IO 节点。 */
-async function injectExplicitMediaIntoWorkflow(
-  workflowObj: Record<string, Record<string, unknown>>,
-  workflowInputs: Record<string, string> | undefined,
-  ioNodes: WorkflowIONode[],
-  baseUrl: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!workflowInputs || Object.keys(workflowInputs).length === 0) return;
-
-  // 构建 nodeId → type 映射
-  const typeMap = new Map(ioNodes.map((io) => [io.nodeId, io.type]));
-
-  const mentionedNodeIds = Object.keys(workflowInputs);
-  for (const ioNodeId of mentionedNodeIds) {
-    const kind = typeMap.get(ioNodeId);
-    if (kind !== 'image' && kind !== 'video') continue;
-
-    const rawValue = workflowInputs[ioNodeId];
-    // 解析 @{nodeId:label} 引用，获取实际图片 URL
-    const resolvedValue = rawValue !== undefined ? resolveNodeReferences(rawValue) : '';
-    if (!resolvedValue || !resolvedValue.trim() || resolvedValue.trim().startsWith('@{')) {
-      throw new Error(`${COMFY_MEDIA_LABEL[kind]}节点 #${ioNodeId} 的引用未解析，请重新选择素材`);
-    }
-
-    const imageUrl = resolvedValue.trim();
-
-    const inputs = workflowObj[ioNodeId]?.inputs as Record<string, unknown> | undefined;
-    const inputKey = inputs && mediaLoaderInputKey(inputs, kind);
-    if (!inputs || !inputKey) {
-      throw new Error(`${COMFY_MEDIA_LABEL[kind]}节点 #${ioNodeId} 不接受上传文件名，请改用上传型加载节点`);
-    }
-    const uploadResult = await uploadMediaToComfyUI(baseUrl, imageUrl, kind, signal);
-    inputs[inputKey] = uploadResult.subfolder ? `${uploadResult.subfolder}/${uploadResult.name}` : uploadResult.name;
-    // 标准 ComfyUI LoadImage 节点还需要 upload 字段
-    if (inputs.upload !== undefined) {
-      inputs.upload = kind;
-    }
-  }
-}
-
-/**
- * 将音频注入到 ComfyUI workflow JSON 的 audio 类型 IO 节点中。
- * ComfyUI 内置 LoadAudio 的输入名为 audio，取值是 input 目录下的文件名
- * （VideoHelperSuite 的 VHS_LoadAudioUpload 同名），所以上传后写文件名即可。
- * 未显式赋值的 audio IO 节点按顺序用连线音频兜底 —— 角色库绑定的声音正是这样进来的。
- */
-async function injectAudioIntoWorkflow(
-  workflowObj: Record<string, Record<string, unknown>>,
-  workflowInputs: Record<string, string> | undefined,
-  ioNodes: WorkflowIONode[],
-  baseUrl: string,
-  referenceAudioUrls: string[],
-  signal?: AbortSignal,
-  /** 指定了默认音频节点且用户没 @ 音频节点时，只填这一个 */
-  defaultAudioNodeId?: string,
-): Promise<void> {
-  const allAudioIoNodeIds = ioNodes
-    .filter((io) => io.type === 'audio')
-    .map((io) => io.nodeId);
-  const audioIoNodeIds = defaultAudioNodeId && allAudioIoNodeIds.includes(defaultAudioNodeId)
-    ? [defaultAudioNodeId]
-    : allAudioIoNodeIds;
-  if (audioIoNodeIds.length === 0) return;
-
-  const fallbackUrls = [...referenceAudioUrls];
-  for (const ioNodeId of audioIoNodeIds) {
-    const rawValue = workflowInputs?.[ioNodeId];
-    const resolvedValue = rawValue !== undefined ? resolveNodeReferences(rawValue).trim() : '';
-    // 显式赋值优先；解析后仍是 @{...} 占位符视为未赋值
-    const explicitUrl = resolvedValue && !resolvedValue.startsWith('@{') ? resolvedValue : '';
-    const audioUrl = explicitUrl || fallbackUrls.shift() || '';
-    if (!audioUrl) continue;
-
-    const jsonNode = workflowObj[ioNodeId];
-    const inputs = jsonNode?.inputs as Record<string, unknown> | undefined;
-    if (!inputs) continue;
-
-    // VHS 的路径变体（VHS_LoadAudio）读的是 ComfyUI 主机上的绝对路径，
-    // 上传到 input 目录得到的文件名对它无效，宁可跳过也不写入错误的路径。
-    if (inputs.audio === undefined && inputs.audio_file !== undefined) {
-      console.warn('[comfyWorkflowService] 该音频节点按主机路径取音频，已跳过注入', ioNodeId);
-      continue;
-    }
-
-    const uploadResult = await uploadMediaToComfyUI(baseUrl, audioUrl, 'audio', signal);
-    // 内置 LoadAudio 与 VHS_LoadAudioUpload 的输入名都是 audio，取值为 input 目录下的文件名
-    inputs.audio = uploadResult.name;
-    if (inputs.upload !== undefined) {
-      inputs.upload = 'audio';
-    }
-  }
-}
-
-/** 媒体加载节点接受 input 目录文件名的输入键：核心 LoadVideo 用的是 file */
-const MEDIA_LOADER_INPUT_KEYS: Record<'image' | 'video', string[]> = {
-  image: ['image'],
-  video: ['video', 'file'],
+/** 上传型加载输入；主机路径和连线输入不能写入上传文件名。 */
+const MEDIA_LOADER_INPUT_KEYS: Record<ComfyMediaKind, string[]> = {
+  image: ['image'], video: ['video', 'file'], audio: ['audio'],
 };
 
-function mediaLoaderInputKey(
-  inputs: Record<string, unknown>,
-  kind: 'image' | 'video',
-): string | undefined {
-  return MEDIA_LOADER_INPUT_KEYS[kind].find((key) => typeof inputs[key] === 'string');
+function mediaLoaderInputKey(inputs: Record<string, unknown>, kind: ComfyMediaKind): string | undefined {
+  return MEDIA_LOADER_INPUT_KEYS[kind].find((key) => Object.prototype.hasOwnProperty.call(inputs, key)
+    && (inputs[key] == null || typeof inputs[key] === 'string'));
+}
+
+/** 先验证整份分配，再上传：显式槽优先，普通引用按同类顺序填充剩余上传槽。 */
+async function injectMediaIntoWorkflow(
+  workflowObj: Record<string, Record<string, unknown>>,
+  workflowInputs: Record<string, string> | undefined,
+  ioNodes: WorkflowIONode[],
+  defaults: Partial<Record<WorkflowIONodeType, string>> | undefined,
+  media: Record<ComfyMediaKind, string[]>,
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const assignments: Array<{ nodeId: string; key: string; kind: ComfyMediaKind; url: string }> = [];
+  const unfilled: string[] = [];
+  const hasAutomaticMedia = Object.values(media).some((urls) => urls.some((url) => url.trim()));
+  for (const kind of ['image', 'video', 'audio'] as const) {
+    const label = COMFY_MEDIA_LABEL[kind];
+    const ids = [...new Set(ioNodes.filter((io) => io.type === kind).map((io) => io.nodeId))];
+    const defaultId = defaults?.[kind];
+    const ordered = defaultId && ids.includes(defaultId) ? [defaultId, ...ids.filter((id) => id !== defaultId)] : ids;
+    const targets = ordered.map((nodeId) => {
+      const node = workflowObj[nodeId];
+      const inputs = node?.inputs as Record<string, unknown> | undefined;
+      const key = inputs && !/Load.*Path/i.test(String(node.class_type)) ? mediaLoaderInputKey(inputs, kind) : undefined;
+      return { nodeId, key };
+    });
+    const explicitUrls = new Set<string>();
+    const available: Array<{ nodeId: string; key: string }> = [];
+    for (const { nodeId, key } of targets) {
+      const raw = workflowInputs?.[nodeId];
+      if (raw !== undefined) {
+        const url = (await resolveNodeReferencesAsync(raw)).trim();
+        if (!url || /@(?:drama|asset)?\{/.test(url)) throw new Error(`${label}节点 #${nodeId} 的引用未解析，请重新选择素材`);
+        if (!key) throw new Error(`${label}节点 #${nodeId} 不接受上传文件名，请改用上传型加载节点`);
+        assignments.push({ nodeId, key, kind, url });
+        explicitUrls.add(url);
+      } else if (key) available.push({ nodeId, key });
+    }
+    const urls = media[kind].map((url) => url.trim()).filter(Boolean)
+      .filter((url) => !explicitUrls.has(url));
+    if (urls.some((url) => /@(?:drama|asset)?\{/.test(url))) throw new Error(`${label}引用未解析，请重新选择素材`);
+    if (urls.length > available.length) {
+      throw new Error(`工作流的${label}上传槽不足：还有 ${urls.length} 份素材待分配，可用槽位 ${available.length} 个。请减少引用或在工作流中添加对应上传输入`);
+    }
+    for (const [index, target] of available.entries()) {
+      if (index < urls.length) assignments.push({ ...target, kind, url: urls[index] });
+      else if (hasAutomaticMedia) unfilled.push(target.nodeId);
+    }
+  }
+  for (const { nodeId, key, kind, url } of assignments) {
+    const uploaded = await uploadMediaToComfyUI(baseUrl, url, kind, signal);
+    const inputs = workflowObj[nodeId].inputs as Record<string, unknown>;
+    inputs[key] = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
+    if (inputs.upload !== undefined) inputs.upload = kind;
+  }
+  for (const nodeId of unfilled) await pruneOptionalMediaNode(workflowObj, nodeId, baseUrl);
 }
 
 /**
@@ -610,53 +612,6 @@ async function pruneOptionalMediaNode(
 
   for (const [inputs, key] of optionalRefs) delete inputs[key];
   for (const nodeId of chain) delete workflowObj[nodeId];
-}
-
-/**
- * 用户没 @ 该类型 IO 节点时，把提示词框里的同类媒体依次注入该类型的所有加载节点
- * （默认节点排第一位）。没轮到内容的可选参考位会被摘掉，避免残留的示例文件名让工作流报错。
- */
-async function injectDefaultMediaIntoWorkflow(
-  workflowObj: Record<string, Record<string, unknown>>,
-  ioNodes: WorkflowIONode[],
-  defaultNodeId: string,
-  kind: 'image' | 'video',
-  mediaUrls: string[],
-  /** 用户这次带了参考媒体：以他给的为准，没轮到的可选参考位清掉 */
-  pruneUnfilled: boolean,
-  baseUrl: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  const targets = [
-    defaultNodeId,
-    ...ioNodes
-      .filter((io) => io.type === kind && io.nodeId !== defaultNodeId)
-      .map((io) => io.nodeId),
-  ].filter((nodeId) => workflowObj[nodeId]?.inputs);
-  const urls = mediaUrls
-    .map((url) => url?.trim())
-    .filter((url): url is string => Boolean(url) && !url.startsWith('@{'));
-  // 一份媒体都没带时保持工作流原样，用户在 ComfyUI 里配好的输入照旧生效
-  if (urls.length === 0 && !pruneUnfilled) return;
-
-  for (const [index, nodeId] of targets.entries()) {
-    const inputs = workflowObj[nodeId].inputs as Record<string, unknown>;
-    const inputKey = mediaLoaderInputKey(inputs, kind);
-    // VHS 的路径变体读的是 ComfyUI 主机上的绝对路径，上传到 input 目录得到的文件名对它无效
-    if (!inputKey) {
-      console.warn('[comfyWorkflowService] 该节点不接受 input 目录文件名，已跳过注入', nodeId);
-      continue;
-    }
-    if (index >= urls.length) {
-      await pruneOptionalMediaNode(workflowObj, nodeId, baseUrl);
-      continue;
-    }
-    const uploadResult = await uploadMediaToComfyUI(baseUrl, urls[index], kind, signal);
-    inputs[inputKey] = uploadResult.name;
-    if (inputs.upload !== undefined) {
-      inputs.upload = kind;
-    }
-  }
 }
 
 const EMPTY_MEDIA_INPUT_KEYS: Record<Exclude<WorkflowIONodeType, 'prompt'>, string[]> = {
@@ -1351,10 +1306,11 @@ async function submitComfyUIWorkflow(
   signal?: AbortSignal,
   /** 连入生成节点的音频，用于兜底填充未显式赋值的 audio IO 节点 */
   referenceAudioUrls: string[] = [],
-  /** 提示词框里引用的图片/视频，用于填充工作流指定的默认 IO 节点 */
+  /** 提示词框里引用的图片/视频，按同类顺序填充工作流上传 IO 节点 */
   promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
   speech?: { settings?: AudioSpeechSettings },
-): Promise<{ baseUrl: string; promptId: string; workflowObj: Record<string, Record<string, unknown>> }> {
+  refmods?: ComfyRefmodSelection[],
+): Promise<{ baseUrl: string; promptId: string; workflowObj: Record<string, Record<string, unknown>>; workflow: WorkflowDefinition; applyParameters: (assertOnly?: boolean) => void; hasDimensionParameters: boolean }> {
   const baseUrl = getComfyUIConfig(workflowId);
 
   // 从 store 中获取工作流定义
@@ -1371,6 +1327,11 @@ async function submitComfyUIWorkflow(
   } catch {
     throw new Error('工作流 JSON 解析失败');
   }
+  const separated = splitComfyWorkflowInputs(workflowInputs);
+  workflowInputs = separated.inputs;
+  // 模型文件按服务端原始名称绑定，不进入普通媒体上传，也不改原工作流。
+  await applyComfyRefmodsToWorkflow(wf, workflowObj, refmods, signal);
+  if (refmods?.length) await assertComfyRefmodSubmissionFresh(wf, refmods, baseUrl);
 
   const speechControls = speech ? resolveAudioSpeechWorkflow(wf) : undefined;
   if (speechControls) {
@@ -1387,11 +1348,15 @@ async function submitComfyUIWorkflow(
     }
   }
 
+  let parameterAssignments = await prepareComfyWorkflowParameterOverrides(wf, separated.parameters,
+    (classType) => fetchNodeInputSpecs(baseUrl, classType, true, signal), separated.inputs);
+  const applyParameters = (assertOnly = false) => applyComfyWorkflowParameterOverrides(workflowObj, parameterAssignments, assertOnly);
+
   // 收集所有 IO 节点信息
-  const ioNodes = wf.ioNodes || [];
+  const ioNodes = wf.ioNodes?.length ? wf.ioNodes : extractComfyUIIONodes(wf.fileContent);
   const ioNodeIds = ioNodes.filter((io) => io.type === 'prompt').map((io) => io.nodeId);
 
-  // 某类型只要被 @ 过，该类型就完全按用户的赋值走，默认节点不再介入
+  // 提示词保留显式赋值规则；媒体各槽由统一分配器处理
   const mentionedTypes = new Set(
     Object.keys(workflowInputs || {})
       .map((nodeId) => ioNodes.find((io) => io.nodeId === nodeId)?.type)
@@ -1405,41 +1370,39 @@ async function submitComfyUIWorkflow(
   }
 
   // 注入提示词到 prompt 类型 IO 节点（没 @ 时优先写默认节点）
-  injectPromptsIntoWorkflow(workflowObj, workflowInputs, prompt, ioNodeIds,
+  await injectPromptsIntoWorkflow(workflowObj, workflowInputs, prompt, ioNodeIds,
     defaultNodeFor('prompt') ?? (!mentionedTypes.has('prompt') ? speechControls?.textNodeId : undefined));
 
-  if (speechControls) applyAudioSpeechSettings(workflowObj, speechControls, speech?.settings);
-
-  // 显式图片/视频 IO 赋值（上传 → 替换对应输入文件名）
-  await injectExplicitMediaIntoWorkflow(workflowObj, workflowInputs, ioNodes, baseUrl, signal);
-
-  // 没 @ 图片/视频节点时，把提示词框里引用的同类媒体送进默认节点
-  const hasPromptMedia = Boolean(promptMedia.imageUrls?.length || promptMedia.videoUrls?.length);
-  for (const kind of ['image', 'video'] as const) {
-    const defaultNodeId = defaultNodeFor(kind);
-    if (!defaultNodeId) continue;
-    const urls = kind === 'image' ? promptMedia.imageUrls : promptMedia.videoUrls;
-    await injectDefaultMediaIntoWorkflow(
-      workflowObj, ioNodes, defaultNodeId, kind, urls || [], hasPromptMedia, baseUrl, signal,
-    );
+  if (speechControls?.qwen?.conversionNodeId) {
+    const qwen = speechControls.qwen;
+    const overrides = speech?.settings?.qwen?.[qwen.workflowId] ?? {};
+    const changed = qwen.fields.filter((field) => field.nodeId === qwen.conversionNodeId && overrides[field.id] !== undefined);
+    if (changed.length) {
+      const specs = await fetchNodeInputSpecs(baseUrl, String(workflowObj[qwen.conversionNodeId!].class_type));
+      if (!specs) throw new Error('无法读取 SeedVC 参数声明，请确认目标 ComfyUI 已安装转换节点，或恢复工作流默认参数');
+      for (const field of changed) {
+        const spec = specs[field.key];
+        const value = overrides[field.id];
+        if (!spec || (typeof value === 'number' && ((spec.min !== undefined && value < spec.min)
+          || (spec.max !== undefined && value > spec.max)))) {
+          throw new Error(`${field.label}不符合目标 ComfyUI 的参数范围`);
+        }
+      }
+    }
   }
+  if (speechControls) applyAudioSpeechSettings(workflowObj, speechControls, speech?.settings, workflowInputs);
 
-  // 注入音频到 audio 类型 IO 节点（上传 → 替换文件名）
-  await injectAudioIntoWorkflow(
-    workflowObj,
-    workflowInputs,
-    ioNodes,
-    baseUrl,
-    referenceAudioUrls,
-    signal,
-    defaultNodeFor('audio'),
-  );
+  await injectMediaIntoWorkflow(workflowObj, workflowInputs, ioNodes, wf.defaultNodes, {
+    image: promptMedia.imageUrls ?? [], video: promptMedia.videoUrls ?? [], audio: referenceAudioUrls,
+  }, baseUrl, signal);
 
   // 空上传节点即使只服务于可选参考位，也会在 ComfyUI prompt 校验阶段先报错。
   await pruneUnfilledOptionalMediaBranches(workflowObj, ioNodes, baseUrl);
+  parameterAssignments = parameterAssignments.filter((assignment) => !assignment.randomSeed || Object.hasOwn(workflowObj, assignment.field.nodeId));
 
   // 返回 workflowObj 让调用方注入尺寸/视频参数后再提交
-  return { baseUrl, promptId: '', workflowObj };
+  const hasDimensionParameters = parameterAssignments.some(({ field }) => /^(?:(?:image|target|output|latent|video|custom)_)?(?:width|height)$|^(?:aspect_ratio|megapixels|resolution|image_size|size|ratio_preset|multiple)$/i.test(field.fieldName));
+  return { baseUrl, promptId: '', workflowObj, workflow: wf, applyParameters, hasDimensionParameters };
 }
 
 /**
@@ -1493,8 +1456,18 @@ async function promptComfyUIWorkflow(
   workflowObj: Record<string, Record<string, unknown>>,
   signal?: AbortSignal,
   progressSession?: ComfyProgressSession,
+  beforeSubmit?: () => void | Promise<void>,
+  finalCheck?: () => void,
+  receipt?: MediaTaskReceipt,
 ): Promise<string> {
   await progressSession?.waitUntilReady();
+  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+  if (beforeSubmit) await beforeSubmit();
+  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+  finalCheck?.();
+  if (receipt && !updatePendingTask(receipt.nodeId, { mediaSubmissionUncertain: true }, '', receipt.attemptId)) {
+    throw new Error('ComfyUI 提交记录已变化，请核对原任务后重新操作');
+  }
   const promptRes = await comfyFetch(`${baseUrl}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1506,19 +1479,34 @@ async function promptComfyUIWorkflow(
   });
 
   if (!promptRes.ok) {
+    // 网关超时或 5xx 可能发生在后端已排队之后，不能据此解除防重。
+    if (receipt && promptRes.status >= 400 && promptRes.status < 500 && promptRes.status !== 408) {
+      updatePendingTask(receipt.nodeId, { mediaSubmissionUncertain: false }, '', receipt.attemptId);
+    }
     const errorBody = await promptRes.text().catch(() => '');
     throw new Error(formatComfyPromptError(promptRes.status, errorBody));
   }
 
   const promptResult = (await promptRes.json()) as { prompt_id?: string; error?: string };
-  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
   if (promptResult.error) {
+    if (receipt) updatePendingTask(receipt.nodeId, { mediaSubmissionUncertain: false }, '', receipt.attemptId);
     throw new Error(`ComfyUI 错误: ${promptResult.error}`);
   }
-  if (!promptResult.prompt_id) {
+  if (typeof promptResult.prompt_id !== 'string' || !promptResult.prompt_id.trim()) {
     throw new Error('ComfyUI 未返回 prompt_id');
   }
 
+  // 即使本地已经停止，已收到的远端身份也必须先落盘。不能把成功回执当作未提交丢掉。
+  if (receipt) {
+    const accepted = updatePendingTask(receipt.nodeId, {
+      taskId: promptResult.prompt_id, submitted: true, baseUrl, mediaSubmissionUncertain: false,
+      comfyRecoveryState: signal?.aborted ? 'disconnected' : undefined,
+      mediaRecoveryState: signal?.aborted ? 'query_paused' : undefined,
+      mediaRecoveryReason: signal?.aborted ? 'query_interrupted' : undefined,
+    }, '', receipt.attemptId);
+    if (!accepted) throw new Error('ComfyUI 回执所属记录已变化，请在服务端核对原任务');
+    if (accepted && signal?.aborted) pauseMediaTask(accepted, undefined, 'query_interrupted');
+  }
   progressSession?.bindPrompt(promptResult.prompt_id);
   return promptResult.prompt_id;
 }
@@ -1529,10 +1517,10 @@ async function pollComfyUIHistory(
   promptId: string,
   dimensions: { width: number; height: number },
   signal?: AbortSignal,
-): Promise<{ url: string; width: number; height: number }> {
+): Promise<{ url: string; file: ComfyOutputFile; width: number; height: number }> {
   return pollComfyHistory(baseUrl, promptId, 'ComfyUI 图片生成超时（1 小时）', (outputs) => {
     const found = resolveComfyOutputUrl(baseUrl, outputs, ['image']);
-    return found ? { url: found.url, width: dimensions.width, height: dimensions.height } : null;
+    return found ? { ...found, width: dimensions.width, height: dimensions.height } : null;
   }, signal);
 }
 
@@ -1540,9 +1528,10 @@ async function pollComfyUIHistory(
 export async function executeComfyUIGenerate(
   params: AIImageGenParams,
   externalSignal?: AbortSignal,
-  /** 提示词框里引用的图片，用于填充工作流指定的默认 image 节点 */
+  /** 提示词框里引用的图片，按顺序填充工作流图片上传节点 */
   referenceImageUrls: string[] = [],
-): Promise<{ url: string; width: number; height: number }> {
+  referenceMedia: { videoUrls?: string[]; audioUrls?: string[] } = {},
+): Promise<{ url: string; width: number; height: number; comfyTaskId?: string }> {
   const { workflowId, workflowInputs, prompt, imageSize = '2K', aspectRatio = '1:1' } = params;
   const comfyUrl = comfyBaseUrlFor(workflowId);
   assertComfyNodeCanSubmit(params.nodeId);
@@ -1554,15 +1543,16 @@ export async function executeComfyUIGenerate(
   let progressSession: ComfyProgressSession | undefined;
   let submittedTaskId: string | undefined;
   let retainPending = false;
+  let pendingReceipt: MediaTaskReceipt | undefined;
 
   try {
     // 预存待续任务（在 submit 之前），确保关窗重启后能恢复
     if (params.nodeId) {
       if (projectId) {
-        savePendingTask({
+        pendingReceipt = savePendingTask({
           nodeId: params.nodeId,
           projectId,
-          nodeType: 'ai-image',
+          nodeType: useAppStore.getState().nodes.find((node) => node.id === params.nodeId)?.data.type ?? 'ai-image',
           provider: 'comfyui',
           taskId: '',
           taskType: 'comfyui',
@@ -1572,48 +1562,76 @@ export async function executeComfyUIGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(
+    const { baseUrl, workflowObj, applyParameters, hasDimensionParameters } = await submitComfyUIWorkflow(
       workflowId!,
       workflowInputs,
       prompt,
       signal,
-      [],
-      { imageUrls: referenceImageUrls },
+      referenceMedia.audioUrls ?? [],
+      { imageUrls: referenceImageUrls, videoUrls: referenceMedia.videoUrls },
     );
 
     // 注入画布选择的尺寸
     const dimensionInjection = await injectDimensionsIntoWorkflow(baseUrl, workflowObj, imageSize, aspectRatio);
+    applyParameters();
 
     if (params.nodeId && projectId) {
-      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal });
+      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal, workflow: workflowObj });
     }
 
     // 提交工作流
-    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession);
+    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession, undefined, undefined, pendingReceipt);
     submittedTaskId = promptId;
-
-    // 回填 promptId，标记为已提交
-    if (params.nodeId) {
-      updatePendingTask(params.nodeId, { taskId: promptId, submitted: true, baseUrl });
-    }
 
     // 计算最终输出尺寸（用于节点显示）
     const dims = dimensionInjection.dimensions;
 
     // 轮询等待结果
-    return await pollComfyUIHistory(baseUrl, promptId, dims, signal);
+    const result = await pollComfyUIHistory(baseUrl, promptId, dims, signal);
+    if (params.nodeId && projectId) {
+      retainPending = true;
+      updatePendingTask(params.nodeId, { comfyRecoveryState: 'save_pending', comfyOutputFile: result.file }, promptId, pendingReceipt?.attemptId);
+    }
+    if (hasDimensionParameters) {
+      try {
+        const actual = await withComfyQueryTimeout(async (querySignal) => {
+          const response = await comfyFetch(result.url, { headers: { Range: 'bytes=0-1048575' }, signal: querySignal });
+          if (!response.ok || (response.status !== 206 && Number(response.headers.get('Content-Length')) > 1024 * 1024)) {
+            void response.body?.cancel().catch(() => undefined); return null;
+          }
+          return parseRasterImageDimensions(new Uint8Array(await response.arrayBuffer()));
+        }, signal);
+        if (actual) Object.assign(result, actual);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        // 文件头不支持或暂时不可读时，保留原有画布尺寸估计，不重投已完成任务。
+      }
+    }
+    await applyConfiguredComfyMemoryPolicy(baseUrl);
+    return { url: result.url, width: result.width, height: result.height, ...(params.nodeId && projectId ? { comfyTaskId: promptId } : {}) };
   } catch (error) {
+    const interrupted = interruptedComfySubmission(pendingReceipt, submittedTaskId);
+    if (interrupted) {
+      retainPending = true;
+      throw pauseMediaTask(interrupted.receipt, error, interrupted.reason) ?? error;
+    }
     if (submittedTaskId && (error instanceof ComfyPendingError || signal?.aborted)) {
+      const outputReceived = retainPending;
       retainPending = true;
       if (params.nodeId && !nodeSignal?.aborted) {
-        updatePendingTask(params.nodeId, { comfyRecoveryState: 'disconnected' }, submittedTaskId);
+        updatePendingTask(params.nodeId, { comfyRecoveryState: error instanceof ComfyOutputUnavailableError ? 'output_unavailable'
+          : outputReceived ? 'save_pending' : 'disconnected',
+          comfyQueryHttpStatus: error instanceof ComfyQueryAuthorizationError ? error.status : undefined }, submittedTaskId, pendingReceipt?.attemptId);
       }
+    }
+    if (submittedTaskId && !(error instanceof ComfyPendingError) && !signal?.aborted) {
+      await applyConfiguredComfyMemoryPolicy(comfyUrl);
     }
     throw error;
   } finally {
     progressSession?.close();
     if (params.nodeId && cleanupNodePolling(params.nodeId, nodeSignal) !== false && !retainPending) {
-      removePendingTask(params.nodeId, submittedTaskId);
+      removePendingTask(params.nodeId, submittedTaskId, pendingReceipt?.attemptId);
     }
   }
 }
@@ -1623,10 +1641,11 @@ async function pollComfyUIHistoryForVideo(
   baseUrl: string,
   promptId: string,
   signal?: AbortSignal,
-): Promise<{ url: string }> {
+): Promise<{ url: string; file: ComfyOutputFile }> {
   return pollComfyHistory(baseUrl, promptId, 'ComfyUI 视频生成超时（1 小时）', (outputs) => (
-    // 视频节点常把成片挂在 images 下（SaveWEBM / SaveVideo），所以图片也算命中
-    resolveComfyOutputUrl(baseUrl, outputs, ['video', 'image'])
+    // SaveWEBM / SaveVideo 可能把 mp4/webm 挂在 images 下；输出解析器会按扩展名识别，
+    // 这里只接受真实视频，避免把编码前的 PreviewImage PNG 当作最终成片。
+    resolveComfyOutputUrl(baseUrl, outputs, ['video'])
   ), signal);
 }
 
@@ -1636,8 +1655,10 @@ export async function executeComfyUIVideoGenerate(
   externalSignal?: AbortSignal,
   /** 连入音频节点的产物，兜底填充工作流的 audio IO 节点 */
   referenceAudioUrls: string[] = [],
-  /** 提示词框里引用的图片/视频，用于填充工作流指定的默认 IO 节点 */
+  /** 提示词框里引用的图片/视频，按同类顺序填充工作流上传 IO 节点 */
   promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
+  /** 仅调用方显式传入时启用；普通节点生成沿用既有流程。 */
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<{ url: string }> {
   const {
     workflowId, workflowInputs, prompt,
@@ -1645,6 +1666,41 @@ export async function executeComfyUIVideoGenerate(
     // 画面比例决定注入工作流的 width/height；未设置时按 16:9
     seedanceRatio = '16:9',
   } = params;
+  const memoryReportOwner = useAppStore.getState();
+  const memoryReportNode = memoryReportOwner.nodes?.find((node) => node.id === params.nodeId);
+  const memoryReportLease = memoryReportNode && memoryReportNode.type === 'ai-video'
+    && memoryReportNode.data.role !== 'source' && memoryReportOwner.currentProjectId ? {
+      projectId: memoryReportOwner.currentProjectId,
+      revision: memoryReportOwner.getCurrentRevision(),
+      fingerprint: videoInputFingerprint(memoryReportNode, memoryReportOwner),
+    } : undefined;
+  if (`${prompt}\n${JSON.stringify(workflowInputs ?? {})}`.includes('@drama{global/')) {
+    const owner = useAppStore.getState();
+    await owner.loadGlobalDramaAssets();
+    if (externalSignal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    if (useAppStore.getState().currentProjectId !== owner.currentProjectId) throw new Error('项目已切换，请重新生成视频');
+  }
+  let checkRefmodNode: (() => void) | undefined;
+  if (params.comfyRefmods?.length) {
+    const captured = useAppStore.getState();
+    const nodeId = params.nodeId;
+    const source = captured.nodes.find((node) => node.id === nodeId);
+    const sourceProjectId = captured.currentProjectId;
+    if (!sourceProjectId || !source || source.type !== 'ai-video' || source.data.role === 'source') {
+      throw new Error('ComfyUI 角色引用需要项目中的视频生成节点');
+    }
+    const sourceRevision = captured.getCurrentRevision();
+    const sourceFingerprint = videoInputFingerprint(source, captured);
+    checkRefmodNode = () => {
+      const current = useAppStore.getState();
+      const node = current.nodes.find((item) => item.id === nodeId);
+      if (current.currentProjectId !== sourceProjectId || current.getCurrentRevision() !== sourceRevision || !node
+        || node.type !== 'ai-video' || node.data.role === 'source'
+        || videoInputFingerprint(node, current) !== sourceFingerprint) {
+        throw new Error('项目、视频节点或角色引用已变化，请重新生成');
+      }
+    };
+  }
   const comfyUrl = comfyBaseUrlFor(workflowId);
   assertComfyNodeCanSubmit(params.nodeId);
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
@@ -1655,12 +1711,13 @@ export async function executeComfyUIVideoGenerate(
   let progressSession: ComfyProgressSession | undefined;
   let submittedTaskId: string | undefined;
   let retainPending = false;
+  let pendingReceipt: MediaTaskReceipt | undefined;
 
   try {
     // 预存待续任务（在 submit 之前），确保关窗重启后能恢复
     if (params.nodeId) {
       if (projectId) {
-        savePendingTask({
+        pendingReceipt = savePendingTask({
           nodeId: params.nodeId,
           projectId,
           nodeType: 'ai-video',
@@ -1673,13 +1730,15 @@ export async function executeComfyUIVideoGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(
+    const { baseUrl, workflowObj, workflow: capturedWorkflow, applyParameters } = await submitComfyUIWorkflow(
       workflowId!,
       workflowInputs,
       prompt,
       signal,
       referenceAudioUrls,
       promptMedia,
+      undefined,
+      params.comfyRefmods,
     );
 
     // 注入视频参数（比例/档位这类 combo 要先问过节点声明才敢写）
@@ -1693,33 +1752,83 @@ export async function executeComfyUIVideoGenerate(
       await resolveParamSpecs(baseUrl, workflowObj, VIDEO_PARAM_SPEC_KEYS),
     );
 
+    applyParameters();
+    const h3MemoryApplication = await applyComfyH3Memory(
+      workflowObj, baseUrl, params.comfyH3MemoryPreset, signal, params.comfyH3ExpectedSettings,
+    );
+    applyParameters(true);
+
     if (params.nodeId && projectId) {
-      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal });
+      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal, workflow: workflowObj });
     }
 
     // 提交工作流
-    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession);
+    const refmodBeforeSubmit = params.comfyRefmods?.length ? async () => {
+      await beforeSubmit?.();
+      await assertComfyRefmodSubmissionFresh(capturedWorkflow, params.comfyRefmods!, baseUrl);
+    } : beforeSubmit;
+    const finalNodeCheck = checkRefmodNode;
+    const finalCheck = finalNodeCheck ? () => {
+      assertComfyRefmodSubmissionTargetFresh(capturedWorkflow, baseUrl);
+      finalNodeCheck();
+    } : undefined;
+    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession, refmodBeforeSubmit, finalCheck, pendingReceipt);
     submittedTaskId = promptId;
 
-    // 回填 promptId，标记为已提交
-    if (params.nodeId) {
-      updatePendingTask(params.nodeId, { taskId: promptId, submitted: true, baseUrl });
+    // 回执只描述已真实提交的执行副本；不让过期提交覆盖另一个项目或新参数的说明。
+    if (params.nodeId && memoryReportLease && !signal?.aborted) {
+      const current = useAppStore.getState();
+      const node = current.nodes.find((item) => item.id === params.nodeId);
+      const workflow = current.workflows.find((item) => item.id === capturedWorkflow.id);
+      if (current.currentProjectId === memoryReportLease.projectId
+        && current.getCurrentRevision() === memoryReportLease.revision && node?.type === 'ai-video'
+        && node.data.role !== 'source' && videoInputData(node, current).workflowId === capturedWorkflow.id
+        && workflow?.fileContent === capturedWorkflow.fileContent
+        && videoInputFingerprint(node, current) === memoryReportLease.fingerprint) {
+        current.updateNodeDataTransient(params.nodeId, {
+          comfyH3MemoryApplied: h3MemoryApplication ? { ...h3MemoryApplication, workflowId: capturedWorkflow.id } : undefined,
+        });
+      }
     }
 
     // 轮询等待结果
-    return await pollComfyUIHistoryForVideo(baseUrl, promptId, signal);
+    const result = await pollComfyUIHistoryForVideo(baseUrl, promptId, signal);
+    // 远端完成不等于已交付：调用方保存文件并回填节点后才清理任务。
+    // 保存期间退出应用或画布变更时，仍可按原 promptId 续取视频。
+    if (params.nodeId && projectId) {
+      retainPending = true;
+      updatePendingTask(params.nodeId, { videoRecoveryState: 'paused', comfyRecoveryState: 'save_pending',
+        comfyOutputFile: result.file }, promptId, pendingReceipt?.attemptId);
+    }
+    await applyConfiguredComfyMemoryPolicy(baseUrl);
+    return { url: result.url };
   } catch (error) {
+    const interrupted = interruptedComfySubmission(pendingReceipt, submittedTaskId);
+    if (interrupted) {
+      retainPending = true;
+      throw pauseMediaTask(interrupted.receipt, error, interrupted.reason) ?? error;
+    }
     if (submittedTaskId && (error instanceof ComfyPendingError || signal?.aborted)) {
+      const outputReceived = retainPending;
       retainPending = true;
       if (params.nodeId && !nodeSignal?.aborted) {
-        updatePendingTask(params.nodeId, { comfyRecoveryState: 'disconnected' }, submittedTaskId);
+        updatePendingTask(params.nodeId, { comfyRecoveryState: error instanceof ComfyOutputUnavailableError ? 'output_unavailable'
+          : outputReceived ? 'save_pending' : 'disconnected',
+          comfyQueryHttpStatus: error instanceof ComfyQueryAuthorizationError ? error.status : undefined }, submittedTaskId, pendingReceipt?.attemptId);
       }
+    }
+    if (retainPending && params.nodeId && !nodeSignal?.aborted) {
+      const paused = pauseVideoNodeTask(params.nodeId, submittedTaskId, error, 'query_interrupted');
+      if (paused) throw paused;
+    }
+    if (submittedTaskId && !(error instanceof ComfyPendingError) && !signal?.aborted) {
+      await applyConfiguredComfyMemoryPolicy(comfyUrl);
     }
     throw error;
   } finally {
     progressSession?.close();
     if (params.nodeId && cleanupNodePolling(params.nodeId, nodeSignal) !== false && !retainPending) {
-      removePendingTask(params.nodeId, submittedTaskId);
+      removePendingTask(params.nodeId, submittedTaskId, pendingReceipt?.attemptId);
     }
   }
 }
@@ -1729,9 +1838,9 @@ async function pollComfyUIHistoryForAudio(
   baseUrl: string,
   promptId: string,
   signal?: AbortSignal,
-): Promise<{ url: string }> {
+): Promise<{ url: string; file: ComfyOutputFile }> {
   return pollComfyHistory(baseUrl, promptId, 'ComfyUI 音频生成超时（1 小时）', (outputs) => (
-    resolveComfyOutputUrl(baseUrl, outputs, ['audio', 'video', 'image'])
+    resolveComfyOutputUrl(baseUrl, outputs, ['audio', 'video'])
   ), signal);
 }
 
@@ -1741,7 +1850,8 @@ export async function executeComfyUIAudioGenerate(
   externalSignal?: AbortSignal,
   /** 连入音频节点的产物，兜底填充工作流的 audio IO 节点 */
   referenceAudioUrls: string[] = [],
-): Promise<{ url: string }> {
+  promptMedia: { imageUrls?: string[]; videoUrls?: string[] } = {},
+): Promise<{ url: string; comfyTaskId?: string }> {
   const { workflowId, workflowInputs, prompt } = params;
   const comfyUrl = comfyBaseUrlFor(workflowId);
   assertComfyNodeCanSubmit(params.nodeId);
@@ -1753,12 +1863,13 @@ export async function executeComfyUIAudioGenerate(
   let progressSession: ComfyProgressSession | undefined;
   let submittedTaskId: string | undefined;
   let retainPending = false;
+  let pendingReceipt: MediaTaskReceipt | undefined;
 
   try {
     // 预存待续任务（在 submit 之前），确保关窗重启后能恢复
     if (params.nodeId) {
       if (projectId) {
-        savePendingTask({
+        pendingReceipt = savePendingTask({
           nodeId: params.nodeId,
           projectId,
           nodeType: 'ai-audio',
@@ -1771,35 +1882,48 @@ export async function executeComfyUIAudioGenerate(
       }
     }
 
-    const { baseUrl, workflowObj } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls, {}, { settings: params.audioSpeechSettings });
+    const { baseUrl, workflowObj, applyParameters } = await submitComfyUIWorkflow(workflowId!, workflowInputs, prompt, signal, referenceAudioUrls, promptMedia, { settings: params.audioSpeechSettings });
+    applyParameters();
 
     if (params.nodeId && projectId) {
-      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal });
+      progressSession = createComfyProgressSession({ baseUrl, projectId, nodeId: params.nodeId, signal, workflow: workflowObj });
     }
 
     // 提交工作流
-    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession);
+    const promptId = await promptComfyUIWorkflow(baseUrl, workflowObj, signal, progressSession, undefined, undefined, pendingReceipt);
     submittedTaskId = promptId;
 
-    // 回填 promptId，标记为已提交
-    if (params.nodeId) {
-      updatePendingTask(params.nodeId, { taskId: promptId, submitted: true, baseUrl });
-    }
-
     // 轮询等待结果
-    return await pollComfyUIHistoryForAudio(baseUrl, promptId, signal);
+    const result = await pollComfyUIHistoryForAudio(baseUrl, promptId, signal);
+    if (params.nodeId && projectId) {
+      retainPending = true;
+      updatePendingTask(params.nodeId, { comfyRecoveryState: 'save_pending', comfyOutputFile: result.file }, promptId, pendingReceipt?.attemptId);
+    }
+    await applyConfiguredComfyMemoryPolicy(baseUrl);
+    return { url: result.url, ...(params.nodeId && projectId ? { comfyTaskId: promptId } : {}) };
   } catch (error) {
+    const interrupted = interruptedComfySubmission(pendingReceipt, submittedTaskId);
+    if (interrupted) {
+      retainPending = true;
+      throw pauseMediaTask(interrupted.receipt, error, interrupted.reason) ?? error;
+    }
     if (submittedTaskId && (error instanceof ComfyPendingError || signal?.aborted)) {
+      const outputReceived = retainPending;
       retainPending = true;
       if (params.nodeId && !nodeSignal?.aborted) {
-        updatePendingTask(params.nodeId, { comfyRecoveryState: 'disconnected' }, submittedTaskId);
+        updatePendingTask(params.nodeId, { comfyRecoveryState: error instanceof ComfyOutputUnavailableError ? 'output_unavailable'
+          : outputReceived ? 'save_pending' : 'disconnected',
+          comfyQueryHttpStatus: error instanceof ComfyQueryAuthorizationError ? error.status : undefined }, submittedTaskId, pendingReceipt?.attemptId);
       }
+    }
+    if (submittedTaskId && !(error instanceof ComfyPendingError) && !signal?.aborted) {
+      await applyConfiguredComfyMemoryPolicy(comfyUrl);
     }
     throw error;
   } finally {
     progressSession?.close();
     if (params.nodeId && cleanupNodePolling(params.nodeId, nodeSignal) !== false && !retainPending) {
-      removePendingTask(params.nodeId, submittedTaskId);
+      removePendingTask(params.nodeId, submittedTaskId, pendingReceipt?.attemptId);
     }
   }
 }

@@ -1,3 +1,6 @@
+/**
+ * mediaReferenceMemoryGuards — 回归测试：媒体引用内存守卫接线。
+ */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -8,7 +11,7 @@ function source(relativePath: string): string {
 describe('媒体引用内存守卫接线', () => {
   it('图片上传透传调用方取消信号', () => {
     expect(source('generateImage.ts')).toContain(
-      'resolveImageUrlArray(allImageUrls, provider, signal)',
+      "resolveImageUrlArray(allImageUrls, providerDefinition?.id === 'toapis' || isLibapi ? connectionId : provider, signal)",
     );
   });
 

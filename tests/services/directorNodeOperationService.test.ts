@@ -1,3 +1,6 @@
+/**
+ * directorNodeOperationService — 回归测试：shared director operation lifecycle。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DirectorOperationOwner } from '../../src/types/directorOperation';
 import { useAppStore } from '../../src/store/useAppStore';

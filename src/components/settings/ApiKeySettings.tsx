@@ -2,9 +2,10 @@
  * ApiKeySettings — provider connections and enabled model catalogs.
  */
 import { Icon } from '@iconify/react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';
+import { NEW_API_KEY_CONNECTION_ID } from '../../store/store.ui';
 import {
   createConnectionId,
   getProviderDefinition,
@@ -16,8 +17,10 @@ import {
 import {
   parseConnectionShare,
   serializeConnection,
+  type ConnectionImportDiagnostic,
 } from '../../services/ai/providerConnectionTransfer';
-import { copyText, readText } from '../../services/clipboardService';
+import { copyText } from '../../services/clipboardService';
+import { exportJsonTextFile, readJsonTextFile, JsonFileTransferError } from '../../services/fileService';
 import type {
   ApiProviderConfig,
   DreaminaRuntime,
@@ -25,21 +28,40 @@ import type {
   WebSearchProviderId,
 } from '../../types';
 import AnimatedButton from '../shared/AnimatedButton';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import ProviderBadge from '../shared/ProviderBadge';
 import { defaultModelGroups } from '../nodes/shared/defaultModels';
-import { shouldListProviderConnection } from './apiKeySettingsUtils';
-import { isSecretStoreAvailable } from '../../services/providerSecretService';
-import { testProviderConnection } from '../../services/testConnection';
+import { getCustomConnectionReadiness, shouldListProviderConnection } from './apiKeySettingsUtils';
+import { deleteAppSecret, isSecretStoreAvailable } from '../../services/providerSecretService';
+import { queryProviderBalance, supportsProviderBalance, type ProviderBalance } from '../../services/testConnection';
 import { replaceLegacyApimartOmni } from '../../services/ai/apimartVideoModels';
+import { RELAYON_BASE_URL } from '../../services/ai/providers/relayonModelManifest';
 import DreaminaLoginModal from './DreaminaLoginModal';
+import ModalOverlay from '../shared/ModalOverlay';
 import ProviderConnectionDialog from './ProviderConnectionDialog';
+import VolcengineBillingSettings from './VolcengineBillingSettings';
+import { queryBillingRuns } from '../../services/billing/volcengineBillingService';
 import { saveAutodlWorkflowTemplate, saveWorkflowApiDrafts } from '../../services/workflowApi/workflowApiConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { useT } from '../../i18n';
+import { RUNNINGHUB_API_SITES, TOAPIS_API_SITES } from '../../constants/api';
+import { buildRunningHubSiteProviders, resolveRunningHubCredential, runningHubSiteDrafts, runningHubSiteId, RUNNINGHUB_CREDENTIAL_IDS } from '../../services/runninghubSiteCredentials';
+import type { RunningHubSiteKeyDrafts } from '../../types/runninghub';
 
 interface ProviderListItem {
   id: string;
   config: ApiProviderConfig;
+}
+
+interface BalanceQueryTarget {
+  id: string;
+  provider: string;
+  apiKey: string;
+  baseUrl?: string;
+}
+
+function balanceFingerprint(target: BalanceQueryTarget): string {
+  return `${target.provider}\u0000${target.apiKey}\u0000${target.baseUrl || ''}`;
 }
 
 function modelCategory(model: { nodeTypes: string[] }): ProviderModelSelection['category'] {
@@ -66,6 +88,12 @@ function isTauri(): boolean {
 
 export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const t = useT();
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const importBusyRef = useRef(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importDiagnostics, setImportDiagnostics] = useState<ConnectionImportDiagnostic[]>([]);
+  const siteSwitchBusyRef = useRef(false);
+  const [switchingSite, setSwitchingSite] = useState<string | null>(null);
   const unreadSecrets = useAppStore((state) => state.configSecretReadErrors);
   const workflows = useAppStore((state) => state.workflows);
   const {
@@ -76,6 +104,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     removeProviderConfig,
     saveConfig,
     pendingApiKeyConnectionId,
+    pendingApiKeyModelId,
     setPendingApiKeyConnectionId,
   } = useAppStore(
     useShallow((state) => ({
@@ -86,19 +115,21 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       removeProviderConfig: state.removeProviderConfig,
       saveConfig: state.saveConfig,
       pendingApiKeyConnectionId: state.pendingApiKeyConnectionId,
+      pendingApiKeyModelId: state.pendingApiKeyModelId,
       setPendingApiKeyConnectionId: state.setPendingApiKeyConnectionId,
     })),
   );
 
   // 三者总是一起变化，合成一份状态；revision 用于每次打开时重挂载对话框
-  const [dialog, setDialog] = useState<{ open: boolean; connectionId?: string; revision: number }>({
+  const [dialog, setDialog] = useState<{ open: boolean; connectionId?: string; revision: number; returnToRelayGroups?: boolean }>({
     open: false,
     revision: 0,
   });
   const [pendingDeleteId, setPendingDeleteId] = useState<string>();
-  const [providerBalances, setProviderBalances] = useState<Record<string, string>>({});
-  const balanceRefreshStartedRef = useRef(new Set<string>());
-  const balanceRefreshActiveRef = useRef(true);
+  const [billingOpen, setBillingOpen] = useState(false);
+  const [hasBillingHistory, setHasBillingHistory] = useState(false);
+  const [providerBalances, setProviderBalances] = useState<Record<string, { fingerprint: string; balance: ProviderBalance }>>({});
+  const balanceRequestsRef = useRef(new Map<string, { fingerprint: string; controller: AbortController }>());
   // 凭据存在 Rust 侧的凭据存储里；不可用时只能本次会话有效，得在用户填写前就说清楚
   const [secretStoreAvailable, setSecretStoreAvailable] = useState(true);
 
@@ -140,19 +171,20 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const providerItems = useMemo(() => {
     const items: ProviderListItem[] = [];
     for (const [id, providerConfig] of Object.entries(config.providers)) {
-      if (id === 'runninghub') continue;
+      if (id === 'runninghub' || RUNNINGHUB_CREDENTIAL_IDS.includes(id)) continue;
       const definition = getProviderDefinition(id, providerConfig);
       if (!definition) continue;
       if (definition.kind === 'web-search' && id !== activeWebSearchProviderId) continue;
       // 森之灵：仅 CLI 登录态（无 API Token）时也允许出现在列表
-      if (!shouldListProviderConnection(providerConfig, definition.authType)
+      if (!['cccapi', 'relayonapi'].includes(definition.id)
+        && !shouldListProviderConnection(providerConfig, definition.authType, config.providers.runninghub?.apiKey)
         && !(id === 'seedling' && seedlingAuth?.loggedIn)) continue;
       items.push({ id, config: providerConfig });
     }
     if (config.providers.runninghub?.apiKey && !config.providers['runninghub-model']) {
       items.push({
         id: 'runninghub-model',
-        config: { name: 'RunningHub', apiKey: '', catalogId: 'runninghub-model' },
+        config: { name: 'RunningHub', apiKey: '', catalogId: 'runninghub-model', baseUrl: config.providers.runninghub.baseUrl },
       });
     }
     if (dreaminaAuth?.loggedIn && !config.providers.dreamina) {
@@ -193,24 +225,75 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     });
   }, [activeWebSearchProviderId, config.providers, dreaminaAuth?.loggedIn, seedlingAuth?.loggedIn]);
 
+  // 只合并展示入口，各连接仍保留独立的 ID、模型和凭据。
+  const cccConnections = providerItems.filter((item) => getProviderDefinition(item.id, item.config)?.id === 'cccapi');
+  const relayonConnections = providerItems.filter((item) => getProviderDefinition(item.id, item.config)?.id === 'relayonapi');
+  const visibleProviderItems = providerItems.filter((item) => {
+    const id = getProviderDefinition(item.id, item.config)?.id;
+    if (id === 'cccapi') return item.id === cccConnections[0]?.id;
+    if (id === 'relayonapi') return item.id === relayonConnections[0]?.id;
+    return true;
+  });
+
+  const balanceTargets = useMemo(() => {
+    const targets: BalanceQueryTarget[] = [];
+    for (const item of providerItems) {
+      const provider = getProviderDefinition(item.id, item.config)?.id;
+      if (!provider || !supportsProviderBalance(provider)) continue;
+      const credentials = item.id === 'runninghub-model'
+        ? resolveRunningHubCredential(config.providers, 'runninghub-model') : item.config;
+      if (credentials?.apiKey.trim()) targets.push({ id: item.id, provider, apiKey: credentials.apiKey, baseUrl: credentials.baseUrl });
+    }
+    if (providerItems.some((item) => getProviderDefinition(item.id, item.config)?.id === 'runninghub-model')) {
+      const credentials = resolveRunningHubCredential(config.providers, 'runninghub');
+      if (credentials?.apiKey.trim()) targets.push({ id: 'runninghub', provider: 'runninghub', apiKey: credentials.apiKey, baseUrl: credentials.baseUrl });
+    }
+    return targets;
+  }, [providerItems, config.providers]);
+
+  const renderProviderBalance = (id: string) => {
+    const target = balanceTargets.find((candidate) => candidate.id === id);
+    const record = providerBalances[id];
+    if (!target || !record || record.fingerprint !== balanceFingerprint(target)) return null;
+    const { balance } = record;
+    return <span className="shrink-0 text-xs font-medium text-canvas-text-secondary"
+      data-tooltip={balance.scope === 'key' ? t('当前 Key 剩余额度；不代表账户总余额') : t('账户剩余额度；打开设置或更换连接后更新')}>
+      {balance.amount}{balance.unit ? ` ${balance.unit === '积分' ? t('积分') : balance.unit === '算力' ? t('算力') : balance.unit}` : ''}
+    </span>;
+  };
+
   const connectedProviderIds = useMemo(
     () => providerItems.map((item) => getProviderDefinition(item.id, item.config)?.id || item.id),
     [providerItems],
   );
+  const hasVolcengineConnection = providerItems.some((item) => getProviderDefinition(item.id, item.config)?.id === 'volcengine');
 
-  // Agent 保存厂商配置后请求补填密钥：在渲染期直接生效，不用 effect 回写本地 state。
+  useEffect(() => {
+    if (billingOpen || hasVolcengineConnection || !isTauri()) return;
+    let cancelled = false;
+    void queryBillingRuns({}, 1, 1).then((page) => {
+      if (!cancelled) setHasBillingHistory(page.total > 0);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [billingOpen, hasVolcengineConnection]);
+
+  // 补填密钥或节点请求模型参数：在渲染期直接生效，不用 effect 回写本地 state。
   // 任何一次手动开关对话框都视为消费掉该请求（关闭设置面板时 store 也会清空它）。
-  const requestedConnectionId = pendingApiKeyConnectionId && config.providers[pendingApiKeyConnectionId]
-    ? pendingApiKeyConnectionId
-    : null;
+  const requestedConnectionId = pendingApiKeyConnectionId === NEW_API_KEY_CONNECTION_ID
+    ? NEW_API_KEY_CONNECTION_ID
+    : pendingApiKeyConnectionId && config.providers[pendingApiKeyConnectionId]
+      ? pendingApiKeyConnectionId
+      : null;
   const connectionDialogOpen = dialog.open || !!requestedConnectionId;
-  const editingConnectionId = requestedConnectionId ?? dialog.connectionId;
+  const editingConnectionId = requestedConnectionId === NEW_API_KEY_CONNECTION_ID
+    ? undefined
+    : requestedConnectionId ?? dialog.connectionId;
   const connectionDialogKey = requestedConnectionId
-    ? `pending-${requestedConnectionId}`
+    ? `pending-${requestedConnectionId}-${pendingApiKeyModelId ?? ''}`
     : dialog.revision;
 
   const editingConfig = editingConnectionId
-    ? providerItems.find((item) => item.id === editingConnectionId)?.config
+    ? config.providers[editingConnectionId] ?? providerItems.find((item) => item.id === editingConnectionId)?.config
     : undefined;
 
   const tauriInvoke = useCallback(
@@ -229,8 +312,11 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   }, []);
 
   useEffect(() => {
-    balanceRefreshActiveRef.current = true;
-    return () => { balanceRefreshActiveRef.current = false; };
+    const requests = balanceRequestsRef.current;
+    return () => {
+      for (const request of requests.values()) request.controller.abort();
+      requests.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -265,31 +351,33 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   }, [config.providers, saveConfig, saveProviderConfig]);
 
   useEffect(() => {
-    for (const item of providerItems) {
-      const definition = getProviderDefinition(item.id, item.config);
-      if (!definition || !['sora2u', 'apimart'].includes(definition.id) || !item.config.apiKey.trim()) continue;
-      const fingerprint = `${item.id}\u0000${item.config.apiKey}\u0000${item.config.baseUrl || ''}`;
-      if (balanceRefreshStartedRef.current.has(fingerprint)) continue;
-      balanceRefreshStartedRef.current.add(fingerprint);
-      setProviderBalances((current) => {
-        const next = { ...current };
-        delete next[item.id];
-        return next;
-      });
-      void testProviderConnection(
-        definition.id,
-        item.config.apiKey.trim(),
-        item.config.baseUrl,
-      ).then((result) => {
-        const balance = result.balance;
-        if (!balanceRefreshActiveRef.current || !result.success || !balance) return;
-        const latest = useAppStore.getState().config.providers[item.id];
-        if (!latest || latest.apiKey !== item.config.apiKey || latest.baseUrl !== item.config.baseUrl
-          || getProviderDefinition(item.id, latest)?.id !== definition.id) return;
-        setProviderBalances((current) => ({ ...current, [item.id]: balance }));
+    const requests = balanceRequestsRef.current;
+    const clearBalance = (id: string) => setProviderBalances((current) => {
+      if (!current[id]) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    for (const [id, request] of requests) {
+      if (balanceTargets.some((target) => target.id === id)) continue;
+      request.controller.abort();
+      requests.delete(id);
+      clearBalance(id);
+    }
+    for (const target of balanceTargets) {
+      const fingerprint = balanceFingerprint(target);
+      const previous = requests.get(target.id);
+      if (previous?.fingerprint === fingerprint) continue;
+      previous?.controller.abort();
+      const request = { fingerprint, controller: new AbortController() };
+      requests.set(target.id, request);
+      clearBalance(target.id);
+      void queryProviderBalance(target.provider, target.apiKey, target.baseUrl, request.controller.signal).then((balance) => {
+        if (!balance || request.controller.signal.aborted || requests.get(target.id) !== request) return;
+        setProviderBalances((current) => ({ ...current, [target.id]: { fingerprint, balance } }));
       });
     }
-  }, [providerItems]);
+  }, [balanceTargets]);
 
   const applyDreaminaRuntime = useCallback((runtime: DreaminaRuntime) => {
     setDreaminaRuntime(runtime);
@@ -410,17 +498,48 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     );
   };
 
-  /** 从剪贴板导入连接；保存后直接打开对话框让用户补填 API Key。 */
-  const handleImportConnection = async () => {
-    const parsed = parseConnectionShare(await readText());
+  const handleExportConnection = async (connectionId: string) => {
+    const providerConfig = config.providers[connectionId];
+    if (!providerConfig) return;
+    try {
+      const connectionWorkflows = useAppStore.getState().workflows
+        .filter((workflow) => workflow.workflowApi?.connectionId === connectionId);
+      const exported = await exportJsonTextFile(
+        serializeConnection(providerConfig, connectionWorkflows), providerConfig.name || 'connection',
+      );
+      if (exported) useAppStore.getState().showToast(t('连接配置已导出（不含 API Key）'), 'success');
+    } catch {
+      useAppStore.getState().showToast(t('导出 JSON 文件失败'), 'error');
+    }
+  };
+
+  /** 从用户选择的 JSON 文件导入自定义连接；保存后补填 API Key。 */
+  const importConnectionFile = async (file: File) => {
+    setImportDiagnostics([]);
+    const parsed = parseConnectionShare(await readJsonTextFile(file));
     if (!parsed) {
-      useAppStore.getState().showToast(t('剪贴板里没有可导入的连接配置'), 'error');
+      useAppStore.getState().showToast(t('文件里没有有效的连接配置'), 'error');
+      return;
+    }
+    if (parsed.diagnostics.length) {
+      setImportDiagnostics(parsed.diagnostics);
+      useAppStore.getState().showToast(t('连接配置未导入，请修正下方列出的模型配置问题后重试'), 'error');
       return;
     }
     const definition = getProviderDefinition(parsed.catalogId);
-    if (!definition || definition.authType === 'oauth') {
+    if (!definition || (definition.id !== 'custom-openai' && definition.id !== 'relayonapi' && definition.kind !== 'workflow-api')) {
       useAppStore.getState().showToast(t('该连接类型不支持导入'), 'error');
       return;
+    }
+    if (definition.id === 'relayonapi' && parsed.config.baseUrl) {
+      try {
+        const url = new URL(parsed.config.baseUrl);
+        if (url.origin !== 'https://relayonapi.com' || url.username || url.password
+          || url.pathname.replace(/\/+$/, '') !== '/v1' || url.search || url.hash) throw new Error();
+      } catch {
+        useAppStore.getState().showToast(t('万象分组配置的接口地址必须是官方地址'), 'error');
+        return;
+      }
     }
     const newConnectionId = createConnectionId(definition.id);
     if (config.providers[newConnectionId]) {
@@ -436,6 +555,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     }));
     saveProviderConfig(newConnectionId, {
       ...parsed.config,
+      ...(definition.id === 'relayonapi' ? { baseUrl: RELAYON_BASE_URL } : {}),
       selectedModels: models,
       catalogModels: parsed.config.catalogModels?.map((model) => ({
         ...model,
@@ -454,6 +574,23 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     setPendingApiKeyConnectionId(newConnectionId);
   };
 
+  const handleImportConnection = async (file: File) => {
+    if (importBusyRef.current) return;
+    importBusyRef.current = true;
+    setImportBusy(true);
+    try {
+      await importConnectionFile(file);
+    } catch (error) {
+      const message = error instanceof JsonFileTransferError
+        ? error.code === 'too-large' ? t('JSON 文件不能超过 8 MiB') : t('文件必须使用 UTF-8 编码')
+        : t('读取 JSON 文件失败');
+      useAppStore.getState().showToast(message, 'error');
+    } finally {
+      importBusyRef.current = false;
+      setImportBusy(false);
+    }
+  };
+
   const openAddDialog = () => {
     setPendingApiKeyConnectionId(null);
     setDialog((previous) => ({ open: true, connectionId: undefined, revision: previous.revision + 1 }));
@@ -466,22 +603,38 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
 
   const closeConnectionDialog = () => {
     setPendingApiKeyConnectionId(null);
-    setDialog((previous) => ({ open: false, connectionId: undefined, revision: previous.revision }));
+    setDialog((previous) => previous.returnToRelayGroups
+      ? { open: true, connectionId: previous.connectionId, revision: previous.revision + 1 }
+      : { open: false, connectionId: undefined, revision: previous.revision });
+  };
+
+  const editRelayGroup = (connectionId: string) => {
+    setPendingApiKeyConnectionId(null);
+    setDialog((previous) => ({ open: true, connectionId, revision: previous.revision + 1, returnToRelayGroups: true }));
   };
 
   const handleSaveConnection = async (
     connectionId: string,
     providerConfig: ApiProviderConfig,
-    related?: { runninghubWorkflowApiKey?: string; workflowApiDrafts?: import('../../types/workflowApi').WorkflowApiDraft[] },
+    related?: { runninghubWorkflowApiKey?: string; runninghubSiteKeys?: RunningHubSiteKeyDrafts; workflowApiDrafts?: import('../../types/workflowApi').WorkflowApiDraft[] },
   ) => {
-    saveProviderConfig(connectionId, providerConfig);
     const definition = getProviderDefinition(connectionId, providerConfig);
+    if (definition?.id === 'runninghub-model' && related?.runninghubSiteKeys) {
+      const providers = buildRunningHubSiteProviders(useAppStore.getState().config.providers, providerConfig, related.runninghubSiteKeys);
+      updateConfig({ providers });
+      saveProviderConfig(connectionId, providers['runninghub-model']);
+      await saveConfig({ throwOnError: true });
+      closeConnectionDialog();
+      return;
+    }
+    saveProviderConfig(connectionId, providerConfig);
     if (definition?.kind === 'web-search') {
       updateConfig({ webSearchProviderId: definition.id as WebSearchProviderId });
     } else if (related?.runninghubWorkflowApiKey) {
       setProviderConfig('runninghub', {
         name: 'RunningHub 工作流',
         apiKey: related.runninghubWorkflowApiKey,
+        baseUrl: providerConfig.baseUrl,
       });
     } else if (related && 'runninghubWorkflowApiKey' in related && config.providers.runninghub) {
       await removeProviderConfig('runninghub');
@@ -491,15 +644,64 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     closeConnectionDialog();
   };
 
-  const handleRemoveConnection = async (connectionId: string) => {
+  const handleSwitchProviderSite = async (connectionId: string, baseUrl: string) => {
+    if (siteSwitchBusyRef.current) return;
+    const state = useAppStore.getState();
+    const current = state.config.providers[connectionId]
+      ?? (connectionId === 'runninghub-model' && state.config.providers.runninghub ? {
+        name: 'RunningHub', apiKey: '', catalogId: 'runninghub-model', baseUrl: state.config.providers.runninghub.baseUrl,
+      } : undefined);
+    if (!current) return;
+    const definition = getProviderDefinition(connectionId, current);
+    const sites = definition?.id === 'toapis' ? TOAPIS_API_SITES
+      : definition?.id === 'runninghub-model' ? RUNNINGHUB_API_SITES : undefined;
+    if (!sites?.some((site) => site.baseUrl === baseUrl)) return;
+    const activeUrl = definition?.id === 'runninghub-model'
+      ? RUNNINGHUB_API_SITES.find((site) => site.id === runningHubSiteId(current.baseUrl))?.baseUrl
+      : (current.baseUrl || definition?.defaultBaseUrl || '').replace(/\/+$/, '');
+    if (activeUrl === baseUrl) return;
+
+    siteSwitchBusyRef.current = true;
+    setSwitchingSite(connectionId);
+    try {
+      if (definition?.id === 'runninghub-model') {
+        // 先保留两站各自的凭据，再同时切换模型和工作流入口；空站点不借用另一站 Key。
+        const providers = buildRunningHubSiteProviders(state.config.providers,
+          { ...current, baseUrl, catalogId: 'runninghub-model' }, runningHubSiteDrafts(state.config.providers));
+        state.updateConfig({ providers });
+        state.saveProviderConfig(connectionId, providers['runninghub-model']);
+      } else {
+        state.saveProviderConfig(connectionId, { ...current, baseUrl });
+      }
+      await state.saveConfig({ throwOnError: true });
+    } catch (error) {
+      state.showToast(error instanceof Error ? error.message : t('保存失败'), 'error');
+    } finally {
+      siteSwitchBusyRef.current = false;
+      setSwitchingSite(null);
+    }
+  };
+
+  const handleSaveCccGroups = async (connections: Record<string, ApiProviderConfig>) => {
+    // 先同步所有组的模型身份，再一次提交配置与凭据；单组失败不提前关闭编辑器。
+    for (const [id, providerConfig] of Object.entries(connections)) saveProviderConfig(id, providerConfig);
+    await saveConfig({ throwOnError: true });
+  };
+
+  const handleRemoveConnection = async (connectionId: string, removeAllGroups = false) => {
     try {
       const providerConfig = useAppStore.getState().config.providers[connectionId];
       const definition = getProviderDefinition(connectionId, providerConfig);
       if (connectionId === 'dreamina') await handleDreaminaLogout();
-      const connectionIds = definition?.kind === 'web-search'
+      const shouldClearVolcengineAssetLibrary = definition?.id === 'volcengine';
+      const connectionIds = removeAllGroups && (definition?.id === 'cccapi' || definition?.id === 'relayonapi')
+        ? Object.entries(useAppStore.getState().config.providers)
+          .filter(([id, connection]) => getProviderDefinition(id, connection)?.id === definition.id)
+          .map(([id]) => id)
+        : definition?.kind === 'web-search'
         ? getWebSearchProviderDefinitions().map((provider) => provider.id)
         : [connectionId];
-      if (connectionId === 'runninghub-model') connectionIds.push('runninghub');
+      if (connectionId === 'runninghub-model') connectionIds.push('runninghub', ...RUNNINGHUB_CREDENTIAL_IDS);
       let cleanupFailed = false;
       for (const id of connectionIds) {
         try {
@@ -507,12 +709,18 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         } catch {
           // Action 先移除内存配置，再清理项目引用。后者失败不能跳过配置提交。
           // 若配置仍存在，则删除本身未完成，不能当作引用清理失败继续。
-          if (useAppStore.getState().config.providers[id]) throw new Error('连接删除失败，请重试');
+          if (useAppStore.getState().config.providers[id]) throw new Error(t('连接删除失败，请重试'));
           cleanupFailed = true;
         }
       }
       if (definition?.kind === 'web-search') updateConfig({ webSearchProviderId: undefined });
       await saveConfig({ silent: true, throwOnError: true });
+      if (shouldClearVolcengineAssetLibrary) {
+        await Promise.all([
+          deleteAppSecret('provider/volcengine/asset-library/access-key'),
+          deleteAppSecret('provider/volcengine/asset-library/secret-key'),
+        ]);
+      }
       setPendingDeleteId(undefined);
       useAppStore.getState().showToast(
         cleanupFailed ? t('连接已删除，但部分项目的模型引用清理失败，请检查相关项目') : t('连接已删除'),
@@ -521,7 +729,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     } catch {
       const state = useAppStore.getState();
       state.showToast(state.configSaveError || t('连接删除失败，请重试'), 'error');
+      return false;
     }
+    return true;
   };
 
   return (
@@ -537,12 +747,20 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
           <AnimatedButton
             type="button"
             className="settings-add-provider-btn"
-            aria-label={t('从剪贴板导入连接')}
-            data-tooltip={t('从剪贴板导入连接')}
-            onClick={() => void handleImportConnection()}
+            aria-label={t('从 JSON 文件导入自定义连接')}
+            data-tooltip={t('从 JSON 文件导入自定义连接')}
+            disabled={importBusy}
+            onClick={() => importFileRef.current?.click()}
           >
-            <Icon icon="mdi:clipboard-arrow-down-outline" width="17" />
+            <Icon icon="mdi:file-import-outline" width="17" />
           </AnimatedButton>
+          <input ref={importFileRef} type="file" accept=".json,application/json" className="hidden"
+            aria-label={t('从 JSON 文件导入自定义连接')}
+            onChange={async (event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = '';
+              if (file) await handleImportConnection(file);
+            }} />
           <AnimatedButton
             type="button"
             className="settings-add-provider-btn"
@@ -556,6 +774,25 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="settings-pane-body provider-settings-body">
+        {importDiagnostics.length > 0 && (
+          <div role="alert" className="ui-alert ui-alert--danger flex-col items-stretch gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <strong>{t('连接配置未导入，请修正下方列出的模型配置问题后重试')}</strong>
+              <button type="button" className="ui-btn ui-btn--sm shrink-0" onClick={() => setImportDiagnostics([])}>
+                {t('关闭')}
+              </button>
+            </div>
+            <ul className="max-h-56 space-y-2 overflow-y-auto text-xs">
+              {importDiagnostics.map((issue, index) => (
+                <li key={`${issue.path}:${index}`} className="break-words">
+                  {issue.modelName && <strong>{issue.modelName}{issue.modelId && issue.modelId !== issue.modelName ? ` · ${issue.modelId}` : ''}</strong>}
+                  <div className="font-mono">{issue.path}</div>
+                  <div>{t(issue.message)}</div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {!secretStoreAvailable && (
           <p className="provider-secret-warning">
             <Icon icon="mdi:shield-alert-outline" width="14" />
@@ -573,18 +810,32 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
           </div>
         ) : (
           <div className="provider-connection-list">
-            {providerItems.map((item) => {
+            {visibleProviderItems.map((item) => {
               const definition = getProviderDefinition(item.id, item.config);
               if (!definition) return null;
-              const selectedCount = item.config.selectedModels?.length;
+              const isCcc = definition.id === 'cccapi';
+              const isRelayon = definition.id === 'relayonapi';
+              const isGrouped = isCcc || isRelayon;
+              const groupConnections = isCcc ? cccConnections : relayonConnections;
+              const groupKeyCount = groupConnections.filter((connection) => connection.config.apiKey.trim()).length;
+              const selectedCount = isGrouped
+                ? groupConnections.reduce((count, connection) => count + (connection.config.selectedModels?.length
+                  ?? config.generalModels?.filter((model) => model.providerConfigId === connection.id).length ?? 0), 0)
+                : item.config.selectedModels?.length;
               const summaryUrl = providerSummaryUrl(item.config, definition.defaultBaseUrl);
               const isDreamina = definition.id === 'dreamina';
               const isRunningHub = definition.id === 'runninghub-model';
+              const siteOptions = definition.id === 'toapis' ? TOAPIS_API_SITES : isRunningHub ? RUNNINGHUB_API_SITES : undefined;
+              const activeSiteUrl = isRunningHub
+                ? RUNNINGHUB_API_SITES.find((site) => site.id === runningHubSiteId(item.config.baseUrl))?.baseUrl
+                : (item.config.baseUrl || definition.defaultBaseUrl || '').replace(/\/+$/, '');
               const isWebSearchProvider = definition.kind === 'web-search';
               const isWorkflowApi = definition.kind === 'workflow-api';
+              const isCustomConnection = definition.id === 'custom-openai' || isWorkflowApi;
               const connectionWorkflows = workflows.filter((workflow) => workflow.workflowApi?.connectionId === item.id);
               const needsWorkflowKey = connectionWorkflows.some((workflow) => workflow.workflowApi?.version !== 2 || workflow.workflowApi.protocol.auth?.type !== 'none');
-              const isPendingApiKey = definition.authType !== 'oauth' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
+              const isPendingApiKey = isGrouped ? groupKeyCount === 0
+                : definition.authType !== 'oauth' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
               const hasRunningHubModelKey = isRunningHub && !!item.config.apiKey.trim();
               const hasRunningHubWorkflowKey = isRunningHub
                 && !!config.providers.runninghub?.apiKey.trim();
@@ -595,27 +846,48 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 : definition.id === 'custom-openai'
                   ? item.config.name.trim() || definition.name
                   : isWorkflowApi ? item.config.name.trim() || t(definition.name) : definition.name;
+              const customReadiness = definition.id === 'custom-openai'
+                ? getCustomConnectionReadiness(item.config.selectedModels) : undefined;
               const statusLabel = isDreamina
                 ? t('OAuth 已连接')
                 : isRunningHub
                   ? t('{count}/2 密钥已配置', { count: runningHubKeyCount })
+                  : isGrouped
+                    ? t('{configured}/{count} 组已配置', { configured: groupKeyCount, count: groupConnections.length })
                   : isPendingApiKey
                     ? t('待填写 API Key')
-                    : isWorkflowApi ? t('已配置') : t('已连接');
+                    : isWorkflowApi ? t('已配置') : customReadiness ? t('Key 已填写') : t('已连接');
               return (
-                <div key={item.id} className={`provider-connection-card${isRunningHub ? ' provider-connection-card--runninghub' : ''}`}>
+                <Fragment key={item.id}>
+                <div className={`provider-connection-card${isRunningHub ? ' provider-connection-card--runninghub' : ''}`}>
                   <ProviderBadge providerId={item.id} config={item.config} size="large" />
                   <div className="provider-connection-copy">
-                    <div className="provider-connection-title-row">
+                    <div className={`provider-connection-title-row${siteOptions ? ' flex-wrap' : ''}`}>
                       <strong>{displayName}</strong>
-                      <span className={`provider-list-status${isPendingApiKey || (isRunningHub && runningHubKeyCount < 2) ? ' is-limited' : ''}`}>
+                      <span className={`provider-list-status${isPendingApiKey || (isRunningHub && runningHubKeyCount < 2) || (isGrouped && groupKeyCount < groupConnections.length) ? ' is-limited' : ''}`}>
                         {statusLabel}
                       </span>
-                      {providerBalances[item.id] && (
-                        <span className="shrink-0 text-xs font-medium text-canvas-text-secondary">
-                          {providerBalances[item.id]}
+                      {customReadiness && (
+                        <span className={`provider-list-status${customReadiness !== 'ready' ? ' is-limited' : ''}`}
+                          data-tooltip={t('仅校验本地配置，不代表实际调用已验证')}>
+                          {customReadiness === 'invalid' ? t('配置需修正')
+                            : customReadiness === 'pending' ? t('协议待配置') : t('本地校验通过')}
                         </span>
                       )}
+                      {siteOptions && <div className="ui-segmented shrink-0" role="group" aria-label={`${displayName} · ${t('API 站点')}`} aria-busy={switchingSite === item.id}>
+                        {siteOptions.map((site) => (
+                          <button key={site.id} type="button"
+                            className={`ui-segmented__item disabled:cursor-wait disabled:opacity-50${activeSiteUrl === site.baseUrl ? ' is-active' : ''}`}
+                            aria-label={`${displayName} · ${t(site.label)}`}
+                            aria-pressed={activeSiteUrl === site.baseUrl}
+                            data-tooltip={t(site.label)}
+                            disabled={switchingSite !== null || pendingDeleteId === item.id}
+                            onClick={() => handleSwitchProviderSite(item.id, site.baseUrl)}>
+                            {t(site.label).replace(/[（(].*$/, '').trim()}
+                          </button>
+                        ))}
+                      </div>}
+                      {!isRunningHub && renderProviderBalance(item.id)}
                     </div>
                     {!isRunningHub && <div className="provider-connection-meta">
                       {isWorkflowApi ? (
@@ -632,7 +904,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                               ? t('沿用内置模型目录')
                               : t('{count} 个模型', { count: selectedCount })}
                           </span>
-                          {summaryUrl && <span>{summaryUrl}</span>}
+                          {isGrouped ? <span>{t('{count} 个分组', { count: groupConnections.length })}</span> : summaryUrl && <span>{summaryUrl}</span>}
                         </>
                       )}
                     </div>}
@@ -647,21 +919,25 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                       {hasRunningHubModelKey && <span className="provider-runninghub-model-count">
                         {selectedCount === undefined ? t('沿用内置模型目录') : t('{count} 个模型', { count: selectedCount })}
                       </span>}
+                      {renderProviderBalance(item.id)}
                     </div>
                     <div className="provider-runninghub-connection">
                       <span className="provider-runninghub-connection-state">
                         <Icon icon={hasRunningHubWorkflowKey ? 'mdi:check-circle-outline' : 'mdi:circle-outline'} width="14" className={hasRunningHubWorkflowKey ? 'is-configured' : ''} />
                         {hasRunningHubWorkflowKey ? t('工作流连接已配置') : t('工作流连接未配置')}
                       </span>
+                      {renderProviderBalance('runninghub')}
                       <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost provider-runninghub-manage" onClick={() => { useAppStore.getState().setSettingsOpen(false); useAppStore.getState().setWorkflowPanelOpen(true, 'workflow'); }}>
-                        管理云工作流 <Icon icon="mdi:arrow-right" width="14" />
+                        {t("管理云工作流")} <Icon icon="mdi:arrow-right" width="14" />
                       </button>
                     </div>
                   </div>}
 
                   {pendingDeleteId === item.id ? (
                     <div className="provider-delete-confirm">
-                      <span>{t('移除此连接？')}</span>
+                      <span>{isGrouped
+                        ? t(isCcc ? '移除全部 {count} 个 CCC 分组及其模型配置？' : '移除全部 {count} 个万象分组及其模型配置？', { count: groupConnections.length })
+                        : t('移除此连接？')}</span>
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
@@ -674,29 +950,37 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                         type="button"
                         className="provider-icon-btn is-danger"
                         aria-label={t('确认删除')}
-                        onClick={() => void handleRemoveConnection(item.id)}
+                        onClick={() => void handleRemoveConnection(item.id, isGrouped)}
                       >
                         <Icon icon="mdi:check" width="15" />
                       </AnimatedButton>
                     </div>
                   ) : (
                     <div className="provider-card-actions">
-                      {!isDreamina && !isWebSearchProvider && (
+                      {definition.id === 'volcengine' && (
+                        <AnimatedButton type="button" className="provider-icon-btn" aria-label={t("查看火山方舟用量记录")} data-tooltip={t("用量记录")} onClick={() => setBillingOpen(true)}>
+                          <Icon icon="lucide:receipt-text" width="16" />
+                        </AnimatedButton>
+                      )}
+                      {!isDreamina && !isWebSearchProvider && !isGrouped && (
                         <AnimatedButton
                           type="button"
                           className="provider-icon-btn"
-                          aria-label={t('复制 {name} 配置', { name: definition.name })}
-                          data-tooltip={t('复制配置（不含 API Key）')}
-                          onClick={() => void handleCopyConnection(item.id)}
+                          aria-label={isCustomConnection
+                            ? t('导出 {name} JSON', { name: displayName }) : t('复制 {name} 配置', { name: definition.name })}
+                          data-tooltip={isCustomConnection
+                            ? t('导出 JSON（不含 API Key）') : t('复制配置（不含 API Key）')}
+                          onClick={() => void (isCustomConnection
+                            ? handleExportConnection(item.id) : handleCopyConnection(item.id))}
                         >
-                          <Icon icon="mdi:content-copy" width="15" />
+                          <Icon icon={isCustomConnection ? 'mdi:file-export-outline' : 'mdi:content-copy'} width="15" />
                         </AnimatedButton>
                       )}
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
-                        aria-label={t('编辑 {name}', { name: definition.name })}
-                        data-tooltip={t('编辑连接')}
+                        aria-label={isCcc ? t('管理 CCC 分组') : isRelayon ? t('管理万象分组') : t('编辑 {name}', { name: definition.name })}
+                        data-tooltip={isGrouped ? t('统一管理分组') : t('编辑连接')}
                         onClick={() => openEditDialog(item.id)}
                       >
                         <Icon icon="mdi:pencil-outline" width="16" />
@@ -704,8 +988,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
-                        aria-label={t('删除 {name}', { name: definition.name })}
-                        data-tooltip={t('删除连接')}
+                        aria-label={isCcc ? t('删除 CCC API 全部分组') : isRelayon ? t('删除万象 API 全部分组') : t('删除 {name}', { name: definition.name })}
+                        data-tooltip={isCcc ? t('删除全部 CCC 分组') : isRelayon ? t('删除全部万象分组') : t('删除连接')}
                         onClick={() => setPendingDeleteId(item.id)}
                       >
                         <Icon icon="mdi:trash-can-outline" width="16" />
@@ -713,9 +997,15 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                     </div>
                   )}
                 </div>
+                </Fragment>
               );
             })}
           </div>
+        )}
+        {!hasVolcengineConnection && hasBillingHistory && (
+          <button type="button" className="ui-btn ui-btn--sm ui-btn--secondary mt-3" onClick={() => setBillingOpen(true)}>
+            <Icon icon="lucide:receipt-text" />{t("火山方舟历史用量")}
+          </button>
         )}
       </div>
 
@@ -739,6 +1029,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         isOpen={connectionDialogOpen}
         connectionId={editingConnectionId}
         initialConfig={editingConfig}
+        initialModelId={requestedConnectionId ? pendingApiKeyModelId ?? undefined : undefined}
         providerConfigs={config.providers}
         connectedProviderIds={connectedProviderIds}
         fallbackModels={fallbackModels}
@@ -748,6 +1039,11 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         onDreaminaLogin={() => void handleDreaminaLogin(!!dreaminaAuth?.loggedIn)}
         onClose={closeConnectionDialog}
         onSave={handleSaveConnection}
+        onSaveCccGroups={handleSaveCccGroups}
+        onCopyCccGroup={handleCopyConnection}
+        onRemoveCccGroup={handleRemoveConnection}
+        onEditRelayGroup={editRelayGroup}
+        forceSingleGroupEdit={!!dialog.returnToRelayGroups || (!!requestedConnectionId && !!pendingApiKeyModelId)}
       />
 
       <DreaminaLoginModal
@@ -757,6 +1053,27 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         onOpenUrl={openExternalUrl}
         onCopy={handleDreaminaCopy}
       />
+      <ModalOverlay
+        isOpen={billingOpen}
+        onClose={() => setBillingOpen(false)}
+        ariaLabel={t("火山方舟用量记录")}
+        className="h-[min(860px,calc(100dvh-24px))] w-[min(1120px,calc(100vw-24px))]"
+        zIndex={270}
+        closeOnBackdrop={false}
+      >
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-canvas-border px-5 py-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Icon icon="lucide:receipt-text" width="19" className="shrink-0 text-canvas-text-secondary" />
+            <h2 className="truncate text-base font-semibold text-canvas-text">{t("火山方舟用量记录")}</h2>
+          </div>
+          <PopupCloseButton
+            ariaLabel={t("关闭用量记录")}
+            title={t("关闭")}
+            onClick={() => setBillingOpen(false)}
+          />
+        </div>
+        {billingOpen && <VolcengineBillingSettings />}
+      </ModalOverlay>
       <span className="sr-only" aria-live="polite">{dreaminaStatusMsg}</span>
     </div>
   );

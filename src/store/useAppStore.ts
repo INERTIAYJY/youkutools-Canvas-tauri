@@ -40,6 +40,8 @@ import type { ToolbarSlice } from './store.toolbar';
 import type { DramaAssetsSlice } from './store.dramaAssets';
 import type { PluginSlice } from './store.plugins';
 import type { AgentPackageSlice } from './store.agentPackages';
+import type { AppearanceSlice } from './store.appearance';
+import type { AssetSyncSlice } from './store.assetSync';
 
 import { createNodeSlice } from './store.nodes';
 import { createUISlice } from './store.ui';
@@ -62,6 +64,9 @@ import { createToolbarSlice } from './store.toolbar';
 import { createDramaAssetsSlice } from './store.dramaAssets';
 import { createPluginSlice } from './store.plugins';
 import { createAgentPackageSlice } from './store.agentPackages';
+import { createVideoBatchSlice, type VideoBatchSlice } from './store.videoBatch';
+import { createAppearanceSlice } from './store.appearance';
+import { createAssetSyncSlice } from './store.assetSync';
 
 // ---- Re-export utilities for backward compatibility ----
 export { generateId, computeImageNodeDimensions } from './store.utils';
@@ -87,7 +92,10 @@ export type AppState = NodeSlice
   & ToolbarSlice
   & DramaAssetsSlice
   & PluginSlice
-  & AgentPackageSlice;
+  & AgentPackageSlice
+  & VideoBatchSlice
+  & AppearanceSlice
+  & AssetSyncSlice;
 
 // ---- Store creation via slice composition ----
 const createAppState: StateCreator<AppState> = (...a) => ({
@@ -112,6 +120,9 @@ const createAppState: StateCreator<AppState> = (...a) => ({
   ...createDramaAssetsSlice(...a),
   ...createPluginSlice(...a),
   ...createAgentPackageSlice(...a),
+  ...createVideoBatchSlice(...a),
+  ...createAppearanceSlice(...a),
+  ...createAssetSyncSlice(...a),
 });
 
 // 仅开发热更新时恢复内存 Store；生产构建与独立窗口仍各自创建正常实例。

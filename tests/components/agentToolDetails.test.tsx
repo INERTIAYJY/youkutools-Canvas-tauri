@@ -1,3 +1,6 @@
+/**
+ * agentToolDetails — 回归测试：AgentToolDetails。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it } from 'vitest';
 import AgentToolDetails from '../../src/components/chat/AgentToolDetails';

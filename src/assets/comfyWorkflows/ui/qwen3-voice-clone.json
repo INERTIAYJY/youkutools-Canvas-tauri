@@ -1,0 +1,495 @@
+{
+  "id": "qwen3-tts-01-faithful-clone",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadAudio",
+      "pos": [
+        80,
+        180
+      ],
+      "size": [
+        300,
+        150
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "COMBO",
+          "widget": {
+            "name": "audio"
+          },
+          "link": null
+        },
+        {
+          "label": "audioUI",
+          "name": "audioUI",
+          "type": "AUDIO_UI",
+          "widget": {
+            "name": "audioUI"
+          },
+          "link": null
+        },
+        {
+          "label": "upload",
+          "name": "upload",
+          "type": "AUDIOUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "AUDIO",
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            1,
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "Node name for S&R": "LoadAudio",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "audio": true,
+            "audioUI": true,
+            "upload": true
+          }
+        }
+      },
+      "widgets_values": [
+        "",
+        null,
+        null
+      ],
+      "title": "① 上传原声参考音频"
+    },
+    {
+      "id": 2,
+      "type": "AILab_Qwen3ASR",
+      "pos": [
+        460,
+        180
+      ],
+      "size": [
+        350,
+        250
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "TEXT",
+          "type": "STRING",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-QwenASR",
+        "ver": "b4a72ce9edff506f1659c059891da8d98b73284b",
+        "Node name for S&R": "AILab_Qwen3ASR",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "Qwen/Qwen3-ASR-1.7B-hf",
+        "bf16",
+        "auto",
+        "",
+        false,
+        true
+      ],
+      "widgets_values_named": {
+        "model": "Qwen/Qwen3-ASR-1.7B-hf",
+        "precision": "bf16",
+        "language": "auto",
+        "hints": "",
+        "normalize_text": false,
+        "unload_models": true
+      },
+      "color": "#151c19",
+      "bgcolor": "#444d49",
+      "title": "② 自动识别参考文本"
+    },
+    {
+      "id": 3,
+      "type": "FB_Qwen3TTSVoiceClone",
+      "pos": [
+        900,
+        100
+      ],
+      "size": [
+        430,
+        650
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "ref_audio",
+          "name": "ref_audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 3
+        },
+        {
+          "label": "voice_clone_prompt",
+          "name": "voice_clone_prompt",
+          "shape": 7,
+          "type": "VOICE_CLONE_PROMPT",
+          "link": null
+        },
+        {
+          "label": "target_text",
+          "name": "target_text",
+          "type": "STRING",
+          "widget": {
+            "name": "target_text"
+          },
+          "link": null
+        },
+        {
+          "label": "model_choice",
+          "name": "model_choice",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_choice"
+          },
+          "link": null
+        },
+        {
+          "label": "device",
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        },
+        {
+          "label": "precision",
+          "name": "precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "precision"
+          },
+          "link": null
+        },
+        {
+          "label": "language",
+          "name": "language",
+          "type": "COMBO",
+          "widget": {
+            "name": "language"
+          },
+          "link": null
+        },
+        {
+          "label": "ref_text",
+          "name": "ref_text",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "ref_text"
+          },
+          "link": 2
+        },
+        {
+          "label": "seed",
+          "name": "seed",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "label": "max_new_tokens",
+          "name": "max_new_tokens",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "max_new_tokens"
+          },
+          "link": null
+        },
+        {
+          "label": "top_p",
+          "name": "top_p",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "top_p"
+          },
+          "link": null
+        },
+        {
+          "label": "top_k",
+          "name": "top_k",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "top_k"
+          },
+          "link": null
+        },
+        {
+          "label": "temperature",
+          "name": "temperature",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "temperature"
+          },
+          "link": null
+        },
+        {
+          "label": "repetition_penalty",
+          "name": "repetition_penalty",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "repetition_penalty"
+          },
+          "link": null
+        },
+        {
+          "label": "x_vector_only",
+          "name": "x_vector_only",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "x_vector_only"
+          },
+          "link": null
+        },
+        {
+          "label": "attention",
+          "name": "attention",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "attention"
+          },
+          "link": null
+        },
+        {
+          "label": "unload_model_after_generate",
+          "name": "unload_model_after_generate",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "unload_model_after_generate"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "qwen3-tts-comfyui",
+        "ver": "c7db6c2eb0f269d358c53bb71688dc95de4f7d07",
+        "Node name for S&R": "FB_Qwen3TTSVoiceClone"
+      },
+      "widgets_values": [
+        "请在这里填写要让原声说的新内容。",
+        "1.7B",
+        "auto",
+        "bf16",
+        "Chinese",
+        "",
+        20260916,
+        "fixed",
+        1536,
+        0.9,
+        50,
+        0.8,
+        1.05,
+        false,
+        "sdpa",
+        true
+      ],
+      "title": "③ 原声 1:1 克隆"
+    },
+    {
+      "id": 4,
+      "type": "SaveAudio",
+      "pos": [
+        1430,
+        220
+      ],
+      "size": [
+        410,
+        130
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "audio",
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 4
+        },
+        {
+          "label": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "label": "audioUI",
+          "name": "audioUI",
+          "type": "AUDIO_UI",
+          "widget": {
+            "name": "audioUI"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "Node name for S&R": "SaveAudio",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "filename_prefix": true,
+            "audioUI": true
+          }
+        }
+      },
+      "widgets_values": [
+        "audio/Qwen3-TTS-01-原声1比1克隆"
+      ],
+      "title": "④ 预览并保存"
+    },
+    {
+      "id": 5,
+      "type": "Note",
+      "pos": [
+        80,
+        520
+      ],
+      "size": [
+        730,
+        250
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Note"
+      },
+      "widgets_values": [
+        "用途：尽量保持参考音频中同一个人的音色、性别、年龄和说话习惯，只替换说话内容。\n\n使用：\n1. 在“上传原声参考音频”中选择 10～20 秒单人、干声、无背景音乐的音频。\n2. ASR 会自动填写参考文本，不需要手工抄写。\n3. 在“原声 1:1 克隆”的 target_text 中填写新台词。\n4. seed 保持 fixed，可减少多次生成之间的音色波动。\n\n注意：这里不使用 VoiceDesign，也不写年龄/性别提示词；这些提示会破坏“原声 1:1”的目标。"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "AUDIO"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      7,
+      "STRING"
+    ],
+    [
+      3,
+      1,
+      0,
+      3,
+      0,
+      "AUDIO"
+    ],
+    [
+      4,
+      3,
+      0,
+      4,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.75,
+      "offset": [
+        0,
+        0
+      ]
+    },
+    "workflow-name": "01-原声1比1克隆"
+  },
+  "version": 0.4
+}
+

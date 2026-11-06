@@ -1,9 +1,14 @@
+/**
+ * shotlistProductionService — 回归测试：镜头制作准备。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../../src/store/useAppStore';
 import { prepareShotlistProduction } from '../../src/services/shotlistProductionService';
+import { updateShotlistRows } from '../../src/services/shotlistService';
 import { clearAgentToolRegistryForTests, getAgentTool, getAvailableAgentTools, prepareAgentToolCall, type AgentToolContext } from '../../src/services/chat/toolRegistry';
 import { registerShotlistAgentTools } from '../../src/services/chat/tools/shotlistTools';
 import { searchMcpToolCatalog } from '../../src/services/mcp/mcpToolCatalog';
+import { expandShotlistRowMentions } from '../../src/services/shotlistPromptService';
 
 const scope = () => ({ projectId: 'ep', baseRevision: useAppStore.getState().getCurrentRevision() });
 const context = (): AgentToolContext => ({ ...scope(), conversationId: 'mcp-control-ep', taskId: '', mode: 'autonomous', signal: new AbortController().signal });
@@ -11,8 +16,8 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({ currentProjectId: 'ep', projectLoadStatus: 'ready', showToast: vi.fn(),
     projects: [{ id: 'ep', name: '集', createdAt: 1, updatedAt: 1, settings: { defaultModels: { audio: 'general/tts', video: 'general/video' } } }],
-    nodes: [{ id: 'sheet', type: 'ai-shotlist', position: { x: 0, y: 0 }, data: { type: 'ai-shotlist', label: '镜头', shotlistRows: [
-      { id: 'r1', shotNo: '1', content: '林夏站在月台', dialogue: '终于等到你了', camera: '推近', duration: 4,
+    nodes: [{ id: 'sheet', type: 'ai-shotlist', position: { x: 0, y: 0 }, data: { type: 'ai-shotlist', label: '镜头', prompt: '保留剧本引用', shotlistRows: [
+      { id: 'r1', shotNo: '1', content: '林夏站在月台', dialogue: '终于等到你了', audio: '列车进站声', camera: '推近', duration: 4,
         frame: { nodeId: 'frame', kind: 'image', url: 'PRIVATE_URL', filePath: 'PRIVATE_PATH' } },
       { id: 'r2', shotNo: '2', content: '列车驶入' },
     ] } }, { id: 'frame', type: 'source-image', position: { x: -300, y: 0 }, data: { type: 'source-image', label: '参考画面', imageUrl: 'PRIVATE_URL' } }],
@@ -22,6 +27,55 @@ beforeEach(() => {
 });
 
 describe('镜头制作准备', () => {
+  it('分镜时长向上取整，新节点自动跟随；MCP 修改和撤销同时恢复分镜与视频', async () => {
+    updateShotlistRows(scope(), 'sheet', 'update', [{ id: 'r1', duration: 4.3 }]);
+    const [result] = prepareShotlistProduction(scope(), 'sheet', ['r1'], 'video');
+    const video = () => useAppStore.getState().nodes.find((n) => n.id === result.nodeId)!;
+    expect(video().data.seedanceDuration).toBe(5);
+    useAppStore.getState().updateNodeDataTransient(result.nodeId, { videoUrl: 'keep.mp4', status: 'success' });
+    updateShotlistRows(scope(), 'sheet', 'update', [{ id: 'r1', duration: 8.1 }]);
+    expect(video().data).toMatchObject({ seedanceDuration: 9, videoUrl: 'keep.mp4', status: 'success' });
+    await useAppStore.getState().undo();
+    expect(video().data.seedanceDuration).toBe(5);
+    expect(useAppStore.getState().nodes.find((n) => n.id === 'sheet')!.data.shotlistRows![0].duration).toBe(4.3);
+    await useAppStore.getState().redo();
+    expect(video().data.seedanceDuration).toBe(9);
+  });
+
+  it('界面瞬时编辑同步，但视频手动时长永久保留，其他镜头不变', () => {
+    const results = prepareShotlistProduction(scope(), 'sheet', ['r1', 'r2'], 'video');
+    const video = (i: number) => useAppStore.getState().nodes.find((n) => n.id === results[i].nodeId)!;
+    const edit = (duration: number | undefined) => {
+      const rows = useAppStore.getState().nodes.find((n) => n.id === 'sheet')!.data.shotlistRows!;
+      useAppStore.getState().updateNodeDataTransient('sheet', { shotlistRows: rows.map((r) => r.id === 'r1' ? { ...r, duration } : r) });
+    };
+    expect(video(1).data.seedanceDuration).toBeUndefined();
+    edit(6.2);
+    expect(video(0).data.seedanceDuration).toBe(7);
+    edit(undefined);
+    edit(0);
+    expect(video(0).data.seedanceDuration).toBe(7);
+    useAppStore.getState().updateNodesDataBatch([results[0].nodeId], { seedanceDuration: 12 });
+    edit(12);
+    edit(8.1);
+    expect(video(0).data.seedanceDuration).toBe(12);
+    expect(video(0).data.shotlistProductionSource?.durationSync).toBe('manual');
+    expect(video(1).data.seedanceDuration).toBeUndefined();
+    expect(prepareShotlistProduction(scope(), 'sheet', ['r1'], 'video')[0].status).toBe('reused');
+    expect(video(0).data.seedanceDuration).toBe(12);
+  });
+
+  it('旧节点仅在仍匹配旧分镜时同步；无来源节点不按名称猜测', () => {
+    const [result] = prepareShotlistProduction(scope(), 'sheet', ['r1'], 'video');
+    useAppStore.getState().updateNodeDataTransient(result.nodeId, {
+      shotlistProductionSource: { nodeId: 'sheet', rowId: 'r1', kind: 'video' },
+    });
+    updateShotlistRows(scope(), 'sheet', 'update', [{ id: 'r1', duration: 9.3 }]);
+    expect(useAppStore.getState().nodes.find((n) => n.id === result.nodeId)!.data.seedanceDuration).toBe(10);
+    useAppStore.getState().updateNodeDataTransient(result.nodeId, { shotlistProductionSource: undefined });
+    updateShotlistRows(scope(), 'sheet', 'update', [{ id: 'r1', duration: 6 }]);
+    expect(useAppStore.getState().nodes.find((n) => n.id === result.nodeId)!.data.seedanceDuration).toBe(10);
+  });
   it('配音只放对白和语音用途，一次历史，重复定位保留人工修改', () => {
     const commit = vi.fn(useAppStore.getState().commitToHistory);
     useAppStore.setState({ commitToHistory: commit });
@@ -30,21 +84,34 @@ describe('镜头制作准备', () => {
     expect(node.data).toMatchObject({ type: 'ai-audio', status: 'idle', prompt: '终于等到你了', audioPurpose: 'speech', model: 'general/tts',
       shotlistProductionSource: { nodeId: 'sheet', rowId: 'r1', kind: 'voiceover' } });
     expect(commit).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().edges).not.toContainEqual(expect.objectContaining({ source: node.id, target: 'sheet' }));
+    expect(useAppStore.getState().nodes.find((item) => item.id === 'sheet')!.data.prompt).toBe('保留剧本引用');
     useAppStore.getState().updateNodeDataTransient(node.id, { prompt: '人工对白' });
     expect(prepareShotlistProduction(scope(), 'sheet', ['r1'], 'voiceover')[0]).toMatchObject({ nodeId: node.id, status: 'reused' });
     expect(useAppStore.getState().nodes.find((item) => item.id === node.id)!.data.prompt).toBe('人工对白');
     expect(commit).toHaveBeenCalledTimes(1);
   });
 
-  it('视频引用真实画面节点，不把快照路径复制进提示词', () => {
+  it('视频保存精确镜头胶囊，生成时读取最新字段和真实图片，不复制快照路径', () => {
     const [result] = prepareShotlistProduction(scope(), 'sheet', ['r1'], 'video');
     const state = useAppStore.getState();
     const node = state.nodes.find((item) => item.id === result.nodeId)!;
-    expect(node.data.prompt).toContain('推近，林夏站在月台');
-    expect(node.data.prompt).toContain('@{frame:参考画面}');
+    expect(node.data.prompt).toBe('@{sheet/shot/r1:镜头 · 镜1}');
+    const resolved = expandShotlistRowMentions(node.data.prompt!, state.nodes);
+    expect(resolved).toContain('运镜：推近');
+    expect(resolved).toContain('林夏站在月台');
+    expect(resolved).toContain('终于等到你了');
+    expect(resolved).toContain('音效/音乐：列车进站声');
+    expect(resolved).toContain('@{frame:参考画面}');
     expect(node.data.prompt).not.toContain('PRIVATE_');
-    expect(state.edges).toContainEqual(expect.objectContaining({ source: 'frame', target: node.id }));
+    expect(state.edges).toContainEqual(expect.objectContaining({ source: 'sheet', target: node.id }));
+    expect(state.edges.filter((edge) => edge.target === node.id)).toHaveLength(1);
+    expect(state.edges).not.toContainEqual(expect.objectContaining({ source: node.id, target: 'sheet' }));
+    expect(state.nodes.find((item) => item.id === 'sheet')!.data.prompt).toBe('保留剧本引用');
     expect(node.data.model).toBe('general/video');
+    updateShotlistRows(scope(), 'sheet', 'update', [{ id: 'r1', camera: '固定机位', dialogue: '先等一下。' }]);
+    expect(expandShotlistRowMentions(node.data.prompt!, useAppStore.getState().nodes)).toContain('先等一下。');
+    expect(useAppStore.getState().nodes.find((item) => item.id === node.id)!.data.prompt).toBe(node.data.prompt);
   });
 
   it('导演台带独立镜头说明且位置不重叠，不伪造场景或成果', async () => {

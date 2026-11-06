@@ -1,3 +1,6 @@
+/**
+ * memoryRetrieval — 回归测试：project memory retrieval。
+ */
 import { describe, expect, it } from 'vitest';
 import type { ProjectMemory, ProjectMemoryKind } from '../../../src/types/memory';
 import { rankProjectMemories } from '../../../src/services/chat/memoryRetrieval';

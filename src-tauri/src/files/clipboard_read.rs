@@ -1,11 +1,14 @@
-//! 主窗口显式读取 Windows 剪贴板图片/文本；不读取文件路径或更改剪贴板。
+//! 主窗口显式读取剪贴板；图片/文本与授权目录使用独立命令。
 use serde::Serialize;
 
+#[cfg(any(target_os = "windows", test))]
 const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(any(target_os = "windows", test))]
 const MAX_TEXT_UNITS: usize = 100_000;
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub enum ClipboardContent {
     Text {
         text: String,
@@ -176,9 +179,236 @@ pub async fn read_canvas_clipboard(webview: tauri::Webview) -> Result<ClipboardC
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn decode_drop_folders(bytes: &[u8]) -> Result<Vec<String>, String> {
+    if bytes.len() < 24 || bytes.len() > 1024 * 1024 {
+        return Err("剪贴板文件列表无效或过大".into());
+    }
+    let offset = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let wide = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    if wide != 1 || offset < 20 || offset >= bytes.len() || (bytes.len() - offset) % 2 != 0 {
+        return Err("剪贴板文件列表编码无效".into());
+    }
+    let units: Vec<u16> = bytes[offset..]
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let mut paths = Vec::new();
+    let mut start = 0;
+    for end in 0..units.len() {
+        if units[end] != 0 {
+            continue;
+        }
+        if end == start {
+            if paths.is_empty() {
+                return Err("剪贴板中没有文件夹".into());
+            }
+            return Ok(paths);
+        }
+        if end - start > 32_768 || paths.len() >= 128 {
+            return Err("剪贴板文件列表超过上限".into());
+        }
+        paths.push(String::from_utf16(&units[start..end]).map_err(|_| "剪贴板路径编码无效")?);
+        start = end + 1;
+    }
+    Err("剪贴板文件列表缺少终止符".into())
+}
+
+#[cfg(target_os = "windows")]
+fn read_folder_paths() -> Result<Vec<String>, String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    struct ClipboardLease;
+    impl Drop for ClipboardLease {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+    unsafe {
+        OpenClipboard(None).map_err(|_| "剪贴板暂时被占用，请稍后重试")?;
+        let _lease = ClipboardLease;
+        let handle = GetClipboardData(15).map_err(|_| "剪贴板中没有可粘贴的文件夹")?;
+        let memory = HGLOBAL(handle.0);
+        let size = GlobalSize(memory);
+        if size == 0 || size > 1024 * 1024 {
+            return Err("剪贴板文件列表无效或过大".into());
+        }
+        let pointer = GlobalLock(memory);
+        if pointer.is_null() {
+            return Err("无法读取剪贴板文件列表".into());
+        }
+        let bytes = std::slice::from_raw_parts(pointer as *const u8, size).to_vec();
+        let _ = GlobalUnlock(memory);
+        decode_drop_folders(&bytes)
+    }
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn read_x11_folder_bytes(
+    mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    // 有些文件管理器只提供标准格式；只在工具读取失败时换格式，不放宽内容解析。
+    read("x-special/gnome-copied-files").or_else(|_| read("text/uri-list"))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn decode_folder_paths(bytes: Vec<u8>, file_uris: bool) -> Result<Vec<String>, String> {
+    if bytes.len() > 1024 * 1024 {
+        return Err("系统剪贴板输出超过上限".into());
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "剪贴板路径编码无效")?;
+    let mut paths = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let path = if file_uris {
+            if line == "copy" || line == "cut" || line.starts_with('#') {
+                continue;
+            }
+            let uri = url::Url::parse(line).map_err(|_| "剪贴板文件地址无效")?;
+            if uri.query().is_some() || uri.fragment().is_some() {
+                return Err("剪贴板文件地址无效".into());
+            }
+            uri
+                .to_file_path()
+                .map_err(|_| "剪贴板中包含非本地文件")?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            line.to_string()
+        };
+        if paths.len() >= 128 {
+            return Err("剪贴板文件夹数量超过上限".into());
+        }
+        paths.push(path);
+    }
+    if paths.is_empty() {
+        return Err("剪贴板中没有可粘贴的文件夹".into());
+    }
+    Ok(paths)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_folder_paths() -> Result<Vec<String>, String> {
+    use std::process::Command;
+    #[cfg(target_os = "macos")]
+    let bytes = {
+        let mut command = Command::new("osascript");
+        command.args(["-e", "set copiedItems to the clipboard as list\nset resultText to \"\"\nrepeat with copiedItem in copiedItems\nset resultText to resultText & (POSIX path of copiedItem) & linefeed\nend repeat\nreturn resultText"]);
+        crate::clipboard::run_clipboard_command(&mut command, 1024 * 1024)?
+    };
+    #[cfg(target_os = "linux")]
+    let bytes = if std::env::var("XDG_SESSION_TYPE").unwrap_or_default() == "wayland" {
+        let mut command = Command::new("wl-paste");
+        command.args(["--no-newline", "--type", "text/uri-list"]);
+        crate::clipboard::run_clipboard_command(&mut command, 1024 * 1024)?
+    } else {
+        // 两种格式共用原来的 5 秒预算，回退不会把等待时间翻倍。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        read_x11_folder_bytes(|target| {
+            let mut command = Command::new("xclip");
+            command.args(["-o", "-selection", "clipboard", "-target", target]);
+            crate::clipboard::run_clipboard_command_until(&mut command, 1024 * 1024, deadline)
+        })?
+    };
+    decode_folder_paths(bytes, cfg!(target_os = "linux"))
+}
+
+#[tauri::command]
+pub async fn read_asset_folder_clipboard(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<Vec<String>, String> {
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    ensure_main_label(webview.label())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut paths = Vec::new();
+        for raw in read_folder_paths()? {
+            let directory = crate::path_policy::authorize_existing_plain_directory(&app, &raw)
+                .map_err(|_| "剪贴板中包含非文件夹或未授权目录；请先将源目录添加到资产库")?;
+            let path = directory.to_string_lossy().into_owned();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    })
+    .await
+    .map_err(|_| "读取文件夹剪贴板失败")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn x11_falls_back_only_after_read_failure_and_keeps_payload_validation() {
+        let mut calls = 0;
+        let bytes = read_x11_folder_bytes(|_| {
+            calls += 1;
+            Ok(b"copy\nfile:///tmp/folder\n".to_vec())
+        }).unwrap();
+        assert_eq!(decode_folder_paths(bytes, true).unwrap(), ["/tmp/folder"]);
+        assert_eq!(calls, 1);
+
+        let mut targets = Vec::new();
+        let bytes = read_x11_folder_bytes(|target| {
+            targets.push(target.to_string());
+            if target == "x-special/gnome-copied-files" {
+                Err("该格式不可用".into())
+            } else {
+                Ok(b"file:///tmp/folder%23one\r\n".to_vec())
+            }
+        }).unwrap();
+        assert_eq!(targets, ["x-special/gnome-copied-files", "text/uri-list"]);
+        assert_eq!(decode_folder_paths(bytes, true).unwrap(), ["/tmp/folder#one"]);
+
+        let mut calls = 0;
+        let bytes = read_x11_folder_bytes(|_| {
+            calls += 1;
+            Ok(b"invalid URI".to_vec())
+        }).unwrap();
+        assert!(decode_folder_paths(bytes, true).is_err());
+        assert_eq!(calls, 1);
+        assert!(read_x11_folder_bytes(|_| Err("读取失败".into())).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_uri_payloads_keep_encoding_size_count_and_local_file_limits() {
+        let payload = "copy\n# comment\nfile:///tmp/%E4%B8%AD%E6%96%87%20%23%3F%2520\n";
+        assert_eq!(decode_folder_paths(payload.as_bytes().to_vec(), true).unwrap(), ["/tmp/中文 #?%20"]);
+        assert!(decode_folder_paths("/tmp/中文".as_bytes().to_vec(), true).is_err());
+        assert!(decode_folder_paths(vec![0xff], true).is_err());
+        assert!(decode_folder_paths(vec![b'a'; 1024 * 1024 + 1], true).is_err());
+        assert_eq!(decode_folder_paths("file:///tmp/a\n".repeat(128).into_bytes(), true).unwrap().len(), 128);
+        assert!(decode_folder_paths("file:///tmp/a\n".repeat(129).into_bytes(), true).is_err());
+        for uri in ["https://example.com/folder", "file://remote/folder", "file:///tmp/a?query", "file:///tmp/a#fragment", "copy\n"] {
+            assert!(decode_folder_paths(uri.as_bytes().to_vec(), true).is_err(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn decodes_bounded_drop_files_and_rejects_malformed_lists() {
+        let mut bytes = vec![0_u8; 20];
+        bytes[0..4].copy_from_slice(&20_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        bytes.extend(
+            "D:\\素材\\人物\0D:\\素材\\场景\0\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
+        assert_eq!(
+            decode_drop_folders(&bytes).unwrap(),
+            vec!["D:\\素材\\人物", "D:\\素材\\场景"]
+        );
+        assert!(decode_drop_folders(&bytes[..bytes.len() - 2]).is_err());
+        bytes[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_drop_folders(&bytes).is_err());
+        assert!(decode_drop_folders(&vec![0; 1024 * 1024 + 1]).is_err());
+    }
     #[test]
     fn restricts_window_and_decodes_bounded_unicode() {
         assert!(ensure_main_label("main").is_ok());

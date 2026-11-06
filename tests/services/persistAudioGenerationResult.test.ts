@@ -1,3 +1,6 @@
+/**
+ * persistAudioGenerationResult — 回归测试：persistAudioGenerationResult。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

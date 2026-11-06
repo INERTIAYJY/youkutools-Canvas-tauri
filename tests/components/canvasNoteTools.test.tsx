@@ -1,3 +1,6 @@
+/**
+ * canvasNoteTools — 回归测试：canvas note tools。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import CanvasDrawingToolbar from '../../src/components/canvas/CanvasDrawingToolbar';

@@ -1,3 +1,6 @@
+/**
+ * iconCacheService — 回归测试：Iconify 持久缓存。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { _api, getIcon, loadIcon } from '@iconify/react';
 

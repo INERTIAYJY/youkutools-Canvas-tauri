@@ -2,11 +2,14 @@
  * 分镜表（ai-shotlist）类型 — 一行一个镜头，逐行描述景别、运镜、内容、台词与时长
  *
  * 与「宫格分镜」（ai-storyboard）无关：那个是把一张图切成宫格再拖出裁片，
- * 这里是前期分镜稿本身，每行的「画面」绑定画布上一个图像/视频节点，
- * 整表可以按行推送成视频编辑器的时间轴片段。
+ * 这里是前期分镜稿本身：「画面」引用制作参考，「生成视频」独立引用成片。
+ * 时间轴只读取生成视频列；未就绪的行跳过，不用参考画面或文字占位。
  */
 import type { VideoEditorTransitionKind } from './videoEditor';
 import type { VideoFrameAnalysisData } from './index';
+import type { CameraGenerationSettings } from './index';
+import type { CinematographySettings } from './cinematography';
+import { buildGenerationCameraPrompt, resolveCinematography } from '../utils/cinematography';
 
 /** 分镜最初使用的本集正文快照；引用节点，避免再次复制正文。 */
 export interface ShotlistScriptSource {
@@ -20,14 +23,24 @@ export interface ShotlistProductionSource {
   nodeId: string;
   rowId: string;
   kind: ShotlistProductionKind;
+  /** 自动跟随分镜；在视频节点单独修改时长后切换为 manual。 */
+  durationSync?: 'auto' | 'manual';
+}
+
+/** 生成素材使用完整整数秒，保留原分镜的小数剪辑时长。 */
+export function resolveShotVideoDuration(duration: number | undefined): number | undefined {
+  return typeof duration === 'number' && Number.isFinite(duration) && duration > 0 && duration <= 3600
+    ? Math.ceil(duration) : undefined;
 }
 
 /** 分镜表的全部列 */
 export type ShotlistColumnKey =
   | 'shotNo'
   | 'frame'
+  | 'video'
   | 'shotSize'
   | 'camera'
+  | 'cinematography'
   | 'content'
   | 'dialogue'
   | 'audio'
@@ -37,25 +50,27 @@ export type ShotlistColumnKey =
 
 /** 常驻列：不可隐藏，隐藏后表就不成其为分镜表了 */
 export const SHOTLIST_PINNED_COLUMNS: ShotlistColumnKey[] = [
-  'shotNo', 'frame', 'shotSize', 'content', 'duration',
+  'shotNo', 'frame', 'video', 'shotSize', 'content', 'duration',
 ];
 
 /** 可选列：由节点头部的「列」菜单勾选显隐 */
 export const SHOTLIST_OPTIONAL_COLUMNS: ShotlistColumnKey[] = [
-  'camera', 'dialogue', 'audio', 'transition', 'note',
+  'camera', 'cinematography', 'dialogue', 'audio', 'transition', 'note',
 ];
 
 /** 列的固定排布顺序，与传统分镜表从左到右一致 */
 export const SHOTLIST_COLUMN_ORDER: ShotlistColumnKey[] = [
-  'shotNo', 'frame', 'shotSize', 'camera', 'content',
+  'shotNo', 'frame', 'video', 'shotSize', 'camera', 'cinematography', 'content',
   'dialogue', 'audio', 'transition', 'duration', 'note',
 ];
 
 export const SHOTLIST_COLUMN_LABELS: Record<ShotlistColumnKey, string> = {
   shotNo: '镜号',
   frame: '画面',
+  video: '生成视频',
   shotSize: '景别',
   camera: '运镜',
+  cinematography: '摄影',
   content: '内容',
   dialogue: '台词',
   audio: '音效/音乐',
@@ -66,7 +81,7 @@ export const SHOTLIST_COLUMN_LABELS: Record<ShotlistColumnKey, string> = {
 
 /** 新建分镜表时默认展开的可选列 */
 export const SHOTLIST_DEFAULT_COLUMNS: ShotlistColumnKey[] = [
-  ...SHOTLIST_PINNED_COLUMNS, 'camera', 'dialogue',
+  ...SHOTLIST_PINNED_COLUMNS, 'camera', 'cinematography', 'dialogue',
 ];
 
 /** 景别候选值；下拉给建议，仍允许自由输入 */
@@ -97,7 +112,7 @@ export const DEFAULT_SHOT_DURATION = 3;
 /**
  * 「画面」格绑定的画布节点。
  *
- * url / filePath / assetId 只是绑定当时的快照：渲染和推送一律以画布上那个节点的
+ * url / filePath / assetId 只是绑定当时的快照：画面渲染以画布上那个节点的
  * 实时数据为准，源节点重新生成后画面自动跟着变，不需要任何回写同步。
  * 快照只在源节点已经不在画布上时兜底，让表里的画面不至于凭空消失。
  */
@@ -111,6 +126,9 @@ export interface ShotFrameBinding {
   sourceDuration?: number;
 }
 
+/** 生成视频列独立于参考画面；源节点为权威，快照仅在来源删除后兜底。 */
+export type ShotVideoBinding = Omit<ShotFrameBinding, 'kind'> & { kind: 'video' };
+
 /** 分镜表的一行 = 一个镜头 */
 export interface ShotRow {
   id: string;
@@ -119,8 +137,11 @@ export interface ShotRow {
   /** 镜号，允许 3a / 3b 这类插入镜，所以是字符串 */
   shotNo: string;
   frame?: ShotFrameBinding | null;
+  /** undefined 允许首次自动回填；null 表示用户已明确解绑。 */
+  video?: ShotVideoBinding | null;
   shotSize?: string;
   camera?: string;
+  cinematography?: CinematographySettings;
   content?: string;
   dialogue?: string;
   audio?: string;
@@ -145,7 +166,7 @@ interface FrameSourceNodeLike {
   data: Record<string, unknown>;
 }
 
-/** 一个可选画面：连到这张表、且已经出图/出片的节点 */
+/** 一个可选画面：本表的输入素材或由本表派生的视频；未完成时显示占位。 */
 export interface ShotFrameCandidate {
   nodeId: string;
   label: string;
@@ -163,7 +184,7 @@ export function readShotFrameSource(node: FrameSourceNodeLike): { kind: 'image' 
 }
 
 /**
- * 连线进这张表的图像/视频节点，供画面格直接挑选。
+ * 本表的输入素材和按镜头来源关联的视频，供画面格直接挑选。
  * 还没出图的节点也列出来（url 为空显示占位），否则用户会以为连线没生效。
  */
 export function collectShotFrameCandidates(
@@ -173,7 +194,11 @@ export function collectShotFrameCandidates(
 ): ShotFrameCandidate[] {
   const sourceIds = new Set(edges.filter((edge) => edge.target === shotlistId).map((edge) => edge.source));
   return nodes
-    .filter((node) => sourceIds.has(node.id) && SHOTLIST_FRAME_SOURCE_TYPES.includes(node.type ?? ''))
+    .filter((node) => {
+      const production = node.data.shotlistProductionSource as ShotlistProductionSource | undefined;
+      return SHOTLIST_FRAME_SOURCE_TYPES.includes(node.type ?? '')
+        && (sourceIds.has(node.id) || (production?.kind === 'video' && production.nodeId === shotlistId));
+    })
     .map((node) => ({
       nodeId: node.id,
       label: (node.data.label as string) || (node.data.fileName as string) || node.id,
@@ -182,27 +207,61 @@ export function collectShotFrameCandidates(
 }
 
 /** 这一行默认拿去生成画面的提示词：景别/运镜当修饰，内容当主体 */
-export function buildShotFramePrompt(row: ShotRow): string {
-  return [row.shotSize?.trim(), row.camera?.trim(), row.content?.trim()]
+export function buildShotFramePrompt(row: ShotRow, defaults?: CinematographySettings): string {
+  const content = [row.shotSize?.trim(), row.camera?.trim(), row.content?.trim()]
     .filter(Boolean)
     .join('，');
+  if (!content) return '';
+  const camera = buildGenerationCameraPrompt(undefined, resolveCinematography(defaults, row.cinematography));
+  return camera ? `${content}\n摄影设定：${camera}` : content;
 }
 
-/** 该行是否连一个字都没有 —— 推时间线时整行跳过 */
+/** 精确镜头引用以稳定行 ID 定位，镜号只用于显示。 */
+export function buildShotlistRowMentionId(nodeId: string, rowId: string): string {
+  return `${nodeId}/shot/${encodeURIComponent(rowId)}`;
+}
+
+export function parseShotlistRowMentionId(referenceId: string): { nodeId: string; rowId: string } | null {
+  const match = /^([^{}:]+)\/shot\/([^/{}:]+)$/.exec(referenceId);
+  if (!match) return null;
+  try {
+    const rowId = decodeURIComponent(match[2]);
+    return rowId ? { nodeId: match[1], rowId } : null;
+  } catch { return null; }
+}
+
+/** 单镜视频描述保留字段语义和对白原文，交给各模型的既有编译入口。 */
+export function formatShotVideoPrompt(row: ShotRow, defaults?: CinematographySettings, overrides?: CameraGenerationSettings): string {
+  const camera = buildGenerationCameraPrompt(overrides, resolveCinematography(defaults, row.cinematography));
+  return [
+    row.shotNo?.trim() ? `镜头：${row.shotNo.trim()}` : '',
+    row.shotSize?.trim() ? `景别：${row.shotSize.trim()}` : '',
+    row.camera?.trim() ? `运镜：${row.camera.trim()}` : '',
+    camera ? `摄影设定：${camera}` : '',
+    row.content?.trim() ? `画面与动作：\n${row.content.trim()}` : '',
+    row.dialogue?.trim() ? `角色对白（按说话人顺序演绎，保留原文，与画面动作配合）：\n${row.dialogue.trim()}` : '',
+    row.audio?.trim() ? `音效/音乐：${row.audio.trim()}` : '',
+    typeof row.duration === 'number' && Number.isFinite(row.duration) && row.duration > 0
+      ? `镜头时长：${row.duration}秒` : '',
+    row.note?.trim() ? `补充要求：${row.note.trim()}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+/** 该行是否既无创作文字，也无参考画面或生成视频。 */
 export function isShotRowBlank(row: ShotRow): boolean {
-  if (row.frame) return false;
+  if (row.frame || row.video) return false;
   const texts = [row.shotSize, row.camera, row.content, row.dialogue, row.audio, row.transition, row.note];
   return texts.every((text) => !text?.trim());
 }
 
-/** 该行有文字但没画面 —— 推时间线时生成文字占位片段 */
+/** 该行只有文字、没有媒体引用；保留供既有展示调用，时间轴不生成文字占位。 */
 export function isShotRowTextOnly(row: ShotRow): boolean {
-  return !row.frame && !isShotRowBlank(row);
+  return !row.frame && !row.video && !isShotRowBlank(row);
 }
 
 /**
- * 无画面行推到时间线时显示的文字。
- * 拼成「1 · 全景 · 警察松动警戒线」，让导演在预览里看得出这儿缺哪个镜头。
+ * 兼容既有调用的镜头占位文案，拼成「1 · 全景 · 警察松动警戒线」。
+ * 当前时间轴只读取生成视频，不再用这段文字创建占位片段。
  */
 export function buildShotPlaceholderText(row: ShotRow): string {
   const head = [row.shotNo?.trim(), row.shotSize?.trim(), row.camera?.trim()].filter(Boolean).join(' · ');
@@ -215,11 +274,12 @@ export function buildShotPlaceholderText(row: ShotRow): string {
  * 单行拼成一句话：`镜号 · 景别 · 运镜 · 内容 / 台词 · N″`。
  * @ 引用整张表时逐行拼给模型，空字段直接略过，不留下「· ·」这种空档。
  */
-export function formatShotRowBrief(row: ShotRow): string {
+export function formatShotRowBrief(row: ShotRow, defaults?: CinematographySettings, overrides?: CameraGenerationSettings): string {
   const body = [row.content?.trim(), row.dialogue?.trim()].filter(Boolean).join(' / ');
   const head = [row.shotNo?.trim(), row.shotSize?.trim(), row.camera?.trim(), body].filter(Boolean).join(' · ');
   const duration = Number(resolveShotDuration(row).toFixed(1));
-  return head ? `${head} · ${duration}″` : `${duration}″`;
+  const camera = buildGenerationCameraPrompt(overrides, resolveCinematography(defaults, row.cinematography));
+  return `${head ? `${head} · ${duration}″` : `${duration}″`}${camera ? ` · 摄影设定：${camera}` : ''}`;
 }
 
 /** 转场文案 → 编辑器转场类型；无法识别的写法按硬切处理 */
@@ -232,7 +292,7 @@ export function resolveShotTransitionKind(transition: string | undefined): Video
 /** 单行推送时占用的时长；未填时长的视频行回退到探测到的源时长 */
 export function resolveShotDuration(row: ShotRow): number {
   if (typeof row.duration === 'number' && row.duration > 0) return row.duration;
-  if (row.frame?.kind === 'video' && (row.frame.sourceDuration ?? 0) > 0) return row.frame.sourceDuration!;
+  if ((row.video?.sourceDuration ?? 0) > 0) return row.video!.sourceDuration!;
   return DEFAULT_SHOT_DURATION;
 }
 

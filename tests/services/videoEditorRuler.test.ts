@@ -1,3 +1,6 @@
+/**
+ * videoEditorRuler — 回归测试：pickTickStep。
+ */
 import { describe, expect, it } from 'vitest';
 
 import {

@@ -3,13 +3,19 @@
  *
  * 拖拽实现：Pointer Events 手动拖拽（不用 HTML5 DnD，避免 React Flow nodrag 冲突）
  */
+import { useT } from '../../../../i18n';
 import { memo, useCallback, useState, useRef, useEffect, useMemo } from 'react';
 import { Icon } from '@iconify/react';
 import { useReactFlow } from '@xyflow/react';
 import type { ToolbarButtonDef, NodeType } from '../../../../types';
+import { PRESET_NODE_TYPES } from '../../../../types';
 import type { UseToolbarEditReturn } from '../../../../hooks/useToolbarEdit';
 import { getSlashCommands } from '../slashCommands';
+import type { SlashCommandItem } from '../slashCommands';
+import { getBuiltinShortcutPresentation, getUserPresetPresentation } from '../shortcutPresentation';
+import type { ShortcutPresentation } from '../shortcutPresentation';
 import { useAppStore } from '../../../../store/useAppStore';
+import { getCanvasLockedZoom, normalizeCanvasZoom } from '../../../../utils/canvasViewportPreferences';
 
 interface ToolbarEditorProps {
   edit: UseToolbarEditReturn;
@@ -69,6 +75,16 @@ function MiniIcon({ icon }: { icon: string }) {
   return <span style={{ fontSize: 12 }}>{icon}</span>;
 }
 
+function ShortcutBadges({ presentation }: { presentation: ShortcutPresentation }) {
+  const t = useT();
+  return (
+    <span className="toolbar-edit-command-meta mt-1 flex flex-wrap gap-1">
+      <span className="ui-badge ui-badge--outline">{presentation.executionLabel}</span>
+      <span className="ui-badge ui-badge--outline">{t('取值：{source}', { source: presentation.inputLabel })}</span>
+    </span>
+  );
+}
+
 // ── 按钮库条目 ──
 function BankItem({ icon, label, isPreset, onClick }: {
   icon: string; label: string; isPreset?: boolean; onClick: () => void;
@@ -88,6 +104,7 @@ function BankItem({ icon, label, isPreset, onClick }: {
 
 // ── Zone 名称编辑 ──
 function ZoneNameEditor({ name, onRename }: { name: string; onRename: (name: string) => void }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(name);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -98,7 +115,7 @@ function ZoneNameEditor({ name, onRename }: { name: string; onRename: (name: str
 
   if (!editing) {
     return (
-      <span className="toolbar-edit-zone-name" onClick={(e) => { e.stopPropagation(); setEditing(true); }} data-tooltip="点击编辑分区名">
+      <span className="toolbar-edit-zone-name" onClick={(e) => { e.stopPropagation(); setEditing(true); }} data-tooltip={t('点击编辑分区名')}>
         {name}
         <Icon icon="mdi:pencil" width={10} height={10} style={{ marginLeft: 4, opacity: 0.5 }} />
       </span>
@@ -122,6 +139,7 @@ function ZoneNameEditor({ name, onRename }: { name: string; onRename: (name: str
 
 // ── 主组件 ──
 function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], nodeType }: ToolbarEditorProps) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const ghostElRef = useRef<HTMLDivElement | null>(null);
@@ -147,9 +165,12 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
     const originalViewport = originalViewportRef.current;
     if (!originalViewport) return;
     originalViewportRef.current = null;
-    void setViewport(originalViewport, {
+    const config = useAppStore.getState().config;
+    const zoom = getCanvasLockedZoom(config) ?? normalizeCanvasZoom(originalViewport.zoom, config);
+    void setViewport({ ...originalViewport, zoom }, {
       duration: VIEWPORT_TRANSITION_DURATION_MS,
       ease: easeOutCubic,
+      interpolate: 'linear',
     });
   }, [setViewport]);
 
@@ -174,7 +195,7 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
     };
   }, [restoreOriginalViewport]);
 
-  // 编辑框完成首次布局后，将其平滑移动到画布可视区域中央并缩放至 120%。
+  // 编辑框完成首次布局后居中；锁定画布时沿用用户比例。
   useEffect(() => {
     if (!edit.isEditing) return;
     originalViewportRef.current ??= getViewport();
@@ -187,14 +208,16 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
       const editorCenterX = editorRect.left + editorRect.width / 2;
       const editorCenterY = editorRect.top + editorRect.height / 2;
       const editorFlowCenter = screenToFlowPosition({ x: editorCenterX, y: editorCenterY });
+      const config = useAppStore.getState().config;
 
       void setCenter(
         editorFlowCenter.x,
         editorFlowCenter.y,
         {
-          zoom: EDITOR_TARGET_ZOOM,
+          zoom: getCanvasLockedZoom(config) ?? normalizeCanvasZoom(EDITOR_TARGET_ZOOM, config),
           duration: VIEWPORT_TRANSITION_DURATION_MS,
           ease: easeOutCubic,
+          interpolate: 'linear',
         },
       );
     });
@@ -348,25 +371,34 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
 
   // ── 快捷指令数据 ──
   const userPresets = useAppStore((s) => s.userPresets);
+  const setPresetManagerOpen = useAppStore((s) => s.setPresetManagerOpen);
+  const presetNodeType = PRESET_NODE_TYPES.find((type) => type === nodeType);
   const allSlashCommands = useMemo(() => {
     const cmds = getSlashCommands(nodeType as NodeType);
-    const flat: { id: string; title: string; icon: string; description: string }[] = [];
+    const flat: (SlashCommandItem & { presentation: ShortcutPresentation })[] = [];
     const walk = (items: typeof cmds) => {
       for (const item of items) {
         if (item.promptTemplate) {
-          flat.push({ id: item.id, title: item.title, icon: item.icon, description: item.description });
+          flat.push({
+            ...item,
+            title: t(item.title),
+            description: t(item.description),
+            presentation: getBuiltinShortcutPresentation(item, 'toolbar', nodeType as NodeType, t),
+          });
         }
         if (item.children) walk(item.children);
       }
     };
     walk(cmds);
     return flat;
-  }, [nodeType]);
+  }, [nodeType, t]);
 
   const matchingUserPresets = useMemo(
     () => userPresets.filter((p) => p.nodeType === nodeType),
     [userPresets, nodeType],
   );
+  const hasAvailableCommands = allSlashCommands.some((command) => !edit.activeButtonKeys.has(command.id))
+    || matchingUserPresets.some((preset) => !edit.activeButtonKeys.has(preset.id));
 
   // ── 根据鼠标位置计算目标 zone + index ──
   const calcTarget = useCallback((clientX: number, clientY: number): { zoneId: string; index: number } | null => {
@@ -592,6 +624,8 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
   // ── 点击外部退出编辑态 ──
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
+      // 管理器通过 Portal 展示，操作其内容时保留工具栏布局草稿。
+      if (useAppStore.getState().presetManagerOpen) return;
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         handleExitEdit();
       }
@@ -624,8 +658,8 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
       {/* ── 按钮库面板 ── */}
       <div className="toolbar-edit-bank nodrag">
         <div className="toolbar-edit-bank-header">
-          <span>按钮库</span>
-          <span className="toolbar-edit-bank-hint">点击添加按钮到下方 Toolbar</span>
+          <span>{t('按钮库')}</span>
+          <span className="toolbar-edit-bank-hint">{t('点击添加按钮到下方 Toolbar')}</span>
         </div>
         <div className="toolbar-edit-bank-list nodrag">
           {bankButtons.map((def) => (
@@ -645,13 +679,13 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
           })}
         </div>
         <div className="toolbar-edit-bank-actions">
-          <button type="button" className="toolbar-edit-action-btn nodrag" onClick={edit.resetLayout} data-tooltip="恢复为默认按钮布局">
+          <button type="button" className="toolbar-edit-action-btn nodrag" onClick={edit.resetLayout} data-tooltip={t('恢复为默认按钮布局')}>
             <Icon icon="mdi:restore" width={14} height={14} />
-            <span>恢复默认</span>
+            <span>{t('恢复默认')}</span>
           </button>
           <button type="button" className="toolbar-edit-action-btn toolbar-edit-action-btn--done nodrag" onClick={handleExitEdit}>
             <Icon icon="mdi:check" width={14} height={14} />
-            <span>完成</span>
+            <span>{t('完成')}</span>
           </button>
         </div>
       </div>
@@ -670,13 +704,13 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
               <span
                 className="toolbar-edit-btn-grip nodrag toolbar-edit-zone-grip"
                 onPointerDown={(e) => handleZoneDragStart(e, zoneIndex)}
-                data-tooltip="拖拽调整分区顺序"
+                data-tooltip={t('拖拽调整分区顺序')}
               >
                 <Icon icon="mdi:drag-vertical" width={12} height={12} />
               </span>
               <ZoneNameEditor name={zone.name} onRename={(n) => edit.renameZone(zone.id, n)} />
               {zone.buttonKeys.length === 0 && zones.length > 1 && (
-                <button type="button" className="toolbar-edit-zone-del nodrag" onClick={() => edit.removeZone(zone.id)} data-tooltip="删除此分区">
+                <button type="button" className="toolbar-edit-zone-del nodrag" onClick={() => edit.removeZone(zone.id)} data-tooltip={t('删除此分区')}>
                   <Icon icon="mdi:close" width={12} height={12} />
                 </button>
               )}
@@ -696,7 +730,7 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
                     {isInsertBefore && <div className="toolbar-edit-insert-indicator" />}
                     <div
                       className="toolbar-edit-btn nodrag"
-                      data-tooltip={`${resolvedDef.label} · 拖拽排序 / 点 × 移除`}
+                      data-tooltip={t('{label} · 拖拽排序 / 点 × 移除', { label: resolvedDef.label })}
                       onPointerDown={(e) => handlePointerDown(e, zone.id, idx)}
                     >
                       <span className="toolbar-edit-btn-grip nodrag">
@@ -708,7 +742,7 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
                         type="button"
                         className="toolbar-edit-btn-remove nodrag"
                         onClick={(e) => { e.stopPropagation(); edit.removeButton(zone.id, key); }}
-                        data-tooltip="移除此按钮"
+                        data-tooltip={t('移除此按钮')}
                       >
                         <Icon icon="mdi:close" width={12} height={12} />
                       </button>
@@ -720,24 +754,31 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
                 <div className="toolbar-edit-insert-indicator toolbar-edit-insert-indicator--end" />
               )}
               {zone.buttonKeys.length === 0 && dragTarget?.zoneId !== zone.id && (
-                <div className="toolbar-edit-zone-empty">拖拽按钮到此处或点击上方按钮添加</div>
+                <div className="toolbar-edit-zone-empty">{t('拖拽按钮到此处或点击上方按钮添加')}</div>
               )}
             </div>
             {zones.indexOf(zone) < zones.length - 1 && <div className="toolbar-edit-zone-divider" />}
           </div>
         ))}
 
-        <button type="button" className="toolbar-edit-add-zone nodrag" onClick={edit.addZone} data-tooltip="新建分区">
+        <button type="button" className="toolbar-edit-add-zone nodrag" onClick={edit.addZone} data-tooltip={t('新建分区')}>
           <Icon icon="mdi:plus" width={14} height={14} />
-          <span>新建分区</span>
+          <span>{t('新建分区')}</span>
         </button>
       </div>
 
       {/* 右侧：快捷指令面板 */}
-      {(allSlashCommands.length > 0 || matchingUserPresets.length > 0) && (
+      {(presetNodeType || allSlashCommands.length > 0 || matchingUserPresets.length > 0) && (
         <div className="toolbar-edit-commands nodrag">
-          <div className="toolbar-edit-commands-header">快捷指令</div>
+          <div className="toolbar-edit-commands-header">{t('快捷指令')}</div>
           <div className="toolbar-edit-commands-list nodrag nowheel">
+            {!hasAvailableCommands && (
+              <p className="m-0 p-2 text-xs text-canvas-text-muted" role="status">
+                {allSlashCommands.length === 0 && matchingUserPresets.length === 0
+                  ? t('暂无快捷指令，可在下方管理中添加')
+                  : t('快捷指令已全部添加')}
+              </p>
+            )}
             {allSlashCommands.map((cmd) => {
               if (edit.activeButtonKeys.has(cmd.id)) return null;
               return (
@@ -746,29 +787,46 @@ function ToolbarEditorInner({ edit, presetItems = [], userPresetItems = [], node
                   type="button"
                   className="toolbar-edit-command-item nodrag"
                   onClick={() => addToZone(cmd.id)}
-                  data-tooltip={cmd.description}
+                  data-tooltip={`${cmd.description}\n${cmd.presentation.modeLabel} · ${cmd.presentation.detail}`}
                 >
                   <span className="toolbar-edit-bank-icon"><MiniIcon icon={cmd.icon} /></span>
-                  <span className="toolbar-edit-command-label">{cmd.title}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="toolbar-edit-command-label block">{cmd.title}</span>
+                    <ShortcutBadges presentation={cmd.presentation} />
+                  </span>
                 </button>
               );
             })}
             {matchingUserPresets.map((p) => {
               if (edit.activeButtonKeys.has(p.id)) return null;
+              const presentation = getUserPresetPresentation(p, 'toolbar', nodeType as NodeType, t);
               return (
                 <button
                   key={`up-${p.id}`}
                   type="button"
                   className="toolbar-edit-command-item nodrag"
                   onClick={() => addToZone(p.id)}
-                  data-tooltip={p.description || p.name}
+                  data-tooltip={`${p.description || p.name}\n${presentation.modeLabel} · ${presentation.detail}`}
                 >
                   <span className="toolbar-edit-bank-icon"><MiniIcon icon={p.icon || 'mdi:star'} /></span>
-                  <span className="toolbar-edit-command-label">{p.name}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="toolbar-edit-command-label block">{p.name}</span>
+                    <ShortcutBadges presentation={presentation} />
+                  </span>
                 </button>
               );
             })}
           </div>
+          {presetNodeType && (
+            <button
+              type="button"
+              className="ui-btn ui-btn--ghost ui-btn--sm ui-btn--block shrink-0 nodrag"
+              onClick={(e) => { e.stopPropagation(); setPresetManagerOpen(true, presetNodeType); }}
+            >
+              <Icon icon="mdi:pencil-outline" width={14} height={14} />
+              {t('管理快捷指令')}
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -26,6 +26,7 @@ site/app
 doc/测试报告.md
 .planning
 .cargo
+.enola/*
 
 generated-images/*
 

@@ -1,3 +1,6 @@
+/**
+ * shotlistRevisionService — 比较剧本变化并构建分镜修订提示。
+ */
 import { getShotlist, type ShotlistScope } from './shotlistService';
 
 /** 共同前缀/后缀之间可能包含多处修改，只提示复核，不声称语义匹配。 */

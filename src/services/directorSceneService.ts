@@ -1,3 +1,6 @@
+/**
+ * directorSceneService — 管理导演场景与结果清单的不可变项目文件。
+ */
 import type {
   DirectorProjectFileReference,
   DirectorResultArtifact,
@@ -23,6 +26,7 @@ import {
   serializeDirectorSceneJson,
 } from './directorSceneSchema';
 import {
+  bytesEqual,
   readVerifiedProjectFile,
   readVerifiedProjectFileByHash,
   sha256Hex,
@@ -49,14 +53,6 @@ const textDecoder = new TextDecoder('utf-8', { fatal: true });
 
 function fail(message: string): never {
   throw new DirectorSceneServiceError(message);
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 function decodeUtf8(bytes: Uint8Array, label: string): string {

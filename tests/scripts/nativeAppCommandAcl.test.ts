@@ -1,3 +1,6 @@
+/**
+ * nativeAppCommandAcl — 回归测试：native application command ACL configuration。
+ */
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 

@@ -7,6 +7,7 @@ import canvas from './canvas';
 import character from './character';
 import chat from './chat';
 import common from './common';
+import projectImport from './projectImport';
 import nodes from './nodes';
 import onboarding from './onboarding';
 import project from './project';
@@ -14,12 +15,21 @@ import projectSettings from './projectSettings';
 import series from './series';
 import settings from './settings';
 import videoEditor from './videoEditor';
+import comfyui from './comfyui';
+import help from './help';
+import workflow from './workflow';
+import director from './director';
+import assets from './assets';
+import imageEditor from './imageEditor';
+import volcengine from './volcengine';
+import assetManagement from './assetManagement';
 
 const jaJP: Record<string, string> = {
   ...canvas,
   ...character,
   ...chat,
   ...common,
+  ...projectImport,
   ...nodes,
   ...onboarding,
   ...project,
@@ -27,6 +37,14 @@ const jaJP: Record<string, string> = {
   ...series,
   ...settings,
   ...videoEditor,
+  ...comfyui,
+  ...help,
+  ...workflow,
+  ...director,
+  ...assets,
+  ...imageEditor,
+  ...volcengine,
+  ...assetManagement,
 };
 
 export default jaJP;

@@ -28,6 +28,55 @@ pub enum PathAccess {
     Write,
 }
 
+/// 外观图片唯一授权根：可执行文件旁的 theme，不接受 Renderer 提交目录。
+pub(crate) fn authorize_theme_asset_file<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    name: &str,
+    create_directory: bool,
+) -> Result<PathBuf, String> {
+    if !is_theme_asset_name(name) {
+        return Err("主题图片引用无效".into());
+    }
+    let executable = std::env::current_exe().map_err(|_| "无法定位应用安装目录")?;
+    let install = canonicalize_simplified(executable.parent().ok_or("无法定位应用安装目录")?)
+        .map_err(|_| "无法解析应用安装目录")?;
+    let directory = install.join("theme");
+    if create_directory && !directory.exists() {
+        match std::fs::create_dir(&directory) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(_) => return Err("安装目录的 theme 文件夹不可写，请检查安装目录权限".into()),
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&directory).map_err(|_| "主题图片目录不存在或不可访问")?;
+    if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+        return Err("主题图片目录不能是符号链接或目录联接".into());
+    }
+    let root = canonicalize_simplified(&directory).map_err(|_| "无法解析主题图片目录")?;
+    if root != directory || overlaps_private_app_path(app, &root) {
+        return Err("主题图片目录超出安装目录或与私有目录重叠".into());
+    }
+    let target = root.join(name);
+    match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => {
+            if !metadata.is_file() || is_link_or_reparse(&metadata)
+                || canonicalize_simplified(&target).map_err(|_| "主题图片不可访问")? != target
+            {
+                return Err("主题图片必须是安装目录中的普通文件".into());
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create_directory => {},
+        Err(_) => return Err("主题图片不存在或不可访问".into()),
+    }
+    Ok(target)
+}
+
+pub(crate) fn is_theme_asset_name(name: &str) -> bool {
+    let Some((digest, extension)) = name.split_once('.') else { return false; };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && matches!(extension, "png" | "jpg" | "webp" | "svg")
+}
+
 /// 校验命令来自自有本地窗口，而不是远程页面或第三方运行时窗口。
 pub fn ensure_trusted_caller<R: Runtime>(webview: &Webview<R>) -> Result<(), String> {
     let label = webview.label();
@@ -114,6 +163,7 @@ fn is_private_app_path<R: Runtime>(app: &tauri::AppHandle<R>, resolved: &Path) -
     is_secret_path(app, resolved)
         || crate::agent_package::is_agent_private_path(app, resolved)
         || crate::plugin_registry::is_plugin_private_path(app, resolved)
+        || crate::comfyui::installation::is_private_path(app, resolved)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -137,6 +187,7 @@ fn overlaps_private_app_path<R: Runtime>(
         || crate::agent_package::is_agent_private_path_overlap(app, resolved)
         || crate::plugin_registry::is_plugin_private_path_overlap(app, resolved)
         || crate::blender_runtime::is_blender_private_path_overlap(app, resolved)
+        || crate::comfyui::installation::overlaps_private_path(app, resolved)
 }
 
 /// 凭据目录可能尚未创建（无法 canonicalize），因此同时按原始路径与解析后路径比对。
@@ -250,32 +301,97 @@ pub fn authorize_existing_plain_directory<R: Runtime>(
         return Err(INVALID_DIRECTORY.to_string());
     }
 
-    authorize_existing_plain_directory_path(app, &path)
+    authorize_existing_plain_directory_path(app, &path, &[])
+}
+
+/// 只检查 ComfyUI 安装候选的物理目录与私有边界，不授予文件权限。
+/// 返回值仍是候选；只有原生选择、已有 scope 或原生确认才能登记安装用途授权。
+pub(crate) fn validate_comfyui_installation_directory<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    if raw.is_empty() || raw.trim() != raw || raw.chars().count() > 32_768
+        || raw.chars().any(char::is_control)
+    {
+        return Err("ComfyUI 安装目录格式无效".to_string());
+    }
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return Err("ComfyUI 安装目录格式无效".to_string());
+    }
+    // 持久授权不能经过祖先目录中的软链或 Windows 目录联接。
+    for ancestor in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor)
+            .map_err(|_| "ComfyUI 安装目录不存在或不可访问".to_string())?;
+        if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+            return Err("ComfyUI 安装目录不能包含符号链接或目录联接".to_string());
+        }
+    }
+    let resolved = canonicalize_simplified(&path)
+        .map_err(|_| "无法解析 ComfyUI 安装目录真实路径".to_string())?;
+    if overlaps_private_app_path(app, &resolved) {
+        return Err("ComfyUI 安装目录与应用私有区域重叠".to_string());
+    }
+    Ok(resolved)
+}
+
+/// 固定安装入口的纯物理检查；不会把未确认的安装候选当作文件授权根。
+pub(crate) fn validate_comfyui_installation_file<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &Path,
+    installation: &Path,
+) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or_else(|| "ComfyUI 安装入口无效".to_string())?;
+    let parent = validate_comfyui_installation_directory(app, &parent.to_string_lossy())?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "ComfyUI 安装入口不存在或不可访问".to_string())?;
+    if !metadata.is_file() || is_link_or_reparse(&metadata) {
+        return Err("ComfyUI 安装入口必须为普通文件".to_string());
+    }
+    let resolved = canonicalize_simplified(path)
+        .map_err(|_| "无法解析 ComfyUI 安装入口真实路径".to_string())?;
+    if !parent.starts_with(installation) || !resolved.starts_with(installation)
+        || resolved.parent() != Some(parent.as_path()) || overlaps_private_app_path(app, &resolved)
+    {
+        return Err("ComfyUI 安装入口超出安装根或与应用私有区域重叠".to_string());
+    }
+    Ok(resolved)
 }
 
 fn authorize_existing_plain_directory_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     path: &Path,
+    extra_roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
     const INVALID_DIRECTORY: &str = "目录无效、不可访问或未获授权";
+    let invalid = |reason: &str| if extra_roots.is_empty() {
+        INVALID_DIRECTORY.to_string()
+    } else {
+        reason.to_string()
+    };
     let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| INVALID_DIRECTORY.to_string())?;
-    if !metadata.is_dir() || is_link_or_reparse(&metadata) {
-        return Err(INVALID_DIRECTORY.to_string());
+        .map_err(|_| invalid("目录不存在或不可访问"))?;
+    if !metadata.is_dir() {
+        return Err(invalid("目标不是目录"));
+    }
+    if is_link_or_reparse(&metadata) {
+        return Err(invalid("目录是符号链接或目录联接，不允许管理"));
     }
 
     let resolved = canonicalize_simplified(path)
-        .map_err(|_| INVALID_DIRECTORY.to_string())?;
+        .map_err(|_| invalid("无法解析目录真实路径"))?;
     let resolved_metadata = std::fs::symlink_metadata(&resolved)
-        .map_err(|_| INVALID_DIRECTORY.to_string())?;
+        .map_err(|_| invalid("真实目录不存在或不可访问"))?;
     if !resolved_metadata.is_dir() || is_link_or_reparse(&resolved_metadata) {
-        return Err(INVALID_DIRECTORY.to_string());
+        return Err(invalid("真实目标不是普通目录"));
     }
-    if overlaps_private_app_path(app, &resolved)
-        || !is_authorized(app, &resolved, PathAccess::Read, &[])
-        || !is_authorized(app, &resolved, PathAccess::Write, &[])
+    if overlaps_private_app_path(app, &resolved) {
+        return Err(invalid("目录与应用私有区域重叠，不允许管理"));
+    }
+    if !is_authorized(app, &resolved, PathAccess::Read, extra_roots)
+        || !is_authorized(app, &resolved, PathAccess::Write, extra_roots)
     {
-        return Err(INVALID_DIRECTORY.to_string());
+        return Err(invalid("目录未获授权"));
     }
 
     Ok(resolved)
@@ -286,13 +402,64 @@ pub fn reauthorize_existing_plain_directory<R: Runtime>(
     app: &tauri::AppHandle<R>,
     path: &Path,
 ) -> Result<PathBuf, String> {
-    authorize_existing_plain_directory_path(app, path)
+    authorize_existing_plain_directory_path(app, path, &[])
+}
+
+/// 对原生会话登记根中的普通目录授权，不扩大公共 fs scope。
+/// `extra_roots` 只能来自调用方已复核的原生用途授权或常规授权真实根，不能采用 Renderer 路径。
+pub fn reauthorize_existing_plain_directory_with_roots<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &Path,
+    extra_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    authorize_existing_plain_directory_path(app, path, extra_roots)
+}
+
+/// 模型扫描专用的浅层目录枚举授权。根只能来自原生管理会话的系统目录选择器。
+/// 允许逐层经过私有目录的祖先，但不得进入任何私有子树；调用方必须对每次 descent
+/// 重新调用本方法，候选文件仍使用普通文件授权，不能将此结果用于递归归档或删除。
+pub(crate) fn authorize_model_scan_directory_with_roots<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &Path,
+    extra_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return Err("模型扫描目录格式无效".into());
+    }
+    for ancestor in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|_| "模型扫描目录不可访问")?;
+        if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+            return Err("模型扫描目录不能含链接或目录联接".into());
+        }
+    }
+    let resolved = canonicalize_simplified(path).map_err(|_| "无法解析模型扫描目录")?;
+    let blender_private = crate::blender_runtime::blender_private_dir(app)
+        .map(|directory| is_under_secret_dir(&directory, &resolved)).unwrap_or(true);
+    if is_private_app_path(app, &resolved) || blender_private {
+        return Err("模型扫描不允许进入应用私有目录".into());
+    }
+    if !is_authorized(app, &resolved, PathAccess::Read, extra_roots)
+        || !is_authorized(app, &resolved, PathAccess::Write, extra_roots)
+    {
+        return Err("模型扫描目录未获原生会话授权".into());
+    }
+    Ok(resolved)
 }
 
 /// 只接受由文件对话框或 fs scope 明确授权的普通现有文件，不回显路径。
 pub fn authorize_existing_plain_file<R: Runtime>(
     app: &tauri::AppHandle<R>,
     raw: &str,
+) -> Result<PathBuf, String> {
+    authorize_existing_plain_file_with_roots(app, raw, &[])
+}
+
+/// 读取原生会话登记根中的普通文件，保留真实路径、链接与私有目录保护。
+/// 附加根必须由调用方先复核其原生用途授权或常规授权；此函数不修改 fs 或 asset scope。
+pub fn authorize_existing_plain_file_with_roots<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    raw: &str,
+    extra_roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
     const INVALID_FILE: &str = "文件无效、不可访问或未获授权";
     const MAX_FILE_CHARS: usize = 32_768;
@@ -318,7 +485,8 @@ pub fn authorize_existing_plain_file<R: Runtime>(
     if !resolved_metadata.is_file()
         || is_link_or_reparse(&resolved_metadata)
         || is_private_app_path(app, &resolved)
-        || !is_authorized(app, &resolved, PathAccess::Read, &[])
+        || (!extra_roots.is_empty() && overlaps_private_app_path(app, &resolved))
+        || !is_authorized(app, &resolved, PathAccess::Read, extra_roots)
     {
         return Err(INVALID_FILE.to_string());
     }

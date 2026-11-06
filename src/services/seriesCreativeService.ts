@@ -1,3 +1,6 @@
+/**
+ * seriesCreativeService — 分析分集创作内容并生成诊断与摘要。
+ */
 import type { EpisodeCreativeInfo } from '../types';
 
 export type EpisodeCreativeAction =

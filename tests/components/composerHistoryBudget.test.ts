@@ -1,3 +1,6 @@
+/**
+ * composerHistoryBudget — 回归测试：composer decoded-image history budget。
+ */
 import { describe, expect, it } from 'vitest';
 import type { Layer } from '../../src/types/composerTypes';
 import {

@@ -72,20 +72,21 @@ export default function HistoryTimelinePanel() {
         ...describeCanvasChange(
           history[index - 1] as HistorySnapshotLike,
           history[index] as HistorySnapshotLike,
+          t,
         ),
         index: index - 1,
       });
     }
     return rows;
-  }, [showRows, history]);
+  }, [showRows, history, t]);
 
   const latestRow = useMemo<TimelineRow | null>(() => {
     if (!trackLive || !live) return null;
     const previous = history[history.length - 1] as HistorySnapshotLike;
-    const label = describeCanvasChange(previous, live);
-    if (label.title === '画布修改') return null;
+    const label = describeCanvasChange(previous, live, t);
+    if (label.title === t('画布修改')) return null;
     return { ...label, index: history.length - 1 };
-  }, [trackLive, history, live]);
+  }, [trackLive, history, live, t]);
 
   // 倒序展示：最近的操作在最上面，紧贴撤销 / 重做按钮
   const orderedRows = useMemo(
@@ -107,6 +108,7 @@ export default function HistoryTimelinePanel() {
   return (
     <div
       ref={panelWrapRef}
+      data-onboarding-target="history"
       className="canvas-history-wrap relative h-12 w-4 select-none"
       data-pinned={pinned ? 'true' : 'false'}
       data-open={panelOpen ? 'true' : 'false'}
@@ -121,16 +123,14 @@ export default function HistoryTimelinePanel() {
     >
       <span
         aria-hidden="true"
-        className="canvas-history-hint absolute right-0 top-0 flex h-12 w-4 items-center justify-end
-                   transition-opacity duration-150"
+        className="canvas-history-hint absolute right-0 top-0 flex h-12 w-4 items-center justify-end"
       >
-        <span className="h-8 w-0.5 rounded-full bg-canvas-text-muted/35" />
+        <span className="h-8 w-0.5 shrink-0 rounded-full bg-canvas-text-muted opacity-60" />
       </span>
       <div
         className="canvas-history-panel glass-bevel glass-bevel--floating
                    absolute right-0 top-0
-                   pointer-events-none opacity-0
-                   transition-opacity duration-150 ease-out"
+                   pointer-events-none opacity-0"
       >
       <div className="canvas-history-panel__head">
         <AnimatedButton
@@ -190,7 +190,7 @@ export default function HistoryTimelinePanel() {
                   className={`canvas-history-item${isCurrent ? ' is-current' : ''}${isUndone ? ' is-undone' : ''}`}
                 >
                   <Icon icon={row.icon} width="13" className="canvas-history-item__icon" />
-                  <span className="canvas-history-item__title">{t(row.title)}</span>
+                  <span className="canvas-history-item__title">{row.title}</span>
                   {isCurrent && <span className="canvas-history-item__badge">{t('当前')}</span>}
                 </li>
               );

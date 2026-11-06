@@ -3,16 +3,19 @@
  */
 import { DEFAULT_BASE_URLS } from '../../../constants/api';
 import { useAppStore } from '../../../store/useAppStore';
-import type { AIAudioGenParams, AIVideoGenParams, AudioGenerationResult } from '../../../types/aiTypes';
+import type { AIAudioGenParams, AIVideoGenParams, AudioGenerationResult, MediaTaskReceipt } from '../../../types/aiTypes';
 import type { BaseNodeData } from '../../../types';
 import { mapImageDimensions } from '../../aiDimensions';
-import { pollTask } from '../../pollTask';
+import { pollTask, PollTaskFailedError } from '../../pollTask';
+import { getHttpResponseError } from '../httpUtils';
 import {
   cleanupNodePolling,
   registerNodePolling,
-  removePendingTask,
+  removeFailedMediaTask,
   savePendingTask,
   updatePendingTask,
+  pauseMediaTask,
+  VIDEO_POLL_MAX_DURATION_MS,
 } from '../../pollManager';
 import {
   extractFlowMusicLyrics,
@@ -22,6 +25,7 @@ import {
   getApimartAudioCapability,
   submitFlowMusicGeneration,
   submitFlowMusicLyrics,
+  submitSunoGeneration,
   type FlowMusicGenerationRequest,
   type FlowMusicTaskState,
 } from '../apimartAudio';
@@ -30,34 +34,9 @@ import { getApimartSeedanceCapability, isApimartSeedanceModel } from '../apimart
 import { getMediaReferenceUrl } from '../connectedReferenceMedia';
 import { assertVideoInputConstraints } from '../videoInputValidation';
 import { extractModelName } from '../helpers';
-import { resolveImageUrlArray } from '../imageUtils';
+import { mapSequentially, resolveImageUrlsSequentially } from '../referenceMediaPreparation';
 import { resolveMediaReferenceUrl } from '../../uploadService';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
-
-async function mapSequentially<T, R>(
-  items: readonly T[],
-  mapper: (item: T, index: number) => Promise<R>,
-  signal?: AbortSignal,
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let index = 0; index < items.length; index += 1) {
-    if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
-    results.push(await mapper(items[index], index));
-  }
-  return results;
-}
-
-function resolveImageUrlsSequentially(
-  urls: readonly string[],
-  provider: string,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  return mapSequentially(
-    urls,
-    async (url) => (await resolveImageUrlArray([url], provider, signal))[0],
-    signal,
-  );
-}
 
 function resolveApimartConnection(): { apiKey: string; baseUrl: string } {
   const providerConfig = useAppStore.getState().config.providers.apimart;
@@ -78,8 +57,9 @@ function buildFlowMusicRequest(
   generated?: { title: string; lyrics: string },
 ): FlowMusicGenerationRequest {
   return {
+    version: params.model.endsWith('flowmusic-lyria-3.5') ? 'lyria-3.5' : undefined,
     soundPrompt: prompt,
-    lyrics: generated?.lyrics || params.musicLyrics,
+    lyrics: generated?.lyrics || (params.autoGenerateLyrics ? undefined : params.musicLyrics),
     title: generated?.title || params.musicTitle,
     bpm: params.musicBpm,
     length: params.musicDuration ?? 60,
@@ -93,13 +73,14 @@ function waitForFlowMusicTask(
   signal?: AbortSignal,
 ): Promise<FlowMusicTaskState> {
   return pollTask<FlowMusicTaskState, FlowMusicTaskState>({
-    fetchState: () => fetchFlowMusicTask(apiKey, baseUrl, taskId, signal),
+    fetchState: (querySignal) => fetchFlowMusicTask(apiKey, baseUrl, taskId, querySignal),
     isComplete: (task) => task.status === 'completed' ? task : null,
     isFailed: (task) =>
       task.status === 'failed' || task.status === 'error' || task.status === 'cancelled'
-        ? `APIMart 音乐任务失败: ${task.status}`
+        ? `APIMart 音乐任务失败: ${typeof task.error === 'string' ? task.error : task.error?.message || task.status}`
         : null,
     interval: 3000,
+    maxDuration: VIDEO_POLL_MAX_DURATION_MS,
     signal,
   });
 }
@@ -111,16 +92,21 @@ async function generateFlowMusic(
   prompt: string,
   externalSignal?: AbortSignal,
 ): Promise<AudioGenerationResult> {
-  const shouldGenerateLyrics = params.autoGenerateLyrics === true;
+  const model = extractModelName(params.model, params.provider);
+  const isSuno = /^suno(?:-v6(?:-wild|-mini)?)?$/.test(model);
+  // 新音乐模型直接使用自身的风格/歌词生成，保持只有一个可恢复的音乐任务阶段。
+  const shouldGenerateLyrics = params.autoGenerateLyrics === true && model === 'flowmusic';
   const initialStage = shouldGenerateLyrics ? 'lyrics' : 'music';
   const projectId = useAppStore.getState().currentProjectId;
+  let receipt: MediaTaskReceipt | undefined;
+  let requestSent = false;
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
   const signal = nodeSignal && externalSignal
     ? AbortSignal.any([nodeSignal, externalSignal])
     : nodeSignal ?? externalSignal;
 
   if (params.nodeId && projectId) {
-    savePendingTask({
+    receipt = savePendingTask({
       nodeId: params.nodeId,
       projectId,
       nodeType: 'ai-audio',
@@ -136,9 +122,12 @@ async function generateFlowMusic(
   try {
     let generatedLyrics: { title: string; lyrics: string } | undefined;
     if (shouldGenerateLyrics) {
-      const lyricsTaskId = await submitFlowMusicLyrics(apiKey, baseUrl, prompt, signal);
+      signal?.throwIfAborted();
+      const submission = submitFlowMusicLyrics(apiKey, baseUrl, prompt, signal);
+      requestSent = true;
+      const lyricsTaskId = await submission;
       if (params.nodeId) {
-        updatePendingTask(params.nodeId, { taskId: lyricsTaskId, submitted: true });
+        receipt = updatePendingTask(params.nodeId, { taskId: lyricsTaskId, submitted: true }, receipt?.taskId, receipt?.attemptId) ?? receipt;
       }
       generatedLyrics = extractFlowMusicLyrics(
         await waitForFlowMusicTask(apiKey, baseUrl, lyricsTaskId, signal),
@@ -155,44 +144,58 @@ async function generateFlowMusic(
         });
       }
       if (params.nodeId) {
-        updatePendingTask(params.nodeId, {
+        receipt = updatePendingTask(params.nodeId, {
           taskId: '',
           audioTaskStage: 'music',
           submitted: false,
-        });
+          mediaRecoveryState: undefined,
+        }, receipt?.taskId, receipt?.attemptId) ?? receipt;
       }
+      requestSent = false;
     }
 
-    const musicTaskId = await submitFlowMusicGeneration(
-      apiKey,
-      baseUrl,
-      buildFlowMusicRequest(params, prompt, generatedLyrics),
-      signal,
-    );
+    signal?.throwIfAborted();
+    const musicSubmission = isSuno
+      ? submitSunoGeneration(apiKey, baseUrl, {
+        version: model === 'suno' ? 'v6' : model.slice('suno-'.length) as 'v6' | 'v6-wild' | 'v6-mini',
+        prompt, lyrics: params.autoGenerateLyrics ? undefined : params.musicLyrics,
+        title: params.musicTitle, duration: params.musicDuration,
+      }, signal)
+      : submitFlowMusicGeneration(apiKey, baseUrl, buildFlowMusicRequest(params, prompt, generatedLyrics), signal);
+    requestSent = true;
+    const musicTaskId = await musicSubmission;
     if (params.nodeId) {
-      updatePendingTask(params.nodeId, {
+      receipt = updatePendingTask(params.nodeId, {
         taskId: musicTaskId,
         audioTaskStage: 'music',
         submitted: true,
-      });
+      }, receipt?.taskId, receipt?.attemptId) ?? receipt;
     }
-    return extractFlowMusicTrack(
+    const result = extractFlowMusicTrack(
       await waitForFlowMusicTask(apiKey, baseUrl, musicTaskId, signal),
     );
-  } finally {
-    if (params.nodeId) {
-      cleanupNodePolling(params.nodeId);
-      removePendingTask(params.nodeId);
+    if (receipt) receipt = updatePendingTask(receipt.nodeId, { mediaRecoveryState: 'delivery_pending' }, receipt.taskId, receipt.attemptId) ?? receipt;
+    return { ...result, ...(receipt ? { taskReceipt: receipt } : {}) };
+  } catch (error) {
+    if (receipt) {
+      const rejected = !receipt.taskId && getHttpResponseError(error)?.definitiveFailure === true;
+      if (!requestSent || rejected || error instanceof PollTaskFailedError) {
+        removeFailedMediaTask(receipt);
+      } else {
+        const paused = pauseMediaTask(receipt, error, receipt.taskId ? undefined : 'submit_unknown');
+        if (paused) throw paused;
+      }
     }
+    throw error;
+  } finally {
+    if (params.nodeId) cleanupNodePolling(params.nodeId, nodeSignal);
   }
 }
 
 /**
  * 用户/调用方是否显式指定了首/尾帧角色。
- * 未显式指定时（例如只上传多张普通参考图），assignVideoReferenceRoles 会按图片顺序
- * 自动推断首/尾帧；但 APIMart Seedance 的 image_with_roles 与 image_urls 互斥，
- * 自动推断会误报「首尾帧与参考素材不能同时使用」。因此只有显式角色才拆分首尾帧，
- * 其余情况全部图片按普通参考图提交（与火山方舟行为保持一致）。
+ * APIMart Seedance 的 image_with_roles 与 image_urls 互斥，因此只有显式角色才拆分
+ * 首尾帧；连线图片和普通 @ 图片全部按普通参考图提交（与其他 Seedance 路径一致）。
  */
 function hasExplicitFrameRoles(params: AIVideoGenParams): boolean {
   if ((params.referenceMedia ?? []).some((ref) => ref.role === 'first_frame' || ref.role === 'last_frame')) {
@@ -224,10 +227,12 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       requestedCount,
       params.nodeId,
       signal,
+      params.imageQuality,
+      params.imageBackground,
     );
   },
 
-  async generateVideo({ params, prompt, resolveReferenceInput, signal }) {
+  async generateVideo({ params, prompt, resolveReferenceInput, signal, beforeSubmit }) {
     const { apiKey, baseUrl } = resolveApimartConnection();
     const modelName = extractModelName(params.model, params.provider);
     const referenceInput = await resolveReferenceInput();
@@ -235,6 +240,9 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       if (referenceInput.operation === 'video-to-video') {
         throw new Error(`APIMart 视频模型 "${modelName}" 暂不支持视频到视频生成`);
       }
+      signal?.throwIfAborted();
+      if (beforeSubmit) await beforeSubmit();
+      signal?.throwIfAborted();
       return generateApimartVideo(apiKey, baseUrl, modelName, prompt, params.nodeId, {}, signal);
     }
     if (
@@ -324,14 +332,21 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       signal,
     );
     if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-    if (capability?.omniVariant) {
+    if (capability?.omniVariant || capability?.requestVariant) {
+      const constraints = structuredClone(capability.inputConstraints);
+      if (capability.requestVariant === 'wan3' && constraints?.referenceVideo && params.seedanceDuration !== -1) {
+        constraints.referenceVideo.totalDurationSeconds = { max: Math.min(15, Math.max(0, 30 - (params.seedanceDuration ?? 5))) };
+      }
       await assertVideoInputConstraints(
         { ...referenceInput, videoUrls, audioUrls },
-        { inputConstraints: capability.inputConstraints },
+        { inputConstraints: constraints },
         capability.modelId,
         { signal },
       );
     }
+    signal?.throwIfAborted();
+    if (beforeSubmit) await beforeSubmit();
+    signal?.throwIfAborted();
     return generateApimartVideo(apiKey, baseUrl, modelName, referenceInput.prompt, params.nodeId, {
       resolution: params.seedanceResolution,
       ratio: params.seedanceRatio,

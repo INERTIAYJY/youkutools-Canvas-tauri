@@ -1,23 +1,26 @@
 /** RunningHub 标准模型 Adapter。固定 manifest 选路；工作流协议仍由 runninghubWorkflow 执行。 */
-import { isRemoteMediaUrl } from '../../../utils/mediaUrl';
 import { useAppStore } from '../../../store/useAppStore';
-import type { AIImageGenParams, AIVideoGenParams, AIAudioGenParams } from '../../../types/aiTypes';
+import type { AIImageGenParams, AIVideoGenParams, AIAudioGenParams, MediaReferenceRole, MediaTaskReceipt } from '../../../types/aiTypes';
 import type { RunningHubConnection, RunningHubMediaKind, RunningHubOutput } from '../../../types/runninghub';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
 import { getMediaReferenceUrls } from '../connectedReferenceMedia';
 import { corsSafeFetch } from '../httpTransport';
+import { classifyHttpResponseFailure, getHttpResponseError, HttpResponseError } from '../httpUtils';
+import { throwIfDefinitiveModelResponseFailure } from '../modelProtocolHttp';
 import { pollTask } from '../../pollTask';
 import { runningHubConnection } from '../../workflowExecutionService';
+import { runningHubSiteId } from '../../runninghubSiteCredentials';
 import { registerCanvasDerivation, isCanvasDerivationFresh, completeCanvasDerivation } from '../../canvasDerivationGuard';
-import { registerNodePolling, cleanupNodePolling, getPendingTasksForProject, savePendingTask, updatePendingTask, removePendingTask } from '../../pollManager';
+import { registerNodePolling, cleanupNodePolling, getPendingTasksForProject, savePendingTask, updatePendingTask, removeFailedMediaTask } from '../../pollManager';
 import { uploadRunningHubMedia } from './runninghubClient';
 import { saveRunningHubOutputs, RunningHubTaskFailed, type RunningHubReferences } from './runninghubWorkflow';
-import { getRunningHubModel, isLegacyRunningHubModel, parseRunningHubModelParameter, type RunningHubModelDefinition, type RunningHubModelValue } from './runninghubModelManifest';
+import { getRunningHubModel, isLegacyRunningHubModel, parseRunningHubModelParameter, runningHubFrameRole, type RunningHubModelDefinition, type RunningHubModelValue } from './runninghubModelManifest';
 import { mapImageDimensions } from '../../aiDimensions';
 
-class RunningHubModelRequestError extends Error {
-  readonly status: number;
-  constructor(status: number) { super(`RunningHub 模型请求失败（HTTP ${status}）`); this.status = status; }
+class RunningHubModelRequestError extends HttpResponseError {
+  constructor(status: number, definitiveFailure = classifyHttpResponseFailure(status, undefined), message = `RunningHub 模型请求失败（HTTP ${status}）`) {
+    super(status, message, definitiveFailure);
+  }
 }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 async function modelRequest(connection: RunningHubConnection, endpoint: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -29,15 +32,29 @@ async function modelRequest(connection: RunningHubConnection, endpoint: string, 
       method: 'POST', headers: { Authorization: `Bearer ${connection.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: activeSignal,
     });
   } catch { throw new Error(activeSignal.aborted ? 'RunningHub 模型查询已停止或超时，任务保留' : 'RunningHub 模型连接中断，任务保留，请勿重复提交'); }
-  if (!response.ok) throw new RunningHubModelRequestError(response.status);
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    let payload: unknown;
+    if (errorText.length <= 1_500_000) {
+      try { payload = JSON.parse(errorText); } catch { /* 固定错误文案不暴露上游正文。 */ }
+    }
+    throw new RunningHubModelRequestError(response.status, classifyHttpResponseFailure(response.status, payload));
+  }
   const text = await response.text();
   if (text.length > 1_500_000) throw new Error('RunningHub 模型响应超过大小限制');
   let parsed: unknown;
   try { parsed = JSON.parse(text.replace(/("taskId"\s*:\s*)(\d{16,})(?=\s*[,}])/g, '$1"$2"')); }
   catch { throw new Error('RunningHub 模型返回无效 JSON'); }
   if (!record(parsed)) throw new Error('RunningHub 模型返回格式无效');
-  if (parsed.code !== undefined && parsed.code !== 0 && parsed.code !== 200) throw new Error('RunningHub 模型请求未成功，请核对账户或任务状态');
-  return record(parsed.data) ? parsed.data : parsed;
+  if (parsed.code !== undefined && parsed.code !== 0 && parsed.code !== 200) {
+    throw new RunningHubModelRequestError(response.status,
+      typeof parsed.code === 'number' && Number.isFinite(parsed.code), 'RunningHub 模型请求未成功，请核对账户或任务状态');
+  }
+  const result = record(parsed.data) ? parsed.data : parsed;
+  if (endpoint !== 'query' && !result.taskId) {
+    throwIfDefinitiveModelResponseFailure(parsed, response.status, undefined, connection.apiKey);
+  }
+  return result;
 }
 
 function mediaSource(value: string): string {
@@ -47,10 +64,60 @@ function mediaSource(value: string): string {
   return value;
 }
 
+type RunningHubRoleAwareReferences = RunningHubReferences & {
+  /** 与 image 数组同序；缺失项按普通参考图处理。 */
+  imageRoles?: MediaReferenceRole[];
+};
+
+/** 普通素材选择同系列已登记的参考操作，只有显式首尾帧才保留帧操作。 */
+function resolveRunningHubVideoOperation(
+  model: RunningHubModelDefinition,
+  parameters: Record<string, string>,
+  references: RunningHubRoleAwareReferences,
+): RunningHubModelDefinition {
+  if (model.kind !== 'video' || model.operation !== 'image-to-video') return model;
+  const frameFields = model.parameters.filter((field) => runningHubFrameRole(field));
+  if (!frameFields.length) return model;
+  const explicitFrame = references.image?.some((_, index) => (
+    references.imageRoles?.[index] === 'first_frame' || references.imageRoles?.[index] === 'last_frame'
+  )) || frameFields.some((field) => parameters[field.name]?.trim());
+  if (explicitFrame) return model;
+  const hasReferences = (['image', 'video', 'audio'] as const).some((kind) => references[kind]?.length)
+    || model.parameters.some((field) => field.mediaKind && parameters[field.name]?.trim());
+  const family = model.id.endsWith('/image-to-video') ? model.id.slice(0, -'/image-to-video'.length) : undefined;
+  const operations = hasReferences ? ['multimodal-video', 'reference-to-video'] : ['text-to-video'];
+  for (const operation of operations) {
+    const candidate = family ? getRunningHubModel(`${family}/${operation}`) : undefined;
+    if (candidate?.kind === 'video' && candidate.operation === (hasReferences ? 'reference-to-video' : 'text-to-video')) return candidate;
+  }
+  throw new Error(hasReferences
+    ? '当前模型不支持普通参考素材，请选择参考图或多模态视频模型；如需首尾帧，请在参数设置中明确指定'
+    : '当前模型需要显式设置首尾帧，请在参数设置中指定，或选择文生视频模型');
+}
+
+function runningHubReferenceSelection(
+  model: RunningHubModelDefinition,
+  field: RunningHubModelDefinition['parameters'][number],
+  references: RunningHubRoleAwareReferences,
+): Array<{ value: string; index: number }> {
+  const sources = references[field.binding as RunningHubMediaKind] ?? [];
+  if (model.kind !== 'video' || field.binding !== 'image') {
+    return sources.map((value, index) => ({ value, index }));
+  }
+  const frameRole = runningHubFrameRole(field);
+  return sources.flatMap((value, index) => {
+    const role = references.imageRoles?.[index] ?? 'reference';
+    const accepted = frameRole
+      ? role === frameRole
+      : role !== 'first_frame' && role !== 'last_frame';
+    return accepted ? [{ value, index }] : [];
+  });
+}
+
 /** 先完成类型/数量校验，再上传；显式参数优先，空字符串表示不使用该可选字段。 */
 export async function buildRunningHubModelRequest(
   connection: RunningHubConnection, model: RunningHubModelDefinition, prompt: string,
-  parameters: Record<string, string> = {}, references: RunningHubReferences = {}, signal?: AbortSignal,
+  parameters: Record<string, string> = {}, references: RunningHubRoleAwareReferences = {}, signal?: AbortSignal,
 ): Promise<Record<string, RunningHubModelValue>> {
   const names = new Set(model.parameters.map((field) => field.name));
   if (Object.keys(parameters).some((name) => !names.has(name))) throw new Error('模型参数已变化，请重新选择模型并检查参数');
@@ -59,10 +126,26 @@ export async function buildRunningHubModelRequest(
   for (const field of model.parameters) {
     let raw = parameters[field.name];
     if (raw === undefined && field.binding === 'prompt') raw = prompt;
+    // 参数框显式指定的帧可以来自同一条连线，不重复计为普通参考图。
+    if (model.kind === 'video' && runningHubFrameRole(field) && raw?.trim()) {
+      references.image?.forEach((url, index) => {
+        if (url.trim() === raw.trim()) consumed.image.add(index);
+      });
+    }
     if (field.binding && field.binding !== 'prompt') {
-      const sources = references[field.binding] ?? [];
-      if (field.schema.type === 'array') { if (raw === undefined && sources.length) raw = JSON.stringify(sources); sources.forEach((_, i) => consumed[field.binding as RunningHubMediaKind].add(i)); }
-      else if (sources[field.referenceIndex ?? 0]) { if (raw === undefined) raw = sources[field.referenceIndex ?? 0]; consumed[field.binding].add(field.referenceIndex ?? 0); }
+      const sources = runningHubReferenceSelection(model, field, references);
+      if (field.schema.type === 'array') {
+        if (raw === undefined && sources.length) raw = JSON.stringify(sources.map((source) => source.value));
+        sources.forEach((source) => consumed[field.binding as RunningHubMediaKind].add(source.index));
+      } else {
+        const source = runningHubFrameRole(field)
+          ? sources[0]
+          : sources[field.referenceIndex ?? 0];
+        if (source) {
+          if (raw === undefined) raw = source.value;
+          consumed[field.binding].add(source.index);
+        }
+      }
     }
     const value = parseRunningHubModelParameter(field, raw);
     if (value !== undefined) {
@@ -88,13 +171,10 @@ export async function buildRunningHubModelRequest(
     const remote: string[] = [];
     for (const url of urls) {
       signal?.throwIfAborted();
-      if (isRemoteMediaUrl(url)) remote.push(url);
-      else {
-        const key = `${field.mediaKind}:${url}`;
-        let uploaded = uploads.get(key);
-        if (!uploaded) { uploaded = (await uploadRunningHubMedia(connection, url, field.mediaKind, signal)).url; uploads.set(key, uploaded); }
-        remote.push(uploaded);
-      }
+      const key = `${field.mediaKind}:${url}`;
+      let uploaded = uploads.get(key);
+      if (!uploaded) { uploaded = (await uploadRunningHubMedia(connection, url, field.mediaKind, signal)).url; uploads.set(key, uploaded); }
+      remote.push(uploaded);
     }
     body[field.name] = Array.isArray(value) ? remote : remote[0];
   }
@@ -143,10 +223,10 @@ export async function queryRunningHubModel(connection: RunningHubConnection, tas
 }
 
 type ModelParams = AIImageGenParams | AIVideoGenParams | AIAudioGenParams;
-export async function executeRunningHubModel(params: ModelParams, kind: RunningHubMediaKind, prompt: string, references: RunningHubReferences, count = 1, externalSignal?: AbortSignal, connectionOverride?: RunningHubConnection): Promise<RunningHubOutput[]> {
+export async function executeRunningHubModel(params: ModelParams, kind: RunningHubMediaKind, prompt: string, references: RunningHubRoleAwareReferences, count = 1, externalSignal?: AbortSignal, connectionOverride?: RunningHubConnection, beforeSubmit?: () => void | Promise<void>): Promise<RunningHubOutput[]> {
   const store = useAppStore.getState();
   const explicitImage = getRunningHubModel(params.model, true)?.parameters.some((field) => field.binding === 'image' && params.runninghubModelParameters?.[field.name]?.trim());
-  const definition = getRunningHubModel(params.model, !!references.image?.length || explicitImage);
+  let definition = getRunningHubModel(params.model, !!references.image?.length || explicitImage);
   if (!definition || definition.kind !== kind) throw new Error('RunningHub 模型或输出类型不匹配');
   if (!Number.isInteger(count) || count < 1 || count > 16 || (kind !== 'image' && count !== 1)) throw new Error('不支持的 RunningHub 生成数量');
   const connection = connectionOverride ?? runningHubConnection(store.config.providers, 'runninghub-model');
@@ -162,10 +242,18 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
     && (!context || (useAppStore.getState().currentProjectId === context.projectId && useAppStore.getState().messages.some((message) => message.id === context.messageId && message.conversationId === context.conversationId)));
   const stage = (runninghubStage: string) => { if (nodeId && fresh()) useAppStore.getState().updateNodeDataTransient(nodeId, { runninghubStage }); };
   const taskIds: string[] = [];
+  let receipt: MediaTaskReceipt | undefined;
   let submitting = false;
   try {
     if (!fresh()) throw new Error('项目或节点已变化，未提交任务');
     let parameters = params.runninghubModelParameters ?? {};
+    stage('检查参数与上传素材');
+    const operation = resolveRunningHubVideoOperation(definition, parameters, references);
+    if (operation !== definition) {
+      const unusedFrameFields = new Set(definition.parameters.filter((field) => runningHubFrameRole(field)).map((field) => field.name));
+      parameters = Object.fromEntries(Object.entries(parameters).filter(([name, value]) => !unusedFrameFields.has(name) || value.trim()));
+      definition = operation;
+    }
     // 旧组合模型继续接受既有比例/分辨率；新增操作由各自表单明确设置。
     if (isLegacyRunningHubModel(params.model) && kind === 'image') {
       const image = params as AIImageGenParams;
@@ -175,11 +263,11 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
         if (field && value && parameters[name] === undefined && (!field.schema.enum || field.schema.enum.includes(value))) parameters[name] = value;
       }
     }
-    stage('检查参数与上传素材');
     const body = await buildRunningHubModelRequest(connection, definition, prompt, parameters, references, signal);
     if (count > 1 && ['n', 'imageNum', 'numImages', 'maxImages'].some((key) => Number(body[key]) > 1)) throw new Error('请仅使用一处数量设置：节点批量数量或模型产物数量');
+    if (beforeSubmit) await beforeSubmit();
     if (!fresh()) throw new Error('画布已变化，未提交任务');
-    if (trackingId && projectId) savePendingTask({ nodeId: trackingId, projectId, nodeType: store.nodes.find((node) => node.id === nodeId)?.data.type ?? `ai-${kind}`, provider: 'runninghub', providerConfigId: 'runninghub-model', taskType: 'runninghub-model', taskId: '', taskIds: [], submitted: false, runninghubRecoveryState: 'submit_unknown', runninghubModelId: params.model, runninghubMessage: context, batchCount: count });
+    if (trackingId && projectId) receipt = savePendingTask({ nodeId: trackingId, projectId, nodeType: store.nodes.find((node) => node.id === nodeId)?.data.type ?? `ai-${kind}`, provider: 'runninghub', providerConfigId: 'runninghub-model', taskType: 'runninghub-model', taskId: '', taskIds: [], submitted: false, runninghubSite: runningHubSiteId(connection.baseUrl), runninghubRecoveryState: 'submit_unknown', runninghubModelId: params.model, runninghubMessage: context, batchCount: count });
     for (let index = 0; index < count; index++) {
       signal?.throwIfAborted();
       stage(count > 1 ? `提交任务 ${index + 1}/${count}` : '提交任务');
@@ -188,7 +276,7 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
       const response = await modelRequest(connection, definition.id, body, signal);
       if (typeof response.taskId !== 'string' || !/^\d{1,30}$/.test(response.taskId)) throw new Error('RunningHub 未返回有效任务 ID，请到平台确认提交状态');
       taskIds.push(response.taskId); submitting = false;
-      if (trackingId) updatePendingTask(trackingId, { taskId: taskIds[0], taskIds: [...taskIds], submitted: true, runninghubRecoveryState: 'disconnected', runninghubSubmissionUncertain: false });
+      if (trackingId) receipt = updatePendingTask(trackingId, { taskId: taskIds[0], taskIds: [...taskIds], submitted: true, runninghubRecoveryState: 'disconnected', runninghubSubmissionUncertain: false }, receipt?.taskId, receipt?.attemptId) ?? receipt;
     }
     const outputs = await queryRunningHubModel(connection, taskIds, kind, signal, stage);
     if (!fresh()) throw new Error('画布或对话已变化，任务已保留');
@@ -198,12 +286,15 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
     if (nodeId && fresh()) useAppStore.getState().updateNodeDataTransient(nodeId, { runninghubOutputs: saved });
     return saved;
   } catch (error) {
+    const certainRejection = getHttpResponseError(error)?.definitiveFailure === true;
+    const terminalFailure = error instanceof RunningHubTaskFailed && taskIds.length === 1;
     if (trackingId) {
-      const certainRejection = error instanceof RunningHubModelRequestError && error.status < 500 && ![408, 429].includes(error.status);
-      if ((!taskIds.length && certainRejection) || (error instanceof RunningHubTaskFailed && taskIds.length === 1)) removePendingTask(trackingId, taskIds[0] ?? '');
-      else if (submitting) updatePendingTask(trackingId, { runninghubRecoveryState: 'submit_unknown', runninghubSubmissionUncertain: !certainRejection });
+      if ((!taskIds.length && certainRejection) || terminalFailure) {
+        if (receipt) removeFailedMediaTask(receipt);
+      } else if (submitting) updatePendingTask(trackingId, { runninghubRecoveryState: 'submit_unknown', runninghubSubmissionUncertain: !certainRejection });
     }
-    if (nodeId && fresh()) stage('任务已保留，可继续查询');
+    if (nodeId && fresh()) stage((!taskIds.length && certainRejection) || terminalFailure
+      ? '生成失败' : taskIds.length || submitting ? '任务已保留，可继续查询' : '任务未提交');
     if (!nodeId && context && taskIds.length) throw new Error(`RunningHub 任务 ${taskIds.join('、')} 已保留，重新打开项目时继续查询。`, { cause: error });
     throw error;
   } finally {
@@ -222,14 +313,16 @@ export const runninghubMediaProviderAdapter: MediaProviderAdapter = {
     const dimensions = mapImageDimensions(params.imageSize ?? '2K', params.aspectRatio ?? '1:1');
     return { requestedCount, failedCount: Math.max(0, requestedCount - outputs.length), results: outputs.map((output) => ({ url: output.url, ...dimensions, runninghubOutputs: outputs })) };
   },
-  generateVideo: async ({ params, resolveReferenceInput, signal }) => {
+  generateVideo: async ({ params, resolveReferenceInput, signal, beforeSubmit }) => {
     const input = await resolveReferenceInput();
     const references = input.references ?? [];
+    const imageReferences = references.filter((reference) => reference.kind === 'image');
     const outputs = await executeRunningHubModel(params, 'video', input.prompt, {
-      image: references.length ? getMediaReferenceUrls(references, 'image', 'local') : input.imageUrls,
+      image: references.length ? imageReferences.map((reference) => reference.url) : input.imageUrls,
+      imageRoles: references.length ? imageReferences.map((reference) => reference.role) : undefined,
       video: references.length ? getMediaReferenceUrls(references, 'video', 'local') : input.videoUrls,
       audio: references.length ? getMediaReferenceUrls(references, 'audio', 'local') : input.audioUrls,
-    }, 1, signal);
+    }, 1, signal, undefined, beforeSubmit);
     return { url: outputs[0].url, runninghubOutputs: outputs };
   },
   generateAudio: async ({ params, prompt, referenceAudioUrls, referenceMedia, signal }) => {

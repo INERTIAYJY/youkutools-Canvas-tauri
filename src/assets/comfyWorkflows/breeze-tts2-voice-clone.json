@@ -1,0 +1,98 @@
+{
+  "8": {
+    "inputs": {
+      "audio": "1_0.wav"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频"
+    }
+  },
+  "9": {
+    "inputs": {
+      "model": "bf16 (best quality)",
+      "dtype": "auto",
+      "device": "auto",
+      "attention": "auto",
+      "decode_mode": "cuda_graphs",
+      "download_if_missing": true
+    },
+    "class_type": "BreezeTTS2LoadModel",
+    "_meta": {
+      "title": "Breeze TTS 2 Load Model"
+    }
+  },
+  "11": {
+    "inputs": {
+      "model": "whisper-large-v3-turbo",
+      "dtype": "auto",
+      "language": "auto",
+      "task": "transcribe",
+      "chunk_length_s": 30,
+      "download_if_missing": false,
+      "audio": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "BreezeWhisperTranscribe",
+    "_meta": {
+      "title": "Breeze TTS 2 Whisper Transcribe"
+    }
+  },
+  "12": {
+    "inputs": {
+      "value": "[大笑]这不！冰女瞬间就躺下啦！"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "文本内容"
+    }
+  },
+  "13": {
+    "inputs": {
+      "text": [
+        "12",
+        0
+      ],
+      "reference_text": [
+        "11",
+        1
+      ],
+      "cfg_scale": 1.1,
+      "max_new_tokens": 1500,
+      "temperature": 0.9,
+      "top_k": 50,
+      "top_p": 1,
+      "repetition_penalty": 1.1,
+      "depth_temperature": 0.9,
+      "depth_top_k": 50,
+      "depth_top_p": 1,
+      "seed": 1753689728,
+      "breeze_model": [
+        "9",
+        0
+      ],
+      "reference_audio": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "BreezeTTS2VoiceClone",
+    "_meta": {
+      "title": "Breeze TTS 2 Voice Clone"
+    }
+  },
+  "14": {
+    "inputs": {
+      "audio": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "PreviewAudio",
+    "_meta": {
+      "title": "预览音频"
+    }
+  }
+}

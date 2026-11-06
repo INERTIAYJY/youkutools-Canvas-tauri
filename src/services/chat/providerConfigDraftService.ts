@@ -17,6 +17,7 @@ import type {
   VideoGenerationInputMode,
   VideoGenerationOperation,
   VideoModelCapability,
+  ImageModelCapability,
 } from '../../types/aiTypes';
 import {
   analyzeModelProtocolExamples,
@@ -40,7 +41,16 @@ import {
   CHAT_API_PROTOCOL_LABELS,
   resolveChatApiProtocol,
 } from '../ai/chatApiProtocol';
+import { assertModelCapabilityProtocol, describeModelParameterGaps } from '../ai/modelCapabilityValidation';
 import { assertVideoModelCapability } from '../ai/videoRequestResolver';
+import {
+  resolveSeedanceAutoTemplate,
+  type SeedanceTemplateId,
+} from '../ai/seedanceModelCapabilities';
+import {
+  resolveH3AutoTemplate,
+  type H3TemplateId,
+} from '../ai/h3ModelCapabilities';
 
 const PROVIDER_CONFIG_DRAFT_TTL_MS = 30 * 60 * 1_000;
 const MAX_PROVIDER_CONFIG_DRAFTS = 32;
@@ -93,6 +103,8 @@ const VIDEO_GENERIC_REFERENCE_VARIABLES = ['referenceUrls', 'inlineReferences'] 
 export type ProviderConfigProtocolSource = 'examples' | 'declarative';
 
 export interface ProviderConfigModelExamples extends Partial<ModelProtocolExamples> {
+  /** 直接采用内置视频模板；未填写时也会按模型 ID 与已知网关自动匹配。 */
+  templateId?: SeedanceTemplateId | H3TemplateId;
   /** 缺省保持原有示例推断模式；declarative 直接使用本地校验通过的声明式协议。 */
   protocolSource?: ProviderConfigProtocolSource;
   /** protocolSource=declarative 时必填；不得与四个请求/响应示例字段混用。 */
@@ -108,6 +120,7 @@ export interface ProviderConfigModelExamples extends Partial<ModelProtocolExampl
   contextWindow?: number;
   imageReferenceRequestMode?: ImageReferenceRequestMode;
   videoCapability?: VideoModelCapability;
+  imageCapability?: ImageModelCapability;
 }
 
 export interface ProviderConfigDraftInput {
@@ -713,6 +726,74 @@ function normalizeBaseUrl(value: string, chatApiProtocol: ChatApiProtocol): stri
   return url.toString().replace(/\/$/, '');
 }
 
+/** MCP 动态能力对象不能依赖工具 schema 校验任意键；只接受有界、无危险键的普通 JSON。 */
+function assertSafeDraftCapability(value: unknown): void {
+  let nodes = 0;
+  const visit = (item: unknown, depth: number): void => {
+    if (++nodes > 2_048 || depth > 8) throw new Error('模型能力声明过大或嵌套过深');
+    if (!item || typeof item !== 'object') return;
+    if (Array.isArray(item)) {
+      if (item.length > 512) throw new Error('模型能力数组过长');
+      item.forEach((entry) => visit(entry, depth + 1));
+      return;
+    }
+    const prototype = Object.getPrototypeOf(item);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error('模型能力必须使用普通 JSON 对象');
+    for (const [key, child] of Object.entries(item)) {
+      if (DANGEROUS_OBJECT_KEYS.has(key.toLowerCase())) throw new Error('模型能力包含不允许的对象键');
+      visit(child, depth + 1);
+    }
+  };
+  visit(value, 0);
+}
+
+/** 限制像素表的动态键与矩阵大小；完整性由共享图片能力校验进一步检查。 */
+function assertDraftDimensions(value: unknown): void {
+  if (value === undefined) return;
+  const validKey = (key: string) => key.length > 0 && key.length <= 40 && key === key.trim()
+    && !Array.from(key).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+    && !DANGEROUS_OBJECT_KEYS.has(key.toLowerCase());
+  const plainRecord = (item: unknown): item is Record<string, unknown> => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    const prototype = Object.getPrototypeOf(item);
+    return prototype === Object.prototype || prototype === null;
+  };
+  if (!plainRecord(value)) throw new Error('dimensionPresets 必须是按分辨率和比例索引的普通对象');
+  const resolutions = Object.entries(value);
+  if (resolutions.length < 1 || resolutions.length > 16
+    || resolutions.some(([key]) => !validKey(key))
+    || new Set(resolutions.map(([key]) => key.toLowerCase())).size !== resolutions.length) {
+    throw new Error('dimensionPresets 的分辨率键必须是 1 至 16 个不重复的有效字符串');
+  }
+  for (const [, ratios] of resolutions) {
+    if (!plainRecord(ratios)) throw new Error('dimensionPresets 的比例表必须是普通对象');
+    const entries = Object.entries(ratios);
+    if (entries.length < 1 || entries.length > 32 || entries.some(([key]) => !validKey(key))
+      || new Set(entries.map(([key]) => key.toLowerCase())).size !== entries.length) {
+      throw new Error('dimensionPresets 的比例键必须是 1 至 32 个不重复的有效字符串');
+    }
+    for (const [, dimensions] of entries) {
+      if (!Array.isArray(dimensions) || dimensions.length !== 2
+        || dimensions.some((dimension) => !Number.isSafeInteger(dimension) || dimension < 1 || dimension > 65_536)) {
+        throw new Error('dimensionPresets 的宽高必须是 1 至 65536 的整数');
+      }
+    }
+  }
+}
+
+/** 仅合并明确提供的能力子字段；数组作为完整候选替换，不改原始配置。 */
+function mergeCapabilityRecords<T extends object>(previous: T | undefined, patch: T): T {
+  const merge = (oldValue: unknown, newValue: unknown): unknown => {
+    if (newValue === undefined) return oldValue;
+    if (!newValue || typeof newValue !== 'object' || Array.isArray(newValue)) return structuredClone(newValue);
+    const current: Record<string, unknown> = oldValue && typeof oldValue === 'object' && !Array.isArray(oldValue)
+      ? { ...oldValue } : {};
+    for (const [key, value] of Object.entries(newValue)) current[key] = merge(current[key], value);
+    return current;
+  };
+  return merge(previous, patch) as T;
+}
+
 function pruneExpiredDrafts(now: number): void {
   for (const [draftId, draft] of drafts) {
     if (draft.expiresAt <= now) drafts.delete(draftId);
@@ -730,9 +811,55 @@ function createModelSelection(
   declaredBaseUrl?: string,
   chatApiProtocol: ChatApiProtocol = 'openai-compatible',
 ): { selection: ProviderModelSelection; baseUrl: string; updateFields: Array<keyof ProviderModelSelection> } {
-  const result = resolveDraftModelProtocol(examples, declaredBaseUrl);
+  assertSafeDraftCapability(examples.imageCapability);
+  assertSafeDraftCapability(examples.videoCapability);
+  assertDraftDimensions(examples.imageCapability?.dimensionPresets);
+  const templateMatch = examples.modelId?.trim()
+    ? resolveSeedanceAutoTemplate({
+        modelId: examples.modelId,
+        name: examples.name,
+        baseUrl: declaredBaseUrl,
+        templateId: examples.templateId,
+        capability: examples.videoCapability,
+      })
+      ?? resolveH3AutoTemplate({
+        modelId: examples.modelId,
+        name: examples.name,
+        baseUrl: declaredBaseUrl,
+        templateId: examples.templateId,
+        capability: examples.videoCapability,
+      })
+    : undefined;
+  const useTemplateProtocol = Boolean(
+    templateMatch?.executionProfile
+    && !hasOwnExampleField(examples)
+    && !Object.hasOwn(examples, 'executionProtocol')
+    && examples.protocolSource === undefined,
+  );
+  let result: ResolvedDraftModelProtocol;
+  if (useTemplateProtocol) {
+    if (!declaredBaseUrl) throw new Error('使用内置视频模板必须显式提供 connection baseUrl');
+    const modelId = examples.modelId?.trim();
+    if (!modelId) throw new Error('使用内置视频模板必须显式提供 modelId');
+    const protocol = resolveModelExecutionProfile(templateMatch?.executionProfile);
+    if (!protocol) throw new Error(`模型“${examples.name?.trim() || modelId}”的内置模板缺少执行协议`);
+    const protocolErrors = validateModelExecutionProtocol(protocol);
+    if (protocolErrors.length > 0) {
+      throw new Error(`模型“${examples.name?.trim() || modelId}”模板协议校验失败：${protocolErrors[0]}`);
+    }
+    result = {
+      baseUrl: declaredBaseUrl,
+      modelId,
+      category: 'video',
+      protocol,
+    };
+  } else {
+    result = resolveDraftModelProtocol(examples, declaredBaseUrl);
+  }
   const displayName = examples.name?.trim() || result.modelId;
   const category = result.category;
+  // 只有协议也来自同一模板时才补模板能力，避免把官方可调项混入用户文档协议。
+  const videoCapability = examples.videoCapability ?? (useTemplateProtocol ? templateMatch?.capability : undefined);
   // 文本模型由连接级标准聊天协议统一处理。仍先解析文档示例以验证模型 ID、
   // Base URL 和文档证据，但不把一次性 OpenAI 风格模板写进模型配置。
   const executionProfile: ModelExecutionProfile | undefined = category === 'text'
@@ -747,18 +874,18 @@ function createModelSelection(
     throw new Error(`模型“${displayName || result.modelId}”只有图片分类可以配置参考图请求协议`);
   }
   // 能力声明只对视频模型生效：参数面板据此约束时长 / 比例 / 分辨率 / 参考素材数量
-  if (examples.videoCapability && category !== 'video') {
+  if (videoCapability && category !== 'video') {
     throw new Error(`模型“${displayName || result.modelId}”只有视频分类可以声明 videoCapability`);
   }
-  if (category === 'video' && !examples.videoCapability?.operations?.length) {
+  if (category === 'video' && !videoCapability?.operations?.length) {
     throw new Error(
       `模型“${displayName || result.modelId}”必须按接口文档声明非空 videoCapability.operations，`
       + '避免运行时猜测文生视频、图生视频或视频生视频能力',
     );
   }
-  if (examples.videoCapability) {
+  if (videoCapability) {
     try {
-      assertVideoModelCapability(examples.videoCapability);
+      assertVideoModelCapability(videoCapability);
     } catch (error) {
       const message = error instanceof Error ? error.message : '能力声明无效';
       throw new Error(
@@ -768,13 +895,13 @@ function createModelSelection(
     }
   }
   if (
-    examples.protocolSource === 'declarative'
+    (examples.protocolSource === 'declarative' || useTemplateProtocol)
     && category === 'video'
-    && examples.videoCapability
+    && videoCapability
   ) {
     assertDeclarativeVideoProtocolSemantics(
       result.protocol,
-      examples.videoCapability,
+      videoCapability,
       result.baseUrl,
       result.modelId,
     );
@@ -792,14 +919,20 @@ function createModelSelection(
   if (contextWindow && category !== 'text') {
     throw new Error(`模型“${displayName || result.modelId}”只有文本分类可以声明 contextWindow`);
   }
+  if (examples.imageCapability && category !== 'image') {
+    throw new Error(`模型“${displayName}”只有图片分类可以声明 imageCapability`);
+  }
+  assertModelCapabilityProtocol({ id: result.modelId, name: displayName, category, provider: connectionId,
+    executionProfile, imageReferenceRequestMode, videoCapability, imageCapability: examples.imageCapability });
   const updateFields: Array<keyof ProviderModelSelection> = ['provider', 'executionProfile'];
   if (examples.name?.trim()) updateFields.push('name');
-  if (examples.category) updateFields.push('category', 'categoryManual');
+  if (examples.category || templateMatch) updateFields.push('category', 'categoryManual');
   if (examples.description !== undefined) updateFields.push('description', 'descriptionManual');
   if (inputModalities) updateFields.push('inputModalities', 'inputModalitiesManual');
   if (contextWindow) updateFields.push('contextWindow');
   if (examples.imageReferenceRequestMode) updateFields.push('imageReferenceRequestMode');
-  if (examples.videoCapability) updateFields.push('videoCapability');
+  if (videoCapability) updateFields.push('videoCapability');
+  if (examples.imageCapability) updateFields.push('imageCapability');
   return {
     baseUrl: normalizeBaseUrl(result.baseUrl, chatApiProtocol),
     updateFields,
@@ -810,12 +943,13 @@ function createModelSelection(
       provider: connectionId,
       executionProfile,
       // 助手按文档定下的分类比拉取目录时的 ID 正则更准，标成手动避免下次刷新被改回去
-      ...(examples.category ? { categoryManual: true } : {}),
+      ...(examples.category || templateMatch ? { categoryManual: true } : {}),
       ...(description !== undefined ? { description, descriptionManual: true } : {}),
       ...(inputModalities ? { inputModalities, inputModalitiesManual: true } : {}),
       ...(contextWindow ? { contextWindow } : {}),
       ...(imageReferenceRequestMode ? { imageReferenceRequestMode } : {}),
-      ...(examples.videoCapability ? { videoCapability: examples.videoCapability } : {}),
+      ...(videoCapability ? { videoCapability } : {}),
+      ...(examples.imageCapability ? { imageCapability: structuredClone(examples.imageCapability) } : {}),
     },
   };
 }
@@ -912,6 +1046,20 @@ export function mergeProviderModels(
       return key !== 'id'
         && (!fields || fields.includes(field))
         && (value !== undefined || Boolean(fields?.includes(field)));
+    }).map(([key, value]): [string, unknown] => {
+      if (key === 'imageCapability' && value !== undefined) {
+        const capability = value as ImageModelCapability;
+        assertSafeDraftCapability(capability);
+        assertDraftDimensions(capability.dimensionPresets);
+        const mergedCapability = mergeCapabilityRecords(model.imageCapability, capability);
+        if (capability.dimensionPresets !== undefined) assertDraftDimensions(mergedCapability.dimensionPresets);
+        return [key, mergedCapability];
+      }
+      if (key === 'videoCapability' && value !== undefined) {
+        assertSafeDraftCapability(value);
+        return [key, mergeCapabilityRecords(model.videoCapability, value as VideoModelCapability)];
+      }
+      return [key, value];
     });
     const patch = Object.fromEntries(entries) as Partial<ProviderModelSelection>;
     const updated = entries
@@ -926,8 +1074,14 @@ export function mergeProviderModels(
       unchangedIds.push(model.id);
       return model;
     }
+    const mergedModel = { ...model, ...patch };
+    if (updated.some((field) => ['executionProfile', 'imageCapability', 'videoCapability', 'imageReferenceRequestMode'].includes(field))) {
+      // 协议更新可能保留旧能力；必须核对合并后的实际配置，不能只校验本轮字段。
+      if (mergedModel.videoCapability) assertVideoModelCapability(mergedModel.videoCapability);
+      assertModelCapabilityProtocol(mergedModel);
+    }
     updatedIds.push(model.id);
-    return { ...model, ...patch };
+    return mergedModel;
   });
   const addedIds: string[] = [];
   for (const model of draftModels) {
@@ -1002,6 +1156,8 @@ export function summarizeProviderConfigDraft(draft: ProviderConfigDraft): string
         ? `，参考图：${referenceModeLabels[model.imageReferenceRequestMode]}`
         : ''}${describeReferenceGap(model)}）`
     )).join('、')}`,
+    ...models.filter((model) => describeModelParameterGaps(model)).map((model) =>
+      `参数 ${model.name}：${describeModelParameterGaps(model)}`),
     '不会写入 API Key：新连接保持空白，已有连接保留原值',
   ].join('\n');
 }

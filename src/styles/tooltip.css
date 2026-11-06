@@ -11,8 +11,8 @@
 .app-tooltip {
   position: fixed;
   z-index: 2147483647;
-  max-width: min(240px, calc(100vw - 16px));
-  overflow: hidden;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 16px));
   padding: 4px 10px;
   border: 1px solid var(--theme-border, #2a2a3a);
   border-radius: 6px;
@@ -21,8 +21,8 @@
   color: var(--theme-text, #e8e8ed);
   font-size: 12px;
   line-height: 1.5;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
@@ -37,19 +37,28 @@
 
 .app-tooltip[data-structured="true"] {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  max-width: min(420px, calc(100vw - 16px));
 }
 
 .app-tooltip__label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .app-tooltip__action {
-  flex: 0 0 auto;
-  white-space: nowrap;
+  flex: 0 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.app-tooltip__hint {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent-amber-text);
+  white-space: pre-line;
+}
+
+.app-tooltip__body {
+  display: block;
+  white-space: pre-line;
 }

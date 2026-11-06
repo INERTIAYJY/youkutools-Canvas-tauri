@@ -1,3 +1,6 @@
+/**
+ * workflowApiAdapter — 执行声明式云工作流的请求、查询与产物解析。
+ */
 import { isRemoteMediaUrl } from '../../utils/mediaUrl';
 import type { ApiProviderConfig } from '../../types';
 import type {
@@ -21,6 +24,7 @@ import {
 import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../canvasDerivationGuard';
 import { saveCloudWorkflowOutputs } from '../workflowExecutionService';
 import { normalizeWorkflowApiBaseUrl, AUTODL_H3_WORKFLOW, resolveWorkflowApiInputValues, validateWorkflowApiManifest } from './autodlWorkflowManifest';
+import { getGenerationNodeType } from '../../utils/nodeGeneration';
 
 const TASK_ID = /^[\w-]{1,128}$/;
 const RETRY_HTTP = new Set([408, 429, 500, 502, 503, 504]);
@@ -323,6 +327,7 @@ export async function executeWorkflowApi(params: {
   workflowId: string; nodeId?: string; prompt: string;
   taskContext?: import('../../types/workflowApi').CloudWorkflowTaskContext;
   inputs?: WorkflowApiInputValues; references?: WorkflowApiReferences;
+  beforeSubmit?: () => void | Promise<void>;
 }, externalSignal?: AbortSignal): Promise<CloudWorkflowOutput[]> {
   const store = useAppStore.getState();
   const workflow = store.workflows.find((item) => item.id === params.workflowId);
@@ -335,7 +340,7 @@ export async function executeWorkflowApi(params: {
   const projectId = context?.projectId ?? store.currentProjectId;
   const node = store.nodes.find((item) => item.id === params.nodeId);
   if (!projectId || store.currentProjectId !== projectId || (!params.nodeId && !context)
-    || (params.nodeId && (!node || node.data.workflowId !== workflow.id || node.data.type !== nodeType))
+    || (params.nodeId && (!node || node.data.workflowId !== workflow.id || getGenerationNodeType(node.data.type) !== nodeType))
     || workflow.category !== nodeType) throw new Error('工作流与当前项目或节点输出类型不匹配');
   const trackingId = params.nodeId ?? `workflow-api-message-${context!.messageId}`;
   if (getPendingTasksForProject(projectId).some((task) => task.nodeId === trackingId)) throw new Error('已有工作流任务，请先继续查询或在平台确认远端任务结束');
@@ -365,6 +370,7 @@ export async function executeWorkflowApi(params: {
     stage('准备素材');
     const variables = manifest.version === 2 ? await prepareDeclaredWorkflowVariables(manifest, params.prompt, params.inputs, params.references, signal) : undefined;
     const body = manifest.version === 1 ? await buildWorkflowApiInputs(manifest, params.prompt, params.inputs, params.references, signal) : undefined;
+    if (params.beforeSubmit) await params.beforeSubmit();
     if (!fresh()) throw new Error('画布已变化，未提交工作流');
     stage('提交任务');
     savePendingTask({ nodeId: trackingId, projectId, nodeType, provider: 'workflow-api',
@@ -396,7 +402,12 @@ export async function executeWorkflowApi(params: {
     return saved;
   } catch (error) {
     if (manifest.version === 2 && error instanceof Error) error.message = responseMessage(error.message, connection.apiKey || '\u0000');
-    const canReport = fresh();
+    // 结束旧任务的等待状态不回填媒体；revision 变化不能把节点永久留在 loading。
+    const current = useAppStore.getState();
+    const canReport = !signal.aborted && current.currentProjectId === projectId
+      && (!submitting || ownsRecord())
+      && current.nodes.some((item) => item.id === params.nodeId && getGenerationNodeType(item.data.type) === nodeType
+        && item.data.workflowId === workflow.id && item.data.status === 'loading');
     if (ownsRecord() && (error instanceof WorkflowApiTaskFailed || (submitting && !taskId && error instanceof WorkflowApiRequestError && error.rejected))) removePendingTask(trackingId, taskId);
     if (params.nodeId && canReport) useAppStore.getState().updateNodeDataTransient(params.nodeId, {
       status: 'error', error: error instanceof Error ? error.message : '工作流执行失败',

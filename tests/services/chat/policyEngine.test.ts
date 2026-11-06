@@ -1,3 +1,6 @@
+/**
+ * policyEngine — 回归测试：evaluateAgentToolPolicy。
+ */
 import { describe, expect, it, vi } from 'vitest';
 import { evaluateAgentToolPolicy } from '../../../src/services/chat/policyEngine';
 import type {
@@ -68,6 +71,7 @@ describe('evaluateAgentToolPolicy', () => {
     'memory_write',
     'config_write',
     'asset_write',
+    'external_write',
   ])('denies %s independently in plan mode', (effect) => {
     expect(evaluateAgentToolPolicy(createTool(effect), {}, context('plan'))).toEqual({
       outcome: 'deny',
@@ -84,6 +88,7 @@ describe('evaluateAgentToolPolicy', () => {
     'memory_write',
     'config_write',
     'asset_write',
+    'external_write',
   ])('allows %s automatically in autonomous mode', (effect) => {
     expect(evaluateAgentToolPolicy(createTool(effect), {}, context('autonomous')))
       .toMatchObject({ outcome: 'allow' });
@@ -97,6 +102,7 @@ describe('evaluateAgentToolPolicy', () => {
     'memory_write',
     'config_write',
     'asset_write',
+    'external_write',
   ])('requires approval for %s in collaborative mode', (effect) => {
     expect(evaluateAgentToolPolicy(createTool(effect), {}, context('collaborative'))).toEqual(
       expect.objectContaining({

@@ -1,8 +1,17 @@
 /**
+ * conversationExecutionController — 编排消息提交、任务续跑与会话审批。
+ */
+import { sanitizeDomainText } from './subAgentMaterials';
+import { subscribeAgentLifecycle } from './agentLifecycle';
+/**
  * 对话提交与恢复的统一控制层，按会话模式分派普通回复、Agent 任务和显式媒体生成。
  * 组件只调用本模块，不直接拼接运行时、调度器或审批流程。
  */
-import { MEDIA_PERSIST_FAILED_MESSAGE, runMediaGeneration } from '../ai/generationRuntime';
+import { completeMediaMessageDelivery, MEDIA_PERSIST_FAILED_MESSAGE, runMediaGeneration } from '../ai/generationRuntime';
+import { getPendingTasksForProject, isMediaTaskPausedError } from '../pollManager';
+import { completeCanvasDerivation } from '../canvasDerivationGuard';
+import { completeRunningHubNodeTask } from '../ai/providers/runninghubWorkflow';
+import { persistMessage } from './chatHistoryService';
 import { workflowExecution } from '../workflowExecutionService';
 import { completeWorkflowApiNodeTask } from '../workflowApi/workflowApiAdapter';
 import {
@@ -22,7 +31,7 @@ import {
   validateTaskResumable,
   type AgentResumeValidation,
 } from './agentRuntime';
-import { enqueueAgentInterjection } from './agentInterjection';
+import { enqueueAgentInterjection, MAX_INTERJECTION_CHARS } from './agentInterjection';
 import {
   getActiveConversationAgentTaskId,
   scheduleConversationAgentExecution,
@@ -39,6 +48,8 @@ import {
   SKILL_CONTENT_LIMITS,
 } from '../skillPromptService';
 import { useAppStore } from '../../store/useAppStore';
+import { formatChatImageReference, parseChatImageReferences, MAX_CHAT_IMAGES } from './chatImageReferenceService';
+import { GENERAL_ASSISTANT_SCOPE_ID, isGeneralAssistantScope, resolveAssistantToolAllowlist } from './assistantScope';
 import type { ChatMessage } from '../../types/chat';
 import {
   type AgentApprovalResolution,
@@ -58,12 +69,14 @@ const STREAMING_UI_FLUSH_INTERVAL_MS = 50;
 
 interface StreamingMessageBuffer {
   append: (delta: string) => void;
+  appendReasoning: (delta: string) => void;
   flush: () => void;
   cancel: () => void;
 }
 
 export interface SubmitConversationMessageOptions {
   content: string;
+  imageFileNames?: string[];
   conversationId: string;
   projectId?: string;
   mode?: AgentMode;
@@ -100,20 +113,27 @@ function createStreamingMessageBuffer(
   onProgress?: () => void,
 ): StreamingMessageBuffer {
   let pendingText = '';
+  let reasoning = '';
+  let reasoningDirty = false;
+  let closed = false;
+  const original = useAppStore.getState().messages.find((item) => item.id === messageId);
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   const flushPending = () => {
     flushTimer = null;
-    if (!pendingText) return;
+    if (closed || (!pendingText && !reasoningDirty)) return;
     const delta = pendingText;
     pendingText = '';
     const store = useAppStore.getState();
     const message = store.messages.find((item) => item.id === messageId);
-    if (!message) return;
+    if (!message || message.conversationId !== original?.conversationId || message.agentTaskId !== original?.agentTaskId) return;
     store.updateMessageTransient(messageId, {
       content: (message.content || '') + delta,
+      ...(reasoningDirty ? { reasoning: sanitizeDomainText(reasoning).replace(/\b(?:sk|key|token)-[A-Za-z0-9_-]*/gi, '[已脱敏密钥]'), reasoningTruncated: reasoning.length >= 12000 } : {}),
       status: 'streaming',
+      activity: delta ? 'responding' : 'planning',
     });
+    reasoningDirty = false;
     onProgress?.();
   };
 
@@ -125,11 +145,17 @@ function createStreamingMessageBuffer(
 
   return {
     append: (delta) => {
-      if (!delta) return;
+      if (closed || !delta) return;
       pendingText += delta;
       if (!flushTimer) {
         flushTimer = setTimeout(flushPending, STREAMING_UI_FLUSH_INTERVAL_MS);
       }
+    },
+    appendReasoning: (delta) => {
+      if (closed || !delta) return;
+      reasoning = (reasoning + delta).slice(0, 12000);
+      reasoningDirty = true;
+      if (!flushTimer) flushTimer = setTimeout(flushPending, STREAMING_UI_FLUSH_INTERVAL_MS);
     },
     flush: () => {
       clearFlushTimer();
@@ -138,6 +164,8 @@ function createStreamingMessageBuffer(
     cancel: () => {
       clearFlushTimer();
       pendingText = '';
+      reasoningDirty = false;
+      closed = true;
     },
   };
 }
@@ -174,26 +202,44 @@ export function resolveConversationAgentApproval(
 
 export function submitConversationMessage({
   content,
+  imageFileNames = [],
   conversationId,
   projectId,
   mode,
   dispatchMode = 'queue',
   onProgress,
 }: SubmitConversationMessageOptions): SubmitConversationMessageResult {
-  const text = content.trim();
+  const store = useAppStore.getState();
+  const pending = store.chatImageDrafts[conversationId] ?? [];
+  const images = pending.filter((image) => imageFileNames.includes(image.fileName));
+  if (imageFileNames.some((fileName) => !images.some((image) => image.fileName === fileName))) {
+    store.showToast('参考图已移除或不属于当前对话，请重新检查附件', 'error');
+    return { status: 'ignored' };
+  }
+  const text = [content.trim(), ...images.map(formatChatImageReference)].filter(Boolean).join('\n');
   if (!text || !conversationId) return { status: 'ignored' };
+  if (new Set(parseChatImageReferences(text).map((image) => image.fileName)).size > MAX_CHAT_IMAGES) {
+    store.showToast(`每条消息最多添加 ${MAX_CHAT_IMAGES} 张参考图`, 'error');
+    return { status: 'ignored' };
+  }
+  if (dispatchMode === 'interject' && parseChatImageReferences(text).length > 0 && text.length > MAX_INTERJECTION_CHARS) {
+    store.showToast('文字与参考图引用超过当前任务追加上限，请缩短文字或使用排队发送', 'error');
+    return { status: 'ignored' };
+  }
 
   const interjectedTaskId = dispatchMode === 'interject'
     ? tryInterjectConversationMessage(conversationId, text)
     : undefined;
   if (interjectedTaskId) {
+    store.removeChatImageDrafts(conversationId, images.map((image) => image.fileName));
     onProgress?.();
     return { status: 'interjected', taskId: interjectedTaskId };
   }
 
-  const store = useAppStore.getState();
   const conversation = store.conversations.find((item) => item.id === conversationId);
-  const executionProjectId = projectId ?? conversation?.projectId ?? store.currentProjectId ?? '';
+  // 窗口快照可能晚于项目切换；通用会话绝不能因此继承新画布权限。
+  const executionProjectId = isGeneralAssistantScope(conversation?.projectId)
+    ? GENERAL_ASSISTANT_SCOPE_ID : projectId ?? conversation?.projectId ?? store.currentProjectId ?? '';
   const userMessage: ChatMessage = {
     id: createMessageId(),
     conversationId,
@@ -203,6 +249,7 @@ export function submitConversationMessage({
     status: 'done',
   };
   store.addMessage(userMessage);
+  store.removeChatImageDrafts(conversationId, images.map((image) => image.fileName));
 
   const assistantMessage: ChatMessage = {
     id: createMessageId(),
@@ -259,7 +306,7 @@ function startAgentMessageExecution({
       userMessageId,
       mode,
       goal: text,
-      toolAllowlist: resolveSkillBindingToolAllowlist(skillBindings),
+      toolAllowlist: resolveAssistantToolAllowlist(projectId, resolveSkillBindingToolAllowlist(skillBindings)),
       skillBindings,
     });
     taskId = task.id;
@@ -371,118 +418,173 @@ function driveAgentTask(
 
     if (resolveAssistantModel(projectId)) {
       const streamingMessage = createStreamingMessageBuffer(assistantMessageId, onProgress);
-      const availableTools = getAvailableAgentTools({
-        taskId,
-        projectId,
-        conversationId,
-        mode,
-        toolAllowlist: task.toolAllowlist,
+      useAppStore.getState().updateMessageTransient(assistantMessageId, { reasoning: undefined, reasoningTruncated: undefined, responseError: undefined, activity: 'connecting', activityStartedAt: Date.now() });
+      const unsubscribe = subscribeAgentLifecycle((event) => {
+        if (signal.aborted) return;
+        if (event.type === 'context.compression' && event.conversationId === conversationId && (!event.taskId || event.taskId === taskId)) {
+          useAppStore.getState().updateMessageTransient(assistantMessageId, { activity: event.phase === 'start' ? 'compressing' : 'planning', activityStartedAt: event.timestamp });
+        } else if (event.type === 'model.round' && event.taskId === taskId && event.phase === 'start') {
+          useAppStore.getState().updateMessageTransient(assistantMessageId, { activity: 'planning', activityStartedAt: event.timestamp });
+        }
       });
-      if (
-        availableTools.length > 0
-        || mode === 'plan'
-        || task.toolAllowlist !== undefined
-      ) {
-        return runAgentLoop({
+      try {
+        const availableTools = getAvailableAgentTools({
           taskId,
-          systemPrompt: buildAssistantSystemPrompt({
-            agentTools: true,
-            projectId,
-            includeCanvasContext: useAppStore.getState().currentProjectId === projectId,
-          }),
-          userMessage: task.skillBindings === undefined
-            ? expandSkillReferences(text, [...store.userSkills, ...store.agentPackageSkills])
-            : expandSkillBindings(text, task.skillBindings),
-          excludeMessageIds: [userMessageId, assistantMessageId],
-          signal,
-          callbacks: {
-            onTextDelta: streamingMessage.append,
-            onComplete: (fullText) => {
-              streamingMessage.cancel();
-              useAppStore.getState().updateMessage(assistantMessageId, {
-                content: fullText,
-                status: 'done',
-              });
-              onProgress?.();
-            },
-            onApprovalRequired: (step) => {
-              streamingMessage.flush();
-              const currentStore = useAppStore.getState();
-              const message = currentStore.messages.find(
-                (item) => item.id === assistantMessageId,
-              );
-              currentStore.updateMessage(assistantMessageId, {
-                content: message?.content || `等待确认：${step.title}`,
-                status: 'preview',
-              });
-            },
-            onToolResult: (result) => {
-              if (!result.sources?.length) return;
-              const currentStore = useAppStore.getState();
-              const message = currentStore.messages.find(
-                (item) => item.id === assistantMessageId,
-              );
-              const sources = [...(message?.sources ?? [])];
-              for (const source of result.sources) {
-                if (!sources.some((item) => item.url === source.url)) sources.push(source);
-              }
-              currentStore.updateMessage(assistantMessageId, { sources });
-              onProgress?.();
-            },
-            onError: (error) => {
-              streamingMessage.cancel();
-              failed = true;
-              useAppStore.getState().updateMessage(assistantMessageId, {
-                content: `处理失败: ${error}`,
-                status: 'error',
-                finishReason: 'error',
-              });
-            },
-          },
+          projectId,
+          conversationId,
+          mode,
+          toolAllowlist: task.toolAllowlist,
         });
-      }
+        if (
+          availableTools.length > 0
+          || isGeneralAssistantScope(projectId)
+          || mode === 'plan'
+          || task.toolAllowlist !== undefined
+        ) {
+          const outcome = await runAgentLoop({
+            taskId,
+            systemPrompt: buildAssistantSystemPrompt({
+              agentTools: true,
+              includeToolGuidance: false,
+              projectId,
+              includeCanvasContext: useAppStore.getState().currentProjectId === projectId,
+            }),
+            userMessage: task.skillBindings === undefined
+              ? expandSkillReferences(text, [...store.userSkills, ...store.agentPackageSkills])
+              : expandSkillBindings(text, task.skillBindings),
+            excludeMessageIds: [userMessageId, assistantMessageId],
+            signal,
+            callbacks: {
+              onTextDelta: streamingMessage.append,
+          onReasoningDelta: streamingMessage.appendReasoning,
+              onComplete: (fullText) => {
+                streamingMessage.flush();
+                streamingMessage.cancel();
+                useAppStore.getState().updateMessage(assistantMessageId, {
+                  content: fullText,
+                  status: 'done',
+                });
+                onProgress?.();
+              },
+              onApprovalRequired: (step) => {
+                streamingMessage.flush();
+                const currentStore = useAppStore.getState();
+                const message = currentStore.messages.find(
+                  (item) => item.id === assistantMessageId,
+                );
+                currentStore.updateMessage(assistantMessageId, {
+                  content: message?.content || `等待确认：${step.title}`,
+                  status: 'preview',
+                });
+              },
+              onToolResult: (result) => {
+                if (!result.sources?.length) return;
+                const currentStore = useAppStore.getState();
+                const message = currentStore.messages.find(
+                  (item) => item.id === assistantMessageId,
+                );
+                const sources = [...(message?.sources ?? [])];
+                for (const source of result.sources) {
+                  if (!sources.some((item) => item.url === source.url)) sources.push(source);
+                }
+                currentStore.updateMessage(assistantMessageId, { sources });
+                onProgress?.();
+              },
+              onError: (error) => {
+                if (signal.aborted) return;
+                streamingMessage.flush();
+                streamingMessage.cancel();
+                failed = true;
+                useAppStore.getState().updateMessage(assistantMessageId, {
+                  content: useAppStore.getState().messages.find((item) => item.id === assistantMessageId)?.content || `处理失败: ${error}`,
+              responseError: sanitizeDomainText(error).slice(0, 1000),
+                  status: useAppStore.getState().agentTasks.find((item) => item.id === taskId)?.status === 'paused' ? 'interrupted' : 'error',
+                  finishReason: 'error',
+                });
+              },
+            },
+          });
+          if (outcome === 'paused' && useAppStore.getState().agentTasks.find(
+            (item) => item.id === taskId,
+          )?.pausedReason === 'model_output_truncated') {
+            streamingMessage.flush();
+            streamingMessage.cancel();
+            const current = useAppStore.getState().messages.find((item) => item.id === assistantMessageId);
+            useAppStore.getState().updateMessage(assistantMessageId, {
+              content: current?.content || '模型回复达到输出上限，本轮工具提案未执行，可继续任务。',
+              status: 'partial',
+              finishReason: 'length',
+            });
+            onProgress?.();
+          }
+          return outcome;
+        }
 
-      await runStreamingPipeline(text, conversationId, {
-        onTextDelta: streamingMessage.append,
-        onComplete: (fullText, results) => {
-          streamingMessage.cancel();
-          useAppStore.getState().updateMessage(assistantMessageId, {
-            content: fullText,
-            status: 'done',
-            executionResults: results.length > 0 ? results : undefined,
+        await runStreamingPipeline(text, conversationId, {
+          onTextDelta: streamingMessage.append,
+          onReasoningDelta: streamingMessage.appendReasoning,
+          onComplete: (fullText, results) => {
+            streamingMessage.flush();
+            streamingMessage.cancel();
+            useAppStore.getState().updateMessage(assistantMessageId, {
+              content: fullText,
+              status: 'done',
+              executionResults: results.length > 0 ? results : undefined,
+            });
+            onProgress?.();
+          },
+          onError: (error) => {
+            if (signal.aborted) return;
+            streamingMessage.flush();
+            streamingMessage.cancel();
+            failed = true;
+            useAppStore.getState().updateMessage(assistantMessageId, {
+              content: useAppStore.getState().messages.find((item) => item.id === assistantMessageId)?.content || `处理失败: ${error}`,
+              responseError: sanitizeDomainText(error).slice(0, 1000),
+              status: 'error',
+              finishReason: 'error',
+            });
+          },
+          onMediaIntent: (intent) => {
+            void triggerMediaGeneration(assistantMessageId, intent);
+          },
+          signal,
+        }, projectId);
+        return failed ? 'failed' : 'completed';
+      } finally {
+        streamingMessage.flush();
+        streamingMessage.cancel();
+        unsubscribe();
+        const currentStore = useAppStore.getState();
+        const currentMessage = currentStore.messages.find((item) => item.id === assistantMessageId);
+        const currentTask = currentStore.agentTasks.find((item) => item.id === taskId);
+        if (currentMessage?.status === 'streaming' && (signal.aborted || currentTask?.status === 'paused')) {
+          currentStore.updateMessage(assistantMessageId, {
+            status: currentTask?.status === 'stopped' ? 'canceled' : 'interrupted',
+            finishReason: signal.aborted ? 'canceled' : currentMessage.finishReason,
           });
-          onProgress?.();
-        },
-        onError: (error) => {
-          streamingMessage.cancel();
-          failed = true;
-          useAppStore.getState().updateMessage(assistantMessageId, {
-            content: `处理失败: ${error}`,
-            status: 'error',
-            finishReason: 'error',
-          });
-        },
-        onMediaIntent: (intent) => {
-          void triggerMediaGeneration(assistantMessageId, intent);
-        },
-        signal,
-      }, projectId);
-      return failed ? 'failed' : 'completed';
+        }
+        useAppStore.getState().updateMessageTransient(assistantMessageId, { activity: undefined, activityStartedAt: undefined });
+      }
     }
 
-    if (mode === 'plan' || task.toolAllowlist !== undefined) {
+    if (isGeneralAssistantScope(projectId) || mode === 'plan' || task.toolAllowlist !== undefined) {
       useAppStore.getState().updateMessage(assistantMessageId, {
-        content: mode === 'plan'
+        content: isGeneralAssistantScope(projectId)
+          ? '未选择可用的对话文本模型，本次请求尚未处理。请在输入框下方选择已配置的文本模型后重试。'
+          : mode === 'plan'
           ? 'Plan 模式需要配置文本模型后才能生成分析与规划；未执行任何写操作。'
           : '该 Skill 声明了工具限制，需要配置文本模型后才能安全执行；未执行任何操作。',
-        status: 'done',
+        status: 'error',
+        finishReason: 'error',
       });
       onProgress?.();
-      return 'completed';
+      return 'failed';
     }
 
     try {
       const result = await runAssistantPipeline(text, conversationId, projectId);
+      if (result.errorCode) throw new Error(result.reply);
       useAppStore.getState().updateMessage(assistantMessageId, {
         content: result.reply,
         status: 'done',
@@ -521,7 +623,7 @@ function tryInterjectConversationMessage(
   return taskId;
 }
 
-async function triggerMediaGeneration(
+export async function triggerMediaGeneration(
   messageId: string,
   intent: MediaGenerationIntent,
 ): Promise<void> {
@@ -529,7 +631,7 @@ async function triggerMediaGeneration(
   const projectId = store.currentProjectId;
   const originMessage = store.messages.find((message) => message.id === messageId);
   const apiWorkflow = store.workflows.find((workflow) => workflow.adapterType === 'workflow-api' && `workflow-api/${workflow.id}` === intent.modelRef);
-  const taskContext = apiWorkflow && projectId && originMessage ? {
+  const taskContext = projectId && originMessage ? {
     projectId, conversationId: originMessage.conversationId, messageId, deliveryMode: intent.deliveryMode,
   } : undefined;
   const isCurrentApiMessage = () => useAppStore.getState().currentProjectId === projectId
@@ -557,8 +659,8 @@ async function triggerMediaGeneration(
   });
   try {
     store.updateMessage(messageId, { mediaStatus: 'generating' });
-    const result = await runMediaGeneration(intent, projectId, undefined, apiWorkflow ? targetNodeId : undefined, taskContext);
-    if (apiWorkflow && !isCurrentApiMessage()) return;
+    const result = await runMediaGeneration(intent, projectId, undefined, targetNodeId, taskContext);
+    if (!isCurrentApiMessage()) return;
     const nodeCreated = placeholderLifecycle
       ? settleMediaPlaceholderLifecycle(placeholderLifecycle, result)
       : targetNodeId ? useAppStore.getState().settleMediaPlaceholder(targetNodeId, result) : false;
@@ -570,6 +672,24 @@ async function triggerMediaGeneration(
       canvasNodeId: targetNodeId,
       canvasError: targetNodeId && !nodeCreated ? MEDIA_PLACEHOLDER_STALE_ERROR : undefined,
     });
+    await completeMediaMessageDelivery(messageId, result, !targetNodeId || nodeCreated);
+    if (projectId && ['runninghub', 'runninghubwf'].includes(result.provider)
+      && result.persistence !== 'failed' && (!targetNodeId || nodeCreated)) {
+      const trackingId = targetNodeId ?? `runninghub-message-${messageId}`;
+      const originalTask = getPendingTasksForProject(projectId).find((task) => task.nodeId === trackingId
+        && task.runninghubMessage?.messageId === messageId);
+      const deliveredMessage = useAppStore.getState().messages.find((message) => message.id === messageId
+        && message.mediaResult?.id === result.id);
+      if (originalTask && deliveredMessage) {
+        await persistMessage(deliveredMessage, projectId, deliveredMessage.conversationId);
+        if (isCurrentApiMessage()
+          && useAppStore.getState().messages.some((message) => message.id === messageId && message.mediaResult?.id === result.id)
+          && getPendingTasksForProject(projectId).some((task) => task.nodeId === trackingId
+            && task.taskId === originalTask.taskId && task.attemptId === originalTask.attemptId)) {
+          completeRunningHubNodeTask(trackingId);
+        }
+      }
+    }
     if (result.workflowApiTaskId && (!targetNodeId || nodeCreated)) completeWorkflowApiNodeTask(targetNodeId ?? `workflow-api-message-${messageId}`, result.workflowApiTaskId);
     // 生成成功不代表已可靠保存，落盘失败必须让用户知道并能重试
     if (result.persistence === 'failed') {
@@ -579,17 +699,20 @@ async function triggerMediaGeneration(
       );
     }
   } catch (error) {
-    if (apiWorkflow && !isCurrentApiMessage()) return;
+    if (!isCurrentApiMessage()) return;
+    const recoverable = isMediaTaskPausedError(error);
+    const submissionUnknown = recoverable && 'reason' in error && error.reason === 'submit_unknown';
     const message = error instanceof Error ? error.message : '未知错误';
-    if (placeholderLifecycle) failMediaPlaceholderLifecycle(placeholderLifecycle, message);
+    if (placeholderLifecycle && recoverable) completeCanvasDerivation(placeholderLifecycle.guard);
+    else if (placeholderLifecycle) failMediaPlaceholderLifecycle(placeholderLifecycle, message);
     else if (targetNodeId) useAppStore.getState().failMediaPlaceholder(targetNodeId, message);
     store.updateMessage(messageId, {
-      mediaStatus: 'failed',
+      mediaStatus: submissionUnknown ? 'submit_unknown' : recoverable ? 'paused' : 'failed',
       mediaError: message,
       canvasStatus: targetNodeId ? 'failed' : 'none',
       canvasNodeId: targetNodeId,
       canvasError: targetNodeId ? message : undefined,
     });
-    store.showToast(`${mediaLabel}生成失败: ${message}`, 'error');
+    store.showToast(recoverable ? `${mediaLabel}任务已保留，可继续查询原任务` : `${mediaLabel}生成失败: ${message}`, recoverable ? 'info' : 'error');
   }
 }

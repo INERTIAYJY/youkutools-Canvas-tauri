@@ -1,0 +1,6 @@
+{
+  "identifier": "project-import",
+  "description": "Project archive exchange is managed by the main window.",
+  "windows": ["main"],
+  "permissions": ["allow-project-import"]
+}

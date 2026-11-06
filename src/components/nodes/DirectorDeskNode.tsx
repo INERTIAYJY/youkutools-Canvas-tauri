@@ -2,9 +2,12 @@
  * DirectorDeskNode — 3D 导演台节点
  * 通过 Tauri 独立窗口打开 Tenney95/3d-director-desk，截图/导出回写本节点。
  */
+import { t, useT } from '../../i18n';
 import Select from '../shared/Select';
 import {
   memo,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -25,7 +28,7 @@ import GooeyBtn from './shared/GooeyBtn';
 import ResizeHandle from './shared/ResizeHandle';
 import { useNodeRename } from './shared/useNodeRename';
 import { useAppStore } from '../../store/useAppStore';
-import { saveDataUrlToProjectData, buildNodeFileName } from '../../services/fileService';
+import { saveDataUrlToProjectData, buildNodeFileName, isTauriEnv } from '../../services/fileService';
 import { collectDirectorImageUrls } from '../../services/directorDeskService';
 import {
   DIRECTOR_RUNTIME_OPTIONS,
@@ -46,9 +49,16 @@ import {
   subscribeDirectorNodeOperations,
 } from '../../services/directorNodeOperationService';
 import type { DirectorNodeOperationRequest, DirectorOperationSnapshot } from '../../types/directorOperation';
+import { loadDirectorPrevisScene, saveDirectorPrevisOutput, subscribeDirectorPrevisOpen } from '../../services/directorPrevisService';
+import LazyLoadBoundary, { LazyLoadFallback } from '../shared/LazyLoadBoundary';
+
+const DirectorPrevisDialog = lazy(() => import('../director/DirectorPrevisDialog'));
 
 const DEFAULT_W = 320;
 const DEFAULT_H = 240;
+
+// 多个导演节点一起载入时，逐个截图并释放 WebGL，避免互相打断 revision 守卫。
+let previsCaptureQueue = Promise.resolve();
 
 function formatBlenderJobStatus(status: DirectorOperationSnapshot): string {
   const phaseLabels: Record<string, string> = {
@@ -58,7 +68,7 @@ function formatBlenderJobStatus(status: DirectorOperationSnapshot): string {
     saving: '保存结果',
     finalizing: '校验结果',
   };
-  if (status.state === 'cancelling') return '正在取消 Blender…';
+  if (status.state === 'cancelling') return t('正在取消 Blender…');
   const phase = status.progress?.phase
     ? (phaseLabels[status.progress.phase] ?? '执行 Blender')
     : status.state === 'preparing'
@@ -66,11 +76,11 @@ function formatBlenderJobStatus(status: DirectorOperationSnapshot): string {
       : status.state === 'collecting'
         ? '回收结果'
         : '执行 Blender';
-  if (!status.progress || status.progress.total <= 0) return `${phase}…`;
+  if (!status.progress || status.progress.total <= 0) return `${t(phase)}…`;
   const percent = Math.min(100, Math.round(
     (status.progress.completed / status.progress.total) * 100,
   ));
-  return `${phase} ${percent}%`;
+  return `${t(phase)} ${percent}%`;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -86,20 +96,23 @@ function DirectorDeskNode({
   data: BaseNodeData;
   selected?: boolean;
 }) {
+  useT();
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const showToast = useAppStore((s) => s.showToast);
   const theme = useAppStore((s) => s.config.theme);
-  const { displayLabel, handleRename } = useNodeRename(id, data, '3D 导演台');
+  const { displayLabel, handleRename } = useNodeRename(id, data, t('3D 导演台'));
 
   const [ready, setReady] = useState(false);
   const [localBusy, setBusy] = useState<string | null>(null);
+  const [previsOpen, setPrevisOpen] = useState(false);
+  const [previsAction, setPrevisAction] = useState<'editor' | 'frame' | 'video'>('editor');
   const activeBlenderOperation = useSyncExternalStore(
     subscribeDirectorNodeOperations,
     useCallback(() => getActiveDirectorNodeOperation(id), [id]),
     () => undefined,
   );
-  const busy = localBusy || (activeBlenderOperation ? formatBlenderJobStatus(activeBlenderOperation) : null);
+  const busy = (localBusy ? t(localBusy) : null) || (activeBlenderOperation ? formatBlenderJobStatus(activeBlenderOperation) : null);
   const videoExportPendingRef = useRef(false);
 
   const instanceId = useMemo(
@@ -134,6 +147,73 @@ function DirectorDeskNode({
   const width = (data.nodeWidth as number) || DEFAULT_W;
   const height = (data.nodeHeight as number) || DEFAULT_H;
   const deskTheme: 'dark' | 'light' = theme === 'light' ? 'light' : 'dark';
+  const projectId = useAppStore((s) => s.currentProjectId);
+  const previsReference = data.directorPrevisScene;
+  const capturedPrevis = useRef(captureUrls.length ? previsReference?.sha256 : undefined);
+  const lastPrevisImage = useRef(data.imageUrl);
+  const captureBinding = useRef({ projectId, instanceId });
+
+  useEffect(() => {
+    if (captureBinding.current.projectId !== projectId || captureBinding.current.instanceId !== instanceId) {
+      captureBinding.current = { projectId, instanceId };
+      capturedPrevis.current = data.imageUrl ? previsReference?.sha256 : undefined;
+      lastPrevisImage.current = data.imageUrl;
+    }
+    // 面板里手动同步过的当前帧已经是最新输出，不再用起始帧覆盖它。
+    if (data.imageUrl && data.imageUrl !== lastPrevisImage.current) {
+      capturedPrevis.current = previsReference?.sha256;
+    }
+    lastPrevisImage.current = data.imageUrl;
+    if (runtimeKind !== 'ai-threejs' || !projectId || !previsReference || !isTauriEnv()
+      || previsOpen || data.status === 'loading' || capturedPrevis.current === previsReference.sha256) return;
+    const controller = new AbortController();
+    previsCaptureQueue = previsCaptureQueue.then(async () => {
+      if (controller.signal.aborted) return;
+      const state = useAppStore.getState();
+      const current = state.nodes.find((node) => node.id === id)?.data;
+      if (state.currentProjectId !== projectId || current?.directorInstanceId !== instanceId
+        || current?.directorRuntimeKind !== 'ai-threejs' || current.status === 'loading'
+        || current?.directorPrevisScene?.sha256 !== previsReference.sha256) return;
+      setBusy('同步预演截图…');
+      try {
+        await saveDirectorPrevisOutput(id, 'image', async (signal) => {
+          const scene = await loadDirectorPrevisScene(projectId, previsReference);
+          signal.throwIfAborted();
+          const { createDirectorPrevisRenderer } = await import('../../services/directorPrevisRenderer');
+          signal.throwIfAborted();
+          const mount = document.createElement('div');
+          mount.className = 'fixed invisible pointer-events-none h-48 w-80';
+          document.body.appendChild(mount);
+          let renderer: ReturnType<typeof createDirectorPrevisRenderer> | undefined;
+          try {
+            renderer = createDirectorPrevisRenderer(mount, scene);
+            // 未打开面板时，播放位置从零开始；只截摄影机画面。
+            return renderer.capture(0);
+          } finally {
+            renderer?.dispose();
+            mount.remove();
+          }
+        }, controller.signal);
+        capturedPrevis.current = previsReference.sha256;
+      } catch (error) {
+        if (!controller.signal.aborted && !isAbortError(error)) {
+          showToast(t('预演自动截图失败，可点击“同步当前帧”重试'), 'error');
+        }
+      } finally {
+        if (!controller.signal.aborted) setBusy(null);
+      }
+    });
+    return () => { controller.abort(); setBusy(null); };
+  }, [data.imageUrl, data.status, id, instanceId, previsOpen, previsReference, projectId, runtimeKind, showToast]);
+
+  useEffect(() => {
+    if (runtimeKind !== 'ai-threejs') return;
+    const unsubscribe = subscribeDirectorPrevisOpen(instanceId, () => {
+      setPrevisAction('editor'); setPrevisOpen(true);
+    });
+    return () => { unsubscribe(); setPrevisOpen(false); };
+  }, [instanceId, runtimeKind]);
+  const closePrevis = useCallback(() => setPrevisOpen(false), []);
 
   useEffect(() => {
     if (data.directorInstanceId === instanceId) return;
@@ -154,7 +234,7 @@ function DirectorDeskNode({
     try {
       await startDirectorNodeOperation({ nodeId: id, operation }, { source: 'ui', projectId }, { allowSetup: true });
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Blender 操作失败', 'error');
+      showToast(error instanceof Error ? error.message : t('Blender 操作失败'), 'error');
     }
   }, [id, showToast]);
 
@@ -221,7 +301,7 @@ function DirectorDeskNode({
       }
 
       if (added === 0) {
-        showToast('未收到有效截图', 'error');
+        showToast(t('未收到有效截图'), 'error');
         return;
       }
 
@@ -245,7 +325,7 @@ function DirectorDeskNode({
         directorStatus: 'ready',
       });
       liveState.incrementRevision();
-      showToast(`已同步 ${added} 张导演台截图到节点`);
+      showToast(t('已同步 {count} 张导演台截图到节点', { count: added }));
     },
     [id, showToast],
   );
@@ -274,6 +354,10 @@ function DirectorDeskNode({
 
   const handleOpen = useCallback(async () => {
     if (busy) return;
+    if (runtimeKind === 'ai-threejs') {
+      setPrevisAction('editor'); setPrevisOpen(true);
+      return;
+    }
     if (runtimeKind === 'blender') {
       await runBlenderOperation('open-editor');
       return;
@@ -294,7 +378,7 @@ function DirectorDeskNode({
         updateNodeDataTransient(id, { directorStatus: captureUrls.length ? 'ready' : 'idle', error: undefined });
         return;
       }
-      const message = error instanceof Error ? error.message : '打开 3D 导演台失败';
+      const message = error instanceof Error ? error.message : t('打开 3D 导演台失败');
       setReady(false);
       updateNodeDataTransient(id, { directorStatus: 'idle', error: message });
       showToast(message, 'error');
@@ -305,12 +389,16 @@ function DirectorDeskNode({
 
   const handleExportFrame = useCallback(async () => {
     if (busy) return;
+    if (runtimeKind === 'ai-threejs') {
+      setPrevisAction('frame'); setPrevisOpen(true);
+      return;
+    }
     if (runtimeKind === 'blender') {
       await runBlenderOperation('render-frame');
       return;
     }
     if (!ready) {
-      showToast('请先打开并等待导演台就绪', 'error');
+      showToast(t('请先打开并等待导演台就绪'), 'error');
       return;
     }
     setBusy('导出当前帧…');
@@ -321,7 +409,7 @@ function DirectorDeskNode({
       });
       await persistCaptures([result]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '导出帧失败';
+      const message = error instanceof Error ? error.message : t('导出帧失败');
       showToast(message, 'error');
       updateNodeDataTransient(id, { error: message });
     } finally {
@@ -331,12 +419,16 @@ function DirectorDeskNode({
 
   const handleExportVideo = useCallback(async () => {
     if (busy || videoExportPendingRef.current) return;
+    if (runtimeKind === 'ai-threejs') {
+      setPrevisAction('video'); setPrevisOpen(true);
+      return;
+    }
     if (runtimeKind === 'blender') {
       await runBlenderOperation('render-video');
       return;
     }
     if (!ready) {
-      showToast('请先打开并等待导演台就绪', 'error');
+      showToast(t('请先打开并等待导演台就绪'), 'error');
       return;
     }
     videoExportPendingRef.current = true;
@@ -366,9 +458,9 @@ function DirectorDeskNode({
         status: 'success', directorStatus: 'ready', error: undefined,
       });
       state.incrementRevision();
-      showToast('参考视频已写入节点；图生视频请优先使用同步的截图/帧');
+      showToast(t('参考视频已写入节点；图生视频请优先使用同步的截图/帧'));
     } catch (error) {
-      const message = error instanceof Error ? error.message : '导出视频失败';
+      const message = error instanceof Error ? error.message : t('导出视频失败');
       showToast(message, 'error');
       updateNodeDataTransient(id, { error: message });
     } finally {
@@ -383,9 +475,10 @@ function DirectorDeskNode({
     if (!projectId || nextKind === runtimeKind) return;
     try {
       setDirectorNodeRuntime(id, nextKind, { source: 'ui', projectId });
+      setPrevisOpen(false);
       setReady(false);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : '切换运行时失败', 'error');
+      showToast(error instanceof Error ? error.message : t('切换运行时失败'), 'error');
     }
   }, [id, runtimeKind, showToast]);
 
@@ -395,7 +488,8 @@ function DirectorDeskNode({
     && runtimeResolution.descriptor.capabilities.exportFrame;
   const canExportVideo = runtimeResolution.supported
     && runtimeResolution.descriptor.capabilities.exportVideo;
-  const runtimeReadyForExport = runtimeKind === 'blender' || ready;
+  const runtimeReadyForExport = runtimeKind === 'blender' || ready
+    || (runtimeKind === 'ai-threejs' && !!data.directorPrevisScene);
 
   return (
     <>
@@ -419,12 +513,12 @@ function DirectorDeskNode({
                 value={runtimeKind ?? ''}
                 onChange={handleRuntimeChange}
                 disabled={!!busy}
-                aria-label="3D 导演运行时"
-                data-tooltip={runtimeUnavailableReason}
+                aria-label={t('3D 导演运行时')}
+                data-tooltip={runtimeUnavailableReason ? t(runtimeUnavailableReason) : undefined}
                 className="min-w-0 max-w-[180px]" size="sm"
               >
                 {!runtimeResolution.supported && (
-                  <option value="" disabled>未知运行时</option>
+                  <option value="" disabled>{t('未知运行时')}</option>
                 )}
                 {DIRECTOR_RUNTIME_OPTIONS.map((option) => (
                   <option
@@ -432,7 +526,7 @@ function DirectorDeskNode({
                     value={option.kind}
                     disabled={!option.selectable && runtimeKind !== option.kind}
                   >
-                    {option.label}
+                    {t(option.label)}
                   </option>
                 ))}
               </Select>
@@ -455,9 +549,9 @@ function DirectorDeskNode({
             ) : (
               <div className="node-preview-placeholder">
                 <Icon icon="mdi:video-3d" width={28} height={28} />
-                <span>{runtimeDescriptor?.label ?? '未知运行时'}</span>
+                <span>{runtimeDescriptor ? t(runtimeDescriptor.label) : t('未知运行时')}</span>
                 <span className="text-node-edit-hint">
-                  {runtimeUnavailableReason || '双击打开 · 同步截图后连线生视频'}
+                  {runtimeUnavailableReason ? t(runtimeUnavailableReason) : t('双击打开 · 同步截图后连线生视频')}
                 </span>
               </div>
             )}
@@ -474,25 +568,27 @@ function DirectorDeskNode({
                 if (busy && runtimeKind === 'blender') cancelActiveBlenderOperation();
                 else void handleOpen();
               }}
-              data-tooltip={runtimeUnavailableReason}
+              data-tooltip={runtimeUnavailableReason ? t(runtimeUnavailableReason) : undefined}
             >
               {busy && runtimeKind === 'blender'
-                ? '取消任务'
+                ? t('取消任务')
                 : canOpenRuntime
                   ? runtimeKind === 'blender'
-                    ? '打开 Blender'
+                    ? t('打开 Blender')
+                    : runtimeKind === 'ai-threejs'
+                      ? t('打开镜头预演')
                     : ready
-                      ? '聚焦导演台'
-                      : '打开导演台'
-                  : '运行时不可用'}
+                      ? t('聚焦导演台')
+                      : t('打开导演台')
+                  : t('运行时不可用')}
             </button>
             <button
               type="button"
               className="director-node-btn grid h-7 w-7 place-items-center p-0"
               disabled={!runtimeReadyForExport || !canExportFrame || !!busy}
               onClick={() => { void handleExportFrame(); }}
-              aria-label="同步当前帧"
-              data-tooltip="同步当前帧"
+              aria-label={t('同步当前帧')}
+              data-tooltip={t('同步当前帧')}
             >
               <Icon icon="lucide:scan-line" width={14} height={14} />
             </button>
@@ -501,15 +597,15 @@ function DirectorDeskNode({
               className="director-node-btn grid h-7 w-7 place-items-center p-0"
               disabled={!runtimeReadyForExport || !canExportVideo || !!busy}
               onClick={() => { void handleExportVideo(); }}
-              aria-label="导出参考视频"
-              data-tooltip="导出参考视频"
+              aria-label={t('导出参考视频')}
+              data-tooltip={t('导出参考视频')}
             >
               <Icon icon="lucide:video" width={14} height={14} />
             </button>
             <span className="director-node-meta">
               {busy
-                || runtimeUnavailableReason
-                || (captureUrls.length > 0 ? `${captureUrls.length} 张参考图` : '未同步截图')}
+                || (runtimeUnavailableReason ? t(runtimeUnavailableReason) : null)
+                || (captureUrls.length > 0 ? t('{count} 张参考图', { count: captureUrls.length }) : t('未同步截图'))}
             </span>
           </div>
 
@@ -533,6 +629,13 @@ function DirectorDeskNode({
         />
       </div>
 
+      {previsOpen && runtimeKind === 'ai-threejs' && (
+        <LazyLoadBoundary label={t('AI 镜头预演')} resetKey={instanceId}>
+          <Suspense fallback={<LazyLoadFallback label={t('AI 镜头预演')} />}>
+            <DirectorPrevisDialog nodeId={id} initialAction={previsAction} onClose={closePrevis} />
+          </Suspense>
+        </LazyLoadBoundary>
+      )}
     </>
   );
 }

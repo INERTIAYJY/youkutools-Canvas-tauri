@@ -1,3 +1,6 @@
+/**
+ * shotlistStoryboardService — 回归测试：宫格绑定指定镜头。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ crop: vi.fn(), save: vi.fn(), tauri: vi.fn() }));
 vi.mock('../../src/components/nodes/shared/image/imageUtils', async (original) => ({ ...await original<object>(), cropImageByRanges: mocks.crop }));

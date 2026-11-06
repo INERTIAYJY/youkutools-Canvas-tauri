@@ -1,5 +1,5 @@
 /** Persisted runtime choice for the single ai-director node type. */
-export type DirectorRuntimeKind = 'lightweight-web' | 'blender';
+export type DirectorRuntimeKind = 'lightweight-web' | 'blender' | 'ai-threejs';
 
 export interface DirectorProjectFileReference {
   kind: 'project-file';

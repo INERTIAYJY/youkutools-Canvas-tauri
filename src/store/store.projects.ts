@@ -1,9 +1,14 @@
-﻿/**
+/**
+ * store.projects — 管理项目保存、切换、恢复与项目域数据装配。
+ */
+import { t } from '../i18n';
+/**
  * Project slice — multi-project management, save/load/init via IndexedDB
  */
 import type { Node, Edge } from '@xyflow/react';
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
+import { GENERAL_ASSISTANT_SCOPE_ID } from '../services/chat/assistantScope';
 import type {
   BaseNodeData,
   CanvasProject,
@@ -21,7 +26,7 @@ import {
   seriesOwnerId,
 } from './store.utils';
 import * as fileService from '../services/fileService';
-import { resumePendingTasks, clearProjectTasks } from '../services/pollManager';
+import { resumePendingTasks, clearProjectTasks, getPendingTasksForProject } from '../services/pollManager';
 import { normalizeProjectSettings } from '../services/projectSettingsService';
 import { captureCurrentCanvasSnapshot } from '../services/projectSnapshotService';
 import { stopProjectAgentTasks } from '../services/chat/agentTaskControl';
@@ -31,12 +36,59 @@ import { reassignProjectMemories } from '../services/chat/projectMemoryService';
 import { duplicateProjectArchive, exportProjectArchive, importProjectArchive } from '../services/projectTransferService';
 import {
   getLastActiveProjectId,
+  getProjectById,
   setLastActiveProjectId,
+  updateProjectSnapshot,
 } from '../services/indexedDbService';
+import { serializeProjectRecord, type ProjectSummaryData } from '../services/storageService';
+import { toProjectSummaryRecord } from '../services/indexedDb/projectSummary';
+import {
+  applySharedAssetSyncCommit,
+  type SharedAssetSyncCommitInput,
+  type SharedAssetSyncCommitResult,
+} from '../services/indexedDb/sharedAssetSyncRepository';
 import { describeStorageError, type StorageFailureKind } from '../services/storageQuota';
+import { relocateMediaReferences } from '../services/indexedDb/mediaRelocations';
+import { applyAssetRepairs, cleanupUnavailableAssets, type AssetRepairPreview } from '../services/fs/assetRepair';
+import type { DramaAssetLibrary, DramaAssetWriteOptions } from '../types/dramaAssets';
+import { assertDramaAssetWriteCurrent } from '../types/dramaAssets';
+import { isWebviewRecovery } from '../services/webviewRecoveryService';
+import { normalizeEpisodeAssetRoster, type EpisodeAssetRoster } from '../types/episodeAssets';
+import { prepareProjectImport, previewProjectImport, applyProjectImport, type PreparedProjectImport,
+  restoreProjectImportRecovery, type ProjectImportPreview, type ProjectImportOptions } from '../services/projectImportService';
+import type { ProjectMergeSide } from '../services/projectMergeService';
 
 type ProjectLoadStatus = 'loading' | 'ready' | 'error';
 let activeProjectMetadataWrite: Promise<void> = Promise.resolve();
+const EMPTY_SERIES_CANVAS: readonly never[] = [];
+const projectInitializations: WeakMap<() => AppState, Promise<void>> = import.meta.hot?.data.projectInitializations ?? new WeakMap();
+if (import.meta.hot) import.meta.hot.data.projectInitializations = projectInitializations;
+const pendingProjectSaves: Map<string, Set<Promise<string | undefined>>> = import.meta.hot?.data.pendingProjectSaves ?? new Map();
+if (import.meta.hot) import.meta.hot.data.pendingProjectSaves = pendingProjectSaves;
+
+function trackProjectSave(projectId: string | null, save: (projectId: string | null) => Promise<string | undefined>): Promise<string | undefined> {
+  const operation = save(projectId);
+  if (!projectId) return operation;
+  const pending = pendingProjectSaves.get(projectId) ?? new Set<Promise<string | undefined>>();
+  pending.add(operation);
+  pendingProjectSaves.set(projectId, pending);
+  const cleanup = () => {
+    pending.delete(operation);
+    if (pending.size === 0 && pendingProjectSaves.get(projectId) === pending) pendingProjectSaves.delete(projectId);
+  };
+  void operation.then(cleanup, cleanup);
+  return operation;
+}
+
+/** 等待已发出的完整保存，包括入队前等待和失败分类；这里不发起新保存。 */
+export async function waitForPendingProjectSaves(projectId: string): Promise<boolean> {
+  while (true) {
+    const pending = [...(pendingProjectSaves.get(projectId) ?? [])];
+    if (pending.length === 0) return true;
+    const results = await Promise.allSettled(pending);
+    if (results.some((result) => result.status === 'rejected' || result.value !== projectId)) return false;
+  }
+}
 
 function getProjectGroups(data: { groups?: unknown } | null | undefined): NodeGroup[] {
   return Array.isArray(data?.groups) ? (data.groups as NodeGroup[]) : [];
@@ -63,6 +115,22 @@ function withInheritedDataFolders(projects: CanvasProject[]): CanvasProject[] {
     const inherited = item.parentId ? folderById.get(item.parentId) : undefined;
     return inherited ? { ...item, dataFolder: inherited } : item;
   });
+}
+
+/** 摘要与完整记录共用白名单，保存代际不能在启动投影时丢失。 */
+function toCanvasProjectSummary(record: ProjectSummaryData): CanvasProject {
+  const summary = toProjectSummaryRecord(record);
+  if (!summary) throw new Error('项目摘要无效，无法加载项目');
+  return { ...summary, settings: record.settings };
+}
+
+/** 只接纳已实际读取的记录，并让版本、元数据与画布/角色库来自同一份内容。 */
+function withLoadedProjectSummaries(projects: CanvasProject[], ...records: (ProjectSaveData | null | undefined)[]): CanvasProject[] {
+  const loaded = new Map(records.filter((record): record is ProjectSaveData => !!record).map((record) => [record.id, record]));
+  return withInheritedDataFolders(projects.map((project) => {
+    const record = loaded.get(project.id);
+    return record ? { ...toCanvasProjectSummary(record), revisionScope: project.revisionScope } : project;
+  }));
 }
 
 function hasProjectCanvasData(data: ProjectSaveData | null): data is ProjectSaveData {
@@ -138,10 +206,41 @@ interface PendingProjectSave {
 
 interface ProjectSaveQueue {
   running: boolean;
+  active: PendingProjectSave | null;
   pending: PendingProjectSave | null;
+  pendingSnapshot: { snapshot: string | undefined; waiters: ProjectSaveWaiter[] } | null;
+  idleWaiters: Array<() => void>;
 }
 
-const projectSaveQueues = new Map<string, ProjectSaveQueue>();
+const projectSaveQueues: Map<string, ProjectSaveQueue> = import.meta.hot?.data.projectSaveQueues ?? new Map();
+if (import.meta.hot) import.meta.hot.data.projectSaveQueues = projectSaveQueues;
+interface ProjectAssetSyncBarrier {
+  done: Promise<void>;
+  library: AppState['dramaAssets'];
+}
+const projectAssetSyncBarriers = new Map<string, ProjectAssetSyncBarrier>();
+const projectImportsApplying = new Set<string>();
+// 只保留最近一个共享库的成功记录；不缓存普通画布或跨重载/同步沿用基线。
+const seriesLibraryOwners = new WeakMap<ProjectSaveData, CanvasProject>();
+let confirmedSeriesLibrary: { record: ProjectSaveData; owner: CanvasProject } | undefined;
+let seriesLibrarySaveEpoch = 0;
+function invalidateSeriesLibrarySave() {
+  confirmedSeriesLibrary = undefined;
+  seriesLibrarySaveEpoch += 1;
+}
+const importPreviewGuards = new WeakMap<ProjectImportPreview, () => void>();
+
+function waitForProjectSaveQueue(projectId: string): Promise<void> {
+  const queue = projectSaveQueues.get(projectId);
+  return queue?.running ? new Promise((resolve) => queue.idleWaiters.push(resolve)) : Promise.resolve();
+}
+
+function waitForProjectAssetSync(get: () => AppState): Promise<void> | undefined {
+  const state = get();
+  if (!state.currentProjectId) return;
+  const ownerId = seriesOwnerId(state.projects, state.currentProjectId);
+  return projectAssetSyncBarriers.get(ownerId)?.done;
+}
 let projectSwitchSequence = 0;
 
 interface CapturedCanvasState {
@@ -149,26 +248,44 @@ interface CapturedCanvasState {
   nodes: AppState['nodes'];
   edges: AppState['edges'];
   groups: AppState['groups'];
-  viewportTransform: string;
+  viewportKey: string;
 }
 
 interface CaptureProjectSnapshotOptions {
   allowProjectChange?: boolean;
-  persistRecord?: ProjectSaveData | null;
+  persistSnapshot?: boolean;
 }
 
 let lastCapturedCanvasState: CapturedCanvasState | null = null;
+const latestSnapshotCaptures = new Map<string, number>();
+let nextSnapshotCaptureId = 1;
+if (import.meta.hot) import.meta.hot.dispose(() => {
+  // 热更新前启动的截图不能再回写到新版本的 Store。
+  latestSnapshotCaptures.clear();
+  lastCapturedCanvasState = null;
+});
 
-function getCanvasViewportTransform(): string {
+function getCanvasViewportKey(): string {
   if (typeof document === 'undefined') return '';
   const viewport = document.querySelector<HTMLElement>('.react-flow__viewport');
-  return viewport?.style.transform ?? '';
+  const bounds = document.querySelector<HTMLElement>('.react-flow')?.getBoundingClientRect();
+  return `${viewport?.style.transform ?? ''}|${bounds?.width ?? 0},${bounds?.height ?? 0}`;
 }
 
 function waitForLoadingPaint(): Promise<void> {
   if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
   return new Promise((resolve) => {
-    requestAnimationFrame(() => setTimeout(resolve, 0));
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (frame !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+      resolve();
+    };
+    // 后台/最小化窗口的 rAF 可能被暂停，不能让返回或项目创建一直等首帧。
+    const timer = setTimeout(finish, 100);
+    const frame = requestAnimationFrame(() => setTimeout(finish, 0));
   });
 }
 
@@ -177,7 +294,7 @@ function isCanvasSnapshotFresh(state: AppState, projectId: string): boolean {
     && lastCapturedCanvasState.nodes === state.nodes
     && lastCapturedCanvasState.edges === state.edges
     && lastCapturedCanvasState.groups === state.groups
-    && lastCapturedCanvasState.viewportTransform === getCanvasViewportTransform();
+    && lastCapturedCanvasState.viewportKey === getCanvasViewportKey();
 }
 
 async function drainProjectSaveQueue(projectId: string, queue: ProjectSaveQueue): Promise<void> {
@@ -185,39 +302,97 @@ async function drainProjectSaveQueue(projectId: string, queue: ProjectSaveQueue)
   queue.running = true;
 
   try {
-    while (queue.pending) {
+    while (queue.pending || queue.pendingSnapshot) {
+      if (!queue.pending) {
+        const patch = queue.pendingSnapshot!;
+        queue.pendingSnapshot = null;
+        try {
+          if (confirmedSeriesLibrary?.record.id === projectId) confirmedSeriesLibrary = undefined;
+          await updateProjectSnapshot(projectId, patch.snapshot);
+          patch.waiters.forEach((waiter) => waiter.resolve(projectId));
+        } catch (error) {
+          patch.waiters.forEach((waiter) => waiter.reject(error));
+        }
+        continue;
+      }
       const batch = queue.pending;
       queue.pending = null;
+      queue.active = batch;
 
+      const epoch = seriesLibrarySaveEpoch;
+      if (confirmedSeriesLibrary?.record.id === projectId) confirmedSeriesLibrary = undefined;
       try {
         const savedProjectId = await fileService.saveProject(batch.record);
+        const owner = seriesLibraryOwners.get(batch.record);
+        // 记录队列实际写入的版本，不能把被后续 pending 覆盖的请求误认为已落库。
+        if (owner && epoch === seriesLibrarySaveEpoch && savedProjectId === projectId) {
+          confirmedSeriesLibrary = { record: batch.record, owner };
+        }
         batch.waiters.forEach((waiter) => waiter.resolve(savedProjectId));
       } catch (error) {
         batch.waiters.forEach((waiter) => waiter.reject(error));
+      } finally {
+        queue.active = null;
       }
     }
   } finally {
     queue.running = false;
-    if (queue.pending) {
+    if (queue.pending || queue.pendingSnapshot) {
       void drainProjectSaveQueue(projectId, queue);
     } else if (projectSaveQueues.get(projectId) === queue) {
       projectSaveQueues.delete(projectId);
+      queue.idleWaiters.splice(0).forEach((resolve) => resolve());
     }
   }
 }
 
-function enqueueProjectSave(record: ProjectSaveData): Promise<string> {
-  let queue = projectSaveQueues.get(record.id);
+function getProjectSaveQueue(projectId: string): ProjectSaveQueue {
+  let queue = projectSaveQueues.get(projectId);
   if (!queue) {
-    queue = { running: false, pending: null };
-    projectSaveQueues.set(record.id, queue);
+    queue = { running: false, active: null, pending: null, pendingSnapshot: null, idleWaiters: [] };
+    projectSaveQueues.set(projectId, queue);
   }
+  return queue;
+}
+
+function hasSameProjectSaveContent(left: ProjectSaveData, right: ProjectSaveData): boolean {
+  const keys = Object.keys(left) as Array<keyof ProjectSaveData>;
+  return keys.length === Object.keys(right).length
+    && keys.every((key) => key === 'updatedAt' || left[key] === right[key]);
+}
+
+function enqueueProjectSnapshot(projectId: string, snapshot: string | undefined): Promise<string> {
+  const queue = getProjectSaveQueue(projectId);
+  return new Promise((resolve, reject) => {
+    if (queue.pendingSnapshot) {
+      queue.pendingSnapshot.snapshot = snapshot;
+      queue.pendingSnapshot.waiters.push({ resolve, reject });
+    } else {
+      queue.pendingSnapshot = { snapshot, waiters: [{ resolve, reject }] };
+    }
+    void drainProjectSaveQueue(projectId, queue);
+  });
+}
+
+function enqueueProjectSave(record: ProjectSaveData): Promise<string> {
+  if (projectImportsApplying.has(record.id)) return Promise.reject(new Error('正在应用项目更新，请稍后保存'));
+  const barrier = projectAssetSyncBarriers.get(record.id);
+  if (barrier) {
+    // 屏障前已捕获的节点和项目元数据仍可保存；所属库必须改用屏障释放时的版本。
+    return barrier.done.then(() => enqueueProjectSave({ ...record,
+      ...(record.dramaAssets ? { dramaAssets: barrier.library } : {}),
+    }));
+  }
+  const queue = getProjectSaveQueue(record.id);
 
   return new Promise((resolve, reject) => {
     const waiter = { resolve, reject };
     if (queue.pending) {
       queue.pending.record = record;
       queue.pending.waiters.push(waiter);
+    } else if (queue.active && hasSameProjectSaveContent(queue.active.record, record)) {
+      // 同一不可变画布的自动保存与返回保存共用在途写入；新版本仍排队。
+      queue.active.waiters.push(waiter);
     } else {
       queue.pending = { record, waiters: [waiter] };
     }
@@ -232,6 +407,7 @@ function createCurrentProjectSaveRecord(state: AppState): ProjectSaveData | null
 
   return {
     id: projectId,
+    exchangeEpoch: project.exchangeEpoch,
     name: state.projectName,
     createdAt: project.createdAt,
     updatedAt: Date.now(),
@@ -243,6 +419,7 @@ function createCurrentProjectSaveRecord(state: AppState): ProjectSaveData | null
     episodeOutline: project.episodeOutline,
     episodeScript: project.episodeScript,
     episodeCreative: project.episodeCreative,
+    episodeAssetRoster: project.episodeAssetRoster,
     series: project.series,
     nodes: state.nodes,
     edges: state.edges,
@@ -263,8 +440,9 @@ function createSeriesLibraryRecord(state: AppState): ProjectSaveData | null {
     : undefined;
   if (!series) return null;
 
-  return {
+  const record: ProjectSaveData = {
     id: series.id,
+    exchangeEpoch: series.exchangeEpoch,
     name: series.name,
     createdAt: series.createdAt,
     updatedAt: Date.now(),
@@ -272,11 +450,23 @@ function createSeriesLibraryRecord(state: AppState): ProjectSaveData | null {
     dataFolder: series.dataFolder,
     settings: series.settings,
     series: series.series,
-    nodes: [],
-    edges: [],
-    groups: [],
+    nodes: EMPTY_SERIES_CANVAS,
+    edges: EMPTY_SERIES_CANVAS,
+    groups: EMPTY_SERIES_CANVAS,
     dramaAssets: state.dramaAssets,
   };
+  seriesLibraryOwners.set(record, series);
+  return record;
+}
+
+/** 跳过已确认的共享库重复写入；排队/屏障期间仍走原串行保存流程。 */
+function enqueueSeriesLibrarySave(record: ProjectSaveData): Promise<string> {
+  const confirmed = confirmedSeriesLibrary;
+  if (confirmed && confirmed.owner === seriesLibraryOwners.get(record)
+    && hasSameProjectSaveContent(confirmed.record, record)
+    && !projectSaveQueues.has(record.id) && !projectAssetSyncBarriers.has(record.id)
+    && !projectImportsApplying.has(record.id)) return Promise.resolve(record.id);
+  return enqueueProjectSave(record);
 }
 
 /** 保存当前画布，同时把共享角色库写回它所属的剧集项目。 */
@@ -284,7 +474,7 @@ async function saveCurrentProjectRecord(state: AppState, record: ProjectSaveData
   const libraryRecord = createSeriesLibraryRecord(state);
   const [savedProjectId] = await Promise.all([
     enqueueProjectSave(record),
-    libraryRecord ? enqueueProjectSave(libraryRecord) : Promise.resolve(undefined),
+    libraryRecord ? enqueueSeriesLibrarySave(libraryRecord) : Promise.resolve(undefined),
   ]);
   return savedProjectId;
 }
@@ -327,8 +517,8 @@ function noteSaveFailure(
   };
   set({ autoSaveFailure: next });
   if (shouldNotify) {
-    const prefix = count > 1 ? `自动保存已连续失败 ${count} 次` : '自动保存失败';
-    get().showToast(`${prefix}：${params.reason}。请手动保存 (Ctrl+S) 或导出项目备份`, 'error');
+    const prefix = count > 1 ? t('自动保存已连续失败 {count} 次', { count }) : t('自动保存失败');
+    get().showToast(t('{prefix}：{reason}。请手动保存 (Ctrl+S) 或导出项目备份', { prefix, reason: params.reason }), 'error');
   }
   return next;
 }
@@ -348,12 +538,25 @@ async function noteSaveError(
   return noteSaveFailure(set, get, { kind, reason, notify });
 }
 
+export interface SharedProjectAssetSyncApplyInput {
+  ownerId: string;
+  originProjectId: string;
+  expectedLibrary: DramaAssetLibrary;
+  nextLibrary?: DramaAssetLibrary;
+  commit: Omit<SharedAssetSyncCommitInput, 'project' | 'expectedProjectLibrary' | 'onCommitted'>;
+  assertCurrent?: () => void;
+  signal?: AbortSignal;
+}
+
 export interface ProjectSlice {
   projects: CanvasProject[];
   currentProjectId: string | null;
   projectName: string;
   projectLoadStatus: ProjectLoadStatus;
+  /** 当前 Store 已完成启动加载；重挂载和热更新不能重读磁盘覆盖当前画布。 */
+  projectInitialized: boolean;
   isCreatingProject: boolean;
+  isReturningToStartPage: boolean;
   /** 正在切换到的画布名；非 null 时显示切换遮罩 */
   switchingProjectName: string | null;
   /** 自动保存持续失败时的诊断状态；成功保存后清空 */
@@ -364,7 +567,7 @@ export interface ProjectSlice {
   captureCurrentProjectSnapshot: (
     options?: CaptureProjectSnapshotOptions,
   ) => Promise<string | undefined>;
-  createProject: (name?: string) => Promise<string | undefined>;
+  createProject: (name?: string, options?: { signal?: AbortSignal }) => Promise<string | undefined>;
   /** 在当前项目所属剧集下批量新增分集（不切画布）；当前项目还不是剧集时先转成剧集。 */
   addEpisodes: (entries: Array<{ name?: string; outline?: string }>) => Promise<string[]>;
   /** 新增一集并切过去。 */
@@ -378,19 +581,33 @@ export interface ProjectSlice {
     episodeId: string,
     updates: { outline?: string; script?: string; creative?: EpisodeCreativeInfo },
   ) => Promise<boolean>;
+  /** 只更新当前准确分集的提取清单；expectedRevision 防止覆盖较新的编辑。 */
+  updateEpisodeAssetRoster: (episodeId: string, roster: EpisodeAssetRoster, expectedRevision?: number) => Promise<boolean>;
   /** 与相邻的一集交换集号；direction 为 -1 上移、1 下移。 */
   moveEpisode: (episodeId: string, direction: -1 | 1) => Promise<boolean>;
   exportProject: (id: string) => Promise<boolean>;
-  importProject: () => Promise<string | undefined>;
+  prepareProjectImport: () => Promise<PreparedProjectImport | null>;
+  previewProjectImport: (session: PreparedProjectImport, targetId: string, confirmedBase?: PreparedProjectImport) => Promise<ProjectImportPreview>;
+  importProject: (session?: PreparedProjectImport, preview?: ProjectImportPreview | null,
+    choices?: Readonly<Record<string, ProjectMergeSide>>, options?: ProjectImportOptions) => Promise<string | undefined>;
+  restoreProjectImport: (ownerId: string, recoveryId: string) => Promise<void>;
   /** 复制项目（含分集、对话与素材），复制完不切画布。 */
   duplicateProject: (id: string) => Promise<string | undefined>;
   deleteProject: (id: string) => Promise<void>;
-  /** captureSnapshot：切走前给当前画布重拍缩略图，只有项目库弹窗需要（拍一张要跑一轮位图合成） */
-  switchProject: (id: string, options?: { captureSnapshot?: boolean }) => void;
+  /** 成功返回实际打开的项目 ID；captureSnapshot 仅项目库使用，signal 只在本次加载内存中保留。 */
+  switchProject: (id: string, options?: { captureSnapshot?: boolean; signal?: AbortSignal }) => Promise<string | undefined>;
+  /** 保存当前画布后返回启动页；保存失败不卸载当前画布。 */
+  returnToStartPage: () => Promise<boolean>;
   saveCurrentProject: () => Promise<string | undefined>;
   saveCurrentProjectSilent: () => Promise<string | undefined>;
+  commitSharedAssetSyncDownload: (input: SharedProjectAssetSyncApplyInput) => Promise<SharedAssetSyncCommitResult>;
   loadProject: () => Promise<void>;
   initFromDb: () => Promise<void>;
+  moveGlobalAssetToFolder: (file: fileService.AssetFileEntry, selection: fileService.AssetFolderSelection,
+    options?: fileService.FileTransferOptions) => Promise<{ path: string; moved: boolean }>;
+  renameAssetFile: (file: fileService.AssetFileEntry, name: string, projectId?: string) => Promise<fileService.AssetFileRenameResult>;
+  repairAssetLocations: (preview: AssetRepairPreview, assetIds: readonly string[], options?: DramaAssetWriteOptions) => Promise<number>;
+  cleanupMissingAssets: (preview: AssetRepairPreview, assetIds: readonly string[], options?: DramaAssetWriteOptions) => Promise<number>;
 }
 
 type ProjectSliceSet = Parameters<StateCreator<AppState, [], [], ProjectSlice>>[0];
@@ -530,6 +747,7 @@ async function patchProjectRecord(
   get: ProjectSliceGet,
   projectId: string,
   patch: Partial<CanvasProject>,
+  rollbackRosterOnly = false,
 ): Promise<boolean> {
   const previous = get().projects.find((item) => item.id === projectId);
   if (!previous) return false;
@@ -553,23 +771,105 @@ async function patchProjectRecord(
   } catch (error) {
     console.warn('[项目元数据] 保存失败:', error);
     set((state) => ({
-      projects: state.projects.map((item) => (item.id === projectId ? previous : item)),
+      projects: state.projects.map((item) => {
+        if (item.id !== projectId) return item;
+        if (rollbackRosterOnly) {
+          // 旧保存失败只能撤回仍是本次值的清单，不能恢复整个旧项目覆盖后来的编辑。
+          return item.episodeAssetRoster === patch.episodeAssetRoster ? {
+            ...item, episodeAssetRoster: previous.episodeAssetRoster,
+            updatedAt: item.updatedAt === updatedAt ? previous.updatedAt : item.updatedAt,
+          } : item;
+        }
+        // 普通元数据保存失败也不能顺带撤销后来已接受的本集清单。
+        return item.episodeAssetRoster === previous.episodeAssetRoster
+          ? previous : { ...previous, episodeAssetRoster: item.episodeAssetRoster };
+      }),
     }));
     get().showToast('保存失败，改动已回滚', 'error');
     return false;
   }
 }
 
-export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = (set, get) => ({
+export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = (set, get, api) => {
+  const live: AppState | undefined = get();
+  // 首次应用这次热更新时，旧 Store 还没有标记；已就绪的画布要沿用内存。
+  const initialized = live?.projectInitialized
+    ?? (live?.projectLoadStatus === 'ready' && typeof live?.initFromDb === 'function');
+  return {
   projects: [
     { id: 'default', name: '默认画布', createdAt: Date.now(), updatedAt: Date.now() },
   ],
   currentProjectId: 'default',
   projectName: '新项目',
   projectLoadStatus: 'loading',
+  projectInitialized: initialized,
   isCreatingProject: false,
+  isReturningToStartPage: false,
   switchingProjectName: null,
   autoSaveFailure: null,
+
+  moveGlobalAssetToFolder: async (file, selection, options) => fileService.moveAssetFile(
+    file, selection, get().config.assetFolders ?? [], (move) => {
+      // 按最新状态迁移精确路径，不把异步操作开始时的旧画布覆盖回来。
+      const state = get();
+      if (relocateMediaReferences(state.nodes, [move]) !== state.nodes) state.commitToHistory();
+      set((current) => ({ ...relocateMediaReferences(current, [move]), recentAssetsRevision: current.recentAssetsRevision + 1 }));
+    }, options),
+
+  renameAssetFile: async (file, name, projectId) => fileService.renameAssetFile(
+    file, name, projectId, get().config.assetFolders ?? [], (move) => {
+      const state = get();
+      if (relocateMediaReferences(state.nodes, [move]) !== state.nodes) state.commitToHistory();
+      set((current) => ({ ...relocateMediaReferences(current, [move]), recentAssetsRevision: current.recentAssetsRevision + 1 }));
+    }),
+
+  repairAssetLocations: async (preview, assetIds, options = {}) => {
+    const initialRoot = get().config.baseDataDir;
+    const assertCurrent = () => {
+      assertDramaAssetWriteCurrent(options);
+      if (get().config.baseDataDir !== initialRoot) throw new Error(t('素材根目录已变化，请重新预览'));
+      if (preview.target.kind === 'folder' && !(get().config.assetFolders ?? []).includes(preview.target.path)) {
+        throw new Error(t('原目录引用已移除，请重新选择'));
+      }
+    };
+    assertCurrent();
+    return applyAssetRepairs(preview, assetIds, get().config.assetFolders ?? [], (moves) => {
+      const state = get();
+      if (relocateMediaReferences(state.nodes, moves) !== state.nodes) state.commitToHistory();
+      set((current) => ({ ...relocateMediaReferences(current, moves), recentAssetsRevision: current.recentAssetsRevision + 1 }));
+      if (preview.target.kind === 'folder' && preview.selectedRoot) {
+        const oldRoot = preview.target.path;
+        const selectedRoot = preview.selectedRoot;
+        const current = get().config.assetFolders ?? [];
+        const allRepaired = !preview.truncated && preview.candidates.length > 0 && preview.candidates.every((candidate) => assetIds.includes(candidate.index.assetId));
+        const assetFolders = allRepaired ? current.map((root) => root === oldRoot ? selectedRoot : root)
+          : [...current, selectedRoot];
+        get().updateConfig({ assetFolders: [...new Set(assetFolders)] });
+      }
+    }, { ...options, assertCurrent });
+  },
+
+  cleanupMissingAssets: async (preview, assetIds, options = {}) => {
+    const initialRoot = get().config.baseDataDir;
+    const assertCurrent = () => {
+      assertDramaAssetWriteCurrent(options);
+      if (get().config.baseDataDir !== initialRoot) throw new Error(t('素材根目录已变化，请重新预览'));
+      if (preview.target.kind === 'folder' && !(get().config.assetFolders ?? []).includes(preview.target.path)) {
+        throw new Error(t('原目录引用已移除，请重新选择'));
+      }
+    };
+    assertCurrent();
+    return cleanupUnavailableAssets(preview, assetIds, ({ historyIds, deletedHistoryCounts }) => {
+      const removed = new Set(historyIds);
+      set((state) => {
+        const records = state.outputHistoryRecords.filter((record) => !removed.has(record.id));
+        const totalCount = Math.max(0, state.historyTotalCount - (state.historyProjectId ? deletedHistoryCounts[state.historyProjectId] ?? 0 : 0));
+        return { outputHistoryRecords: records, historyTotalCount: totalCount,
+          historyHasMore: state.historyHasMore && totalCount > records.length, recentAssetsRevision: state.recentAssetsRevision + 1 };
+      });
+      void get().refreshHistoryAfterAssetCleanup();
+    }, { ...options, assertCurrent });
+  },
 
   setProjectName: (name) => {
     const state = get();
@@ -634,6 +934,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         const latestProject = latest.projects.find((item) => item.id === id)!;
         record = {
           id,
+          exchangeEpoch: latestProject.exchangeEpoch,
           name: nextName,
           createdAt: latestProject.createdAt,
           updatedAt,
@@ -645,6 +946,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
           episodeOutline: latestProject.episodeOutline,
           episodeScript: latestProject.episodeScript,
           episodeCreative: latestProject.episodeCreative,
+          episodeAssetRoster: latestProject.episodeAssetRoster,
           series: latestProject.series,
           nodes: nextNodes,
           edges: latest.edges,
@@ -736,7 +1038,10 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     const project = state.projects.find((item) => item.id === projectId);
     if (!projectId || !project || state.projectLoadStatus !== 'ready') return undefined;
 
+    const captureId = nextSnapshotCaptureId++;
+    latestSnapshotCaptures.set(projectId, captureId);
     if (state.nodes.length === 0) {
+      latestSnapshotCaptures.delete(projectId);
       lastCapturedCanvasState = null;
       if (project.snapshot) {
         set((current) => ({
@@ -745,13 +1050,37 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
           )),
         }));
       }
+      if (options.persistSnapshot) {
+        try {
+          await enqueueProjectSnapshot(projectId, undefined);
+        } catch (error) {
+          console.warn('[项目快照] 清理预览失败:', error);
+        }
+      }
       return projectId;
     }
 
-    if (project.snapshot && isCanvasSnapshotFresh(state, projectId)) return projectId;
+    // 离开项目时重新取图，图片解码或视频首帧就绪并不一定会更新 Store。
+    if (!options.allowProjectChange && project.snapshot && isCanvasSnapshotFresh(state, projectId)) {
+      latestSnapshotCaptures.delete(projectId);
+      if (options.persistSnapshot) {
+        try {
+          await enqueueProjectSnapshot(projectId, project.snapshot);
+        } catch (error) {
+          console.warn('[项目快照] 持久化失败:', error);
+        }
+      }
+      return projectId;
+    }
 
-    const viewportTransform = getCanvasViewportTransform();
-    const snapshot = await captureCurrentCanvasSnapshot(projectId);
+    const viewportKey = getCanvasViewportKey();
+    const snapshot = await captureCurrentCanvasSnapshot(
+      projectId,
+      { nodes: state.nodes, edges: state.edges },
+      { fresh: options.allowProjectChange },
+    );
+    if (latestSnapshotCaptures.get(projectId) !== captureId) return undefined;
+    latestSnapshotCaptures.delete(projectId);
     const latest = get();
     const projectStillExists = latest.projects.some((item) => item.id === projectId);
     if (!projectStillExists) return undefined;
@@ -761,39 +1090,32 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       latest.nodes !== state.nodes
       || latest.edges !== state.edges
       || latest.groups !== state.groups
-      || getCanvasViewportTransform() !== viewportTransform
+      || getCanvasViewportKey() !== viewportKey
     );
     if (currentCanvasChanged || (!isStillCurrent && !options.allowProjectChange)) return undefined;
 
     if (snapshot) {
-      lastCapturedCanvasState = {
-        projectId,
-        nodes: state.nodes,
-        edges: state.edges,
-        groups: state.groups,
-        viewportTransform,
-      };
+      if (isStillCurrent) {
+        lastCapturedCanvasState = {
+          projectId,
+          nodes: state.nodes,
+          edges: state.edges,
+          groups: state.groups,
+          viewportKey,
+        };
+      } else if (lastCapturedCanvasState?.projectId === projectId) {
+        lastCapturedCanvasState = null;
+      }
       set((current) => ({
         projects: current.projects.map((item) => (
           item.id === projectId ? { ...item, snapshot } : item
         )),
       }));
 
-      if (options.persistRecord) {
-        const snapshotRecord: ProjectSaveData = {
-          ...options.persistRecord,
-          updatedAt: Date.now(),
-          snapshot,
-        };
+      if (options.persistSnapshot) {
         try {
-          await enqueueProjectSave(snapshotRecord);
-          set((current) => ({
-            projects: current.projects.map((item) => (
-              item.id === projectId
-                ? { ...item, updatedAt: Math.max(item.updatedAt, snapshotRecord.updatedAt) }
-                : item
-            )),
-          }));
+          // 只在最新记录上补缩略图，不能用捕获前的正文覆盖后续自动保存。
+          await enqueueProjectSnapshot(projectId, snapshot);
         } catch (error) {
           console.warn('[项目快照] 持久化失败:', error);
         }
@@ -802,21 +1124,20 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     return projectId;
   },
 
-  createProject: async (name) => {
-    if (get().isCreatingProject) return undefined;
+  createProject: async (name, options) => {
+    if (options?.signal?.aborted || get().isCreatingProject || get().isReturningToStartPage) return undefined;
     set({ isCreatingProject: true });
     try {
       const createSequence = ++projectSwitchSequence;
-      const isLatestCreate = () => createSequence === projectSwitchSequence;
+      const isLatestCreate = () => !options?.signal?.aborted && createSequence === projectSwitchSequence;
       await waitForLoadingPaint();
       if (!isLatestCreate()) return undefined;
       const previousProjectId = get().currentProjectId;
 
       if (previousProjectId) {
-        const snapshotRecord = createCurrentProjectSaveRecord(get());
         void get().captureCurrentProjectSnapshot({
           allowProjectChange: true,
-          persistRecord: snapshotRecord,
+          persistSnapshot: true,
         });
         const savedProjectId = await get().saveCurrentProject();
         if (!isLatestCreate()) return undefined;
@@ -873,7 +1194,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
             : [...state.projects, project],
         }));
         fileService.ensureProjectDataDir(id).catch((e) => console.warn('[创建项目] 数据目录初始化失败:', e));
-        return id;
+        return options?.signal?.aborted ? undefined : id;
       }
 
       set((state) => ({
@@ -992,6 +1313,20 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     return patchProjectRecord(set, get, episodeId, patch);
   },
 
+  updateEpisodeAssetRoster: async (episodeId, roster, expectedRevision) => {
+    const state = get();
+    const episode = state.projects.find((project) => project.id === episodeId);
+    const owner = episode?.parentId ? state.projects.find((project) => project.id === episode.parentId) : undefined;
+    if (state.projectLoadStatus !== 'ready' || state.currentProjectId !== episodeId
+      || state.isCreatingProject || state.isReturningToStartPage || state.switchingProjectName !== null
+      || !episode?.parentId || !owner || owner.parentId) return false;
+    const current = normalizeEpisodeAssetRoster(episode.episodeAssetRoster);
+    if ((expectedRevision ?? roster.revision) !== current.revision) return false;
+    if (current.revision >= Number.MAX_SAFE_INTEGER) return false;
+    const next = { ...normalizeEpisodeAssetRoster(roster), revision: current.revision + 1 };
+    return patchProjectRecord(set, get, episodeId, { episodeAssetRoster: next }, true);
+  },
+
   moveEpisode: async (episodeId, direction) => {
     const state = get();
     const episode = state.projects.find((item) => item.id === episodeId);
@@ -1011,46 +1346,51 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
 
   exportProject: async (id) => {
     const state = get();
-    const project = state.projects.find((item) => item.id === id);
+    const ownerId = seriesOwnerId(state.projects, id);
+    const project = state.projects.find((item) => item.id === ownerId);
     if (!project) return false;
 
-    // 导出读的是 IndexedDB 里已落盘的记录，当前项目必须先把内存改动写回去。
-    if (state.currentProjectId === id) {
+    // 导出整部剧前，先保存当前分集画布与共享角色库。
+    const activeId = state.currentProjectId;
+    if (activeId && seriesOwnerId(state.projects, activeId) === ownerId) {
       if (state.projectLoadStatus !== 'ready') {
         state.showToast('项目尚未成功加载，已阻止导出', 'error');
         return false;
       }
       void get().captureCurrentProjectSnapshot();
-      if (await get().saveCurrentProjectSilent() !== id) {
+      if (await get().saveCurrentProjectSilent() !== activeId || get().currentProjectId !== activeId) {
         get().showToast('项目保存失败，已取消导出', 'error');
         return false;
       }
     }
 
     try {
-      const result = await exportProjectArchive(id);
+      const result = await exportProjectArchive(ownerId);
       if (!result) return false;
-      get().showToast(`已导出「${project.name}」，含 ${result.assetCount} 个素材`);
+      const episodes = result.episodeCount > 0 ? t('{count} 个分集、', { count: result.episodeCount }) : '';
+      get().showToast(t('已导出「{name}」，含 {episodes}{count} 个素材', { name: project.name, episodes, count: result.assetCount }));
       return true;
     } catch (error) {
       console.error('[项目导出] 失败:', error);
-      get().showToast(error instanceof Error ? `项目导出失败：${error.message}` : '项目导出失败', 'error');
+      get().showToast(error instanceof Error ? t('项目导出失败：{reason}', { reason: error.message }) : '项目导出失败', 'error');
       return false;
     }
   },
 
   duplicateProject: async (id) => {
     const state = get();
-    const project = state.projects.find((item) => item.id === id);
+    const ownerId = seriesOwnerId(state.projects, id);
+    const project = state.projects.find((item) => item.id === ownerId);
     if (!project) return undefined;
 
     // 复制读的是 IndexedDB 里已落盘的记录，当前项目必须先把内存改动写回去。
-    if (state.currentProjectId === id || listEpisodes(state.projects, id).some((e) => e.id === state.currentProjectId)) {
+    const activeId = state.currentProjectId;
+    if (activeId && seriesOwnerId(state.projects, activeId) === ownerId) {
       if (state.projectLoadStatus !== 'ready') {
         state.showToast('项目尚未成功加载，已阻止复制', 'error');
         return undefined;
       }
-      if (await get().saveCurrentProjectSilent() !== state.currentProjectId) {
+      if (await get().saveCurrentProjectSilent() !== activeId || get().currentProjectId !== activeId) {
         get().showToast('项目保存失败，已取消复制', 'error');
         return undefined;
       }
@@ -1058,9 +1398,8 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
 
     try {
       const result = await duplicateProjectArchive(
-        id,
+        ownerId,
         `${project.name} 副本`,
-        listEpisodes(get().projects, id).map((episode) => episode.id),
       );
       const copy: CanvasProject = {
         id: result.projectId,
@@ -1070,27 +1409,68 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         dataFolder: result.dataFolder,
         settings: result.settings,
         snapshot: result.snapshot,
-        series: project.series,
+        series: result.series,
       };
       fileService.registerProjectFolders([copy, ...result.episodes]);
       set((current) => ({ projects: [...current.projects, copy, ...result.episodes] }));
-      get().showToast(`已复制为「${result.projectName}」`);
+      const episodes = result.episodes.length > 0 ? t('，含 {count} 个分集', { count: result.episodes.length }) : '';
+      get().showToast(t('已复制为「{name}」{episodes}', { name: result.projectName, episodes }));
       return result.projectId;
     } catch (error) {
       console.error('[项目复制] 失败:', error);
-      get().showToast(error instanceof Error ? `项目复制失败：${error.message}` : '项目复制失败', 'error');
+      get().showToast(error instanceof Error ? t('项目复制失败：{reason}', { reason: error.message }) : '项目复制失败', 'error');
       return undefined;
     }
   },
 
-  importProject: async () => {
+  prepareProjectImport: () => prepareProjectImport(),
+  previewProjectImport: async (session, targetId, confirmedBase) => {
+    const state = get();
+    if (state.currentProjectId && seriesOwnerId(state.projects, state.currentProjectId) === targetId) {
+      if (await state.saveCurrentProjectSilent() !== state.currentProjectId) throw new Error('当前画布保存失败，无法对比');
+    }
+    const ids = get().projects.filter((item) => item.id === targetId || item.parentId === targetId).map((item) => item.id);
+    await Promise.all(ids.map(waitForProjectSaveQueue));
+    const before = get();
+    const assertCurrent = () => {
+      const latest = get();
+      if (latest.currentProjectId !== before.currentProjectId || latest.nodes !== before.nodes || latest.edges !== before.edges
+        || latest.groups !== before.groups || latest.dramaAssets !== before.dramaAssets || latest.projects !== before.projects) {
+        throw new Error('预览后项目内容已变化，请重新对比');
+      }
+    };
+    const preview = await previewProjectImport(session, targetId, confirmedBase); assertCurrent(); importPreviewGuards.set(preview, assertCurrent); return preview;
+  },
+  importProject: async (session, preview, choices = {}, options = { appendChat: false, appendMemories: false }) => {
+    invalidateSeriesLibrarySave();
     let result: Awaited<ReturnType<typeof importProjectArchive>>;
+    let committed = false, lockedCanvas = false;
+    const affected = preview ? get().projects.filter((item) => item.id === preview.targetId || item.parentId === preview.targetId).map((item) => item.id) : [];
     try {
-      result = await importProjectArchive();
+      if (preview) {
+        const guard = importPreviewGuards.get(preview); if (!guard) throw new Error('预览状态已失效，请重新对比'); guard();
+        if (projectAssetSyncBarriers.has(preview.targetId) || affected.some((id) => projectImportsApplying.has(id))) throw new Error('项目正在同步或应用更新，请稍后重试');
+        if (affected.some((id) => getPendingTasksForProject(id).length > 0)
+          || get().agentTasks.some((task) => affected.includes(task.projectId) && !['completed', 'failed', 'stopped', 'paused'].includes(task.status))
+          || get().videoBatchBusy || get().nodes.some((node) => affected.includes(get().currentProjectId ?? '') && node.data.status === 'loading')) {
+          throw new Error('目标项目仍有生成或助手任务，请先停止任务再应用更新');
+        }
+        affected.forEach((id) => projectImportsApplying.add(id));
+        await Promise.all(affected.map(waitForProjectSaveQueue)); guard();
+        affected.forEach(cancelProjectCanvasDerivations);
+        if (affected.includes(get().currentProjectId ?? '')) { lockedCanvas = true; set({ projectLoadStatus: 'loading' }); }
+      }
+      result = session ? await applyProjectImport(session, preview ?? null, choices, options, preview ? importPreviewGuards.get(preview) : undefined) : await importProjectArchive();
+      committed = !!result;
     } catch (error) {
       console.error('[项目导入] 失败:', error);
-      get().showToast(error instanceof Error ? `项目导入失败：${error.message}` : '项目导入失败', 'error');
+      get().showToast(error instanceof Error ? t('项目导入失败：{reason}', { reason: error.message }) : '项目导入失败', 'error');
+      if (session) throw error;
       return undefined;
+    } finally {
+      invalidateSeriesLibrarySave();
+      affected.forEach((id) => projectImportsApplying.delete(id));
+      if (lockedCanvas && !committed) set({ projectLoadStatus: 'ready' });
     }
     if (!result) return undefined;
 
@@ -1102,19 +1482,82 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       dataFolder: result.dataFolder,
       settings: result.settings,
       snapshot: result.snapshot,
+      series: result.series,
     };
-    set((state) => ({ projects: [...state.projects, project] }));
-    // 缺素材不阻断导入，只在提示里说明，与项目加载时保留节点的策略一致。
-    if (result.missingAssetCount > 0) {
-      get().showToast(`已导入「${result.projectName}」，${result.missingAssetCount} 个素材未找到`, 'info');
-    } else {
-      get().showToast(`已导入「${result.projectName}」，含 ${result.assetCount} 个素材`);
+    fileService.registerProjectFolders([project, ...result.episodes]);
+    let projects: Awaited<ReturnType<typeof fileService.loadProjectsList>>;
+    try { projects = await fileService.loadProjectsList(); }
+    catch { if (lockedCanvas) set({ projectLoadStatus: 'error' }); get().showToast('项目已写入，但项目列表刷新失败，请重启后打开', 'error'); return result.projectId; }
+    if (!projects.some((item) => item.id === result.projectId)) {
+      if (lockedCanvas) set({ projectLoadStatus: 'error' });
+      get().showToast('项目已写入，但项目列表刷新失败，请重启后打开', 'error'); return result.projectId;
     }
-    get().switchProject(result.projectId);
+    const replacingCurrent = preview && affected.includes(get().currentProjectId ?? '');
+    if (replacingCurrent) {
+      set({ currentProjectId: null, projectLoadStatus: 'ready', projectName: '', nodes: [], edges: [], groups: [],
+        history: [], historyIndex: -1, selectedNodeIds: [], activeNodeId: null, projects });
+    } else set({ projects });
+    let opened = false;
+    try {
+      // 项目列表已有全部分集，既有切换流程会打开第一集并加载共享资产。
+      const targetId = resolveOpenTargetId(get().projects, result.projectId);
+      opened = await get().switchProject(result.projectId) === targetId;
+    } catch {
+      // 导入已经落盘，打开失败不能把它误报成导入失败。
+    }
+    const episodes = result.episodes.length > 0 ? t('{count} 个分集、', { count: result.episodes.length }) : '';
+    const notices = [
+      t('已导入「{name}」，含 {episodes}{count} 个素材', { name: result.projectName, episodes, count: result.assetCount }),
+      ...(result.missingAssetCount > 0 ? [t('{count} 个素材未找到', { count: result.missingAssetCount })] : []),
+      ...result.warnings.map((warning) => t(warning)),
+      ...(!opened ? [t('自动打开失败，请从项目库重新打开')] : []),
+    ];
+    // 旧包缺失分集与素材的提示保留在同一条反馈，避免成功提示覆盖原因。
+    get().showToast(notices.join('；'), notices.length > 1 ? 'info' : undefined);
     return result.projectId;
   },
 
+  restoreProjectImport: async (ownerId, recoveryId) => {
+    invalidateSeriesLibrarySave();
+    if (projectAssetSyncBarriers.has(ownerId)) throw new Error('项目正在同步，请稍后恢复');
+    const affected = get().projects.filter((item) => item.id === ownerId || item.parentId === ownerId).map((item) => item.id);
+    if (!affected.length || affected.some((id) => projectImportsApplying.has(id) || getPendingTasksForProject(id).length)
+      || get().agentTasks.some((task) => affected.includes(task.projectId) && !['completed', 'failed', 'stopped', 'paused'].includes(task.status))
+      || get().videoBatchBusy) throw new Error('项目正在执行任务或更新，请先停止后再恢复');
+    if (affected.includes(get().currentProjectId ?? '')) {
+      const id = get().currentProjectId; if (await get().saveCurrentProjectSilent() !== id) throw new Error('当前画布保存失败');
+    }
+    affected.forEach((id) => projectImportsApplying.add(id));
+    let lockedCanvas = false, committed = false, projected = false;
+    try {
+      await Promise.all(affected.map(waitForProjectSaveQueue));
+      const before = get();
+      const assertCurrent = () => { const current = get();
+        if (current.nodes !== before.nodes || current.edges !== before.edges || current.groups !== before.groups
+          || current.projects !== before.projects || current.dramaAssets !== before.dramaAssets) throw new Error('恢复期间项目发生变化，请重试'); };
+      affected.forEach(cancelProjectCanvasDerivations);
+      if (affected.includes(get().currentProjectId ?? '')) { lockedCanvas = true; set({ projectLoadStatus: 'loading' }); }
+      await restoreProjectImportRecovery(ownerId, recoveryId, assertCurrent);
+      committed = true;
+      const projects = await fileService.loadProjectsList();
+      if (!projects.some((item) => item.id === ownerId)) throw new Error('恢复已提交，项目列表刷新失败，请重启后打开');
+      if (affected.includes(get().currentProjectId ?? '')) set({ currentProjectId: null, projectLoadStatus: 'ready', projectName: '',
+        nodes: [], edges: [], groups: [], history: [], historyIndex: -1, selectedNodeIds: [], activeNodeId: null, projects });
+      else set({ projects });
+      projected = true;
+      // 在后续切换加载之前释放屏障；空画布不会把旧内容重新保存。
+      invalidateSeriesLibrarySave();
+      affected.forEach((id) => projectImportsApplying.delete(id));
+      await get().switchProject(ownerId); get().showToast('已恢复项目，恢复前的状态也已保存为恢复点');
+    } finally {
+      invalidateSeriesLibrarySave();
+      affected.forEach((id) => projectImportsApplying.delete(id));
+      if (lockedCanvas && !projected) set({ projectLoadStatus: committed ? 'error' : 'ready' });
+    }
+  },
+
   deleteProject: async (id) => {
+    invalidateSeriesLibrarySave();
     projectSwitchSequence += 1;
     const state = get();
     const target = state.projects.find((project) => project.id === id);
@@ -1223,9 +1666,11 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         const data = await fileService.loadProjectData(nextId);
         const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
         if (hasProjectCanvasData(data)) {
-          const ownerId = seriesOwnerId(filtered, nextId);
+          const ownerId = data.parentId ?? nextId;
           const ownerData = ownerId === nextId ? data : await fileService.loadProjectData(ownerId);
           set({
+            projects: withLoadedProjectSummaries(get().projects, data, ownerData),
+            projectName: data.name,
             nodes: data.nodes as Node<BaseNodeData>[],
             edges: data.edges as Edge[],
             groups: getProjectGroups(data),
@@ -1255,12 +1700,15 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   },
 
   switchProject: async (requestedId, options) => {
+    invalidateSeriesLibrarySave();
+    if (options?.signal?.aborted || get().isReturningToStartPage || get().isCreatingProject
+      || get().projectLoadStatus === 'loading') return;
     if (!get().projects.some((project) => project.id === requestedId)) return;
     // 剧集项目自身没有画布，点它等于打开它的分集。
     // ponytail: 固定开第一集；要「回到上次打开的那集」再往剧集记录里存一个 lastEpisodeId。
     const id = resolveOpenTargetId(get().projects, requestedId);
     const switchSequence = ++projectSwitchSequence;
-    const isLatestSwitch = () => switchSequence === projectSwitchSequence;
+    const isLatestSwitch = () => switchSequence === projectSwitchSequence && !options?.signal?.aborted;
     const currentProjectId = get().currentProjectId;
     const previousOwnerId = currentProjectId
       ? seriesOwnerId(get().projects, currentProjectId)
@@ -1273,13 +1721,17 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     try {
       if (get().projectLoadStatus === 'ready') {
         if (options?.captureSnapshot) {
-          const snapshotRecord = createCurrentProjectSaveRecord(get());
           void get().captureCurrentProjectSnapshot({
             allowProjectChange: true,
-            persistRecord: snapshotRecord,
+            persistSnapshot: true,
           });
         }
-        await get().saveCurrentProject();
+        const savedId = await get().saveCurrentProject();
+        if (!isLatestSwitch()) return;
+        if (currentProjectId && savedId !== currentProjectId) {
+          get().showToast('当前项目保存失败，已取消项目切换', 'error');
+          return;
+        }
       }
       if (!isLatestSwitch()) return;
       // Clean up undo-trash dirs from the old project before switching
@@ -1301,20 +1753,19 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       }
 
       // 角色库归剧集项目所有；同一部剧内换集时内存里的那份就是对的，不用再读盘。
-      const ownerId = project.parentId ?? id;
+      const ownerId = data.parentId ?? id;
       let dramaAssets = get().dramaAssets;
-      if (ownerId !== previousOwnerId) {
-        const ownerData = ownerId === id ? data : await fileService.loadProjectData(ownerId);
+      let ownerData: ProjectSaveData | null = null;
+      if (ownerId === id || ownerId !== previousOwnerId) {
+        ownerData = ownerId === id ? data : await fileService.loadProjectData(ownerId);
         if (!isLatestSwitch()) return;
         dramaAssets = ownerData?.dramaAssets ?? emptyDramaAssetLibrary();
       }
 
       set({
-        projects: get().projects.map((item) => (
-          item.id === id ? { ...item, settings: data.settings } : item
-        )),
+        projects: withLoadedProjectSummaries(get().projects, data, ownerData),
         currentProjectId: id,
-        projectName: project.name,
+        projectName: data.name,
         projectLoadStatus: 'ready',
         nodes: data.nodes as Node<BaseNodeData>[],
         edges: data.edges as Edge[],
@@ -1335,13 +1786,69 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       get().loadProjectMemoriesForProject(ownerId).catch((e) => console.warn('[切换项目] 加载项目记忆失败:', e));
 
       setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
+      return id;
     } finally {
-      if (isLatestSwitch()) set({ switchingProjectName: null });
+      if (switchSequence === projectSwitchSequence) set({ switchingProjectName: null });
     }
   },
 
-  saveCurrentProject: async () => {
+  returnToStartPage: async () => {
     const state = get();
+    if (!state.currentProjectId) return true;
+    if (state.isReturningToStartPage || state.isCreatingProject || state.switchingProjectName !== null) return false;
+    if (state.projectLoadStatus !== 'ready') {
+      state.showToast('项目尚未成功加载，暂时无法返回启动页', 'error');
+      return false;
+    }
+    const projectId = state.currentProjectId;
+    const sequence = projectSwitchSequence;
+    set({ isReturningToStartPage: true });
+    try {
+      // 先绘制返回状态。缩略图是派生预览，不能阻塞必要保存和导航。
+      await waitForLoadingPaint();
+      if (get().currentProjectId !== projectId || projectSwitchSequence !== sequence) return false;
+      const savingState = get();
+      // 正文先入队，空图清理或缓存预览的补丁随后排队，不能抢占必要保存。
+      const saving = savingState.saveCurrentProjectSilent();
+      void get().captureCurrentProjectSnapshot({ allowProjectChange: true, persistSnapshot: true })
+        .catch(() => undefined);
+      const savedId = await saving;
+      if (savedId !== projectId || get().currentProjectId !== projectId || projectSwitchSequence !== sequence) return false;
+      const latest = get();
+      // 保存期间 MCP 或生成任务仍可回填；卸载前必须确认没有落在这次快照之后的新内容。
+      if (latest.nodes !== savingState.nodes || latest.edges !== savingState.edges
+        || latest.groups !== savingState.groups || latest.dramaAssets !== savingState.dramaAssets) {
+        latest.showToast('保存期间画布有新变化，已保留当前项目，请稍后再返回启动页', 'error');
+        return false;
+      }
+      cancelProjectCanvasDerivations(projectId);
+      if (lastCapturedCanvasState?.projectId === projectId) lastCapturedCanvasState = null;
+      set({
+        currentProjectId: null,
+        projectName: '',
+        projectLoadStatus: 'ready',
+        nodes: [], edges: [], groups: [],
+        history: [], historyIndex: -1, selectedNodeIds: [],
+        activeNodeId: null, dialogPosition: null, pendingPresetAction: null,
+        nodeMenuVisible: false, nodePickerOpen: false, projectLibraryOpen: false,
+        assetsPanelOpen: false, characterLibraryOpen: false, characterActionLibraryOpen: false,
+        historyPanelOpen: false, dramaAssetsPanelOpen: false, workflowPanelOpen: false,
+        chatOpen: false, activeConversationId: null, chatComposerLiveDraft: '', reversePromptRequest: null,
+      });
+      return true;
+    } catch {
+      get().showToast('返回启动页失败，已保留当前画布，请重试', 'error');
+      return false;
+    } finally {
+      set({ isReturningToStartPage: false });
+    }
+  },
+
+  saveCurrentProject: () => trackProjectSave(get().currentProjectId, async (projectId) => {
+    const syncPending = waitForProjectAssetSync(get);
+    if (syncPending) await syncPending;
+    const state = get();
+    if (state.currentProjectId !== projectId) return undefined;
     if (state.currentProjectId && state.projectLoadStatus !== 'ready') {
       // 加载中只是还没就绪，不算故障；加载失败才记进退出拦截状态
       if (state.projectLoadStatus === 'error') {
@@ -1370,14 +1877,17 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       console.error('Save failed:', error);
       // 手动保存本来就每次都给反馈，交给 toast 自己说，不走去重逻辑
       const failure = await noteSaveError(set, get, error, false);
-      get().showToast(`保存失败：${failure.reason}`, 'error');
+      get().showToast(t('保存失败：{reason}', { reason: failure.reason }), 'error');
       return undefined;
     }
-  },
+  }),
 
   /** 静默保存（不弹 toast），用于自动保存 */
-  saveCurrentProjectSilent: async () => {
+  saveCurrentProjectSilent: () => trackProjectSave(get().currentProjectId, async (projectId) => {
+    const syncPending = waitForProjectAssetSync(get);
+    if (syncPending) await syncPending;
     const state = get();
+    if (state.currentProjectId !== projectId) return undefined;
     if (state.currentProjectId && state.projectLoadStatus !== 'ready') {
       if (state.projectLoadStatus === 'error') {
         noteSaveFailure(set, get, {
@@ -1404,19 +1914,95 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       await noteSaveError(set, get, error, true);
       return undefined;
     }
+  }),
+
+  commitSharedAssetSyncDownload: async (input) => {
+    if (input.commit.ownerId !== input.ownerId || projectAssetSyncBarriers.has(input.ownerId) || projectImportsApplying.has(input.ownerId)) {
+      throw new Error('该项目正在应用共享资产，请稍后重试');
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort(input.signal?.reason ?? input.commit.signal?.reason);
+    const assertCurrent = () => {
+      controller.signal.throwIfAborted();
+      input.signal?.throwIfAborted();
+      input.commit.signal?.throwIfAborted();
+      input.assertCurrent?.();
+      input.commit.assertCurrent?.();
+      const current = get();
+      if (current.projectLoadStatus !== 'ready' || current.currentProjectId !== input.originProjectId
+        || !current.projects.some((project) => project.id === input.ownerId)
+        || seriesOwnerId(current.projects, input.originProjectId) !== input.ownerId
+        || current.dramaAssets !== input.expectedLibrary) {
+        throw new Error('项目或资产内容已变化，请重新预览');
+      }
+    };
+    assertCurrent();
+    input.signal?.addEventListener('abort', abort, { once: true });
+    input.commit.signal?.addEventListener('abort', abort, { once: true });
+    let release!: () => void;
+    const barrier: ProjectAssetSyncBarrier = {
+      done: new Promise<void>((resolve) => { release = resolve; }), library: input.expectedLibrary,
+    };
+    invalidateSeriesLibrarySave();
+    projectAssetSyncBarriers.set(input.ownerId, barrier);
+    let unsubscribe = api.subscribe(() => { try { assertCurrent(); } catch { controller.abort(); } });
+    try {
+      // 屏障先登记，再等旧 active/pending 写完；后来的自动保存不能挤到下载提交后面写旧库。
+      await waitForProjectSaveQueue(input.ownerId);
+      assertCurrent();
+      let project: ProjectSaveData | undefined;
+      let expectedProjectLibrary: unknown;
+      if (input.nextLibrary) {
+        const previous = await getProjectById(input.ownerId);
+        assertCurrent();
+        if (!previous) throw new Error('所属项目已不存在，已停止共享资产应用');
+        expectedProjectLibrary = previous.dramaAssets;
+        const state = { ...get(), dramaAssets: input.nextLibrary };
+        const captured = input.ownerId === input.originProjectId
+          ? createCurrentProjectSaveRecord(state) : createSeriesLibraryRecord(state);
+        if (!captured) throw new Error('所属项目已变化，请重新预览');
+        project = await serializeProjectRecord(captured);
+        assertCurrent();
+      }
+      return await applySharedAssetSyncCommit({
+        ...input.commit, project, expectedProjectLibrary, signal: controller.signal, assertCurrent,
+        onCommitted: (result) => {
+          if (result.alreadyApplied) return;
+          if (input.nextLibrary) barrier.library = input.nextLibrary;
+          const current = get();
+          // 提交后的取消不能撤回已持久化数据；只给仍持有原库的原项目投影，不覆盖新编辑。
+          if (current.currentProjectId !== input.originProjectId || current.projectLoadStatus !== 'ready'
+            || current.dramaAssets !== input.expectedLibrary
+            || seriesOwnerId(current.projects, input.originProjectId) !== input.ownerId) return;
+          unsubscribe(); unsubscribe = () => undefined;
+          // IDB 已提交；同一回调里同步投影，校验与 set 之间没有 await。
+          set((state) => ({
+            ...(input.nextLibrary ? { dramaAssets: input.nextLibrary } : {}),
+            projects: project ? state.projects.map((item) => item.id === input.ownerId
+              ? { ...item, updatedAt: project!.updatedAt } : item) : state.projects,
+          }));
+        },
+      });
+    } finally {
+      unsubscribe();
+      input.signal?.removeEventListener('abort', abort);
+      input.commit.signal?.removeEventListener('abort', abort);
+      const current = get();
+      if (current.currentProjectId && seriesOwnerId(current.projects, current.currentProjectId) === input.ownerId) {
+        if (current.dramaAssets !== input.expectedLibrary) barrier.library = current.dramaAssets;
+      }
+      invalidateSeriesLibrarySave();
+      projectAssetSyncBarriers.delete(input.ownerId);
+      release();
+    }
   },
 
   loadProject: async () => {
+    invalidateSeriesLibrarySave();
     try {
       const allProjects = await fileService.loadProjectsList();
       if (allProjects.length > 0) {
-        const mapped: CanvasProject[] = withInheritedDataFolders(allProjects.map((p) => ({
-          id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt,
-          snapshot: p.snapshot, dataFolder: p.dataFolder, settings: p.settings,
-          parentId: p.parentId, episodeNo: p.episodeNo, episodeOutline: p.episodeOutline,
-          episodeScript: p.episodeScript, episodeCreative: p.episodeCreative,
-          series: p.series,
-        })));
+        const mapped: CanvasProject[] = withInheritedDataFolders(allProjects.map(toCanvasProjectSummary));
         fileService.registerProjectFolders(mapped);
         const current = get().currentProjectId;
         const exists = mapped.find((p) => p.id === current);
@@ -1426,12 +2012,10 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         const data = await fileService.loadProjectData(targetId);
         if (hasProjectCanvasData(data)) {
           const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
-          const ownerId = seriesOwnerId(mapped, targetId);
+          const ownerId = data.parentId ?? targetId;
           const ownerData = ownerId === targetId ? data : await fileService.loadProjectData(ownerId);
           set({
-            projects: mapped.map((project) => (
-              project.id === targetId ? { ...project, settings: data.settings } : project
-            )),
+            projects: withLoadedProjectSummaries(mapped, data, ownerData),
             currentProjectId: targetId,
             projectName: data.name || '已加载项目',
             nodes: data.nodes as Node<BaseNodeData>[],
@@ -1458,52 +2042,30 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
     }
   },
 
-  initFromDb: async () => {
-    try {
-      await Promise.all([get().loadConfig(), get().loadWorkflows(), get().loadPresets(), get().loadSkills(), get().loadSubAgentProfiles(), get().loadCustomStyles(), get().loadToolbarLayouts(), get().loadPlugins()]);
+  initFromDb: () => {
+    invalidateSeriesLibrarySave();
+    if (get().projectInitialized) return Promise.resolve();
+    const pending = projectInitializations.get(get);
+    if (pending) return pending;
+    // get 与 API.getState 是同一稳定引用，首次创建和 HMR 的绑定 Store 都能共用。
+    const initialization: Promise<void> = Promise.resolve().then(async () => {
+      set({ currentProjectId: null, projectLoadStatus: 'loading' });
+      try {
+        await Promise.all([get().loadConfig(), get().loadWorkflows(), get().loadPresets(), get().loadSkills(), get().loadSubAgentProfiles(), get().loadCustomStyles(), get().loadToolbarLayouts(), get().loadPlugins()]);
+        await get().loadAppearanceThemes();
 
-      const allProjects = await fileService.loadProjectsList();
-      const valid = allProjects.filter((p) => p.id !== 'default');
-      if (valid.length < allProjects.length) {
-        fileService.deleteProjectData('default').catch((e) => console.warn('[初始化] 清理默认项目数据失败:', e));
-      }
-      let activeProjectId: string | null = null;
-      if (valid.length > 0) {
-        const mapped: CanvasProject[] = withInheritedDataFolders(valid.map((p) => ({
-          id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt,
-          snapshot: p.snapshot, dataFolder: p.dataFolder, settings: p.settings,
-          parentId: p.parentId, episodeNo: p.episodeNo, episodeOutline: p.episodeOutline,
-          episodeScript: p.episodeScript, episodeCreative: p.episodeCreative,
-          series: p.series,
-        })));
+        const allProjects = await fileService.loadProjectsList();
+        const valid = allProjects.filter((p) => p.id !== 'default');
+        if (valid.length < allProjects.length) {
+          fileService.deleteProjectData('default').catch((e) => console.warn('[初始化] 清理默认项目数据失败:', e));
+        }
+        let activeProjectId: string | null = null;
+        const mapped: CanvasProject[] = withInheritedDataFolders(valid.map(toCanvasProjectSummary));
         fileService.registerProjectFolders(mapped);
         mapped.sort((a, b) => b.updatedAt - a.updatedAt);
-        const rememberedProjectId = await getLastActiveProjectId().catch(() => null);
-        const targetId = resolveOpenTargetId(mapped, rememberedProjectId
-          && mapped.some((project) => project.id === rememberedProjectId)
-          ? rememberedProjectId
-          : mapped[0].id);
-
-        const data = await fileService.loadProjectData(targetId);
-        const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
-        if (hasProjectCanvasData(data)) {
-          activeProjectId = targetId;
-          const ownerId = seriesOwnerId(mapped, targetId);
-          const ownerData = ownerId === targetId ? data : await fileService.loadProjectData(ownerId);
-          set({
-            projects: mapped.map((project) => (
-              project.id === targetId ? { ...project, settings: data.settings } : project
-            )),
-            currentProjectId: targetId,
-            projectName: data.name || '新项目',
-            nodes: data.nodes as Node<BaseNodeData>[],
-            edges: data.edges as Edge[],
-            groups: getProjectGroups(data),
-            dramaAssets: ownerData?.dramaAssets ?? emptyDramaAssetLibrary(),
-            projectLoadStatus: 'ready',
-          });
-          rememberActiveProject(targetId);
-        } else {
+        const recoveringWebview = await isWebviewRecovery();
+        if (get().config.startupView === 'project-library' || recoveringWebview) {
+          // 启动页只读摘要；选定项目后才通过既有切换流程加载画布及项目域数据。
           set({
             projects: mapped,
             currentProjectId: null,
@@ -1511,50 +2073,95 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
             nodes: [],
             edges: [],
             groups: [],
-            dramaAssets: emptyDramaAssetLibrary(),
-            projectLoadStatus: 'error',
+            history: [],
+            historyIndex: -1,
+            selectedNodeIds: [],
+            projectLoadStatus: 'ready',
           });
-          get().showToast('项目加载失败，已阻止空画布覆盖原数据', 'error');
+        } else if (valid.length > 0) {
+          const rememberedProjectId = await getLastActiveProjectId().catch(() => null);
+          const targetId = resolveOpenTargetId(mapped, rememberedProjectId
+            && mapped.some((project) => project.id === rememberedProjectId)
+            ? rememberedProjectId
+            : mapped[0].id);
+
+          const data = await fileService.loadProjectData(targetId);
+          const { emptyDramaAssetLibrary } = await import('../types/dramaAssets');
+          if (hasProjectCanvasData(data)) {
+            activeProjectId = targetId;
+            const ownerId = data.parentId ?? targetId;
+            const ownerData = ownerId === targetId ? data : await fileService.loadProjectData(ownerId);
+            set({
+              projects: withLoadedProjectSummaries(mapped, data, ownerData),
+              currentProjectId: targetId,
+              projectName: data.name || '新项目',
+              nodes: data.nodes as Node<BaseNodeData>[],
+              edges: data.edges as Edge[],
+              groups: getProjectGroups(data),
+              dramaAssets: ownerData?.dramaAssets ?? emptyDramaAssetLibrary(),
+              projectLoadStatus: 'ready',
+            });
+            rememberActiveProject(targetId);
+          } else {
+            set({
+              projects: mapped,
+              currentProjectId: null,
+              projectName: '',
+              nodes: [],
+              edges: [],
+              groups: [],
+              dramaAssets: emptyDramaAssetLibrary(),
+              projectLoadStatus: 'error',
+            });
+            get().showToast('项目加载失败，已阻止空画布覆盖原数据', 'error');
+          }
+          fileService.ensureProjectDataDir(targetId).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
+        } else {
+          const id = generateProjectId();
+          activeProjectId = id;
+          const now = Date.now();
+          const dataFolder = fileService.buildProjectFolderName('默认画布', id);
+          fileService.registerProjectFolder(id, dataFolder);
+          const defaultProject = { id, name: '默认画布', createdAt: now, updatedAt: now, dataFolder, nodes: [], edges: [] };
+          set({
+            projects: [{ id, name: '默认画布', createdAt: now, updatedAt: now, dataFolder }],
+            currentProjectId: id,
+            projectName: '默认画布',
+            nodes: [],
+            edges: [],
+            groups: [],
+            projectLoadStatus: 'ready',
+          });
+          await fileService.saveProject(defaultProject).catch((e) => console.warn('[初始化] 创建默认项目失败:', e));
+          fileService.ensureProjectDataDir(id).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
+          rememberActiveProject(id);
         }
-        fileService.ensureProjectDataDir(targetId).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
-      } else {
-        const id = generateProjectId();
-        activeProjectId = id;
-        const now = Date.now();
-        const dataFolder = fileService.buildProjectFolderName('默认画布', id);
-        fileService.registerProjectFolder(id, dataFolder);
-        const defaultProject = { id, name: '默认画布', createdAt: now, updatedAt: now, dataFolder, nodes: [], edges: [] };
-        set({
-          projects: [{ id, name: '默认画布', createdAt: now, updatedAt: now, dataFolder }],
-          currentProjectId: id,
-          projectName: '默认画布',
-          nodes: [],
-          edges: [],
-          groups: [],
-          projectLoadStatus: 'ready',
-        });
-        await fileService.saveProject(defaultProject).catch((e) => console.warn('[初始化] 创建默认项目失败:', e));
-        fileService.ensureProjectDataDir(id).catch((e) => console.warn('[初始化] 数据目录初始化失败:', e));
-        rememberActiveProject(id);
+        // 恢复当前项目的待续轮询任务
+        if (activeProjectId) {
+          resumePendingTasks(activeProjectId).catch((e) => console.warn('[初始化] 恢复待续任务失败:', e));
+          // 加载聊天会话
+          get().loadConversationsForProject(activeProjectId).catch((e) => console.warn('[初始化] 加载会话失败:', e));
+          get().repairInterruptedForProject(activeProjectId).catch((e) => console.warn('[初始化] 修复中断消息失败:', e));
+          get().loadProjectMemoriesForProject(seriesOwnerId(get().projects, activeProjectId))
+            .catch((e) => console.warn('[初始化] 加载项目记忆失败:', e));
+        }
+        // 即使停留在启动页，也修复所有项目的遗留 Agent 任务，禁止打开项目时自动续跑。
+        await Promise.all([
+          ...get().projects.map((project) => get().repairInterruptedAgentTasksForProject(project.id)),
+          get().repairInterruptedAgentTasksForProject(GENERAL_ASSISTANT_SCOPE_ID),
+          get().repairInterruptedForProject(GENERAL_ASSISTANT_SCOPE_ID),
+        ]);
+        if (get().projectLoadStatus === 'ready') set({ projectInitialized: true });
+      } catch (error) {
+        console.error('Init from IndexedDB failed:', error);
+        set({ currentProjectId: null, projectLoadStatus: 'error' });
+        get().showToast('项目数据读取失败，未创建空项目', 'error');
       }
-      // 恢复当前项目的待续轮询任务
-      if (activeProjectId) {
-        resumePendingTasks(activeProjectId).catch((e) => console.warn('[初始化] 恢复待续任务失败:', e));
-        // 加载聊天会话
-        get().loadConversationsForProject(activeProjectId).catch((e) => console.warn('[初始化] 加载会话失败:', e));
-        get().repairInterruptedForProject(activeProjectId).catch((e) => console.warn('[初始化] 修复中断消息失败:', e));
-        get().loadProjectMemoriesForProject(seriesOwnerId(get().projects, activeProjectId))
-          .catch((e) => console.warn('[初始化] 加载项目记忆失败:', e));
-        // 应用重启后，所有项目的未完成 Agent 任务都必须恢复为暂停，禁止自动续跑。
-        const projectIds = get().projects.map((project) => project.id);
-        await Promise.all(projectIds.map((projectId) =>
-          get().repairInterruptedAgentTasksForProject(projectId),
-        ));
-      }
-    } catch (error) {
-      console.error('Init from IndexedDB failed:', error);
-      set({ currentProjectId: null, projectLoadStatus: 'error' });
-      get().showToast('项目数据读取失败，未创建空项目', 'error');
-    }
+    }).finally(() => {
+      if (projectInitializations.get(get) === initialization) projectInitializations.delete(get);
+    });
+    projectInitializations.set(get, initialization);
+    return initialization;
   },
-});
+  };
+};

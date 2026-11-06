@@ -1,0 +1,27 @@
+/** Offline project exchange. */
+const projectImport: Record<string, string> = {
+  '导入与更新项目': 'Import and update projects', '选择项目包': 'Choose project archive', '重新选择项目包': 'Choose another archive',
+  '导入为新项目': 'Import as new project', '更新已有项目': 'Update existing project', '要更新的项目': 'Project to update',
+  '请选择目标项目或整部剧': 'Choose a project or series', '对比改动': 'Compare changes', '重新对比': 'Compare again',
+  '作为独立副本，开始新的协作来源': 'Create an independent copy with a new collaboration lineage',
+  '可自动合并 {auto} 项，冲突 {conflicts} 项，尚有 {remaining} 项未选择': '{auto} automatic changes, {conflicts} conflicts, {remaining} unresolved',
+  '该版本已处理；重复导入不会覆盖之后的本机修改。': 'This revision was already processed. Reimporting will preserve subsequent local edits.',
+  '共同版本不可用，采用人工对照': 'No common revision available; manual comparison', '只看冲突': 'Conflicts only', '筛选改动': 'Filter changes',
+  '搜索名称、字段或类型': 'Search names, fields or types', '筛选内保留我的（{count}）': 'Keep mine in filter ({count})',
+  '筛选内采用对方（{count}）': 'Use incoming in filter ({count})', '保留我的': 'Keep mine', '采用对方的': 'Use incoming',
+  '冲突': 'Conflict', '自动合并，可调整': 'Automatic; adjustable', '查看共同版本': 'View common revision',
+  '（不存在 / 已删除）': '(Absent / deleted)', '当前筛选没有改动': 'No changes match this filter', '改动分页': 'Change pages',
+  '可选追加': 'Optional append', '聊天记录': 'Chat history', '项目记忆': 'Project memories', '应用更新': 'Apply update',
+  '正在处理，请稍候…': 'Processing…', '取消导入': 'Cancel import', '已取消导入，原项目未改变': 'Import cancelled; the original project is unchanged',
+  '素材预览': 'Media preview', '收起全文': 'Collapse text', '显示全文': 'Show full text', '个分集': 'episodes', '个素材': 'assets',
+  '旧项目包没有可靠共同版本。更新时每项差异都需要人工选择；请仔细核对分集与删除项。': 'Legacy archives have no verified common revision. Review each difference, especially episodes and deletions.',
+  '补充最初交接的项目包': 'Provide the original handoff archive', '我确认这是双方开始修改前的共同版本；选择错误会影响自动合并和删除判断。': 'I confirm this is the common revision before either side edited. An incorrect choice affects merges and deletions.',
+  '使用已确认的原始交接包作为共同版本': 'Using the confirmed original handoff as the common revision',
+  '应用后保留原项目及其目录，保存更新前恢复点。素材发布到新目录，原文件不覆盖。': 'Keep the existing project and folder, with a recovery point. Incoming assets use new paths and preserve original files.',
+  '请取消“只看冲突”，调整关联节点、分组、连线或素材的选择。': 'Turn off “Conflicts only” and adjust related nodes, groups, edges or assets.',
+  '导入更新恢复点': 'Import recovery points', '项目导入恢复点': 'Project import recovery points', '此项目尚无导入恢复点': 'No import recovery points yet',
+  '恢复会替换整部剧的画布、分集、设置与创作资产。当前状态会另存恢复点，聊天和记忆保留。': 'Restore all canvases, episodes, settings and creative assets in the series. Save the current state as another recovery point. Keep chats and memories.',
+  '确认将当前项目恢复为所选时间点？': 'Restore this project to the selected point?', '确认恢复': 'Confirm restore', '正在恢复…': 'Restoring…',
+  '导入更新前': 'Before import update', '恢复操作前': 'Before restore', '项目与分集': 'Project and episodes', '画布节点': 'Canvas node', '镜头行': 'Shot row', '素材文件': 'Asset file',
+};
+export default projectImport;

@@ -1,3 +1,6 @@
+/**
+ * videoEditorAiTransitionService — 回归测试：video editor AI transition custom protocols。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

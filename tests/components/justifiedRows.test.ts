@@ -1,3 +1,6 @@
+/**
+ * justifiedRows — 回归测试：justifiedRows。
+ */
 import { describe, expect, it } from 'vitest';
 import { justifiedRows } from '../../src/components/character/justifiedRows';
 

@@ -1,3 +1,6 @@
+/**
+ * ProviderWorkflowSection — 提供厂商工作流配置界面与交互。
+ */
 import Select from '../../shared/Select';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useT } from '../../../i18n';

@@ -1,3 +1,6 @@
+/**
+ * composerHistoryBudget — 按图片预算裁剪合成历史并释放不可达的对象 URL。
+ */
 import type { Layer } from '../../../../../types/composerTypes';
 import {
   MAX_COMPOSER_SOURCE_RGBA_BYTES,

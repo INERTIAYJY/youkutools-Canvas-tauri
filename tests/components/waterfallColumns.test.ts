@@ -1,3 +1,6 @@
+/**
+ * waterfallColumns — 回归测试：distributeToColumns。
+ */
 import { describe, expect, it } from 'vitest';
 import { distributeToColumns } from '../../src/components/assets/waterfallColumns';
 

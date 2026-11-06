@@ -38,6 +38,8 @@ export interface ProjectMemorySource {
 }
 
 export interface ProjectMemory {
+  /** 离线归档追加的稳定来源身份；不作为权限或执行授权。 */
+  archiveOriginId?: string;
   id: string;
   projectId: string;
   kind: ProjectMemoryKind;

@@ -1,3 +1,6 @@
+/**
+ * volcengineVideoModels — 回归测试：volcengine Seedance capability。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   getVolcengineSeedanceCapability,
@@ -28,7 +31,7 @@ describe('volcengine Seedance capability', () => {
     expect(capability?.modelId).toBe(modelId);
     expect(capability?.resolutions).toEqual(resolutions);
     expect(capability?.defaultResolution).toBe('720p');
-    expect(capability?.ratios).toEqual(['21:9', '16:9', '4:3', '1:1', '3:4', '9:16']);
+    expect(capability?.ratios).toEqual(['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive']);
     expect(capability?.defaultRatio).toBe('16:9');
     expect(capability?.minDuration).toBe(4);
     expect(capability?.maxDuration).toBe(15);
@@ -44,9 +47,15 @@ describe('volcengine Seedance capability', () => {
     expect(capability?.resolutions).toEqual(['480p', '720p', '1080p']);
     expect(capability?.defaultResolution).toBe('720p');
     expect(capability?.ratios).toContain('adaptive');
-    expect(capability?.defaultRatio).toBe('16:9');
+    expect(capability?.defaultRatio).toBe('adaptive');
     expect(capability?.minDuration).toBe(4);
     expect(capability?.maxDuration).toBe(30);
+    expect(capability?.defaultDuration).toBeUndefined();
+    expect(capability?.automaticDurationValue).toBe(-1);
+    expect(capability?.operationCapabilities?.['video-to-video']).toMatchObject({
+      ratios: ['adaptive'],
+      automaticDurationOnly: true,
+    });
     expect(capability?.maxImageReferences).toBe(30);
     expect(capability?.maxVideoReferences).toBe(10);
     expect(capability?.maxAudioReferences).toBe(10);

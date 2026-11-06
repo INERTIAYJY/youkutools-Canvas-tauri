@@ -1,3 +1,6 @@
+/**
+ * workflowApi — 定义云工作流定义、参数与产物的领域类型。
+ */
 import type { ModelExecutionProtocol, ResolvedModelProtocolPoll } from './aiTypes';
 
 /** 云工作流共享产物；请求与鉴权仍由各厂商 adapter 定义。 */

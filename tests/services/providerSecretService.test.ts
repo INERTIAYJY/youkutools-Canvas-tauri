@@ -1,3 +1,6 @@
+/**
+ * providerSecretService — 回归测试：provider secret persistence。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const tauriMocks = vi.hoisted(() => ({
@@ -26,6 +29,7 @@ import {
   writeAppSecret,
 } from '../../src/services/providerSecretService';
 import { enqueueConfigPersistence } from '../../src/services/configPersistenceQueue';
+import { buildRunningHubSiteProviders, runningHubCredentialId } from '../../src/services/runninghubSiteCredentials';
 
 function config(providers: Record<string, Record<string, unknown>>, extra: Record<string, unknown> = {}) {
   return { theme: 'dark', providers, ...extra };
@@ -57,6 +61,45 @@ beforeEach(() => {
 });
 
 describe('provider secret persistence', () => {
+  it('RunningHub 两站四个密钥独立落原生，入口不另存或回读旧共享凭据', async () => {
+    const siteKeys = { cn: { modelKey: 'cn-model-fixture', workflowKey: 'cn-workflow-fixture' }, ai: { modelKey: 'ai-model-fixture', workflowKey: 'ai-workflow-fixture' } };
+    const providers = buildRunningHubSiteProviders({}, { name: 'RH', apiKey: '', baseUrl: 'https://www.runninghub.ai/openapi/v2' }, siteKeys);
+    const { config: stripped } = await stripConfigSecrets({ providers });
+    for (const key of Object.values(siteKeys).flatMap((site) => Object.values(site))) expect(JSON.stringify(stripped)).not.toContain(key);
+    expect(tauriMocks.invoke.mock.calls.filter(([command]) => command === 'secret_set')).toHaveLength(4);
+    expect(tauriMocks.keychain.has('provider/runninghub-model')).toBe(false);
+    const restored = await restoreConfigSecrets(stripped);
+    expect(restored.config).toMatchObject({ providers: { 'runninghub-model': { apiKey: siteKeys.ai.modelKey }, runninghub: { apiKey: siteKeys.ai.workflowKey } } });
+    const saved = structuredClone(stripped) as { providers: Record<string, Record<string, unknown>> };
+    delete saved.providers[runningHubCredentialId('ai', 'runninghub-model')];
+    tauriMocks.keychain.set('provider/runninghub-model', 'old-shared-fixture');
+    tauriMocks.invoke.mockClear();
+    const missing = await restoreConfigSecrets(saved);
+    expect(missing.config).toMatchObject({ providers: { 'runninghub-model': { apiKey: '' } } });
+    expect(tauriMocks.invoke.mock.calls.some(([, args]) => (args as { key?: string }).key === 'provider/runninghub-model')).toBe(false);
+  });
+
+  it('persists and restores independent CCC group credentials without copying keys into configuration', async () => {
+    const raw = config({
+      'cccapi-free': { name: 'CCC', catalogId: 'cccapi', cccGroup: 'CCC生图白嫖', apiKey: 'free-fixture' },
+      'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: 'CCC生图稳定', apiKey: 'stable-fixture' },
+    });
+    const { config: stripped } = await stripConfigSecrets(raw);
+    expect(hasPlaintextSecret(stripped)).toBe(false);
+    expect(JSON.stringify(stripped)).not.toContain('free-fixture');
+    expect(JSON.stringify(stripped)).not.toContain('stable-fixture');
+    const restored = await restoreConfigSecrets(stripped);
+    expect(restored.config).toMatchObject({ providers: {
+      'cccapi-free': { apiKey: 'free-fixture', cccGroup: 'CCC生图白嫖' },
+      'cccapi-stable': { apiKey: 'stable-fixture', cccGroup: 'CCC生图稳定' },
+    } });
+    tauriMocks.keychain.delete('provider/cccapi-stable');
+    const missing = await restoreConfigSecrets(stripped);
+    expect(missing.missing).toEqual(['cccapi-stable']);
+    expect(missing.config).toMatchObject({ providers: {
+      'cccapi-free': { apiKey: 'free-fixture' }, 'cccapi-stable': { apiKey: '' },
+    } });
+  });
   it('passes the observed native value as a compare condition and does not retry conflicts', async () => {
     tauriMocks.keychain.set('provider/apimart', 'original-fixture');
     await stripConfigSecrets(config({ apimart: { apiKey: 'next-fixture' } }));

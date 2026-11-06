@@ -1,3 +1,6 @@
+/**
+ * subAgentTools — 回归测试：可用性与权限边界。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const runSubAgentMock = vi.hoisted(() => vi.fn());
@@ -199,7 +202,7 @@ describe('系统提示词索引', () => {
     expect(prompt).toContain('可用子智能体');
     expect(prompt).toContain('agent_run_sub_agent');
     expect(prompt).toContain('同一轮内发起多次调用即可并行');
-    expect(prompt).toContain('由你自己调用画布工具并经用户确认');
+    expect(prompt).toContain('由你自己调用画布工具，按当前模式处理确认');
   });
 
   it('旧命令分支不注入子智能体索引', () => {

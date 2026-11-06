@@ -1,3 +1,6 @@
+/**
+ * providerModelCatalogService — 回归测试：provider model catalog。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderModelChoice } from '../../../src/types/agent';
 import { clearProviderModelCatalogsForTask, clearProviderModelCatalogsForTests, createProviderModelCatalog,

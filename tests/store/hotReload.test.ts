@@ -1,3 +1,6 @@
+/**
+ * hotReload — 回归测试：开发热更新 Store 身份。
+ */
 import { describe, expect, it } from 'vitest';
 import type { StateCreator } from 'zustand';
 import { createOrRefreshHotStore } from '../../src/store/store.hotReload';

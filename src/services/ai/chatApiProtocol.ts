@@ -5,6 +5,7 @@
  * Anthropic Messages 或 Gemini generateContent，避免 Agent Runtime 和画布业务分叉。
  */
 import type { ChatApiProtocol } from '../../types';
+import type { ModelExecutionProfile, ModelProtocolPresetId } from '../../types/aiTypes';
 
 export const DEFAULT_CHAT_API_PROTOCOL: ChatApiProtocol = 'openai-compatible';
 
@@ -22,6 +23,21 @@ export function isChatApiProtocol(value: unknown): value is ChatApiProtocol {
 
 export function resolveChatApiProtocol(value: unknown): ChatApiProtocol {
   return isChatApiProtocol(value) ? value : DEFAULT_CHAT_API_PROTOCOL;
+}
+
+/** 模型级原生对话预设沿用已实现的消息、工具与流式适配器。 */
+export function isNativeTextProtocolPreset(
+  preset: string,
+): preset is Extract<ModelProtocolPresetId, 'anthropic-chat' | 'gemini-chat'> {
+  return preset === 'anthropic-chat' || preset === 'gemini-chat';
+}
+
+export function resolveNativeTextChatProtocol(
+  profile: ModelExecutionProfile | undefined,
+): ChatApiProtocol | undefined {
+  if (profile?.preset === 'anthropic-chat') return 'anthropic-compatible';
+  if (profile?.preset === 'gemini-chat') return 'gemini-native';
+  return undefined;
 }
 
 export type ChatApiContent = string | Array<{
@@ -74,6 +90,7 @@ export interface ParsedChatApiToolCall {
 
 export interface ParsedChatApiResponse {
   text: string;
+  reasoning?: string;
   toolCalls: ParsedChatApiToolCall[];
   inputTokens?: number;
   outputTokens?: number;
@@ -377,6 +394,11 @@ export function parseChatApiResponse(
         const block = item as Record<string, unknown>;
         return block.type === 'text' && typeof block.text === 'string' ? [block.text] : [];
       }).join(''),
+      reasoning: content.flatMap((item) => {
+        if (!item || typeof item !== 'object') return [];
+        const block = item as Record<string, unknown>;
+        return block.type === 'thinking' && typeof block.thinking === 'string' ? [block.thinking] : [];
+      }).join('') || undefined,
       toolCalls,
       inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined,
       outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined,
@@ -411,7 +433,8 @@ export function parseChatApiResponse(
       ? record.usageMetadata as Record<string, unknown>
       : {};
     return {
-      text: readTextParts(parts),
+      text: readTextParts(parts.filter((item) => !(item && typeof item === 'object' && (item as Record<string, unknown>).thought === true))),
+      reasoning: readTextParts(parts.filter((item) => item && typeof item === 'object' && (item as Record<string, unknown>).thought === true)) || undefined,
       toolCalls,
       inputTokens: typeof usage.promptTokenCount === 'number' ? usage.promptTokenCount : undefined,
       outputTokens: typeof usage.candidatesTokenCount === 'number' ? usage.candidatesTokenCount : undefined,
@@ -450,6 +473,7 @@ export function parseChatApiResponse(
     : {};
   return {
     text: readTextParts(message.content),
+    reasoning: typeof message.reasoning_content === 'string' ? message.reasoning_content : typeof message.reasoning === 'string' ? message.reasoning : undefined,
     toolCalls,
     inputTokens: typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined,
     outputTokens: typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined,

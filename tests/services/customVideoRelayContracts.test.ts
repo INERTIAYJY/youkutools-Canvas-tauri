@@ -1,3 +1,6 @@
+/**
+ * customVideoRelayContracts — 回归测试：custom video relay contracts。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildGeneralVideoProtocolVariables } from '../../src/services/ai/generateVideo';
 import { buildModelProtocolRequest } from '../../src/services/ai/modelProtocol';

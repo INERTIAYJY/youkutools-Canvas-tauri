@@ -2,7 +2,7 @@
  * CanvasContextMenu 画布右键菜单 — 在画布空白区域右键弹出，支持添加节点（生成/来源）、撤销、重做、粘贴
  * 子菜单位置会自动检测屏幕边界，避免溢出
  */
-import { memo, useLayoutEffect, useState } from 'react';
+import { memo, useLayoutEffect, useRef, useState } from 'react';
 import type { NodeType } from '../../types';
 import type { AvailablePluginNode } from '../../types/plugin';
 import { calcFixedPosition, calcSubmenuPosition } from '../../utils/popupPosition';
@@ -38,7 +38,7 @@ const NODE_ITEMS: MergedNodeItem[] = [
   { label: '生成视频', type: 'ai-video', role: 'generator', shortcut: '3' },
   { label: '生成音频', type: 'ai-audio', role: 'generator', shortcut: '4' },
   { label: '生成360全景', type: 'ai-panorama', role: 'generator', shortcut: '5' },
-  { label: '生成动画', type: 'ai-animation', role: 'generator', shortcut: '6' },
+  { label: '帧动画', type: 'ai-animation', role: 'generator', shortcut: '6' },
   { label: '3D 导演台', type: 'ai-director', role: 'source', shortcut: '7' },
   // ── 源节点 ──
   { label: '文本', type: 'ai-text', role: 'source', shortcut: '1' },
@@ -58,9 +58,12 @@ const MENU_PADDING = 10;
  *  以选中态最大项数估算高度，避免溢出。 */
 const L1_ITEM_COUNT = 9;
 const L1_SEP_COUNT = 3;
-/** 子菜单项数（7 个内容节点 + 1 条分割线 + 6 个源节点 = 13 个 .menu-row + 1 个 .menu-sep） */
-const SUB_ITEM_COUNT = 13;
+/** 子菜单项数（7 个内容节点 + 1 条分割线 + 7 个源节点） */
+const SUB_ITEM_COUNT = 14;
 const SUB_SEP_COUNT = 1;
+const GRID_PICKER_ROWS = 8;
+const GRID_PICKER_COLS = 12;
+const GRID_MAX_DIMENSION = 20;
 
 /** 估算菜单高度 */
 function estMenuHeight(items: number, seps: number = 0): number {
@@ -79,7 +82,7 @@ interface CanvasContextMenuProps {
   hoverMenu: 'addNode' | null;
   menuRef: React.RefObject<HTMLDivElement | null>;
   submenuRef: React.RefObject<HTMLDivElement | null>;
-  onAddNode: (type: NodeType, label: string, role: 'generator' | 'source') => void;
+  onAddNode: (type: NodeType, label: string, role: 'generator' | 'source', grid?: { rows: number; cols: number }) => void;
   onAddPluginNode: (pluginNode: AvailablePluginNode) => void;
   pluginNodes: AvailablePluginNode[];
   onUndo: () => void;
@@ -93,6 +96,91 @@ interface CanvasContextMenuProps {
   onOpenProjectDir: () => void;
   onShowSubmenu: (menu: 'addNode' | null) => void;
   onHideSubmenu: (backTo: 'addNode' | null) => void;
+}
+
+function GridPicker({
+  anchorRef,
+  onCreate,
+  onMouseEnter,
+  onMouseLeave,
+}: {
+  anchorRef: React.RefObject<HTMLDivElement | null>;
+  onCreate: (rows: number, cols: number) => void;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+}) {
+  const t = useT();
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+  const [rowsInput, setRowsInput] = useState('3');
+  const [colsInput, setColsInput] = useState('3');
+  const [hover, setHover] = useState<{ rows: number; cols: number } | null>(null);
+  const rows = Number(rowsInput);
+  const cols = Number(colsInput);
+  const valid = Number.isInteger(rows) && Number.isInteger(cols)
+    && rows >= 1 && cols >= 1 && rows <= GRID_MAX_DIMENSION && cols <= GRID_MAX_DIMENSION;
+
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current;
+    const picker = pickerRef.current;
+    if (!anchor || !picker) return;
+    const next = calcSubmenuPosition(anchor.getBoundingClientRect(), picker.offsetWidth, picker.offsetHeight);
+    const containerRect = picker.closest<HTMLElement>('.app-canvas-viewport')?.getBoundingClientRect();
+    setPosition({
+      left: next.left - (containerRect?.left ?? 0),
+      top: next.top - (containerRect?.top ?? 0),
+    });
+  }, [anchorRef]);
+
+  return (
+    <div
+      ref={pickerRef}
+      className="canvas-ctx-menu w-[300px] max-h-[calc(100vh-16px)] overflow-y-auto"
+      style={{ left: position?.left ?? 0, top: position?.top ?? 0, visibility: position ? 'visible' : 'hidden' }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+    >
+      <div className="px-2 py-2 text-xs font-medium text-canvas-text-secondary">{t('选择宫格')}</div>
+      <div className="grid grid-cols-4 gap-1 px-2">
+        {[2, 3, 4, 5].map((side) => (
+          <button key={side} type="button" className="ui-btn ui-btn--sm ui-btn--ghost" onClick={() => onCreate(side, side)}>
+            {side * side}{t('宫格')}
+          </button>
+        ))}
+      </div>
+      <div className="mx-2 my-2 border-t border-canvas-border" />
+      <div className="px-2 text-xs text-canvas-text-secondary">
+        {hover ? `${hover.rows} 行 × ${hover.cols} 列` : t('自定义行列')}
+      </div>
+      <div className="grid grid-cols-12 gap-1 p-2" onMouseLeave={() => setHover(null)} role="group" aria-label={t('选择宫格行列')}>
+        {Array.from({ length: GRID_PICKER_ROWS * GRID_PICKER_COLS }, (_, index) => {
+          const cellRows = Math.floor(index / GRID_PICKER_COLS) + 1;
+          const cellCols = index % GRID_PICKER_COLS + 1;
+          const active = hover && cellRows <= hover.rows && cellCols <= hover.cols;
+          return (
+            <button
+              key={index}
+              type="button"
+              className={`h-4 w-4 rounded-[3px] border cursor-pointer ${active ? 'border-brand bg-brand/50' : 'border-canvas-text-muted/50 bg-canvas-surface hover:border-brand'}`}
+              aria-label={t('{rows} 行 {cols} 列', { rows: cellRows, cols: cellCols })}
+              onMouseEnter={() => setHover({ rows: cellRows, cols: cellCols })}
+              onFocus={() => setHover({ rows: cellRows, cols: cellCols })}
+              onClick={() => onCreate(cellRows, cellCols)}
+            />
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-1.5 px-2 pb-2">
+        <input className="ui-input ui-input--sm w-16" type="number" min={1} max={GRID_MAX_DIMENSION} value={rowsInput}
+          onChange={(event) => setRowsInput(event.target.value)} aria-label={t('行数')} />
+        <span className="text-canvas-text-muted">×</span>
+        <input className="ui-input ui-input--sm w-16" type="number" min={1} max={GRID_MAX_DIMENSION} value={colsInput}
+          onChange={(event) => setColsInput(event.target.value)} aria-label={t('列数')} />
+        <button type="button" className="ui-btn ui-btn--sm ui-btn--primary ml-auto" disabled={!valid}
+          onClick={() => onCreate(rows, cols)}>{t('创建')}</button>
+      </div>
+    </div>
+  );
 }
 
 function CanvasContextMenu({
@@ -120,6 +208,8 @@ function CanvasContextMenu({
   // 估算值仅用于首次布局；挂载后使用真实 DOM 尺寸修正，避免菜单项变化或界面缩放导致底部被裁切。
   const [l1Pos, setL1Pos] = useState<{ left: number; top: number } | null>(null);
   const [subPos, setSubPos] = useState<{ left: number; top: number } | null>(null);
+  const [gridPickerOpen, setGridPickerOpen] = useState(false);
+  const gridRowRef = useRef<HTMLDivElement>(null);
 
   const l1Height = estMenuHeight(L1_ITEM_COUNT, L1_SEP_COUNT);
   const l1Width = estMenuWidth(L1_ITEM_COUNT);
@@ -180,9 +270,9 @@ function CanvasContextMenu({
       >
         <div
           className={`menu-row menu-row-split${hoverMenu === 'addNode' ? ' highlight' : ''}`}
-          onMouseEnter={() => onShowSubmenu('addNode')}
+          onMouseEnter={() => { setGridPickerOpen(false); onShowSubmenu('addNode'); }}
           onMouseLeave={() => onHideSubmenu(null)}
-          onClick={() => onShowSubmenu('addNode')}
+          onClick={() => { setGridPickerOpen(false); onShowSubmenu('addNode'); }}
         >
           <span className="menu-rowlabel">{t('添加节点')}</span>
           <span className="menu-arrow menu-arrow-ml8">▶</span>
@@ -244,6 +334,7 @@ function CanvasContextMenu({
               {i === 7 && <div className="menu-sep" />}
               <div
                 className="menu-row menu-row-split"
+                onMouseEnter={() => setGridPickerOpen(false)}
                 onClick={() => onAddNode(item.type, item.label, item.role)}
               >
                 <span>{t(item.label)}</span>
@@ -251,6 +342,15 @@ function CanvasContextMenu({
               </div>
             </div>
           ))}
+          <div
+            ref={gridRowRef}
+            className={`menu-row menu-row-split${gridPickerOpen ? ' highlight' : ''}`}
+            onMouseEnter={() => setGridPickerOpen(true)}
+            onClick={() => setGridPickerOpen(true)}
+          >
+            <span>{t('宫格分镜')}</span>
+            <span className="menu-arrow">▶</span>
+          </div>
           {pluginNodes.length > 0 && (
             <>
               <div className="menu-sep" />
@@ -258,6 +358,7 @@ function CanvasContextMenu({
                 <div
                   key={`${pluginNode.pluginId}-${pluginNode.node.id}`}
                   className="menu-row menu-row-split"
+                  onMouseEnter={() => setGridPickerOpen(false)}
                   title={pluginNode.pluginName}
                   onClick={() => onAddPluginNode(pluginNode)}
                 >
@@ -268,6 +369,14 @@ function CanvasContextMenu({
             </>
           )}
         </div>
+      )}
+      {hoverMenu === 'addNode' && gridPickerOpen && (
+        <GridPicker
+          anchorRef={gridRowRef}
+          onCreate={(rows, cols) => onAddNode('ai-storyboard', '宫格分镜', 'source', { rows, cols })}
+          onMouseEnter={() => onShowSubmenu('addNode')}
+          onMouseLeave={() => { setGridPickerOpen(false); onHideSubmenu(null); }}
+        />
       )}
     </>
   );

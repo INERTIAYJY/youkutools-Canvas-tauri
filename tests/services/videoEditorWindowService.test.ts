@@ -1,3 +1,6 @@
+/**
+ * videoEditorWindowService — 回归测试：videoEditorWindowService。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const tauriMocks = vi.hoisted(() => ({

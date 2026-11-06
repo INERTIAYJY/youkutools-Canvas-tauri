@@ -19,6 +19,7 @@ import {
   buildChatApiRequest,
   parseChatApiResponse,
   resolveChatApiProtocol,
+  resolveNativeTextChatProtocol,
   type ChatApiMessage,
 } from './chatApiProtocol';
 import type { ChatApiProtocol } from '../../types';
@@ -27,6 +28,7 @@ import type { ChatApiProtocol } from '../../types';
 (DEFAULT_BASE_URLS as Record<string, string>).runninghubwf = 'https://api.runninghub.cn';
 
 export async function generateText(params: AIGenerateParams): Promise<string> {
+  params.signal?.throwIfAborted();
   const { prompt: rawPrompt, model, provider } = params;
 
   const config = useAppStore.getState().config;
@@ -90,10 +92,13 @@ export async function generateText(params: AIGenerateParams): Promise<string> {
   const messages: ChatApiMessage[] = [];
   messages.push({ role: 'user', content: resolvedContent });
 
-  if (generalModel?.executionProfile) {
+  const nativeTextProtocol = resolveNativeTextChatProtocol(generalModel?.executionProfile);
+  if (nativeTextProtocol) chatApiProtocol = nativeTextProtocol;
+  if (generalModel?.executionProfile && !nativeTextProtocol) {
     const protocol = resolveModelExecutionProfile(generalModel.executionProfile);
     if (!protocol) throw new Error(`通用模型 "${generalModel.name}" 未配置调用协议`);
     const result = await executeModelProtocol({
+      signal: params.signal,
       apiKey,
       baseUrl,
       protocol,
@@ -116,6 +121,7 @@ export async function generateText(params: AIGenerateParams): Promise<string> {
     model: modelName,
     messages,
     stream: false,
+    signal: params.signal,
   });
   // 不设超时（仅 ComfyUI 才设超时）
   const response = await corsSafeFetch(request.url, request.init);

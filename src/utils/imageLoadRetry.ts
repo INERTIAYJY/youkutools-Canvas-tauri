@@ -1,3 +1,6 @@
+/**
+ * imageLoadRetry — 定义图片加载的重试间隔与可重试来源。
+ */
 export const IMAGE_LOAD_RETRY_DELAYS_MS = [400, 1_200, 2_500] as const;
 
 /**

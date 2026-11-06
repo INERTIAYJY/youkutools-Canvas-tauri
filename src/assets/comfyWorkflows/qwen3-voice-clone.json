@@ -1,0 +1,72 @@
+{
+  "1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": ""
+    },
+    "_meta": {
+      "title": "① 上传原声参考音频"
+    }
+  },
+  "2": {
+    "class_type": "AILab_Qwen3ASR",
+    "inputs": {
+      "model": "Qwen/Qwen3-ASR-1.7B-hf",
+      "precision": "bf16",
+      "language": "auto",
+      "hints": "",
+      "normalize_text": false,
+      "unload_models": true,
+      "audio": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "② 自动识别参考文本"
+    }
+  },
+  "3": {
+    "class_type": "FB_Qwen3TTSVoiceClone",
+    "inputs": {
+      "target_text": "请在这里填写要让原声说的新内容。",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "Chinese",
+      "ref_text": [
+        "2",
+        0
+      ],
+      "seed": 20260916,
+      "max_new_tokens": 1536,
+      "top_p": 0.9,
+      "top_k": 50,
+      "temperature": 0.8,
+      "repetition_penalty": 1.05,
+      "x_vector_only": false,
+      "attention": "sdpa",
+      "unload_model_after_generate": true,
+      "ref_audio": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "③ 原声 1:1 克隆"
+    }
+  },
+  "4": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "filename_prefix": "audio/Qwen3-TTS-01-原声1比1克隆",
+      "audio": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "④ 预览并保存"
+    }
+  }
+}

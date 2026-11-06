@@ -1,3 +1,6 @@
+/**
+ * shotlistRevisionService — 回归测试：剧本改动复核。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../../src/store/useAppStore';
 import { createEpisodeShotlist, updateShotlistRows } from '../../src/services/shotlistService';

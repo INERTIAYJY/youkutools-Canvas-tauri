@@ -8,7 +8,7 @@ import type { ProviderModelSelection } from '../../../types';
 
 export const XAI_BASE_URL = 'https://api.x.ai/v1';
 
-const XAI_IMAGE_PROTOCOL: NormalizedModelExecutionProtocol = {
+export const XAI_IMAGE_PROTOCOL: NormalizedModelExecutionProtocol = {
   version: 2,
   mode: 'sync',
   auth: { type: 'bearer' },

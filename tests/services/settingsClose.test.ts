@@ -1,3 +1,6 @@
+/**
+ * settingsClose — 回归测试：settings close lifecycle。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 beforeEach(() => { vi.resetModules(); });

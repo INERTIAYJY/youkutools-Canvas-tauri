@@ -1,12 +1,9 @@
 /**
  * 定义摄影棚相机与灯光状态、预设和提示词转换规则，供 3D 面板与节点操作复用。
  */
-import type {
-  CameraAperture,
-  CameraGenerationSettings,
-  CameraLens,
-  CameraShutterEffect,
-} from '../../../../types';
+import type { CameraLens } from '../../../../types';
+import { describeCameraLens } from '../../../../utils/cinematography';
+export { buildGenerationCameraPrompt, describeCameraLens } from '../../../../utils/cinematography';
 
 export type { CameraLens } from '../../../../types';
 
@@ -124,50 +121,6 @@ const DISTANCE_PROMPTS: Record<CameraDistance, string> = {
   close: 'close-up framing',
   'extreme-close': 'extreme close-up framing',
 };
-
-const LENS_PROMPTS: Record<CameraLens, string> = {
-  '15mm': '15mm ultra-wide lens',
-  '24mm': '24mm wide-angle lens',
-  '35mm': '35mm cinematic lens',
-  '50mm': '50mm natural perspective lens',
-  '85mm': '85mm portrait lens',
-  '200mm': '200mm telephoto lens compression',
-  macro: '100mm macro lens, extreme close-up, 1:1 magnification, fine surface detail',
-  fisheye: 'fisheye lens distortion',
-};
-
-export function describeCameraLens(lens: CameraLens): string {
-  return LENS_PROMPTS[lens];
-}
-
-const SHUTTER_EFFECT_PROMPTS: Record<CameraShutterEffect, string> = {
-  freeze: 'high-speed shutter effect, crisp frozen motion',
-  natural: 'natural shutter motion rendering',
-  motion: 'slow-shutter motion blur',
-  'light-trails': 'long-exposure light trails',
-};
-
-const APERTURE_PROMPTS: Record<CameraAperture, string> = {
-  'f/1.4': 'f/1.4 wide aperture, extremely shallow depth of field',
-  'f/2': 'f/2 wide aperture, shallow depth of field',
-  'f/2.8': 'f/2.8 aperture, soft background separation',
-  'f/4': 'f/4 aperture, balanced depth of field',
-  'f/5.6': 'f/5.6 aperture, moderate depth of field',
-  'f/8': 'f/8 aperture, deep depth of field',
-  'f/11': 'f/11 narrow aperture, extensive depth of field',
-  'f/16': 'f/16 narrow aperture, maximum depth of field',
-};
-
-export function buildGenerationCameraPrompt(settings?: CameraGenerationSettings): string {
-  if (!settings) return '';
-  const terms = [
-    settings.lens ? describeCameraLens(settings.lens) : undefined,
-    settings.shutterEffect ? SHUTTER_EFFECT_PROMPTS[settings.shutterEffect] : undefined,
-    settings.aperture ? APERTURE_PROMPTS[settings.aperture] : undefined,
-    settings.exposureTime ? `${settings.exposureTime} exposure time` : undefined,
-  ].filter((term): term is string => Boolean(term));
-  return terms.join(', ');
-}
 
 function describeLightDirection(light: CameraStudioLightState): string {
   const yaw = normalizeCameraYaw(light.yaw);

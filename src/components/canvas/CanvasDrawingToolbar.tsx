@@ -9,6 +9,7 @@ import {
   Circle,
   Diamond,
   Eraser,
+  Hand,
   Image as ImageIcon,
   Minus,
   MousePointer2,
@@ -17,11 +18,12 @@ import {
   Type,
   type LucideIcon,
 } from 'lucide-react';
-import type { CanvasDrawingTool } from '../../types';
+import type { CanvasDrawingTool, InteractionMode } from '../../types';
 import { useT } from '../../i18n';
 
 interface CanvasDrawingToolbarProps {
   activeTool: CanvasDrawingTool;
+  interactionMode?: InteractionMode;
   imageReady: boolean;
   onSelectTool: (tool: CanvasDrawingTool) => void;
 }
@@ -39,23 +41,26 @@ const TOOLS: Array<{ id: CanvasDrawingTool; label: string; icon: LucideIcon }> =
   { id: 'eraser', label: '橡皮擦', icon: Eraser },
 ];
 
-function CanvasDrawingToolbar({ activeTool, imageReady, onSelectTool }: CanvasDrawingToolbarProps) {
+function CanvasDrawingToolbar({ activeTool, interactionMode = 'default', imageReady, onSelectTool }: CanvasDrawingToolbarProps) {
   const t = useT();
   return (
     <div className="canvas-drawing-toolbar canvas-drawing-ui" role="toolbar" aria-label={t('画布笔记工具')}>
       {TOOLS.map(({ id, label, icon: ToolIcon }) => {
         const selected = activeTool === id;
+        const panTool = id === 'select' && interactionMode === 'classic';
+        const Icon = panTool ? Hand : ToolIcon;
+        const toolLabel = panTool ? '平移画布' : label;
         return (
           <button
             key={id}
             type="button"
             className={`canvas-drawing-tool ${selected ? 'is-active' : ''}`}
-            aria-label={t(label)}
+            aria-label={t(toolLabel)}
             aria-pressed={selected}
-            data-tooltip={id === 'image' && selected && !imageReady ? t('选择图片') : t(label)}
+            data-tooltip={id === 'image' && selected && !imageReady ? t('选择图片') : t(toolLabel)}
             onClick={() => onSelectTool(id)}
           >
-            <ToolIcon size={18} strokeWidth={1.8} aria-hidden="true" />
+            <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
             {id === 'image' && selected && !imageReady && <span className="canvas-drawing-tool-loading" aria-hidden="true" />}
           </button>
         );

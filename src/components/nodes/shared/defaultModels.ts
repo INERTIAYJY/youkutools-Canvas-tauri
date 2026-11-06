@@ -16,7 +16,10 @@ import { CATEGORY_TO_NODE_TYPES, GENERAL_MODEL_CATEGORY_LABELS } from '../../../
 import { RUNNINGHUB_MODEL_MANIFEST, isLegacyRunningHubModel, getRunningHubModel, normalizeRunningHubModelId } from '../../../services/ai/providers/runninghubModelManifest';
 import { isRunningHubWorkflow, workflowExecution } from '../../../services/workflowExecutionService';
 import { DREAMINA_IMAGE_MODELS, DREAMINA_VIDEO_MODELS } from '../../../services/ai/dreaminaModels';
-import { APIMART_OMNI_MODELS, isLegacyApimartOmni, replaceLegacyApimartOmni } from '../../../services/ai/apimartVideoModels';
+import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, isLegacyApimartOmni, replaceLegacyApimartOmni } from '../../../services/ai/apimartVideoModels';
+import { GRSAI_ADDED_MODELS } from '../../../services/ai/grsaiModels';
+import { resolveAudioParameterCapability } from '../../../services/ai/mediaModelCapabilities';
+import { getProviderDefinition } from '../../../services/ai/providerCatalogService';
 
 export type MediaModelKind = 'image' | 'video' | 'audio';
 
@@ -55,133 +58,41 @@ export const defaultModelGroups: ModelGroup[] = [
     badgeText: 'AM',
     models: [
       // ── 文本模型 ──
-      {
-        value: 'apimart/gpt-5.4',
-        provider: 'apimart',
-        label: 'GPT-5.4',
-        description: '极致逻辑与推理性能',
-        iconType: 'badge',
-        badgeText: 'OA',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/gpt-5.2',
-        provider: 'apimart',
-        label: 'GPT-5.2',
-        description: '最新旗舰，顶尖推理与代码能力',
-        iconType: 'badge',
-        badgeText: 'OA',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/gpt-5',
-        provider: 'apimart',
-        label: 'GPT-5',
-        description: 'OpenAI 旗舰模型，增强推理',
-        iconType: 'badge',
-        badgeText: 'OA',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/gpt-4o',
-        provider: 'apimart',
-        label: 'GPT-4o',
-        description: '多模态旗舰，平衡性能与成本',
-        iconType: 'badge',
-        badgeText: 'OA',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/claude-opus-4-7',
-        provider: 'apimart',
-        label: 'Claude Opus 4.7',
-        description: 'Anthropic 最强推理模型',
-        iconType: 'badge',
-        badgeText: 'AN',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/claude-sonnet-4-6',
-        provider: 'apimart',
-        label: 'Claude Sonnet 4.6',
-        description: '高性价比复杂推理',
-        iconType: 'badge',
-        badgeText: 'AN',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/gemini-3.5-flash',
-        provider: 'apimart',
-        label: 'Gemini 3.5 Flash',
-        description: 'Google 最新多模态模型',
-        iconType: 'badge',
-        badgeText: 'GG',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/gemini-3.1-pro-preview',
-        provider: 'apimart',
-        label: 'Gemini 3.1 Pro',
-        description: 'Google 旗舰推理模型',
-        iconType: 'badge',
-        badgeText: 'GG',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/deepseek-v4-pro',
-        provider: 'apimart',
-        label: 'DeepSeek V4 Pro',
-        description: 'DeepSeek 最强模型，超长上下文',
-        iconType: 'badge',
-        badgeText: 'DS',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/kimi-k2.5',
-        provider: 'apimart',
-        label: 'Kimi K2.5',
-        description: '月之暗面最新版，超长上下文',
-        iconType: 'badge',
-        badgeText: 'KM',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/kimi-k2-instruct',
-        provider: 'apimart',
-        label: 'Kimi K2',
-        description: '月之暗面指令遵循模型',
-        iconType: 'badge',
-        badgeText: 'KM',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/glm-5.1',
-        provider: 'apimart',
-        label: 'GLM-5.1',
-        description: '智谱最新大语言模型',
-        iconType: 'badge',
-        badgeText: 'GL',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/minimax-m2.5',
-        provider: 'apimart',
-        label: 'MiniMax M2.5',
-        description: 'MiniMax 大语言模型',
-        iconType: 'badge',
-        badgeText: 'MM',
-        nodeTypes: ['ai-text'],
-      },
-      {
-        value: 'apimart/o4-mini',
-        provider: 'apimart',
-        label: 'o4-mini',
-        description: 'OpenAI 推理模型，高性价比',
-        iconType: 'badge',
-        badgeText: 'OA',
-        nodeTypes: ['ai-text'],
-      },
+      ...[
+        ['gemini-3.8-flash', 'Gemini 3.8 Flash'],
+        ['gemini-4-argon', 'Gemini 4 Argon'],
+        ['qwen3.8-flash', 'Qwen 3.8 Flash'],
+        ['deepseek-v4.1-flash', 'DeepSeek V4.1 Flash'],
+        ['gpt-6.1-sol', 'GPT-6.1 Sol'],
+        ['grok-4.7', 'Grok 4.7'],
+        ['qwen3.8-27b', 'Qwen 3.8 27B'],
+        ['claude-opus-5-5', 'Claude Opus 5.5'],
+        ['glm-5.3-flash', 'GLM 5.3 Flash'],
+      ].map(([id, label]): ModelOption => ({
+        value: `apimart/${id}`, provider: 'apimart', label,
+        description: 'APIMart OpenAI 兼容文本模型', iconType: 'badge', badgeText: 'AM', nodeTypes: ['ai-text'],
+      })),
       // ── 图片模型 ──
+      ...[
+        ['gemini-3.1-flash-lite-image', 'Nano Banana Lite', '仅 1K，最多 14 张参考图'],
+        ['gemini-3.1-flash-lite-image-ext', 'Nano Banana Lite Ext', '仅 1K，最多 14 张参考图'],
+        ['gemini-3.1-flash-image-preview-official', 'Nano Banana 2 官方渠道', '最高 4K，支持极端比例与参考图'],
+        ['gemini-3-pro-image-preview-official', 'Nano Banana Pro 官方渠道', '1K/2K/4K，支持参考图'],
+        ['gpt-image-2-official', 'GPT Image 2 官方渠道', '1K/2K/4K，最多 16 张参考图'],
+        ['gpt-image-2.5-ext', 'GPT Image 2.5 Ext (Flare)', '1K/2K/4K，最多 16 张参考图'],
+        ['gpt-image-2.6-flare', 'GPT Image 2.6 Flare', '1K/2K/4K，支持质量、透明背景与最多 16 张参考图'],
+        ['gpt-image-2.6-sunburst', 'GPT Image 2.6 Sunburst', '1K/2K/4K，支持质量、透明背景与最多 16 张参考图'],
+        ['seedream-5-0-pro', 'Seedream 5.0 Pro', '1K/1.5K/2K，最多 10 张参考图'],
+        ['seedream-5-0-flash', 'Seedream 5.0 Flash', '1K/1.5K/2K，最多 10 张参考图'],
+        ['qwen-image-3.0', 'Qwen Image 3.0', '1K/2K，最多 3 张参考图，批量最多 6 张'],
+        ['qwen-image-3.0-pro', 'Qwen Image 3.0 Pro', '增强图文排版，最多 3 张参考图'],
+        ['grok-imagine-1.5-apimart', 'Grok Imagine 1.5', '支持最多 5 张参考图编辑'],
+        ['grok-imagine-2.0-ext', 'Grok Imagine 2.0 Ext', '仅文生图，单次最多 12 张'],
+        ['grok-imagine-image-2.0', 'Grok Imagine Image 2.0 官方', '1K/2K，最多 3 张参考图'],
+      ].map(([id, label, description]): ModelOption => ({
+        value: `apimart/${id}`, provider: 'apimart', label, description,
+        iconType: 'badge', badgeText: 'AM', nodeTypes: ['ai-image'],
+      })),
       {
         value: 'apimart/gemini-3.1-flash-image-preview',
         provider: 'apimart',
@@ -328,7 +239,7 @@ export const defaultModelGroups: ModelGroup[] = [
       },
       // ── 视频模型 ──
       {
-        value: 'apimart/doubao-seedance-2.0-fast',
+        value: 'apimart/seedance-2.0-fast',
         provider: 'apimart',
         label: '豆包视频 2.0 Fast',
         description: 'Seedance 2.0 快速视频生成',
@@ -337,7 +248,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/doubao-seedance-2.0',
+        value: 'apimart/seedance-2.0',
         provider: 'apimart',
         label: '豆包视频 2.0',
         description: 'Seedance 2.0 高质量视频生成',
@@ -346,7 +257,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/doubao-seedance-2.0-mini',
+        value: 'apimart/seedance-2.0-mini',
         provider: 'apimart',
         label: '豆包视频 2.0 Mini',
         description: 'Seedance 2.0 轻量视频生成',
@@ -355,7 +266,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/doubao-seedance-2.5',
+        value: 'apimart/seedance-2.5',
         provider: 'apimart',
         label: '豆包视频 2.5',
         description: 'Seedance 2.5 视频生成，4-30s，多模态/编辑/延长/首尾帧，480p/720p',
@@ -436,24 +347,6 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/MiniMax-H3-Context-IR',
-        provider: 'apimart',
-        label: 'MiniMax H3 Context-IR',
-        description: 'MiniMax H3 提示词增强版，上下文感知重写提示词后生成视频',
-        iconType: 'badge',
-        badgeText: 'MM',
-        nodeTypes: ['ai-video'],
-      },
-      {
-        value: 'apimart/MiniMax-H3-Regeneration',
-        provider: 'apimart',
-        label: 'MiniMax H3 Regeneration',
-        description: 'MiniMax H3 重生成版，基于已有视频片段重新生成',
-        iconType: 'badge',
-        badgeText: 'MM',
-        nodeTypes: ['ai-video'],
-      },
-      {
         value: 'apimart/wan2.7',
         provider: 'apimart',
         label: 'Wan 2.7',
@@ -484,6 +377,10 @@ export const defaultModelGroups: ModelGroup[] = [
         value: `apimart/${model.id}`, provider: 'apimart', label: model.name,
         description: model.description, iconType: 'badge', badgeText: 'GO', nodeTypes: ['ai-video'],
       })),
+      ...APIMART_UPDATED_VIDEO_MODELS.map((model): ModelOption => ({
+        value: `apimart/${model.id}`, provider: 'apimart', label: model.name, description: model.description,
+        iconType: 'badge', badgeText: 'AM', nodeTypes: ['ai-video'],
+      })),
       // ── 音频模型 ──
       {
         value: 'apimart/gpt-4o-mini-tts',
@@ -505,6 +402,14 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-audio'],
         audioPurpose: 'music',
       },
+      ...[
+        ['flowmusic-lyria-3.5', 'Lyria 3.5'],
+        ['suno-v6', 'Suno V6'], ['suno-v6-wild', 'Suno V6 Wild'], ['suno-v6-mini', 'Suno V6 Mini'],
+      ].map(([id, label]): ModelOption => ({
+        value: `apimart/${id}`, provider: 'apimart', label,
+        description: '风格提示或自定义歌词生成音乐', iconType: 'badge', badgeText: 'AM',
+        nodeTypes: ['ai-audio'], audioPurpose: 'music',
+      })),
     ],
   },
   {
@@ -645,10 +550,14 @@ export const defaultModelGroups: ModelGroup[] = [
   {
     id: 'grsai',
     name: 'GRSAI',
-    description: '图像生成与多模态文本模型服务',
+    description: '图像、视频与多模态文本模型服务',
     iconType: 'badge',
     badgeText: 'GR',
     models: [
+      ...GRSAI_ADDED_MODELS.map((model): ModelOption => ({
+        value: `grsai/${model.id}`, provider: 'grsai', label: model.name, description: model.description,
+        iconType: 'badge', badgeText: 'GR', nodeTypes: CATEGORY_TO_NODE_TYPES[model.category],
+      })),
       // --- 图片模型 ---
       {
         value: 'grsai/gpt-image-2',
@@ -768,15 +677,6 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-image'],
       },
       // --- 文本模型 ---
-      {
-        value: 'grsai/gpt-5.4',
-        provider: 'grsai',
-        label: 'GPT-5.4',
-        description: 'OpenAI 文本生成与推理模型',
-        iconType: 'badge',
-        badgeText: 'GR',
-        nodeTypes: ['ai-text'],
-      },
       {
         value: 'grsai/gpt-5.5',
         provider: 'grsai',
@@ -1172,33 +1072,36 @@ function dedicatedGeneralModelGroup(
   config?: ProviderModelVisibilityConfig,
 ): GeneralModelGroupPresentation | null {
   const provider = config?.providers[model.providerConfigId];
-  const catalogId = provider?.catalogId || model.providerConfigId;
-  if (catalogId === 'sora2u') {
-    return {
-      id: `general-provider-${model.providerConfigId}`,
-      name: 'Sora2U',
-      description: 'Seedance 视频与图片模型',
-      badgeText: 'S2U',
-    };
-  }
-  if (catalogId === 'cccapi') {
-    return {
-      id: `general-provider-${model.providerConfigId}`,
-      name: 'CCC API',
-      description: 'OpenAI 兼容文本与图片模型',
-      badgeText: 'CCC',
-    };
-  }
-  return null;
+  const definition = getProviderDefinition(model.providerConfigId, provider);
+  const menu = definition?.policy.modelMenuGroup;
+  if (!definition || !menu) return null;
+  return {
+    id: `general-provider-${menu.scope === 'catalog' ? definition.id : model.providerConfigId}`,
+    name: definition.name,
+    description: menu.description,
+    badgeText: definition.badgeText,
+  };
 }
 
-function createGeneralModelOption(model: GeneralModelConfig): ModelOption {
+function generalModelLabel(model: GeneralModelConfig, config?: ProviderModelVisibilityConfig): string {
+  const provider = config?.providers[model.providerConfigId];
+  const catalogId = getProviderDefinition(model.providerConfigId, provider)?.id;
+  const group = catalogId === 'cccapi' ? provider?.cccGroup?.trim()
+    : catalogId === 'relayonapi' ? provider?.relayonGroup?.trim() : undefined;
+  return group ? `${model.name} · ${group}` : model.name;
+}
+
+function createGeneralModelOption(model: GeneralModelConfig, config?: ProviderModelVisibilityConfig): ModelOption {
+  const audioCapability = config && model.category === 'audio'
+    ? resolveAudioParameterCapability(`general/${model.id}`, 'general', { providers: config.providers, generalModels: [model] })
+    : undefined;
   return {
     value: `general/${model.id}`,
     provider: 'general',
-    label: model.name,
-    description: `ID: ${model.modelId}`,
+    label: generalModelLabel(model, config),
+    description: describeGeneralModel(model, config),
     inputModalities: model.inputModalities,
+    ...(audioCapability ? { audioPurpose: audioCapability.kind } : {}),
     iconType: 'badge',
     badgeText: GENERAL_MODEL_CATEGORY_LABELS[model.category].slice(0, 2),
     nodeTypes: CATEGORY_TO_NODE_TYPES[model.category],
@@ -1218,7 +1121,7 @@ export function getGeneralModelGroups(
       !CATEGORY_TO_NODE_TYPES[model.category].includes(nodeType)
       || !isProviderCategoryVisible(config, model.providerConfigId, model.category)
     ) continue;
-    const option = createGeneralModelOption(model);
+    const option = createGeneralModelOption(model, config);
     const presentation = dedicatedGeneralModelGroup(model, config);
     if (!presentation) {
       genericModels.push(option);
@@ -1291,12 +1194,14 @@ export function getMediaModelOptions(
           ? 'ai-video'
           : 'ai-audio';
       const dedicatedGroup = dedicatedGeneralModelGroup(model, config);
+      const audioPurpose = createGeneralModelOption(model, config).audioPurpose;
       return {
         value: `general/${model.id}`,
         provider: 'general',
-        label: model.name,
+        label: generalModelLabel(model, config),
         description: describeGeneralModel(model, config),
         inputModalities: model.inputModalities,
+        ...(audioPurpose ? { audioPurpose } : {}),
         iconType: 'badge',
         badgeText: mediaKind === 'image' ? '图' : mediaKind === 'video' ? '视' : '音',
         nodeTypes: [nodeType],
@@ -1396,11 +1301,13 @@ const VISION_TEXT_MODEL_PATTERNS: RegExp[] = [
   /step-1o|step-1v/i,
   /doubao.*(vision|seed)/i,
   /kimi.*(vl|latest)|moonshot-v1-\d+k-vision/i,
+  // DeepSeek Flash 已支持视觉；不把中转／自托管的旧 V4 Flash 或 Pro 当作新版。
+  /(?:^|\/)deepseek-(?:flash|v4\.1-flash(?:-1017)?|v4-flash-vision-exp)$/i,
 ];
 
 /**
- * 判断文本模型是否能吃图片输入。
- * 只按模型 ID 关键字匹配，命中不了不代表真的不支持——仅用于优先挑选，不做拦截。
+ * 缺少显式能力时，按已知模型 ID 兼容判断图片输入；未命中时不自动认定支持视觉。
+ * 调用方有模态声明时应使用 hasVisionInputCapability，保留用户与渠道的明确限制。
  */
 export function isVisionCapableTextModel(modelId: string): boolean {
   return VISION_TEXT_MODEL_PATTERNS.some((pattern) => pattern.test(modelId));

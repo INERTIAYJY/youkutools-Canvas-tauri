@@ -1,3 +1,6 @@
+/**
+ * seriesSourceTools — 向 Agent 工具注册表注册剧集原文查询能力。
+ */
 import type { SeriesSourcePart, SeriesSourceReference } from '../../../types/seriesSource';
 import { useAppStore } from '../../../store/useAppStore';
 import { findSeriesChapters, readSeriesChapter, readSeriesSource } from '../../seriesSourceService';

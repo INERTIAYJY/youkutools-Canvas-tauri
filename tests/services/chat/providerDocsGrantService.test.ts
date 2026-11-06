@@ -1,3 +1,6 @@
+/**
+ * providerDocsGrantService — 回归测试：providerDocsGrantService。
+ */
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   beginProviderDocRead,

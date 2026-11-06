@@ -1,3 +1,6 @@
+/**
+ * updateDirectorDeskRelease — 回归测试：update-director-desk-release。
+ */
 import { gzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {

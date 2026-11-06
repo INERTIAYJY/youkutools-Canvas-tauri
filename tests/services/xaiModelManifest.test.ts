@@ -1,3 +1,6 @@
+/**
+ * xaiModelManifest — 回归测试：xAI 官方模型清单。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   parseModelExecutionProtocol,

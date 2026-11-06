@@ -1,3 +1,6 @@
+/**
+ * canvasNoteGeometry — 回归测试：canvas note geometry。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   clearCanvasNoteCurveControl,

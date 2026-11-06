@@ -1,3 +1,6 @@
+/**
+ * expertTools — 回归测试：expertTaskService。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentExpertRole, AgentTask } from '../../../src/types/agent';
 

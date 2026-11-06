@@ -10,7 +10,8 @@ import type {
   DramaProp,
   DramaScene,
 } from '../types/dramaAssets';
-import { DRAMA_ASSET_KIND_LABEL } from '../types/dramaAssets';
+import { buildDramaMentionId, DRAMA_ASSET_CATEGORY_LABEL, formatDramaMention, parseDramaMentionId } from '../types/dramaAssets';
+import { getDramaAssetCategory } from './dramaAssetSearch';
 
 export type DramaAssetPromptPurpose = 'lookbook' | 'scene_plate' | 'prop_ref';
 
@@ -24,10 +25,37 @@ export function listDramaAssetsFlat(library: DramaAssetLibrary): DramaAsset[] {
   return [...library.characters, ...library.scenes, ...library.props];
 }
 
+/** 全局三类资产复用同一份卡片记录；文件位置不参与业务身份。 */
+export function listGlobalDramaAssets(source: {
+  globalCharacters?: readonly DramaCharacter[];
+  globalScenes?: readonly DramaScene[];
+  globalProps?: readonly DramaProp[];
+}): DramaAsset[] {
+  return [...(source.globalCharacters ?? []), ...(source.globalScenes ?? []), ...(source.globalProps ?? [])];
+}
+
+/** 已在内存中的卡片直接复用；冷引用只读加载，不要求先打开资源库。 */
+export async function loadGlobalDramaAssetsForPrompt(
+  prompt: string,
+  source: Parameters<typeof listGlobalDramaAssets>[0],
+): Promise<DramaAsset[]> {
+  const assets = listGlobalDramaAssets(source);
+  const missing = [...prompt.matchAll(/@drama\{(global\/[^:}]+):[^}]*\}/g)].some((match) => {
+    const id = parseDramaMentionId(match[1]).assetId.slice('global/'.length);
+    return !assets.some((asset) => asset.id === id);
+  });
+  return missing ? (await import('./globalDramaAssetService')).loadGlobalDramaAssetCards() : assets;
+}
+
 export function findDramaAsset(
   library: DramaAssetLibrary,
   id: string,
+  globalAssets: readonly DramaAsset[] = [],
 ): DramaAsset | undefined {
+  if (id.startsWith('global/')) {
+    const asset = globalAssets.find((entry) => entry.id === id.slice('global/'.length));
+    return asset ? { ...asset, id } : undefined;
+  }
   return listDramaAssetsFlat(library).find((a) => a.id === id);
 }
 
@@ -51,7 +79,7 @@ export function formatDramaAssetTextBrief(asset: DramaAsset): string {
       : asset.importance === 'supporting' ? '（次要）'
         : '';
   const lines: string[] = [
-    `## ${DRAMA_ASSET_KIND_LABEL[asset.kind]}：${asset.name}${imp}`,
+    `## ${DRAMA_ASSET_CATEGORY_LABEL[getDramaAssetCategory(asset)]}：${asset.name}${imp}`,
   ];
 
   if (asset.kind === 'character') {
@@ -120,28 +148,73 @@ export function resolveDramaVoiceRef(asset: DramaAsset | undefined, clipId?: str
   return { ...clip, url, label: `${asset.name} · ${clip.label?.trim() || '音频'}` };
 }
 
-/** 已绑图像节点且该节点已有图时，才视为「可引图」；指定 referenceImageId 时引用角色的那一张参考图 */
+/** 指定 referenceImageId 时只解析人物 / 场景 / 道具的那张图，失效时绝不替换为主图。 */
 export function resolveDramaAssetImageRef(
   asset: DramaAsset,
   nodes: Array<{ id: string; data?: Record<string, unknown> }>,
   referenceImageId?: string,
 ): { imageNodeId?: string; imageUrl: string } | null {
-  const reference = asset.kind === 'character'
-    ? (referenceImageId
+  const reference = referenceImageId !== undefined
       ? asset.referenceImages?.find((item) => item.id === referenceImageId)
-      : undefined)
-      || asset.referenceImages?.find((item) => item.id === asset.primaryReferenceImageId)
-      || asset.referenceImages?.[0]
-    : undefined;
-  const imageNodeId = reference?.sourceNodeId || asset.imageNodeId;
+      : asset.referenceImages?.find((item) => item.id === asset.primaryReferenceImageId)
+        || asset.referenceImages?.[0];
+  if (referenceImageId !== undefined && !reference) return null;
+  const imageNodeId = asset.id.startsWith('global/') ? undefined
+    : referenceImageId !== undefined ? reference?.sourceNodeId : reference?.sourceNodeId || asset.imageNodeId;
   const node = imageNodeId ? nodes.find((item) => item.id === imageNodeId) : undefined;
   const imageUrl =
     (node?.data?.imageUrl as string | undefined)
     || (node?.data?.thumbnailUrl as string | undefined)
     || reference?.imageUrl
-    || asset.imageUrl;
+    || (referenceImageId === undefined ? asset.imageUrl : undefined);
   if (!imageUrl || !String(imageUrl).trim()) return null;
   return { imageNodeId, imageUrl };
+}
+
+/** 仅同一张可用图片且库内归属唯一时推荐库引用；不按名称猜测，也不替换分镜单格。 */
+export function preferredDramaMentionForNode(
+  nodeId: string,
+  nodes: Array<{ id: string; data?: Record<string, unknown> }>,
+  library: DramaAssetLibrary,
+  globalAssets: readonly DramaAsset[] = [],
+): string | undefined {
+  const node = nodes.find((item) => item.id === nodeId);
+  if (!node || !['ai-image', 'source-image', 'ai-panorama', 'ai-animation', 'ai-storyboard'].includes(String(node.data?.type))) return undefined;
+  const imageUrl = node.data?.imageUrl || node.data?.thumbnailUrl;
+  if (typeof imageUrl !== 'string' || !imageUrl.trim()) return undefined;
+  const candidates = (assets: readonly DramaAsset[], global: boolean) => {
+    const mentions = new Set<string>();
+    for (const asset of assets) {
+      if (/[:#{}\r\n]/.test(asset.id) || /[{}\r\n]/.test(asset.name)) continue;
+      const references = asset.referenceImages?.length
+        ? asset.referenceImages.map((reference) => reference.id) : [undefined];
+      for (const referenceId of references) {
+        if (referenceId && /[:{}\r\n]/.test(referenceId)) continue;
+        if (resolveDramaAssetImageRef(asset, global ? [] : nodes, referenceId)?.imageUrl !== imageUrl) continue;
+        const id = global ? `global/${asset.id}` : asset.id;
+        mentions.add(formatDramaMention(buildDramaMentionId(id, referenceId), asset.name));
+      }
+    }
+    return [...mentions];
+  };
+  const projectMentions = candidates(listDramaAssetsFlat(library), false);
+  if (projectMentions.length) return projectMentions.length === 1 ? projectMentions[0] : undefined;
+  const globalMentions = candidates(globalAssets, true);
+  return globalMentions.length === 1 ? globalMentions[0] : undefined;
+}
+
+/** 保留 Picture 顺序和正文；无法精确映射的节点引用继续走原协议。 */
+export function preferDramaLibraryReferences(
+  prompt: string,
+  nodes: Array<{ id: string; data?: Record<string, unknown> }>,
+  library: DramaAssetLibrary,
+  globalAssets: readonly DramaAsset[] = [],
+): string {
+  const cache = new Map<string, string | undefined>();
+  return prompt.replace(/@\{([^:}\r\n]+):[^}\r\n]+\}/g, (token, nodeId: string) => {
+    if (!cache.has(nodeId)) cache.set(nodeId, preferredDramaMentionForNode(nodeId, nodes, library, globalAssets));
+    return cache.get(nodeId) ?? token;
+  });
 }
 
 /** 角色的全部参考图地址（按库内顺序），用于 @drama{id#all} 拼成一张 */
@@ -152,7 +225,7 @@ export function collectCharacterReferenceUrls(
   if (asset.kind !== 'character') return [];
   return (asset.referenceImages ?? [])
     .map((reference) => {
-      const node = reference.sourceNodeId
+      const node = !asset.id.startsWith('global/') && reference.sourceNodeId
         ? nodes.find((item) => item.id === reference.sourceNodeId)
         : undefined;
       return (node?.data?.imageUrl as string | undefined)

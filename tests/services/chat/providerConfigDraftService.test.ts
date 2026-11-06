@@ -1,3 +1,6 @@
+/**
+ * providerConfigDraftService — 回归测试：provider model field merge。
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   clearProviderConfigDraftsForTests,
@@ -7,7 +10,7 @@ import {
   type ProviderConfigDraftInput,
 } from '../../../src/services/chat/providerConfigDraftService';
 import { buildModelProtocolRequest } from '../../../src/services/ai/modelProtocol';
-import type { ModelExecutionProtocol, VideoModelCapability } from '../../../src/types/aiTypes';
+import type { ImageModelCapability, ModelExecutionProtocol, VideoModelCapability } from '../../../src/types/aiTypes';
 import type { ProviderModelSelection } from '../../../src/types';
 
 describe('provider model field merge', () => {
@@ -88,6 +91,122 @@ curl https://gateway.example.com/v1/images/generations \\
 const IMAGE_RESPONSE = `{
   "data": [{"url": "https://cdn.example.com/image.png"}]
 }`;
+
+describe('media parameters in each imported model', () => {
+  const optionsProtocol: ModelExecutionProtocol = {
+    version: 2, mode: 'sync', auth: { type: 'bearer' },
+    submit: { method: 'POST', path: '/images/generations', body: {
+      model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}',
+      quality: '{{imageQuality}}', background: '{{imageBackground}}', output_format: 'png',
+    } },
+    response: { type: 'json', result: { urlPath: 'data.0.url' } },
+  };
+  const draftForImageCapability = (imageCapability: ImageModelCapability): ProviderConfigDraftInput => ({
+    connectionName: 'Relay', baseUrl: 'https://gateway.example.com/v1', models: [{
+      modelId: 'image-options', category: 'image', protocolSource: 'declarative',
+      executionProtocol: structuredClone(optionsProtocol), imageCapability,
+    }],
+  });
+
+  it('creates a locally validated image draft with quality, background and exact pixels', () => {
+    const capability: ImageModelCapability = { resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'], defaultRatio: '1:1',
+      qualities: ['low', 'high'], defaultQuality: 'high', backgrounds: ['opaque', 'transparent'], defaultBackground: 'opaque',
+      hasResolutionField: true, resolutionField: 'size', dimensionPresets: { '1K': { '1:1': [1024, 1024] } } };
+    const draft = createProviderConfigDraft('image-options', draftForImageCapability(capability));
+    expect(draft.config.selectedModels?.[0].imageCapability).toEqual(capability);
+    expect(draft.config.selectedModels?.[0].executionProfile?.protocol?.submit.body).toMatchObject({
+      quality: '{{imageQuality}}', background: '{{imageBackground}}', output_format: 'png',
+    });
+  });
+
+  it('rejects invalid defaults, fixed mappings and unsafe or unbounded dynamic pixel matrices', () => {
+    expect(() => createProviderConfigDraft('invalid-default', draftForImageCapability({ qualities: ['low'], defaultQuality: 'high' })))
+      .toThrow('defaultQuality');
+    const fixed = draftForImageCapability({ qualities: ['low', 'high'] });
+    fixed.models[0].executionProtocol!.submit.body = { model: '{{model}}', prompt: '{{prompt}}', quality: 'high' };
+    expect(() => createProviderConfigDraft('fixed-quality', fixed)).toThrow('可调质量');
+    const dimensions = (table: unknown) => draftForImageCapability({ dimensionPresets: table as ImageModelCapability['dimensionPresets'] });
+    expect(() => createProviderConfigDraft('dangerous-key', dimensions(JSON.parse('{"__proto__":{"1:1":[1,1]}}'))))
+      .toThrow('不允许的对象键');
+    expect(() => createProviderConfigDraft('non-plain', dimensions(new Date()))).toThrow('普通 JSON 对象');
+    expect(() => createProviderConfigDraft('too-wide', dimensions({ '1K': { '1:1': [65_537, 1] } }))).toThrow('宽高');
+    expect(() => createProviderConfigDraft('too-many', dimensions(Object.fromEntries(
+      Array.from({ length: 17 }, (_, index) => [`${index}K`, { '1:1': [1024, 1024] }]),
+    )))).toThrow('分辨率键');
+  });
+
+  it('merges partial image capabilities before validating the effective protocol and preserves inputs', () => {
+    const previous: ProviderModelSelection = { id: 'image-options', name: 'Image', category: 'image', provider: 'custom',
+      executionProfile: { preset: 'custom', protocol: structuredClone(optionsProtocol) },
+      imageCapability: { resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'], defaultRatio: '1:1',
+        dimensionPresets: { '1K': { '1:1': [1024, 1024] } } } };
+    const update: ProviderModelSelection = { id: previous.id, name: previous.name, category: 'image', provider: previous.provider,
+      imageCapability: { resolutions: ['1K', '2K'], qualities: ['low', 'high'], defaultQuality: 'high',
+        backgrounds: ['opaque', 'transparent'], defaultBackground: 'opaque', dimensionPresets: { '2K': { '1:1': [2048, 2048] } } } };
+    const before = structuredClone({ previous, update });
+    const merged = mergeProviderModels([previous], [update], { [previous.id]: ['imageCapability'] }).merged[0];
+    expect(merged.imageCapability).toMatchObject({ defaultResolution: '1K', ratios: ['1:1'], defaultRatio: '1:1',
+      qualities: ['low', 'high'], defaultQuality: 'high', backgrounds: ['opaque', 'transparent'],
+      dimensionPresets: { '1K': { '1:1': [1024, 1024] }, '2K': { '1:1': [2048, 2048] } } });
+    expect({ previous, update }).toEqual(before);
+    expect(() => mergeProviderModels([previous], [{ ...update, imageCapability: { qualities: ['low'], defaultQuality: 'high' } }],
+      { [previous.id]: ['imageCapability'] })).toThrow('defaultQuality');
+  });
+
+  it('merges per-operation video capability fields without dropping previously configured limits', () => {
+    const previous: ProviderModelSelection = { id: 'video-options', name: 'Video', category: 'video', provider: 'custom',
+      executionProfile: { preset: 'custom', protocol: { version: 2, mode: 'sync',
+        submit: { method: 'POST', path: '/videos', body: { prompt: '{{prompt}}', ratio: '{{aspectRatio}}', duration: '{{duration}}' } },
+        response: { type: 'json', result: { urlPath: 'data.0.url' } } } },
+      videoCapability: { operations: ['text-to-video'], ratios: ['16:9', '9:16'], defaultRatio: '16:9', minDuration: 4, maxDuration: 15,
+        operationCapabilities: { 'text-to-video': { ratios: ['16:9', '9:16'], defaultRatio: '16:9' } } } };
+    const update: ProviderModelSelection = { id: previous.id, name: previous.name, category: 'video', provider: 'custom',
+      videoCapability: { operations: ['text-to-video'], automaticDurationValue: -1, maxVideoAudioReferences: 3,
+        operationCapabilities: { 'text-to-video': { automaticDurationOnly: true } } } };
+    const before = structuredClone({ previous, update });
+    const merged = mergeProviderModels([previous], [update], { [previous.id]: ['videoCapability'] }).merged[0];
+    expect(merged.videoCapability).toMatchObject({ ratios: ['16:9', '9:16'], minDuration: 4, maxDuration: 15,
+      automaticDurationValue: -1, maxVideoAudioReferences: 3,
+      operationCapabilities: { 'text-to-video': { ratios: ['16:9', '9:16'], defaultRatio: '16:9', automaticDurationOnly: true } } });
+    expect({ previous, update }).toEqual(before);
+    expect(() => mergeProviderModels([previous], [{ ...update, videoCapability: { operations: ['text-to-video'],
+      automaticDurationValue: 1 } }], { [previous.id]: ['videoCapability'] })).toThrow('automaticDurationValue');
+  });
+
+  it('keeps different image tiers per model and reports undeclared parameters', () => {
+    const draft = createProviderConfigDraft('image-parameters', { connectionName: 'Relay', models: [
+      { modelId: 'image-pro', category: 'image', submitRequest: IMAGE_REQUEST, submitResponse: IMAGE_RESPONSE,
+        imageCapability: { resolutions: ['1K'], defaultResolution: '1K', ratios: ['1:1'], defaultRatio: '1:1', supportsBatch: false } },
+      { modelId: 'image-hd', category: 'image', submitRequest: IMAGE_REQUEST.replaceAll('image-pro', 'image-hd'), submitResponse: IMAGE_RESPONSE,
+        imageCapability: { resolutions: ['1K', '2K'], ratios: ['1:1', '16:9'] } },
+    ] });
+    expect(draft.config.selectedModels?.map((model) => model.imageCapability?.resolutions)).toEqual([['1K'], ['1K', '2K']]);
+    expect(draft.summary).toContain('参考图待确认');
+  });
+
+  it('rejects adjustable options that a fixed request would silently ignore', () => {
+    expect(() => createProviderConfigDraft('fixed-image', { connectionName: 'Relay', baseUrl: 'https://gateway.example.com/v1', models: [{
+      modelId: 'fixed-image', category: 'image', protocolSource: 'declarative',
+      imageCapability: { resolutions: ['1K', '2K'] },
+      executionProtocol: { version: 2, mode: 'sync', auth: { type: 'bearer' },
+        submit: { method: 'POST', path: '/images/generations', body: { model: '{{model}}', prompt: '{{prompt}}', size: '1024x1024' } },
+        response: { type: 'json', result: { urlPath: 'data.0.url' } } },
+    }] })).toThrow('可调分辨率');
+  });
+
+  it('checks preserved image capabilities when replacing only the protocol', () => {
+    const model: ProviderModelSelection = { id: 'image', name: 'Image', category: 'image', provider: 'custom',
+      imageCapability: { resolutions: ['1K', '2K'] },
+    };
+    const protocol: ModelExecutionProtocol = { version: 2, mode: 'sync',
+      submit: { method: 'POST', path: '/images/generations', body: { prompt: '{{prompt}}', size: '1024x1024' } },
+      response: { type: 'json', result: { urlPath: 'data.0.url' } },
+    };
+    expect(() => mergeProviderModels([model], [{ id: model.id, name: model.name, category: 'image', provider: 'custom',
+      executionProfile: { preset: 'custom', protocol },
+    }], { image: ['executionProfile'] })).toThrow('可调分辨率');
+  });
+});
 
 const VIDEO_REQUEST = `
 curl https://gateway.example.com/v1/videos \\
@@ -1009,6 +1128,7 @@ curl https://gateway.example.com/v1/videos \
       models: [{
         ...VIDEO_MODEL,
         videoCapability: capability,
+        submitRequest: `curl https://gateway.example.com/v1/videos -d '{"model":"lec-seed-2-0-900","prompt":"cat","duration":15,"aspect_ratio":"16:9","resolution":"720p","fps":24,"generate_audio":true,"images":["https://cdn.example.com/ref.png"],"videos":["https://cdn.example.com/ref.mp4"],"audios":["https://cdn.example.com/ref.mp3"]}'`,
       }],
     });
     expect(draft.config.selectedModels?.[0].videoCapability).toEqual(capability);
@@ -1048,5 +1168,156 @@ curl https://gateway.example.com/v1/videos \
         videoCapability: { maxDuration: 15 },
       }],
     })).toThrow('只有视频分类可以声明 videoCapability');
+  });
+});
+
+describe('Seedance built-in provider templates', () => {
+  it.each([
+    ['dreamina-seedance-2-0-260128-max', 'https://relay.example.com/v1'],
+    ['doubao-seedance-2-0-260128', 'https://ark.cn-beijing.volces.com/api/v3'],
+    ['MiniMax-H3', 'https://api.minimax.io'],
+  ])('keeps custom %s protocols separate from inferred template capabilities', (modelId, baseUrl) => {
+    const executionProtocol: ModelExecutionProtocol = {
+      version: 2, mode: 'sync',
+      submit: { method: 'POST', path: '/videos', body: { model: '{{model}}', prompt: '{{prompt}}' } },
+      response: { type: 'json', result: { urlPath: 'url' } },
+    };
+    const model = { modelId, category: 'video' as const, protocolSource: 'declarative' as const, executionProtocol };
+    // 自有协议必须显式说明操作类型，不能借型号名引入整套官方能力。
+    expect(() => createProviderConfigDraft(`custom-missing-operations-${modelId}`, {
+      connectionName: 'Custom video relay', baseUrl, models: [model],
+    })).toThrow('videoCapability.operations');
+    const capability: VideoModelCapability = { operations: ['text-to-video'] };
+    const draft = createProviderConfigDraft(`custom-video-protocol-${modelId}`, {
+      connectionName: 'Custom video relay', baseUrl, models: [{ ...model, videoCapability: capability }],
+    });
+    const selected = draft.config.selectedModels![0];
+    expect(selected.videoCapability).toEqual(capability);
+    expect(selected.videoCapability?.supportsAudio).toBeUndefined();
+    expect(selected.executionProfile?.protocol?.submit).toEqual(executionProtocol.submit);
+    expect(capability).toEqual({ operations: ['text-to-video'] });
+  });
+
+  it('keeps the Lec audio toggle undeclared while retaining supported reference audio', () => {
+    const draft = createProviderConfigDraft('lec-audio-parameters', {
+      connectionName: 'Lec', baseUrl: 'https://gateway.example.com/v1',
+      models: [{ modelId: 'private-seedance-2.5', templateId: '2.5:lec' }],
+    });
+    const model = draft.config.selectedModels![0];
+    expect(model.videoCapability?.supportsAudio).toBeUndefined();
+    expect(model.videoCapability?.maxAudioReferences).toBeGreaterThan(0);
+    expect(model.executionProfile?.protocol?.submit.body).toMatchObject({ audios: '{{audioUrls}}' });
+  });
+  it('auto-matches a verified relay from baseUrl and exact model id', () => {
+    const draft = createProviderConfigDraft('task-seedance-lec', {
+      connectionName: 'Lec Seedance',
+      baseUrl: 'https://api.paipu.net',
+      models: [{ modelId: 'lec-gt-seedance-2-5-720p' }],
+    });
+    const [model] = draft.config.selectedModels ?? [];
+
+    expect(model).toMatchObject({
+      id: 'lec-gt-seedance-2-5-720p',
+      category: 'video',
+      categoryManual: true,
+      videoCapability: {
+        resolutions: ['480p', '720p', '1080p'],
+        minDuration: 12,
+        maxDuration: 30,
+        maxImageReferences: 30,
+        maxVideoReferences: 10,
+        maxAudioReferences: 10,
+      },
+      executionProfile: {
+        preset: 'custom',
+        protocol: {
+          submit: { path: '/v1/videos' },
+          poll: { path: '/v1/videos/{{submit.id}}' },
+        },
+      },
+    });
+  });
+
+  it('lets an explicit template work on a custom gateway while preserving explicit capability', () => {
+    const explicitCapability: VideoModelCapability = {
+      operations: ['text-to-video'],
+      resolutions: ['720p'],
+      durations: [8],
+      maxImageReferences: 0,
+      maxVideoReferences: 0,
+      maxAudioReferences: 0,
+    };
+    const draft = createProviderConfigDraft('task-seedance-explicit', {
+      connectionName: 'Private Seedance Gateway',
+      baseUrl: 'https://gateway.example.com/api',
+      models: [{
+        modelId: 'private-seedance-2.5',
+        templateId: '2.5:lec',
+        videoCapability: explicitCapability,
+      }],
+    });
+    const [model] = draft.config.selectedModels ?? [];
+
+    expect(model.videoCapability).toEqual(explicitCapability);
+    expect(model.executionProfile?.protocol?.submit.body).toEqual(expect.not.objectContaining({
+      images: expect.anything(),
+      videos: expect.anything(),
+      audios: expect.anything(),
+    }));
+  });
+
+  it('does not invent a transport protocol for an unknown relay', () => {
+    expect(() => createProviderConfigDraft('task-seedance-unknown', {
+      connectionName: 'Unknown Relay',
+      baseUrl: 'https://unknown.example.com',
+      models: [{ modelId: 'doubao-seedance-2-5-pro' }],
+    })).toThrow('examples 模式必须提供 submitRequest');
+  });
+
+  it.each(['h3-standard', 'h3-max'] as const)('H3 %s quick templates declare only mapped audio controls', (variant) => {
+    for (const transport of ['minimax', 'apimart', 'aiping'] as const) {
+      const draft = createProviderConfigDraft(`task-${variant}-${transport}`, {
+        connectionName: 'H3 template fixture', baseUrl: 'https://example.test',
+        models: [{ modelId: variant, templateId: `${variant}:${transport}` }],
+      });
+      expect(draft.config.selectedModels?.[0].videoCapability?.supportsAudio).toBeUndefined();
+    }
+  });
+
+  it('creates an H3 draft from a verified AI Ping template', () => {
+    const draft = createProviderConfigDraft('task-h3-aiping', {
+      connectionName: 'AI Ping H3',
+      baseUrl: 'https://api.aiping.cn',
+      models: [{ modelId: 'MiniMax-H3-Max', templateId: 'h3-max:aiping' }],
+    });
+    const [model] = draft.config.selectedModels ?? [];
+
+    expect(model).toMatchObject({
+      id: 'MiniMax-H3-Max',
+      category: 'video',
+      categoryManual: true,
+      videoCapability: {
+        resolutions: ['480P', '768P'],
+        minDuration: 5,
+        maxDuration: 15,
+      },
+      executionProfile: {
+        preset: 'custom',
+        protocol: {
+          submit: { path: '/api/v1/multimodal/minimax/videos/video_generation' },
+          poll: {
+            path: '/api/v1/multimodal/minimax/videos/query/video_generation/{{submit.task_id}}',
+          },
+        },
+      },
+    });
+  });
+
+  it('does not auto-match H3 special operations as ordinary video generation', () => {
+    expect(() => createProviderConfigDraft('task-h3-context-ir', {
+      connectionName: 'MiniMax Context IR',
+      baseUrl: 'https://api.minimax.io',
+      models: [{ modelId: 'MiniMax-H3-Context-IR' }],
+    })).toThrow('examples 模式必须提供 submitRequest');
   });
 });

@@ -1,3 +1,6 @@
+/**
+ * mattingUtils — 处理抠图像素填充与图像历史裁剪。
+ */
 export type RgbaColor = readonly [number, number, number, number];
 
 const DEFAULT_TOLERANCE = 20;

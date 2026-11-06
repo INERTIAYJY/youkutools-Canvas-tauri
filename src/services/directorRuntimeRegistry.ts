@@ -1,8 +1,8 @@
 /**
  * 3D 导演节点的固定运行时路由表。
  *
- * 本模块不提供动态注册入口。lightweight-web 复用现有导演台服务；Blender 在接入
- * 固定脚本与场景协议前只返回 unavailable，不能回退或触发网页运行时。
+ * 本模块不提供动态注册入口。lightweight-web 复用现有导演台服务；Blender 使用独立
+ * 原生合同；ai-threejs 使用主窗口预演弹窗，不能回退到其他运行时。
  */
 import type {
   DirectorResultManifestReference,
@@ -128,14 +128,21 @@ const BLENDER_DESCRIPTOR: DirectorRuntimeDescriptor = {
   },
 };
 
+const PREVIS_DESCRIPTOR: DirectorRuntimeDescriptor = {
+  kind: 'ai-threejs', label: 'AI 镜头预演', selectable: true,
+  capabilities: { open: true, exportFrame: true, exportVideo: true },
+};
+
 const DIRECTOR_RUNTIME_DESCRIPTORS = {
   'lightweight-web': LIGHTWEIGHT_WEB_DESCRIPTOR,
   blender: BLENDER_DESCRIPTOR,
+  'ai-threejs': PREVIS_DESCRIPTOR,
 } satisfies Record<DirectorRuntimeKind, DirectorRuntimeDescriptor>;
 
 export const DIRECTOR_RUNTIME_OPTIONS: readonly DirectorRuntimeDescriptor[] = [
   LIGHTWEIGHT_WEB_DESCRIPTOR,
   BLENDER_DESCRIPTOR,
+  PREVIS_DESCRIPTOR,
 ];
 
 export function resolveDirectorRuntime(value: unknown): DirectorRuntimeResolution {
@@ -151,7 +158,7 @@ export function resolveDirectorRuntime(value: unknown): DirectorRuntimeResolutio
     };
   }
 
-  if (value === 'lightweight-web' || value === 'blender') {
+  if (value === 'lightweight-web' || value === 'blender' || value === 'ai-threejs') {
     return {
       supported: true,
       kind: value,
@@ -177,6 +184,7 @@ export async function getDirectorRuntimeAvailability(
     const { getDirectorBlenderAvailability } = await import('./directorBlenderRuntimeService');
     return getDirectorBlenderAvailability();
   }
+  if (resolution.kind === 'ai-threejs') return { state: 'ready' };
 
   const runtimeService = await import('./directorDeskRuntimeService');
   if (!runtimeService.isDirectorDeskRuntimeAvailable()) {
@@ -214,6 +222,11 @@ export async function openDirectorRuntime(
   if (kind === 'lightweight-web') {
     const { openDirectorDeskWindow } = await import('./directorDeskWindowService');
     await openDirectorDeskWindow({ instanceId: request.instanceId, theme: request.theme });
+    return;
+  }
+  if (kind === 'ai-threejs') {
+    const { openDirectorPrevis } = await import('./directorPrevisService');
+    openDirectorPrevis(request.instanceId);
     return;
   }
 
@@ -304,6 +317,7 @@ export async function exportDirectorRuntimeFrame(
   options: DirectorRuntimeFrameExportOptions,
 ): Promise<DirectorRuntimeCapture> {
   const kind = requireSupportedRuntime(value);
+  if (kind === 'ai-threejs') throw new Error('请在 AI 镜头预演面板同步当前镜头');
   if (kind === 'blender') {
     const context = requireBlenderContext(options.blender);
     if (!(context.sceneSource === 'saved-blender' && options.targetFrame === undefined)
@@ -359,6 +373,7 @@ export async function exportDirectorRuntimeVideo(
   options: DirectorRuntimeVideoExportOptions,
 ): Promise<DirectorRuntimeVideoResult> {
   const kind = requireSupportedRuntime(value);
+  if (kind === 'ai-threejs') throw new Error('请在 AI 镜头预演面板导出参考视频');
   if (kind === 'blender') {
     const context = requireBlenderContext(options.blender);
     const { runDirectorBlenderOperation } = await import('./directorBlenderRuntimeService');

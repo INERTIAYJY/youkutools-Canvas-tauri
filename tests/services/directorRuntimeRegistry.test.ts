@@ -1,3 +1,6 @@
+/**
+ * directorRuntimeRegistry — 回归测试：directorRuntimeRegistry。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type ProtocolMessage = {
@@ -33,6 +36,9 @@ vi.mock('../../src/services/directorBlenderRuntimeService', () => ({
   runDirectorBlenderOperation: mocks.runDirectorBlenderOperation,
 }));
 
+import {
+  subscribeDirectorPrevisOpen,
+} from '../../src/services/directorPrevisService';
 import {
   BLENDER_RUNTIME_UNAVAILABLE_REASON,
   exportDirectorRuntimeFrame,
@@ -97,7 +103,28 @@ describe('directorRuntimeRegistry', () => {
     }
   });
 
-  it('resolves only the two fixed runtime identifiers', () => {
+  it('opens previs through its main-window host and never calls the other runtimes', async () => {
+    const opened = vi.fn();
+    const stop = subscribeDirectorPrevisOpen('previs-test', opened);
+    try {
+      await openDirectorRuntime('ai-threejs', { instanceId: 'previs-test', theme: 'dark' });
+      expect(opened).toHaveBeenCalledOnce();
+      await expect(exportDirectorRuntimeFrame('ai-threejs', 'previs-test', {
+        position: 'current', quality: '1080p', fileName: 'frame.png',
+      })).rejects.toThrow('预演面板');
+      await expect(exportDirectorRuntimeVideo('ai-threejs', 'previs-test', {
+        quality: '720p', fps: 24, fileName: 'reference.mp4',
+      })).rejects.toThrow('预演面板');
+      expect(mocks.openDirectorDeskWindow).not.toHaveBeenCalled();
+      expect(mocks.runDirectorBlenderOperation).not.toHaveBeenCalled();
+      expect(mocks.requestDirectorWindowAction).not.toHaveBeenCalled();
+    } finally { stop(); }
+  });
+
+  it('resolves the three fixed runtime identifiers', () => {
+    expect(resolveDirectorRuntime('ai-threejs')).toMatchObject({
+      supported: true, kind: 'ai-threejs', descriptor: { label: 'AI 镜头预演', selectable: true },
+    });
     expect(resolveDirectorRuntime('lightweight-web')).toMatchObject({
       supported: true,
       kind: 'lightweight-web',
@@ -118,6 +145,9 @@ describe('directorRuntimeRegistry', () => {
   });
 
   it('reports availability through the selected runtime without cross-calling services', async () => {
+    await expect(getDirectorRuntimeAvailability('ai-threejs')).resolves.toEqual({ state: 'ready' });
+    expect(mocks.getDirectorDeskRuntimeStatus).not.toHaveBeenCalled();
+    expect(mocks.getDirectorBlenderAvailability).not.toHaveBeenCalled();
     mocks.isDirectorDeskRuntimeAvailable.mockReturnValue(false);
     await expect(getDirectorRuntimeAvailability(undefined)).resolves.toEqual({
       state: 'unavailable',

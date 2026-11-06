@@ -1,3 +1,6 @@
+/**
+ * mediaProviderRegistry — 回归测试：MediaProviderRegistry。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -73,6 +76,11 @@ beforeEach(() => {
 });
 
 describe('MediaProviderRegistry', () => {
+  it('registers GRSAI video while image generation keeps its existing contract', () => {
+    expect(mediaProviderRegistry.getVideoAdapter('grsai')?.providerId).toBe('grsai');
+    expect(mediaProviderRegistry.getImageAdapter('grsai')).toBeUndefined();
+    expect(mediaProviderRegistry.getAudioAdapter('grsai')).toBeUndefined();
+  });
   it('resolves only handlers declared by the provider capability contract', () => {
     const registry = new MediaProviderRegistry([imageAdapter('example')]);
 
@@ -108,7 +116,7 @@ describe('MediaProviderRegistry', () => {
     expect(mediaProviderRegistry.supports('apimart', 'audio')).toBe(true);
   });
 
-  it('resolves APIMart connection once inside the image adapter and forwards cancellation', async () => {
+  it('resolves APIMart connection once and forwards cancellation, image quality and background', async () => {
     const signal = new AbortController().signal;
     const adapter = mediaProviderRegistry.getImageAdapter('apimart');
 
@@ -120,6 +128,8 @@ describe('MediaProviderRegistry', () => {
         nodeId: 'image-node',
         imageSize: '2K',
         aspectRatio: '1:1',
+        imageQuality: 'high',
+        imageBackground: 'transparent',
       },
       prompt: 'resolved prompt',
       imageUrls: ['https://cdn.example/reference.png'],
@@ -139,6 +149,8 @@ describe('MediaProviderRegistry', () => {
       2,
       'image-node',
       signal,
+      'high',
+      'transparent',
     );
   });
 

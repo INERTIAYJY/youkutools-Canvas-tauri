@@ -1,3 +1,6 @@
+/**
+ * toolbarPersistence — 回归测试：toolbar persistence failure protection。
+ */
 import { IDBFactory } from 'fake-indexeddb';
 import { createStore, type StateCreator } from 'zustand/vanilla';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

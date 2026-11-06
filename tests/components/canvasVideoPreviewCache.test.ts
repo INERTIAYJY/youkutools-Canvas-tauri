@@ -1,4 +1,10 @@
+/**
+ * canvasVideoPreviewCache — 回归测试：canvas video poster scheduling and ownership。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const media = vi.hoisted(() => ({ acquire: vi.fn() }));
+vi.mock('../../src/services/comfyMediaSource', () => ({ acquireComfyMediaSource: media.acquire }));
 
 class FakeVideo extends EventTarget {
   readyState = 0;
@@ -24,6 +30,7 @@ class FakeVideo extends EventTarget {
 
 type Poster = import('../../src/components/nodes/shared/video/canvasVideoPreviewCache').CanvasVideoPoster;
 let cache: typeof import('../../src/components/nodes/shared/video/canvasVideoPreviewCache');
+let mode: typeof import('../../src/services/performanceModeRuntime');
 let videos: FakeVideo[];
 let canvases: Array<{ width: number; height: number }>;
 let interacting: boolean;
@@ -54,6 +61,7 @@ async function finish(video = videos[videos.length - 1]) {
 }
 
 beforeEach(async () => {
+  media.acquire.mockReset().mockImplementation(async (src: string) => ({ src, release: () => {} }));
   vi.useFakeTimers();
   vi.resetModules();
   videos = [];
@@ -90,10 +98,12 @@ beforeEach(async () => {
       return canvas;
     },
   });
+  mode = await import('../../src/services/performanceModeRuntime');
   cache = await import('../../src/components/nodes/shared/video/canvasVideoPreviewCache');
 });
 
 afterEach(async () => {
+  mode.syncPerformanceModeRuntime(false);
   controllers.forEach((controller) => controller.abort());
   leases.forEach((poster) => poster.release());
   pendingEncoder?.(null);
@@ -104,6 +114,78 @@ afterEach(async () => {
 });
 
 describe('canvas video poster scheduling and ownership', () => {
+  it('释放接口按顺序暂停、清空 src 并重置视频，空引用直接结束', () => {
+    const calls: string[] = [];
+    const video = {
+      pause: () => { calls.push('pause'); },
+      removeAttribute: (name: string) => { calls.push(`remove:${name}`); },
+      load: () => { calls.push('load'); },
+    };
+    cache.releaseCanvasVideo(video as unknown as HTMLVideoElement);
+    cache.releaseCanvasVideo(null);
+    expect(calls).toEqual(['pause', 'remove:src', 'load']);
+  });
+
+  it('uses the native Comfy range source and releases it after extracting the poster', async () => {
+    const release = vi.fn();
+    media.acquire.mockResolvedValueOnce({ src: 'http://comfy-media.localhost/opaque', release });
+    const request = acquire('http://127.0.0.1:8188/view?filename=old.mp4');
+    await start();
+    expect(videos[0].src).toBe('http://comfy-media.localhost/opaque');
+    await finish();
+    expect(await request.promise).not.toBeNull();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a placeholder on a native source failure without assigning the raw URL', async () => {
+    media.acquire.mockRejectedValueOnce(new Error('native unavailable'));
+    const request = acquire('http://127.0.0.1:8188/view?filename=old.mp4');
+    await start();
+    expect(await request.promise).toBeNull();
+    expect(videos[0].src).toBe('');
+  });
+  it('prunes idle poster memory on a mode switch while keeping playback leases and recent cached frames', async () => {
+    const makePoster = async (source: string) => {
+      const request = acquire(source); await start();
+      const video = videos[videos.length - 1];
+      video.videoWidth = video.videoHeight = 4096;
+      await finish(video);
+      return (await request.promise)!;
+    };
+    const active = await makePoster('asset://active.mp4');
+    const idle: Poster[] = [];
+    for (let index = 0; index < 6; index++) {
+      const poster = await makePoster(`asset://idle-${index}.mp4`);
+      idle.push(poster); poster.release();
+    }
+    expect(revokeUrl).not.toHaveBeenCalled();
+    mode.syncPerformanceModeRuntime(true);
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith(idle[0].src);
+    expect(revokeUrl).not.toHaveBeenCalledWith(active.src);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const recent = await acquire('asset://idle-5.mp4').promise;
+    expect(recent?.src).toBe(idle[5].src);
+    expect(videos).toHaveLength(7);
+  });
+
+  it('bounds idle failure entries in performance mode while retaining recent failed sources for the existing grace period', async () => {
+    mode.syncPerformanceModeRuntime(true);
+    failDrawing = true;
+    for (let index = 0; index < 17; index++) {
+      const request = acquire(`asset://unsupported-${index}.mp4`);
+      await start(); await finish();
+      expect(await request.promise).toBeNull();
+    }
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await acquire('asset://unsupported-16.mp4').promise).toBeNull();
+    expect(videos).toHaveLength(17);
+    const oldest = acquire('asset://unsupported-0.mp4');
+    await start();
+    expect(videos).toHaveLength(18);
+    oldest.controller.abort();
+    expect(await oldest.promise).toBeNull();
+  });
+
   it('shares one decode and keeps the original metadata while bounding the poster footprint', async () => {
     const first = acquire('asset://same.mp4');
     const second = acquire('asset://same.mp4');

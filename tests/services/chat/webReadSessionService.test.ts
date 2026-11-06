@@ -1,3 +1,6 @@
+/**
+ * webReadSessionService — 回归测试：bounded web read sessions。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WebReadAccessScope, WebReadDocument } from '../../../src/types/chat';
 import { clearWebReadSessionsForTask, clearWebReadSessionsForTests, readWebSession, WEB_READ_SESSION_TTL_MS } from '../../../src/services/chat/webReadSessionService';

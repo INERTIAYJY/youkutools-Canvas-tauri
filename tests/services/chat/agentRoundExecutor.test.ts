@@ -1,6 +1,11 @@
+/**
+ * agentRoundExecutor — 回归测试：provider approval round parity。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentApprovalResolution, AgentMode, AgentTask } from '../../../src/types/agent';
 import type { ProposedToolCall, ToolResultSummary } from '../../../src/types/chat';
+import { executeRegisteredAgentToolCall } from '../../../src/services/chat/agentToolExecution';
+import { MCP_GLOBAL_TOOL_NAMES, MCP_SETTINGS_CONVERSATION_ID, MCP_SETTINGS_SCOPE_ID, MCP_SETTINGS_TOOL_NAMES } from '../../../src/services/mcp/mcpSettingsScope';
 
 const streamAssistantReplyMock = vi.hoisted(() => vi.fn());
 const executeGenerationMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
@@ -170,6 +175,42 @@ function arrangeCalls(calls: ProposedToolCall[], duringStream?: () => void) {
   });
 }
 
+it.each([false, true])('executes application settings without a project only under the closed allowlist (invalid %s)', async (invalid) => {
+  const execute = vi.fn(async () => ({ status: 'success' as const, summary: 'preview', modelContent: 'preview' }));
+  registerAgentTool({ id: 'provider_config_preview', title: 'Preview', description: 'Preview', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  useAppStore.setState({ currentProjectId: null, agentTasks: [{ ...createTask(),
+    projectId: MCP_SETTINGS_SCOPE_ID, conversationId: MCP_SETTINGS_CONVERSATION_ID,
+    toolAllowlist: [...MCP_SETTINGS_TOOL_NAMES, ...(invalid ? ['canvas_update'] : [])],
+  }] });
+  const result = await executeRegisteredAgentToolCall({ taskId: 'task-round',
+    call: { callId: 'preview', toolId: 'provider_config_preview', input: {} }, signal: new AbortController().signal,
+    transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }),
+  });
+  expect(result.summary.status).toBe(invalid ? 'denied' : 'success');
+  expect(execute).toHaveBeenCalledTimes(invalid ? 0 : 1);
+});
+
+it.each(['valid', 'wrong-conversation', 'extra-tool', 'no-allowlist'])('guards project navigation outside a canvas context (%s)', async (variant) => {
+  const execute = vi.fn(async () => {
+    useAppStore.setState({ currentProjectId: 'opened-project', historyIndex: 2 });
+    return { status: 'success' as const, summary: 'opened', modelContent: 'opened' };
+  });
+  registerAgentTool({ id: 'project_open', title: 'Open', description: 'Open', effect: 'canvas_write',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  useAppStore.setState({ currentProjectId: null, agentTasks: [{ ...createTask(), projectId: MCP_SETTINGS_SCOPE_ID,
+    conversationId: variant === 'wrong-conversation' ? 'forged' : MCP_SETTINGS_CONVERSATION_ID,
+    toolAllowlist: variant === 'no-allowlist' ? undefined : [...MCP_GLOBAL_TOOL_NAMES, ...(variant === 'extra-tool' ? ['canvas_update'] : [])],
+  }] });
+  const result = await executeRegisteredAgentToolCall({ taskId: 'task-round',
+    call: { callId: 'project-open', toolId: 'project_open', input: {} }, signal: new AbortController().signal,
+    transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }),
+  });
+  expect(result.summary.status).toBe(variant === 'valid' ? 'success' : 'denied');
+  expect(execute).toHaveBeenCalledTimes(variant === 'valid' ? 1 : 0);
+  expect(useAppStore.getState().agentTasks[0].steps[0]?.toolCall?.canvasCheckpoint).toBeUndefined();
+});
+
 function runRound(
   controller = new AbortController(),
   callbacks: AgentRoundCallbacks = {},
@@ -228,6 +269,44 @@ function arrangeMedia(kind: 'image' | 'video' | 'audio' = 'image') {
 }
 
 describe('agent round executor', () => {
+  it.each([false, true])('pauses a truncated response without completing or executing tools (tools %s)', async (withTools) => {
+    arrangeCanvas();
+    const execute = vi.spyOn(getAgentTool('canvas_update_nodes')!, 'execute');
+    streamAssistantReplyMock.mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'text.delta', delta: '还没说完的回答' });
+      if (withTools) onEvent({ type: 'tool.call.final', call: {
+        callId: 'truncated-write', toolId: 'canvas_update_nodes', input: { nodeIds: ['b'], prompt: 'must not execute' },
+      } });
+      onEvent({ type: 'done', finishReason: 'length' });
+    });
+    const onComplete = vi.fn();
+    const waitForApproval = vi.fn();
+    const result = await runRound(undefined, { onComplete }, waitForApproval);
+    expect(result).toMatchObject({ outcome: 'paused', fullText: '还没说完的回答' });
+    expect(execute).not.toHaveBeenCalled();
+    expect(waitForApproval).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(nodePrompt('b')).toBe('initial');
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({
+      status: 'paused', pausedReason: 'model_output_truncated', errorCode: 'MODEL_OUTPUT_TRUNCATED', toolCallCount: 0,
+    });
+  });
+
+  it.each(['canceled', 'error'] as const)('does not execute proposals after a %s terminal event', async (finishReason) => {
+    arrangeCanvas();
+    const execute = vi.spyOn(getAgentTool('canvas_update_nodes')!, 'execute');
+    streamAssistantReplyMock.mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'tool.call.final', call: {
+        callId: 'failed-write', toolId: 'canvas_update_nodes', input: { nodeIds: ['b'], prompt: 'must not execute' },
+      } });
+      onEvent({ type: 'done', finishReason });
+    });
+    const onComplete = vi.fn();
+    await expect(runRound(undefined, { onComplete })).rejects.toThrow();
+    expect(execute).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it.each(['paused', 'stopped'] as const)('does not execute queued writes after a task is %s during a read', async (status) => {
     arrangeCanvas();
     const controller = new AbortController();

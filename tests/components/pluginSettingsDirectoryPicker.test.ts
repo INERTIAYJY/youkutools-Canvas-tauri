@@ -1,3 +1,6 @@
+/**
+ * pluginSettingsDirectoryPicker — 回归测试：插件目录选择入口。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   isIgnoredPluginMetadataEntry,

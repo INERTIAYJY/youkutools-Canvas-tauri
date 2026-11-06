@@ -1,3 +1,6 @@
+/**
+ * agentLifecycle — 回归测试：agentLifecycle。
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   clearAgentLifecycleListenersForTests,

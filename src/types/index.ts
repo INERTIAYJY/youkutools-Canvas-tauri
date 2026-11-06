@@ -1,10 +1,12 @@
 /**
  * types 全局类型定义 — 定义 NodeType、BaseNodeData、CanvasProject、AppConfig、ModelOption、WorkflowDefinition 等核心类型
  */
-import type { AudioOutputFormat, AudioSpeechSettings, AudioTtsVoice, ModelExecutionProfile, VideoModelCapability, VideoReferenceItem } from './aiTypes';
+import type { AudioOutputFormat, AudioSpeechSettings, AudioTtsVoice, ModelExecutionProfile, ImageModelCapability, VideoModelCapability, VideoReferenceItem } from './aiTypes';
 import type { AudioGenerationPurpose } from './media';
 import type { ImageAnnotationLayer } from '@tenney95/xiaoluo-image-editor';
 import type { CanvasNoteData } from './canvasNote';
+import type { DirectorPrevisReference } from './directorPrevis';
+import type { CinematographySettings } from './cinematography';
 import type {
   DirectorResultManifestReference,
   DirectorRuntimeKind,
@@ -13,6 +15,11 @@ import type {
 import type { ShotlistColumnKey, ShotRow, ShotlistScriptSource, ShotlistProductionSource } from './shotlist';
 import type { Locale } from '../i18n';
 import type { McpToolExposure } from './mcp';
+import type { McpClientConnection } from './mcpClient';
+import type { AnimationFrameEdit, AnimationProcessing, AnimationSheet } from './animation';
+import type { AiAppReference } from './aiApp';
+import type { ComfyRefmodAsset, ComfyRefmodSelection } from './comfyRefmod';
+import type { EpisodeAssetRoster } from './episodeAssets';
 
 export type {
   CanvasDrawingTool,
@@ -61,7 +68,7 @@ export type {
   DirectorWorldColor,
 } from './directorScene';
 
-export type { ShotFrameBinding, ShotFrameCandidate, ShotlistColumnKey, ShotRow } from './shotlist';
+export type { ShotFrameBinding, ShotVideoBinding, ShotFrameCandidate, ShotlistColumnKey, ShotRow } from './shotlist';
 export {
   buildShotFramePrompt,
   buildShotPlaceholderText,
@@ -114,6 +121,7 @@ export type NodeType =
   | 'ai-storyboard'
   | 'ai-shotlist'
   | 'ai-director'
+  | 'ai-app'
   | 'source-image'
   | 'source-video'
   | 'source-audio'
@@ -125,7 +133,7 @@ export type NodeType =
 // 内置图像预设可请求的生成后处理流程
 export type ImagePostProcess = 'character-8-direction-grid';
 
-export type AnimationAction = 'idle' | 'walk' | 'run' | 'jump' | 'attack' | 'hit';
+export type AnimationAction = 'idle' | 'walk' | 'run' | 'jump' | 'attack' | 'hit' | 'custom';
 export type AnimationPreviewMode = 'playing' | 'sheet';
 export type CameraLens = '15mm' | '24mm' | '35mm' | '50mm' | '85mm' | '200mm' | 'macro' | 'fisheye';
 export type CameraShutterEffect = 'freeze' | 'natural' | 'motion' | 'light-trails';
@@ -133,6 +141,7 @@ export type CameraAperture = 'f/1.4' | 'f/2' | 'f/2.8' | 'f/4' | 'f/5.6' | 'f/8'
 export type CameraExposureTime = '1/2000s' | '1/1000s' | '1/500s' | '1/250s' | '1/125s' | '1/60s' | '1/30s' | '1/8s' | '1/2s' | '1s' | '5s';
 
 export interface CameraGenerationSettings {
+  cinematography?: CinematographySettings; // 视频摄影设定；缺省跟随引用镜头，null 明确自动
   lens?: CameraLens;
   shutterEffect?: CameraShutterEffect;
   aperture?: CameraAperture;
@@ -146,6 +155,7 @@ export const ANIMATION_ACTION_LABELS: Record<AnimationAction, string> = {
   jump: '跳跃',
   attack: '攻击',
   hit: '受击',
+  custom: '自定义',
 };
 
 export const ANIMATION_FRAME_GRIDS: Record<6 | 8 | 10 | 12 | 16 | 20, { cols: number; rows: number }> = {
@@ -211,16 +221,27 @@ export interface VideoFrameAnalysisData {
 export interface BaseNodeData {
   label: string;
   type: NodeType;
+  aiApp?: AiAppReference;
   displayId?: number;         // 节点展示编号（#10, #11, ...）
   role?: 'generator' | 'source'; // 节点角色：生成器（有AI对话框） vs 源节点（上传/粘贴内容）
   fileName?: string;           // 上传的文件名（源节点使用）
   prompt?: string;           // 提示词
   output?: string;            // 输出结果（文本/URL等）
   status?: 'idle' | 'loading' | 'success' | 'error';
-  model?: string;             // 选择的模型 ID（如 qwen/qwen3.5-397b-a17b）
+  /** 本轮图片／视频生成开始时间；视频暂停和续查沿用，不逐秒写入，交付或明确结束时清理。 */
+  generationStartedAt?: number;
+  /** 已提交的视频任务暂停本地查询，仍可续查或提交新的生成。 */
+  videoTaskState?: 'paused';
+  /** 已提交的图片／音频／视频只续取原任务；无 ID 时不能承诺可查询。 */
+  mediaTaskState?: 'paused' | 'submit_unknown' | 'delivery_pending';
+  mediaTaskStage?: 'submitting' | 'querying' | 'saving';
+  model?: string;             // 模型 ID；空字符串表示主动清除，不回填偏好或项目默认模型
   provider?: string;          // 选择的供应商 ID（如 apimart）
   workflowId?: string;        // 选择的工作流 ID
   workflowInputs?: Record<string, string>; // 本地 IO 或云工作流 nodeId/fieldName 赋值
+  comfyRefmods?: ComfyRefmodSelection[]; // 本地 H3 参考包与已有加载槽位的绑定
+  comfyH3MemoryPreset?: import('./comfyLaunch').ComfyH3MemoryOverride; // 本节点覆盖 H3 低显存预设；缺省跟随常用设置
+  comfyH3MemoryApplied?: import('./comfyLaunch').ComfyH3MemoryApplication; // 上次真实提交的 H3 优化回执
   runninghubOutputs?: import('./runninghub').RunningHubOutput[];
   runninghubModelParameters?: Record<string, string>;
   runninghubStage?: string;
@@ -228,6 +249,10 @@ export interface BaseNodeData {
   workflowApiStage?: string;
   imageUrl?: string;          // 生成的图片 URL（Tauri: asset://localhost/..., 浏览器: data:...）
   videoUrl?: string;          // 生成的视频 URL
+  /** Successful video inputs digest for detecting results that need regeneration. */
+  videoBatchFingerprint?: string;
+  /** Canvas presentation title, independent of media archival filenames. */
+  displayLabel?: string;
   audioUrl?: string;          // 生成的音频 URL
   sourceUrl?: string;         // 原始远程生成 URL（下载到本地前保留）
   filePath?: string;          // 本地文件路径（项目 data 目录下，重建 asset URL 用）
@@ -257,7 +282,9 @@ export interface BaseNodeData {
   videoHeight?: number;       // 视频原始高度（用于节点等比布局）
   nodeWidth?: number;         // 画布节点当前宽度
   nodeHeight?: number;        // 画布节点当前高度
-  imageSize?: string;         // 画质选择：'1K' | '2K' | '4K'
+  imageSize?: string;         // 分辨率选择：'1K' | '2K' | '4K'
+  imageQuality?: string;      // 厂商声明的生成质量，与分辨率独立
+  imageBackground?: string;   // 厂商声明的图片背景；空字符串显式使用接口默认
   aspectRatio?: string;       // 图片比例：'1:1' | '16:9' | ...
   batchCount?: number;        // 单次批量生成图片数量，默认 1
   batchGroupId?: string;      // 同一次批量生成的结果分组 ID
@@ -274,6 +301,9 @@ export interface BaseNodeData {
   animationPreviewMode?: AnimationPreviewMode; // 动图预览 / 静态排布
   animationFps?: number;      // 预览播放帧率（1-24），默认 8
   animationLoop?: boolean;    // 预览循环播放，false 时播到末帧停住，默认 true
+  animationSheet?: AnimationSheet; // 当前原图的格数快照，独立于下次生成的帧数
+  animationProcessing?: AnimationProcessing;
+  animationEdits?: AnimationFrameEdit[]; // 按播放顺序排列，保留禁用项以便恢复
   seedanceResolution?: string;// Seedance 分辨率：'480p' | '720p' | '1080p' | '4k'
   seedanceRatio?: string;     // Seedance 宽高比：'16:9' | '4:3' | '1:1' | '3:4' | '9:16' | '21:9' | 'adaptive'
   seedanceDuration?: number;  // Seedance 时长（整数秒）：2-15
@@ -301,7 +331,10 @@ export interface BaseNodeData {
   storyboardOverrides?: (StoryboardCellOverride | null)[]; // 各格被拖入的图片（覆盖源图裁片显示）
   // ── 分镜表（ai-shotlist）──
   shotlistRows?: ShotRow[];                 // 逐行镜头
+  shotlistCinematography?: CinematographySettings; // 整表摄影默认；镜头逐项覆盖
   shotlistColumns?: ShotlistColumnKey[];    // 当前显示的列（常驻列恒在其中）
+  shotlistColumnWidths?: Partial<Record<ShotlistColumnKey, number>>; // 自定义列宽（px），普通与全屏共用
+  shotlistColumnRatios?: Partial<Record<ShotlistColumnKey, number>>; // 弹性列的相对权重；兼容旧像素列宽，镜号 48px、时长 84px 固定
   shotlistScriptSource?: ShotlistScriptSource;
   shotlistProductionSource?: ShotlistProductionSource;
   frameAnalysis?: VideoFrameAnalysisData;   // 视频拉片抽帧及画面分析结果
@@ -311,7 +344,12 @@ export interface BaseNodeData {
   directorStatus?: 'idle' | 'open' | 'ready';
   directorCaptureUrls?: string[];        // 从导演台同步的截图 URL 列表
   directorCaptureFilePaths?: string[];   // 对应本地路径
+  directorCaptureRelativePaths?: string[]; // 可迁移的项目内截图身份；加载时投影本机路径和 URL
   directorScene?: DirectorSceneReference; // 结构化 Director Scene 的不可变项目文件引用
+  directorPrevisScene?: DirectorPrevisReference; // AI 镜头预演；独立合同，不覆盖 Blender Scene
+  directorPrevisPrompt?: string;
+  directorPrevisModel?: string;
+  directorPrevisProvider?: string;
   directorResultManifest?: DirectorResultManifestReference; // 当前结果清单的不可变项目文件引用
   /** 轻量笔记/绘图元素。与 AI 生成节点数据语义隔离。 */
   note?: CanvasNoteData;
@@ -319,6 +357,12 @@ export interface BaseNodeData {
 }
 
 // ── AI 输出历史记录 ──
+/** 输出历史的共享筛选条件；空值表示不限。 */
+export interface HistoryQuery {
+  nodeType?: string;
+  search?: string;
+}
+
 export interface OutputHistoryEntry {
   id: string;                    // 唯一 ID
   projectId: string;             // 所属项目 ID
@@ -330,7 +374,9 @@ export interface OutputHistoryEntry {
   nodeType: NodeType;            // 节点类型
   model: string;                 // 模型 ID
   provider: string;              // 供应商 ID
-  status: 'success' | 'error';   // 生成结果
+  status: 'success' | 'error' | 'download_pending' | 'abandoned'; // 生成与交付结果
+  /** 只关联原任务，不在历史中复制下载地址、查询协议或凭据。 */
+  recoveryTask?: import('./aiTypes').MediaTaskReceipt;
   error?: string;                // 错误信息
   mediaUrl?: string;             // 媒体资源 URL（imageUrl/videoUrl/audioUrl）
   filePath?: string;             // 本地文件路径
@@ -358,6 +404,8 @@ export interface EpisodeCreativeInfo {
 }
 
 export interface CanvasProject {
+  /** 归档更新后提升；旧窗口/旧保存快照不能跨此代际写回。 */
+  exchangeEpoch?: number;
   id: string;
   name: string;
   createdAt: number;
@@ -383,6 +431,8 @@ export interface CanvasProject {
   episodeScript?: string;
   /** 本集结构化创作要点。 */
   episodeCreative?: EpisodeCreativeInfo;
+  /** 本集人物/道具提取清单；与整部剧共享的正式创作资产库分开保存。 */
+  episodeAssetRoster?: EpisodeAssetRoster;
   /** 剧集级原著与剧本；仅剧集项目有。 */
   series?: ProjectSeriesInfo;
 }
@@ -495,6 +545,8 @@ export interface ProviderModelSelection {
   imageReferenceRequestMode?: ImageReferenceRequestMode;
   /** 视频模型的参数能力声明（时长/分辨率/比例/参考素材等），缺省走通用兜底。 */
   videoCapability?: VideoModelCapability;
+  /** 图片模型的参数能力；未声明字段不代表已确认支持。 */
+  imageCapability?: ImageModelCapability;
 }
 
 export interface ApiProviderConfig {
@@ -506,11 +558,21 @@ export interface ApiProviderConfig {
   apiKey: string;
   /** 凭据在凭据存储中的条目名；由持久化层维护，业务代码不要直接读写。 */
   apiKeyRef?: string;
+  /** RunningHub 当前入口使用独立站点凭据记录；此入口的 apiKey 仅为内存派生值。 */
+  runninghubSiteCredentials?: boolean;
   baseUrl?: string;
   /** 文本/对话请求协议；旧配置缺失时按 openai-compatible 处理。 */
   chatApiProtocol?: ChatApiProtocol;
+  /** @deprecated 仅用于读取此前连接级图片协议；编辑连接时复制到已选模型。 */
+  imageProtocolDefault?: ModelExecutionProfile;
+  /** @deprecated 仅用于读取此前连接级参考图模式。 */
+  imageReferenceRequestModeDefault?: ImageReferenceRequestMode;
   /** 内置目录定义 ID；自定义连接的配置 key 与目录定义 ID 不同。 */
   catalogId?: string;
+  /** CCC 控制台中该 Key 对应的分组名称；仅作连接标识，不随请求发送。 */
+  cccGroup?: string;
+  /** 万象控制台中该 Key 对应的分组名称；仅作连接标识，不随请求发送。 */
+  relayonGroup?: string;
   /** undefined 表示旧配置尚未选择；空数组表示用户明确未启用任何模型。 */
   selectedModels?: ProviderModelSelection[];
   /** 最近一次拉取并保存在本地的完整模型目录，不包含凭据。 */
@@ -518,6 +580,7 @@ export interface ApiProviderConfig {
   /** undefined 表示旧配置全部可见；空数组表示从所有节点模型列表隐藏该厂商。 */
   visibleModelCategories?: GeneralModelCategory[];
   catalogUpdatedAt?: number;
+  assetLibrary?: import('./volcengineAssetLibrary').VolcengineAssetLibraryConfig;
 }
 
 // 即梦/Dreamina OAuth 登录态（登录态由官方 dreamina_cli 持久化，此处仅镜像用于 UI）
@@ -549,6 +612,8 @@ export interface DreaminaRuntime {
   loggedIn: boolean;
   username: string;
   credit: string;
+  downloadedBytes?: number;
+  downloadTotalBytes?: number;
 }
 
 /** 画布背景主题 */
@@ -560,6 +625,166 @@ export type CanvasBackground =
   | 'off-white'
   | 'frosted-glass'
   | 'custom';
+
+/** 外观模式；system 根据操作系统深浅色偏好解析为 dark 或 light。 */
+export type AppearanceMode = 'dark' | 'light' | 'system';
+
+export type AppearanceCanvasKind = CanvasBackground | 'color' | 'image';
+
+/** 底色保留为颜色令牌，图片独立叠加，切回纯色时恢复原配色。 */
+export interface AppearanceBackgroundImage {
+  kind: 'color' | 'image';
+  /** 桌面端为 theme-asset:摘要.扩展名；兼容旧版内嵌 Data URL，字段名保留以兼容旧预设。 */
+  imageDataUrl?: string;
+  imageFit: 'cover' | 'contain' | 'fill';
+}
+
+/** auto 表示跟随当前主题，其他值为用户自定义颜色。 */
+export interface AppearanceButtonColors {
+  background: string;
+  hoverBackground: string;
+  backgroundImage?: AppearanceBackgroundImage;
+  /** 未单独配置时沿用普通状态的背景图片。 */
+  hoverBackgroundImage?: AppearanceBackgroundImage;
+  text: string;
+  border: string;
+}
+
+export interface AppearanceButtonTokens {
+  radius: number;
+  borderWidth: number;
+  normal: AppearanceButtonColors;
+  primary: AppearanceButtonColors;
+}
+
+export type AppearanceCanvasPanelId = 'projectBar' | 'sidebar' | 'drawingToolbar' | 'viewportToolbar';
+
+export interface AppearancePanelBackground {
+  background: string;
+  backgroundImage?: AppearanceBackgroundImage;
+  /** 背景层不透明度（0–1），不影响文字与控件；缺省沿用明暗主题厚度。 */
+  opacity?: number;
+  /** 背后画布的模糊半径（px），0 为关闭；缺省沿用主题玻璃参数。 */
+  blur?: number;
+}
+
+/** 未配置 shared 时继承窗口背景；没有独立覆盖的区域保持关联。 */
+export interface AppearanceCanvasPanels {
+  shared?: AppearancePanelBackground;
+  overrides: Partial<Record<AppearanceCanvasPanelId, AppearancePanelBackground>>;
+}
+
+export interface AppearanceUiTokens {
+  background: string;
+  surface: string;
+  surfaceImage?: AppearanceBackgroundImage;
+  canvasPanels: AppearanceCanvasPanels;
+  card: string;
+  hover: string;
+  border: string;
+  /** auto 沿用明暗主题的默认输入底色。 */
+  inputBackground: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  accent: string;
+  accentStrong: string;
+  accentSoft: string;
+  focus: string;
+  success: string;
+  warning: string;
+  danger: string;
+  info: string;
+  radius: number;
+  shadowOpacity: number;
+  glassOpacity: number;
+  glassBlur: number;
+  scrollbar: string;
+  scrollbarHover: string;
+  button: AppearanceButtonTokens;
+}
+
+export interface AppearanceCanvasConfig {
+  kind: AppearanceCanvasKind;
+  color: string;
+  /** 固定 theme 目录相对引用；旧版 Data URL 在桌面端加载时迁移。 */
+  imageDataUrl?: string;
+  imageFit: 'cover' | 'contain' | 'fill';
+  imagePosition: string;
+  imageOpacity: number;
+  /** 只作用于画布背景图片，不影响网格、节点或面板。 */
+  imageBlur: number;
+  imageBrightness: number;
+  imageContrast: number;
+  imageSaturation: number;
+  imageOverlayColor: string;
+  imageOverlayOpacity: number;
+  gridVisible: boolean;
+  gridColor: string;
+  gridSize: number;
+}
+
+export interface AppearanceNodeConfig {
+  background: string;
+  backgroundImage?: AppearanceBackgroundImage;
+  backgroundOpacity: number;
+  border: string;
+  borderWidth: number;
+  radius: number;
+  shadow: string;
+  headerBackground: string;
+  selectedBorder: string;
+  selectedGlow: string;
+  text: string;
+  handleColor: string;
+}
+
+export interface AppearanceEdgeConfig {
+  color: string;
+  width: number;
+  selectedColor: string;
+  selectedWidth: number;
+  flowColor: string;
+  previewColor: string;
+  animationEnabled: boolean;
+}
+
+export interface AppearanceHandleConfig {
+  /** 手柄视觉来源：纯色或上传图片。 */
+  kind: 'color' | 'image';
+  color: string;
+  hoverColor: string;
+  size: number;
+  /** 固定 theme 目录相对引用；旧版 Data URL 在桌面端加载时迁移。 */
+  imageDataUrl?: string;
+  imageFit: 'contain' | 'cover' | 'fill';
+  opacity: number;
+}
+
+export interface AppearanceMotionConfig {
+  enabled: boolean;
+  scale: number;
+}
+
+/** 可导入、可导出的完整外观快照。内置预设只读，编辑后生成自定义副本。 */
+export interface AppearanceTheme {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  builtin: boolean;
+  mode: AppearanceMode;
+  ui: AppearanceUiTokens;
+  canvas: AppearanceCanvasConfig;
+  node: AppearanceNodeConfig;
+  edge: AppearanceEdgeConfig;
+  handle: AppearanceHandleConfig;
+  motion: AppearanceMotionConfig;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 独立 UI Kit 窗口的 UI 令牌及主题图片相对引用，不携带画布图片、绝对路径或应用配置。 */
+export type AppearanceUiSnapshot = Pick<AppearanceTheme, 'id' | 'name' | 'mode' | 'ui'>;
 
 /** 画布交互模式：default = Figma 风格（左键框选 / 右键·中键平移 / 滚轮缩放）；classic = 传统（左键平移 / Shift+拖动框选 / 滚轮纵横平移 / Ctrl+滚轮缩放） */
 export type InteractionMode = 'default' | 'classic';
@@ -601,21 +826,37 @@ export interface CanvasQuickAction {
   url?: string;
 }
 
+export type PromptSubmitShortcut = 'enter' | 'shift-enter' | 'ctrl-enter' | 'alt-enter';
+export type CanvasViewportMode = 'auto' | 'manual' | 'locked';
+
+export type AssetSortBy = 'name' | 'createdAt' | 'modifiedAt' | 'size' | 'usedAt';
+export type AssetSortOrder = 'asc' | 'desc';
+
 export interface AppConfig {
   providers: Record<string, ApiProviderConfig>;
   /** 当前用于 Agent 联网搜索的厂商；旧配置未设置时优先沿用 Tavily。 */
   webSearchProviderId?: WebSearchProviderId;
-  theme: 'dark' | 'light';
+  theme: AppearanceMode;
+  /** 当前完整外观快照；旧版本仅有 theme/canvasBackground 时由迁移层补齐。 */
+  appearance?: AppearanceTheme;
   language?: Locale; // 界面语言，未设置时跟随系统
   canvasBackground?: CanvasBackground; // 画布背景主题
+  defaultDarkBackgroundShade?: number; // 默认暗色背景灰度，0-58；未设置时为 20
+  offWhiteBackgroundColor?: string; // 米白浅色背景颜色；未设置时沿用原有 #F4F6FB
   interactionMode?: InteractionMode; // 画布交互模式，默认 'default'
+  canvasViewportMode?: CanvasViewportMode; // 自动适配窗口 / 手动 / 锁定比例，默认 auto
+  canvasViewportZoom?: number; // 手动或锁定模式的全局比例，受自定义范围约束
+  canvasViewportMinZoom?: number; // 画布最小比例，默认 0.1；常规设置按百分比输入
+  canvasViewportMaxZoom?: number; // 画布最大比例，默认 5；允许与最小比例相同
   nodeToolbarMode?: NodeToolbarMode; // 节点顶部工具栏显示方式，默认 'icons'
   nodeLabelVisible?: boolean; // 是否显示节点顶部标题标签，默认 true
   canvasNoteToolbarVisible?: boolean; // 是否显示画布笔记工具栏，默认 true
+  autoMentionOnConnect?: boolean; // 连线后自动在生成节点提示词中 @ 上游素材，默认 true
+  promptSubmitShortcut?: PromptSubmitShortcut; // 节点与助手输入框共用的发送快捷键，未设置时为 Shift+Enter
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
   outputHistoryPinned?: boolean; // 输出历史面板是否固定常驻（固定后跳转节点不关闭面板）
   canvasQuickActions?: CanvasQuickAction[]; // 画布空白处长按圆环，最多 6 个槽位
-  startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'last-project'
+  startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'project-library'
   windowAspectRatio?: WindowAspectRatio; // 窗口尺寸预设所用比例，默认 '16:9'
   windowAspectLocked?: boolean; // 拖拽缩放窗口时是否固定为上面的比例，默认 false
   windowSize?: { width: number; height: number }; // 上次退出时的窗口逻辑尺寸，启动时恢复
@@ -625,10 +866,13 @@ export interface AppConfig {
   customBackgroundOpacity?: number; // 自定义背景透明度 0-1，默认 0.3
   comfyUIUrl?: string;        // ComfyUI 默认服务地址（工作流没绑定服务端时用它）
   comfyServers?: ComfyServer[]; // 额外的 ComfyUI 服务端，供工作流按需绑定
+  comfyRefmodAssets?: ComfyRefmodAsset[]; // 参考包目录元数据，不复制模型文件
   comfyUIPath?: string;       // ComfyUI 安装目录路径
+  comfyMemoryPolicy?: ComfyMemoryPolicy; // 本地服务任务结束后的资源策略，默认保留智能缓存
   dreaminaAuth?: DreaminaAuthData; // 即梦登录态
   seedlingAuth?: SeedlingAuthMirror; // 森之灵 CLI 登录态镜像（CLI 配置文件持久化登录态）
   baseDataDir?: string;       // 用户自定义文件保存根目录，保存结构为 {baseDataDir}/{projectId}/**
+  volcengineBillingPath?: string; // 火山方舟账本数据库所在目录；文件名固定为 volcengine-usage.sqlite
   generalModels?: GeneralModelConfig[]; // 用户自建通用模型
   sidebarFloating?: boolean;  // 侧边栏是否悬浮显示（半隐于窗口边缘），默认 false
   windowGlassFrame?: boolean; // 是否显示主窗口玻璃外框，默认 true
@@ -640,6 +884,10 @@ export interface AppConfig {
   mascotPosition?: MascotPosition; // 吉祥物相对视口位置，未设置时使用右下角默认位置
   assetFolders?: string[];    // 资产管理中登记的外部本地文件夹路径（引用不拷贝）
   assetWaterfallColumns?: number; // 资产管理瀑布流列数，默认 3，范围 2-6
+  assetSortBy?: AssetSortBy; // 资产文件排序字段，默认 name
+  assetSortOrder?: AssetSortOrder; // 资产文件排序方向，默认 asc
+  creativeAssetSortBy?: 'name' | 'createdAt' | 'updatedAt';
+  creativeAssetSortOrder?: AssetSortOrder;
   photoshopPath?: string;    // Photoshop 安装路径，自动检测失败时手动配置
   jianyingPath?: string;     // 剪映专业版安装路径，自动检测失败时手动配置
   premierePath?: string;     // Adobe Premiere Pro 安装路径，自动检测失败时手动配置
@@ -648,7 +896,8 @@ export interface AppConfig {
   assistantVideoModelId?: string;  // 助手生视频模型 ID：generalModels 中的 video 模型 id
   cloudParseEnabled?: boolean; // 是否启用云端解析，默认 true；关闭后助手仅使用本地规则
   mcpAutoStart?: boolean;     // 启动软件时自动开启 MCP 本地控制会话，默认 false
-  mcpPort?: number;           // MCP 固定端口，1024-65535；未设置时随机分配
+  mcpClientConnections?: McpClientConnection[]; // 外部服务；无认证明文
+  mcpPort?: number;           // MCP 固定端口，默认 27149；1024-65535 可自定义，0 为显式随机模式
   mcpTransport?: 'stdio' | 'streamable-http'; // 默认 stdio；HTTP 模式监听 0.0.0.0
   mcpToolExposure?: McpToolExposure; // 默认 compact；full 兼容客户端原生工具发现
 }
@@ -669,6 +918,8 @@ export interface GeneralModelConfig {
   imageReferenceRequestMode?: ImageReferenceRequestMode;
   /** 视频模型的参数能力声明（时长/分辨率/比例/参考素材等），缺省走通用兜底。 */
   videoCapability?: VideoModelCapability;
+  /** 图片模型的参数能力；未声明字段不代表已确认支持。 */
+  imageCapability?: ImageModelCapability;
 }
 
 export const GENERAL_MODEL_CATEGORY_LABELS: Record<GeneralModelCategory, string> = {
@@ -726,6 +977,9 @@ export interface ModelGroup {
 // 工作流定义 — ComfyUI workflow import
 // ============================================
 
+/** ComfyUI 任务结束后的资源策略；自动策略只对回环地址生效。 */
+export type ComfyMemoryPolicy = 'smart' | 'unload-models' | 'free-memory';
+
 /** 额外的 ComfyUI 服务端；图片 / 视频分开部署时，工作流各自绑定一台 */
 export interface ComfyServer {
   id: string;
@@ -738,6 +992,9 @@ export type WorkflowCategory = 'ai-text' | 'ai-image' | 'ai-video' | 'ai-audio';
 
 /** 工作流中识别的输入/输出节点类型 */
 export type WorkflowIONodeType = 'prompt' | 'image' | 'video' | 'audio';
+
+/** 根据 ComfyUI 连线识别的提示词用途；缺省表示证据不足，不影响输入绑定。 */
+export type WorkflowPromptRole = 'positive' | 'negative' | 'mixed';
 
 /** 工作流中识别的输入/输出节点信息 */
 export interface WorkflowIONode {
@@ -808,7 +1065,7 @@ export const NODE_TYPE_CONFIG: Record<string, NodeTypeVisualConfig> = {
   'ai-image':    { icon: 'mdi:image-outline',             color: 'text-green-400',   bg: 'bg-green-500/15',   label: '生成图像' },
   'ai-video':    { icon: 'mdi:video-outline',             color: 'text-blue-400',    bg: 'bg-blue-500/15',    label: '生成视频' },
   'ai-audio':    { icon: 'mdi:volume-high',               color: 'text-orange-400',  bg: 'bg-orange-500/15',  label: '生成音频' },
-  'ai-animation': { icon: 'mdi:animation-play-outline',    color: 'text-fuchsia-400', bg: 'bg-fuchsia-500/15', label: '生成动画' },
+  'ai-animation': { icon: 'mdi:animation-play-outline',    color: 'text-fuchsia-400', bg: 'bg-fuchsia-500/15', label: '帧动画' },
   'ai-panorama': { icon: 'mdi:panorama',                  color: 'text-cyan-400',    bg: 'bg-cyan-500/15',    label: '生成360全景' },
   'ai-markdown': { icon: 'mdi:language-markdown-outline', color: 'text-purple-400',  bg: 'bg-purple-500/15',  label: 'Markdown' },
   'ai-storyboard': { icon: 'mdi:grid',                    color: 'text-pink-400',    bg: 'bg-pink-500/15',    label: '宫格分镜' },
@@ -846,6 +1103,8 @@ export interface PresetSequenceStep {
   name: string;
   nodeType: PresetNodeType;
   promptTemplate: string;
+  /** source 引用触发节点；previous 或缺省引用上一步，首步始终引用触发节点。 */
+  referenceSource?: 'source' | 'previous';
   model?: string;
   provider?: string;
   /** provider=comfyui 时指定本地工作流；缺省则沿用触发节点的工作流 */
@@ -857,6 +1116,8 @@ export interface PresetSequenceStep {
 export interface PresetAdvancedConfig {
   parameters: PresetParameterDefinition[];
   steps: PresetSequenceStep[];
+  /** 缺省顺序执行；parallel 按参考依赖并发，仍等待依赖成功并在失败后停止启动新步骤。 */
+  executionMode?: 'sequential' | 'parallel';
 }
 
 export interface PresetRunRequest {
@@ -881,6 +1142,13 @@ export interface CustomStyle {
   createdAt: number;
 }
 
+/** 快捷指令的一层逻辑分类，不对应磁盘目录。 */
+export interface PresetFolder {
+  id: string;
+  nodeType: PresetNodeType;
+  name: string;
+}
+
 export interface UserPreset {
   id: string;
   nodeType: PresetNodeType;
@@ -890,6 +1158,8 @@ export interface UserPreset {
   icon?: string;              // iconify icon name (e.g. 'mdi:star'), for Toolbar display
   thumbnail?: string;        // base64 data URL
   triggerMode: PresetTriggerMode;  // direct=替换全文, insertPrompt=追加到提示词
+  /** 缺省或文件夹失效时展示在“未分组”。 */
+  folderId?: string;
   // 可选：预设绑定的模型和尺寸，选择后生图时覆盖节点设置
   model?: string;
   provider?: string;

@@ -5,7 +5,8 @@
  */
 import type { VideoEditorProjectRecord } from '../../types/videoEditor';
 import { VIDEO_EDITOR_SCHEMA_VERSION } from '../../types/videoEditor';
-import { openDB, STORE_VIDEO_EDITOR_PROJECTS } from './schema';
+import { withRelocatedMedia } from './mediaRelocations';
+import { openDB, STORE_METADATA, STORE_VIDEO_EDITOR_PROJECTS } from './schema';
 
 /** 由画布项目与节点推出稳定的工程 ID，避免重复开窗产生多份工程 */
 export function buildVideoEditorProjectId(projectId: string, nodeId: string): string {
@@ -15,7 +16,7 @@ export function buildVideoEditorProjectId(projectId: string, nodeId: string): st
 export async function saveVideoEditorProject(record: VideoEditorProjectRecord): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_VIDEO_EDITOR_PROJECTS, 'readwrite');
+    const transaction = db.transaction([STORE_VIDEO_EDITOR_PROJECTS, STORE_METADATA], 'readwrite');
     const store = transaction.objectStore(STORE_VIDEO_EDITOR_PROJECTS);
     const request = store.get(record.id);
     request.onsuccess = () => {
@@ -25,7 +26,7 @@ export async function saveVideoEditorProject(record: VideoEditorProjectRecord): 
         transaction.abort();
         return;
       }
-      store.put(record);
+      withRelocatedMedia(transaction, record, (next) => store.put(next));
     };
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
@@ -40,7 +41,7 @@ export async function compareAndSaveVideoEditorProject(
 ): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_VIDEO_EDITOR_PROJECTS, 'readwrite');
+    const transaction = db.transaction([STORE_VIDEO_EDITOR_PROJECTS, STORE_METADATA], 'readwrite');
     const store = transaction.objectStore(STORE_VIDEO_EDITOR_PROJECTS);
     const request = store.get(record.id);
     request.onsuccess = () => {
@@ -49,7 +50,7 @@ export async function compareAndSaveVideoEditorProject(
         transaction.abort();
         return;
       }
-      store.put(record);
+      withRelocatedMedia(transaction, record, (next) => store.put(next));
     };
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error ?? new Error('剪辑工程保存失败'));

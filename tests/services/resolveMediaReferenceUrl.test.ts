@@ -1,3 +1,6 @@
+/**
+ * resolveMediaReferenceUrl — 回归测试：resolveMediaReferenceUrl — 本地媒体参考统一分发。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

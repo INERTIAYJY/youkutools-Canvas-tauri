@@ -1,3 +1,6 @@
+/**
+ * webSearchService — 回归测试：web search response normalization。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   parseBochaSearchResponse,

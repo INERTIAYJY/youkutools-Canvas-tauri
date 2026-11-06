@@ -8,12 +8,17 @@ import {
   useImperativeHandle,
   useRef,
 } from 'react';
-import { useT } from '../../i18n';
+import { t as translate, useT } from '../../i18n';
+import type { PromptSubmitShortcut } from '../../types';
+import { resolvePromptEnterAction } from '../../utils/promptSubmitShortcut';
+import { buildReferenceChipEl } from '../shared/referenceChipDom';
+import { useComfyDomImageSources } from '../../hooks/useComfyDomImageSources';
 
 export type ChatComposerReference =
   | { kind: 'node'; id: string; label: string; displayId?: number }
   | { kind: 'model'; id: string; label: string }
   | { kind: 'skill'; id: string; label: string }
+  | { kind: 'image'; id: string; label: string }
   /** 资产库人物/场景/道具；发送时由 promptResolver 展开为设定正文或参考图 */
   | { kind: 'drama'; id: string; label: string };
 
@@ -26,6 +31,8 @@ interface ChatComposerEditorProps {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  canSubmitEmpty?: boolean;
+  submitShortcut?: PromptSubmitShortcut;
   nodeDisplayIds: ReadonlyMap<string, number | undefined>;
   onMentionQueryChange: (query: string | null) => void;
   onSlashQueryChange: (query: string | null) => void;
@@ -35,26 +42,31 @@ interface ChatComposerEditorProps {
   suggestionsOpen?: boolean;
   placeholder: string;
   disabled?: boolean;
+  /** 宿主可复用自己的引用 DOM；序列化与光标行为仍由编辑器维护。 */
+  referencePresentation?: {
+    createElement: (reference: ChatComposerReference) => HTMLSpanElement;
+    synchronize?: (root: HTMLDivElement) => void;
+  };
 }
 
 type ParsedReference = ChatComposerReference & { raw: string };
 
 const ZWSP = '\u200B';
-const REFERENCE_PATTERN = /@\{([^:}\r\n]+):([^}\r\n]+)\}|@model\{([^|}\r\n]+)\|([^}\r\n]*)\}|@skill\{([^|}\r\n]+)\|([^}\r\n]*)\}|@drama\{([^:}\r\n]+):([^}\r\n]+)\}/g;
-const REFERENCE_TEXT_PATTERN = /@\{[^:}\r\n]+:[^}\r\n]+\}|@model\{[^|}\r\n]+\|[^}\r\n]*\}|@skill\{[^|}\r\n]+\|[^}\r\n]*\}|@drama\{[^:}\r\n]+:[^}\r\n]+\}/;
+const REFERENCE_PATTERN = /@\{([^:}\r\n]+):([^}\r\n]+)\}|@model\{([^|}\r\n]+)\|([^}\r\n]*)\}|@skill\{([^|}\r\n]+)\|([^}\r\n]*)\}|@drama\{([^:}\r\n]+):([^}\r\n]+)\}|@image\{(chat-ref-[a-f0-9-]{36}\.(?:png|jpg|webp))\|([^}\r\n]*)\}/g;
+const REFERENCE_TEXT_PATTERN = /@\{[^:}\r\n]+:[^}\r\n]+\}|@model\{[^|}\r\n]+\|[^}\r\n]*\}|@skill\{[^|}\r\n]+\|[^}\r\n]*\}|@drama\{[^:}\r\n]+:[^}\r\n]+\}|@image\{chat-ref-[a-f0-9-]{36}\.(?:png|jpg|webp)\|[^}\r\n]*\}/;
 
-/** 芯片配色：边框 / 底色 / 文字 / 竖条 */
-const REFERENCE_STYLES: Record<ChatComposerReference['kind'], { chip: string; accent: string }> = {
-  node: { chip: 'border-indigo-400/25 bg-indigo-400/10 text-indigo-100', accent: 'bg-indigo-300/70' },
-  model: { chip: 'border-sky-400/25 bg-sky-400/10 text-sky-100', accent: 'bg-sky-300/70' },
-  skill: { chip: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100', accent: 'bg-emerald-300/70' },
-  drama: { chip: 'border-violet-400/25 bg-violet-400/10 text-violet-100', accent: 'bg-violet-300/70' },
-};
+/** 只读取草稿实际引用的节点；与编辑器解析使用同一语法。 */
+// eslint-disable-next-line react-refresh/only-export-components
+export function getChatComposerNodeIds(value: string): string[] {
+  return [...new Set([...value.matchAll(REFERENCE_PATTERN)].flatMap((match) => match[1] === undefined ? [] : [match[1]]))];
+}
+
 const REFERENCE_ARIA_PREFIX: Record<ChatComposerReference['kind'], string> = {
   node: '节点',
   model: '模型',
   skill: 'Skill',
   drama: '资产',
+  image: '参考图',
 };
 
 function decodeLabel(value: string): string {
@@ -79,6 +91,7 @@ function serializeReference(reference: ChatComposerReference): string {
   if (reference.kind === 'drama') {
     return `@drama{${reference.id}:${sanitizeLabel(reference.label) || '资产'}}`;
   }
+  if (reference.kind === 'image') return `@image{${reference.id}|${encodeURIComponent(reference.label)}}`;
   return `@skill{${reference.id}|${encodeURIComponent(reference.label)}}`;
 }
 
@@ -97,7 +110,7 @@ function parseReference(match: RegExpExecArray, nodeDisplayIds: ReadonlyMap<stri
     return {
       kind: 'model',
       id: match[3],
-      label: match[4] || '模型',
+      label: match[4] || translate('模型'),
       raw,
     };
   }
@@ -109,10 +122,11 @@ function parseReference(match: RegExpExecArray, nodeDisplayIds: ReadonlyMap<stri
       raw,
     };
   }
+  if (match[9] !== undefined) return { kind: 'image', id: match[9], label: decodeLabel(match[10]) || translate('参考图'), raw };
   return {
     kind: 'drama',
     id: match[7],
-    label: match[8] || '资产',
+    label: match[8] || translate('资产'),
     raw,
   };
 }
@@ -134,34 +148,41 @@ function ensureCaretSlotBefore(referenceElement: HTMLElement): void {
   }
 }
 
-function buildReferenceElement(reference: ParsedReference): HTMLSpanElement {
-  const element = document.createElement('span');
+function setReferenceAriaLabel(element: HTMLElement, reference: ParsedReference): void {
+  element.setAttribute('aria-label', `${translate(REFERENCE_ARIA_PREFIX[reference.kind])} ${reference.label}${
+    reference.kind === 'node' && reference.displayId != null ? translate('，编号 {id}', { id: reference.displayId }) : ''
+  }`);
+}
+
+function buildReferenceElement(reference: ParsedReference, presentation?: ChatComposerEditorProps['referencePresentation']): HTMLSpanElement {
+  const element = presentation?.createElement(reference) ?? buildReferenceChipEl(document, {
+    label: reference.kind === 'skill' ? `/${reference.label}` : reference.label,
+    kind: reference.kind === 'image' || reference.kind === 'drama' ? 'image' : 'text',
+    badge: reference.kind === 'node' && reference.displayId != null ? `#${reference.displayId}` : undefined,
+    iconText: reference.kind === 'model' ? 'M' : reference.kind === 'skill' ? '✦' : '@',
+  });
   element.contentEditable = 'false';
+  element.setAttribute('role', 'button');
+  element.tabIndex = 0;
   element.setAttribute('data-chat-reference', reference.kind);
   element.setAttribute('data-chat-reference-raw', reference.raw);
-  const style = REFERENCE_STYLES[reference.kind];
-  element.setAttribute('aria-label', `${REFERENCE_ARIA_PREFIX[reference.kind]} ${reference.label}${
-    reference.kind === 'node' && reference.displayId != null ? `，编号 ${reference.displayId}` : ''
-  }`);
-  element.className = `mx-0.5 inline-flex max-w-[min(100%,18rem)] select-none items-center align-middle
-    rounded-[7px] border px-2 py-1 text-[12px] font-medium leading-none shadow-sm ${style.chip}`;
-
-  const accent = document.createElement('span');
-  accent.setAttribute('aria-hidden', 'true');
-  accent.className = `mr-1.5 h-3 w-0.5 shrink-0 rounded-full ${style.accent}`;
-  element.appendChild(accent);
-
-  const label = document.createElement('span');
-  label.className = 'max-w-[12rem] truncate';
-  label.textContent = reference.kind === 'skill' ? `/${reference.label}` : reference.label;
-  element.appendChild(label);
-
-  if (reference.kind === 'node' && reference.displayId != null) {
-    const displayId = document.createElement('span');
-    displayId.className = 'ml-1.5 shrink-0 border-l border-indigo-300/20 pl-1.5 text-[10px] font-semibold tabular-nums text-indigo-200/65';
-    displayId.textContent = `#${reference.displayId}`;
-    element.appendChild(displayId);
+  if (reference.kind === 'node') {
+    element.setAttribute('data-ref-id', reference.id);
+    element.setAttribute('data-ref-label', reference.label);
+  } else if (reference.kind === 'drama') {
+    element.setAttribute('data-drama-id', reference.id);
+    element.setAttribute('data-drama-label', reference.label);
+  } else if (reference.kind === 'skill') {
+    element.setAttribute('data-skill-id', reference.id);
+    element.setAttribute('data-skill-name', reference.label);
+  } else if (reference.kind === 'model') {
+    element.setAttribute('data-model-ref-id', reference.id);
+    element.setAttribute('data-model-ref-label', reference.label);
+  } else {
+    element.setAttribute('data-chat-image-file-name', reference.id);
+    element.setAttribute('data-chat-image-label', reference.label);
   }
+  setReferenceAriaLabel(element, reference);
   return element;
 }
 
@@ -174,14 +195,14 @@ function appendText(nodes: Node[], value: string): void {
   });
 }
 
-function renderValue(value: string, nodeDisplayIds: ReadonlyMap<string, number | undefined>): Node[] {
+function renderValue(value: string, nodeDisplayIds: ReadonlyMap<string, number | undefined>, presentation?: ChatComposerEditorProps['referencePresentation']): Node[] {
   const nodes: Node[] = [];
   let cursor = 0;
   for (const match of value.matchAll(REFERENCE_PATTERN)) {
     const start = match.index;
     if (start == null) continue;
     appendText(nodes, value.slice(cursor, start));
-    const referenceElement = buildReferenceElement(parseReference(match, nodeDisplayIds));
+    const referenceElement = buildReferenceElement(parseReference(match, nodeDisplayIds), presentation);
     const previous = nodes[nodes.length - 1];
     if (!previous || isBreakElement(previous) || isReferenceElement(previous)) {
       nodes.push(document.createTextNode(ZWSP));
@@ -256,6 +277,8 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
   value,
   onChange,
   onSubmit,
+  canSubmitEmpty = false,
+  submitShortcut = 'enter',
   nodeDisplayIds,
   onMentionQueryChange,
   onSlashQueryChange,
@@ -265,15 +288,20 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
   suggestionsOpen = false,
   placeholder,
   disabled = false,
+  referencePresentation,
 }, ref) {
   const t = useT();
   const editorRef = useRef<HTMLDivElement>(null);
+  useComfyDomImageSources(editorRef);
   const lastRangeRef = useRef<Range | null>(null);
   const triggerRangeRef = useRef<Range | null>(null);
+  const previousPresentationRef = useRef(referencePresentation);
 
   const emitValue = useCallback(() => {
-    if (editorRef.current) onChange(serializeEditor(editorRef.current));
-  }, [onChange]);
+    if (!editorRef.current) return;
+    referencePresentation?.synchronize?.(editorRef.current);
+    onChange(serializeEditor(editorRef.current));
+  }, [onChange, referencePresentation]);
 
   const captureSelection = useCallback(() => {
     const editor = editorRef.current;
@@ -323,13 +351,25 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
     const editor = editorRef.current;
     if (!editor) return;
     const serializedValue = serializeEditor(editor);
-    if (serializedValue === value && !containsUndecoratedReference(editor)) return;
+    const presentationChanged = previousPresentationRef.current !== referencePresentation;
+    previousPresentationRef.current = referencePresentation;
+    if (!presentationChanged && serializedValue === value && !containsUndecoratedReference(editor)) return;
 
     const hadFocus = document.activeElement === editor;
     editor.innerHTML = '';
-    for (const node of renderValue(value, nodeDisplayIds)) editor.appendChild(node);
+    for (const node of renderValue(value, nodeDisplayIds, referencePresentation)) editor.appendChild(node);
+    referencePresentation?.synchronize?.(editor);
     if (hadFocus) placeCaretAtEnd(editor);
-  }, [nodeDisplayIds, value]);
+  }, [nodeDisplayIds, value, referencePresentation]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    for (const element of editor.querySelectorAll<HTMLElement>('[data-chat-reference-raw]')) {
+      const match = element.getAttribute('data-chat-reference-raw')?.matchAll(REFERENCE_PATTERN).next().value;
+      if (match) setReferenceAriaLabel(element, parseReference(match, nodeDisplayIds));
+    }
+  }, [nodeDisplayIds, t]);
 
   useEffect(() => {
     const focusEditor = () => editorRef.current?.focus();
@@ -356,7 +396,7 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
       range.deleteContents();
 
       const raw = serializeReference(reference);
-      const chip = buildReferenceElement({ ...reference, raw });
+      const chip = buildReferenceElement({ ...reference, raw }, referencePresentation);
       range.insertNode(chip);
       ensureCaretSlotBefore(chip);
       const spacer = document.createTextNode(' ');
@@ -371,7 +411,7 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
       onSlashQueryChange(null);
       emitValue();
     },
-  }), [disabled, emitValue, onMentionQueryChange, onSlashQueryChange]);
+  }), [disabled, emitValue, onMentionQueryChange, onSlashQueryChange, referencePresentation]);
 
   const handleInput = useCallback(() => {
     const editor = editorRef.current;
@@ -409,15 +449,17 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
   }, [emitValue]);
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.nativeEvent.isComposing) return;
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     if (onSuggestionKeyDown?.(event)) return;
-    if (event.key === 'Enter' && !event.shiftKey) {
+    const action = resolvePromptEnterAction(event.nativeEvent, submitShortcut);
+    if (action === 'submit') {
       event.preventDefault();
-      if (!disabled && value.trim()) onSubmit();
+      if (!disabled && (value.trim() || canSubmitEmpty)) onSubmit();
       return;
     }
-    if (event.key === 'Enter' && event.shiftKey) {
+    if (event.key === 'Enter') {
       event.preventDefault();
+      if (action !== 'newline') return;
       const selection = window.getSelection();
       if (!selection?.rangeCount) return;
       const range = selection.getRangeAt(0);
@@ -435,7 +477,7 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
     }
     if (event.key === 'Backspace' && removeAdjacentReference('before')) event.preventDefault();
     if (event.key === 'Delete' && removeAdjacentReference('after')) event.preventDefault();
-  }, [disabled, emitValue, onSubmit, onSuggestionKeyDown, removeAdjacentReference, value]);
+  }, [disabled, emitValue, onSubmit, canSubmitEmpty, onSuggestionKeyDown, removeAdjacentReference, submitShortcut, value]);
 
   const handlePaste = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -453,17 +495,13 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
   }, [handleInput]);
 
   return (
-    <div className="relative min-h-[64px] max-h-[160px]">
-      {!value && (
-        <span className="pointer-events-none absolute inset-x-0 top-0 text-[13px] leading-5 text-canvas-text-muted">
-          {placeholder}
-        </span>
-      )}
+    <div className="ui-ai-input__editor-wrap">
       <div
         ref={editorRef}
         role="textbox"
         aria-label={t('对话消息')}
         aria-multiline="true"
+        aria-disabled={disabled}
         aria-autocomplete="list"
         aria-controls={suggestionsOpen ? suggestionListId : undefined}
         aria-activedescendant={suggestionsOpen ? activeSuggestionId : undefined}
@@ -477,9 +515,8 @@ const ChatComposerEditor = forwardRef<ChatComposerEditorHandle, ChatComposerEdit
         onMouseUp={captureSelection}
         onPaste={handlePaste}
         onBlur={emitValue}
-        className={`chat-panel-textarea relative z-10 block w-full min-h-[64px] max-h-[160px]
-          overflow-y-auto whitespace-pre-wrap break-words bg-transparent text-[13px] leading-5 text-canvas-text
-          outline-none selection:bg-indigo-400/25 rounded-[8px] ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
+        className={`ui-ai-input__editor chat-panel-textarea${!value ? ' is-empty' : ''}`}
+        data-placeholder={placeholder}
       />
     </div>
   );

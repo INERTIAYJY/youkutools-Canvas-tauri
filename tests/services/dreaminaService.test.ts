@@ -1,3 +1,6 @@
+/**
+ * dreaminaService — 回归测试：即梦 CLI 视频命令路由。
+ */
 import { describe, expect, it } from 'vitest';
 import { buildDreaminaVideoParams } from '../../src/services/dreaminaService';
 import type { MediaReference } from '../../src/types/aiTypes';
@@ -9,6 +12,23 @@ const reference = (
 ): MediaReference => ({ kind, url, role, origin: 'connection' });
 
 describe('即梦 CLI 视频命令路由', () => {
+  it('单张普通参考图使用全模态并保留用户比例', () => {
+    expect(buildDreaminaVideoParams({
+      model: 'dreamina/seedance2.5', prompt: '参考人物', ratio: '16:9',
+      references: [reference('image', 'https://test/ref.png')],
+    })).toMatchObject({ kind: 'multimodal2video', ratio: '16:9', images: ['https://test/ref.png'] });
+  });
+
+  it('仅尾帧及首帧混用普通参考图时明确拒绝，不丢弃角色', () => {
+    for (const references of [
+      [reference('image', 'https://test/last.png', 'last_frame')],
+      [reference('image', 'https://test/first.png', 'first_frame'), reference('image', 'https://test/ref.png')],
+      [reference('image', 'https://test/first.png', 'first_frame'), reference('video', 'https://test/ref.mp4')],
+    ]) {
+      expect(() => buildDreaminaVideoParams({ model: 'dreamina/seedance2.5', prompt: 'test', references }))
+        .toThrow('请调整参考角色');
+    }
+  });
   it('纯文本使用 text2video 并保留 Seedance 2.5 的 1080p/30 秒', () => {
     expect(buildDreaminaVideoParams({
       model: 'dreamina/seedance2.5',

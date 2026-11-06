@@ -1,3 +1,6 @@
+/**
+ * agentTaskCenter — 回归测试：AgentTaskCenter。
+ */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import AgentTaskCenter from '../../src/components/chat/AgentTaskCenter';

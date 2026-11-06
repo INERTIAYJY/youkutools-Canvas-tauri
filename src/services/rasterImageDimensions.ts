@@ -1,3 +1,6 @@
+/**
+ * rasterImageDimensions — 解析栅格图片文件头并读取图片尺寸。
+ */
 export interface RasterImageDimensions {
   width: number;
   height: number;

@@ -1,3 +1,6 @@
+/**
+ * settingsPersistence — 回归测试：settings persistence consumers。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppState } from '../../src/store/useAppStore';
 
@@ -6,6 +9,7 @@ const driver = vi.hoisted(() => ({
   slots: [] as unknown[], cursor: 0, state: {} as AppState,
   save: vi.fn(), load: vi.fn(), ask: vi.fn(), toast: vi.fn(), close: vi.fn(),
   readOrdinary: vi.fn(), saveOrdinary: vi.fn(), pick: vi.fn(),
+  applyPerformance: vi.fn(),
 }));
 // 真实组件事件及可重渲染状态；窗口监听、媒体加载等挂载副作用由各自测试覆盖。
 vi.mock('react', async () => ({
@@ -29,9 +33,13 @@ vi.mock('zustand/react/shallow', () => ({ useShallow: <T,>(s: T) => s }));
 vi.mock('../../src/store/useAppStore', () => ({
   useAppStore: Object.assign((s: (state: AppState) => unknown) => s(driver.state), { getState: () => driver.state }),
 }));
-vi.mock('../../src/i18n', () => ({ useT: () => (s: string) => s, getLocale: () => 'zh-CN', LOCALES: [], LOCALE_LABELS: {}, setLocale: vi.fn() }));
+vi.mock('../../src/i18n', () => ({ t: (s: string) => s, useT: () => (s: string) => s, getLocale: () => 'zh-CN', LOCALES: [], LOCALE_LABELS: {}, setLocale: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: driver.ask }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('../../src/services/nativePerformanceModeService', () => ({
+  applyNativePerformanceMode: driver.applyPerformance,
+  isNativePerformanceModeSupported: () => true,
+}));
 vi.mock('@iconify/react', () => ({ Icon: 'icon' }));
 vi.mock('framer-motion', () => ({ motion: { div: 'div', button: 'button' }, AnimatePresence: 'presence' }));
 vi.mock('../../src/components/shared/ModalOverlay', () => ({ default: 'modal' }));
@@ -88,6 +96,7 @@ async function click(e: Element) {
 beforeEach(() => {
   vi.clearAllMocks(); driver.slots = [];
   driver.save.mockReset().mockResolvedValue(undefined);
+  driver.applyPerformance.mockReset().mockResolvedValue(undefined);
   driver.saveOrdinary.mockReset().mockResolvedValue([]);
   driver.ask.mockReset().mockResolvedValue(false);
   driver.readOrdinary.mockReset().mockResolvedValue({ providers: {}, theme: 'dark', assetFolders: [] });
@@ -104,6 +113,49 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('settings persistence consumers', () => {
+  it.each(['dark', 'light'] as const)('defaults automatic mentions on and saves the toggle in the %s theme', async (theme) => {
+    component = SettingsPanel;
+    driver.state.config.theme = theme;
+    const toggle = () => all(tree, (e) => e.type === 'button' && e.props['aria-labelledby'] === 'auto-mention-on-connect-label')[0];
+    render();
+    expect(text(tree)).toContain('连线后自动 @ 素材');
+    expect(toggle().props['aria-checked']).toBe(true);
+    await click(toggle());
+    expect(driver.state.updateConfig).toHaveBeenCalledWith({ autoMentionOnConnect: false });
+    expect(driver.save).toHaveBeenCalledOnce();
+    driver.state.config.autoMentionOnConnect = false;
+    render();
+    expect(toggle().props['aria-checked']).toBe(false);
+    await click(toggle());
+    expect(driver.state.updateConfig).toHaveBeenLastCalledWith({ autoMentionOnConnect: true });
+    expect(driver.save).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the save-and-restart service and disables the switch while it is pending', async () => {
+    component = SettingsPanel;
+    let resolve!: () => void;
+    driver.applyPerformance.mockImplementationOnce(() => new Promise<void>((done) => { resolve = done; }));
+    const performanceButton = () => all(tree, (e) => e.type === 'button' && 'aria-pressed' in e.props && text(e.props.children).includes('性能模式'))[0];
+    render();
+    expect(text(tree)).toContain('保存并自动重启');
+    await click(performanceButton());
+    expect(driver.applyPerformance).toHaveBeenCalledWith(true);
+    expect(performanceButton().props.disabled).toBe(true);
+    resolve(); await new Promise<void>((done) => setImmediate(done)); render();
+    expect(performanceButton().props.disabled).toBe(false);
+    expect(driver.state.updateConfig).not.toHaveBeenCalled();
+  });
+
+  it('exposes reapply after failure without requiring the user to toggle the mode off', async () => {
+    component = SettingsPanel; driver.state.config.performanceMode = true;
+    driver.applyPerformance.mockRejectedValueOnce(new Error('设置尚未保存，已取消自动重启'));
+    render(); await click(button('重新应用'));
+    expect(driver.toast).toHaveBeenCalledWith('设置尚未保存，已取消自动重启', 'error');
+    expect(button('重新应用').props.disabled).toBe(false);
+    await click(button('重新应用'));
+    expect(driver.applyPerformance).toHaveBeenNthCalledWith(2, true);
+  });
+
   it('shows failed settings and exposes a retry without reporting success', async () => {
     component = SettingsPanel;
     driver.state.configSaveStatus = 'error'; driver.state.configSaveError = '保存失败';

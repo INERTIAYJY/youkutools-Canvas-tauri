@@ -1,3 +1,6 @@
+/**
+ * nodeAssetIdentity — 回归测试：节点换文件时作废旧的资产身份。
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Node } from '@xyflow/react';
 import type { BaseNodeData } from '../../src/types';

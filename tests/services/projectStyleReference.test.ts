@@ -1,3 +1,6 @@
+/**
+ * projectStyleReference — 回归测试：project style reference (风格母图)。
+ */
 import { describe, expect, it } from 'vitest';
 import {
   applyProjectDefaultsToNodeData,

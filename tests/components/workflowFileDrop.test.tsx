@@ -1,4 +1,7 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+/**
+ * workflowFileDrop — 回归测试：imports a Finder workflow on a Retina Mac using logical drop coordinates。
+ */
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 type ElementLike = { props: Record<string, unknown> & { children?: unknown } };
 type DropPayload =
@@ -14,13 +17,15 @@ function find(root: unknown, predicate: (el: ElementLike) => boolean): ElementLi
 }
 
 beforeEach(() => { vi.resetModules(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 
-async function setup() {
+async function setup(platform = 'Win32') {
   const slots: unknown[] = [];
   let cursor = 0;
   let effects: Array<() => void | (() => void)> = [];
   vi.doMock('react', async () => ({
     ...await vi.importActual<typeof import('react')>('react'),
+    useSyncExternalStore: <T,>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
     useCallback: <T,>(callback: T) => callback,
     useEffect: (effect: () => void | (() => void)) => { effects.push(effect); },
     useRef: <T,>(initial: T) => {
@@ -48,6 +53,7 @@ async function setup() {
   vi.doMock('../../src/services/fileService', () => ({ readBinaryFile: read, copyFileToProjectData: vi.fn(), arrayBufferToBase64: vi.fn() }));
   const store = {
     workflows: [], workflowPanelOpen: true, workflowPanelSource: 'comfyui', config: { comfyServers: [] },
+    currentProjectId: 'project-a', getCurrentRevision: () => 1, markAssetUsed: vi.fn(),
     addNode: vi.fn(), pasteExternalFromDataTransfer: vi.fn(), showToast: vi.fn(),
   };
   vi.doMock('../../src/store/useAppStore', () => ({
@@ -65,6 +71,7 @@ async function setup() {
   }) }));
   let globalDrop: ((event: { payload: { paths: string[]; position: { x: number; y: number } } }) => void) | undefined;
   vi.doMock('@tauri-apps/api/event', () => ({ listen: async (_name: string, callback: typeof globalDrop) => { globalDrop = callback; return vi.fn(); } }));
+  vi.stubGlobal('navigator', { platform });
   vi.stubGlobal('window', { __TAURI_INTERNALS__: {}, devicePixelRatio: 2, addEventListener: vi.fn(), removeEventListener: vi.fn() });
   const { default: WorkflowPanel } = await import('../../src/components/WorkflowPanel');
   const { useNodeCreation: createNodes } = await import('../../src/hooks/useNodeCreation');
@@ -79,13 +86,25 @@ async function setup() {
   await vi.waitFor(() => { expect(callbacks).toHaveLength(2); expect(globalDrop).toBeDefined(); });
   return { store, read, extract, canvas, zone, render, callbacks, releases,
     dispose: () => cleanup.forEach((release) => release?.()),
-    nativeDrop: async (x = 300, path = 'G:\\workflow.json') => {
-      const payload = { type: 'drop' as const, paths: [path], position: { x, y: 300 } };
+    nativeDrop: async (x = 300, path = 'G:\\workflow.json', y = 300) => {
+      const payload = { type: 'drop' as const, paths: [path], position: { x, y } };
       await Promise.all(callbacks.map((callback) => callback({ payload })));
       globalDrop?.({ payload });
     },
   };
 }
+
+it('imports a Finder workflow on a Retina Mac using logical drop coordinates', async () => {
+  const h = await setup('MacIntel');
+  try {
+    await h.nativeDrop(150, '/Users/example/中文工作流.json', 150);
+    expect(h.extract).toHaveBeenCalledExactlyOnceWith('{"nodes":[]}');
+    expect(find(h.render(), (el) => el.props.title === '中文工作流.json')).toBeDefined();
+    expect(h.store.addNode).not.toHaveBeenCalled();
+    await h.callbacks[0]({ payload: { type: 'over', position: { x: 250, y: 150 } } });
+    expect(String(find(h.render(), (el) => el.props.role === 'button' && String(el.props.className).includes('ui-dropzone'))?.props.className)).not.toContain('is-dragover');
+  } finally { h.dispose(); }
+});
 
 it('imports a native workflow at scaled drop-zone coordinates without creating canvas nodes', async () => {
   const h = await setup();

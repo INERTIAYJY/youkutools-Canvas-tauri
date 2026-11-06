@@ -10,9 +10,20 @@
 //!  · 官方 Comfy Desktop（v0.20+）：<base>/ComfyUI-Installs/ComfyUI/ComfyUI/main.py，
 //!    venv 在同目录 .venv/；用户可能选 <base> 或 <base>/Comfy Desktop（Electron 安装目录）
 //!
-//! 启动参数：--listen 开放 HTTP API；--enable-cors-header 允许跨源（本应用打包后
-//! 从 tauri://localhost 直连 ComfyUI 必需）。GPU 无需参数——CUDA 可用时默认启用，
-//! 三种发行版的 Python 环境都自带 CUDA 版 torch（兜底 bat 亦优先 run_nvidia_gpu.bat）。
+//! 启动参数固定绑定回环 HTTP API，并按已保存的白名单设置覆盖端口、显存、
+//! 扩散模型精度、注意力与预览。默认 GPU 选择由 ComfyUI 自行决定。
+pub mod installation;
+pub mod installer;
+pub mod launch_settings;
+pub mod management;
+pub mod media_source;
+pub mod model_dedupe;
+pub mod model_dedupe_links;
+pub mod model_dedupe_history;
+pub mod runtime_console;
+pub mod progress;
+
+use launch_settings::ComfyUILaunchSettings;
 use serde::{Deserialize, Serialize};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -42,10 +53,23 @@ const COMFY_ARGS: &[&str] = &[
     "--enable-cors-header",
 ];
 const COMFYUI_WINDOW_LABEL: &str = "comfyui";
+const FAST_DISK_MARKER: &str = ".ai-canvas-fast-disk";
+#[cfg(windows)]
+const FALLBACK_SCRIPTS: [&str; 3] = ["run_nvidia_gpu.bat", "run.bat", "run_cpu.bat"];
+#[cfg(windows)]
+const FALLBACK_LAUNCHERS: [&str; 5] = [
+    "ComfyUi.exe", "A启动器.exe", "启动器.exe", "Comfy Desktop.exe",
+    ".launcher/StableDiffusionWebUILauncher.exe",
+];
 const COMFYUI_BRIDGE_SCRIPT: &str = include_str!("bridge.js");
+const COMFYUI_BRIDGE_STYLES: &str = include_str!("bridge.css");
+const COMFYUI_BRIDGE_ICON: &str = include_str!("../../../../public/favicon.svg");
 const MAX_WORKFLOW_JSON_LENGTH: usize = 16 * 1024 * 1024;
 const COMFYUI_ACTION_PATH: &str = "/__ai_canvas_comfy_action__";
 const COMFYUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(700);
+const COMFYUI_WINDOW_STATE_TIMEOUT: Duration = Duration::from_secs(5);
+// 设置页与工作流编辑入口共用固定标签，检查、关闭和创建必须在同一把锁内。
+static COMFYUI_WINDOW_OPEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const TAKE_SAVE_PAYLOAD_SCRIPT: &str = r#"(() => {
   const payload = window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__ ?? null;
   delete window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__;
@@ -163,10 +187,18 @@ async fn wait_for_editor_load(
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ComfyUIWorkflowSaveMode {
+    Update,
+    Create,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ComfyUIWorkflowSavePayload {
     request_id: String,
     workflow_id: String,
+    save_mode: ComfyUIWorkflowSaveMode,
     name: String,
     category: String,
     file_name: String,
@@ -201,6 +233,15 @@ fn is_same_comfyui_origin(left: &Url, right: &Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
         && left.port_or_known_default() == right.port_or_known_default()
+}
+
+/// 初始化脚本可能在导航后再次执行；工作流正文与桥接都只交给配置的顶层页面。
+fn scope_comfyui_script(url: &Url, script: &str) -> String {
+    let origin = serde_json::to_string(&url.origin().ascii_serialization())
+        .expect("URL origin can be serialized");
+    format!(
+        "(() => {{ const aiCanvasComfyOrigin = {origin}; if (window.top !== window || window.location.origin !== aiCanvasComfyOrigin) return;\n{script}\n}})();"
+    )
 }
 
 fn comfyui_socket_endpoint(url: &Url) -> Result<(String, u16), String> {
@@ -451,14 +492,15 @@ fn find_main_py(root: &Path) -> Option<PathBuf> {
         root.join("ComfyUI-Installs")
             .join("ComfyUI")
             .join("ComfyUI"),
-        // Comfy Desktop v0.20+：用户选择了 Electron 安装目录（如 F:\ComfyUI\Comfy Desktop）
+        // Desktop 目录提示；后面仍限定在所选安装根内，不跟随根外的同级源码。
         root.parent()
             .map(|p| p.join("ComfyUI-Installs").join("ComfyUI").join("ComfyUI"))
             .unwrap_or_default(),
         // 旧版 Comfy Desktop（≤v0.4）：源码打包在 resources 下
         root.join("resources").join("ComfyUI"),
     ];
-    candidates.into_iter().find(|d| d.join("main.py").is_file())
+    candidates.into_iter().filter(|candidate| candidate.starts_with(root))
+        .find(|directory| directory.join("main.py").is_file())
 }
 
 /// 查找与安装配套的 Python 解释器
@@ -527,63 +569,71 @@ fn find_comfy_desktop_shared_model_paths(root: &Path, working_dir: &Path) -> Opt
         .filter(|p| p.is_file())
 }
 
-fn build_comfy_args(root: &Path, working_dir: &Path) -> Vec<String> {
+fn build_comfy_args(
+    root: &Path,
+    working_dir: &Path,
+    settings: &ComfyUILaunchSettings,
+) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = COMFY_ARGS.iter().map(|arg| (*arg).to_string()).collect();
-
-    if let Some(shared_model_paths) = find_comfy_desktop_shared_model_paths(root, working_dir) {
-        args.push("--extra-model-paths-config".to_string());
-        args.push(shared_model_paths.to_string_lossy().into_owned());
-    }
-
-    args
-}
-
-/// 在 Windows 新终端窗口中启动 ComfyUI
-#[cfg(windows)]
-fn launch_windows(comfy_path: &str) -> Result<String, String> {
-    let root = Path::new(comfy_path);
-
-    // 1) 首选：直接启动 main.py —— 可注入 API/CORS 参数，跳过启动器的 custom_nodes 检测
-    if let Some(working_dir) = find_main_py(root) {
-        if let Some(python) = find_python(&working_dir, root) {
-            let args = build_comfy_args(root, &working_dir);
-            spawn_new_console(&python, &args, &working_dir)?;
-            return Ok(format!(
-                "ComfyUI 已启动（API 模式）\n{}",
-                working_dir.display()
-            ));
+    let declared_args = std::fs::read_to_string(working_dir.join("comfy/cli_args.py"))
+        .map_err(|_| {
+            "无法读取 ComfyUI 启动参数声明，请检查安装目录中的 comfy/cli_args.py".to_string()
+        })?;
+    for flag in ["--listen", "--enable-cors-header"] {
+        if !launch_settings::declares_cli_flag(&declared_args, flag) {
+            return Err(format!("当前 ComfyUI 版本不支持 API 启动参数 {flag}"));
         }
     }
+    settings.append_args(&mut args, &declared_args)?;
 
-    // 2) 兜底：便携版 bat（GPU 优先）
-    for script in &["run_nvidia_gpu.bat", "run.bat", "run_cpu.bat"] {
+    // fast-disk can avoid Windows page-file thrashing for models larger than system RAM.
+    // Keep it opt-in per ComfyUI installation because it can be slower on mechanical disks,
+    // and only pass the flag when the installed ComfyUI version actually declares it.
+    let fast_disk_enabled =
+        root.join(FAST_DISK_MARKER).is_file() || working_dir.join(FAST_DISK_MARKER).is_file();
+    let fast_disk_supported = launch_settings::declares_cli_flag(&declared_args, "--fast-disk");
+    if fast_disk_enabled && fast_disk_supported {
+        args.push("--fast-disk".to_string());
+    }
+
+    if let Some(shared_model_paths) = find_comfy_desktop_shared_model_paths(root, working_dir) {
+        launch_settings::append_supported_arg(
+            &mut args,
+            &declared_args,
+            "--extra-model-paths-config",
+            Some(shared_model_paths.to_string_lossy().as_ref()),
+        )?;
+    }
+
+    Ok(args)
+}
+
+/// 仅保留无法直接启动 Python 的旧整合包兜底；此模式不能捕获输出。
+#[cfg(windows)]
+fn launch_external_windows(app: &tauri::AppHandle, root: &Path, settings: &ComfyUILaunchSettings) -> Result<String, String> {
+    if settings.requires_direct_launch() {
+        return Err("当前安装只能使用启动器或批处理启动，无法应用已保存的启动设置；请补齐 main.py 与配套 Python，或先恢复默认设置".to_string());
+    }
+
+    // 便携版 bat（GPU 优先）
+    for script in &FALLBACK_SCRIPTS {
         let script_path = root.join(script);
         if script_path.is_file() {
+            crate::path_policy::validate_comfyui_installation_file(app, &script_path, root)?;
             return run_bat_script(&script_path);
         }
     }
 
-    // 3) 兜底：启动器 exe（秋叶启动器 / Comfy Desktop Electron）
-    let launchers = [
-        root.join("ComfyUi.exe"),
-        root.join("A启动器.exe"),
-        root.join("启动器.exe"),
-        root.join("Comfy Desktop.exe"),
-        root.join(".launcher")
-            .join("StableDiffusionWebUILauncher.exe"),
-    ];
-    for launcher_path in &launchers {
+    // 启动器 exe（秋叶启动器 / Comfy Desktop Electron）
+    for launcher in &FALLBACK_LAUNCHERS {
+        let launcher_path = root.join(launcher);
         if launcher_path.is_file() {
-            return run_exe_new_console(launcher_path);
+            crate::path_policy::validate_comfyui_installation_file(app, &launcher_path, root)?;
+            return run_exe_new_console(&launcher_path);
         }
     }
 
-    Err(format!(
-        "在目录 {} 中未找到 ComfyUI。\n\
-         支持：GitHub 源码版 / 秋叶整合包（含 main.py）、官方便携版（ComfyUI/main.py）、\n\
-         官方 Comfy Desktop（选择安装基目录，如 F:\\ComfyUI）。",
-        comfy_path
-    ))
+    Err("未找到可用的 ComfyUI main.py、Python 或受支持的启动入口，请检查安装目录。".into())
 }
 
 /// 通过 cmd 内建 start 在全新控制台中运行命令。
@@ -637,68 +687,24 @@ fn run_exe_new_console(exe_path: &Path) -> Result<String, String> {
     Ok("ComfyUI 启动器已启动".into())
 }
 
-/// 用 cmd /k 在新控制台启动进程（保留窗口以便查看服务日志）
-#[cfg(windows)]
-fn spawn_new_console(program: &str, args: &[String], working_dir: &Path) -> Result<(), String> {
-    let program_normalized = program.replace('/', "\\");
-    let args_joined = args
-        .iter()
-        .map(|arg| quote_cmd_arg(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let inner = format!(r#"cmd /k ""{}" {}""#, program_normalized, args_joined);
-    start_new_console(&inner, working_dir, "启动 ComfyUI 失败")
-}
-
-#[cfg(windows)]
-fn quote_cmd_arg(arg: &str) -> String {
-    if arg.is_empty() || arg.contains([' ', '\t', '"']) {
-        format!(r#""{}""#, arg.replace('"', r#"\""#))
-    } else {
-        arg.to_string()
-    }
-}
-
-/// 非 Windows 系统
-#[cfg(not(windows))]
-fn launch_unix(comfy_path: &str) -> Result<String, String> {
-    let root = Path::new(comfy_path);
-
-    let working_dir =
-        find_main_py(root).ok_or_else(|| format!("在目录 {} 中未找到 main.py。", comfy_path))?;
-
-    let python = find_python(&working_dir, root).unwrap_or_else(|| "python3".to_string());
-
-    let args = build_comfy_args(root, &working_dir);
-
-    Command::new(&python)
-        .args(args)
-        .current_dir(&working_dir)
-        .spawn()
-        .map_err(|e| format!("启动 ComfyUI 失败: {e}"))?;
-
-    Ok("ComfyUI 已启动（API 模式）".into())
-}
-
 /// Tauri command: 启动 ComfyUI
 #[tauri::command]
-pub async fn launch_comfyui(webview: tauri::Webview, comfy_path: String) -> Result<String, String> {
+pub async fn launch_comfyui(
+    webview: tauri::Webview,
+    app: tauri::AppHandle,
+    comfy_path: String,
+) -> Result<runtime_console::ComfyUIRuntimeStartResult, String> {
     // 只有自有本地窗口能触发进程启动；目录内容仍由下面的已知文件名探测约束。
     crate::path_policy::ensure_trusted_caller(&webview)?;
-    let path = Path::new(&comfy_path);
-    if !path.exists() || !path.is_dir() {
-        return Err(format!("ComfyUI 目录不存在: {}", comfy_path));
-    }
-
-    #[cfg(windows)]
-    {
-        launch_windows(&comfy_path)
-    }
-
-    #[cfg(not(windows))]
-    {
-        launch_unix(&comfy_path)
-    }
+    if webview.label() != "main" { return Err("仅主窗口可以通过安装路径启动 ComfyUI".into()); }
+    let _operation_guard = management::lock_operations().await;
+    let path = installation::authorize_installation(&app, &comfy_path).await?;
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    let launch_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || runtime_console::launch_authorized(&launch_app, &path))
+        .await.map_err(|_| "ComfyUI 启动任务中断，请查看运行状态".to_string())??;
+    runtime_console::notify_main_started(&app, &result);
+    Ok(result)
 }
 
 /// 把下载结果告诉 ComfyUI 页面。wry 默认把下载标记为已处理，WebView2 既不弹「另存为」
@@ -711,6 +717,25 @@ fn notify_comfyui_download(webview: &tauri::Webview, path: Option<&Path>, succes
     let _ = webview.eval(&format!(
         "window.__AI_CANVAS_COMFY__?.notifyDownload?.({success}, {encoded});"
     ));
+}
+
+/// 等待原生窗口状态稳定；超时保留现有窗口，不强行销毁可能含有草稿的页面。
+async fn wait_for_comfyui_window_state<T>(
+    mut inspect: impl FnMut() -> Result<Option<T>, String>,
+    timeout: Duration,
+    timeout_message: &str,
+) -> Result<T, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(value) = inspect()? {
+            return Ok(value);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(timeout_message.to_string());
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+    }
 }
 
 /// Tauri command: 在应用内的独立 Webview 窗口中打开 ComfyUI 页面。
@@ -729,13 +754,8 @@ pub async fn open_comfyui_window(
 ) -> Result<Option<ComfyUIWorkflowOpenResult>, String> {
     crate::path_policy::ensure_trusted_caller(&webview)?;
     let url = parse_comfyui_url(&comfy_url)?;
-    let use_local_bridge = is_local_comfyui_url(&url);
-    if api_json.is_some() && !use_local_bridge {
-        return Err(
-            "远程 ComfyUI 当前不支持自动载入编辑工作流，请在该服务器页面手动导入 JSON".to_string(),
-        );
-    }
-    if use_local_bridge {
+    let _open_guard = COMFYUI_WINDOW_OPEN_LOCK.lock().await;
+    if is_local_comfyui_url(&url) {
         // 服务短暂离线只返回错误，不能关闭还保存着未提交草稿的编辑窗口。
         ensure_local_comfyui_reachable(&url).await?;
     }
@@ -750,17 +770,23 @@ pub async fn open_comfyui_window(
     )?;
 
     if let Some(window) = app.get_webview_window(COMFYUI_WINDOW_LABEL) {
+        // WebView2 初始地址可能仍是 about:blank；此时不能把加载中的窗口当作旧服务关闭。
+        let current = wait_for_comfyui_window_state(
+            || {
+                let current = window
+                    .url()
+                    .map_err(|_| "无法读取 ComfyUI 窗口状态，请稍后重试".to_string())?;
+                Ok((current.as_str() != "about:blank").then_some(current))
+            },
+            COMFYUI_WINDOW_STATE_TIMEOUT,
+            "ComfyUI 窗口仍在加载，请稍后重试",
+        )
+        .await?;
         // 只要还是同一个 ComfyUI 服务就复用窗口：前端自己改过的路径/查询串不算“换了地址”
-        if window
-            .url()
-            .is_ok_and(|current| is_same_comfyui_origin(&current, &url))
-        {
-            window
-                .set_decorations(!use_local_bridge)
-                .map_err(|e| format!("更新 ComfyUI 标题栏失败: {e}"))?;
+        if is_same_comfyui_origin(&current, &url) {
             if let Some(script) = editor_script {
                 window
-                    .eval(&script)
+                    .eval(scope_comfyui_script(&url, &script))
                     .map_err(|e| format!("载入 ComfyUI 工作流失败: {e}"))?;
             }
             let _ = window.unminimize();
@@ -781,12 +807,27 @@ pub async fn open_comfyui_window(
         window
             .close()
             .map_err(|e| format!("关闭旧 ComfyUI 窗口失败: {e}"))?;
+        // close 只排入关闭请求；等管理器注销 WebView 后才能复用固定标签。
+        wait_for_comfyui_window_state(
+            || {
+                Ok(app
+                    .get_webview_window(COMFYUI_WINDOW_LABEL)
+                    .is_none()
+                    .then_some(()))
+            },
+            COMFYUI_WINDOW_STATE_TIMEOUT,
+            "旧 ComfyUI 窗口尚未关闭，请先关闭该窗口后重试",
+        )
+        .await?;
     }
 
-    let mut initialization_script = String::new();
-    if use_local_bridge {
-        initialization_script.push_str(COMFYUI_BRIDGE_SCRIPT);
-    }
+    let bridge_styles = serde_json::to_string(COMFYUI_BRIDGE_STYLES)
+        .expect("ComfyUI bridge styles can be serialized");
+    let bridge_icon = serde_json::to_string(COMFYUI_BRIDGE_ICON)
+        .expect("ComfyUI bridge icon can be serialized");
+    let mut initialization_script = format!(
+        "const aiCanvasComfyStyles = {bridge_styles};\nconst aiCanvasComfyIcon = {bridge_icon};\n{COMFYUI_BRIDGE_SCRIPT}"
+    );
     if let Some(script) = editor_script {
         initialization_script.push_str(&script);
     }
@@ -803,7 +844,7 @@ pub async fn open_comfyui_window(
     .min_inner_size(900.0, 600.0)
     .center()
     .resizable(true)
-    // 本地页面加载完成前保留原生标题栏；连接异常时窗口仍有系统关闭按钮。
+    // 页面加载完成前保留原生标题栏；连接异常时窗口仍有系统关闭按钮。
     .decorations(true)
     // Tauri 默认的原生拖放处理会吞掉 HTML5 drag 事件，ComfyUI 就收不到拖进来的
     // 工作流 JSON / 图片；关掉它交还给页面自己处理
@@ -817,15 +858,26 @@ pub async fn open_comfyui_window(
         true
     })
     .visible(true);
-    if use_local_bridge {
+    {
         let navigation_app = app.clone();
         builder = builder.on_navigation(move |navigation_url| {
             let Some(action) = parse_comfyui_window_action(navigation_url, &action_origin) else {
-                return true;
+                return is_same_comfyui_origin(navigation_url, &action_origin);
             };
             let action_app = navigation_app.clone();
+            let expected_origin = action_origin.clone();
             let _ = navigation_app.run_on_main_thread(move || {
-                let _ = handle_comfyui_window_action(&action_app, action);
+                // 校验动作发起页面，而不只校验导航目标；排队期间窗口也可能被替换。
+                if action_app
+                    .get_webview_window(COMFYUI_WINDOW_LABEL)
+                    .is_some_and(|window| {
+                        window.url().is_ok_and(|current| {
+                            is_same_comfyui_origin(&current, &expected_origin)
+                        })
+                    })
+                {
+                    let _ = handle_comfyui_window_action(&action_app, action);
+                }
             });
             false
         });
@@ -847,9 +899,7 @@ pub async fn open_comfyui_window(
             }
         });
     }
-    if !initialization_script.is_empty() {
-        builder = builder.initialization_script(&initialization_script);
-    }
+    builder = builder.initialization_script(scope_comfyui_script(&url, &initialization_script));
     let window = builder
         .build()
         .map_err(|e| format!("创建 ComfyUI 窗口失败: {e}"))?;
@@ -865,13 +915,89 @@ pub async fn open_comfyui_window(
 
 #[cfg(test)]
 mod tests {
+    use super::launch_settings::ComfyUILaunchSettings;
     use super::{
-        build_editor_script, comfyui_socket_endpoint, ensure_local_comfyui_reachable,
-        is_local_comfyui_url, is_same_comfyui_origin, parse_comfyui_url,
-        parse_comfyui_window_action, parse_editor_load_result, parse_workflow_save_payload,
-        ComfyUIWindowAction, COMFY_ARGS,
+        build_comfy_args, build_editor_script, comfyui_socket_endpoint,
+        ensure_local_comfyui_reachable, is_local_comfyui_url, is_same_comfyui_origin,
+        parse_comfyui_url, parse_comfyui_window_action, parse_editor_load_result,
+        parse_workflow_save_payload, scope_comfyui_script, wait_for_comfyui_window_state,
+        ComfyUIWindowAction, COMFY_ARGS, FAST_DISK_MARKER,
     };
+    use std::fs;
     use std::net::TcpListener;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use url::Url;
+
+    #[tokio::test]
+    async fn waits_for_loading_window_before_deciding_whether_to_reuse_it() {
+        let configured = parse_comfyui_url("http://127.0.0.1:8188").unwrap();
+        let mut states = std::collections::VecDeque::from([
+            Url::parse("about:blank").unwrap(),
+            parse_comfyui_url("http://127.0.0.1:8188/?workflow=draft").unwrap(),
+        ]);
+        let current = wait_for_comfyui_window_state(
+            || {
+                let current = states.pop_front().unwrap();
+                Ok((current.as_str() != "about:blank").then_some(current))
+            },
+            std::time::Duration::from_secs(1),
+            "仍在加载",
+        )
+        .await
+        .unwrap();
+        assert!(is_same_comfyui_origin(&current, &configured));
+        assert!(states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loading_window_state_times_out() {
+        let result = wait_for_comfyui_window_state::<Url>(
+            || Ok(None),
+            std::time::Duration::from_millis(1),
+            "ComfyUI 窗口仍在加载，请稍后重试",
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "ComfyUI 窗口仍在加载，请稍后重试");
+    }
+
+    #[tokio::test]
+    async fn waits_until_the_old_webview_is_unregistered() {
+        // 关闭请求已返回，但管理器在后续事件循环才移除同名 WebView。
+        let mut registered = std::collections::VecDeque::from([true, true, false]);
+        wait_for_comfyui_window_state(
+            || Ok((!registered.pop_front().unwrap()).then_some(())),
+            std::time::Duration::from_secs(1),
+            "尚未关闭",
+        )
+        .await
+        .unwrap();
+        assert!(registered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn waiting_for_unregistration_times_out_when_close_is_cancelled() {
+        let result = wait_for_comfyui_window_state::<()>(
+            || Ok(None),
+            std::time::Duration::from_millis(1),
+            "旧 ComfyUI 窗口尚未关闭，请先关闭该窗口后重试",
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "旧 ComfyUI 窗口尚未关闭，请先关闭该窗口后重试"
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_when_window_state_cannot_be_read() {
+        let result = wait_for_comfyui_window_state::<Url>(
+            || Err("窗口已销毁".to_string()),
+            std::time::Duration::from_secs(1),
+            "等待超时",
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "窗口已销毁");
+    }
 
     #[test]
     fn reuses_window_when_only_the_frontend_route_changed() {
@@ -912,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn enables_bridge_only_for_loopback_urls() {
+    fn probes_connectivity_only_for_loopback_urls() {
         assert!(is_local_comfyui_url(
             &parse_comfyui_url("http://127.0.0.1:8188").unwrap()
         ));
@@ -1026,10 +1152,47 @@ mod tests {
     }
 
     #[test]
+    fn remote_window_actions_require_the_configured_origin() {
+        let configured = parse_comfyui_url("https://comfy.example.com/comfy/").unwrap();
+        let save =
+            parse_comfyui_url("https://comfy.example.com/__ai_canvas_comfy_action__?action=save")
+                .unwrap();
+        assert_eq!(
+            parse_comfyui_window_action(&save, &configured),
+            Some(ComfyUIWindowAction::Save)
+        );
+        for other in [
+            "https://other.example.com/__ai_canvas_comfy_action__?action=save",
+            "http://comfy.example.com/__ai_canvas_comfy_action__?action=save",
+            "https://comfy.example.com:8443/__ai_canvas_comfy_action__?action=save",
+        ] {
+            assert_eq!(
+                parse_comfyui_window_action(&parse_comfyui_url(other).unwrap(), &configured),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn scopes_bridge_and_workflow_payload_to_the_configured_top_level_origin() {
+        let url = parse_comfyui_url("https://comfy.example.com/comfy/?token=private").unwrap();
+        let script = scope_comfyui_script(&url, "window.__AI_CANVAS_PENDING_WORKFLOW__ = {};");
+        assert!(script.contains("const aiCanvasComfyOrigin = \"https://comfy.example.com\""));
+        assert!(script.contains("window.top !== window"));
+        assert!(script.contains("window.location.origin !== aiCanvasComfyOrigin) return;"));
+        assert!(!script.contains("token=private"));
+        assert!(
+            script.find("return;").unwrap()
+                < script.find("window.__AI_CANVAS_PENDING_WORKFLOW__").unwrap()
+        );
+    }
+
+    #[test]
     fn validates_workflow_payload_from_comfyui_webview() {
         let valid = serde_json::json!({
             "requestId": "save-test-1",
             "workflowId": "wf-1",
+            "saveMode": "update",
             "name": "测试工作流",
             "category": "ai-image",
             "fileName": "workflow.json",
@@ -1042,6 +1205,14 @@ mod tests {
         invalid_category["category"] = serde_json::Value::String("unknown".to_string());
         assert!(parse_workflow_save_payload(&invalid_category.to_string()).is_err());
 
+        let mut invalid_mode = valid.clone();
+        invalid_mode["saveMode"] = serde_json::Value::String("overwrite".to_string());
+        assert!(parse_workflow_save_payload(&invalid_mode.to_string()).is_err());
+        invalid_mode["saveMode"] = serde_json::Value::String("create".to_string());
+        assert!(parse_workflow_save_payload(&invalid_mode.to_string()).is_ok());
+        invalid_mode.as_object_mut().unwrap().remove("saveMode");
+        assert!(parse_workflow_save_payload(&invalid_mode.to_string()).is_err());
+
         let mut invalid_workflow = valid;
         invalid_workflow["fileContent"] = serde_json::Value::String("not-json".to_string());
         assert!(parse_workflow_save_payload(&invalid_workflow.to_string()).is_err());
@@ -1049,6 +1220,7 @@ mod tests {
         let mut invalid_request_id = serde_json::json!({
             "requestId": "request-without-save-prefix",
             "workflowId": "wf-1",
+            "saveMode": "create",
             "name": "测试工作流",
             "category": "ai-image",
             "fileName": "workflow.json",
@@ -1065,5 +1237,40 @@ mod tests {
         assert!(COMFY_ARGS
             .windows(2)
             .any(|args| args == ["--listen", "127.0.0.1"]));
+    }
+
+    #[test]
+    fn enables_fast_disk_only_for_an_opted_in_supported_installation() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ai-canvas-comfy-fast-disk-{unique}"));
+        let comfy_dir = root.join("comfy");
+        fs::create_dir_all(&comfy_dir).unwrap();
+        fs::write(
+            comfy_dir.join("cli_args.py"),
+            "parser.add_argument('--listen')\nparser.add_argument('--enable-cors-header')\nparser.add_argument('--port')\nparser.add_argument('--fast-disk')",
+        )
+        .unwrap();
+
+        let settings = ComfyUILaunchSettings::default();
+        assert!(!build_comfy_args(&root, &root, &settings)
+            .unwrap()
+            .contains(&"--fast-disk".to_string()));
+        fs::write(root.join(FAST_DISK_MARKER), "enabled\n").unwrap();
+        assert!(build_comfy_args(&root, &root, &settings)
+            .unwrap()
+            .contains(&"--fast-disk".to_string()));
+
+        fs::write(
+            comfy_dir.join("cli_args.py"),
+            "parser.add_argument('--listen')\nparser.add_argument('--enable-cors-header')\nparser.add_argument('--port')",
+        )
+        .unwrap();
+        assert!(!build_comfy_args(&root, &root, &settings)
+            .unwrap()
+            .contains(&"--fast-disk".to_string()));
+        fs::remove_dir_all(root).unwrap();
     }
 }

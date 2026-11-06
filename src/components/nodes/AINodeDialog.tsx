@@ -514,6 +514,14 @@ function AINodeDialog() {
       targetHandle: 'left',
     }));
     addNodesWithEdges(newNodes, newEdges);
+    // 前置节点不进入等待周期：只让新建的后置节点显示生成中，
+    // 这样等待期间前置节点仍可继续改提示词、换模型、再次发起生成。
+    updateNodeDataTransient(submittingNodeId, {
+      status: 'idle',
+      error: undefined,
+      videoTaskState: undefined,
+      mediaTaskState: undefined,
+    });
     showToast(`正在并行生成 ${count} 条视频`);
 
     // 2. 并行提交生成请求，每个结果填入对应空白节点
@@ -1382,6 +1390,10 @@ function AINodeDialog() {
     && recoverableComfyTask?.comfyRecoveryState !== 'output_unavailable';
   const cloudTask = currentProjectId ? getPendingTasksForProject(currentProjectId).find((task) => task.nodeId === activeNodeId && ['runninghub-workflow', 'runninghub-model'].includes(task.taskType)) : undefined;
   const workflowApiTask = currentProjectId ? getPendingTasksForProject(currentProjectId).find((task) => task.nodeId === activeNodeId && task.taskType === 'workflow-api') : undefined;
+  // 关闭「在此节点生成」时结果落在新建的后置节点，前置节点不应被等待态挡住，
+  // 否则等待期间无法继续改提示词、换模型或再次发起生成。
+  const videoGeneratesToNewNodes = nodeType === 'ai-video' && data.generateInPlace === false;
+  const sourceNodeBusy = data.status === 'loading' && !videoGeneratesToNewNodes;
 
   const audioPurpose = data.audioPurpose
     ?? (data.model ? findMediaModelOption(data.model)?.audioPurpose : undefined);
@@ -1562,8 +1574,8 @@ function AINodeDialog() {
             onAnimationActionChange={onAnimationActionChange}
             animationFrames={data.animationFrames ?? 8}
             onAnimationFramesChange={onAnimationFramesChange}
-            canGenerate={(nodeType !== 'ai-director' || isPrevis) && data.status !== 'loading' && !imageBatchGenerating && !recoverableComfyTask && !cloudTask && !workflowApiTask}
-            isGenerating={data.status === 'loading' || imageBatchGenerating}
+            canGenerate={(nodeType !== 'ai-director' || isPrevis) && !sourceNodeBusy && !imageBatchGenerating && !recoverableComfyTask && !cloudTask && !workflowApiTask}
+            isGenerating={sourceNodeBusy || imageBatchGenerating}
             onCancelGeneration={imageBatchGenerating || isPrevis || ['comfyui', 'runninghubwf', 'runninghub', 'workflow-api'].includes(data.provider ?? '') ? () => { void onCancelGeneration(); } : undefined}
             onChange={onPromptChange}
             onContinuousEditEnd={finishContinuousEdit}

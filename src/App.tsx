@@ -66,12 +66,9 @@ const PresetManager = lazy(() => import('./components/nodes/shared/PresetManager
 const PresetRunnerDialog = lazy(() => import('./components/nodes/shared/PresetRunnerDialog'));
 const ReversePromptDialog = lazy(() => import('./components/nodes/shared/ReversePromptDialog'));
 const DirectorDeskRuntimeManager = lazy(() => import('./components/director/DirectorDeskRuntimeManager'));
-const FreeDistributionNoticeDialog = lazy(() => import('./components/FreeDistributionNoticeDialog'));
 const OnboardingDialog = lazy(() => import('./components/OnboardingDialog'));
 const CanvasEntryGuide = lazy(() => import('./components/OnboardingDialog').then((module) => ({ default: module.CanvasEntryGuide })));
 
-/** 免费发行提醒独立记忆；升级后的现有用户也会看到一次。 */
-const FREE_DISTRIBUTION_NOTICE_SEEN_KEY = 'ai-canvas-free-distribution-notice-seen-v1';
 /** 画布入口引导独立于旧欢迎说明，首次进入画布时展示一次。 */
 const ONBOARDING_SEEN_KEY = 'ai-canvas-canvas-guide-seen-v1';
 
@@ -148,13 +145,6 @@ export default function App() {
   const [splashDone, setSplashDone] = useState(false);
   const [closePhase, setClosePhase] = useState<'saving' | 'closing' | 'restarting' | null>(null);
   const closeInProgress = useRef(false);
-  const [freeDistributionNoticeOpen, setFreeDistributionNoticeOpen] = useState(
-    () => localStorage.getItem(FREE_DISTRIBUTION_NOTICE_SEEN_KEY) !== 'true',
-  );
-  const acknowledgeFreeDistributionNotice = useCallback(() => {
-    localStorage.setItem(FREE_DISTRIBUTION_NOTICE_SEEN_KEY, 'true');
-    setFreeDistributionNoticeOpen(false);
-  }, []);
   // 等待真实画布首帧就绪，启动页不弹入口引导。
   const [onboardingOpen, setOnboardingOpen] = useState(
     () => {
@@ -209,11 +199,11 @@ export default function App() {
     || featureVisibility.presetManager || featureVisibility.presetRunner || featureVisibility.reversePrompt;
   useEffect(() => {
     if (!onboardingOpen || canvasGuideOpen || !showCanvas || showProjectSplash
-      || projectLoadStatus !== 'ready' || freeDistributionNoticeOpen
+      || projectLoadStatus !== 'ready'
       || canvasGuideBlocked) return;
     useAppStore.getState().setCanvasGuideOpen(true);
   }, [onboardingOpen, canvasGuideOpen, showCanvas, showProjectSplash, projectLoadStatus,
-    freeDistributionNoticeOpen, canvasGuideBlocked]);
+    canvasGuideBlocked]);
   const mcpAutoStart = useAppStore((state) => state.config.mcpAutoStart === true);
 
   // 开屏动画结束后后台静默检查更新
@@ -816,13 +806,7 @@ export default function App() {
         <DirectorDeskRuntimeManager />
       </Suspense>
 
-      {splashDone && freeDistributionNoticeOpen && (
-        <Suspense fallback={null}>
-          <FreeDistributionNoticeDialog onAcknowledge={acknowledgeFreeDistributionNotice} />
-        </Suspense>
-      )}
-
-      {showCanvas && projectLoadStatus === 'ready' && !showProjectSplash && !freeDistributionNoticeOpen && canvasGuideOpen && (
+      {showCanvas && projectLoadStatus === 'ready' && !showProjectSplash && canvasGuideOpen && (
         <Suspense fallback={null}>
           <CanvasEntryGuide onClose={closeOnboarding} onOpenTips={() => {
             closeOnboarding();

@@ -447,10 +447,8 @@ function AINodeDialog() {
       settings: projectSettings,
       customStyles: store.customStyles,
     });
-    const cameraPrompt = buildGenerationCameraPrompt(latestData.cameraSettings);
-    const effectivePrompt = cameraPrompt
-      ? `${projectPrompt}\n\nCamera settings: ${cameraPrompt}.`
-      : projectPrompt;
+    // 与统一提交入口一致：镜头设置由 shotlistPromptService 解析节点引用后并入提示词。
+    const effectivePrompt = applyGenerationCameraPrompt(projectPrompt, store.nodes, latestData.cameraSettings);
     const videoControls = resolveVideoSubmissionControls({
       provider: nodeProvider,
       workflowId: latestData.workflowId,

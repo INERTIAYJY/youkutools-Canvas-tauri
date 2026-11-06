@@ -1150,6 +1150,10 @@ export default function PromptPanel({
               seedanceRatio={seedanceRatio}
               seedanceDuration={seedanceDuration}
               generateAudio={generateAudio}
+              generateInPlace={generateInPlace}
+              generateCount={generateCount}
+              onChangeGenerateInPlace={onChangeGenerateInPlace}
+              onChangeGenerateCount={onChangeGenerateCount}
               onChangeSeedanceResolution={onChangeSeedanceResolution}
               onChangeSeedanceRatio={onChangeSeedanceRatio}
               onChangeSeedanceDuration={onChangeSeedanceDuration}

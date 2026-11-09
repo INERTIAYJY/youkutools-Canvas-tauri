@@ -350,6 +350,7 @@ export default function VideoParamSelector({
   const generalModels = useAppStore((state) => state.config.generalModels);
   // 森之灵模型能力只在 Provider 目录里（models list 动态拉取），必须显式读取。
   const seedlingModels = useAppStore((state) => state.config.providers?.seedling?.selectedModels);
+  const seedlingCatalogModels = useAppStore((state) => state.config.providers?.seedling?.catalogModels);
   const projectCharacters = useAppStore((state) => state.dramaAssets.characters);
   const globalCharacters = useAppStore((state) => state.globalCharacters);
   const loadGlobalCharacters = useAppStore((state) => state.loadGlobalCharacters);
@@ -464,9 +465,9 @@ export default function VideoParamSelector({
   // 森之灵：能力来自目录 videoCapability（分辨率/比例/时长/配乐/参考上限）。
   const seedlingCapability = useMemo(
     () => (provider === 'seedling'
-      ? resolveSeedlingVideoCapability(seedlingModels, selectedModel)
+      ? resolveSeedlingVideoCapability(seedlingModels, selectedModel, seedlingCatalogModels)
       : undefined),
-    [provider, selectedModel, seedlingModels],
+    [provider, selectedModel, seedlingModels, seedlingCatalogModels],
   );
 
   const apimartCapability = provider === 'apimart'

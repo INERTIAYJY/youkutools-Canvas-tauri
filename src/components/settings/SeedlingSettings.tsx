@@ -25,6 +25,7 @@ import {
   startSeedlingAuthLogin,
 } from '../../services/seedlingService';
 import { buildSeedlingCatalogModels } from '../../services/ai/providerCatalogService';
+import { refreshSeedlingModelCapabilities } from '../../services/ai/seedlingCatalogRefresh';
 
 const AUTH_EVENT = 'seedling-login-runtime';
 
@@ -76,7 +77,12 @@ export default function SeedlingSettings() {
    */
   const ensureSeedlingModelsEnabled = useCallback(async () => {
     const store = useAppStore.getState();
-    if (store.config.providers?.seedling?.selectedModels?.length) return;
+    if (store.config.providers?.seedling?.selectedModels?.length) {
+      // 目录已有选择时不再覆盖，但要把能力（时长/参考上限）按最新 CLI 目录刷新一次。
+      await refreshSeedlingModelCapabilities().catch(() => false);
+      await loadModels();
+      return;
+    }
     try {
       const payload = await fetchSeedlingModels();
       const selections = buildSeedlingCatalogModels(payload.models ?? []);

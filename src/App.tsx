@@ -27,6 +27,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, type AppState } from './store/useAppStore';
 import * as fileService from './services/fileService';
 import { checkForUpdate, downloadAndInstallUpdate, isAppUpdateRunning, type UpdateInfo } from './services/updateService';
+import { refreshSeedlingModelCapabilities } from './services/ai/seedlingCatalogRefresh';
 import { DOWNLOAD_MASCOT_EVENT } from './components/shared/ModelDownloadDialog';
 import UpdateBubble from './components/shared/mascot/UpdateBubble';
 import HiddenFilmSet from './components/shared/mascot/HiddenFilmSet';
@@ -224,6 +225,13 @@ export default function App() {
     };
     run();
   }, [configHydrated, splashDone]);
+
+  // 森之灵模型能力自愈：旧版本存下的目录快照可能仍是 4~15 秒，这里按 CLI 目录刷新一次。
+  useEffect(() => {
+    if (!isTauri || !configHydrated) return;
+    if (!useAppStore.getState().config.providers?.seedling) return;
+    void refreshSeedlingModelCapabilities().catch(() => undefined);
+  }, [configHydrated]);
 
   // 监听下载事件 → 控制吉祥物缩小动画
   useEffect(() => {

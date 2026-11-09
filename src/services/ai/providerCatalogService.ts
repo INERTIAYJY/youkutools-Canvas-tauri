@@ -951,11 +951,23 @@ export function mapSeedlingModelCapability(model: SeedlingModelInfo): VideoModel
 export function resolveSeedlingVideoCapability(
   selectedModels: readonly ProviderModelSelection[] | undefined,
   selectedModel: string | undefined,
+  catalogModels?: readonly ProviderModelSelection[],
 ): VideoModelCapability | undefined {
-  const modelId = selectedModel?.trim().replace(/^seedling\//, '');
-  if (!modelId || !selectedModels?.length) return undefined;
-  const match = selectedModels.find((model) => model.id === modelId);
+  const modelId = normalizeSeedlingModelId(selectedModel);
+  if (!modelId) return undefined;
+  const findIn = (models?: readonly ProviderModelSelection[]) => models?.find(
+    (model) => normalizeSeedlingModelId(model.id) === modelId && model.videoCapability,
+  );
+  // 已勾选模型优先；用户取消勾选后节点仍可能保留该模型，退回完整目录再找一次，
+  // 否则参数面板会掉回 2~15 秒 / 4K 的通用默认值。
+  const match = findIn(selectedModels) ?? findIn(catalogModels);
   return match?.videoCapability;
+}
+
+/** 目录里的模型 ID 可能带 `seedling/` 前缀或大小写差异，统一后比较。 */
+function normalizeSeedlingModelId(id: string | undefined): string | undefined {
+  const trimmed = id?.trim().replace(/^seedling\//i, '').toLowerCase();
+  return trimmed || undefined;
 }
 
 /** 由 `seedling models list` 的模型项构建 ProviderModelSelection 目录（video 类）。 */

@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VideoGenerationReferenceInput } from '../../src/types/aiTypes';
-import type { MediaProviderRequest } from '../../src/services/ai/mediaProviderRegistry';
+import type { VideoProviderRequest } from '../../src/services/ai/mediaProviderRegistry';
 import { useAppStore } from '../../src/store/useAppStore';
 
 const seedlingMocks = vi.hoisted(() => ({
@@ -33,7 +33,7 @@ function buildRequest(overrides?: {
   references?: VideoGenerationReferenceInput['references'];
   imageUrls?: string[];
   videoUrls?: string[];
-}): MediaProviderRequest {
+}): VideoProviderRequest {
   return {
     params: {
       prompt: '测试视频',

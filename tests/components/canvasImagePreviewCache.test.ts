@@ -422,6 +422,7 @@ describe('canvas image preview cache', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     interacting = false;
     await vi.advanceTimersByTimeAsync(80);
+    await flush();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(bitmapMock).toHaveBeenCalledTimes(1);
     resolveBitmap({ close: vi.fn() } as unknown as ImageBitmap);
@@ -438,6 +439,7 @@ describe('canvas image preview cache', () => {
     expect(await item.promise).toBeNull();
     interacting = false;
     await vi.advanceTimersByTimeAsync(100);
+    await flush();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -448,6 +450,7 @@ describe('canvas image preview cache', () => {
     const item = request();
     await flush();
     item.controller.abort();
+    await flush();
     expect(await item.promise).toBeNull();
     const signal = fetchMock.mock.calls[0][1]?.signal;
     expect(signal?.aborted).toBe(true);

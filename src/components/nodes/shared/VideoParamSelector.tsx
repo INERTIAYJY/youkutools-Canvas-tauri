@@ -462,24 +462,31 @@ export default function VideoParamSelector({
     ? settingsConnection.selectedModels?.find((model) => model.id === settingsModelId && model.category === 'video')
     : undefined;
 
+  // 节点历史数据可能只存了 model、或 provider 与模型前缀不一致（例如老节点缺 provider 字段），
+  // 能力解析用模型前缀兜底，否则会掉回 2~15 秒 / 4K 的通用默认值。
+  const modelProviderPrefix = selectedModel?.includes('/')
+    ? selectedModel.split('/')[0].trim().toLowerCase()
+    : undefined;
+  const capabilityProvider = provider ?? modelProviderPrefix;
+
   // 森之灵：能力来自目录 videoCapability（分辨率/比例/时长/配乐/参考上限）。
   const seedlingCapability = useMemo(
-    () => (provider === 'seedling'
+    () => (capabilityProvider === 'seedling'
       ? resolveSeedlingVideoCapability(seedlingModels, selectedModel, seedlingCatalogModels)
       : undefined),
-    [provider, selectedModel, seedlingModels, seedlingCatalogModels],
+    [capabilityProvider, selectedModel, seedlingModels, seedlingCatalogModels],
   );
 
-  const apimartCapability = provider === 'apimart'
+  const apimartCapability = capabilityProvider === 'apimart'
     ? getApimartSeedanceCapability(selectedModel)
     : undefined;
-  const volcengineCapability = provider === 'volcengine'
+  const volcengineCapability = capabilityProvider === 'volcengine'
     ? getVolcengineSeedanceCapability(selectedModel)
     : undefined;
-  const dreaminaCapability = provider === 'dreamina'
+  const dreaminaCapability = capabilityProvider === 'dreamina'
     ? getDreaminaVideoCapability(selectedModel)
     : undefined;
-  const grsaiCapability = provider === 'grsai'
+  const grsaiCapability = capabilityProvider === 'grsai'
     ? getGrsaiVideoCapability(selectedModel, seedanceResolution) : undefined;
   const generalCapability = generalModel
     ? generalModel.videoCapability
@@ -505,6 +512,9 @@ export default function VideoParamSelector({
   const baseParameterCapability = nativeParameterCapability
     ?? grsaiCapability
     ?? workflowApiCapability
+    // 森之灵能力只在 Provider 目录里（models list 动态拉取），必须在 generalCapability 之前参与
+    // 分辨率/比例/时长解析；只接到音频开关上会让整块参数面板回退到 2~15 秒 + 4K 的通用默认值。
+    ?? seedlingCapability
     ?? generalCapability;
   const selectedInputMode = resolveVideoParameterInputMode(
     frameReferences,
@@ -541,9 +551,10 @@ export default function VideoParamSelector({
   // 并靠 CLI 的 `--audio` 开关生效，因此两者在这里统一成「是否支持 + 是否默认开启」。
   const nativeAudio = resolveNativeVideoAudioCapability(nativeCapability, seedlingCapability);
   // 森之灵沿用 Seedance 风格的按秒时长 + 比例参数面板。
-  const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina'
-    || provider === 'seedling'
-    || Boolean(apimartCapability || grsaiCapability || workflowApiCapability);  const generalControlSupport = resolveGeneralVideoControlSupport(generalCapability);
+  const isNativeSeedance = capabilityProvider === 'volcengine' || capabilityProvider === 'dreamina'
+    || capabilityProvider === 'seedling'
+    || Boolean(apimartCapability || grsaiCapability || workflowApiCapability);
+  const generalControlSupport = resolveGeneralVideoControlSupport(generalCapability);
   const hasParameterOverrides = [
     ...Object.values(generalCapability?.inputModeCapabilities ?? {}),
     ...Object.values(generalCapability?.operationCapabilities ?? {}),
@@ -585,6 +596,7 @@ export default function VideoParamSelector({
     ?? volcengineCapability
     ?? dreaminaCapability
     ?? workflowApiCapability
+    ?? seedlingCapability
     ?? generalCapability;
   const describeLimit = (max: number | undefined, kind: 'image' | 'video' | 'audio') => {
     if (max === undefined) return '';

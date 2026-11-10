@@ -167,7 +167,7 @@ async function saveGeneratedMedia(
 ) {
   const baseName = `对话${MEDIA_LABELS[kind]}-${artifactId}`;
   const persisted = await persistMediaUrlToProjectData(url, projectId, MEDIA_NODE_TYPES[kind], baseName, { mediaDownloadAccess, signal });
-  if (kind !== 'video') return persisted;
+  if (!persisted || kind !== 'video') return persisted;
   // HEVC(10bit) 结果在 WebView 内无法解码，落盘后按需转成 H.264。
   const playable = await ensurePlayableVideoFile(persisted.filePath, signal);
   return playable && playable !== persisted.filePath

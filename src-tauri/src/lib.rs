@@ -50,6 +50,8 @@ mod theme_assets;
 mod local_fonts;
 #[path = "media/reference_image_upload.rs"]
 mod reference_image_upload;
+#[path = "media/ffmpeg.rs"]
+mod video_ffmpeg;
 #[path = "mcp/bridge.rs"]
 mod mcp_bridge;
 #[path = "mcp/client.rs"]
@@ -1976,6 +1978,10 @@ pub fn run() {
             seedling::seedling_auth_login_runtime,
             seedling::seedling_auth_login_cancel,
             seedling::seedling_auth_logout,
+            video_ffmpeg::ffmpeg_status,
+            video_ffmpeg::ffmpeg_ensure,
+            video_ffmpeg::video_probe_codec,
+            video_ffmpeg::video_transcode_h264,
             plugin_registry::stage_plugin_revision,
             plugin_registry::activate_plugin_revision,
             plugin_registry::ensure_plugin_registration,

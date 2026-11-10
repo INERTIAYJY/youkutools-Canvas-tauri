@@ -17,6 +17,7 @@ import {
   isTransientMediaUrl,
   persistMediaUrlToProjectData,
 } from '../fileService';
+import { ensurePlayableVideoFile, playableVideoUrl } from '../videoPlaybackCompat';
 import { comfyBaseUrlFor } from '../comfyServers';
 import { isRunningHubWorkflow, mediaProviderConfigId, workflowExecution, runningHubConnection } from '../workflowExecutionService';
 import { getRunningHubModel } from './providers/runninghubModelManifest';
@@ -165,7 +166,13 @@ async function saveGeneratedMedia(
   signal?: AbortSignal,
 ) {
   const baseName = `对话${MEDIA_LABELS[kind]}-${artifactId}`;
-  return persistMediaUrlToProjectData(url, projectId, MEDIA_NODE_TYPES[kind], baseName, { mediaDownloadAccess, signal });
+  const persisted = await persistMediaUrlToProjectData(url, projectId, MEDIA_NODE_TYPES[kind], baseName, { mediaDownloadAccess, signal });
+  if (kind !== 'video') return persisted;
+  // HEVC(10bit) 结果在 WebView 内无法解码，落盘后按需转成 H.264。
+  const playable = await ensurePlayableVideoFile(persisted.filePath, signal);
+  return playable && playable !== persisted.filePath
+    ? { ...persisted, filePath: playable, mediaUrl: playableVideoUrl(playable) }
+    : persisted;
 }
 
 interface MediaPersistOutcome {

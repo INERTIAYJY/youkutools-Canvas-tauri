@@ -12,6 +12,7 @@ import { MAX_IMAGE_BATCH_COUNT, type MediaTaskReceipt } from '../types/aiTypes';
 import { generateText, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from './aiService';
 import { persistAudioGenerationResult } from './ai/generateAudio';
 import { persistMediaUrlToProjectData } from './fileService';
+import { ensurePlayableVideoFile, playableVideoUrl } from './videoPlaybackCompat';
 import {
   applyImageBatchResults,
   failImageBatchNodes,
@@ -585,9 +586,14 @@ export async function executeGeneration(
       }
       if (taskReceipt) store.updateNodeDataTransient(nodeId, { mediaTaskStage: 'saving' });
       const signal = beginMediaSaving();
-      const persisted = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (submittingProjectId
+      const persistedRaw = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (submittingProjectId
         ? await persistMediaUrlToProjectData(result.url, submittingProjectId, 'ai-video', data.label, { mediaDownloadAccess: result.mediaDownloadAccess, signal })
         : { mediaUrl: result.url, sourceUrl: result.url });
+      // HEVC(10bit) 结果无法在 WebView 内解码，落盘后按需转成 H.264 再交给节点。
+      const playablePath = await ensurePlayableVideoFile(persistedRaw.filePath, signal);
+      const persisted = playablePath && playablePath !== persistedRaw.filePath
+        ? { ...persistedRaw, filePath: playablePath, mediaUrl: playableVideoUrl(playablePath) }
+        : persistedRaw;
       if (lease) await assertLease();
       if (!isStillCurrentSubmission()) {
         if (taskReceipt) pauseMediaTask(taskReceipt, undefined, 'canvas_changed');

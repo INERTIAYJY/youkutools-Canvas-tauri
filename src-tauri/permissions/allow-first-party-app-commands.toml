@@ -143,6 +143,11 @@ commands.allow = [
   "seedling_auth_login_runtime",
   "seedling_auth_login_cancel",
   "seedling_auth_logout",
+  # 视频播放兼容（HEVC → H.264 转码与按需 ffmpeg）
+  "ffmpeg_status",
+  "ffmpeg_ensure",
+  "video_probe_codec",
+  "video_transcode_h264",
 ]
 
 [[permission]]

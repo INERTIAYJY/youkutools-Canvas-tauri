@@ -20,6 +20,7 @@ import { resolveVideoSubmissionControls } from '../../services/ai/videoRequestRe
 import { removeAudioSpeechReference } from '../../services/ai/audioSpeechSettings';
 import { persistAudioGenerationResult } from '../../services/ai/generateAudio';
 import { persistMediaUrlToProjectData } from '../../services/fileService';
+import { ensurePlayableVideoFile, playableVideoUrl } from '../../services/videoPlaybackCompat';
 import {
   applyImageBatchResults,
   failImageBatchNodes,
@@ -531,10 +532,15 @@ function AINodeDialog() {
         if (!isStill()) return;
         const result = await generateVideo(nodeParams);
         if (!isStill()) return;
-        const persisted = submittingProjectId
+        const persistedRaw = submittingProjectId
           ? await persistMediaUrlToProjectData(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${index + 1}`)
             .catch(() => ({ mediaUrl: result.url, sourceUrl: result.url, filePath: undefined }))
           : { mediaUrl: result.url, sourceUrl: result.url, filePath: undefined };
+        // HEVC(10bit) 结果无法在 WebView 内解码，落盘后按需转成 H.264 再交给节点。
+        const playablePath = await ensurePlayableVideoFile(persistedRaw.filePath);
+        const persisted = playablePath && playablePath !== persistedRaw.filePath
+          ? { ...persistedRaw, filePath: playablePath, mediaUrl: playableVideoUrl(playablePath) }
+          : persistedRaw;
         useAppStore.getState().updateNodeData(node.id, {
           videoUrl: persisted.mediaUrl,
           sourceUrl: persisted.sourceUrl,

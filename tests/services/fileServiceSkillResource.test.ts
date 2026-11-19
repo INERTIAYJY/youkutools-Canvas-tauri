@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const existsMock = vi.hoisted(() => vi.fn());
 const readFileMock = vi.hoisted(() => vi.fn());
 const readDirMock = vi.hoisted(() => vi.fn());
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock, convertFileSrc: vi.fn() }));
 
 vi.mock('@tauri-apps/plugin-fs', () => ({
   exists: existsMock,
@@ -21,6 +24,7 @@ import {
   assertSafeSkillRelativePath,
   listSkillResourceFiles,
   readSkillResourceFile,
+  removeSkillSourceFiles,
 } from '../../src/services/fileService';
 
 const ROOT = '/Users/tester/Library/Application Support/ai-canvas/skill/audit';
@@ -30,10 +34,33 @@ beforeEach(() => {
   existsMock.mockReset().mockResolvedValue(true);
   readFileMock.mockReset().mockResolvedValue(new TextEncoder().encode('参考资料正文'));
   readDirMock.mockReset().mockResolvedValue([]);
+  invokeMock.mockReset();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('removeSkillSourceFiles', () => {
+  it('仅将原生来源 ID 交给删除命令，不向原生提交 Renderer 路径', async () => {
+    invokeMock.mockResolvedValue(true);
+    await expect(removeSkillSourceFiles('managed-source')).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('remove_skill_source_files', { sourceId: 'managed-source' });
+    expect(existsMock).not.toHaveBeenCalled();
+    expect(readDirMock).not.toHaveBeenCalled();
+  });
+
+  it('保留外部来源语义，并透传原生脱敏权限错误', async () => {
+    invokeMock.mockResolvedValueOnce(false).mockRejectedValueOnce('Skill 文件删除失败，请检查安装目录 skills 的权限或文件占用后重试');
+    await expect(removeSkillSourceFiles('linked-source')).resolves.toBe(false);
+    await expect(removeSkillSourceFiles('managed-source')).rejects.toThrow('安装目录 skills 的权限');
+  });
+
+  it('非桌面环境不能默默跳过托管文件清理并继续删除记录', async () => {
+    vi.stubGlobal('window', {});
+    await expect(removeSkillSourceFiles('managed-source')).rejects.toThrow('Tauri 桌面端');
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('assertSafeSkillRelativePath', () => {
@@ -95,6 +122,45 @@ describe('readSkillResourceFile', () => {
     readFileMock.mockResolvedValue(new Uint8Array([0xff, 0xfe, 0x00]));
     await expect(readSkillResourceFile(ROOT, 'notes.md')).rejects.toThrow('UTF-8');
   });
+
+  it('重启后凭持久来源身份读取外部目录，不依赖旧的选择器插件授权', async () => {
+    invokeMock.mockResolvedValue('原位置的参考资料');
+    await expect(readSkillResourceFile('D:/user-skills/audit', 'references/checklist.md', 'saved-source'))
+      .resolves.toBe('原位置的参考资料');
+    expect(invokeMock).toHaveBeenCalledWith('read_skill_source_file', {
+      sourceId: 'saved-source', relativePath: 'references/checklist.md',
+    });
+    expect(existsMock).not.toHaveBeenCalled();
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it('带来源身份的相对路径仍先经过本地校验', async () => {
+    await expect(readSkillResourceFile('D:/user-skills/audit', '../other/secret.md', 'saved-source'))
+      .rejects.toThrow('路径无效');
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it('未知 IPC 异常只返回固定提示，不传播绝对路径和嵌套 cause', async () => {
+    invokeMock.mockRejectedValue(new Error('permission denied: D:/private/secret.md', {
+      cause: new Error('native path: D:/private/secret.md'),
+    }));
+    const error = await readSkillResourceFile('D:/user-skills/audit', 'notes.md', 'saved-source')
+      .catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ message: 'Skill 资料读取失败' });
+    expect(error).not.toHaveProperty('cause');
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['Skill 来源不存在或已失效', 'Skill 文件必须是 UTF-8 文本'])(
+    '原生拒绝附属资料读取时保留脱敏原因且不降级读取：%s', async (message) => {
+      invokeMock.mockRejectedValue(message);
+      await expect(readSkillResourceFile('D:/user-skills/audit', 'references/checklist.md', 'saved-source'))
+        .rejects.toThrow(message);
+      expect(existsMock).not.toHaveBeenCalled();
+      expect(readFileMock).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('listSkillResourceFiles', () => {
@@ -119,5 +185,27 @@ describe('listSkillResourceFiles', () => {
   it('读取失败时降级为空数组而不是抛错', async () => {
     readDirMock.mockRejectedValue(new Error('目录不可读'));
     expect(await listSkillResourceFiles(ROOT, 10)).toEqual([]);
+  });
+
+  it('持久来源身份枚举安装根或原位置目录时只向原生传身份和上限', async () => {
+    invokeMock.mockResolvedValue(['SKILL.md', 'references/checklist.md']);
+    await expect(listSkillResourceFiles('C:/AI-Canvas/skills/audit', 10, 'saved-source'))
+      .resolves.toEqual(['SKILL.md', 'references/checklist.md']);
+    expect(invokeMock).toHaveBeenCalledWith('list_skill_source_files', { sourceId: 'saved-source', limit: 10 });
+    expect(existsMock).not.toHaveBeenCalled();
+    expect(readDirMock).not.toHaveBeenCalled();
+  });
+
+  it('原生来源失效时仍返回空资料清单，不回退到任意路径枚举', async () => {
+    invokeMock.mockRejectedValue('Skill 来源不存在或已失效');
+    expect(await listSkillResourceFiles('D:/user-skills/audit', 10, 'missing-source')).toEqual([]);
+    expect(existsMock).not.toHaveBeenCalled();
+    expect(readDirMock).not.toHaveBeenCalled();
+  });
+
+  it('零上限不会触发原生目录读取', async () => {
+    expect(await listSkillResourceFiles('D:/user-skills/audit', 0, 'saved-source')).toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(readDirMock).not.toHaveBeenCalled();
   });
 });

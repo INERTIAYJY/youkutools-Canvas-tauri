@@ -2,6 +2,7 @@
  * mcpControlService — 回归测试：MCP on-demand discovery。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getLocale, setLocale, t } from '../../../src/i18n';
 import {
   handleMcpBridgeRequest,
   initMcpControlService,
@@ -35,9 +36,11 @@ import { MCP_SETTINGS_CONVERSATION_ID, MCP_SETTINGS_SCOPE_ID } from '../../../sr
 import * as chatHistory from '../../../src/services/chat/chatHistoryService';
 import * as mcpBridge from '../../../src/services/mcp/mcpBridgeService';
 import { MCP_CATALOG_MAX_BYTES } from '../../../src/services/mcp/mcpToolCatalog';
+import { captureLegacyEpisodeContext, captureLegacyProjectExpectedContext } from '../../../src/services/projectExecutionContext';
+import { registerEpisodeEditorSession } from '../../../src/services/episodeEditorSessionService';
 
-const { getChatWindow } = vi.hoisted(() => ({ getChatWindow: vi.fn() }));
-vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: { getByLabel: getChatWindow } }));
+const { openDetachedChatWindow } = vi.hoisted(() => ({ openDetachedChatWindow: vi.fn<() => Promise<void>>() }));
+vi.mock('../../../src/services/chat/chatWindowLifecycle', () => ({ openDetachedChatWindow }));
 
 function packageSkill(partial: Partial<AgentPackageSkill> = {}): AgentPackageSkill {
   return {
@@ -107,12 +110,13 @@ function packageInstallation(
 }
 
 beforeEach(() => {
-  getChatWindow.mockReset();
+  openDetachedChatWindow.mockReset().mockResolvedValue(undefined);
   resetAgentToolsRegistrationForTests();
   clearAgentToolRegistryForTests();
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-mcp',
+    projectLoadStatus: 'ready',
     projects: [{
       id: 'project-mcp',
       name: 'MCP project',
@@ -485,7 +489,8 @@ describe('MCP on-demand discovery', () => {
     const text = preview.content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
     const draftId = /draftId: (provider-draft-[\w-]+)/.exec(text)?.[1];
     expect(draftId).toBeTruthy();
-    useAppStore.setState({ currentProjectId: 'another-project' });
+    useAppStore.setState((state) => ({ currentProjectId: 'another-project', projects: [...state.projects,
+      { id: 'another-project', name: 'another project', createdAt: 1, updatedAt: 1 }] }));
     expect(await mcpCall('tools_call', { name: 'provider_config_apply', arguments: { draftId } }, 'global-apply')).toMatchObject({ isError: false });
     expect(saveConfig).toHaveBeenCalledOnce();
     expect(useAppStore.getState().config.generalModels?.[0].imageCapability?.resolutions).toEqual(['1K']);
@@ -641,7 +646,8 @@ describe('MCP on-demand discovery', () => {
   it('rechecks the active project instead of reusing an earlier catalog context', async () => {
     const execute = registerDispatchProbe({ authorize: (context) => ({ allowed: context.projectId === 'project-mcp', reason: '项目不匹配' }) });
     catalogResult(await mcpCall('tools_describe', { names: ['mcp_dispatch_probe'] }, 'describe'));
-    useAppStore.setState({ currentProjectId: 'other-project' });
+    useAppStore.setState((state) => ({ currentProjectId: 'other-project', projects: [...state.projects,
+      { id: 'other-project', name: 'other project', createdAt: 1, updatedAt: 1 }] }));
     expect(await mcpCall('tools_call', { name: 'mcp_dispatch_probe', arguments: { value: 'ok' } })).toMatchObject({ isError: true, summary: '项目不匹配' });
     expect(execute).not.toHaveBeenCalled();
   });
@@ -663,7 +669,7 @@ describe('MCP on-demand discovery', () => {
         chatOpen: true, chatPanelView: 'chat', activeConversationId: 'mcp-control-project-mcp',
       });
       expect(execute).not.toHaveBeenCalled();
-      expect(getChatWindow).not.toHaveBeenCalled();
+      expect(openDetachedChatWindow).not.toHaveBeenCalled();
     } finally {
       await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-choice', method: 'requests/cancel', params: { requestId: 'session:choice' } });
       await pending;
@@ -673,17 +679,12 @@ describe('MCP on-demand discovery', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('reveals an existing detached assistant for user_choice without recreating it', async () => {
-    const detached = { unminimize: vi.fn().mockResolvedValue(undefined), show: vi.fn().mockResolvedValue(undefined), setFocus: vi.fn().mockResolvedValue(undefined) };
-    getChatWindow.mockResolvedValue(detached);
+  it('reveals the detached assistant for user_choice through the shared lifecycle', async () => {
     useAppStore.setState({ chatOpen: false, chatPanelDetached: true, chatPanelView: 'list' });
     const execute = registerDispatchProbe({ effect: 'user_choice' });
     const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:detached-choice');
     try {
-      await vi.waitFor(() => expect(detached.setFocus).toHaveBeenCalledOnce());
-      expect(getChatWindow).toHaveBeenCalledWith('chat-assistant');
-      expect(detached.unminimize).toHaveBeenCalledOnce();
-      expect(detached.show).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(openDetachedChatWindow).toHaveBeenCalledOnce());
       expect(useAppStore.getState()).toMatchObject({
         chatPanelDetached: true, chatPanelView: 'chat', activeConversationId: 'mcp-control-project-mcp',
       });
@@ -694,35 +695,46 @@ describe('MCP on-demand discovery', () => {
     }
   });
 
-  it('falls back to the main panel if the detached assistant is unavailable', async () => {
-    getChatWindow.mockResolvedValue(null);
-    useAppStore.setState({ chatOpen: false, chatPanelDetached: true });
-    registerDispatchProbe({ effect: 'user_choice' });
-    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:missing-choice');
+  it.each(['zh-CN', 'en-US'] as const)('preserves the live detached assistant when the shared focus attempt fails (%s)', async (locale) => {
+    const previousLocale = getLocale();
+    setLocale(locale);
+    openDetachedChatWindow.mockRejectedValueOnce(new Error('focus failed while the original window remains alive'));
+    const showToast = vi.fn();
+    useAppStore.setState({ chatOpen: false, chatPanelDetached: true, showToast });
+    const execute = registerDispatchProbe({ effect: 'user_choice' });
+    const requestId = `session:missing-choice:${locale}`;
+    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, requestId);
     try {
-      await vi.waitFor(() => expect(useAppStore.getState().chatPanelDetached).toBe(false));
-      expect(useAppStore.getState()).toMatchObject({ chatOpen: true, chatPanelView: 'chat' });
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(t('打开独立窗口失败'), 'error'));
+      expect(openDetachedChatWindow).toHaveBeenCalledOnce();
+      expect(useAppStore.getState()).toMatchObject({ chatPanelDetached: true, chatOpen: true, chatPanelView: 'chat' });
+      expect(useAppStore.getState().agentTasks[0]?.status).toBe('waiting_approval');
+      expect(execute).not.toHaveBeenCalled();
     } finally {
-      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-missing-choice', method: 'requests/cancel', params: { requestId: 'session:missing-choice' } });
+      setLocale(previousLocale);
+      await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: `cancel-missing-choice:${locale}`, method: 'requests/cancel', params: { requestId } });
       await pending;
     }
   });
 
-  it('does not focus a detached assistant after the user switches projects', async () => {
-    let resolveWindow!: (value: { unminimize: ReturnType<typeof vi.fn> }) => void;
-    getChatWindow.mockReturnValue(new Promise((resolve) => { resolveWindow = resolve; }));
+  it('does not start the shared detached lifecycle after the user switches projects', async () => {
     useAppStore.setState({ chatPanelDetached: true });
     registerDispatchProbe({ effect: 'user_choice' });
-    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:stale-choice');
-    const detached = { unminimize: vi.fn() };
-    try {
-      await vi.waitFor(() => expect(getChatWindow).toHaveBeenCalledOnce());
+    let switched = false;
+    const stopWatching = useAppStore.subscribe((state) => {
+      if (switched || !state.chatOpen || state.activeConversationId !== 'mcp-control-project-mcp'
+        || !state.agentTasks.some((task) => task.status === 'waiting_approval')) return;
+      switched = true;
       useAppStore.setState({ currentProjectId: 'other-project', activeConversationId: 'other-chat', chatOpen: false });
-      resolveWindow(detached);
+    });
+    const pending = mcpCall('mcp_dispatch_probe', { value: 'ok' }, 'session:stale-choice');
+    try {
+      await vi.waitFor(() => expect(switched).toBe(true));
       await Promise.resolve();
-      expect(detached.unminimize).not.toHaveBeenCalled();
+      expect(openDetachedChatWindow).not.toHaveBeenCalled();
       expect(useAppStore.getState()).toMatchObject({ chatOpen: false, activeConversationId: 'other-chat' });
     } finally {
+      stopWatching();
       await handleMcpBridgeRequest({ sessionId: 'catalog-session', requestId: 'cancel-stale-choice', method: 'requests/cancel', params: { requestId: 'session:stale-choice' } });
       await pending;
     }
@@ -733,7 +745,7 @@ describe('MCP on-demand discovery', () => {
     registerDispatchProbe({ effect: 'read' });
     expect(await mcpCall('mcp_dispatch_probe', { value: 'ok' })).toMatchObject({ isError: false });
     expect(useAppStore.getState()).toMatchObject({ chatOpen: false, chatPanelView: 'tasks', activeConversationId: 'other-chat' });
-    expect(getChatWindow).not.toHaveBeenCalled();
+    expect(openDetachedChatWindow).not.toHaveBeenCalled();
   });
 
   it('forwards cancellation to an executing target', async () => {
@@ -920,6 +932,8 @@ describe('MCP control service', () => {
       'director_cancel_operation',
     ]));
     expect(tools.every((tool) => tool.inputSchema.type === 'object')).toBe(true);
+    expect(useAppStore.getState().conversations).toHaveLength(0);
+    expect(await mcpCall('canvas_query', {}, 'discovery-read')).toMatchObject({ isError: false });
     expect(useAppStore.getState().conversations).toContainEqual(
       expect.objectContaining({
         id: 'mcp-control-project-mcp',
@@ -1012,7 +1026,8 @@ describe('MCP control service', () => {
     expect(result).toEqual({
       isError: false,
       summary: '状态读取完成',
-      content: [{ type: 'text', text: JSON.stringify({ revision: 3 }) }],
+      content: [{ type: 'text', text: JSON.stringify({ revision: 3 }) },
+        { type: 'text', text: expect.stringContaining('"expectedContext"') }],
     });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(useAppStore.getState().agentTasks[0]).toMatchObject({
@@ -1161,6 +1176,52 @@ describe('MCP control service', () => {
     expect(JSON.stringify(result)).not.toContain(staleSkill.sourceId);
   });
 
+  it.each([
+    ['episode_update_script', { episodeId: 'project-mcp', script: '外部新正文' }],
+    ['episode_update_outline', { episodeId: 'project-mcp', outline: '外部新大纲' }],
+    ['episode_update_creative_field', { episodeId: 'project-mcp', field: 'task', value: '外部新要点' }],
+  ] as const)('%s 的脏稿拒绝经过完整 MCP 执行链后仍是明确失败', async (name, input) => {
+    const write = vi.fn(async () => true);
+    useAppStore.setState({ projects: [
+      { id: 'series-mcp', name: '测试剧集', createdAt: 1, updatedAt: 1 },
+      { id: 'project-mcp', parentId: 'series-mcp', name: '测试分集', createdAt: 1, updatedAt: 1 },
+    ], updateEpisodeCreative: write, updateEpisodeOutline: write });
+    let dirty = true;
+    const close = registerEpisodeEditorSession('project-mcp', () => ({ dirty, saving: false }));
+    try {
+      const result = await mcpCall('tools_call', { schemaVersion: 2, name, arguments: input,
+        expectedContext: captureLegacyEpisodeContext(useAppStore.getState(), 'project-mcp') }, `editor-blocked:${name}`);
+      expect(result).toMatchObject({ isError: true, summary: expect.stringContaining('未保存') });
+      const content = result.content[0];
+      if (content.type !== 'text') throw new Error('Expected structured editor conflict');
+      expect(JSON.parse(content.text)).toMatchObject({ episodeId: 'project-mcp', errorCode: 'EPISODE_EDITOR_WRITE_BLOCKED', retryable: false });
+      expect(write).not.toHaveBeenCalled();
+      expect(useAppStore.getState().agentTasks[0]).toMatchObject({ status: 'failed', steps: [
+        expect.objectContaining({ status: 'failed', errorCode: 'EPISODE_EDITOR_WRITE_BLOCKED' }),
+      ] });
+      expect(useAppStore.getState().agentTasks[0].pausedReason).not.toBe('tool_outcome_unknown');
+      expect(useAppStore.getState().messages).toContainEqual(expect.objectContaining({
+        role: 'assistant', status: 'done', content: expect.stringContaining('未保存'),
+      }));
+    } finally { dirty = false; close(); }
+  });
+
+  it('本集写入开始后抛错仍按结果未知暂停，且不自动重试', async () => {
+    const write = vi.fn(async () => { throw new Error('写入结果尚未确认'); });
+    useAppStore.setState({ projects: [
+      { id: 'series-mcp', name: '测试剧集', createdAt: 1, updatedAt: 1 },
+      { id: 'project-mcp', parentId: 'series-mcp', name: '测试分集', createdAt: 1, updatedAt: 1 },
+    ], updateEpisodeCreative: write });
+    const result = await mcpCall('tools_call', { schemaVersion: 2, name: 'episode_update_script',
+      arguments: { episodeId: 'project-mcp', script: '新正文' },
+      expectedContext: captureLegacyEpisodeContext(useAppStore.getState(), 'project-mcp') }, 'episode-write-unknown');
+    expect(result).toMatchObject({ isError: true, summary: expect.stringContaining('结果未知') });
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({
+      status: 'paused', pausedReason: 'tool_outcome_unknown', errorCode: 'TOOL_OUTCOME_UNKNOWN',
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a structured tool failure distinct from a failed response', async () => {
     registerAgentTool({
       id: 'mcp_control_structured_error_test',
@@ -1228,7 +1289,8 @@ describe('MCP control service', () => {
     expect(result).toEqual({
       isError: false,
       summary: '图像已生成',
-      content: [{ type: 'image', data: 'YWJj', mimeType: 'image/jpeg' }],
+      content: [{ type: 'image', data: 'YWJj', mimeType: 'image/jpeg' },
+        { type: 'text', text: expect.stringContaining('"expectedContext"') }],
     });
     expect(JSON.stringify(useAppStore.getState().messages)).not.toContain('YWJj');
     expect(JSON.stringify(useAppStore.getState().agentTasks)).not.toContain('YWJj');
@@ -1253,7 +1315,8 @@ describe('MCP control service', () => {
       expect(execute).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-mcp',
         conversationId: 'mcp-control-project-mcp' }), args);
       expect(result).toMatchObject({ isError: false, summary: '已返回原文件字节块' });
-      expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(chunk) }]);
+      expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(chunk) },
+        { type: 'text', text: expect.stringContaining('"expectedContext"') }]);
       const persisted = JSON.stringify([useAppStore.getState().messages, useAppStore.getState().agentTasks]);
       expect(persisted).not.toContain(data);
       expect(persisted).not.toContain(chunk.downloadId);
@@ -1409,6 +1472,94 @@ describe('MCP control service', () => {
   });
 });
 
+describe('MCP versioned execution context', () => {
+  it('permits explicit deleted receipt auditing with a fresh global context without creating a scope task', async () => {
+    useAppStore.setState({ currentProjectId: null });
+    const operations = await import('../../../src/services/mcp/mcpOperationService');
+    const read = vi.spyOn(operations, 'getHistoricalMcpOperationReceipt').mockResolvedValueOnce({ operationId: 'original-binding',
+      taskId: 'original-task', projectId: 'deleted-canvas', toolId: 'media_generate', status: 'unknown', sequence: 7,
+      resultAvailable: false, retryable: false, requiresReadVerification: true, nextAction: '只读核实，勿重投' });
+    const result = await mcpCall('tools_call', { schemaVersion: 2, name: 'mcp_operation_get',
+      arguments: { operationId: 'original-binding', legacyProjectId: 'deleted-canvas', auditScope: 'deleted-target' },
+      expectedContext: captureLegacyProjectExpectedContext(useAppStore.getState(), 'global') }, 'typed:deleted-audit');
+    expect(result.isError).not.toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+    expect(useAppStore.getState().conversations).toHaveLength(0);
+  });
+
+  it('rejects a missing or stale v2 write context before task creation without upgrading the old Canvas ID', async () => {
+    const execute = registerDispatchProbe();
+    const expectedContext = captureLegacyProjectExpectedContext(useAppStore.getState());
+    const missing = await mcpCall('tools_call', { schemaVersion: 2, name: 'mcp_dispatch_probe', arguments: { value: 'ok' } }, 'typed:missing');
+    expect(JSON.stringify(missing)).toContain('CONTEXT_REFRESH_REQUIRED');
+    useAppStore.getState().incrementRevision();
+    const stale = await mcpCall('tools_call', { schemaVersion: 2, name: 'mcp_dispatch_probe', arguments: { value: 'ok' }, expectedContext }, 'typed:stale');
+    expect(JSON.stringify(stale)).toContain('CONTEXT_REFRESH_REQUIRED');
+    expect(execute).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+  });
+
+  it('returns a reusable context from a read and preserves its value across another physical connection', async () => {
+    registerDispatchProbe({ effect: 'read' });
+    const result = await mcpCall('mcp_dispatch_probe', { value: 'read' }, 'typed:read');
+    const block = result.content.find((item) => item.type === 'text' && item.text.includes('expectedContext'));
+    if (!block || block.type !== 'text') throw new Error('Missing reusable context');
+    const { expectedContext } = JSON.parse(block.text);
+    const execute = registerDispatchProbe({ id: 'mcp_typed_write' });
+    const written = await handleMcpBridgeRequest({ sessionId: 'second-physical-connection', requestId: 'typed:write', method: 'tools/call',
+      params: { name: 'tools_call', arguments: { schemaVersion: 2, name: 'mcp_typed_write', arguments: { value: 'write' }, expectedContext } } }) as McpToolCallResult;
+    expect(written.isError).toBe(false);
+    expect(execute).toHaveBeenCalledOnce();
+    const task = useAppStore.getState().agentTasks.find((item) => item.goal.includes('分发测试') && item.executionContext);
+    expect(task).toMatchObject({ projectId: 'project-mcp', conversationId: 'mcp-control-project-mcp', executionContext: expectedContext });
+  });
+
+  it('blocks a target epoch change during asynchronous operation identification without claiming a new key', async () => {
+    const execute = registerDispatchProbe({ id: 'canvas_typed_race', effect: 'canvas_write' });
+    const expectedContext = captureLegacyProjectExpectedContext(useAppStore.getState());
+    const operations = await import('../../../src/services/mcp/mcpOperationService');
+    const identify = operations.identifyMcpOperation;
+    vi.spyOn(operations, 'identifyMcpOperation').mockImplementationOnce(async (input) => {
+      const identity = await identify(input);
+      useAppStore.setState({ projects: useAppStore.getState().projects.map((item) => ({ ...item, exchangeEpoch: (item.exchangeEpoch ?? 0) + 1 })) });
+      return identity;
+    });
+    const result = await mcpCall('tools_call', { schemaVersion: 2, name: 'canvas_typed_race', arguments: { value: 'ok' },
+      expectedContext, operationKey: 'typed-epoch-race' }, 'typed:epoch-race');
+    expect(JSON.stringify(result)).toContain('CONTEXT_REFRESH_REQUIRED');
+    expect(execute).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+  });
+
+  it('rejects a stale new-model context before creating audit scopes or consulting operation storage', async () => {
+    const execute = registerDispatchProbe();
+    const actual = useAppStore.getState();
+    const fixture = { ...captureLegacyProjectExpectedContext(actual), modelGeneration: 1 };
+    vi.spyOn(useAppStore, 'getState').mockReturnValue({ ...actual, projectExecutionContext: { ...fixture, runtimeEpoch: 'different-runtime' } } as typeof actual);
+    const result = await mcpCall('tools_call', { schemaVersion: 2, name: 'mcp_dispatch_probe', arguments: { value: 'fixture' }, expectedContext: fixture }, 'typed:dormant');
+    expect(JSON.stringify(result)).toContain('CONTEXT_REFRESH_REQUIRED');
+    expect(execute).not.toHaveBeenCalled();
+    expect(actual.agentTasks).toHaveLength(0);
+    expect(actual.conversations).toHaveLength(0);
+  });
+
+  it('hides Canvas capabilities on a series without a Canvas and rejects paid chat delivery before task creation', async () => {
+    useAppStore.setState({ currentProjectId: 'series-owner', projects: [
+      { id: 'series-owner', name: 'series', createdAt: 1, updatedAt: 1 },
+      { id: 'episode-a', parentId: 'series-owner', name: 'episode', createdAt: 1, updatedAt: 1 },
+    ] });
+    const execute = registerDispatchProbe({ id: 'media_paid_probe', effect: 'media_generation' });
+    const tools = await listMcpTools('full');
+    expect(tools.map((item) => item.name)).not.toContain('canvas_query');
+    expect(tools.map((item) => item.name)).not.toContain('media_paid_probe');
+    const result = await mcpCall('media_paid_probe', { value: 'ok', delivery: 'chat' }, 'typed:no-canvas-media');
+    expect(JSON.stringify(result)).toContain('NO_ACTIVE_CANVAS');
+    expect(execute).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+  });
+});
+
 describe('MCP keyed operation receipts', () => {
   function project(id: string) {
     useAppStore.setState({ currentProjectId: id, projects: [{ id, name: id, createdAt: 1, updatedAt: 1 }] });
@@ -1420,6 +1571,50 @@ describe('MCP keyed operation receipts', () => {
     }
     throw new Error('Missing operation receipt');
   }
+
+  it('reads an explicit historical alias after switching episodes without creating another task or resetting counters', async () => {
+    const projects = [
+      { id: 'receipt-owner', name: 'owner', createdAt: 1, updatedAt: 1 },
+      { id: 'receipt-episode-a', parentId: 'receipt-owner', name: 'a', createdAt: 1, updatedAt: 1 },
+      { id: 'receipt-episode-b', parentId: 'receipt-owner', name: 'b', createdAt: 1, updatedAt: 1 },
+    ];
+    useAppStore.setState({ currentProjectId: 'receipt-episode-a', projects });
+    const execute = registerDispatchProbe({ id: 'canvas_historical_once', effect: 'canvas_write' });
+    const first = await mcpCall('tools_call', { name: 'canvas_historical_once', arguments: { value: 'ok' }, operationKey: 'historical-once' }, 'historical:first');
+    const original = operation(first);
+    const tasks = structuredClone(useAppStore.getState().agentTasks);
+    const conversations = useAppStore.getState().conversations.map((item) => item.id);
+    useAppStore.setState({ currentProjectId: 'receipt-episode-b' });
+    const result = await mcpCall('mcp_operation_get', { operationKey: 'historical-once', legacyProjectId: 'receipt-episode-a' }, 'historical:query');
+    expect(result.isError).toBe(false);
+    expect(operation(result)).toMatchObject({ operationId: original.operationId, taskId: original.taskId,
+      projectId: 'receipt-episode-a', sequence: original.sequence, retryable: false });
+    expect(useAppStore.getState().agentTasks).toEqual(tasks);
+    expect(useAppStore.getState().conversations.map((item) => item.id)).toEqual(conversations);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a known paid effect on its original receipt when context changes before result delivery', async () => {
+    project('receipt-paid-original');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn<AgentToolDefinition['execute']>(async () => {
+      await gate;
+      return { status: 'success', summary: '原付费操作已明确返回', modelContent: 'private-paid-result' };
+    });
+    registerDispatchProbe({ id: 'media_paid_delivery_context', effect: 'media_generation', execute });
+    const pending = mcpCall('tools_call', { name: 'media_paid_delivery_context', arguments: { value: 'ok' }, operationKey: 'known-paid-result' }, 'paid:original');
+    try {
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+      useAppStore.setState({ currentProjectId: 'receipt-paid-other', canvasRevision: 999 });
+    } finally { release(); }
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(operation(result)).toMatchObject({ projectId: 'receipt-paid-original', status: 'succeeded', retryable: false });
+    expect(operation(result)).not.toHaveProperty('revisionAfter', 999);
+    expect(JSON.stringify(result)).not.toContain('private-paid-result');
+    expect(execute).toHaveBeenCalledOnce();
+  });
 
   it('executes a keyed write once and returns its durable receipt after the write changed revision', async () => {
     project('receipt-control-once');

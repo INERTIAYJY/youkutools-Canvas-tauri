@@ -3,6 +3,7 @@ import { createHash, webcrypto } from 'node:crypto';
 import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ProjectSaveData } from '../../src/services/storageService';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
 import type { ArchiveAssetDigest } from '../../src/services/projectExchangeDomain';
 import type { ProjectArchiveJsonEntry, ProjectArchiveTextEntry } from '../../src/services/projectArchiveSerialization';
 import type { PreparedProjectImport } from '../../src/services/projectImportService';
@@ -76,7 +77,8 @@ beforeEach(async () => {
       });
       // 后续 unpack 使用本次真实导出的全部文本与字节，不手写 exchange/state/manifest。
       native.archives.set(input.outputPath!, structuredClone({ entries: input.entries!, files }));
-      return { assetCount: files.length, assetBytes: files.reduce((sum, file) => sum + file.bytes.length, 0), archiveBytes: 100 };
+      return { assetCount: files.length, assetBytes: files.reduce((sum, file) => sum + file.bytes.length, 0), archiveBytes: 100,
+        operationId: input.operationId, publicationRef: `native-${input.operationId}`, archiveSha256: 'a'.repeat(64) };
     }
     if (command === 'unpack_project_archive') {
       expect(filesUnder(input.assetsDir!)).toHaveLength(0);
@@ -186,6 +188,23 @@ async function roundTrip(context: Runtime, source: ProjectSaveData[], independen
   return { imported, records, archive, returned, state };
 }
 
+it('故事图经真实导出、跨身份导入、保存重开和再次导出后保留出处与布局', async () => {
+  const context = await runtime(), owner = project(), graph = createEmptyStoryGraph('graph');
+  graph.nodes.push({ id: 'event', kind: 'event', label: '相逢', description: '本集关键事件', aliases: [],
+    episodeIds: ['story-episode'], evidence: [], origin: 'manual', certainty: 'explicit' });
+  graph.positions.event = { x: 120, y: 60 };
+  graph.revision = 7;
+  owner.series = { script: '全剧资料', storyGraph: graph };
+  const source = [owner, { ...project('story-episode'), parentId: owner.id, episodeNo: 1, episodeScript: '二人相逢。' }];
+  await seed(context, source, []);
+  const result = await roundTrip(context, source);
+  const received = result.records[0].series!.storyGraph!;
+  expect(received.nodes[0].episodeIds).toEqual([result.records[1].id]);
+  expect(received.positions.event).toEqual({ x: 120, y: 60 });
+  const texts = Object.fromEntries(result.returned.entries.map((entry) => [entry.path, entry.content]));
+  expect(JSON.parse(texts['project.json']).series.storyGraph.nodes[0].episodeIds).toEqual([result.records[1].id]);
+});
+
 it.each([false, true])('真实导出→预览→入库→保存重开→再次导出多分集、同字节别名和空附件（独立=%s）', async (independent) => {
   const context = await runtime(), owner = project();
   owner.dramaAssets = context.drama.normalizeDramaAssetLibrary({ characters: [{ id: 'character', name: '主角',
@@ -244,7 +263,7 @@ it('序列化后的业务投影被破坏时，真实收件门禁阻止 native pa
 });
 
 it.each([false, true].flatMap((series) => (['loadProject', 'initFromDb'] as const).map((reload) => ({ series, reload }))))(
-  '真实 Store 导入后 $reload 保留保存代际并拒绝过期窗口（剧集=$series）', async ({ series, reload }) => {
+  '真实旧结构导入后 Store $reload 保留保存代际并拒绝过期窗口（剧集=$series）', async ({ series, reload }) => {
     const context = await runtime();
     const owner = project();
     owner.dramaAssets = context.drama.normalizeDramaAssetLibrary({ characters: [{ id: 'character', name: '原角色' }] });
@@ -256,8 +275,12 @@ it.each([false, true].flatMap((series) => (['loadProject', 'initFromDb'] as cons
     const exported = (await context.transfer.exportProjectArchive(owner.id))!;
     native.open.mockResolvedValueOnce(exported.filePath);
     const prepared = (await context.imports.prepareProjectImport())!; sessions.push(prepared);
+    // 本组验证旧库导入后的代际；Store 的“新副本导入”入口现已默认使用新结构。
+    const imported = await context.imports.applyProjectImport(prepared, null, {}, { appendChat: false, appendMemories: false });
+    const importedId = imported.projectId;
     const useAppStore = await resetAppStore();
-    const importedId = await useAppStore.getState().importProject(prepared, null, {}, { appendChat: false, appendMemories: false });
+    useAppStore.setState({ currentProjectId: importedId });
+    await useAppStore.getState().loadProject();
     expect(importedId).toBeDefined();
     const activeId = useAppStore.getState().currentProjectId!;
     expect(activeId).toBe(series ? useAppStore.getState().projects.find((item) => item.parentId === importedId)!.id : importedId);
@@ -306,8 +329,11 @@ it('切换用实际读取的完整记录同步摘要，不把旧元数据和未�
   const exported = (await context.transfer.exportProjectArchive(owner.id))!;
   native.open.mockResolvedValueOnce(exported.filePath);
   const prepared = (await context.imports.prepareProjectImport())!; sessions.push(prepared);
+  // 显式使用旧库导入契约，随后由真实 Store 加载，保留旧摘要/共享库的回归边界。
+  const importedId = (await context.imports.applyProjectImport(prepared, null, {}, { appendChat: false, appendMemories: false })).projectId;
   const useAppStore = await resetAppStore();
-  const importedId = (await useAppStore.getState().importProject(prepared, null, {}, { appendChat: false, appendMemories: false }))!;
+  useAppStore.setState({ currentProjectId: importedId });
+  await useAppStore.getState().loadProject();
   const imported = await context.records.readProjectImportScope(importedId);
   const first = imported.find((record) => record.episodeNo === 1)!;
   const second = imported.find((record) => record.episodeNo === 2)!;

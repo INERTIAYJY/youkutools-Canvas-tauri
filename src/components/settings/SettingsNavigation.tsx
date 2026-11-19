@@ -19,10 +19,12 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'comfyui', label: 'ComfyUI' },
   { id: 'shortcuts', label: '快捷键' },
   { id: 'plugins', label: '插件' },
+  { id: 'external-agents', label: '外部 Agent' },
   { id: 'mcp', label: 'MCP 控制' },
 ];
 
 function SettingsTabIcon({ tab }: { tab: SettingsTab }) {
+  if (tab === 'external-agents') return <Icon icon="lucide:bot" width="18" height="18" />;
   if (tab === 'mcp') return <Icon icon="lucide:plug-zap" width="18" height="18" />;
   if (tab === 'seedling') return <Icon icon="lucide:clapperboard" width="18" height="18" />;
   if (tab === 'plugins') return <Icon icon="lucide:blocks" width="18" height="18" />;

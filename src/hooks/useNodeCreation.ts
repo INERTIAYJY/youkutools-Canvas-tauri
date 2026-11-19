@@ -1,6 +1,6 @@
 /**
  * useNodeCreation — 节点创建 Hook
- * 封装所有节点创建方法（文本/图片/视频/音频）、文件拖放（浏览器 + Tauri 原生）
+ * 封装双击新建文本、文件拖放（浏览器 + Tauri 原生）
  */
 import { t } from '../i18n';
 
@@ -18,6 +18,7 @@ import { textNodeHeight } from '../utils/num';
 import { COMFY_REFMOD_MIME } from '../utils/comfyRefmod';
 import { registerCanvasImport, registerCanvasDerivation, isCanvasDerivationFresh, completeCanvasDerivation } from '../services/canvasDerivationGuard';
 import { getPreferredNodeModel } from '../services/modelPreferenceService';
+import { createUiNodeData } from '../services/uiNodeCreationData';
 
 import { classifyFile, MIME_MAP } from '../utils/sourceFileType';
 export { classifyFile, FILE_EXT_IMAGE, FILE_EXT_VIDEO, FILE_EXT_AUDIO, FILE_EXT_TEXT } from '../utils/sourceFileType';
@@ -42,6 +43,12 @@ export function useNodeCreation() {
   // ── Drag-over visual state (shared by browser HTML5 + Tauri native) ──
   const [isDragOver, setIsDragOver] = useState(false);
   const enterCount = useRef(0);
+  const cancelForScriptPage = useCallback(() => {
+    if (useAppStore.getState().projectWorkspaceView !== 'script') return false;
+    enterCount.current = 0;
+    setIsDragOver(false);
+    return true;
+  }, []);
 
   // ===========================
   //  Node creation helpers
@@ -55,88 +62,10 @@ export function useNodeCreation() {
         type: 'ai-text',
         position,
         data: {
-          label: opts?.label ?? '生成文本',
-          type: 'ai-text' as const,
+          ...createUiNodeData('ai-text', opts?.label ?? '生成文本'),
           prompt: opts?.prompt ?? '',
-          status: 'idle' as const,
           nodeWidth: opts?.width ?? 280,
           nodeHeight: opts?.height ?? 160,
-          ...defaultModel,
-        },
-      } as RFNode<BaseNodeData>);
-    },
-    [addNode],
-  );
-
-  const addImageNode = useCallback(
-    async (position: { x: number; y: number }, opts?: { label?: string; dataUrl?: string }) => {
-      const dataUrl = opts?.dataUrl;
-      const isGenerator = !dataUrl;
-      const defaultModel = isGenerator ? getPreferredNodeModel('ai-image', useAppStore.getState()) : null;
-      const dims = dataUrl
-        ? await computeImageNodeDimensions(dataUrl)
-        : { nodeWidth: 280, nodeHeight: 158 };
-      addNode({
-        id: `node-${generateId()}`,
-        type: 'ai-image',
-        position,
-        data: {
-          label: opts?.label ?? '生成图像',
-          type: 'ai-image' as const,
-          role: dataUrl ? ('source' as const) : ('generator' as const),
-          status: dataUrl ? ('success' as const) : ('idle' as const),
-          ...(dataUrl
-            ? { imageUrl: dataUrl }
-            : { prompt: '', aspectRatio: '16:9' as const, imageSize: '2K' as const }),
-          ...dims,
-          ...defaultModel,
-        },
-      } as RFNode<BaseNodeData>);
-    },
-    [addNode],
-  );
-
-  const addVideoNode = useCallback(
-    (position: { x: number; y: number }, opts?: { label?: string; dataUrl?: string }) => {
-      const dataUrl = opts?.dataUrl;
-      const isGenerator = !dataUrl;
-      const defaultModel = isGenerator ? getPreferredNodeModel('ai-video', useAppStore.getState()) : null;
-      addNode({
-        id: `node-${generateId()}`,
-        type: 'ai-video',
-        position,
-        data: {
-          label: opts?.label ?? '生成视频',
-          type: 'ai-video' as const,
-          role: dataUrl ? ('source' as const) : ('generator' as const),
-          status: dataUrl ? ('success' as const) : ('idle' as const),
-          ...(dataUrl ? { videoUrl: dataUrl } : { prompt: '' }),
-          nodeWidth: 280,
-          nodeHeight: 160,
-          ...defaultModel,
-        },
-      } as RFNode<BaseNodeData>);
-    },
-    [addNode],
-  );
-
-  const addAudioNode = useCallback(
-    (position: { x: number; y: number }, opts?: { label?: string; dataUrl?: string }) => {
-      const dataUrl = opts?.dataUrl;
-      const isGenerator = !dataUrl;
-      const defaultModel = isGenerator ? getPreferredNodeModel('ai-audio', useAppStore.getState()) : null;
-      addNode({
-        id: `node-${generateId()}`,
-        type: 'ai-audio',
-        position,
-        data: {
-          label: opts?.label ?? '生成音频',
-          type: 'ai-audio' as const,
-          role: dataUrl ? ('source' as const) : ('generator' as const),
-          status: dataUrl ? ('success' as const) : ('idle' as const),
-          ...(dataUrl ? { audioUrl: dataUrl } : { prompt: '' }),
-          nodeWidth: 260,
-          nodeHeight: 140,
           ...defaultModel,
         },
       } as RFNode<BaseNodeData>);
@@ -149,22 +78,25 @@ export function useNodeCreation() {
   // ===========================
 
   const onDragEnter = useCallback((e: React.DragEvent) => {
+    if (cancelForScriptPage()) return;
     if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
     e.preventDefault();
     e.stopPropagation();
     if (useAppStore.getState().workflowPanelOpen || isExternalDropCaptured()) return;
     enterCount.current++;
     if (e.dataTransfer?.types?.length > 0) setIsDragOver(true);
-  }, []);
+  }, [cancelForScriptPage]);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
+    if (cancelForScriptPage()) return;
     if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-  }, []);
+  }, [cancelForScriptPage]);
 
   const onDragLeave = useCallback((e: React.DragEvent) => {
+    if (cancelForScriptPage()) return;
     if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -173,10 +105,11 @@ export function useNodeCreation() {
       enterCount.current = 0;
       setIsDragOver(false);
     }
-  }, []);
+  }, [cancelForScriptPage]);
 
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
+      if (cancelForScriptPage()) return;
       if (Array.from(e.dataTransfer?.types ?? []).includes(COMFY_REFMOD_MIME)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -188,7 +121,7 @@ export function useNodeCreation() {
       const pos = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
       await useAppStore.getState().pasteExternalFromDataTransfer(dt, pos, 20, '已拖入');
     },
-    [rf],
+    [rf, cancelForScriptPage],
   );
 
   // ===========================
@@ -223,7 +156,7 @@ export function useNodeCreation() {
       let lastDropTs = 0;
 
       const handleDrag = async (payload: DragPayload) => {
-        if (cancelled) return;
+        if (cancelled || cancelForScriptPage()) return;
         if (payload.type === 'drop') {
           if (Date.now() - lastDropTs < 400) return;
           lastDropTs = Date.now();
@@ -247,6 +180,10 @@ export function useNodeCreation() {
 
         const flowPos = rf.screenToFlowPosition(nativeDropClientPosition(position));
         const store = useAppStore.getState();
+        const canAdd = () => {
+          const current = useAppStore.getState();
+          return current.projectWorkspaceView !== 'script' && current.currentProjectId === store.currentProjectId;
+        };
         const recordSuccessfulDrop = (path: string, nodeId: string, projectId: string) => {
           const current = useAppStore.getState();
           if (current.currentProjectId === projectId
@@ -267,10 +204,10 @@ export function useNodeCreation() {
           const offX = count * 30;
           const offY = count * 30;
 
-          if (useAppStore.getState().currentProjectId !== store.currentProjectId) break;
+          if (!canAdd()) break;
           const importGuard = registerCanvasImport(useAppStore.getState());
           if (!importGuard) break;
-          const isFresh = () => isCanvasDerivationFresh(importGuard, useAppStore.getState());
+          const isFresh = () => canAdd() && isCanvasDerivationFresh(importGuard, useAppStore.getState());
           try {
             const projectId = store.currentProjectId;
             if (cat !== 'text' && projectId && projectId !== 'default') {
@@ -365,7 +302,7 @@ export function useNodeCreation() {
           } finally { completeCanvasDerivation(importGuard); }
         }
 
-        if (count > 0 && useAppStore.getState().currentProjectId === store.currentProjectId) store.showToast(t('已拖入 {count} 个源节点', { count }));
+        if (count > 0 && canAdd()) store.showToast(t('已拖入 {count} 个源节点', { count }));
       };
 
       type RawPaths = { paths: string[]; position: { x: number; y: number } };
@@ -391,7 +328,7 @@ export function useNodeCreation() {
       unlistenRef.current?.();
       unlistenRef.current = null;
     };
-  }, [rf]);
+  }, [rf, cancelForScriptPage]);
 
   // ===========================
   //  Double-click → text node
@@ -409,9 +346,6 @@ export function useNodeCreation() {
 
   return {
     addTextNode,
-    addImageNode,
-    addVideoNode,
-    addAudioNode,
     isDragOver,
     onDragEnter,
     onDragOver,

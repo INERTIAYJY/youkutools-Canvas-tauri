@@ -1,11 +1,73 @@
-/** 对话助手媒体生成领域类型。 */
+/** 媒体生成与图片编辑领域类型。 */
 import type { AudioOutputFormat, AudioTtsVoice } from './aiTypes';
+import type { CanvasContext } from './project';
+
+/** 扩图编辑器确认的画幅、模型和工作流参数。 */
+export interface OutpaintSettings {
+  size: string;
+  width: number;
+  height: number;
+  model: string;
+  provider: string;
+  prompt: string;
+  workflowId?: string;
+  workflowInputs?: Record<string, string>;
+}
+
+/** 结果节点保留的独立扩图垫图；生成回填不能替换该输入身份。 */
+export interface OutpaintInput {
+  url?: string;
+  assetId?: string;
+  relativePath?: string;
+  storageRootRef?: string;
+  width: number;
+  height: number;
+}
+
+/** 只在内存中持有同一保存队列的位置，不得放入媒体回执或其它持久化对象。 */
+export interface NativeMediaSubmissionPreparation {
+  readonly context: CanvasContext;
+  readonly canvasRevision: number;
+  assertCurrent(): void;
+  release(): void;
+}
 
 export type MediaKind = 'image' | 'video' | 'audio';
 
 export type AudioGenerationPurpose = 'music' | 'speech';
 
 export type MediaDeliveryMode = 'chat' | 'canvas' | 'both';
+/** 新媒体回执只保存原目的地身份，不保存请求正文或凭据。 */
+export interface NativeMediaOrigin {
+  conversationId: string;
+  messageId: string;
+  agentTaskId?: string;
+  modelId?: string;
+  deliveryMode: MediaDeliveryMode;
+}
+export interface NativeMediaLocalResult { relativePath: string; bytes: number; sha256: string }
+/** 完整的原作业产物集合；序号是投递身份，不能用请求数量截断。 */
+export interface NativeMediaLocalOutput extends NativeMediaLocalResult { category: MediaKind }
+export interface NativeMediaCompletion {
+  taskCount: number; failedTasks: number;
+  failedSubmissions?: number; unknownSubmissions?: number; notStartedSubmissions?: number;
+}
+/** 不可变查询合同身份；分阶段提交意图由对应原生 sidecar 单独保留。 */
+export interface NativeMediaRecoveryBinding {
+  kind: 'general-protocol' | 'workflow' | 'builtin-audio' | 'builtin-image' | 'builtin-video';
+  workflowId?: string;
+  modelId?: string;
+  serverId?: string;
+  digest?: string;
+  expectedCount?: number;
+}
+export interface NativeApimartImageBatch {
+  version: 1;
+  requestedCount: number;
+  submissions: Array<{ id: string; state: 'prepared' | 'unknown' | 'submitted' | 'not-started' | 'failed'; taskIds: string[] }>;
+  tasks: Array<{ taskId: string; state: 'submitted' | 'completed' | 'failed'; results?: NativeMediaLocalResult[] }>;
+  uncertainAcknowledged?: true;
+}
 
 /** 用户显式选择或审批前锁定的媒体参数；不包含提示词、素材和凭据。 */
 export interface MediaGenerationParameters {
@@ -14,6 +76,10 @@ export interface MediaGenerationParameters {
   duration?: number;
   imageQuality?: string;
   imageBackground?: string;
+  imageOutputFormat?: import('./aiTypes').ImageOutputFormat;
+  imageFrameCount?: number;
+  imageFrameDurationMs?: number;
+  imageTransparent?: boolean;
   videoFps?: number;
   generateAudio?: boolean;
 }
@@ -86,6 +152,12 @@ export interface MediaGenerationResult {
   createdAt: number;
 }
 
+/** 仅在本轮交付中携带同一作业的其他候选；拆成独立消息后才持久化。 */
+export interface MediaGenerationDelivery extends MediaGenerationResult {
+  additionalResults?: MediaGenerationResult[];
+  expectedOutputCount?: number;
+}
+
 export interface ResolvedMediaModel {
   configId: string;
   requestModel: string;
@@ -93,4 +165,26 @@ export interface ResolvedMediaModel {
   audioPurpose?: AudioGenerationPurpose;
   /** 选中的是 ComfyUI 工作流时带上，生成入口据此走本地工作流 */
   workflowId?: string;
+}
+/** 角色图片任务只保存原查询身份；提交正文与运行时对象不进入回执。 */
+export type CharacterVisualGenerationParameters = Pick<import('./aiTypes').AIImageGenParams,
+  'aspectRatio' | 'imageSize' | 'imageQuality' | 'imageBackground' | 'imageOutputFormat'
+  | 'imageFrameCount' | 'imageFrameDurationMs' | 'imageTransparent' | 'workflowInputs' | 'runninghubModelParameters'>;
+
+export interface CharacterImageTaskRecovery {
+  version: 1;
+  kind: 'builtin' | 'apimart' | 'general-async' | 'workflow' | 'protocol';
+  connectionId: string;
+  providerBase: string;
+  modelRef: string;
+  configurationDigest: string;
+  expectedCount: number;
+  tasks: Array<{ taskId: string; recoveryContext?: Record<string, unknown> }>;
+  builtinMode?: 'standard' | 'protocol' | 'volcengine' | 'ccc' | 'dreamina';
+  workflow?: import('../services/nativeWorkflowRepository').NativeWorkflowDescriptor;
+  query?: {
+    modelId: string;
+    digest: string;
+  };
+  mediaDownloadAccess?: import('./aiTypes').MediaDownloadAccess;
 }

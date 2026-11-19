@@ -5,28 +5,64 @@ import * as files from './fileService';
 import { readArchiveProject, readArchiveChat, readArchiveEpisodes, restoreProjectArchive,
   type ProjectArchiveManifest, type ProjectArchiveChatPayload, type ProjectImportResult } from './projectTransferService';
 import type { ProjectSaveData } from './storageService';
+import type { ValidatedProjectArchiveV4 } from '../types/projectArchiveV4';
 import type { ProjectExchangeBundle, ProjectExchangeIdentity, ProjectExchangeRevision, ProjectExchangeState } from '../types/projectExchange';
 import { materializeExchangeSnapshot, safeExchangePath, exchangeEqual, type ArchiveAssetDigest, type ExchangeCapture } from './projectExchangeDomain';
-import { createProjectExchangeRevision, parseProjectExchangeBundle, findProjectExchangeBase } from './projectExchangeFormat';
-import { loadProjectExchangeGraph, loadProjectExchangeState, saveProjectExchangeCheckpoint, parseProjectExchangeState } from './indexedDb/projectExchangeRepository';
-import { beginProjectImportOperation, commitProjectImport, readProjectImportScope, listProjectImportRecoveries,
-  type ProjectImportHistoryRow } from './indexedDb/projectImportRepository';
+import { createProjectExchangeRevision, parseProjectExchangeBundle, findProjectExchangeBase, verifyProjectExchangeRevision,
+  verifyProjectExchangeHeader } from './projectExchangeFormat';
+import { loadProjectExchangeGraph, loadProjectExchangeState, parseProjectExchangeState } from './indexedDb/projectExchangeRepository';
+import { beginProjectImportOperation, advanceProjectImportOperation, savePreparedProjectImportOperation, commitProjectImport, readProjectImportOperation, readProjectImportScope, listProjectImportRecoveries,
+  type ProjectImportCommit, type ProjectImportHistoryRow } from './indexedDb/projectImportRepository';
 import { resolveProjectMerge, type ProjectMergePlan, type ProjectMergeSide } from './projectMergeService';
 import { compareProjectSnapshots, captureProjectSnapshot } from './projectMergeWorkerClient';
 import { configValuesEqual } from './configPatch';
 import { sha256BytesHex } from './mediaDataUrl';
 import { toProjectSummaryRecord } from './indexedDb/projectSummary';
+import { normalizeStoryGraph } from './storyGraphService';
 import { selectArchiveImportPaths } from './projectArchiveValidation';
+import { normalizeConversationWorkbenchTarget } from './chat/workbenchConversationScope';
+import { openDB } from './indexedDb/schema';
+import { assertLegacyProjectWritesAllowed } from './indexedDb/legacyProjectWriteGuard';
+import { throwProjectImportCommitFailure } from './projectImportOutcome';
+import { verifyPreparedProjectImportMedia } from './projectImportResumeService';
+import { assertLegacyProjectArchiveRoots } from './projectArchiveRoots';
+export { resumeProjectImportOperation } from './projectImportResumeService';
+
+/** 接收端重建本机令牌；可交换语义不含该令牌，旧候选还受 exchangeEpoch 约束。 */
+function restoreImportedGraphRevisions(records: ProjectSaveData[], before: readonly ProjectSaveData[]): ProjectSaveData[] {
+  return records.map((record) => {
+    if (!record.series?.storyGraph) return record;
+    const previous = before.find((item) => item.id === record.id)?.series?.storyGraph?.revision ?? 0;
+    if (!Number.isSafeInteger(previous) || previous >= Number.MAX_SAFE_INTEGER) throw new Error('故事图本机版本已超出范围');
+    return { ...record, series: { ...record.series,
+      storyGraph: normalizeStoryGraph({ ...record.series.storyGraph, revision: previous + 1 }) } };
+  });
+}
 
 export interface PreparedProjectImport {
   id: string; stagingProjectId: string; stagingFolder: string; archivePath: string; directory: string;
   manifest: ProjectArchiveManifest; records: ProjectSaveData[]; chat: Array<ProjectArchiveChatPayload | null>;
   assets: ArchiveAssetDigest[]; bundle: ProjectExchangeBundle | null; sourceState: ProjectExchangeState | null; disposed: boolean;
+  /** 已校验的新结构来源；旧包不能投影时仍允许使用原有旧项目更新流程。 */
+  nativeSource: ValidatedProjectArchiveV4 | null;
+  nativeSourceError?: string;
 }
 export interface ProjectImportPreview {
   sessionId: string; targetId: string; expectedRecords: ProjectSaveData[]; expectedState: ProjectExchangeState | null;
   local: ExchangeCapture; incoming: ExchangeCapture; plan: ProjectMergePlan; baseStatus: string; localDirectory: string;
   incomingHead: ProjectExchangeRevision | null; localHead: ProjectExchangeRevision | null;
+  nativeUpdate?: import('./nativeProjectUpdateService').NativeProjectUpdatePreview;
+}
+/** V2 差异只投影显示字段；应用时仍使用原始 V2 计划。 */
+export function nativeImportPreview(sessionId: string, targetId: string,
+  nativeUpdate: import('./nativeProjectUpdateService').NativeProjectUpdatePreview): ProjectImportPreview {
+  const changes = nativeUpdate.plan.changes.map((change) => ({ ...change,
+    kind: change.kind === 'episode' || change.kind === 'canvas' ? 'project' as const : change.kind,
+    label: change.entityKey }));
+  return { sessionId, targetId, expectedRecords: [], expectedState: null,
+    local: null as unknown as ExchangeCapture, incoming: null as unknown as ExchangeCapture,
+    plan: { ...nativeUpdate.plan, changes, alreadyApplied: changes.length === 0 && !nativeUpdate.editorChoiceRequired } as unknown as ProjectMergePlan,
+    baseStatus: 'found', localDirectory: '', incomingHead: null, localHead: null, nativeUpdate };
 }
 export interface ProjectImportOptions {
   appendChat: boolean; appendMemories: boolean; independent?: boolean;
@@ -35,6 +71,10 @@ export interface ProjectImportOptions {
 const sessions = new Map<string, PreparedProjectImport>();
 const cleanedSessions = new WeakSet<PreparedProjectImport>();
 const sessionCleanups = new WeakMap<PreparedProjectImport, Promise<void>>();
+const importAttempts = new WeakMap<PreparedProjectImport, { intent: string; result: Promise<ProjectImportResult> }>();
+const successfulImportSessions = new WeakSet<PreparedProjectImport>();
+const sessionControllers = new WeakMap<PreparedProjectImport, AbortController>();
+const sessionReaders = new WeakMap<PreparedProjectImport, Set<Promise<void>>>();
 /** 改绑文件位置后保留旧路径墓碑，防止仍在磁盘的旧原稿被下次扫描当成新附件。 */
 function remapImportIdentities(current: readonly ProjectExchangeIdentity[], updates: readonly ProjectExchangeIdentity[],
   previousPaths: readonly ProjectExchangeIdentity[] = current): ProjectExchangeIdentity[] {
@@ -49,9 +89,28 @@ function remapImportIdentities(current: readonly ProjectExchangeIdentity[], upda
 function requireSession(session: PreparedProjectImport) {
   if (session.disposed || sessions.get(session.id) !== session) throw new Error('项目包预览已关闭，请重新选择');
 }
+/** 读取预览暂存期间禁止清理；关闭先撤销会话，待现有读取退出后再清理。 */
+export async function withPreparedProjectImportRead<T>(session: PreparedProjectImport, work: () => Promise<T>): Promise<T> {
+  requireSession(session);
+  const readers = sessionReaders.get(session) ?? new Set<Promise<void>>();
+  sessionReaders.set(session, readers);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  readers.add(pending);
+  try { return await work(); }
+  finally {
+    readers.delete(pending);
+    if (!readers.size && sessionReaders.get(session) === readers) sessionReaders.delete(session);
+    release();
+  }
+}
 export async function closePreparedProjectImport(session: PreparedProjectImport): Promise<void> {
   if (cleanedSessions.has(session)) return;
   session.disposed = true; sessions.delete(session.id);
+  sessionControllers.get(session)?.abort();
+  await Promise.all([...(sessionReaders.get(session) ?? [])]);
+  // journal 已冻结原暂存引用；pending/失败/未知提交都不能因关闭预览丢掉恢复来源。
+  if (importAttempts.has(session) && !successfulImportSessions.has(session)) return;
   let pending = sessionCleanups.get(session);
   if (!pending) {
     pending = files.deleteProjectDataDir(session.stagingProjectId, { throwOnError: true }).then(() => { cleanedSessions.add(session); });
@@ -96,15 +155,35 @@ export async function prepareProjectImport(): Promise<PreparedProjectImport | nu
   try {
     const directory = await files.ensureProjectDataDir(stagingProjectId); if (!directory) throw new Error('无法准备导入目录');
     const unpacked = await invoke<{ texts: Record<string, string>; assets: ArchiveAssetDigest[] }>('unpack_project_archive', { archivePath, assetsDir: directory });
-    const contents = await readProjectArchiveContents(unpacked);
-    const session: PreparedProjectImport = { id: crypto.randomUUID(), stagingProjectId, stagingFolder, archivePath, directory, ...contents, disposed: false };
+    const manifest = JSON.parse(unpacked.texts['manifest.json'] ?? 'null') as ProjectArchiveManifest | null;
+    const isV4 = manifest?.formatVersion === 4;
+    const contents = isV4 ? null : await readProjectArchiveContents(unpacked);
+    let nativeSource: ValidatedProjectArchiveV4 | null = null, nativeSourceError: string | undefined;
+    try {
+      nativeSource = await (await import('./projectModelArchiveService')).readProjectModelArchive(unpacked.texts, unpacked.assets);
+    } catch (error) {
+      if (isV4) throw error;
+      // 新模型额外校验失败不能改变旧包更新既有旧项目的行为。
+      nativeSourceError = '该旧项目包无法转换为新结构，可继续用于更新旧项目';
+    }
+    if (isV4 && !nativeSource) throw new Error('项目包校验失败');
+    const source = contents ?? { manifest: nativeSource!.manifest, records: [], chat: [], assets: nativeSource!.assets, bundle: null, sourceState: null };
+    const session: PreparedProjectImport = { id: crypto.randomUUID(), stagingProjectId, stagingFolder, archivePath, directory,
+      ...source, nativeSource, ...(nativeSourceError ? { nativeSourceError } : {}), disposed: false };
     sessions.set(session.id, session); return session;
   } catch (error) { await files.deleteProjectDataDir(stagingProjectId, { throwOnError: true }).catch(() => undefined); throw error; }
 }
 
-export async function prepareExchangeExport(records: ProjectSaveData[], assets: ArchiveAssetDigest[], directory?: string): Promise<ProjectExchangeBundle> {
-  const ownerId = records[0].id, previous = await loadProjectExchangeState(ownerId);
-  const graph = previous ? await loadProjectExchangeGraph(previous.lineageId) : { revisions: [], ancestors: [] };
+export async function prepareExchangeExportMaterial(records: ProjectSaveData[], assets: ArchiveAssetDigest[], directory?: string,
+  source?: import('./indexedDb/projectArchiveRepository').LegacyProjectArchiveCapture): Promise<{
+    bundle: ProjectExchangeBundle; checkpoint: import('./indexedDb/projectExchangeRepository').ProjectExchangeCheckpointInput;
+  }> {
+  await assertLegacyProjectWritesAllowed(await openDB());
+  const ownerId = records[0].id, previous = source ? (source.state ? parseProjectExchangeState(source.state) : null) : await loadProjectExchangeState(ownerId);
+  const graph = source ? {
+    revisions: await Promise.all(source.graph.filter((row) => row.snapshot).map((row) => verifyProjectExchangeRevision(row))),
+    ancestors: await Promise.all(source.graph.filter((row) => !row.snapshot).map((row) => verifyProjectExchangeHeader(row))),
+  } : previous ? await loadProjectExchangeGraph(previous.lineageId) : { revisions: [], ancestors: [] };
   const oldHead = graph.revisions.find((revision) => revision.revisionId === previous?.headRevisionId);
   const captured = await captureProjectSnapshot(records, assets, previous, oldHead?.snapshot, directory);
   let head = await createProjectExchangeRevision(captured.snapshot, previous ? [previous.headRevisionId] : []);
@@ -120,16 +199,23 @@ export async function prepareExchangeExport(records: ProjectSaveData[], assets: 
       const entity = head.snapshot.entities.find((item) => item.kind === 'file' && item.data.mediaId === descriptor.id)!;
       return { mediaId: descriptor.id, archivePath: `assets/${captured.files.get(entity.id)!}` };
     }) });
-  // 先确认完整版本材料仍可导出，超限不得把本机协作状态推进到不可读取的版本。
-  await saveProjectExchangeCheckpoint({ expectedState: previous, state, revisions: [head] });
-  return bundle;
+  // 准备材料不推进已发布状态；原生发布回执核实后才登记 checkpoint。
+  return { bundle, checkpoint: { expectedState: previous, state, revisions: [head] } };
+}
+
+/** 保留旧纯准备 API；调用者不能把返回 bundle 当作已发布回执。 */
+export async function prepareExchangeExport(records: ProjectSaveData[], assets: ArchiveAssetDigest[], directory?: string): Promise<ProjectExchangeBundle> {
+  return (await prepareExchangeExportMaterial(records, assets, directory)).bundle;
 }
 
 /** 旧包只按仍保留的源 ID 人工对照；从不据此宣称找到了共同版本。 */
 export async function previewProjectImport(session: PreparedProjectImport, targetId: string, confirmedBase?: PreparedProjectImport): Promise<ProjectImportPreview> {
   requireSession(session);
+  if (session.manifest.formatVersion === 4 || confirmedBase?.manifest.formatVersion === 4) throw new Error('新结构项目包暂不支持更新已有项目');
   const expectedRecords = await readProjectImportScope(targetId), expectedState = await loadProjectExchangeState(targetId);
+  files.registerProjectFolders(expectedRecords);
   const directory = await files.ensureProjectDataDir(targetId); if (!directory) throw new Error('无法读取目标项目素材');
+  await assertLegacyProjectArchiveRoots(expectedRecords, directory);
   const localGraph = expectedState ? await loadProjectExchangeGraph(expectedState.lineageId) : { revisions: [], ancestors: [] };
   const localSnapshot = localGraph.revisions.find((item) => item.revisionId === expectedState?.headRevisionId)?.snapshot;
   if (expectedState && !localSnapshot) throw new Error('本机协作版本缺少完整快照，请使用原始项目包恢复');
@@ -190,7 +276,7 @@ export async function previewProjectImport(session: PreparedProjectImport, targe
 
 /** 只为已校验的本地文件生成预览地址；不加载包内任意网络 URL。 */
 export function projectImportMediaPreview(session: PreparedProjectImport, preview: ProjectImportPreview, side: 'local' | 'incoming', value: unknown): { url: string; kind: string } | null {
-  if (value === undefined) return null;
+  if (preview.nativeUpdate || value === undefined) return null;
   const capture = side === 'local' ? preview.local : preview.incoming;
   const token = JSON.stringify(value).match(/exchange-file:([A-Za-z0-9_-]+)/)?.[1];
   const entity = token ? capture.snapshot.entities.find((item) => item.kind === 'file' && item.id === token)
@@ -238,10 +324,23 @@ async function historyRows(session: PreparedProjectImport, records: ProjectSaveD
     const projectId = projectMap.get(session.records[index].id); if (!projectId) continue;
     const localConversations = new Set(payload.conversations.map((conversation) => conversation.id));
     if (options.appendChat) {
-      for (const conversation of payload.conversations) rows.push({ store: 'chatConversations', value: {
-        id: conversations.get(conversation.id)!, archiveOriginId: await origin('conversation', conversation), projectId, title: conversation.title, titleSource: conversation.titleSource,
-        pinned: false, archived: conversation.archived === true, agentMode: 'plan', createdAt: conversation.createdAt,
-        updatedAt: conversation.updatedAt, messageCount: payload.messages.filter((message) => message.conversationId === conversation.id).length } });
+      for (const conversation of payload.conversations) {
+        const sourceTarget = normalizeConversationWorkbenchTarget(conversation.workbenchTarget, conversation.projectId);
+        let workbenchTarget: typeof sourceTarget;
+        if (sourceTarget) {
+          const seriesId = projectMap.get(sourceTarget.seriesId), episodeId = projectMap.get(sourceTarget.episodeId);
+          if (!seriesId || !episodeId || seriesId !== projectId
+            || records.find((record) => record.id === episodeId)?.parentId !== seriesId) {
+            throw new Error('工作台历史的目标分集未保留在导入项目中，无法恢复只读绑定');
+          }
+          workbenchTarget = { seriesId, episodeId };
+        }
+        rows.push({ store: 'chatConversations', value: {
+          id: conversations.get(conversation.id)!, archiveOriginId: await origin('conversation', conversation), projectId, title: conversation.title, titleSource: conversation.titleSource,
+          workbenchTarget,
+          pinned: false, archived: conversation.archived === true, agentMode: 'plan', createdAt: conversation.createdAt,
+          updatedAt: conversation.updatedAt, messageCount: payload.messages.filter((message) => message.conversationId === conversation.id).length } });
+      }
       for (const message of payload.messages) {
         if (!localConversations.has(message.conversationId)) continue;
         rows.push({ store: 'chatMessages', value: { id: messages.get(message.id)!, archiveOriginId: await origin('message', message), projectId, conversationId: conversations.get(message.conversationId)!,
@@ -280,9 +379,28 @@ async function freezeRecovery(capture: ExchangeCapture, records: ProjectSaveData
     assets: assets.map((asset) => ({ path: `imports/${operationId}/${asset.destinationPath}`, bytes: asset.bytes, sha256: asset.sha256 })) };
 }
 
-export async function applyProjectImport(session: PreparedProjectImport, preview: ProjectImportPreview | null,
+export function applyProjectImport(session: PreparedProjectImport, preview: ProjectImportPreview | null,
   choices: Readonly<Record<string, ProjectMergeSide>>, options: ProjectImportOptions, assertCurrent?: () => void): Promise<ProjectImportResult> {
   requireSession(session);
+  if (session.manifest.formatVersion === 4) return Promise.reject(new Error('新结构项目包不能通过旧项目更新入口应用'));
+  const intent = JSON.stringify([preview?.expectedRecords, preview?.expectedState, choices, options.appendChat, options.appendMemories, options.independent]);
+  const previous = importAttempts.get(session);
+  if (previous) {
+    if (previous.intent !== intent) return Promise.reject(new Error('该预览已有提交尝试，请先核对原操作并重新预览'));
+    return previous.result;
+  }
+  const controller = new AbortController(); sessionControllers.set(session, controller);
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const result = applyPreparedProjectImport(session, preview, structuredClone(choices), { ...options, signal }, assertCurrent);
+  importAttempts.set(session, { intent, result });
+  void result.then(() => { successfulImportSessions.add(session); }, () => undefined);
+  return result;
+}
+
+async function applyPreparedProjectImport(session: PreparedProjectImport, preview: ProjectImportPreview | null,
+  choices: Readonly<Record<string, ProjectMergeSide>>, options: ProjectImportOptions, assertCurrent?: () => void): Promise<ProjectImportResult> {
+  requireSession(session);
+  await assertLegacyProjectWritesAllowed(await openDB());
   if (!preview && !session.bundle) return restoreProjectArchive(session.archivePath, undefined, options, session);
   if (preview && preview.sessionId !== session.id) throw new Error('预览会话已变化');
   if (preview?.plan.alreadyApplied) throw new Error('该版本已经处理，未重复写入项目');
@@ -292,6 +410,7 @@ export async function applyProjectImport(session: PreparedProjectImport, preview
   const folder = preview?.expectedRecords[0].dataFolder ?? files.buildProjectFolderName(String(snapshot.entities.find((item) => item.kind === 'project' && item.id === snapshot.rootProjectId)?.data.name ?? '导入项目'), ownerId);
   files.registerProjectFolder(ownerId, folder);
   const targetDir = await files.ensureProjectDataDir(ownerId); if (!targetDir) throw new Error('无法准备目标素材目录');
+  if (preview) await assertLegacyProjectArchiveRoots(preview.expectedRecords, targetDir);
   const paths = new Map<string, string>(), incomingAssets: Array<ArchiveAssetDigest & { destinationPath: string }> = [];
   for (const entity of snapshot.entities.filter((item) => item.kind === 'file')) {
     const localEntity = preview?.local.snapshot.entities.find((item) => item.kind === 'file' && item.id === entity.id);
@@ -303,14 +422,14 @@ export async function applyProjectImport(session: PreparedProjectImport, preview
   }
   if (preview && !configValuesEqual(preview.expectedRecords, await readProjectImportScope(ownerId))) throw new Error('项目在预览后发生变化，请重新对比');
   await beginProjectImportOperation(operationId, ownerId, session.stagingProjectId, session.stagingFolder);
-  await invoke('publish_project_import_assets', { stagingDir: session.directory, projectDir: targetDir, operationId, assets: incomingAssets });
   options.signal?.throwIfAborted();
   // 文件映射使用接收端的实际相对路径，同时保留被替换位置的本机墓碑。
   const identities = remapImportIdentities(
     structuredClone(preview?.local.identities ?? [{ kind: 'project' as const, scopeId: snapshot.rootProjectId, id: snapshot.rootProjectId, localId: ownerId }]),
     [...paths].map(([id, path]) => ({ kind: 'file' as const, scopeId: snapshot.rootProjectId, id, localId: path })),
   );
-  const records = materializeExchangeSnapshot(snapshot, identities, preview?.expectedRecords ?? [], folder, paths);
+  const records = restoreImportedGraphRevisions(materializeExchangeSnapshot(snapshot, identities,
+    preview?.expectedRecords ?? [], folder, paths), preview?.expectedRecords ?? []);
   const graph = preview?.expectedState ? await loadProjectExchangeGraph(preview.expectedState.lineageId) : { revisions: [], ancestors: [] };
   const revisions = new Map([...graph.revisions, ...(session.bundle?.revisions ?? [])].map((item) => [item.revisionId, item]));
   if (preview?.localHead) revisions.set(preview.localHead.revisionId, preview.localHead);
@@ -337,11 +456,33 @@ export async function applyProjectImport(session: PreparedProjectImport, preview
   const headers = new Map([...graph.ancestors, ...(session.bundle?.ancestors ?? [])].filter((item) => !revisions.has(item.revisionId) && item.lineageId === state?.lineageId).map((item) => [item.revisionId, item]));
   const history = await historyRows(session, records, options, identities);
   const recovery = preview ? await freezeRecovery(preview.local, preview.expectedRecords, targetDir, options) : null;
-  await commitProjectImport({ operationId, expectedRecords: preview?.expectedRecords ?? [], records,
+  const commit: ProjectImportCommit = { operationId, expectedRecords: preview?.expectedRecords ?? [], records,
     expectedState: preview?.expectedState ?? null, state, revisions: [...revisions.values()], ancestors: [...headers.values()], history, label: '导入更新前',
     assertCurrent: () => { options.signal?.throwIfAborted(); assertCurrent?.(); }, signal: options.signal,
-    recoveryRecords: recovery?.records, recoveryIdentities: recovery?.identities, recoveryAssets: recovery?.assets });
-  files.registerProjectFolders(records); files.notifyProjectDiskChanged();
+    recoveryRecords: recovery?.records, recoveryIdentities: recovery?.identities, recoveryAssets: recovery?.assets };
+  const required = snapshot.entities.filter((item) => item.kind === 'file').map((entity) => {
+    const media = snapshot.media.find((item) => item.id === entity.data.mediaId)!;
+    return { path: safeExchangePath(paths.get(entity.id)!), bytes: media.bytes, sha256: media.sha256 };
+  });
+  await savePreparedProjectImportOperation(operationId, { commit, media: { mode: 'publish', targetFolder: folder,
+    assets: incomingAssets, required: [...required, ...(recovery?.assets ?? [])], verified: true } });
+  options.signal?.throwIfAborted();
+  await advanceProjectImportOperation(operationId, 'media_publishing');
+  options.onTransfer?.(operationId);
+  await invoke('publish_project_import_assets', { stagingDir: session.directory, projectDir: targetDir, operationId, assets: incomingAssets });
+  await advanceProjectImportOperation(operationId, 'media_ready');
+  options.signal?.throwIfAborted();
+  await verifyPreparedProjectImportMedia(targetDir, [...required, ...(recovery?.assets ?? [])]);
+  let committed = false;
+  try {
+    await commitProjectImport(commit);
+    committed = true;
+    files.registerProjectFolders(records); files.notifyProjectDiskChanged();
+    await advanceProjectImportOperation(operationId, 'projected');
+    await advanceProjectImportOperation(operationId, 'finalized');
+  } catch (error) {
+    return throwProjectImportCommitFailure(error, operationId, ownerId, committed, () => readProjectImportOperation(operationId));
+  }
   const record = records[0];
   return { projectId: ownerId, projectName: record.name, createdAt: record.createdAt, updatedAt: record.updatedAt, dataFolder: folder,
     settings: record.settings, series: record.series, episodes: records.slice(1).map((item) => toProjectSummaryRecord(item)!), warnings: [],
@@ -351,12 +492,17 @@ export async function applyProjectImport(session: PreparedProjectImport, preview
 
 /** 恢复也是一次新的本机修订；不倒退写入代际，也不撤销已经处理的远端父链。 */
 export async function restoreProjectImportRecovery(ownerId: string, recoveryId: string, assertCurrent?: () => void): Promise<void> {
+  await assertLegacyProjectWritesAllowed(await openDB());
   const recovery = (await listProjectImportRecoveries(ownerId)).find((item) => item.id === recoveryId);
   if (!recovery) throw new Error('恢复点不存在');
   const expectedRecords = await readProjectImportScope(ownerId), expectedState = await loadProjectExchangeState(ownerId);
+  files.registerProjectFolders(expectedRecords);
   // 恢复业务内容不回退本机目录定位；项目改名/迁移目录后，旧恢复点仍使用当前素材根。
-  const restoredRecords = recovery.records.map((record) => ({ ...record, dataFolder: expectedRecords[0].dataFolder ?? ownerId }));
+  const restoredRecords = restoreImportedGraphRevisions(recovery.records.map((record) => ({
+    ...record, dataFolder: expectedRecords[0].dataFolder ?? ownerId,
+  })), expectedRecords);
   const directory = await files.ensureProjectDataDir(ownerId); if (!directory) throw new Error('无法读取项目素材');
+  await assertLegacyProjectArchiveRoots(expectedRecords, directory);
   if (!recovery.assets && (recovery.identities ?? recovery.state?.identities ?? []).some((item) => item.kind === 'file')) {
     throw new Error('旧恢复点缺少素材校验信息，请使用原始项目包恢复');
   }
@@ -392,8 +538,23 @@ export async function restoreProjectImportRecovery(ownerId: string, recoveryId: 
   const state: ProjectExchangeState = { ownerId, rootProjectId: captured.snapshot.rootProjectId, lineageId: captured.snapshot.lineageId,
     stateVersion: (expectedState?.stateVersion ?? 0) + 1, identities: captured.identities, headRevisionId: head.revisionId };
   assertCurrent?.();
-  await commitProjectImport({ operationId: crypto.randomUUID(), expectedRecords, records: restoredRecords,
+  const operationId = crypto.randomUUID();
+  await beginProjectImportOperation(operationId, ownerId, ownerId, expectedRecords[0].dataFolder ?? ownerId);
+  await advanceProjectImportOperation(operationId, 'media_publishing');
+  await advanceProjectImportOperation(operationId, 'media_ready');
+  const commit: ProjectImportCommit = { operationId, expectedRecords, records: restoredRecords,
     expectedState, state, revisions, ancestors, history: [], label: '恢复操作前', assertCurrent,
-    recoveryRecords: beforeRestore.records, recoveryIdentities: beforeRestore.identities, recoveryAssets: beforeRestore.assets });
-  files.notifyProjectDiskChanged();
+    recoveryRecords: beforeRestore.records, recoveryIdentities: beforeRestore.identities, recoveryAssets: beforeRestore.assets };
+  await savePreparedProjectImportOperation(operationId, { commit, media: { mode: 'already-ready',
+    targetFolder: expectedRecords[0].dataFolder ?? ownerId, assets: [], required: [...restoredAssets, ...beforeRestore.assets], verified: true } });
+  let committed = false;
+  try {
+    await commitProjectImport(commit);
+    committed = true;
+    files.notifyProjectDiskChanged();
+    await advanceProjectImportOperation(operationId, 'projected');
+    await advanceProjectImportOperation(operationId, 'finalized');
+  } catch (error) {
+    return throwProjectImportCommitFailure(error, operationId, ownerId, committed, () => readProjectImportOperation(operationId));
+  }
 }

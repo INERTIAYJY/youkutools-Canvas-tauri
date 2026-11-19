@@ -1,7 +1,7 @@
 /**
  * plugin-dev — 监听本地插件源码并生成开发用插件包。
  */
-import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, stat, realpath } from 'node:fs/promises';
 import { watch } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, dirname, join, basename } from 'node:path';
@@ -27,6 +27,22 @@ async function manifestParser() {
   return validator;
 }
 
+function localTypeDeclarations(source, roots, label) {
+  const declarations = new Map(source.statements.filter((node) => ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+    .map((node) => [node.name.text, node]));
+  const names = new Set(roots);
+  for (const name of names) {
+    const declaration = declarations.get(name);
+    if (!declaration) throw new Error(`缺少${label}声明：${name}`);
+    const visit = (node) => {
+      if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && declarations.has(node.typeName.text)) names.add(node.typeName.text);
+      ts.forEachChild(node, visit);
+    };
+    visit(declaration);
+  }
+  return source.statements.filter((node) => node.name && names.has(node.name.text)).map((node) => node.getFullText());
+}
+
 // 类型直接来自宿主源码；初始化时生成可独立携带的声明，避免手写第二套 API。
 async function portableSdk() {
   const parse = async (path) => ts.createSourceFile(path, await text(join(repository, path)), ts.ScriptTarget.Latest, true);
@@ -38,25 +54,13 @@ async function portableSdk() {
     .find((node) => node.name.getText() === 'LOCALES').initializer.expression.elements;
   const plugin = await parse('src/types/plugin.ts');
   const aiTypes = await parse('src/types/aiTypes.ts');
-  const aiDeclarations = new Map(aiTypes.statements.filter((node) => ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
-    .map((node) => [node.name.text, node]));
-  const capabilityNames = new Set(['VideoModelCapability']);
-  for (const name of capabilityNames) {
-    const declaration = aiDeclarations.get(name);
-    if (!declaration) throw new Error(`缺少视频能力声明：${name}`);
-    const visit = (node) => {
-      if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && aiDeclarations.has(node.typeName.text)) {
-        capabilityNames.add(node.typeName.text);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(declaration);
-  }
+  const projectTypes = await parse('src/types/project.ts');
   const sdk = await parse('sdk/plugin-sdk.d.ts');
   return [
     '// 由 plugin-dev 生成；更新宿主后用 sdk 命令刷新。',
     ...aliases, `export type Locale = ${locales.map((node) => node.getText()).join(' | ')};`,
-    ...aiTypes.statements.filter((node) => node.name && capabilityNames.has(node.name.text)).map((node) => node.getFullText()),
+    ...localTypeDeclarations(aiTypes, ['VideoModelCapability'], '视频能力'),
+    ...localTypeDeclarations(projectTypes, ['CanvasContext'], '项目上下文'),
     ...plugin.statements.filter((node) => !ts.isImportDeclaration(node)).map((node) => node.getFullText()),
     ...sdk.statements.filter((node) => !ts.isImportDeclaration(node) && !ts.isExportDeclaration(node)).map((node) => node.getFullText()),
   ].join('\n');
@@ -99,7 +103,8 @@ async function atomicText(path, contents) {
   await rename(temporary, path);
 }
 
-export async function initPlugin(root) {
+export async function initPlugin(root, template = 'node-tool') {
+  if (!['node-tool', 'protocol'].includes(template)) throw new Error('模板仅支持 node-tool 或 protocol');
   // mkdir 不使用 recursive，已存在的目录直接拒绝，避免覆盖作者的项目。
   await mkdir(root);
   await mkdir(join(root, 'src'));
@@ -113,8 +118,16 @@ export async function initPlugin(root) {
       nodeTypes: ['ai-text', 'source-text'], inputFields: ['output'], output: { mode: 'update-current', fields: ['output'] },
     }] },
   };
+  if (template === 'protocol') {
+    manifest.id = 'com.example.openai-responses';
+    manifest.name = 'OpenAI Responses';
+    manifest.category = 'utility';
+    manifest.requiredCapabilities = ['model.protocolPresets'];
+    manifest.permissions = [];
+    manifest.contributes = { nodeTools: [], modelProtocols: [{ id: 'responses', name: 'OpenAI Responses', category: 'text', adapter: 'openai-responses' }] };
+  }
   await writeFile(join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  await writeFile(join(root, 'src/main.ts'), await text(join(repository, 'sdk/plugin-template.ts')), 'utf8');
+  await writeFile(join(root, 'src/main.ts'), template === 'protocol' ? 'definePlugin({ tools: {} });\n' : await text(join(repository, 'sdk/plugin-template.ts')), 'utf8');
   await writeFile(join(root, 'host.d.ts'), await portableSdk(), 'utf8');
   await writeFile(join(root, 'tsconfig.json'), `${JSON.stringify({
     compilerOptions: { target: 'ES2020', module: 'ESNext', moduleResolution: 'Bundler', strict: true,
@@ -170,13 +183,13 @@ function errorMessage(error, root) {
 }
 
 async function main() {
-  const [command, directory] = process.argv.slice(2);
+  const [command, directory, template] = process.argv.slice(2);
   if (!directory || !['init', 'sdk', 'check', 'build', 'watch'].includes(command)) {
     throw new Error('用法：node scripts/plugin-dev.mjs <init|sdk|check|build|watch> <插件目录>');
   }
   const root = resolve(directory);
   if (command === 'sdk') await atomicText(join(root, 'host.d.ts'), await portableSdk());
-  else if (command === 'init') await initPlugin(root);
+  else if (command === 'init') await initPlugin(root, template);
   else if (command === 'check') await checkPlugin(root);
   else if (command !== 'watch') await buildPlugin(root);
   if (command !== 'watch') {
@@ -206,7 +219,8 @@ async function main() {
     } while (dirty);
     running = false;
   };
-  const watcher = watch(root, { recursive: true }, (_event, filename) => {
+  // Windows 的 8.3 临时目录别名与通知中的完整名称可能不同，监听前统一真实路径。
+  const watcher = watch(await realpath(root), { recursive: true }, (_event, filename) => {
     const path = String(filename ?? '').replaceAll('\\', '/');
     if (!['manifest.json', 'tsconfig.json', 'host.d.ts'].includes(path)
       && !path.startsWith('src/') && !declaredResources.has(path)) return;

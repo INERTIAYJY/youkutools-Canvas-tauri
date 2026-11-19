@@ -13,6 +13,7 @@ import { apimartMediaProviderAdapter } from './providers/apimartMedia';
 import { runninghubMediaProviderAdapter } from './providers/runninghubMedia';
 import { seedlingMediaProviderAdapter } from './providers/seedlingMedia';
 import { grsaiMediaProviderAdapter } from './providers/grsaiMedia';
+import { museMediaProviderAdapter } from './providers/museMedia';
 
 
 export type MediaProviderCapability = 'image' | 'video' | 'audio';
@@ -24,6 +25,7 @@ export interface ImageProviderRequest {
   referenceMedia?: import('../../types/aiTypes').MediaReference[];
   requestedCount: number;
   signal?: AbortSignal;
+  beforeSubmit?: () => void | Promise<void>;
 }
 
 export interface VideoProviderRequest {
@@ -42,13 +44,14 @@ export interface AudioProviderRequest {
   referenceAudioUrls: string[];
   referenceMedia?: import('../../types/aiTypes').MediaReference[];
   signal?: AbortSignal;
+  beforeSubmit?: () => void | Promise<void>;
 }
 
 export interface MediaProviderAdapter {
   providerId: string;
   capabilities: readonly MediaProviderCapability[];
   generateImage?: (request: ImageProviderRequest) => Promise<BatchImageResult>;
-  generateVideo?: (request: VideoProviderRequest) => Promise<{ url: string; runninghubOutputs?: import('../../types/runninghub').RunningHubOutput[] }>;
+  generateVideo?: (request: VideoProviderRequest) => Promise<{ url: string; taskReceipt?: import('../../types/aiTypes').MediaTaskReceipt; runninghubOutputs?: import('../../types/runninghub').RunningHubOutput[] }>;
   generateAudio?: (request: AudioProviderRequest) => Promise<AudioGenerationResult>;
 }
 
@@ -129,5 +132,5 @@ export const mediaProviderRegistry = new MediaProviderRegistry([
   runninghubMediaProviderAdapter,
   seedlingMediaProviderAdapter,
   grsaiMediaProviderAdapter,
-
+  museMediaProviderAdapter,
 ]);

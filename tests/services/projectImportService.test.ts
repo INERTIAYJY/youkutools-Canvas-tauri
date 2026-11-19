@@ -2,6 +2,7 @@
 import { webcrypto } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectSaveData } from '../../src/services/storageService';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
 import type { ProjectArchiveChatPayload } from '../../src/services/projectTransferService';
 import type { ProjectExchangeRevision, ProjectExchangeState } from '../../src/types/projectExchange';
 import type { ProjectImportCommit } from '../../src/services/indexedDb/projectImportRepository';
@@ -9,27 +10,38 @@ import { captureExchangeSnapshot } from '../../src/services/projectExchangeDomai
 import { createProjectExchangeRevision } from '../../src/services/projectExchangeFormat';
 import { buildProjectMergePlan } from '../../src/services/projectMergeService';
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn(), read: vi.fn(), state: vi.fn(), graph: vi.fn(), commit: vi.fn(), delete: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn(), read: vi.fn(), state: vi.fn(), graph: vi.fn(), commit: vi.fn(),
+  delete: vi.fn(), advance: vi.fn(), readOperation: vi.fn(), recoveries: vi.fn(), prepare: vi.fn(), rootDirectory: vi.fn(), exists: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke, convertFileSrc: (value: string) => value }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ exists: mocks.exists }));
 vi.mock('../../src/services/fileService', () => ({
   isTauriEnv: () => true, buildProjectFolderName: (name: string, id: string) => `${name}-${id}`,
   registerProjectFolder: vi.fn(), registerProjectFolders: vi.fn(), ensureProjectDataDir: async () => '/projects/recipient',
   deleteProjectDataDir: mocks.delete, notifyProjectDiskChanged: vi.fn(),
+  getProjectDataDir: mocks.rootDirectory,
 }));
 vi.mock('../../src/services/indexedDb/projectExchangeRepository', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/services/indexedDb/projectExchangeRepository')>(),
   loadProjectExchangeState: mocks.state, loadProjectExchangeGraph: mocks.graph,
 }));
 vi.mock('../../src/services/indexedDb/projectImportRepository', () => ({
-  readProjectImportScope: mocks.read, beginProjectImportOperation: vi.fn(async () => undefined), commitProjectImport: mocks.commit,
+  readProjectImportScope: mocks.read, beginProjectImportOperation: vi.fn(async () => undefined),
+  advanceProjectImportOperation: mocks.advance, commitProjectImport: mocks.commit,
+  readProjectImportOperation: mocks.readOperation, listProjectImportRecoveries: mocks.recoveries,
+  savePreparedProjectImportOperation: mocks.prepare,
 }));
 vi.mock('../../src/services/projectMergeWorkerClient', () => ({
   captureProjectSnapshot: (...args: Parameters<typeof captureExchangeSnapshot>) => captureExchangeSnapshot(...args),
   compareProjectSnapshots: (...args: Parameters<typeof buildProjectMergePlan>) => buildProjectMergePlan(...args),
 }));
+vi.mock('../../src/services/projectArchiveSerialization', () => ({
+  serializeProjectArchiveEntries: async (entries: Array<{ path: string; value: unknown }>) =>
+    entries.map((entry) => ({ path: entry.path, content: JSON.stringify(entry.value) })),
+}));
 import { applyProjectImport, closePreparedProjectImport, prepareProjectImport, previewProjectImport,
-  type PreparedProjectImport } from '../../src/services/projectImportService';
+  restoreProjectImportRecovery, withPreparedProjectImportRead, type PreparedProjectImport } from '../../src/services/projectImportService';
+import { ProjectImportCommittedError } from '../../src/services/projectImportOutcome';
 
 const sessions: PreparedProjectImport[] = [];
 const project = (id: string, parentId?: string): ProjectSaveData => ({
@@ -78,6 +90,10 @@ beforeEach(() => {
   mocks.open.mockResolvedValue('/incoming/project.aicanvas');
   mocks.state.mockResolvedValue(null); mocks.graph.mockResolvedValue({ revisions: [], ancestors: [] });
   mocks.commit.mockResolvedValue(undefined); mocks.delete.mockResolvedValue(undefined);
+  mocks.advance.mockResolvedValue(undefined); mocks.readOperation.mockResolvedValue({ phase: 'media_ready' });
+  mocks.recoveries.mockResolvedValue([]);
+  mocks.prepare.mockResolvedValue(undefined);
+  mocks.rootDirectory.mockResolvedValue('/projects/recipient'); mocks.exists.mockResolvedValue(false);
 });
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map(closePreparedProjectImport));
@@ -85,12 +101,188 @@ afterEach(async () => {
 });
 
 describe('项目导入历史追加编排', () => {
+  it('v4 预览使用已验证的新结构来源，不能走旧项目更新入口', async () => {
+    const { buildProjectExchangeSnapshotV2, serializeProjectArchiveV4 } = await import('../../src/services/projectArchiveV4');
+    const { createProjectExchangeRevisionV2 } = await import('../../src/services/projectExchangeV2Format');
+    const business = { project: { id: 'P', name: '零集剧集', kind: 'series' as const,
+      storageRoots: [{ id: 'shared', role: 'shared' as const }] }, episodes: [], canvases: [],
+      contents: { project: { projectId: 'P', data: {} }, episodes: [] } };
+    const snapshot = buildProjectExchangeSnapshotV2(business, 'lineage', [], []);
+    const revision = await createProjectExchangeRevisionV2(snapshot);
+    const exchange = { format: 'ai-canvas-project-exchange' as const, version: 2 as const, packageId: 'package', lineageId: 'lineage',
+      head: { canonicalVersion: 2 as const, revisionId: revision.revisionId }, revisions: [revision], ancestors: [], files: [] };
+    const entries = await serializeProjectArchiveV4({ ...business, exchange }, { packageId: 'package', exportedAt: 1 });
+    const texts = Object.fromEntries(entries.map((entry) => [entry.path, entry.content]));
+    mocks.invoke.mockResolvedValueOnce({ texts, assets: [] });
+    const session = await prepareProjectImport();
+    expect(session?.manifest).toMatchObject({ formatVersion: 4, episodeCount: 0 });
+    expect(session?.nativeSource?.payload.project.kind).toBe('series');
+    expect(session?.records).toEqual([]);
+    await expect(previewProjectImport(session!, 'legacy')).rejects.toThrow('暂不支持更新');
+    await expect(applyProjectImport(session!, null, {}, { appendChat: false, appendMemories: false })).rejects.toThrow('不能通过旧项目');
+    await closePreparedProjectImport(session!);
+  });
+
+  it('关闭预览先禁止新读取，并等待正在冻结的来源后清理目录', async () => {
+    const session = await prepareArchive([project('source')], [emptyChat()], 2);
+    let release!: () => void;
+    const pending = withPreparedProjectImportRead(session, () => new Promise<void>((resolve) => { release = resolve; }));
+    const closing = closePreparedProjectImport(session);
+    expect(session.disposed).toBe(true);
+    await expect(withPreparedProjectImportRead(session, async () => undefined)).rejects.toThrow('预览已关闭');
+    expect(mocks.delete).not.toHaveBeenCalled();
+    release(); await pending; await closing;
+    expect(mocks.delete).toHaveBeenCalledOnce();
+  });
+
+  it('旧包不能投影新结构时仍保留旧项目更新路径', async () => {
+    const archive = await import('../../src/services/projectModelArchiveService');
+    const projection = vi.spyOn(archive, 'readProjectModelArchive').mockRejectedValueOnce(new Error('unsupported projection'));
+    try {
+      const session = await prepareArchive([project('source')], [emptyChat()], 2);
+      expect(session.nativeSource).toBeNull();
+      expect(session.nativeSourceError).toContain('可继续用于更新旧项目');
+      mocks.read.mockResolvedValue([project('recipient')]);
+      await expect(previewProjectImport(session, 'recipient')).resolves.toMatchObject({ targetId: 'recipient' });
+    } finally { projection.mockRestore(); }
+  });
+  it('旧目标分集仅独立root的typed imports文件非空时拒绝有损预览和更新', async () => {
+    const source = project('source'), session = await prepareArchive([source], [emptyChat()], 2);
+    const local = project('recipient'), episode = { ...project('local-episode', local.id),
+      nodes: [{ id: 'reference', data: { relativePath: 'imports/old/reference.png' } }] };
+    mocks.read.mockResolvedValue([local, episode]);
+    mocks.rootDirectory.mockResolvedValue('/projects/episode-root'); mocks.exists.mockResolvedValue(true);
+    mocks.invoke.mockImplementation(async (command: string, input: { assetsDir: string; includeImportPaths?: string[] }) => {
+      if (command !== 'inspect_project_archive_assets') throw new Error(`Unexpected native command: ${command}`);
+      expect(input.assetsDir).toBe('/projects/episode-root');
+      expect(input.includeImportPaths).toContain('imports/old/reference.png');
+      return [{ path: 'imports/old/reference.png', bytes: 1, sha256: 'a'.repeat(64) }];
+    });
+    await expect(previewProjectImport(session, local.id)).rejects.toThrow('多个素材根');
+    expect(mocks.commit).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled();
+  });
+  it('提交后交接 journal 失败返回结构化已提交状态，不重放媒体或数据库事务', async () => {
+    const source = project('source'), session = await prepareArchive([source], [emptyChat()]);
+    mocks.advance.mockImplementation(async (_operationId: string, phase: string) => {
+      if (phase === 'projected') throw new Error('交接回执未保存');
+    });
+    const first = applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false });
+    const error = await first.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ProjectImportCommittedError);
+    expect(error).toMatchObject({ operationId: committed().operationId, ownerId: committed().records[0].id, outcome: 'committed' });
+    await expect(applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false })).rejects.toBe(error);
+    expect(mocks.commit).toHaveBeenCalledOnce();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'publish_project_import_assets')).toHaveLength(1);
+    expect(mocks.delete).not.toHaveBeenCalled();
+  });
+
+  it.each(['db_committed', 'unknown'])('提交 ACK 丢失按原 marker 判定（%s），不重投或删除媒体', async (phase) => {
+    const session = await prepareArchive([project('source')], [emptyChat()]);
+    mocks.commit.mockRejectedValueOnce(new Error('提交 ACK 丢失'));
+    if (phase === 'unknown') mocks.readOperation.mockRejectedValueOnce(new Error('marker 不可读'));
+    else mocks.readOperation.mockResolvedValueOnce({ phase });
+    await expect(applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false }))
+      .rejects.toMatchObject({ name: 'ProjectImportCommittedError', outcome: phase === 'unknown' ? 'unknown' : 'committed',
+        operationId: expect.any(String), ownerId: expect.any(String) });
+    expect(mocks.commit).toHaveBeenCalledOnce();
+    expect(mocks.delete).not.toHaveBeenCalled();
+    await closePreparedProjectImport(session);
+    expect(mocks.delete).not.toHaveBeenCalled();
+  });
+
+  it('关闭正在发布的预览立即失效并取消提交，保留原暂存来源供 journal 恢复', async () => {
+    const session = await prepareArchive([project('source')], [emptyChat()]);
+    let started!: () => void, finish!: () => void;
+    const publishing = new Promise<void>((resolve) => { started = resolve; });
+    const publication = new Promise<void>((resolve) => { finish = resolve; });
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command !== 'publish_project_import_assets') throw new Error(`Unexpected native command: ${command}`);
+      started(); return publication;
+    });
+    const result = applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false });
+    const failed = result.catch((error: unknown) => error);
+    await publishing;
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(mocks.prepare.mock.invocationCallOrder[0]).toBeLessThan(mocks.invoke.mock.invocationCallOrder.at(-1)!);
+    expect(mocks.prepare.mock.calls[0][1]).toMatchObject({ commit: { operationId: expect.any(String), records: [expect.objectContaining({ id: expect.any(String) })] },
+      media: { mode: 'publish', targetFolder: expect.any(String), verified: true } });
+    await closePreparedProjectImport(session);
+    expect(session.disposed).toBe(true);
+    expect(mocks.delete).not.toHaveBeenCalled();
+    finish();
+    expect(await failed).toMatchObject({ name: 'AbortError' });
+    expect(mocks.commit).not.toHaveBeenCalled();
+    await closePreparedProjectImport(session);
+    expect(mocks.delete).not.toHaveBeenCalled();
+  });
+
+  it('只有导入成功确认后关闭才清理预览来源，重复关闭不重复删除', async () => {
+    const session = await prepareArchive([project('source')], [emptyChat()]);
+    await applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false });
+    await closePreparedProjectImport(session);
+    await closePreparedProjectImport(session);
+    expect(mocks.delete).toHaveBeenCalledExactlyOnceWith(session.stagingProjectId, { throwOnError: true });
+  });
+
+  it('恢复事务完成后的交接失败也返回同一结构化已提交边界', async () => {
+    const owner = project('recipient');
+    mocks.read.mockResolvedValue([owner]);
+    mocks.recoveries.mockResolvedValue([{ id: 'recovery', records: [owner], identities: [], assets: [], state: null }]);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'inspect_project_archive_assets') return [];
+      if (command === 'publish_project_import_assets') return undefined;
+      throw new Error(`Unexpected native command: ${command}`);
+    });
+    mocks.advance.mockImplementation(async (_operationId: string, phase: string) => {
+      if (phase === 'finalized') throw new Error('完成回执未保存');
+    });
+    await expect(restoreProjectImportRecovery(owner.id, 'recovery')).rejects.toMatchObject({
+      name: 'ProjectImportCommittedError', outcome: 'committed', ownerId: owner.id, operationId: expect.any(String),
+    });
+    expect(mocks.commit).toHaveBeenCalledOnce();
+    expect(mocks.delete).not.toHaveBeenCalled();
+  });
+
+  it('新版历史追加把工作台会话目标映射到接收端剧集和分集', async () => {
+    const source = project('source'), episode = project('episode', source.id);
+    const payload = chat(source.id, 'workbench');
+    payload.conversations[0].workbenchTarget = { seriesId: source.id, episodeId: episode.id };
+    const session = await prepareArchive([source, episode], [payload, emptyChat()]);
+    await applyProjectImport(session, null, {}, { appendChat: true, appendMemories: false });
+    const { records, history } = committed(), owner = records.find((record) => !record.parentId)!;
+    const importedEpisode = records.find((record) => record.parentId === owner.id)!;
+    expect(history.find((row) => row.store === 'chatConversations')!.value.workbenchTarget)
+      .toEqual({ seriesId: owner.id, episodeId: importedEpisode.id });
+  });
+
+  it('新版无法映射工作台历史目标时拒绝追加，不提交失去限制的会话', async () => {
+    const source = project('source'), payload = chat(source.id, 'workbench');
+    payload.conversations[0].workbenchTarget = { seriesId: source.id, episodeId: 'missing-episode' };
+    const session = await prepareArchive([source], [payload]);
+    await expect(applyProjectImport(session, null, {}, { appendChat: true, appendMemories: false }))
+      .rejects.toThrow('无法恢复只读绑定');
+    expect(mocks.commit).not.toHaveBeenCalled();
+  });
+
+  it('新版接收端重建故事图本机版本，证据绑定接收端分集', async () => {
+    const source = project('source'), episode = project('episode', source.id), graph = createEmptyStoryGraph('graph');
+    graph.revision = 90;
+    graph.nodes.push({ id: 'event', kind: 'event', label: '揭露', description: '', aliases: [], episodeIds: [episode.id],
+      evidence: [], origin: 'manual', certainty: 'explicit' });
+    source.series = { storyGraph: graph };
+    const session = await prepareArchive([source, episode], [emptyChat(), emptyChat()]);
+    await applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false });
+    const { records } = committed();
+    expect(records[0].series!.storyGraph!.revision).toBe(1);
+    expect(records[0].series!.storyGraph!.nodes[0].episodeIds).toEqual([records[1].id]);
+    expect(records[1].id).not.toBe(episode.id);
+  });
   it('关闭预览立即失效，物理清理失败后重试仍会删除，成功后不再重复删除', async () => {
     const source = project('source'), session = await prepareArchive([source], [emptyChat()]);
     mocks.delete.mockRejectedValueOnce(new Error('文件被占用'));
     await expect(closePreparedProjectImport(session)).rejects.toThrow('文件被占用');
     expect(session.disposed).toBe(true);
-    await expect(applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false })).rejects.toThrow('预览已关闭');
+    expect(() => applyProjectImport(session, null, {}, { appendChat: false, appendMemories: false })).toThrow('预览已关闭');
     await closePreparedProjectImport(session);
     await closePreparedProjectImport(session);
     expect(mocks.delete).toHaveBeenCalledTimes(2);
@@ -102,7 +294,7 @@ describe('项目导入历史追加编排', () => {
     let rejectCleanup!: (error: Error) => void;
     mocks.delete.mockReturnValueOnce(new Promise<void>((_resolve, reject) => { rejectCleanup = reject; }));
     const first = closePreparedProjectImport(session), second = closePreparedProjectImport(session);
-    expect(mocks.delete).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mocks.delete).toHaveBeenCalledTimes(1));
     const rejected = Promise.allSettled([first, second]); rejectCleanup(new Error('暂存目录占用'));
     expect((await rejected).every((result) => result.status === 'rejected')).toBe(true);
     await Promise.all([closePreparedProjectImport(session), closePreparedProjectImport(session)]);

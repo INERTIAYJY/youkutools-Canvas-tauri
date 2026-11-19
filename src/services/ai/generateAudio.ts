@@ -21,6 +21,7 @@ import { resolveMediaReferenceUrl } from '../uploadService';
 import type { AIAudioGenParams, AudioGenerationResult, MediaReference } from '../../types/aiTypes';
 import type { MediaPersistenceStatus } from '../../types/media';
 import { resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
+import { isNativeVideoSubmissionGuard } from '../nativeVideoSubmission';
 import { resolveProviderCatalogId } from './providerPolicies';
 import {
   collectConnectedReferenceMedia,
@@ -68,6 +69,7 @@ function normalizeProtocolAudioResult(url: string): AudioGenerationResult {
 
 async function resolveGeneralAudioReferenceUrls(
   references: readonly MediaReference[],
+  provider: string | undefined,
   signal?: AbortSignal,
 ): Promise<string[]> {
   const budget = createMediaDataUrlBudget('本次音频模型参考媒体');
@@ -76,9 +78,10 @@ async function resolveGeneralAudioReferenceUrls(
   for (const reference of audioReferences) {
     if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
     const url = getMediaReferenceUrl(reference);
-    // 通用协议模型需要 data URL（base64）；公网 / data: 原样返回
+    // 方舟参考音频统一经当前连接的 TOS；其他通用协议沿用已有 data URL 传输。
     results.push(await resolveMediaReferenceUrl(url, {
-      mode: 'dataUrl', kind: 'audio', signal, dataUrlBudget: budget,
+      ...(provider ? { provider } : {}),
+      mode: provider ? 'publicUrl' : 'dataUrl', kind: 'audio', signal, dataUrlBudget: budget,
     }));
   }
   return results;
@@ -150,11 +153,15 @@ export async function persistAudioGenerationResult(
 export async function generateAudio(
   params: AIAudioGenParams,
   signal?: AbortSignal,
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<AudioGenerationResult> {
   const { model, provider } = params;
   let rawPrompt = params.prompt;
   const rawWorkflowPrompt = rawPrompt;
   const state = useAppStore.getState();
+  if (state.projectExecutionContext?.modelGeneration === 1) {
+    if (!isNativeVideoSubmissionGuard(beforeSubmit)) throw new Error('此原生音频调用缺少原画布提交守卫，未提交请求');
+  }
   const globalAssets = await loadGlobalDramaAssetsForPrompt(`${rawPrompt}\n${JSON.stringify(params.workflowInputs ?? {})}`, state);
   if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
   if (useAppStore.getState().currentProjectId !== state.currentProjectId) throw new Error('项目已切换，请重新生成音频');
@@ -195,13 +202,13 @@ export async function generateAudio(
       const result = await executeWorkflowApiMedia({ workflowId: workflow.id, nodeId: params.nodeId, taskContext: params.workflowApiTaskContext,
         prompt, inputs: parseWorkflowApiFields(params.workflowInputs, workflow.workflowApi), references: {
           image: getMediaReferenceUrls(references, 'image', 'local'), video: getMediaReferenceUrls(references, 'video', 'local'), audio: getMediaReferenceUrls(references, 'audio', 'local'),
-        } }, signal);
+        }, beforeSubmit }, signal);
       return { ...normalizeProtocolAudioResult(result.url), ...result };
     }
     if (isRunningHubWorkflow(workflow)) {
       const outputs = await executeRunningHubWorkflow({ ...params, workflowId: params.workflowId, rawWorkflowPrompt, prompt, kind: 'audio', references: {
         image: getMediaReferenceUrls(references, 'image', 'local'), video: getMediaReferenceUrls(references, 'video', 'local'), audio: getMediaReferenceUrls(references, 'audio', 'local'),
-      } }, signal);
+      } }, signal, beforeSubmit);
       return { ...normalizeProtocolAudioResult(outputs[0].url), runninghubOutputs: outputs };
     }
     const comfyReferences = mergeMediaReferences((await resolvePromptWithMediaRefs(rawPrompt)).references, connectedMedia.references);
@@ -210,13 +217,14 @@ export async function generateAudio(
       signal,
       getMediaReferenceUrls(comfyReferences, 'audio', 'local'),
       { imageUrls: getMediaReferenceUrls(comfyReferences, 'image', 'local'), videoUrls: getMediaReferenceUrls(comfyReferences, 'video', 'local') },
+      beforeSubmit,
     );
   }
 
   if (provider === 'workflow-api') throw new Error('请先配置并选择工作流 API');
   const registeredAdapter = mediaProviderRegistry.getAudioAdapter(provider);
   if (registeredAdapter) {
-    return registeredAdapter.generateAudio({ params, prompt, referenceAudioUrls, referenceMedia: references, signal });
+    return registeredAdapter.generateAudio({ params, prompt, referenceAudioUrls, referenceMedia: references, signal, beforeSubmit });
   }
 
   // ── 通用模型音频生成 ──
@@ -260,12 +268,15 @@ export async function generateAudio(
       };
       const effectiveVariables = usesLibapiProtocol ? libapiAudioVariables(gm.modelId, variables)
         : usesMinimaxProtocol ? minimaxAudioVariables(gm.modelId, variables) : variables;
-      const protocolAudioUrls = await resolveGeneralAudioReferenceUrls(references, signal);
+      const referenceProvider = resolveProviderCatalogId(connection.providerConfigId, connection.provider) === 'volcengine'
+        ? connection.providerConfigId : undefined;
+      const protocolAudioUrls = await resolveGeneralAudioReferenceUrls(references, referenceProvider, signal);
       const urls = await runConfiguredModelProtocol({
         model: gm,
         category: 'audio',
         nodeId: params.nodeId,
         signal,
+        beforeSubmit,
         variables: {
           ...effectiveVariables,
           audioUrls: protocolAudioUrls,
@@ -292,6 +303,8 @@ export async function generateAudio(
         prompt,
         batchCount: 1,
       }),
+      beforeSubmit,
+      `general/${gm.id}`,
     );
     const access = createMediaDownloadAccess(connection.providerConfigId, connection.baseUrl, { type: 'bearer' });
     const urls = retainCompletedMediaResults([result.url], access, params.nodeId, 'audio', 1, result.taskReceipt, state.currentProjectId);

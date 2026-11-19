@@ -1,6 +1,6 @@
 [package]
 name = "ai-canvas-tauri"
-version = "0.10.34"
+version = "0.11.10"
 edition = "2021"
 
 [lib]
@@ -16,6 +16,8 @@ debug = 1
 [features]
 default = ["local-onnx"]
 local-onnx = ["dep:ort"]
+# 仅供 Windows debug 冷维护隔离演练；不开放正式迁移或应用窗口权限。
+project-model-fixture-host = []
 # 仅供离线 MockRuntime 安全回归；普通构建不包含测试支架。
 tauri-channel-tests = ["tauri/test"]
 
@@ -28,7 +30,7 @@ required-features = ["tauri-channel-tests"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.2", features = ["macos-private-api", "protocol-asset", "devtools"] }
+tauri = { version = "=2.11.2", features = ["macos-private-api", "protocol-asset", "devtools", "unstable"] }
 tauri-plugin-fs = { version = "2", features = ["watch"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
@@ -86,8 +88,14 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSError", "NSGeometry", "NSObject", "NSProcessInfo", "NSString", "NSValue"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "WKWebView", "objc2-app-kit"] }
 
+# GtkBox packing of the fixed browser toolbar, using Tauri's existing dependency version.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"
+
 # Windows: DXGI 适配器枚举（GPU 探测用）+ 剪贴板 CF_HDROP 文件写入
 [target.'cfg(windows)'.dependencies]
+webview2-com = "=0.38.2"
+windows-core = "=0.61.2"
 windows = { version = "0.58", features = [
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dwm",

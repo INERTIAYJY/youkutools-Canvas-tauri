@@ -22,7 +22,7 @@ const fileMocks = vi.hoisted(() => ({
     return references;
   }),
   deleteNodeFile: vi.fn(async () => undefined),
-  deleteNodeFiles: vi.fn(async () => undefined),
+  deleteNodeFiles: vi.fn<typeof import('../../src/services/fileService').deleteNodeFiles>(async () => undefined),
   deletedGroupFolderNames: (groups: NodeGroup[], deleted: ReadonlySet<string>) => groups.filter((group) =>
     deleted.has(group.id) || (group.nodeIds.length > 0 && group.nodeIds.every((id) => deleted.has(id)))).map((group) => group.name),
   resolveGroupUndoTrashPaths: vi.fn(async (names: string[]) => names.map((name) => `project/${name}`)),
@@ -69,7 +69,7 @@ vi.mock('../../src/utils/nodeAnimations', () => ({
 }));
 
 import { useAppStore } from '../../src/store/useAppStore';
-import { isCanvasConnectionValid } from '../../src/store/store.nodes';
+import { createNodeFileDeletionContext, isCanvasConnectionValid } from '../../src/store/store.nodes';
 import {
   getConnectionMenuOptions,
   resolveNodeBodyHandle,
@@ -132,6 +132,206 @@ beforeEach(() => {
   nodeExitMocks.pending.clear();
   nodeExitMocks.playNodeExit.mockResolvedValue(undefined);
   useAppStore.setState(useAppStore.getInitialState(), true);
+});
+
+describe('节点回收的实时引用保护', () => {
+  it('移动前重新读取新增节点及聊天引用，项目切换或待删节点变化时拒绝继续', () => {
+    const removed = node('removed', { filePath: 'project/removed.png' });
+    useAppStore.setState({ currentProjectId: 'project-1', nodes: [removed], messages: [] });
+    const context = createNodeFileDeletionContext(useAppStore.getState, [removed], new Set([removed.id]), 'project-1');
+    expect(context.deletedNodeIds).toEqual([removed.id]);
+    expect(context.getLiveKeepPaths()).toEqual(new Set());
+
+    useAppStore.setState({ nodes: [removed, node('new-reference', { filePath: 'project/removed.png' })],
+      messages: [{ id: 'message', conversationId: 'conversation', role: 'assistant', content: '', timestamp: 1, status: 'done',
+        mediaResult: { id: 'media', kind: 'image', deliveryMode: 'chat', url: 'asset://project/chat.png',
+          sourceUrl: '', filePath: 'project/chat.png', persistence: 'saved', prompt: '', modelId: '', provider: '', createdAt: 1 } }],
+    });
+    expect(context.getLiveKeepPaths()).toEqual(new Set(['project/removed.png', 'project/chat.png']));
+
+    useAppStore.setState({ currentProjectId: 'project-2' });
+    expect(context.getLiveKeepPaths()).toBeNull();
+    useAppStore.setState({ currentProjectId: 'project-1', nodes: [{ ...removed, data: { ...removed.data, filePath: 'project/replaced.png' } }] });
+    expect(context.getLiveKeepPaths()).toBeNull();
+  });
+});
+
+describe('shared canvas deletion', () => {
+  function holdExit() {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    nodeExitMocks.playNodeExit.mockReturnValueOnce(pending);
+    return async () => { finish(); await pending; await Promise.resolve(); };
+  }
+
+  it('does nothing for an empty selection and clears selected edges immediately before one undoable removal', async () => {
+    useAppStore.setState({ nodes: [node('a'), node('b')], edges: [{ id: 'edge', source: 'a', target: 'b' }] });
+    expect(useAppStore.getState().deleteSelectedCanvasElements()).toBe(false);
+    expect(fileMocks.deleteNodeFiles).not.toHaveBeenCalled();
+    expect(nodeExitMocks.playNodeExit).not.toHaveBeenCalled();
+    expect(useAppStore.getState().history).toEqual([]);
+    const finish = holdExit();
+    useAppStore.setState({ edges: [{ id: 'edge', source: 'a', target: 'b', selected: true }] });
+    expect(useAppStore.getState().deleteSelectedCanvasElements()).toBe(true);
+    expect(useAppStore.getState().edges[0].selected).toBe(false);
+    expect(useAppStore.getState().deleteSelectedCanvasElements()).toBe(false);
+    await finish();
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['a', 'b']);
+    expect(useAppStore.getState().edges).toEqual([]);
+    expect(useAppStore.getState().history).toHaveLength(1);
+    expect(await useAppStore.getState().undo()).toBe(true);
+    expect(useAppStore.getState().edges.map((edge) => edge.id)).toEqual(['edge']);
+    expect(await useAppStore.getState().redo()).toBe(true);
+    expect(useAppStore.getState().edges).toEqual([]);
+  });
+
+  it.each(['selection', 'batch'] as const)('keeps the 50-root API limit separate from complete manual selections (%s)', async (mode) => {
+    const nodes = Array.from({ length: 60 }, (_, index) => node(`node-${index}`));
+    useAppStore.setState({ nodes: [...nodes, node('survivor')], selectedNodeIds: nodes.map((item) => item.id) });
+    const commit = useAppStore.getState().commitToHistory;
+    const commitSpy = vi.fn(commit);
+    useAppStore.setState({ commitToHistory: commitSpy });
+    const finish = holdExit();
+    if (mode === 'selection') {
+      expect(useAppStore.getState().deleteSelectedCanvasElements()).toBe(true);
+      expect(useAppStore.getState().selectedNodeIds).toEqual([]);
+    } else useAppStore.getState().deleteNodesBatch(nodes.map((item) => item.id));
+    useAppStore.getState().setSelectedNodeIds(['survivor']);
+    await finish();
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(mode === 'selection'
+      ? ['survivor'] : [...nodes.slice(50).map((item) => item.id), 'survivor']);
+    expect(useAppStore.getState().selectedNodeIds).toEqual(['survivor']);
+    expect(commitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes mixed edges and the last child of a mapped group while retaining manual empty groups', async () => {
+    const folder = groupNode('folder-node');
+    folder.data = { ...folder.data, groupId: 'folder-record' } as unknown as BaseNodeData;
+    const child = { ...node('child'), parentId: folder.id };
+    const empty = groupNode('manual-empty');
+    useAppStore.setState({ nodes: [folder, child, empty, node('a'), node('b')], selectedNodeIds: [child.id],
+      groups: [
+        { id: 'folder-record', name: 'Folder', nodeIds: [child.id], color: '#fff', createdAt: 0 },
+        { id: empty.id, name: 'Empty', nodeIds: [], color: '#fff', createdAt: 0 },
+      ], edges: [{ id: 'independent', source: 'a', target: 'b', selected: true },
+        { id: 'folder-edge', source: folder.id, target: 'a' }],
+    });
+    expect(useAppStore.getState().deleteSelectedCanvasElements()).toBe(true);
+    await Promise.resolve();
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual([empty.id, 'a', 'b']);
+    expect(useAppStore.getState().groups.map((group) => group.id)).toEqual([empty.id]);
+    expect(useAppStore.getState().edges).toEqual([]);
+    expect(fileMocks.deleteNodeFiles).toHaveBeenCalledWith([child.data], expect.any(Set), expect.anything(), ['Folder'], expect.anything());
+    expect(await useAppStore.getState().undo()).toBe(true);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual([folder.id, child.id, empty.id, 'a', 'b']);
+  });
+
+  it('shares file-reference protection and keeps artifact-owned media out of file staging', async () => {
+    const removed = node('removed', { filePath: 'project/shared.png' });
+    const artifact = node('artifact', { artifactId: 'artifact-1', filePath: 'project/artifact.png' });
+    useAppStore.setState({ currentProjectId: 'project-1', nodes: [removed, artifact,
+      node('director', { directorCaptureFilePaths: ['project/shared.png'] })], selectedNodeIds: [removed.id, artifact.id] });
+    useAppStore.getState().deleteSelectedCanvasElements();
+    expect(fileMocks.deleteNodeFiles).toHaveBeenCalledWith([removed.data], new Set(['project/shared.png', 'project/artifact.png']),
+      'project-1', [], expect.objectContaining({ deletedNodeIds: [removed.id, artifact.id] }));
+    await Promise.resolve();
+  });
+
+  it.each(['switch-back', 'import', 'exchange-epoch', 'native-runtime'] as const)('rejects a stale exit after same-ID canvas replacement (%s)', async (boundary) => {
+    const original = node('same-id', { label: 'old' });
+    const replacement = node('same-id', { label: 'replacement' });
+    const context = { kind: 'canvas' as const, schemaVersion: 2 as const, modelGeneration: 1, runtimeEpoch: 'old-runtime',
+      projectId: 'owner', projectEpoch: 1, canvasId: 'project-1', canvasEpoch: 1, canvasRevision: 1, episodeId: null };
+    useAppStore.setState({ currentProjectId: 'project-1', nodes: [original],
+      projects: [{ id: 'project-1', name: 'Project', createdAt: 1, updatedAt: 1, exchangeEpoch: 1 }],
+      ...(boundary === 'native-runtime' ? { projectExecutionContext: context } : {}) });
+    const finish = holdExit();
+    useAppStore.getState().deleteNode(original.id);
+    const fileContext = fileMocks.deleteNodeFiles.mock.calls[0][4]!;
+    if (boundary === 'switch-back') {
+      useAppStore.setState({ currentProjectId: 'other' });
+      useAppStore.setState({ currentProjectId: 'project-1', nodes: [replacement] });
+    } else if (boundary === 'import') useAppStore.setState({ nodes: [replacement], history: [], historyIndex: -1 });
+    else if (boundary === 'exchange-epoch') useAppStore.setState({ nodes: [replacement], projects: [
+      { id: 'project-1', name: 'Project', createdAt: 1, updatedAt: 1, exchangeEpoch: 2 },
+    ] });
+    else useAppStore.setState({ nodes: [replacement], projectExecutionContext: { ...context, runtimeEpoch: 'new-runtime' } });
+    expect(fileContext.getLiveKeepPaths()).toBeNull();
+    await finish();
+    expect(useAppStore.getState().nodes).toEqual([replacement]);
+  });
+
+  it('does not delete a replacement that reuses an ID after the original leaves the canvas', async () => {
+    useAppStore.setState({ nodes: [node('same-id')] });
+    const finish = holdExit();
+    useAppStore.getState().deleteNode('same-id');
+    useAppStore.setState({ nodes: [] });
+    const replacement = node('same-id', { label: 'new incarnation' });
+    useAppStore.setState({ nodes: [replacement] });
+    await finish();
+    expect(useAppStore.getState().nodes).toEqual([replacement]);
+  });
+
+  it.each(['undo', 'redo'] as const)('keeps already-restored same-ID nodes when an old exit finishes after %s', async (transition) => {
+    useAppStore.setState({ nodes: [node('same-id')] });
+    useAppStore.getState().commitToHistory();
+    useAppStore.getState().updateNodePositionTransient('same-id', { x: 100, y: 20 });
+    const finish = holdExit();
+    useAppStore.getState().deleteNode('same-id');
+    expect(await useAppStore.getState().undo()).toBe(true);
+    if (transition === 'redo') expect(await useAppStore.getState().redo()).toBe(true);
+    const restored = useAppStore.getState().nodes;
+    await finish();
+    expect(useAppStore.getState().nodes).toEqual(restored);
+    expect(useAppStore.getState().nodes[0].position).toEqual(transition === 'undo' ? { x: 0, y: 0 } : { x: 100, y: 20 });
+  });
+
+  it('allows progress, geometry, revision changes and history prefix trimming while preserving a new selection', async () => {
+    useAppStore.setState({ nodes: [node('removed'), node('survivor')], selectedNodeIds: ['removed'] });
+    const finish = holdExit();
+    useAppStore.getState().deleteSelectedCanvasElements();
+    useAppStore.getState().updateNodeDataTransient('removed', { status: 'loading', mediaTaskStage: 'querying' });
+    for (let index = 1; index <= 60; index += 1) {
+      useAppStore.getState().updateNodePositionTransient('survivor', { x: index, y: 0 });
+      useAppStore.getState().commitToHistory();
+      useAppStore.getState().incrementRevision();
+    }
+    useAppStore.getState().setSelectedNodeIds(['survivor']);
+    await finish();
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['survivor']);
+    expect(useAppStore.getState().nodes[0].position).toEqual({ x: 60, y: 0 });
+    expect(useAppStore.getState().selectedNodeIds).toEqual(['survivor']);
+  });
+
+  it('invalidates file staging after synchronous exit setup failure and still supports a later deletion', async () => {
+    useAppStore.setState({ nodes: [node('removed')] });
+    nodeExitMocks.playNodeExit.mockImplementationOnce(() => { throw new Error('exit setup failed'); });
+    expect(() => useAppStore.getState().deleteNode('removed')).toThrow('exit setup failed');
+    expect(fileMocks.deleteNodeFiles.mock.calls[0][4]!.getLiveKeepPaths()).toBeNull();
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['removed']);
+    useAppStore.getState().deleteNode('removed');
+    await Promise.resolve();
+    expect(useAppStore.getState().nodes).toEqual([]);
+  });
+
+  it('completes deletion if the exit promise rejects', async () => {
+    useAppStore.setState({ nodes: [node('removed')] });
+    nodeExitMocks.playNodeExit.mockRejectedValueOnce(new Error('exit failed'));
+    useAppStore.getState().deleteNode('removed');
+    await Promise.resolve();
+    expect(useAppStore.getState().nodes).toEqual([]);
+  });
+
+  it('finishes independent overlapping deletions without cancelling either operation', async () => {
+    useAppStore.setState({ nodes: [node('a'), node('b'), node('c')] });
+    const finishFirst = holdExit();
+    useAppStore.getState().deleteNode('a');
+    const finishSecond = holdExit();
+    useAppStore.getState().deleteNodesBatch(['a', 'b']);
+    await finishFirst();
+    await finishSecond();
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['c']);
+  });
 });
 
 describe('工作流模型与尺寸的新建偏好', () => {
@@ -444,6 +644,41 @@ describe('precise shot duration references', () => {
     ] });
     expect(video().seedanceDuration).toBe(9);
     expect(video().videoUrl).toBe('keep.mp4');
+  });
+
+  it('matches reordered rows within each sheet and leaves text-only edits and manual timing alone', () => {
+    const binding = { nodeId: 'sheet', rowId: 'row-1', kind: 'video' as const };
+    const automatic = node('video', { type: 'ai-video', seedanceDuration: 5,
+      shotlistProductionSource: { ...binding, durationSync: 'auto' } });
+    const legacy = node('legacy', { type: 'ai-video', seedanceDuration: 9,
+      shotlistProductionSource: { ...binding, nodeId: 'other' } });
+    const manual = node('manual', { type: 'ai-video', seedanceDuration: 12,
+      shotlistProductionSource: { ...binding, durationSync: 'manual' } });
+    const overridden = node('overridden', { type: 'ai-video', seedanceDuration: 3,
+      shotlistProductionSource: { ...binding, nodeId: 'other' } });
+    const unrelated = node('unrelated', { type: 'ai-video', seedanceDuration: 5,
+      shotlistProductionSource: { ...binding, nodeId: 'untouched', durationSync: 'auto' } });
+    const sheet = source();
+    useAppStore.setState({ nodes: [sheet,
+      node('other', { type: 'ai-shotlist', shotlistRows: [{ id: 'row-1', shotNo: '1', duration: 8.4 }] }),
+      automatic, legacy, manual, overridden, unrelated] });
+
+    useAppStore.getState().updateNodeDataTransient('sheet', {
+      shotlistRows: sheet.data.shotlistRows!.map((row) => ({ ...row, content: '只修改文字' })),
+    });
+    expect(useAppStore.getState().nodes.slice(2)).toEqual([automatic, legacy, manual, overridden, unrelated]);
+    expect(useAppStore.getState().nodes[2]).toBe(automatic);
+
+    useAppStore.getState().updateNodesDataBatch(['sheet', 'other'], { shotlistRows: [
+      { id: 'row-2', shotNo: '1', duration: 7.2 },
+      { id: 'row-1', shotNo: '2', duration: 6.1 },
+    ] });
+    const updated = useAppStore.getState().nodes;
+    expect(updated[2].data.seedanceDuration).toBe(7);
+    expect(updated[3].data.seedanceDuration).toBe(7);
+    expect(updated[4]).toBe(manual);
+    expect(updated[5]).toBe(overridden);
+    expect(updated[6]).toBe(unrelated);
   });
 
   it('replaces an auto-mentioned whole sheet with the selected shot while keeping other references and prose', () => {
@@ -830,7 +1065,8 @@ describe('multi-selection connections', () => {
 
 describe('batch canvas history', () => {
   it('undo and redo preserve the independent file created by media duplication', async () => {
-    useAppStore.setState({ currentProjectId: 'p', nodes: [{ ...node('source'), type: 'ai-image',
+    useAppStore.setState({ currentProjectId: 'p', projectLoadStatus: 'ready',
+      projects: [{ id: 'p', name: '测试项目', createdAt: 1, updatedAt: 1 }], nodes: [{ ...node('source'), type: 'ai-image',
       data: { type: 'ai-image', label: 'image', filePath: 'project/original.png', imageUrl: 'asset://project/original.png' } }],
       history: [], historyIndex: -1 });
     await useAppStore.getState().duplicateNode('source');
@@ -896,7 +1132,7 @@ describe('batch canvas history', () => {
     ]);
     expect(useAppStore.getState().groups).toEqual(groups);
     expect(useAppStore.getState()).toMatchObject({ historyIndex: -1 });
-    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/node-a.png');
+    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/node-a.png', 'project-1');
 
     await expect(useAppStore.getState().redo()).resolves.toBe(true);
 
@@ -904,6 +1140,7 @@ describe('batch canvas history', () => {
     expect(useAppStore.getState()).toMatchObject({ historyIndex: 0 });
     expect(fileMocks.deleteNodeFiles).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ filePath: 'project/node-a.png' })]), expect.any(Set), expect.anything(), expect.any(Array),
+      expect.objectContaining({ deletedNodeIds: expect.any(Array), getLiveKeepPaths: expect.any(Function) }),
     );
     await expect(useAppStore.getState().redo()).resolves.toBe(false);
   });
@@ -928,12 +1165,13 @@ describe('batch canvas history', () => {
 
     await expect(useAppStore.getState().undo()).resolves.toBe(true);
     expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith(
-      'project/director/scenes/scene-history',
+      'project/director/scenes/scene-history', 'project-1',
     );
 
     await expect(useAppStore.getState().redo()).resolves.toBe(true);
     expect(fileMocks.deleteNodeFiles).toHaveBeenCalledWith(
       [director.data], expect.any(Set), 'project-1', [],
+      expect.objectContaining({ deletedNodeIds: expect.any(Array), getLiveKeepPaths: expect.any(Function) }),
     );
   });
 
@@ -961,7 +1199,8 @@ describe('batch canvas history', () => {
       expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['node-b']);
     });
     expect(useAppStore.getState().groups).toEqual([]);
-    expect(fileMocks.deleteNodeFiles).toHaveBeenCalledWith([child.data], expect.any(Set), expect.anything(), ['Group']);
+    expect(fileMocks.deleteNodeFiles).toHaveBeenCalledWith([child.data], expect.any(Set), expect.anything(), ['Group'],
+      expect.objectContaining({ deletedNodeIds: expect.any(Array), getLiveKeepPaths: expect.any(Function) }));
     expect(useAppStore.getState().edges).toEqual([]);
 
     await expect(useAppStore.getState().undo()).resolves.toBe(true);
@@ -972,14 +1211,14 @@ describe('batch canvas history', () => {
     ]);
     expect(useAppStore.getState().nodes[0].style).toEqual({ width: 400, height: 300 });
     expect(useAppStore.getState().groups).toEqual(groups);
-    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/Group');
+    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/Group', expect.anything());
 
     await expect(useAppStore.getState().redo()).resolves.toBe(true);
     expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['node-b']);
     expect(useAppStore.getState().groups).toEqual([]);
   });
 
-  it.each(['single', 'batch'])('deletes a whole group and restores its folder before files (%s)', async (mode) => {
+  it.each(['single', 'batch', 'selection'])('deletes a whole group and restores its folder before files (%s)', async (mode) => {
     const folder = groupNode('group-folder');
     const child = { ...node('media-child', { filePath: 'project/Folder/image.png' }), parentId: folder.id };
     useAppStore.setState({ currentProjectId: 'project-1', nodes: [folder, child],
@@ -987,15 +1226,21 @@ describe('batch canvas history', () => {
       history: [], historyIndex: -1,
     });
     if (mode === 'single') useAppStore.getState().deleteNode(folder.id);
-    else useAppStore.getState().deleteNodesBatch([folder.id, child.id]);
+    else if (mode === 'batch') useAppStore.getState().deleteNodesBatch([folder.id, child.id]);
+    else {
+      useAppStore.getState().setSelectedNodeIds([folder.id, child.id]);
+      useAppStore.getState().deleteSelectedCanvasElements();
+    }
     await vi.waitFor(() => expect(useAppStore.getState().nodes).toEqual([]));
-    expect(fileMocks.deleteNodeFiles).toHaveBeenLastCalledWith([folder.data, child.data], expect.any(Set), 'project-1', ['Folder']);
+    expect(fileMocks.deleteNodeFiles).toHaveBeenLastCalledWith([folder.data, child.data], expect.any(Set), 'project-1', ['Folder'],
+      expect.objectContaining({ deletedNodeIds: expect.any(Array), getLiveKeepPaths: expect.any(Function) }));
     fileMocks.restoreFromUndoTrash.mockClear();
     await useAppStore.getState().undo();
-    expect(fileMocks.restoreFromUndoTrash).toHaveBeenNthCalledWith(1, 'project/Folder');
-    expect(fileMocks.restoreFromUndoTrash).toHaveBeenNthCalledWith(2, 'project/Folder/image.png');
+    expect(fileMocks.restoreFromUndoTrash).toHaveBeenNthCalledWith(1, 'project/Folder', 'project-1');
+    expect(fileMocks.restoreFromUndoTrash).toHaveBeenNthCalledWith(2, 'project/Folder/image.png', 'project-1');
     await useAppStore.getState().redo();
-    expect(fileMocks.deleteNodeFiles).toHaveBeenLastCalledWith([folder.data, child.data], expect.any(Set), 'project-1', ['Folder']);
+    expect(fileMocks.deleteNodeFiles).toHaveBeenLastCalledWith([folder.data, child.data], expect.any(Set), 'project-1', ['Folder'],
+      expect.objectContaining({ deletedNodeIds: expect.any(Array), getLiveKeepPaths: expect.any(Function) }));
   });
 
   it('removes an empty group when React Flow removes its last child', () => {
@@ -1070,7 +1315,7 @@ describe('batch canvas history', () => {
 
     finishStaging();
     await expect(undoResult).resolves.toBe(true);
-    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/clip.mp4');
+    expect(fileMocks.restoreFromUndoTrash).toHaveBeenCalledWith('project/clip.mp4', 'project-1');
   });
 
   it('undoes and redoes a node move from the gesture start position', async () => {
@@ -1526,6 +1771,83 @@ describe('history snapshot sharing', () => {
   });
 });
 
+describe('恢复基线后的新历史分支', () => {
+  async function restoredBranch() {
+    useAppStore.setState({ nodes: [node('branch-a')], edges: [], groups: [] });
+    const state = useAppStore.getState();
+    state.commitToHistory();
+    useAppStore.setState({ nodes: [{ ...node('branch-a'), position: { x: 20, y: 0 } }] });
+    state.commitToHistory();
+    expect(await state.undo()).toBe(true);
+    return state;
+  }
+
+  it('动作前去重恢复基线后，新动作立即满足界面撤销判据，且可撤销', async () => {
+    const state = await restoredBranch();
+    const restored = useAppStore.getState();
+    expect(restored.historyIndex >= 0 && restored.history.length > 0).toBe(false);
+    state.addNode(node('branch-b'));
+    const edited = useAppStore.getState();
+    // HistoryTimelinePanel 的按钮判据，不能仅检查 undo() 最终返回 true。
+    expect(edited.historyIndex >= 0 && edited.history.length > 0).toBe(true);
+    expect(await state.undo()).toBe(true);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['branch-a']);
+  });
+
+  it('新动作截断旧重做且保留恢复基线，不让旧分支覆盖新内容', async () => {
+    const state = await restoredBranch();
+    const checkpoint = useAppStore.getState().history[0];
+    state.addNode(node('branch-b'));
+    expect(useAppStore.getState().history).toEqual([checkpoint]);
+    expect(await state.redo()).toBe(false);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['branch-a', 'branch-b']);
+    expect(await state.undo()).toBe(true);
+    expect(useAppStore.getState().nodes.map((item) => item.id)).toEqual(['branch-a']);
+  });
+
+  it('先完成修改再提交时仍保留恢复基线，且新分支能撤销重做', async () => {
+    const state = await restoredBranch();
+    useAppStore.setState({ nodes: [{ ...node('branch-a'), position: { x: 50, y: 0 } }] });
+    state.commitToHistory();
+    const edited = useAppStore.getState();
+    expect(edited.historyIndex >= 0 && edited.history.length > 0).toBe(true);
+    expect(await state.undo()).toBe(true);
+    expect(useAppStore.getState().nodes[0].position.x).toBe(0);
+    expect(await state.redo()).toBe(true);
+    expect(useAppStore.getState().nodes[0].position.x).toBe(50);
+  });
+});
+
+describe('冻结自动让位后的布局历史', () => {
+  it.each(['locked', 'hidden'] as const)('其他节点的撤销重做保留%s目标的可见坐标与自动偏移', async (frozen) => {
+    const source = { ...groupNode('frozen-layout-source'), position: { x: 0, y: 100 }, width: 220, height: 152,
+      style: { width: 220, height: 152 }, data: { ...groupNode('frozen-layout-source').data,
+        groupCollapsed: true, groupExpandedSize: { width: 1000, height: 600 } } };
+    const target = { ...node('frozen-layout-target'), position: { x: 320, y: 100 }, width: 220, height: 152 };
+    const other = { ...node('frozen-layout-other'), position: { x: -1000, y: -1000 } };
+    useAppStore.setState({ nodes: [source, target, other], edges: [], groups: [] });
+    const state = useAppStore.getState();
+    const current = (id: string) => useAppStore.getState().nodes.find((item) => item.id === id)!;
+    state.commitToHistory();
+    state.toggleGroupCollapsed(source.id);
+    expect(current(target.id)).toMatchObject({ position: { x: 1100, y: 100 }, data: { groupLayoutOffsetX: 780 } });
+    useAppStore.setState({ nodes: useAppStore.getState().nodes.map((item) => item.id === target.id
+      ? { ...item, ...(frozen === 'locked' ? { draggable: false } : { hidden: true }) } : item) });
+    state.onNodesChange([{ id: other.id, type: 'position', position: { x: -950, y: -1000 } }]);
+    expect(await state.undo()).toBe(true);
+    expect(current(other.id).position).toEqual(other.position);
+    expect(current(target.id)).toMatchObject({ position: { x: 1100, y: 100 }, data: { groupLayoutOffsetX: 780 } });
+    expect(await state.redo()).toBe(true);
+    expect(current(other.id).position).toEqual({ x: -950, y: -1000 });
+    expect(current(target.id)).toMatchObject({ position: { x: 1100, y: 100 }, data: { groupLayoutOffsetX: 780 } });
+    useAppStore.setState({ nodes: useAppStore.getState().nodes.map((item) => item.id === target.id
+      ? { ...item, ...(frozen === 'locked' ? { draggable: true } : { hidden: false }) } : item) });
+    state.toggleGroupCollapsed(source.id);
+    expect(current(target.id).position).toEqual(target.position);
+    expect(current(target.id).data.groupLayoutOffsetX ?? 0).toBe(0);
+  });
+});
+
 
 it('does not write a late undo result into another project with matching node ids', async () => {
   const original = node('same');
@@ -1549,4 +1871,60 @@ it('does not write a late undo result into another project with matching node id
   release();
   await undo;
   expect(useAppStore.getState().nodes[0]).toMatchObject({ position: { x: 20, y: 0 }, data: { output: '第二项目' } });
+});
+
+
+describe('strict interaction no-op boundaries', () => {
+  it('keeps Store and node identities for repeated snapped position/select while preserving the final dragging transition', () => {
+    const original = { ...node('dragged'), position: { x: 8, y: 16 }, selected: true, dragging: true };
+    useAppStore.setState({ nodes: [original], selectedNodeIds: ['dragged'] });
+    const before = useAppStore.getState(), notify = vi.fn();
+    const unsubscribe = useAppStore.subscribe(notify);
+    try {
+      before.onNodesChange([{ type: 'position', id: original.id, position: { x: 8, y: 16 }, dragging: true },
+        { type: 'select', id: original.id, selected: true }]);
+      before.setSelectedNodeIds(['dragged']);
+      expect(useAppStore.getState()).toBe(before);
+      expect(notify).not.toHaveBeenCalled();
+      before.onNodesChange([{ type: 'position', id: original.id, position: { x: 8, y: 16 }, dragging: false }]);
+      expect(useAppStore.getState().nodes[0]).toMatchObject({ position: original.position, dragging: false });
+      expect(notify).toHaveBeenCalledOnce();
+      expect(useAppStore.getState().history).toBe(before.history);
+    } finally { unsubscribe(); }
+  });
+
+  it('applies duplicate IDs in input order and leaves dimensions, mixed batches and absolute-position changes on the RF path', () => {
+    useAppStore.setState({ nodes: [node('a')] });
+    const state = useAppStore.getState();
+    state.onNodesChange([{ type: 'select', id: 'a', selected: true }, { type: 'select', id: 'a', selected: false },
+      { type: 'position', id: 'a', position: { x: 5, y: 6 } }, { type: 'position', id: 'a', position: { x: 5, y: 6 }, dragging: false }]);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({ selected: false, position: { x: 5, y: 6 }, dragging: false });
+    const previous = useAppStore.getState().nodes;
+    state.onNodesChange([{ type: 'position', id: 'a', position: { x: 5, y: 6 } },
+      { type: 'dimensions', id: 'a', dimensions: { width: 320, height: 180 }, setAttributes: true }]);
+    expect(useAppStore.getState().nodes).not.toBe(previous);
+    expect(useAppStore.getState().nodes[0]).toMatchObject({ measured: { width: 320, height: 180 }, width: 320, height: 180 });
+    const resized = useAppStore.getState().nodes;
+    state.onNodesChange([{ type: 'position', id: 'a', positionAbsolute: { x: 30, y: 40 } }]);
+    expect(useAppStore.getState().nodes).not.toBe(resized);
+    const beforeMissing = useAppStore.getState().nodes;
+    state.onNodesChange([{ type: 'select', id: 'missing', selected: false }]);
+    expect(useAppStore.getState().nodes).toEqual(beforeMissing);
+  });
+
+  it('keeps selection order, undefined-to-false semantics and sequential edge selections', () => {
+    useAppStore.setState({ nodes: [node('a'), node('b')], selectedNodeIds: ['a', 'b'],
+      edges: [{ id: 'edge', source: 'a', target: 'b', selected: false }] });
+    const state = useAppStore.getState();
+    state.onEdgesChange([{ type: 'select', id: 'edge', selected: false }]);
+    expect(useAppStore.getState()).toBe(state);
+    state.onNodesChange([{ type: 'select', id: 'a', selected: false }]);
+    expect(useAppStore.getState().nodes[0].selected).toBe(false);
+    state.setSelectedNodeIds(['b', 'a']);
+    expect(useAppStore.getState().selectedNodeIds).toEqual(['b', 'a']);
+    state.onEdgesChange([{ type: 'select', id: 'edge', selected: true }, { type: 'select', id: 'edge', selected: false }]);
+    expect(useAppStore.getState().edges[0].selected).toBe(false);
+    expect(useAppStore.getState().edges).not.toBe(state.edges);
+    expect(useAppStore.getState().history).toBe(state.history);
+  });
 });

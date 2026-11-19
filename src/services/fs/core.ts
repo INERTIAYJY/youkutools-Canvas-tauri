@@ -21,6 +21,7 @@ import {
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { appDataDir, executableDir } from '@tauri-apps/api/path';
 import { mediaFileAllocationKey, retiredMediaPaths } from '../indexedDb/mediaRelocations';
+import { isNativeMediaPendingFile } from '../../utils/nativeMediaPendingFile';
 
 /** 检测是否运行在 Tauri 桌面环境中 */
 export function isTauriEnv(): boolean {
@@ -63,10 +64,16 @@ export function browserOpenFile(accept: string): Promise<File | null> {
 /** 项目目录磁盘内容发生增删改时派发的事件名（由 useAutoSave 监听，触发静默保存） */
 export const PROJECT_DISK_CHANGED_EVENT = 'project-disk-changed';
 
+export interface ProjectDiskChangedDetail {
+  /** 内部物化已被当前保存或规范化结果覆盖，只需刷新目录展示。 */
+  source: 'save-materialization';
+  projectId: string;
+}
+
 /** 通知监听方：当前项目的磁盘内容发生了增删改 */
-export function notifyProjectDiskChanged(): void {
+export function notifyProjectDiskChanged(detail?: ProjectDiskChangedDetail): void {
   if (typeof window === 'undefined') return;
-  window.dispatchEvent(new CustomEvent(PROJECT_DISK_CHANGED_EVENT));
+  window.dispatchEvent(new CustomEvent(PROJECT_DISK_CHANGED_EVENT, detail ? { detail } : undefined));
 }
 
 export function getMimeType(ext: string): string {
@@ -318,12 +325,14 @@ export async function watchFilePaths(
 // Cross-platform utilities
 // ============================================
 
-/** Cross-platform path join using forward slashes (Tauri FS accepts both / and \ on all platforms) */
+/** Join native paths with forward slashes while preserving a Windows network share root. */
 export function joinPath(...segments: string[]): string {
-  return segments
-    .map((s) => s.replace(/\\/g, '/').replace(/\/+$/, ''))
+  const parts = segments.map((part) => part.replace(/\\/g, '/'));
+  const path = parts
+    .map((part) => part.replace(/\/+$/, ''))
     .join('/')
     .replace(/\/+/g, '/');
+  return /^\/\/[^/]/.test(parts[0] ?? '') ? `/${path}` : path;
 }
 
 /**
@@ -437,10 +446,77 @@ export async function getBaseDir(): Promise<string | null> {
  * projectId → 数据文件夹名（形如「项目名-短ID」）。由 store 在创建/加载项目时注入。
  * 缺失时回退到 projectId 本身，从而兼容历史上以 projectId 命名的旧项目目录。
  */
-const _projectFolders = new Map<string, string>();
+const _projectFolders: Map<string, string> = import.meta.hot?.data.projectFolders ?? new Map();
+const _legacyProjectIds: Set<string> = import.meta.hot?.data.legacyProjectIds ?? new Set();
+const _nativeProjectOwners: Map<string, string> = import.meta.hot?.data.nativeProjectOwners ?? new Map();
+if (import.meta.hot) {
+  import.meta.hot.data.projectFolders = _projectFolders;
+  import.meta.hot.data.legacyProjectIds = _legacyProjectIds;
+  import.meta.hot.data.nativeProjectOwners = _nativeProjectOwners;
+}
+const nativeId = /^(?:p2|c2|e2)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const nativeOwnerId = /^p2-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+let nativeSearchContext = false;
+let nativeVideoEditorContext: { projectId: string; canvasId: string; sessionId: string } | undefined;
+let searchRootSync: Promise<void> = import.meta.hot?.data.nativeSearchRootSync ?? Promise.resolve();
+
+/** 独立搜索窗口只使用原生受限查询，不取得主窗口的素材操作权限。 */
+export function activateNativeAssetSearchContext(): void { nativeSearchContext = true; }
+
+/** 子窗口只能解析主窗口为该剪辑会话绑定的作品根。 */
+export function bindNativeVideoEditorContext(binding: { projectId: string; canvasId: string; sessionId: string }): void {
+  if (!nativeOwnerId.test(binding.projectId) || !nativeId.test(binding.canvasId) || !binding.canvasId.startsWith('c2-')
+    || !/^[a-f0-9-]{36}$/i.test(binding.sessionId)) throw new Error('剪辑窗口素材身份无效');
+  nativeVideoEditorContext = { ...binding };
+}
+
+/** 仅主窗口可在核验联合目录后刷新搜索窗口可访问的作品身份。 */
+export function syncNativeAssetSearchRoots(projectIds: readonly string[]): Promise<void> {
+  if (!isTauriEnv()) return Promise.resolve();
+  const ids = [...projectIds];
+  if (ids.some((id) => !nativeOwnerId.test(id))) return Promise.reject(new Error('项目素材身份无效'));
+  const pending = searchRootSync.then(async () => {
+    try { await invoke<void>('sync_native_asset_search_roots', { projectIds: ids }); }
+    catch (error) {
+      // 无法确认新快照时尽力撤销旧授权；调用方仍收到原错误。
+      await invoke<void>('sync_native_asset_search_roots', { projectIds: [] }).catch(() => undefined);
+      throw error;
+    }
+  });
+  searchRootSync = pending.catch(() => undefined);
+  if (import.meta.hot) import.meta.hot.data.nativeSearchRootSync = searchRootSync;
+  return pending;
+}
+
+/** 登记已由项目目录核验的新结构身份；前缀本身不是归属证明。 */
+export function registerNativeProjectFolders(bindings: ReadonlyArray<{ id: string; projectId: string }>): void {
+  const next = new Map<string, string>();
+  for (const { id, projectId } of bindings) {
+    if (!nativeId.test(id) || !nativeOwnerId.test(projectId) || _legacyProjectIds.has(id)
+      || (_nativeProjectOwners.has(id) && _nativeProjectOwners.get(id) !== projectId)
+      || (next.has(id) && next.get(id) !== projectId)) throw new Error('项目素材身份冲突');
+    next.set(id, projectId);
+  }
+  for (const [id, projectId] of next) _nativeProjectOwners.set(id, projectId);
+}
+
+export function getNativeProjectOwner(id: string): string | undefined {
+  return _nativeProjectOwners.get(id);
+}
+
+/** 新作品按创建时名称认领独占根；已有绑定复用原目录，未知目录不会被接管。 */
+export async function claimNativeProjectDataDir(projectId: string, projectName?: string): Promise<string> {
+  if (!nativeOwnerId.test(projectId) || !isTauriEnv()) throw new Error('新项目素材目录不可用');
+  const directory = await invoke<string>('claim_native_project_media_root', { projectId,
+    ...(projectName !== undefined ? { projectName } : {}) });
+  if (typeof directory !== 'string' || !directory) throw new Error('新项目素材目录不可用');
+  return directory;
+}
 
 /** 注册/更新单个项目的数据文件夹名 */
 export function registerProjectFolder(projectId: string, folderName: string | undefined): void {
+  if (_nativeProjectOwners.has(projectId)) throw new Error('新旧项目素材身份冲突');
+  _legacyProjectIds.add(projectId);
   if (folderName && folderName.trim()) _projectFolders.set(projectId, folderName.trim());
 }
 
@@ -473,12 +549,26 @@ function resolveProjectFolder(projectId: string): string {
 
 /** 剧集和分集共用目录时，节点只拥有画布引用，不能随节点删除共享文件。 */
 export function isSharedProjectDataDir(projectId: string): boolean {
+  // 新模型中画布共享作品根；节点删除不能顺带删除其他画布引用的文件。
+  if (_nativeProjectOwners.has(projectId)) return true;
   const folder = resolveProjectFolder(projectId);
   return [..._projectFolders].some(([id, otherFolder]) => id !== projectId && otherFolder === folder);
 }
 
 /** 获取项目的本地数据目录路径 */
 export async function getProjectDataDir(projectId: string): Promise<string | null> {
+  const owner = _nativeProjectOwners.get(projectId);
+  if (owner) {
+    if (!isTauriEnv()) return null;
+    if (nativeVideoEditorContext && (owner !== nativeVideoEditorContext.projectId
+      || projectId !== owner && projectId !== nativeVideoEditorContext.canvasId)) throw new Error('剪辑窗口素材身份已变化');
+    const directory = nativeVideoEditorContext
+      ? await invoke<string>('resolve_video_editor_native_root', nativeVideoEditorContext)
+      : await invoke<string>(nativeSearchContext ? 'resolve_asset_search_native_project_root' : 'resolve_native_project_media_root', { projectId: owner });
+    if (typeof directory !== 'string' || !directory) throw new Error('新项目素材目录不可用');
+    return directory;
+  }
+  if (nativeId.test(projectId) && !_legacyProjectIds.has(projectId)) throw new Error('项目素材身份尚未确认');
   const folder = resolveProjectFolder(projectId);
   // 优先使用用户自定义的根目录，结构为 {baseDataDir}/{文件夹名}
   if (_baseDataDir) {
@@ -498,6 +588,7 @@ export async function ensureProjectDataDir(
   if (!isTauriEnv()) return null;
   const dirPath = await getProjectDataDir(projectId);
   if (!dirPath) return null;
+  if (_nativeProjectOwners.has(projectId)) return dirPath;
   try {
     const dirExists = await exists(dirPath);
     if (!dirExists) await mkdir(dirPath, { recursive: true });
@@ -675,6 +766,7 @@ export async function renameProjectDataDir(
   oldFolderName: string | undefined,
   newFolderName: string,
 ): Promise<ProjectDataDirRenameResult | null> {
+  if (_nativeProjectOwners.has(projectId)) throw new Error('新项目素材根不能随项目名称更改');
   if (!isTauriEnv()) {
     registerProjectFolder(projectId, newFolderName);
     return null;
@@ -861,7 +953,7 @@ export async function listDirectoryFiles(dirPath: string): Promise<AssetFileEntr
     const files: AssetFileEntry[] = [];
 
     for (const entry of entries) {
-      if (!entry.isFile) continue;
+      if (!entry.isFile || isNativeMediaPendingFile(entry.name)) continue;
       try {
         const filePath = joinPath(dirPath, entry.name);
         const fileStat = await stat(filePath);

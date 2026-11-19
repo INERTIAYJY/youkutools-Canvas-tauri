@@ -1,17 +1,20 @@
 /**
  * agentRoundExecutor — 执行 Agent 模型轮次、工具调用与结果回传。
  */
+import { RESPONSES_OUTPUT } from '../ai/responsesApiProtocol';
 import { estimateTokens } from './tokenEstimate';
 /**
  * 执行 Agent 的单个模型轮次，串联上下文、流式响应、工具提案与执行结果。
  * 任务预算、审批等待和步骤快照在此轮次边界内统一更新。
  */
 import { isMcpGlobalToolContext } from '../mcp/mcpSettingsScope';
-import { isGeneralAssistantToolContext } from './assistantScope';
+import { isGeneralAssistantScope, isGeneralAssistantToolContext } from './assistantScope';
 import { useAppStore } from '../../store/useAppStore';
+import { isWorkbenchAgentTaskInScope, isWorkbenchTeamTaskInScope } from '../episodeWorkspaceScope';
 import { getPreparedProviderCatalogApproval, MAX_PROVIDER_MODEL_SELECTION, validateProviderModelSelection } from './providerModelCatalogService';
 import {
   streamAssistantReply,
+  resolveAssistantModel,
   type AssistantModelMessage,
 } from '../ai/assistantStream';
 import type {
@@ -25,6 +28,7 @@ import type {
   AgentTaskStatus,
   AgentToolDisplaySnapshot,
   AgentToolDisplayValue,
+  AgentDispatchRecord,
 } from '../../types/agent';
 import { AGENT_TERMINAL_STATUSES } from '../../types/agent';
 import type {
@@ -36,13 +40,14 @@ import type {
 import type { McpContent } from '../../types/mcp';
 import {
   buildAssistantFunctionTools,
+  getAgentTool,
   prepareAgentToolCall,
   type AgentToolContext,
   type AgentToolEffect,
   type AgentToolExecutionResult,
   type PreparedAgentToolCall,
 } from './toolRegistry';
-import { evaluateAgentToolPolicy } from './policyEngine';
+import { evaluateAgentToolPolicy, type AgentPolicyDecision } from './policyEngine';
 import {
   estimateModelMessagesTokens,
   resolveAssistantContextSpec,
@@ -50,6 +55,7 @@ import {
 import {
   AGENT_LIFETIME_BUDGET_PAUSE_REASON,
   evaluateAgentLifetimeUsage,
+  isAgentTaskBudgetLimited,
 } from './agentBudgetService';
 import { drainAgentInterjections } from './agentInterjection';
 import { buildAssistantToolGuidance } from './agentPromptGuidance';
@@ -60,6 +66,10 @@ import {
 } from './agentCheckpointService';
 import { emitAgentLifecycleEvent } from './agentLifecycle';
 import { createSkillReadBudget } from './skillReadService';
+import { AgentDurabilityError, beginAgentDispatch, digestAgentDispatchInput, settleAgentDispatch } from './agentDurabilityService';
+import { AGENT_RESULT_PAGE_CHARS, AGENT_RESULT_PREVIEW_CHARS, captureAgentResult } from './agentResultService';
+import { assertAgentProjectContext, captureAgentProjectScope } from './agentProjectContext';
+import { isProjectExpectedContextCurrent, ProjectExecutionContextError } from '../projectExecutionContext';
 
 // 每次 runAgentLoop 都创建自己的 messages 数组；恢复候选跨只读轮次保留，
 // 不包含当前执行段新完成的步骤，也不写入 Store/IndexedDB。数组释放后自动回收。
@@ -77,6 +87,8 @@ export interface AgentRoundCallbacks {
 
 export interface AgentRoundOptions {
   taskId: string;
+  /** 执行段入口冻结的legacy scope，不能在上下文读取/轮次之间重新捕获。 */
+  projectScope?: AgentTask['projectScope'];
   /** 当前执行段指定的文本模型，不持久化到任务。 */
   modelId?: string;
   signal: AbortSignal;
@@ -103,6 +115,8 @@ export interface AgentRoundResult {
 
 export interface ExecutedToolCall {
   summary: ToolResultSummary;
+  /** 工具已明确返回时的真实effect结论，与交付是否成功分开。 */
+  effectOutcome?: 'success' | 'error';
   modelContent: string;
   mcpContent?: McpContent[];
   /** 瞬时结果交付失败，不改变工具已执行的真实状态或持久化审计。 */
@@ -391,10 +405,17 @@ export async function executePreparedToolCall(
   let checkpointBefore: { historyIndex: number; revision: number } | undefined;
 
   while (true) {
+    let dispatch: AgentDispatchRecord | undefined;
+    let returnedResult: AgentToolExecutionResult | undefined;
     // 审批等待、前序读取和重试退避期间，停止/降级/撤权都必须即时生效。
     assertAgentTaskActive(taskId, context.signal);
     const currentTask = getTask(taskId);
     const executionContext = { ...context, mode: resolveAgentExecutionMode(currentTask, policyMode) };
+    try { assertAgentProjectContext(useAppStore.getState(), executionContext); }
+    catch {
+      return rejectPreparedToolCall(taskId, call, prepared, step, 'CONTEXT_REFRESH_REQUIRED',
+        '项目/分集/画布身份或代际已变化，未执行旧工具请求', startedAt, retryCount);
+    }
     const policy = evaluateAgentToolPolicy(prepared.definition, prepared.input, executionContext);
     const currentStep = currentTask.steps.find((item) => item.id === step.id);
     const globalScopeActive = (isMcpGlobalToolContext(executionContext, prepared.definition.id)
@@ -402,7 +423,15 @@ export async function executePreparedToolCall(
       || (isGeneralAssistantToolContext(executionContext, prepared.definition.id)
         && isGeneralAssistantToolContext(currentTask, prepared.definition.id)
         && currentTask.conversationId === context.conversationId);
-    const reverifyReason = !globalScopeActive
+    const workbenchScopeActive = prepared.definition.effect === 'file_write'
+      && currentTask.projectId === context.projectId && currentTask.conversationId === context.conversationId
+      && isWorkbenchTeamTaskInScope(useAppStore.getState(), currentTask, prepared.definition.id);
+    const workbenchAgentScopeActive = prepared.definition.effect === 'read'
+      && currentTask.projectId === context.projectId && currentTask.conversationId === context.conversationId
+      && isWorkbenchAgentTaskInScope(useAppStore.getState(), currentTask, prepared.definition.id);
+    const reverifyReason = currentTask.workbenchTarget && !workbenchAgentScopeActive
+      ? '工作台目标、会话或只读工具范围已失效，已取消该工具执行'
+      : !globalScopeActive && !workbenchScopeActive && !workbenchAgentScopeActive
       && useAppStore.getState().currentProjectId !== context.projectId
       ? '目标项目已切换，已取消该工具执行'
       : policy.outcome === 'deny'
@@ -458,7 +487,64 @@ export async function executePreparedToolCall(
     }
     try {
       assertAgentTaskActive(taskId, context.signal);
+      const inputDigest = await digestAgentDispatchInput(call.toolId, prepared.input);
+      dispatch = await beginAgentDispatch({
+        taskId, kind: 'tool', toolId: call.toolId, stepId: step.id,
+        effect: prepared.definition.effect, inputDigest, signal: context.signal,
+        revalidate: () => {
+          assertAgentTaskActive(taskId, context.signal);
+          assertAgentProjectContext(useAppStore.getState(), executionContext);
+          const live = getTask(taskId);
+          if (getAgentTool(call.toolId) !== prepared.definition
+            || (live.toolAllowlist !== undefined && !live.toolAllowlist.includes(call.toolId))) {
+            throw new Error('保存执行记录期间工具已变更或被撤权，未执行工具');
+          }
+          executionContext.mode = resolveAgentExecutionMode(live, policyMode);
+          const freshPolicy = evaluateAgentToolPolicy(prepared.definition, prepared.input, executionContext);
+          const liveStep = live.steps.find((item) => item.id === step.id);
+          if (freshPolicy.outcome === 'deny'
+            || (freshPolicy.outcome === 'require_approval' && liveStep?.approval?.status !== 'approved')) {
+            throw new Error('保存执行记录期间权限已变化，未执行工具');
+          }
+          const liveWorkbenchAgentScope = prepared.definition.effect === 'read'
+            && live.projectId === context.projectId && live.conversationId === context.conversationId
+            && isWorkbenchAgentTaskInScope(useAppStore.getState(), live, call.toolId);
+          if (live.workbenchTarget && !liveWorkbenchAgentScope) {
+            throw new Error('保存执行记录期间工作台目标或只读工具范围已失效，未执行工具');
+          }
+          if (!globalScopeActive && !workbenchScopeActive && !liveWorkbenchAgentScope
+            && useAppStore.getState().currentProjectId !== context.projectId) {
+            throw new Error('保存执行记录期间项目已切换，未执行工具');
+          }
+          if (prepared.definition.effect === 'canvas_write' && context.baseRevision !== undefined
+            && useAppStore.getState().getCurrentRevision() !== context.baseRevision) {
+            throw new Error('保存执行记录期间画布已变化，未执行工具');
+          }
+        },
+      });
       const result = await prepared.definition.execute(executionContext, prepared.input);
+      // 只读结果没有外部副作用；取消后不能写入完成步骤或交付迟到正文。
+      if (prepared.definition.effect === 'read') assertAgentTaskActive(taskId, context.signal);
+      returnedResult = result;
+      const status = result.status === 'success' ? 'succeeded' : 'failed';
+      const persistentSummary = sanitizePersistentSummary(result.summary);
+      const currentToolCall = getTask(taskId).steps.find((item) => item.id === step.id)?.toolCall
+        ?? step.toolCall!;
+      // 最小成功步骤与真实执行结论同一快照落盘；大结果保存、切集或交付失败不能留下可重投窗口。
+      await settleAgentDispatch(taskId, dispatch, status, { toolStep: {
+        id: step.id, status, outputSummary: persistentSummary, errorCode: result.errorCode,
+        toolCall: { ...currentToolCall, callId: call.callId, toolId: call.toolId, effect: prepared.definition.effect,
+          retryCount, finishedAt: Date.now(), resultSummary: persistentSummary, errorCode: result.errorCode },
+      } });
+      if (prepared.definition.effect === 'read') assertAgentTaskActive(taskId, context.signal);
+      // 导航/结构工具有意改变上下文；其后下一次工具仍按原意图复核，不自动改绑。
+      const changesContext = /^(?:project_(?:create|open|switch|delete|rename)|episode_(?:move|delete)|series_split_episodes)$/.test(call.toolId);
+      if (!changesContext) assertAgentProjectContext(useAppStore.getState(), executionContext, { checkRevision: false });
+      const taskAfterExecution = getTask(taskId);
+      if (taskAfterExecution.workbenchTarget
+        && !isWorkbenchAgentTaskInScope(useAppStore.getState(), taskAfterExecution, call.toolId)) {
+        throw new Error('工具响应期间工作台目标或会话已失效，未接纳该结果');
+      }
       const revisionAfterExecution = useAppStore.getState().getCurrentRevision();
       const historyIndexAfterExecution = useAppStore.getState().historyIndex;
       if (result.status === 'error' && result.retryable && retryCount < maxRetries) {
@@ -466,6 +552,7 @@ export async function executePreparedToolCall(
         retryCount += 1;
         addAgentTaskMetrics(taskId, { retryCount: 1 });
         updateStep(taskId, step.id, {
+          status: 'running',
           toolCall: {
             ...step.toolCall!,
             retryCount,
@@ -477,8 +564,31 @@ export async function executePreparedToolCall(
         continue;
       }
 
-      const status = result.status === 'success' ? 'succeeded' : 'failed';
-      const persistentSummary = sanitizePersistentSummary(result.summary);
+      const persistResult = prepared.definition.resultPolicy?.storage === 'project'
+        && result.resultPolicy?.storage !== 'memory' && !result.resultPolicy?.authorize
+        && (result.resultPolicy?.source ?? prepared.definition.resultPolicy.source) === 'project-derived';
+      const authorizeResult = () => {
+        try {
+          assertAgentProjectContext(useAppStore.getState(), executionContext, { checkRevision: false });
+          const live = getTask(taskId);
+          const fresh = { ...executionContext, mode: resolveAgentExecutionMode(live, policyMode) };
+          return getAgentTool(call.toolId) === prepared.definition
+            && (!live.workbenchTarget || isWorkbenchAgentTaskInScope(useAppStore.getState(), live, call.toolId))
+            && (live.toolAllowlist === undefined || live.toolAllowlist.includes(call.toolId))
+            && prepared.definition.isAvailable?.(fresh) !== false
+            // 短写入回执可能消费一次性草稿；大结果仍需原工具授权，才允许缓存或回读。
+            && (prepared.definition.effect !== 'read' && result.modelContent.length <= AGENT_RESULT_PREVIEW_CHARS
+              || prepared.definition.authorize?.(fresh, prepared.input)?.allowed !== false)
+            && result.resultPolicy?.authorize?.() !== false;
+        } catch { return false; }
+      };
+      if (call.toolId === 'agent_result_read' && !authorizeResult()) throw new Error('结果读取授权已撤销，未交付结果');
+      const captured = call.toolId === 'agent_result_read'
+        ? { modelContent: result.modelContent, reference: undefined, truncated: result.truncated ?? false }
+        : await captureAgentResult({ scope: context, toolId: call.toolId, text: result.modelContent, navigationContextChange: changesContext,
+          policy: { ...prepared.definition.resultPolicy, ...result.resultPolicy,
+            storage: persistResult ? 'project' : 'memory', authorize: authorizeResult } });
+      if (!changesContext) assertAgentProjectContext(useAppStore.getState(), executionContext, { checkRevision: false });
       const checkpointAfter = checkpointBefore && result.status === 'success'
         ? {
             historyIndex: historyIndexAfterExecution,
@@ -495,10 +605,10 @@ export async function executePreparedToolCall(
             historyIndexAfter: checkpointAfter.historyIndex,
             revisionBefore: checkpointBefore.revision,
             revisionAfter: checkpointAfter.revision,
+            ...((context.executionContext ?? context.projectScope)?.modelGeneration
+              ? { runtimeEpoch: (context.executionContext ?? context.projectScope)?.runtimeEpoch } : {}),
           }
         : undefined;
-      const currentToolCall = getTask(taskId).steps.find((item) => item.id === step.id)?.toolCall
-        ?? step.toolCall!;
       updateStep(taskId, step.id, {
         status,
         outputSummary: persistentSummary,
@@ -511,6 +621,7 @@ export async function executePreparedToolCall(
           resultDisplay: sanitizeToolDisplay(result.display),
           errorCode: result.errorCode,
           canvasCheckpoint,
+          resultReference: captured.reference,
         },
       });
       const durationMs = Date.now() - startedAt;
@@ -540,16 +651,16 @@ export async function executePreparedToolCall(
           ...canvasCheckpoint,
         });
       }
-      const modelContentLimit = 20_000;
-      const modelContent = result.modelContent.slice(0, modelContentLimit);
+      const modelContent = captured.modelContent;
       return {
         summary: {
           callId: call.callId,
           toolId: call.toolId,
           status: result.status,
           summary: persistentSummary,
-          truncated: (result.truncated ?? false) || result.modelContent.length > modelContentLimit,
+          truncated: (result.truncated ?? false) || captured.truncated,
           sources: result.sources,
+          resultReference: captured.reference,
         },
         modelContent,
         ...preserveMcpToolContent(result, context, prepared.definition.effect),
@@ -559,6 +670,30 @@ export async function executePreparedToolCall(
           : undefined,
       };
     } catch (error) {
+      if (error instanceof AgentDurabilityError) throw error;
+      if (returnedResult && dispatch) {
+        // 工具已明确返回，交付/保存引用失败不降为unknown，也不重试原effect。
+        await settleAgentDispatch(taskId, dispatch, returnedResult.status === 'success' ? 'succeeded' : 'failed');
+        if (prepared.definition.effect === 'read' && isAgentExecutionInactive(taskId, context.signal)) {
+          assertAgentTaskActive(taskId, context.signal);
+        }
+        const errorCode = error instanceof ProjectExecutionContextError ? error.code : 'AGENT_RESULT_DELIVERY_FAILED';
+        const message = '工具已返回，执行事实保留在原任务；上下文变化或结果交付失败，已暂停且不会自动重投';
+        const liveCall = getTask(taskId).steps.find((item) => item.id === step.id)?.toolCall ?? step.toolCall!;
+        const status = returnedResult.status === 'success' ? 'succeeded' : 'failed';
+        updateStep(taskId, step.id, { status, outputSummary: sanitizePersistentSummary(returnedResult.summary),
+          errorCode, errorMessage: message, toolCall: { ...liveCall, retryCount, finishedAt: Date.now(), errorCode,
+            resultSummary: sanitizePersistentSummary(returnedResult.summary), resultDisplay: sanitizeToolDisplay(returnedResult.display) } });
+        addAgentTaskMetrics(taskId, { toolDurationMs: Date.now() - startedAt });
+        appendAgentEvent(taskId, 'tool_end', { toolId: call.toolId, callId: call.callId,
+          effect: prepared.definition.effect, status, errorCode, durationMs: Date.now() - startedAt, retryCount });
+        if (!isAgentExecutionInactive(taskId, context.signal)) useAppStore.getState().updateAgentTask(taskId, {
+          status: 'paused', pausedReason: 'result_delivery_context_changed', errorCode, errorMessage: message,
+        });
+        return { summary: { callId: call.callId, toolId: call.toolId, status: 'error', summary: message, errorCode, truncated: false },
+          modelContent: message, effectOutcome: returnedResult.status };
+      }
+      if (dispatch) await settleAgentDispatch(taskId, dispatch, prepared.definition.effect === 'read' ? 'failed' : 'unknown');
       if (isAgentExecutionInactive(taskId, context.signal)) {
         emitAgentLifecycleEvent({
           type: 'tool.execution',
@@ -571,7 +706,8 @@ export async function executePreparedToolCall(
         });
         throw new DOMException('Agent 任务已取消或不再运行', 'AbortError');
       }
-      if (prepared.definition.effect === 'read' && retryCount < maxRetries) {
+      const transient = /network|fetch failed|网络|超时|timeout|(?:HTTP|状态码)[^\d]*(?:408|429|5\d\d)/i.test(error instanceof Error ? error.message : '');
+      if (prepared.definition.effect === 'read' && transient && retryCount < maxRetries) {
         retryCount += 1;
         addAgentTaskMetrics(taskId, { retryCount: 1 });
         const retryMessage = sanitizePersistentSummary(
@@ -624,14 +760,15 @@ export async function executePreparedToolCall(
         durationMs,
         errorCode: 'AGENT_TOOL_EXCEPTION',
       });
+      if (dispatch && prepared.definition.effect !== 'read') {
+        useAppStore.getState().updateAgentTask(taskId, {
+          status: 'paused', pausedReason: 'tool_outcome_unknown', errorCode: 'TOOL_OUTCOME_UNKNOWN',
+          errorMessage: '工具已进入调用但结果未知，请先核实原操作；不会自动重投',
+        });
+        throw error;
+      }
       return {
-        summary: {
-          callId: call.callId,
-          toolId: call.toolId,
-          status: 'error',
-          summary: message,
-          truncated: false,
-        },
+        summary: { callId: call.callId, toolId: call.toolId, status: 'error', summary: message, truncated: false },
         modelContent: message,
       };
     }
@@ -765,8 +902,90 @@ export function resolveApprovalSelection(
   }
 }
 
+/** 只记录已计算的策略；模式刷新与授权仍由各执行入口负责。 */
+export function recordToolPolicyDecision(
+  taskId: string, call: ProposedToolCall, effect: AgentToolEffect, policy: AgentPolicyDecision,
+): void {
+  appendAgentEvent(taskId, 'policy_decision', {
+    toolId: call.toolId, callId: call.callId, effect, decision: policy.outcome,
+  });
+  emitAgentLifecycleEvent({ type: 'policy.decision', taskId, toolId: call.toolId, effect, outcome: policy.outcome });
+  addAgentTaskMetrics(taskId, policy.outcome === 'deny' ? { policyDenied: 1 } : {
+    policyAllowed: policy.outcome === 'allow' ? 1 : 0,
+    approvalCount: policy.outcome === 'require_approval' ? 1 : 0,
+  });
+}
+
+export function createAgentToolStep(
+  taskId: string, call: ProposedToolCall, prepared: PreparedAgentToolCall,
+  context: Omit<AgentToolContext, 'signal'>, policy: Exclude<AgentPolicyDecision, { outcome: 'deny' }>,
+  inputRequest?: AgentApprovalInputRequest,
+): AgentStep {
+  const now = Date.now();
+  const index = getTask(taskId).steps.length;
+  const id = createStepId(taskId, index);
+  return {
+    id, taskId, index,
+    kind: policy.outcome === 'require_approval' ? 'approval' : 'tool',
+    title: prepared.definition.title,
+    status: policy.outcome === 'require_approval' ? 'waiting_approval' : 'running',
+    createdAt: now,
+    updatedAt: now,
+    toolCall: {
+      callId: call.callId, toolId: call.toolId,
+      inputSummary: sanitizePersistentSummary(prepared.definition.summarizeInput
+        ? prepared.definition.summarizeInput(prepared.input) : '参数已通过本地 schema 校验').slice(0, 500),
+      inputDisplay: buildToolInputDisplay(prepared, context),
+      retryCount: 0,
+      startedAt: now,
+      effect: prepared.definition.effect,
+    },
+    ...(policy.outcome === 'require_approval' ? { approval: {
+      id: `${id}-approval`, kind: policy.approvalKind, status: 'pending' as const,
+      summary: policy.reason, requestedAt: now, inputRequest,
+    } } : {}),
+  };
+}
+
+export function updateAgentToolApprovalStep(
+  taskId: string, call: ProposedToolCall, stepId: string, approvalId: string, resolution: AgentApprovalResolution,
+  selection: ReturnType<typeof resolveApprovalSelection>, context: Omit<AgentToolContext, 'signal'>,
+): void {
+  const { prepared, error: approvalError } = selection;
+  const canExecute = resolution.approved && !approvalError;
+  appendAgentEvent(taskId, 'approval_resolved', {
+    toolId: call.toolId, callId: call.callId, approved: resolution.approved,
+  });
+  emitAgentLifecycleEvent({ type: 'approval.resolved', taskId, approvalId, approved: resolution.approved });
+  const resolvedAt = Date.now();
+  updateTaskSnapshot(taskId, (current) => ({
+    ...current,
+    steps: current.steps.map((item) => item.id === stepId ? {
+      ...item,
+      status: canExecute ? 'running' : resolution.approved ? 'failed' : 'skipped',
+      updatedAt: resolvedAt,
+      errorCode: approvalError ? 'AGENT_APPROVAL_INPUT_INVALID' : item.errorCode,
+      errorMessage: approvalError?.summary,
+      toolCall: canExecute && item.toolCall ? {
+        ...item.toolCall,
+        inputSummary: sanitizePersistentSummary(prepared.definition.summarizeInput
+          ? prepared.definition.summarizeInput(prepared.input)
+          : item.toolCall.inputSummary || '参数已通过本地 schema 校验').slice(0, 500),
+        inputDisplay: buildToolInputDisplay(prepared, context),
+      } : item.toolCall,
+      approval: item.approval ? {
+        ...item.approval,
+        status: resolution.approved ? 'approved' : 'rejected',
+        resolvedAt,
+        inputRequest: selection.inputRequest,
+      } : undefined,
+    } : item),
+  }));
+}
+
 export async function executeAgentRound({
   taskId,
+  projectScope,
   modelId,
   signal,
   messages,
@@ -778,13 +997,19 @@ export async function executeAgentRound({
 }: AgentRoundOptions): Promise<AgentRoundResult> {
   assertAgentTaskActive(taskId, signal);
   const initialTask = getTask(taskId);
+  if (initialTask.workbenchTarget && !isWorkbenchAgentTaskInScope(useAppStore.getState(), initialTask)) {
+    throw new Error('工作台目标或会话已失效，请返回所属剧集后继续');
+  }
   const contextBase = {
     taskId,
     projectId: initialTask.projectId,
     conversationId: initialTask.conversationId,
     mode: initialTask.mode,
     toolAllowlist: initialTask.toolAllowlist,
+    executionContext: initialTask.executionContext,
+    projectScope: projectScope ?? initialTask.projectScope ?? captureAgentProjectScope(useAppStore.getState(), initialTask),
   };
+  assertAgentProjectContext(useAppStore.getState(), contextBase);
 
   const task = getTask(taskId);
   // 模型流式返回和逐个工具审批都可能耗时较久，其间用户可能下调模式；
@@ -798,7 +1023,10 @@ export async function executeAgentRound({
   };
   let checkpointReplayStepIds = checkpointReplayCandidates.get(messages);
   if (!checkpointReplayStepIds) {
-    checkpointReplayStepIds = new Set((task.resumeCount ?? 0) > 0
+    const historyContext = task.executionContext ?? task.projectScope;
+    const historyProven = !!historyContext && historyContext.kind === 'canvas'
+      && isProjectExpectedContextCurrent(historyContext, useAppStore.getState(), { checkCanvasRevision: false });
+    checkpointReplayStepIds = new Set(historyProven && (task.resumeCount ?? 0) > 0
       ? task.steps.filter((step) => step.status === 'succeeded').map((step) => step.id)
       : []);
     checkpointReplayCandidates.set(messages, checkpointReplayStepIds);
@@ -836,15 +1064,18 @@ export async function executeAgentRound({
     return { outcome: 'paused', fullText, totalToolResultChars };
   }
 
-  if (task.modelRounds >= task.budget.maxModelRounds) {
+  if (isAgentTaskBudgetLimited(task) && task.modelRounds >= task.budget.maxModelRounds) {
     transitionTask(taskId, 'paused', { pausedReason: 'model_round_budget_exhausted' });
     callbacks.onError?.('已达到模型规划轮次上限，任务已暂停');
     return { outcome: 'paused', fullText, totalToolResultChars };
   }
 
   const contextSpec = resolveAssistantContextSpec(task.projectId, modelId);
-  const tools = buildAssistantFunctionTools(roundContext);
-  const toolGuidance = buildAssistantToolGuidance(tools.map((tool) => tool.function.name), roundContext.mode, contextSpec.inputBudget);
+  const supportsTools = resolveAssistantModel(task.projectId, modelId)?.supportsTools !== false;
+  const tools = supportsTools ? buildAssistantFunctionTools(roundContext) : [];
+  const toolGuidance = supportsTools
+    ? buildAssistantToolGuidance(tools.map((tool) => tool.function.name), roundContext.mode, contextSpec.inputBudget)
+    : '当前文本模型仅提供文本或图片问答，不能调用应用工具。请直接回答，不能宣称已读取文件、操作画布或执行工具；需要操作时说明此能力限制。';
   let guidanceMessage = toolGuidanceMessages.get(messages);
   if (!guidanceMessage) {
     guidanceMessage = { role: 'system', content: toolGuidance };
@@ -871,10 +1102,14 @@ export async function executeAgentRound({
   }));
 
   const proposedCalls: ProposedToolCall[] = [];
+  let responsesOutput: Array<Record<string, unknown>> = [];
   let roundText = '';
   const completion: { reason: FinishReason } = { reason: 'stop' };
   let streamError: string | undefined;
+  let streamErrorCode: string | undefined;
   const modelStartedAt = Date.now();
+  let modelDispatch: AgentDispatchRecord | undefined;
+  let modelReturned = false;
   let roundInputTokens = 0;
   let roundOutputTokens = 0;
   appendAgentEvent(taskId, 'model_round_start');
@@ -885,6 +1120,15 @@ export async function executeAgentRound({
     round: task.modelRounds + 1,
   });
   try {
+    modelDispatch = await beginAgentDispatch({ taskId, kind: 'model', signal,
+      revalidate: () => {
+        assertAgentTaskActive(taskId, signal);
+        assertAgentProjectContext(useAppStore.getState(), contextBase);
+        const live = getTask(taskId);
+        if (live.workbenchTarget && !isWorkbenchAgentTaskInScope(useAppStore.getState(), live)) {
+          throw new Error('保存执行记录期间工作台目标或会话已失效，未调用模型');
+        }
+      } });
     await streamAssistantReply({
       systemPrompt: '',
       userMessage: '',
@@ -892,6 +1136,8 @@ export async function executeAgentRound({
       projectId: task.projectId,
       modelId,
       tools,
+      sensitive: !!task.workbenchTarget,
+      resolveVisualReferences: !task.workbenchTarget && !(task.parentTaskId && isGeneralAssistantScope(task.projectId)),
       signal,
       onEvent: (event: AssistantStreamEvent) => {
         if (event.type === 'text.delta') {
@@ -900,12 +1146,16 @@ export async function executeAgentRound({
           callbacks.onTextDelta?.(event.delta);
         } else if (event.type === 'reasoning.delta') {
           callbacks.onReasoningDelta?.(event.delta);
+        } else if (event.type === 'responses.context') {
+          responsesOutput = event.output;
         } else if (event.type === 'tool.call.final') {
+          if (!supportsTools) throw new Error('当前文本模型未开放工具调用，未执行其工具提案');
           proposedCalls.push(event.call);
         } else if (event.type === 'done') {
           completion.reason = event.finishReason;
         } else if (event.type === 'error') {
           streamError = event.message;
+          streamErrorCode = event.code;
           callbacks.onError?.(event.message);
         } else if (event.type === 'usage') {
           roundInputTokens += event.inputTokens ?? 0;
@@ -913,6 +1163,7 @@ export async function executeAgentRound({
         }
       },
     });
+    modelReturned = true;
   } finally {
     const durationMs = Date.now() - modelStartedAt;
     addAgentTaskMetrics(taskId, {
@@ -934,11 +1185,19 @@ export async function executeAgentRound({
       outputTokens: roundOutputTokens,
       durationMs,
     });
+    if (modelDispatch) await settleAgentDispatch(taskId, modelDispatch,
+      !modelReturned || completion.reason === 'canceled' ? 'unknown'
+        : streamError || completion.reason === 'error' ? 'failed' : 'succeeded');
   }
 
   assertAgentTaskActive(taskId, signal);
+  const completedRoundTask = getTask(taskId);
+  assertAgentProjectContext(useAppStore.getState(), contextBase, { checkRevision: false });
+  if (completedRoundTask.workbenchTarget && !isWorkbenchAgentTaskInScope(useAppStore.getState(), completedRoundTask)) {
+    throw new Error('模型响应期间工作台目标或会话已失效，未继续处理结果');
+  }
   if (completion.reason === 'canceled') throw new DOMException('模型请求已取消', 'AbortError');
-  if (streamError || completion.reason === 'error') throw new Error(streamError || '模型请求失败');
+  if (streamError || completion.reason === 'error') throw Object.assign(new Error(streamError || '模型请求失败'), { code: streamErrorCode });
   if (completion.reason === 'length') {
     // 截断时即使参数碰巧能解析，也不能认为整轮工具提案已经完整。
     transitionTask(taskId, 'paused', {
@@ -962,7 +1221,8 @@ export async function executeAgentRound({
   }
 
   const currentTask = getTask(taskId);
-  if (currentTask.toolCallCount + proposedCalls.length > currentTask.budget.maxToolCalls) {
+  if (isAgentTaskBudgetLimited(currentTask)
+    && currentTask.toolCallCount + proposedCalls.length > currentTask.budget.maxToolCalls) {
     transitionTask(taskId, 'paused', { pausedReason: 'tool_call_budget_exhausted' });
     callbacks.onError?.('已达到工具调用上限，任务已暂停');
     return { outcome: 'paused', fullText, totalToolResultChars };
@@ -975,6 +1235,7 @@ export async function executeAgentRound({
   messages.push({
     role: 'assistant',
     content: roundText,
+    ...(responsesOutput.length ? { [RESPONSES_OUTPUT]: responsesOutput } : {}),
     tool_calls: proposedCalls.map((call) => ({
       id: call.callId,
       type: 'function',
@@ -1026,21 +1287,8 @@ export async function executeAgentRound({
       prepared.input,
       roundContext,
     );
-    appendAgentEvent(taskId, 'policy_decision', {
-      toolId: call.toolId,
-      callId: call.callId,
-      effect: prepared.definition.effect,
-      decision: policy.outcome === 'require_approval' ? 'require_approval' : policy.outcome,
-    });
-    emitAgentLifecycleEvent({
-      type: 'policy.decision',
-      taskId,
-      toolId: call.toolId,
-      effect: prepared.definition.effect,
-      outcome: policy.outcome,
-    });
+    recordToolPolicyDecision(taskId, call, prepared.definition.effect, policy);
     if (policy.outcome === 'deny') {
-      addAgentTaskMetrics(taskId, { policyDenied: 1 });
       const denied: ToolResultSummary = {
         callId: call.callId,
         toolId: call.toolId,
@@ -1052,52 +1300,8 @@ export async function executeAgentRound({
       callbacks.onToolResult?.(denied);
       continue;
     }
-    addAgentTaskMetrics(taskId, {
-      policyAllowed: policy.outcome === 'allow' ? 1 : 0,
-      approvalCount: policy.outcome === 'require_approval' ? 1 : 0,
-    });
-
-    const now = Date.now();
-    const stepIndex = getTask(taskId).steps.length;
-    const stepId = createStepId(taskId, stepIndex);
-    const step: AgentStep = {
-      id: stepId,
-      taskId,
-      index: stepIndex,
-      kind: policy.outcome === 'require_approval' ? 'approval' : 'tool',
-      title: prepared.definition.title,
-      status: policy.outcome === 'require_approval' ? 'waiting_approval' : 'running',
-      createdAt: now,
-      updatedAt: now,
-      toolCall: {
-        callId: call.callId,
-        toolId: call.toolId,
-        inputSummary: sanitizePersistentSummary(
-          prepared.definition.summarizeInput
-            ? prepared.definition.summarizeInput(
-                prepared.input,
-              )
-            : '参数已通过本地 schema 校验',
-        ).slice(0, 500),
-        inputDisplay: buildToolInputDisplay(prepared, roundContext),
-        retryCount: 0,
-        startedAt: now,
-        effect: prepared.definition.effect,
-        inputFingerprint: fingerprintToolInput(call.toolId, prepared.input),
-      },
-      ...(policy.outcome === 'require_approval'
-        ? {
-            approval: {
-              id: `${stepId}-approval`,
-              kind: policy.approvalKind,
-              status: 'pending' as const,
-              summary: policy.reason,
-              requestedAt: now,
-              inputRequest: approvalInput.inputRequest,
-            },
-          }
-        : {}),
-    };
+    const step = createAgentToolStep(taskId, call, prepared, roundContext, policy, approvalInput.inputRequest);
+    step.toolCall!.inputFingerprint = fingerprintToolInput(call.toolId, prepared.input);
     appendStep(taskId, step);
 
     if (policy.outcome === 'require_approval') {
@@ -1111,50 +1315,7 @@ export async function executeAgentRound({
       const approvalError = selection.error;
       resolvedCall = selection.call;
       prepared = selection.prepared;
-      const canExecute = resolution.approved && !approvalError;
-      appendAgentEvent(taskId, 'approval_resolved', {
-        toolId: call.toolId,
-        callId: call.callId,
-        approved: resolution.approved,
-      });
-      emitAgentLifecycleEvent({
-        type: 'approval.resolved',
-        taskId,
-        approvalId,
-        approved: resolution.approved,
-      });
-      const resolvedAt = Date.now();
-      updateTaskSnapshot(taskId, (current) => ({
-        ...current,
-        steps: current.steps.map((item) => item.id === step.id
-          ? {
-              ...item,
-              status: canExecute ? 'running' : resolution.approved ? 'failed' : 'skipped',
-              updatedAt: resolvedAt,
-              errorCode: approvalError ? 'AGENT_APPROVAL_INPUT_INVALID' : item.errorCode,
-              errorMessage: approvalError?.summary,
-              toolCall: canExecute && item.toolCall
-                ? {
-                    ...item.toolCall,
-                    inputSummary: sanitizePersistentSummary(
-                      prepared.definition.summarizeInput
-                        ? prepared.definition.summarizeInput(prepared.input)
-                        : item.toolCall.inputSummary || '参数已通过本地 schema 校验',
-                    ).slice(0, 500),
-                    inputDisplay: buildToolInputDisplay(prepared, roundContext),
-                  }
-                : item.toolCall,
-              approval: item.approval
-                ? {
-                    ...item.approval,
-                    status: resolution.approved ? 'approved' : 'rejected',
-                    resolvedAt,
-                    inputRequest: selection.inputRequest,
-                  }
-                : undefined,
-            }
-          : item),
-      }));
+      updateAgentToolApprovalStep(taskId, call, step.id, approvalId, resolution, selection, roundContext);
       if (!resolution.approved) {
         const denied: ToolResultSummary = {
           callId: call.callId,
@@ -1243,16 +1404,15 @@ export async function executeAgentRound({
   }
 
   assertAgentTaskActive(taskId, signal);
+  // 每轮结果有界并为每个已执行调用保留回执；跨轮累计量仅作统计，不再耗尽后暂停。
+  const maxResultChars = Math.min(AGENT_RESULT_PAGE_CHARS, Math.floor(200_000 / Math.max(1, results.size)));
   for (const call of proposedCalls) {
     const result = results.get(call.callId);
     if (!result) continue;
-    const remainingToolResultChars = 200_000 - totalToolResultChars;
-    if (remainingToolResultChars <= 0) {
-      transitionTask(taskId, 'paused', { pausedReason: 'tool_result_budget_exhausted' });
-      callbacks.onError?.('工具结果上下文已达到 200 KB 上限，任务已暂停');
-      return { outcome: 'paused', fullText, totalToolResultChars };
-    }
-    const modelContent = result.modelContent.slice(0, remainingToolResultChars);
+    // 结果回读已在原服务按页和任务限制；保留完整 JSON，不能截断正文后仍返回跳过内容的 nextOffset。
+    const modelContent = call.toolId === 'agent_result_read'
+      ? result.modelContent
+      : result.modelContent.slice(0, maxResultChars);
     totalToolResultChars += modelContent.length;
     messages.push({
       role: 'tool',
@@ -1261,6 +1421,7 @@ export async function executeAgentRound({
         status: result.summary.status,
         summary: result.summary.summary,
         result: modelContent,
+        ...(result.summary.resultReference ? { resultId: result.summary.resultReference.id } : {}),
         truncated: result.summary.truncated || modelContent.length < result.modelContent.length,
       }),
     });

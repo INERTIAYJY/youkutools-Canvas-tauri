@@ -3,12 +3,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentTask } from '../../../src/types/agent';
+import { captureLegacyCanvasContext } from '../../../src/services/projectExecutionContext';
 
 const streamAssistantReplyMock = vi.hoisted(() => vi.fn());
 const assembleAgentContextMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/services/ai/assistantStream', () => ({
   streamAssistantReply: streamAssistantReplyMock,
+  resolveAssistantModel: () => ({ supportsTools: true }),
 }));
 
 vi.mock('../../../src/services/chat/contextManager', () => ({
@@ -76,6 +78,8 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-1',
+    projectLoadStatus: 'ready',
+    projects: [{ id: 'project-1', name: '项目', createdAt: 1, updatedAt: 1 }],
     activeConversationId: 'conversation-1',
     conversations: [{
       id: 'conversation-1', projectId: 'project-1', title: 'Diagnostics', titleSource: 'auto',
@@ -118,6 +122,7 @@ function arrangeStream() {
 function restoreCheckpointTask() {
   const restoredTask = createTask(true);
   restoredTask.resumeCount = 1;
+  restoredTask.projectScope = captureLegacyCanvasContext(useAppStore.getState())!;
   restoredTask.steps[0].toolCall!.canvasCheckpoint = {
     historyIndexBefore: 0, historyIndexAfter: 1, revisionBefore: 0, revisionAfter: 1,
   };
@@ -126,6 +131,16 @@ function restoreCheckpointTask() {
 }
 
 describe('agent runtime diagnostics', () => {
+  it('P4 无scope旧任务在异步材料读取期间换epoch后不重新绑定或调用模型', async () => {
+    assembleAgentContextMock.mockImplementationOnce(async () => {
+      useAppStore.setState((state) => ({ projects: state.projects.map((item) => ({ ...item, exchangeEpoch: 9 })) }));
+      return { messages: [{ role: 'user', content: '旧材料' }], usage: {} };
+    });
+    await expect(runAgentLoop({ taskId: 'task-diagnostics', systemPrompt: 'system', userMessage: '原请求', signal: new AbortController().signal }))
+      .rejects.toThrow('上下文');
+    expect(streamAssistantReplyMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({ modelRounds: 0, toolCallCount: 0 });
+  });
   it('applies requirements added during a tool-free response before completing', async () => {
     const requests: Array<Array<{ role: string; content: string }>> = [];
     streamAssistantReplyMock.mockImplementation(async ({ onEvent, messages }) => {
@@ -152,20 +167,28 @@ describe('agent runtime diagnostics', () => {
     expect(enqueueAgentInterjection('task-diagnostics', '任务已结束')).toBeNull();
   });
 
-  it('still pauses at the round budget when a late requirement needs another response', async () => {
-    useAppStore.getState().updateAgentTask('task-diagnostics', { budget: { ...createTask().budget, maxModelRounds: 1 } });
+  it.each([false, true])('handles a late requirement beyond the old round budget (bounded %s)', async (bounded) => {
+    useAppStore.getState().updateAgentTask('task-diagnostics', {
+      ...(bounded ? { parentTaskId: 'parent-1' } : {}),
+      budget: { ...createTask().budget, maxModelRounds: 1 },
+    });
     streamAssistantReplyMock.mockImplementation(async ({ onEvent }) => {
-      onEvent({ type: 'text.delta', delta: '首轮回复' });
-      enqueueAgentInterjection('task-diagnostics', '补充要求');
+      const firstRound = streamAssistantReplyMock.mock.calls.length === 1;
+      onEvent({ type: 'text.delta', delta: firstRound ? '首轮回复' : '已按补充要求完成' });
+      if (firstRound) enqueueAgentInterjection('task-diagnostics', '补充要求');
     });
     const onComplete = vi.fn();
     expect(await runAgentLoop({
       taskId: 'task-diagnostics', systemPrompt: 'system', userMessage: 'update canvas',
       signal: new AbortController().signal, callbacks: { onComplete },
-    })).toBe('paused');
-    expect(streamAssistantReplyMock).toHaveBeenCalledTimes(1);
-    expect(onComplete).not.toHaveBeenCalled();
-    expect(useAppStore.getState().agentTasks[0].pausedReason).toBe('model_round_budget_exhausted');
+    })).toBe(bounded ? 'paused' : 'completed');
+    expect(streamAssistantReplyMock).toHaveBeenCalledTimes(bounded ? 1 : 2);
+    if (bounded) {
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(useAppStore.getState().agentTasks[0].pausedReason).toBe('model_round_budget_exhausted');
+    } else {
+      expect(onComplete).toHaveBeenCalledExactlyOnceWith('首轮回复\n\n已按补充要求完成');
+    }
   });
 
   it('refreshes mode and available tool instructions each round without accumulating system messages', async () => {
@@ -203,7 +226,7 @@ describe('agent runtime diagnostics', () => {
     const snapshot = await readWebSession(options, load);
     const catalog = createProviderModelCatalog(options.scope, [{ id: 'm', name: 'M', category: 'text' }]);
     streamAssistantReplyMock.mockResolvedValue(undefined);
-    if (outcome === 'paused') useAppStore.setState({ agentTasks: [{ ...task, budget: { ...task.budget, maxModelRounds: 0 } }] });
+    if (outcome === 'paused') useAppStore.setState({ agentTasks: [{ ...task, parentTaskId: 'parent-1', budget: { ...task.budget, maxModelRounds: 0 } }] });
     const controller = new AbortController();
     if (outcome === 'aborted') controller.abort();
     if (outcome === 'context_error') assembleAgentContextMock.mockRejectedValue(new Error('context failed'));

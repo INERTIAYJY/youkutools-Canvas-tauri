@@ -19,6 +19,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
   mkdir: vi.fn(),
   readDir: vi.fn(),
   readFile: mocks.readFile,
+  remove: vi.fn(),
   rename: vi.fn(),
   stat: vi.fn(),
   writeFile: mocks.writeFile,
@@ -46,7 +47,8 @@ vi.mock('../../src/services/fs/core', () => ({
   stripVerbatimPrefix: (p: string) => p,
 }));
 
-import { saveNodeOutputToFile, type NodeOutputDownloadProgress } from '../../src/services/fileService';
+import { saveNodeOutputToFile, saveBinaryToLocalFile, saveBinaryToProjectData, type NodeOutputDownloadProgress } from '../../src/services/fileService';
+import { ensureProjectDataDir, resolveUniqueDestPath } from '../../src/services/fs/core';
 import { githubMirrorUrl } from '../../src/services/githubDownloadService';
 
 /** mac 的 asset URL 形如 asset://localhost/<encoded path>；Windows 是 http://asset.localhost/… */
@@ -81,6 +83,22 @@ describe('saveNodeOutputToFile', () => {
     }));
     expect(onProgress).toHaveBeenCalledWith({ transferredBytes: 0, totalBytes: null, phase: 'saving' });
     expect(onProgress).toHaveBeenLastCalledWith({ transferredBytes: 900_000_000, totalBytes: 900_000_000, phase: 'saving' });
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['gif', 'svg'])('keeps a generated %s original and its suffix in the save dialog', async (extension) => {
+    const source = `/project/原件.${extension}`, destination = `/Users/me/Desktop/原件.${extension}`;
+    mocks.save.mockResolvedValue(destination);
+    mocks.exists.mockImplementation(async (path: string) => path === source);
+    mocks.invoke.mockResolvedValue({ path: destination, totalBytes: 43, contentType: null });
+    await expect(saveNodeOutputToFile({ filePath: source, fileName: '原件', nodeType: 'ai-image' })).resolves.toBe(destination);
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({
+      defaultPath: `原件.${extension}`,
+      filters: expect.arrayContaining([expect.objectContaining({ extensions: expect.arrayContaining(['gif', 'svg']) })]),
+    }));
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith('copy_file_streamed', expect.objectContaining({ sourcePath: source, destinationPath: destination }));
     expect(mocks.readFile).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
@@ -461,6 +479,23 @@ describe('saveNodeOutputToFile', () => {
       nodeType: 'ai-audio',
     })).resolves.toBeNull();
     expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a stale local export after the save dialog without writing bytes', async () => {
+    let current = true;
+    mocks.save.mockImplementationOnce(async () => { current = false; return '/selected/stale.mp4'; });
+    await expect(saveBinaryToLocalFile(new Uint8Array([1]), 'out.mp4', undefined,
+      { assertCurrent: () => { if (!current) throw new Error('剪辑窗口已撤销'); } })).rejects.toThrow('撤销');
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('checks the original scope after allocating the project path and before physical output', async () => {
+    let current = true;
+    vi.mocked(ensureProjectDataDir).mockResolvedValueOnce('/project');
+    vi.mocked(resolveUniqueDestPath).mockImplementationOnce(async () => { current = false; return '/project/stale.mp4'; });
+    await expect(saveBinaryToProjectData(new Uint8Array([1]), 'project', 'out.mp4',
+      { assertCurrent: () => { if (!current) throw new Error('原项目代际已变化'); } })).rejects.toThrow('代际');
     expect(mocks.writeFile).not.toHaveBeenCalled();
   });
 });

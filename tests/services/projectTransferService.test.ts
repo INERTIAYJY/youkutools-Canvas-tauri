@@ -2,6 +2,10 @@
  * projectTransferService — 回归测试：projectTransferService。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
+import type { ProjectImportCommit } from '../../src/services/indexedDb/projectImportRepository';
+import type { LegacyArchiveExportOperation } from '../../src/services/indexedDb/projectArchiveOperationRepository';
+import { registerEpisodeEditorSession, settleEpisodeEditorSessions } from '../../src/services/episodeEditorSessionService';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -20,22 +24,52 @@ const mocks = vi.hoisted(() => ({
   ensureProjectDataDir: vi.fn(),
   renameProjectDataDir: vi.fn(),
   registerProjectFolder: vi.fn(),
+  registerProjectFolders: vi.fn(),
   deleteProjectDataDir: vi.fn(),
   notifyProjectDiskChanged: vi.fn(),
   getBaseDir: vi.fn(async () => '/data'),
+  getDefaultBaseDir: vi.fn(),
+  mkdir: vi.fn(),
   remove: vi.fn(async () => undefined),
+  exists: vi.fn(),
+  getProjectDataDir: vi.fn(),
   serializeEntries: vi.fn(),
+  legacyWriteGuard: vi.fn(),
+  captureArchive: vi.fn(),
+  assertCaptureCurrent: vi.fn(),
+  commitImport: vi.fn(),
+  beginImport: vi.fn(),
+  advanceImport: vi.fn(),
+  readImport: vi.fn(),
+  prepareExport: vi.fn(),
+  advanceExport: vi.fn(),
+  readExport: vi.fn(),
+  saveCheckpoint: vi.fn(),
+  savePrepared: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: mocks.getVersion }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open, save: mocks.save }));
-vi.mock('@tauri-apps/plugin-fs', () => ({ remove: mocks.remove }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ mkdir: mocks.mkdir, remove: mocks.remove, exists: mocks.exists }));
 vi.mock('../../src/services/projectArchiveSerialization', () => ({ serializeProjectArchiveEntries: mocks.serializeEntries }));
+vi.mock('../../src/services/indexedDb/legacyProjectWriteGuard', () => ({ assertLegacyProjectWritesAllowed: mocks.legacyWriteGuard }));
+vi.mock('../../src/services/indexedDb/schema', () => ({ openDB: async () => ({}) }));
+vi.mock('../../src/services/indexedDb/projectArchiveRepository', () => ({ captureLegacyProjectArchive: mocks.captureArchive,
+  assertLegacyProjectArchiveCurrent: mocks.assertCaptureCurrent }));
+vi.mock('../../src/services/indexedDb/projectArchiveOperationRepository', () => ({
+  prepareLegacyArchiveExport: mocks.prepareExport, advanceLegacyArchiveExport: mocks.advanceExport, readLegacyArchiveExport: mocks.readExport,
+}));
+vi.mock('../../src/services/indexedDb/projectImportRepository', () => ({
+  beginProjectImportOperation: mocks.beginImport, advanceProjectImportOperation: mocks.advanceImport,
+  commitProjectImport: mocks.commitImport, readProjectImportOperation: mocks.readImport,
+  savePreparedProjectImportOperation: mocks.savePrepared,
+}));
 // 本文件保留旧包恢复/目录回滚的回归；v3 内核与事务在各自的专用用例覆盖。
 vi.mock('../../src/services/indexedDb/projectExchangeRepository', () => ({
   loadProjectExchangeState: async () => ({ headRevisionId: 'export-head', lineageId: 'export-lineage', rootProjectId: 'export-root', identities: [] }),
   loadProjectExchangeGraph: async () => ({ revisions: [{ revisionId: 'export-head', snapshot: { lineageId: 'export-lineage', rootProjectId: 'export-root', entities: [] } }], ancestors: [] }),
+  saveProjectExchangeCheckpoint: mocks.saveCheckpoint,
 }));
 vi.mock('../../src/services/projectExchangeDomain', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/services/projectExchangeDomain')>(),
@@ -46,7 +80,11 @@ vi.mock('../../src/services/projectArchiveValidation', async (importOriginal) =>
   selectArchiveAssets: () => [],
 }));
 vi.mock('../../src/services/projectImportService', () => ({
-  prepareExchangeExport: async () => ({ headRevisionId: 'export-head', revisions: [{ revisionId: 'export-head', snapshot: {} }] }),
+  prepareExchangeExportMaterial: async (records: Array<{ id: string }>) => ({
+    bundle: { headRevisionId: 'export-head', revisions: [{ revisionId: 'export-head', snapshot: {} }] },
+    checkpoint: { expectedState: null, state: { ownerId: records[0].id, headRevisionId: 'export-head',
+      lineageId: 'export-lineage', rootProjectId: 'export-root', stateVersion: 1, identities: [] }, revisions: [], ancestors: [] },
+  }),
   readProjectArchiveContents: async () => undefined,
   prepareProjectImport: async () => {
     if (!mocks.isTauriEnv()) throw new Error('项目导入仅在桌面版可用');
@@ -67,11 +105,14 @@ vi.mock('../../src/services/indexedDbService', () => ({
 vi.mock('../../src/services/fileService', () => ({
   isTauriEnv: mocks.isTauriEnv,
   ensureProjectDataDir: mocks.ensureProjectDataDir,
+  getProjectDataDir: mocks.getProjectDataDir,
   renameProjectDataDir: mocks.renameProjectDataDir,
   registerProjectFolder: mocks.registerProjectFolder,
+  registerProjectFolders: mocks.registerProjectFolders,
   deleteProjectDataDir: mocks.deleteProjectDataDir,
   notifyProjectDiskChanged: mocks.notifyProjectDiskChanged,
   getBaseDir: mocks.getBaseDir,
+  getDefaultBaseDir: mocks.getDefaultBaseDir,
   saveProject: mocks.saveProject,
   joinPath: (...parts: string[]) => parts.join('/'),
   buildProjectFolderName: (name: string, id: string) => `${name}-${id.slice(0, 8)}`,
@@ -127,6 +168,14 @@ const EPISODE_RECORD = {
 };
 
 const EMPTY_CHAT = { conversations: [], messages: [], memories: [] };
+function mockNativePublication(counts: { assetCount: number; assetBytes: number; archiveBytes: number }) {
+  mocks.invoke.mockImplementation(async (command: string, args: { operationId?: string }) => {
+    if (command === 'inspect_project_archive_assets') return [];
+    if (command === 'pack_project_archive') return { ...counts, operationId: args.operationId,
+      publicationRef: 'native-publication', archiveSha256: 'a'.repeat(64) };
+    throw new Error(`Unexpected native command: ${command}`);
+  });
+}
 
 function archiveTexts(overrides: Record<string, unknown> = {}) {
   return {
@@ -156,19 +205,54 @@ function archiveTexts(overrides: Record<string, unknown> = {}) {
 /** 原生边界只模拟打包/解包，记录使用真实导出文本往返。 */
 function mockArchiveRoundTrip(assetPaths: string[] = []) {
   let texts: Record<string, string> = {};
-  mocks.invoke.mockImplementation(async (command: string, args: { entries?: { path: string; content: string }[] }) => {
+  mocks.invoke.mockImplementation(async (command: string, args: { entries?: { path: string; content: string }[]; operationId?: string }) => {
+    if (command === 'inspect_project_archive_assets') return [];
     if (command === 'pack_project_archive') {
       texts = Object.fromEntries(args.entries!.map((entry) => [entry.path, entry.content]));
-      return { assetCount: assetPaths.length, assetBytes: 12, archiveBytes: 8 };
+      return { assetCount: assetPaths.length, assetBytes: 12, archiveBytes: 8,
+        operationId: args.operationId, publicationRef: 'native-publication', archiveSha256: 'a'.repeat(64) };
     }
     return { texts, assetPaths, assetBytes: 12 };
   });
 }
 
 describe('projectTransferService', () => {
+  it.each([false, true])('恢复分集 TXT 引用并统计缺失的稿件文件（文件存在=%s）', async (present) => {
+    const reference = { fileName: '不可信展示名.txt', relativePath: 'manuscripts/第一集.txt', digest: 'a'.repeat(64), sourceName: '第一集.txt',
+      filePath: 'C:/private/第一集.txt', token: 'fixture-private' };
+    mocks.invoke.mockResolvedValue({ texts: archiveTexts({ project: SERIES_RECORD, chat: EMPTY_CHAT,
+      manifest: { formatVersion: 2 }, episodes: [{ project: { ...EPISODE_RECORD, nodes: [], edges: [], groups: [], episodeScriptFile: reference }, chat: EMPTY_CHAT }] }),
+      assetPaths: present ? ['manuscripts/第一集.txt'] : [], assetBytes: present ? 6 : 0 });
+
+    const result = await restoreProjectArchive('/incoming/manuscripts.aicanvas');
+
+    expect(result.missingAssetCount).toBe(present ? 0 : 1);
+    const saved = mocks.saveProject.mock.calls[1][0];
+    expect(saved.episodeScript).toBe(EPISODE_RECORD.episodeScript);
+    expect(saved.episodeScriptFile).toEqual({ fileName: '第一集.txt', relativePath: 'manuscripts/第一集.txt', digest: 'a'.repeat(64), sourceName: '第一集.txt' });
+    expect(result.episodes[0].episodeScriptFile).toEqual(saved.episodeScriptFile);
+    expect(JSON.stringify(saved.episodeScriptFile)).not.toContain('fixture-private');
+  });
+
+  it('旧包故事图的出处随分集新身份迁移，不指回原项目', async () => {
+    const graph = createEmptyStoryGraph('graph');
+    graph.nodes.push({ id: 'event', kind: 'event', label: '关键点', description: '', aliases: [],
+      episodeIds: [EPISODE_RECORD.id], evidence: [], origin: 'manual', certainty: 'explicit' });
+    mocks.invoke.mockResolvedValue({ texts: archiveTexts({
+      project: { ...SERIES_RECORD, series: { ...SERIES_RECORD.series, storyGraph: graph } },
+      manifest: { formatVersion: 2 }, chat: EMPTY_CHAT, episodes: [{ project: EPISODE_RECORD, chat: EMPTY_CHAT }],
+    }), assetPaths: [], assetBytes: 0 });
+    const result = await restoreProjectArchive('/incoming/story.aicanvas');
+    const [root, episode] = mocks.saveProject.mock.calls.map(([record]) => record);
+    expect(root.series.storyGraph.nodes[0].episodeIds).toEqual([episode.id]);
+    expect(root.series.storyGraph.revision).toBe(1);
+    expect(episode.id).not.toBe(EPISODE_RECORD.id);
+    expect(result.series?.storyGraph).toEqual(root.series.storyGraph);
+  });
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset());
     mocks.isTauriEnv.mockReturnValue(true);
+    mocks.legacyWriteGuard.mockResolvedValue(undefined);
     mocks.getVersion.mockResolvedValue('0.6.13');
     mocks.getAllProjects.mockResolvedValue([{ id: PROJECT_RECORD.id, name: PROJECT_RECORD.name,
       createdAt: PROJECT_RECORD.createdAt, updatedAt: PROJECT_RECORD.updatedAt }]);
@@ -191,7 +275,58 @@ describe('projectTransferService', () => {
     mocks.putChatMessage.mockResolvedValue(undefined);
     mocks.putProjectMemory.mockResolvedValue(undefined);
     mocks.getBaseDir.mockResolvedValue('/data');
+    mocks.getDefaultBaseDir.mockResolvedValue('/app-owned/data');
+    mocks.mkdir.mockResolvedValue(undefined);
     mocks.remove.mockResolvedValue(undefined);
+    mocks.exists.mockResolvedValue(false);
+    mocks.getProjectDataDir.mockResolvedValue('/data/导入中-abc');
+    mocks.captureArchive.mockImplementation(async (requestedId: string) => {
+      const summaries = await mocks.getAllProjects();
+      const requested = summaries.find((record: { id: string }) => record.id === requestedId);
+      const ownerId = requested?.parentId ?? requestedId;
+      const owner = await mocks.getProjectById(ownerId);
+      if (!owner) throw new Error('项目记录不可读取');
+      const children = summaries.filter((record: { parentId?: string }) => record.parentId === ownerId)
+        .sort((left: { episodeNo?: number }, right: { episodeNo?: number }) => (left.episodeNo ?? 0) - (right.episodeNo ?? 0));
+      const records = [owner];
+      for (const summary of children) {
+        const child = await mocks.getProjectById(summary.id);
+        if (!child) throw new Error('分集记录不可读取');
+        records.push(child);
+      }
+      const chat = [];
+      for (const record of records) chat.push(readArchiveChat(await mocks.getProjectChatForExport(record.id, 100_000)));
+      return { records, chat, state: { headRevisionId: 'export-head', lineageId: 'export-lineage', rootProjectId: 'export-root', identities: [] },
+        graph: [{ revisionId: 'export-head', snapshot: { lineageId: 'export-lineage', rootProjectId: 'export-root', entities: [] } }] };
+    });
+    const imports = new Map<string, { phase: string; prepared?: unknown }>();
+    mocks.beginImport.mockImplementation(async (id: string) => { imports.set(id, { phase: 'prepared' }); });
+    mocks.advanceImport.mockImplementation(async (id: string, phase: string) => { imports.set(id, { ...imports.get(id), phase }); });
+    mocks.savePrepared.mockImplementation(async (id: string, prepared: unknown) => { imports.set(id, { phase: imports.get(id)!.phase, prepared }); });
+    mocks.readImport.mockImplementation(async (id: string) => imports.get(id) ?? null);
+    // 只有整事务成功后投影这些观察 spy；它们不模拟逐条持久化或逐条回滚。
+    mocks.commitImport.mockImplementation(async (input: ProjectImportCommit) => {
+      imports.set(input.operationId, { phase: 'db_committed' });
+      for (const record of input.records) await mocks.saveProject(record);
+      for (const row of input.history) {
+        const observe = row.store === 'chatConversations' ? mocks.putChatConversation
+          : row.store === 'chatMessages' ? mocks.putChatMessage : mocks.putProjectMemory;
+        await observe(row.value);
+      }
+    });
+    const exports = new Map<string, LegacyArchiveExportOperation>();
+    mocks.prepareExport.mockImplementation(async (operationId: string, checkpoint: LegacyArchiveExportOperation['checkpoint']) => {
+      const operation: LegacyArchiveExportOperation = { id: `project-export-operation:${operationId}`, operationId,
+        ownerId: checkpoint.state.ownerId, checkpoint, phase: 'prepared', sequence: 1, createdAt: 1, updatedAt: 1 };
+      exports.set(operationId, operation); return operation;
+    });
+    mocks.advanceExport.mockImplementation(async (id: string, expected: number, phase: LegacyArchiveExportOperation['phase'],
+      receipt?: { publicationRef: string; archiveSha256: string }) => {
+      const current = exports.get(id)!;
+      if (current.sequence !== expected) throw new Error('归档阶段冲突');
+      const next = { ...current, ...receipt, phase, sequence: expected + 1 }; exports.set(id, next); return next;
+    });
+    mocks.readExport.mockImplementation(async (id: string) => exports.get(id) ?? null);
   });
 
   it('rejects a legacy archive replaced after preview without saving any project', async () => {
@@ -218,11 +353,14 @@ describe('projectTransferService', () => {
     });
     mocks.ensureProjectDataDir.mockResolvedValue('/data/分镜项目-source12');
     mocks.save.mockResolvedValue('/out/分镜项目.aicanvas');
-    mocks.invoke.mockResolvedValue({ assetCount: 3, assetBytes: 10, archiveBytes: 8 });
+    mockNativePublication({ assetCount: 3, assetBytes: 10, archiveBytes: 8 });
 
     const result = await exportProjectArchive('source-project');
 
-    expect(result).toEqual({ filePath: '/out/分镜项目.aicanvas', assetCount: 3, archiveBytes: 8, episodeCount: 0 });
+    expect(result).toEqual({ filePath: '/out/分镜项目.aicanvas', assetCount: 3, archiveBytes: 8, episodeCount: 0, operationId: expect.any(String) });
+    expect(mocks.captureArchive).toHaveBeenCalledExactlyOnceWith(PROJECT_RECORD.id);
+    expect(mocks.saveCheckpoint).toHaveBeenCalledOnce();
+    expect(mocks.advanceExport.mock.calls.map((call) => call[2])).toEqual(['packing', 'published', 'registered']);
     expect(mocks.getProjectChatForExport).toHaveBeenCalledExactlyOnceWith(PROJECT_RECORD.id, 100_000);
     const [command, args] = mocks.invoke.mock.calls.find(([name]) => name === 'pack_project_archive')!;
     expect(command).toBe('pack_project_archive');
@@ -250,6 +388,19 @@ describe('projectTransferService', () => {
     expect(mocks.getProjectById).not.toHaveBeenCalled();
     expect(mocks.serializeEntries).not.toHaveBeenCalled();
     expect(mocks.getProjectChatForExport).not.toHaveBeenCalled();
+    expect(mocks.captureArchive).not.toHaveBeenCalled();
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it('原生发布缺少原操作回执时不提前推进协作版本', async () => {
+    mocks.getProjectById.mockResolvedValue(PROJECT_RECORD);
+    mocks.save.mockResolvedValue('/out/unconfirmed.aicanvas');
+    mocks.invoke.mockImplementation(async (command: string) => command === 'inspect_project_archive_assets'
+      ? [] : { assetCount: 0, assetBytes: 0, archiveBytes: 8 });
+    await expect(exportProjectArchive(PROJECT_RECORD.id)).rejects.toThrow('未推进协作版本');
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+    expect(mocks.advanceExport.mock.calls.map((call) => call[2])).toEqual(['packing']);
+    expect(mocks.invoke.mock.calls.filter(([name]) => name === 'pack_project_archive')).toHaveLength(1);
   });
 
   it('uses only summaries before the dialog and packs the latest complete record after confirmation', async () => {
@@ -260,7 +411,7 @@ describe('projectTransferService', () => {
       mocks.getProjectById.mockResolvedValue(latest);
       return '/out/latest.aicanvas';
     });
-    mocks.invoke.mockResolvedValue({ assetCount: 0, assetBytes: 0, archiveBytes: 8 });
+    mockNativePublication({ assetCount: 0, assetBytes: 0, archiveBytes: 8 });
 
     await exportProjectArchive(PROJECT_RECORD.id);
 
@@ -348,7 +499,7 @@ describe('projectTransferService', () => {
     mocks.getAllProjects.mockResolvedValue(records);
     mocks.getProjectById.mockImplementation(async (id: string) => records.find((record) => record.id === id));
     mocks.save.mockResolvedValue('/out/整部剧.aicanvas');
-    mocks.invoke.mockResolvedValue({ assetCount: 1, assetBytes: 12, archiveBytes: 8 });
+    mockNativePublication({ assetCount: 1, assetBytes: 12, archiveBytes: 8 });
 
     const result = await exportProjectArchive(EPISODE_RECORD.id);
 
@@ -363,6 +514,40 @@ describe('projectTransferService', () => {
     expect(mocks.getProjectChatForExport.mock.calls).toEqual([
       [SERIES_RECORD.id, 100_000], ['episode-1', 100_000], ['episode-2', 100_000],
     ]);
+  });
+
+  it('分集第二素材根非空时拒绝有损 v3 导出且不推进协作版本', async () => {
+    const records = [SERIES_RECORD, EPISODE_RECORD];
+    mocks.getAllProjects.mockResolvedValue(records);
+    mocks.getProjectById.mockImplementation(async (id: string) => records.find((record) => record.id === id));
+    mocks.save.mockResolvedValue('/out/multiple-roots.aicanvas');
+    mocks.getProjectDataDir.mockResolvedValue('/data/episode-only');
+    mocks.exists.mockResolvedValue(true);
+    mocks.invoke.mockImplementation(async (command: string, args: { assetsDir: string }) => {
+      if (command === 'inspect_project_archive_assets' && args.assetsDir === '/data/episode-only') {
+        return [{ path: 'reference.png', bytes: 1, sha256: 'a'.repeat(64) }];
+      }
+      throw new Error(`Unexpected native command: ${command}`);
+    });
+    await expect(exportProjectArchive(SERIES_RECORD.id)).rejects.toThrow('多个素材根');
+    expect(mocks.invoke.mock.calls.some(([name]) => name === 'pack_project_archive')).toBe(false);
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+    expect(mocks.prepareExport).not.toHaveBeenCalled();
+  });
+
+  it('其他分集工作台的受保护脏稿阻止整部剧外发，不读取或发布旧稿', async () => {
+    const records = [SERIES_RECORD, EPISODE_RECORD];
+    mocks.getAllProjects.mockResolvedValue(records);
+    mocks.getProjectById.mockImplementation(async (id: string) => records.find((record) => record.id === id));
+    mocks.save.mockResolvedValue('/out/dirty-workbench.aicanvas');
+    let dirty = true;
+    const unregister = registerEpisodeEditorSession(EPISODE_RECORD.id, () => ({ dirty, saving: false }));
+    try {
+      await expect(exportProjectArchive(SERIES_RECORD.id)).rejects.toThrow('未保存');
+      expect(mocks.invoke).not.toHaveBeenCalled();
+      expect(mocks.prepareExport).not.toHaveBeenCalled();
+      expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
+    } finally { dirty = false; unregister(); settleEpisodeEditorSessions(EPISODE_RECORD.id); }
   });
 
   it.each(['分集读取', '对话读取', '素材目录'])('fails export instead of silently omitting unavailable %s', async (stage) => {
@@ -398,6 +583,10 @@ describe('projectTransferService', () => {
     expect(result!.assetCount).toBe(1);
     expect(result!.conversationCount).toBe(1);
     expect(result!.memoryCount).toBe(1);
+    expect(mocks.commitImport).toHaveBeenCalledOnce();
+    expect(mocks.commitImport.mock.calls[0][0]).toMatchObject({ expectedRecords: [], expectedState: null,
+      state: null, label: '旧包新建导入', records: [expect.objectContaining({ id: result!.projectId })] });
+    expect(mocks.deleteProjectFromDb).not.toHaveBeenCalled();
 
     // 素材先解到临时目录，读到项目名后才改成正式的项目目录名
     expect(mocks.renameProjectDataDir).toHaveBeenCalledWith(
@@ -436,7 +625,8 @@ describe('projectTransferService', () => {
     mocks.getAllProjects.mockResolvedValue(records);
     mocks.getProjectById.mockImplementation(async (id: string) => records.find((record) => record.id === id));
     mocks.getProjectChatForExport.mockImplementation(async (projectId: string) => ({
-      conversations: [{ id: `conv-${projectId}`, projectId, title: projectId, messageCount: 1 }],
+      conversations: [{ id: `conv-${projectId}`, projectId, title: projectId, messageCount: 1,
+        ...(projectId === SERIES_RECORD.id ? { workbenchTarget: { seriesId: SERIES_RECORD.id, episodeId: EPISODE_RECORD.id } } : {}) }],
       messages: [{ id: `msg-conv-${projectId}`, projectId, conversationId: `conv-${projectId}`,
         sequence: 1, content: '讨论', agentTaskId: 'old-task' }],
       memories: projectId === SERIES_RECORD.id ? [{
@@ -486,6 +676,7 @@ describe('projectTransferService', () => {
     const conversations = mocks.putChatConversation.mock.calls.map(([conversation]) => conversation);
     const messages = mocks.putChatMessage.mock.calls.map(([message]) => message);
     expect(conversations.map((conversation) => conversation.projectId)).toEqual([root.id, first.id, next.id]);
+    expect(conversations[0].workbenchTarget).toEqual({ seriesId: root.id, episodeId: first.id });
     expect(messages.map((message) => message.conversationId)).toEqual(conversations.map((conversation) => conversation.id));
     expect(messages.map((message) => message.projectId)).toEqual([root.id, first.id, next.id]);
     expect(messages.every((message) => message.agentTaskId === undefined)).toBe(true);
@@ -581,6 +772,22 @@ describe('projectTransferService', () => {
     expect(row.video).toEqual({ nodeId: 'deleted-video', kind: 'video', relativePath: 'final.mp4', sourceDuration: 5 });
   });
 
+  it.each([false, true])('旧项目归档扩图垫图解除源资产身份并计入素材缺失（文件存在=%s）', async (present) => {
+    const project = { ...PROJECT_RECORD, nodes: [{ id: 'expanded', data: { type: 'ai-image',
+      outpaintInput: { assetId: 'source-padding', relativePath: 'padding.png', width: 1024, height: 768 },
+    } }] };
+    mocks.open.mockResolvedValue('/in/扩图.aicanvas');
+    mocks.invoke.mockResolvedValue({ texts: archiveTexts({ project }),
+      assetPaths: present ? ['padding.png'] : [], assetBytes: present ? 3 : 0 });
+
+    const result = (await importProjectArchive())!;
+
+    expect(result.missingAssetCount).toBe(present ? 0 : 1);
+    const saved = mocks.saveProject.mock.calls[0][0];
+    expect(saved.nodes).toHaveLength(1);
+    expect(saved.nodes[0].data.outpaintInput).toEqual({ relativePath: 'padding.png', width: 1024, height: 768 });
+  });
+
   it('allocates independent project and episode ids on repeated import and includes episode missing assets', async () => {
     mocks.open.mockResolvedValue('/in/整部剧.aicanvas');
     mocks.invoke.mockResolvedValue({
@@ -623,7 +830,7 @@ describe('projectTransferService', () => {
     expect(mocks.deleteProjectDataDir).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['项目保存', '对话保存'])('cleans up only newly created records when episode %s fails', async (stage) => {
+  it('整部剧及历史单事务失败时保留已冻结原操作素材，不逐条回滚或重分配身份', async () => {
     const chat = {
       ...EMPTY_CHAT,
       conversations: [{ id: 'episode-conv', projectId: EPISODE_RECORD.id }],
@@ -634,30 +841,58 @@ describe('projectTransferService', () => {
       texts: archiveTexts({ project: SERIES_RECORD, chat: EMPTY_CHAT, episodes: [{ project: EPISODE_RECORD, chat }] }),
       assetPaths: [], assetBytes: 0,
     });
-    if (stage === '项目保存') {
-      mocks.saveProject.mockImplementationOnce(async (record: { id: string }) => record.id)
-        .mockRejectedValueOnce(new Error('分集保存失败'));
-    } else {
-      mocks.putChatMessage.mockRejectedValueOnce(new Error('对话保存失败'));
-    }
+    mocks.commitImport.mockRejectedValueOnce(new Error('整事务保存失败'));
 
     await expect(importProjectArchive()).rejects.toThrow('保存失败');
-    const createdIds = mocks.saveProject.mock.calls.map(([record]) => record.id);
-    expect(mocks.deleteProjectFromDb.mock.calls.map(([id]) => id)).toEqual([...createdIds].reverse());
+    expect(mocks.commitImport).toHaveBeenCalledOnce();
+    const input = mocks.commitImport.mock.calls[0][0] as ProjectImportCommit;
+    const createdIds = input.records.map((record) => record.id);
+    expect(createdIds).toHaveLength(2);
+    expect(input.history.map((row) => row.store)).toEqual(['chatConversations', 'chatMessages']);
+    expect(mocks.saveProject).not.toHaveBeenCalled();
+    expect(mocks.putChatConversation).not.toHaveBeenCalled();
+    expect(mocks.putChatMessage).not.toHaveBeenCalled();
+    expect(mocks.deleteProjectFromDb).not.toHaveBeenCalled();
     expect(createdIds).not.toContain(SERIES_RECORD.id);
     expect(createdIds).not.toContain(EPISODE_RECORD.id);
-    expect(mocks.deleteProjectDataDir).toHaveBeenCalledExactlyOnceWith(createdIds[0]);
+    expect(mocks.savePrepared).toHaveBeenCalledOnce();
+    expect(mocks.savePrepared.mock.calls[0][1].commit.records.map((record: { id: string }) => record.id)).toEqual(createdIds);
+    expect(mocks.deleteProjectDataDir).not.toHaveBeenCalled();
     expect(mocks.notifyProjectDiskChanged).not.toHaveBeenCalled();
   });
 
-  it('retains assets and reports incomplete cleanup when database rollback fails', async () => {
+  it('目标分集不在归档时拒绝恢复工作台历史，不移除绑定后导入', async () => {
+    mocks.invoke.mockResolvedValue({ texts: archiveTexts({ project: SERIES_RECORD, episodes: [], chat: {
+      ...EMPTY_CHAT, conversations: [{ id: 'workbench', projectId: SERIES_RECORD.id,
+        workbenchTarget: { seriesId: SERIES_RECORD.id, episodeId: 'missing-episode' } }],
+    } }), assetPaths: [], assetBytes: 0 });
+    await expect(restoreProjectArchive('/in/missing-target.aicanvas')).rejects.toThrow('无法恢复只读绑定');
+    expect(mocks.putChatConversation).not.toHaveBeenCalled();
+  });
+
+  it('提交结果未知且原操作 marker 不可读时保留媒体，不推断未提交', async () => {
     mocks.open.mockResolvedValue('/in/整部剧.aicanvas');
     mocks.invoke.mockResolvedValue({ texts: archiveTexts(), assetPaths: [], assetBytes: 0 });
-    mocks.putChatMessage.mockRejectedValueOnce(new Error('保存失败'));
-    mocks.deleteProjectFromDb.mockRejectedValue(new Error('清理失败'));
+    mocks.commitImport.mockRejectedValueOnce(new Error('提交回执丢失'));
+    mocks.readImport.mockRejectedValueOnce(new Error('marker 不可读'));
 
-    await expect(importProjectArchive()).rejects.toThrow('已保留素材');
+    await expect(importProjectArchive()).rejects.toMatchObject({ name: 'ProjectImportCommittedError', outcome: 'unknown',
+      operationId: expect.any(String), ownerId: expect.any(String) });
+    expect(mocks.commitImport).toHaveBeenCalledOnce();
+    expect(mocks.deleteProjectFromDb).not.toHaveBeenCalled();
     expect(mocks.deleteProjectDataDir).not.toHaveBeenCalled();
+  });
+
+  it('原 marker 确认已提交时保留媒体，要求读取原操作而非再次导入', async () => {
+    mocks.open.mockResolvedValue('/in/committed.aicanvas');
+    mocks.invoke.mockResolvedValue({ texts: archiveTexts(), assetPaths: [], assetBytes: 0 });
+    mocks.commitImport.mockRejectedValueOnce(new Error('提交回执丢失'));
+    mocks.readImport.mockResolvedValueOnce({ phase: 'db_committed' });
+    await expect(importProjectArchive()).rejects.toThrow('项目已提交');
+    expect(mocks.commitImport).toHaveBeenCalledOnce();
+    expect(mocks.deleteProjectFromDb).not.toHaveBeenCalled();
+    expect(mocks.deleteProjectDataDir).not.toHaveBeenCalled();
+    expect(mocks.notifyProjectDiskChanged).not.toHaveBeenCalled();
   });
 
   it.each([true, false])('keeps v1 compatibility and explains absent episode data (empty=%s)', async (empty) => {
@@ -752,6 +987,19 @@ describe('projectTransferService', () => {
     expect(mocks.saveProject.mock.calls[0][0].nodes[0].data.directorPrevisScene).toEqual(reference);
   });
 
+  it.each([true, false])('导入带相对路径的导演截图时保留路径并准确统计缺失素材（均存在=%s）', async (allPresent) => {
+    const captures = ['director/captures/first.png', 'director/captures/second.png', 'director/captures/second.png'];
+    const project = { ...PROJECT_RECORD, nodes: [{ id: 'director-captures', data: {
+      type: 'ai-director', directorCaptureRelativePaths: captures,
+    } }] };
+    mocks.open.mockResolvedValue('/in/director-captures.aicanvas');
+    mocks.invoke.mockResolvedValue({ texts: archiveTexts({ project }),
+      assetPaths: allPresent ? captures.slice(0, 2) : [captures[0]], assetBytes: 2 });
+    const result = await importProjectArchive();
+    expect(result!.missingAssetCount).toBe(allPresent ? 0 : 1);
+    expect(mocks.saveProject.mock.calls[0][0].nodes[0].data.directorCaptureRelativePaths).toEqual(captures);
+  });
+
   it('does not infer new Director references from legacy capture arrays', async () => {
     const project = {
       ...PROJECT_RECORD,
@@ -783,6 +1031,7 @@ describe('projectTransferService', () => {
   });
 
   it('duplicates a project through a temp archive and clones its episodes', async () => {
+    mocks.getBaseDir.mockResolvedValue('/custom-media-root');
     const EPISODE = {
       ...PROJECT_RECORD,
       id: 'episode-1',
@@ -802,7 +1051,11 @@ describe('projectTransferService', () => {
     expect(result.projectName).toBe('分镜项目 副本');
     // 副本目录名跟着副本名走，不能和源项目共用同一个素材目录
     expect(result.dataFolder).toContain('分镜项目 副本');
-    expect(mocks.invoke.mock.calls.find(([name]) => name === 'pack_project_archive')![1].outputPath).toContain('.duplicate-');
+    expect(mocks.mkdir).toHaveBeenCalledWith('/app-owned/data', { recursive: true });
+    expect(mocks.invoke.mock.calls.find(([name]) => name === 'pack_project_archive')![1].outputPath).toMatch(/^\/app-owned\/data\/duplicate-[^/]+\.aicanvas$/);
+    expect(mocks.invoke.mock.calls.find(([name]) => name === 'pack_project_archive')![1].operationId).toBeUndefined();
+    expect(mocks.prepareExport).not.toHaveBeenCalled();
+    expect(mocks.saveCheckpoint).not.toHaveBeenCalled();
     // 临时归档无论成败都要删掉，否则数据目录里会堆积复制残留
     expect(mocks.remove).toHaveBeenCalledWith(mocks.invoke.mock.calls.find(([name]) => name === 'pack_project_archive')![1].outputPath);
 
@@ -830,6 +1083,14 @@ describe('projectTransferService', () => {
     expect(mocks.remove).toHaveBeenCalledTimes(1);
     expect(mocks.remove).toHaveBeenCalledWith(mocks.invoke.mock.calls.find(([name]) => name === 'pack_project_archive')![1].outputPath);
     expect(mocks.saveProject).not.toHaveBeenCalled();
+  });
+
+  it('fails before packing when the application temporary directory cannot be created', async () => {
+    mocks.mkdir.mockRejectedValue(new Error('应用目录不可写'));
+    await expect(duplicateProjectArchive('source-project', '副本')).rejects.toThrow('应用目录不可写');
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.saveProject).not.toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
   });
 
   it('keeps the staging folder name when renaming the data directory fails', async () => {
@@ -864,5 +1125,15 @@ describe('projectTransferService', () => {
 
     await expect(importProjectArchive()).resolves.toBeNull();
     expect(mocks.ensureProjectDataDir).not.toHaveBeenCalled();
+  });
+
+  it('冻结/新模型状态在导出、复制和旧恢复文件effect之前拒绝，不生成临时材料', async () => {
+    mocks.legacyWriteGuard.mockRejectedValue(new Error('旧项目写入已停止'));
+    await expect(exportProjectArchive('source-project')).rejects.toThrow('旧项目写入已停止');
+    await expect(duplicateProjectArchive('source-project', '副本')).rejects.toThrow('旧项目写入已停止');
+    await expect(restoreProjectArchive('/fixture/legacy.aicanvas')).rejects.toThrow('旧项目写入已停止');
+    expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.registerProjectFolder).not.toHaveBeenCalled(); expect(mocks.ensureProjectDataDir).not.toHaveBeenCalled();
+    expect(mocks.saveProject).not.toHaveBeenCalled(); expect(mocks.remove).not.toHaveBeenCalled();
   });
 });

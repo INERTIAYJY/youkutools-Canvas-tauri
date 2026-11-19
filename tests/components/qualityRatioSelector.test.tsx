@@ -1,7 +1,16 @@
 /**
  * qualityRatioSelector — 回归测试：image resolution and quality selector。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPortal } from 'react-dom';
+import type { ImageModelCapability } from '../../src/types/aiTypes';
+
+const outputCapability: ImageModelCapability = {
+  outputFormats: ['png', 'gif', 'svg'], defaultOutputFormat: 'png',
+  squareOnlyOutputFormats: ['gif', 'svg'], textOnlyOutputFormats: ['gif', 'svg'],
+  gifFrameCount: { min: 2, max: 16, default: 9 },
+  gifFrameDurationMs: { min: 20, max: 655350, step: 10, default: 200 }, supportsGifTransparency: true,
+};
 
 const driver = vi.hoisted(() => ({ open: false }));
 vi.mock('react', async () => ({
@@ -9,7 +18,9 @@ vi.mock('react', async () => ({
   useState: () => [driver.open, (open: boolean) => { driver.open = open; }],
   useRef: () => ({ current: null }),
   useEffect: () => undefined,
+  useLayoutEffect: () => undefined,
 }));
+vi.mock('react-dom', () => ({ createPortal: vi.fn((content: unknown) => content) }));
 vi.mock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
 import QualityRatioSelector from '../../src/components/nodes/shared/QualityRatioSelector';
 
@@ -33,9 +44,46 @@ function backgroundOptions(tree: ElementLike[]) {
   return elements(tree.find((element) => element.props['data-ui-schema-field'] === 'imageBackground'))
     .filter((element) => 'data-ui-schema-value' in element.props);
 }
-beforeEach(() => { driver.open = false; });
+beforeEach(() => { driver.open = false; vi.mocked(createPortal).mockClear(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('image resolution and quality selector', () => {
+  it('accepts capability ratio strings without adding undeclared defaults', () => {
+    driver.open = true;
+    const onChangeAspectRatio = vi.fn();
+    const tree = render({ ratios: ['2:3', '3:1'], imageSizes: ['1k', '4k'], showAdaptive: false, onChangeAspectRatio });
+    const area = tree.find((element) => element.props['data-ui-schema-field'] === 'aspectRatio');
+    const options = elements(area).filter((element) => 'data-ui-schema-value' in element.props);
+    expect(options.map((element) => element.props['data-ui-schema-value'])).toEqual(['2:3', '3:1']);
+    expect(elements(area).map((element) => element.props.className)).toEqual(expect.arrayContaining([
+      'img-rp-icon img-rp-p23', 'img-rp-icon img-rp-ultra',
+    ]));
+    (options[0].props.onClick as () => void)();
+    expect(onChangeAspectRatio).toHaveBeenCalledWith('2:3');
+    const sizes = elements(tree.find((element) => element.props['data-ui-schema-field'] === 'imageSize'))
+      .filter((element) => 'data-ui-schema-value' in element.props);
+    expect(sizes.map((element) => element.props['data-ui-schema-value'])).toEqual(['1k', '4k']);
+  });
+
+  it('disables the trigger and hides an open popup while generation is pending', () => {
+    driver.open = true;
+    const tree = render({ disabled: true });
+    expect(summary(tree).disabled).toBe(true);
+    expect(summary(tree)['aria-expanded']).toBe(false);
+    expect(tree.some((element) => element.props['data-ui-schema-field'] === 'imageSize')).toBe(false);
+    expect(driver.open).toBe(false);
+  });
+
+  it('portals the workbench popup to the viewport while retaining the shared panel', () => {
+    driver.open = true;
+    const body = {};
+    vi.stubGlobal('document', { body });
+    const tree = render({ fixedMenu: true });
+    const popup = tree.find((element) => element.props.role === 'dialog');
+    expect(popup?.props['aria-label']).toBe('16:9 · 2K');
+    expect(createPortal).toHaveBeenCalledWith(popup, body);
+  });
+
   it('retains the shared size/ratio pill and omits undeclared generation quality', () => {
     driver.open = true;
     const tree = render({ imageQuality: 'max' });
@@ -154,5 +202,52 @@ describe('image resolution and quality selector', () => {
     const omitted = render({ ...props, imageBackground: '' });
     expect(backgroundOptions(omitted).filter((element) => element.props['aria-pressed']).map((element) => element.props.children)).toEqual(['接口默认']);
     expect(summary(omitted)['aria-label']).toBe('16:9 · 2K');
+  });
+});
+
+
+describe('declared image output formats', () => {
+  it('changes format, clears GIF-only fields and selects the required square ratio', () => {
+    driver.open = true;
+    const onChangeImageOutputParameters = vi.fn(), onChangeAspectRatio = vi.fn();
+    const tree = render({ imageOutputCapability: outputCapability,
+      imageOutputParameters: { imageOutputFormat: 'gif', imageFrameCount: 8, imageFrameDurationMs: 300, imageTransparent: true },
+      onChangeImageOutputParameters, onChangeAspectRatio });
+    const area = tree.find((element) => element.props['data-ui-schema-field'] === 'imageOutputFormat');
+    const options = elements(area).filter((element) => 'data-ui-schema-value' in element.props);
+    expect(options.map((element) => element.props['data-ui-schema-value'])).toEqual(['png', 'gif', 'svg']);
+    (options[0].props.onClick as () => void)();
+    expect(onChangeImageOutputParameters).toHaveBeenLastCalledWith({ imageOutputFormat: 'png',
+      imageFrameCount: undefined, imageFrameDurationMs: undefined, imageTransparent: undefined });
+    (options[2].props.onClick as () => void)();
+    expect(onChangeAspectRatio).toHaveBeenLastCalledWith('1:1');
+  });
+
+  it('shows capability GIF defaults, keeps false and never persists a non-number', () => {
+    driver.open = true;
+    const onChangeImageOutputParameters = vi.fn();
+    const tree = render({ imageOutputCapability: outputCapability,
+      imageOutputParameters: { imageOutputFormat: 'gif' }, onChangeImageOutputParameters });
+    const numbers = tree.filter((element) => element.props.type === 'number');
+    expect(numbers.map((element) => element.props.value)).toEqual([9, 200]);
+    (numbers[0].props.onChange as (event: unknown) => void)({ target: { value: '8', valueAsNumber: 8 } });
+    expect(onChangeImageOutputParameters).toHaveBeenLastCalledWith({ imageFrameCount: 8 });
+    onChangeImageOutputParameters.mockClear();
+    (numbers[0].props.onChange as (event: unknown) => void)({ target: { value: '-', valueAsNumber: NaN } });
+    expect(onChangeImageOutputParameters).not.toHaveBeenCalled();
+    const checkbox = tree.find((element) => element.props.type === 'checkbox')!;
+    expect(checkbox.props.checked).toBe(false);
+    (checkbox.props.onChange as (event: unknown) => void)({ target: { checked: false } });
+    expect(onChangeImageOutputParameters).toHaveBeenLastCalledWith({ imageTransparent: false });
+  });
+
+  it('limits SVG to square and omits GIF controls and undeclared format controls', () => {
+    driver.open = true;
+    const tree = render({ imageOutputCapability: outputCapability, imageOutputParameters: { imageOutputFormat: 'svg' }, showAdaptive: true });
+    const area = tree.find((element) => element.props['data-ui-schema-field'] === 'aspectRatio');
+    expect(elements(area).filter((element) => 'data-ui-schema-value' in element.props)
+      .map((element) => element.props['data-ui-schema-value'])).toEqual(['1:1']);
+    expect(tree.some((element) => element.props.type === 'number' || element.props.type === 'checkbox')).toBe(false);
+    expect(render().some((element) => element.props['data-ui-schema-field'] === 'imageOutputFormat')).toBe(false);
   });
 });

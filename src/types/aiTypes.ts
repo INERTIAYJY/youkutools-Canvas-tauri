@@ -11,9 +11,42 @@ export interface AIGenerateParams {
   signal?: AbortSignal;
   /** 追加到消息末尾的图片；文本/VLM 请求统一转换为受限 Base64 data URL。 */
   imageUrls?: string[];
+  /** 本地 ComfyUI 文本工作流；不走普通文本厂商鉴权。 */
+  workflowId?: string;
+  workflowInputs?: Record<string, string>;
 }
 
-export interface AIImageGenParams extends AIGenerateParams {
+export interface TextGenerationResult {
+  text: string;
+  /** 调用方完成文本回填及历史保存后，再确认交付。 */
+  comfyTaskId?: string;
+}
+
+export type ImageOutputFormat = 'png' | 'gif' | 'svg';
+
+/** 原图输出参数；GIF选项与精灵动画节点的帧数分开。 */
+export interface ImageOutputParameters {
+  imageOutputFormat?: ImageOutputFormat;
+  imageFrameCount?: number;
+  imageFrameDurationMs?: number;
+  imageTransparent?: boolean;
+}
+
+export interface ImageParameterRange {
+  min: number;
+  max: number;
+  step?: number;
+  default: number;
+}
+
+export interface AIImageGenParams extends AIGenerateParams, ImageOutputParameters {
+  imagePromptResolution?: { original: string; replacement: string };
+  /** 仅供完整交付多候选的图片节点／对话入口使用，不写入厂商请求。 */
+  collectCandidates?: boolean;
+  /** 角色工作台只使用显式选择的素材，交付到角色任务。 */
+  characterWorkbench?: 'project' | 'global';
+  /** 角色局部编辑使用透明 PNG 蒙版，仅向明确支持的 multipart 合同传递。 */
+  characterPaintMask?: string;
   workflowApiTaskContext?: import('./workflowApi').CloudWorkflowTaskContext;
   runninghubModelParameters?: Record<string, string>;
   runninghubTaskContext?: import('./runninghub').RunningHubTaskContext;
@@ -22,8 +55,6 @@ export interface AIImageGenParams extends AIGenerateParams {
   imageBackground?: string; // 厂商声明的图片背景；空字符串显式使用接口默认
   aspectRatio?: string;   // '1:1' | '16:9' | '9:16' | ...
   image_urls?: string[];  // 参考图片 URL（从 @图片节点 引用中提取）
-  workflowId?: string;    // ComfyUI 工作流 ID（存在时走 ComfyUI 执行）
-  workflowInputs?: Record<string, string>; // IO 节点赋值映射
 }
 
 export type ProtocolJsonValue =
@@ -185,12 +216,14 @@ export type ModelExecutionProtocol = ModelExecutionProtocolV1 | ModelExecutionPr
 /** parser、编辑器与执行器统一使用的规范协议。 */
 export type NormalizedModelExecutionProtocol = ModelExecutionProtocolV2;
 
-export type ModelProtocolPresetId = 'openai-chat' | 'anthropic-chat' | 'gemini-chat' | 'openai-image' | 'openai-gpt-image' | 'gpt-image-gateway-json' | 'google-image-native' | 'xai-image-native' | 'agnes-video' | 'custom';
+export type ModelProtocolPresetId = 'openai-chat' | 'openai-responses' | 'anthropic-chat' | 'gemini-chat' | 'openai-image' | 'openai-gpt-image' | 'gpt-image-gateway-json' | 'google-image-native' | 'xai-image-native' | 'agnes-video' | 'custom' | 'plugin';
 
 export interface ModelExecutionProfile {
   preset: ModelProtocolPresetId;
   /** preset=custom 时保存用户声明的协议。 */
   protocol?: ModelExecutionProtocol;
+  /** preset=plugin 时仅保存稳定身份；适配器声明必须读取原生活动 revision。 */
+  plugin?: { pluginId: string; presetId: string };
 }
 
 /** 声明式数值范围；边界默认包含，可按厂商规则改为严格大于 / 小于。 */
@@ -309,6 +342,15 @@ export interface VideoModelCapability {
  * 便于同一套参数面板与生成入口消费。
  */
 export interface ImageModelCapability {
+  /** 只显示并提交厂商明确声明的原文件格式。 */
+  outputFormats?: ImageOutputFormat[];
+  defaultOutputFormat?: ImageOutputFormat;
+  /** 这些格式只支持文生，或仅支持方图；限制在上传前校验。 */
+  textOnlyOutputFormats?: ImageOutputFormat[];
+  squareOnlyOutputFormats?: ImageOutputFormat[];
+  gifFrameCount?: ImageParameterRange;
+  gifFrameDurationMs?: ImageParameterRange;
+  supportsGifTransparency?: boolean;
   /** 可选分辨率档位，如 ['1K', '2K', '4K'] 或 ['1MP', '2MP']。 */
   resolutions?: string[];
   /** 未指定分辨率时的默认值。 */
@@ -368,6 +410,8 @@ export interface AudioModelCapability {
 export interface ResolvedModelProtocolPoll {
   method: ModelProtocolHttpMethod;
   url: string;
+  /** 原提交运行时的隐私标记，恢复查询时继续禁止记录请求；不含素材或凭据。 */
+  sensitive?: boolean;
   /** 只保存鉴权方式，不保存密钥。 */
   auth?: ModelProtocolAuthConfig;
   headers?: Record<string, string>;
@@ -404,6 +448,12 @@ export interface MediaTaskReceipt {
   attemptId?: string;
 }
 
+export interface GenerationRecovery {
+  state: 'unknown' | 'paused' | 'delivery_pending';
+  receipt?: MediaTaskReceipt;
+  nativeOperationId?: string;
+}
+
 /** 结果下载仅持久化连接身份与鉴权方式，密钥在实际下载时读取。 */
 export interface MediaDownloadAccess {
   providerConfigId: string;
@@ -418,6 +468,14 @@ export interface MediaTaskContext {
   deliveryMode?: 'node' | 'message' | 'node+message';
   canvasNodeId?: string;
   modelId?: string;
+  /** 剪辑转场使用独立跟踪 ID；锚点只供用户主动取回，不是画布写入授权。 */
+  editorTransition?: {
+    anchorNodeId: string;
+    requestId: string;
+    /** 项目数据根目录内的实际文件名，不保存本机绝对路径。 */
+    fileName?: string;
+    delivered?: true;
+  };
   /** 原任务恢复与回填所需的媒体参数，不包含提示词或素材。 */
   parameters?: import('./media').MediaGenerationParameters;
 }
@@ -427,6 +485,10 @@ export type MediaProtocolUrls = string[] & { taskReceipt?: MediaTaskReceipt; med
 
 export interface ImageGenerationResult {
   url: string;
+  /** 同一次作业额外返回的候选；仅本轮传递，不递归嵌套或当作新的生成请求。 */
+  additionalResults?: ImageGenerationResult[];
+  /** 本作业期望交付的图片总数，与提交 n 和用户选择的作业次数分开。 */
+  expectedOutputCount?: number;
   mediaDownloadAccess?: MediaDownloadAccess;
   taskReceipt?: MediaTaskReceipt;
   /** 本地 ComfyUI 已完成但尚待画布交付的任务身份，仅完成同一任务时清理。 */
@@ -444,6 +506,8 @@ export interface BatchImageResult {
   /** 所有远端任务均已成功或明确失败；不包括提交未知或查询中断。 */
   allTasksSettled?: boolean;
   requestedCount: number;
+  /** 固定多候选作业的图片交付总数；未声明时沿用 requestedCount。 */
+  expectedOutputCount?: number;
   results: ImageGenerationResult[];
   failedCount: number;
 }

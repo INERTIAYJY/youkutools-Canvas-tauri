@@ -7,6 +7,7 @@ import {
   getProviderDefinition,
   getProviderDefinitions,
   createConnectionId,
+  isRetiredProviderConnection,
   resolveCccGeminiImageExecutionProfile,
   resolveProviderImageModelForValidation,
   mapSeedlingModelCapability,
@@ -26,7 +27,7 @@ import type { ApiProviderConfig, AppConfig, ProviderModelSelection } from '../..
 import type { ModelExecutionProfile, ProtocolJsonValue } from '../../src/types/aiTypes';
 import { getProviderPolicy } from '../../src/services/ai/providerPolicies';
 import { resolveGeneralModelConnection } from '../../src/services/ai/helpers';
-import { getCccGroupPresetModels } from '../../src/services/ai/cccProviderGroups';
+import { CCC_BANANA_MODEL_IDS, getCccGroupPresetModels, isCccBananaGroup, isCccBananaModelId } from '../../src/services/ai/cccProviderGroups';
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -38,7 +39,7 @@ function jsonResponse(body: unknown): Response {
 describe('MiniMax 官方本地候选目录', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('新建无 Key 时列出六个候选，刷新不调用假设的 models 接口或声称远端验证成功', async () => {
+  it('新建无 Key 时列出八个候选，刷新不调用假设的 models 接口或声称远端验证成功', async () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
     const definition = getProviderDefinition('minimax')!;
@@ -51,9 +52,11 @@ describe('MiniMax 官方本地候选目录', () => {
     });
     expect(result.source).toBe('local-manifest');
     expect(result.warning).toContain('未验证 API Key');
-    expect(result.models).toHaveLength(6);
+    expect(result.models).toHaveLength(8);
     expect(result.models.every((model) => model.provider === 'minimax-international')).toBe(true);
     expect(result.models.map((model) => model.id)).toContain('speech-2.8-hd');
+    expect(result.models.filter((model) => model.category === 'image').map((model) => model.id))
+      .toEqual(['MiniMax-H3-Image', 'MiniMax-H3-Image-Highspeed']);
     expect(result.models.some((model) => model.id === 'old-stale')).toBe(false);
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -192,16 +195,17 @@ describe('LibAPI 内置目录与连接身份', () => {
     expect(createConnectionId('libapi')).toBe('libapi');
   });
 
-  it('先校验目录凭据，再用公开技能目录排除退役和未适配型号，不加入认证目录未返回的型号', async () => {
+  it('先校验目录凭据，再与公开逻辑目录及本地合同求交并排除退役型号', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: [
-        { id: 'gt-6.1-sol' }, { id: 'gt-image-2.5-flare', category: 'text' },
-        { id: 'vo-3.1' }, { id: 'happyhorse-1-0' }, { id: 'future-video' },
+        { id: 'gt-6.1-sol' }, { id: 'gpt-image-2.5-flare', category: 'text' }, { id: 'vo-3.1' },
+        { id: 'happyhorse-1-1' }, { id: 'doubao-seedream-5-0' }, { id: 'future-video' },
       ] }))
       .mockResolvedValueOnce(jsonResponse({ models: [
-        { name: 'gpt-6.1-sol', type: 'text' }, { name: 'gpt-image-2.5-flare', type: 'image' },
-        { name: 'veo-3.1', type: 'video' }, { name: 'seedance-2-5', type: 'video' },
-        { name: 'future-video', type: 'video' },
+        { id: 'gpt-6.1-sol', public_id: 'gt-6.1-sol', type: 'chat' },
+        { id: 'gpt-image-2.5-flare', public_id: 'gt-image-2.5-flare', type: 'image', deprecated: false },
+        { id: 'veo-3.1', type: 'video' }, { id: 'happyhorse-1-1', type: 'video', deprecated: true },
+        { id: 'seedance-2-5', type: 'video' }, { id: 'future-video', type: 'video' },
       ] }));
     vi.stubGlobal('fetch', fetchMock);
     const result = await fetchProviderModelCatalog({ providerId: 'libapi',
@@ -209,46 +213,55 @@ describe('LibAPI 内置目录与连接身份', () => {
       fallbackModels: [...LIBAPI_MODEL_MANIFEST],
     });
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      'https://libapi.cc/v1/models', 'https://libapi.cc/v1/skills/models',
+      'https://libapi.cc/v1/models', 'https://libapi.cc/v1/logical-models',
     ]);
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'GET', headers: { Authorization: 'Bearer libapi-fixture' } });
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'GET', credentials: 'omit' });
     expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('headers');
     expect(result).toMatchObject({ source: 'remote', resolvedBaseUrl: 'https://libapi.cc/v1' });
     expect(result.models.map(({ id, category, provider }) => ({ id, category, provider }))).toEqual([
       { id: 'gt-6.1-sol', category: 'text', provider: 'libapi' },
-      { id: 'gt-image-2.5-flare', category: 'image', provider: 'libapi' },
+      { id: 'gpt-image-2.5-flare', category: 'image', provider: 'libapi' },
       { id: 'vo-3.1', category: 'video', provider: 'libapi' },
     ]);
     expect(result.models.filter((model) => model.category !== 'text').every((model) => model.executionProfile)).toBe(true);
     expect(result.warning).toBeTruthy();
   });
 
-  it.each([401, 503])('目录 HTTP %s 失败不回退静态模型，也不访问公开技能目录', async (status) => {
+  it.each([401, 503])('认证目录 HTTP %s 失败不回退静态模型，也不访问公开逻辑目录', async (status) => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status }));
     vi.stubGlobal('fetch', fetchMock);
     await expect(fetchProviderModelCatalog({ providerId: 'libapi', config: { name: 'LibAPI', apiKey: 'fixture', catalogId: 'libapi' },
-      fallbackModels: [...LIBAPI_MODEL_MANIFEST] })).rejects.toThrow();
+      fallbackModels: [...LIBAPI_MODEL_MANIFEST] })).rejects.toThrow(`模型列表拉取失败 (HTTP ${status})`);
     expect(fetchMock.mock.calls.every(([url]) => url === 'https://libapi.cc/v1/models')).toBe(true);
   });
 
-  it('技能目录失败保留调用方旧选择，不用静态型号冒充已验证目录', async () => {
+  it('公开逻辑目录失败保留调用方旧选择，不用静态型号冒充已验证目录', async () => {
     const selected = LIBAPI_MODEL_MANIFEST.find((model) => model.id === 'gt-image-2.5-flare')!;
     const config: ApiProviderConfig = { name: 'LibAPI', apiKey: 'fixture', catalogId: 'libapi', selectedModels: [selected] };
     const original = JSON.stringify(config);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ id: selected.id }] }))
       .mockResolvedValueOnce(new Response('{}', { status: 503 })));
-    await expect(fetchProviderModelCatalog({ providerId: 'libapi', config, fallbackModels: [...LIBAPI_MODEL_MANIFEST] })).rejects.toThrow();
+    await expect(fetchProviderModelCatalog({ providerId: 'libapi', config, fallbackModels: [...LIBAPI_MODEL_MANIFEST] }))
+      .rejects.toThrow('模型列表拉取失败 (HTTP 503)');
     expect(JSON.stringify(config)).toBe(original);
   });
 
-  it('缺少 Key 不请求公开目录，认证目录没有已适配型号时不借用静态清单', async () => {
+  it('缺少 Key 时不请求目录', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     await expect(fetchProviderModelCatalog({ providerId: 'libapi', config: { name: 'LibAPI', apiKey: '', catalogId: 'libapi' },
       fallbackModels: [...LIBAPI_MODEL_MANIFEST] })).rejects.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
-    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [{ id: 'future-video' }] }))
-      .mockResolvedValueOnce(jsonResponse({ models: [{ name: 'future-video', type: 'video' }] }));
+  });
+
+  it.each([
+    { id: 'future-video', type: 'video' },
+    { id: 'happyhorse-1-1', type: 'video', deprecated: true },
+  ])('目录中的 $id 无适配或已退役时返回空的远端结果', async (model) => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: [{ id: model.id }] }))
+      .mockResolvedValueOnce(jsonResponse({ models: [model] })));
     const result = await fetchProviderModelCatalog({ providerId: 'libapi', config: { name: 'LibAPI', apiKey: 'fixture', catalogId: 'libapi' },
       fallbackModels: [...LIBAPI_MODEL_MANIFEST] });
     expect(result).toMatchObject({ source: 'remote', models: [] });
@@ -293,14 +306,14 @@ describe('万象 API 内置目录与连接身份', () => {
       name: '万象 API（RelayOnAPI）', defaultBaseUrl: 'https://relayonapi.com/v1', modelsPath: '/models',
       catalogAdapter: 'openai-compatible', models: RELAYON_MODEL_MANIFEST,
       policy: { syncGeneralModels: true, catalog: {
-        initialModelsOnCreate: 'fallback', initialModelsOnEdit: 'fallback', refresh: 'replace',
+        initialModelsOnCreate: 'fallback', initialModelsOnEdit: 'fallback', refresh: 'replace-unselected',
         fallback: 'deny', invalidateOnKeyChange: true, connectionTest: 'catalog',
       } },
     });
     expect(definition?.models?.filter((model) => model.category === 'text').map((model) => model.id)).toEqual([
       'gemini-3.8-flash', 'gemini-4-argon', 'gpt-6.1-sol', 'claude-opus-5-5',
     ]);
-    expect(definition?.models).toHaveLength(24);
+    expect(definition?.models).toHaveLength(34);
     expect(definition?.models?.filter((model) => model.category === 'image').map((model) => model.id)).toEqual([...RELAYON_IMAGE_MODEL_IDS]);
     expect(definition?.models?.filter((model) => model.category === 'video').map((model) => model.id)).toEqual([...RELAYON_VIDEO_MODEL_IDS]);
     expect(definition?.models?.filter((model) => model.category === 'text').every((model) => model.executionProfile?.preset === 'openai-chat')).toBe(true);
@@ -311,16 +324,16 @@ describe('万象 API 内置目录与连接身份', () => {
 
   it('分组候选是精确型号的静态快照，并非密钥验证', () => {
     expect(RELAYON_PROVIDER_GROUPS.map(({ name }) => name)).toEqual([
-      'ClaudeMax号池', 'GPTpro号池', 'Gemini号池', 'default', 'image', 'video',
+      'Claudekiro号池', 'GPTpro号池', 'Gemini号池', 'default', 'image', 'video',
     ]);
     expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, 'Gemini号池').map(({ id }) => id)).toEqual([
       'gemini-3.8-flash', 'gemini-4-argon',
     ]);
-    expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, 'image')).toHaveLength(9);
-    expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, 'video')).toHaveLength(11);
-    for (const id of ['minimax-h3', 'sd-2.0-c3', 'sd-2.5-c1']) {
+    expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, 'image').map(({ id }) => id)).toEqual([...RELAYON_IMAGE_MODEL_IDS]);
+    expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, 'video')).toHaveLength(13);
+    for (const id of ['minimax-h3', 'sd-2.0-c3', 'sd-2.5-c1', 'sd-2.5-c2', 'sd-2.5-c3']) {
       expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, 'video').some((model) => model.id === id)).toBe(true);
-      for (const group of ['image', 'default', 'GPTpro号池', 'Gemini号池', 'ClaudeMax号池']) {
+      for (const group of ['image', 'default', 'GPTpro号池', 'Gemini号池', 'Claudekiro号池']) {
         expect(getRelayonGroupPresetModels(RELAYON_MODEL_MANIFEST, group).some((model) => model.id === id)).toBe(false);
       }
     }
@@ -346,28 +359,37 @@ describe('万象 API 内置目录与连接身份', () => {
     } });
     expect(result.models.map(({ id }) => id)).toEqual(['Image-2.5-Flare']);
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ headers: { Authorization: 'Bearer group-key' } });
-    expect(fetchMock.mock.calls[1][0]).toBe('https://relayonapi.com/api/pricing');
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.relayonapi.com/api/pricing');
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: 'omit' });
     expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('headers');
     expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('body');
   });
 
-  it('新增三款视频只按 video 分组及当前 Key 实际权限启用', async () => {
+  it('视频候选包含 2.5 C2／C3，只按 video 分组及当前 Key 实际权限启用', async () => {
+    const ids = ['minimax-h3', 'sd-2.0-c3', 'sd-2.5-c1', 'sd-2.5-c2', 'sd-2.5-c3'];
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: [{ id: 'minimax-h3' }, { id: 'sd-2.0-c3' }, { id: 'sd-2.5-c1' }] }))
-      .mockResolvedValueOnce(jsonResponse({ success: true, data: [
-        { model_name: 'minimax-h3', enable_groups: ['video'] },
-        { model_name: 'sd-2.0-c3', enable_groups: ['video'] },
-        { model_name: 'sd-2.5-c1', enable_groups: ['video'] },
-      ] }));
+      .mockResolvedValueOnce(jsonResponse({ data: ids.map((id) => ({ id })) }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, data: ids.map((id) => ({ model_name: id, enable_groups: ['video'] })) }));
     vi.stubGlobal('fetch', fetchMock);
     const result = await fetchProviderModelCatalog({ providerId: 'my-video-group', config: {
       name: '视频组', catalogId: 'relayonapi', relayonGroup: 'video', apiKey: 'video-group-fixture',
     } });
-    expect(result.models.map(({ id }) => id)).toEqual(['minimax-h3', 'sd-2.0-c3', 'sd-2.5-c1']);
+    expect(result.models.map(({ id }) => id)).toEqual(ids);
     expect(result.models.every((model) => model.category === 'video' && model.provider === 'my-video-group')).toBe(true);
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer video-group-fixture' });
     expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('headers');
+  });
+
+  it.each(['sd-2.5-c2', 'sd-2.5-c3'])('%s 未获当前 Key 开放时不从公开视频候选补入', async (id) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: [{ id: 'sd-2.5-c1' }] }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, data: ['sd-2.5-c1', id]
+        .map((model_name) => ({ model_name, enable_groups: ['video'] })) }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await fetchProviderModelCatalog({ providerId: 'my-video-group', config: {
+      name: '视频组', catalogId: 'relayonapi', relayonGroup: 'video', apiKey: 'video-group-fixture',
+    } });
+    expect(result.models.map((model) => model.id)).toEqual(['sd-2.5-c1']);
   });
 
   it.each([null, { success: false, data: [] }, { success: true, data: [{ model_name: 'x' }] }])(
@@ -421,7 +443,7 @@ describe('万象 API 内置目录与连接身份', () => {
       method: 'GET', headers: expect.objectContaining({ Authorization: 'Bearer alias-fixture-key' }),
     }));
     expect(result).toMatchObject({ source: 'remote', resolvedBaseUrl: 'https://relayonapi.com/v1' });
-    expect(result.models).toHaveLength(24);
+    expect(result.models).toHaveLength(34);
     expect(result.models).toEqual(expect.arrayContaining(RELAYON_MODEL_MANIFEST.map((model) => ({
       ...model, provider: 'relayon-alias',
     }))));
@@ -447,7 +469,7 @@ describe('万象 API 内置目录与连接身份', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const definition = getProviderDefinition('relayonapi');
-    expect(definition?.models).toHaveLength(24);
+    expect(definition?.models).toHaveLength(34);
     await expect(fetchProviderModelCatalog({ providerId: 'relayonapi',
       config: { name: '万象', catalogId: 'relayonapi', apiKey: '' },
       fallbackModels: [...RELAYON_MODEL_MANIFEST] })).rejects.toThrow();
@@ -463,7 +485,7 @@ describe('万象 API 内置目录与连接身份', () => {
 
   it('认证目录只返回未接入型号时保留真实空结果，不追加预置候选', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
-      data: [{ id: 'gpt-6-astra' }, { id: 'Midjourney v8.2' }, { id: 'future-video' }],
+      data: [{ id: 'gpt-6-astra' }, { id: 'Midjourney v9' }, { id: 'future-video' }],
     })));
     const result = await fetchProviderModelCatalog({ providerId: 'relayonapi',
       config: { name: '万象', catalogId: 'relayonapi', apiKey: 'fixture' },
@@ -557,21 +579,22 @@ describe('即梦登录后的模型目录与选择', () => {
 });
 
 describe('providerCatalogService 模型分类推断', () => {
-  it.each(['https://toapis.cn/v1', 'https://toapis.com/v1'])('ToAPIs 只请求所选站点 %s，绑定渠道协议并筛选文本型号', async (baseUrl) => {
+  it.each(['https://toapis.cn/v1', 'https://toapis.com/v1'])('ToAPIs 只请求所选站点 %s 的全类型目录并绑定渠道协议', async (baseUrl) => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: [
-      { id: 'gemini-3.8-flash' }, { id: 'gpt-5.6-sol' }, { id: 'seedance-2-5' }, { id: 'suno' },
+      { id: 'gemini-3.8-flash' }, { id: 'gpt-5.6-sol' }, { id: 'gpt-image-2' }, { id: 'seedance-2-5' }, { id: 'suno' },
     ] }));
     vi.stubGlobal('fetch', fetchMock);
     const result = await fetchProviderModelCatalog({ providerId: 'toapis-user',
       config: { name: 'ToAPIs', apiKey: 'shared-fixture', catalogId: 'toapis', baseUrl },
       fallbackModels: [...getProviderDefinition('toapis')!.models!],
     });
-    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(`${baseUrl}/models`, expect.objectContaining({
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(`${baseUrl}/models?type=all`, expect.objectContaining({
       headers: expect.objectContaining({ Authorization: 'Bearer shared-fixture' }),
     }));
-    expect(result.models.map((item) => item.id)).toEqual(['gemini-3.8-flash', 'seedance-2-5', 'suno']);
-    expect(result.models[1]).toMatchObject({ category: 'video', provider: 'toapis-user', executionProfile: { preset: 'custom' } });
-    expect(result.models[2].category).toBe('audio');
+    expect(result.models.map(({ id, category }) => [id, category])).toEqual([
+      ['gemini-3.8-flash', 'text'], ['gpt-image-2', 'image'], ['seedance-2-5', 'video'], ['suno', 'audio'],
+    ]);
+    expect(result.models[2]).toMatchObject({ provider: 'toapis-user', executionProfile: { preset: 'custom' } });
   });
 
   it('ToAPIs 验证失败不能用预置清单假装 Key 或另一站点验证成功', async () => {
@@ -631,6 +654,30 @@ describe('providerCatalogService 模型分类推断', () => {
     expect(JSON.parse(JSON.stringify(result.models[0])).imageCapability)
       .toMatchObject({ qualities: ['auto', 'high'], defaultQuality: 'auto',
         backgrounds: ['opaque', 'transparent'], defaultBackground: 'transparent' });
+  });
+
+  it.each(['camel', 'snake'] as const)('远端%s格式/GIF元数据保持类型和false，序列化后不丢失', async (style) => {
+    const capability = style === 'camel' ? {
+      outputFormats: ['png', 'gif', 'svg'], defaultOutputFormat: 'png',
+      textOnlyOutputFormats: ['gif', 'svg'], squareOnlyOutputFormats: ['gif', 'svg'],
+      gifFrameCount: { min: 2, max: 16, step: 1, default: 9 },
+      gifFrameDurationMs: { min: 20, max: 655350, step: 10, default: 200 }, supportsGifTransparency: false,
+    } : {
+      output_formats: ['png', 'gif', 'svg'], default_output_format: 'png',
+      text_only_output_formats: ['gif', 'svg'], square_only_output_formats: ['gif', 'svg'],
+      gif_frame_count: { min: 2, max: 16, step: 1, default: 9 },
+      gif_frame_duration_ms: { min: 20, max: 655350, step: 10, default: 200 }, supports_gif_transparency: false,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ data: [{ id: 'custom-output-image', category: 'image',
+      image_capability: capability }] })));
+    const result = await fetchProviderModelCatalog({ providerId: 'custom-formats',
+      config: { name: '格式目录', apiKey: 'fixture', catalogId: 'custom-openai', baseUrl: 'https://api.example/v1' } });
+    const expected = { outputFormats: ['png', 'gif', 'svg'], defaultOutputFormat: 'png',
+      textOnlyOutputFormats: ['gif', 'svg'], squareOnlyOutputFormats: ['gif', 'svg'],
+      gifFrameCount: { min: 2, max: 16, step: 1, default: 9 },
+      gifFrameDurationMs: { min: 20, max: 655350, step: 10, default: 200 }, supportsGifTransparency: false };
+    expect(result.models[0]?.imageCapability).toMatchObject(expected);
+    expect(JSON.parse(JSON.stringify(result.models[0])).imageCapability).toMatchObject(expected);
   });
 
   it('fails a CCC group catalog explicitly instead of offering models from other groups', async () => {
@@ -968,7 +1015,7 @@ describe('CCC API 内置厂商目录', () => {
     for (const id of ['gemini-3-pro-image-preview', 'gemini-3-pro-image',
       'gemini-3.1-flash-image', 'gemini-2.5-flash-image', 'nano-banana2', 'nano-banana-pro']) {
       expect(models.find((model) => model.id === id), id).toMatchObject({
-        category: 'image', inputModalities: ['text'], executionProfile: {
+        category: 'image', inputModalities: ['text', 'image'], executionProfile: {
           preset: 'custom', protocol: { submit: { path: '/v1beta/models/{{model}}:generateContent' } },
         },
       });
@@ -1026,11 +1073,16 @@ describe('GPT Image 2.6 的逐厂商目录', () => {
     for (const [provider, ids] of [
       ['toapis', ['gpt-image-2.6-flare-official', 'gpt-image-2.6-sunburst-official']],
       ['aigc-si', ['image-2.6-flare', 'image-2.6-sunburst']],
+      ['relayonapi', ['image-2.6-01', 'image-2.6-flare-01', 'image-2.6-sunburst-01']],
     ] as const) {
       for (const id of ids) expect(getProviderDefinition(provider)!.models!.find((item) => item.id === id)?.category).toBe('image');
     }
-    for (const provider of ['libapi', 'relayonapi', 'sora2u']) {
-      expect(getProviderDefinition(provider)!.models?.some((item) => /(?:gpt-)?image[- ]?2\.6/i.test(item.id))).not.toBe(true);
+    const withoutImage26 = [
+      getProviderDefinition('libapi')!,
+      getProviderDefinition('sora2u', { catalogId: 'sora2u' })!,
+    ];
+    for (const provider of withoutImage26) {
+      expect(provider.models?.some((item) => /(?:gpt-)?image[- ]?2\.6/i.test(item.id))).not.toBe(true);
     }
   });
 });
@@ -1041,11 +1093,49 @@ describe('CCC Gemini 图片型号与旧连接协议兼容', () => {
     vi.restoreAllMocks();
   });
 
+  it('香蕉当前预置仅展示三个精确型号，不把旧别名当作当前候选', () => {
+    const models = getProviderDefinition('cccapi')!.models!;
+    const original = structuredClone(models);
+    const current = getCccGroupPresetModels(models, '🍌香蕉（官k）');
+    expect(current.map((model) => model.id)).toEqual([...CCC_BANANA_MODEL_IDS]);
+    for (const id of CCC_BANANA_MODEL_IDS) {
+      expect(isCccBananaModelId(id)).toBe(true);
+      expect(current.find((model) => model.id === id)?.imageCapability).toMatchObject({
+        resolutions: ['1K', '2K', '4K'], defaultResolution: '1K',
+      });
+    }
+    for (const id of ['nano-banana-pro', 'nano-banana2', 'gemini-3-pro-image-preview', 'Nano-Banana-Next']) {
+      expect(isCccBananaModelId(id)).toBe(false);
+    }
+    expect(isCccBananaGroup(' 🍌香蕉（官k） ')).toBe(true);
+    expect(isCccBananaGroup('CCC生图稳定')).toBe(false);
+    expect(isCccBananaGroup(undefined)).toBe(false);
+    expect(getCccGroupPresetModels(models, 'CCC生图稳定').every((model) => model.id.startsWith('gpt-image-'))).toBe(true);
+    expect(getCccGroupPresetModels(models, '新分组')).toEqual([]);
+    expect(models).toEqual(original);
+  });
+
+  it('当前 Key 返回的三款香蕉保留精确 ID 和分辨率，不添加未返回候选', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ data: [
+      { id: 'Nano-Banana-pro' }, { id: 'Nano-Banana-2.1' },
+    ] })));
+    const result = await fetchProviderModelCatalog({ providerId: 'ccc-banana-current', config: {
+      name: 'CCC', catalogId: 'cccapi', cccGroup: '🍌香蕉（官k）', apiKey: 'fixture-key',
+    }, fallbackModels: [...getProviderDefinition('cccapi')!.models!] });
+    expect(result.models.map((model) => model.id).sort()).toEqual(['Nano-Banana-2.1', 'Nano-Banana-pro']);
+    for (const model of result.models) {
+      expect(model.imageCapability).toMatchObject({ resolutions: ['1K', '2K', '4K'], defaultResolution: '1K' });
+      expect(model.imageCapability?.qualities).toBeUndefined();
+      expect(model.imageCapability?.backgrounds).toBeUndefined();
+      expect(model.imageCapability?.maxImageReferences).toBeUndefined();
+    }
+  });
+
   it('候选包含网页的三个精确 Nano Banana 写法，并保留旧型号 ID', () => {
     const models = getProviderDefinition('cccapi')!.models!;
     for (const id of ['Nano-Banana-pro', 'Nano-Banana-2', 'Nano-Banana-2.1', 'nano-banana-pro', 'nano-banana2']) {
       expect(models.find((model) => model.id === id), id).toMatchObject({
-        id, category: 'image', provider: 'cccapi', inputModalities: ['text'],
+        id, category: 'image', provider: 'cccapi', inputModalities: ['text', 'image'],
         executionProfile: { preset: 'custom', protocol: { submit: {
           method: 'POST', path: '/v1beta/models/{{model}}:generateContent', pathMode: 'origin',
         } } },
@@ -1083,6 +1173,60 @@ describe('CCC Gemini 图片型号与旧连接协议兼容', () => {
     }
   });
 
+  function legacyNativeImageProfile(modelId: string): ModelExecutionProfile {
+    const profile = structuredClone(getProviderDefinition('cccapi')!.models!
+      .find((model) => model.id === modelId)!.executionProfile!);
+    const body = profile.protocol!.submit.body as Record<string, ProtocolJsonValue>;
+    body.contents = [{ role: 'user', parts: [{ text: '{{prompt}}' }] }];
+    return profile;
+  }
+
+  it.each(['gemini-3-pro-image-preview', 'gemini-2.5-flash-image', 'Nano-Banana-2.1'])(
+    '完整旧内置模板 %s 临时补齐全部参考图，已保存协议保持原样', (modelId) => {
+      const profile = legacyNativeImageProfile(modelId);
+      const saved = structuredClone(profile);
+      const effective = resolveCccGeminiImageExecutionProfile(modelId.toUpperCase(), profile);
+      expect(effective).not.toBe(profile);
+      expect(effective?.protocol?.submit.body).toMatchObject({
+        contents: [{ role: 'user', parts: '{{googleImageParts}}' }],
+      });
+      const body = effective?.protocol?.submit.body as Record<string, ProtocolJsonValue>;
+      expect(body.generationConfig).toMatchObject({ imageConfig: modelId === 'gemini-2.5-flash-image'
+        ? { aspectRatio: '{{aspectRatio}}' } : { aspectRatio: '{{aspectRatio}}', imageSize: '{{imageSize}}' } });
+      if (modelId === 'gemini-2.5-flash-image') {
+        expect(body.generationConfig).not.toHaveProperty('imageConfig.imageSize');
+      }
+      expect(profile).toEqual(saved);
+      const model: ProviderModelSelection = { id: modelId, name: modelId, category: 'image',
+        provider: 'cccapi', executionProfile: profile };
+      expect(resolveProviderImageModelForValidation(getProviderDefinition('cccapi'), model).executionProfile)
+        .toEqual(effective);
+      expect(model.executionProfile).toEqual(saved);
+    },
+  );
+
+  it.each(['path', 'headers', 'body', 'result'] as const)(
+    '旧内置模板的 %s 被用户修改后不替换协议', (field) => {
+      const profile = legacyNativeImageProfile('gemini-3-pro-image-preview');
+      const protocol = profile.protocol!;
+      if (field === 'path') protocol.submit.path = '/my-native-image';
+      if (field === 'headers') protocol.submit.headers = { 'X-Image-Mode': 'custom' };
+      if (field === 'body') (protocol.submit.body as Record<string, ProtocolJsonValue>).customOption = true;
+      if (field === 'result' && protocol.version === 2) protocol.response.result = { urlPath: 'my_image.url' };
+      const saved = structuredClone(profile);
+      expect(resolveCccGeminiImageExecutionProfile('gemini-3-pro-image-preview', profile)).toBe(profile);
+      expect(profile).toEqual(saved);
+    },
+  );
+
+  it('不替换新模板，也不为未知 ID 套用旧模板升级', () => {
+    const current = getProviderDefinition('cccapi')!.models!
+      .find((model) => model.id === 'gemini-3-pro-image-preview')!.executionProfile!;
+    expect(resolveCccGeminiImageExecutionProfile('gemini-3-pro-image-preview', current)).toBe(current);
+    const legacy = legacyNativeImageProfile('gemini-3-pro-image-preview');
+    expect(resolveCccGeminiImageExecutionProfile('gemini-4-image-preview', legacy)).toBe(legacy);
+  });
+
   it('远端大小写不同仍补已知原生合同，原 ID 和当前 Key 的目录范围保持不变', async () => {
     const ids = ['NANO-BANANA-PRO', 'nano-banana-2.1', 'GeMiNi-3.1-flash-image', 'gemini-4-image-preview'];
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ data: ids.map((id) => ({ id })) })));
@@ -1094,7 +1238,7 @@ describe('CCC Gemini 图片型号与旧连接协议兼容', () => {
     expect(result.models.map((model) => model.id).sort()).toEqual([...ids].sort());
     for (const id of ids.slice(0, 3)) {
       expect(result.models.find((model) => model.id === id), id).toMatchObject({ id,
-        inputModalities: ['text'], executionProfile: { preset: 'custom', protocol: { submit: {
+        inputModalities: ['text', 'image'], executionProfile: { preset: 'custom', protocol: { submit: {
           path: '/v1beta/models/{{model}}:generateContent',
         } } },
       });
@@ -1202,83 +1346,46 @@ describe('自定义连接原生模型目录', () => {
   });
 });
 
-describe('Sora2U 远端模型能力目录', () => {
+describe('Sora2U 目录下架', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  it.each([undefined, 0, 3, 4])('保留远端联合名额 %s，缺省时保留内置补充', async (maximum) => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ object: 'list', data: [{
-      id: 'seedance-2.0', reference_limits: { image: 9, video: 3, audio: 3,
-        ...(maximum === undefined ? {} : { videoAudioCombined: maximum }) },
-    }] })));
-    const result = await fetchProviderModelCatalog({ providerId: 'sora2u',
-      config: { name: 'Sora2U', apiKey: 'fixture-key', baseUrl: 'https://sora2u.com', catalogId: 'sora2u' },
-      fallbackModels: [...SORA2U_MODEL_MANIFEST] });
-    expect(result.models.find((model) => model.id === 'seedance-2.0')?.videoCapability)
-      .toMatchObject({ maxImageReferences: 9, maxVideoReferences: 3, maxAudioReferences: 3,
-        maxVideoAudioReferences: maximum ?? 3 });
+  it.each([
+    { providerId: 'sora2u', connection: {} },
+    { providerId: 'saved-connection', connection: { catalogId: 'sora2u' } },
+    { providerId: 'sora2u', connection: { baseUrl: 'https://sora2u.com' } },
+    { providerId: 'renamed-connection', connection: { catalogId: 'sora2u', baseUrl: 'https://sora2u.com' } },
+  ])('下架连接 $providerId 拒绝拉取远端目录和展示本地回退模型', async ({ providerId, connection }) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const config = { name: 'Sora2U', apiKey: 'fixture-key', ...connection };
+
+    expect(isRetiredProviderConnection(providerId, config)).toBe(true);
+    await expect(fetchProviderModelCatalog({ providerId, config, fallbackModels: [...SORA2U_MODEL_MANIFEST] }))
+      .rejects.toThrow('内置厂商已下架');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('隐藏 Sora2U 的三个 Seedance 2.5 变体，并保留其他远端新增模型', async () => {
+  it('显式自定义连接可以沿用相同 ID 和名称，继续按自己的地址拉取', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
       object: 'list',
-      data: [
-        {
-          id: 'seedance-2.5',
-          object: 'model',
-          name: 'Seedance 2.5 Remote',
-          durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 30],
-          duration_range: { min: 5, max: 30, step: 1 },
-          default_duration: 15,
-          aspect_ratios: ['16:9', '9:16', 'adaptive'],
-          default_aspect_ratio: 'adaptive',
-          resolutions: ['720p', '1080p'],
-          default_resolution: '720p',
-          supports_text_only: false,
-          supports_image: true,
-          supports_video: true,
-          supports_audio: true,
-          reference_limits: { image: 30, video: 10, audio: 10, total: 50 },
-        },
-        {
-          id: 'future-image',
-          object: 'model',
-          name: 'Future Image',
-          supports_image: true,
-          supports_video: false,
-          supports_audio: false,
-        },
-      ],
+      data: [{ id: 'custom-image', name: 'Custom Image', supports_image: true }],
     }));
     vi.stubGlobal('fetch', fetchMock);
-
-    const result = await fetchProviderModelCatalog({
-      providerId: 'sora2u',
-      config: {
-        name: 'Sora2U',
-        apiKey: 'sk_sora_test',
-        baseUrl: 'https://sora2u.com',
-        catalogId: 'sora2u',
-      },
-      fallbackModels: [...SORA2U_MODEL_MANIFEST],
-    });
-
+    const config = { name: 'Sora2U', apiKey: 'custom-fixture-key', baseUrl: 'https://relay.example/v1', catalogId: 'custom-openai' };
+    expect(isRetiredProviderConnection('sora2u', config)).toBe(false);
+    const result = await fetchProviderModelCatalog({ providerId: 'sora2u', config });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://sora2u.com/api/v1/models?utm_source=tenney&utm_medium=canvas&utm_content=wx',
+      'https://relay.example/v1/models',
       expect.objectContaining({
         method: 'GET',
-        headers: { Authorization: 'Bearer sk_sora_test' },
+        headers: { Authorization: 'Bearer custom-fixture-key' },
       }),
     );
-    expect(result.models.find((model) => model.id === 'seedance-2.5')).toBeUndefined();
-    expect(result.models.some((model) => model.id.startsWith('seedance-2.5'))).toBe(false);
-    expect(result.models.find((model) => model.id === 'future-image')).toMatchObject({
-      category: 'image',
-      provider: 'sora2u',
-      inputModalities: ['text', 'image'],
-    });
+    expect(result.source).toBe('remote');
+    expect(result.models).toEqual([expect.objectContaining({ id: 'custom-image', provider: 'sora2u' })]);
   });
 });
 

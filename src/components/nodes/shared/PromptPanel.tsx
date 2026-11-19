@@ -49,12 +49,14 @@ import SkillManager from './SkillManager';
 import { expandSkillReferences } from '../../../services/skillPromptService';
 import { listRuntimeSkills, projectSkillPickerOptions } from '../../../services/chat/skillCatalog';
 import { MAX_IMAGE_BATCH_COUNT } from '../../../types/aiTypes';
+import type { ImageOutputParameters } from '../../../types/aiTypes';
+import { resolveImageOutputCapability } from '../../../services/ai/imageOutputParameters';
 import type { AudioOutputFormat, AudioSpeechSettings, AudioSpeechReference, AudioTtsVoice, VideoReferenceItem } from '../../../types/aiTypes';
 import type { AudioGenerationPurpose } from '../../../types/media';
 import { useT } from '../../../i18n';
 import CloudWorkflowParamSelector from './CloudWorkflowParamSelector';
 import { DREAMINA_IMAGE_RATIOS, getDreaminaImageModel } from '../../../services/ai/dreaminaModels';
-import { resolveAudioParameterCapability, resolveImageParameterCapability } from '../../../services/ai/mediaModelCapabilities';
+import { resolveAudioParameterCapability, resolveImageOutputsPerJob, resolveImageParameterCapability } from '../../../services/ai/mediaModelCapabilities';
 import { getProviderDefinition } from '../../../services/ai/providerCatalogService';
 import { getPromptSubmitShortcutHint, normalizePromptSubmitShortcut } from '../../../utils/promptSubmitShortcut';
 
@@ -409,10 +411,12 @@ interface PromptPanelProps {
   imageSize?: string;
   imageQuality?: string;
   imageBackground?: string;
+  imageOutputParameters?: ImageOutputParameters;
   aspectRatio?: string;
   onChangeImageSize?: (size: string) => void;
   onChangeImageQuality?: (quality: string | undefined) => void;
   onChangeImageBackground?: (background: string | undefined) => void;
+  onChangeImageOutputParameters?: (parameters: ImageOutputParameters) => void;
   onChangeAspectRatio?: (ratio: string) => void;
   batchCount?: number;
   onChangeBatchCount?: (count: number) => void;
@@ -500,10 +504,12 @@ export default function PromptPanel({
   imageSize,
   imageQuality,
   imageBackground,
+  imageOutputParameters,
   aspectRatio,
   onChangeImageSize,
   onChangeImageQuality,
   onChangeImageBackground,
+  onChangeImageOutputParameters,
   onChangeAspectRatio,
   batchCount = 1,
   onChangeBatchCount,
@@ -610,9 +616,14 @@ export default function PromptPanel({
   const dreaminaImageModel = nodeType === 'ai-image' && selectedProvider === 'dreamina'
     ? getDreaminaImageModel(selectedModel)
     : undefined;
-  const imageCapability = nodeType === 'ai-image' && !dreaminaImageModel
+  const baseImageCapability = nodeType === 'ai-image' && !dreaminaImageModel
     ? resolveImageParameterCapability(selectedModel, selectedProvider, imageModelConfig)
     : undefined;
+  const outputFormat = baseImageCapability?.outputFormats?.find((format) => format === imageOutputParameters?.imageOutputFormat)
+    ?? baseImageCapability?.defaultOutputFormat ?? baseImageCapability?.outputFormats?.[0];
+  const imageCapability = resolveImageOutputCapability(baseImageCapability, outputFormat);
+  const imageOutputsPerJob = nodeType === 'ai-image' && !selectedWorkflowId
+    ? resolveImageOutputsPerJob(selectedModel, selectedProvider, imageModelConfig) : 1;
   const imageResolutions = dreaminaImageModel?.resolutions ?? imageCapability?.resolutions;
   const imageGeneralModel = selectedProvider === 'general'
     ? imageModelConfig.generalModels?.find((model) => model.id === selectedModel?.replace(/^general\//, ''))
@@ -688,6 +699,8 @@ export default function PromptPanel({
   const userPresets = useAppStore((s) => s.userPresets);
   const presetFolders = useAppStore((s) => s.presetFolders);
   const userSkills = useAppStore((s) => s.userSkills);
+  const recentSkillIds = useAppStore((s) => s.recentSkillIds);
+  const markSkillUsed = useAppStore((s) => s.markSkillUsed);
   const agentPackageSkills = useAppStore((s) => s.agentPackageSkills);
   const skillOptions = useMemo(
     () => projectSkillPickerOptions(userSkills, agentPackageSkills),
@@ -803,13 +816,24 @@ export default function PromptPanel({
     if (shouldTrigger) {
       // Direct trigger: combine preset template + input box content, call model directly
       // Don't update the input box — the preset prompt is only used for this generation
-      handleSingleSubmit(filledPrompt, preset?.postProcess);
+      let submittedPrompt = filledPrompt;
+      if (preset?.postProcess === 'character-8-direction-grid' && nodeId) {
+        const node = useAppStore.getState().nodes.find((item) => item.id === nodeId);
+        const image = node?.data.imageUrl || node?.data.thumbnailUrl;
+        const alreadyReferenced = [...filledPrompt.matchAll(/@\{([^:}]+):[^}]+\}/g)].some((match) => match[1] === nodeId);
+        if (typeof image === 'string' && image.trim() && !alreadyReferenced) {
+          const label = node?.data.label?.replace(/[{}\r\n]/g, ' ').trim() || t('当前图片');
+          // 显式引用优先；当前图片仅补到本次提交。
+          submittedPrompt += `\n@{${nodeId}:${label}}`;
+        }
+      }
+      handleSingleSubmit(submittedPrompt, preset?.postProcess);
     } else {
       // Insert mode: update input box with filled template, user can edit before generating
       onChange(filledPrompt);
       onContinuousEditEnd?.();
     }
-  }, [handleSingleSubmit, onChange, onContinuousEditEnd, onModelSelect, onChangeImageSize, onChangeAspectRatio]);
+  }, [handleSingleSubmit, nodeId, onChange, onContinuousEditEnd, onModelSelect, onChangeImageSize, onChangeAspectRatio, t]);
 
   // ── 从 Toolbar 点击快捷指令后的自动执行 ──
   useEffect(() => {
@@ -863,7 +887,8 @@ export default function PromptPanel({
     const spacer = prompt && !/\s$/.test(prompt) ? ' ' : '';
     onChange(`${prompt}${spacer}${token}`);
     onContinuousEditEnd?.();
-  }, [onChange, onContinuousEditEnd, prompt]);
+    void markSkillUsed(skill.id).catch(() => showToast(t('最近 Skill 使用记录保存失败'), 'error'));
+  }, [onChange, onContinuousEditEnd, prompt, markSkillUsed, showToast, t]);
 
   const handleUploadSkill = useCallback(async (source: 'file' | 'folder') => {
     setSlashOpen(false);
@@ -945,7 +970,9 @@ export default function PromptPanel({
       disabled={!canGenerate || !hasGenerationInput}
       aria-haspopup="menu"
       aria-expanded={!!shortcutMenuAnchor || (batchSupported && batchMenuOpen)}
-      data-tooltip={`${isGenerating ? t('生成中') : (batchSupported ? t('点击生成 1 张，长按选择数量') : t('调用模型生成'))} · ${t('右键设置发送快捷键')}`}
+      data-tooltip={`${isGenerating ? t('生成中') : imageOutputsPerJob > 1
+        ? t('点击生成 {count} 张候选图，长按选择作业次数', { count: imageOutputsPerJob })
+        : (batchSupported ? t('点击生成 1 张，长按选择数量') : t('调用模型生成'))} · ${t('右键设置发送快捷键')}`}
       onPointerDown={handleBatchPointerDown}
       onPointerUp={clearBatchLongPress}
       onPointerCancel={clearBatchLongPress}
@@ -1104,6 +1131,9 @@ export default function PromptPanel({
                 imageBackgrounds={selectedWorkflowId ? undefined : imageCapability?.backgrounds}
                 defaultImageBackground={selectedWorkflowId ? undefined : imageCapability?.defaultBackground}
                 imageBackgroundIsFixed={selectedWorkflowId ? false : imageCapability?.backgroundIsFixed}
+                imageOutputParameters={imageOutputParameters}
+                imageOutputCapability={selectedWorkflowId ? undefined : imageCapability}
+                onChangeImageOutputParameters={onChangeImageOutputParameters}
                 aspectRatio={imageRatioValues?.length === 0 && !imageSupportsAdaptive ? t('比例待确认') : aspectRatio}
                 onChangeImageSize={onChangeImageSize || (() => {})}
                 onChangeImageQuality={onChangeImageQuality}
@@ -1322,7 +1352,7 @@ export default function PromptPanel({
                     <div
                       className="image-batch-menu"
                       role="menu"
-                      aria-label={t('选择批量生成数量')}
+                      aria-label={imageOutputsPerJob > 1 ? t('选择生成作业次数') : t('选择批量生成数量')}
                       aria-hidden={!batchMenuOpen}
                     >
                       {imageBatchCounts.map((count) => (
@@ -1332,8 +1362,12 @@ export default function PromptPanel({
                           role="menuitem"
                           tabIndex={batchMenuOpen ? 0 : -1}
                           className={`image-batch-menu-item${batchCount === count ? ' active' : ''}`}
-                          aria-label={t('生成 {count} 张图片', { count })}
-                          title={count >= 4 ? t('生成 {count} 张，费用可能按张计算', { count }) : t('生成 {count} 张', { count })}
+                          aria-label={imageOutputsPerJob > 1
+                            ? t('生成 {jobs} 次作业，共 {count} 张候选图', { jobs: count, count: count * imageOutputsPerJob })
+                            : t('生成 {count} 张图片', { count })}
+                          title={imageOutputsPerJob > 1
+                            ? t('生成 {jobs} 次作业，共 {count} 张候选图', { jobs: count, count: count * imageOutputsPerJob })
+                            : count >= 4 ? t('生成 {count} 张，费用可能按张计算', { count }) : t('生成 {count} 张', { count })}
                           onClick={handleBatchSelect(count)}
                         >
                           {count}
@@ -1359,6 +1393,7 @@ export default function PromptPanel({
         userPresets={userPresets}
         presetFolders={presetFolders}
         skillOptions={skillOptions}
+        recentSkillIds={recentSkillIds}
         onSelect={handleSlashSelect}
         onRunAdvancedPreset={handleRunAdvancedPreset}
         onSelectSkill={handleSkillSelect}

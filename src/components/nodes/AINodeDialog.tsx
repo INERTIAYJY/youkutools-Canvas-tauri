@@ -14,12 +14,11 @@ import { derivedNodePlacement } from '../../store/store.utils';
 import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePostProcess, ModelOption } from '../../types';
 import { ANIMATION_FRAME_GRIDS } from '../../types';
 import { generateShotlistRows } from '../../services/shotlistService';
-import { MAX_IMAGE_BATCH_COUNT, type MediaTaskReceipt, type AudioSpeechSettings, type AudioSpeechReference, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
-import { generateText, generateImage, generateImagesBatch, generateAudio, generateVideo, buildPanoramaPrompt } from '../../services/aiService';
+import { MAX_IMAGE_BATCH_COUNT, type MediaTaskReceipt, type TextGenerationResult, type AudioSpeechSettings, type AudioSpeechReference, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
+import { generateText, generateTextResult, generateImage, generateImagesBatch, generateVideo, buildPanoramaPrompt } from '../../services/aiService';
 import { resolveVideoSubmissionControls } from '../../services/ai/videoRequestResolver';
 import { removeAudioSpeechReference } from '../../services/ai/audioSpeechSettings';
-import { persistAudioGenerationResult } from '../../services/ai/generateAudio';
-import { persistMediaUrlToProjectData } from '../../services/fileService';
+import { persistMediaUrlToProjectData, type PersistedProjectMedia } from '../../services/fileService';
 import { ensurePlayableVideoFile, playableVideoUrl } from '../../services/videoPlaybackCompat';
 import {
   applyImageBatchResults,
@@ -52,9 +51,11 @@ import {
   buildAnimationSpritePrompt,
   resolveAnimationSheetAspectRatio,
 } from '../../services/ai/animationPrompt';
-import { resolveAudioParameterCapability, resolveImageParameterCapability } from '../../services/ai/mediaModelCapabilities';
+import { resolveAudioParameterCapability, resolveImageOutputsPerJob, resolveImageParameterCapability } from '../../services/ai/mediaModelCapabilities';
 import { DREAMINA_IMAGE_RATIOS, getDreaminaImageModel } from '../../services/ai/dreaminaModels';
 import { resolveConfiguredImageBackground, resolveConfiguredImageQuality } from '../../services/ai/modelCapabilityValidation';
+import type { ImageOutputParameters } from '../../types/aiTypes';
+import { pickImageOutputParameters, resolveConfiguredImageOutput, resolveImageOutputCapability } from '../../services/ai/imageOutputParameters';
 import { applyGenerationCameraPrompt } from '../../services/shotlistPromptService';
 import { cancelComfyUINodeTask } from '../../services/comfyWorkflowService';
 import { COMFY_OUTPUT_UNAVAILABLE_MESSAGE, getComfyQueryAuthorizationMessage } from '../../services/comfyPolling';
@@ -68,6 +69,7 @@ import { cancelRunningHubNodeTask, completeRunningHubNodeTask } from '../../serv
 import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../services/canvasDerivationGuard';
 import { animationProcessing, animationResultPatch } from '../../services/animationService';
 import { useT } from '../../i18n';
+import { historyMediaTaskReceipt } from '../../services/historyMediaRecovery';
 import { mergeAppendedNodeMentions } from '../../utils/promptConnectionMentions';
 import { resolveGenerationNodeData } from '../../utils/nodeGeneration';
 import { cancelImageBatchGeneration, isImageBatchGenerating, subscribeImageBatches, usesSequentialImageBatch } from '../../services/generationService';
@@ -594,6 +596,34 @@ function AINodeDialog() {
       showToast(t('该节点还有未确认结束的 ComfyUI 任务，请先继续查询或终止任务'), 'error');
       return;
     }
+    if (['ai-image', 'ai-animation', 'ai-panorama'].includes(latestData.type)) {
+      const originalProjectId = store.currentProjectId;
+      const originalData = latestNode!.data;
+      const { executeGenerationWithImagePromptChoice } = await import('../../services/imagePromptOverflowService');
+      const current = useAppStore.getState();
+      if (current.currentProjectId !== originalProjectId || current.activeNodeId !== latestNode!.id
+        || current.nodes.find((node) => node.id === latestNode!.id)?.data !== originalData) return;
+      await executeGenerationWithImagePromptChoice(latestNode!.id, overridePrompt, postProcess);
+      return;
+    }
+    if (latestData.type === 'ai-audio') {
+      // 旧项目的弹窗须先显式选模型，避免缺少选择时使用项目的默认付费模型。
+      if (store.projectExecutionContext?.modelGeneration !== 1 && (!latestData.model || !latestData.provider)) {
+        const prompt = overridePrompt ?? latestData.prompt ?? '';
+        const cloud = isCloudWorkflow(store.workflows.find((item) => item.id === latestData.workflowId));
+        showToast(t(!prompt.trim() && !cloud && latestData.provider !== 'runninghub'
+          ? '请输入提示词' : '请先在底部模型选择器中选择一个模型'), 'error');
+        return;
+      }
+      const originalData = latestNode!.data;
+      const originalProjectId = store.currentProjectId;
+      const { executeGeneration } = await import('../../services/generationService');
+      const live = useAppStore.getState();
+      if (live.currentProjectId !== originalProjectId || live.activeNodeId !== latestNode!.id
+        || live.nodes.find((item) => item.id === latestNode!.id)?.data !== originalData) return;
+      await executeGeneration(latestNode!.id, overridePrompt, postProcess);
+      return;
+    }
     if (latestData.type === 'ai-director' || latestData.type === 'ai-video') {
       // 视频节点取消「在此节点生成」时，改为按数量生成到右侧新建节点。
       if (latestData.type === 'ai-video' && latestData.generateInPlace === false) {
@@ -627,7 +657,8 @@ function AINodeDialog() {
     }
     if (latestData.type === 'ai-image') {
       if (isImageBatchGenerating(latestNode!.id)) return;
-      if (Number(latestData.batchCount) > 1 && usesSequentialImageBatch(
+      if (resolveImageOutputsPerJob(latestData.model ?? '', latestData.provider ?? '', store.config) > 1
+        || Number(latestData.batchCount) > 1 && usesSequentialImageBatch(
         latestData.provider, latestData.model, store.config, latestData.workflowId,
       )) {
         const originalProjectId = store.currentProjectId;
@@ -669,13 +700,13 @@ function AINodeDialog() {
     }
     const submittingNodeId = activeNodeId!;
     const submittingProjectId = currentProjectId;
-    const mediaSubmission = ['ai-image', 'ai-animation', 'ai-panorama', 'ai-audio'].includes(latestData.type);
-    if (mediaSubmission) {
+    const mediaSubmission = ['ai-image', 'ai-animation', 'ai-panorama'].includes(latestData.type);
+    const localComfyTask = !!latestData.workflowId && !cloudWorkflow;
+    if (mediaSubmission || localComfyTask) {
       try { prepareMediaNodeGeneration(submittingNodeId); }
       catch (error) { showToast(error instanceof Error ? error.message : t('暂时无法继续查询，请检查连接配置'), 'error'); return; }
     }
     const runningHubTask = cloudWorkflow || latestData.provider === 'runninghub';
-    const localComfyTask = !!latestData.workflowId && !cloudWorkflow;
     let comfyTaskId: string | undefined;
     let comfyDeliveryError: unknown;
     let savingSignal: AbortSignal | undefined;
@@ -692,7 +723,7 @@ function AINodeDialog() {
         && (!guardedSubmission || (!!cloudGuard && isCanvasDerivationFresh(cloudGuard, state)))
       );
     };
-    const endOperation = mediaSubmission ? registerMediaNodeOperation(submittingNodeId, true) : undefined;
+    const endOperation = mediaSubmission || localComfyTask ? registerMediaNodeOperation(submittingNodeId, true) : undefined;
     updateNodeDataTransient(activeNodeId!, { status: 'loading', error: undefined, videoTaskState: undefined, mediaTaskState: undefined });
     let batchNodeIds: string[] | undefined;
     let taskReceipt: MediaTaskReceipt | undefined;
@@ -707,6 +738,7 @@ function AINodeDialog() {
         ? resolveImageParameterCapability(nodeModel, nodeProvider, store.config) : undefined;
       const imageQuality = resolveConfiguredImageQuality(imageCapability, latestData.imageQuality);
       const imageBackground = resolveConfiguredImageBackground(imageCapability, latestData.imageBackground);
+      const imageOutput = nodeType === 'ai-image' ? resolveConfiguredImageOutput(imageCapability, latestData) : {};
       const batchCount = cloudWorkflow ? 1 : Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(latestData.batchCount) || 1)));
       if (nodeType === 'ai-image' && batchCount > 1) {
         if (postProcess) throw new Error(t('批量生成暂不支持图片后处理，请将数量设为 1'));
@@ -727,6 +759,7 @@ function AINodeDialog() {
           imageSize,
           imageQuality,
           imageBackground: latestData.imageBackground === '' ? '' : imageBackground,
+          ...imageOutput,
           aspectRatio,
           workflowId: latestData.workflowId,
           workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
@@ -747,6 +780,7 @@ function AINodeDialog() {
           imageSize,
           imageQuality,
           imageBackground,
+          ...imageOutput,
           aspectRatio,
         });
         return;
@@ -770,6 +804,7 @@ function AINodeDialog() {
           imageSize,
           imageQuality,
           imageBackground: latestData.imageBackground === '' ? '' : imageBackground,
+          ...imageOutput,
           aspectRatio,
           workflowId: latestData.workflowId,
           workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
@@ -782,7 +817,7 @@ function AINodeDialog() {
         // 下载远程 URL 到本地项目目录
         if (taskReceipt) updateNodeDataTransient(submittingNodeId, { mediaTaskStage: 'saving' });
         const signal = beginMediaSaving();
-        const persisted = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (currentProjectId
+        const persisted: PersistedProjectMedia = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (currentProjectId
           ? await persistMediaUrlToProjectData(result.url, currentProjectId, 'ai-image', nodeLabel, { mediaDownloadAccess: result.mediaDownloadAccess, signal })
           : { mediaUrl: result.url, sourceUrl: result.url });
         if (!isStillCurrentSubmission()) return;
@@ -794,8 +829,8 @@ function AINodeDialog() {
           thumbnailUrl: mediaUrl,
           output: persisted.sourceUrl,
           status: 'success',
-          imageWidth: result.width,
-          imageHeight: result.height,
+          imageWidth: persisted.width ?? result.width,
+          imageHeight: persisted.height ?? result.height,
           ...(isAnimation ? { aspectRatio, ...animationResultPatch(latestData) } : {}),
         });
         confirmMediaDelivery();
@@ -816,7 +851,7 @@ function AINodeDialog() {
           filePath: persisted.filePath,
           params: isAnimation
             ? { imageSize, aspectRatio, animationAction, animationFrames, grid: ANIMATION_FRAME_GRIDS[animationFrames], animationProcessing: spriteProcessing, animationPromptVersion: 1 }
-            : { imageSize, imageQuality, imageBackground, aspectRatio, cameraSettings: latestData.cameraSettings },
+            : { imageSize, imageQuality, imageBackground, ...imageOutput, aspectRatio, cameraSettings: latestData.cameraSettings },
         });
         if (postProcess === 'character-8-direction-grid') {
           if (!persisted.filePath) {
@@ -916,73 +951,6 @@ function AINodeDialog() {
           params: { imageSize, aspectRatio },
         });
         showToast(t('全景图生成完成'));
-      } else if (nodeType === 'ai-audio') {
-        const result = await generateAudio({
-          prompt: effectivePrompt,
-          model: nodeModel,
-          provider: nodeProvider,
-          audioSpeechSettings: latestData.audioSpeechSettings,
-          audioVoice: latestData.audioVoice,
-          audioFormat: latestData.audioFormat,
-          audioSpeed: latestData.audioSpeed,
-          musicTitle: latestData.musicTitle,
-          musicLyrics: latestData.musicLyrics,
-          musicBpm: latestData.musicBpm,
-          musicDuration: latestData.musicDuration,
-          autoGenerateLyrics: latestData.autoGenerateLyrics,
-          workflowId: latestData.workflowId,
-          workflowInputs: latestData.workflowInputs, runninghubModelParameters: latestData.runninghubModelParameters,
-          nodeId: activeNodeId ?? undefined,
-        });
-        taskReceipt = result.taskReceipt;
-        comfyTaskId = result.comfyTaskId;
-        if (comfyTaskId) beginComfyNodeDelivery(submittingNodeId, comfyTaskId);
-        if (!isStillCurrentSubmission()) {
-          if (result.url.startsWith('blob:')) URL.revokeObjectURL(result.url);
-          return;
-        }
-        if (taskReceipt) updateNodeDataTransient(submittingNodeId, { mediaTaskStage: 'saving' });
-        const persisted = await persistAudioGenerationResult(result, currentProjectId, nodeLabel);
-        if (guardedSubmission && !isStillCurrentSubmission()) return;
-        if (persisted.persistence === 'failed') throw new Error(t('音频已生成，但保存失败；请继续保存原结果'));
-        updateNodeData(activeNodeId!, {
-          audioUrl: persisted.mediaUrl,
-          sourceUrl: persisted.sourceUrl,
-          filePath: persisted.filePath,
-          thumbnailUrl: persisted.mediaUrl,
-          output: persisted.outputUrl,
-          musicClipId: result.clipId,
-          ...(result.title ? { musicTitle: result.title } : {}),
-          ...(result.lyrics ? { musicLyrics: result.lyrics } : {}),
-          status: 'success',
-        });
-        confirmMediaDelivery();
-        if (result.workflowApiTaskId) completeWorkflowApiNodeTask(submittingNodeId, result.workflowApiTaskId);
-        if (result.comfyTaskId) completeComfyNodeTask(submittingNodeId, result.comfyTaskId);
-        recordOutputHistory(activeNodeId!, {
-          nodeId: activeNodeId!,
-          nodeLabel: nodeLabel,
-          timestamp: Date.now(),
-          prompt: effectivePrompt,
-          output: persisted.outputUrl,
-          nodeType: 'ai-audio',
-          model: nodeModel,
-          provider: nodeProvider,
-          status: 'success',
-          mediaUrl: persisted.mediaUrl,
-          filePath: persisted.filePath,
-          params: {
-            audioSpeechSettings: latestData.audioSpeechSettings,
-            audioVoice: latestData.audioVoice,
-            audioFormat: latestData.audioFormat,
-            audioSpeed: latestData.audioSpeed,
-            musicTitle: result.title || latestData.musicTitle,
-            musicBpm: latestData.musicBpm,
-            musicDuration: latestData.musicDuration,
-            autoGenerateLyrics: latestData.autoGenerateLyrics,
-          },
-        });
-        showToast(t('音频生成完成'));
       } else if (nodeType === 'ai-shotlist') {
         const rows = await generateShotlistRows(submittingNodeId, effectivePrompt, nodeModel, nodeProvider);
         showToast(t('已生成 {count} 个镜头', { count: rows.length }));
@@ -991,26 +959,44 @@ function AINodeDialog() {
         if (textSource !== rawPrompt) effectivePrompt = resolveProjectGenerationPrompt({
           prompt: textSource, data: latestData, settings: projectSettings, customStyles: store.customStyles,
         });
-        const result = await generateText({
+        const textParams = {
           prompt: effectivePrompt,
           model: nodeModel,
           provider: nodeProvider,
-        });
+        };
+        const result: TextGenerationResult = localComfyTask
+          ? await generateTextResult({ ...textParams, nodeId: submittingNodeId,
+            workflowId: latestData.workflowId, workflowInputs: latestData.workflowInputs })
+          : { text: await generateText(textParams) };
+        comfyTaskId = result.comfyTaskId;
+        if (comfyTaskId) { beginMediaSaving(); beginComfyNodeDelivery(submittingNodeId, comfyTaskId); }
+        const textTask = comfyTaskId && submittingProjectId ? getPendingTasksForProject(submittingProjectId)
+          .find((task) => task.nodeId === submittingNodeId && task.taskId === comfyTaskId && task.taskType === 'comfyui') : undefined;
+        const textReceipt = textTask ? historyMediaTaskReceipt(textTask) : undefined;
         if (!isStillCurrentSubmission()) return;
-        const processed = postProcessDramaExtractOutput(effectivePrompt, result);
+        const processed = postProcessDramaExtractOutput(effectivePrompt, result.text);
         if (!processed.ok) throw new Error(processed.error);
         updateNodeData(activeNodeId!, { output: processed.output, status: 'success' });
-        recordOutputHistory(activeNodeId!, {
+        if (comfyTaskId && cloudGuard) {
+          completeCanvasDerivation(cloudGuard);
+          cloudGuard = registerCanvasDerivation(useAppStore.getState(), submittingNodeId);
+        }
+        const textHistory = {
           nodeId: activeNodeId!,
           nodeLabel: nodeLabel,
           timestamp: Date.now(),
           prompt: effectivePrompt,
           output: processed.output,
-          nodeType: 'ai-text',
+          nodeType: 'ai-text' as const,
           model: nodeModel,
           provider: nodeProvider,
-          status: 'success',
-        });
+          status: 'success' as const,
+          ...(textReceipt ? { params: { comfyTextTaskId: textReceipt.taskId, comfyTextAttemptId: textReceipt.attemptId } } : {}),
+        };
+        if (comfyTaskId) await recordOutputHistory(activeNodeId!, textHistory, true, textReceipt);
+        else await recordOutputHistory(activeNodeId!, textHistory);
+        if (!isStillCurrentSubmission()) return;
+        if (comfyTaskId) completeComfyNodeTask(submittingNodeId, comfyTaskId);
         if (processed.kind) {
           if (processed.parsed) {
             useAppStore.getState().mergeDramaExtract(processed.parsed, {
@@ -1132,8 +1118,11 @@ function AINodeDialog() {
       const current = state.nodes.find((item) => item.id === activeNodeId)?.data;
       if (!activeNodeId || !current) return;
       const modelChanged = current.model !== model.value || current.provider !== model.provider || !!current.workflowId;
-      const imageCapability = nodeType === 'ai-image' && modelChanged
+      const baseImageCapability = nodeType === 'ai-image' && modelChanged
         ? resolveImageParameterCapability(model.value, model.provider, state.config) : undefined;
+      const outputFormat = baseImageCapability?.outputFormats?.find((format) => format === current.imageOutputFormat)
+        ?? baseImageCapability?.defaultOutputFormat ?? baseImageCapability?.outputFormats?.[0];
+      const imageCapability = resolveImageOutputCapability(baseImageCapability, outputFormat);
       const dreaminaImage = nodeType === 'ai-image' && modelChanged && model.provider === 'dreamina'
         ? getDreaminaImageModel(model.value) : undefined;
       const imageResolutions = dreaminaImage?.resolutions ?? imageCapability?.resolutions;
@@ -1162,6 +1151,10 @@ function AINodeDialog() {
         workflowId: undefined, workflowInputs: undefined, workflowApiOutputs: undefined, workflowApiStage: undefined,
         ...(modelChanged ? { comfyRefmods: undefined } : {}),
         ...(nodeType === 'ai-image' && modelChanged ? {
+          imageOutputFormat: outputFormat,
+          imageFrameCount: outputFormat === 'gif' ? current.imageFrameCount : undefined,
+          imageFrameDurationMs: outputFormat === 'gif' ? current.imageFrameDurationMs : undefined,
+          imageTransparent: outputFormat === 'gif' ? current.imageTransparent : undefined,
           imageSize: imageResolutions?.length
             ? keepSupportedImageValue(current.imageSize, imageResolutions, imageCapability?.defaultResolution
               ?? imageResolutions.find((value) => value.toLowerCase() === '2k') ?? imageResolutions[0])
@@ -1204,7 +1197,8 @@ function AINodeDialog() {
         ...(previousWorkflowId !== workflowId ? { comfyRefmods: undefined } : {}),
         workflowInputs: undefined, runninghubModelParameters: undefined, runninghubOutputs: undefined, runninghubStage: undefined,
         workflowApiOutputs: undefined, workflowApiStage: undefined,
-        ...(nodeType === 'ai-image' ? { imageQuality: undefined, imageBackground: undefined } : {}),
+        ...(nodeType === 'ai-image' ? { imageQuality: undefined, imageBackground: undefined,
+          imageOutputFormat: undefined, imageFrameCount: undefined, imageFrameDurationMs: undefined, imageTransparent: undefined } : {}),
         ...(workflow ? { ...workflowExecution(workflow, previousWorkflowId), batchCount: 1, audioPurpose: undefined } : {}),
       });
     },
@@ -1225,7 +1219,8 @@ function AINodeDialog() {
       runninghubStage: undefined,
       workflowApiOutputs: undefined,
       workflowApiStage: undefined,
-      ...(nodeType === 'ai-image' ? { imageQuality: undefined, imageBackground: undefined } : {}),
+      ...(nodeType === 'ai-image' ? { imageQuality: undefined, imageBackground: undefined,
+        imageOutputFormat: undefined, imageFrameCount: undefined, imageFrameDurationMs: undefined, imageTransparent: undefined } : {}),
       ...(nodeType === 'ai-director' ? { directorPrevisModel: '', directorPrevisProvider: undefined } : {}),
     });
   }, [activeNodeId, nodeType, updateNodeData]);
@@ -1242,6 +1237,11 @@ function AINodeDialog() {
 
   const onChangeImageBackground = useCallback(
     (value: string | undefined) => updateNodeData(activeNodeId!, { imageBackground: value }),
+    [activeNodeId, updateNodeData]
+  );
+
+  const onChangeImageOutputParameters = useCallback(
+    (parameters: ImageOutputParameters) => updateNodeData(activeNodeId!, { ...parameters }),
     [activeNodeId, updateNodeData]
   );
 
@@ -1597,10 +1597,12 @@ function AINodeDialog() {
             imageSize={(data.imageSize as string) || '2K'}
             imageQuality={data.imageQuality}
             imageBackground={data.imageBackground}
+            imageOutputParameters={pickImageOutputParameters(data)}
             aspectRatio={(data.aspectRatio as string) || (nodeType === 'ai-panorama' ? '2:1' : '1:1')}
             onChangeImageSize={onChangeImageSize}
             onChangeImageQuality={onChangeImageQuality}
             onChangeImageBackground={onChangeImageBackground}
+            onChangeImageOutputParameters={onChangeImageOutputParameters}
             onChangeAspectRatio={onChangeAspectRatio}
             batchCount={(data.batchCount as number) || 1}
             onChangeBatchCount={onChangeBatchCount}

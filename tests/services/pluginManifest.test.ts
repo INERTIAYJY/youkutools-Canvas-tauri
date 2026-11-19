@@ -48,6 +48,30 @@ function manifest(overrides: Record<string, unknown> = {}): string {
 }
 
 describe('AI Canvas Plugin Manifest Standard', () => {
+  it('accepts permission-free protocol-only packages and requires the API 2 capability', () => {
+    const contributes = { nodeTools: [], modelProtocols: [{ id: 'responses', name: 'OpenAI Responses', category: 'text', adapter: 'openai-responses' }] };
+    const options = { apiVersion: 2, requiredCapabilities: ['model.protocolPresets'], permissions: [], contributes };
+    expect(parsePluginBundle(manifest(options), 'definePlugin({ tools: {} });').contributes.modelProtocols).toEqual(contributes.modelProtocols);
+    expect(() => parsePluginBundle(manifest({ ...options, requiredCapabilities: [] }), 'source')).toThrow();
+    expect(() => parsePluginBundle(manifest({ ...options, apiVersion: 1 }), 'source')).toThrow();
+  });
+  it.each([
+    [{ id: 'same', name: 'a', category: 'text', adapter: 'openai-responses' }, { id: 'same', name: 'b', category: 'text', adapter: 'openai-responses' }],
+    [{ id: 'x', name: 'x', category: 'video', adapter: 'openai-responses' }],
+    [{ id: 'x', name: 'x', category: 'text', adapter: 'unknown' }],
+    [{ id: 'x', name: 'x', category: 'text', adapter: ['openai-responses'] }],
+    [{ id: 'x', name: 'x', category: 'text', adapter: 'openai-responses', path: '/responses' }],
+    [{ id: 'x', name: 'a\nb', category: 'text', adapter: 'openai-responses' }],
+  ])('rejects invalid or self-authorizing protocol contributions %j', (...modelProtocols) => {
+    expect(() => parsePluginBundle(manifest({ apiVersion: 2, requiredCapabilities: ['model.protocolPresets'], contributes: { nodeTools: [], modelProtocols } }), 'source')).toThrow();
+  });
+  it('requires explicit API 2 capability for bounded dependency declarations', () => {
+    const dependency = { dependencies: [{ pluginId: 'example.base', minVersion: '1.0.0' }] };
+    expect(() => parsePluginBundle(manifest(dependency), 'source')).toThrow('API 2');
+    expect(() => parsePluginBundle(manifest({ ...dependency, apiVersion: 2 }), 'source')).toThrow('plugin.dependencies');
+    expect(parsePluginBundle(manifest({ ...dependency, apiVersion: 2, requiredCapabilities: ['plugin.dependencies'] }), 'source').dependencies)
+      .toEqual(dependency.dependencies);
+  });
   it('requires explicit API 2 prompt reference permission and capability', () => {
     const safe = manifest({ apiVersion: 2, permissions: ['node.read', 'node.write', 'prompt.references.read'], requiredCapabilities: ['prompt.mentions'] });
     expect(parsePluginBundle(safe, 'definePlugin({ tools: {} });').permissions).toContain('prompt.references.read');

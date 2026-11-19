@@ -11,7 +11,7 @@
  * 只影响发送给模型的上下文，不修改、不删除原始消息历史。
  */
 import { useAppStore } from '../../store/useAppStore';
-import { seriesOwnerId } from '../../store/store.utils';
+import { projectMemoryOwnerId } from '../../store/store.utils';
 import {
   getConfiguredModelGroups,
   resolveTextModelContextSpec,
@@ -236,7 +236,7 @@ function buildMemoryBlock(projectId: string, query: string): string {
   const memories = selectProjectMemoriesForContext(
     state.projectMemories,
     // 记忆整部剧共用，挂在剧集项目上
-    seriesOwnerId(state.projects, projectId),
+    projectMemoryOwnerId(state.projects, projectId),
     query,
   );
   if (memories.length === 0) return '';
@@ -254,9 +254,13 @@ function buildMemoryBlock(projectId: string, query: string): string {
 // ============================================
 
 export interface AssembleAgentContextOptions {
+  /** 本次执行段冻结的运行时前提；不进入消息/摘要持久化。 */
+  assertCurrent?: () => void;
   conversationId: string;
   /** 当前项目 ID；用于注入项目记忆 */
   projectId?: string;
+  /** 工作台会话保留本会话历史，但不注入项目记忆和提示词学习样本。 */
+  includeProjectContext?: boolean;
   systemPrompt: string;
   userMessage: string;
   /** 当前轮已在界面新建的消息（当前用户消息、助手占位），从历史中排除 */
@@ -328,8 +332,9 @@ function buildMessages(
   const rawHistoryTokens = costs.reduce((sum, cost) => sum + cost, 0);
   let firstIncluded = history.length;
   while (firstIncluded > 0) {
-    const start = findHistoryCutIndex(history.slice(0, firstIncluded), 1);
-    const tokens = costs.slice(start, firstIncluded).reduce((sum, cost) => sum + cost, 0);
+    const start = findHistoryCutIndex(history, 1, firstIncluded);
+    let tokens = 0;
+    for (let index = start; index < firstIncluded; index++) tokens += costs[index];
     if (fixedTokens + historyTokens + tokens > inputBudget) break;
     historyTokens += tokens;
     firstIncluded = start;
@@ -367,16 +372,18 @@ export async function assembleAgentContext(
   options: AssembleAgentContextOptions,
 ): Promise<AssembledAgentContext> {
   const { conversationId, projectId, systemPrompt, userMessage, signal } = options;
+  options.assertCurrent?.();
   const excludeIds = new Set(options.excludeMessageIds ?? []);
   const spec = resolveAssistantContextSpec(projectId);
   // 对话历史与提示词样本互不依赖，并行读取可避免给每轮 Agent 响应叠加串行存储延迟。
   const [persistedResult, learnedPromptBlock] = await Promise.all([
     loadMessages(conversationId, 0, 200),
-    projectId ? buildLearnedPromptContext(projectId, userMessage) : Promise.resolve(''),
+    projectId && options.includeProjectContext !== false ? buildLearnedPromptContext(projectId, userMessage) : Promise.resolve(''),
   ]);
+  options.assertCurrent?.();
   // 学习样本复用记忆块的预算入口，使后续裁剪和压缩仍由统一上下文预算控制。
   const memoryBlock = [
-    projectId ? buildMemoryBlock(projectId, userMessage) : '',
+    projectId && options.includeProjectContext !== false ? buildMemoryBlock(projectId, userMessage) : '',
     learnedPromptBlock,
   ].filter(Boolean).join('\n\n');
 
@@ -405,7 +412,9 @@ export async function assembleAgentContext(
         projectId,
         excludeMessageIds: options.excludeMessageIds,
         signal,
+        assertCurrent: options.assertCurrent,
       });
+      options.assertCurrent?.();
       if (compressed) {
         forcedCompression = true;
         summary = compressed;
@@ -424,6 +433,7 @@ export async function assembleAgentContext(
     void compressConversationContext(conversationId, {
       projectId,
       excludeMessageIds: options.excludeMessageIds,
+      assertCurrent: options.assertCurrent,
     }).catch(() => { /* 预压缩失败不影响本次请求，下次达到 90% 时再强制压缩 */ });
   }
 

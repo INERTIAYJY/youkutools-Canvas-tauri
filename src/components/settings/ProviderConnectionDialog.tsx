@@ -15,6 +15,10 @@ import type {
   ProviderModelSelection,
 } from '../../types';
 import type { VolcengineAssetLibraryConfig } from '../../types/volcengineAssetLibrary';
+import type { ImageHostingConfig } from '../../types/imageHosting';
+import type { VolcengineTosConfig, VolcengineTosCredentials } from '../../types/volcengineTos';
+import { persistImageHosting, validateImageHosting } from '../../services/imageHostingService';
+import { deleteVolcengineTosCredential, persistVolcengineTosConfig, validateVolcengineTosConfig } from '../../services/volcengineTosConfigService';
 import { resolveChatApiProtocol } from '../../services/ai/chatApiProtocol';
 import {
   applySeedanceTemplateDefaults,
@@ -37,7 +41,6 @@ import {
   type ProviderDefinition,
 } from '../../services/ai/providerCatalogService';
 import { normalizeBaseUrl } from '../../services/ai/providerBaseUrl';
-import { emitCloseChatWindow } from '../../services/chat/chatWindowService';
 import { testProviderConnection } from '../../services/testConnection';
 import { confirmAction } from '../../services/confirmDialog';
 import { useAppStore } from '../../store/useAppStore';
@@ -53,7 +56,9 @@ import type { WorkflowApiDraft } from '../../types/workflowApi';
 import { normalizeWorkflowApiBaseUrl } from '../../services/workflowApi/autodlWorkflowManifest';
 import { editableWorkflowApiManifest, validateDeclarativeWorkflowManifest } from '../../services/workflowApi/workflowApiDefinition';
 import ProviderWebSearchPicker from './providerConnection/ProviderWebSearchPicker';
+import ProviderImageHostingSettings from './providerConnection/ProviderImageHostingSettings';
 import VolcengineAssetLibrarySettings from '../volcengine/VolcengineAssetLibrarySettings';
+import VolcengineTosSettings from './VolcengineTosSettings';
 import {
   assertProviderModelsVideoCapabilities,
   materializeLegacyImageProtocolDefault,
@@ -83,6 +88,8 @@ interface ConnectionDraftState {
   manualModelId: string;
   manualModelName: string;
   manualCategory: GeneralModelCategory;
+  imageHosting?: ImageHostingConfig;
+  tosUpload?: VolcengineTosConfig;
 }
 
 /** 仅比较弹窗内的编辑内容；凭据单独在内存比较，不进入序列化快照。 */
@@ -142,7 +149,13 @@ export default function ProviderConnectionDialog({
     () => resolveChatApiProtocol(initialConfig?.chatApiProtocol),
   );
   const [genericApiKey, setGenericApiKey] = useState(initialConfig?.apiKey || '');
+  const [museCredentialReady, setMuseCredentialReady] = useState(false);
   const [baseUrl, setBaseUrl] = useState(initialBaseUrl);
+  const [imageHosting, setImageHosting] = useState(initialConfig?.imageHosting);
+  const [imageHostingApiKey, setImageHostingApiKey] = useState('');
+  const [tosUpload, setTosUpload] = useState<VolcengineTosConfig | undefined>(initialConfig?.tosUpload);
+  const [tosCredentials, setTosCredentials] = useState<VolcengineTosCredentials>({ accessKeyId: '', secretAccessKey: '' });
+  const tosCleanupRefs = useRef(new Set(initialConfig?.tosUpload?.credentialRef ? [initialConfig.tosUpload.credentialRef] : []));
   const [assetLibraryConfig, setAssetLibraryConfig] = useState<VolcengineAssetLibraryConfig | undefined>(initialConfig?.assetLibrary);
   const [legacyWorkflowApiKey, setLegacyWorkflowApiKey] = useState(runninghubWorkflowApiKey);
   const [siteKeys, setSiteKeys] = useState(() => runningHubSiteDrafts({ ...providerConfigs,
@@ -170,7 +183,7 @@ export default function ProviderConnectionDialog({
   const [workflowValid, setWorkflowValid] = useState(false);
   const [models, setModels] = useState<ProviderModelSelection[]>(
     () => {
-      const options = { preferIncomingConfiguration: initialDefinition?.id === 'relayonapi' };
+      const options = { preferIncomingConfiguration: initialDefinition?.policy.catalog.refresh === 'replace-unselected' };
       return mergeModels(mergeModels(initialLocalModels, initialCatalogModels, options), initialSelectedModels, options)
         .map((model) => applyKnownVideoTemplateDefaults(model, initialBaseUrl));
     },
@@ -178,6 +191,12 @@ export default function ProviderConnectionDialog({
   const [selectedIds, setSelectedIds] = useState(() =>
     new Set(initialSelectedModels.map((model) => model.id)),
   );
+  const selectedIdsRef = useRef(selectedIds);
+  const updateSelectedIds = (update: Set<string> | ((current: Set<string>) => Set<string>)) => {
+    const next = typeof update === 'function' ? update(selectedIdsRef.current) : update;
+    selectedIdsRef.current = next;
+    setSelectedIds(next);
+  };
   const [catalogStatus, setCatalogStatus] = useState<CatalogStatus>(
     initialSelectedModels.length > 0 || initialLocalModels.length > 0 ? 'ready' : 'idle',
   );
@@ -211,7 +230,7 @@ export default function ProviderConnectionDialog({
   const abortRef = useRef<AbortController | null>(null);
   const currentConnectionDraft = (): ConnectionDraftState => ({
     connectionName, chatApiProtocol, baseUrl, models, selectedIds, visibleModelCategories,
-    manualModelId, manualModelName, manualCategory,
+    manualModelId, manualModelName, manualCategory, imageHosting, tosUpload,
   });
   const [draftBaseline, setDraftBaseline] = useState(() => ({
     snapshot: serializeConnectionDraft(currentConnectionDraft()),
@@ -289,6 +308,7 @@ export default function ProviderConnectionDialog({
     if (definition.kind === 'workflow-api') return !baseUrl.trim();
     if (definition.authType === 'oauth') return !dreaminaLoggedIn;
     // RunningHub 允许只用工作流 Key 建连接，此时 apiKey 为空不算缺凭据。
+    if (definition.authType === 'browser-session') return !museCredentialReady;
     if (definition.id === 'runninghub-model') return activeRunningHubSite
       ? !Object.values(siteKeys).some((keys) => keys.modelKey.trim() || keys.workflowKey.trim())
       : !apiKey.trim() && !workflowApiKey.trim();
@@ -299,11 +319,13 @@ export default function ProviderConnectionDialog({
     return definition.credentials.some(
       (field) => field.required && field.key === 'baseUrl' && !baseUrl.trim(),
     );
-  }, [apiKey, baseUrl, definition, dreaminaLoggedIn, workflowApiKey, activeRunningHubSite, siteKeys]);
+  }, [apiKey, baseUrl, definition, dreaminaLoggedIn, museCredentialReady, workflowApiKey, activeRunningHubSite, siteKeys]);
   const workflowOnlyConnection = definition?.id === 'runninghub-model' && !apiKey.trim();
 
-  const hasConnectionChanges = () => definition?.id === 'custom-openai'
+  const hasConnectionChanges = () => (definition?.id === 'custom-openai' || definition?.id === 'volcengine')
     && (apiKey !== draftBaseline.apiKey
+      || !!imageHostingApiKey
+      || !!tosCredentials.accessKeyId || !!tosCredentials.secretAccessKey
       || serializeConnectionDraft(currentConnectionDraft()) !== draftBaseline.snapshot);
 
   const navigateWithDraftGuard = async (navigate: () => void, discardConnection = false): Promise<boolean> => {
@@ -344,12 +366,17 @@ export default function ProviderConnectionDialog({
       setChatApiProtocol(resolveChatApiProtocol(savedConfig?.chatApiProtocol));
       setGenericApiKey(savedConfig?.apiKey || '');
       setBaseUrl(savedConfig?.baseUrl || nextDefinition.defaultBaseUrl || '');
+      setImageHosting(savedConfig?.imageHosting);
+      setImageHostingApiKey('');
+      setTosUpload(savedConfig?.tosUpload);
+      setTosCredentials({ accessKeyId: '', secretAccessKey: '' });
+      tosCleanupRefs.current = new Set(savedConfig?.tosUpload?.credentialRef ? [savedConfig.tosUpload.credentialRef] : []);
       setAssetLibraryConfig(savedConfig?.assetLibrary);
       setLegacyWorkflowApiKey('');
       if (nextDefinition.id === 'runninghub-model') setSiteKeys(runningHubSiteDrafts(providerConfigs));
       const localModels = nextDefinition.policy.catalog.initialModelsOnCreate === 'empty' ? [] : fallbackModels[nextDefinition.id] || [];
       setModels(localModels);
-      setSelectedIds(new Set());
+      updateSelectedIds(new Set());
       setCatalogStatus(localModels.length > 0 ? 'ready' : 'idle');
       setCatalogMessage('');
       setQuery('');
@@ -372,6 +399,8 @@ export default function ProviderConnectionDialog({
           selectedIds: new Set(),
           visibleModelCategories: new Set(CATEGORY_ORDER),
           manualModelId: '', manualModelName: '', manualCategory: 'text',
+          imageHosting: savedConfig?.imageHosting,
+          tosUpload: savedConfig?.tosUpload,
         }),
         apiKey: savedConfig?.apiKey || '',
       });
@@ -397,7 +426,9 @@ export default function ProviderConnectionDialog({
       abortRef.current?.abort();
       setCatalogStatus('idle');
       setCatalogMessage(t('站点已切换，请重新拉取当前站点的模型目录。'));
-      setModels((current) => mergeModels(fallbackModels.toapis || [], current.filter((model) => selectedIds.has(model.id))));
+      const checkedIds = selectedIdsRef.current;
+      setModels((current) => mergeModels(fallbackModels.toapis || [], current.filter((model) => checkedIds.has(model.id)),
+        { preferIncomingConfiguration: true }));
     }
     setBaseUrl(next);
   };
@@ -424,14 +455,16 @@ export default function ProviderConnectionDialog({
         const result = await testProviderConnection('runninghub-model', apiKey.trim(), baseUrl.trim() || undefined);
         if (!result.success) throw new Error(result.error || t('RunningHub API Key 验证失败'));
       }
+      const isRelay = definition.id === 'relayonapi';
       const result = await fetchProviderModelCatalog({
-        providerId: definition.id,
+        providerId: isRelay && connectionId ? connectionId : definition.id,
         config: {
           name: connectionName.trim() || definition.name,
           apiKey: apiKey.trim(),
           baseUrl: baseUrl.trim() || undefined,
           catalogId: definition.id,
           chatApiProtocol,
+          ...(isRelay ? { relayonGroup: initialConfig?.relayonGroup } : {}),
         },
         fallbackModels: fallbackModels[definition.id] || [],
         signal: controller.signal,
@@ -439,25 +472,29 @@ export default function ProviderConnectionDialog({
       if (controller.signal.aborted) return;
       const resolvedBaseUrl = result.resolvedBaseUrl || baseUrl;
       const remoteIds = new Set(result.models.map((model) => model.id));
+      const { refresh } = definition.policy.catalog;
+      const checkedIds = selectedIdsRef.current;
+      const retainedMissing = refresh === 'replace-unselected' && [...checkedIds].some((id) => !remoteIds.has(id));
+      const keepModel = (id: string) => remoteIds.has(id) || (refresh === 'replace-unselected' && checkedIds.has(id));
       setModels((current) => mergeModels(
-        definition.policy.catalog.refresh === 'replace' ? current.filter((model) => remoteIds.has(model.id)) : current,
+        refresh === 'merge' ? current : current.filter((model) => keepModel(model.id)),
         result.models,
       )
         .map((model) => applyKnownVideoTemplateDefaults(model, resolvedBaseUrl)));
-      if (definition.policy.catalog.refresh === 'replace') {
-        setSelectedIds((current) => new Set([...current].filter((id) => remoteIds.has(id))));
-        if (protocolModelId && !remoteIds.has(protocolModelId)) {
+      if (refresh === 'replace') updateSelectedIds(new Set([...checkedIds].filter(keepModel)));
+      if (refresh !== 'merge') {
+        if (protocolModelId && !keepModel(protocolModelId)) {
           setProtocolModelId(null);
           setProtocolValid(true);
         }
-        if (videoCapabilityModelId && !remoteIds.has(videoCapabilityModelId)) setVideoCapabilityModelId(null);
-        if (imageCapabilityModelId && !remoteIds.has(imageCapabilityModelId)) setImageCapabilityModelId(null);
-        if (categoryEditModelId && !remoteIds.has(categoryEditModelId)) setCategoryEditModelId(null);
+        if (videoCapabilityModelId && !keepModel(videoCapabilityModelId)) setVideoCapabilityModelId(null);
+        if (imageCapabilityModelId && !keepModel(imageCapabilityModelId)) setImageCapabilityModelId(null);
+        if (categoryEditModelId && !keepModel(categoryEditModelId)) setCategoryEditModelId(null);
       }
-      setCatalogStatus(result.warning ? 'warning' : 'ready');
+      setCatalogStatus(result.warning || retainedMissing ? 'warning' : 'ready');
       const corrected = adoptResolvedBaseUrl(result.resolvedBaseUrl);
       setCatalogMessage(
-        result.warning
+        (retainedMissing ? t('部分已选模型未出现在本次目录中，已保留原配置，请确认该 Key 和分组权限。') : result.warning)
         || (corrected
           ? t('已获取 {count} 个模型，接口地址已更正为 {url}', {
             count: result.models.length,
@@ -472,9 +509,8 @@ export default function ProviderConnectionDialog({
     }
   };
 
-  const handleAssistantAdd = async () => {
+  const handleAssistantAdd = () => {
     const store = useAppStore.getState();
-    if (store.chatPanelDetached) await emitCloseChatWindow();
     store.openChatWithDraft(
       buildRelayAssistantPrompt(
         connectionName.trim(),
@@ -549,7 +585,7 @@ export default function ProviderConnectionDialog({
       if (removingProtocol) closeProtocolEditor();
       if (selectedIds.has(modelId) && videoCapabilityModelId === modelId) setVideoCapabilityModelId(null);
       if (selectedIds.has(modelId) && imageCapabilityModelId === modelId) setImageCapabilityModelId(null);
-      setSelectedIds((current) => {
+      updateSelectedIds((current) => {
         const next = new Set(current);
         if (next.has(modelId)) next.delete(modelId);
         else next.add(modelId);
@@ -577,7 +613,7 @@ export default function ProviderConnectionDialog({
       ) setVideoCapabilityModelId(null);
       if (allVisibleSelected && imageCapabilityModelId
         && filteredModels.some((model) => model.id === imageCapabilityModelId)) setImageCapabilityModelId(null);
-      setSelectedIds((current) => {
+      updateSelectedIds((current) => {
         const next = new Set(current);
         for (const model of filteredModels) {
           if (allVisibleSelected) next.delete(model.id);
@@ -623,7 +659,7 @@ export default function ProviderConnectionDialog({
     const add = () => {
       if (displacesProtocol) closeProtocolEditor();
       setModels((current) => mergeModels(current, [model]));
-      setSelectedIds((current) => new Set(current).add(id));
+      updateSelectedIds((current) => new Set(current).add(id));
       setManualModelId('');
       setManualModelName('');
       if (definition.id === 'custom-openai' && model.category === 'image') {
@@ -744,7 +780,7 @@ export default function ProviderConnectionDialog({
     }, true);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (savedAt: number) => {
     if (
       !definition
       || savingRef.current
@@ -755,6 +791,8 @@ export default function ProviderConnectionDialog({
       || !protocolValid
     ) return;
     try {
+      if (definition.id === 'custom-openai' && imageHosting) validateImageHosting(imageHosting, !!imageHostingApiKey.trim(), { apiKey, baseUrl });
+      if (definition.id === 'volcengine') validateVolcengineTosConfig(tosUpload, tosCredentials);
       if (isWorkflowApi) {
         if (!baseUrl.trim() || !workflowValid || !workflowDrafts.length) throw new Error(t('请完成工作流配置'));
         normalizeWorkflowApiBaseUrl(baseUrl, true);
@@ -777,20 +815,32 @@ export default function ProviderConnectionDialog({
           catalogModels: capCatalogModels(models, selectedIds)
             .map((model) => ({ ...model, provider: nextConnectionId })),
           visibleModelCategories: CATEGORY_ORDER.filter((item) => visibleModelCategories.has(item)),
-          catalogUpdatedAt: Date.now(),
+          catalogUpdatedAt: savedAt,
         };
     savingRef.current = true;
     setSaving(true);
     try {
+      const savedImageHosting = definition.id === 'custom-openai' && imageHosting
+        ? await persistImageHosting(imageHosting, imageHostingApiKey, { apiKey, baseUrl }) : undefined;
+      // 保存连接失败时保留新引用，重试不必再次输入或覆盖旧 Key。
+      setImageHosting(savedImageHosting);
+      setImageHostingApiKey('');
+      if (definition.id === 'volcengine' && tosUpload?.credentialRef) tosCleanupRefs.current.add(tosUpload.credentialRef);
+      const savedTosUpload = definition.id === 'volcengine'
+        ? await persistVolcengineTosConfig(tosUpload, tosCredentials) : undefined;
+      // 连接保存失败时保持新引用和空凭据草稿；重试不会覆写或丢弃原凭据。
+      setTosUpload(savedTosUpload);
+      setTosCredentials({ accessKeyId: '', secretAccessKey: '' });
       await onSave(
         nextConnectionId,
         {
           ...(definition.id === 'relayonapi' ? initialConfig : {}),
           name: connectionName.trim() || definition.name,
-          apiKey: definition.authType === 'oauth' ? '' : apiKey.trim(),
+          apiKey: definition.authType === 'api-key' ? apiKey.trim() : '',
           baseUrl: isWorkflowApi ? normalizeWorkflowApiBaseUrl(baseUrl, true) : normalizeBaseUrl(baseUrl, chatApiProtocol) || undefined,
           catalogId: definition.id,
-          ...(definition.id === 'custom-openai' ? { chatApiProtocol } : {}),
+          ...(definition.id === 'custom-openai' ? { chatApiProtocol, imageHosting: savedImageHosting } : {}),
+          ...(definition.id === 'volcengine' ? { tosUpload: savedTosUpload } : {}),
           ...modelConfig,
           ...(definition.id === 'volcengine' && assetLibraryConfig ? { assetLibrary: { ...assetLibraryConfig, projectName: assetLibraryConfig.projectName || 'default' } } : {}),
         },
@@ -798,7 +848,17 @@ export default function ProviderConnectionDialog({
           ? { runninghubWorkflowApiKey: workflowApiKey.trim(), ...(activeRunningHubSite ? { runninghubSiteKeys: siteKeys } : {}) }
           : isWorkflowApi ? { workflowApiDrafts: workflowDrafts } : undefined,
       );
-      setDraftBaseline({ snapshot: serializeConnectionDraft(currentConnectionDraft()), apiKey });
+      setDraftBaseline({ snapshot: serializeConnectionDraft({ ...currentConnectionDraft(), imageHosting: savedImageHosting, tosUpload: savedTosUpload }), apiKey });
+      if (definition.id === 'volcengine') {
+        for (const ref of tosCleanupRefs.current) {
+          if (ref === savedTosUpload?.credentialRef
+            || Object.values(useAppStore.getState().config.providers).some((provider) => provider.tosUpload?.credentialRef === ref)) continue;
+          try {
+            await deleteVolcengineTosCredential(ref);
+            tosCleanupRefs.current.delete(ref);
+          } catch { useAppStore.getState().showToast(t('连接已保存，旧 TOS 凭据清理未完成'), 'error'); }
+        }
+      }
     } catch (error) {
       setCatalogStatus('error');
       setCatalogMessage(error instanceof Error ? error.message : t('保存失败'));
@@ -881,6 +941,7 @@ export default function ProviderConnectionDialog({
               dreaminaLoggedIn={dreaminaLoggedIn}
               dreaminaLoading={dreaminaLoading}
               onDreaminaLogin={onDreaminaLogin}
+              onMuseCredentialReadyChange={setMuseCredentialReady}
               duplicateConnectionName={duplicateConnectionName}
               catalogStatus={catalogStatus}
               catalogMessage={catalogMessage}
@@ -888,6 +949,13 @@ export default function ProviderConnectionDialog({
               onReturnToPicker={returnToDefinitionPicker}
               onTestConnection={handleTestConnection}
             />
+
+            {definition?.id === 'custom-openai' && <ProviderImageHostingSettings
+              config={imageHosting} onChange={setImageHosting} apiKey={imageHostingApiKey} onApiKeyChange={setImageHostingApiKey}
+            />}
+
+            {definition?.id === 'volcengine' && <VolcengineTosSettings key={tosUpload?.credentialRef || 'new-tos'} config={tosUpload} onChange={setTosUpload}
+              credentials={tosCredentials} onCredentialsChange={setTosCredentials} disabled={saving} />}
 
             {definition?.id === 'volcengine' && (
               <VolcengineAssetLibrarySettings
@@ -997,7 +1065,7 @@ export default function ProviderConnectionDialog({
                   || (!isWebSearchProvider && !isWorkflowApi && !workflowOnlyConnection && selectedModels.length === 0)
                   || !protocolValid
                 }
-                onClick={() => void handleSave()}
+                onClick={() => void handleSave(Date.now())}
               >
                 {saving ? t('保存中...') : editing ? t('保存更改') : t('添加厂商')}
               </AnimatedButton>

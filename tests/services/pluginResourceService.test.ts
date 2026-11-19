@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Edge, Node } from '@xyflow/react';
 import type { BaseNodeData } from '../../src/types';
 import type { PluginResourceStateSnapshot } from '../../src/services/plugins/pluginResourceService';
-import type { PluginInvocationResources } from '../../src/types/plugin';
+import type { InstalledPlugin, PluginInvocationResources } from '../../src/types/plugin';
 import type { PluginLineArtImage } from '../../src/services/plugins/pluginImageService';
+import { captureLegacyCanvasContext } from '../../src/services/projectExecutionContext';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -47,6 +48,7 @@ import {
   clearPluginResources,
   getPluginLineArtResource,
   mintPluginInvocationResources,
+  assertPluginResourceContextCurrent,
   readPluginDerivedResourceForOutput,
   readPluginResourceRange,
   readPluginPlaybackRange,
@@ -116,6 +118,19 @@ function lineArt(bytes = new Uint8Array([10, 20, 30])): PluginLineArtImage {
 }
 
 describe('pluginResourceService', () => {
+  it('rejects a resource lease after a resolved dependency revision changes', async () => {
+    const { state } = createState();
+    const installed = (id: string): InstalledPlugin => ({ id, source: '', sourceDigest: SOURCE_DIGEST, revisionDigest: REVISION_DIGEST,
+      enabled: true, installedAt: 1, updatedAt: 1, manifest: { apiVersion: 2, id, name: id, version: '1.0.0', runtime: 'javascript',
+        entry: 'main.js', category: 'utility', permissions: [], contributes: { nodeTools: [] } } });
+    const owner = installed('plugin-a'); const base = installed('plugin-b');
+    owner.manifest.dependencies = [{ pluginId: base.id }];
+    state.installedPlugins = [owner, base];
+    const resources = await mintPluginInvocationResources({ pluginId: owner.id, sourceDigest: SOURCE_DIGEST, revisionDigest: REVISION_DIGEST,
+      invocationId: 'invoke-1', projectId: 'project-1', nodeId: 'target', baseRevision: 7, access: { incoming: true }, state });
+    base.revisionDigest = 'd'.repeat(64);
+    await expect(readPluginResourceRange(readContext(state), resources.incoming[0].resourceId, 0, 1)).rejects.toThrow('依赖');
+  });
   it('replaces full derived batches without accumulating quota and restores old leases on failure', () => {
     const { state } = createState();
     const context = { ...readContext(state), permissions: ['files.connected.read', 'files.output.create'] as const };
@@ -156,6 +171,18 @@ describe('pluginResourceService', () => {
     const context = { ...readContext(state), permissions: ['files.connected.read', 'files.output.create'] as const };
     return { state, setRevision, resources, context };
   }
+
+  it('uses the live Store rather than a captured resource snapshot after same-id restore', () => {
+    const state = { ...createState().state, projects: [{ id: 'project-1', exchangeEpoch: 0 }] };
+    let actual = state;
+    const expectedContext = captureLegacyCanvasContext(state)!;
+    const context = { ...readContext(state), expectedContext, getState: () => actual };
+    expect(() => assertPluginResourceContextCurrent(context)).not.toThrow();
+    actual = { ...state, projects: [{ id: 'project-1', exchangeEpoch: 1 }] };
+    expect(context.state.projects?.[0].exchangeEpoch).toBe(0);
+    expect(() => assertPluginResourceContextCurrent(context)).toThrow('上下文');
+    expect(() => assertPluginResourceContextCurrent({ ...context, expectedContext: undefined })).toThrow('上下文');
+  });
 
   it('binds one playback preview to its source without exposing it as an output image', async () => {
     const { resources, context } = await workspaceSetup();
@@ -208,7 +235,7 @@ describe('pluginResourceService', () => {
       : { isDirectory: false, isFile: true, isSymlink: false, size: 12, mtime: new Date(1_000) });
     await expect(resolvePluginMediaWorkspaceInputs(context, resources)).rejects.toThrow('文件已变化');
     setRevision(8);
-    await expect(resolvePluginMediaWorkspaceInputs(context, resources)).rejects.toThrow('画布已变化');
+    await expect(resolvePluginMediaWorkspaceInputs(context, resources)).rejects.toThrow('画布上下文已变化');
   });
 
   it('rejects media workspace inputs above 256 MiB before copying or decoding bytes', async () => {

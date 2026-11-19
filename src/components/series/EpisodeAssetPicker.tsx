@@ -6,7 +6,8 @@ import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useT } from '../../i18n';
 import { useAppStore } from '../../store/useAppStore';
-import type { EpisodeAssetKind } from '../../types/episodeAssets';
+import type { EpisodeAssetKind, EpisodeAssetPickerSnapshot } from '../../types/episodeAssets';
+export type { EpisodeAssetPickerSnapshot } from '../../types/episodeAssets';
 import { resolveDramaAssetImageRef } from '../../services/dramaAssetPrompt';
 import MentionPicker, { type MentionPickerItem } from '../shared/MentionPicker';
 import ModalOverlay from '../shared/ModalOverlay';
@@ -17,16 +18,31 @@ interface EpisodeAssetPickerProps {
   initialQuery?: string;
   onSelect: (assetId: string, scope: 'project' | 'global') => Promise<void>;
   onClose: () => void;
+  snapshot?: EpisodeAssetPickerSnapshot;
+  onLoadGlobal?: () => Promise<void>;
 }
 
-/** 选择业务卡片，与视频输入选择不同：无图片的角色、道具也可以绑定。 */
-export default function EpisodeAssetPicker({ kind, initialQuery = '', onSelect, onClose }: EpisodeAssetPickerProps) {
-  const t = useT();
-  const listId = useId();
-  const { library, globalCharacters, globalProps, nodes, loadGlobalCharacters, loadGlobalDramaAssets } = useAppStore(useShallow((state) => ({
-    library: state.dramaAssets, globalCharacters: state.globalCharacters, globalProps: state.globalProps,
+export default function EpisodeAssetPicker(props: EpisodeAssetPickerProps) {
+  return props.snapshot
+    ? <EpisodeAssetPickerView {...props} snapshot={props.snapshot} />
+    : <LocalEpisodeAssetPicker {...props} />;
+}
+
+function LocalEpisodeAssetPicker(props: EpisodeAssetPickerProps) {
+  const data = useAppStore(useShallow((state) => ({
+    library: state.dramaAssets, globalCharacters: state.globalCharacters, globalScenes: state.globalScenes, globalProps: state.globalProps,
     nodes: state.nodes, loadGlobalCharacters: state.loadGlobalCharacters, loadGlobalDramaAssets: state.loadGlobalDramaAssets,
   })));
+  return <EpisodeAssetPickerView {...props} snapshot={data}
+    onLoadGlobal={() => props.kind === 'character' ? data.loadGlobalCharacters() : data.loadGlobalDramaAssets()} />;
+}
+
+/** 选择业务卡片，与视频输入选择不同：无图片的角色、场景、道具也可以绑定。 */
+function EpisodeAssetPickerView({ kind, initialQuery = '', onSelect, onClose, snapshot, onLoadGlobal }:
+  EpisodeAssetPickerProps & { snapshot: EpisodeAssetPickerSnapshot }) {
+  const t = useT();
+  const listId = useId();
+  const { library, globalCharacters, globalScenes = [], globalProps, nodes } = snapshot;
   const [scope, setScope] = useState<'project' | 'global'>('project');
   const [query, setQuery] = useState(initialQuery);
   const [loading, setLoading] = useState(false);
@@ -43,7 +59,8 @@ export default function EpisodeAssetPicker({ kind, initialQuery = '', onSelect, 
     setLoading(true);
     setLoadError('');
     try {
-      await (kind === 'character' ? loadGlobalCharacters() : loadGlobalDramaAssets());
+      if (!onLoadGlobal) throw new Error(t('加载资产失败，请重试'));
+      await onLoadGlobal();
     } catch (cause) {
       if (aliveRef.current && loadRequestRef.current === request) setLoadError(cause instanceof Error ? cause.message : t('加载资产失败，请重试'));
     } finally {
@@ -53,10 +70,10 @@ export default function EpisodeAssetPicker({ kind, initialQuery = '', onSelect, 
   const loadingCurrent = scope === 'global' && loading;
   const visibleError = error || (scope === 'global' ? loadError : '');
 
-  const source = scope === 'global' ? kind === 'character' ? globalCharacters : globalProps
-    : kind === 'character' ? library.characters : library.props;
+  const source = scope === 'global' ? kind === 'character' ? globalCharacters : kind === 'scene' ? globalScenes : globalProps
+    : kind === 'character' ? library.characters : kind === 'scene' ? library.scenes : library.props;
   const term = query.trim().toLocaleLowerCase();
-  const assets = source.filter((asset) => !term || `${asset.name}\n${asset.summary}\n${asset.kind === 'character' ? asset.aliases?.join(' ') ?? '' : asset.ownerName ?? ''}`.toLocaleLowerCase().includes(term));
+  const assets = source.filter((asset) => !term || `${asset.name}\n${asset.summary}\n${asset.kind === 'character' ? asset.aliases?.join(' ') ?? '' : asset.kind === 'prop' ? asset.ownerName ?? '' : ''}`.toLocaleLowerCase().includes(term));
   const select = async (assetId: string) => {
     if (busyRef.current || loadingCurrent) return;
     busyRef.current = true;
@@ -75,7 +92,7 @@ export default function EpisodeAssetPicker({ kind, initialQuery = '', onSelect, 
   const items: MentionPickerItem[] = assets.map((asset, index) => ({
     key: asset.id, domId: `${listId}-${index}`, label: asset.name, title: `${asset.name}\n${asset.summary}`,
     thumbnailUrl: resolveDramaAssetImageRef(asset, scope === 'project' ? nodes : [])?.imageUrl,
-    icon: kind === 'character' ? 'lucide:user-round' : 'lucide:box', disabled: busy || loadingCurrent,
+    icon: kind === 'character' ? 'lucide:user-round' : kind === 'scene' ? 'lucide:map-pin' : 'lucide:box', disabled: busy || loadingCurrent,
     onSelect: () => { void select(asset.id); },
   }));
   const activeKey = items.find((item) => item.key === highlightedKey)?.key ?? items[0]?.key;
@@ -114,10 +131,10 @@ export default function EpisodeAssetPicker({ kind, initialQuery = '', onSelect, 
     }
   };
   return (
-    <ModalOverlay isOpen onClose={close} ariaLabel={t(kind === 'character' ? '选择本集角色资产' : '选择本集道具资产')}
+    <ModalOverlay isOpen onClose={close} ariaLabel={t(kind === 'character' ? '选择本集角色资产' : kind === 'scene' ? '选择本集场景资产' : '选择本集道具资产')}
       zIndex={320} className="ui-dialog-surface w-[min(640px,calc(100vw-24px))] max-h-[80vh]">
       <div className="flex shrink-0 items-center gap-2 border-b border-canvas-border p-3">
-        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{t(kind === 'character' ? '选择本集角色资产' : '选择本集道具资产')}</h2>
+        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{t(kind === 'character' ? '选择本集角色资产' : kind === 'scene' ? '选择本集场景资产' : '选择本集道具资产')}</h2>
         <PopupCloseButton disabled={busy} onClick={close} />
       </div>
       <div className="min-h-0 overflow-y-auto p-3" onKeyDown={keyDown} onClick={(event) => {

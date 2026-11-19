@@ -12,6 +12,7 @@ import {
   type AudioCapabilityKind,
 } from './mediaModelCapabilities';
 import { buildAudioMusicRequestBody, buildAudioSpeechRequestBody } from './audioParameterMappings';
+import { pollTask } from '../pollTask';
 
 export type ApimartAudioCapability = AudioCapabilityKind;
 
@@ -91,8 +92,11 @@ async function submitFlowMusicTask(
   body: Record<string, unknown>,
   errorLabel: string,
   signal?: AbortSignal,
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<string> {
   try {
+    if (beforeSubmit) await beforeSubmit();
+    signal?.throwIfAborted();
     const response = await corsSafeFetch(endpoint(baseUrl, path), {
       method: 'POST',
       headers: buildAuthHeaders(apiKey),
@@ -139,12 +143,15 @@ export async function generateApimartSpeech(
     speed: number;
   },
   signal?: AbortSignal,
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<AudioGenerationResult> {
   try {
     if (!params.input.trim()) throw new Error('TTS 文本不能为空');
     if (params.input.length > 4096) throw new Error('TTS 文本不能超过 4096 个字符');
     if (params.speed < 0.25 || params.speed > 4) throw new Error('TTS 语速必须在 0.25 到 4 之间');
 
+    if (beforeSubmit) await beforeSubmit();
+    signal?.throwIfAborted();
     const response = await corsSafeFetch(endpoint(baseUrl, '/audio/speech'), {
       method: 'POST',
       headers: buildAuthHeaders(apiKey),
@@ -223,6 +230,7 @@ export function submitFlowMusicLyrics(
   baseUrl: string,
   prompt: string,
   signal?: AbortSignal,
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<string> {
   if (!prompt.trim()) throw new Error('歌词生成提示词不能为空');
   if (prompt.length > 3000) throw new Error('歌词生成提示词不能超过 3000 个字符');
@@ -233,6 +241,7 @@ export function submitFlowMusicLyrics(
     { model: 'flowmusic', prompt },
     'APIMart 歌词任务提交失败',
     signal,
+    beforeSubmit,
   );
 }
 
@@ -241,6 +250,7 @@ export function submitFlowMusicGeneration(
   baseUrl: string,
   request: FlowMusicGenerationRequest,
   signal?: AbortSignal,
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<string> {
   const soundPrompt = request.soundPrompt?.trim();
   const lyrics = request.lyrics?.trim();
@@ -271,6 +281,7 @@ export function submitFlowMusicGeneration(
     body,
     'APIMart 音乐任务提交失败',
     signal,
+    beforeSubmit,
   );
 }
 
@@ -280,6 +291,7 @@ export function submitSunoGeneration(
   baseUrl: string,
   request: { version: 'v6' | 'v6-wild' | 'v6-mini'; prompt: string; lyrics?: string; title?: string; duration?: number },
   signal?: AbortSignal,
+  beforeSubmit?: () => void | Promise<void>,
 ): Promise<string> {
   const lyrics = request.lyrics?.trim();
   const custom = Boolean(lyrics);
@@ -293,9 +305,10 @@ export function submitSunoGeneration(
   return submitFlowMusicTask(apiKey, baseUrl, '/music/generations', {
     model: 'suno', version: request.version, custom, prompt,
     ...(custom ? { style: request.prompt.trim(), title: request.title?.trim(), duration: request.duration } : {}),
-  }, 'APIMart Suno 音乐任务提交失败', signal);
+  }, 'APIMart Suno 音乐任务提交失败', signal, beforeSubmit);
 }
 
+/** 读取一次 APIMart 歌词或音乐任务状态，并对错误脱敏。 */
 export async function fetchFlowMusicTask(
   apiKey: string,
   baseUrl: string,
@@ -325,6 +338,30 @@ export async function fetchFlowMusicTask(
   }
 }
 
+/** FlowMusic 与 Suno 共用原阶段的首次取回和续查，阶段提交由调用方管理。 */
+export function queryApimartMusicTask(
+  apiKey: string,
+  baseUrl: string,
+  taskId: string,
+  { signal, maxDuration, failureMessage }: {
+    signal?: AbortSignal;
+    maxDuration: number;
+    failureMessage?: (task: FlowMusicTaskState) => string;
+  },
+): Promise<FlowMusicTaskState> {
+  return pollTask<FlowMusicTaskState, FlowMusicTaskState>({
+    fetchState: (querySignal) => fetchFlowMusicTask(apiKey, baseUrl, taskId, querySignal),
+    isComplete: (task) => task.status === 'completed' ? task : null,
+    isFailed: (task) => ['failed', 'error', 'cancelled'].includes(task.status ?? '')
+      ? failureMessage?.(task) ?? `APIMart 音乐任务失败: ${typeof task.error === 'string' ? task.error : task.error?.message || task.status}`
+      : null,
+    interval: 3000,
+    maxDuration,
+    signal,
+  });
+}
+
+/** 读取歌词任务的首条歌词及标题，并校验歌词内容。 */
 export function extractFlowMusicLyrics(task: FlowMusicTaskState): Required<FlowMusicLyrics> {
   const item = task.result?.lyrics?.[0];
   const lyrics = item?.lyrics?.trim();
@@ -332,6 +369,7 @@ export function extractFlowMusicLyrics(task: FlowMusicTaskState): Required<FlowM
   return { title: item?.title?.trim() || '', lyrics };
 }
 
+/** 读取原音乐任务的首个音轨，兼容不同音频地址字段。 */
 export function extractFlowMusicTrack(task: FlowMusicTaskState): AudioGenerationResult {
   const item = task.result?.music?.[0];
   const url = item?.audio_url || item?.url || item?.wav_url;
@@ -342,4 +380,11 @@ export function extractFlowMusicTrack(task: FlowMusicTaskState): AudioGeneration
     title: item?.title,
     lyrics: item?.lyrics,
   };
+}
+
+/** 读取原音乐任务的有界完整音轨集合，供原生恢复按原顺序保存和交付。 */
+export function extractFlowMusicTracks(task: FlowMusicTaskState): AudioGenerationResult[] {
+  const tracks = task.result?.music;
+  if (!Array.isArray(tracks) || !tracks.length || tracks.length > 128) throw new Error('原音乐任务音轨集合缺失或超过上限');
+  return tracks.map((track) => extractFlowMusicTrack({ result: { music: [track] } }));
 }

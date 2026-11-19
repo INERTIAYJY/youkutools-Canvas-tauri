@@ -12,7 +12,9 @@ import type {
   PluginPackageResourcePayload,
 } from '../types/plugin';
 import { createInstalledPlugin, parsePluginBundle } from '../services/plugins/pluginManifest';
-import { clearPluginResources } from '../services/plugins/pluginResourceService';
+import { clearPluginResources as clearPluginResourceHandles } from '../services/plugins/pluginResourceService';
+import { revokePluginProtocolPresets } from '../services/plugins/pluginProtocolPresetService';
+import { affectedPluginIds, resolvePluginDependencies } from '../services/plugins/pluginDependencyService';
 import {
   deletePluginFromDb,
   getAllPlugins,
@@ -50,15 +52,27 @@ interface StagedPluginRevision {
   revisionDigest: string;
 }
 
+function clearPluginResources(id: string): void {
+  revokePluginProtocolPresets(id);
+  clearPluginResourceHandles(id);
+}
+
 const SOURCE_DIGEST_RE = /^[0-9a-f]{64}$/u;
 const pluginMutationQueues = new Map<string, Promise<void>>();
+let pluginGraphMutationQueue = Promise.resolve();
+let graphMutationReservations = 0;
 
-function enqueuePluginMutation<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+function enqueuePluginMutation<T>(pluginId: string, operation: () => Promise<T>, graphMutation = false): Promise<T> {
   const previous = pluginMutationQueues.get(pluginId) ?? Promise.resolve();
-  const result = previous.catch(() => undefined).then(operation);
+  const waitForGraph = graphMutation || graphMutationReservations > 0;
+  if (graphMutation) graphMutationReservations += 1;
+  const result = (waitForGraph ? pluginGraphMutationQueue : Promise.resolve()).catch(() => undefined)
+    .then(() => previous.catch(() => undefined).then(operation));
   const tail = result.then(() => undefined, () => undefined);
   pluginMutationQueues.set(pluginId, tail);
+  pluginGraphMutationQueue = Promise.all([pluginGraphMutationQueue, tail]).then(() => undefined);
   return result.finally(() => {
+    if (graphMutation) graphMutationReservations -= 1;
     if (pluginMutationQueues.get(pluginId) === tail) pluginMutationQueues.delete(pluginId);
   });
 }
@@ -111,16 +125,20 @@ async function stagePluginRevision(
   };
 }
 
+function pluginExecutionIdentity(plugin: InstalledPlugin) {
+  if (!plugin.sourceDigest) throw new Error('插件源码摘要缺失');
+  if (!plugin.revisionDigest) throw new Error('插件 revision 摘要缺失');
+  return { sourceDigest: plugin.sourceDigest, revisionDigest: plugin.revisionDigest };
+}
+
 async function activatePluginRevision(
   plugin: InstalledPlugin,
   requestDirectoryAccess = false,
 ): Promise<void> {
-  if (!plugin.sourceDigest) throw new Error('插件源码摘要缺失');
-  if (!plugin.revisionDigest) throw new Error('插件 revision 摘要缺失');
+  const identity = pluginExecutionIdentity(plugin);
   await invoke('activate_plugin_revision', {
     pluginId: plugin.id,
-    sourceDigest: plugin.sourceDigest,
-    revisionDigest: plugin.revisionDigest,
+    ...identity,
     enabled: plugin.enabled,
     // 仅显式启用可请求目录授权；安装后的激活和失败补偿不重复提示。
     ...(requestDirectoryAccess ? { requestDirectoryAccess: true } : {}),
@@ -202,6 +220,10 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           ? { uiDigest: normalizeUiIntegrity(manifest.ui.integrity) }
           : {}),
       };
+      if (plugin.enabled) {
+        const dependencies = resolvePluginDependencies([...get().installedPlugins.filter((item) => item.id !== plugin.id), plugin], plugin.id);
+        if (!dependencies.ready) throw new Error('插件必需依赖不可用或存在循环，请先检查依赖配置');
+      }
       if (options?.expectedSourceDigest !== undefined) {
         const expected = normalizeSourceDigest(options.expectedSourceDigest, '用户确认的插件源码摘要');
         if (staged.sourceDigest !== expected) {
@@ -216,7 +238,10 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           )),
         }));
         previousLeaseRevoked = true;
-        if (previous.revisionDigest !== plugin.revisionDigest) clearPluginResources(plugin.id);
+        for (const id of affectedPluginIds(get().installedPlugins, plugin.id)) revokePluginProtocolPresets(id);
+        if (previous.revisionDigest !== plugin.revisionDigest) {
+          for (const id of affectedPluginIds(get().installedPlugins, plugin.id)) clearPluginResources(id);
+        }
       }
       await activatePluginRevision(plugin);
       set((state) => ({
@@ -280,12 +305,17 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
     if (enabled && plugin.manifest.runtime === 'python' && options?.trustedPythonConfirmed !== true) {
       throw new Error('启用可信 Python 插件前必须确认其可访问本机资源');
     }
+    // 先验证插件自身的执行身份；缺失摘要不能伪装成依赖图故障。
+    if (enabled) pluginExecutionIdentity(plugin);
     const updated = { ...plugin, enabled, updatedAt: Date.now() };
+    if (enabled && !resolvePluginDependencies(get().installedPlugins.map((item) => item.id === id ? updated : item), id).ready) {
+      throw new Error('插件必需依赖不可用或存在循环，请先检查依赖配置');
+    }
     if (!enabled) {
       set((state) => ({
         installedPlugins: state.installedPlugins.map((item) => item.id === id ? updated : item),
       }));
-      clearPluginResources(id);
+      for (const affected of affectedPluginIds(get().installedPlugins, id)) clearPluginResources(affected);
     }
     try {
       if (enabled) {
@@ -342,7 +372,7 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
         item.id === id && disabled ? disabled : item
       )),
     }));
-    clearPluginResources(id);
+    for (const affected of affectedPluginIds(get().installedPlugins, id)) clearPluginResources(affected);
     let nativeRemoved = false;
     try {
       await invoke('remove_plugin_registration', { pluginId: id });
@@ -379,17 +409,20 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
       return enqueuePluginMutation(
         manifest.id,
         () => installPluginBundleCore(manifest, source, options),
+        Boolean(manifest.dependencies?.length || get().installedPlugins.some((plugin) => plugin.manifest.dependencies?.length)),
       );
     },
 
     setPluginEnabled: async (id, enabled, options) => enqueuePluginMutation(
       id,
       () => setPluginEnabledCore(id, enabled, options),
+      get().installedPlugins.some((plugin) => Boolean(plugin.manifest.dependencies?.length)),
     ),
 
-    deletePlugin: async (id) => enqueuePluginMutation(id, () => deletePluginCore(id)),
+    deletePlugin: async (id) => enqueuePluginMutation(id, () => deletePluginCore(id), get().installedPlugins.some((plugin) => Boolean(plugin.manifest.dependencies?.length))),
 
-    repairPluginRegistry: async () => {
+    repairPluginRegistry: async () => enqueuePluginMutation('$registry', async () => {
+      revokePluginProtocolPresets();
       const repaired = await invoke<boolean>('repair_plugin_registry');
       if (!repaired) {
         set({ pluginRegistryRepairRequired: false });
@@ -412,9 +445,10 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
         throw new Error(`插件信任注册表已修复，但有 ${failed} 个插件的停用状态保存失败`);
       }
       get().showToast('插件信任注册表已修复；请重试卸载或重新安装插件');
-    },
+    }, true),
 
     loadPlugins: async () => {
+      revokePluginProtocolPresets();
       const plugins: InstalledPlugin[] = [];
       let repairRequired = false;
       for (const persisted of await getAllPlugins()) {

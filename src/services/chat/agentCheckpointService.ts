@@ -3,10 +3,20 @@
  */
 import type {
   AgentCanvasCheckpoint,
+  AgentDispatchRecord,
   AgentReplanReason,
   AgentStep,
   AgentTask,
 } from '../../types/agent';
+
+/** 已知成功但缺少原成功步骤的写入不能凭普通继续重新执行。只读工具仍可重试。 */
+export function unmaterializedToolDispatches(task: AgentTask): AgentDispatchRecord[] {
+  return (task.dispatches ?? []).filter((record) => record.kind === 'tool' && record.effect !== 'read'
+    && record.phase === 'settled' && record.outcome === 'succeeded'
+    && (record.materializationBlocked === true || !task.steps.some((step) => step.id === record.stepId
+      && step.status === 'succeeded' && !!step.toolCall && step.toolCall.toolId === record.toolId
+      && step.toolCall.effect === record.effect)));
+}
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -64,6 +74,8 @@ export function findSucceededDuplicateWrite(
     return context.checkpointReplayStepIds?.has(step.id) === true
       && call.effect === 'canvas_write'
       && !!checkpoint
+      && (!(task.executionContext ?? task.projectScope)?.modelGeneration
+        || !!checkpoint.runtimeEpoch && checkpoint.runtimeEpoch === (task.executionContext ?? task.projectScope)?.runtimeEpoch)
       && checkpoint.historyIndexAfter === context.historyIndex
       && checkpoint.revisionAfter === context.revision;
   });
@@ -87,6 +99,16 @@ function buildReplanDirective(task: AgentTask): string {
 
 export function buildAgentResumeContext(task: AgentTask): string {
   const sections: string[] = [];
+  const unmaterialized = unmaterializedToolDispatches(task);
+  if (unmaterialized.length) sections.push(`以下工具已成功返回，但原成功步骤不完整，禁止重新提交；请先只读核实，新意图须新建任务：${
+    unmaterialized.slice(-20).map((item) => `${item.toolId}（${item.id}）`).join('；')}`);
+  const unknown = (task.dispatches ?? []).filter((item) => !item.recovery
+    && (item.phase === 'outcome_unknown' || item.phase === 'dispatched'));
+  if (unknown.length) sections.push(`以下调用结果未知，禁止重复提交，只能先只读核实：${
+    unknown.slice(-20).map((item) => `${item.toolId ?? item.kind}（${item.id}）`).join('；')}`);
+  const resolvedWrites = (task.dispatches ?? []).filter((item) => item.kind === 'tool' && item.effect !== 'read' && item.recovery);
+  if (resolvedWrites.length) sections.push(`以下原写入已有用户核实决定，仍禁止在本任务重投；新意图须由用户新建任务：${
+    resolvedWrites.slice(-20).map((item) => `${item.toolId}（${item.recovery!.decision === 'verified_completed' ? '用户标记已完成' : '用户放弃，不重投'}）`).join('；')}`);
   const replanDirective = buildReplanDirective(task);
   if (replanDirective) sections.push(replanDirective);
 

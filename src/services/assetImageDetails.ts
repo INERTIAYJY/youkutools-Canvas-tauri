@@ -110,7 +110,7 @@ export async function loadAssetImageDetails(file: AssetFileEntry, projectId?: st
   if (!isTauriEnv()) return { identity: null, record: null, references: [], history, contentChanged: false, warning: '编辑和添加参考图仅支持桌面应用' };
   const identity = await identifyAssetImage(file, projectId, signal);
   const saved = await findSavedAssetImage(identity, signal);
-  const references = saved.record ? await resolveAssetImageReferences(saved.record.references, signal) : [];
+  const references = saved.record ? await resolveAssetImageReferences(saved.record.references, signal, saved.record.assetId) : [];
   return { identity, record: saved.record, references, contentChanged: saved.contentChanged,
     history: saved.contentChanged && !saved.record ? null : history,
     warning: saved.ambiguous ? '找到多个相同内容的信息记录，未自动关联' : saved.contentChanged && !saved.record ? '原图内容已变化，旧提示词与参考图仍保留' : null };
@@ -160,6 +160,11 @@ export async function resolvePromptImageReferences(
   const regex = /@asset\{([^}]+)\}|@drama\{([^:]+):([^}]+)\}|@\{([^:]+):([^}]+)\}/g;
   const references: AssetImageReferenceView[] = [];
   const seenUrls = new Set<string>();
+  const appendReference = (id: string, name: string, url?: string) => {
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    references.push({ id, name, relativePath: '', digest: '', bytes: 0, url });
+  };
   const nodes = options?.nodes;
   const dramaAssets = options?.dramaAssets;
   const projectId = options?.projectId;
@@ -173,17 +178,7 @@ export async function resolvePromptImageReferences(
       const name = path.split(/[\\/]/).pop() || '参考图';
       if (getFileCategory(name) === 'image') {
         const url = safeLocalAssetUrl(path) || path;
-        if (url && !seenUrls.has(url)) {
-          seenUrls.add(url);
-          references.push({
-            id: `prompt-ref-asset:${path}`,
-            name,
-            relativePath: '',
-            digest: '',
-            bytes: 0,
-            url,
-          });
-        }
+        appendReference(`prompt-ref-asset:${path}`, name, url);
       }
     } else if (match[2] !== undefined) {
       const dramaId = match[2];
@@ -220,17 +215,7 @@ export async function resolvePromptImageReferences(
             name = found.name;
           }
         }
-        if (url && !seenUrls.has(url)) {
-          seenUrls.add(url);
-          references.push({
-            id: `prompt-ref-drama:${dramaId}`,
-            name,
-            relativePath: '',
-            digest: '',
-            bytes: 0,
-            url,
-          });
-        }
+        appendReference(`prompt-ref-drama:${dramaId}`, name, url);
       }
     } else if (match[4] !== undefined) {
       const nodeId = match[4];
@@ -273,17 +258,7 @@ export async function resolvePromptImageReferences(
           }
         }
       }
-      if (url && !seenUrls.has(url)) {
-        seenUrls.add(url);
-        references.push({
-          id: `prompt-ref-node:${nodeId}`,
-          name,
-          relativePath: '',
-          digest: '',
-          bytes: 0,
-          url,
-        });
-      }
+      appendReference(`prompt-ref-node:${nodeId}`, name, url);
     }
   }
 

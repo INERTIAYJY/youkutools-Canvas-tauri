@@ -4,8 +4,10 @@ import type { GeneralModelCategory, ProviderModelSelection } from '../../types';
 import type { ImageModelCapability, ModelProtocolPresetId, NormalizedModelExecutionProtocol, VideoGenerationInputMode, VideoGenerationOperation, VideoModelCapability } from '../../types/aiTypes';
 import type { MediaGenerationParameters } from '../../types/media';
 import { modelProtocolUsesVariable, resolveModelExecutionProfile } from './modelProtocol';
+import { assertImageOutputCapability } from './imageOutputParameters';
+import { parsePluginProtocolReference } from '../plugins/pluginProtocolPresetService';
 
-export const MEDIA_PARAMETER_TEXT_FIELDS = ['aspectRatio', 'resolution', 'imageQuality', 'imageBackground'] as const;
+export const MEDIA_PARAMETER_TEXT_FIELDS = ['aspectRatio', 'resolution', 'imageQuality', 'imageBackground', 'imageOutputFormat'] as const;
 
 /** 允许常见厂商枚举与比例，禁止地址、路径和常见密钥格式进入媒体参数快照。 */
 export function isSafeMediaParameterText(value: unknown, key: typeof MEDIA_PARAMETER_TEXT_FIELDS[number]): value is string {
@@ -37,8 +39,8 @@ const RESULT_CATEGORY_LABELS: Record<GeneralModelCategory, string> = {
 };
 
 const MODEL_PROTOCOL_PRESET_IDS: readonly ModelProtocolPresetId[] = [
-  'openai-chat', 'anthropic-chat', 'gemini-chat', 'openai-image', 'openai-gpt-image',
-  'gpt-image-gateway-json', 'google-image-native', 'xai-image-native', 'agnes-video', 'custom',
+  'openai-chat', 'openai-responses', 'anthropic-chat', 'gemini-chat', 'openai-image', 'openai-gpt-image',
+  'gpt-image-gateway-json', 'google-image-native', 'xai-image-native', 'agnes-video', 'custom', 'plugin',
 ];
 
 export function isModelProtocolPresetId(value: unknown): value is ModelProtocolPresetId {
@@ -107,6 +109,7 @@ export function assertModelProtocolResultMapping(
 }
 
 export function assertImageModelCapability(capability: ImageModelCapability): void {
+  assertImageOutputCapability(capability);
   for (const [field, defaultField] of [
     ['resolutions', 'defaultResolution'], ['ratios', 'defaultRatio'], ['qualities', 'defaultQuality'],
     ['backgrounds', 'defaultBackground'],
@@ -146,6 +149,8 @@ export function assertImageModelCapability(capability: ImageModelCapability): vo
     for (const resolution of capability.resolutions ?? []) {
       const key = Object.keys(capability.dimensionPresets).find((value) => value.toLowerCase() === resolution.toLowerCase());
       for (const ratio of capability.ratios ?? []) {
+        // 动态画幅由输入/模型决定，不存在可要求补齐的固定像素。
+        if (['auto', 'adaptive', '自适应'].includes(ratio)) continue;
         if (!key || !capability.dimensionPresets[key][ratio]) {
           throw new Error(`图片参数 ${resolution} / ${ratio} 缺少像素尺寸映射，请重新应用相应模板`);
         }
@@ -255,6 +260,14 @@ export function assertModelCapabilityProtocol(model: ProviderModelSelection): vo
   if (model.executionProfile && !isModelProtocolPresetId(model.executionProfile.preset)) {
     throw new Error('executionProfile.preset：调用协议预设不受当前应用支持');
   }
+  if (model.executionProfile?.preset === 'plugin') {
+    if (model.category !== 'text' || model.executionProfile.protocol !== undefined) {
+      throw new Error('executionProfile.preset：插件对话协议只支持文本模型，不能混用自定义协议');
+    }
+    parsePluginProtocolReference(model.executionProfile.plugin);
+    return;
+  }
+  if (model.executionProfile?.plugin !== undefined) throw new Error('executionProfile.plugin：仅插件预设可以保存插件引用');
   if (model.imageCapability) assertImageModelCapability(model.imageCapability);
   if (model.imageCapability?.supportsDataUrlReference === false
     && model.imageReferenceRequestMode === 'generation-json-image-data-urls') {
@@ -264,7 +277,12 @@ export function assertModelCapabilityProtocol(model: ProviderModelSelection): vo
   if (model.executionProfile && !protocol && model.category !== 'text') {
     throw new Error('executionProfile.preset：原生文本协议不能用于媒体模型');
   }
-  if (!protocol) return;
+  if (!protocol) {
+    if (model.category === 'image' && model.imageCapability?.outputFormats?.length) {
+      throw new Error(`模型“${model.name}”声明图片输出格式，但未配置格式请求协议`);
+    }
+    return;
+  }
   assertModelProtocolResultMapping(model.category, protocol);
   if (model.category === 'image' && (model.imageCapability?.qualities?.length ?? 0) > 1
     && !modelProtocolUsesVariable(JSON.stringify(protocol.submit), 'imageQuality')) {
@@ -274,6 +292,11 @@ export function assertModelCapabilityProtocol(model: ProviderModelSelection): vo
     const backgrounds = model.imageCapability?.backgrounds;
     const body = protocol.submit.body;
     const fields = body && typeof body === 'object' && !Array.isArray(body) ? body : undefined;
+    const formats = model.imageCapability?.outputFormats;
+    if (formats?.length && !modelProtocolUsesVariable(JSON.stringify(protocol.submit), 'imageOutputFormat')
+      && !(formats.length === 1 && fields?.output_format === formats[0])) {
+      throw new Error(`模型“${model.name}”声明图片输出格式，但提交协议没有映射 {{imageOutputFormat}}`);
+    }
     const fixedBackground = typeof fields?.background === 'string' && !fields.background.includes('{{')
       ? fields.background : undefined;
     if (backgrounds?.length && !modelProtocolUsesVariable(JSON.stringify(protocol.submit), 'imageBackground')
@@ -298,6 +321,7 @@ export function assertModelCapabilityProtocol(model: ProviderModelSelection): vo
     if (!capability) return;
     requireMapping((capability.resolutions?.length ?? 0) > 1, '分辨率', ['imageSize', 'size', 'width', 'height']);
     requireMapping((capability.ratios?.length ?? 0) > 1, '比例', ['aspectRatio', 'size', 'width', 'height']);
+    requireMapping((capability.outputFormats?.length ?? 0) > 1, '输出格式', ['imageOutputFormat']);
     requireMapping(capability.supportsBatch === true && (capability.maxBatchCount ?? 2) > 1, '数量', ['n', 'batchCount']);
     requireMapping(capability.supportsImageReference === true, '参考图', ['imageUrls', 'googleImageParts']);
     if (capability.supportsImageReference === false && modelProtocolUsesVariable(source, 'imageUrls', 'googleImageParts')) {

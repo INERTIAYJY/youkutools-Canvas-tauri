@@ -5,6 +5,7 @@
 //! resource-integrity and process-tree checks have succeeded.
 
 use super::result::{
+    is_valid_identifier as is_valid_scene_id, is_valid_sha256,
     validate_blender_collect_candidate, BlenderCollectCandidate, BlenderCollectedResult,
     BlenderResultArtifactKind, BlenderResultBinding,
 };
@@ -56,6 +57,8 @@ pub struct BlenderJobStartRequest {
     pub scene_source: BlenderSceneSource,
     pub project_grant_id: String,
     pub project_id: String,
+    #[serde(default, deserialize_with = "crate::project_execution_context::optional_canvas_context")]
+    pub expected_context: Option<crate::project_execution_context::CanvasExecutionContext>,
     pub director_instance_id: String,
     pub scene_id: String,
     pub scene_revision: u64,
@@ -74,6 +77,7 @@ impl BlenderJobStartRequest {
             || !is_valid_scene_id(&self.scene_id)
             || !is_positive_safe_integer(self.scene_revision)
             || !is_valid_sha256(&self.scene_sha256)
+            || self.expected_context.as_ref().is_some_and(|context| !context.matches_canvas(&self.project_id, None))
         {
             return Err(BlenderJobCoreError::new(
                 BlenderJobCoreErrorCode::InvalidRequest,
@@ -140,6 +144,7 @@ impl BlenderJobStartRequest {
             && self.target_frame == other.target_frame
             && self.project_grant_id == other.project_grant_id
             && self.project_id == other.project_id
+            && self.expected_context == other.expected_context
             && self.director_instance_id == other.director_instance_id
             && self.scene_id == other.scene_id
             && self.scene_revision == other.scene_revision
@@ -1209,13 +1214,6 @@ fn is_positive_safe_integer(value: u64) -> bool {
     value > 0 && value <= JS_SAFE_INTEGER_MAX
 }
 
-fn is_valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
 fn is_valid_opaque_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_OPAQUE_ID_BYTES
@@ -1224,21 +1222,17 @@ fn is_valid_opaque_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
-fn is_valid_scene_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > MAX_OPAQUE_ID_BYTES {
-        return false;
-    }
-    let is_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
-    is_edge(bytes[0])
-        && is_edge(bytes[bytes.len() - 1])
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        })
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scene_ids_keep_a_narrower_contract_than_opaque_job_ids() {
+        assert!(super::is_valid_scene_id("scene-1"));
+        assert!(super::is_valid_opaque_id(".Job:ABC."));
+        assert!(!super::is_valid_scene_id(".Job:ABC."));
+        assert!(super::is_valid_scene_id(&"a".repeat(128)));
+        assert!(!super::is_valid_scene_id(&"a".repeat(129)));
+    }
+
     #[test]
     fn compatibility_failures_expose_only_fixed_public_codes_and_messages() {
         for (kind, code) in [
@@ -1336,6 +1330,7 @@ mod tests {
             scene_source: BlenderSceneSource::DirectorScene,
             project_grant_id: "project-grant-test".to_string(),
             project_id: "project-1".to_string(),
+            expected_context: None,
             director_instance_id: "director-1".to_string(),
             scene_id: "scene-1".to_string(),
             scene_revision: 1,
@@ -1344,6 +1339,24 @@ mod tests {
             previous_manifest_sha256: None,
             target_frame: Some(1),
         }
+    }
+
+    #[test]
+    fn canvas_context_remains_part_of_the_fixed_job_binding() {
+        let mut scoped = request();
+        scoped.expected_context = Some(serde_json::from_value(serde_json::json!({
+            "kind":"canvas", "schemaVersion":2, "modelGeneration":0, "runtimeEpoch":"process-a",
+            "projectId":"owner", "projectEpoch":2, "canvasId":"project-1", "episodeId":null,
+            "canvasEpoch":3, "canvasRevision":7
+        })).unwrap());
+        assert!(scoped.validate().is_ok());
+        let mut restored = scoped.clone();
+        restored.expected_context.as_mut().unwrap().runtime_epoch = Some("process-b".into());
+        assert!(!scoped.has_same_binding(&restored));
+        restored.expected_context = None;
+        assert!(!scoped.has_same_binding(&restored));
+        scoped.project_id = "owner".into();
+        assert!(scoped.validate().is_err());
     }
 
     #[test]

@@ -1,11 +1,14 @@
 /**
  * Agent 工具的注册、可用性过滤与本地 schema 校验中心；实际权限仍由 Policy Engine 决定。
  */
+import { useAppStore } from '../../store/useAppStore';
 import type { AgentMode, AgentToolDisplaySnapshot } from '../../types/agent';
 import type { ProposedToolCall, ToolResultSummary, WebSource } from '../../types/chat';
 import type { McpContent } from '../../types/mcp';
 import type { SkillReadBudget } from './skillReadService';
+import type { AgentResultPolicy } from '../../types/agentResult';
 import { isGeneralAssistantScope, isGeneralAssistantTool } from './assistantScope';
+import { isAgentToolProjectContextCompatible } from './agentProjectContext';
 import {
   validateAgentToolInput,
   type AgentToolSchema,
@@ -27,6 +30,8 @@ export type AgentToolEffect =
 export interface AgentToolContext {
   taskId: string;
   projectId: string;
+  executionContext?: import('../../types/project').ProjectExpectedContext;
+  projectScope?: import('../../types/project').ProjectExpectedContext;
   conversationId: string;
   mode: AgentMode;
   /** 任务级工具上限；缺省表示不额外限制，空数组表示无工具。 */
@@ -51,6 +56,7 @@ export interface AgentToolExecutionResult {
   display?: AgentToolDisplaySnapshot;
   /** 仅由 MCP 控制层返回的瞬时富内容；不得进入模型上下文、消息或任务持久化。 */
   mcpContent?: McpContent[];
+  resultPolicy?: AgentResultPolicy;
 }
 
 export interface AgentToolDefinition<TInput = unknown> {
@@ -59,6 +65,8 @@ export interface AgentToolDefinition<TInput = unknown> {
   description: string;
   inputSchema: AgentToolSchema;
   effect: AgentToolEffect;
+  /** 宿主静态白名单；执行结果本身不能提升为持久化。 */
+  resultPolicy?: Omit<AgentResultPolicy, 'authorize'>;
   isAvailable?: (context: Omit<AgentToolContext, 'signal'>) => boolean;
   authorize?: (
     context: Omit<AgentToolContext, 'signal'>,
@@ -131,6 +139,7 @@ export function getAvailableAgentTools(
   context: Omit<AgentToolContext, 'signal'>,
 ): AgentToolDefinition[] {
   return [...registry.values()].filter((definition) => {
+    if (!isAgentToolProjectContextCompatible(definition, context)) return false;
     if (isGeneralAssistantScope(context.projectId) && !isGeneralAssistantTool(definition.id)) return false;
     if (context.mode === 'plan' && definition.effect !== 'read') return false;
     if (
@@ -167,6 +176,7 @@ export function prepareAgentToolCall(
 ): PrepareAgentToolCallResult {
   const definition = registry.get(call.toolId);
   const unavailable = !definition
+    || !isAgentToolProjectContextCompatible(definition, context, call.input, useAppStore.getState())
     || (isGeneralAssistantScope(context.projectId) && !isGeneralAssistantTool(call.toolId))
     || (context.mode === 'plan' && definition.effect !== 'read')
     || (

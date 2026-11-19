@@ -3,7 +3,7 @@
  *
  * 常驻对话模型选择器；媒体模型通过轻量 @model mention 按轮覆盖。
  */
-import { lazy, Suspense, useRef, useEffect, useCallback, useMemo, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useRef, useEffect, useCallback, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Icon } from '@iconify/react';
 import LazyLoadBoundary from '../shared/LazyLoadBoundary';
@@ -13,6 +13,7 @@ import ContextUsageIndicator from './ContextUsageIndicator';
 import ChatComposerEditor, { getChatComposerNodeIds, type ChatComposerEditorHandle, type ChatComposerReference } from './ChatComposerEditor';
 import ChatImageAttachments from './ChatImageAttachments';
 import type { ChatImageReference } from '../../types/chat';
+import type { AssistantExecutionSelection } from '../../types/agentTeam';
 import { parseChatImageReferences } from '../../services/chat/chatImageReferenceService';
 import MentionPicker, { type MentionPickerItem } from '../shared/MentionPicker';
 import { resolveDramaMentionItems } from '../nodes/shared/mentionEditorSources';
@@ -38,13 +39,6 @@ import { getPerformanceModeEnabled, subscribePerformanceMode } from '../../servi
 import { getPromptSubmitShortcutHint } from '../../utils/promptSubmitShortcut';
 
 const MetalFx = lazy(() => import('../nodes/shared/PolishMetalFx'));
-// 独立窗口的外观由窗口运行时投影到 DOM，不从本窗口默认 Store 配置推断。
-const getInputTheme = (): 'dark' | 'light' => document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-function subscribeInputTheme(onChange: () => void) {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-  return () => observer.disconnect();
-}
 
 type ReferenceScope = 'all' | 'nodes' | 'models' | 'assets';
 type PickerTab = 'nodes' | 'assets' | 'models';
@@ -174,8 +168,14 @@ interface ChatInputProps {
   /** 当前选中的文本模型 ID */
   assistantModelId?: string;
   onAssistantModelChange: (modelId?: string) => void;
+  assistantModelDisabled?: boolean;
+  assistantModelHint?: string;
   /** 独立窗口由主窗口下发的脱敏文本模型分组。 */
   assistantModelGroups?: ModelGroup[];
+  executionSelection?: AssistantExecutionSelection;
+  teamConfiguration?: ReactNode;
+  teamContextHint?: string;
+  appearanceMode: 'dark' | 'light';
   mediaModels: GeneralModelConfig[];
   mediaModelOptions: MediaModelOption[];
   mediaModelAvailability: Record<string, boolean>;
@@ -200,12 +200,20 @@ interface ChatInputProps {
   allowSkillUpload?: boolean;
   /** 独立窗口只接收可选择的 Skill 元数据，不同步正文或来源路径。 */
   skillOptions?: SkillPickerOption[];
+  /** 引用插入成功后记录用户使用；独立窗口由主窗口保存。 */
+  onSkillUsed?: (skillId: string) => void;
 }
 
 export default function ChatInput({
   assistantModelId,
   onAssistantModelChange,
+  assistantModelDisabled = false,
+  assistantModelHint,
   assistantModelGroups,
+  executionSelection,
+  teamConfiguration,
+  teamContextHint,
+  appearanceMode,
   mediaModels,
   mediaModelOptions,
   mediaModelAvailability,
@@ -227,12 +235,12 @@ export default function ChatInput({
   disabled = false,
   allowSkillUpload = true,
   skillOptions,
+  onSkillUsed,
 }: ChatInputProps) {
   const t = useT();
   const inputRef = useRef<ChatComposerEditorHandle>(null);
   const reduceMotion = useReducedMotion();
   const performanceMode = useSyncExternalStore(subscribePerformanceMode, getPerformanceModeEnabled, getPerformanceModeEnabled);
-  const appearanceMode = useSyncExternalStore(subscribeInputTheme, getInputTheme, getInputTheme);
   const [shortcutMenuAnchor, setShortcutMenuAnchor] = useState<HTMLElement | null>(null);
   const closeShortcutMenu = useCallback(() => setShortcutMenuAnchor(null), []);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -385,11 +393,12 @@ export default function ChatInput({
   );
 
   const handleTextModelSelect = useCallback((model: ModelOption) => {
+    if (disabled || assistantModelDisabled) return;
     const modelId = model.value.startsWith('general/')
       ? model.value.slice('general/'.length)
       : model.value;
     onAssistantModelChange(modelId);
-  }, [onAssistantModelChange]);
+  }, [assistantModelDisabled, disabled, onAssistantModelChange]);
 
   const selectedTextModel = useMemo(() => {
     if (!assistantModelId || assistantModelId.startsWith('general/')) return assistantModelId;
@@ -400,6 +409,7 @@ export default function ChatInput({
   }, [assistantModelId, mediaModels]);
 
   const insertModelMention = useCallback((model: MediaModelOption) => {
+    if (disabled) return;
     inputRef.current?.insertReference({
       kind: 'model',
       id: model.value,
@@ -410,9 +420,10 @@ export default function ChatInput({
     setPickerTab('nodes');
     setMediaKind('all');
     setActiveSuggestionIndex(0);
-  }, []);
+  }, [disabled]);
 
   const insertNodeMention = useCallback((nodeId: string, label: string, displayId?: number) => {
+    if (disabled) return;
     inputRef.current?.insertReference({
       kind: 'node',
       id: nodeId,
@@ -424,28 +435,33 @@ export default function ChatInput({
     setPickerTab('nodes');
     setMediaKind('all');
     setActiveSuggestionIndex(0);
-  }, []);
+  }, [disabled]);
 
   // 资产芯片走 @drama{id:name}，发送前由 promptResolver 展开成设定正文或参考图
   const insertDramaMention = useCallback((item: DramaMentionItem) => {
+    if (disabled) return;
     inputRef.current?.insertReference({ kind: 'drama', id: item.id, label: item.name });
     setModelMenuOpen(false);
     setModelQuery('');
     setPickerTab('nodes');
     setAssetKind('all');
     setActiveSuggestionIndex(0);
-  }, []);
+  }, [disabled]);
 
   const insertSkillReference = useCallback((skillId: string, skillName: string) => {
-    inputRef.current?.insertReference({
+    if (disabled) return;
+    const editor = inputRef.current;
+    if (!editor) return;
+    editor.insertReference({
       kind: 'skill',
       id: skillId,
       label: skillName,
     });
+    onSkillUsed?.(skillId);
     setSkillMenuOpen(false);
     setSkillQuery('');
     setActiveSuggestionIndex(0);
-  }, []);
+  }, [disabled, onSkillUsed]);
 
   const referenceSuggestions = useMemo<ReferenceSuggestion[]>(() => [
     ...visibleCanvasNodes.map((node) => ({
@@ -500,6 +516,7 @@ export default function ChatInput({
   }, [insertDramaMention, insertModelMention, insertNodeMention]);
 
   const handleSuggestionKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return false;
     const suggestionsOpen = modelMenuOpen || skillMenuOpen;
     if (!suggestionsOpen) return false;
     if (!['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) return false;
@@ -536,6 +553,7 @@ export default function ChatInput({
     }
     return true;
   }, [
+    disabled,
     insertSkillReference,
     modelMenuOpen,
     referenceSuggestions,
@@ -595,16 +613,18 @@ export default function ChatInput({
     }),
   ];
 
-  const activeSuggestionId = modelMenuOpen
+  const modelMenuVisible = !disabled && modelMenuOpen;
+  const skillMenuVisible = !disabled && skillMenuOpen;
+  const activeSuggestionId = modelMenuVisible
     ? (referenceSuggestions.length > 0
       ? `chat-reference-suggestion-${resolvedActiveSuggestionIndex}`
       : undefined)
-    : skillMenuOpen && skillSuggestions.length > 0
+    : skillMenuVisible && skillSuggestions.length > 0
       ? `chat-skill-suggestion-${resolvedActiveSuggestionIndex}`
       : undefined;
 
   const handleUploadSkill = useCallback(async (source: 'file' | 'folder') => {
-    if (skillUploading) return;
+    if (disabled || skillUploading) return;
     setSkillUploading(true);
     try {
       await uploadSkill(source);
@@ -613,7 +633,7 @@ export default function ChatInput({
     } finally {
       setSkillUploading(false);
     }
-  }, [showToast, skillUploading, t, uploadSkill]);
+  }, [disabled, showToast, skillUploading, t, uploadSkill]);
 
   // 自动聚焦
   useEffect(() => {
@@ -624,6 +644,7 @@ export default function ChatInput({
 
   useEffect(() => {
     const openModelReferences = () => {
+      if (disabled) return;
       setSkillMenuOpen(false);
       setSkillQuery('');
       setPickerTab('models');
@@ -635,7 +656,7 @@ export default function ChatInput({
     };
     window.addEventListener('chat-open-reference-menu', openModelReferences);
     return () => window.removeEventListener('chat-open-reference-menu', openModelReferences);
-  }, []);
+  }, [disabled]);
 
   const inputImages = parseChatImageReferences(inputValue);
   const images = [...new Map([...inputImages, ...imageDrafts].map((image) => [image.fileName, image])).values()];
@@ -643,7 +664,7 @@ export default function ChatInput({
   const sendButton = (
     <button type="button" disabled={sendDisabled} onClick={onSend}
       className="ui-ai-input__icon-btn ui-ai-input__submit chat-panel-send-btn"
-      aria-haspopup="menu" aria-expanded={!!shortcutMenuAnchor}
+      aria-haspopup="menu" aria-expanded={!disabled && !!shortcutMenuAnchor}
       aria-label={hasActiveTask ? t('将消息加入队列') : t('发送消息')}
       title={`${hasActiveTask ? t('当前任务完成后发送') : t('发送消息')} · ${getPromptSubmitShortcutHint(submitShortcut)} · ${t('右键设置发送快捷键')}`}>
       <Icon icon={hasActiveTask ? 'mdi:playlist-plus' : 'lucide:arrow-up'} width={16} height={16} aria-hidden="true" />
@@ -655,6 +676,7 @@ export default function ChatInput({
       <div className="ui-ai-input chat-panel-input-box">
         <div className="ui-ai-input__body">
           <ChatImageAttachments images={images} previews={imagePreviewUrls} onRemove={(fileName) => {
+            if (disabled) return;
             const nextValue = inputImages.filter((image) => image.fileName === fileName)
               .reduce((text, image) => text.replaceAll(image.raw, ''), inputValue);
             if (nextValue !== inputValue) onInputChange(nextValue);
@@ -674,6 +696,7 @@ export default function ChatInput({
                   {onRevokeLocalFile && (
                     <button
                       type="button"
+                      disabled={disabled}
                       aria-label={t('撤销 {name} 的读取授权', { name: grant.displayName })}
                       onClick={() => onRevokeLocalFile(grant.id)}
                       className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-canvas-text-muted transition-colors
@@ -689,13 +712,14 @@ export default function ChatInput({
           <ChatComposerEditor
             ref={inputRef}
             value={inputValue}
-            onChange={onInputChange}
+            onChange={(value) => { if (!disabled) onInputChange(value); }}
             onSubmit={onSend}
             canSubmitEmpty={imageDrafts.length > 0}
             submitShortcut={submitShortcut}
             nodeDisplayIds={nodeDisplayIds}
             referencePresentation={CHAT_REFERENCE_PRESENTATION}
             onMentionQueryChange={(query) => {
+              if (disabled) return;
               setModelMenuOpen(query != null);
               setActiveSuggestionIndex(0);
               const parsedQuery = parseReferenceQuery(query ?? '');
@@ -708,6 +732,7 @@ export default function ChatInput({
               if (query != null) setSkillMenuOpen(false);
             }}
             onSlashQueryChange={(query) => {
+              if (disabled) return;
               setSkillMenuOpen(query != null);
               setActiveSuggestionIndex(0);
               setSkillQuery(query ?? '');
@@ -716,15 +741,19 @@ export default function ChatInput({
             onSuggestionKeyDown={handleSuggestionKeyDown}
             suggestionListId={modelMenuOpen ? REFERENCE_SUGGESTION_LIST_ID : SKILL_SUGGESTION_LIST_ID}
             activeSuggestionId={activeSuggestionId}
-            suggestionsOpen={modelMenuOpen || skillMenuOpen}
+            suggestionsOpen={modelMenuVisible || skillMenuVisible}
             placeholder={`${t('输入消息，@n 节点 · @a 资产 · @m 模型 · / 调用 Skill')}\n${getPromptSubmitShortcutHint(submitShortcut)}`}
             disabled={disabled}
           />
         </div>
 
+        {executionSelection?.kind === 'team' && teamContextHint && (
+          <p className="min-w-0 px-2 pb-1 text-xs leading-relaxed text-canvas-text-secondary">{teamContextHint}</p>
+        )}
+        {assistantModelHint && <p className="ui-hint px-2 pb-1">{assistantModelHint}</p>}
         <div className="ui-ai-input__footer ui-ai-input__footer--single-row chat-panel-input-toolbar">
           <AnimatePresence>
-            {modelMenuOpen && (
+            {modelMenuVisible && (
             <motion.div
               initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -770,7 +799,7 @@ export default function ChatInput({
           )}
           </AnimatePresence>
           <AnimatePresence>
-            {skillMenuOpen && (
+          {skillMenuVisible && (
             <motion.div
               initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -793,7 +822,7 @@ export default function ChatInput({
                     <button
                       key={upload.source}
                       type="button"
-                      disabled={skillUploading}
+                      disabled={disabled || skillUploading}
                       onClick={(event) => {
                         event.stopPropagation();
                         void handleUploadSkill(upload.source);
@@ -853,22 +882,26 @@ export default function ChatInput({
           )}
           </AnimatePresence>
 
+          {teamConfiguration}
+
           {/* 助手只显示实际绑定；不能借用节点历史偏好冒充已选择的对话模型。 */}
-          <ModelSelector
+          {executionSelection?.kind !== 'team' && <ModelSelector
             appearance="pill"
             theme={appearanceMode}
             nodeType="ai-text"
             selectedModel={selectedTextModel ?? ''}
+            disabled={disabled || assistantModelDisabled}
             onSelect={handleTextModelSelect}
             configuredGroupsOverride={assistantModelGroups}
             generalModelsOverride={assistantModelGroups ? [] : mediaModels}
             groupAvailability={modelGroupAvailability}
-          />
+          />}
 
           <div className="ui-ai-input__tools">
             <div className="ui-ai-input__actions">
               <button
                 type="button"
+                disabled={disabled}
                 onClick={() => {
                   setModelQuery('');
                   setPickerTab('nodes');
@@ -880,12 +913,13 @@ export default function ChatInput({
                 }}
                 aria-label={t('引用画布节点或媒体模型')}
                 title={t('引用画布节点或媒体模型')}
-                className={`ui-ai-input__icon-btn${modelMenuOpen ? ' is-active' : ''}`}
+                className={`ui-ai-input__icon-btn${modelMenuVisible ? ' is-active' : ''}`}
               >
                 <Icon icon="mdi:at" width="14" />
               </button>
               <button
                 type="button"
+                disabled={disabled}
                 onClick={() => {
                   setSkillQuery('');
                   setModelMenuOpen(false);
@@ -895,7 +929,7 @@ export default function ChatInput({
                 }}
                 aria-label={t('调用 Skill')}
                 title={t('调用 Skill')}
-                className={`ui-ai-input__icon-btn${skillMenuOpen ? ' is-active' : ''}`}
+                className={`ui-ai-input__icon-btn${skillMenuVisible ? ' is-active' : ''}`}
               >
                 <Icon icon="mdi:slash-forward" width="14" />
               </button>
@@ -931,6 +965,7 @@ export default function ChatInput({
             <div className="inline-flex shrink-0" onContextMenu={(event) => {
               event.preventDefault();
               event.stopPropagation();
+              if (disabled) return;
               setModelMenuOpen(false);
               setSkillMenuOpen(false);
               setShortcutMenuAnchor(event.currentTarget);
@@ -952,9 +987,9 @@ export default function ChatInput({
         </div>
       </div>
 
-      {shortcutMenuAnchor && <SendShortcutMenu anchor={shortcutMenuAnchor} value={submitShortcut}
+      {!disabled && shortcutMenuAnchor && <SendShortcutMenu anchor={shortcutMenuAnchor} value={submitShortcut}
         onChange={(shortcut) => onSubmitShortcutChange?.(shortcut)} onClose={closeShortcutMenu}
-        disabled={shortcutSettingsDisabled || !onSubmitShortcutChange} />}
+        disabled={disabled || shortcutSettingsDisabled || !onSubmitShortcutChange} />}
     </div>
   );
 }

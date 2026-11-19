@@ -10,8 +10,9 @@ function source(relativePath: string): string {
 
 describe('媒体引用内存守卫接线', () => {
   it('图片上传透传调用方取消信号', () => {
-    expect(source('generateImage.ts')).toContain(
-      "resolveImageUrlArray(allImageUrls, providerDefinition?.id === 'toapis' || isLibapi ? connectionId : provider, signal)",
+    // 这里守住上传调用的取消信号，具体连接分流由请求用例覆盖。
+    expect(source('generateImage.ts')).toMatch(
+      /resolveImageUrlArray\(allImageUrls,[^\n]*,\s*signal\)/,
     );
   });
 
@@ -25,7 +26,9 @@ describe('媒体引用内存守卫接线', () => {
   it('通用音频引用按顺序转换并检查取消信号', () => {
     const audioSource = source('generateAudio.ts');
     expect(audioSource).toContain('for (const reference of audioReferences)');
-    expect(audioSource).toContain("mode: 'dataUrl', kind: 'audio', signal, dataUrlBudget: budget");
+    expect(audioSource).toContain("mode: provider ? 'publicUrl' : 'dataUrl', kind: 'audio', signal, dataUrlBudget: budget");
+    expect(audioSource).toContain('...(provider ? { provider } : {})');
+    expect(audioSource).toContain("if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError')");
     expect(audioSource).not.toMatch(
       /Promise\.all\(references\.filter\(\(reference\) => reference\.kind === 'audio'\)/,
     );

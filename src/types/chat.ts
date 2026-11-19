@@ -2,7 +2,8 @@
  * Chat 类型定义 — 对话助手相关的 CommandId、Selector AST、CommandIntent、
  * CommandPlan、CommandResult、ChatMessage、ChatConversation 等核心类型
  */
-import type { AgentMode, ProviderModelCatalogSummary } from './agent';
+import type { AgentMode, AgentTask, ProviderModelCatalogSummary } from './agent';
+import type { AssistantExecutionSelection } from './agentTeam';
 
 export type ChatPanelView = 'chat' | 'list' | 'tasks';
 
@@ -103,9 +104,10 @@ export type FinishReason = 'stop' | 'length' | 'canceled' | 'error';
 export type AssistantStreamEvent =
   | { type: 'start'; requestId: string; modelId: string }
   | { type: 'text.delta'; delta: string }
-  | { type: 'reasoning.delta'; delta: string; source: 'openai-compatible' | 'anthropic-compatible' | 'gemini-native' }
+  | { type: 'reasoning.delta'; delta: string; source: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible' | 'gemini-native' }
   | { type: 'status'; phase: StreamPhase; message?: string }
   | { type: 'conversation.title'; title: string }
+  | { type: 'responses.context'; output: Array<Record<string, unknown>> }
   | { type: 'tool.call.delta'; callId: string; delta: string }
   | { type: 'tool.call.final'; call: ProposedToolCall }
   | { type: 'tool.result'; result: ToolResultSummary }
@@ -132,6 +134,7 @@ export interface ToolResultSummary {
   errorCode?: string;
   truncated: boolean;
   sources?: WebSource[];
+  resultReference?: import('./agentResult').AgentResultReference;
 }
 
 export interface WebSource {
@@ -353,6 +356,8 @@ export interface ConversationContextSummary {
 export interface ChatConversation {
   id: string;
   projectId: string;
+  /** 主窗口建立的工作台会话持续绑定分集；任务清理后仍保留只读创作范围。 */
+  workbenchTarget?: AgentTask['workbenchTarget'];
   title: string;
   /** 标题来源：auto=自动生成，user=用户手动命名 */
   titleSource: 'auto' | 'user';
@@ -360,6 +365,11 @@ export interface ChatConversation {
   archived: boolean;
   /** 当前会话的 Agent 自治模式；旧会话读取时回填 collaborative。 */
   agentMode: AgentMode;
+  /** 执行方式独立于 Plan/B/C 权限；旧会话缺省为单模型。 */
+  executionSelection?: AssistantExecutionSelection;
+  creationProfile?: import('./creationProfile').CreationProfileSelection;
+  creationProfileRevision?: number;
+  teamProfileOverride?: import('./agentTeam').AgentTeamProfile;
   /** 用户为本会话显式启用的外部 MCP 连接；默认全部关闭。 */
   mcpServerIds?: string[];
   /** 每次选择变化均轮换，撤销后重新勾选不能复活旧审批。 */
@@ -372,8 +382,16 @@ export interface ChatConversation {
   /** 最近一条消息预览文本 */
   lastMessagePreview?: string;
   messageCount: number;
+  branchSource?: ConversationBranchSource;
   /** 软删除时间戳，存在则在回收站中 */
   deletedAt?: number;
+}
+
+export interface ConversationBranchSource {
+  conversationId: string;
+  messageId: string;
+  sequence: number;
+  createdAt: number;
 }
 
 // ============================================

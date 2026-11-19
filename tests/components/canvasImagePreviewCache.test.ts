@@ -58,6 +58,25 @@ async function flush(): Promise<void> {
   for (let index = 0; index < 6; index++) await vi.advanceTimersByTimeAsync(1);
 }
 
+async function flushUntilDecode(): Promise<void> {
+  // Native Response(Blob) streaming can finish after a fake-timer tick.
+  for (let index = 0; index < 200 && bitmapMock.mock.calls.length === 0; index++) {
+    await vi.advanceTimersByTimeAsync(1);
+  }
+  expect(bitmapMock).toHaveBeenCalledOnce();
+}
+
+async function streamedPreviewSource(): Promise<Response> {
+  const image = png();
+  const bytes = new Uint8Array(await image.arrayBuffer());
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  }), { headers: { 'content-type': image.type } });
+}
+
 async function lease(source = 'asset://localhost/image.png', maxEdge = 512): Promise<CanvasImagePreviewLease> {
   const item = request(source, maxEdge);
   await flush();
@@ -112,7 +131,7 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  warnMock.mockRestore();
+  vi.restoreAllMocks();
 });
 
 describe('canvas image preview cache', () => {
@@ -413,6 +432,7 @@ describe('canvas image preview cache', () => {
   });
 
   it('pauses queued work during interaction and starts one derivation at a time', async () => {
+    fetchMock.mockImplementation(streamedPreviewSource);
     interacting = true;
     let resolveBitmap!: (bitmap: ImageBitmap) => void;
     bitmapMock.mockImplementationOnce(() => new Promise((resolve) => { resolveBitmap = resolve; }));
@@ -422,10 +442,11 @@ describe('canvas image preview cache', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     interacting = false;
     await vi.advanceTimersByTimeAsync(80);
+    await flushUntilDecode();
     await flush();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(bitmapMock).toHaveBeenCalledTimes(1);
     resolveBitmap({ close: vi.fn() } as unknown as ImageBitmap);
+    await vi.advanceTimersByTimeAsync(100);
     await flush();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     (await first.promise)?.release();
@@ -444,11 +465,12 @@ describe('canvas image preview cache', () => {
   });
 
   it('closes late decoded bitmaps after cancellation and delivers no stale URL', async () => {
+    fetchMock.mockImplementation(streamedPreviewSource);
     let resolveBitmap!: (bitmap: ImageBitmap) => void;
     const close = vi.fn();
     bitmapMock.mockImplementationOnce(() => new Promise((resolve) => { resolveBitmap = resolve; }));
     const item = request();
-    await flush();
+    await flushUntilDecode();
     item.controller.abort();
     await flush();
     expect(await item.promise).toBeNull();

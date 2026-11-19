@@ -10,7 +10,7 @@ import {
   type NodeChange,
   type EdgeChange,
 } from '@xyflow/react';
-import type { StateCreator } from 'zustand';
+import type { StateCreator, StoreApi } from 'zustand';
 import type { AppState } from './useAppStore';
 import type {
   BaseNodeData,
@@ -32,17 +32,21 @@ import { BATCH_NODE_LIMIT } from './store.chat';
 import * as fileService from '../services/fileService';
 import { playNodeExit } from '../utils/nodeAnimations';
 import { cancelNodePolling } from '../services/pollManager';
-import { applyProjectDefaultsToNodeData, getImageNodeDimensionsForAspectRatio } from '../services/projectSettingsService';
+import { applyProjectDefaultsToNodeData, getImageNodeDimensionsForAspectRatio, resolveImageGenerationParameters } from '../services/projectSettingsService';
 import { getCanvasPointerPosition } from '../services/canvasPointerService';
-import { getNodeSize, getParentOffset, videoNodeDimensionsForAspectRatio } from '../utils/nodeBounds';
+import { getNodeBounds, getNodeSize, getParentOffset, videoNodeDimensionsForAspectRatio } from '../utils/nodeBounds';
+import { clearGroupLayoutData, detachGroupLayoutNodes } from '../utils/groupCollapseLayout';
+import { getCanvasNodeById } from '../utils/canvasRenderProjection';
 import { resolveDirectorRuntime } from '../services/directorRuntimeRegistry';
 import { copyNodeMedia, needsNodeMediaCopy, discardCopiedNodeMedia } from '../services/nodeMediaCopy';
 import { registerCanvasDerivation, isCanvasDerivationFresh, completeCanvasDerivation } from '../services/canvasDerivationGuard';
 import { AI_APP_COPY_MESSAGE, AI_APP_CREATION_MESSAGE, assertAiAppNodeInsertion, isAiAppNode } from '../services/aiApps/aiAppCreation';
 import { getGenerationNodeType } from '../utils/nodeGeneration';
+import { pickImageOutputParameters } from '../services/ai/imageOutputParameters';
 import { collectCanvasDescendantIds } from '../utils/canvasHierarchy';
 import { normalizeShotlistPromptReferences, resolveSingleShotlistRowReference } from '../services/shotlistPromptService';
 import { pickWorkflowSizeInputs, readNodeModelPreference, saveWorkflowModelPreference } from '../services/modelPreferenceService';
+import { isProjectExpectedContextCurrent } from '../services/projectExecutionContext';
 
 /** 只投影本次真实传入的媒体参数，保留 false、接口默认背景与自动时长。 */
 function mediaParametersToNodeData(kind: MediaKind, parameters?: MediaGenerationParameters): Partial<BaseNodeData> {
@@ -52,6 +56,7 @@ function mediaParametersToNodeData(kind: MediaKind, parameters?: MediaGeneration
     ...(parameters.resolution !== undefined ? { imageSize: parameters.resolution } : {}),
     ...(parameters.imageQuality !== undefined ? { imageQuality: parameters.imageQuality } : {}),
     ...(parameters.imageBackground !== undefined ? { imageBackground: parameters.imageBackground } : {}),
+    ...pickImageOutputParameters(parameters),
   };
   if (kind === 'video') return {
     ...(parameters.aspectRatio !== undefined ? { seedanceRatio: parameters.aspectRatio } : {}),
@@ -332,6 +337,51 @@ function nodeCenter(node: Node<BaseNodeData>, nodes: Node<BaseNodeData>[]) {
   return { x: position.x + size.width / 2, y: position.y + size.height / 2 };
 }
 
+/** 只缓存本次结算的几何；父链仍沿用共享工具的循环/缺失父级终止规则。 */
+function createGroupSettlementGeometry(nodes: Node<BaseNodeData>[]) {
+  const parents = new Map<string, Node<BaseNodeData>>();
+  // 与原数组 find 一致，即使旧数据意外包含重复 ID 也先命中第一项。
+  for (const node of nodes) if (!parents.has(node.id)) parents.set(node.id, node);
+  const cache = new WeakMap<Node<BaseNodeData>, ReturnType<typeof getNodeBounds>>();
+  const bounds = (node: Node<BaseNodeData>) => {
+    let value = cache.get(node);
+    if (!value) { value = getNodeBounds(node, parents); cache.set(node, value); }
+    return value;
+  };
+  return {
+    position: (node: Node<BaseNodeData>) => { const value = bounds(node); return { x: value.x, y: value.y }; },
+    center: (node: Node<BaseNodeData>) => { const value = bounds(node); return { x: value.centerX, y: value.centerY }; },
+    contains: (node: Node<BaseNodeData>, point: { x: number; y: number }) => {
+      const value = bounds(node);
+      return point.x >= value.left && point.x <= value.right && point.y >= value.top && point.y <= value.bottom;
+    },
+  };
+}
+
+/** 仅纯 position/select 批次省略同值项；其他变化完整交回 React Flow。 */
+function changedNodeInteractions(changes: NodeChange<Node<BaseNodeData>>[], nodes: Node<BaseNodeData>[]) {
+  if (!changes.every((change) => (change.type === 'position' || change.type === 'select')
+    && Object.keys(change).every((key) => (change.type === 'position' ? ['id', 'type', 'position', 'dragging'] : ['id', 'type', 'selected']).includes(key))
+    && (change.type !== 'position' || change.position === undefined || change.position !== null && Object.keys(change.position).every((key) => key === 'x' || key === 'y')))) return changes;
+  const projected = new Map<string, Pick<Node<BaseNodeData>, 'position' | 'dragging' | 'selected'>>();
+  const filtered = changes.filter((change) => {
+    if (change.type !== 'position' && change.type !== 'select') return true;
+    const node = projected.get(change.id) ?? getCanvasNodeById(nodes, change.id);
+    if (!node) return true;
+    if (change.type === 'select') {
+      if (Object.is(node.selected, change.selected)) return false;
+      projected.set(change.id, { position: node.position, dragging: node.dragging, selected: change.selected });
+    } else {
+      if ((change.position === undefined || Object.is(node.position.x, change.position.x) && Object.is(node.position.y, change.position.y))
+        && (change.dragging === undefined || Object.is(node.dragging, change.dragging))) return false;
+      projected.set(change.id, { position: change.position ?? node.position,
+        dragging: change.dragging === undefined ? node.dragging : change.dragging, selected: node.selected });
+    }
+    return true;
+  });
+  return filtered.length === changes.length ? changes : filtered;
+}
+
 /** 新建节点按画布位置加入展开分组，与插入本身共用一次历史快照。 */
 function insertNodeInGroup(state: Pick<AppState, 'nodes' | 'groups'>, node: Node<BaseNodeData>) {
   const center = nodeCenter(node, state.nodes);
@@ -343,7 +393,7 @@ function insertNodeInGroup(state: Pick<AppState, 'nodes' | 'groups'>, node: Node
   const position = absoluteNodePosition(parent, state.nodes);
   return {
     nodes: [...state.nodes, {
-      ...node, parentId: parent.id,
+      ...node, parentId: parent.id, data: clearGroupLayoutData(node.data),
       position: { x: node.position.x - position.x, y: node.position.y - position.y },
     }],
     groups: state.groups.map((group) => group.id === parent.data.groupId
@@ -353,7 +403,8 @@ function insertNodeInGroup(state: Pick<AppState, 'nodes' | 'groups'>, node: Node
 
 const MEDIA_PARAMETER_PREF_KEY = 'canvas-media-parameter-prefs';
 const MEDIA_PARAMETER_TYPES = {
-  'ai-image': { imageSize: 'string', imageQuality: 'string', imageBackground: 'string', aspectRatio: 'string' },
+  'ai-image': { imageSize: 'string', imageQuality: 'string', imageBackground: 'string', aspectRatio: 'string',
+    imageOutputFormat: 'string', imageFrameCount: 'number', imageFrameDurationMs: 'number', imageTransparent: 'boolean' },
   'ai-video': {
     videoResolution: 'number', videoFps: 'number', videoFrames: 'number',
     seedanceResolution: 'string', seedanceRatio: 'string', seedanceDuration: 'number',
@@ -482,7 +533,7 @@ function prepareDuplicateNodeData(
   cloneId: string,
   includeContent: boolean,
 ): BaseNodeData {
-  const duplicate = structuredClone(data);
+  const duplicate = clearGroupLayoutData(structuredClone(data));
 
   if (!includeContent) {
     // 拖拽复用生成配置，不带走上一份结果、文件身份或运行记录。
@@ -490,7 +541,7 @@ function prepareDuplicateNodeData(
       'output', 'imageUrl', 'videoUrl', 'audioUrl', 'sourceUrl', 'thumbnailUrl',
       'fileName', 'filePath', 'assetId', 'relativePath', 'artifactId', 'mediaVersion',
       'imageWidth', 'imageHeight', 'videoWidth', 'videoHeight', 'videoDuration', 'videoBatchFingerprint',
-      'mattingMask', 'annotation', 'annotationLayer', 'batchGroupId',
+      'mattingMask', 'annotation', 'annotationLayer', 'outpaintInput', 'batchGroupId',
       'runninghubOutputs', 'runninghubStage', 'workflowApiOutputs', 'workflowApiStage', 'pluginOutputs',
       'musicClipId', 'animationSheet', 'animationEdits',
       'storyboardExtracted', 'storyboardOverrides', 'shotlistRows',
@@ -545,12 +596,35 @@ export function collectKeepPaths(
   return keepPaths;
 }
 
+/** 文件暂存晚于画布事件；回收前复核原项目、删除对象和新出现的共享引用。 */
+export function createNodeFileDeletionContext(
+  get: () => Pick<AppState, 'currentProjectId' | 'nodes' | 'messages'>,
+  nodes: Node<BaseNodeData>[], idsToDelete: ReadonlySet<string>, projectId: string | null,
+  isCurrent?: () => boolean,
+): fileService.NodeFileDeletionContext {
+  const deleted = new Map(nodes.filter((node) => idsToDelete.has(node.id)).map((node) => [node.id, node.data]));
+  return {
+    deletedNodeIds: [...idsToDelete],
+    getLiveKeepPaths: () => {
+      const latest = get();
+      if (isCurrent?.() === false || latest.currentProjectId !== projectId
+        || latest.nodes.some((node) => deleted.has(node.id) && deleted.get(node.id) !== node.data)) return null;
+      return collectKeepPaths(latest.nodes, idsToDelete, latest.messages);
+    },
+  };
+}
+
 function mergeNodeData(previous: BaseNodeData, patch: Partial<BaseNodeData>): BaseNodeData {
   if ('type' in patch && patch.type !== previous.type
     && (patch.type === 'ai-app' || previous.type === 'ai-app')) {
     throw new Error(AI_APP_CREATION_MESSAGE);
   }
   const next = withGenerationTiming({ ...previous, ...patch } as BaseNodeData, previous);
+  // 显式改比例才联动画框；媒体加载、同值水化及用户手动缩放保持原尺寸。
+  if (next.type === 'ai-image' && patch.aspectRatio !== undefined && patch.aspectRatio !== previous.aspectRatio
+    && patch.nodeWidth === undefined && patch.nodeHeight === undefined) {
+    Object.assign(next, getImageNodeDimensionsForAspectRatio(patch.aspectRatio) ?? {});
+  }
   if (getGenerationNodeType(previous.type) === 'ai-video' && previous.shotlistProductionSource?.kind === 'video'
     && 'seedanceDuration' in patch && patch.seedanceDuration !== previous.seedanceDuration) {
     next.shotlistProductionSource = { ...previous.shotlistProductionSource, durationSync: 'manual' };
@@ -662,22 +736,30 @@ function syncShotlistVideoResults(
   return result;
 }
 
+function indexShotlistRows(rows: readonly ShotRow[]): Map<string, ShotRow> {
+  const byId = new Map<string, ShotRow>();
+  // 和原来的 find 一样取首项，旧数据里即使有重复 ID 也不换到另一行。
+  for (const row of rows) if (!byId.has(row.id)) byId.set(row.id, row);
+  return byId;
+}
+
 /** 在同一次 Store 更新中同步镜头视频与时长，沿用调用方的历史快照。 */
 function mergeNodeDataWithShotDurations(nodes: Node<BaseNodeData>[], targetIds: Set<string>, patch: Partial<BaseNodeData>) {
   let next = nodes.map((node) => targetIds.has(node.id)
     ? { ...node, data: mergeShotlistReferenceSource(node.data, mergeNodeData(node.data, patch), patch, nodes) } : node);
   next = syncShotlistVideoResults(nodes, next, targetIds, patch);
   if (!Array.isArray(patch.shotlistRows)) return next;
+  const rowsById = indexShotlistRows(patch.shotlistRows);
   const sheets = new Map(nodes.filter((node) => targetIds.has(node.id) && node.data.type === 'ai-shotlist')
-    .map((node) => [node.id, node.data.shotlistRows ?? []]));
+    .map((node) => [node.id, indexShotlistRows(node.data.shotlistRows ?? [])]));
   return next.map((node) => {
     const source = node.data.shotlistProductionSource;
     if (getGenerationNodeType(node.data.type) !== 'ai-video' || source?.kind !== 'video' || source.durationSync === 'manual'
       || targetIds.has(node.id)) return node;
     const previousRows = sheets.get(source.nodeId);
     if (!previousRows) return node;
-    const previous = previousRows.find((row) => row.id === source.rowId);
-    const row = patch.shotlistRows!.find((item) => item.id === source.rowId);
+    const previous = previousRows.get(source.rowId);
+    const row = rowsById.get(source.rowId);
     if (!previous || !row || previous.duration === row.duration) return node;
     const duration = resolveShotVideoDuration(row.duration);
     if (duration === undefined) return node;
@@ -838,6 +920,8 @@ export interface NodeSlice {
   deleteNode: (nodeId: string) => void;
   /** 原子批量删除多个节点（一次 commitToHistory，一次退场动画） */
   deleteNodesBatch: (nodeIds: string[]) => void;
+  /** 手工删除完整选区（不限节点数，包含独立选边）；有目标时立即清选择。 */
+  deleteSelectedCanvasElements: () => boolean;
   onConnect: (connection: Connection) => void;
   connectSelectedNodes: (sourceIds: string[], targetId: string, projectId: string | null) => number;
   addNodeFromSelection: (node: Node<BaseNodeData>, sourceIds: string[], projectId: string | null) => boolean;
@@ -912,14 +996,111 @@ export function createNodeDuplicateDrag(getState: () => AppState, sourceId: stri
   };
 }
 
-export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, get) => ({
+/** 三种删除入口共用文件保护与退场生命周期；运行时登记只存在于本次调用。 */
+function deleteCanvasElements(
+  set: Parameters<StateCreator<AppState>>[0], get: () => AppState, api: StoreApi<AppState>,
+  nodeIds: string[], selectedEdges: Edge[] = [], clearSelection = false,
+): boolean {
+  const initial = get();
+  const existingIds = new Set(initial.nodes.map((node) => node.id));
+  const roots = nodeIds.filter((id) => existingIds.has(id));
+  if (roots.length === 0 && selectedEdges.length === 0) return false;
+  const idsToDelete = collectCanvasDescendantIds(initial.nodes, roots);
+  const edgesToDelete = new Map(selectedEdges.map((edge) => [edge.id, edge]));
+  if (clearSelection) set({ selectedNodeIds: [], edges: initial.edges.map((edge) => edge.selected ? { ...edge, selected: false } : edge) });
+  get().commitToHistory();
+
+  const origin = initial;
+  const projectId = origin.currentProjectId;
+  const project = origin.projects.find((item) => item.id === projectId);
+  const owner = origin.projects.find((item) => item.id === (project?.parentId ?? projectId));
+  const sameTarget = (state: AppState): boolean => {
+    if (state.currentProjectId !== projectId) return false;
+    const context = origin.projectExecutionContext;
+    if (context == null ? state.projectExecutionContext !== context
+      : !state.projectExecutionContext || !isProjectExpectedContextCurrent(context, state.projectExecutionContext, { checkCanvasRevision: false })) return false;
+    const current = state.projects.find((item) => item.id === projectId);
+    const currentOwner = state.projects.find((item) => item.id === (current?.parentId ?? projectId));
+    return current?.parentId === project?.parentId && current?.revisionScope === project?.revisionScope
+      && (current?.exchangeEpoch ?? 0) === (project?.exchangeEpoch ?? 0)
+      && (currentOwner?.exchangeEpoch ?? 0) === (owner?.exchangeEpoch ?? 0);
+  };
+  let invalidated = false;
+  let applied = false;
+  const retiredNodeIds = new Set<string>();
+  const retiredEdgeIds = new Set<string>();
+  // 只观察本操作的存续；普通历史追加、节点进度和位置变化不会取消合法删除。
+  let unsubscribe = () => {};
+  unsubscribe = api.subscribe((state, previous) => {
+    if (invalidated) return;
+    const targetChanged = state.currentProjectId !== previous.currentProjectId
+      || state.projectExecutionContext !== previous.projectExecutionContext || state.projects !== previous.projects;
+    const historyChanged = state.history !== previous.history;
+    if (targetChanged && !sameTarget(state) || state.historyIndex !== previous.historyIndex
+      && (!historyChanged || state.historyIndex < previous.historyIndex)
+      || historyChanged && !state.history.some((entry) => previous.history.includes(entry))) {
+      invalidated = true;
+      unsubscribe();
+      return;
+    }
+    if (!applied && idsToDelete.size > 0 && state.nodes !== previous.nodes) {
+      const present = new Set(state.nodes.map((node) => node.id));
+      for (const id of idsToDelete) if (!present.has(id)) retiredNodeIds.add(id);
+    }
+    if (!applied && edgesToDelete.size > 0 && state.edges !== previous.edges) {
+      const present = new Set(state.edges.map((edge) => edge.id));
+      for (const id of edgesToDelete.keys()) if (!present.has(id)) retiredEdgeIds.add(id);
+    }
+  });
+  const isCurrent = () => !invalidated && sameTarget(get());
+  const deletedGroupIds = new Set(idsToDelete);
+  for (const node of initial.nodes) {
+    if (idsToDelete.has(node.id) && node.type === 'group') {
+      const groupId = (node.data as unknown as GroupNodeDataAccess).groupId;
+      if (groupId) deletedGroupIds.add(groupId);
+    }
+  }
+  const applyDeletion = () => set((state) => {
+    if (!isCurrent()) return state;
+    const liveIds = new Set([...idsToDelete].filter((id) => !retiredNodeIds.has(id)));
+    const pruned = pruneDeletedNodesAndEmptyGroups(state.nodes, state.edges, state.groups, liveIds);
+    applied = true;
+    return { ...pruned,
+      edges: pruned.edges.filter((edge) => {
+        const original = edgesToDelete.get(edge.id);
+        return !original || retiredEdgeIds.has(edge.id) || edge.source !== original.source || edge.target !== original.target
+          || edge.sourceHandle !== original.sourceHandle || edge.targetHandle !== original.targetHandle;
+      }),
+      selectedNodeIds: state.selectedNodeIds.filter((id) => pruned.nodes.some((node) => node.id === id)),
+    };
+  });
+  try {
+    for (const id of idsToDelete) cancelNodePolling(id);
+    const files = fileService.deleteNodeFiles(
+      initial.nodes.filter((node) => idsToDelete.has(node.id) && !node.data.artifactId).map((node) => node.data),
+      collectKeepPaths(initial.nodes, idsToDelete, initial.messages), projectId,
+      fileService.deletedGroupFolderNames(initial.groups, deletedGroupIds),
+      createNodeFileDeletionContext(get, initial.nodes, idsToDelete, projectId, isCurrent),
+    ).catch((error) => console.warn('[删除节点] 文件清理失败:', error));
+    const exit = playNodeExit([...idsToDelete]).then(applyDeletion, applyDeletion);
+    void Promise.allSettled([files, exit]).then(unsubscribe);
+  } catch (error) {
+    invalidated = true;
+    unsubscribe();
+    throw error;
+  }
+  return true;
+}
+
+export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, get, api) => ({
   nodes: [],
   edges: [],
   selectedNodeIds: [],
 
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
-  setSelectedNodeIds: (ids) => set({ selectedNodeIds: ids }),
+  setSelectedNodeIds: (ids) => set((state) => state.selectedNodeIds.length === ids.length
+    && state.selectedNodeIds.every((id, index) => id === ids[index]) ? state : { selectedNodeIds: ids }),
 
   addNode: (node) => {
     assertAiAppNodeInsertion([node]);
@@ -1015,6 +1196,11 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       ? 'general' : intent.modelRef?.split('/')[0];
     retainMediaModelDefaults(nodeData, mediaProvider, intent);
     Object.assign(nodeData, mediaParametersToNodeData(intent.kind, intent));
+    if (intent.kind === 'image') {
+      const parameters = resolveImageGenerationParameters(settings, intent);
+      Object.assign(nodeData, mediaParametersToNodeData('image', parameters),
+        getImageNodeDimensionsForAspectRatio(parameters.aspectRatio) ?? {});
+    }
     state.commitToHistory();
     set((current) => ({
       nodes: [...current.nodes, {
@@ -1039,6 +1225,10 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         const recoveredParameters = mediaParametersToNodeData(artifact.kind, artifact.parameters);
         const missingParameters = Object.fromEntries(Object.entries(recoveredParameters)
           .filter(([key]) => node.data[key as keyof BaseNodeData] === undefined));
+        const legacyPlaceholderSize = node.data.nodeWidth === undefined && node.data.nodeHeight === undefined
+          || node.data.nodeWidth === 280 && node.data.nodeHeight === 158;
+        const recoveredDimensions = artifact.kind === 'image' && typeof missingParameters.aspectRatio === 'string' && legacyPlaceholderSize
+          ? getImageNodeDimensionsForAspectRatio(missingParameters.aspectRatio) : null;
         const mediaField = artifact.kind === 'image'
           ? { imageUrl: artifact.url, imageWidth: artifact.width, imageHeight: artifact.height }
           : artifact.kind === 'video'
@@ -1049,6 +1239,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
           data: {
             ...node.data,
             ...missingParameters,
+            ...recoveredDimensions,
             ...mediaField,
             artifactId: artifact.id,
             prompt: artifact.prompt,
@@ -1343,7 +1534,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
           get().commitToHistory();
           get().addNodeTransient({ ...source, id: cloneId,
             position: { x: source.position.x + 24, y: source.position.y + 24 },
-            data, selected: false, dragging: false });
+            data: clearGroupLayoutData(data), selected: false, dragging: false });
           return cloneId;
         } catch {
           if (get().currentProjectId === guard.projectId) get().showToast('素材复制失败，请重试', 'error');
@@ -1360,7 +1551,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       selected: true,
       dragging: false,
       data: {
-        ...structuredClone(source.data),
+        ...clearGroupLayoutData(structuredClone(source.data)),
         displayId: getNextDisplayId(state.nodes),
       },
     } as Node<BaseNodeData>;
@@ -1478,68 +1669,13 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     return true;
   },
 
-  deleteNode: (nodeId) => {
-    get().commitToHistory();
+  deleteNode: (nodeId) => { deleteCanvasElements(set, get, api, [nodeId]); },
 
-    // Collect all node IDs to delete: self + descendants (for group nodes)
-    const { nodes } = get();
-    const idsToDelete = collectCanvasDescendantIds(nodes, [nodeId]);
-    // Cancel any active polling for all deleted nodes
-    for (const id of idsToDelete) {
-      cancelNodePolling(id);
-    }
+  deleteNodesBatch: (nodeIds) => { deleteCanvasElements(set, get, api, nodeIds.slice(0, BATCH_NODE_LIMIT)); },
 
-    // Delete local files for all affected nodes —— 跳过仍被存活节点引用的共享文件（复制节点场景）
-    const keepPaths = collectKeepPaths(nodes, idsToDelete, get().messages);
-    void fileService.deleteNodeFiles(
-      nodes.filter((node) => idsToDelete.has(node.id) && !node.data.artifactId).map((node) => node.data),
-      keepPaths, get().currentProjectId,
-      fileService.deletedGroupFolderNames(get().groups, idsToDelete),
-    ).catch((e) => console.warn('[删除节点] 文件清理失败:', e));
-
-    // 先播放退场动画，结束后再真正从状态中移除（动画期间历史已提交，撤销仍指向删除前状态）
-    playNodeExit([...idsToDelete]).then(() => {
-      set((state) => pruneDeletedNodesAndEmptyGroups(
-        state.nodes,
-        state.edges,
-        state.groups,
-        idsToDelete,
-      ));
-    });
-  },
-
-  deleteNodesBatch: (nodeIds) => {
-    if (nodeIds.length === 0) return;
-    // 最多删 BATCH_NODE_LIMIT 个
-    const limitedIds = nodeIds.length > BATCH_NODE_LIMIT ? nodeIds.slice(0, BATCH_NODE_LIMIT) : nodeIds;
-
-    get().commitToHistory();
-
-    // 收集所有要删除的 ID（包含子节点递归）
-    const { nodes } = get();
-    const idsToDelete = collectCanvasDescendantIds(nodes, limitedIds);
-    // 取消所有轮询
-    for (const id of idsToDelete) {
-      cancelNodePolling(id);
-    }
-
-    // 清理文件
-    const keepPaths = collectKeepPaths(nodes, idsToDelete, get().messages);
-    void fileService.deleteNodeFiles(
-      nodes.filter((node) => idsToDelete.has(node.id) && !node.data.artifactId).map((node) => node.data),
-      keepPaths, get().currentProjectId,
-      fileService.deletedGroupFolderNames(get().groups, idsToDelete),
-    ).catch((e) => console.warn('[批量删除] 文件清理失败:', e));
-
-    // 统一播放退场动画后移除
-    playNodeExit([...idsToDelete]).then(() => {
-      set((state) => pruneDeletedNodesAndEmptyGroups(
-        state.nodes,
-        state.edges,
-        state.groups,
-        idsToDelete,
-      ));
-    });
+  deleteSelectedCanvasElements: () => {
+    const state = get();
+    return deleteCanvasElements(set, get, api, state.selectedNodeIds, state.edges.filter((edge) => edge.selected), true);
   },
 
   bindShotlistVideo: (shotlistId, rowId, sourceNodeId) => {
@@ -1719,9 +1855,10 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     }
 
     if (removedIds.length === 0) {
-      set((s) => ({
-        nodes: applyNodeChanges(changes, s.nodes) as Node<BaseNodeData>[],
-      }));
+      set((state) => {
+        const changed = changedNodeInteractions(changes, state.nodes);
+        return changed.length === 0 ? state : { nodes: applyNodeChanges(changed, state.nodes) as Node<BaseNodeData>[] };
+      });
       return;
     }
 
@@ -1759,7 +1896,10 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
       ) as Node<BaseNodeData>[];
 
       set((s) => ({
-        nodes: finalNodes,
+        nodes: detachGroupLayoutNodes(finalNodes, new Set([
+          ...removedIds,
+          ...state.nodes.filter((node) => node.parentId && groupNodeIdSet.has(node.parentId)).map((node) => node.id),
+        ])),
         edges: s.edges.filter(
           (e) => !removedIds.includes(e.source) && !removedIds.includes(e.target),
         ),
@@ -1782,7 +1922,18 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     const hasRemoval = changes.some((c) => c.type === 'remove');
     if (hasRemoval) get().commitToHistory();
     set((s) => {
-      const edges = applyEdgeChanges(changes, s.edges) as Edge[];
+      let changed = changes;
+      if (changes.every((change) => change.type === 'select' && Object.keys(change).every((key) => ['id', 'type', 'selected'].includes(key)))) {
+        const selected = new Map(s.edges.map((edge) => [edge.id, edge.selected]));
+        changed = changes.filter((change) => {
+          if (change.type !== 'select' || !selected.has(change.id)) return true;
+          if (Object.is(selected.get(change.id), change.selected)) return false;
+          selected.set(change.id, change.selected);
+          return true;
+        });
+        if (changed.length === 0) return s;
+      }
+      const edges = applyEdgeChanges(changed, s.edges) as Edge[];
       if (!hasRemoval) return { edges };
       const remainingIds = new Set(edges.map((edge) => edge.id));
       return {
@@ -1813,20 +1964,21 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     if (!group || group.hidden || group.draggable === false || group.data.groupCollapsed || group.data.hiddenByCharacterLibrary
       || !state.groups.some((record) => record.id === group.data.groupId)) return;
 
-    const position = absoluteNodePosition(group, state.nodes);
+    const geometry = createGroupSettlementGeometry(state.nodes);
+    const position = geometry.position(group);
     const capturedIds = new Set(state.nodes.filter((node) => (
       node.type !== 'group' && !node.parentId && !node.hidden && node.draggable !== false
       && !node.data.hiddenByCharacterLibrary
-      && groupContainsPoint(group, nodeCenter(node, state.nodes), state.nodes)
+      && geometry.contains(group, geometry.center(node))
     )).map((node) => node.id));
     // 脱组前按完整父链换算画布坐标，解除绑定时不移动节点；空分组继续保留。
     const releasedPositions = new Map(state.nodes.filter((node) => (
       node.parentId === group.id
-      && !groupContainsPoint(group, nodeCenter(node, state.nodes), state.nodes)
-    )).map((node) => [node.id, absoluteNodePosition(node, state.nodes)] as const));
+      && !geometry.contains(group, geometry.center(node))
+    )).map((node) => [node.id, geometry.position(node)] as const));
 
     if (capturedIds.size > 0 || releasedPositions.size > 0) {
-      const nodes = state.nodes.map((node) => {
+      const nodes = detachGroupLayoutNodes(state.nodes.map((node) => {
         const releasedPosition = releasedPositions.get(node.id);
         if (releasedPosition) return {
           ...node,
@@ -1840,7 +1992,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
           parentId: group.id,
           position: { x: node.position.x - position.x, y: node.position.y - position.y },
         } : node;
-      });
+      }), new Set([...capturedIds, ...releasedPositions.keys()]));
       set({
         // 与拖入分组一致，保证父分组排在新加入的子节点前面。
         nodes: [...nodes.filter((node) => node.type === 'group'), ...nodes.filter((node) => node.type !== 'group')],
@@ -1858,23 +2010,26 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     const allNodes = state.nodes;
     const nodeMap = new Map(allNodes.map((node) => [node.id, node]));
     const groupNodes = allNodes.filter((candidate) => candidate.type === 'group' && !candidate.hidden);
+    const groupsById = new Map<string, Node<BaseNodeData>>();
+    for (const group of groupNodes) if (!groupsById.has(group.id)) groupsById.set(group.id, group);
+    const geometry = createGroupSettlementGeometry(allNodes);
     const updates = new Map<string, Node<BaseNodeData>>();
     const addedByGroup = new Map<string, Set<string>>();
     const oldParentIds = new Set<string>();
     for (const node of Array.isArray(nodes) ? nodes : [nodes]) {
       const stored = nodeMap.get(node.id);
       if (!stored || stored.type === 'group' || stored.hidden || stored.draggable === false) continue;
-      const oldParent = groupNodes.find((candidate) => candidate.id === node.parentId);
+      const oldParent = node.parentId === undefined ? undefined : groupsById.get(node.parentId);
       // 分镜等非普通分组的父子关系由对应业务入口管理。
       if (node.parentId && !oldParent) continue;
-      const center = nodeCenter(node, allNodes);
-      const parent = oldParent && groupContainsPoint(oldParent, center, allNodes)
+      const center = geometry.center(node);
+      const parent = oldParent && geometry.contains(oldParent, center)
         ? oldParent
-        : groupNodes.find((candidate) => groupContainsPoint(candidate, center, allNodes));
+        : groupNodes.find((candidate) => geometry.contains(candidate, center));
       if (parent?.id === node.parentId) continue;
 
-      const absPos = absoluteNodePosition(node, allNodes);
-      const parentPos = parent ? absoluteNodePosition(parent, allNodes) : { x: 0, y: 0 };
+      const absPos = geometry.position(node);
+      const parentPos = parent ? geometry.position(parent) : { x: 0, y: 0 };
       updates.set(node.id, {
         ...stored,
         parentId: parent?.id,
@@ -1890,7 +2045,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     }
     if (updates.size === 0) return;
 
-    let newNodes = allNodes.map((node) => updates.get(node.id) ?? node);
+    let newNodes = detachGroupLayoutNodes(allNodes.map((node) => updates.get(node.id) ?? node), new Set(updates.keys()));
     let newGroups = state.groups.map((group) => {
       const added = addedByGroup.get(group.id);
       const nodeIds = group.nodeIds.filter((id) => !updates.has(id));
@@ -1899,9 +2054,11 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     });
 
     // 整批归属确定后再清理旧组，避免换组途中删除仍将接收其他成员的分组。
+    const childCounts = new Map<string, number>();
+    for (const node of newNodes) if (node.parentId !== undefined) childCounts.set(node.parentId, (childCounts.get(node.parentId) ?? 0) + 1);
     const emptyGroupIds = new Set(
       groupNodes
-        .filter((gn) => oldParentIds.has(gn.id) && !newNodes.some((n) => n.parentId === gn.id))
+        .filter((gn) => oldParentIds.has(gn.id) && !childCounts.has(gn.id))
         .map((gn) => gn.id),
     );
     if (emptyGroupIds.size > 0) {

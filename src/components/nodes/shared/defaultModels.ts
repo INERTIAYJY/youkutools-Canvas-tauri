@@ -16,10 +16,12 @@ import { CATEGORY_TO_NODE_TYPES, GENERAL_MODEL_CATEGORY_LABELS } from '../../../
 import { RUNNINGHUB_MODEL_MANIFEST, isLegacyRunningHubModel, getRunningHubModel, normalizeRunningHubModelId } from '../../../services/ai/providers/runninghubModelManifest';
 import { isRunningHubWorkflow, workflowExecution } from '../../../services/workflowExecutionService';
 import { DREAMINA_IMAGE_MODELS, DREAMINA_VIDEO_MODELS } from '../../../services/ai/dreaminaModels';
+import { MUSE_MODEL_MANIFEST } from '../../../services/ai/museModels';
 import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, isLegacyApimartOmni, replaceLegacyApimartOmni } from '../../../services/ai/apimartVideoModels';
 import { GRSAI_ADDED_MODELS } from '../../../services/ai/grsaiModels';
 import { resolveAudioParameterCapability } from '../../../services/ai/mediaModelCapabilities';
-import { getProviderDefinition } from '../../../services/ai/providerCatalogService';
+import { getProviderDefinition, isRetiredProviderConnection } from '../../../services/ai/providerCatalogService';
+import { resolveRelayonGroup } from '../../../services/ai/relayonProviderGroups';
 
 export type MediaModelKind = 'image' | 'video' | 'audio';
 
@@ -443,7 +445,16 @@ export const defaultModelGroups: ModelGroup[] = [
         value: 'volcengine/doubao-seedream-5-0-pro-260628',
         provider: 'volcengine',
         label: 'Seedream 5.0 Pro',
-        description: '旗舰生图模型，支持文生图/组图/多图参考，1K/2K',
+        description: '旗舰单图模型，支持文生图/多图参考，1K/1.5K/2K，最多 10 张参考图',
+        iconType: 'badge',
+        badgeText: 'V',
+        nodeTypes: ['ai-image'],
+      },
+      {
+        value: 'volcengine/doubao-seedream-5-0-flash-260915',
+        provider: 'volcengine',
+        label: 'Seedream 5.0 Flash',
+        description: '快速单图模型，支持文生图/多图参考，1K/1.5K/2K，最多 10 张参考图',
         iconType: 'badge',
         badgeText: 'V',
         nodeTypes: ['ai-image'],
@@ -790,6 +801,16 @@ export const defaultModelGroups: ModelGroup[] = [
     badgeText: 'SL',
     models: [],
   },
+  {
+    id: 'muse', name: 'Muse', description: '网页登录，文本与看图对话、图片和视频生成',
+    iconType: 'badge', badgeText: 'MU',
+    models: MUSE_MODEL_MANIFEST.map((model) => ({
+      value: `muse/${model.id}`, provider: 'muse', label: model.name,
+      inputModalities: model.inputModalities,
+      description: model.description, iconType: 'badge' as const, badgeText: 'MU',
+      nodeTypes: CATEGORY_TO_NODE_TYPES[model.category],
+    })),
+  },
 
   // --- RunningHUB 模型 ---
   {
@@ -965,7 +986,7 @@ export function isProviderCategoryVisible(
 ): boolean {
   if (!providerConfigId) return true;
   const provider = config.providers[providerConfigId];
-  if (!provider) return false;
+  if (!provider || isRetiredProviderConnection(providerConfigId, provider)) return false;
   return provider.visibleModelCategories === undefined
     || provider.visibleModelCategories.includes(category);
 }
@@ -1003,7 +1024,7 @@ export function getConfiguredModelGroups(
     const dreaminaLegacyConnection = group.id === 'dreamina' && !!config.dreaminaAuth?.loggedIn;
     const seedlingLegacyConnection = group.id === 'seedling' && !!config.seedlingAuth?.loggedIn;
     if (!provider && !dreaminaLegacyConnection && !seedlingLegacyConnection) return [];
-    if (group.id !== 'dreamina' && group.id !== 'seedling' && !provider?.apiKey) return [];
+    if (group.id !== 'dreamina' && group.id !== 'seedling' && group.id !== 'muse' && !provider?.apiKey) return [];
     if (provider && !isProviderCategoryVisible(config, providerConfigId, category)) return [];
 
     const modelProvider = group.models[0]?.provider || group.id;
@@ -1087,7 +1108,7 @@ function generalModelLabel(model: GeneralModelConfig, config?: ProviderModelVisi
   const provider = config?.providers[model.providerConfigId];
   const catalogId = getProviderDefinition(model.providerConfigId, provider)?.id;
   const group = catalogId === 'cccapi' ? provider?.cccGroup?.trim()
-    : catalogId === 'relayonapi' ? provider?.relayonGroup?.trim() : undefined;
+    : catalogId === 'relayonapi' ? resolveRelayonGroup(provider?.relayonGroup) : undefined;
   return group ? `${model.name} · ${group}` : model.name;
 }
 

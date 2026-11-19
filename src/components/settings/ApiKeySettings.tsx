@@ -11,7 +11,7 @@ import {
   getProviderDefinition,
   getProviderDefinitions,
   getWebSearchProviderDefinitions,
-  isProviderModelVisible,
+  isRetiredProviderConnection,
   resolveWebSearchProviderId,
 } from '../../services/ai/providerCatalogService';
 import {
@@ -33,14 +33,16 @@ import ProviderBadge from '../shared/ProviderBadge';
 import { defaultModelGroups } from '../nodes/shared/defaultModels';
 import { getCustomConnectionReadiness, shouldListProviderConnection } from './apiKeySettingsUtils';
 import { deleteAppSecret, isSecretStoreAvailable } from '../../services/providerSecretService';
+import { deleteImageHostingCredential } from '../../services/imageHostingService';
 import { queryProviderBalance, supportsProviderBalance, type ProviderBalance } from '../../services/testConnection';
 import { replaceLegacyApimartOmni } from '../../services/ai/apimartVideoModels';
-import { RELAYON_BASE_URL } from '../../services/ai/providers/relayonModelManifest';
+import { isRelayonOfficialBaseUrl, relayonGroupBaseUrl } from '../../services/ai/relayonProviderGroups';
 import DreaminaLoginModal from './DreaminaLoginModal';
 import ModalOverlay from '../shared/ModalOverlay';
 import ProviderConnectionDialog from './ProviderConnectionDialog';
 import VolcengineBillingSettings from './VolcengineBillingSettings';
-import { queryBillingRuns } from '../../services/billing/volcengineBillingService';
+import GlobalImageHostingSettings from './GlobalImageHostingSettings';
+import { hasBillingHistory as checkBillingHistory } from '../../services/billing/volcengineBillingService';
 import { saveAutodlWorkflowTemplate, saveWorkflowApiDrafts } from '../../services/workflowApi/workflowApiConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { useT } from '../../i18n';
@@ -173,7 +175,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     for (const [id, providerConfig] of Object.entries(config.providers)) {
       if (id === 'runninghub' || RUNNINGHUB_CREDENTIAL_IDS.includes(id)) continue;
       const definition = getProviderDefinition(id, providerConfig);
-      if (!definition) continue;
+      if (!definition || definition.retired) continue;
       if (definition.kind === 'web-search' && id !== activeWebSearchProviderId) continue;
       // 森之灵：仅 CLI 登录态（无 API Token）时也允许出现在列表
       if (!['cccapi', 'relayonapi'].includes(definition.id)
@@ -209,6 +211,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       'grsai',
       'dreamina',
       'seedling',
+      'muse',
       'web-search',
       'custom-openai',
     ];
@@ -271,17 +274,18 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (billingOpen || hasVolcengineConnection || !isTauri()) return;
     let cancelled = false;
-    void queryBillingRuns({}, 1, 1).then((page) => {
-      if (!cancelled) setHasBillingHistory(page.total > 0);
+    void checkBillingHistory({ volcengineBillingPath: config.volcengineBillingPath }).then((exists) => {
+      if (!cancelled) setHasBillingHistory(exists);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [billingOpen, hasVolcengineConnection]);
+  }, [billingOpen, hasVolcengineConnection, config.volcengineBillingPath, config.baseDataDir]);
 
   // 补填密钥或节点请求模型参数：在渲染期直接生效，不用 effect 回写本地 state。
   // 任何一次手动开关对话框都视为消费掉该请求（关闭设置面板时 store 也会清空它）。
   const requestedConnectionId = pendingApiKeyConnectionId === NEW_API_KEY_CONNECTION_ID
     ? NEW_API_KEY_CONNECTION_ID
     : pendingApiKeyConnectionId && config.providers[pendingApiKeyConnectionId]
+      && !isRetiredProviderConnection(pendingApiKeyConnectionId, config.providers[pendingApiKeyConnectionId])
       ? pendingApiKeyConnectionId
       : null;
   const connectionDialogOpen = dialog.open || !!requestedConnectionId;
@@ -324,28 +328,13 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     for (const [connectionId, providerConfig] of Object.entries(config.providers)) {
       const catalogId = providerConfig.catalogId
         || getProviderDefinition(connectionId, providerConfig)?.id;
-      if (catalogId === 'apimart') {
-        const selectedModels = replaceLegacyApimartOmni(providerConfig.selectedModels);
-        const catalogModels = replaceLegacyApimartOmni(providerConfig.catalogModels);
-        if (selectedModels !== providerConfig.selectedModels || catalogModels !== providerConfig.catalogModels) {
-          changed = true;
-          saveProviderConfig(connectionId, { ...providerConfig, selectedModels, catalogModels });
-        }
-        continue;
+      if (catalogId !== 'apimart') continue;
+      const selectedModels = replaceLegacyApimartOmni(providerConfig.selectedModels);
+      const catalogModels = replaceLegacyApimartOmni(providerConfig.catalogModels);
+      if (selectedModels !== providerConfig.selectedModels || catalogModels !== providerConfig.catalogModels) {
+        changed = true;
+        saveProviderConfig(connectionId, { ...providerConfig, selectedModels, catalogModels });
       }
-      if (catalogId !== 'sora2u') continue;
-      const selectedModels = providerConfig.selectedModels?.filter(
-        (model) => isProviderModelVisible(catalogId, model.id),
-      );
-      const catalogModels = providerConfig.catalogModels?.filter(
-        (model) => isProviderModelVisible(catalogId, model.id),
-      );
-      if (
-        selectedModels?.length === providerConfig.selectedModels?.length
-        && catalogModels?.length === providerConfig.catalogModels?.length
-      ) continue;
-      changed = true;
-      saveProviderConfig(connectionId, { ...providerConfig, selectedModels, catalogModels });
     }
     if (changed) void saveConfig({ silent: true });
   }, [config.providers, saveConfig, saveProviderConfig]);
@@ -531,15 +520,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       useAppStore.getState().showToast(t('该连接类型不支持导入'), 'error');
       return;
     }
-    if (definition.id === 'relayonapi' && parsed.config.baseUrl) {
-      try {
-        const url = new URL(parsed.config.baseUrl);
-        if (url.origin !== 'https://relayonapi.com' || url.username || url.password
-          || url.pathname.replace(/\/+$/, '') !== '/v1' || url.search || url.hash) throw new Error();
-      } catch {
-        useAppStore.getState().showToast(t('万象分组配置的接口地址必须是官方地址'), 'error');
-        return;
-      }
+    if (definition.id === 'relayonapi' && parsed.config.baseUrl && !isRelayonOfficialBaseUrl(parsed.config.baseUrl)) {
+      useAppStore.getState().showToast(t('万象分组配置的接口地址必须是官方地址'), 'error');
+      return;
     }
     const newConnectionId = createConnectionId(definition.id);
     if (config.providers[newConnectionId]) {
@@ -555,7 +538,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     }));
     saveProviderConfig(newConnectionId, {
       ...parsed.config,
-      ...(definition.id === 'relayonapi' ? { baseUrl: RELAYON_BASE_URL } : {}),
+      ...(definition.id === 'relayonapi' ? { baseUrl: parsed.config.baseUrl?.trim() || relayonGroupBaseUrl(parsed.config.relayonGroup) } : {}),
       selectedModels: models,
       catalogModels: parsed.config.catalogModels?.map((model) => ({
         ...model,
@@ -619,6 +602,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     related?: { runninghubWorkflowApiKey?: string; runninghubSiteKeys?: RunningHubSiteKeyDrafts; workflowApiDrafts?: import('../../types/workflowApi').WorkflowApiDraft[] },
   ) => {
     const definition = getProviderDefinition(connectionId, providerConfig);
+    const previousImageHostingRef = useAppStore.getState().config.providers[connectionId]?.imageHosting?.credentialRef;
     if (definition?.id === 'runninghub-model' && related?.runninghubSiteKeys) {
       const providers = buildRunningHubSiteProviders(useAppStore.getState().config.providers, providerConfig, related.runninghubSiteKeys);
       updateConfig({ providers });
@@ -640,6 +624,10 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       await removeProviderConfig('runninghub');
     }
     await saveConfig({ throwOnError: true });
+    if (previousImageHostingRef && previousImageHostingRef !== providerConfig.imageHosting?.credentialRef
+      && !Object.values(useAppStore.getState().config.providers).some((provider) => provider.imageHosting?.credentialRef === previousImageHostingRef)) {
+      await deleteImageHostingCredential(previousImageHostingRef);
+    }
     if (definition?.kind === 'workflow-api') await saveWorkflowApiDrafts(connectionId, related?.workflowApiDrafts ?? []);
     closeConnectionDialog();
   };
@@ -693,6 +681,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       const providerConfig = useAppStore.getState().config.providers[connectionId];
       const definition = getProviderDefinition(connectionId, providerConfig);
       if (connectionId === 'dreamina') await handleDreaminaLogout();
+      if (definition?.id === 'muse' && isTauri()) await tauriInvoke('muse_logout');
       const shouldClearVolcengineAssetLibrary = definition?.id === 'volcengine';
       const connectionIds = removeAllGroups && (definition?.id === 'cccapi' || definition?.id === 'relayonapi')
         ? Object.entries(useAppStore.getState().config.providers)
@@ -702,6 +691,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         ? getWebSearchProviderDefinitions().map((provider) => provider.id)
         : [connectionId];
       if (connectionId === 'runninghub-model') connectionIds.push('runninghub', ...RUNNINGHUB_CREDENTIAL_IDS);
+      const imageHostingRefs = connectionIds.map((id) => useAppStore.getState().config.providers[id]?.imageHosting?.credentialRef);
       let cleanupFailed = false;
       for (const id of connectionIds) {
         try {
@@ -715,6 +705,11 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       }
       if (definition?.kind === 'web-search') updateConfig({ webSearchProviderId: undefined });
       await saveConfig({ silent: true, throwOnError: true });
+      for (const ref of imageHostingRefs) {
+        if (ref && !Object.values(useAppStore.getState().config.providers).some((provider) => provider.imageHosting?.credentialRef === ref)) {
+          await deleteImageHostingCredential(ref);
+        }
+      }
       if (shouldClearVolcengineAssetLibrary) {
         await Promise.all([
           deleteAppSecret('provider/volcengine/asset-library/access-key'),
@@ -774,6 +769,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="settings-pane-body provider-settings-body">
+        <GlobalImageHostingSettings />
         {importDiagnostics.length > 0 && (
           <div role="alert" className="ui-alert ui-alert--danger flex-col items-stretch gap-2">
             <div className="flex items-center justify-between gap-2">
@@ -835,7 +831,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
               const connectionWorkflows = workflows.filter((workflow) => workflow.workflowApi?.connectionId === item.id);
               const needsWorkflowKey = connectionWorkflows.some((workflow) => workflow.workflowApi?.version !== 2 || workflow.workflowApi.protocol.auth?.type !== 'none');
               const isPendingApiKey = isGrouped ? groupKeyCount === 0
-                : definition.authType !== 'oauth' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
+                : definition.authType === 'api-key' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
               const hasRunningHubModelKey = isRunningHub && !!item.config.apiKey.trim();
               const hasRunningHubWorkflowKey = isRunningHub
                 && !!config.providers.runninghub?.apiKey.trim();
@@ -850,6 +846,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 ? getCustomConnectionReadiness(item.config.selectedModels) : undefined;
               const statusLabel = isDreamina
                 ? t('OAuth 已连接')
+                : definition.authType === 'browser-session'
+                  ? t('网页登录')
                 : isRunningHub
                   ? t('{count}/2 密钥已配置', { count: runningHubKeyCount })
                   : isGrouped
@@ -962,7 +960,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                           <Icon icon="lucide:receipt-text" width="16" />
                         </AnimatedButton>
                       )}
-                      {!isDreamina && !isWebSearchProvider && !isGrouped && (
+                      {definition.authType === 'api-key' && !isWebSearchProvider && !isGrouped && (
                         <AnimatedButton
                           type="button"
                           className="provider-icon-btn"

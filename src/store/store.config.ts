@@ -23,7 +23,7 @@ import {
   syncAuthorizedDirectories,
   type ProjectSaveData,
 } from '../services/fileService';
-import { setLocale } from '../i18n';
+import { setLocale, t } from '../i18n';
 import { applyConfigPatch, ConfigConflictError, configValuesEqual, configWithoutSecrets, createConfigPatch } from '../services/configPatch';
 import { areSettingsMutationsFrozen, registerSettingsPersistence } from '../services/configPersistenceQueue';
 import { getCanvasZoomRange, MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM, normalizeCanvasZoom } from '../utils/canvasViewportPreferences';
@@ -33,6 +33,8 @@ import { syncPerformanceModeRuntime } from '../services/performanceModeRuntime';
 import { hydrateRunningHubAliases, isRunningHubCredentialAlias } from '../services/runninghubSiteCredentials';
 import { normalizeComfyRefmodAssets } from '../utils/comfyRefmod';
 import { getProviderPolicy } from '../services/ai/providerPolicies';
+import { parseCreationProfile } from '../services/creationProfiles/creationProfileManifest';
+import { getBillingStorageErrorMessage } from '../services/billing/billingStorageErrors';
 
 const defaultConfig: AppConfig = {
   providers: {},
@@ -439,6 +441,10 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
     if (areSettingsMutationsFrozen()) return;
     set((state) => {
       const config = { ...state.config, ...partial };
+      if ('creationProfiles' in partial) {
+        if (partial.creationProfiles && partial.creationProfiles.length > 64) throw new Error('最多保存 64 个创作组合包');
+        config.creationProfiles = partial.creationProfiles?.map(parseCreationProfile);
+      }
       if ('comfyRefmodAssets' in partial) config.comfyRefmodAssets = normalizeComfyRefmodAssets(partial.comfyRefmodAssets);
       if ('canvasViewportMinZoom' in partial || 'canvasViewportMaxZoom' in partial || 'canvasViewportZoom' in partial) {
         const { minZoom, maxZoom } = getCanvasZoomRange(config);
@@ -465,33 +471,8 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
     }
   },
 
-  setProviderKey: (providerName, key) =>
-    set((state) => ({
-      config: {
-        ...state.config,
-        providers: {
-          ...state.config.providers,
-          [providerName]: {
-            ...(state.config.providers[providerName] || { name: providerName }),
-            apiKey: key,
-          },
-        },
-      },
-    })),
-
-  setProviderUrl: (providerName, url) =>
-    set((state) => ({
-      config: {
-        ...state.config,
-        providers: {
-          ...state.config.providers,
-          [providerName]: {
-            ...(state.config.providers[providerName] || { name: providerName, apiKey: '' }),
-            baseUrl: url,
-          },
-        },
-      },
-    })),
+  setProviderKey: (providerName, key) => get().setProviderConfig(providerName, { apiKey: key }),
+  setProviderUrl: (providerName, url) => get().setProviderConfig(providerName, { baseUrl: url }),
 
   setProviderConfig: (providerName, cfg) =>
     set((state) => ({
@@ -700,8 +681,8 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
         try {
           await import('../services/billing/volcengineBillingService')
             .then(({ syncBillingStoragePath }) => syncBillingStoragePath(merged));
-        } catch {
-          get().showToast('设置已保存，但火山方舟账本目录未能同步，原账本已保留；请检查目录权限或同名账本冲突', 'error');
+        } catch (error) {
+          get().showToast(t('设置已保存，但火山方舟账本目录同步失败：{reason}', { reason: t(getBillingStorageErrorMessage(error)) }), 'error');
         }
         if (committedFailure !== undefined) throw committedFailure;
         if (unstored.length) throw new Error('配置已保存，但凭据存储不可用，API Key 仅本次会话有效');
@@ -796,8 +777,8 @@ export const createConfigSlice: StateCreator<AppState, [], [], ConfigSlice> = (r
       try {
         await import('../services/billing/volcengineBillingService')
           .then(({ syncBillingStoragePath }) => syncBillingStoragePath(merged));
-      } catch {
-        get().showToast('火山方舟账本目录未能同步，原账本已保留；请检查保存根目录或单独设置的账本目录', 'error');
+      } catch (error) {
+        get().showToast(t('火山方舟账本目录同步失败：{reason}', { reason: t(getBillingStorageErrorMessage(error)) }), 'error');
       }
     } catch {
       get().showToast('配置已加载，但文件目录授权同步失败', 'error');

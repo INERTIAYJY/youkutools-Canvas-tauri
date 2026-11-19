@@ -111,6 +111,10 @@ export const PROTOCOL_VARIABLES: readonly ProtocolVariableSpec[] = [
   },
   { name: 'imageQuality', supplied: IMAGE, fields: ['quality', 'imagequality'] },
   { name: 'imageBackground', supplied: IMAGE, fields: ['background', 'imagebackground'] },
+  { name: 'imageOutputFormat', supplied: IMAGE, fields: ['outputformat', 'imageoutputformat'] },
+  { name: 'imageFrameCount', supplied: IMAGE, fields: ['framecount', 'imageframecount'] },
+  { name: 'imageFrameDurationMs', supplied: IMAGE, fields: ['framedurationms', 'imageframedurationms'] },
+  { name: 'imageTransparent', supplied: IMAGE, fields: ['transparent', 'imagetransparent'] },
   // 非图片模型的 resolution 走视频档位（'720p' 这类），图片模型由上面的规则先接走
   {
     name: 'seedanceResolution', supplied: VIDEO,
@@ -221,13 +225,13 @@ export const PROTOCOL_VARIABLES: readonly ProtocolVariableSpec[] = [
     ]),
   },
   {
-    name: 'referenceUrls', supplied: VIDEO,
+    name: 'referenceUrls', supplied: IMAGE_VIDEO,
     reference: true,
     categories: VIDEO,
     fields: ['referenceurls'],
   },
   {
-    name: 'inlineReferences', supplied: VIDEO,
+    name: 'inlineReferences', supplied: IMAGE_VIDEO,
     reference: true,
     categories: VIDEO,
     fields: ['references', 'inlinereferences'],
@@ -273,6 +277,10 @@ const PROTOCOL_VARIABLE_DESCRIPTIONS: Readonly<Record<string, string>> = {
   imageSize: '图片分辨率档位，如 2K',
   imageQuality: '已声明的图片生成质量，如 auto、medium；未选择且未声明默认值时省略',
   imageBackground: '已声明的图片背景模式，如 transparent；接口默认时省略，与图片格式支持一同按渠道文档配置',
+  imageOutputFormat: '已声明的图片原文件格式，如 png、gif、svg',
+  imageFrameCount: 'GIF动画帧数，仅在所选模型和格式明确支持时提交',
+  imageFrameDurationMs: 'GIF单帧时长，单位毫秒，须符合所选模型声明的步进',
+  imageTransparent: 'GIF透明背景布尔值，false也会明确传递，仅适用于GIF',
   seedanceResolution: '视频分辨率档位，如 720p',
   width: '输出宽度（像素）',
   height: '输出高度（像素）',
@@ -356,17 +364,18 @@ export const REFERENCE_PROTOCOL_VARIABLES: readonly string[] = PROTOCOL_VARIABLE
   .map((spec) => spec.name);
 
 /**
- * 把中转站请求体里的一个字段名解析成协议模板值（如 `{{imageUrls}}`）。
+ * 把中转站请求体里的字段名归一化后解析成协议模板值（如 `{{imageUrls}}`）。
  * 认不出来返回 undefined，调用方保留字面量。
  *
  * 该类别运行时拿不到值的变量不参与匹配：映射过去只会让这个字段在真实请求里
  * 整条消失（如给文本模型的 input 映射成 prompt），保留字面量才是对的。
  */
 export function resolveProtocolFieldTemplate(
-  normalizedField: string,
+  field: string,
   value: ProtocolJsonValue,
   category: GeneralModelCategory,
 ): string | undefined {
+  const normalizedField = field.toLowerCase().replace(/[^a-z0-9]/g, '');
   return COMPILED_RULES.find((rule) => (
     rule.key === normalizedField
     && rule.supplied.includes(category)

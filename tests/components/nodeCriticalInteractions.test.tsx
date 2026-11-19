@@ -178,7 +178,7 @@ function createStore(nodes: TestNode[], getRevision: () => number): TestStore {
 function installStoreMock(store: TestStore) {
   const useAppStore = Object.assign(
     <T,>(selector: (state: TestStore) => T) => selector(store),
-    { getState: () => store },
+    { getState: () => store, subscribe: () => () => undefined },
   );
   vi.doMock('../../src/store/useAppStore', () => ({
     generateId: () => 'generated',
@@ -366,13 +366,12 @@ async function installShotlistTimelineMock() {
 }
 
 async function setupShotlistWidths(
-  widths?: Record<string, number>, rows: Record<string, unknown>[] = [], dragRowId?: string,
+  widths?: Record<string, number>, rows: Record<string, unknown>[] = [],
   dataOverrides: Record<string, unknown> = {},
   options: { nodes?: TestNode[]; picker?: Record<string, unknown> } = {},
 ) {
   const setters: Array<ReturnType<typeof vi.fn>> = [];
-  await installReactHookDriver((initial, index) => index === 1 ? true
-    : index === 2 ? dragRowId ?? initial : index === 4 ? options.picker ?? initial : initial,
+  await installReactHookDriver((initial, index) => index === 1 ? true : index === 4 ? options.picker ?? initial : initial,
   undefined, undefined, setters);
   const shotlist: TestNode = {
     id: 'shotlist', type: 'ai-shotlist', position: { x: 0, y: 0 },
@@ -397,16 +396,35 @@ async function setupShotlistWidths(
     dataset: { shotColumn: 'content' }, offsetWidth: widths?.content ?? 200,
     getBoundingClientRect: () => ({ width: (widths?.content ?? 200) / 2 }),
   };
-  (table.props.ref as { current: unknown }).current = { offsetWidth: 1456 };
+  const ownerDocument = Object.assign(new EventTarget(), { elementFromPoint: vi.fn() });
+  const tableElement = { offsetWidth: 1456, ownerDocument };
+  (table.props.ref as { current: unknown }).current = tableElement;
   const handle = findElement(tree, (element) => element.type === 'button' && element.props['aria-label'] === '内容列宽');
   const pointer = (clientX: number) => ({
-    button: 0, pointerId: 7, clientX, preventDefault: vi.fn(), stopPropagation: vi.fn(),
+    button: 0, buttons: 1, isPrimary: true, pointerId: 7, pointerType: 'mouse', clientX, clientY: 120,
+    preventDefault: vi.fn(), stopPropagation: vi.fn(),
     currentTarget: {
       closest: () => header, setPointerCapture: vi.fn(),
       hasPointerCapture: () => true, releasePointerCapture: vi.fn(),
     },
   });
-  return { tree, table, store, handle, pointer, setters, timeline };
+  const dragRow = (sourceId: string) => {
+    const row = findElement(tree, (element) => element.props['data-shot-row-id'] === sourceId);
+    const grip = findElement(row, (element) => typeof element.props.onLostPointerCapture === 'function');
+    const dragWindow = new EventTarget();
+    vi.stubGlobal('window', dragWindow);
+    const start = pointer(100);
+    const send = (handler: string, event = { ...pointer(150), currentTarget: start.currentTarget }) =>
+      (grip.props[handler] as (event: ReturnType<typeof pointer>) => void)(event);
+    send('onPointerDown', start);
+    return {
+      dragWindow, ownerDocument, send, start,
+      hit: (id: string, sameTable = true) => tableElement.ownerDocument.elementFromPoint.mockReturnValue({
+        closest: () => ({ dataset: { shotRowId: id }, closest: () => sameTable ? tableElement : {} }),
+      }),
+    };
+  };
+  return { tree, table, store, handle, pointer, setters, timeline, dragRow };
 }
 
 beforeEach(() => {
@@ -422,6 +440,79 @@ beforeEach(() => {
   // The hook driver renders element trees directly, including the dialog's body portal.
   vi.doMock('react-dom', () => ({ createPortal: (children: unknown) => children }));
   vi.stubGlobal('document', { body: {}, documentElement: { getAttribute: () => null } });
+});
+
+describe('audio node clock and waveform ownership', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    for (const path of ['../../src/hooks/useViewportMediaSource', '../../src/components/nodes/shared/audio/useAudioNodeAsr',
+      '../../src/components/nodes/shared/audio/audioWaveformCache', '../../src/components/nodes/shared/AudioNodeToolbar',
+      '../../src/components/nodes/shared/MediaTaskStatus', '../../src/components/shared/CanvasAudioPreview',
+      '../../src/components/shared/ModelDownloadDialog', '../../src/components/shared/FullscreenOverlay']) vi.doUnmock(path);
+  });
+  async function setup() {
+    const effects: Array<() => void | (() => void)> = [];
+    const setters: Array<ReturnType<typeof vi.fn>> = [];
+    await installReactHookDriver(undefined, effects, undefined, setters);
+    const node: TestNode = { id: 'audio', type: 'ai-audio', position: { x: 0, y: 0 }, data: { type: 'ai-audio', audioUrl: 'asset://tone.wav' } };
+    const store = createStore([node], () => 1);
+    installStoreMock(store); installCommonNodeMocks();
+    vi.doMock('@xyflow/react', () => ({ Handle: () => null, Position: { Left: 'left', Right: 'right' } }));
+    vi.doMock('../../src/hooks/useViewportMediaSource', () => ({ useViewportMediaSource: (source?: string) => source }));
+    vi.doMock('../../src/components/nodes/shared/audio/useAudioNodeAsr', () => ({ useAudioNodeAsr: () => ({}) }));
+    const pending = deferred<{ peaks: number[]; duration: number }>();
+    const acquire = vi.fn<(_source: string, _signal: AbortSignal) => Promise<{ peaks: number[]; duration: number }>>(() => pending.promise);
+    vi.doMock('../../src/components/nodes/shared/audio/audioWaveformCache', () => ({ WAVEFORM_COLUMNS: 220, acquireAudioWaveform: acquire }));
+    vi.doMock('../../src/components/nodes/shared/AudioNodeToolbar', () => ({ default: () => null }));
+    vi.doMock('../../src/components/nodes/shared/MediaTaskStatus', () => ({ default: () => null }));
+    vi.doMock('../../src/components/shared/CanvasAudioPreview', () => ({ default: () => null }));
+    // 这里只驱动父节点的播放时钟；未挂载的下载和全屏子树不应冷导入整套运行时。
+    vi.doMock('../../src/components/shared/ModelDownloadDialog', () => ({ default: () => null }));
+    vi.doMock('../../src/components/shared/FullscreenOverlay', () => ({ default: () => null }));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal('document', { hidden: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal('window', {});
+    const AudioNode = (await import('../../src/components/nodes/AudioNode')).default as unknown as (props: { id: string; data: Record<string, unknown>; selected: boolean }) => unknown;
+    const tree = AudioNode({ id: node.id, data: node.data, selected: true });
+    const audio = { currentTime: 1.875, duration: 60, paused: true,
+      play: vi.fn(async () => { audio.paused = false; }), pause: vi.fn(() => { audio.paused = true; }) };
+    const context = { clearRect: vi.fn() };
+    const canvas = { width: 220, height: 80, getContext: vi.fn(() => context) };
+    (findElement(tree, (element) => element.type === 'audio').props.ref as { current: unknown }).current = audio;
+    (findElement(tree, (element) => element.type === 'canvas').props.ref as { current: unknown }).current = canvas;
+    const waveform = findElement(tree, (element) => element.props.className === 'audio-waveform-wrapper');
+    return { effects, setters, frames, audio, canvas, waveform, pending, acquire };
+  }
+
+  it('publishes whole display seconds while fullscreen keeps the exact playback position', async () => {
+    const { waveform, frames, audio, setters } = await setup();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    (waveform.props.onPointerDownCapture as () => void)();
+    (waveform.props.onClick as (event: unknown) => void)({ detail: 1, stopPropagation: vi.fn() });
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    frames.at(-1)!(0);
+    expect(setters[2]).toHaveBeenLastCalledWith(1);
+    audio.currentTime = 2.875;
+    frames.at(-1)!(16);
+    expect(setters[2]).toHaveBeenLastCalledWith(2);
+    (waveform.props.onDoubleClick as (event: unknown) => void)({ preventDefault: vi.fn(), stopPropagation: vi.fn() });
+    expect(setters[4]).toHaveBeenLastCalledWith({ projectId: 'project-a', time: 2.875, playing: true });
+  });
+
+  it('releases its waveform consumer on unmount and ignores a late completed result', async () => {
+    const { effects, acquire, pending, canvas } = await setup();
+    const cleanup = effects[1]();
+    const signal = acquire.mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    cleanup?.();
+    expect(signal.aborted).toBe(true);
+    pending.resolve({ peaks: [1], duration: 1 });
+    await pending.promise; await Promise.resolve();
+    expect(canvas.getContext).not.toHaveBeenCalled();
+  });
 });
 
 async function setupImageFullscreen() {
@@ -453,6 +544,7 @@ async function setupImageFullscreen() {
   vi.doMock('../../src/services/clipboardService', () => ({ copyImage: vi.fn() }));
   vi.doMock('../../src/services/apimartService', () => ({ generateOutpaintImage: vi.fn() }));
   vi.doMock('../../src/services/generationService', () => ({ executeGeneration: vi.fn() }));
+  vi.doMock('../../src/services/imagePromptOverflowService', () => ({ executeGenerationWithImagePromptChoice: vi.fn() }));
   vi.doMock('../../src/store/store.utils', () => ({ blobToDataUrl: vi.fn() }));
   vi.doMock('../../src/components/nodes/shared/toolbar/presetAction', () => ({ createPresetNode: vi.fn() }));
   const ImageNode = (await import('../../src/components/nodes/ImageNode')).default as unknown as (
@@ -480,7 +572,7 @@ describe('image fullscreen save barrier', () => {
       '../../src/hooks/useCanvasNodeLod', '../../src/components/nodes/shared/image/useImageNodeOnnxActions',
       '../../src/components/nodes/shared/image/imageUtils', '../../src/services/fileService',
       '../../src/services/clipboardService', '../../src/services/apimartService',
-      '../../src/services/generationService', '../../src/store/store.utils',
+      '../../src/services/generationService', '../../src/services/imagePromptOverflowService', '../../src/store/store.utils',
       '../../src/components/nodes/shared/toolbar/presetAction',
     ]) vi.doUnmock(path);
   });
@@ -563,8 +655,26 @@ function visibleShotRatio(store: TestStore, column: string) {
 
 /** 只测工作流编辑与关闭回调，生成服务不在本用例执行范围内。 */
 async function loadWorkflowEditingDialog() {
+  vi.doMock('../../src/components/nodes/shared/ConnectedNodesPreview', () => ({ default: () => null }));
+  vi.doMock('../../src/components/shared/ResourceVideoPreview', () => ({ default: () => null }));
+  // 本组只执行弹窗编辑回调，不渲染预览和费用子组件，避免把其冷加载算入交互耗时。
+  vi.doMock('../../src/components/shared/ViewportImage', () => ({ default: () => null }));
+  vi.doMock('../../src/components/shared/ViewportAudio', () => ({ default: () => null }));
+  vi.doMock('../../src/components/nodes/shared/VolcengineCostEstimate', () => ({ default: () => null }));
+  // 编辑回调不执行生成或文件操作；隔离这些边界，避免冷加载整套原生生成依赖图。
+  vi.doMock('../../src/services/fileService', () => ({ persistMediaUrlToProjectData: vi.fn() }));
+  vi.doMock('../../src/services/imageBatchService', () => ({
+    applyImageBatchResults: vi.fn(), failImageBatchNodes: vi.fn(), prepareImageBatchNodes: vi.fn(),
+  }));
+  vi.doMock('../../src/services/comfyWorkflowService', () => ({ cancelComfyUINodeTask: vi.fn() }));
+  vi.doMock('../../src/services/workflowApi/workflowApiAdapter', () => ({
+    completeWorkflowApiNodeTask: vi.fn(), stopWorkflowApiNodeTask: vi.fn(),
+  }));
+  vi.doMock('../../src/services/ai/providers/runninghubWorkflow', () => ({
+    cancelRunningHubNodeTask: vi.fn(), completeRunningHubNodeTask: vi.fn(),
+  }));
   vi.doMock('../../src/services/aiService', () => ({
-    generateText: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
+    generateText: vi.fn(), generateTextResult: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
     generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn(),
   }));
   vi.doMock('../../src/services/generationService', () => ({
@@ -577,6 +687,16 @@ async function loadWorkflowEditingDialog() {
     return (await import('../../src/components/nodes/AINodeDialog')).default as unknown as () => unknown;
   } finally {
     // 当前模块保留导入的替身；后续 resetModules 后的生成用例仍加载自己的真实实现或替身。
+    vi.doUnmock('../../src/components/nodes/shared/ConnectedNodesPreview');
+    vi.doUnmock('../../src/components/shared/ResourceVideoPreview');
+    vi.doUnmock('../../src/components/shared/ViewportImage');
+    vi.doUnmock('../../src/components/shared/ViewportAudio');
+    vi.doUnmock('../../src/components/nodes/shared/VolcengineCostEstimate');
+    vi.doUnmock('../../src/services/fileService');
+    vi.doUnmock('../../src/services/imageBatchService');
+    vi.doUnmock('../../src/services/comfyWorkflowService');
+    vi.doUnmock('../../src/services/workflowApi/workflowApiAdapter');
+    vi.doUnmock('../../src/services/ai/providers/runninghubWorkflow');
     vi.doUnmock('../../src/services/aiService');
     vi.doUnmock('../../src/services/generationService');
     vi.doUnmock('../../src/services/shotlistService');
@@ -826,7 +946,7 @@ describe('critical canvas node interactions', () => {
     const effects: Array<() => void | (() => void)> = [];
     const setters: Array<ReturnType<typeof vi.fn>> = [];
     let previewState: unknown;
-    await installReactHookDriver((initial, index) => index % 6 === 5 ? previewState : initial, effects, undefined, setters);
+    await installReactHookDriver((initial, index) => index % 4 === 3 ? previewState : initial, effects, undefined, setters);
     const node: TestNode = {
       id: 'animation', type: 'ai-animation', position: { x: 0, y: 0 },
       data: { type: 'ai-animation', filePath: 'sprite.png', imageUrl: 'asset://original', animationPreviewMode: mode },
@@ -843,30 +963,30 @@ describe('critical canvas node interactions', () => {
     const AnimationNode = (await import('../../src/components/nodes/AnimationNode')).default as unknown as (props: { id: string; data: Record<string, unknown> }) => unknown;
     const props = { id: node.id, data: node.data };
     const pending = AnimationNode(props);
-    expect(() => findElement(pending, (element) => element.type === 'img')).toThrow('Element not found');
-    expect(findElement(pending, (element) => element.props.role === 'status').props.children).toBeDefined();
+    expect(findElement(pending, (element) => componentName(element) === 'AnimationNodePreview').props.displaySrc).toBeUndefined();
+    expect(findElement(pending, (element) => componentName(element) === 'AnimationNodePreview').props.preparingPreview).toBe(true);
     const cleanup = effects[0]();
     const preview = { url: 'blob:transparent-cache', cols: 4, rows: 2, cellWidth: 96, cellHeight: 96, warnings: [], dispose: vi.fn() };
     request.resolve(preview);
     await request.promise;
     await Promise.resolve();
     expect(prepare).toHaveBeenCalledExactlyOnceWith('sprite.png', expect.any(Object), expect.any(Object), 'project-a');
-    previewState = setters[5].mock.calls[0][0];
+    previewState = setters[3].mock.calls[0][0];
     const ready = AnimationNode(props);
-    expect(findElement(ready, (element) => element.type === 'img').props.src).toBe(preview.url);
+    expect(findElement(ready, (element) => componentName(element) === 'AnimationNodePreview').props.displaySrc).toBe(preview.url);
     // 相同路径在另一个项目，或换图/改处理参数，都不能沿用旧缓存或先闪原图。
     store.currentProjectId = 'project-b';
-    expect(() => findElement(AnimationNode(props), (element) => element.type === 'img')).toThrow('Element not found');
+    expect(findElement(AnimationNode(props), (element) => componentName(element) === 'AnimationNodePreview').props.displaySrc).toBeUndefined();
     store.currentProjectId = 'project-a';
     for (const patch of [{ filePath: 'new-sprite.png' }, { animationProcessing: { chromaKey: 'green' } }]) {
-      expect(() => findElement(AnimationNode({ ...props, data: { ...node.data, ...patch } }), (element) => element.type === 'img')).toThrow('Element not found');
+      expect(findElement(AnimationNode({ ...props, data: { ...node.data, ...patch } }), (element) => componentName(element) === 'AnimationNodePreview').props.displaySrc).toBeUndefined();
     }
     cleanup?.();
     expect(preview.dispose).toHaveBeenCalledOnce();
     previewState = undefined;
     const remounted = AnimationNode(props);
-    expect(() => findElement(remounted, (element) => element.type === 'img')).toThrow('Element not found');
-    expect(findElement(remounted, (element) => element.props.role === 'status').props.children).toBeDefined();
+    expect(findElement(remounted, (element) => componentName(element) === 'AnimationNodePreview').props.displaySrc).toBeUndefined();
+    expect(findElement(remounted, (element) => componentName(element) === 'AnimationNodePreview').props.preparingPreview).toBe(true);
     expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
     expect(store.commitToHistory).not.toHaveBeenCalled();
   });
@@ -874,7 +994,7 @@ describe('critical canvas node interactions', () => {
     const effects: Array<() => void | (() => void)> = [];
     const setters: Array<ReturnType<typeof vi.fn>> = [];
     let previewState: unknown;
-    await installReactHookDriver((initial, index) => index % 6 === 5 ? previewState : initial, effects, undefined, setters);
+    await installReactHookDriver((initial, index) => index % 4 === 3 ? previewState : initial, effects, undefined, setters);
     const node: TestNode = {
       id: 'animation', type: 'ai-animation', position: { x: 0, y: 0 },
       data: { type: 'ai-animation', imageUrl: 'asset://original', ...(local ? { filePath: 'sprite.png' } : {}) },
@@ -892,10 +1012,10 @@ describe('critical canvas node interactions', () => {
     effects[0]();
     if (local) {
       await Promise.resolve(); await Promise.resolve();
-      previewState = setters[5].mock.calls[0][0];
+      previewState = setters[3].mock.calls[0][0];
     } else expect(prepare).not.toHaveBeenCalled();
     const tree = AnimationNode(props);
-    expect(findElement(tree, (element) => element.type === 'img').props.src).toBe('asset://original');
+    expect(findElement(tree, (element) => componentName(element) === 'AnimationNodePreview').props.displaySrc).toBe('asset://original');
     if (local) expect(findElement(tree, (element) => element.props.className === 'animation-processing-hint').props.children).toBe('preview unavailable');
   });
   it('lets a custom Select type spaces and use input undo without triggering canvas shortcuts', async () => {
@@ -947,7 +1067,7 @@ describe('critical canvas node interactions', () => {
     const frame = { nodeId: 'reference', kind: 'image', url: 'asset://reference.png' };
     const { tree, table, setters } = await setupShotlistWidths(undefined, [
       { id: 'row-1', shotNo: '1', frame },
-    ], undefined, { shotlistColumns: ['camera', 'dialogue'] }, { nodes: [
+    ], { shotlistColumns: ['camera', 'dialogue'] }, { nodes: [
       { id: 'other-video', type: 'source-video', position: { x: 0, y: 0 }, data: { label: '导入视频', videoUrl: 'asset://other.mp4' } },
       { id: 'shot-video', type: 'ai-video', position: { x: 0, y: 0 }, data: { label: '本镜成片', videoUrl: 'asset://shot.mp4',
         shotlistProductionSource: { kind: 'video', nodeId: 'shotlist', rowId: 'row-1' } } },
@@ -970,7 +1090,7 @@ describe('critical canvas node interactions', () => {
   it('binds a picked generated video through its own Store action', async () => {
     vi.stubGlobal('document', { body: {} });
     const frame = { nodeId: 'reference', kind: 'image', url: 'asset://reference.png' };
-    const { tree, store } = await setupShotlistWidths(undefined, [{ id: 'row-1', shotNo: '1', frame }], undefined, {}, {
+    const { tree, store } = await setupShotlistWidths(undefined, [{ id: 'row-1', shotNo: '1', frame }], {}, {
       picker: { rowId: 'row-1', target: 'video', projectId: 'project-a', left: 0, top: 0,
         candidates: [{ nodeId: 'shot-video', kind: 'video', label: '本镜成片' }] },
     });
@@ -1027,11 +1147,11 @@ describe('critical canvas node interactions', () => {
   it.each(['add', 'delete', 'reorder'])(
     'renumbers shots after %s while keeping their stable IDs and frame bindings', async (action) => {
       const frame = { nodeId: 'image-source', kind: 'image', url: 'data:image/png;base64,frame' };
-      const { tree, store } = await setupShotlistWidths(undefined, [
+      const { tree, store, dragRow } = await setupShotlistWidths(undefined, [
         { id: 'row-1', shotNo: '3a', frame },
         { id: 'row-2', shotNo: '9' },
         { id: 'row-3', shotNo: '12' },
-      ], action === 'reorder' ? 'row-1' : undefined);
+      ]);
       const body = findElement(tree, (element) => element.type === 'tbody');
       const renderedRows = body.props.children as ElementLike[];
       if (action === 'add') {
@@ -1042,7 +1162,13 @@ describe('critical canvas node interactions', () => {
         const remove = findElement(renderedRows[1], (element) => element.props['aria-label'] === '删除该镜');
         (remove.props.onClick as () => void)();
       } else {
-        (renderedRows[2].props.onDrop as (event: unknown) => void)({ preventDefault: vi.fn() });
+        const drag = dragRow('row-1');
+        drag.hit('row-3');
+        drag.send('onPointerMove');
+        expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
+        drag.send('onPointerUp');
+        expect(drag.start.currentTarget.setPointerCapture).toHaveBeenCalledWith(7);
+        expect(drag.start.currentTarget.releasePointerCapture).toHaveBeenCalledOnce();
       }
       const result = store.nodes[0].data.shotlistRows as Array<Record<string, unknown>>;
       const expectedIds = action === 'add' ? ['row-1', 'row-2', 'row-3', 'shot-generated']
@@ -1052,6 +1178,34 @@ describe('critical canvas node interactions', () => {
       expect(result.find((row) => row.id === 'row-1')?.frame).toBe(frame);
       expect(store.updateNodeDataTransient).toHaveBeenCalledOnce();
       expect(store.commitToHistory).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    'outside', 'another table', 'cancel', 'lost capture', 'removed grip',
+    'escape', 'window blur', 'project switch', 'revision change', 'mouse released', 'click',
+  ])(
+    'clears the row drag without reordering after %s', async (reason) => {
+      const { store, dragRow, pointer, setters } = await setupShotlistWidths(undefined, [
+        { id: 'row-1', shotNo: '1' }, { id: 'row-2', shotNo: '2' },
+      ]);
+      const drag = dragRow('row-1');
+      if (reason !== 'outside') drag.hit('row-2', reason !== 'another table');
+      if (reason !== 'click') drag.send('onPointerMove');
+      if (reason === 'project switch') store.currentProjectId = 'project-b';
+      if (reason === 'revision change') store.getCurrentRevision = () => 2;
+      if (reason === 'escape') drag.dragWindow.dispatchEvent(Object.assign(new Event('keydown'), { key: 'Escape' }));
+      if (reason === 'window blur') drag.dragWindow.dispatchEvent(new Event('blur'));
+      if (reason === 'removed grip') {
+        drag.ownerDocument.dispatchEvent(Object.assign(new Event('lostpointercapture'), { pointerId: 7 }));
+      }
+      if (reason === 'mouse released') drag.send('onPointerMove', { ...pointer(150), buttons: 0 });
+      const handler = reason === 'cancel' ? 'onPointerCancel' : reason === 'lost capture' ? 'onLostPointerCapture' : 'onPointerUp';
+      drag.send(handler, reason === 'click' ? drag.start : undefined);
+      expect(drag.start.currentTarget.releasePointerCapture).toHaveBeenCalledOnce();
+      expect(setters[2]).toHaveBeenLastCalledWith(null);
+      expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
+      expect(store.commitToHistory).not.toHaveBeenCalled();
     },
   );
 
@@ -1208,7 +1362,7 @@ describe('critical canvas node interactions', () => {
   });
 
   it('supports keyboard resizing with a bounded width', async () => {
-    const { handle, store } = await setupShotlistWidths(undefined, [], undefined, {
+    const { handle, store } = await setupShotlistWidths(undefined, [], {
       shotlistColumnRatios: { shotNo: 1, frame: 1, video: 1, shotSize: 2, camera: 2, cinematography: 2, dialogue: 2, content: 94 },
     });
     (handle.props.onKeyDown as (event: unknown) => void)({
@@ -1228,7 +1382,7 @@ describe('critical canvas node interactions', () => {
   });
 
   it('keeps shot numbers fixed at 48px and excludes them from resizing and percentage settings', async () => {
-    const { tree, table } = await setupShotlistWidths({ shotNo: 300, content: 300 }, [], undefined, {
+    const { tree, table } = await setupShotlistWidths({ shotNo: 300, content: 300 }, [], {
       shotlistColumnRatios: { shotNo: 90, content: 30 },
     });
     expect((table.props.style as Record<string, string>)['--shotlist-columns']).toMatch(/^26px 48px /);
@@ -1236,7 +1390,7 @@ describe('critical canvas node interactions', () => {
   });
 
   it('restores persisted ratios while keeping hidden column preferences', async () => {
-    const { tree, store } = await setupShotlistWidths(undefined, [], undefined, {
+    const { tree, store } = await setupShotlistWidths(undefined, [], {
       shotlistColumnRatios: { shotNo: 5, frame: 10, shotSize: 10, camera: 15, cinematography: 20, content: 30, dialogue: 30, note: 20 },
     });
     const stepper = findElement(tree, (element) => componentName(element) === 'NumberStepper'
@@ -1396,74 +1550,116 @@ describe('critical canvas node interactions', () => {
     )).toThrow('Element not found');
   });
 
-  it('ImageNode cancels a pending crop when the canvas revision changes', async () => {
-    let revision = 1;
-    const store = createStore([{
-      id: 'image-source',
-      type: 'ai-image',
-      position: { x: 20, y: 30 },
-      data: { type: 'ai-image', label: 'Source image', imageUrl: 'data:image/png;base64,source' },
-    }], () => revision);
-    const saveResult = deferred<{ assetUrl: string; filePath: string }>();
+  describe.each(['crop', 'compose'] as const)('ImageNode %s result saving', (operation) => {
+    const suffix = operation === 'crop' ? 'cropped' : 'composed';
+    const failureMessage = operation === 'crop' ? '裁切失败，请重试' : '合成失败，请重试';
+    const successMessage = operation === 'crop' ? '裁切完成，已创建新节点' : '合成完成，已创建新节点';
 
-    // 强制打开裁切编辑器：按 ImageNode 里 useState 的声明顺序数，isCrop 是第 7 个（下标 6）。
-    // 在它之前增删 useState 会让本用例找不到裁切编辑器，届时按声明顺序重新数一次。
-    const IS_CROP_STATE_INDEX = 6;
-    await installReactHookDriver((initialValue, index) => (
-      index === IS_CROP_STATE_INDEX ? true : initialValue
-    ));
-    installStoreMock(store);
-    installCommonNodeMocks();
-    vi.doMock('../../src/components/nodes/shared/image/CropEditor', () => ({
-      default: function CropEditorMock() { return null; },
-    }));
-    vi.doMock('../../src/components/nodes/shared/image/imageUtils', () => ({
-      computeImageNodeDimensions: vi.fn().mockResolvedValue({ nodeWidth: 200, nodeHeight: 120 }),
-    }));
-    vi.doMock('../../src/services/fileService', () => ({
-      buildNodeFileName: () => 'crop.png',
-      saveDataUrlToProjectData: vi.fn(() => saveResult.promise),
-    }));
-    vi.doMock('../../src/services/clipboardService', () => ({ copyImage: vi.fn() }));
-    vi.doMock('../../src/services/apimartService', () => ({ generateOutpaintImage: vi.fn() }));
-    vi.doMock('../../src/services/onnxService', () => ({
-      imageUpscale: vi.fn(), subjectMatting: vi.fn(), checkModelExists: vi.fn(), downloadModel: vi.fn(),
-    }));
-    vi.doMock('../../src/services/generationService', () => ({ executeGeneration: vi.fn() }));
-    vi.doMock('../../src/store/store.utils', () => ({ blobToDataUrl: vi.fn() }));
-    vi.doMock('../../src/components/nodes/shared/toolbar/presetAction', () => ({ createPresetNode: vi.fn() }));
+    async function setup(projectId = 'project-a') {
+      let revision = 1;
+      const store = createStore([{
+        id: 'image-source', type: 'ai-image', position: { x: 20, y: 30 },
+        data: { type: 'ai-image', label: 'Source image', imageUrl: 'data:image/png;base64,source' },
+      }], () => revision);
+      store.currentProjectId = projectId;
+      if (projectId === 'default') store.projects.push({ id: 'default' });
+      const saved = { assetUrl: 'asset://result.png', filePath: 'data/result.png' };
+      const measured = { imageWidth: 640, imageHeight: 360, nodeWidth: 200, nodeHeight: 120 };
+      const saveFile = vi.fn<typeof import('../../src/services/fileService').saveDataUrlToProjectData>().mockResolvedValue(saved);
+      const dimensions = vi.fn<typeof import('../../src/components/nodes/shared/image/imageUtils').computeImageNodeDimensions>()
+        .mockResolvedValue(measured);
+      const buildName = vi.fn((_label: string, _extension: string, fallback: string) => `${fallback}.png`);
+      // The existing hook driver opens one lazy editor by its useState position.
+      const editorStateIndex = operation === 'crop' ? 6 : 8;
+      await installReactHookDriver((initialValue, index) => index === editorStateIndex ? true : initialValue);
+      installStoreMock(store);
+      installCommonNodeMocks();
+      vi.doMock('../../src/components/nodes/shared/image/imageUtils', () => ({ computeImageNodeDimensions: dimensions }));
+      vi.doMock('../../src/services/fileService', () => ({ buildNodeFileName: buildName, saveDataUrlToProjectData: saveFile }));
+      vi.doMock('../../src/services/clipboardService', () => ({ copyImage: vi.fn() }));
+      vi.doMock('../../src/services/apimartService', () => ({ generateOutpaintImage: vi.fn() }));
+      vi.doMock('../../src/services/onnxService', () => ({
+        imageUpscale: vi.fn(), subjectMatting: vi.fn(), checkModelExists: vi.fn(), downloadModel: vi.fn(),
+      }));
+      vi.doMock('../../src/services/generationService', () => ({ executeGeneration: vi.fn() }));
+      vi.doMock('../../src/store/store.utils', () => ({ blobToDataUrl: vi.fn() }));
+      vi.doMock('../../src/components/nodes/shared/toolbar/presetAction', () => ({ createPresetNode: vi.fn() }));
+      const ImageNode = (await import('../../src/components/nodes/ImageNode')).default as unknown as (
+        props: { id: string; data: Record<string, unknown>; selected: boolean },
+      ) => unknown;
+      const tree = ImageNode({ id: 'image-source', data: store.nodes[0].data, selected: true });
+      const editor = findElement(tree, (element) => (
+        typeof element.props.onStart === 'function' && typeof element.props.onSave === 'function'
+      ));
+      return { store, saved, measured, saveFile, dimensions, buildName,
+        start: editor.props.onStart as () => void,
+        save: editor.props.onSave as (url: string, metadata?: { width: number; height: number }) => Promise<void>,
+        invalidate: () => { revision += 1; } };
+    }
 
-    const ImageNode = (await import('../../src/components/nodes/ImageNode')).default as unknown as (
-      props: { id: string; data: Record<string, unknown>; selected: boolean },
-    ) => unknown;
-    const tree = ImageNode({ id: 'image-source', data: store.nodes[0].data, selected: true });
-    // CropEditor 已改为 lazy 加载，而本文件的 react stub 把所有 lazy 统一换成
-    // LazyComponentMock，按组件名找不到它。几个编辑器都是条件渲染，本用例只打开了
-    // 裁切，按裁切编辑器特有的 onStart + onSave 回调定位比按组件名更稳。
-    const cropEditor = findElement(tree, (element) => (
-      typeof element.props.onStart === 'function'
-      && typeof element.props.onSave === 'function'
-    ));
+    it.each(['saving', 'measuring'] as const)('cancels a result that becomes stale during %s', async (stage) => {
+      const current = await setup();
+      const saving = deferred<typeof current.saved>();
+      const measuring = deferred<typeof current.measured>();
+      if (stage === 'saving') current.saveFile.mockImplementationOnce(() => saving.promise);
+      else current.dimensions.mockImplementationOnce(() => measuring.promise);
+      current.start();
+      const completion = current.save('data:image/png;base64,result');
+      if (stage === 'measuring') await vi.waitFor(() => expect(current.dimensions).toHaveBeenCalledOnce());
+      else expect(current.saveFile).toHaveBeenCalledOnce();
+      current.invalidate();
+      if (stage === 'saving') saving.resolve(current.saved);
+      else measuring.resolve(current.measured);
+      await completion;
+      expect(current.store.nodes.map((node) => node.id)).toEqual(['image-source']);
+      expect(current.store.updateNodeDataTransient).not.toHaveBeenCalled();
+      expect(current.store.commitToHistory).not.toHaveBeenCalled();
+      expect(current.store.showToast).not.toHaveBeenCalled();
+      if (stage === 'saving') expect(current.dimensions).not.toHaveBeenCalled();
+    }, 20_000);
 
-    (cropEditor.props.onStart as () => void)();
-    expect(store.nodes.map((node) => node.id)).toContain('node-generated');
+    it.each(['saving', 'measuring'] as const)('removes its placeholder and reports a %s failure without committing', async (stage) => {
+      const current = await setup();
+      if (stage === 'saving') current.saveFile.mockRejectedValueOnce(new Error('save fixture'));
+      else current.dimensions.mockRejectedValueOnce(new Error('measure fixture'));
+      current.start();
+      await current.save('data:image/png;base64,result');
+      expect(current.store.nodes.map((node) => node.id)).toEqual(['image-source']);
+      expect(current.store.updateNodeDataTransient).not.toHaveBeenCalled();
+      expect(current.store.commitToHistory).not.toHaveBeenCalled();
+      expect(current.store.showToast).toHaveBeenCalledExactlyOnceWith(failureMessage, 'error');
+    }, 20_000);
 
-    const completion = (cropEditor.props.onSave as (url: string) => Promise<void>)('data:image/png;base64,crop');
-    await vi.waitFor(() => expect(store.nodes).toHaveLength(2));
-    revision = 2;
-    saveResult.resolve({ assetUrl: 'asset://crop.png', filePath: 'data/crop.png' });
-    await completion;
-
-    expect(store.nodes.map((node) => node.id)).toEqual(['image-source']);
-    expect(store.updateNodeDataTransient).not.toHaveBeenCalledWith(
-      'node-generated',
-      expect.objectContaining({ status: 'success' }),
-    );
-    expect(store.showToast).not.toHaveBeenCalledWith('裁切完成，已创建新节点');
-  },
-  // 该用例要 doMock 十余个模块并驱动 React hook，单跑约 2~3 秒；
-  // 全量并发时会被调度拖慢，默认 5s 超时不够用，这里放宽到 20s 避免偶发失败。
-  20_000);
+    it.each(['project-a', 'default'])('keeps naming, metadata priority and commit order in %s', async (projectId) => {
+      const current = await setup(projectId);
+      const metadata = projectId === 'default' ? undefined : { width: 1024, height: 512 };
+      const dataUrl = 'data:image/png;base64,result';
+      current.start();
+      await current.save(dataUrl, metadata);
+      expect(current.store.updateNodeDataTransient).toHaveBeenCalledExactlyOnceWith('node-generated', {
+        imageUrl: projectId === 'default' ? dataUrl : current.saved.assetUrl,
+        filePath: projectId === 'default' ? undefined : current.saved.filePath,
+        status: 'success', imageWidth: metadata?.width ?? current.measured.imageWidth,
+        imageHeight: metadata?.height ?? current.measured.imageHeight,
+        nodeWidth: current.measured.nodeWidth, nodeHeight: current.measured.nodeHeight,
+      });
+      if (projectId === 'default') {
+        expect(current.saveFile).not.toHaveBeenCalled();
+        expect(current.buildName).not.toHaveBeenCalled();
+      } else {
+        expect(current.buildName).toHaveBeenCalledExactlyOnceWith(
+          operation === 'crop' ? 'Source image 裁切' : 'Source image 合成', 'png', suffix,
+        );
+        expect(current.saveFile).toHaveBeenCalledExactlyOnceWith(dataUrl, projectId, `${suffix}.png`);
+      }
+      expect(current.store.commitToHistory).toHaveBeenCalledOnce();
+      expect(current.store.showToast).toHaveBeenCalledExactlyOnceWith(successMessage);
+      expect(current.store.updateNodeDataTransient.mock.invocationCallOrder[0])
+        .toBeLessThan(current.store.commitToHistory.mock.invocationCallOrder[0]);
+      expect(current.store.commitToHistory.mock.invocationCallOrder[0])
+        .toBeLessThan(current.store.showToast.mock.invocationCallOrder[0]);
+    }, 20_000);
+  });
 
   it('VideoNode does not create a frame node after its derivation becomes stale', async () => {
     let revision = 1;
@@ -1774,7 +1970,7 @@ describe('critical canvas node interactions', () => {
       }));
       vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
       vi.doMock('../../src/services/aiService', () => ({
-        generateText, generateImage, generateImagesBatch: vi.fn(), generateVideo: vi.fn(), generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn(),
+        generateText, generateTextResult: vi.fn(), generateImage, generateImagesBatch: vi.fn(), generateVideo: vi.fn(), generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn(),
       }));
       vi.doMock('../../src/services/fileService', () => ({
         persistMediaUrlToProjectData: vi.fn(async (url: string) => ({ mediaUrl: url, sourceUrl: url, filePath: 'result.png' })),
@@ -1832,6 +2028,115 @@ describe('critical canvas node interactions', () => {
     });
   });
 
+  describe('AINodeDialog local ComfyUI text delivery', () => {
+    afterEach(() => {
+      vi.doUnmock('../../src/services/projectSettingsService');
+      vi.doUnmock('../../src/services/pollManager');
+      vi.doUnmock('../../src/services/dramaAssetExtract');
+    });
+
+    async function setupLocalTextDialog() {
+      const store = createStore([{ id: 'local-text', type: 'ai-text', position: { x: 0, y: 0 },
+        data: { type: 'ai-text', label: '本地提示词增强', status: 'idle', prompt: '待增强的描述',
+          provider: 'comfyui', model: 'comfyui/workflow', workflowId: 'wf-local-text', workflowInputs: { '1': '指定输入' } } }], () => 1);
+      store.activeNodeId = 'local-text';
+      const pendingTasks: import('../../src/services/pollManager').PendingTask[] = [];
+      const textReceipt = { projectId: 'project-a', nodeId: 'local-text', taskId: 'local-text-task', attemptId: 'text-attempt' };
+      const generateTextResult = vi.fn().mockImplementation(async () => {
+        pendingTasks.push({ ...textReceipt, nodeType: 'ai-text', provider: 'comfyui', taskType: 'comfyui', submitted: true,
+          comfyRecoveryState: 'save_pending', comfyTextOutputNodeIds: ['7'] });
+        return { text: '完整增强后的提示词', comfyTaskId: 'local-text-task' };
+      });
+      const generateText = vi.fn();
+      const completeComfyNodeTask = vi.fn();
+      const pauseComfyNodeDelivery = vi.fn();
+      const prepareMediaNodeGeneration = vi.fn();
+      await installReactHookDriver();
+      installStoreMock(store);
+      vi.doMock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
+      vi.doMock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
+      vi.doMock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => path }));
+      vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({ default: function PromptPanelMock() { return null; } }));
+      vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
+      vi.doMock('../../src/services/aiService', () => ({ generateText, generateTextResult, generateImage: vi.fn(),
+        generateImagesBatch: vi.fn(), generateVideo: vi.fn(), generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn() }));
+      vi.doMock('../../src/services/projectSettingsService', async () => ({
+        ...await vi.importActual<typeof import('../../src/services/projectSettingsService')>('../../src/services/projectSettingsService'),
+        resolveProjectGenerationPrompt: ({ prompt }: { prompt: string }) => prompt,
+      }));
+      vi.doMock('../../src/services/generationService', () => ({ executeGeneration: vi.fn(), cancelImageBatchGeneration: vi.fn(),
+        isImageBatchGenerating: () => false, subscribeImageBatches: () => () => {}, usesSequentialImageBatch: () => false }));
+      vi.doMock('../../src/services/pollManager', () => ({ ...mockComfyDeliveries(), getPendingTasksForProject: () => pendingTasks,
+        completeComfyNodeTask, pauseComfyNodeDelivery, prepareMediaNodeGeneration }));
+      const Dialog = (await import('../../src/components/nodes/AINodeDialog')).default as unknown as () => unknown;
+      const panel = () => findElement(Dialog(), (element) => componentName(element) === 'PromptPanelMock');
+      return { store, panel, generateText, generateTextResult, completeComfyNodeTask, pauseComfyNodeDelivery,
+        prepareMediaNodeGeneration, textReceipt };
+    }
+
+    it('passes the selected local workflow without an API key and confirms it after durable text history', async () => {
+      const { store, panel, generateText, generateTextResult, completeComfyNodeTask, prepareMediaNodeGeneration, textReceipt } = await setupLocalTextDialog();
+      const history = deferred<void>();
+      store.recordOutputHistory.mockReturnValueOnce(history.promise);
+      const pending = (panel().props.onSubmit as () => Promise<void>)();
+      await vi.waitFor(() => expect(store.recordOutputHistory).toHaveBeenCalledOnce());
+      expect(store.config.providers).toEqual({});
+      expect(generateTextResult).toHaveBeenCalledExactlyOnceWith({ prompt: '待增强的描述', provider: 'comfyui',
+        model: 'comfyui/workflow', nodeId: 'local-text', workflowId: 'wf-local-text', workflowInputs: { '1': '指定输入' } });
+      expect(prepareMediaNodeGeneration).toHaveBeenCalledWith('local-text');
+      expect(store.nodes[0].data.output).toBe('完整增强后的提示词');
+      expect(store.recordOutputHistory).toHaveBeenCalledWith('local-text', expect.objectContaining({
+        nodeType: 'ai-text', output: '完整增强后的提示词', status: 'success' }), true, textReceipt);
+      expect(completeComfyNodeTask).not.toHaveBeenCalled();
+      history.resolve();
+      await pending;
+      expect(completeComfyNodeTask).toHaveBeenCalledExactlyOnceWith('local-text', 'local-text-task');
+      expect(generateText).not.toHaveBeenCalled();
+    });
+
+    it('keeps the original Comfy text task when history persistence fails', async () => {
+      const { store, panel, generateTextResult, completeComfyNodeTask, pauseComfyNodeDelivery } = await setupLocalTextDialog();
+      const failure = new Error('history storage failed');
+      store.recordOutputHistory.mockRejectedValueOnce(failure);
+      await (panel().props.onSubmit as () => Promise<void>)();
+      expect(generateTextResult).toHaveBeenCalledOnce();
+      expect(completeComfyNodeTask).not.toHaveBeenCalled();
+      expect(pauseComfyNodeDelivery).toHaveBeenCalledWith('local-text', 'local-text-task', expect.any(Function), failure);
+    });
+
+    it('does not fill another canvas after a late local text response', async () => {
+      const { store, panel, generateTextResult, completeComfyNodeTask, pauseComfyNodeDelivery } = await setupLocalTextDialog();
+      const response = deferred<{ text: string; comfyTaskId: string }>();
+      generateTextResult.mockReturnValueOnce(response.promise);
+      const pending = (panel().props.onSubmit as () => Promise<void>)();
+      await vi.waitFor(() => expect(generateTextResult).toHaveBeenCalledOnce());
+      store.getCurrentRevision = () => 2;
+      response.resolve({ text: '过期增强结果', comfyTaskId: 'local-text-task' });
+      await pending;
+      expect(store.nodes[0].data.output).toBeUndefined();
+      expect(store.recordOutputHistory).not.toHaveBeenCalled();
+      expect(completeComfyNodeTask).not.toHaveBeenCalled();
+      expect(pauseComfyNodeDelivery).toHaveBeenCalledWith('local-text', 'local-text-task', expect.any(Function), undefined);
+    });
+
+    it('does not confirm the text task or merge extracted assets after the project changes during history persistence', async () => {
+      vi.doMock('../../src/services/dramaAssetExtract', () => ({
+        prepareDramaExtractPrompt: (prompt: string) => prompt,
+        postProcessDramaExtractOutput: () => ({ ok: true, output: '原项目人物简介', kind: 'character', parsed: { characters: [] } }),
+      }));
+      const { store, panel, completeComfyNodeTask } = await setupLocalTextDialog();
+      const history = deferred<void>();
+      store.recordOutputHistory.mockReturnValueOnce(history.promise);
+      const pending = (panel().props.onSubmit as () => Promise<void>)();
+      await vi.waitFor(() => expect(store.recordOutputHistory).toHaveBeenCalledOnce());
+      store.currentProjectId = 'another-project';
+      history.resolve();
+      await pending;
+      expect(completeComfyNodeTask).not.toHaveBeenCalled();
+      expect(store.mergeDramaExtract).not.toHaveBeenCalled();
+    });
+  });
+
   describe('AINodeDialog image quality', () => {
     afterEach(() => {
       for (const module of [
@@ -1841,7 +2146,7 @@ describe('critical canvas node interactions', () => {
       ]) vi.doUnmock(module);
     });
 
-    async function setupImageQualityDialog(batchCount = 1) {
+    async function setupImageQualityDialog(batchCount = 1, outputsPerJob = 1) {
       const store = createStore([{
         id: 'quality-image', type: 'ai-image', position: { x: 0, y: 0 },
         data: { type: 'ai-image', label: '图片', status: 'idle', prompt: 'cat',
@@ -1864,18 +2169,19 @@ describe('critical canvas node interactions', () => {
       await installReactHookDriver();
       installStoreMock(store);
       vi.doMock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
-      vi.doMock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
+      vi.doMock('../../src/i18n', () => ({ t: (text: string) => text, useT: () => (text: string) => text }));
       vi.doMock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => path }));
       vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({ default: function PromptPanelMock() { return null; } }));
       vi.doMock('../../src/components/nodes/shared/MediaTaskStatus', () => ({ default: function MediaTaskStatusMock() { return null; } }));
       vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
       vi.doMock('../../src/services/aiService', () => ({
-        generateText: vi.fn(), generateImage, generateImagesBatch, generateVideo: vi.fn(), generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn(),
+        generateText: vi.fn(), generateTextResult: vi.fn(), generateImage, generateImagesBatch, generateVideo: vi.fn(), generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn(),
       }));
       vi.doMock('../../src/services/fileService', () => ({
         persistMediaUrlToProjectData,
       }));
       vi.doMock('../../src/services/ai/mediaModelCapabilities', () => ({
+        resolveImageOutputsPerJob: () => outputsPerJob,
         resolveImageParameterCapability: (model: string) => model === 'general/model-compatible'
           ? { resolutions: ['1K', '2k', '4K'], defaultResolution: '1K', ratios: ['1:1', '16:9', '9:16', 'auto'], defaultRatio: '1:1',
             qualities: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'], defaultQuality: 'auto',
@@ -1895,7 +2201,6 @@ describe('critical canvas node interactions', () => {
       vi.doMock('../../src/services/projectSettingsService', async () => ({
         ...await vi.importActual<typeof import('../../src/services/projectSettingsService')>('../../src/services/projectSettingsService'),
         resolveProjectGenerationPrompt: ({ prompt }: { prompt: string }) => prompt,
-        getImageNodeDimensionsForAspectRatio: () => ({ nodeWidth: 280, nodeHeight: 280 }),
       }));
       vi.doMock('../../src/services/pollManager', () => ({
         ...mockComfyDeliveries(), getPendingTasksForProject: () => pendingTasks, pauseComfyNodeDelivery,
@@ -1912,6 +2217,21 @@ describe('critical canvas node interactions', () => {
         persistMediaUrlToProjectData, savingController, registerNodePolling, cleanupNodePolling, registerMediaNodeOperation,
         completeMediaNodeTask, pauseMediaTask, pauseComfyNodeDelivery, pendingTasks, dialog: AINodeDialog };
     }
+
+    it('固定四候选即使选择一次作业也委托完整图片交付入口，不走本地首图保存分支', async () => {
+      const executeGeneration = vi.fn().mockResolvedValue({ success: true });
+      vi.doMock('../../src/services/generationService', () => ({ executeGeneration,
+        subscribeImageBatches: () => () => {}, isImageBatchGenerating: () => false,
+        cancelImageBatchGeneration: vi.fn(), usesSequentialImageBatch: () => false,
+      }));
+      const { panel, generateImage, generateImagesBatch, persistMediaUrlToProjectData } = await setupImageQualityDialog(1, 4);
+      await (panel().props.onSubmit as (prompt: string) => Promise<void>)('MJ prompt');
+      expect(executeGeneration).toHaveBeenCalledOnce();
+      expect(executeGeneration).toHaveBeenCalledWith('quality-image', 'MJ prompt', undefined, undefined);
+      expect(generateImage).not.toHaveBeenCalled();
+      expect(generateImagesBatch).not.toHaveBeenCalled();
+      expect(persistMediaUrlToProjectData).not.toHaveBeenCalled();
+    });
 
     it('本地 ComfyUI 保存失败把原始错误交给恢复层，保留原任务而不重新生成', async () => {
       const { panel, store, generateImage, persistMediaUrlToProjectData, pauseComfyNodeDelivery, completeMediaNodeTask } = await setupImageQualityDialog();
@@ -2031,7 +2351,7 @@ describe('critical canvas node interactions', () => {
       persistMediaUrlToProjectData.mockReturnValueOnce(saving.promise);
       const pending = (panel().props.onSubmit as () => Promise<void>)();
       await vi.waitFor(() => expect(persistMediaUrlToProjectData).toHaveBeenCalledOnce());
-      expect(registerNodePolling).toHaveBeenCalledWith('quality-image');
+      expect(registerNodePolling).toHaveBeenCalledWith('quality-image', undefined);
       expect(persistMediaUrlToProjectData).toHaveBeenCalledWith('https://example.com/result.png', 'project-a', 'ai-image', '图片', {
         mediaDownloadAccess: undefined, signal: savingController.signal,
       });
@@ -2065,7 +2385,7 @@ describe('critical canvas node interactions', () => {
       (panel().props.onChangeImageBackground as (background: string) => void)('transparent');
       expect(store.nodes[0].data).toMatchObject({ aspectRatio: '16:9', nodeWidth: 280, nodeHeight: 158 });
       (panel().props.onChangeAspectRatio as (ratio: string) => void)('9:16');
-      expect(store.nodes[0].data).toMatchObject({ aspectRatio: '9:16', nodeWidth: 280, nodeHeight: 280 });
+      expect(store.nodes[0].data).toMatchObject({ aspectRatio: '9:16', nodeWidth: 158, nodeHeight: 280 });
       (panel().props.onChangeImageQuality as (quality: string) => void)('high');
       expect(store.nodes[0].data.imageQuality).toBe('high');
       select('general/model-a');
@@ -2083,6 +2403,17 @@ describe('critical canvas node interactions', () => {
       (panel().props.onClearModel as () => void)();
       expect(store.nodes[0].data.imageQuality).toBeUndefined();
       expect(store.nodes[0].data.imageBackground).toBeUndefined();
+    });
+
+    it('MCP图片节点在生成弹窗改比例立即改框，实际生成参数与回填后的画框保持一致', async () => {
+      const { store, panel, generateImage } = await setupImageQualityDialog();
+      Object.assign(store.nodes[0].data, { role: 'source', aspectRatio: '1:1', nodeWidth: 185, nodeHeight: 327,
+        imageUrl: 'asset://previous.png' });
+      (panel().props.onChangeAspectRatio as (ratio: string) => void)('9:16');
+      expect(store.nodes[0].data).toMatchObject({ aspectRatio: '9:16', nodeWidth: 158, nodeHeight: 280 });
+      await (panel().props.onSubmit as () => Promise<void>)();
+      expect(generateImage).toHaveBeenCalledWith(expect.objectContaining({ aspectRatio: '9:16' }));
+      expect(store.nodes[0].data).toMatchObject({ aspectRatio: '9:16', nodeWidth: 158, nodeHeight: 280 });
     });
 
     it.each([
@@ -2246,7 +2577,7 @@ describe('critical canvas node interactions', () => {
     vi.doMock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => path }));
     vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({ default: function PromptPanelMock() { return null; } }));
     vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
-    vi.doMock('../../src/services/aiService', () => ({ generateText: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
+    vi.doMock('../../src/services/aiService', () => ({ generateText: vi.fn(), generateTextResult: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
       generateVideo: vi.fn(), generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn() }));
     vi.doMock('../../src/services/pollManager', () => ({ ...mockComfyDeliveries(), getPendingTasksForProject: () => [],
       prepareMediaNodeGeneration: vi.fn(), registerMediaNodeOperation: () => vi.fn(), completeMediaNodeTask: vi.fn() }));
@@ -2526,6 +2857,58 @@ describe('critical canvas node interactions', () => {
     });
   });
 
+  describe('AINodeDialog shared audio generation', () => {
+    it.each([
+      { type: 'ai-audio', scenario: 'submit' },
+      { type: 'source-audio', scenario: 'submit' },
+      { type: 'ai-audio', scenario: 'project-switch' },
+      { type: 'source-audio', scenario: 'node-replaced' },
+      { type: 'ai-audio', scenario: 'missing-model' },
+      { type: 'ai-audio', scenario: 'missing-provider' },
+    ])('delegates $type using the original input identity: $scenario', async ({ type, scenario }) => {
+      const store = createStore([{
+        id: 'audio-node', type, position: { x: 0, y: 0 },
+        data: { type, label: '配音', prompt: '当前节点提示词',
+          model: scenario === 'missing-model' ? undefined : 'general/voice',
+          provider: scenario === 'missing-provider' ? undefined : 'general' },
+      }], () => 1);
+      store.activeNodeId = 'audio-node';
+      store.projects[0].settings = { defaultModels: { audio: 'general/default-voice' } };
+      const executeGeneration = vi.fn().mockResolvedValue({ success: true });
+      await installReactHookDriver();
+      installStoreMock(store);
+      vi.doMock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
+      vi.doMock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
+      vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({
+        default: function PromptPanelMock() { return null; },
+      }));
+      vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
+      vi.doMock('../../src/services/pollManager', () => ({ ...mockComfyDeliveries(), getPendingTasksForProject: () => [] }));
+      vi.doMock('../../src/services/generationService', () => ({
+        executeGeneration, subscribeImageBatches: () => () => {}, isImageBatchGenerating: () => false,
+        cancelImageBatchGeneration: vi.fn(), usesSequentialImageBatch: () => false,
+      }));
+      const Dialog = (await import('../../src/components/nodes/AINodeDialog')).default as unknown as () => unknown;
+      const panel = findElement(Dialog(), (element) => componentName(element) === 'PromptPanelMock');
+      const override = '临时配音提示词 @{reference:角色声音}';
+      const submission = (panel.props.onSubmit as (prompt: string) => Promise<void>)(override);
+      if (scenario === 'project-switch') store.currentProjectId = 'project-b';
+      if (scenario === 'node-replaced') {
+        store.nodes[0] = { ...store.nodes[0], data: { ...store.nodes[0].data, prompt: '编辑后的正文' } };
+      }
+
+      await submission;
+
+      if (scenario === 'submit') expect(executeGeneration).toHaveBeenCalledExactlyOnceWith('audio-node', override, undefined);
+      else expect(executeGeneration).not.toHaveBeenCalled();
+      if (scenario === 'missing-model' || scenario === 'missing-provider') {
+        expect(store.showToast).toHaveBeenCalledWith('请先在底部模型选择器中选择一个模型', 'error');
+      }
+      expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
+      expect(store.recordOutputHistory).not.toHaveBeenCalled();
+    });
+  });
+
   it.each([
     { label: '通用到通用', from: 'general/video-a', fromProvider: 'general', to: 'general/video-b', provider: 'general', ratio: '9:16' },
     { label: '通用到原生', from: 'general/video-a', fromProvider: 'general', to: 'volcengine/doubao-seedance-2-5', provider: 'volcengine', ratio: '9:16' },
@@ -2557,7 +2940,7 @@ describe('critical canvas node interactions', () => {
     vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({ default: function PromptPanelMock() { return null; } }));
     vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
     const generateVideo = vi.fn();
-    vi.doMock('../../src/services/aiService', () => ({ generateText: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
+    vi.doMock('../../src/services/aiService', () => ({ generateText: vi.fn(), generateTextResult: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
       generateVideo, generateAudio: vi.fn(), buildPanoramaPrompt: vi.fn() }));
     vi.doMock('../../src/services/pollManager', () => ({ ...mockComfyDeliveries(), getPendingTasksForProject: () => [],
       prepareMediaNodeGeneration: vi.fn(), registerMediaNodeOperation: () => vi.fn(), completeMediaNodeTask: vi.fn() }));
@@ -2613,7 +2996,7 @@ describe('critical canvas node interactions', () => {
       default: function PromptPanelMock() { return null; },
     }));
     vi.doMock('../../src/services/aiService', () => ({
-      generateText: vi.fn(),
+      generateText: vi.fn(), generateTextResult: vi.fn(),
       generateImage: vi.fn(),
       generateImagesBatch: vi.fn(),
       generateVideo,
@@ -2788,7 +3171,7 @@ describe('critical canvas node interactions', () => {
       default: function PromptPanelMock() { return null; },
     }));
     vi.doMock('../../src/services/aiService', () => ({
-      generateText: vi.fn(),
+      generateText: vi.fn(), generateTextResult: vi.fn(),
       generateImage,
       generateImagesBatch: vi.fn(),
       generateVideo: vi.fn(),
@@ -2811,7 +3194,8 @@ describe('critical canvas node interactions', () => {
       CANVAS_PAN_DURATION_MS: 200,
       requestCanvasPanBy: vi.fn(),
     }));
-    vi.doMock('../../src/services/projectSettingsService', () => ({
+    vi.doMock('../../src/services/projectSettingsService', async () => ({
+      ...await vi.importActual<typeof import('../../src/services/projectSettingsService')>('../../src/services/projectSettingsService'),
       getImageNodeDimensionsForAspectRatio: vi.fn(),
       resolveProjectGenerationPrompt: vi.fn(),
     }));
@@ -2849,5 +3233,100 @@ describe('critical canvas node interactions', () => {
     expect(store.showToast).toHaveBeenCalledWith(outcome === 'local-stopped'
       ? '已停止本地等待；ComfyUI 任务结束尚未确认，请核对原任务后继续查询' : '已终止 ComfyUI 任务');
     if (outcome === 'local-stopped') expect(pendingTasks).toHaveLength(1);
+  });
+});
+
+describe('MJ generation job controls', () => {
+  afterEach(() => {
+    for (const module of ['framer-motion', '../../src/components/nodes/shared/PromptPanel',
+      '../../src/services/ai/mediaModelCapabilities']) vi.doUnmock(module);
+  });
+
+  it.each([4, 1])('labels a job with %i output images without multiplying the submitted job count', async (outputsPerJob) => {
+    const store = Object.assign(createStore([], () => 1), {
+      userPresets: [], presetFolders: [], userSkills: [], agentPackageSkills: [],
+    });
+    await installReactHookDriver();
+    installStoreMock(store);
+    vi.doMock('../../src/i18n', () => ({ useT: () => (key: string, values: Record<string, unknown> = {}) => (
+      key.replace(/\{([^}]+)\}/g, (match, name: string) => String(values[name] ?? match))
+    ), t: (key: string) => key }));
+    vi.doMock('framer-motion', async () => ({
+      ...await vi.importActual<typeof import('framer-motion')>('framer-motion'), useReducedMotion: () => false,
+    }));
+    vi.doMock('../../src/services/ai/mediaModelCapabilities', () => ({
+      resolveAudioParameterCapability: () => undefined,
+      resolveImageOutputsPerJob: () => outputsPerJob,
+      resolveImageParameterCapability: () => ({ resolutions: ['1K'], defaultResolution: '1K',
+        ratios: ['16:9'], defaultRatio: '16:9', supportsBatch: false, maxBatchCount: 1 }),
+    }));
+    vi.doUnmock('../../src/components/nodes/shared/PromptPanel');
+    const Panel = (await import('../../src/components/nodes/shared/PromptPanel')).default;
+    const onSubmit = vi.fn();
+    const onChangeBatchCount = vi.fn();
+    const tree = Panel({ nodeType: 'ai-image', selectedModel: 'general/mj', selectedProvider: 'general',
+      prompt: 'cat', onChange: vi.fn(), onSubmit, onModelSelect: vi.fn(), onChangeBatchCount });
+    const submit = findElement(tree, (element) => element.type === 'button' && element.props['aria-label'] === '调用模型生成');
+    expect(submit.props['data-tooltip']).toContain(outputsPerJob === 4
+      ? '点击生成 4 张候选图，长按选择作业次数' : '点击生成 1 张，长按选择数量');
+    const item = findElement(tree, (element) => element.props.role === 'menuitem'
+      && element.props['aria-label'] === (outputsPerJob === 4 ? '生成 3 次作业，共 12 张候选图' : '生成 3 张图片'));
+    expect(item.props.title).toBe(outputsPerJob === 4 ? '生成 3 次作业，共 12 张候选图' : '生成 3 张');
+    (item.props.onClick as (event: { stopPropagation: () => void }) => void)({ stopPropagation: vi.fn() });
+    expect(onChangeBatchCount).toHaveBeenLastCalledWith(3);
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenLastCalledWith('cat', undefined);
+    (submit.props.onClick as (event: { stopPropagation: () => void }) => void)({ stopPropagation: vi.fn() });
+    expect(onChangeBatchCount).toHaveBeenLastCalledWith(1);
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('character direction shortcuts', () => {
+  afterEach(() => {
+    vi.doUnmock('framer-motion');
+    vi.doUnmock('../../src/i18n');
+  });
+
+  it.each([
+    { id: 'char-8dir-run', draft: '', image: { imageUrl: 'blob:character' }, addCurrentImage: true },
+    { id: 'char-8dir-walk', draft: '@{extra:服装}', image: { thumbnailUrl: 'blob:character' }, addCurrentImage: true },
+    { id: 'char-8dir-walk', draft: '@{extra:服装} @{character:已引用图片}', image: { imageUrl: 'blob:character' }, addCurrentImage: false },
+  ])('passes the existing image to $id while preserving explicit references in "$draft"', async ({
+    id, draft, image, addCurrentImage,
+  }) => {
+    const store = Object.assign(createStore([
+      { id: 'character', type: 'ai-image', position: { x: 0, y: 0 },
+        data: { type: 'ai-image', label: '角色参考', prompt: draft, ...image } },
+      { id: 'extra', type: 'ai-image', position: { x: 0, y: 0 },
+        data: { type: 'ai-image', label: '服装', imageUrl: 'blob:costume' } },
+    ], () => 1), { userPresets: [], presetFolders: [], userSkills: [], agentPackageSkills: [] });
+    await installReactHookDriver((initial, index) => index === 1 ? true : initial);
+    installStoreMock(store);
+    vi.doMock('../../src/i18n', () => ({ useT: () => (key: string) => key, t: (key: string) => key }));
+    vi.doMock('framer-motion', async () => ({
+      ...await vi.importActual<typeof import('framer-motion')>('framer-motion'), useReducedMotion: () => false,
+    }));
+    vi.doUnmock('../../src/components/nodes/shared/PromptPanel');
+    const { default: Panel } = await import('../../src/components/nodes/shared/PromptPanel');
+    const { fillTemplate, getSlashCommands } = await import('../../src/components/nodes/shared/slashCommands');
+    const preset = getSlashCommands('ai-image').find((item) => item.id === 'character')
+      ?.children?.find((item) => item.id === id);
+    if (!preset?.promptTemplate) throw new Error(`缺少角色快捷指令：${id}`);
+    const onSubmit = vi.fn();
+    const onChange = vi.fn();
+    const tree = Panel({ nodeId: 'character', nodeType: 'ai-image', prompt: draft,
+      onSubmit, onChange, onModelSelect: vi.fn() });
+    const menu = findElement(tree, (element) => componentName(element) === 'SlashCommandMenu');
+    const filled = fillTemplate(preset.promptTemplate, menu.props.currentPrompt as string);
+    const onSelect = menu.props.onSelect as (prompt: string, direct: boolean, override: typeof preset) => void;
+    onSelect(filled, true, preset);
+
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      addCurrentImage ? `${filled}\n@{character:角色参考}` : filled,
+      'character-8-direction-grid',
+    );
+    expect(onChange).not.toHaveBeenCalled();
+    expect(store.nodes[0].data.prompt).toBe(draft);
   });
 });

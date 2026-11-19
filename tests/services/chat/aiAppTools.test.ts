@@ -60,7 +60,8 @@ beforeEach(() => {
   resetAgentToolsRegistrationForTests();
   clearAgentToolRegistryForTests();
   useAppStore.setState(useAppStore.getInitialState(), true);
-  useAppStore.setState({ currentProjectId: 'project-a' });
+  useAppStore.setState({ currentProjectId: 'project-a', projectLoadStatus: 'ready',
+    projects: [{ id: 'project-a', name: '测试项目', createdAt: 1, updatedAt: 1 }] });
   unregisters = registerAiAppAgentTools();
   vi.mocked(createAiAppNode).mockResolvedValue('app-1');
   vi.mocked(getAiAppNode).mockImplementation(() => ({
@@ -166,6 +167,16 @@ describe('AI application Agent and MCP tools', () => {
     expect(useAppStore.getState().nodes).toBe(before.nodes);
     expect(useAppStore.getState().history).toBe(before.history);
     expect(useAppStore.getState().getCurrentRevision()).toBe(revisionBefore);
+  });
+
+  it.each(['abort', 'project-switch'] as const)('does not start an app action after %s during runtime loading', async (boundary) => {
+    const controller = new AbortController();
+    const pending = getAgentTool('canvas_app_run')!.execute(context({ signal: controller.signal }), inputs.canvas_app_run);
+    if (boundary === 'abort') controller.abort();
+    else useAppStore.setState({ currentProjectId: 'project-b' });
+    await expect(pending).resolves.toMatchObject({ status: 'error', retryable: false });
+    expect(runAiAppAction).not.toHaveBeenCalled();
+    expect(saveAiAppState).not.toHaveBeenCalled();
   });
 
   it('rechecks the application revision after asynchronous definition loading', async () => {

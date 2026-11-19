@@ -67,6 +67,15 @@ const dramaAssetImports = new Set<string>();
 
 export type CharacterLibraryScope = 'project' | 'global';
 
+function findScopedCharacter(
+  state: Pick<AppState, 'dramaAssets' | 'globalCharacters'>,
+  scope: CharacterLibraryScope,
+  characterId: string,
+): DramaCharacter | undefined {
+  return (scope === 'project' ? state.dramaAssets.characters : state.globalCharacters)
+    .find((character) => character.id === characterId);
+}
+
 /** 从画布收纳一份动作素材；关联仅保存在来源项目的节点上。 */
 export interface CharacterActionNodeCapture {
   nodeId: string;
@@ -188,7 +197,7 @@ export interface DramaAssetsSlice {
   saveCharacterCard: (
     scope: CharacterLibraryScope,
     character: DramaCharacter,
-    options?: DramaAssetWriteOptions,
+    options?: DramaAssetWriteOptions & { awaitProjectSave?: boolean },
   ) => Promise<boolean>;
   addCharacterReferenceImage: (
     scope: CharacterLibraryScope,
@@ -1363,7 +1372,8 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   saveCharacterCard: async (scope, character, options) => {
     if (scope !== 'project' && scope !== 'global') return false;
-    const characters = scope === 'project' ? get().dramaAssets.characters : get().globalCharacters;
+    const initial = get();
+    const characters = scope === 'project' ? initial.dramaAssets.characters : initial.globalCharacters;
     const existing = characters.find((item) => item.id === character.id);
     try { character = { ...character, weaponIds: checkedCharacterWeapons(character,
       scope === 'project' ? get().dramaAssets.props : get().globalProps, existing) }; }
@@ -1372,6 +1382,8 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
       ? { ...character, libraryOrder: existing.libraryOrder } : character));
     if (scope === 'project') {
       try { assertDramaAssetWriteCurrent(options); } catch { return false; }
+      const projectId = initial.currentProjectId;
+      if (options?.awaitProjectSave && (!projectId || initial.projectLoadStatus !== 'ready')) return false;
       const current = get().dramaAssets;
       const exists = current.characters.some((item) => item.id === normalized.id);
       set({
@@ -1382,8 +1394,29 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
             : [...current.characters, normalized],
         },
       });
-      silentSave(get);
-      return true;
+      if (!options?.awaitProjectSave) {
+        silentSave(get);
+        return true;
+      }
+      try {
+        if (await get().saveCurrentProjectSilent(() => {
+          assertDramaAssetWriteCurrent({ signal: options.signal });
+          const live = get();
+          if (live.currentProjectId !== projectId || live.projectLoadStatus !== 'ready'
+            || !sameCharacterContent(normalized, findScopedCharacter(live, scope, normalized.id))) {
+            throw new Error(t('角色已修改或删除，请重新保存'));
+          }
+        }) === projectId) return true;
+      } catch { /* The editor retains its draft for another save attempt. */ }
+      const latest = get();
+      if (latest.currentProjectId === projectId && latest.projectLoadStatus === 'ready'
+        && sameCharacterContent(normalized, findScopedCharacter(latest, scope, normalized.id))) {
+        set({ dramaAssets: { ...latest.dramaAssets, characters: latest.dramaAssets.characters.flatMap((item) => (
+          item.id !== normalized.id ? [item] : existing ? [{ ...existing, libraryOrder: item.libraryOrder }] : []
+        )) } });
+      }
+      if (!options.signal?.aborted) get().showToast?.(t('角色保存失败，请重试'), 'error');
+      return false;
     }
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -1419,20 +1452,14 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
   },
 
   addCharacterReferenceImage: async (scope, characterId, reference, options) => {
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character) return false;
     const next = upsertCharacterReference(character, reference, options?.makePrimary === true);
     return get().saveCharacterCard(scope, next, options);
   },
 
   setCharacterAvatar: async (scope, characterId, referenceImageId, crop) => {
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character?.referenceImages?.some((reference) => reference.id === referenceImageId)) {
       return false;
     }
@@ -1583,10 +1610,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   createImageNodeFromCharacterReference: (scope, characterId, referenceImageId) => {
     const state = get();
-    const characters = scope === 'project'
-      ? state.dramaAssets.characters
-      : state.globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(state, scope, characterId);
     const reference = character?.referenceImages?.find((item) => item.id === referenceImageId);
     if (!character || !reference?.imageUrl) {
       state.showToast?.('参考图不可用', 'error');
@@ -1635,10 +1659,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
   },
 
   addCharacterVoiceClip: async (scope, characterId, clip, options) => {
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character) return false;
     return get().saveCharacterCard(
       scope,
@@ -1648,10 +1669,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
   },
 
   updateCharacterVoiceClip: async (scope, characterId, clipId, patch, options) => {
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character?.voiceClips?.some((clip) => clip.id === clipId)) return false;
     return get().saveCharacterCard(scope, normalizeDramaCharacter({
       ...character,
@@ -1664,10 +1682,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   removeCharacterVoiceClip: async (scope, characterId, clipId, options) => {
     const state = get();
-    const characters = scope === 'project'
-      ? state.dramaAssets.characters
-      : state.globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(state, scope, characterId);
     const clip = character?.voiceClips?.find((item) => item.id === clipId);
     if (!character || !clip) return false;
     const rest = (character.voiceClips ?? []).filter((item) => item.id !== clipId);
@@ -1693,10 +1708,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
   },
 
   setCharacterPrimaryVoice: async (scope, characterId, clipId, options) => {
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character?.voiceClips?.some((clip) => clip.id === clipId)) return false;
     return get().saveCharacterCard(scope, normalizeDramaCharacter({
       ...character,
@@ -1706,10 +1718,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
   },
 
   addCharacterAction: async (scope, characterId, action, capture) => {
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     const name = action.name.trim();
     const prompt = action.prompt.trim();
     if (!character || !name) return null;
@@ -1739,10 +1748,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   addCharacterActionMedia: async (scope, characterId, actionId, media, capture) => {
     if (media.length === 0) return false;
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character?.actions?.some((action) => action.id === actionId)) return false;
     const now = Date.now();
     return saveCharacterActionWithNode(set, get, scope, normalizeDramaCharacter({
@@ -1760,10 +1766,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   removeCharacterActionMedia: async (scope, characterId, actionId, mediaId) => {
     const projectId = get().currentProjectId;
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     const action = character?.actions?.find((item) => item.id === actionId);
     if (!character || !action?.media?.some((item) => item.id === mediaId)) return false;
     const now = Date.now();
@@ -1787,10 +1790,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   removeCharacterAction: async (scope, characterId, actionId) => {
     const projectId = get().currentProjectId;
-    const characters = scope === 'project'
-      ? get().dramaAssets.characters
-      : get().globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(get(), scope, characterId);
     if (!character?.actions?.some((action) => action.id === actionId)) return false;
     const saved = await get().saveCharacterCard(scope, normalizeDramaCharacter({
       ...character,
@@ -1811,10 +1811,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
       state.showToast?.('该节点没有可用的音频', 'error');
       return null;
     }
-    const characters = input.scope === 'project'
-      ? state.dramaAssets.characters
-      : state.globalCharacters;
-    const character = characters.find((item) => item.id === input.characterId);
+    const character = findScopedCharacter(state, input.scope, input.characterId);
     if (!character) {
       state.showToast?.('请选择角色', 'error');
       return null;
@@ -1859,10 +1856,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
 
   createAudioNodeFromCharacterVoice: (scope, characterId, clipId) => {
     const state = get();
-    const characters = scope === 'project'
-      ? state.dramaAssets.characters
-      : state.globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(state, scope, characterId);
     const clip = character?.voiceClips?.find((item) => item.id === clipId);
     if (!character || !clip?.audioUrl) {
       state.showToast?.('角色声音不可用', 'error');
@@ -1907,10 +1901,7 @@ export const createDramaAssetsSlice: StateCreator<AppState, [], [], DramaAssetsS
     if (!voiceNodeId) return null;
 
     const state = get();
-    const characters = scope === 'project'
-      ? state.dramaAssets.characters
-      : state.globalCharacters;
-    const character = characters.find((item) => item.id === characterId);
+    const character = findScopedCharacter(state, scope, characterId);
     if (!character) return null;
     const clip = character.voiceClips?.find((item) => item.id === clipId);
     const voiceNode = state.nodes.find((node) => node.id === voiceNodeId);

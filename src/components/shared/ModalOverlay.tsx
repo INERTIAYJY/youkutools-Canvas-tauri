@@ -1,7 +1,7 @@
 /**
  * ModalOverlay — 可复用的模态框外层容器（AnimatePresence + backdrop + 弹簧落位）
  */
-import { useCallback, useEffect, useRef, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useRef, type PointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AnimatePresence,
@@ -12,9 +12,10 @@ import {
 } from 'framer-motion';
 import { fadeFast, fadeNormal, panelMotion, springSmooth } from '../../utils/motion';
 import { useDialogFocus } from '../../hooks/useDialogFocus';
+import { ModalPresentationContext } from './modalPresentationContext';
 
 export default function ModalOverlay({
-  isOpen,
+  isOpen: requestedOpen,
   onClose,
   children,
   ariaLabel,
@@ -37,6 +38,8 @@ export default function ModalOverlay({
   /** Overlay stacking order. Higher values keep nested dialogs above their parent modal. */
   zIndex?: number;
 }) {
+  const parentVisible = useContext(ModalPresentationContext);
+  const isOpen = requestedOpen && parentVisible;
   const reduceMotion = useReducedMotion();
   const quickMotion = motionPreset === 'quick';
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -120,7 +123,7 @@ export default function ModalOverlay({
             aria-modal="true"
             aria-label={ariaLabel}
             tabIndex={-1}
-            className={`relative glass-panel border rounded-2xl shadow-2xl overflow-hidden overscroll-contain flex flex-col ${className}`}
+            className={`relative glass-panel ui-dialog-glass border rounded-2xl shadow-2xl overflow-hidden overscroll-contain flex flex-col ${className}`}
             style={draggable ? { x: dragX, y: dragY } : undefined}
             {...panelMotion(Boolean(reduceMotion), quickMotion, draggable)}
             transition={reduceMotion || quickMotion ? fadeFast : springSmooth}

@@ -10,6 +10,10 @@ import { setLocale } from './i18n'
 import { initializeIconCache } from './services/iconCacheService'
 import { applyAppearanceTheme } from './services/appearance/appearanceRuntime'
 import { getAppearanceForConfig } from './services/appearance/appearanceMigration'
+import { installCursorPressFeedback } from './services/appearance/cursorRuntime'
+import { installAbortSignalCompatibility } from './utils/abortSignalCompatibility'
+
+installAbortSignalCompatibility()
 
 // 复用同一入口，通过 ?view= 区分窗口类型
 const searchParams = new URLSearchParams(window.location.search)
@@ -44,6 +48,8 @@ async function applyInitialChatWindowTheme() {
 }
 
 async function mountRoot() {
+  const stopCursorPressFeedback = installCursorPressFeedback()
+  import.meta.hot?.dispose(stopCursorPressFeedback)
   initializeIconCache()
   await applyInitialChatWindowTheme()
   if (view !== 'comfyui-settings') {

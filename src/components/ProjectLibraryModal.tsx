@@ -9,6 +9,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
 import { GENERAL_ASSISTANT_SCOPE_ID } from '../services/chat/assistantScope';
 import { listTopLevelProjects, resolveOpenTargetId, seriesOwnerId } from '../store/store.utils';
+import type { NativeProjectViewItem } from '../store/nativeProjectView';
 import type { CanvasProject } from '../types';
 import * as fileService from '../services/fileService';
 import { calcFixedPosition } from '../utils/popupPosition';
@@ -56,6 +57,7 @@ function formatProjectTimestamp(timestamp: number, t: (text: string, vars?: Reco
 /** 右键菜单估算尺寸，仅用于贴边时的翻转计算。 */
 const PROJECT_MENU_WIDTH = 160;
 const PROJECT_MENU_HEIGHT = 230;
+const START_PAGE_PROJECT_MENU_HEIGHT = 284;
 
 function ProjectMenuItem({ icon, label, danger, disabled, onClick }: {
   icon: string;
@@ -88,6 +90,7 @@ function ProjectSnapshotPreview({ snapshot }: { snapshot?: string }) {
         <img
           src={snapshot}
           alt=""
+          loading="lazy"
           className="h-full w-full object-cover"
           draggable={false}
         />
@@ -149,6 +152,9 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
   // 项目库只列顶层项目；分集在画布右侧的分集栏里管理。
   const topLevelProjects = useMemo(() => listTopLevelProjects(projects), [projects]);
   const activeProjectId = currentProjectId ? seriesOwnerId(projects, currentProjectId) : null;
+  const deleteEpisodeCount = deleteTarget ? projects.filter((project) => project.parentId === deleteTarget.id).length : 0;
+  const deleteBinding = (deleteTarget as Partial<NativeProjectViewItem> | null)?.nativeView;
+  const recycleMediaOnDelete = isTauri && deleteBinding?.episodeId === null;
 
   const deletableProjectCount = useMemo(
     () => topLevelProjects.filter((project) => project.id !== 'default').length,
@@ -167,6 +173,29 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
         return right.updatedAt - left.updatedAt;
       });
   }, [activeProjectId, topLevelProjects, query, sort]);
+
+  const coverTargets = useMemo(() => {
+    const byId = new Map(projects.map((project) => [project.id, project]));
+    return new Map(visibleProjects.map((project) => [project.id, byId.get(resolveOpenTargetId(projects, project.id))]));
+  }, [projects, visibleProjects]);
+  const [nativeCovers, setNativeCovers] = useState<{ targets: typeof coverTargets; snapshots: Map<string, string> }>();
+  useEffect(() => {
+    if (!isOpen || resourcePageOpen) return;
+    const targets = [...coverTargets.values()].flatMap((project) => {
+      const binding = (project as NativeProjectViewItem | undefined)?.nativeView;
+      return !project?.snapshot && binding?.canvasId ? [{ projectId: binding.projectId, canvasId: binding.canvasId }] : [];
+    });
+    if (!targets.length) return;
+    const controller = new AbortController();
+    void import('../services/indexedDb/nativeProjectRepository')
+      .then(({ readNativeCanvasPreviews }) => readNativeCanvasPreviews(targets, { signal: controller.signal }))
+      .then((previews) => {
+        if (!controller.signal.aborted) {
+          setNativeCovers({ targets: coverTargets, snapshots: new Map([...previews].map(([id, preview]) => [id, preview.snapshot])) });
+        }
+      }).catch(() => { /* 封面不可读时仍允许打开项目。 */ });
+    return () => controller.abort();
+  }, [coverTargets, isOpen, resourcePageOpen]);
 
   useLayoutEffect(() => {
     const grid = projectGridRef.current;
@@ -227,10 +256,11 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
     if (!isStartPage) closeLibrary();
   };
 
-  const openProject = async (projectId: string) => {
+  const openProject = async (projectId: string, openWorkbench = false) => {
     if (projectBusy || listUnavailable) return;
     // 在画布中再次点当前剧集时，保留正在编辑的分集，不切回第一集。
     if (projectId === activeProjectId && projectLoadStatus === 'ready') {
+      if (openWorkbench && currentProjectId) useAppStore.getState().requestScriptWorkbenchOpen(currentProjectId);
       closeLibrary();
       return;
     }
@@ -240,7 +270,10 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
       await switchProject(projectId, { captureSnapshot: !isStartPage });
       const state = useAppStore.getState();
       if (state.currentProjectId === resolveOpenTargetId(state.projects, projectId)
-        && state.projectLoadStatus === 'ready') closeLibrary();
+        && state.projectLoadStatus === 'ready') {
+        if (openWorkbench && state.currentProjectId) state.requestScriptWorkbenchOpen(state.currentProjectId);
+        closeLibrary();
+      }
     } catch {
       useAppStore.getState().showToast(t('项目打开失败，请重试'), 'error');
     } finally {
@@ -325,7 +358,8 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
     if (!deleteTarget || isDeleting) return;
     setIsDeleting(true);
     try {
-      await deleteProject(deleteTarget.id);
+      if (recycleMediaOnDelete) await deleteProject(deleteTarget.id, { recycleMedia: true });
+      else await deleteProject(deleteTarget.id);
       setDeleteTarget(null);
     } finally {
       setIsDeleting(false);
@@ -543,6 +577,9 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
             {visibleProjects.map((project) => {
               const isCurrent = project.id === activeProjectId;
               const isEditingName = renameTargetId === project.id;
+              const coverTarget = coverTargets.get(project.id);
+              const snapshot = project.snapshot ?? coverTarget?.snapshot ?? (coverTarget && nativeCovers?.targets === coverTargets
+                ? nativeCovers.snapshots.get(coverTarget.id) : undefined);
               return (
                 <div
                   key={project.id}
@@ -565,10 +602,7 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
                     className="block w-full border-b border-canvas-border text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400/60"
                   >
                     {/* 剧集自己没有画布，缩略图取点开后会看到的那一集 */}
-                    <ProjectSnapshotPreview
-                      snapshot={project.snapshot
-                        ?? projects.find((item) => item.id === resolveOpenTargetId(projects, project.id))?.snapshot}
-                    />
+                    <ProjectSnapshotPreview snapshot={snapshot} />
                   </button>
 
                   {isEditingName ? (
@@ -722,7 +756,7 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
             <div
               role="menu"
               aria-label={t('项目操作')}
-              style={calcFixedPosition(contextMenu.x, contextMenu.y, PROJECT_MENU_WIDTH, PROJECT_MENU_HEIGHT)}
+              style={calcFixedPosition(contextMenu.x, contextMenu.y, PROJECT_MENU_WIDTH, isStartPage ? START_PAGE_PROJECT_MENU_HEIGHT : PROJECT_MENU_HEIGHT)}
               onMouseDown={(event) => event.stopPropagation()}
               className="fixed w-40 select-none overflow-hidden rounded-lg border border-canvas-border bg-canvas-card py-1 shadow-xl"
             >
@@ -731,6 +765,14 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
                 label={t('打开项目')}
                 onClick={() => openProject(contextMenu.project.id)}
               />
+              {isStartPage && (
+                <ProjectMenuItem
+                  icon="lucide:notebook-pen"
+                  label={t('打开剧本创作工作台')}
+                  disabled={projectBusy || listUnavailable}
+                  onClick={() => void openProject(contextMenu.project.id, true)}
+                />
+              )}
               <ProjectMenuItem
                 icon="mdi:folder-search-outline"
                 label={t('打开项目文件夹')}
@@ -809,9 +851,18 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
                   <Icon icon="mdi:alert-outline" width="21" height="21" aria-hidden="true" />
                 </span>
                 <div className="min-w-0">
-                  <h3 id="delete-project-title" className="text-sm font-semibold text-canvas-text">{t('删除“{name}”？', { name: deleteTarget.name })}</h3>
+                  <h3 id="delete-project-title" className="text-sm font-semibold text-canvas-text">{deleteEpisodeCount > 0
+                    ? t('删除整部剧“{name}”？', { name: deleteTarget.name })
+                    : t('删除“{name}”？', { name: deleteTarget.name })}</h3>
                   <p id="delete-project-description" className="mt-1.5 text-xs leading-5 text-canvas-text-secondary">
-                    {t('项目画布及本地项目数据将被删除，此操作不可撤销。')}
+                    {recycleMediaOnDelete ? <>
+                      {deleteEpisodeCount > 0
+                        ? t('将移除整部剧及其 {count} 个分集的项目记录。', { count: deleteEpisodeCount })
+                        : t('将移除此项目的项目记录。')}{' '}
+                      {t('符合条件的素材目录将移入系统回收站。受到保护或回收失败时，素材目录会保留。项目记录不能直接撤销。')}
+                    </> : deleteEpisodeCount > 0
+                      ? t('将移除整部剧及其 {count} 个分集的项目记录；历史回执和素材文件保留。本操作不能直接撤销。', { count: deleteEpisodeCount })
+                      : t('将移除此项目的项目记录；历史回执和素材文件保留。本操作不能直接撤销。')}
                   </p>
                 </div>
               </div>
@@ -832,7 +883,7 @@ export default function ProjectLibraryModal({ isOpen, onClose, presentation = 'm
                   className="inline-flex h-9 items-center gap-2 rounded-md bg-red-500 px-3.5 text-xs font-medium text-white transition-colors hover:bg-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isDeleting ? <Icon icon="mdi:loading" width="16" height="16" className="animate-spin" aria-hidden="true" /> : null}
-                  {isDeleting ? t('正在删除') : t('确认删除')}
+                  {isDeleting ? t('正在删除') : recycleMediaOnDelete ? t('删除并回收素材') : t('确认删除')}
                 </button>
               </div>
             </motion.div>

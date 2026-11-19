@@ -6,7 +6,7 @@ import { useAppStore } from '../../../store/useAppStore';
 import type { AIAudioGenParams, AIVideoGenParams, AudioGenerationResult, MediaTaskReceipt } from '../../../types/aiTypes';
 import type { BaseNodeData } from '../../../types';
 import { mapImageDimensions } from '../../aiDimensions';
-import { pollTask, PollTaskFailedError } from '../../pollTask';
+import { PollTaskFailedError } from '../../pollTask';
 import { getHttpResponseError } from '../httpUtils';
 import {
   cleanupNodePolling,
@@ -20,14 +20,13 @@ import {
 import {
   extractFlowMusicLyrics,
   extractFlowMusicTrack,
-  fetchFlowMusicTask,
   generateApimartSpeech,
   getApimartAudioCapability,
+  queryApimartMusicTask,
   submitFlowMusicGeneration,
   submitFlowMusicLyrics,
   submitSunoGeneration,
   type FlowMusicGenerationRequest,
-  type FlowMusicTaskState,
 } from '../apimartAudio';
 import { generateApimartImagesBatch, generateApimartVideo } from '../apimartGen';
 import { getApimartSeedanceCapability, isApimartSeedanceModel } from '../apimartVideoModels';
@@ -37,6 +36,7 @@ import { extractModelName } from '../helpers';
 import { mapSequentially, resolveImageUrlsSequentially } from '../referenceMediaPreparation';
 import { resolveMediaReferenceUrl } from '../../uploadService';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
+import { isNativeVideoSubmissionGuard } from '../../nativeVideoSubmission';
 
 function resolveApimartConnection(): { apiKey: string; baseUrl: string } {
   const providerConfig = useAppStore.getState().config.providers.apimart;
@@ -66,25 +66,6 @@ function buildFlowMusicRequest(
   };
 }
 
-function waitForFlowMusicTask(
-  apiKey: string,
-  baseUrl: string,
-  taskId: string,
-  signal?: AbortSignal,
-): Promise<FlowMusicTaskState> {
-  return pollTask<FlowMusicTaskState, FlowMusicTaskState>({
-    fetchState: (querySignal) => fetchFlowMusicTask(apiKey, baseUrl, taskId, querySignal),
-    isComplete: (task) => task.status === 'completed' ? task : null,
-    isFailed: (task) =>
-      task.status === 'failed' || task.status === 'error' || task.status === 'cancelled'
-        ? `APIMart 音乐任务失败: ${typeof task.error === 'string' ? task.error : task.error?.message || task.status}`
-        : null,
-    interval: 3000,
-    maxDuration: VIDEO_POLL_MAX_DURATION_MS,
-    signal,
-  });
-}
-
 async function generateFlowMusic(
   apiKey: string,
   baseUrl: string,
@@ -100,26 +81,23 @@ async function generateFlowMusic(
   const projectId = useAppStore.getState().currentProjectId;
   let receipt: MediaTaskReceipt | undefined;
   let requestSent = false;
-  const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
-  const signal = nodeSignal && externalSignal
-    ? AbortSignal.any([nodeSignal, externalSignal])
-    : nodeSignal ?? externalSignal;
-
-  if (params.nodeId && projectId) {
-    receipt = savePendingTask({
-      nodeId: params.nodeId,
-      projectId,
-      nodeType: 'ai-audio',
-      provider: 'apimart',
-      providerConfigId: 'apimart',
-      taskId: '',
-      taskType: 'apimart-flow-music',
-      audioTaskStage: initialStage,
-      submitted: false,
-    });
-  }
+  const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId, externalSignal) : undefined;
+  const signal = nodeSignal ?? externalSignal;
 
   try {
+    if (params.nodeId && projectId) {
+      receipt = savePendingTask({
+        nodeId: params.nodeId,
+        projectId,
+        nodeType: 'ai-audio',
+        provider: 'apimart',
+        providerConfigId: 'apimart',
+        taskId: '',
+        taskType: 'apimart-flow-music',
+        audioTaskStage: initialStage,
+        submitted: false,
+      });
+    }
     let generatedLyrics: { title: string; lyrics: string } | undefined;
     if (shouldGenerateLyrics) {
       signal?.throwIfAborted();
@@ -130,7 +108,7 @@ async function generateFlowMusic(
         receipt = updatePendingTask(params.nodeId, { taskId: lyricsTaskId, submitted: true }, receipt?.taskId, receipt?.attemptId) ?? receipt;
       }
       generatedLyrics = extractFlowMusicLyrics(
-        await waitForFlowMusicTask(apiKey, baseUrl, lyricsTaskId, signal),
+        await queryApimartMusicTask(apiKey, baseUrl, lyricsTaskId, { signal, maxDuration: VIDEO_POLL_MAX_DURATION_MS }),
       );
 
       if (
@@ -172,7 +150,7 @@ async function generateFlowMusic(
       }, receipt?.taskId, receipt?.attemptId) ?? receipt;
     }
     const result = extractFlowMusicTrack(
-      await waitForFlowMusicTask(apiKey, baseUrl, musicTaskId, signal),
+      await queryApimartMusicTask(apiKey, baseUrl, musicTaskId, { signal, maxDuration: VIDEO_POLL_MAX_DURATION_MS }),
     );
     if (receipt) receipt = updatePendingTask(receipt.nodeId, { mediaRecoveryState: 'delivery_pending' }, receipt.taskId, receipt.attemptId) ?? receipt;
     return { ...result, ...(receipt ? { taskReceipt: receipt } : {}) };
@@ -211,7 +189,7 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
   providerId: 'apimart',
   capabilities: ['image', 'video', 'audio'],
 
-  async generateImage({ params, prompt, imageUrls, requestedCount, signal }) {
+  async generateImage({ params, prompt, imageUrls, requestedCount, signal, beforeSubmit }) {
     const { apiKey, baseUrl } = resolveApimartConnection();
     const imageSize = params.imageSize ?? '2K';
     const aspectRatio = params.aspectRatio ?? '1:1';
@@ -229,6 +207,7 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       signal,
       params.imageQuality,
       params.imageBackground,
+      beforeSubmit,
     );
   },
 
@@ -243,7 +222,7 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       signal?.throwIfAborted();
       if (beforeSubmit) await beforeSubmit();
       signal?.throwIfAborted();
-      return generateApimartVideo(apiKey, baseUrl, modelName, prompt, params.nodeId, {}, signal);
+      return generateApimartVideo(apiKey, baseUrl, modelName, prompt, params.nodeId, {}, signal, beforeSubmit);
     }
     if (
       !referenceInput.prompt.trim()
@@ -359,13 +338,18 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       videoUrls,
       audioUrls,
       operation: referenceInput.operation,
-    }, signal);
+    }, signal, beforeSubmit);
   },
 
-  generateAudio({ params, prompt, referenceAudioUrls, signal }) {
+  async generateAudio({ params, prompt, referenceAudioUrls, referenceMedia, signal, beforeSubmit }) {
     const { apiKey, baseUrl } = resolveApimartConnection();
     const modelName = extractModelName(params.model, params.provider);
     const capability = getApimartAudioCapability(modelName);
+    if (useAppStore.getState().projectExecutionContext?.modelGeneration === 1 || isNativeVideoSubmissionGuard(beforeSubmit)) {
+      if (referenceAudioUrls.length || referenceMedia?.length) throw new Error('APIMart 音频合同不支持素材参考，未提交生成');
+      const { generateNativeBuiltinAudio } = await import('../../nativeBuiltinAudioRecovery');
+      return generateNativeBuiltinAudio({ params, prompt, apiKey, baseUrl, signal, beforeSubmit });
+    }
     // APIMart 的 TTS 是 OpenAI 兼容的 /audio/speech，Flow Music 走歌词与风格参数，
     // 两者都没有音色参考入参；连了声音却被静默丢弃会让用户误以为生效，这里显式说明。
     if (referenceAudioUrls.length > 0) {

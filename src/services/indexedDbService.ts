@@ -3,8 +3,10 @@
  */
 import type { HistoryQuery } from '../types';
 import { matchesHistoryQuery } from '../utils/historyQuery';
-import type { AgentMode, AgentTask, McpOperationBinding, McpOperationIdentity, McpOperationUpdate } from '../types/agent';
-import type { ConversationContextSummary } from '../types/chat';
+import type { AgentTask, McpOperationBinding, McpOperationIdentity, McpOperationUpdate } from '../types/agent';
+import type { AgentTeamRun } from '../types/agentTeam';
+import type { StoryGraph, StoryGraphPatch } from '../types/storyGraph';
+import { applyStoryGraphPatch, normalizeStoryGraph } from './storyGraphService';
 import type { ProjectMemory } from '../types/memory';
 import type { DramaAsset, DramaAssetWriteOptions, DramaCharacter, DramaProp, DramaScene } from '../types/dramaAssets';
 import { assertDramaAssetWriteCurrent, MAX_CHARACTER_WEAPONS, normalizeCharacterWeaponIds } from '../types/dramaAssets';
@@ -35,13 +37,17 @@ import {
 } from './indexedDb/schema';
 import {
   toProjectSummaryRecord,
+  normalizeProjectSeriesInfo,
   type ProjectSummaryRecord,
 } from './indexedDb/projectSummary';
 
 import { withRelocatedMedia } from './indexedDb/mediaRelocations';
+import { projectHistoryRange, pruneProjectHistory } from './indexedDb/outputHistoryRetention';
+import { withLegacyProjectWrite } from './indexedDb/legacyProjectWriteGuard';
 import { localMediaUrlToPath } from '../utils/mediaUrl';
 import { stripVerbatimPrefix } from './fs/core';
 import { isProjectSnapshotDataUrl } from './projectSnapshotValidation';
+import type { ChatConversationRecord, ChatMessageRecord } from './indexedDb/chatConversationRepository';
 
 const LAST_ACTIVE_PROJECT_KEY = 'last-active-project';
 const RECENT_ASSET_USAGE_KEY = 'recent-asset-usage';
@@ -66,6 +72,7 @@ function cleanupTimestamp(value: unknown): number | undefined {
 
 /** Old identities stay retired; an explicit new import receives an independent asset ID. */
 export function withActiveAsset(tx: IDBTransaction, assetId: string, write: () => void, onForgotten: () => void): void {
+  if (assetId.startsWith('na2-')) { onForgotten(); tx.abort(); return; }
   const request = tx.objectStore(STORE_METADATA).get(forgottenAssetKey(assetId));
   request.onsuccess = () => {
     if (request.result !== undefined) {
@@ -207,6 +214,15 @@ export async function getRecentAssetUsage(): Promise<AssetUsageRecord[]> {
 
 /** 只读取当前列表的稳定 ID；旧库仍保留的最近十项可作为时间回退，不补造更早历史。 */
 export async function getAssetLastUsedTimes(assetIds: readonly string[]): Promise<Map<string, number>> {
+  if (assetIds.some((id) => id.startsWith('na2-'))) {
+    const native = await import('./indexedDb/nativeAssetRepository');
+    const result = await getAssetLastUsedTimes(assetIds.filter((id) => !id.startsWith('na2-')));
+    for (const id of assetIds.filter((id) => id.startsWith('na2-'))) {
+      const row = await native.readNativeAsset(id);
+      if (row?.lastUsedAt !== undefined) result.set(id, row.lastUsedAt);
+    }
+    return result;
+  }
   const ids = new Set(assetIds.filter((id) => typeof id === 'string' && id.trim() && id.length <= 256));
   if (!ids.size) return new Map<string, number>();
   const db = await openDB();
@@ -236,6 +252,8 @@ export async function getAssetLastUsedTimes(assetIds: readonly string[]): Promis
 /** 原子维护最近十项与全量索引时间，多个窗口/旧扫描不能覆盖较新的使用记录。 */
 export async function recordRecentAssetUsage(assetId: string, usedAt = Date.now()): Promise<void> {
   if (normalizeAssetUsage([{ assetId, usedAt }]).length !== 1) throw new Error('最近使用记录无效');
+  if (assetId.startsWith('na2-')) return (await import('./indexedDb/nativeAssetRepository')).updateNativeAsset(assetId,
+    (record) => ({ ...record, lastUsedAt: Math.max(record.lastUsedAt ?? 0, usedAt) }));
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_METADATA, STORE_ASSET_INDEX], 'readwrite');
@@ -286,13 +304,17 @@ export * from './indexedDb/catalogRepository';
 export * from './indexedDb/videoEditorRepository';
 
 /** 保存整个项目（含 nodes/edges）到 IndexedDB */
-export async function saveProjectToDb(record: ProjectRecord): Promise<void> {
+export async function saveProjectToDb(record: ProjectRecord, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const summary = toProjectSummaryRecord(record);
   if (!summary) throw new Error('项目摘要无效，无法写入 IndexedDB');
   const db = await openDB();
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_PROJECTS, STORE_PROJECT_SUMMARIES, STORE_METADATA], 'readwrite');
     let failure: Error | undefined;
+    const abort = () => { try { tx.abort(); } catch { /* 已提交事务保留原结果 */ } };
+    signal?.addEventListener('abort', abort, { once: true });
     const current = tx.objectStore(STORE_PROJECTS).get(record.id);
     current.onsuccess = () => {
       const before = current.result as ProjectRecord | undefined;
@@ -301,23 +323,74 @@ export async function saveProjectToDb(record: ProjectRecord): Promise<void> {
         if ((before?.exchangeEpoch ?? 0) !== (record.exchangeEpoch ?? 0) || (!before && tombstone.result)) {
           failure = new Error('项目已被导入更新或删除，请重新打开项目后保存'); tx.abort(); return;
         }
-        withRelocatedMedia(tx, record, (next) => tx.objectStore(STORE_PROJECTS).put(next));
-        tx.objectStore(STORE_PROJECT_SUMMARIES).put(summary);
+        try {
+          // 正式图只能经下方 CAS 写入；迟到的普通保存不得恢复旧图或抹掉新图。
+          const next = { ...record };
+          const series = normalizeProjectSeriesInfo(record.series);
+          const storedGraph = before?.series?.storyGraph;
+          if (before && (series || storedGraph)) {
+            next.series = { ...(series ?? before.series) };
+            if (storedGraph) next.series.storyGraph = normalizeStoryGraph(storedGraph);
+            else delete next.series.storyGraph;
+          } else if (series) next.series = series;
+          if (next.parentId && next.series?.storyGraph) throw new Error('故事关系图只能由所属剧集保存');
+          const nextSummary = toProjectSummaryRecord(next);
+          if (!nextSummary) throw new Error('项目摘要无效，无法写入 IndexedDB');
+          withRelocatedMedia(tx, next, (relocated) => tx.objectStore(STORE_PROJECTS).put(relocated));
+          tx.objectStore(STORE_PROJECT_SUMMARIES).put(nextSummary);
+        } catch (error) { failure = error instanceof Error ? error : new Error('故事图保存失败'); tx.abort(); }
       };
     };
     let settled = false;
     const fail = (error: DOMException | null) => {
       if (settled) return;
       settled = true;
-      reject(failure ?? error ?? new Error(`项目 ${record.id} 的 IndexedDB 写入失败`));
+      signal?.removeEventListener('abort', abort);
+      reject(failure ?? signal?.reason ?? error ?? new Error(`项目 ${record.id} 的 IndexedDB 写入失败`));
     };
     tx.oncomplete = () => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', abort);
       resolve();
     };
     tx.onerror = () => fail(tx.error);
     tx.onabort = () => fail(tx.error);
+  });
+}
+
+/** 合并最新剧集记录后原子提交图补丁；不重存画布，也不覆盖同时更新的全剧剧本。 */
+export async function updateProjectStoryGraphCAS(
+  seriesId: string, patch: StoryGraphPatch, expectedRevision: number, expectedExchangeEpoch: number,
+  assertCurrent?: (next?: StoryGraph) => void,
+): Promise<StoryGraph> {
+  if (!seriesId || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0
+    || !Number.isSafeInteger(expectedExchangeEpoch) || expectedExchangeEpoch < 0) throw new Error('故事图保存版本无效');
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_PROJECTS, STORE_PROJECT_SUMMARIES, STORE_METADATA], 'readwrite');
+    let result: StoryGraph | undefined;
+    let failure: unknown;
+    const request = tx.objectStore(STORE_PROJECTS).get(seriesId);
+    request.onsuccess = () => withLegacyProjectWrite(tx, () => {
+      try {
+        assertCurrent?.();
+        const before = request.result as ProjectRecord | undefined;
+        if (!before || before.parentId || (before.exchangeEpoch ?? 0) !== expectedExchangeEpoch) {
+          throw new Error('故事图所属剧集已变化，请重新打开关系图');
+        }
+        const series = normalizeProjectSeriesInfo(before.series);
+        result = applyStoryGraphPatch(series?.storyGraph, patch, expectedRevision);
+        const next = { ...before, series: { ...series, storyGraph: result }, updatedAt: Date.now() };
+        const summary = toProjectSummaryRecord(next);
+        if (!summary) throw new Error('故事图项目摘要无效');
+        assertCurrent?.(result);
+        tx.objectStore(STORE_PROJECTS).put(next);
+        tx.objectStore(STORE_PROJECT_SUMMARIES).put(summary);
+      } catch (error) { failure = error; tx.abort(); }
+    }, (error) => { failure = error; });
+    tx.oncomplete = () => result ? resolve(result) : reject(new Error('故事图未提交'));
+    tx.onerror = tx.onabort = () => reject(failure ?? tx.error ?? new Error('故事图提交失败'));
   });
 }
 
@@ -328,7 +401,7 @@ export async function updateProjectSnapshot(id: string, snapshot: string | undef
   }
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_PROJECTS, STORE_PROJECT_SUMMARIES], 'readwrite');
+    const tx = db.transaction([STORE_PROJECTS, STORE_PROJECT_SUMMARIES, STORE_METADATA], 'readwrite');
     const projects = tx.objectStore(STORE_PROJECTS);
     const request = projects.get(id);
     let updated = false;
@@ -338,7 +411,7 @@ export async function updateProjectSnapshot(id: string, snapshot: string | undef
       settled = true;
       reject(error ?? new Error('项目缩略图保存失败'));
     };
-    request.onsuccess = () => {
+    request.onsuccess = () => withLegacyProjectWrite(tx, () => {
       const current = request.result as ProjectRecord | undefined;
       if (!current) return;
       try {
@@ -352,7 +425,7 @@ export async function updateProjectSnapshot(id: string, snapshot: string | undef
         tx.abort();
         fail(error);
       }
-    };
+    }, fail);
     request.onerror = () => fail(request.error);
     tx.oncomplete = () => {
       if (settled) return;
@@ -727,6 +800,16 @@ export async function clearGlobalCharacters(): Promise<void> {
   });
 }
 
+/** 复用已有主键游标；事务、索引范围和错误处理仍由调用方负责。 */
+function deleteKeyCursorEntries(store: IDBObjectStore, request: IDBRequest<IDBCursor | null>): void {
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) return;
+    store.delete(cursor.primaryKey);
+    cursor.continue();
+  };
+}
+
 /** 原子删除项目及其项目域持久化数据。 */
 export async function deleteProjectFromDb(id: string): Promise<void> {
   const db = await openDB();
@@ -763,12 +846,7 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
     const conversationCursor = conversationStore
       .index('projectId_updatedAt')
       .openKeyCursor(conversationRange);
-    conversationCursor.onsuccess = () => {
-      const cursor = conversationCursor.result;
-      if (!cursor) return;
-      conversationStore.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(conversationStore, conversationCursor);
 
     // chatMessages 没有 projectId 索引；项目删除是低频操作，事务内全表扫描
     // 可以清理会话记录已损坏时留下的孤儿消息，同时避免为此升级 schema。
@@ -785,47 +863,27 @@ export async function deleteProjectFromDb(id: string): Promise<void> {
     const taskCursor = taskStore
       .index('projectId_updatedAt')
       .openKeyCursor(taskRange);
-    taskCursor.onsuccess = () => {
-      const cursor = taskCursor.result;
-      if (!cursor) return;
-      taskStore.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(taskStore, taskCursor);
 
     const memoryRange = IDBKeyRange.bound([id, 0], [id, Infinity]);
     const memoryStore = tx.objectStore(STORE_PROJECT_MEMORIES);
     const memoryCursor = memoryStore
       .index('projectId_updatedAt')
       .openKeyCursor(memoryRange);
-    memoryCursor.onsuccess = () => {
-      const cursor = memoryCursor.result;
-      if (!cursor) return;
-      memoryStore.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(memoryStore, memoryCursor);
 
     const historyStore = tx.objectStore(STORE_HISTORY);
     const historyCursor = historyStore
       .index('projectId_timestamp_id')
       .openKeyCursor(projectHistoryRange(id));
-    historyCursor.onsuccess = () => {
-      const cursor = historyCursor.result;
-      if (!cursor) return;
-      historyStore.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(historyStore, historyCursor);
 
     const visualRange = IDBKeyRange.bound([id, 0], [id, Infinity]);
     const visualStore = tx.objectStore(STORE_PROJECT_VISUAL_DESCRIPTIONS);
     const visualCursor = visualStore
       .index('projectId_updatedAt')
       .openKeyCursor(visualRange);
-    visualCursor.onsuccess = () => {
-      const cursor = visualCursor.result;
-      if (!cursor) return;
-      visualStore.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(visualStore, visualCursor);
 
     tx.oncomplete = () => resolve();
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error(`删除项目 ${id} 的持久化数据失败`));
@@ -875,6 +933,8 @@ export interface HistoryRecord {
   error?: string;
   mediaUrl?: string;
   filePath?: string;
+  relativePath?: string;
+  storageRootRef?: string;
   params?: Record<string, unknown>;
 }
 
@@ -916,6 +976,15 @@ async function findMediaHistoryByReferences(references: string[], nodeType: 'ai-
   const keys = new Set(references.map(imageHistoryReferenceKey).filter((key): key is string => !!key));
   if (!keys.size) return null;
   if (signal?.aborted) throw new DOMException('Preview closed', 'AbortError');
+  if (projectId?.startsWith('c2-')) {
+    const records = await getHistoryEntriesForExport(projectId);
+    signal?.throwIfAborted();
+    return records.find((record) => record.status === 'success'
+      && (record.nodeType === nodeType || nodeType === 'ai-image' && record.nodeType === 'ai-animation')
+      && [record.filePath, record.mediaUrl, record.output].some((reference) => {
+        const key = imageHistoryReferenceKey(reference); return !!key && keys.has(key);
+      })) ?? null;
+  }
   const db = await openDB();
   if (signal?.aborted) throw new DOMException('Preview closed', 'AbortError');
   return new Promise((resolve, reject) => {
@@ -959,37 +1028,67 @@ async function findMediaHistoryByReferences(references: string[], nodeType: 'ai-
 }
 
 const HISTORY_MIGRATION_PREFIX = 'output-history-v1:';
-const MAX_PROJECT_HISTORY = 16;
 
-function projectHistoryRange(
-  projectId: string,
-  cursor?: HistoryPageCursor | null,
-): IDBKeyRange {
-  const lower: [string, number, string] = [projectId, 0, ''];
-  const upper: [string, number, string] = cursor
-    ? [projectId, cursor.timestamp, cursor.id]
-    : [projectId, Number.MAX_SAFE_INTEGER, '\uffff'];
-  return IDBKeyRange.bound(lower, upper, false, Boolean(cursor));
+const nativeHistoryProjectionKey = (id: string) => `native-output-history-projected:${id}`;
+
+/** 先读消费标记，避免每次打开面板都重验已投影的媒体文件。 */
+export async function getUnprojectedNativeOutputHistory(records: HistoryRecord[]): Promise<HistoryRecord[]> {
+  if (!records.length) return [];
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_METADATA, 'readonly');
+    const unseen = new Set<string>();
+    for (const record of records) {
+      const request = tx.objectStore(STORE_METADATA).get(nativeHistoryProjectionKey(record.id));
+      request.onsuccess = () => { if (request.result === undefined) unseen.add(record.id); };
+    }
+    tx.oncomplete = () => resolve(records.filter((record) => unseen.has(record.id)));
+    tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('新项目输出历史标记读取失败'));
+  });
 }
 
-function pruneProjectHistory(store: IDBObjectStore, projectId: string): void {
-  const request = store.index('projectId_timestamp_id').openKeyCursor(
-    projectHistoryRange(projectId),
-    'prev',
-  );
-  let skippedRetained = false;
-  request.onsuccess = () => {
-    const cursor = request.result;
-    if (!cursor) return;
-    if (!skippedRetained) {
-      // 首条就是最新记录；跳过保留区，只继续遍历待删除的主键。
-      skippedRetained = true;
-      cursor.advance(MAX_PROJECT_HISTORY);
-      return;
+/** 历史与消费标记原子写入；删除、清空或16条裁剪后不得被outbox再次补回。 */
+export async function putNativeOutputHistoryEntries(records: HistoryRecord[]): Promise<void> {
+  if (!records.length) return;
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_HISTORY, STORE_METADATA], 'readwrite');
+    const store = tx.objectStore(STORE_HISTORY), metadata = tx.objectStore(STORE_METADATA);
+    for (const record of records) {
+      const request = metadata.get(nativeHistoryProjectionKey(record.id));
+      request.onsuccess = () => {
+        if (request.result !== undefined) return;
+        const existing = store.index('projectId_timestamp_id').getAll(projectHistoryRange(record.projectId));
+        existing.onsuccess = () => {
+          // 导入已保存完整历史时，不再把相同文件的无原稿补记添加为第二条。
+          const duplicate = (existing.result as HistoryRecord[]).some((entry) => entry.id === record.id
+            || record.params?.originalInputUnavailable === true && entry.status === 'success'
+              && entry.relativePath === record.relativePath && entry.storageRootRef === record.storageRootRef
+              && entry.nodeType === record.nodeType);
+          withActiveHistory(tx, [record], (active) => {
+            if (!duplicate) for (const entry of active) store.put(entry);
+            metadata.put({ id: nativeHistoryProjectionKey(record.id), projectId: record.projectId });
+            pruneProjectHistory(store, record.projectId);
+          });
+        };
+      };
     }
-    store.delete(cursor.primaryKey);
-    cursor.continue();
-  };
+    tx.oncomplete = () => resolve();
+    tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('新项目输出历史投影失败'));
+  });
+}
+
+async function syncNativeHistory(projectId: string): Promise<void> {
+  // 前缀只减少旧项目开销；实际身份由新库只读查询确认，不创建或迁移任何项目。
+  if (!projectId.startsWith('c2-')) return;
+  const { syncNativeOutputHistory } = await import('./nativeOutputHistorySync');
+  await syncNativeOutputHistory(projectId);
+}
+
+async function nativeHistoryView(projectId: string, records: HistoryRecord[]): Promise<HistoryRecord[]> {
+  if (!projectId.startsWith('c2-')) return records;
+  const { hydrateNativeOutputHistoryRecords } = await import('./nativeOutputHistorySync');
+  return hydrateNativeOutputHistoryRecords(projectId, records);
 }
 
 async function trimProjectHistory(projectId: string): Promise<void> {
@@ -1060,8 +1159,9 @@ export async function getHistoryEntriesPage(
   cursor: HistoryPageCursor | null = null,
   query: HistoryQuery = {},
 ): Promise<HistoryPage> {
+  await syncNativeHistory(projectId);
   const db = await openDB();
-  return new Promise((resolve, reject) => {
+  const page = await new Promise<HistoryPage>((resolve, reject) => {
     const tx = db.transaction([STORE_HISTORY, STORE_METADATA], 'readonly');
     const index = tx.objectStore(STORE_HISTORY).index('projectId_timestamp_id');
     const request = index.openCursor(projectHistoryRange(projectId, cursor), 'prev');
@@ -1094,6 +1194,7 @@ export async function getHistoryEntriesPage(
     };
     request.onerror = () => { /* 事务统一报告。 */ };
   });
+  return { ...page, records: await nativeHistoryView(projectId, page.records) };
 }
 
 /** 仅在用户显式导出时扫描并返回全部匹配记录。 */
@@ -1101,8 +1202,9 @@ export async function getHistoryEntriesForExport(
   projectId: string,
   query: HistoryQuery = {},
 ): Promise<HistoryRecord[]> {
+  await syncNativeHistory(projectId);
   const db = await openDB();
-  return new Promise((resolve, reject) => {
+  const records = await new Promise<HistoryRecord[]>((resolve, reject) => {
     const tx = db.transaction([STORE_HISTORY, STORE_METADATA], 'readonly');
     const request = tx.objectStore(STORE_HISTORY)
       .index('projectId_timestamp_id')
@@ -1122,12 +1224,14 @@ export async function getHistoryEntriesForExport(
     };
     request.onerror = () => { /* 事务统一报告。 */ };
   });
+  return nativeHistoryView(projectId, records);
 }
 
 /** 使用 nodeId 索引读取指定节点的全部历史记录，按生成时间倒序返回。 */
 export async function getNodeHistoryEntries(projectId: string, nodeId: string): Promise<HistoryRecord[]> {
+  await syncNativeHistory(projectId);
   const db = await openDB();
-  return new Promise((resolve, reject) => {
+  const entries = await new Promise<HistoryRecord[]>((resolve, reject) => {
     const tx = db.transaction([STORE_HISTORY, STORE_METADATA], 'readonly');
     let records: HistoryRecord[] = [];
     const request = tx.objectStore(STORE_HISTORY)
@@ -1141,9 +1245,11 @@ export async function getNodeHistoryEntries(projectId: string, nodeId: string): 
     tx.oncomplete = () => resolve(records);
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('生成记录读取失败'));
   });
+  return nativeHistoryView(projectId, entries);
 }
 
 export async function getHistoryEntryCount(projectId: string): Promise<number> {
+  await syncNativeHistory(projectId);
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE_HISTORY, 'readonly')
@@ -1239,6 +1345,7 @@ export async function claimLegacyHistoryEntries(
 
 /** 清空指定项目的全部历史记录 */
 export async function clearAllHistoryEntries(projectId: string): Promise<void> {
+  await syncNativeHistory(projectId);
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_HISTORY, 'readwrite');
@@ -1246,12 +1353,7 @@ export async function clearAllHistoryEntries(projectId: string): Promise<void> {
     const request = store
       .index('projectId_timestamp_id')
       .openKeyCursor(projectHistoryRange(projectId));
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) return;
-      store.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(store, request);
     tx.oncomplete = () => resolve();
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('历史记录清理失败'));
   });
@@ -1259,6 +1361,7 @@ export async function clearAllHistoryEntries(projectId: string): Promise<void> {
 
 /** 使用 nodeId 索引批量删除指定节点的历史记录。 */
 export async function deleteNodeHistoryEntries(projectId: string, nodeId: string): Promise<void> {
+  await syncNativeHistory(projectId);
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_HISTORY, 'readwrite');
@@ -1266,12 +1369,7 @@ export async function deleteNodeHistoryEntries(projectId: string, nodeId: string
     const request = store
       .index('projectId_nodeId')
       .openKeyCursor(IDBKeyRange.only([projectId, nodeId]));
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) return;
-      store.delete(cursor.primaryKey);
-      cursor.continue();
-    };
+    deleteKeyCursorEntries(store, request);
     request.onerror = () => reject(request.error);
     tx.oncomplete = () => resolve();
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('节点历史记录清理失败'));
@@ -1293,7 +1391,7 @@ export interface AssetMetaRecord {
 // 图片编辑信息按资产身份及内容摘要独立存放，避免标签更新或历史裁剪覆盖它。
 const ASSET_IMAGE_PREFIX = 'asset-image:';
 
-export async function getAssetImageRecords(signal?: AbortSignal): Promise<import('../types/assetImage').AssetImageRecord[]> {
+async function legacy_getAssetImageRecords(signal?: AbortSignal): Promise<import('../types/assetImage').AssetImageRecord[]> {
   if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
   const db = await openDB();
   if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
@@ -1322,6 +1420,20 @@ export async function putAssetImageRecord(record: import('../types/assetImage').
     || record.revision !== expectedRevision + 1) throw new Error('图片信息无效');
   const replacement = options?.tagReplacement;
   if (replacement && (replacement.tags.length > 16 || replacement.tags.some((tag) => !tag.trim() || tag.length > 40))) throw new Error('标签信息无效');
+  if (record.assetId.startsWith('na2-')) {
+    return (await import('./indexedDb/nativeAssetRepository')).updateNativeAsset(record.assetId, (asset) => {
+      const current = asset.images?.find((image) => image.id === record.id);
+      if ((current?.revision ?? 0) !== expectedRevision || current && current.contentDigest !== record.contentDigest) throw new Error('图片信息已变化，请重新读取');
+      if (replacement) {
+        const tags = asset.tags;
+        if (replacement.expected ? !tags || tags.updatedAt !== replacement.expected.updatedAt
+          || JSON.stringify(tags.tags) !== JSON.stringify(replacement.expected.tags) : !!tags) throw new Error('标签已变化，请重新读取');
+        asset.tags = { assetId: record.assetId, tags: [...replacement.tags], taggedBy: 'vision', updatedAt: Date.now() };
+      }
+      asset.images = [...(asset.images ?? []).filter((image) => image.id !== record.id), structuredClone(record)];
+      return asset;
+    }, { signal: options?.signal });
+  }
   options?.signal?.throwIfAborted();
   const db = await openDB();
   options?.signal?.throwIfAborted();
@@ -1366,7 +1478,7 @@ export async function putAssetImageRecord(record: import('../types/assetImage').
 }
 
 /** 获取全部资产元数据（一次性读入，组件侧建 Map 合并） */
-export async function getAllAssetMeta(): Promise<AssetMetaRecord[]> {
+async function legacy_getAllAssetMeta(): Promise<AssetMetaRecord[]> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_ASSET_META_V2, 'readonly');
@@ -1379,6 +1491,7 @@ export async function getAllAssetMeta(): Promise<AssetMetaRecord[]> {
 
 /** 批量任务逐项捕获当前标签基线，避免为每张图片读取整个标签目录。 */
 export async function getAssetMetaById(assetId: string): Promise<AssetMetaRecord | undefined> {
+  if (assetId.startsWith('na2-')) return (await (await import('./indexedDb/nativeAssetRepository')).readNativeAsset(assetId))?.tags;
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE_ASSET_META_V2, 'readonly').objectStore(STORE_ASSET_META_V2).get(assetId);
@@ -1389,6 +1502,10 @@ export async function getAssetMetaById(assetId: string): Promise<AssetMetaRecord
 
 /** 写入/更新单个文件的标签元数据 */
 export async function putAssetMeta(record: AssetMetaRecord): Promise<void> {
+  if (record.assetId.startsWith('na2-')) {
+    const { path: _path, ...tags } = record;
+    return (await import('./indexedDb/nativeAssetRepository')).updateNativeAsset(record.assetId, (asset) => ({ ...asset, tags }));
+  }
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_ASSET_META_V2, STORE_METADATA], 'readwrite');
@@ -1403,6 +1520,7 @@ export async function putAssetMeta(record: AssetMetaRecord): Promise<void> {
 
 /** 删除单个文件的标签元数据 */
 export async function deleteAssetMeta(assetId: string): Promise<void> {
+  if (assetId.startsWith('na2-')) return (await import('./indexedDb/nativeAssetRepository')).updateNativeAsset(assetId, (asset) => { delete asset.tags; return asset; });
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_ASSET_META_V2, 'readwrite');
@@ -1412,121 +1530,20 @@ export async function deleteAssetMeta(assetId: string): Promise<void> {
   });
 }
 
-// ============================================
-// Chat Conversations CRUD
-// ============================================
-
-export interface ChatConversationRecord {
-  archiveOriginId?: string;
-  id: string;
-  projectId: string;
-  title: string;
-  titleSource: 'auto' | 'user';
-  pinned: boolean;
-  archived: boolean;
-  agentMode: AgentMode;
-  mcpServerIds?: string[];
-  mcpSelectionRevision?: string;
-  contextSummary?: ConversationContextSummary;
-  createdAt: number;
-  updatedAt: number;
-  lastMessageAt?: number;
-  lastMessagePreview?: string;
-  messageCount: number;
-  deletedAt?: number;
-}
-
-/** 保存 / 更新会话 */
-export async function putChatConversation(record: ChatConversationRecord): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_CHAT_CONVERSATIONS, 'readwrite');
-    tx.objectStore(STORE_CHAT_CONVERSATIONS).put(record);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-/** 获取指定项目的全部会话（不含已删除） */
-export async function getProjectConversations(projectId: string): Promise<ChatConversationRecord[]> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_CHAT_CONVERSATIONS, 'readonly');
-    const store = tx.objectStore(STORE_CHAT_CONVERSATIONS);
-    const index = store.index('projectId_updatedAt');
-    const range = IDBKeyRange.bound([projectId, 0], [projectId, Infinity]);
-    const request = index.getAll(range);
-    request.onsuccess = () => {
-      const all = request.result as ChatConversationRecord[];
-      // 过滤掉已删除的
-      resolve(all.filter((c) => !c.deletedAt));
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-/** 获取回收站中的会话 */
-export async function getTrashConversations(projectId: string): Promise<ChatConversationRecord[]> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_CHAT_CONVERSATIONS, 'readonly');
-    const store = tx.objectStore(STORE_CHAT_CONVERSATIONS);
-    const index = store.index('deletedAt');
-    const range = IDBKeyRange.lowerBound(1);
-    const request = index.getAll(range);
-    request.onsuccess = () => {
-      const all = request.result as ChatConversationRecord[];
-      resolve(all.filter((c) => c.projectId === projectId));
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// ============================================
-// Chat Messages CRUD
-// ============================================
-
-export interface ChatMessageRecord {
-  archiveOriginId?: string;
-  id: string;
-  projectId: string;
-  conversationId: string;
-  sequence: number;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  status: string;
-  requestId?: string;
-  agentTaskId?: string;
-  modelId?: string;
-  createdAt: number;
-  updatedAt: number;
-  finishReason?: string;
-  commands?: unknown;
-  executionResults?: unknown;
-  mediaStatus?: string;
-  mediaError?: string;
-  mediaResult?: unknown;
-  canvasStatus?: string;
-  canvasNodeId?: string;
-  canvasError?: string;
-  sources?: unknown;
-}
+export {
+  putChatConversation,
+  setConversationCreationProfileCAS,
+  getProjectConversations,
+  getTrashConversations,
+  forkChatConversationAtMessage,
+} from './indexedDb/chatConversationRepository';
+export type { ChatConversationRecord, ChatMessageRecord } from './indexedDb/chatConversationRepository';
 
 export interface LegacyAssetMetaRecord {
   path: string;
   tags: string[];
   taggedBy?: 'manual' | 'comfyui' | 'vision';
   updatedAt: number;
-}
-
-export async function getLegacyAssetMeta(path: string): Promise<LegacyAssetMetaRecord | undefined> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_ASSET_META, 'readonly');
-    const request = tx.objectStore(STORE_ASSET_META).get(path);
-    request.onsuccess = () => resolve(request.result as LegacyAssetMetaRecord | undefined);
-    request.onerror = () => reject(request.error);
-  });
 }
 
 export interface AssetIndexRecord {
@@ -1548,6 +1565,11 @@ export interface AssetIndexRecord {
 }
 
 export async function getAssetIndexById(assetId: string): Promise<AssetIndexRecord | undefined> {
+  if (assetId.startsWith('na2-')) {
+    const native = await import('./indexedDb/nativeAssetRepository');
+    const record = await native.readNativeAsset(assetId);
+    return record ? native.resolveNativeAssetIndex(record) : undefined;
+  }
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_ASSET_INDEX, 'readonly');
@@ -1557,7 +1579,7 @@ export async function getAssetIndexById(assetId: string): Promise<AssetIndexReco
   });
 }
 
-export async function getAllAssetIndexes(): Promise<AssetIndexRecord[]> {
+async function legacy_getAllAssetIndexes(): Promise<AssetIndexRecord[]> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE_ASSET_INDEX, 'readonly').objectStore(STORE_ASSET_INDEX).getAll();
@@ -1566,7 +1588,7 @@ export async function getAllAssetIndexes(): Promise<AssetIndexRecord[]> {
   });
 }
 
-export async function getAssetIndexByPath(path: string): Promise<AssetIndexRecord | undefined> {
+async function legacy_getAssetIndexByPath(path: string): Promise<AssetIndexRecord | undefined> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_ASSET_INDEX, 'readonly');
@@ -1576,7 +1598,7 @@ export async function getAssetIndexByPath(path: string): Promise<AssetIndexRecor
   });
 }
 
-export async function getAssetIndexesByFingerprint(fingerprint: string): Promise<AssetIndexRecord[]> {
+async function legacy_getAssetIndexesByFingerprint(fingerprint: string): Promise<AssetIndexRecord[]> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_ASSET_INDEX, 'readonly');
@@ -1587,7 +1609,7 @@ export async function getAssetIndexesByFingerprint(fingerprint: string): Promise
 }
 
 /** 目录扫描的小批路径查询；一次事务读取，按输入顺序返回，不扫描整张索引表。 */
-export async function getAssetIndexesByPaths(paths: readonly string[]): Promise<Array<AssetIndexRecord | undefined>> {
+async function legacy_getAssetIndexesByPaths(paths: readonly string[]): Promise<Array<AssetIndexRecord | undefined>> {
   if (!paths.length) return [];
   if (paths.length > 128) throw new Error('资产索引查询批次过大');
   const db = await openDB();
@@ -1611,6 +1633,20 @@ export async function putAssetIndexes(
 ): Promise<AssetIndexRecord[]> {
   if (!records.length) return [];
   if (records.length > 128) throw new Error('资产索引保存批次过大');
+  if (records.some((record) => record.assetId.startsWith('na2-'))) {
+    const verified = new Map<string, AssetIndexRecord>();
+    const normalize = (value: string) => { const path = value.replace(/\\/g, '/').replace(/\/+$/, ''); return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path; };
+    for (const record of records) {
+      if (!record.assetId.startsWith('na2-')) continue;
+      const current = await getAssetIndexById(record.assetId);
+      if (!current || normalize(current.path) !== normalize(record.path)
+        || current.size !== record.size || current.projectId !== record.projectId) throw new Error('恢复素材的身份或字节已变化，不能覆盖原索引');
+      verified.set(record.assetId, current);
+    }
+    const legacy = await putAssetIndexes(records.filter((record) => !record.assetId.startsWith('na2-')), options);
+    let position = 0;
+    return records.map((record) => verified.get(record.assetId) ?? legacy[position++]);
+  }
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const stores = options.migrateLegacyTags
@@ -1685,6 +1721,7 @@ export async function forgetMissingAssetRecords(
 ): Promise<{ assetIds: string[]; historyIds: string[]; deletedHistoryCounts: Record<string, number> }> {
   assertDramaAssetWriteCurrent(options);
   const snapshot = expected.map((record) => ({ ...record }));
+  if (snapshot.some((record) => record.assetId.startsWith('na2-'))) throw new Error('新项目恢复素材需从项目恢复入口处理，旧素材清理不能改写其身份');
   const assetIds = new Set(snapshot.map((record) => record.assetId));
   if (snapshot.length > 500 || assetIds.size !== snapshot.length || snapshot.some((record) => (
     typeof record.assetId !== 'string' || !record.assetId.trim() || record.assetId.length > 256
@@ -1791,6 +1828,7 @@ export async function forgetMissingAssetRecords(
 /** 仅回收尚未提交的资产包索引；位置已改变的记录不属于本轮可清理范围。 */
 export async function deleteImportedAssetIndexes(entries: readonly { assetId: string; path: string }[]): Promise<void> {
   if (!entries.length) return;
+  if (entries.some((entry) => entry.assetId.startsWith('na2-'))) throw new Error('旧导入清理不能删除新项目恢复素材索引');
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_ASSET_INDEX, 'readwrite');
@@ -1973,13 +2011,7 @@ export async function deleteConversationMessages(conversationId: string): Promis
       [conversationId, Infinity],
     );
     const cursorReq = index.openKeyCursor(range);
-    cursorReq.onsuccess = () => {
-      const cursor = cursorReq.result;
-      if (cursor) {
-        store.delete(cursor.primaryKey);
-        cursor.continue();
-      }
-    };
+    deleteKeyCursorEntries(store, cursorReq);
     cursorReq.onerror = () => reject(cursorReq.error);
     tx.oncomplete = () => resolve();
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('会话消息删除失败'));
@@ -2001,13 +2033,7 @@ export async function permanentlyDeleteConversation(convId: string): Promise<voi
     const msgIndex = msgStore.index('conversationId_sequence');
     const range = IDBKeyRange.bound([convId, 0], [convId, Infinity]);
     const cursorReq = msgIndex.openKeyCursor(range);
-    cursorReq.onsuccess = () => {
-      const cursor = cursorReq.result;
-      if (cursor) {
-        msgStore.delete(cursor.primaryKey);
-        cursor.continue();
-      }
-    };
+    deleteKeyCursorEntries(msgStore, cursorReq);
     // 删除该会话的 Agent 任务。
     const taskStore = tx.objectStore(STORE_AGENT_TASKS);
     const taskIndex = taskStore.index('conversationId_updatedAt');
@@ -2226,7 +2252,9 @@ export async function putAgentTask(record: AgentTaskRecord): Promise<void> {
         currentRequest.onsuccess = () => {
           const current = currentRequest.result as AgentTask | undefined;
           const operation = current?.mcpOperation ?? next.mcpOperation;
-          if (!operation) { tasks.put(next); return; }
+          // v2 图只由下方 CAS 事务推进；后台旧快照不能覆盖已领取的节点租约。
+          const protectedTask = current?.teamRun?.version === 2 ? { ...next, teamRun: current.teamRun } : next;
+          if (!operation) { tasks.put(protectedTask); return; }
           const bindingRequest = metadata.get(operation.bindingId);
           bindingRequest.onsuccess = () => {
             try {
@@ -2237,7 +2265,7 @@ export async function putAgentTask(record: AgentTaskRecord): Promise<void> {
                 throw new Error('MCP 操作任务身份不一致');
               }
               if (binding.taskDeletedAt || !current?.mcpOperation) return;
-              tasks.put({ ...next, mcpOperation: current.mcpOperation });
+              tasks.put({ ...protectedTask, mcpOperation: current.mcpOperation });
             } catch { tx.abort(); }
           };
         };
@@ -2245,6 +2273,43 @@ export async function putAgentTask(record: AgentTaskRecord): Promise<void> {
     });
     tx.oncomplete = () => resolve();
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('文件引用写入事务失败'));
+  });
+}
+
+/** 同一事务比较并推进图版本。结构变更/节点领取/完成均不能借普通 put 绕过。 */
+export async function updateTeamRunCAS(
+  taskId: string,
+  expected: { revision: number; boardRevision: number },
+  update: (run: AgentTeamRun) => AgentTeamRun,
+): Promise<AgentTask> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_AGENT_TASKS, STORE_METADATA], 'readwrite');
+    const tasks = tx.objectStore(STORE_AGENT_TASKS);
+    let result: AgentTask | undefined;
+    let failure: Error | undefined;
+    const request = tasks.get(taskId);
+    request.onsuccess = () => {
+      const task = request.result as AgentTask | undefined;
+      const run = task?.teamRun;
+      if (!task || task.executionKind !== 'team' || !run || run.version !== 2
+        || run.revision !== expected.revision || (run.boardRevision ?? 0) !== expected.boardRevision) {
+        failure = new Error('TEAM_GRAPH_CAS_CONFLICT'); tx.abort(); return;
+      }
+      const deleted = tx.objectStore(STORE_METADATA).get(`project-deleted:${task.projectId}`);
+      deleted.onsuccess = () => {
+        try {
+          if (deleted.result) throw new Error('项目已删除');
+          const next = update(structuredClone(run));
+          if (next.id !== run.id || next.version !== 2 || !Number.isSafeInteger(next.revision)
+            || next.revision < run.revision || !Number.isSafeInteger(next.boardRevision)
+            || next.boardRevision! <= (run.boardRevision ?? 0)) throw new Error('团队图 CAS 必须推进有效版本');
+          result = { ...task, teamRun: structuredClone(next), updatedAt: Date.now() }; tasks.put(result);
+        } catch (error) { failure = error instanceof Error ? error : new Error('团队图更新失败'); tx.abort(); }
+      };
+    };
+    tx.oncomplete = () => result ? resolve(result) : reject(new Error('团队图更新未完成'));
+    tx.onerror = tx.onabort = () => reject(failure ?? tx.error ?? new Error('团队图事务失败'));
   });
 }
 
@@ -2384,13 +2449,7 @@ export async function deleteProjectMemories(projectId: string): Promise<void> {
     const index = store.index('projectId_updatedAt');
     const range = IDBKeyRange.bound([projectId, 0], [projectId, Infinity]);
     const cursorRequest = index.openKeyCursor(range);
-    cursorRequest.onsuccess = () => {
-      const cursor = cursorRequest.result;
-      if (cursor) {
-        store.delete(cursor.primaryKey);
-        cursor.continue();
-      }
-    };
+    deleteKeyCursorEntries(store, cursorRequest);
     cursorRequest.onerror = () => reject(cursorRequest.error);
     tx.oncomplete = () => resolve();
     tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('项目记忆清理失败'));
@@ -2519,4 +2578,55 @@ export async function putProjectVisualDescription(
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+/** 新项目恢复索引优先，旧索引保持原记录与原身份。 */
+export async function getAllAssetIndexes(): Promise<AssetIndexRecord[]> {
+  const [legacy, rows] = await Promise.all([legacy_getAllAssetIndexes(), availableNativeAssetIndexes()]);
+  return [...legacy, ...rows];
+}
+export async function getAssetIndexByPath(path: string): Promise<AssetIndexRecord | undefined> {
+  const [legacy, native] = await Promise.all([legacy_getAssetIndexByPath(path), availableNativeAssetIndexes([path])]);
+  const normalize = (value: string) => { const path = value.replace(/\\/g, '/').replace(/\/+$/, ''); return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path; };
+  const matches = native.filter((index) => normalize(index.path) === normalize(path));
+  if (matches.length > 1) throw new Error('同一文件存在多个恢复素材身份，请按原ID核对');
+  // 新库提交的恢复副本是该路径的权威；旧扫描提前发现的索引仍留给旧历史按ID读取。
+  return matches[0] ?? legacy;
+}
+export async function getAssetIndexesByFingerprint(fingerprint: string): Promise<AssetIndexRecord[]> {
+  const [legacy, rows] = await Promise.all([legacy_getAssetIndexesByFingerprint(fingerprint), availableNativeAssetIndexes()]);
+  return [...legacy, ...rows.filter((row) => row.fingerprint === fingerprint)];
+}
+export async function getAssetIndexesByPaths(paths: readonly string[]): Promise<Array<AssetIndexRecord | undefined>> {
+  if (paths.length > 128) throw new Error('资产索引查询批次过大');
+  const [legacy, indexes] = await Promise.all([legacy_getAssetIndexesByPaths(paths), availableNativeAssetIndexes(paths)]);
+  const normalize = (value: string) => { const path = value.replace(/\\/g, '/').replace(/\/+$/, ''); return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path; };
+  return paths.map((path, i) => {
+    const matches = indexes.filter((row) => normalize(row.path) === normalize(path));
+    if (matches.length > 1) throw new Error('同一文件存在多个恢复素材身份，请按原ID核对');
+    return matches[0] ?? legacy[i];
+  });
+}
+async function availableNativeAssetIndexes(paths?: readonly string[]): Promise<AssetIndexRecord[]> {
+  const native = await import('./indexedDb/nativeAssetRepository');
+  const roots = new Map<string, string | null>(), indexes: AssetIndexRecord[] = [];
+  for (const row of await native.readNativeAssets()) {
+    if (paths && !paths.some((path) => path.replace(/\\/g, '/').toLowerCase().endsWith('/' + row.relativePath.toLowerCase()))) continue;
+    const rootKey = JSON.stringify([row.projectId, row.rootRef]);
+    if (roots.get(rootKey) === null) continue;
+    try {
+      const index = await native.resolveNativeAssetIndex(row, roots.get(rootKey) ?? undefined);
+      roots.set(rootKey, index.rootPath!); indexes.push(index);
+    } catch { roots.set(rootKey, null); /* 不可用的新项目根不能阻断旧项目目录；显式按ID读取仍会报告错误。 */ }
+  }
+  return indexes;
+}
+export async function getAllAssetMeta(): Promise<AssetMetaRecord[]> {
+  const [legacy, native] = await Promise.all([legacy_getAllAssetMeta(), (await import('./indexedDb/nativeAssetRepository')).readNativeAssets()]);
+  return [...legacy, ...native.flatMap((asset) => asset.tags ? [asset.tags] : [])];
+}
+export async function getAssetImageRecords(signal?: AbortSignal): Promise<import('../types/assetImage').AssetImageRecord[]> {
+  signal?.throwIfAborted();
+  const [legacy, native] = await Promise.all([legacy_getAssetImageRecords(signal), (await import('./indexedDb/nativeAssetRepository')).readNativeAssets({ signal })]);
+  signal?.throwIfAborted(); return [...legacy, ...native.flatMap((asset) => asset.images ?? [])];
 }

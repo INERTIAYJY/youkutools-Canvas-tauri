@@ -2,18 +2,26 @@
  * agentRoundExecutor — 回归测试：provider approval round parity。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentApprovalResolution, AgentMode, AgentTask } from '../../../src/types/agent';
+import { DEFAULT_AGENT_TASK_METRICS, type AgentApprovalResolution, type AgentMode, type AgentTask } from '../../../src/types/agent';
+import type { AssistantModelMessage } from '../../../src/services/ai/assistantStream';
 import type { ProposedToolCall, ToolResultSummary } from '../../../src/types/chat';
+import * as taskService from '../../../src/services/chat/agentTaskService';
+import * as resultService from '../../../src/services/chat/agentResultService';
 import { executeRegisteredAgentToolCall } from '../../../src/services/chat/agentToolExecution';
 import { MCP_GLOBAL_TOOL_NAMES, MCP_SETTINGS_CONVERSATION_ID, MCP_SETTINGS_SCOPE_ID, MCP_SETTINGS_TOOL_NAMES } from '../../../src/services/mcp/mcpSettingsScope';
+import { buildChatApiRequest, type ChatApiMessage } from '../../../src/services/ai/chatApiProtocol';
 
 const streamAssistantReplyMock = vi.hoisted(() => vi.fn());
+const resolveAssistantModelMock = vi.hoisted(() => vi.fn<
+  (projectId?: string | null, modelId?: string) => { supportsTools?: boolean } | null
+>(() => ({ supportsTools: true })));
 const executeGenerationMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 
 vi.mock('../../../src/services/generationService', () => ({ executeGeneration: executeGenerationMock }));
 
 vi.mock('../../../src/services/ai/assistantStream', () => ({
   streamAssistantReply: streamAssistantReplyMock,
+  resolveAssistantModel: resolveAssistantModelMock,
 }));
 
 vi.mock('../../../src/services/chat/contextManager', () => ({
@@ -41,6 +49,7 @@ import {
 import { useAppStore } from '../../../src/store/useAppStore';
 import { registerProviderConfigAgentTools } from '../../../src/services/chat/tools/providerConfigTools';
 import { clearProviderModelCatalogsForTests, clearProviderModelCatalogsForTask, createProviderModelCatalog } from '../../../src/services/chat/providerModelCatalogService';
+import { subscribeAgentLifecycle, type AgentLifecycleEvent } from '../../../src/services/chat/agentLifecycle';
 
 afterEach(() => { clearProviderModelCatalogsForTests(); vi.restoreAllMocks(); });
 
@@ -136,6 +145,8 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-1',
+    projectLoadStatus: 'ready',
+    projects: [{ id: 'project-1', name: '项目', createdAt: 1, updatedAt: 1 }],
     activeConversationId: 'conversation-1',
     conversations: [{
       id: 'conversation-1',
@@ -152,6 +163,7 @@ beforeEach(() => {
     agentTasks: [createTask()],
   });
   streamAssistantReplyMock.mockReset();
+  resolveAssistantModelMock.mockReset().mockReturnValue({ supportsTools: true });
   executeGenerationMock.mockClear();
 });
 
@@ -174,6 +186,89 @@ function arrangeCalls(calls: ProposedToolCall[], duringStream?: () => void) {
     calls.forEach((call) => onEvent({ type: 'tool.call.final', call }));
   });
 }
+
+it('does not call the model when the execution persistence barrier fails', async () => {
+  const saving = vi.spyOn(taskService, 'saveAgentTask').mockRejectedValue(new Error('injected storage failure'));
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    arrangeCalls([]);
+    await expect(runRound()).rejects.toMatchObject({ code: 'AGENT_DURABILITY_FAILED' });
+    expect(streamAssistantReplyMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0].status).toBe('paused');
+    await Promise.resolve();
+  } finally { saving.mockRestore(); warning.mockRestore(); }
+});
+
+it.each(['success', 'error'] as const)('先耐久保存真实%s步骤，再进入大结果交付；交付失败不改写effect结论', async (returnedStatus) => {
+  const execute = vi.fn(async () => ({ status: returnedStatus, summary: '原工具执行结论', modelContent: '大结果'.repeat(4000) }));
+  registerAgentTool({ id: 'paid_result_boundary', title: '生成', description: '生成', effect: 'media_generation',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  const durableSnapshots: AgentTask[] = [];
+  const capture = vi.spyOn(resultService, 'captureAgentResult').mockImplementation(async () => {
+    const snapshot = await taskService.loadAgentTask('task-round');
+    if (!snapshot) throw new Error('工具结算尚未落盘');
+    durableSnapshots.push(snapshot);
+    throw new Error('模拟成功结算后进程中断或交付失败');
+  });
+  const call = { callId: 'original-paid-call', toolId: 'paid_result_boundary', input: {} };
+  const result = await executeRegisteredAgentToolCall({ taskId: 'task-round', call,
+    signal: new AbortController().signal, transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }) });
+  const terminalStatus = returnedStatus === 'success' ? 'succeeded' : 'failed';
+  expect(durableSnapshots[0]).toMatchObject({ toolCallCount: 1,
+    steps: [{ status: terminalStatus, outputSummary: '原工具执行结论',
+      toolCall: { callId: call.callId, resultSummary: '原工具执行结论', finishedAt: expect.any(Number) } }],
+    dispatches: [{ phase: 'settled', outcome: terminalStatus }],
+  });
+  expect(result).toMatchObject({ effectOutcome: returnedStatus, summary: { status: 'error', errorCode: 'AGENT_RESULT_DELIVERY_FAILED' } });
+  expect(useAppStore.getState().agentTasks[0]).toMatchObject({ status: 'paused', steps: [{ status: terminalStatus }],
+    dispatches: [{ phase: 'settled', outcome: terminalStatus }] });
+  expect(execute).toHaveBeenCalledOnce();
+  if (returnedStatus === 'success') {
+    // 只恢复结算落盘时的快照，丢弃进程中其后全部交付更新，重放原call仍不能重新付费。
+    const interrupted = durableSnapshots[0];
+    useAppStore.setState({ agentTasks: [{ ...interrupted, status: 'running' }] });
+    capture.mockRestore();
+    const replay = await executeRegisteredAgentToolCall({ taskId: 'task-round', call,
+      signal: new AbortController().signal, transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }) });
+    expect(replay.summary).toMatchObject({ status: 'success', summary: expect.stringContaining('复用先前成功结果') });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().agentTasks[0].dispatches).toEqual(interrupted.dispatches);
+  }
+});
+
+it('旧只读成功回执和本轮retryable错误不阻止只读重试', async () => {
+  const execute = vi.fn()
+    .mockResolvedValueOnce({ status: 'error', summary: '网络超时', modelContent: 'retry', retryable: true })
+    .mockResolvedValueOnce({ status: 'success', summary: '读取完成', modelContent: 'done' });
+  registerAgentTool({ id: 'read_retry_boundary', title: '读取', description: '读取', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  useAppStore.getState().updateAgentTask('task-round', { dispatches: [{ id: 'old-read', kind: 'tool',
+    toolId: 'read_retry_boundary', effect: 'read', stepId: 'missing-old-step', phase: 'settled', outcome: 'succeeded', preparedAt: 1 }] });
+  const result = await executeRegisteredAgentToolCall({ taskId: 'task-round',
+    call: { callId: 'read-again', toolId: 'read_retry_boundary', input: {} }, signal: new AbortController().signal,
+    transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }) });
+  expect(result.summary.status).toBe('success');
+  expect(execute).toHaveBeenCalledTimes(2);
+  expect(useAppStore.getState().agentTasks[0].steps[0]).toMatchObject({ status: 'succeeded', toolCall: { retryCount: 1 } });
+  expect(useAppStore.getState().agentTasks[0].dispatches?.slice(-2).map((item) => item.outcome)).toEqual(['failed', 'succeeded']);
+});
+
+it('最小工具结算保存失败时暂停，不启动后续付费调用', async () => {
+  const execute = vi.fn(async () => ({ status: 'success' as const, summary: '已生成', modelContent: 'done' }));
+  registerAgentTool({ id: 'settlement_failure_boundary', title: '生成', description: '生成', effect: 'media_generation',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  const save = taskService.saveAgentTask;
+  vi.spyOn(taskService, 'saveAgentTask').mockImplementation(async (task) => {
+    if (task.dispatches?.some((item) => item.kind === 'tool' && item.phase === 'settled')) throw new Error('结算存储失败');
+    await save(task);
+  });
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  arrangeCalls([{ callId: 'first-paid', toolId: 'settlement_failure_boundary', input: {} },
+    { callId: 'next-paid', toolId: 'settlement_failure_boundary', input: {} }]);
+  await expect(runRound()).rejects.toMatchObject({ code: 'AGENT_DURABILITY_FAILED' });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(useAppStore.getState().agentTasks[0]).toMatchObject({ status: 'paused', pausedReason: 'durability_failed' });
+});
 
 it.each([false, true])('executes application settings without a project only under the closed allowlist (invalid %s)', async (invalid) => {
   const execute = vi.fn(async () => ({ status: 'success' as const, summary: 'preview', modelContent: 'preview' }));
@@ -228,6 +323,162 @@ function runRound(
   });
 }
 
+it('ordinary tasks keep all tool receipts after exceeding former cumulative and segment limits', async () => {
+  const execute = vi.fn(async () => ({ status: 'success' as const, summary: '读取完成', modelContent: 'done' }));
+  registerAgentTool({ id: 'read_past_old_budget', title: '读取', description: '读取', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  useAppStore.getState().updateAgentTask('task-round', {
+    modelRounds: 60, toolCallCount: 120, resumeCount: 8,
+    metrics: { ...DEFAULT_AGENT_TASK_METRICS, inputTokens: 1_500_000, outputTokens: 1 },
+  });
+  arrangeCalls([{ callId: 'read-a', toolId: 'read_past_old_budget', input: {} },
+    { callId: 'read-b', toolId: 'read_past_old_budget', input: {} }]);
+  const messages: AssistantModelMessage[] = [{ role: 'user', content: '继续完成当前任务' }];
+  const result = await executeAgentRound({
+    taskId: 'task-round', signal: new AbortController().signal, messages,
+    fullText: '', totalToolResultChars: 200_000,
+    transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }),
+  });
+
+  expect(result.outcome).toBe('continue');
+  expect(result.totalToolResultChars).toBe(200_008);
+  expect(execute).toHaveBeenCalledTimes(2);
+  expect(messages.filter((message) => message.role === 'tool')).toEqual([
+    expect.objectContaining({ tool_call_id: 'read-a' }),
+    expect.objectContaining({ tool_call_id: 'read-b' }),
+  ]);
+  expect(useAppStore.getState().agentTasks[0]).toMatchObject({ modelRounds: 61, toolCallCount: 122, resumeCount: 8 });
+});
+
+it('keeps the configured model-round budget for readonly child tasks', async () => {
+  useAppStore.getState().updateAgentTask('task-round', { parentTaskId: 'parent-1', modelRounds: 4 });
+
+  expect((await runRound()).outcome).toBe('paused');
+  expect(streamAssistantReplyMock).not.toHaveBeenCalled();
+  expect(useAppStore.getState().agentTasks[0].pausedReason).toBe('model_round_budget_exhausted');
+});
+
+it('delivers a bounded receipt for every result in a large tool batch', async () => {
+  vi.spyOn(resultService, 'captureAgentResult').mockResolvedValue({ modelContent: 'x'.repeat(12_000), truncated: false });
+  registerAgentTool({ id: 'large_batch_read', title: '读取结果', description: '读取结果', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    execute: async () => ({ status: 'success' as const, summary: '读取完成', modelContent: 'x'.repeat(12_000) }),
+  });
+  const calls = Array.from({ length: 20 }, (_, index) => ({ callId: `page-${index}`, toolId: 'large_batch_read', input: {} }));
+  arrangeCalls(calls);
+  const messages: AssistantModelMessage[] = [{ role: 'user', content: '按页读取' }];
+  const result = await executeAgentRound({
+    taskId: 'task-round', signal: new AbortController().signal, messages,
+    fullText: '', totalToolResultChars: 200_000,
+    transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }),
+  });
+
+  expect(result.outcome).toBe('continue');
+  const receipts = messages.filter((message) => message.role === 'tool');
+  expect(receipts).toHaveLength(calls.length);
+  const contents = receipts.map((message) => {
+    if (typeof message.content !== 'string') throw new Error('Tool receipt must contain serialized text');
+    return JSON.parse(message.content);
+  });
+  expect(contents.every((value: { truncated: boolean }) => value.truncated)).toBe(true);
+  expect(contents.reduce((total: number, value: { result: string }) => total + value.result.length, 0)).toBe(200_000);
+  expect(result.totalToolResultChars).toBe(400_000);
+});
+
+it('preserves a full serialized result page and its next cursor beyond the preview limit', async () => {
+  const page = { resultId: 'result-00000000-0000-0000-0000-000000000001',
+    offset: 0, nextOffset: 12_000, totalChars: 24_000, text: '\\'.repeat(12_000), eof: false, untrusted: true };
+  const pageContent = JSON.stringify(page);
+  registerAgentTool({ id: 'agent_result_read', title: '读取结果', description: '读取结果', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    execute: async () => ({ status: 'success' as const, summary: '已读取 0-12000 字', modelContent: pageContent, truncated: true }),
+  });
+  arrangeCalls([{ callId: 'read-full-page', toolId: 'agent_result_read', input: {} }]);
+  const messages: AssistantModelMessage[] = [{ role: 'user', content: '继续读取结果' }];
+  const result = await executeAgentRound({
+    taskId: 'task-round', signal: new AbortController().signal, messages,
+    fullText: '', totalToolResultChars: 200_000,
+    transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }),
+  });
+
+  expect(result.outcome).toBe('continue');
+  const receipt = messages.find((message) => message.role === 'tool');
+  expect(receipt).toBeDefined();
+  if (typeof receipt!.content !== 'string') throw new Error('Tool receipt must contain serialized text');
+  const content = JSON.parse(receipt!.content).result;
+  expect(content.length).toBeGreaterThan(12_000);
+  expect(JSON.parse(content)).toEqual(page);
+  expect(result.totalToolResultChars).toBe(200_000 + pageContent.length);
+});
+
+it('replays ordered Responses reasoning and function output across Agent rounds without persisting opaque context', async () => {
+  const execute = vi.fn(async () => ({ status: 'success' as const, summary: '已读取', modelContent: '{"nodes":2}' }));
+  registerAgentTool({ id: 'responses_read', title: 'Read', description: 'Read', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  const output = [
+    { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'opaque-round-context' },
+    { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', phase: 'commentary',
+      content: [{ type: 'output_text', text: '先读取', annotations: [] }] },
+    { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'responses_read', arguments: '{}', status: 'completed' },
+  ];
+  streamAssistantReplyMock.mockImplementationOnce(async ({ onEvent }) => {
+    onEvent({ type: 'text.delta', delta: '先读取' });
+    onEvent({ type: 'responses.context', output });
+    onEvent({ type: 'tool.call.final', call: { callId: 'call_1', toolId: 'responses_read', input: {} } });
+    onEvent({ type: 'done', finishReason: 'stop' });
+  });
+  const messages: ChatApiMessage[] = [{ role: 'user', content: '读取画布' }];
+  const controller = new AbortController();
+  const params = { taskId: 'task-round', signal: controller.signal, messages, fullText: '', totalToolResultChars: 0,
+    callbacks: {}, transitionTask: transitionAgentTask, waitForApproval: async () => ({ approved: true }) };
+  await expect(executeAgentRound(params)).resolves.toMatchObject({ outcome: 'continue' });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(JSON.stringify(useAppStore.getState().agentTasks)).not.toContain('opaque-round-context');
+  expect(JSON.stringify(messages)).not.toContain('opaque-round-context');
+  streamAssistantReplyMock.mockImplementationOnce(async ({ messages: nextMessages, onEvent }) => {
+    const request = buildChatApiRequest({ protocol: 'openai-responses', apiKey: 'fixture',
+      baseUrl: 'https://gateway.example/v1', model: 'configured-model', stream: true, messages: nextMessages });
+    const body = JSON.parse(String(request.init.body));
+    const reasoningIndex = body.input.findIndex((item: { type: string }) => item.type === 'reasoning');
+    expect(body.input.slice(reasoningIndex, reasoningIndex + output.length)).toEqual(output);
+    expect(body.input[reasoningIndex + output.length]).toMatchObject({ type: 'function_call_output', call_id: 'call_1' });
+    onEvent({ type: 'text.delta', delta: '读取完成' });
+    onEvent({ type: 'done', finishReason: 'stop' });
+  });
+  await expect(executeAgentRound(params)).resolves.toMatchObject({ outcome: 'completed' });
+});
+
+it.each(['plan', 'collaborative', 'autonomous'] as const)('Muse %s rounds complete ordinary answers with no offered or executed tools', async (mode) => {
+  const actualStream = await vi.importActual<typeof import('../../../src/services/ai/assistantStream')>(
+    '../../../src/services/ai/assistantStream',
+  );
+  resolveAssistantModelMock.mockImplementation(actualStream.resolveAssistantModel);
+  useAppStore.setState((state) => ({ config: { ...state.config, assistantModelId: 'muse/muse-chat',
+    generalModels: [], providers: { muse: { name: 'Muse', apiKey: '', catalogId: 'muse', selectedModels: [
+      { id: 'muse-chat', name: 'Muse 问答', category: 'text', provider: 'muse', inputModalities: ['text', 'image'] },
+    ] } },
+  }, conversations: state.conversations.map((conversation) => ({ ...conversation, agentMode: mode })),
+  agentTasks: state.agentTasks.map((task) => ({ ...task, mode })) }));
+  expect(actualStream.resolveAssistantModel('project-1')).toMatchObject({ supportsTools: false, transport: 'muse-webview' });
+  const execute = vi.fn(async () => ({ status: 'success' as const, summary: '读取完成', modelContent: '读取完成' }));
+  registerAgentTool({ id: 'muse_read_boundary', title: '读取', description: '读取', effect: 'read',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute });
+  streamAssistantReplyMock.mockImplementation(async ({ tools, messages, onEvent }) => {
+    expect(tools).toEqual([]);
+    expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'system',
+      content: expect.stringContaining('不能调用应用工具') })]));
+    onEvent({ type: 'text.delta', delta: '普通问答回复' });
+    onEvent({ type: 'done', finishReason: 'stop' });
+    return '普通问答回复';
+  });
+  const onComplete = vi.fn();
+  await expect(runRound(undefined, { onComplete })).resolves.toMatchObject({ outcome: 'completed', fullText: '普通问答回复' });
+  expect(onComplete).toHaveBeenCalledWith('普通问答回复');
+  expect(execute).not.toHaveBeenCalled();
+  expect(useAppStore.getState().agentTasks[0].toolCallCount).toBe(0);
+  expect(streamAssistantReplyMock).toHaveBeenCalledOnce();
+});
+
 function arrangeRead(beforeReturn: () => void) {
   registerAgentTool({
     id: 'round_read_boundary',
@@ -269,6 +520,53 @@ function arrangeMedia(kind: 'image' | 'video' | 'audio' = 'image') {
 }
 
 describe('agent round executor', () => {
+  it.each([
+    { entry: 'round', approved: true }, { entry: 'round', approved: false },
+    { entry: 'registered', approved: true }, { entry: 'registered', approved: false },
+  ] as const)('保留 $entry 入口的审批步骤、指纹与事件，批准=$approved', async ({ entry, approved }) => {
+    const execute = vi.fn(async () => ({ status: 'success' as const, summary: 'done', modelContent: 'done' }));
+    registerAgentTool<{ query: string }>({
+      id: 'approval_parity', title: 'Approval parity', description: 'Approval parity', effect: 'file_write',
+      inputSchema: { type: 'object', required: ['query'], additionalProperties: false, properties: { query: { type: 'string' } } },
+      summarizeInput: ({ query }) => query,
+      buildInputDisplay: ({ query }) => ({ fields: [{ label: '查询', value: query }] }), execute,
+    });
+    useAppStore.getState().updateConversation('conversation-1', { agentMode: 'collaborative' });
+    transitionAgentTask('task-round', 'planning');
+    const call = { callId: 'approval-call', toolId: 'approval_parity', input: { query: 'token-abcdefghijklmnop' } };
+    const lifecycle = vi.fn<(event: Readonly<AgentLifecycleEvent>) => void>();
+    const dispose = subscribeAgentLifecycle(lifecycle);
+    const waitForApproval = vi.fn(async (approvalId: string) => {
+      const task = useAppStore.getState().agentTasks[0], step = task.steps[0];
+      expect(task.status).toBe('waiting_approval');
+      expect(step).toMatchObject({ kind: 'approval', status: 'waiting_approval', approval: { id: approvalId, status: 'pending' } });
+      expect(step.createdAt).toBe(step.updatedAt);
+      expect(step.toolCall?.startedAt).toBe(step.createdAt);
+      expect(step.toolCall?.inputSummary).toBe('[已脱敏密钥]');
+      if (entry === 'round') expect(step.toolCall?.inputFingerprint).toEqual(expect.any(String));
+      else expect(step.toolCall).not.toHaveProperty('inputFingerprint');
+      return { approved };
+    });
+    try {
+      if (entry === 'round') {
+        arrangeCalls([call]);
+        await runRound(undefined, {}, () => waitForApproval(useAppStore.getState().agentTasks[0].steps[0].approval!.id));
+      } else await executeRegisteredAgentToolCall({ taskId: 'task-round', call, signal: new AbortController().signal,
+        transitionTask: transitionAgentTask, waitForApproval });
+      const task = useAppStore.getState().agentTasks[0], step = task.steps[0];
+      expect(execute).toHaveBeenCalledTimes(approved ? 1 : 0);
+      expect(waitForApproval).toHaveBeenCalledOnce();
+      expect(task.metrics).toMatchObject({ policyAllowed: 0, policyDenied: 0, approvalCount: 1 });
+      expect(step).toMatchObject({ status: approved ? 'succeeded' : 'skipped',
+        approval: { status: approved ? 'approved' : 'rejected', resolvedAt: expect.any(Number) },
+        toolCall: { inputDisplay: { fields: [{ label: '查询', value: '[已脱敏密钥]' }] } } });
+      expect(task.events?.filter((event) => event.type === 'policy_decision' || event.type === 'approval_resolved')
+        .map((event) => event.type)).toEqual(['policy_decision', 'approval_resolved']);
+      expect(lifecycle.mock.calls.map(([event]) => event).filter((event) => event.type === 'approval.resolved'))
+        .toEqual([expect.objectContaining({ taskId: task.id, approvalId: step.approval!.id, approved })]);
+    } finally { dispose(); }
+  });
+
   it.each([false, true])('pauses a truncated response without completing or executing tools (tools %s)', async (withTools) => {
     arrangeCanvas();
     const execute = vi.spyOn(getAgentTool('canvas_update_nodes')!, 'execute');

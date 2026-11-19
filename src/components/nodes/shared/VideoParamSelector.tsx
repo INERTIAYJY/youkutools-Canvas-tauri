@@ -25,9 +25,10 @@ import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoM
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
 import { resolveSeedlingVideoCapability } from '../../../services/ai/providerCatalogService';
+import { MUSE_VIDEO_CAPABILITY, MUSE_VIDEO_MODEL } from '../../../services/ai/museModels';
 import { getGrsaiVideoCapability } from '../../../services/ai/grsaiModels';
 import { AUTODL_H3_WORKFLOW } from '../../../services/workflowApi/autodlWorkflowManifest';
-import { getModelProtocolPresetVideoCapability } from '../../../services/ai/modelProtocol';
+import { resolveConfiguredVideoCapability } from '../../../services/ai/videoModelCapabilityResolver';
 import { getProviderDefinition } from '../../../services/ai/providerCatalogService';
 import {
   resolveVideoDurationSeconds,
@@ -401,7 +402,7 @@ export default function VideoParamSelector({
     }
     if (references.some((item) => item.id === option.id && item.kind === kind)) return;
     const role: VideoReferenceItem['role'] = frameReferences.some((item) => item.role === 'first_frame')
-      ? 'last_frame' : 'first_frame';
+      ? provider === 'muse' ? 'reference' : 'last_frame' : 'first_frame';
     onChangeVideoReferences?.([...references, {
       id: option.id, kind, role, url: option.url, label: option.label,
       sourceNodeId: option.id.startsWith('character:') ? undefined : option.id,
@@ -449,7 +450,7 @@ export default function VideoParamSelector({
   const generalModel = useMemo(() => {
     return resolveGeneralVideoModel(generalModels, selectedModel, provider);
   }, [generalModels, provider, selectedModel]);
-  const settingsConnectionId = provider === 'general' ? generalModel?.providerConfigId : provider;
+  const settingsConnectionId = generalModel?.providerConfigId ?? provider;
   const settingsConnection = useAppStore((state) => (
     settingsConnectionId ? state.config.providers[settingsConnectionId] : undefined
   ));
@@ -457,8 +458,9 @@ export default function VideoParamSelector({
     ? generalModel?.modelId
     : settingsConnectionId && selectedModel?.startsWith(`${settingsConnectionId}/`)
       ? selectedModel.slice(settingsConnectionId.length + 1) : selectedModel;
+  const settingsDefinition = settingsConnectionId ? getProviderDefinition(settingsConnectionId, settingsConnection) : undefined;
   const settingsModel = settingsConnectionId && settingsConnection
-    && getProviderDefinition(settingsConnectionId, settingsConnection)?.id === 'custom-openai'
+    && settingsDefinition?.id === 'custom-openai'
     ? settingsConnection.selectedModels?.find((model) => model.id === settingsModelId && model.category === 'video')
     : undefined;
 
@@ -489,9 +491,10 @@ export default function VideoParamSelector({
   const grsaiCapability = capabilityProvider === 'grsai'
     ? getGrsaiVideoCapability(selectedModel, seedanceResolution) : undefined;
   const generalCapability = generalModel
-    ? generalModel.videoCapability
-      ?? getModelProtocolPresetVideoCapability(generalModel.executionProfile)
-    : undefined;
+    ? resolveConfiguredVideoCapability(settingsDefinition?.id, generalModel.modelId,
+      generalModel.executionProfile, generalModel.videoCapability)
+    : provider === 'muse' && selectedModel?.replace(/^muse\//, '') === MUSE_VIDEO_MODEL
+      ? MUSE_VIDEO_CAPABILITY : undefined;
   // 原生模型和通用模型共享参数面板，但通用模型不再经过会补齐 Seedance 默认值的能力视图。
   // 这样 capability 未声明的字段会保持未指定，不会被 UI 悄悄写成 720p / 16:9 / 24fps。
   const workflowApiCapability: VideoModelCapability | undefined = provider === 'workflow-api' && workflowApiManifest?.version === 1
@@ -635,7 +638,9 @@ export default function VideoParamSelector({
     && !allowedDurations
     && (generalCapability?.minDuration === undefined || generalCapability?.maxDuration === undefined),
   );
-  const durationTooltip = apimartCapability?.durationMode === 'without-video'
+  const durationTooltip = provider === 'muse'
+    ? t('通过提示词请求 {durations} 秒，实际成片时长以 Muse 输出为准。', { durations: allowedDurations?.join(' / ') ?? '' })
+    : apimartCapability?.durationMode === 'without-video'
     ? t('仅支持 4 / 6 / 8 / 10 秒。使用参考视频时，此时长设置不生效，由模型决定输出时长。')
     : allowedDurations
     ? t('该模型仅支持 {durations} 秒。', { durations: allowedDurations.join(' / ') })
@@ -812,6 +817,40 @@ export default function VideoParamSelector({
         ? t('{ratio} · {resolution} · 时长{duration}s', { ratio: genericRatio, resolution: legacyVideoResolution, duration: displayedDuration ?? '' })
         : t('时长{duration}s · 帧率{fps} · 分辨率{resolution}', { duration: displayedDuration ?? '', fps: legacyVideoFps, resolution: legacyVideoResolution });
 
+  const renderDurationSlider = (activeDuration: number | undefined) => (
+    <div className="rh-duration-slider">
+      <div className="rh-duration-track">
+        <div
+          className="rh-duration-fill"
+          style={{ width: activeDuration === undefined
+            ? '0%'
+            : `${((durationControlValue - minDuration) / Math.max(1, maxDuration - minDuration)) * 100}%` }}
+        />
+        <input
+          type="range"
+          className="rh-duration-input"
+          min={minDuration}
+          max={maxDuration}
+          step={1}
+          value={durationControlValue}
+          onChange={(e) => onChangeSeedanceDuration?.(Number(e.target.value))}
+          onBlur={onContinuousEditEnd}
+        />
+      </div>
+      <div className="rh-duration-labels">
+        {durationTicks.map((value) => (
+          <span
+            key={value}
+            className={`rh-duration-tick ${activeDuration !== undefined && activeDuration >= value ? 'active' : ''}`}
+            onClick={() => onChangeSeedanceDuration?.(value)}
+          >
+            {durationLabelValues.has(value) ? `${value}s` : ''}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+
   return (<>
     <div className="ui-schema-renderer" data-ui-schema-placement="videoParams" ref={ref}>
       <div className="ui-schema-quality-ratio-pill">
@@ -857,14 +896,14 @@ ${t('该模型：{limits}（连线带入的素材一并计数）。', { limits: 
                       <div key={item.id} className="rh-video-frame-row">
                         <ViewportImage className="rh-video-frame-thumb" src={getReferencePreviewUrl(item)} alt={item.label || t('参考帧')} title={item.label} loading="lazy" />
                         <div className="img-rp-quality-segmented rh-video-frame-seg">
-                          {FRAME_ROLE_OPTIONS.map((option) => (
+                          {FRAME_ROLE_OPTIONS.filter((option) => provider !== 'muse' || option.value !== 'last_frame').map((option) => (
                             <AnimatedButton
                               key={option.value}
                               type="button"
                               className={`img-rp-quality-item rh-v5-res-btn ui-schema-option ${item.role === option.value ? 'active' : ''}`}
                               onClick={() => setFrameRole(item.id, option.value)}
                             >
-                              {t(option.label)}
+                              {t(provider === 'muse' && option.value === 'reference' ? '参考图' : option.label)}
                             </AnimatedButton>
                           ))}
                         </div>
@@ -1091,35 +1130,7 @@ ${t('该模型：{limits}（连线带入的素材一并计数）。', { limits: 
                         )}
                         onBlur={onContinuousEditEnd}
                       />
-                    ) : (
-                    <div className="rh-duration-slider">
-                      <div className="rh-duration-track">
-                         <div
-                           className="rh-duration-fill"
-                           style={{ width: displayedDuration === undefined
-                             ? '0%'
-                             : `${((durationControlValue - minDuration) / Math.max(1, maxDuration - minDuration)) * 100}%` }}
-                         />
-                        <input
-                          type="range"
-                          className="rh-duration-input"
-                          min={minDuration}
-                          max={maxDuration}
-                          step={1}
-                          value={durationControlValue}
-                          onChange={(e) => onChangeSeedanceDuration?.(Number(e.target.value))}
-                          onBlur={onContinuousEditEnd}
-                        />
-                      </div>
-                      <div className="rh-duration-labels">
-                        {durationTicks.map((v) => (
-                          <span key={v} className={`rh-duration-tick ${displayedDuration !== undefined && displayedDuration >= v ? 'active' : ''}`} onClick={() => onChangeSeedanceDuration?.(v)}>
-                            {durationLabelValues.has(v) ? `${v}s` : ''}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    ))}
+                    ) : renderDurationSlider(displayedDuration))}
                   </div>}
 
 
@@ -1269,35 +1280,7 @@ ${t('该模型：{limits}（连线带入的素材一并计数）。', { limits: 
                       <span>{t('生成时长（秒）')}</span>
                       <span className="rh-tip" data-tooltip={t('整数秒，范围 {min}-{max}。提交时会根据帧率自动换算为模型需要的总帧数。', { min: minDuration, max: maxDuration })}>!</span>
                     </div>
-                    <div className="rh-duration-slider">
-                      <div className="rh-duration-track">
-                        <div
-                          className="rh-duration-fill"
-                          style={{ width: `${((durationControlValue - minDuration) / Math.max(1, maxDuration - minDuration)) * 100}%` }}
-                        />
-                        <input
-                          type="range"
-                          className="rh-duration-input"
-                          min={minDuration}
-                          max={maxDuration}
-                          step={1}
-                          value={durationControlValue}
-                          onChange={(e) => onChangeSeedanceDuration?.(Number(e.target.value))}
-                          onBlur={onContinuousEditEnd}
-                        />
-                      </div>
-                      <div className="rh-duration-labels">
-                        {durationTicks.map((value) => (
-                          <span
-                            key={value}
-                            className={`rh-duration-tick ${durationControlValue >= value ? 'active' : ''}`}
-                            onClick={() => onChangeSeedanceDuration?.(value)}
-                          >
-                            {durationLabelValues.has(value) ? `${value}s` : ''}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
+                    {renderDurationSlider(durationControlValue)}
                   </div>
                 </div>
               </>

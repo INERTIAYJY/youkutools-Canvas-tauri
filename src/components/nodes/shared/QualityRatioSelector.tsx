@@ -1,9 +1,14 @@
 /**
  * QualityRatioSelector — 图像分辨率、生成质量和宽高比选择器
  */
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useT } from '../../../i18n';
+import { bindDialogFocus } from '../../../hooks/useDialogFocus';
+import { calcAnchoredPosition } from '../../../utils/popupPosition';
+import type { ImageModelCapability, ImageOutputParameters } from '../../../types/aiTypes';
+import { resolveImageOutputCapability } from '../../../services/ai/imageOutputParameters';
 
 interface RatioOption {
   value: string;
@@ -11,6 +16,9 @@ interface RatioOption {
 }
 
 interface QualityRatioSelectorProps {
+  disabled?: boolean;
+  /** 滚动弹窗中挂到视口，避免父容器裁切。 */
+  fixedMenu?: boolean;
   imageSize?: string;
   imageQuality?: string;
   imageQualities?: readonly string[];
@@ -19,6 +27,9 @@ interface QualityRatioSelectorProps {
   imageBackgrounds?: readonly string[];
   defaultImageBackground?: string;
   imageBackgroundIsFixed?: boolean;
+  imageOutputParameters?: ImageOutputParameters;
+  imageOutputCapability?: ImageModelCapability;
+  onChangeImageOutputParameters?: (parameters: ImageOutputParameters) => void;
   aspectRatio?: string;
   onChangeImageSize?: (size: string) => void;
   onChangeImageQuality?: (quality: string | undefined) => void;
@@ -29,7 +40,7 @@ interface QualityRatioSelectorProps {
   /** 是否显示"自适应"选项，默认 true */
   showAdaptive?: boolean;
   /** 自定义比例选项列表，不传则使用默认 */
-  ratios?: RatioOption[];
+  ratios?: readonly (RatioOption | string)[];
   /** 自定义分辨率档位，不传则使用通用档位 */
   imageSizes?: readonly string[];
   /** 弹出方向：'top'(默认，向上，适合底部工具栏) | 'bottom'(向下，适合顶部工具栏) */
@@ -37,6 +48,8 @@ interface QualityRatioSelectorProps {
 }
 
 export default function QualityRatioSelector({
+  disabled = false,
+  fixedMenu = false,
   imageSize = '1K',
   imageQuality,
   imageQualities,
@@ -45,6 +58,9 @@ export default function QualityRatioSelector({
   imageBackgrounds,
   defaultImageBackground,
   imageBackgroundIsFixed,
+  imageOutputParameters,
+  imageOutputCapability,
+  onChangeImageOutputParameters,
   aspectRatio = '16:9',
   onChangeImageSize,
   onChangeImageQuality,
@@ -58,12 +74,52 @@ export default function QualityRatioSelector({
 }: QualityRatioSelectorProps) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  if (disabled && open) setOpen(false);
   const ref = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open || disabled || !fixedMenu) return;
+    const trigger = ref.current?.querySelector<HTMLButtonElement>('.ui-schema-menu-trigger');
+    const popup = popupRef.current;
+    if (!trigger || !popup) return;
+    let layer = 300;
+    for (let parent: HTMLElement | null = ref.current; parent; parent = parent.parentElement) {
+      const value = Number.parseInt(window.getComputedStyle(parent).zIndex, 10);
+      if (Number.isFinite(value)) layer = Math.max(layer, value + 1);
+    }
+    const update = () => {
+      const rect = trigger.getBoundingClientRect();
+      popup.style.position = 'fixed';
+      popup.style.bottom = 'auto';
+      popup.style.right = 'auto';
+      popup.style.margin = '0';
+      popup.style.zIndex = String(layer);
+      popup.style.maxHeight = `${Math.max(0, Math.max(rect.top, window.innerHeight - rect.bottom) - 14)}px`;
+      const position = calcAnchoredPosition(rect, popup.offsetWidth, popup.offsetHeight, 6);
+      popup.style.left = `${position.left}px`;
+      popup.style.top = `${position.top}px`;
+      popup.style.transformOrigin = position.placement === 'above' ? 'bottom left' : 'top left';
+    };
+    update();
+    const unbindFocus = bindDialogFocus(popup, () => setOpen(false), { zIndex: layer });
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+    observer?.observe(popup);
+    observer?.observe(trigger);
+    window.addEventListener('resize', update);
+    document.addEventListener('scroll', update, true);
+    return () => {
+      unbindFocus();
+      observer?.disconnect();
+      window.removeEventListener('resize', update);
+      document.removeEventListener('scroll', update, true);
+    };
+  }, [open, disabled, fixedMenu]);
 
   // Close popup on outside click (capture phase to beat React Flow event interception)
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
+      if (ref.current && !ref.current.contains(e.target as Node) && !popupRef.current?.contains(e.target as Node)) {
         setOpen(false);
       }
     };
@@ -105,7 +161,17 @@ export default function QualityRatioSelector({
     { value: '8:1', className: 'img-rp-l81' },
   ];
 
-  const ratios = customRatios || DEFAULT_RATIOS;
+  const outputFormat = imageOutputCapability?.outputFormats?.find((value) => value === imageOutputParameters?.imageOutputFormat)
+    ?? imageOutputCapability?.defaultOutputFormat ?? imageOutputCapability?.outputFormats?.[0];
+  const outputCapability = resolveImageOutputCapability(imageOutputCapability, outputFormat);
+  const squareOutput = outputFormat !== undefined && imageOutputCapability?.squareOnlyOutputFormats?.includes(outputFormat);
+  const ratios = (squareOutput ? ['1:1'] : customRatios)?.map((ratio) => {
+    if (typeof ratio !== 'string') return ratio;
+    const known = DEFAULT_RATIOS.find((option) => option.value === ratio);
+    const [width, height] = ratio.split(':').map(Number);
+    return known ?? { value: ratio, className: width === height ? 'img-rp-sq'
+      : width >= height * 2 ? 'img-rp-ultra' : width > height ? 'img-rp-wide' : 'img-rp-tall' };
+  }) ?? DEFAULT_RATIOS;
   const selectedQuality = imageQualities?.find((quality) => quality.toLowerCase() === imageQuality?.toLowerCase())
     ?? imageQualities?.find((quality) => quality.toLowerCase() === defaultImageQuality?.toLowerCase());
   const backgroundDefault = imageBackgrounds?.find((background) => background.toLowerCase() === defaultImageBackground?.toLowerCase());
@@ -114,8 +180,9 @@ export default function QualityRatioSelector({
     : imageBackgrounds?.find((background) => background.toLowerCase() === imageBackground?.toLowerCase()) ?? backgroundDefault;
   const backgroundLabels: Record<string, string> = { auto: t('自动'), transparent: t('透明'), opaque: t('不透明') };
   const backgroundSummaries: Record<string, string> = { auto: t('自动背景'), transparent: t('透明背景'), opaque: t('不透明背景') };
-  const summary = [aspectRatio, showImageSize ? imageSize : undefined, selectedQuality,
+  const summary = [aspectRatio, showImageSize ? imageSize : undefined, outputFormat?.toUpperCase(), selectedQuality,
     selectedBackground ? backgroundSummaries[selectedBackground] ?? selectedBackground : undefined].filter(Boolean).join(' · ');
+  const renderPopup = (content: ReactNode) => fixedMenu ? createPortal(content, document.body) : content;
 
   return (
     <div className="ui-schema-renderer" data-ui-schema-model="apimart/gemini-3.1-flash-image-preview" data-ui-schema-placement="resolution" ref={ref}>
@@ -124,8 +191,9 @@ export default function QualityRatioSelector({
           type="button"
           className="img-pill-btn ui-schema-menu-trigger"
           data-ui-schema-menu-trigger="qualityRatio"
+          disabled={disabled}
           aria-label={summary}
-          aria-expanded={open}
+          aria-expanded={open && !disabled}
           title={summary}
           onClick={(e) => {
             e.stopPropagation();
@@ -142,13 +210,14 @@ export default function QualityRatioSelector({
           </span>
         </AnimatedButton>
 
-        {open && (
-          <div className={`img-ratio-popup ui-schema-popup ui-schema-quality-ratio-popup${placement === 'bottom' ? ' img-ratio-popup--down' : ''}`}>
+        {open && !disabled && renderPopup(
+          <div ref={popupRef} role={fixedMenu ? 'dialog' : undefined} aria-label={fixedMenu ? summary : undefined} tabIndex={-1}
+            className={`img-ratio-popup ui-schema-popup ui-schema-quality-ratio-popup${placement === 'bottom' ? ' img-ratio-popup--down' : ''}`}>
             {showImageSize && (
               <div className="img-rp-quality-area" data-ui-schema-field="imageSize" data-ui-schema-type="segmented" data-ui-schema-default="2K">
                 <div className="img-rp-section-label">{t('分辨率')}</div>
                 <div className="ui-segmented ui-segmented--brand" role="group" aria-label={t('分辨率')}>
-                  {imageSizes.map((size) => (
+                  {(outputCapability?.resolutions ?? imageSizes).map((size) => (
                     <AnimatedButton
                       key={size}
                       type="button"
@@ -162,6 +231,56 @@ export default function QualityRatioSelector({
                     </AnimatedButton>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {!!imageOutputCapability?.outputFormats?.length && (
+              <div data-ui-schema-field="imageOutputFormat" data-ui-schema-type="segmented">
+                <div className="img-rp-section-label">{t('输出格式')}</div>
+                <div className="ui-segmented ui-segmented--brand" role="group" aria-label={t('输出格式')}>
+                  {imageOutputCapability.outputFormats.map((format) => (
+                    <AnimatedButton key={format} type="button"
+                      className={`ui-segmented__item ui-schema-option${outputFormat === format ? ' is-active' : ''}`}
+                      aria-pressed={outputFormat === format} data-ui-schema-value={format}
+                      onClick={() => {
+                        onChangeImageOutputParameters?.({ imageOutputFormat: format,
+                          imageFrameCount: undefined, imageFrameDurationMs: undefined, imageTransparent: undefined });
+                        if (imageOutputCapability.squareOnlyOutputFormats?.includes(format)) onChangeAspectRatio('1:1');
+                      }}>{format.toUpperCase()}</AnimatedButton>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {outputFormat === 'gif' && (
+              <div className="ui-stack ui-stack--tight">
+                {imageOutputCapability?.gifFrameCount && <label className="ui-field">
+                  <span className="img-rp-section-label">{t('GIF 帧数')}</span>
+                  <input className="ui-input ui-input--sm" type="number" aria-label={t('GIF 帧数')}
+                    min={imageOutputCapability.gifFrameCount.min} max={imageOutputCapability.gifFrameCount.max}
+                    step={imageOutputCapability.gifFrameCount.step ?? 1}
+                    value={imageOutputParameters?.imageFrameCount ?? imageOutputCapability.gifFrameCount.default}
+                    onChange={(event) => {
+                      const value = event.target.value === '' ? undefined : event.target.valueAsNumber;
+                      if (value === undefined || Number.isFinite(value)) onChangeImageOutputParameters?.({ imageFrameCount: value });
+                    }} />
+                </label>}
+                {imageOutputCapability?.gifFrameDurationMs && <label className="ui-field">
+                  <span className="img-rp-section-label">{t('每帧时长（毫秒）')}</span>
+                  <input className="ui-input ui-input--sm" type="number" aria-label={t('每帧时长（毫秒）')}
+                    min={imageOutputCapability.gifFrameDurationMs.min} max={imageOutputCapability.gifFrameDurationMs.max}
+                    step={imageOutputCapability.gifFrameDurationMs.step ?? 1}
+                    value={imageOutputParameters?.imageFrameDurationMs ?? imageOutputCapability.gifFrameDurationMs.default}
+                    onChange={(event) => {
+                      const value = event.target.value === '' ? undefined : event.target.valueAsNumber;
+                      if (value === undefined || Number.isFinite(value)) onChangeImageOutputParameters?.({ imageFrameDurationMs: value });
+                    }} />
+                </label>}
+                {imageOutputCapability?.supportsGifTransparency && <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={imageOutputParameters?.imageTransparent ?? false}
+                    onChange={(event) => onChangeImageOutputParameters?.({ imageTransparent: event.target.checked })} />
+                  <span>{t('GIF 透明背景')}</span>
+                </label>}
               </div>
             )}
 
@@ -209,8 +328,8 @@ export default function QualityRatioSelector({
 
             <div className="img-rp-ratio-area" data-ui-schema-field="aspectRatio" data-ui-schema-type="segmented" data-ui-schema-default={showAdaptive ? '自适应' : '16:9'}>
               <div className="img-rp-section-label">{t('比例')}</div>
-              <div className={`img-rp-ratio-split${showAdaptive ? ' has-adaptive' : ''}`}>
-                {showAdaptive && (
+              <div className={`img-rp-ratio-split${showAdaptive && !squareOutput ? ' has-adaptive' : ''}`}>
+                {showAdaptive && !squareOutput && (
                   <div className="img-rp-ratio-left">
                     <AnimatedButton
                       type="button"

@@ -1,36 +1,96 @@
 name: Release
+run-name: ${{ github.event_name == 'push' && format('调度 {0}', github.ref_name) || format('发布 {0}', inputs.tag) }}
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 已推送的正式版本标签（vX.Y.Z）
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# tag 入口与实际发布共用标签锁；排队，不中断已经开始的安装包上传。
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
+  dispatch:
+    name: Dispatch tagged release on default branch
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch fixed release workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a stable vX.Y.Z release tag' >&2
+            exit 1
+          fi
+          gh workflow run release.yml --repo "$GH_REPO" --ref "$DEFAULT_BRANCH" --field "tag=$RELEASE_TAG"
+
   quality:
     name: Quality gate
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      sha: ${{ steps.target.outputs.sha }}
+      version: ${{ steps.target.outputs.version }}
+      release_name: ${{ steps.target.outputs.release_name }}
+      release_body: ${{ steps.target.outputs.release_body }}
+      artifact_run_id: ${{ steps.proof.outputs.artifact_run_id }}
+      artifact_id: ${{ steps.proof.outputs.artifact_id }}
     steps:
+      # 默认分支保存跨版本缓存；目标源码仍固定到标签的不可变 SHA。
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ github.event.repository.default_branch }}
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Typecheck, test and build
-        run: npm run ci
+      - name: Resolve immutable release source and notes
+        id: target
+        run: node scripts/release-workflow.mjs resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+      - name: Wait for exact release tag CI and verified frontend
+        id: proof
+        run: node scripts/release-workflow.mjs wait-ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          RELEASE_SHA: ${{ steps.target.outputs.sha }}
 
   publish:
     name: Publish ${{ matrix.target }}
     needs: quality
     permissions:
       contents: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -39,86 +99,59 @@ jobs:
             os: windows-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-
     runs-on: ${{ matrix.os }}
-
+    env:
+      RELEASE_TAG: ${{ needs.quality.outputs.tag }}
+      RELEASE_SHA: ${{ needs.quality.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ needs.quality.outputs.sha }}
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
+          cache: npm
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
-
+      - name: Cache native release dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-${{ matrix.target }}-standard
       - name: Install npm dependencies
         run: npm ci
-
+      - name: Download exact verified frontend
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.quality.outputs.artifact_id }}
+          run-id: ${{ needs.quality.outputs.artifact_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dist
+      - name: Verify frontend file hashes and source
+        run: node scripts/release-workflow.mjs verify-frontend
+      - name: Guard release tag and draft
+        run: node scripts/release-workflow.mjs assert-publishable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build with Tauri Action
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Tauri signs all macOS bundle components before packaging; no Apple credentials are needed.
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'AI Canvas v0.10.34 - H.265 视频预览修复与导入自动转码'
-          releaseBody: |
-            ## ✨ 版本摘要
-            
-            AI Canvas v0.10.34 修复 H.265 视频「偶尔无法预览」的问题，并新增「导入自动转码H264」开关。森之灵等厂商输出的 HEVC Main10 在内置播放器里无法解码，本版修正了编码探测的漏判，并让已存在的旧视频也能自动修复。
-            
-            ## 🎞️ H.265 视频预览修复
-            
-            - 修复编码探测只看文件头导致漏判的问题：森之灵等服务端边下边写出的 MP4 把 `moov` 与编码标记放在文件尾，4–8MB 的短片此前会被判成未知编码而跳过转码，表现为「偶尔」无法预览。现在文件头尾都会检查。
-            - 播放器报「视频格式或编码不兼容」时自动修复：按节点已保存的本地文件重新探测编码，命中 H.265 就转成 H.264 并回写节点，无需手动重做。
-            - 已存在的旧 H.265 节点同样可以自动修复，不必重新生成；全屏预览与节点内播放都支持。
-            - 转码只处理工程目录内的文件，外部原片保持不变；任何失败只提示原因并保留原片，不阻断生成或导入。
-            
-            ## 📥 导入自动转码H264
-            
-            - 设置新增「视频导入 → 导入自动转码H264」开关，默认开启。
-            - 从外部拖入 H.265 视频时自动转成 H.264，并替换工程内的副本；外部原文件不动，被替换的旧副本移入项目回收区，可撤销。
-            - 关闭开关后，拖入的 H.265 视频按原样导入。
-            - 首次转码需要下载解码组件（本机已装 ffmpeg 时直接使用），转换期间有进度提示。
-            
-            ## ⚙️ 其他
-            
-            - 视频容器识别扩展到 `.mp4`、`.m4v`、`.mov`；其他容器保持原样导入，不做猜测性改名。
-            - 播放器错误回调现在会带上具体错误码，便于区分解码失败与网络/文件读取失败。
-            
-            ## ⚠️ 升级与兼容性
-            
-            - 数据库沿用 v22，项目包沿用 v3，本版不新增数据迁移。升级前备份重要项目与应用数据。
-            - 自动转码只影响新导入的视频和自动修复的旧节点；已有项目文件不会被批量重写。
-            - 转码后的 H.264 副本体积通常小于原始 H.265，磁盘占用不会明显增加；原始副本仍在回收区内。
-            - 真实 GPU 生成、各平台安装升级与解码效果仍需桌面验收；自动修复依赖本机可用的 ffmpeg，缺失时会自动下载。
-            
-            ## 📦 下载
-            
-            - 🪟 Windows：使用 `.exe` 或 `.msi`。
-            - 🪟 Windows 旧款 CPU：使用名称含 `Legacy` 的 `.exe` 或 `.msi`。
-            - 🍎 macOS：仅提供 M 系列芯片（Apple Silicon）的 `aarch64.dmg`。
-            - 🐧 Linux：使用 `.AppImage`、`.deb` 或 `.rpm`。
+          tagName: ${{ needs.quality.outputs.tag }}
+          releaseCommitish: ${{ needs.quality.outputs.sha }}
+          releaseName: ${{ needs.quality.outputs.release_name }}
+          releaseBody: ${{ needs.quality.outputs.release_body }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
-          args: --target ${{ matrix.target }}
-
+          args: --target ${{ matrix.target }} --config scripts/tauri-release.config.json
       - name: Verify ad-hoc signature and macOS app startup
         if: runner.os == 'macOS'
         shell: bash
@@ -138,8 +171,6 @@ jobs:
             echo "Expected an ad-hoc signature on $app" >&2
             exit 1
           fi
-
-          # This checks runtime startup on the runner, not Gatekeeper approval after download.
           smoke_dir="$(mktemp -d "${RUNNER_TEMP}/ai-canvas-macos-smoke.XXXXXX")"
           trap 'rm -rf "$smoke_dir"' EXIT
           ditto "$app" "$smoke_dir/$(basename "$app")"
@@ -156,65 +187,113 @@ jobs:
           exit 1
 
   publish-windows-legacy:
-    name: Publish Windows x64 legacy
-    needs: publish
+    name: Build Windows x64 legacy
+    needs: quality
     runs-on: windows-latest
     permissions:
-      contents: write
-
+      contents: read
+      actions: read
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma
+      RELEASE_TAG: ${{ needs.quality.outputs.tag }}
+      RELEASE_SHA: ${{ needs.quality.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.quality.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ needs.quality.outputs.sha }}
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
+          cache: npm
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-pc-windows-msvc
-
+      - name: Cache isolated Legacy dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-x86_64-pc-windows-msvc-legacy
       - name: Install npm dependencies
         run: npm ci
-
+      - name: Download exact verified frontend
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.quality.outputs.artifact_id }}
+          run-id: ${{ needs.quality.outputs.artifact_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dist
+      - name: Verify frontend file hashes and source
+        run: node scripts/release-workflow.mjs verify-frontend
       - name: Build Windows x64 legacy
         shell: pwsh
-        env:
-          RUSTFLAGS: -C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma
         run: |
-          $legacyConfig = '{"productName":"AI Canvas Legacy","plugins":{"updater":{"endpoints":[]}},"bundle":{"createUpdaterArtifacts":false}}'
           node node_modules/@tauri-apps/cli/tauri.js build `
             --target x86_64-pc-windows-msvc `
-            --config $legacyConfig `
+            --config scripts/tauri-release-legacy.config.json `
             -- `
             --no-default-features
-
-      - name: Upload Windows x64 legacy installers
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy build failed' }
+      - name: Collect only this version's Legacy installers
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $bundleRoot = Resolve-Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
-          $artifacts = @(
-            Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
-              Where-Object { $_.Extension -in '.exe', '.msi' }
-          )
-          if ($artifacts.Count -eq 0) {
-            throw "No Windows x64 legacy installers were generated."
-          }
-          foreach ($artifact in $artifacts) {
-            gh release upload "${{ github.ref_name }}" $artifact.FullName --clobber
-          }
+          $bundleRoot = Resolve-Path 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle'
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'legacy-installers'
+          New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
+          $artifacts = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File | Where-Object {
+            $_.Extension -in '.exe', '.msi' -and $_.Name.Contains('Legacy') -and $_.Name.Contains("_$($env:RELEASE_VERSION)_")
+          })
+          if ($artifacts.Count -eq 0) { throw 'No installers for this Legacy version were generated' }
+          foreach ($artifact in $artifacts) { Copy-Item -LiteralPath $artifact.FullName -Destination $artifactDirectory }
+      - name: Keep Legacy installers until every standard platform passes
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-legacy-${{ needs.quality.outputs.sha }}
+          path: ${{ runner.temp }}/legacy-installers/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
   finalize-release:
     name: Publish verified release
-    needs: publish-windows-legacy
+    needs: [quality, publish, publish-windows-legacy]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.quality.outputs.tag }}
+      RELEASE_SHA: ${{ needs.quality.outputs.sha }}
+      REQUIRE_DRAFT: 'true'
     steps:
-      - name: Make release public after all checks pass
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.quality.outputs.sha }}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download verified Legacy installers
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-legacy-${{ needs.quality.outputs.sha }}
+          path: ${{ runner.temp }}/legacy-installers
+      - name: Upload Legacy and make release public after every platform passes
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft=false
+          LEGACY_ARTIFACT_DIRECTORY: ${{ runner.temp }}/legacy-installers
+        run: |
+          set -euo pipefail
+          node scripts/release-workflow.mjs assert-publishable
+          shopt -s nullglob
+          artifacts=("$LEGACY_ARTIFACT_DIRECTORY"/*.exe "$LEGACY_ARTIFACT_DIRECTORY"/*.msi)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo 'No verified Legacy installers were downloaded' >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GH_REPO" "${artifacts[@]}" --clobber
+          node scripts/release-workflow.mjs assert-publishable
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false

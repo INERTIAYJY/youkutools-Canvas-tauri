@@ -88,6 +88,8 @@ function directorNode(
 
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
+  useAppStore.setState({ projectLoadStatus: 'ready', projects: ['a', 'b', 'project-a', 'project-b']
+    .map((id) => ({ id, name: id, createdAt: 1, updatedAt: 1 })) });
   fileMocks.copyFileToProjectData.mockReset();
   fileMocks.copyFileToProjectData.mockImplementation(async (_source: string, projectId: string) => ({
     filePath: `/data/${projectId}/copied.png`,
@@ -97,6 +99,20 @@ beforeEach(() => {
 });
 
 describe('canvas clipboard', () => {
+  it('外部粘贴解析期间切到剧本页，不向隐藏画布提交；切回后可正常粘贴', async () => {
+    useAppStore.setState({ currentProjectId: 'a', projectWorkspaceView: 'canvas', nodes: [] });
+    const transfer = { files: [], items: [], types: ['text/plain'], getData: () => '待粘贴的正文' };
+    const pending = useAppStore.getState().pasteExternalFromDataTransfer(transfer, { x: 20, y: 30 });
+    useAppStore.getState().setProjectWorkspaceView('script');
+    await pending;
+    expect(useAppStore.getState().nodes).toHaveLength(0);
+
+    useAppStore.getState().setProjectWorkspaceView('canvas');
+    await useAppStore.getState().pasteExternalFromDataTransfer(transfer, { x: 20, y: 30 });
+    expect(useAppStore.getState().nodes).toHaveLength(1);
+    expect(useAppStore.getState().nodes[0].data.output).toBe('待粘贴的正文');
+  });
+
   it('copies nested descendants once for overlapping group selections', () => {
     const root = { ...node('root'), type: 'group' };
     const child = { ...node('child'), type: 'group', parentId: root.id };
@@ -250,6 +266,7 @@ describe('modifier-drag duplication', () => {
       runninghubModelParameters: { strength: '0.8' },
       cameraSettings: { lens: '50mm' },
       mattingMask: 'data:mask', annotation: 'data:annotation',
+      outpaintInput: { url: 'asset://localhost/data/a/padding.png', assetId: 'padding-a', relativePath: 'padding.png', width: 1440, height: 2560 },
       imageWidth: 1440, imageHeight: 2560, sourceUrl: 'https://example.test/result.png',
       fileName: 'original.png', output: 'https://example.test/result.png',
       artifactId: 'artifact', mediaVersion: 3, batchGroupId: 'old-batch',
@@ -277,7 +294,7 @@ describe('modifier-drag duplication', () => {
         runninghubModelParameters: { strength: '0.8' }, cameraSettings: { lens: '50mm' } } });
     for (const field of ['output', 'filePath', 'fileName', 'imageUrl', 'thumbnailUrl', 'sourceUrl',
       'assetId', 'relativePath', 'artifactId', 'mediaVersion', 'batchGroupId',
-      'imageWidth', 'imageHeight', 'mattingMask', 'annotation', 'dramaAssetId', 'characterLibraryLinks',
+      'imageWidth', 'imageHeight', 'mattingMask', 'annotation', 'outpaintInput', 'dramaAssetId', 'characterLibraryLinks',
       'runninghubOutputs', 'runninghubStage', 'workflowApiOutputs', 'workflowApiStage']) {
       expect(clone?.data[field], field).toBeUndefined();
     }

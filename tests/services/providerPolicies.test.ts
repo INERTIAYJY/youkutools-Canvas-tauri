@@ -4,16 +4,29 @@
 import { describe, expect, it } from 'vitest';
 import { getProviderPolicy, resolveProviderCatalogId } from '../../src/services/ai/providerPolicies';
 
+it('方舟官方使用独立 TOS，同名自定义连接不借用该上传方式', () => {
+  expect(getProviderPolicy(resolveProviderCatalogId('volcengine')).upload).toBe('volcengine-tos');
+  expect(getProviderPolicy(resolveProviderCatalogId('方舟连接', { catalogId: 'volcengine' })).upload).toBe('volcengine-tos');
+  expect(getProviderPolicy(resolveProviderCatalogId('volcengine', { catalogId: 'custom-openai' })).upload).toBeUndefined();
+});
+
 describe('厂商接线策略', () => {
   it.each(['custom-openai', 'cccapi', 'xai', 'google', 'sora2u', 'toapis', 'libapi', 'relayonapi', 'aigc-si', 'minimax'])('%s 沿用通用模型同步', (id) => {
     expect(getProviderPolicy(id).syncGeneralModels).toBe(true);
   });
 
-  it.each(['apimart', 'runninghub-model', 'grsai', 'dreamina', 'workflow-api', 'unknown', undefined])('%s 不隐式改用通用模型或独立上传', (id) => {
+  it.each(['apimart', 'runninghub-model', 'grsai', 'dreamina', 'workflow-api', 'unknown', undefined])('%s 不隐式改用通用模型且只登记已有上传', (id) => {
     const policy = getProviderPolicy(id);
     expect(policy.syncGeneralModels).toBe(false);
-    expect(policy.upload).toBeUndefined();
+    expect(policy.upload).toBe(id === 'apimart' ? 'apimart' : undefined);
     expect(policy.catalog).toMatchObject({ refresh: 'merge', fallback: 'allow', connectionTest: 'default' });
+  });
+
+  it.each(['apimart', 'cccapi', 'toapis', 'libapi', 'relayonapi', 'aigc-si', 'sora2u', 'grsai'])('%s 禁止连接及全局图床兜底，只按真实 catalog 身份生效', (catalogId) => {
+    expect(getProviderPolicy(catalogId).publicUploadFallback).toBe('deny');
+    expect(getProviderPolicy(resolveProviderCatalogId('自己的中转连接', { catalogId })).publicUploadFallback).toBe('deny');
+    expect(getProviderPolicy(resolveProviderCatalogId(catalogId, { catalogId: 'custom-openai' })).publicUploadFallback).toBeUndefined();
+    expect(getProviderPolicy(resolveProviderCatalogId(catalogId, { catalogId: 'workflow-api' })).publicUploadFallback).toBeUndefined();
   });
 
   it('CCC 与万象合并连接分组，其他既有专属菜单按连接区分', () => {
@@ -26,14 +39,14 @@ describe('厂商接线策略', () => {
   });
 
   it.each([
-    ['cccapi', 'empty', 'fallback', 'ungrouped-only', false],
-    ['toapis', 'fallback', 'fallback', 'deny', true],
-    ['libapi', 'fallback', 'fallback', 'deny', true],
-    ['relayonapi', 'fallback', 'fallback', 'deny', true],
-    ['aigc-si', 'fallback', 'fallback', 'deny', true],
-  ] as const)('%s 分别声明初始目录、刷新和失败规则', (id, create, edit, fallback, keyChange) => {
+    ['cccapi', 'empty', 'fallback', 'replace', 'ungrouped-only', false],
+    ['toapis', 'fallback', 'fallback', 'replace-unselected', 'deny', true],
+    ['libapi', 'fallback', 'fallback', 'replace', 'deny', true],
+    ['relayonapi', 'fallback', 'fallback', 'replace-unselected', 'deny', true],
+    ['aigc-si', 'fallback', 'fallback', 'replace', 'deny', true],
+  ] as const)('%s 分别声明初始目录、刷新和失败规则', (id, create, edit, refresh, fallback, keyChange) => {
     expect(getProviderPolicy(id).catalog).toEqual({ initialModelsOnCreate: create,
-      initialModelsOnEdit: edit, refresh: 'replace', fallback,
+      initialModelsOnEdit: edit, refresh, fallback,
       invalidateOnKeyChange: keyChange, connectionTest: 'catalog' });
   });
 
@@ -48,11 +61,11 @@ describe('厂商接线策略', () => {
     expect(resolveProviderCatalogId('autodl-workflow', { catalogId: 'custom-openai' })).toBe('custom-openai');
   });
 
-  it('RelayOnAPI 使用公开素材策略及提交幂等键，不借用专有上传或同名连接身份', () => {
+  it('RelayOnAPI 随模型请求提交参考文件，不声明独立上传或借用同名连接身份', () => {
     const policy = getProviderPolicy(resolveProviderCatalogId('自己的万象连接', { catalogId: 'relayonapi' }));
     expect(policy.modelMenuGroup).toMatchObject({ scope: 'catalog' });
     expect(policy.submitIdempotency).toBe(true);
-    expect(policy.referenceTransport).toBe('public-url');
+    expect(policy.referenceTransport).toBe('request-files');
     expect(policy.upload).toBeUndefined();
     const custom = getProviderPolicy(resolveProviderCatalogId('relayonapi', { catalogId: 'custom-openai' }));
     expect(custom.modelMenuGroup).toBeUndefined();

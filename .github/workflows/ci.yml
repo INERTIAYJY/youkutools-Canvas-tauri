@@ -1,10 +1,9 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -14,12 +13,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  frontend:
-    name: Frontend quality
+  plan:
+    name: Release source CI plan
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      mode: ${{ steps.freeze.outputs.mode }}
+      base: ${{ steps.freeze.outputs.base }}
+      rust: ${{ steps.freeze.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Select checks from a trusted full baseline
+        id: plan
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/ci-source-plan.mjs plan
+
+      - name: Install dependencies to resolve related tests
+        if: steps.plan.outputs.candidate_mode == 'affected'
+        run: npm ci
+
+      - name: Freeze exact check scope
+        id: freeze
+        run: node scripts/ci-source-plan.mjs finalize
+
+      - name: Keep immutable check plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-plan-${{ github.sha }}-${{ github.run_attempt }}
+          path: release-ci-plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  frontend-static:
+    name: Frontend lint and test types
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -30,19 +79,196 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint, typecheck, test and build
-        run: npm run ci
+      - name: Lint and check test types
+        run: |
+          npm run lint
+          npm run test:typecheck
 
-  rust:
-    name: Rust check
-    runs-on: windows-latest
+  frontend-tests:
+    name: Frontend tests (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/4', '2/4', '3/4', '4/4']
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Vitest shard
+        run: npm run test -- --shard=${{ matrix.shard }}
+
+  frontend:
+    name: Frontend quality
+    runs-on: ubuntu-latest
+    needs: [plan, frontend-static, frontend-tests]
+    if: ${{ always() }}
+
+    steps:
+      - name: Verify the planned front-end checks
+        shell: bash
+        env:
+          CI_PLAN_RESULT: ${{ needs.plan.result }}
+          CI_MODE: ${{ needs.plan.outputs.mode }}
+          FRONTEND_STATIC_RESULT: ${{ needs.frontend-static.result }}
+          FRONTEND_TESTS_RESULT: ${{ needs.frontend-tests.result }}
+        run: |
+          test "$CI_PLAN_RESULT" = success
+          case "$CI_MODE" in
+            full) expected=success ;;
+            affected) expected=skipped ;;
+            *) exit 1 ;;
+          esac
+          test "$FRONTEND_STATIC_RESULT" = "$expected"
+          test "$FRONTEND_TESTS_RESULT" = "$expected"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download this attempt's frozen check plan
+        if: needs.plan.outputs.mode == 'affected'
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-plan-${{ github.sha }}-${{ github.run_attempt }}
+          path: .
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check application types and build
+        if: needs.plan.outputs.mode == 'full'
+        run: npm run build
+
+      - name: Execute related checks and build
+        if: needs.plan.outputs.mode == 'affected'
+        run: npm run ci:affected -- --execute-plan release-ci-plan.json --build
+
+      - name: Stamp release frontend artifact
+        run: node scripts/release-workflow.mjs stamp-frontend
+
+      - name: Keep verified release frontend
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+
+  rust-platform:
+    name: Rust check (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            os: windows-latest
+            cache_key: ci-windows-check
+          - platform: macOS
+            os: macos-latest
+            cache_key: ci-macos-check
+          - platform: Linux
+            os: ubuntu-latest
+            cache_key: ci-linux-check
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+
+      - name: Cache Rust check dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ${{ matrix.cache_key }}
+          save-if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Check Tauri library
         working-directory: src-tauri
-        run: cargo check --lib
+        run: cargo check --lib --locked
+
+      - name: Verify Windows media publication and recovery
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        run: cargo test --lib --locked native_project_media::tests::windows_media_
+
+  rust:
+    name: Rust check
+    runs-on: ubuntu-latest
+    needs: [plan, rust-platform]
+    if: ${{ always() }}
+    steps:
+      - name: Verify the planned platform checks
+        shell: bash
+        env:
+          CI_PLAN_RESULT: ${{ needs.plan.result }}
+          CI_MODE: ${{ needs.plan.outputs.mode }}
+          CI_RUST: ${{ needs.plan.outputs.rust }}
+          RUST_PLATFORM_RESULT: ${{ needs.rust-platform.result }}
+        run: |
+          test "$CI_PLAN_RESULT" = success
+          case "$CI_MODE:$CI_RUST" in
+            full:true|affected:true) test "$RUST_PLATFORM_RESULT" = success ;;
+            affected:false) test "$RUST_PLATFORM_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
+
+  source-quality:
+    name: ${{ needs.plan.outputs.mode == 'full' && 'Full source quality' || format('Affected source quality ({0})', needs.plan.outputs.base) }}
+    runs-on: ubuntu-latest
+    needs: [plan, frontend, rust]
+    if: ${{ always() }}
+    steps:
+      - name: Confirm the exact source check mode
+        env:
+          CI_PLAN_RESULT: ${{ needs.plan.result }}
+          CI_MODE: ${{ needs.plan.outputs.mode }}
+          CI_BASE: ${{ needs.plan.outputs.base }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          CI_RUST: ${{ needs.plan.outputs.rust }}
+        run: |
+          test "$CI_PLAN_RESULT" = success
+          test "$FRONTEND_RESULT" = success
+          test "$RUST_RESULT" = success
+          case "$CI_MODE" in
+            full) test "$CI_RUST" = true ;;
+            affected) [[ "$CI_BASE" =~ ^[0-9a-f]{40}$ ]] ;;
+            *) exit 1 ;;
+          esac

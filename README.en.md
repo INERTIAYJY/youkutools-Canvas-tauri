@@ -6,7 +6,7 @@
 
 [![GitHub Stars](https://img.shields.io/github/stars/Tenney95/AI-Canvas-tauri?style=flat&label=Star%20on%20GitHub)](https://github.com/Tenney95/AI-Canvas-tauri/stargazers)
 
-**[Live demo](https://tenney95.github.io/AI-Canvas-tauri/) · [Download desktop app](https://github.com/Tenney95/AI-Canvas-tauri/releases) · [Share your work](https://github.com/Tenney95/AI-Canvas-tauri/discussions)**
+**[Live demo](https://tenney95.github.io/AI-Canvas-tauri/) · [Download desktop app](https://github.com/Tenney95/AI-Canvas-tauri/releases) · [Share your work](https://github.com/Tenney95/AI-Canvas-tauri/discussions) · [Support on Afdian](https://ifdian.net/a/AI-Canvas) · [Contribute](#contributors)**
 
 [简体中文](README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md)
 
@@ -14,7 +14,7 @@
 
 AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, Markdown, shot lists, 360° panoramas and hand-drawn notes into connectable canvas nodes. In a single project you can orchestrate generation pipelines, manage characters, scenes, props and local media assets, run ComfyUI workflows, and use the conversational assistant to query or modify the canvas, generate media, dispatch read-only sub-agents, read authorized files, and accumulate project memory. Projects can also be split into series and episodes — each episode of an AI short drama gets its own canvas, while the character library and assets are shared across the whole series.
 
-![Version](https://img.shields.io/badge/version-0.10.27-6366f1)
+![Version](https://img.shields.io/badge/version-0.11.9-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
 ![React Flow](https://img.shields.io/badge/React_Flow-12-ff0072)
@@ -25,7 +25,7 @@ AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, 
 
 **Download:** <https://github.com/tenney95/AI-Canvas-tauri/releases> (desktop installers)
 
-[Live demo](https://tenney95.github.io/AI-Canvas-tauri/) · [Download](https://github.com/tenney95/AI-Canvas-tauri/releases) · [Sponsors](#sponsors) · [Capabilities](#capabilities) · [Getting Started](#getting-started) · [Documentation](#documentation) · [License](#license)
+[Live demo](https://tenney95.github.io/AI-Canvas-tauri/) · [Download](https://github.com/tenney95/AI-Canvas-tauri/releases) · [Sponsors](#sponsors) · [Capabilities](#capabilities) · [Getting Started](#getting-started) · [Contribute](#contributors) · [Documentation](#documentation) · [License](#license)
 
 > The web version is ideal for exploring the canvas and interface. File system, credential storage, separate windows, the 3D director desk and local models depend on the Tauri desktop environment; for the full experience, launch the desktop app using the steps below.
 
@@ -34,6 +34,16 @@ AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, 
 ![AI Canvas Tauri Screenshot](public/screenshot.png)
 
 ## Sponsors
+
+### Support the project and its contributors
+
+If AI Canvas helps you create, you can [support the project on Afdian](https://ifdian.net/a/AI-Canvas). Sponsorship is voluntary; give only what you are comfortable with. Reporting issues, sharing your work, leaving a Star and contributing code are all welcome ways to help.
+
+**I will set aside most sponsorship income to share with outstanding code contributors, so people who help build AI Canvas can share in the project's growth. Selection criteria and distribution details will be published later.**
+
+[Read about the project and contributor revenue sharing](https://ifdian.net/p/172129e4e27a11f1b27452540025c377) · [Join development](#contributors)
+
+### Project sponsors
 
 <table>
   <tr>
@@ -60,6 +70,7 @@ AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, 
 | Capability | Description |
 | --- | --- |
 | Multimodal node canvas | Connect text, images, video, audio, animation, Markdown, storyboards, panoramas, director nodes and canvas notes. |
+| Group collapse spacing | Double-click a group header to collapse it or its folder to expand it. Content on the same row to the right moves with it, preserving spacing and manual moves. |
 | Frame animation editing & export | Import or generate sprite sheets, edit animation frames and playback, and export GIFs, PNG sequences or atlases. |
 | AI & workflows | Connect cloud and custom models, CCC, LibAPI text/image/video/audio models, multiple ComfyUI servers, RunningHub, generic workflow APIs, Dreamina and local ONNX models. |
 | Workflow parameters | Local ComfyUI and RunningHub share a parameter popover with declared ratios, resolution, steps and schedulers. Fields show `C#` node IDs and detected prompt roles; the default prompt and references remain in the node composer. |
@@ -68,15 +79,17 @@ AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, 
 | Preset workflows & sharing | Reference the original input or the previous step, run advanced steps sequentially or by dependency, and copy, export or import JSON as independent presets. |
 | Video parameter retention | Keep the chosen aspect ratio and compatible resolution, frame rate, duration and audio settings when switching video models. Review them against the selected model before generating. |
 | User plugins | Install plugins from local files, the marketplace or GitHub Releases to extend tools, nodes and interfaces. JavaScript runs with restricted capabilities; trusted Python plugins run with your user permissions. |
-| Scripts & shot production | Browse source material, write episode scripts, generate and revise shots, and prepare voice and video assets for the editing timeline. |
+| Scripts & source writing | Write outlines, episode scripts and source material in the main or separate workbench, with tools that follow the active tab. The plain text source editor supports AI openings, continuation and polishing; review candidates and save explicitly. Source material and episode scripts are saved as TXT files in the project's `manuscripts` folder. |
+| Story relationships | Organize characters, events, foreshadowing and relationships in graph, timeline or list views, with source evidence. Preview AI extraction results before adding them to the graph. |
 | Built-in video editing | Arrange multiple tracks and edit clips, transitions, captions, stickers and volume in a separate editor. Supports video export and MCP control. |
-| Conversational Agent | Query and edit the canvas, generate media and manage tasks through conversation. Supports multiple conversations, Plan/B/C modes, project memory, separate windows and read-only sub-agents. |
+| Conversational Agent & collaboration | The assistant and script workbench can select authorized agents and Skills for the task, with multi-model teams and reviewable results. Configure execution, members, models and task permissions through the workbench's Agent collaboration button, within the existing Plan/B/C, project memory and read-only sub-agent boundaries. |
+| Assistant windows & recent Skills | Hand off conversation drafts between windows and restore editing if closing fails. Node `/` menus offer the 5 most recent available uploaded or package Skills; selections in the main or separate assistant update the same record. Selecting a Skill adds a reference without starting generation. |
 | AI app nodes | Create interactive apps through the Agent or MCP. Apps access only bound canvas assets, run read-only actions and save results. |
 | Project asset cloud sync | Connect a shared project through S3-compatible storage, preview and manually sync project media, characters, scenes, props and related data. Cloud-only clearing and deletion keep local assets; global assets and automatic sync are not included. |
 | RelayOnAPI groups | Manage separate connections and API keys by group, and choose supported text, image and video models. |
 | Characters & creative assets | Manage project and global characters, scenes, props and weapons. Bind voices, actions and multiple same-library weapons to a character; asset packages, copies and project cloud sync preserve weapon links. Scenes and props support multiple reference images and precise individual-image references. |
 | External MCP control | Let external AI tools control the canvas, media and editing projects through local stdio or Streamable HTTP. Disabled by default; remote access requires confirmation to enable. |
-| Local storage | Save projects and media locally, and manage API keys in a separate credential store. Storage health separates file usage from app data quota, confirms cleanup and rechecks references, and can reveal unreferenced files in their folders. |
+| Local storage | Save projects and media locally, with a separate credential store for API keys. Storage health separates file usage from app data quota and checks unreferenced ordinary originals in old and new projects before confirmed cleanup. New-project immutable media, imports and ranges with unfinished operations remain protected. |
 | Lossless image compression | Compress PNG / JPEG images from an image node. Create a separate copy only when it is smaller, keeping the original image. |
 | Series & episodes | Give each episode its own canvas while sharing characters, project memory and assets across the series. AI extracts episode characters and props into a reviewable list; add or bind them to the library explicitly. |
 | Asset library & editing | Preview and edit media, prompts, tags, text and Markdown, with batch prompt extraction from images. Select creative assets in bulk, copy them between projects and the global library, transfer asset packages, find usage locations, reconnect missing files and explicitly clean up missing records. Record cleanup cannot be undone and keeps disk files. |
@@ -179,9 +192,21 @@ The toolbar and properties panel of the canvas note visual design reference [Exc
 
 ## Contact
 
+Discord: [Join the AI Canvas community](https://discord.gg/wZ5Qqab78B)
+
 Development QQ group: 873354155
 
 ## Contributors
+
+Help us make AI Canvas better. Contributions are welcome across React / TypeScript, Tauri / Rust, model and workflow integrations, plugins, documentation and translations.
+
+1. Read the [development guide](doc/开发指南.md) and [module documentation index](doc/文档导航.md), both currently in Chinese, to understand the project structure and engineering boundaries.
+2. Report reproducible problems in [Issues](https://github.com/Tenney95/AI-Canvas-tauri/issues) and discuss ideas in [Discussions](https://github.com/Tenney95/AI-Canvas-tauri/discussions). Discuss larger features or structural changes before implementing them.
+3. Start with a focused change and open a [Pull Request](https://github.com/Tenney95/AI-Canvas-tauri/pulls) for a fix, feature, documentation update or translation. Describe the problem, your changes and what you verified.
+
+The sponsorship income sharing plan for outstanding code contributors is described under [Sponsors](#sponsors). Selection criteria and distribution details will be published later.
+
+Thank you to everyone helping build the project:
 
 <p>
   <a href="https://github.com/zhurui0523" title="zhurui0523"><img src="https://images.weserv.nl/?url=github.com/zhurui0523.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="zhurui0523" /></a>

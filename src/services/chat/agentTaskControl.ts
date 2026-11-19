@@ -4,6 +4,7 @@
 import { isMcpSettingsToolContext } from '../mcp/mcpSettingsScope';
 import { isGeneralAssistantScope, isGeneralAssistantToolContext } from './assistantScope';
 import { useAppStore } from '../../store/useAppStore';
+import { isWorkbenchAgentTaskInScope, isWorkbenchTeamTaskInScope } from '../episodeWorkspaceScope';
 import {
   AGENT_TERMINAL_STATUSES,
   type AgentApprovalResolution,
@@ -18,6 +19,11 @@ import {
 } from './agentScheduler';
 import { appendAgentEvent } from './agentJournal';
 import { emitAgentLifecycleEvent } from './agentLifecycle';
+import { unmaterializedTeamDispatches, unresolvedAgentDispatches } from './agentDurabilityService';
+import { unmaterializedToolDispatches } from './agentCheckpointService';
+import { assertCreationProfileSnapshot } from '../creationProfiles/creationProfileService';
+import { clearAgentResults } from './agentResultService';
+import { nativeAgentResumeContext } from './agentResumeContext';
 
 export type AgentExecutionOutcome =
   | 'completed'
@@ -167,7 +173,34 @@ export function pauseAgentTask(taskId: string, reason = 'user_paused'): AgentTas
   return transitionAgentTask(taskId, 'paused', { pausedReason: reason });
 }
 
+/** 显式应用已有团队成果；不放宽普通已完成任务的状态机或重新调用模型。 */
+export function prepareTeamTaskApplication(taskId: string): AgentTask {
+  const task = getTask(taskId);
+  if (task.executionKind !== 'team' || !task.teamRun?.resultArtifactId) {
+    throw new Error('该任务没有可应用的团队成果');
+  }
+  if (activeControllers.has(taskId) || isAgentExecutionScheduled(taskId)
+    || !['completed', 'failed', 'stopped', 'paused'].includes(task.status)) {
+    throw new Error('任务仍在执行，请等待当前操作完成');
+  }
+  if (task.status !== 'completed') {
+    return transitionAgentTask(taskId, 'queued', {
+      pausedReason: undefined, errorCode: undefined, errorMessage: undefined,
+    });
+  }
+  const next: AgentTask = {
+    ...task, status: 'queued', updatedAt: Date.now(), completedAt: undefined,
+    pausedReason: undefined, errorCode: undefined, errorMessage: undefined,
+  };
+  useAppStore.getState().upsertAgentTask(next);
+  appendAgentEvent(taskId, 'task_status', { status: 'queued' });
+  emitAgentLifecycleEvent({ type: 'task.status', taskId, projectId: task.projectId,
+    conversationId: task.conversationId, status: 'queued' });
+  return next;
+}
+
 export function stopAgentTask(taskId: string): AgentTask {
+  clearAgentResults({ taskId });
   activeControllers.get(taskId)?.abort();
   return transitionAgentTask(taskId, 'stopped', {
     pausedReason: undefined,
@@ -176,6 +209,7 @@ export function stopAgentTask(taskId: string): AgentTask {
 }
 
 export function stopConversationAgentTasks(conversationId: string): void {
+  clearAgentResults({ conversationId });
   cancelConversationAgentExecutions(conversationId);
   const tasks = useAppStore.getState().agentTasks.filter(
     (task) => task.conversationId === conversationId
@@ -195,6 +229,7 @@ export function stopConversationAgentTasks(conversationId: string): void {
 }
 
 export function stopProjectAgentTasks(projectId: string): void {
+  clearAgentResults({ projectId });
   const tasks = useAppStore.getState().agentTasks.filter(
     (task) => task.projectId === projectId
       && !AGENT_TERMINAL_STATUSES.has(task.status),
@@ -239,6 +274,21 @@ export function validateTaskResumable(taskId: string): AgentResumeValidation {
   if (!['paused', 'failed'].includes(task.status)) {
     return { ok: false, errorCode: 'AGENT_RESUME_NOT_RESUMABLE', message: '任务当前状态不支持继续' };
   }
+  if (task.creationProfilePreparation && task.creationProfilePreparation !== 'ready') {
+    return { ok: false, errorCode: 'CREATION_PROFILE_NOT_PREPARED',
+      message: '组合包准备尚未成功完成，请等待准备完成或重新发起请求，不能跳过准备直接继续' };
+  }
+  try { assertCreationProfileSnapshot(task.creationProfile); }
+  catch (error) { return { ok: false, errorCode: 'CREATION_PROFILE_BINDING_CHANGED',
+    message: error instanceof Error ? error.message : '组合包绑定的能力已变化，请重新选择后发起任务' }; }
+  if (unresolvedAgentDispatches(task).some((item) => item.effect !== 'read')) {
+    return { ok: false, errorCode: 'AGENT_OUTCOME_REQUIRES_VERIFICATION',
+      message: '存在已进入调用但结果未知的操作，请先核实原操作；继续不会自动重投' };
+  }
+  if (unmaterializedToolDispatches(task).length) return { ok: false, errorCode: 'AGENT_SUCCESS_STEP_INCOMPLETE',
+    message: '原工具已成功返回但成功步骤不完整，请先只读核实或新建任务；普通继续不会重投' };
+  if (unmaterializedTeamDispatches(task).length) return { ok: false, errorCode: 'TEAM_UNKNOWN_RESULT_NO_ARTIFACT',
+    message: '原团队调用已核实但没有可恢复成果，请补充新要求或新建任务；普通继续不会重投' };
   if (task.parentTaskId) {
     return {
       ok: false,
@@ -246,7 +296,8 @@ export function validateTaskResumable(taskId: string): AgentResumeValidation {
       message: '专家子任务不能单独继续，请从上级任务重新规划',
     };
   }
-  if (store.currentProjectId !== task.projectId && !isGeneralAssistantScope(task.projectId)) {
+  if (store.currentProjectId !== task.projectId && !isGeneralAssistantScope(task.projectId)
+    && !isWorkbenchTeamTaskInScope(store, task) && !isWorkbenchAgentTaskInScope(store, task)) {
     return {
       ok: false,
       errorCode: 'AGENT_RESUME_PROJECT_NOT_ACTIVE',
@@ -255,7 +306,9 @@ export function validateTaskResumable(taskId: string): AgentResumeValidation {
   }
   const conversation = store.conversations.find((item) => item.id === task.conversationId);
   if (!conversation || conversation.deletedAt
-    || (isGeneralAssistantScope(task.projectId) && conversation.projectId !== task.projectId)) {
+    || (task.workbenchTarget && !isWorkbenchAgentTaskInScope(store, task))
+    || (isGeneralAssistantScope(task.projectId) && conversation.projectId !== task.projectId)
+    || (task.teamRun?.source === 'script-workbench' && conversation.projectId !== task.teamRun.target?.seriesId)) {
     return {
       ok: false,
       errorCode: 'AGENT_RESUME_CONVERSATION_GONE',
@@ -266,6 +319,9 @@ export function validateTaskResumable(taskId: string): AgentResumeValidation {
   if (lifetime.exceeded) {
     return { ok: false, errorCode: lifetime.errorCode, message: lifetime.message };
   }
+  try { nativeAgentResumeContext(store, task); }
+  catch { return { ok: false, errorCode: 'AGENT_RESUME_CONTEXT_CHANGED',
+    message: '原项目、分集或画布版本已变化，请核对原任务；不会把任务绑定到当前其他画布' }; }
   return { ok: true };
 }
 
@@ -283,11 +339,15 @@ export function resolveAgentApproval(
   const generalApproval = !!task && isGeneralAssistantToolContext(task, step?.toolCall?.toolId ?? '')
     && store.conversations.some((conversation) => conversation.id === task.conversationId
       && conversation.projectId === task.projectId && !conversation.deletedAt);
+  const workbenchApproval = !!task && isWorkbenchTeamTaskInScope(store, task, step?.toolCall?.toolId ?? '')
+    && store.conversations.some((conversation) => conversation.id === task.conversationId
+      && conversation.projectId === task.teamRun?.target?.seriesId && !conversation.deletedAt);
   if (
     !task
     || store.activeConversationId !== task.conversationId
     || (store.currentProjectId !== task.projectId
       && !generalApproval
+      && !workbenchApproval
       && !task.steps.some((step) => step.approval?.id === approvalId
         && step.approval.kind === 'user_choice'
         && isMcpSettingsToolContext(task, step.toolCall?.toolId ?? '')))
@@ -303,7 +363,10 @@ export function resolveAgentApproval(
  * 注意不要清除 replanRequest：它要一直留到 Runtime 把重新规划要求写进模型上下文为止。
  */
 export function prepareAgentTaskResume(taskId: string): AgentTask {
+  const store = useAppStore.getState(), task = getTask(taskId);
+  const context = nativeAgentResumeContext(store, task);
   return transitionAgentTask(taskId, 'queued', {
+    ...context,
     pausedReason: undefined,
     errorCode: undefined,
     errorMessage: undefined,

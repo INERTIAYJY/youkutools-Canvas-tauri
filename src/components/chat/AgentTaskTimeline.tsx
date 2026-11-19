@@ -22,6 +22,8 @@ import AgentExecutionRationale from './AgentExecutionRationale';
 import { AssistantActivityMark } from './AssistantActivity';
 import type { MediaModelOption } from '../nodes/shared/defaultModels';
 import { useT } from '../../i18n';
+import type { TeamArtifactReference, TeamGraphDefinition } from '../../types/agentTeam';
+import TeamRunCard from '../shared/agentTeams/TeamRunCard';
 
 export interface AgentTaskControls {
   onResolveApproval: (approvalId: string, resolution: AgentApprovalResolution) => void;
@@ -33,6 +35,13 @@ export interface AgentTaskControls {
   onSkip: (taskId: string, stepId: string) => void;
   onReplan: (taskId: string) => void;
   onRewind: (taskId: string) => void;
+  onReadTeamArtifact?: (taskId: string, artifact: TeamArtifactReference) => Promise<string>;
+  onApplyTeamResult?: (taskId: string) => void | Promise<void>;
+  onRestoreTeamResult?: (taskId: string) => void | Promise<void>;
+  onReconcileTeamResult?: (taskId: string) => void | Promise<void>;
+  onAmendTeamTask?: (taskId: string, instruction: string) => void | Promise<void>;
+  onEditTeamGraph?: (taskId: string, graph: TeamGraphDefinition, expected: { revision: number; boardRevision: number }) => Promise<void>;
+  onResolveDispatch?: (taskId: string, dispatchId: string, decision: 'verified_completed' | 'abandoned') => void | Promise<void>;
 }
 
 interface AgentTaskTimelineProps extends AgentTaskControls {
@@ -179,11 +188,36 @@ export default function AgentTaskTimeline({
   onSkip,
   onReplan,
   onRewind,
+  onReadTeamArtifact,
+  onApplyTeamResult,
+  onRestoreTeamResult,
+  onReconcileTeamResult,
+  onAmendTeamTask,
+  onEditTeamGraph,
+  onResolveDispatch,
 }: AgentTaskTimelineProps) {
   const t = useT();
   const isTerminal = AGENT_TERMINAL_STATUSES.has(task.status);
   const isExpertTask = !!task.parentTaskId;
-  const [expanded, setExpanded] = useState(!isTerminal);
+  const settled = task.status === 'completed' || task.status === 'stopped';
+  const disclosurePhase = settled ? 'settled'
+    : ['paused', 'failed', 'waiting_approval'].includes(task.status) ? task.status : 'active';
+  const disclosureScope = `${task.id}\u0000${disclosurePhase}`;
+  const [disclosure, setDisclosure] = useState({ scope: disclosureScope, expanded: !settled });
+  // 新任务或新阶段恢复默认展示；同阶段仍允许用户手动重新展开。
+  if (disclosure.scope !== disclosureScope) setDisclosure({ scope: disclosureScope, expanded: !settled });
+  const expanded = disclosure.scope === disclosureScope ? disclosure.expanded : !settled;
+  const [resolving, setResolving] = useState<string | null>(null);
+  const [resolutionError, setResolutionError] = useState('');
+  const unknownDispatches = (task.dispatches ?? []).filter((dispatch) => !dispatch.recovery
+    && (dispatch.phase === 'outcome_unknown' || (dispatch.phase === 'dispatched' && ['paused', 'failed', 'stopped'].includes(task.status))));
+  const resolveDispatch = async (dispatchId: string, decision: 'verified_completed' | 'abandoned') => {
+    if (!onResolveDispatch || resolving) return;
+    setResolving(dispatchId); setResolutionError('');
+    try { await onResolveDispatch(task.id, dispatchId, decision); }
+    catch (error) { setResolutionError(error instanceof Error ? error.message : t('调用结果未能核实')); }
+    finally { setResolving(null); }
+  };
 
   const meta = STATUS_META[task.status];
   const isActive = ACTIVE_STATUSES.includes(task.status);
@@ -213,12 +247,35 @@ export default function AgentTaskTimeline({
     : 0;
   const terminalLabel = task.status === 'completed' ? t('运行记录') : t(meta.label);
 
+  if (task.teamRun) return (
+    <>
+      <TeamRunCard task={task} onPause={onPause} onResume={onResume} onStop={onStop}
+        onReadArtifact={onReadTeamArtifact} onApply={onApplyTeamResult} onRestore={onRestoreTeamResult}
+        onReconcile={onReconcileTeamResult} onAmend={onAmendTeamTask}
+        onEditGraph={onEditTeamGraph ? (graph, expected) => onEditTeamGraph(task.id, graph, expected) : undefined}
+        onResolveDispatch={onResolveDispatch ? (dispatchId, decision) => onResolveDispatch(task.id, dispatchId, decision) : undefined} />
+      {pendingApprovalStep && <AgentApprovalCard step={pendingApprovalStep} mediaModelOptions={mediaModelOptions}
+        mediaModelAvailability={mediaModelAvailability} onResolve={onResolveApproval} />}
+    </>
+  );
+
   return (
     <div className="agent-task-timeline mt-2 max-w-full py-0.5">
+      {unknownDispatches.length > 0 && <div className="ui-alert ui-alert--warning mb-2 space-y-2">
+        <p>{t('存在结果未知的调用。请先核实，系统不会自动重投。')}</p>
+        {unknownDispatches.map((dispatch) => <div key={dispatch.id} className="flex flex-wrap items-center gap-2">
+          <span className="text-xs">{dispatch.kind === 'tool' ? t('工具调用') : t('模型调用')}</span>
+          {onResolveDispatch && <><button type="button" className="ui-btn ui-btn--sm" disabled={!!resolving || !['paused', 'failed', 'stopped'].includes(task.status)}
+            onClick={() => void resolveDispatch(dispatch.id, 'verified_completed')}>{t('已核实完成')}</button>
+          <button type="button" className="ui-btn ui-btn--sm" disabled={!!resolving || !['paused', 'failed', 'stopped'].includes(task.status)}
+            onClick={() => void resolveDispatch(dispatch.id, 'abandoned')}>{t('放弃本次调用')}</button></>}
+        </div>)}
+        {resolutionError && <p role="alert">{resolutionError}</p>}
+      </div>}
       {/* 当前活动：只展示可验证的任务和工具状态，不展示模型隐藏推理。 */}
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => setDisclosure({ scope: disclosureScope, expanded: !expanded })}
         aria-expanded={expanded}
         className="flex min-h-7 w-full items-center gap-1.5 rounded-md px-0.5 text-left transition-colors hover:bg-canvas-hover/35 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/40"
       >
@@ -285,28 +342,21 @@ export default function AgentTaskTimeline({
         </p>
       )}
 
-      {expanded && (
-        <>
-          {task.steps.length > 0 && (
-            <div className="mt-1 space-y-0.5">
-              {task.steps.map((step) => (
-                <AgentStepCard key={step.id} step={step} animateActivity={animateActivity && isActive && task.status !== 'waiting_approval'} />
-              ))}
-            </div>
-          )}
-
-          {pendingApprovalStep && (
-            <AgentApprovalCard
-              key={pendingApprovalStep.approval?.id}
-              step={pendingApprovalStep}
-              mediaModelOptions={mediaModelOptions}
-              mediaModelAvailability={mediaModelAvailability}
-              onResolve={onResolveApproval}
-            />
-          )}
-
-
-        </>
+      {expanded && task.steps.length > 0 && (
+        <div className="mt-1 space-y-0.5">
+          {task.steps.map((step) => (
+            <AgentStepCard key={step.id} step={step} animateActivity={animateActivity && isActive && task.status !== 'waiting_approval'} />
+          ))}
+        </div>
+      )}
+      {pendingApprovalStep && (
+        <AgentApprovalCard
+          key={pendingApprovalStep.approval?.id}
+          step={pendingApprovalStep}
+          mediaModelOptions={mediaModelOptions}
+          mediaModelAvailability={mediaModelAvailability}
+          onResolve={onResolveApproval}
+        />
       )}
       {/* 控制操作 */}
           {!isTerminal && !isExpertTask && (

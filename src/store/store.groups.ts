@@ -10,7 +10,9 @@ import { GROUP_COLOR_PALETTE } from '../types';
 import { generateId } from './store.utils';
 import { layoutEpisodeShots } from '../utils/episodeLayout';
 import { getNodeSize } from '../utils/nodeBounds';
+import { detachGroupLayoutNodes, toggleGroupLayout } from '../utils/groupCollapseLayout';
 import { isNodeMediaCopySource } from '../services/nodeMediaCopy';
+import { nativeMediaContentDigest } from '../services/nativeMediaDisplay';
 import { persistMissingNodeTextFiles } from '../services/nodeTextFilePersistence';
 import { registerCanvasImport, isCanvasDerivationFresh, completeCanvasDerivation, type CanvasDerivationGuard } from '../services/canvasDerivationGuard';
 import { persistMediaRelocation, pendingMediaRelocations, completeMediaRelocation,
@@ -37,7 +39,7 @@ export interface GroupSlice {
   /** 折叠/展开分组：不进入撤销历史；折叠后收成文件夹卡片，组内节点与其连线不再渲染 */
   toggleGroupCollapsed: (groupId: string) => void;
   setGroupColor: (groupId: string, color: string) => void;
-  /** 把节点文件搬到所属分组的文件夹（未分组则搬回项目根目录），由自动保存驱动 */
+  /** 同步节点文件与分组目录，保留新项目的共享原件和不可变产物。 */
   syncGroupFiles: () => Promise<void>;
 }
 
@@ -92,6 +94,7 @@ function groupFilesSignature(state: Pick<AppState, 'nodes' | 'groups'>): string 
 async function relocateGroupedFiles(projectId: string, projectDir: string, guard: CanvasDerivationGuard,
   set: Parameters<StateCreator<AppState>>[0], get: () => AppState,
   pending: MediaRelocation[], scanFiles: boolean): Promise<boolean> {
+  const native = guard.expectedContext?.modelGeneration === 1;
   const fresh = () => isCanvasDerivationFresh(guard, get());
   let expectedSignature = groupFilesSignature(get());
   const inputsFresh = () => {
@@ -139,7 +142,13 @@ async function relocateGroupedFiles(projectId: string, projectDir: string, guard
     return inputsFresh();
   };
   if (!inputsFresh()) return false;
-  if (pending.length) {
+  if (native) {
+    // 旧日志缺少新库的引用范围证明。撤去待清理项，保留源与副本，由当前画布按新规则重新归档。
+    for (const move of pending) {
+      if (!inputsFresh()) return false;
+      await completeMediaRelocation(move);
+    }
+  } else if (pending.length) {
     set((state) => pending.reduce((current, move) => move.ownerId
       ? relocateOwnedMediaReferences(current, move, move.ownerId) : relocateMediaReferences(current, [move]), state));
     expectedSignature = groupFilesSignature(get());
@@ -164,12 +173,15 @@ async function relocateGroupedFiles(projectId: string, projectDir: string, guard
       const path = slot === null ? node.data.filePath : node.data.storyboardOverrides?.[slot]?.filePath;
       if (!path) continue;
       if (isNodeMediaCopySource(path)) { complete = false; continue; }
-      // Shared legacy nodes split first. The last owner performs the actual relocation.
-      const shared = (ownersByPath.get(key(path))?.size ?? 0) > 1;
+      // 旧项目的同画布共享引用先拆副本；新项目的素材还可能被其他画布和恢复点引用。
+      const shared = !native && (ownersByPath.get(key(path))?.size ?? 0) > 1;
       const folder = node.parentId ? folderByGroupId.get(node.parentId) ?? null : null;
+      if (native && folder && /^(?:roots|imports|media)$/i.test(folder)) continue;
       const normalized = key(stripVerbatimPrefix(path));
       if (!normalized.startsWith(`${root}/`)) continue;
-      const segments = normalized.slice(root.length + 1).split('/');
+      const relativePath = normalized.slice(root.length + 1);
+      const segments = relativePath.split('/');
+      if (native && (segments[0].toLowerCase() === 'roots' || nativeMediaContentDigest(relativePath.toLowerCase()))) continue;
       const currentFolder = segments.length > 1 ? segments.slice(0, -1).join('/') : null;
       if (segments.some((part) => !part || part.startsWith('.')
         || /^(?:appdata|agent-private|plugin-private|blender-private|secrets)$/i.test(part))
@@ -181,13 +193,18 @@ async function relocateGroupedFiles(projectId: string, projectDir: string, guard
       const oldAssetUrl = await getAssetUrlFromPath(path);
       if (!inputsFresh()) return false;
       const move: MediaRelocation = { oldPath: path, newPath: moved.filePath, assetUrl: moved.assetUrl,
-        relativePath: moved.relativePath, projectId, ownerId: shared ? nodeId : undefined, oldAssetUrl };
-      await persistMediaRelocation(move, shared ? nodeId : undefined);
-      if (!inputsFresh()) return false; // 已落盘的迁移留待下次打开项目恢复。
-      set((state) => shared ? relocateOwnedMediaReferences(state, move, nodeId) : relocateMediaReferences(state, [move]));
+        relativePath: moved.relativePath, projectId, ownerId: native || shared ? nodeId : undefined, oldAssetUrl };
+      if (native) {
+        // 副本只改当前画布的目标节点。旧库引用、历史和指向原件的素材身份继续有效。
+        set((state) => ({ nodes: state.nodes.map((item) => item.id === nodeId ? relocateMediaReferences(item, [move]) : item) }));
+      } else {
+        await persistMediaRelocation(move, shared ? nodeId : undefined);
+        if (!inputsFresh()) return false; // 已落盘的迁移留待下次打开项目恢复。
+        set((state) => shared ? relocateOwnedMediaReferences(state, move, nodeId) : relocateMediaReferences(state, [move]));
+      }
       expectedSignature = groupFilesSignature(get());
       if (await get().saveCurrentProjectSilent() !== projectId || !inputsFresh()) return false;
-      if (!await finish(move)) return false;
+      if (!native && !await finish(move)) return false;
     }
   }
   return complete && inputsFresh();
@@ -303,7 +320,7 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
 
     set((state) => ({
       groups: [...state.groups, newGroup],
-      nodes: [
+      nodes: detachGroupLayoutNodes([
         // Place group node BEFORE children (xyflow requirement)
         groupNode,
         ...state.nodes.map((n) =>
@@ -311,7 +328,7 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
             ? { ...n, parentId: groupId, position: relMap.get(n.id)! }
             : n
         ),
-      ],
+      ], new Set(candidateIds)),
     }));
 
     void ensureGroupFolder(get().currentProjectId, newGroup.name);
@@ -363,7 +380,7 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
     // Remove parentId and convert to absolute positions
     set((state) => ({
       groups: newNodeGroups,
-      nodes: state.nodes
+      nodes: detachGroupLayoutNodes(state.nodes
         .filter((n) => {
           // Remove dissolved group nodes
           if (affectedGroupIds.has(n.id) && n.type === 'group') return false;
@@ -382,7 +399,7 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
             };
           }
           return n;
-        }),
+        }), new Set([...affectedGroupIds, ...dissolvedChildIds])),
     }));
 
     retireFolders(get().currentProjectId, dissolvedNames);
@@ -424,36 +441,18 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
     if (!groupNode) return;
     const collapsed = groupNode.data.groupCollapsed === true;
     const childIds = new Set(get().nodes.filter((n) => n.parentId === groupId).map((n) => n.id));
-    const expanded = groupNode.data.groupExpandedSize;
-    const currentSize = {
-      width: Number(groupNode.width ?? groupNode.style?.width ?? groupNode.measured?.width) || 320,
-      height: Number(groupNode.height ?? groupNode.style?.height ?? groupNode.measured?.height) || 200,
-    };
-    const nextSize = collapsed ? expanded ?? currentSize : COLLAPSED_GROUP_SIZE;
-
     // 开合只改变浏览状态，不创建历史记录或截断重做分支。
-    set((state) => ({
-      nodes: state.nodes.map((n) => {
-        if (n.id !== groupId) {
-          // 折叠后组内节点看不见了，不能继续留在选区里
-          return collapsed || !childIds.has(n.id) || !n.selected ? n : { ...n, selected: false };
-        }
-        return {
-          ...n,
-          width: nextSize.width,
-          height: nextSize.height,
-          style: { ...n.style, ...nextSize },
-          data: {
-            ...n.data,
-            groupCollapsed: collapsed ? undefined : true,
-            groupExpandedSize: collapsed ? expanded : currentSize,
-          },
-        };
-      }),
-      selectedNodeIds: collapsed
-        ? state.selectedNodeIds
-        : state.selectedNodeIds.filter((id) => !childIds.has(id)),
-    }));
+    set((state) => {
+      // 几何统一求解；收起后组内不可见节点退出选区。
+      const nodes = toggleGroupLayout(state.nodes, groupId, COLLAPSED_GROUP_SIZE).map((node) =>
+        !collapsed && childIds.has(node.id) && node.selected ? { ...node, selected: false } : node);
+      return {
+        nodes,
+        selectedNodeIds: collapsed
+          ? state.selectedNodeIds
+          : state.selectedNodeIds.filter((id) => !childIds.has(id)),
+      };
+    });
   },
 
   setGroupColor: (groupId, color) => {

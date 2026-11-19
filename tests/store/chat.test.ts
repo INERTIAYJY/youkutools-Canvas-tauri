@@ -3,6 +3,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatConversation, ChatMessage } from '../../src/types/chat';
+import type { NativeProjectViewItem } from '../../src/store/nativeProjectView';
 
 const historyMocks = vi.hoisted(() => ({
   saveConversation: vi.fn(async () => undefined),
@@ -11,14 +12,29 @@ const historyMocks = vi.hoisted(() => ({
   loadMessages: vi.fn<() => Promise<{ messages: ChatMessage[]; total: number }>>(),
   persistMessage: vi.fn(async () => undefined),
   clearConversationMessages: vi.fn(async () => undefined),
-  repairInterruptedMessages: vi.fn(async () => [] as string[]),
+  repairInterruptedMessages: vi.fn<(projectId: string) => Promise<string[]>>().mockResolvedValue([]),
 }));
+const chatWindowMocks = vi.hoisted(() => ({
+  close: vi.fn<(sessionId?: string) => Promise<void>>(),
+  sessionId: vi.fn<() => string | undefined>(),
+}));
+const nativeProjectMocks = vi.hoisted(() => ({ listRetiredCanvases: vi.fn<() => Promise<string[]>>() }));
 
 vi.mock('../../src/services/chat/chatHistoryService', () => historyMocks);
+vi.mock('../../src/services/chat/chatWindowService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/services/chat/chatWindowService')>(),
+  emitCloseChatWindow: chatWindowMocks.close,
+  getMainChatWindowSessionId: chatWindowMocks.sessionId,
+}));
+vi.mock('../../src/services/indexedDb/nativeProjectRepository', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/services/indexedDb/nativeProjectRepository')>(),
+  listNativeRetiredCanvasIds: nativeProjectMocks.listRetiredCanvases,
+}));
 
 import { useAppStore } from '../../src/store/useAppStore';
 import { GENERAL_ASSISTANT_SCOPE_ID } from '../../src/services/chat/assistantScope';
 import { MCP_SETTINGS_CONVERSATION_ID, MCP_SETTINGS_SCOPE_ID } from '../../src/services/mcp/mcpSettingsScope';
+import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasImport } from '../../src/services/canvasDerivationGuard';
 
 const storageValues = new Map<string, string>();
 const localStorageMock = {
@@ -68,6 +84,228 @@ beforeEach(() => {
   useAppStore.setState({ currentProjectId: 'project-1' });
   historyMocks.loadProjectConversations.mockReset();
   historyMocks.loadMessages.mockReset();
+  nativeProjectMocks.listRetiredCanvases.mockReset().mockResolvedValue([]);
+  chatWindowMocks.close.mockReset().mockResolvedValue(undefined);
+  chatWindowMocks.sessionId.mockReset().mockReturnValue('old-window-session');
+});
+
+describe('新项目画布版本与派生结果', () => {
+  it('编辑后同步运行时上下文，使旧结果失效且新操作仍可登记', () => {
+    useAppStore.setState({ currentProjectId: 'canvas-a', projectLoadStatus: 'ready', switchingProjectName: null,
+      isCreatingProject: false, isReturningToStartPage: false, canvasRevision: 3, globalCanvasRevision: 10,
+      projects: [{ id: 'canvas-a', name: '画布', createdAt: 1, updatedAt: 1 }],
+      projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1, runtimeEpoch: 'runtime',
+        projectId: 'project-a', projectEpoch: 1, episodeId: 'episode-a', canvasId: 'canvas-a', canvasEpoch: 1, canvasRevision: 3 } });
+    const previous = registerCanvasImport(useAppStore.getState())!;
+    expect(previous).not.toBeNull();
+    useAppStore.getState().incrementRevision();
+    expect(isCanvasDerivationFresh(previous, useAppStore.getState())).toBe(false);
+    const current = registerCanvasImport(useAppStore.getState())!;
+    expect(current?.expectedContext?.canvasRevision).toBe(4);
+    expect(isCanvasDerivationFresh(current, useAppStore.getState())).toBe(true);
+    completeCanvasDerivation(previous); completeCanvasDerivation(current);
+  });
+
+  it('按当前画布的版本模式同步，且不修改其他画布的上下文', () => {
+    const context = { kind: 'canvas' as const, schemaVersion: 2 as const, modelGeneration: 1, runtimeEpoch: 'runtime',
+      projectId: 'project-a', projectEpoch: 1, episodeId: null, canvasId: 'canvas-a', canvasEpoch: 1, canvasRevision: 10 };
+    useAppStore.setState({ currentProjectId: 'canvas-a', canvasRevision: 3, globalCanvasRevision: 10,
+      projects: [{ id: 'canvas-a', name: '画布', createdAt: 1, updatedAt: 1, revisionScope: 'global' }], projectExecutionContext: context });
+    useAppStore.getState().setCanvasRevision(8);
+    expect(useAppStore.getState().projectExecutionContext).toEqual(context);
+    useAppStore.getState().setGlobalCanvasRevision(12);
+    expect(useAppStore.getState().projectExecutionContext).toMatchObject({ canvasRevision: 12 });
+    useAppStore.setState({ currentProjectId: 'canvas-b' });
+    useAppStore.getState().incrementRevision();
+    expect(useAppStore.getState().projectExecutionContext).toMatchObject({ canvasId: 'canvas-a', canvasRevision: 12 });
+  });
+
+  it('切换过程中拒绝登记和写回当前新画布的派生操作', () => {
+    useAppStore.setState({ currentProjectId: 'canvas-a', projectLoadStatus: 'ready', switchingProjectName: null,
+      isCreatingProject: false, isReturningToStartPage: false, canvasRevision: 3,
+      projects: [{ id: 'canvas-a', name: '画布', createdAt: 1, updatedAt: 1 }],
+      projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1, runtimeEpoch: 'runtime',
+        projectId: 'project-a', projectEpoch: 1, episodeId: null, canvasId: 'canvas-a', canvasEpoch: 1, canvasRevision: 3 } });
+    const pending = registerCanvasImport(useAppStore.getState())!;
+    expect(pending).not.toBeNull();
+    useAppStore.setState({ switchingProjectName: '另一项目' });
+    expect(registerCanvasImport(useAppStore.getState())).toBeNull();
+    expect(isCanvasDerivationFresh(pending, useAppStore.getState())).toBe(false);
+    completeCanvasDerivation(pending);
+  });
+});
+
+describe('工作台会话持久范围', () => {
+  const target = { seriesId: 'project-1', episodeId: 'episode-a' };
+  beforeEach(() => {
+    historyMocks.saveConversation.mockClear();
+    useAppStore.setState({ projectLoadStatus: 'ready', isCreatingProject: false, isReturningToStartPage: false,
+      switchingProjectName: null, projects: [
+        { id: 'project-1', name: '剧集', createdAt: 1, updatedAt: 1 },
+        { id: 'episode-a', parentId: 'project-1', name: '第一集', createdAt: 1, updatedAt: 1 },
+        { id: 'episode-b', parentId: 'project-1', name: '第二集', createdAt: 1, updatedAt: 1 },
+      ], conversations: [conversation('conv-workbench', 1)], activeConversationId: 'conv-workbench' });
+  });
+
+  it('首次绑定只接受当前剧集分集，后续元数据更新和任务清理都保留目标', () => {
+    const state = useAppStore.getState();
+    state.updateConversation('conv-workbench', { workbenchTarget: target });
+    useAppStore.setState({ agentTasks: [] });
+    state.updateConversation('conv-workbench', { title: '新标题', workbenchTarget: undefined,
+      id: 'forged-id', projectId: 'forged-project' });
+    expect(useAppStore.getState().conversations[0]).toMatchObject({ id: 'conv-workbench', projectId: 'project-1',
+      title: '新标题', workbenchTarget: target });
+    expect(historyMocks.saveConversation).toHaveBeenLastCalledWith(expect.objectContaining({ workbenchTarget: target }));
+    expect(() => state.updateConversation('conv-workbench', { workbenchTarget: { ...target, episodeId: 'episode-b' } }))
+      .toThrow('不能更换');
+    expect(useAppStore.getState().conversations[0].workbenchTarget).toEqual(target);
+  });
+
+  it('错误归属、已离开的剧集或不存在的分集不能建立绑定', () => {
+    const state = useAppStore.getState();
+    expect(() => state.updateConversation('conv-workbench', { workbenchTarget: { ...target, seriesId: 'other-series' } }))
+      .toThrow('目标无效');
+    expect(() => state.updateConversation('conv-workbench', { workbenchTarget: { ...target, episodeId: 'missing' } }))
+      .toThrow('范围已变化');
+    useAppStore.setState({ currentProjectId: null });
+    expect(() => state.updateConversation('conv-workbench', { workbenchTarget: target })).toThrow('范围已变化');
+    expect(useAppStore.getState().conversations[0].workbenchTarget).toBeUndefined();
+  });
+
+  it('其他产品入口的新草稿进入普通会话，保留原工作台会话与其草稿', () => {
+    const state = useAppStore.getState();
+    state.updateConversation('conv-workbench', { workbenchTarget: target });
+    state.setChatComposerLiveDraft('工作台尚未发送的要求', 'conv-workbench');
+    state.openChatWithDraft('读取全剧并拆分章节');
+    const latest = useAppStore.getState();
+    expect(latest.activeConversationId).not.toBe('conv-workbench');
+    expect(latest.conversations.find((entry) => entry.id === latest.activeConversationId)?.workbenchTarget).toBeUndefined();
+    expect(latest.conversations.find((entry) => entry.id === 'conv-workbench')?.workbenchTarget).toEqual(target);
+    expect(latest.chatComposerDrafts['conv-workbench']).toBe('工作台尚未发送的要求');
+    expect(latest.chatComposerDraft).toBe('读取全剧并拆分章节');
+    expect(latest.chatOpen).toBe(true);
+  });
+});
+
+describe('外部草稿的独立窗口交接', () => {
+  beforeEach(() => {
+    useAppStore.setState({ chatOpen: true, chatPanelDetached: true, chatComposerDraft: null,
+      projectLoadStatus: 'ready', switchingProjectName: null, isCreatingProject: false, isReturningToStartPage: false,
+      projects: [{ id: 'project-1', name: '项目一', createdAt: 1, updatedAt: 1 }],
+      conversations: [conversation('conv-first', 1), conversation('conv-second', 2)], activeConversationId: 'conv-first',
+      chatComposerLiveDraft: '原有草稿', chatComposerDrafts: { 'conv-first': '原有草稿', 'conv-second': '另一会话草稿' },
+      showToast: vi.fn() });
+  });
+
+  it('真实关窗完成前保留独立显示，连续请求只交接一次并采用最后草稿', async () => {
+    let finish!: () => void;
+    chatWindowMocks.close.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const state = useAppStore.getState();
+    state.openChatWithDraft('第一份外部草稿');
+    state.openChatWithDraft('最后一份外部草稿');
+    await vi.waitFor(() => expect(chatWindowMocks.close).toHaveBeenCalledOnce());
+    expect(useAppStore.getState()).toMatchObject({ chatPanelDetached: true, chatComposerDraft: null, activeConversationId: 'conv-first' });
+    state.setChatComposerLiveDraft('独立窗口末次输入', 'conv-first');
+    finish();
+
+    await vi.waitFor(() => expect(useAppStore.getState().chatPanelDetached).toBe(false));
+    expect(useAppStore.getState()).toMatchObject({ chatOpen: true, chatComposerDraft: '最后一份外部草稿',
+      chatComposerDrafts: { 'conv-first': '独立窗口末次输入', 'conv-second': '另一会话草稿' } });
+    expect(chatWindowMocks.close).toHaveBeenCalledOnce();
+    expect(chatWindowMocks.close).toHaveBeenCalledWith('old-window-session');
+  });
+
+  it('拆分预览在独立助手交接后进入新 Plan 会话并保留旧草稿', async () => {
+    chatWindowMocks.close.mockResolvedValueOnce(undefined);
+    useAppStore.getState().openChatWithDraft('分集参数与章节引用', { planConversationTitle: 'AI 分集拆分预览' });
+
+    await vi.waitFor(() => expect(useAppStore.getState().chatPanelDetached).toBe(false));
+    const state = useAppStore.getState();
+    expect(state.conversations.find((entry) => entry.id === state.activeConversationId))
+      .toMatchObject({ projectId: 'project-1', title: 'AI 分集拆分预览', agentMode: 'plan' });
+    expect(state.conversations.find((entry) => entry.id === 'conv-first')?.agentMode).toBe('collaborative');
+    expect(state.chatComposerDrafts['conv-first']).toBe('原有草稿');
+    expect(state.chatComposerDraft).toBe('分集参数与章节引用');
+  });
+
+  it('交接失败不显示内嵌面板、不覆盖草稿，错误不暴露原始细节', async () => {
+    chatWindowMocks.close.mockRejectedValueOnce(new Error('untrusted native failure details'));
+    useAppStore.getState().openChatWithDraft('不能填入的新草稿');
+    await vi.waitFor(() => expect(useAppStore.getState().showToast)
+      .toHaveBeenCalledWith('独立窗口尚未完成草稿交接，未打开内嵌助手', 'error'));
+    expect(useAppStore.getState()).toMatchObject({ chatPanelDetached: true, chatComposerDraft: null,
+      chatComposerLiveDraft: '原有草稿', chatComposerDrafts: { 'conv-first': '原有草稿' } });
+  });
+
+  it('正式交接尚未开始就出现新窗口时，不向新实例发送关闭请求', async () => {
+    useAppStore.getState().openChatWithDraft('旧窗口请求的草稿');
+    chatWindowMocks.sessionId.mockReturnValue('new-window-session');
+    await vi.waitFor(() => expect(useAppStore.getState().showToast).toHaveBeenCalledWith('项目或会话已变化，未填入助手草稿', 'info'));
+    expect(chatWindowMocks.close).not.toHaveBeenCalled();
+    expect(useAppStore.getState()).toMatchObject({ chatPanelDetached: true, chatComposerDraft: null, chatComposerLiveDraft: '原有草稿' });
+  });
+
+  it.each(['project', 'conversation', 'revision', 'navigation', 'context', 'new-window'])('交接期间 %s 变化后取消注入，保留原会话交接草稿', async (change) => {
+    let finish!: () => void;
+    chatWindowMocks.close.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const state = useAppStore.getState();
+    state.openChatWithDraft('过期的外部草稿');
+    await vi.waitFor(() => expect(chatWindowMocks.close).toHaveBeenCalledOnce());
+    if (change === 'project') useAppStore.setState({ currentProjectId: 'project-2', activeConversationId: 'conv-other',
+      conversations: [{ ...conversation('conv-other', 3), projectId: 'project-2' }], chatComposerLiveDraft: '新项目草稿' });
+    if (change === 'conversation') state.setActiveConversation('conv-second');
+    if (change === 'revision') state.incrementRevision();
+    if (change === 'navigation') {
+      state.setActiveConversation('conv-second');
+      state.setActiveConversation('conv-first');
+    }
+    if (change === 'context') useAppStore.setState({ projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1,
+      projectId: 'owner', projectEpoch: 1, canvasId: 'project-1', canvasEpoch: 1, canvasRevision: 0, episodeId: null, runtimeEpoch: 'new-runtime' } });
+    if (change === 'new-window') chatWindowMocks.sessionId.mockReturnValue('new-window-session');
+    state.setChatComposerLiveDraft('独立窗口末次输入', 'conv-first', 'project-1');
+    finish();
+
+    await vi.waitFor(() => expect(useAppStore.getState().showToast).toHaveBeenCalledWith('项目或会话已变化，未填入助手草稿', 'info'));
+    expect(useAppStore.getState().chatPanelDetached).toBe(true);
+    expect(useAppStore.getState().chatComposerDraft).toBeNull();
+    expect(useAppStore.getState().chatComposerDrafts['conv-first']).toBe('独立窗口末次输入');
+    if (change === 'project') expect(useAppStore.getState().chatComposerLiveDraft).toBe('新项目草稿');
+    if (change === 'conversation') expect(useAppStore.getState().chatComposerLiveDraft).toBe('另一会话草稿');
+  });
+
+  it('仅核验过归属的已离开会话可保存草稿，不切换当前输入或活动会话', () => {
+    const state = useAppStore.getState();
+    expect(state.setChatComposerLiveDraft('未经核验的旧输入', 'conv-prior-project')).toBe(false);
+    expect(useAppStore.getState().chatComposerDrafts).not.toHaveProperty('conv-prior-project');
+    expect(state.setChatComposerLiveDraft('已核验旧会话末次输入', 'conv-prior-project', 'prior-project')).toBe(true);
+    expect(useAppStore.getState().chatComposerDrafts['conv-prior-project']).toBe('已核验旧会话末次输入');
+    expect(useAppStore.getState()).toMatchObject({ activeConversationId: 'conv-first', chatComposerLiveDraft: '原有草稿' });
+  });
+
+  it('软删除尚未提交时也拒绝迟到的旧 owner 核验草稿，不复活删除记录', () => {
+    const removed = conversation('conv-removed-pending-delete', 3);
+    let finish!: (result: ChatConversation) => void;
+    historyMocks.softDeleteConversation.mockImplementationOnce(() => new Promise<ChatConversation>((resolve) => { finish = resolve; }));
+    useAppStore.setState((state) => ({ conversations: [...state.conversations, removed], activeConversationId: removed.id,
+      chatComposerLiveDraft: '删除前草稿', chatComposerDrafts: { ...state.chatComposerDrafts, [removed.id]: '删除前草稿' } }));
+    const state = useAppStore.getState();
+    state.removeConversation(removed.id);
+    state.setActiveConversation('conv-second');
+
+    expect(state.setChatComposerLiveDraft('持久化查询仍看到的旧输入', removed.id, removed.projectId)).toBe(false);
+    expect(state.setChatComposerLiveDraft('', removed.id, removed.projectId)).toBe(false);
+    expect(useAppStore.getState().chatComposerDrafts).not.toHaveProperty(removed.id);
+    expect(useAppStore.getState()).toMatchObject({ activeConversationId: 'conv-second', chatComposerLiveDraft: '另一会话草稿' });
+    finish({ ...removed, deletedAt: 4 });
+  });
+
+  it.each(['deleted', 'wrong-owner'])('已核验交接也不能覆盖当前列表中 %s 的会话', (change) => {
+    useAppStore.setState((state) => ({ conversations: state.conversations.map((item) => item.id === 'conv-first'
+      ? { ...item, ...(change === 'deleted' ? { deletedAt: 1 } : {}) } : item) }));
+    expect(useAppStore.getState().setChatComposerLiveDraft('不允许覆盖', 'conv-first', change === 'wrong-owner' ? 'other-project' : 'project-1')).toBe(false);
+    expect(useAppStore.getState().chatComposerDrafts['conv-first']).toBe('原有草稿');
+    expect(useAppStore.getState().chatComposerLiveDraft).toBe('原有草稿');
+  });
 });
 
 describe('chat conversation restoration', () => {
@@ -259,7 +497,7 @@ describe('chat conversation restoration', () => {
     useAppStore.setState({ conversations: [conversation('a', 1), conversation('b', 2)] });
     const store = useAppStore.getState();
     store.setActiveConversation('a');
-    store.setChatComposerLiveDraft('甲的草稿');
+    expect(store.setChatComposerLiveDraft('甲的草稿')).toBe(true);
     store.setActiveConversation('b');
     expect(useAppStore.getState().chatComposerLiveDraft).toBe('');
     store.setChatComposerLiveDraft('乙的草稿');
@@ -267,9 +505,9 @@ describe('chat conversation restoration', () => {
     expect(useAppStore.getState().chatComposerLiveDraft).toBe('乙的草稿');
     store.setActiveConversation('a');
     expect(useAppStore.getState().chatComposerLiveDraft).toBe('甲的最后一次输入');
-    store.setChatComposerLiveDraft('');
+    expect(store.setChatComposerLiveDraft('')).toBe(true);
     expect(useAppStore.getState().chatComposerDrafts).toEqual({ b: '乙的草稿' });
-    store.setChatComposerLiveDraft('不存在的会话', 'missing');
+    expect(store.setChatComposerLiveDraft('不存在的会话', 'missing')).toBe(false);
     expect(useAppStore.getState().chatComposerDrafts).not.toHaveProperty('missing');
   });
 
@@ -341,6 +579,67 @@ describe('chat conversation restoration', () => {
     expect(historyMocks.loadProjectConversations).toHaveBeenCalledWith('project-1');
     const id = useAppStore.getState().createConversation('project-1');
     expect(useAppStore.getState().conversations.find((c) => c.id === id)?.projectId).toBe('project-1');
+  });
+
+  it('转剧集后保留旧画布会话、原消息和草稿，新建会话始终属于作品', async () => {
+    const projectId = 'p2-series';
+    const firstCanvas: NativeProjectViewItem = { id: 'c2-first', name: '独立画布', createdAt: 1, updatedAt: 1,
+      nativeView: { projectId, canvasId: 'c2-first', episodeId: null } };
+    const owner: NativeProjectViewItem = { id: projectId, name: '剧集', createdAt: 1, updatedAt: 1,
+      nativeView: { projectId, canvasId: null, episodeId: null } };
+    const currentCanvas: NativeProjectViewItem = { id: 'c2-second', name: '第二集', parentId: projectId, createdAt: 2, updatedAt: 2,
+      nativeView: { projectId, canvasId: 'c2-second', episodeId: 'e2-second' } };
+    useAppStore.setState({ projects: [firstCanvas], currentProjectId: firstCanvas.id });
+    const createdId = useAppStore.getState().createConversation(firstCanvas.id);
+    const created = useAppStore.getState().conversations.find((item) => item.id === createdId)!;
+    expect(created.projectId).toBe(projectId);
+
+    const original = { ...conversation('conv-original', 1), projectId: firstCanvas.id };
+    const originalMessage = message('original-message', original.id);
+    const firstEpisode: NativeProjectViewItem = { ...firstCanvas, parentId: projectId,
+      nativeView: { ...firstCanvas.nativeView, episodeId: 'e2-first' } };
+    storageValues.clear();
+    storageValues.set(`ai-canvas.chat.active-conversation:${firstCanvas.id}`, original.id);
+    useAppStore.setState({ projects: [owner, firstEpisode, currentCanvas], currentProjectId: currentCanvas.id,
+      conversations: [], activeConversationId: null, chatComposerDrafts: { [original.id]: '原会话草稿' } });
+    historyMocks.loadProjectConversations.mockResolvedValue([created, original, conversation('unrelated', 3)]);
+    historyMocks.loadMessages.mockResolvedValue({ messages: [originalMessage], total: 1 });
+
+    await useAppStore.getState().loadConversationsForProject(currentCanvas.id);
+
+    expect(historyMocks.loadProjectConversations).toHaveBeenCalledWith(projectId, [firstCanvas.id, currentCanvas.id]);
+    expect(useAppStore.getState()).toMatchObject({ conversations: [created, original], activeConversationId: original.id,
+      chatComposerLiveDraft: '原会话草稿', messages: [originalMessage] });
+    expect(storageValues.get(`ai-canvas.chat.active-conversation:${projectId}`)).toBe(original.id);
+    const nextId = useAppStore.getState().createConversation(currentCanvas.id);
+    expect(useAppStore.getState().conversations.find((item) => item.id === nextId)?.projectId).toBe(projectId);
+  });
+
+  it('通过所属作品的退役身份继续显示原会话', async () => {
+    const projectId = 'p2-retired-canvas-owner';
+    const remaining: NativeProjectViewItem = { id: 'c2-remaining', name: '当前分集', parentId: projectId, createdAt: 1, updatedAt: 1,
+      nativeView: { projectId, canvasId: 'c2-remaining', episodeId: 'e2-remaining' } };
+    const original = { ...conversation('conv-retired', 1), projectId: 'c2-retired' };
+    useAppStore.setState({ projects: [remaining], currentProjectId: remaining.id });
+    nativeProjectMocks.listRetiredCanvases.mockResolvedValue([original.projectId]);
+    historyMocks.loadProjectConversations.mockResolvedValue([original]);
+    historyMocks.loadMessages.mockResolvedValue({ messages: [], total: 0 });
+
+    await useAppStore.getState().loadConversationsForProject(remaining.id);
+
+    expect(nativeProjectMocks.listRetiredCanvases).toHaveBeenCalledWith(projectId);
+    expect(historyMocks.loadProjectConversations).toHaveBeenCalledWith(projectId, [remaining.id, original.projectId]);
+    expect(useAppStore.getState()).toMatchObject({ activeConversationId: original.id, conversations: [original] });
+  });
+
+  it('同一作品首次打开前只修复一次中断消息', async () => {
+    const { repairNativeWorkConversationsOnFirstOpen } = useAppStore.getState();
+    const owner = 'p2-first-open-repair';
+    const first = repairNativeWorkConversationsOnFirstOpen(owner);
+    expect(repairNativeWorkConversationsOnFirstOpen(owner)).toBe(first);
+    await first;
+    await repairNativeWorkConversationsOnFirstOpen(owner);
+    expect(historyMocks.repairInterruptedMessages.mock.calls.filter(([projectId]) => projectId === owner)).toHaveLength(1);
   });
 
   it('falls back to the first available conversation when the saved one no longer exists', async () => {

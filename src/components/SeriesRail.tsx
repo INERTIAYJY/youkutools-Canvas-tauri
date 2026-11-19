@@ -3,29 +3,21 @@
  * 收起只能通过面板右上角的关闭按钮。分集各自是一张画布，点一下就切过去；
  * 原著与剧本挂在剧集项目上，整部剧共用。
  */
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../store/useAppStore';
-import { listEpisodes, seriesOwnerId } from '../store/store.utils';
-import { getProjectDataDir, uploadSourceFileToProject } from '../services/fileService';
+import { listEpisodes, resolveOpenTargetId, seriesOwnerId } from '../store/store.utils';
+import { attachSeriesOriginalFile } from '../services/seriesSourceService';
 import ModalOverlay from './shared/ModalOverlay';
+import { ModalPresentationContext } from './shared/modalPresentationContext';
 import PopupCloseButton from './shared/PopupCloseButton';
 import EpisodeNameDialog from './shared/EpisodeNameDialog';
 import ProjectAssetsOverlay from './ProjectAssetsOverlay';
 import ScriptWorkbench from './ScriptWorkbench';
 import SeriesSourceBrowser from './SeriesSourceBrowser';
 import { useT } from '../i18n';
-
-/** 原著文件落在项目数据目录里，只存相对路径，换机器或导入后仍能定位。 */
-function toProjectRelativePath(filePath: string, projectDir: string | null): string {
-  const path = filePath.replace(/\\/g, '/');
-  const dir = (projectDir ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
-  if (dir && path.toLowerCase().startsWith(`${dir.toLowerCase()}/`)) {
-    return path.slice(dir.length + 1);
-  }
-  return path.split('/').pop() ?? path;
-}
+import { focusScriptWorkbenchWindow } from '../services/scriptWorkbenchWindowService';
 
 /** 草稿由打开它的那次点击初始化，弹窗自己只管编辑，不用 effect 去同步外部值。 */
 function TextEditorDialog({
@@ -59,7 +51,7 @@ function TextEditorDialog({
   };
 
   return (
-    <ModalOverlay isOpen={isOpen} onClose={onClose} ariaLabel={title}>
+    <ModalOverlay isOpen={isOpen} onClose={() => { if (!isSaving) onClose(); }} ariaLabel={title}>
       <div
         className="glass-bevel glass-bevel--panel flex h-[min(72vh,640px)] w-[min(680px,calc(100vw-32px))]
                    flex-col overflow-hidden rounded-2xl border border-[var(--glass-ring)]
@@ -73,11 +65,12 @@ function TextEditorDialog({
             <h2 className="truncate text-sm font-semibold leading-5">{title}</h2>
             <p className="truncate text-[11px] leading-4 text-canvas-text-muted">{hint}</p>
           </div>
-          <PopupCloseButton ariaLabel={t('关闭{title}', { title })} onClick={onClose} />
+          <PopupCloseButton ariaLabel={t('关闭{title}', { title })} onClick={onClose} disabled={isSaving} />
         </header>
         <textarea
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
+          disabled={isSaving}
           spellCheck={false}
           className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-[13px] leading-relaxed
                      text-canvas-text outline-none placeholder:text-canvas-text-muted"
@@ -102,6 +95,119 @@ function TextEditorDialog({
 
 export default function SeriesRail() {
   const t = useT();
+  const { scriptWorkbenchOpenProjectId, currentProjectId, projectLoadStatus, clearScriptWorkbenchOpenRequest,
+    projectWorkspaceView, setProjectWorkspaceView } = useAppStore(useShallow((state) => ({
+    scriptWorkbenchOpenProjectId: state.scriptWorkbenchOpenProjectId,
+    currentProjectId: state.currentProjectId,
+    projectLoadStatus: state.projectLoadStatus,
+    clearScriptWorkbenchOpenRequest: state.clearScriptWorkbenchOpenRequest,
+    projectWorkspaceView: state.projectWorkspaceView,
+    setProjectWorkspaceView: state.setProjectWorkspaceView,
+  })));
+  const [workbenchMode, setWorkbenchMode] = useState<'editor' | 'split' | null>(null);
+  const [workbenchRequest, setWorkbenchRequest] = useState({ revision: 0, split: false });
+  const workbenchDetached = useRef(false);
+  const workbenchOwner = useRef<{ seriesId: string; projectId: string; name: string } | null>(null);
+  const returningToWorkbenchRef = useRef(false);
+  const [returningToWorkbench, setReturningToWorkbench] = useState(false);
+  const closeWorkbench = useCallback(() => {
+    workbenchDetached.current = false;
+    workbenchOwner.current = null;
+    setWorkbenchMode(null);
+    setProjectWorkspaceView('canvas');
+  }, [setProjectWorkspaceView]);
+  const switchToCanvas = useCallback(() => setProjectWorkspaceView('canvas'), [setProjectWorkspaceView]);
+  const changeWorkbenchPageVisibility = useCallback((visible: boolean) => {
+    setProjectWorkspaceView(visible ? 'script' : 'canvas');
+  }, [setProjectWorkspaceView]);
+  const trackWorkbenchDetached = useCallback((detached: boolean) => { workbenchDetached.current = detached; }, []);
+  const returnToWorkbenchProject = useCallback(async () => {
+    const owner = workbenchOwner.current;
+    const state = useAppStore.getState();
+    if (!owner || returningToWorkbenchRef.current || state.projectLoadStatus === 'loading'
+      || state.isCreatingProject || state.isReturningToStartPage) return false;
+    if (!state.projects.some((project) => project.id === owner.seriesId)) {
+      state.showToast(t('项目打开失败，请重试'), 'error');
+      return false;
+    }
+    const targetId = state.projects.some((project) => project.id === owner.projectId
+      && seriesOwnerId(state.projects, project.id) === owner.seriesId)
+      ? owner.projectId : resolveOpenTargetId(state.projects, owner.seriesId);
+    returningToWorkbenchRef.current = true;
+    setReturningToWorkbench(true);
+    try {
+      await state.switchProject(targetId, { captureSnapshot: state.projectWorkspaceView !== 'script' });
+      const latest = useAppStore.getState();
+      if (workbenchOwner.current !== owner) return false;
+      if (latest.currentProjectId === targetId && latest.projectLoadStatus === 'ready') return true;
+      latest.showToast(t('项目打开失败，请重试'), 'error');
+      return false;
+    } catch {
+      useAppStore.getState().showToast(t('项目打开失败，请重试'), 'error');
+      return false;
+    } finally {
+      returningToWorkbenchRef.current = false;
+      setReturningToWorkbench(false);
+    }
+  }, [t]);
+  const openWorkbench = useCallback(async (mode: 'editor' | 'split') => {
+    const state = useAppStore.getState();
+    if (!state.currentProjectId || state.projectLoadStatus !== 'ready') return;
+    const ownerId = seriesOwnerId(state.projects, state.currentProjectId);
+    const owner = workbenchOwner.current;
+    if (owner && owner.seriesId !== ownerId) {
+      state.showToast(t('工作台仍属于「{name}」，请先返回原剧集保存或关闭，再打开其他剧集', {
+        name: state.projects.find((project) => project.id === owner.seriesId)?.name ?? owner.name,
+      }), 'error');
+      setProjectWorkspaceView(workbenchDetached.current ? 'canvas' : 'script');
+      if (workbenchDetached.current && await returnToWorkbenchProject()) {
+        void focusScriptWorkbenchWindow().catch(() => {});
+      }
+      return;
+    }
+    if (!owner) workbenchOwner.current = { seriesId: ownerId, projectId: state.currentProjectId,
+      name: state.projects.find((project) => project.id === ownerId)?.name ?? t('当前剧集') };
+    setWorkbenchMode((current) => current ?? mode);
+    setWorkbenchRequest((current) => ({ revision: current.revision + 1, split: mode === 'split' }));
+    setProjectWorkspaceView(workbenchDetached.current ? 'canvas' : 'script');
+    void focusScriptWorkbenchWindow().catch(() => {});
+  }, [setProjectWorkspaceView, returnToWorkbenchProject, t]);
+  useEffect(() => {
+    if (!scriptWorkbenchOpenProjectId) return;
+    let cancelled = false;
+    // 项目页与画布跨挂载交接，等本轮挂载完成后再消费；卸载或 StrictMode 重挂载可取消。
+    queueMicrotask(() => {
+      if (cancelled) return;
+      const state = useAppStore.getState();
+      if (state.scriptWorkbenchOpenProjectId !== scriptWorkbenchOpenProjectId) return;
+      if (scriptWorkbenchOpenProjectId !== currentProjectId || scriptWorkbenchOpenProjectId !== state.currentProjectId
+        || projectLoadStatus === 'error' || state.projectLoadStatus === 'error') {
+        clearScriptWorkbenchOpenRequest();
+        setProjectWorkspaceView('canvas');
+        return;
+      }
+      if (projectLoadStatus !== 'ready' || state.projectLoadStatus !== 'ready') return;
+      openWorkbench('editor');
+      clearScriptWorkbenchOpenRequest();
+    });
+    return () => { cancelled = true; };
+  }, [scriptWorkbenchOpenProjectId, currentProjectId, projectLoadStatus, clearScriptWorkbenchOpenRequest, openWorkbench, setProjectWorkspaceView]);
+  return <>
+    <ModalPresentationContext value={projectWorkspaceView !== 'script'}>
+      <div className={projectWorkspaceView === 'script' ? 'hidden' : undefined} inert={projectWorkspaceView === 'script'}>
+        <SeriesRailPanel onOpenWorkbench={openWorkbench} />
+      </div>
+    </ModalPresentationContext>
+    {workbenchMode && <ScriptWorkbench isOpen startWithSplit={workbenchMode === 'split'}
+      openRequestRevision={workbenchRequest.revision} requestSplit={workbenchRequest.split} onClose={closeWorkbench}
+      presentation="page" visible={projectWorkspaceView === 'script'} onSwitchToCanvas={switchToCanvas}
+      onPageVisibilityChange={changeWorkbenchPageVisibility} onDetachedChange={trackWorkbenchDetached}
+      onReturnToProject={returnToWorkbenchProject} returningToProject={returningToWorkbench} />}
+  </>;
+}
+
+function SeriesRailPanel({ onOpenWorkbench }: { onOpenWorkbench: (mode: 'editor' | 'split') => void }) {
+  const t = useT();
   const {
     projects, currentProjectId, projectLoadStatus,
     switchProject, updateSeriesInfo,
@@ -123,11 +229,11 @@ export default function SeriesRail() {
   // 资产浮层：双击竖线打开，关闭按钮收起
   const [assetsOpen, setAssetsOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
-  // 区分单击 / 双击：单击延迟执行，双击时取消
-  const singleClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 打开编辑器时就把草稿装好，弹窗内部不用再和外部值同步
-  const [editorDraft, setEditorDraft] = useState<string | null>(null);
-  const [workbenchMode, setWorkbenchMode] = useState<'editor' | 'split' | null>(null);
+  const [scriptEditor, setScriptEditor] = useState<{
+    projectId: string; seriesId: string; seriesName: string; exchangeEpoch: number; runtimeEpoch?: string;
+    initialScript: string; draft: string;
+  } | null>(null);
   const [episodeNameDialog, setEpisodeNameDialog] = useState<{ episodeId?: string } | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -138,6 +244,7 @@ export default function SeriesRail() {
     [projects, seriesId],
   );
   const currentEpisode = projects.find((project) => project.id === currentProjectId) ?? null;
+  const nativeSeries = (series as typeof series & { nativeView?: { canvasId: string | null } })?.nativeView?.canvasId === null;
   const originalWork = series?.series?.originalWork;
   const script = series?.series?.script ?? '';
 
@@ -155,20 +262,13 @@ export default function SeriesRail() {
   };
 
   const handleUploadOriginal = () => runBusy('original', async () => {
-    const uploaded = await uploadSourceFileToProject('txt,md', currentProjectId);
-    if (!uploaded) return;
-    if (!uploaded.filePath) {
-      showToast(t('原著需要保存到项目目录，请在桌面端添加'), 'error');
-      return;
+    try { await attachSeriesOriginalFile(currentProjectId, series.id); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      const known = ['原著所属项目不存在', '原著所属项目或引用已变化，请重新添加',
+        '原著需要保存到项目目录，请在桌面端添加', '无法确认原著位于原项目目录，请重新添加', '原著引用未保存，已复制的文件保留在原项目目录'];
+      showToast(t(known.includes(message) ? message : '添加原著失败，请检查项目目录后重试'), 'error');
     }
-    const projectDir = await getProjectDataDir(currentProjectId);
-    await updateSeriesInfo({
-      originalWork: {
-        fileName: uploaded.fileName,
-        relativePath: toProjectRelativePath(uploaded.filePath, projectDir),
-        addedAt: Date.now(),
-      },
-    });
   });
 
   const handleRemoveOriginal = () => runBusy('original', async () => {
@@ -176,35 +276,51 @@ export default function SeriesRail() {
     await updateSeriesInfo({ originalWork: undefined });
   });
 
+  const saveScript = async (next: string) => {
+    if (!scriptEditor) return false;
+    const assertCurrent = () => {
+      const state = useAppStore.getState();
+      if (state.currentProjectId !== scriptEditor.projectId
+        || seriesOwnerId(state.projects, scriptEditor.projectId) !== scriptEditor.seriesId
+        || state.projectExecutionContext?.runtimeEpoch !== scriptEditor.runtimeEpoch) {
+        throw new Error('剧本所属项目已变化，已保留草稿');
+      }
+    };
+    try {
+      assertCurrent();
+    } catch {
+      showToast(t('剧本所属项目已变化，已保留草稿'), 'error');
+      return false;
+    }
+    try {
+      return await updateSeriesInfo({ script: next }, scriptEditor.runtimeEpoch ? {
+        expectedSeriesId: scriptEditor.seriesId, expectedExchangeEpoch: scriptEditor.exchangeEpoch,
+        expectedScript: scriptEditor.initialScript, assertCurrent,
+      } : undefined);
+    } catch {
+      showToast(t('剧本保存失败，已保留草稿'), 'error');
+      return false;
+    }
+  };
+
   return (
     <>
       <div
         className="group/series pointer-events-none fixed right-0 top-1/2 z-[150] flex h-[min(70vh,560px)]
                    w-6 -translate-y-1/2 items-center justify-end"
       >
+        {/* 面板让出竖线所在的右缘区域，保留双击入口且不遮挡面板滚动条。 */}
         <button
           type="button"
           aria-label={t('展开剧集栏（双击打开项目资产）')}
+          aria-expanded={pinned}
           data-onboarding-target="series"
-          data-tooltip={t('单击：展开剧集栏｜双击：打开项目资产')}
-          onClick={() => {
-            // 清除之前的定时器（如果有）
-            if (singleClickTimer.current) clearTimeout(singleClickTimer.current);
-            // 延迟 200ms 执行单击逻辑；如果在此期间触发双击，定时器会被清除
-            singleClickTimer.current = setTimeout(() => {
-              singleClickTimer.current = null;
-              setPinned(true);
-            }, 200);
-          }}
-          onDoubleClick={() => {
-            // 双击：取消单击的延迟，直接打开资产浮层
-            if (singleClickTimer.current) {
-              clearTimeout(singleClickTimer.current);
-              singleClickTimer.current = null;
-            }
-            setAssetsOpen(true);
-          }}
-          className={`pointer-events-auto absolute right-2.5 h-20 w-[3px] rounded-full
+          data-tooltip={t('悬浮：展开剧集栏｜双击：打开项目资产')}
+          onPointerEnter={() => setPinned(true)}
+          onFocus={() => setPinned(true)}
+          onClick={() => setPinned(true)}
+          onDoubleClick={() => setAssetsOpen(true)}
+          className={`pointer-events-auto absolute right-2.5 z-10 h-20 w-[3px] rounded-full
                      bg-canvas-text-muted transition-all duration-150
                      ${pinned ? 'opacity-0 scale-100' : 'opacity-40 hover:opacity-70 hover:scale-[1.2]'}`}
         />
@@ -212,7 +328,7 @@ export default function SeriesRail() {
           aria-label={t('剧集')}
           data-onboarding-target="series-panel"
           aria-hidden={!pinned}
-          className={`glass-bevel glass-bevel--panel absolute right-2.5 top-1/2 flex max-h-full
+          className={`glass-bevel glass-bevel--panel absolute right-6 top-1/2 flex max-h-full
                      w-[min(360px,calc(100vw-32px))] -translate-y-1/2 flex-col overflow-hidden
                      rounded-[14px] border border-[var(--glass-ring)] bg-[var(--glass-bg)]
                      text-canvas-text shadow-2xl shadow-black/40 backdrop-blur-2xl
@@ -235,7 +351,7 @@ export default function SeriesRail() {
             </div>
             <button
               type="button"
-              onClick={() => setWorkbenchMode('editor')}
+              onClick={() => onOpenWorkbench('editor')}
               data-tooltip={t('打开剧本创作工作台')}
               aria-label={t('打开剧本创作工作台')}
               className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-canvas-text-muted
@@ -296,7 +412,8 @@ export default function SeriesRail() {
                   <button
                     type="button"
                     disabled={!ready}
-                    onClick={() => setEditorDraft(script)}
+                    onClick={() => setScriptEditor({ projectId: currentProjectId, seriesId: series.id, seriesName: series.name, exchangeEpoch: series.exchangeEpoch ?? 0,
+                      runtimeEpoch: useAppStore.getState().projectExecutionContext?.runtimeEpoch, initialScript: script, draft: script })}
                     className="flex h-8 items-center gap-1 rounded-lg border border-canvas-border bg-canvas-card
                                px-2 text-left leading-none transition-colors hover:bg-canvas-hover
                                disabled:cursor-not-allowed disabled:opacity-40"
@@ -311,7 +428,7 @@ export default function SeriesRail() {
               <button
                 type="button"
                 disabled={!ready}
-                onClick={() => setWorkbenchMode('editor')}
+                onClick={() => onOpenWorkbench('editor')}
                 className="flex h-9 items-center justify-center gap-2 rounded-lg border border-indigo-400/30
                            bg-indigo-500/10 text-[11px] font-medium text-indigo-400 transition-colors
                            hover:border-indigo-400/50 hover:bg-indigo-500/15 disabled:cursor-not-allowed
@@ -346,7 +463,7 @@ export default function SeriesRail() {
                     />
                     <button
                       type="button"
-                      disabled={busy !== null}
+                      disabled={!ready || busy !== null}
                       onClick={() => { if (!isCurrent) void switchProject(episode.id); }}
                       aria-current={isCurrent}
                       data-tooltip={episode.name}
@@ -371,7 +488,7 @@ export default function SeriesRail() {
                                     group-hover/episode:opacity-100 group-focus-within/episode:opacity-100">
                       <button
                         type="button"
-                        disabled={index === 0 || busy !== null}
+                        disabled={!ready || index === 0 || busy !== null}
                         onClick={() => { void runBusy('move', () => moveEpisode(episode.id, -1)); }}
                         aria-label={t('把 {name} 上移', { name: episode.name })}
                         className="grid h-5 w-5 place-items-center rounded text-canvas-text-muted
@@ -382,7 +499,7 @@ export default function SeriesRail() {
                       </button>
                       <button
                         type="button"
-                        disabled={index === episodes.length - 1 || busy !== null}
+                        disabled={!ready || index === episodes.length - 1 || busy !== null}
                         onClick={() => { void runBusy('move', () => moveEpisode(episode.id, 1)); }}
                         aria-label={t('把 {name} 下移', { name: episode.name })}
                         className="grid h-5 w-5 place-items-center rounded text-canvas-text-muted
@@ -393,8 +510,9 @@ export default function SeriesRail() {
                       </button>
                       <button
                         type="button"
-                        disabled={busy !== null}
+                        disabled={!ready || busy !== null || (episodes.length <= 1 && !nativeSeries)}
                         onClick={() => {
+                          if (!ready || (episodes.length <= 1 && !nativeSeries)) return;
                           if (confirmDeleteId === episode.id) {
                             setConfirmDeleteId(null);
                             void runBusy('delete', () => deleteProject(episode.id));
@@ -405,7 +523,9 @@ export default function SeriesRail() {
                         aria-label={confirmDeleteId === episode.id
                           ? t('确认删除 {name}', { name: episode.name })
                           : t('删除 {name}', { name: episode.name })}
-                        data-tooltip={confirmDeleteId === episode.id ? t('再点一次确认删除') : t('删除这一集')}
+                        data-tooltip={episodes.length <= 1 && !nativeSeries
+                          ? t('最后一集暂不可删除，整部剧请在项目库管理')
+                          : confirmDeleteId === episode.id ? t('再点一次确认删除') : t('删除这一集')}
                         className={`grid h-5 w-5 place-items-center rounded transition-colors
                                     disabled:cursor-not-allowed disabled:opacity-25 ${
                                       confirmDeleteId === episode.id
@@ -420,6 +540,12 @@ export default function SeriesRail() {
                 );
               })}
 
+              {episodes.length === 1 && !nativeSeries ? (
+                <p className="px-1.5 text-[10px] leading-4 text-canvas-text-muted">
+                  {t('最后一集暂不可删除，整部剧请在项目库管理。')}
+                </p>
+              ) : null}
+
               <button
                 type="button"
                 disabled={!ready || busy !== null}
@@ -430,13 +556,13 @@ export default function SeriesRail() {
                            disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Icon icon="lucide:plus" className="h-3.5 w-3.5" />
-                {episodes.length > 0 ? t('新增分集') : t('转为剧集并新增分集')}
+                {episodes.length > 0 || nativeSeries ? t('新增分集') : t('转为剧集并新增分集')}
               </button>
 
               <button
                 type="button"
                 disabled={!ready || busy !== null}
-                onClick={() => setWorkbenchMode('split')}
+                onClick={() => onOpenWorkbench('split')}
                 className="flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-[11px]
                            text-canvas-text-muted transition-colors hover:bg-canvas-hover
                            hover:text-canvas-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
@@ -454,7 +580,7 @@ export default function SeriesRail() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setWorkbenchMode('editor')}
+                  onClick={() => onOpenWorkbench('editor')}
                   className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-canvas-border bg-canvas-card
                              px-2.5 py-2 text-left transition-colors hover:bg-canvas-hover"
                 >
@@ -470,13 +596,13 @@ export default function SeriesRail() {
       </div>
 
       <TextEditorDialog
-        isOpen={editorDraft !== null}
+        isOpen={scriptEditor !== null}
         title={t('剧本')}
-        hint={t('{name} · 整部剧共用', { name: series.name })}
-        draft={editorDraft ?? ''}
-        onDraftChange={setEditorDraft}
-        onClose={() => setEditorDraft(null)}
-        onSave={(next) => updateSeriesInfo({ script: next })}
+        hint={t('{name} · 整部剧共用', { name: scriptEditor?.seriesName ?? series.name })}
+        draft={scriptEditor?.draft ?? ''}
+        onDraftChange={(draft) => setScriptEditor((editor) => editor && { ...editor, draft })}
+        onClose={() => setScriptEditor(null)}
+        onSave={saveScript}
       />
       {episodeNameDialog && (
         <EpisodeNameDialog
@@ -485,13 +611,6 @@ export default function SeriesRail() {
         />
       )}
       {sourceOpen && <SeriesSourceBrowser onClose={() => setSourceOpen(false)} />}
-      {workbenchMode ? (
-        <ScriptWorkbench
-          isOpen
-          startWithSplit={workbenchMode === 'split'}
-          onClose={() => setWorkbenchMode(null)}
-        />
-      ) : null}
       {assetsOpen && (
         <ProjectAssetsOverlay
           isOpen={assetsOpen}

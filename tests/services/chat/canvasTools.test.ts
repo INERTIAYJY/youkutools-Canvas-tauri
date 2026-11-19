@@ -18,7 +18,7 @@ import { emptyDramaAssetLibrary, type DramaAsset } from '../../../src/types/dram
 import type { AssetTextSnapshot } from '../../../src/services/fileService';
 import type { ArchiveAssetDigest } from '../../../src/services/projectExchangeDomain';
 
-const executeGeneration = vi.hoisted(() => vi.fn(async () => ({ success: true })));
+const executeGeneration = vi.hoisted(() => vi.fn<typeof import('../../../src/services/generationService').executeGeneration>().mockResolvedValue({ success: true }));
 const loadGlobalAssets = vi.hoisted(() => vi.fn<() => Promise<DramaAsset[]>>());
 const textFiles = vi.hoisted(() => ({ desktop: false, read: vi.fn(), save: vi.fn() }));
 const cloudOutputRepair = vi.hoisted(() => ({ invoke: vi.fn(), directory: vi.fn() }));
@@ -77,6 +77,8 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'p1',
+    projectLoadStatus: 'ready',
+    projects: [{ id: 'p1', name: '测试项目', createdAt: 1, updatedAt: 1 }],
     nodes: [
       node('n1', { displayId: 1, prompt: '一只猫', imageUrl: 'asset://localhost/D:/data/cat.png' }),
       node('n2', { displayId: 2, type: 'source-text', output: '剧本正文' }, { x: 500, y: 220 }),
@@ -548,6 +550,42 @@ describe('canvas agent tools', () => {
     expect(run.status).toBe('error');
     expect(JSON.parse(run.modelContent).results[0].message).toContain('质量');
     expect(executeGeneration).not.toHaveBeenCalled();
+  });
+
+  it('MCP 创建和更新 GIF 参数保留 false，切换 SVG 或未声明模型清除失效参数', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config,
+      providers: { ...state.config.providers, output: { name: '图片连接', catalogId: 'custom-openai', apiKey: 'fixture' } },
+      generalModels: [
+        { id: 'image-output', name: '图片模型', modelId: 'image-output', category: 'image', providerConfigId: 'output',
+          executionProfile: { preset: 'custom', protocol: { version: 2, mode: 'sync',
+            submit: { method: 'POST', path: '/images/generations', body: { model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}',
+              output_format: '{{imageOutputFormat}}', frame_count: '{{imageFrameCount}}',
+              frame_duration_ms: '{{imageFrameDurationMs}}', transparent: '{{imageTransparent}}' } },
+            response: { type: 'json', result: { urlPath: 'data.*.url' } } } },
+          imageCapability: { ratios: ['1:1'], resolutions: ['2K'], outputFormats: ['png', 'gif', 'svg'], defaultOutputFormat: 'png',
+            squareOnlyOutputFormats: ['gif', 'svg'], textOnlyOutputFormats: ['gif', 'svg'],
+            gifFrameCount: { min: 2, max: 16, default: 9 }, gifFrameDurationMs: { min: 20, max: 655350, step: 10, default: 200 },
+            supportsGifTransparency: true } },
+        { id: 'plain-image', name: '普通图片', modelId: 'plain-image', category: 'image', providerConfigId: 'output' },
+      ],
+    } }));
+    const create = getAgentTool('canvas_create_nodes')!, update = getAgentTool('canvas_update_nodes')!;
+    const output = { imageOutputFormat: 'gif', imageFrameCount: 8, imageFrameDurationMs: 300, imageTransparent: false };
+    const input = { nodes: [{ type: 'ai-image', label: '动图', model: 'general/image-output', aspectRatio: '1:1', ...output }] };
+    expect(validateAgentToolInput(create.inputSchema, input).valid).toBe(true);
+    expect((await create.execute(context(), input)).status).toBe('success');
+    const node = useAppStore.getState().nodes.find((item) => item.data.label === '动图')!;
+    expect(node.data).toMatchObject(output);
+    expect((await update.execute(context(), { nodeIds: [node.id], aspectRatio: '16:9' })).status).toBe('error');
+    expect((await update.execute(context(), { nodeIds: [node.id], model: 'general/image-output', imageSize: '4K' })).status).toBe('success');
+    expect(useAppStore.getState().nodes.find((item) => item.id === node.id)?.data).toMatchObject({ ...output, imageSize: '4K' });
+    expect((await update.execute(context(), { nodeIds: [node.id], imageFrameCount: 17 })).status).toBe('error');
+    expect((await update.execute(context(), { nodeIds: [node.id], imageOutputFormat: 'svg' })).status).toBe('success');
+    expect(useAppStore.getState().nodes.find((item) => item.id === node.id)?.data).toMatchObject({ imageOutputFormat: 'svg',
+      imageFrameCount: undefined, imageFrameDurationMs: undefined, imageTransparent: undefined });
+    expect((await update.execute(context(), { nodeIds: [node.id], model: 'general/plain-image' })).status).toBe('success');
+    expect(useAppStore.getState().nodes.find((item) => item.id === node.id)?.data.imageOutputFormat).toBeUndefined();
+    expect((await update.execute(context(), { nodeIds: [node.id], imageOutputFormat: 'gif' })).status).toBe('error');
   });
 
   it('拒绝未声明的自动时长及跨类型参数，不写入画布', async () => {
@@ -1879,6 +1917,52 @@ describe('canvas agent tools', () => {
       { nodeId: 'n1', status: 'skipped', message: '节点正在生成中' },
       { nodeId: 'n2', status: 'success', message: undefined },
     ]);
+  });
+
+  it('native run freezes host leases after controlled reference metadata patches, including overlapping selected references', async () => {
+    const references = [{ id: 'ref', kind: 'frame' as const, role: 'reference' as const, url: 'asset://localhost/project/ref.png' }];
+    useAppStore.setState({ nodes: [node('n1', { videoReferences: references }), node('n2', { videoReferences: references })],
+      edges: [{ id: 'reference', source: 'n2', target: 'n1' }],
+      projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1, runtimeEpoch: 'native-run',
+        projectId: 'owner', projectEpoch: 1, canvasId: 'p1', episodeId: null, canvasEpoch: 1, canvasRevision: 0 } });
+    const normalize = vi.fn(async (nodeId: string) => {
+      const state = useAppStore.getState(), target = state.nodes.find((item) => item.id === nodeId)!;
+      if (target.data.videoReferences?.[0].assetId) return { targetPatch: {}, nodePatches: new Map<string, Partial<BaseNodeData>>() };
+      const patch = { videoReferences: references.map((reference) => ({ ...reference, assetId: 'asset-ref' })) };
+      useAppStore.setState({ nodes: state.nodes.map((item) => ({ ...item, data: { ...item.data, ...patch } })) });
+      return { targetPatch: patch, nodePatches: new Map([['n1', patch], ['n2', patch]]) };
+    });
+    useAppStore.setState({ normalizeNativeMediaGenerationInputs: normalize });
+    for (let count = 0; count < 2; count++) executeGeneration.mockImplementationOnce(async (nodeId, _prompt, _post, _data, lease) => {
+      await normalize(nodeId); await lease?.assertFresh(); return { success: true };
+    });
+    const result = await getAgentTool('canvas_run_nodes')!.execute(context(), { nodeIds: ['n1', 'n2'] });
+    expect(result.status).toBe('success'); expect(executeGeneration).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(result.modelContent).results.every((item: { status: string }) => item.status === 'success')).toBe(true);
+    expect(normalize).toHaveBeenCalledTimes(4);
+  });
+
+  it('native host preparation never accepts another selected node real edit as a fresh authorization baseline', async () => {
+    const references = [{ id: 'ref', kind: 'frame' as const, role: 'reference' as const, url: 'asset://localhost/project/ref.png' }];
+    useAppStore.setState({ nodes: [node('n1', { videoReferences: references }), node('n2', { prompt: '原授权提示词' })], edges: [],
+      projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1, runtimeEpoch: 'native-run',
+        projectId: 'owner', projectEpoch: 1, canvasId: 'p1', episodeId: null, canvasEpoch: 1, canvasRevision: 0 } });
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const normalize = vi.fn(async () => {
+      await gate;
+      const patch = { videoReferences: references.map((reference) => ({ ...reference, assetId: 'asset-ref' })) };
+      useAppStore.setState({ nodes: useAppStore.getState().nodes.map((item) => item.id === 'n1' ? { ...item, data: { ...item.data, ...patch } } : item) });
+      return { targetPatch: patch, nodePatches: new Map([['n1', patch]]) };
+    });
+    useAppStore.setState({ normalizeNativeMediaGenerationInputs: normalize });
+    const pending = getAgentTool('canvas_run_nodes')!.execute(context(), { nodeIds: ['n1', 'n2'] });
+    expect(normalize).toHaveBeenCalledOnce();
+    useAppStore.getState().updateNodeDataTransient('n2', { prompt: '准备期间真实新输入' });
+    finish();
+    await expect(pending).rejects.toThrow(/输入已变化/);
+    expect(executeGeneration).not.toHaveBeenCalled();
+    expect(useAppStore.getState().nodes[1].data.prompt).toBe('准备期间真实新输入');
   });
 
   it('caps how many nodes one run call may generate', async () => {

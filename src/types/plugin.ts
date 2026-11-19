@@ -4,6 +4,7 @@
 import type { GeneralModelCategory, NodeType } from './index';
 import type { Locale } from '../i18n';
 import type { VideoModelCapability } from './aiTypes';
+import type { CanvasContext } from './project';
 
 export type PluginPermission =
   | 'node.read'
@@ -271,6 +272,8 @@ export interface PluginUiWindowBinding {
   readonly projectId: string;
   readonly nodeId: string;
   readonly canvasRevision: number;
+  /** 进程内捕获的目标代际；旧 projectId 仍表示画布 ID。 */
+  readonly expectedContext?: Readonly<CanvasContext>;
 }
 
 export type PluginUiRequestKind = 'context' | 'effect' | 'set-parameters' | 'submit' | 'close' | 'toast';
@@ -334,11 +337,28 @@ export interface PluginHostInfo {
   limits: Record<'tool' | 'ui', Record<string, number>> & { replica?: Record<string, number> };
 }
 
+/** 声明式预设只绑定宿主适配器，不运行插件脚本或获取连接凭据。 */
+export type PluginChatAdapter = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible' | 'gemini-native';
+
+export interface PluginModelProtocolManifest {
+  id: string;
+  name: string;
+  category: 'text';
+  adapter: PluginChatAdapter;
+}
+
+export interface PluginModelProtocolReference {
+  pluginId: string;
+  presetId: string;
+}
+
 export interface PluginManifest {
   apiVersion: 1 | 2;
   /** 兼容声明仅用于 API 2，旧宿主会在安装时拒绝该版本。 */
   minHostVersion?: string;
   requiredCapabilities?: string[];
+  /** API 2 执行前置条件；不授予跨插件调用或共享服务权限。 */
+  dependencies?: PluginDependency[];
   /** v1 显式选择 QuickJS 或可信 Python。 */
   runtime: PluginRuntime;
   id: string;
@@ -362,7 +382,53 @@ export interface PluginManifest {
   contributes: {
     nodeTools: PluginNodeToolManifest[];
     nodes?: PluginCustomNodeManifest[];
+    modelProtocols?: PluginModelProtocolManifest[];
   };
+}
+
+export interface PluginDependency {
+  pluginId: string;
+  minVersion?: string;
+  optional?: boolean;
+}
+
+/** 原生只读诊断；不含路径、源码、凭据或运行时句柄。 */
+export interface PluginRegistrationStatus {
+  pluginId: string;
+  exists: boolean;
+  enabled: boolean;
+  activeSourceDigest: string | null;
+  activeRevisionDigest: string | null;
+  version: string | null;
+  snapshotVerified?: boolean;
+  healthCode?: 'ready' | 'disabled' | 'missing' | 'blocked' | 'invalid';
+  dependencyFingerprint?: string;
+  /** 仅在原生快照核验且活动版本可用时返回。 */
+  modelProtocols?: PluginModelProtocolManifest[];
+}
+
+export interface PluginHealthSnapshot {
+  pluginId: string;
+  configuredEnabled: boolean;
+  nativeEnabled: boolean;
+  state: 'ready' | 'disabled' | 'missing' | 'blocked' | 'invalid' | 'unavailable';
+  reasons: string[];
+  activeRevision: string | null;
+  snapshotVerified: boolean;
+}
+
+export interface PluginContractEntry {
+  id: string;
+  section: 'host' | 'manifest' | 'sdk' | 'ui' | 'plugins';
+  summary: string;
+  contract: Record<string, unknown>;
+}
+
+export interface PluginInspectInput {
+  section?: PluginContractEntry['section'];
+  query?: string;
+  offset?: number;
+  limit?: number;
 }
 
 export interface InstalledPlugin {

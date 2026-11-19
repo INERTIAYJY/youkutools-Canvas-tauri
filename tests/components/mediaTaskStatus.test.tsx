@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     nodes: [{ id: 'media', data: { type: 'ai-image', label: '图片', mediaTaskState: 'paused', status: 'idle' } as BaseNodeData }],
     showToast: vi.fn() },
   tasks: [] as Array<Record<string, unknown>>, resume: vi.fn(), discard: vi.fn(),
+  nativeOperationId: undefined as string | undefined, resumeNative: vi.fn(),
   busy: false, confirmed: undefined as string | undefined, cursor: 0,
 }));
 vi.mock('react', async () => ({ ...await vi.importActual<typeof import('react')>('react'),
@@ -21,6 +22,9 @@ vi.mock('react', async () => ({ ...await vi.importActual<typeof import('react')>
 vi.mock('../../src/store/useAppStore', () => ({ useAppStore: (selector: (state: typeof mocks.state) => unknown) => selector(mocks.state) }));
 vi.mock('../../src/services/pollManager', () => ({
   getPendingTasksForProject: () => mocks.tasks, resumeMediaNodeTask: mocks.resume, discardMediaTask: mocks.discard,
+  getNativeComfyVideoRecovery: () => mocks.nativeOperationId, resumeNativeComfyVideoFromNode: mocks.resumeNative,
+  hasMuseQueryIdentity: (task: { taskType?: string; taskId: string }) => task.taskType === 'muse'
+    && task.taskId === 'ac655c56-b537-4c04-8913-fd150fc0e92a',
 }));
 vi.mock('../../src/i18n', () => ({ useT: () => (text: string, params?: Record<string, string | number>) =>
   Object.entries(params ?? {}).reduce((value, [key, replacement]) => value.replaceAll(`{${key}}`, String(replacement)), text) }));
@@ -41,9 +45,33 @@ beforeEach(() => {
   mocks.state.nodes[0].data = { type: 'ai-image', label: '图片', mediaTaskState: 'paused', status: 'idle' };
   mocks.tasks = [{ projectId: 'project', nodeId: 'media', nodeType: 'ai-image', taskId: 'original', attemptId: 'first', submitted: true, mediaRecoveryState: 'query_paused' }];
   mocks.resume.mockReset().mockResolvedValue(undefined); mocks.discard.mockReset(); mocks.state.showToast.mockReset();
+  mocks.nativeOperationId = undefined; mocks.resumeNative.mockReset().mockResolvedValue(undefined);
 });
 
 describe('跨媒体原任务续取入口', () => {
+  it('新项目 ComfyUI 视频保存失败后只续取绑定的原操作', async () => {
+    mocks.tasks = [];
+    mocks.nativeOperationId = 'original-operation';
+    mocks.state.nodes[0].data = { type: 'ai-video', label: '视频', status: 'idle', mediaTaskState: 'delivery_pending' };
+    const button = elements(render(true)).find((element) => element.props['aria-label'] === '继续保存');
+    expect(button).toBeDefined();
+    (button!.props.onClick as () => void)();
+    expect(mocks.resumeNative).toHaveBeenCalledExactlyOnceWith('media', 'original-operation');
+    expect(mocks.resume).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.busy).toBe(false));
+  });
+
+  it('Muse 已留存本机任务身份时，发送回包丢失仍可仅读续查', async () => {
+    mocks.tasks[0] = { ...mocks.tasks[0], taskType: 'muse', taskId: 'ac655c56-b537-4c04-8913-fd150fc0e92a',
+      submitted: false, mediaSubmissionUncertain: true, mediaRecoveryState: 'submit_unknown' };
+    mocks.state.nodes[0].data.mediaTaskState = 'paused';
+    expect(queryButton()).toBeDefined();
+    (queryButton()!.props.onClick as () => void)();
+    expect(mocks.resume).toHaveBeenCalledWith('media');
+    expect(mocks.discard).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.busy).toBe(false));
+  });
+
   it('ComfyUI 提交未知到迟到 ID 转换只恢复原任务查询，不显示重新生成', () => {
     mocks.tasks[0] = { ...mocks.tasks[0], taskType: 'comfyui', taskId: '', submitted: false,
       mediaSubmissionUncertain: true, mediaRecoveryState: 'submit_unknown' };
@@ -184,6 +212,27 @@ describe('跨媒体原任务续取入口', () => {
     expect(message).toContain('SaveImage');
     expect(message).toContain('仅 WebSocket');
     expect(queryButton()).toBeDefined();
+  });
+
+  it('ComfyUI 文本缺失显示 SaveText 边界，不提示图片输出节点', () => {
+    mocks.tasks[0].taskType = 'comfyui';
+    mocks.tasks[0].nodeType = 'ai-text';
+    mocks.tasks[0].comfyRecoveryState = 'output_unavailable';
+    const message = elements(render()).find((element) => element.type === 'span')?.props.children;
+    expect(message).toContain('SaveText');
+    expect(message).not.toContain('SaveImage');
+    expect(queryButton()?.props.className).toContain('ui-btn--node-text');
+  });
+
+  it('文本保存未完成时仅续取原任务', async () => {
+    mocks.tasks[0].taskType = 'comfyui';
+    mocks.tasks[0].nodeType = 'ai-text';
+    mocks.tasks[0].mediaRecoveryState = 'delivery_pending';
+    const message = elements(render()).find((element) => element.type === 'span')?.props.children;
+    expect(message).toContain('文本已生成');
+    (queryButton()!.props.onClick as () => void)();
+    expect(mocks.resume).toHaveBeenCalledWith('media');
+    await vi.waitFor(() => expect(mocks.busy).toBe(false));
   });
 
   it('批量已取得部分ID但后续提交未知时仍禁止伪续取', () => {

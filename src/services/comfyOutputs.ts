@@ -25,6 +25,48 @@ export type ComfyOutputs = Record<string, ComfyOutputNode>;
 
 export type ComfyOutputKind = 'image' | 'video' | 'audio';
 
+/** 音频工作流优先使用独立音轨，兼容以视频容器交付的结果。 */
+export const COMFY_AUDIO_OUTPUT_KINDS = ['audio', 'video'] as const;
+
+export interface ComfyTextOutput {
+  text: string;
+}
+
+/** 与本地文本文件编辑一致的应用预算，不是 ComfyUI 的模型能力上限。 */
+export const MAX_COMFY_TEXT_BYTES = 2 * 1024 * 1024;
+
+/** 只认已提交图中的官方文本输出，不将输入展示节点误当生成结果。 */
+export function getComfyTextOutputNodeIds(workflow: Record<string, unknown>): string[] {
+  return Object.entries(workflow).filter(([, node]) => node && typeof node === 'object' && !Array.isArray(node)
+    && (node as Record<string, unknown>).class_type === 'SaveText').map(([nodeId]) => nodeId);
+}
+
+export function assertComfyTextOutputSize(text: string): void {
+  if (text.length > MAX_COMFY_TEXT_BYTES || new TextEncoder().encode(text).byteLength > MAX_COMFY_TEXT_BYTES) {
+    throw new RangeError('ComfyUI 文本结果超过 2 MiB 读取限制，原任务已保留');
+  }
+}
+
+/** 官方 SaveText 的 UI 输出为 text[]；仅 files 的旧输出暂不下载。 */
+export function resolveComfyTextOutput(outputs: ComfyOutputs, outputNodeIds: readonly string[]): ComfyTextOutput | null {
+  if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs) || outputNodeIds.length !== 1) return null;
+  const nodeId = outputNodeIds[0];
+  if (!Object.hasOwn(outputs, nodeId)) return null;
+  const node = outputs[nodeId];
+  if (!node || typeof node !== 'object' || Array.isArray(node) || !Array.isArray(node.text)
+    || node.text.length === 0 || node.text.some((item) => typeof item !== 'string')) return null;
+  // 编码前先检查字符数，避免先拼接一份明显超预算的大字符串。
+  let characters = Math.max(0, node.text.length - 1);
+  for (const part of node.text as string[]) {
+    characters += part.length;
+    if (characters > MAX_COMFY_TEXT_BYTES) throw new RangeError('ComfyUI 文本结果超过 2 MiB 读取限制，原任务已保留');
+  }
+  const text = (node.text as string[]).join('\n');
+  if (!text.trim()) return null;
+  assertComfyTextOutputSize(text);
+  return { text };
+}
+
 /** 各类媒体的已知键名，单复数都收 —— 内置节点与自定义节点命名并不统一 */
 const OUTPUT_KEYS: Record<ComfyOutputKind, string[]> = {
   image: ['images', 'image'],
@@ -110,24 +152,19 @@ function toOutputFiles(value: unknown): ComfyOutputFile[] {
 }
 
 /** 从单个节点输出里取某类媒体：先认已知键名，认不出再按扩展名扫描其余键 */
-function pickFromNode(node: ComfyOutputNode, kind: ComfyOutputKind, storageType: 'output' | 'legacy' | 'any'): ComfyOutputFile | null {
+function filesFromNode(node: ComfyOutputNode, kind: ComfyOutputKind, storageType: 'output' | 'legacy' | 'any'): ComfyOutputFile[] {
   const extensions = OUTPUT_EXTENSIONS[kind];
   const extension = (file: ComfyOutputFile) => file.filename.split('.').pop()?.toLowerCase() ?? '';
   const hasMatchingExtension = (file: ComfyOutputFile) => extensions.includes(extension(file));
   const accepts = (file: ComfyOutputFile) => (storageType === 'any'
     || (storageType === 'legacy' ? !file.type : file.type === 'output'))
+    && !['txt', 'md', 'json', 'csv'].includes(extension(file))
     && (kind === 'video' ? hasMatchingExtension(file) : !Object.entries(OUTPUT_EXTENSIONS).some(
       ([otherKind, otherExtensions]) => otherKind !== kind && otherExtensions.includes(extension(file)),
     ));
-  for (const key of OUTPUT_KEYS[kind]) {
-    const file = toOutputFiles(node[key]).find(accepts);
-    if (file) return file;
-  }
-  for (const value of Object.values(node)) {
-    const file = toOutputFiles(value).find((item) => accepts(item) && hasMatchingExtension(item));
-    if (file) return file;
-  }
-  return null;
+  const result = OUTPUT_KEYS[kind].flatMap((key) => toOutputFiles(node[key]).filter(accepts));
+  for (const value of Object.values(node)) result.push(...toOutputFiles(value).filter((item) => accepts(item) && hasMatchingExtension(item)));
+  return result;
 }
 
 /**
@@ -136,7 +173,7 @@ function pickFromNode(node: ComfyOutputNode, kind: ComfyOutputKind, storageType:
  */
 export function findComfyOutputFile(
   outputs: ComfyOutputs,
-  kinds: ComfyOutputKind[],
+  kinds: readonly ComfyOutputKind[],
 ): ComfyOutputFile | null {
   if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) return null;
   for (const kind of kinds) {
@@ -144,12 +181,26 @@ export function findComfyOutputFile(
     for (const storageType of ['output', 'legacy', 'any'] as const) {
       for (const node of Object.values(outputs)) {
         if (!node || typeof node !== 'object' || Array.isArray(node)) continue;
-        const file = pickFromNode(node, kind, storageType);
+        const file = filesFromNode(node, kind, storageType)[0];
         if (file) return file;
       }
     }
   }
   return null;
+}
+
+/** 供原生恢复按媒体类型和正式输出优先规则选择一组完整候选，并在组内去重。 */
+export function findComfyOutputFiles(outputs: ComfyOutputs, kinds: readonly ComfyOutputKind[]): ComfyOutputFile[] {
+  if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) return [];
+  for (const kind of kinds) for (const storageType of ['output', 'legacy', 'any'] as const) {
+    const unique = new Map<string, ComfyOutputFile>();
+    for (const node of Object.values(outputs)) {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) continue;
+      for (const file of filesFromNode(node, kind, storageType)) unique.set(JSON.stringify([file.filename, file.subfolder ?? '', file.type ?? '']), file);
+    }
+    if (unique.size) return [...unique.values()];
+  }
+  return [];
 }
 
 /** 把 /history 输出里的文件拼成可直接下载的 /view 地址。 */
@@ -161,11 +212,11 @@ export function buildComfyFileUrl(baseUrl: string, file: ComfyOutputFile): strin
   return `${baseUrl.replace(/\/+$/, '')}/view?filename=${encodeURIComponent(safeFile.filename)}${subfolder}${type}`;
 }
 
-/** 找到目标媒体就拼成 /view 地址，没找到返回 null（表示还没出结果）。 */
+/** 供 ComfyUI 工作流及原任务续查取首个目标媒体，并构造 /view 地址。找不到时返回 null。 */
 export function resolveComfyOutputUrl(
   baseUrl: string,
   outputs: ComfyOutputs,
-  kinds: ComfyOutputKind[],
+  kinds: readonly ComfyOutputKind[],
 ): { url: string; file: ComfyOutputFile } | null {
   const file = findComfyOutputFile(outputs, kinds);
   return file ? { url: buildComfyFileUrl(baseUrl, file), file } : null;

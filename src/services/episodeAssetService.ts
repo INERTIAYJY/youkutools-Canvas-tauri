@@ -1,12 +1,14 @@
 /** 本集清单的提取、编辑及显式资产库绑定；模型输出从不直接入库。 */
 import { t } from '../i18n';
-import { useAppStore } from '../store/useAppStore';
-import { seriesOwnerId } from '../store/store.utils';
-import type { DramaAsset, DramaCharacter, DramaProp } from '../types/dramaAssets';
+import { useAppStore, type AppState } from '../store/useAppStore';
+import { readEpisodeWorkspaceScope } from './episodeWorkspaceScope';
+import type { DramaAsset } from '../types/dramaAssets';
 import {
   EPISODE_ASSET_LIMITS, episodeScriptFingerprint, normalizeEpisodeAssetRoster,
   type EpisodeAssetEntry, type EpisodeAssetKind, type EpisodeAssetRoster,
+  type EpisodeAssetPanelSnapshot, type EpisodeAssetPanelAction, type EpisodeAssetPanelActionResult,
 } from '../types/episodeAssets';
+import { resolveDramaAssetImageRef } from './dramaAssetPrompt';
 import { generateText } from './ai/generateText';
 import { normalizeAssetKey } from './dramaAssetExtract';
 import { copyGlobalDramaAssetsToProject } from './dramaAssetTransferService';
@@ -16,6 +18,7 @@ import {
 } from './seriesAssetExtractionService';
 
 const listKey = (kind: EpisodeAssetKind) => {
+  if (kind === 'scene') return 'scenes';
   if (kind !== 'character' && kind !== 'prop') throw new Error(t('资产已变化，请重新选择'));
   return kind === 'character' ? 'characters' : 'props';
 };
@@ -27,63 +30,188 @@ interface EpisodeContext {
   script: string;
   revision: number;
   version: number;
+  sourceVersion: number;
 }
 const candidateSources = new Map<string, { context: EpisodeContext; kind: EpisodeAssetKind }>();
+const panelExtractions = new Map<string, { items: EpisodeAssetEntry[]; revision: number; fingerprint: string }>();
+const episodeSourceVersions = new Map<string, number>();
+let stopSourceObservation: (() => void) | undefined;
+
+function displayImageUrl(value: unknown): string | undefined {
+  return typeof value === 'string' && /^(?:https?:|asset:|tauri:|blob:|data:image\/)/iu.test(value) ? value : undefined;
+}
+
+function projectPanelAsset<T extends DramaAsset>(asset: T, nodes: EpisodeAssetPanelSnapshot['nodes']): T {
+  // 只发送卡片展示所需字段。参考图、声音、动作中的 filePath 与原始 prompt 不跨窗。
+  const base = { id: asset.id, kind: asset.kind, name: asset.name, key: asset.key, summary: asset.summary,
+    visualNotes: asset.visualNotes, importance: asset.importance, confirmed: asset.confirmed,
+    createdAt: asset.createdAt, updatedAt: asset.updatedAt, source: asset.source,
+    imageUrl: displayImageUrl(resolveDramaAssetImageRef(asset, nodes)?.imageUrl) };
+  return { ...base, ...(asset.kind === 'character' ? { identity: asset.identity, aliases: asset.aliases }
+    : asset.kind === 'prop' ? { ownerName: asset.ownerName, propType: asset.propType } : {}) } as T;
+}
+
+/** 只投影目标分集与当前剧集资产；非画布当前集不能借用当前图节点解释资产引用。 */
+type EpisodeAssetPanelState = Pick<AppState, 'projects' | 'currentProjectId' | 'projectLoadStatus' | 'isCreatingProject'
+  | 'isReturningToStartPage' | 'switchingProjectName' | 'dramaAssets' | 'globalCharacters' | 'globalScenes' | 'globalProps' | 'nodes'>;
+
+export function buildEpisodeAssetPanelSnapshot(state: EpisodeAssetPanelState, episodeId: string): EpisodeAssetPanelSnapshot {
+  const scope = readEpisodeWorkspaceScope(state, episodeId);
+  const episode = scope?.episode;
+  const nodes = scope && state.currentProjectId === episodeId ? state.nodes.map((node) => ({ id: node.id,
+    data: { imageUrl: displayImageUrl(node.data.imageUrl), thumbnailUrl: displayImageUrl(node.data.thumbnailUrl) } })) : [];
+  return {
+    episode: episode ? { id: episode.id, parentId: episode.parentId, name: episode.name,
+      episodeScript: episode.episodeScript, episodeAssetRoster: episode.episodeAssetRoster } : null,
+    ready: !!scope,
+    library: { version: 2,
+      characters: scope ? state.dramaAssets.characters.map((asset) => projectPanelAsset(asset, nodes)) : [],
+      scenes: scope ? state.dramaAssets.scenes.map((asset) => projectPanelAsset(asset, nodes)) : [],
+      props: scope ? state.dramaAssets.props.map((asset) => projectPanelAsset(asset, nodes)) : [] },
+    globalCharacters: scope ? state.globalCharacters.map((asset) => projectPanelAsset(asset, [])) : [],
+    globalScenes: scope ? state.globalScenes.map((asset) => projectPanelAsset(asset, [])) : [],
+    globalProps: scope ? state.globalProps.map((asset) => projectPanelAsset(asset, [])) : [],
+    nodes,
+  };
+}
+
+/** 主窗口唯一执行入口；窗口只能提交业务 ID，候选正文从主窗口保存的原始提取结果取得。 */
+export async function executeEpisodeAssetPanelAction(
+  episodeId: string, kind: EpisodeAssetKind, action: EpisodeAssetPanelAction,
+): Promise<EpisodeAssetPanelActionResult> {
+  const state = useAppStore.getState();
+  const scope = readEpisodeWorkspaceScope(state, episodeId);
+  if (!scope || (kind !== 'character' && kind !== 'scene' && kind !== 'prop')) throw new Error('项目已切换');
+  const key = `${episodeId}:${kind}`;
+  switch (action.type) {
+    case 'extract': {
+      const revision = scope.episode.episodeAssetRoster?.revision ?? 0;
+      const fingerprint = episodeScriptFingerprint(scope.episode.episodeScript ?? '');
+      const items = await extractEpisodeAssetCandidates({ episodeId, kind });
+      const result = { items, revision, fingerprint };
+      panelExtractions.set(key, result);
+      while (panelExtractions.size > 20) panelExtractions.delete(panelExtractions.keys().next().value!);
+      return { type: 'candidates', ...result };
+    }
+    case 'load-global':
+      await (kind === 'character' ? state.loadGlobalCharacters() : state.loadGlobalDramaAssets());
+      break;
+    case 'save-entry':
+      if (action.entry.kind !== kind) throw new Error('资产已变化，请重新选择');
+      await saveEpisodeAssetEntry(episodeId, action.entry, action.expectedRevision);
+      break;
+    case 'remove-entry':
+      await removeEpisodeAssetEntry(episodeId, action.entryId, kind, action.expectedRevision);
+      break;
+    case 'bind':
+      await bindEpisodeAsset(episodeId, action.entryId, kind, action.targetId, action.scope, action.expectedRevision);
+      break;
+    case 'add-library':
+      await addLibraryAssetToEpisode(episodeId, kind, action.targetId, action.scope, action.expectedRevision);
+      break;
+    case 'promote': {
+      const count = await promoteEpisodeAssetEntries(episodeId, kind, action.entryIds);
+      useAppStore.getState().showToast(t('已入库并绑定 {count} 项', { count }));
+      return { type: 'updated', count };
+    }
+    case 'merge-candidates': {
+      const extraction = panelExtractions.get(key);
+      if (!extraction || extraction.revision !== action.expectedRevision || extraction.fingerprint !== action.fingerprint
+        || !Array.isArray(action.candidateIds) || action.candidateIds.length > EPISODE_ASSET_LIMITS.entriesPerKind) {
+        throw new Error('提取来源已变化，请重新提取');
+      }
+      const ids = new Set(action.candidateIds);
+      const candidates = extraction.items.filter((entry) => ids.has(entry.id));
+      if (candidates.length !== ids.size) throw new Error('提取来源已变化，请重新提取');
+      await mergeEpisodeAssetCandidates(episodeId, kind, candidates, action.expectedRevision);
+      panelExtractions.delete(key);
+      break;
+    }
+    default: throw new Error('资产操作无效');
+  }
+  return { type: 'updated' };
+}
+
+/** 非画布当前集也要识别“修改后又恢复正文”，而非只比最后一次文本。 */
+function episodeSourceVersion(episodeId: string): number {
+  if (!stopSourceObservation) {
+    stopSourceObservation = useAppStore.subscribe((state, previous) => {
+      if (state.projects === previous.projects) return;
+      for (const [id, version] of episodeSourceVersions) {
+        const before = previous.projects.find((episode) => episode.id === id);
+        const after = state.projects.find((episode) => episode.id === id);
+        if (before?.episodeScript !== after?.episodeScript || before?.parentId !== after?.parentId) {
+          episodeSourceVersions.set(id, version + 1);
+        }
+      }
+    });
+  }
+  if (!episodeSourceVersions.has(episodeId)) episodeSourceVersions.set(episodeId, 0);
+  return episodeSourceVersions.get(episodeId)!;
+}
+if (import.meta.hot) import.meta.hot.dispose(() => stopSourceObservation?.());
 
 function readContext(episodeId: string, expectedRevision?: number): { context: EpisodeContext; roster: EpisodeAssetRoster } {
   const state = useAppStore.getState();
-  const episode = state.projects.find((project) => project.id === episodeId);
-  const owner = state.projects.find((project) => project.id === episode?.parentId);
-  if (!episode?.parentId || !owner || owner.parentId || state.currentProjectId !== episodeId
-    || state.projectLoadStatus !== 'ready' || state.isCreatingProject || state.isReturningToStartPage
-    || state.switchingProjectName !== null) {
-    throw new Error(t('项目已切换'));
-  }
+  const workspace = readEpisodeWorkspaceScope(state, episodeId);
+  if (!workspace) throw new Error(t('项目已切换'));
+  const { episode, owner } = workspace;
   const roster = normalizeEpisodeAssetRoster(episode.episodeAssetRoster);
   if (expectedRevision !== undefined && roster.revision !== expectedRevision) {
     throw new Error(t('本集清单已变化，请重新操作'));
   }
-  return { roster, context: { episodeId, ownerId: seriesOwnerId(state.projects, episodeId),
-    script: episode.episodeScript ?? '', revision: roster.revision, version: getAssetExtractionContextVersion() } };
+  return { roster, context: { episodeId, ownerId: owner.id,
+    script: episode.episodeScript ?? '', revision: roster.revision, version: getAssetExtractionContextVersion(),
+    sourceVersion: episodeSourceVersion(episodeId) } };
 }
 
 function assertContext(context: EpisodeContext): void {
   const current = readContext(context.episodeId, context.revision).context;
   if (current.ownerId !== context.ownerId || current.script !== context.script
-    || current.version !== context.version) throw new Error(t('提取来源已变化，请重新提取'));
+    || current.version !== context.version || current.sourceVersion !== context.sourceVersion) throw new Error(t('提取来源已变化，请重新提取'));
 }
 
 async function saveRoster(context: EpisodeContext, roster: EpisodeAssetRoster): Promise<void> {
   assertContext(context);
-  if (!await useAppStore.getState().updateEpisodeAssetRoster(context.episodeId, roster, context.revision)) {
+  const canvasProjectId = useAppStore.getState().currentProjectId;
+  if (!await useAppStore.getState().updateEpisodeAssetRoster(context.episodeId, roster, context.revision,
+    { allowSameSeries: true, assertCurrent: () => assertContext(context), assertCommitCurrent: () => {
+      const state = useAppStore.getState();
+      const scope = readEpisodeWorkspaceScope(state, context.episodeId);
+      if (!scope || state.currentProjectId !== canvasProjectId || scope.owner.id !== context.ownerId
+        || (scope.episode.episodeScript ?? '') !== context.script || episodeSourceVersion(context.episodeId) !== context.sourceVersion) {
+        throw new Error(t('提取来源已变化，请重新提取'));
+      }
+    } })) {
     throw new Error(t('保存失败'));
   }
 }
 
 function getEntry(roster: EpisodeAssetRoster, kind: EpisodeAssetKind, id: string): EpisodeAssetEntry {
-  const entry = roster[listKey(kind)].find((item) => item.id === id);
+  const entry = roster[listKey(kind)]?.find((item) => item.id === id);
   if (!entry) throw new Error(t('本集条目已删除，请重新选择'));
   return entry;
 }
 
-function libraryAsset(kind: EpisodeAssetKind, id: string, scope: Scope): DramaCharacter | DramaProp {
+function libraryAsset(kind: EpisodeAssetKind, id: string, scope: Scope): DramaAsset {
   if ((scope !== 'project' && scope !== 'global') || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(id)) {
     throw new Error(t('资产已变化，请重新选择'));
   }
   const state = useAppStore.getState();
   const source = scope === 'project' ? state.dramaAssets[listKey(kind)]
-    : kind === 'character' ? state.globalCharacters : state.globalProps;
+    : kind === 'character' ? state.globalCharacters : kind === 'scene' ? state.globalScenes : state.globalProps;
   const asset = source.find((item) => item.id === id);
   if (!asset || asset.kind !== kind) throw new Error(t('资产已删除，请重新选择'));
   return asset;
 }
 
-function entryFromAsset(asset: DramaCharacter | DramaProp, id = crypto.randomUUID()): EpisodeAssetEntry {
+function entryFromAsset(asset: DramaAsset, id = crypto.randomUUID()): EpisodeAssetEntry {
   const now = Date.now();
   return { id, kind: asset.kind, name: asset.name, summary: asset.summary,
     visualNotes: asset.visualNotes, notes: '', appearances: asset.appearances,
     evidence: asset.firstSeen,
-    ...(asset.kind === 'character' ? { identity: asset.identity, aliases: asset.aliases } : { ownerName: asset.ownerName }),
+    ...(asset.kind === 'character' ? { identity: asset.identity, aliases: asset.aliases }
+      : asset.kind === 'prop' ? { ownerName: asset.ownerName } : {}),
     createdAt: now, updatedAt: now };
 }
 
@@ -107,11 +235,11 @@ export async function extractEpisodeAssetCandidates(input: {
   const raw = await generateText({ prompt, model: model.model, provider: model.provider });
   assertContext(context);
   const parsed = parseAssetExtractionCandidates(input.kind, raw);
-  const assets = input.kind === 'character' ? parsed.characters : parsed.props;
+  const assets = parsed[key];
   if (assets.length > EPISODE_ASSET_LIMITS.entriesPerKind) throw new Error(t('本集条目数量超过限制'));
   const parsedEntries = assets.map((asset) => entryFromAsset(asset));
   const entries = normalizeEpisodeAssetRoster({ version: 1, revision: context.revision,
-    characters: input.kind === 'character' ? parsedEntries : [], props: input.kind === 'prop' ? parsedEntries : [] })[key];
+    characters: [], props: [], [key]: parsedEntries })[key] ?? [];
   if (entries.length !== assets.length) throw new Error(t('模型返回内容无法解析为资产，请重试'));
   // Keep only a bounded number of pending previews; editing copies preserve IDs.
   for (const entry of entries) candidateSources.set(entry.id, { context, kind: input.kind });
@@ -131,11 +259,12 @@ export async function mergeEpisodeAssetCandidates(episodeId: string, kind: Episo
     const source = candidate?.context;
     if (!source || candidate?.kind !== kind || source.episodeId !== episodeId || source.revision !== expectedRevision
       || source.ownerId !== context.ownerId || source.script !== context.script || source.version !== context.version
+      || source.sourceVersion !== context.sourceVersion
       || entry.kind !== kind) throw new Error(t('提取来源已变化，请重新提取'));
   }
-  const existing = roster[listKey(kind)];
+  const existing = roster[listKey(kind)] ?? [];
   const names = new Set(existing.map((entry) => nameKey(entry.name)));
-  const ids = new Set([...roster.characters, ...roster.props].map((entry) => entry.id));
+  const ids = new Set([...roster.characters, ...(roster.scenes ?? []), ...roster.props].map((entry) => entry.id));
   const additions = candidates.filter((entry) => {
     const key = nameKey(entry.name);
     if (ids.has(entry.id) || names.has(key)) return false;
@@ -153,27 +282,28 @@ export async function saveEpisodeAssetEntry(episodeId: string, entry: EpisodeAss
   expectedRevision: number): Promise<void> {
   const { context, roster } = readContext(episodeId, expectedRevision);
   const key = listKey(entry.kind);
-  const previous = roster[key].find((item) => item.id === entry.id);
-  if (!previous && roster[key].length >= EPISODE_ASSET_LIMITS.entriesPerKind) throw new Error(t('本集条目数量超过限制'));
+  const existing = roster[key] ?? [];
+  const previous = existing.find((item) => item.id === entry.id);
+  if (!previous && existing.length >= EPISODE_ASSET_LIMITS.entriesPerKind) throw new Error(t('本集条目数量超过限制'));
   const now = Date.now();
   const next = { ...entry, createdAt: previous?.createdAt ?? now, updatedAt: now,
     boundDramaAssetId: previous?.boundDramaAssetId };
   const normalized = normalizeEpisodeAssetRoster({ version: 1, revision: roster.revision,
-    characters: entry.kind === 'character' ? [next] : [], props: entry.kind === 'prop' ? [next] : [] });
-  if (normalized[key].length !== 1) throw new Error(t('请输入名称'));
-  if (!previous && [...roster.characters, ...roster.props].some((item) => item.id === entry.id)) {
+    characters: [], props: [], [key]: [next] })[key] ?? [];
+  if (normalized.length !== 1) throw new Error(t('请输入名称'));
+  if (!previous && [...roster.characters, ...(roster.scenes ?? []), ...roster.props].some((item) => item.id === entry.id)) {
     throw new Error(t('资产已变化，请重新选择'));
   }
   await saveRoster(context, { ...roster, [key]: previous
-    ? roster[key].map((item) => item.id === entry.id ? normalized[key][0] : item)
-    : [...roster[key], normalized[key][0]] });
+    ? existing.map((item) => item.id === entry.id ? normalized[0] : item)
+    : [...existing, normalized[0]] });
 }
 
 export async function removeEpisodeAssetEntry(episodeId: string, entryId: string, kind: EpisodeAssetKind,
   expectedRevision: number): Promise<void> {
   const { context, roster } = readContext(episodeId, expectedRevision);
   getEntry(roster, kind, entryId);
-  await saveRoster(context, { ...roster, [listKey(kind)]: roster[listKey(kind)].filter((item) => item.id !== entryId) });
+  await saveRoster(context, { ...roster, [listKey(kind)]: (roster[listKey(kind)] ?? []).filter((item) => item.id !== entryId) });
 }
 
 async function materializeTarget(context: EpisodeContext, kind: EpisodeAssetKind,
@@ -230,7 +360,7 @@ export async function bindEpisodeAsset(episodeId: string, entryId: string, kind:
     const boundId = targetId === null ? undefined : await materializeTarget(context, kind, targetId, scope);
     assertContext(context);
     if (boundId) libraryAsset(kind, boundId, 'project');
-    await saveRoster(context, { ...roster, [listKey(kind)]: roster[listKey(kind)].map((entry) => entry.id === entryId
+    await saveRoster(context, { ...roster, [listKey(kind)]: (roster[listKey(kind)] ?? []).map((entry) => entry.id === entryId
       ? { ...entry, boundDramaAssetId: boundId, updatedAt: Date.now() } : entry) });
   });
 }
@@ -239,24 +369,25 @@ export async function addLibraryAssetToEpisode(episodeId: string, kind: EpisodeA
   scope: Scope, expectedRevision?: number): Promise<void> {
   const { context, roster } = readContext(episodeId, expectedRevision);
   return withAssetPublication(context.ownerId, async () => {
-    if (roster[listKey(kind)].length >= EPISODE_ASSET_LIMITS.entriesPerKind) throw new Error(t('本集条目数量超过限制'));
+    const entries = roster[listKey(kind)] ?? [];
+    if (entries.length >= EPISODE_ASSET_LIMITS.entriesPerKind) throw new Error(t('本集条目数量超过限制'));
     libraryAsset(kind, targetId, scope);
     const boundId = await materializeTarget(context, kind, targetId, scope);
     assertContext(context);
-    if (roster[listKey(kind)].some((entry) => entry.boundDramaAssetId === boundId)) return;
+    if (entries.some((entry) => entry.boundDramaAssetId === boundId)) return;
     const entry = { ...entryFromAsset(libraryAsset(kind, boundId, 'project')), boundDramaAssetId: boundId };
-    await saveRoster(context, { ...roster, [listKey(kind)]: [...roster[listKey(kind)], entry] });
+    await saveRoster(context, { ...roster, [listKey(kind)]: [...entries, entry] });
   });
 }
 
-function assetFromEntry(entry: EpisodeAssetEntry, id: string): DramaCharacter | DramaProp {
+function assetFromEntry(entry: EpisodeAssetEntry, id: string): DramaAsset {
   const now = Date.now();
   const base = { id, name: entry.name, key: normalizeAssetKey(entry.name), summary: entry.summary,
     visualNotes: entry.visualNotes, storyRole: entry.notes || undefined, appearances: entry.appearances,
     firstSeen: entry.evidence, importance: 'supporting' as const, confirmed: true,
     createdAt: now, updatedAt: now, source: 'manual' as const };
   return entry.kind === 'character' ? { ...base, kind: 'character', identity: entry.identity || entry.summary,
-    aliases: entry.aliases } : { ...base, kind: 'prop', ownerName: entry.ownerName };
+    aliases: entry.aliases } : entry.kind === 'scene' ? { ...base, kind: 'scene' } : { ...base, kind: 'prop', ownerName: entry.ownerName };
 }
 
 /** Returns the number of newly bound entries, including recovery after a prior roster-save failure. */
@@ -288,7 +419,7 @@ export async function promoteEpisodeAssetEntries(episodeId: string, kind: Episod
     if (additions.length) await useAppStore.getState().importDramaAssets(additions, { assertCurrent });
     assertCurrent();
     for (const id of bindings.values()) libraryAsset(kind, id, 'project');
-    if (bindings.size) await saveRoster(context, { ...roster, [listKey(kind)]: roster[listKey(kind)].map((entry) => {
+    if (bindings.size) await saveRoster(context, { ...roster, [listKey(kind)]: (roster[listKey(kind)] ?? []).map((entry) => {
       const id = bindings.get(entry.id);
       return id ? { ...entry, boundDramaAssetId: id, updatedAt: Date.now() } : entry;
     }) });

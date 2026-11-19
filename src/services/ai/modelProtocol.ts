@@ -10,7 +10,8 @@ import type {
   ModelExecutionProfile,
   NormalizedModelExecutionProtocol,
 } from '../../types/aiTypes';
-import { corsSafeFetch } from './httpTransport';
+import { corsSafeFetch, logAiResponse, type AiResponseLogContext } from './httpTransport';
+import { redactModelProtocolMultipartPreview } from './modelProtocolBody';
 import { readModelProtocolFirstScalar, readModelProtocolUrls } from './modelProtocolResponse';
 import {
   ensureSuccessfulRawResponse,
@@ -34,6 +35,7 @@ import {
   isRecord,
 } from './modelProtocolShared';
 import { parseModelExecutionProtocol } from './modelProtocolValidation';
+import { isSafeNativeProtocolTaskId } from '../nativeProtocolContext';
 import type {
   ExecuteModelProtocolOptions,
   ExecuteModelProtocolResult,
@@ -88,10 +90,7 @@ export function modelProtocolUsesVariable(source: string, ...variables: string[]
   });
 }
 
-/** 返回协议片段中出现的模板路径；调用方可据此区分整数组与 `.0` 等局部引用。 */
-export function collectModelProtocolTemplatePaths(source: string): string[] {
-  return [...source.matchAll(TEMPLATE_RE)].map((match) => match[1]);
-}
+export { collectModelProtocolTemplatePaths } from './modelProtocolShared';
 
 /** 返回协议中实际使用 `$forEach` 展开的受信数组变量。 */
 export function collectModelProtocolForEachVariables(value: unknown): string[] {
@@ -117,8 +116,9 @@ export function resolveModelExecutionProfile(
   profile: ModelExecutionProfile | undefined,
 ): NormalizedModelExecutionProtocol | null {
   if (!profile) return null;
+  if (profile.preset === 'plugin') throw new Error('插件协议必须通过原生活动预设执行');
   // 原生文本预设经 chatApiProtocol 转换消息、工具与流式事件，不能按声明式 JSON 执行。
-  if (profile.preset === 'anthropic-chat' || profile.preset === 'gemini-chat') return null;
+  if (profile.preset === 'openai-responses' || profile.preset === 'anthropic-chat' || profile.preset === 'gemini-chat') return null;
   if (profile.preset === 'custom') {
     if (!profile.protocol) throw new Error('自定义调用协议不能为空');
     return parseModelExecutionProtocol(profile.protocol);
@@ -129,6 +129,7 @@ export function resolveModelExecutionProfile(
 /** 规范化完整协议的稳定比较键；无可解析协议时返回 undefined。 */
 export function comparableProtocol(profile: ModelExecutionProfile | undefined): string | undefined {
   try {
+    if (profile?.preset === 'plugin') return JSON.stringify({ preset: 'plugin', pluginId: profile.plugin?.pluginId, presetId: profile.plugin?.presetId });
     const protocol = resolveModelExecutionProfile(profile);
     return protocol ? JSON.stringify(protocol, (_key, value: unknown) => (
       value && typeof value === 'object' && !Array.isArray(value)
@@ -145,21 +146,41 @@ export async function submitModelProtocol(
   const built = buildModelProtocolRequest(options);
   const protocol = built.protocol;
   const context: Record<string, unknown> = { ...options.variables };
-  const response = await corsSafeFetch(built.url, built.init);
+  if (options.beforeSubmit) {
+    await options.beforeSubmit();
+    options.signal?.throwIfAborted();
+  }
+  const traceId = import.meta.env.DEV && !options.sensitive
+    ? globalThis.crypto?.randomUUID?.() ?? `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}` : undefined;
+  const debug: AiResponseLogContext = { url: built.url, method: built.init.method,
+    source: 'Model Protocol', traceId, apiKey: options.apiKey, sensitive: options.sensitive };
+  // 只在真实提交点展示渲染后的值，不在预览/预检时冒充已发出的请求。
+  const requestDebug = traceId ? { traceId, stage: 'submit' as const, apiKey: options.apiKey,
+    bodyEncoding: protocol.submit.bodyEncoding ?? 'json',
+    body: protocol.submit.bodyEncoding === 'multipart' && built.renderedBody !== undefined
+      ? redactModelProtocolMultipartPreview(built.renderedBody) : built.renderedBody } : undefined;
+  const response = await (options.sensitive
+    ? corsSafeFetch(built.url, built.init, { sensitive: true })
+    : requestDebug ? corsSafeFetch(built.url, built.init, { debug: requestDebug })
+      : corsSafeFetch(built.url, built.init));
   const responseConfig = protocol.response;
 
   if (protocol.mode === 'sync') {
     if (responseConfig.type === 'text') {
-      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
+      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey, debug);
       const text = await response.text();
+      logAiResponse(response, text, debug);
       if (!text) throw new Error('模型响应中未找到文本结果');
       return { text };
     }
     if (responseConfig.type === 'binary') {
-      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
-      return { urls: [await readBinaryModelProtocolResult(response, responseConfig.result?.mimeType, options.signal)] };
+      await ensureSuccessfulRawResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey, debug);
+      const url = await readBinaryModelProtocolResult(response, responseConfig.result?.mimeType, options.signal);
+      logAiResponse(response, { type: 'binary', mimeType: responseConfig.result?.mimeType ?? response.headers.get('content-type'),
+        encodedLength: url.length }, debug);
+      return { urls: [url] };
     }
-    const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
+    const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey, debug);
     try {
       options.validateResponse?.(payload);
     } catch (error) {
@@ -175,6 +196,8 @@ export async function submitModelProtocol(
         options.apiKey,
         resultConfig.mimeType,
         options.signal,
+        undefined,
+        options.sensitive,
       );
     }
     const base64Urls = resultConfig.base64Path
@@ -196,9 +219,10 @@ export async function submitModelProtocol(
     };
   }
 
-  const payload = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey);
+  let payload: unknown = await readJsonResponse(response, '模型请求失败', responseConfig.errorPath, options.apiKey, debug);
   try {
     options.validateResponse?.(payload);
+    if (options.normalizeSubmitResponse) payload = options.normalizeSubmitResponse(payload);
   } catch (error) {
     throw redactModelProtocolError(error, options.apiKey);
   }
@@ -209,10 +233,19 @@ export async function submitModelProtocol(
     throw new Error(`模型提交响应中未找到任务 ID：${responseConfig.taskIdPath}`);
   }
   const pollContext = { ...context, submit: payload };
-  return {
-    taskId: String(taskIdValue),
-    poll: resolvePoll(options.baseUrl, protocol.poll!, protocol.auth, pollContext),
-  };
+  try {
+    return {
+      taskId: String(taskIdValue),
+      ...(options.captureRecoveryContext ? { recoveryContext: options.captureRecoveryContext(payload) } : {}),
+      poll: resolvePoll(options.baseUrl, protocol.poll!, protocol.auth, pollContext),
+    };
+  } catch (error) {
+    // 任务已获服务商ID；恢复字段校验失败也不能把已付费请求误记为无ID。
+    if (options.captureRecoveryContext) throw Object.assign(new Error('原任务已提交，但查询恢复字段不能安全保存',
+      { cause: redactModelProtocolError(error, options.apiKey) }),
+      isSafeNativeProtocolTaskId(String(taskIdValue), [options.apiKey]) ? { nativeTaskId: String(taskIdValue) } : {});
+    throw error;
+  }
 }
 
 export async function executeModelProtocol(
@@ -228,6 +261,8 @@ export async function executeModelProtocol(
       options.apiKey,
       options.signal,
       options.baseUrl,
+      undefined,
+      options.sensitive,
     ),
     taskId: submitted.taskId,
   };

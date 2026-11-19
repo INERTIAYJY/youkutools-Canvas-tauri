@@ -26,14 +26,17 @@ const mocks = vi.hoisted(() => {
   captureVideoTaskGeneration: vi.fn(),
   pauseMediaTask: vi.fn((receipt: { taskId: string }, _error?: unknown, reason?: string) => Object.assign(new Error('任务查询已暂停'),
     { name: 'MediaTaskPausedError', taskReceipt: receipt, reason: reason ?? 'query_interrupted' })),
-  registerNodePolling: vi.fn(() => new AbortController().signal),
+  registerNodePolling: vi.fn((_nodeId: string, parentSignal?: AbortSignal) => {
+    parentSignal?.throwIfAborted();
+    return parentSignal ?? new AbortController().signal;
+  }),
   images: vi.fn(async (urls: string[]) => urls.map((url) => url.replace('asset://', 'https://uploads.example/'))),
   media: vi.fn(async (url: string) => url.replace('asset://', 'https://uploads.example/')),
   state: { config: { providers: { grsai: { name: 'GRSAI', apiKey: 'fixture-key', baseUrl: '' } } }, currentProjectId: 'project' },
 }; });
 vi.mock('../../src/store/useAppStore', () => ({ useAppStore: { getState: () => mocks.state } }));
 vi.mock('../../src/services/pollManager', () => mocks);
-vi.mock('../../src/services/ai/httpTransport', () => ({ corsSafeFetch: mocks.fetch }));
+vi.mock('../../src/services/ai/httpTransport', () => ({ corsSafeFetch: mocks.fetch, logAiResponse: vi.fn() }));
 vi.mock('../../src/services/ai/imageUtils', () => ({ resolveImageUrlArray: mocks.images }));
 vi.mock('../../src/services/uploadService', () => ({ resolveMediaReferenceUrl: mocks.media }));
 import { grsaiMediaProviderAdapter } from '../../src/services/ai/providers/grsaiMedia';
@@ -171,13 +174,15 @@ describe('GRSAI H3 独立视频合同', () => {
       .resolves.toMatchObject({ urls: ['https://cdn.example/recovered.mp4'] });
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
     expect(mocks.fetch).toHaveBeenCalledWith('https://grsai.dakka.com.cn/v1/api/result?id=recover-task',
-      expect.objectContaining({ method: 'GET', headers: { Authorization: 'Bearer rotated-key' } }));
+      expect.objectContaining({ method: 'GET', headers: { Authorization: 'Bearer rotated-key' } }),
+      expect.objectContaining({ debug: expect.objectContaining({ stage: 'poll', traceId: expect.any(String) }) }));
   });
 
   it('cancels after submission without resubmission', async () => {
     const controller = new AbortController();
     mocks.fetch.mockImplementationOnce(async () => { controller.abort(); return json({ id: 'task', status: 'running' }); });
     await expect(generate({}, {}, controller.signal)).rejects.toThrow();
+    expect(mocks.registerNodePolling).toHaveBeenCalledWith('node', controller.signal);
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 });

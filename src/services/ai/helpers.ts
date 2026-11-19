@@ -3,7 +3,7 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import type { ApiProviderConfig, GeneralModelConfig } from '../../types';
-import { getProviderDefinition, type ProviderDefinition } from './providerCatalogService';
+import { getProviderDefinition, isRetiredProviderConnection, type ProviderDefinition } from './providerCatalogService';
 
 /** 去掉 model value 中的 provider/ 前缀，得到实际的模型名 */
 export function extractModelName(modelValue: string, provider: string): string {
@@ -41,6 +41,7 @@ export function formatImageSizeForModel(
  */
 const SEEDREAM_SIZE_SUPPORT: Record<string, string[]> = {
   'doubao-seedream-5-0-pro': ['1K', '1.5K', '2K'],
+  'doubao-seedream-5-0-flash': ['1K', '1.5K', '2K'],
   'doubao-seedream-5-0-lite': ['2K', '3K', '4K'],
   'doubao-seedream-4-5': ['2K', '4K'],
   'doubao-seedream-4-0': ['1K', '2K', '4K'],
@@ -71,11 +72,17 @@ export function normalizeSeedreamSize(modelName: string, requestedSize: string):
   return best;
 }
 
+export function assertProviderAvailableForSubmission(providerId: string, provider?: Pick<ApiProviderConfig, 'catalogId'>): void {
+  if (isRetiredProviderConnection(providerId, provider)) throw new Error('该内置厂商已下架，请选择其他连接');
+}
+
 /** 从 store 中查找通用模型配置 */
 export function resolveGeneralModel(modelValue: string) {
   const config = useAppStore.getState().config;
   const gmId = modelValue.replace(/^general\//, '');
-  return config.generalModels?.find((m) => m.id === gmId);
+  const model = config.generalModels?.find((m) => m.id === gmId);
+  if (model) assertProviderAvailableForSubmission(model.providerConfigId, config.providers[model.providerConfigId]);
+  return model;
 }
 
 export interface ResolvedGeneralModelConnection {
@@ -90,6 +97,7 @@ export interface ResolvedGeneralModelConnection {
 /** 通过模型引用解析当前连接；地址缺省时沿用内置厂商定义，密钥只取该连接。 */
 export function resolveGeneralModelConnection(
   modelValue: string,
+  { forRecovery = false }: { forRecovery?: boolean } = {},
 ): ResolvedGeneralModelConnection | undefined {
   const config = useAppStore.getState().config;
   const gmId = modelValue.replace(/^general\//, '');
@@ -97,6 +105,7 @@ export function resolveGeneralModelConnection(
   if (!model?.providerConfigId) return undefined;
   const provider = config.providers[model.providerConfigId];
   if (!provider) return undefined;
+  if (!forRecovery && isRetiredProviderConnection(model.providerConfigId, provider)) return undefined;
   const definition = getProviderDefinition(model.providerConfigId, provider);
   return {
     model,

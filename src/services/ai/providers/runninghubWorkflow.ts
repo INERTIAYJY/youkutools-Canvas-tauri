@@ -7,13 +7,16 @@ import { resolveRunningHubParameters, runningHubFieldValue, runningHubParameterK
 import { runningHubConnection, isRunningHubWorkflow, saveCloudWorkflowOutputs, getCloudWorkflowPersistedOutput } from '../../workflowExecutionService';
 import { runningHubSiteId } from '../../runninghubSiteCredentials';
 import { runningHubRequest, uploadRunningHubMedia, RunningHubRequestError } from './runninghubClient';
-import { pollTask } from '../../pollTask';
+import { pollTask, PollTaskFailedError } from '../../pollTask';
 import { cancelNodePolling, cleanupNodePolling, getPendingTasksForProject, registerNodePolling, removePendingTask, savePendingTask, updatePendingTask } from '../../pollManager';
 import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../canvasDerivationGuard';
 import { resolveRunningHubInputRouting, splitRunningHubPrompt, type RunningHubInputRouting } from './runninghubWorkflowInputs';
 import { resolveWorkflowSeed } from '../../workflowSeed';
+import { isNativeWorkflowExecution, nativeWorkflowDigest } from '../../nativeWorkflowExecution';
 
-export class RunningHubTaskFailed extends Error {}
+export class RunningHubTaskFailed extends PollTaskFailedError {
+  override name = 'Error';
+}
 export type RunningHubReferences = Partial<Record<RunningHubMediaKind, string[]>>;
 
 /** 云适配器已保存全部产物，调用方直接使用保存结果，避免再次下载 asset URL。 */
@@ -137,8 +140,10 @@ export async function executeRunningHubWorkflow(params: {
   workflowInputs?: Record<string, string>; references?: RunningHubReferences;
   beforeSubmit?: () => void | Promise<void>;
   runninghubTaskContext?: import('../../../types/runninghub').RunningHubTaskContext;
-}, externalSignal?: AbortSignal): Promise<RunningHubOutput[]> {
+}, externalSignal?: AbortSignal, beforeSubmit?: () => void | Promise<void>): Promise<RunningHubOutput[]> {
+  if (beforeSubmit) params = { ...params, beforeSubmit };
   const store = useAppStore.getState();
+  const nativeMode = isNativeWorkflowExecution(params.beforeSubmit);
   const workflow = store.workflows.find((item) => item.id === params.workflowId);
   if (!isRunningHubWorkflow(workflow) || !workflow?.runninghub) throw new Error('未找到 RunningHub 工作流，请重新导入');
   const manifest = workflow.runninghub;
@@ -148,14 +153,15 @@ export async function executeRunningHubWorkflow(params: {
   const context = params.runninghubTaskContext;
   const projectId = context?.projectId ?? store.currentProjectId;
   const nodeId = params.nodeId;
+  const nativeChat = nativeMode && context?.deliveryMode === 'chat';
   const trackingId = nodeId ?? (context ? `runninghub-message-${context.messageId}` : undefined);
   if (trackingId && projectId && getPendingTasksForProject(projectId).some((task) => task.nodeId === trackingId && task.taskType === 'runninghub-workflow')) throw new Error('已有 RunningHub 任务，请先继续查询或确认远端任务结束');
-  const nodeSignal = trackingId ? registerNodePolling(trackingId) : undefined;
-  const signal = nodeSignal && externalSignal ? AbortSignal.any([nodeSignal, externalSignal]) : nodeSignal ?? externalSignal;
-  const guard = nodeId ? registerCanvasDerivation(store, nodeId) : null;
-  const fresh = () => !signal?.aborted && (!nodeId || (!!guard && isCanvasDerivationFresh(guard, useAppStore.getState())))
+  const nodeSignal = trackingId ? registerNodePolling(trackingId, externalSignal) : undefined;
+  const signal = nodeSignal ?? externalSignal;
+  const guard = nodeId && !nativeChat ? registerCanvasDerivation(store, nodeId) : null;
+  const fresh = () => !signal?.aborted && (!nodeId || nativeChat || (!!guard && isCanvasDerivationFresh(guard, useAppStore.getState())))
     && (!context || (useAppStore.getState().currentProjectId === context.projectId && useAppStore.getState().messages.some((message) => message.id === context.messageId && message.conversationId === context.conversationId)));
-  const stage = (runninghubStage: string) => { if (nodeId && fresh()) useAppStore.getState().updateNodeDataTransient(nodeId, { runninghubStage }); };
+  const stage = (runninghubStage: string) => { if (nodeId && !nativeChat && fresh()) useAppStore.getState().updateNodeDataTransient(nodeId, { runninghubStage }); };
   let taskId = '';
   let submitting = false;
   try {
@@ -168,6 +174,25 @@ export async function executeRunningHubWorkflow(params: {
     if (params.beforeSubmit) await params.beforeSubmit();
     if (!fresh()) throw new Error('画布已变化，请重新生成');
     stage('提交任务');
+    if (nativeMode) {
+      const { submitNativeWorkflowTask } = await import('../../nativeWorkflowTasks');
+      return await submitNativeWorkflowTask({ nodeId: trackingId, signal, beforeSubmit: params.beforeSubmit, secretValues: [connection.apiKey],
+      descriptor: { adapter: 'runninghub-workflow', workflowId: workflow.id, connectionId: manifest.connectionId,
+        providerBase: connection.baseUrl, category: params.kind, outputNodeIds: manifest.outputNodeIds,
+        digest: await nativeWorkflowDigest(['runninghub-workflow-v1', workflow.id, manifest, params.kind]) },
+      requestMaterial: { manifest, nodeInfoList }, isDefinitiveFailure: (error) => error instanceof RunningHubRequestError
+        && (error.code !== undefined || error.httpStatus >= 400 && error.httpStatus < 500 && ![408, 429].includes(error.httpStatus)),
+      submit: async (_index, requestSignal) => {
+        const response = await runningHubRequest(connection, manifest.kind === 'app' ? '/task/openapi/ai-app/run' : '/task/openapi/create', {
+          [manifest.kind === 'app' ? 'webappId' : 'workflowId']: manifest.remoteId, nodeInfoList,
+          ...(manifest.instanceType && manifest.instanceType !== 'default' ? { instanceType: manifest.instanceType } : {}),
+          ...(manifest.kind === 'workflow' ? { addMetadata: false, usePersonalQueue: manifest.usePersonalQueue ?? false } : {}),
+        }, requestSignal);
+        const data = isRecord(response.data) ? response.data : {};
+        if (typeof data.taskId !== 'string' || !/^\d{1,30}$/.test(data.taskId)) throw new Error('RunningHub 未返回有效任务 ID，请核对原平台');
+        return { taskId: data.taskId };
+      } });
+    }
     if (trackingId && projectId) savePendingTask({ nodeId: trackingId, projectId, nodeType: workflow.category, provider: 'runninghubwf', providerConfigId: manifest.connectionId, taskType: 'runninghub-workflow', taskId: '', submitted: false, runninghubSite: runningHubSiteId(connection.baseUrl), runninghubRecoveryState: 'submit_unknown', runninghubOutputNodeIds: manifest.outputNodeIds, runninghubWorkflowId: workflow.id, runninghubMessage: context });
     submitting = true;
     const response = await runningHubRequest(connection, manifest.kind === 'app' ? '/task/openapi/ai-app/run' : '/task/openapi/create', {
@@ -190,6 +215,7 @@ export async function executeRunningHubWorkflow(params: {
     }
     return saved;
   } catch (error) {
+    if (nativeMode) throw error;
     if (trackingId && (error instanceof RunningHubTaskFailed || (submitting && !taskId && error instanceof RunningHubRequestError && error.httpStatus < 500 && ![408, 429].includes(error.httpStatus)))) removePendingTask(trackingId, taskId);
     if (nodeId && fresh()) stage(taskId ? '任务已保留，可继续查询' : submitting ? '提交状态待确认' : '未提交');
     else if (nodeId && useAppStore.getState().currentProjectId === projectId && useAppStore.getState().nodes.some((item) => item.id === nodeId) && getPendingTasksForProject(projectId ?? '').some((item) => item.nodeId === nodeId && item.taskId === taskId)) {

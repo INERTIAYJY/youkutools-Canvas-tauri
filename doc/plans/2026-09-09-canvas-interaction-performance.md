@@ -634,3 +634,267 @@ npx vitest run tests/store/history.test.ts tests/store/groupFolders.test.ts
 5. 连续移动、调整分组成员、创建/删除/连线，再撤销和重做；布局、成员、连线与文件恢复一致，最新模型输出保留。撤销后另做新操作应截断重做分支；保存重开及撤销恢复过程中切项目，不应回写旧项目状态。
 
 性能采样尚未进行：后续在同设备、同项目与同操作序列下比较长回答 React 挂载/提交、同步补丁体积和主线程时间、搜索首条可用时间与峰值扫描数、索引事务/put 次数、历史快照分配和提交耗时。没有采样结果前不宣称具体提速比例。回滚按本节前端、服务、测试和文档差异撤回，无数据库迁移。
+
+## 2026-11-06 前端交互续查（仅静态审查）
+
+审查基线：基于 `a76e252d` 后源码核对调用链，下表保留审查时的行为与建议。用户表格的七项已分两批实现（I01～I08，手绘包含 I07/I08），实施与验收缺口见本文末；I09～I12 及 Select 仍为后续候选。本轮未运行测试、lint、类型检查、构建、性能基准或浏览器/Tauri 交互。表中的重复工作和缺失处理由源码确认；卡顿幅度、主线程耗时、帧率、内存峰值及交互现象尚未实测，不能据此承诺提速。已有拖拽合帧、连线集中绘制、LOD、历史缓存、Markdown 分块、独立窗口投影、资源搜索增量与资产索引批处理不重复列为待做。
+
+### 优先候选
+
+| 条目 | Before：当前行为 | After：建议行为 | Why：证据与影响 |
+|---|---|---|---|
+| I01 聊天滚动归属 | 每次流式进度安排 100ms 后无条件滚底，绕过消息区的近底部判断 | 跟随统一由当前会话消息区决定；主动发送/点击最新消息才强制滚动，旧会话计时器失效 | [ChatPanel.tsx:680](../../src/components/chat/ChatPanel.tsx#L680)、[controller:130](../../src/services/chat/conversationExecutionController.ts#L130) 与 [ChatMessages.tsx:271](../../src/components/chat/ChatMessages.tsx#L271) 两套滚动控制竞争；阅读历史被拉回和旧后台进度影响当前会话是静态风险，未实测 |
+| I02 媒体恢复显示 | 所有气泡（含纯文本）订阅媒体任务，快照与渲染均查恢复账本 | 普通文本不订阅；媒体显示读取一次发布的不可变快照/消息索引，快照读取不访问或写入存储 | [MessageBubble.tsx:66](../../src/components/chat/MessageBubble.tsx#L66) → [generationRuntime.ts:609](../../src/services/ai/generationRuntime.ts#L609) → [pollManager.ts:815](../../src/services/pollManager.ts#L815)：每次查询同步读取 localStorage、解析、脱敏及序列化，任务保存广播所有订阅者。长会话会重复处理同一账本 |
+| I03 输入与历史解耦 | 输入每字重新过滤当前会话消息、解析所有历史图片引用，新数组触发行和滚动逻辑 | 当前会话消息按真实消息变化派生；历史图片引用与草稿分别缓存并正确失效 | [ChatPanel.tsx:273](../../src/components/chat/ChatPanel.tsx#L273)、[:524](../../src/components/chat/ChatPanel.tsx#L524)、[ChatMessages.tsx:149](../../src/components/chat/ChatMessages.tsx#L149)。输入草稿本身无需重处理未变历史；保留 IME、附件和双窗口同步 |
+| I04 引用编辑器 | 订阅完整 nodes/edges；无关位移也使元数据变化，在布局阶段同步胶囊、克隆 DOM 历史 | 引用显示字段、当前编辑节点和展开候选分开订阅；无关位置变化不操作编辑 DOM | [MentionEditor.tsx:323](../../src/components/nodes/shared/MentionEditor.tsx#L323)、[:422](../../src/components/nodes/shared/MentionEditor.tsx#L422)、[ShotlistNode.tsx:828](../../src/components/nodes/ShotlistNode.tsx#L828)。多个分镜单元格可同时挂载，WeakMap 仅复用相同数组，不能过滤位移更新 |
+| I05 剧集资产浮层 | 整个 nodes 数组是加载依赖，任意位移/状态变化都取消重启整剧分集读取，期间显示加载态 | 当前分集仅按媒体字段刷新，未变化分集按数据版本复用；无关位移不重读 | [ProjectAssetsOverlay.tsx:74](../../src/components/ProjectAssetsOverlay.tsx#L74)、[:91](../../src/components/ProjectAssetsOverlay.tsx#L91)、[:135](../../src/components/ProjectAssetsOverlay.tsx#L135)。逐个 `loadProjectData` 读取完整分集，有重复 I/O 和列表闪回加载态的风险 |
+| I06 已关闭面板停算 | 首次打开后组件保留；角色库扫描全部 nodes 准备三类候选，资产 selector 每次通知扫描未读/道具分类 | 保留 UI 草稿/选择状态，关闭时停止无关展示计算；候选按需准备，纯计数按库引用复用 | [App.tsx:92](../../src/App.tsx#L92)、[CharacterLibraryPanel.tsx:182](../../src/components/CharacterLibraryPanel.tsx#L182)、[:356](../../src/components/CharacterLibraryPanel.tsx#L356)、[AssetsPanel.tsx:193](../../src/components/AssetsPanel.tsx#L193)。`useShallow` 不能省掉 selector 内扫描，角色动作过滤还会生成临时 ID |
+| I07 手绘预览合帧 | 每个有效移动复制全量点列，重新求边界/本地点位/path，并生成 React Flow 节点数组 | 保留完整采样，运行期保存原始点，预览按帧发布、增量维护边界，松手同步刷新最终草稿 | [useCanvasDrawing.ts:307](../../src/hooks/useCanvasDrawing.ts#L307)、[:343](../../src/hooks/useCanvasDrawing.ts#L343)、[Canvas.tsx:1337](../../src/components/Canvas.tsx#L1337)。长笔划成本随点数增长；不得以丢点或改变线形换取速度 |
+| I08 绘图取消 | 仅处理 down/move/up，无同项目 pointercancel、丢 capture、blur 或 Escape 收尾，额外指针可覆盖活动 pointerId | 统一取消草稿/预览帧/capture，拒绝额外触点；取消不新增节点或历史，随后能重新绘制 | [useCanvasDrawing.ts:262](../../src/hooks/useCanvasDrawing.ts#L262)、[Canvas.tsx:1634](../../src/components/Canvas.tsx#L1634)。这是手势中断后的残留路径，未实机复现；[App.tsx:621](../../src/App.tsx#L621) 按项目 key 卸载画布，不能据此误报跨项目写入 |
+
+建议首批优先 I01、I03、I05、I06，先减少交互争用、无关重读和关闭面板的后台工作。I02 与 I04 的潜在收益较高，但分别涉及任务账本和编辑器上下文，需独立补完整回归；不能把展示快照用作业务授权或写回依据。I07/I08 可合为绘图专项，保留全部采样、选择和一次历史语义。
+
+### 次优先候选
+
+| 条目 | Before：当前行为 | After：建议行为 | Why：证据与边界 |
+|---|---|---|---|
+| I09 多选拖线 | 每次 pointermove 更新 React state；拖动时隐藏的 anchor 仍计算，视口变化重复按数组查父链 | 选中几何和视口投影分离；拖线时跳过 anchor，用既有 Map/合帧工具发布预览 | [SelectionConnectionNode.tsx:32](../../src/components/canvas/SelectionConnectionNode.tsx#L32)、[:53](../../src/components/canvas/SelectionConnectionNode.tsx#L53)、[:66](../../src/components/canvas/SelectionConnectionNode.tsx#L66)。保留 displayId 顺序、起拖快照、松手真实坐标、项目复核、去重及一次历史 |
+| I10 橡皮擦手势 | 每命中新笔记都调用 deleteNode，重复扫描文件引用、历史检查和退场；长一笔可能形成多个撤销步 | 一次手势收集目标、保留即时反馈，结束时通过 Store 一次提交与清理 | [useCanvasDrawing.ts:252](../../src/hooks/useCanvasDrawing.ts#L252)、[store.nodes.ts:1481](../../src/store/store.nodes.ts#L1481)。这是交互语义调整，需独立确认；不能直接套用限制 50 根节点的批量 API，也不能丢共享文件/artifact 保护 |
+| I11 项目缩略图 | 全部可见项目卡片挂 src，图片无懒加载/异步解码；启动页仅靠高度裁两行 | 先复用原生 lazy/async 或现有视口媒体组件，保持固定比例与首屏可用 | [ProjectLibraryModal.tsx:84](../../src/components/ProjectLibraryModal.tsx#L84)、[:543](../../src/components/ProjectLibraryModal.tsx#L543)。离屏解码峰值是待测假设，不直接引入虚拟化；保留搜索、排序、键盘和缺失预览 |
+| I12 工具栏提示 | 每换一个目标均等待 800ms，没有连续浏览的热切换 | 首次延迟保留，短时间扫过相邻提示立即切换，离开后恢复延迟 | [useTooltipAutoPlacement.ts:11](../../src/hooks/useTooltipAutoPlacement.ts#L11)、[:214](../../src/hooks/useTooltipAutoPlacement.ts#L214)。主要改善感知等待，非帧率优化；保持悬浮/键盘焦点、边界定位和点击关闭 |
+
+共用 Select 还有较小候选：[Select.tsx:153](../../src/components/shared/Select.tsx#L153) 对每个未禁用控件（包括关闭菜单）都绑定 window keydown/keyup/blur，展开时滚动定位还读写几何。可评估只由当前聚焦/展开控件处理全局按键、定位按帧合并；必须保持先于父弹窗的 Escape 配对、IME、Tab、F12、Ctrl+S 和画布快捷键隔离，不能简单删监听。多控件页是否值得改应先采样。
+
+### 后续验收与采样入口
+
+以下步骤供用户在 Tauri 桌面端执行；本轮均未执行，涉及真实流式输出时使用测试会话和现有授权模型配置：
+
+1. 聊天：长会话流式输出期间向上阅读、切会话、暂停/继续和关闭面板，位置保持且未读提示正确；底部时正常跟随，主动发送/点最新仍能到尾部。在纯文本会话中让另一个媒体任务改变状态，比较账本读取次数、React 提交及主线程时间，媒体恢复入口和项目/会话身份不丢失。
+2. 输入/编辑：长历史连续输入、粘贴、IME 及附件增删，确认未变历史不重解析；在多行分镜中编辑含引用正文，同时拖动无关节点，光标/选区/撤销保持，引用改名、媒体换源及工作流/RefMod 更新仍及时显示。
+3. 资产：先对照角色库首次打开前与打开后关闭，再拖动同一画布；三个候选选择器重开时应取最新内容，徽标随资产真正变化更新。较多分集的剧集打开资产浮层，拖动无关节点不重读整剧，生成/替换/删除媒体仍刷新正确分集；关闭/切项目后迟到结果不写回。
+4. 绘图：同一画布连续绘制 10～20 秒，保留所有点与松手末端；中途 Escape、Alt+Tab、系统 pointercancel 和第二触点，取消不落历史且可立即重新操作。一次长擦除跨过多张笔记，检查一次 Undo/Redo、共享图片和项目边界。多选普通/嵌套组内节点拖线，检查真实落点、取消和一次撤销。
+5. 小体验：项目多页缩略图的首开/滚动，比较离屏解码及内存；连续扫工具栏提示，再检查键盘焦点、窗口边缘和点击关闭。多下拉页面检查键盘与父弹窗 Esc、Tab、IME、画布 Delete 隔离；深浅主题与减少动态效果分别回归。
+
+已有回归可复用：聊天 `tests/components/chatMessages.test.ts`、`tests/services/generationRuntime.test.ts`、`tests/services/chat/chatImageReferenceService.test.ts`、`tests/services/chat/detachedChatSyncController.test.ts`；编辑器 `tests/components/mentionEditorImageIndices.test.ts`、`tests/components/mentionEditorHistory.test.ts`、`tests/components/shotlistFieldEditor.test.tsx`；资产/项目 `tests/components/assetsPanelDrawer.test.tsx`、`tests/components/startupPage.test.tsx`、`tests/components/viewportImage.test.tsx`；绘图/连接 `tests/components/canvasNoteTools.test.tsx`、`tests/utils/canvasNoteGeometry.test.ts`、`tests/store/history.test.ts`；共用控件 `tests/hooks/tooltipAutoPlacement.test.ts`、`tests/components/select.test.tsx`、`tests/components/selectPortalBoundary.test.ts`。
+
+当前缺口：chatMessages 的 effect mock 不能覆盖父级滚动计时器竞争；没有纯文本气泡媒体订阅、无关节点位移下编辑 DOM 同步、剧集浮层重读次数、关闭角色面板计算、实时绘图/取消、多选指针及橡皮擦整手势的直接回归。asset 面板回归将未读计数模拟为固定值，不能证明扫描已避免。实施时补实际入口和取消/过期场景，不能只测新 helper。
+
+性能前后采样应使用同设备、同项目/历史/资产规模、同视口及操作序列，冷/热状态分开，记录输入延迟、长任务、React 提交/DOM 同步、账本/分集读取、帧与分配；未采样前不填提速比例。后续按批次分别确认文件、行为边界及回滚，不因本审查自动获得测试或实机操作授权。
+
+### 首批实施：I01 / I03 / I05 / I06（2026-11-06）
+
+状态：已实现，待用户验证。只调整五个前端组件及直接相关回归，不增加依赖、不修改持久化格式。完成了源码调用链、差异与 UTF-8 静态核对；本次未运行测试，待用户验收，未进行性能采样。
+
+| 条目 | 最终实现与保留边界 |
+|---|---|
+| I01 | `ChatPanel` 移除发送、继续任务和重新规划的持续滚动回调；主动发送改为携带会话 ID 的局部滚动请求。`ChatMessages` 统一处理近底跟随、历史未读和主动跳最新，待执行帧在离开底部、切会话或卸载时取消，并复核会话与容器。空会话也使用显式 ID，独立窗口沿用快照与动作协议。 |
+| I03 | 当前会话消息按来源 memo；历史图片引用按消息对象及正文复用，草稿独立解析。预览准备依赖有序去重后的文件名集合，使用 JSON 编码避免分隔符碰撞；保留附件增删、草稿及双窗口同步路径。 |
+| I05 | `ProjectAssetsOverlay` 复用既有媒体字段投影，当前分集媒体从就绪后的内存节点同步派生。非当前分集仍串行读取，按 ID、保存时间、归档代际和数据目录复用本次打开的条目；当前集保存不触发其他集重读。关闭或切换剧集/当前项目清缓存，异步返回前复核请求序号，保留分集顺序、折叠和预览。 |
+| I06 | `CharacterLibraryPanel` 关闭时不订阅完整节点，图片、声音和动作候选仅在对应入口展开时准备，保留原组件及草稿/选择状态。声音/动作绑定读取当前 Store 节点并复核项目归属。`AssetsPanel` 关闭时不扫描未读及全局道具分类，开启时按库引用 memo，重开读取最新库。 |
+
+改动文件：`src/components/chat/ChatPanel.tsx`、`src/components/chat/ChatMessages.tsx`、`src/components/ProjectAssetsOverlay.tsx`、`src/components/CharacterLibraryPanel.tsx`、`src/components/AssetsPanel.tsx`；回归为 `tests/components/chatMessages.test.ts`、`tests/components/assetsPanelDrawer.test.tsx` 与新增 `tests/components/projectAssetsOverlay.test.tsx`，文档仅本专项。其他任务已有差异不纳入本批。
+
+已补充但未执行的回归覆盖：历史阅读时流式不拉回、显式最新、旧会话帧/请求失效、空会话与卸载；真实聊天容器输入时历史消息引用及解析复用、正文/附件失效和发送归属；浮层无关更新不重读、未保存媒体即时变化、非当前分集版本失效、关闭重开与迟到结果；关闭面板免候选/计数扫描、重开最新、动作草稿保留及绑定读取实时节点。组件使用现有仓库的 headless hook driver，不能代替真实 React DOM、输入法和桌面窗口验收。
+
+用户验收步骤（Tauri 桌面端）：
+
+1. 准备超过 80 条消息、含图片引用的测试会话，使用已有授权模型发起流式回复。向上阅读时位置保持且出现未读提示；点最新或主动发送后到尾部，底部正常跟随。继续/重新规划后再次向上阅读，不能被强制拉回；切会话、关面板及主/独立窗口交接后，旧回复不能滚动当前会话。
+2. 在同一长会话连续中文输入、粘贴、编辑历史提示词及增删图片附件；草稿、预览、发送、重新生成和队列插话保持可用。切换会话/项目后，图片预览和草稿应各归原会话。减少动态效果开启/关闭分别检查滚动。
+3. 准备至少三个分集及图片/视频，打开剧集资产浮层，拖动无关节点或等待生成进度变化，列表不应重回加载态；当前集替换、删除、新增媒体即刻反映。保存并切换分集后读取正确媒体；折叠、图像/视频切换、预览保持可用。关闭重开会重新读取，快速换剧后不显示旧请求结果；项目尚未加载就绪时不把旧节点归给新分集。
+4. 角色库分别打开图片、声音和动作候选，填写未保存动作草稿后关闭，在画布生成/替换素材再重开，草稿保留且候选取最新内容。绑定、定位、隐藏/显示节点保持可用；切项目后旧视图绑定不可写新项目。资产面板关闭时新增/修改创作资产，重开后未读及道具/武器计数正确，打开短剧页后未读正常清零。
+
+可在仓库根目录手动执行以下命令（本轮均未执行）：
+
+```powershell
+npm run typecheck
+npm run test:typecheck
+npx vitest run tests/components/chatMessages.test.ts tests/components/assetsPanelDrawer.test.tsx tests/components/projectAssetsOverlay.test.tsx tests/services/chat/chatImageReferenceService.test.ts tests/services/chat/detachedChatSyncController.test.ts
+```
+
+首批已本地提交 `e3193b8e`。上述命令、Tauri 桌面回归及同设备前后采样均待执行，不宣称性能百分比或验收通过；I02/I04 和绘图的后续实现见下一节。首批回滚仅撤回五个组件、三处测试及本文对应变更，无数据库迁移。
+
+### 补齐表格剩余项：I02 / I04 / I07 / I08（2026-11-06）
+
+状态：已实现，待用户验证。用户表格七项现在均有代码实现；“已实现”不代表已通过测试或性能采样。本次未运行测试，待用户验收；未运行 lint、类型检查、构建或实机，不引入依赖或持久化格式迁移。
+
+| 条目 | 实现与边界 |
+|---|---|
+| I02 媒体恢复展示 | `pollManager` 发布冻结的最小身份/状态快照，复用未变条目并与 HMR 运行时共存；`getSnapshot` 只读取内存。初始化在挂载/订阅后按批合并，保留旧账本脱敏迁移、重订阅及跨窗口 storage 更新。普通用户/系统气泡不使用媒体 hook，普通助手文本只在身份变化后探测旧账本关联，命中才订阅；裸旧消息在独立窗口冷启也保留恢复入口。`generationRuntime` 展示匹配沿用项目、会话、attempt 和多图回执语义；真正恢复/保存继续实时读取原账本，不以展示快照授权执行。输出历史共用快照，关闭/无项目返回稳定空值，真实重试复核保持不变。 |
+| I04 引用编辑器 | 胶囊显示只订阅既有字段投影，同字段编辑器共享投影及元数据缓存，避免每个分镜格重复扫描整张画布；最后一个编辑器卸载时释放共享缓存。当前节点 data、选中工作流独立订阅；完整节点/边仅用于已展开候选，悬停预览独立读取完整节点。保留分组/父组、全项目搜索、角色多图/声音/动作、工作流及 RefMod；owner、IME、光标、选区、DOM 历史和业务写回守卫沿用原实现。 |
+| I07/I08 绘图 | 运行期 ref 保留全部按原 1.5 距离规则接收的移动采样，增量维护边界，复用合帧工具每帧物化一次不可变预览；松手同步追加不同于最后采样的真实终点后只调用一次既有 addNode/历史。Canvas 基础节点投影独立 memo，草稿追加不重扫基础投影。统一处理 pointercancel、丢 capture、blur、Escape、换工具、项目与卸载；额外指针不替换活动手势，旧项目事件拒绝写回。取消未完成拖拽草稿不落节点/追加历史。文本/图片仍按下插入，橡皮擦已生效的即时删除及撤销语义保持，未扩展 I10 批量擦除。 |
+
+源码范围为 `src/services/pollManager.ts`、`src/services/ai/generationRuntime.ts`、`src/components/chat/MessageBubble.tsx`、`src/components/OutputHistoryPanel.tsx`、`src/components/nodes/shared/MentionEditor.tsx`、`src/components/nodes/shared/mentionEditorDom.ts`、`src/hooks/useCanvasDrawing.ts`、`src/components/Canvas.tsx`。新增回归为 `tests/components/messageBubble.test.tsx`、`tests/components/mentionEditorSubscriptions.test.tsx`、`tests/hooks/useCanvasDrawing.test.ts`；另补现有 `tests/services/pollManager.test.ts`、`tests/services/generationRuntime.test.ts`、`tests/components/outputHistoryRecovery.test.tsx`。文档仅本专项，工作区其他任务的差异保留。
+
+静态核对包含调用链、消费者与 diff、UTF-8 和原 BOM/换行；交叉审阅收敛了隐藏历史面板的快照 gate、旧任务空会话兼容、多编辑器共享投影，以及绘图的实时项目和 Escape 归属守卫。新增回归均未执行，不能用 headless driver 或 SSR 测试替代真实 React/Zustand 调度、DOM 选区、原生指针和桌面窗口验收。
+
+用户验收步骤（Tauri 桌面端）：
+
+1. 准备长纯文本会话与现有媒体恢复消息。流式输入或另一个媒体任务更新时，普通文本内容、复制和编辑保持正常；媒体暂停、继续查询/保存、提交状态未知及保存失败入口保持原规则。未知提交不得自动重新生成；同 taskId 不同 attempt、项目或会话不能串用任务。主窗口和独立窗口分别检查含原回执的多图结果、旧裸媒体消息冷启和切项目后的迟到探测。
+2. 输出历史关闭时更新媒体任务，再重开查看最新恢复提示。现有待下载记录的重新下载/放弃、处理中禁用、原任务已失效和旧失败记录提示应正确；不得用任务投影替代真实执行前的原任务核对。
+3. 在多行分镜同时挂载编辑器，输入含图片、视频、分镜行和角色的引用，拖动无关节点时光标/选区不跳，中文组合输入及编辑器 Undo/Redo 保持。引用改名、换媒体、导演截图、宫格覆盖/行列、分镜改号与资产变化及时显示；悬停预览仍读取最新正文、视频封面和宫格裁切。
+4. 打开 @ 菜单检查连线素材、父组/来源组、全项目搜索、工作流输入、角色多图/声音/动作和 RefMod；关闭后不准备候选，再打开取最新数据。切项目、换工作流或进入生成状态后，旧弹层与旧 RefMod 回调不能写入错误 owner；最后一个编辑器关闭后不长期保留旧画布投影。
+5. 连续手绘 10～20 秒并快速松手，完整采样及最终末端保留，只新增一个节点，一次 Undo/Redo 对应整条笔划。矩形、菱形、椭圆、箭头、直线和点击默认尺寸/样式回归；预览最后一帧尚未显示时松手也应正确提交。
+6. 拖绘中依次使用 Escape、Alt+Tab、系统 pointercancel、丢 capture、换工具、第二触点和切项目，草稿/捕获/待执行帧正确清理，旧事件不落新节点，随后可以重新绘制。Escape 不抢占 IME、输入控件或弹窗；图片原生选择造成的 blur 不取消有效读取，换工具/项目后的迟到图片不进入新草稿；文本插入后的编辑焦点、橡皮擦即时命中、共享图片和保存重开沿用既有行为。
+
+可在仓库根目录手动执行以下命令（本批均未执行）：
+
+```powershell
+npm run typecheck
+npm run test:typecheck
+npx vitest run tests/services/pollManager.test.ts tests/services/generationRuntime.test.ts tests/components/messageBubble.test.tsx tests/components/outputHistoryRecovery.test.tsx
+npx vitest run tests/components/mentionEditorSubscriptions.test.tsx tests/components/mentionEditorSources.test.ts tests/components/mentionEditorImageIndices.test.ts tests/components/mentionEditorPreview.test.ts tests/components/mentionEditorHistory.test.ts tests/components/mentionEditorChipDrag.test.ts tests/components/mentionEditorTextSelection.test.ts tests/components/promptSubmitShortcut.test.ts
+npx vitest run tests/hooks/useCanvasDrawing.test.ts tests/components/canvasNoteTools.test.tsx tests/utils/canvasNoteGeometry.test.ts
+```
+
+剩余缺口：所有自动化、桌面验收及前后性能采样待执行。手绘每帧仍需本地化完整点列并生成路径，未引入丢点或另一套笔迹持久化；不宣称帧率、输入延迟或提速比例。回滚只撤回本批八处源码、六处回归与对应文档差异，无数据库迁移；首批提交可独立保留。
+
+## 2026-11-06 画布性能突破续查（仅静态审查）
+
+基线：`7afe9002` 后当前源码，包含此前 `e3193b8e` / `79739b68` 的交互优化。本轮只追加本文，未修改业务代码、未提交，未运行测试、lint、类型检查、构建、基准或桌面操作；下列均为待实施候选，优先级来自调用频率和数据规模，实际占时及收益待采样。
+
+已核对并排除重复建议：稳定 nodeTypes/edgeTypes、React Flow Provider、`onlyRenderVisibleElements`、节点渲染投影、图片/视频 LOD 与准备预算、集中连线/Path2D/裁剪缓存、滚轮合帧、帧内视口 ref 与手势结束才持久化、拖入预览合帧、等距候选构建排序/区间查询、不可变撤销快照及 I01～I08。I09 多选拖线仍属既有待做项，不当作本轮新发现。
+
+### 新候选与实施边界
+
+| 条目 | Before：当前证据 | After：建议突破 | Why：影响与必须保留的边界 |
+|---|---|---|---|
+| I13 普通节点缩放 | [ResizeHandle:116](../../src/components/nodes/shared/ResizeHandle.tsx#L116) 每个原生 move 立即回调尺寸；左/上方向在 :161 再写位置。经 [store.nodes:1152](../../src/store/store.nodes.ts#L1152) 触发尺寸合并/分镜派生等全图遍历，再进行位置 map | 先复用现有合帧工具，松手同步真实终点及 Shift 状态；是否合并原子几何写入另行采样决定 | 高频输入可能多于显示帧，左/上方向有两次 Store 发布。保留八方向、对边固定、比例、最小尺寸、吸附、起止历史及取消/项目守卫；不能跳过 shotVideoAttempts 等在途回填身份迁移 |
+| I14 分布间距拖动 | [DistributionGapHandles:109](../../src/components/canvas/DistributionGapHandles.tsx#L109) 每个 move 从 startNodes 重算分布并立即 setNodes（:139）；[distributionGeometry:28](../../src/utils/distributionGeometry.ts#L28) 重复筛选、边界与排序，渲染手柄又计算一次 | 起拖缓存顺序/边界，按帧发布位置，松手同步末端；把位置合并到最新节点而非回写旧完整数组 | 每次约 O(N + K·H·N + K log K)，再触发画布订阅。保留 Shift 仅相邻、横纵顺序、零间距、单次历史、并行生成数据及增删，不因缓存覆盖新媒体结果 |
+| I15 吸附查询索引 | [useNodeSnap:376](../../src/hooks/useNodeSnap.ts#L376)、[:405](../../src/hooks/useNodeSnap.ts#L405) 每次 applySnap/applyResizeSnap 仍线性查边、中心与等距候选；:647/:717 总发布新提示线数组 | 在既有起拖/resize 缓存上增加有序查询索引，仅检查现有阈值内候选；相同提示线保留引用 | 起拖等距候选构建已优化，这里针对查询阶段 O(P·V)。保留原候选顺序的平局结果、浮点减法边界、交叉对齐与等距优先级；不能借旧构建基准宣称查询收益 |
+| I16 同值更新止于 Store | [Canvas:1382](../../src/components/Canvas.tsx#L1382) 将吸附后的 position 交给 [onNodesChange:1723](../../src/store/store.nodes.ts#L1723)，相同坐标仍产生新数组；选中 ID Action 也缺同值 gate | 首先只过滤严格未变的纯 position/select 批次，以及相同有序 selectedIds | 两轴吸附保持原位仍可能触发全图派生。必须保留最终 dragging=false、所有显式变化字段及 remove/add/replace/dimensions/混合批次语义。RF 已比较选中 ID，不能误报所有位移都会触发 onSelectionChange |
+| I17 集中连线的增量失效 | [canvasEdgeModels:150](../../src/utils/canvasEdgeModels.ts#L150) 先扫描全部 nodeLookup 并创建 geometry/elevation/handle 临时数组，:160 后才判断纯 viewport；[CanvasEdgeLayer:210](../../src/components/canvas/CanvasEdgeLayer.tsx#L210) 订阅所有 RF 发布 | 建立可信几何/样式版本或 dirty IDs，使纯视口发布提前复用模型；失效信号不完整时回退原保守扫描 | 当前每个新视口 state 仍为 O(N + handle 数)，已有 reader 仅挡同 state 重复读取，path 缓存也在扫描之后。需覆盖原地 handle/测量、父级绝对位置、选择/zIndex、edge/default style/marker 和 mounted IDs，不能只按 Map 引用跳过 |
+| I18 音频显示时钟 | [AudioNode:449](../../src/components/nodes/AudioNode.tsx#L449) 每个播放 rAF setCurrentTime，state 唯一展示在 :637，格式化 :206 已取整秒 | 只按整秒发布展示 state，保留精确媒体时钟、原 rAF 和波形绘制 | 组件自身 state 更新不受 memo 阻挡。恢复位置 ref 及全屏交接原本读取 audio.currentTime，不应降低播放/跳转精度；此项可独立于解码调度小步实施 |
+| I19 波形共享准备预算 | [AudioNode:52](../../src/components/nodes/AudioNode.tsx#L52) 读取整文件，:90 解码后同步扫描 PCM；:117 缓存 miss 即启动，:390 各节点 idle 最长一秒后也会启动，无共享活动上限 | 保留同 URL Promise 去重，为不同 URL 增加共享并发预算，活动注册与已完成缓存分开；撤销无人使用的排队项，按消费者管理生命周期 | 已有 32 MiB 读取上限和 64 项 Promise 缓存，但 LRU 逐出活动 Promise 不会停止工作，也不限制活动解码。不同音频入屏有资源峰值风险；现有图片/视频队列未覆盖。不可取消 decode 仍占槽，不能取消其他消费者；错误/换源/卸载及迟到结果需回归 |
+| I20 动画更新缩到预览子树 | [AnimationNode:129](../../src/components/nodes/AnimationNode.tsx#L129) 每个自动播放节点独立更新顶层 frameIndex，:268 重算帧样式；动画不在 [Canvas:122](../../src/components/Canvas.tsx#L122) 图片/视频 LOD 类型中 | 先隔离预览更新以保持原播放行为，再采样评估远景静态预览与按需激活 | 已有页面隐藏停止和 RF 离屏卸载；同屏缩远后仍持续更新。不得无条件暂停用户明确播放的动画，须保留循环/单次末帧、换源、隐藏恢复和当前帧 |
+| I21 全景资源按需激活 | [PanoramaNode:292](../../src/components/nodes/PanoramaNode.tsx#L292) 360 模式挂查看器；[XiaoLuoPanoramaViewer:124](../../src/components/nodes/panorama/XiaoLuoPanoramaViewer.tsx#L124) 始终挂核心，interactive 仅控制遮罩；[PanoramaCore:153](../../src/components/nodes/panorama/internal/PanoramaCore.tsx#L153) 加载完整源，:208 卸载才销毁 | 先采样多实例纹理/上下文占用，再评估同视角静态封面及主动交互时激活 | 已有全屏/紧凑互斥，不是双实例泄漏。此项存在首次激活准备时间的体验取舍；保留相机角度、截图、主动交互及全屏原图，不能将未激活等同于可随意丢弃视图状态 |
+| I22 批量几何只算一次 | [MultiSelectToolbar:193](../../src/components/canvas/MultiSelectToolbar.tsx#L193) 每个选中节点重复 sel.map/reduce 求同一对齐目标；[store.nodes:1859](../../src/store/store.nodes.ts#L1859) 松手结算虽有 Map，后续边界仍传数组，父链继续 [find:99](../../src/utils/nodeBounds.ts#L99) | 对齐预计算一次边界/目标并使用 Set/Map；分组结算复用已有 Map、预计算分组 bounds/子节点数 | 对齐有 K 次全组选中聚合，分组结算最坏 O(K·G·H·N)。Map 支持已存在，无需新空间索引；保留实测尺寸、旧组优先/原命中顺序、父链保护、锁定/隐藏、清空组及历史顺序 |
+
+N 为节点数，K 为选中/参与节点数，H 为父链深度，G 为参与分组数，P 为移动查询次数，V 为既有裁剪后的候选数。复杂度描述调用次数与分配范围，不是耗时、帧率或提速测量。
+
+### 补充候选
+
+- [GroupNode:106](../../src/components/nodes/GroupNode.tsx#L106) 展开时也订阅封面，[groupChildImageKey:18](../../src/utils/groupChildImageKey.ts#L18) 对每个新 nodes 数组重建全组封面并在 :30 字符串化 URL。已有跨组共享缓存，不能误报 G×N；剩余是无关位移带来的 O(N + 封面文本量)。可先停用展开组封面订阅，再按父 ID/封面字段复用索引，保留直接子节点、顺序、缩略图优先和抽样。
+- [MiniMapNodeStats:107](../../src/components/canvas/MiniMapNodeStats.tsx#L107) 未悬浮仍订阅并计数全部 RF nodes，hover 仅控制后续 JSX。可仅在统计卡显示时计算，保持 MiniMap 本体实时几何和原统计口径。小图槽另有 [ShotlistNode:719](../../src/components/nodes/ShotlistNode.tsx#L719) 未传 previewMaxEdge、[DirectorDeskNode:540](../../src/components/nodes/DirectorDeskNode.tsx#L540) 四张截图普通 img，可独立接入既有预算，保留来源、动图和原图查看；先采样价值，不与资源调度混做。
+
+### 建议顺序与后续采样
+
+第一批优先 I13/I14 与 I18：统一高频预览发布，缩小纯展示 state 更新；I22 可单独小步收敛。第二批处理 I15/I16，先用差分回归守住吸附边界和结束状态。I17 是更深的增量几何方向，需完整失效模型；I19/I20/I21 分媒体类型采样和评估，尤其全景静态化涉及激活延迟，不宜与输入链一次混改。
+
+后续由用户在 Tauri 桌面端使用同设备、同视口、同批节点与操作序列采样，冷/热缓存分开，不以 Web 结果代替桌面性能：
+
+1. 拖动/缩放：固定节点与连线规模，比较尺寸八方向、Shift、比例/最小值、间距横纵/相邻模式的原始 move 数、Store 发布数、React commit 和长任务；松手实际末端与一次 Undo/Redo 正确，并行媒体完成不能被旧位置数组覆盖。
+2. 吸附与连线：分别增加候选数、RF nodeLookup 数和 handle 数，区分起拖构建、移动查询与纯视口几何扫描；保留平局、负值/浮点边界、原地 handle 更新、父级移动、选中/样式/marker 和边交互。原地双轴吸附时不重复发布，dragging=false 仍必须处理。
+3. 媒体：相同数量的不同音频冷入屏，记录活动读取/解码、PCM 扫描与内存峰值；播放时单独比较时钟 state 与波形绘制。动画与全景分别比较静态、自动/主动播放、缩远、离屏及激活恢复，检查相机/帧/播放进度和原图/全屏功能。
+4. 批量与隐藏派生：逐步增加选中数/组深度，测六种对齐、批量松手和分组缩放结束的主线程时间；再对照展开/折叠组、小地图关闭/开启不悬浮/统计展开，确定额外派生的实际占比。
+
+可复用但本轮未执行的回归入口：`tests/hooks/useNodeSnap.test.ts`、`tests/components/distributionGapHandles.test.tsx`、`tests/utils/nodeBounds.test.ts`、`tests/store/groupFolders.test.ts`、`tests/store/history.test.ts`、`tests/utils/canvasRenderProjection.test.ts`、`tests/utils/canvasEdgeModels.test.ts`、`tests/components/canvasEdgeLayer.test.tsx`、`tests/components/canvasEdgeStrokeLayer.test.tsx`、`tests/components/nodeCriticalInteractions.test.tsx`、`tests/components/panoramaInternalization.test.ts`。ResizeHandle 被现有节点交互测试 mock，间距测试偏静态投影，音频时钟/波形并发、动画推进和全景激活资源缺直接入口覆盖；后续实现应补真实输入及取消/失效场景，不能只测试新 helper。
+
+以上为实施前审查，不为静态审查填写收益数字；本次未运行测试。
+
+### 2026-11-06 本轮实施范围（用户已确认）
+
+按上述七组实施 I13–I22：输入合帧与末端收尾、吸附查询和严格同值 gate、集中连线纯视口失效、音频显示与波形预算、动画预览隔离、全景静态封面与交互恢复、批量几何复用。不扩展补充候选，不新增依赖或修改持久化格式。
+
+源文件按输入 UI、Store/吸附、音频/动画、连线/全景分组并行修改，保留原算法与 Store Action、原始数据和历史语义。连线只有经已核对 React Flow 视口入口标记的发布可提前复用，其他发布仍保守核对；全景只有成功取得同视角封面后才释放核心，截图失败保留原查看器。主要风险为手势取消与松手次序、候选平局/浮点边界、共享波形消费者和不可取消解码、全景重新激活的准备时间，分别补直接回归及桌面验收入口。
+
+实施阶段依仓库默认规则未运行验证；随后用户明确授权助手测试，最终反馈“我测试好了”并要求本地提交。实际验证结果见本节末尾；提交阶段不新增测试或全量质检。
+
+实施状态：I13–I22 均已实现，用户已反馈测试完成。已做调用链、消费者、差异、UTF-8/BOM/原换行和差异空白静态核对，输入 UI、Store 与连线/全景已交叉审阅；未测量帧率、耗时或内存收益。用户未列出逐项测试范围，不将该反馈扩写为完整验收矩阵通过。
+
+| 范围 | 实际实现与保留边界 |
+| --- | --- |
+| I13 / I14 输入链路 | ResizeHandle 与间距手柄复用 frameCoalescer，松手同步真实指针终点，缩放读取 PointerEvent.shiftKey。取消、失焦、失去捕获、项目/父级/成员失效和卸载清待帧；尺寸沿原八方向、比例、最小值和吸附算法，历史起止仍由原回调负责。间距起拖固定排序/边界，每帧只合并位置到最新节点，保留并行媒体数据、另一轴及未参与的增删。 |
+| I15 / I16 吸附与同值 gate | 候选起拖建阈值查询索引，二分沿用原减法，局部恢复原 ordinal；密集命中与非有限值回退原线性逻辑。相同提示线保留引用。Store 只过滤字段白名单内严格同值的纯位置/选择批次及相同有序选择 ID；保留重复 ID 变更顺序、最终 dragging=false、尺寸/absolute/增删/替换与混批。 |
+| I17 集中连线 | 既有版本锁定适配器核对两处完整纯视口入口，在同步通知前通过 WeakMap 记录版本，不改依赖落盘文件或 RF Store 字段。相同可信版本及相同输入可在节点/handle 扫描前返回；任意其他发布、版本变化、mounted IDs 或参数变化仍保守核对。支持测量/handle 原地更新后 set({})，以及几何/边样式发布紧接平移后 React 仅读最后快照的情况。 |
+| I18 / I19 音频 | 显示时钟仅发布整秒，播放、恢复/跳转与全屏交接继续使用精确媒体时钟，rAF 波形不变。共享串行队列覆盖 fetch/解码/PCM 扫描，进行中注册独立于 64 项完成 LRU；保留同 URL 去重、私有 Comfy 获取协议和 32 MiB 限制。消费者取消只撤销自己的等待；最后消费者离开可中止 fetch/删除排队项，不可取消 decode 仍占槽至结束。 |
+| I20 动画 | frameIndex、播放计时器、帧样式与 transport 下沉同文件 memo 预览子树，父节点的工具条、导出与源准备不随每帧更新。默认自动播放、暂停、逐帧、循环/单次末帧、换源/模式/页面隐藏后的当前帧语义沿用。 |
+| I21 全景 | 未交互预览复用既有显示准备预算，成功获取当前视角封面后卸载 Core，释放 Pannellum 实例；相机保存在当前来源会话内，主动交互立即按原图恢复。静态封面随容器缩放，显式截图会按当前尺寸重新准备原图 renderer，等待最多 15 秒并复用本次读回；错误/超时/换源/卸载结束等待。截图失败保留原 live 查看器。保留原紧凑/全屏互斥与全屏原图链路；再次激活存在资源准备时间，不宣称跨离屏卸载或重启持久化视角。 |
+| I22 批量几何 | 六种对齐一次建 Set/Map、选区 bounds 与公共目标；分组结算使用动作内 Map/几何缓存及一次子计数。保留父链循环保护、实测尺寸、旧组优先/首命中、锁定/隐藏、批末清空组及历史/动画入口。 |
+
+本轮直接回归入口：`tests/components/canvasGeometryInteractions.test.tsx`、`tests/hooks/useNodeSnap.test.ts`、`tests/store/history.test.ts`、`tests/store/groupFolders.test.ts`、`tests/scripts/viteCanvasEdgeLayer.test.ts`、`tests/utils/canvasEdgeModels.test.ts`、`tests/services/audioWaveformCache.test.ts`、`tests/components/animationNodePreview.test.tsx`、`tests/components/nodeCriticalInteractions.test.tsx`、`tests/components/panoramaCompactPreview.test.tsx`。事件/Hook driver 与状态测试不能代替真实 React 提交、原生捕获、音频解码或 WebGL 桌面验收。
+
+用户验收（Tauri 桌面端）：
+
+1. 在同一项目放置多尺寸节点和嵌套组。逐一拖八向缩放、比例/Shift/最小尺寸、横纵间距及 Shift 相邻模式，快速松手应落在实际终点；按一次撤销/重做检查手势历史。拖动中失焦、取消指针、切项目或删除成员，应停止后续写入。间距拖动期间让媒体任务完成，结果、另一轴与新节点应保留。
+2. 在含多连接点与父组的密集画布检查边/中心/等距吸附，负坐标、相等候选与临界位置不跳变；原位反复吸附后松手不能继续 dragging。平移缩放后再改尺寸、连接点、父组、选中、边样式/marker，连线几何与交互应及时更新；六种对齐及整批换组保持位置，旧组仍能接收成员，真正空组按原规则清理。
+3. 同时放入多个不同音频及多个相同来源，冷加载、切源、离屏/返回及断开来源后检查波形与重试；暂停/续播、跳转、结束复位、全屏交接保持精确进度。帧动画检查自动播放、循环/单次末帧重播、暂停逐帧、帧率、换源、静态模式、隐藏/恢复，以及编辑/导出入口。
+4. 多个 360 节点先显示封面，再逐一激活、转向/缩放、Esc/点击外部退出并再次激活，应恢复退出时视角。拖动节点不误激活；改变节点尺寸后截图应按当前尺寸生成，原图全屏及比例截图正常。换源/项目/全屏时不串旧封面，来源失败可重试；加载悬挂的截图等待会结束，其他查看器仍可使用。深浅主题均检查封面、加载与错误态。
+
+如需自动回归，由用户在仓库根目录运行 `npx vitest run tests/components/canvasGeometryInteractions.test.tsx tests/hooks/useNodeSnap.test.ts tests/store/history.test.ts tests/store/groupFolders.test.ts tests/scripts/viteCanvasEdgeLayer.test.ts tests/utils/canvasEdgeModels.test.ts tests/services/audioWaveformCache.test.ts tests/components/animationNodePreview.test.tsx tests/components/nodeCriticalInteractions.test.tsx tests/components/panoramaCompactPreview.test.tsx`。继续参考上节同设备、同视口、同批数据的性能采样，冷/热缓存分开。
+
+2026-11-06 已执行的验证与剩余缺口：
+
+- 输入/几何：`npx vitest run tests/components/canvasGeometryInteractions.test.tsx tests/components/distributionGapHandles.test.tsx tests/utils/nodeBounds.test.ts`，3 文件、82 例通过，退出码 0。
+- 吸附/Store：`npx vitest run tests/hooks/useNodeSnap.test.ts tests/store/history.test.ts tests/store/groupFolders.test.ts tests/utils/canvasRenderProjection.test.ts`，4 文件、191 例通过，退出码 0。
+- 连线/全景：`npx vitest run tests/scripts/viteCanvasEdgeLayer.test.ts tests/utils/canvasEdgeModels.test.ts tests/components/canvasEdgeLayer.test.tsx tests/components/canvasEdgeStrokeLayer.test.tsx tests/components/panoramaCompactPreview.test.tsx tests/components/panoramaInternalization.test.ts`，6 文件、78 例通过，退出码 0。
+- 媒体：`npx vitest run tests/services/audioWaveformCache.test.ts tests/components/animationNodePreview.test.tsx tests/components/nodeCriticalInteractions.test.tsx`，235 例中 234 通过、1 失败，退出码 1。新增音频时钟用例在初始化阶段超时；单例复测又暴露 fake timers 覆盖 rAF stub，已将时钟模拟移至初始化完成后并仅模拟 setTimeout/clearTimeout。最终复测被中断，未取得有效结果，不能标为通过。
+- 定向 ESLint：输入 5 文件、吸附/Store 5 文件、媒体 6 文件、连线/全景 8 文件各次退出码均为 0；媒体检查发生在最终测试夹具微调前。
+- `npm run typecheck` 与 `npm run test:typecheck` 各退出码 2。检查时受到其他任务中的 ScriptWorkbench 类型错误阻断；测试检查另发现本轮两处夹具类型标注问题，已修正 AudioBuffer 部分 mock 的断言和全景测试的 ReactElement props 类型，未重跑类型检查，不宣称检查通过。
+- 助手未完成桌面交互验收；用户随后反馈测试完成并要求提交。未运行全量 CI、构建、Rust 检查或性能基准。
+
+无数据格式迁移；回退可按输入、吸附/Store、连线、音频、动画、全景各组恢复对应源文件与直接回归，连线适配器/领域类型/模型选择器须一起恢复。保持工作区其他任务改动不变。
+
+## 图片加载空白与离屏缓存边界（2026-11-10）
+
+状态：已实现，完成静态核对；本次未运行测试，待用户验收。未采样帧率、解码耗时或内存收益。
+
+截图中的破图图标与 `Generated` 替代文字对应 `CanvasPreviewImage.tsx`：首次挂载仍在等待显示队列时，真实 `<img>` 没有可用来源，而此前已取消通用图片淡入隐藏。该组件现在通过 Tailwind `invisible` 保留图片几何并显示容器底色，只有当前元素完成加载和解码后才显示；不增加揭示动画。错误仍回传 `ImageNode` 的错误／重试入口。
+
+就绪状态绑定本次来源、项目和实际显示 URL 的请求身份；真实换源、跨项目、往返切换及卸载会使旧解码回调失效。不同清晰度租约返回相同 URL 时沿用就绪状态和在途解码，避免因没有第二次 `load` 而永久空白。保持单个 `<img>`、分档准备、显示队列及租约释放流程。
+
+离屏仍沿用 React Flow 可见区卸载与有界缩略图缓存，不让全部离屏图片常驻。已有 256／512／1024 档、30 秒空闲复用与容量淘汰；Windows 普通模式空闲图片缓存为 32 MiB／128 项，性能模式为 8 MiB／32 项。这些是空闲预览预算，不是进程或 GPU 总内存上限。相较之下，若 1000 张 256×256 RGBA 图全部常驻，仅像素体积就约 250 MiB，尚不含其他开销。当前选择依据现有资源生命周期，不宣称未经测量的性能提升。
+
+定向回归源码位于 `tests/components/canvasPreviewImage.test.tsx`。用户可在仓库根目录运行 `npx vitest run tests/components/canvasPreviewImage.test.tsx tests/components/canvasImageDisplay.test.ts tests/components/canvasNodeLodPreview.test.tsx`；本轮未执行。
+
+Tauri 桌面验收：
+
+1. 打开包含多张角色图的项目，分别在普通／性能模式快速平移，让图片反复离屏再返回，并在远近缩放档之间切换。未就绪时应为空白底色，不出现破图图标、替代文字或渐进解码的半张图；就绪后正常显示，节点尺寸不跳变。
+2. 对同一画布分别检查首次冷加载、短时回访及空闲超过 30 秒后的回访；小图或动图在清晰度档之间来回切换后不能永久空白。回归双击原图、节点选中与工具条，原图质量不受预览门控影响。
+3. 图片加载期间快速切换项目、返回原项目，或替换实际来源，不能露出旧项目／旧来源图。对已有失效图片检查错误与重试仍可用；深浅主题均确认空白底色与原节点一致。
+
+回滚仅恢复上述组件和直接回归差异，无媒体、缓存格式、持久化数据或原生配置迁移。
+
+
+<a id="algorithm-performance-20261116"></a>
+
+## 算法性能收敛（2026-11-16）
+
+状态：六项均已实现并补充定向回归源码，完成调用链、差异与 UTF-8 静态核对；本次按用户要求与代码精简一并提交。本次未运行测试，待用户验收；未运行 lint、类型检查、构建、性能基准或桌面应用，不填写实测提速数字。
+
+用户随后要求把审查列出的内容全部收敛，补齐下表末尾三项次优先候选，共九项。补充三项已实现并补充回归源码，按用户要求单独提交；本次只做静态核对，未运行测试，待用户验收，不把提交状态视为验收通过。
+
+| 范围 | 实现与保留边界 |
+| --- | --- |
+| 文件引用判断 | `fs/storageHealth.ts` 保留规范化后的精确路径 Set，目录保护改为按文件路径各级祖先查询，去掉每文件复制并扫描全部引用。保留 Windows／UNC 规范化、目录分隔边界及整根保护。 |
+| 分镜时长同步 | `store.nodes.ts` 每次更新只为新行和各目标表的旧行建立一次 ID Map，视频查询不再逐个遍历镜头数组。保留首个同 ID 行、按表隔离、重排、手动时长、旧来源接管及原历史入口。 |
+| 连接素材预览 | `connectedNodesPreviewInteractions.ts` 一次建立父组到子节点的索引；`ConnectedNodesPreview.tsx` 使用实例级稳定投影，位置及无关 data 变化不重建预览。成员核对仍线性扫描，保留节点顺序、父组继承、多边及断连语义。 |
+| 媒体显示调度 | `canvasDisplayScheduler.ts` 在已有就绪批次中续取，避免每帧全扫剩余任务；批次耗尽、准备槽位释放及预算改变时仍重算下一截止时间。保留优先级、取消、交互静默期、延迟唤醒和准备并发预算。 |
+| 批量存储清理 | `StorageHealthCenter.tsx` 批前完整盘点，批后沿用完整刷新；逐文件通过 `verifyStorageCleanupFile` 重读跨项目当前引用，核对目标祖先目录、普通文件身份、大小、原生前后快照和实时复制源。重复清理仅对目标和未选中的保留副本计算摘要，回收站仍核对撤销记录与确认摘要。未知引用／状态、链接、保留副本消失或变更时拒绝删除。 |
+| 批量生成预检 | `batchExecute.ts` 复用既有 `getCanvasNodeById`，预检、正规化回写及执行前查询不再反复全数组 find。每次 await 后仍读取最新节点数组，保留项目、revision、执行上下文和 data 身份检查；额外预检分支仅作用于 `modelGeneration === 1`。 |
+| Agent 历史裁剪 | `contextTranscript.ts` 的轮次切点接受原数组前缀终点，`contextManager.ts` 用倒序游标与索引累计成本，去掉每轮前缀／成本数组复制，整体 O(H)。保留完整用户轮次、同时间戳不分割、预算临界判断与原压缩策略；磁盘默认读取上限仍为 200 条，组装还合并已加载内存历史。 |
+| 原生存储快照分组 | `nativeStorageReferences.ts` 为自身读取、验证并冻结的事务快照一次建立项目索引，同一快照不再为每个项目过滤全部账本并重复解析 owner。索引按快照弱引用释放；每次查询仍返回独立数组，外部构造的可变材料继续按原逻辑核对，前后快照不共用索引。保留原身份与体积上限、未知状态保护及快照比较。 |
+| 小地图统计 | `MiniMapNodeStats.tsx` 仅在悬浮时挂载统计子组件，收起后不订阅和统计全量节点。原 MiniMap、类型顺序、未知类型排序、空态与总数保持原样，重新打开读取当前节点。 |
+
+复杂度变化是源码推导：引用判断由文件数乘引用数变为按路径深度查询；分镜时长查询由视频数乘镜头数变为建表后直接查询；上游分组展开由分组连线数乘全图节点数变为单次索引加实际展开量；稳定显示批次去掉按帧重复扫描；批量预检由 O(K²N) 收敛至 O(KN + K²)。这些不等于整次交互或生成耗时的实测倍数。
+
+存储清理没有缓存旧引用作为删除授权：逐文件仍读取全部相关项目、历史、会话与恢复材料，主要减少无关目录枚举和全候选摘要读取。保留原生命令的路径与资源保护，不把前端预检描述为跨进程停写、原子租约或文件系统竞态的完整解决方案。没有新增依赖、数据库迁移、持久化缓存或安全权限。
+
+### 验证入口（待用户执行）
+
+在仓库根目录运行：
+
+```sh
+npx vitest run tests/services/storageHealth.test.ts tests/services/projectThumbnailExclusion.test.ts tests/store/history.test.ts tests/services/batchExecute.test.ts tests/services/canvasDisplayScheduler.test.ts tests/components/connectedNodesPreviewInteractions.test.ts tests/components/canvasNodeLodPreview.test.tsx tests/components/nodeCriticalInteractions.test.tsx tests/services/chat/agentConversationContext.test.ts tests/services/chat/contextCompression.test.ts tests/services/nativeStorageReferences.test.ts tests/services/nativeNodeTrash.test.ts tests/components/miniMapNodeStats.test.tsx
+```
+
+Tauri 桌面端使用独立测试项目与可丢弃文件验收：
+
+1. 准备至少两张分镜表、同表多个自动关联视频和手动时长视频。编辑文字、重排镜头，再改一行时长；文字和重排不改视频时长，改时长只影响对应表和行的自动关联，手动值与媒体结果保留。撤销／重做、保存重开后仍一致。
+2. 让多个素材和分组连到目标节点或目标父组，打开 AI 节点的引用条。拖动无关节点、更新无关输出时顺序与内容稳定；修改上游输出、换组、重排、断开一条同源连线及切项目时，预览与断连动作仍对应最新来源。
+3. 在含大量图片／视频的画布切换远近景、平移并快速重复操作，普通／性能模式均应逐批恢复全部可见内容。加载期间切换模式或项目，不应丢任务、卡在空白、提前显示未到期内容或突破准备并发限制；回归取消、加载失败和深浅主题。
+4. 在「设置 → 存储健康」准备多项目共享目录、未引用文件、目录保护引用、回收站和同名同大小的重复副本。批量清理只删除选中且当前仍可清理的文件；确认后新增节点／历史引用、开始复制、删除或改写保留副本、替换祖先为链接、切项目或取消时，应保留不再符合条件的目标并报告未清理项。被引用文件、原生保护目录与未知操作所属根继续保留，批后报告与实际文件一致。
+5. 在支持原生新数据模型的项目里启动分组批量生成，等待输入正规化期间编辑、删除或替换后续节点，旧输入不得继续生成。回归项目／revision 变化中止、工作流顺序、普通旧项目批量执行及单次历史提交。
+6. 在长会话里连续追问并触发上下文裁剪／压缩，近期历史必须成轮保留，不留下只有回答的半轮；超预算仍按原策略暂停或压缩，同时间戳消息不跨摘要切点，切会话／项目不串历史。真实模型调用由用户自行选择并执行。
+7. 多个原生项目分别准备完成与待续的任务、不同素材根和撤销记录，再扫描并清理；保护仅归对应项目，新一轮状态变化仍及时反映。反复悬浮／离开小地图并在中间增删节点，统计应使用最新节点，固定／未知类型顺序、空态、总数、拖动与深浅主题保持正常。
+
+性能采样需另行授权，使用同一设备、相同项目数据与操作分别比较冷／热状态。回滚按以上九个范围恢复源码及直接回归即可，存储引用提取与 UI 目标核对须成组恢复，保留工作区其他任务的修改。

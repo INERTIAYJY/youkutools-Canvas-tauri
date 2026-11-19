@@ -2,10 +2,25 @@
  * generateTextProtocol — 回归测试：custom text model protocol。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { generateText } from '../../src/services/ai/generateText';
+import { generateText, generateTextResult } from '../../src/services/ai/generateText';
 import { useAppStore } from '../../src/store/useAppStore';
 import { resolvePromptWithMediaRefs } from '../../src/services/ai/promptResolver';
+import * as imageUtils from '../../src/services/ai/imageUtils';
+import * as promptResolver from '../../src/services/ai/promptResolver';
 import type { ModelExecutionProfile } from '../../src/types/aiTypes';
+import type { WorkflowDefinition } from '../../src/types';
+import { getPendingTasksForProject } from '../../src/services/pollManager';
+import type { InstalledPlugin } from '../../src/types/plugin';
+import { revokePluginProtocolPresets } from '../../src/services/plugins/pluginProtocolPresetService';
+const protocolNative = vi.hoisted(() => ({ invoke: vi.fn(), desktop: false }));
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...await original<typeof import('@tauri-apps/api/core')>(), invoke: (...args: unknown[]) => protocolNative.invoke(...args), isTauri: () => protocolNative.desktop,
+}));
+
+vi.mock('../../src/services/comfyProgress', () => ({ createComfyProgressSession: () => ({
+  clientId: 'text-workflow-progress', waitUntilReady: async () => {}, bindPrompt: () => {}, close: () => {},
+}) }));
+vi.mock('../../src/services/comfyMemory', () => ({ maybeAutoReleaseComfyMemory: async () => {} }));
 
 const jsonResponse = (payload: unknown) => new Response(JSON.stringify(payload), {
   status: 200,
@@ -15,9 +30,253 @@ const jsonResponse = (payload: unknown) => new Response(JSON.stringify(payload),
 beforeEach(() => {
   vi.unstubAllGlobals();
   useAppStore.setState(useAppStore.getInitialState(), true);
+  protocolNative.desktop = false; protocolNative.invoke.mockReset(); revokePluginProtocolPresets();
+});
+
+it('rejects a saved direct text submission from a retired built-in connection before fetching', async () => {
+  useAppStore.setState((state) => ({ config: { ...state.config, providers: {
+    ...state.config.providers, 'old-sora': { name: 'Sora2U', catalogId: 'sora2u', apiKey: 'synthetic-key', baseUrl: 'https://sora2u.com' },
+  } } }));
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+
+  await expect(generateText({ provider: 'old-sora', model: 'old-sora/text-model', prompt: '测试' }))
+    .rejects.toThrow('内置厂商已下架');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+function installResponsesPlugin(catalogId: 'custom-openai' | 'volcengine' = 'custom-openai') {
+  const reference = { pluginId: 'example.responses', presetId: 'responses' };
+  const plugin: InstalledPlugin = { id: reference.pluginId, enabled: true, source: 'definePlugin({tools:{}});', sourceDigest: 'a'.repeat(64), revisionDigest: 'b'.repeat(64), installedAt: 1, updatedAt: 1,
+    manifest: { apiVersion: 2, requiredCapabilities: ['model.protocolPresets'], id: reference.pluginId, name: 'Responses', version: '1.0.0', category: 'utility', runtime: 'javascript', entry: 'main.js', permissions: [],
+      contributes: { nodeTools: [], modelProtocols: [{ id: 'responses', name: 'Responses', category: 'text', adapter: 'openai-responses' }] } } };
+  useAppStore.setState((state) => ({ installedPlugins: [plugin], config: { ...state.config, providers: { p: { name: 'p', catalogId, apiKey: 'key', baseUrl: 'https://gateway.example/v1' } },
+    generalModels: [{ id: 'plugin-model', name: 'plugin model', modelId: 'configured-model', category: 'text', providerConfigId: 'p', executionProfile: { preset: 'plugin', plugin: reference } }] } }));
+  protocolNative.desktop = true;
+  protocolNative.invoke.mockResolvedValue({ pluginId: plugin.id, exists: true, enabled: true, snapshotVerified: true, healthCode: 'ready', activeSourceDigest: plugin.sourceDigest,
+    activeRevisionDigest: plugin.revisionDigest, dependencyFingerprint: 'c'.repeat(64), modelProtocols: plugin.manifest.contributes.modelProtocols });
+  return plugin;
+}
+
+it('uses a verified plugin for five-image text generation and rejects a result after revocation', async () => {
+  const plugin = installResponsesPlugin();
+  const payload = { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '五图齐全' }] }] };
+  const fetch = vi.fn().mockResolvedValue(jsonResponse(payload)); vi.stubGlobal('fetch', fetch);
+  const params = { provider: 'general', model: 'general/plugin-model', prompt: '分析五图', imageUrls: Array.from({ length: 5 }, (_, i) => `data:image/png;base64,${i}AAA`) };
+  await expect(generateText(params)).resolves.toBe('五图齐全');
+  expect(fetch.mock.calls[0][0]).toBe('https://gateway.example/v1/responses');
+  expect(JSON.parse(fetch.mock.calls[0][1].body).input[0].content.filter((item: { type: string }) => item.type === 'input_image')).toHaveLength(5);
+  fetch.mockResolvedValue({ ok: true, json: async () => { revokePluginProtocolPresets(plugin.id); return payload; } });
+  await expect(generateText(params)).rejects.toThrow();
+  useAppStore.setState({ installedPlugins: [] }); fetch.mockClear();
+  await expect(generateText(params)).rejects.toThrow('未安装');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+describe('Volcengine text-node media preparation with a protocol preset', () => {
+  const params = { provider: 'general', model: 'general/plugin-model', prompt: '分析参考图',
+    imageUrls: ['data:image/png;base64,AQID'] };
+
+  it.each(['disabled', 'unavailable'] as const)('rejects a %s plugin before reading or uploading reference images', async (state) => {
+    const plugin = installResponsesPlugin('volcengine');
+    if (state === 'disabled') useAppStore.setState({ installedPlugins: [{ ...plugin, enabled: false }] });
+    else protocolNative.invoke.mockResolvedValueOnce({ pluginId: plugin.id, healthCode: 'invalid' });
+    const resolvePrompt = vi.spyOn(promptResolver, 'resolvePromptToChatContent');
+    const upload = vi.spyOn(imageUtils, 'resolveContentImageUrls');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(generateText(params)).rejects.toThrow(state === 'disabled' ? '未启用' : '活动版本不可用');
+      expect(resolvePrompt).not.toHaveBeenCalled();
+      expect(upload).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      resolvePrompt.mockRestore();
+      upload.mockRestore();
+    }
+  });
+
+  it.each(['plugin', 'caller'] as const)('cancels an in-flight reference upload when the %s cancels', async (source) => {
+    const plugin = installResponsesPlugin('volcengine');
+    const caller = new AbortController();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const resolvePrompt = vi.spyOn(promptResolver, 'resolvePromptToChatContent');
+    const upload = vi.spyOn(imageUtils, 'resolveContentImageUrls').mockImplementationOnce((_content, _provider, signal) =>
+      new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true })));
+    try {
+      const result = generateText({ ...params, signal: caller.signal });
+      const rejected = expect(result).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() => expect(upload).toHaveBeenCalledOnce());
+      const signal = upload.mock.calls[0][2];
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(resolvePrompt).toHaveBeenCalledWith(params.prompt, { signal });
+      expect(protocolNative.invoke).toHaveBeenCalledWith('get_plugin_registration_status', { pluginId: plugin.id });
+      expect(protocolNative.invoke.mock.invocationCallOrder[0]).toBeLessThan(resolvePrompt.mock.invocationCallOrder[0]);
+      if (source === 'plugin') revokePluginProtocolPresets(plugin.id);
+      else caller.abort();
+      await rejected;
+      expect(signal?.aborted).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      caller.abort();
+      resolvePrompt.mockRestore();
+      upload.mockRestore();
+    }
+  });
+});
+
+it('sends all five reference images through the native Responses text-node path', async () => {
+  useAppStore.setState((state) => ({ config: { ...state.config,
+    providers: { ...state.config.providers, 'responses-provider': {
+      name: 'Responses', catalogId: 'custom-openai', apiKey: 'secret', baseUrl: 'https://gateway.example/v1',
+      chatApiProtocol: 'openai-compatible',
+    } },
+    generalModels: [{ id: 'responses-vision', name: 'Vision', modelId: 'configured-model', category: 'text',
+      providerConfigId: 'responses-provider', inputModalities: ['text', 'image'], executionProfile: { preset: 'openai-responses' } }],
+  } }));
+  const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ status: 'completed', output: [
+    { type: 'message', content: [{ type: 'output_text', text: '风格分析' }] },
+  ] }));
+  vi.stubGlobal('fetch', fetchMock);
+  const images = Array.from({ length: 5 }, (_, index) => `data:image/png;base64,${index}AAA`);
+  await expect(generateText({ provider: 'general', model: 'general/responses-vision', prompt: '分析五图', imageUrls: images }))
+    .resolves.toBe('风格分析');
+  expect(fetchMock.mock.calls[0][0]).toBe('https://gateway.example/v1/responses');
+  expect(JSON.parse(fetchMock.mock.calls[0][1].body).input[0].content.slice(1))
+    .toEqual(images.map((url) => ({ type: 'input_image', image_url: url, detail: 'auto' })));
+});
+
+describe('local ComfyUI text execution', () => {
+  function installTextWorkflow(graphOverride?: Record<string, unknown>) {
+    localStorage.clear();
+    const graph = graphOverride ?? {
+      '1': { class_type: 'TE_text_display', inputs: { text: 'original saved input' } },
+      '2': { class_type: 'TE_Qwen_Image_2_1_Prompt_Enhancer', inputs: { 输入提示词: ['1', 0] } },
+      '7': { class_type: 'SaveText', inputs: { text: ['2', 0], format: 'txt', filename_prefix: 'enhanced' } },
+    };
+    const workflow: WorkflowDefinition = { id: 'wf-local-text', name: '本地提示词增强', category: 'ai-text',
+      adapterType: 'comfyui', fileName: 'local-text.json', fileContent: JSON.stringify(graph), createdAt: 1,
+      ioNodes: [{ nodeId: '1', title: '提示词', type: 'prompt' },
+        ...(Object.hasOwn(graph, '3') ? [{ nodeId: '3', title: '参考图', type: 'image' as const }] : [])],
+      defaultNodes: { prompt: '1', ...(Object.hasOwn(graph, '3') ? { image: '3' } : {}) } };
+    useAppStore.setState((state) => ({ currentProjectId: 'text-project', workflows: [workflow],
+      nodes: [{ id: 'text-node', type: 'ai-text', position: { x: 0, y: 0 },
+        data: { type: 'ai-text', label: '提示词增强', provider: 'comfyui', model: 'comfyui/workflow',
+          workflowId: workflow.id, prompt: 'new prompt', status: 'loading' } }],
+      config: { ...state.config, providers: {}, comfyUIUrl: 'http://comfy-text.test:8188', comfyMemoryPolicy: 'smart' } }));
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/upload/image')) return jsonResponse({ name: 'uploaded-reference.png', subfolder: '', type: 'input' });
+      if (url.endsWith('/prompt') && init?.method === 'POST') return jsonResponse({ prompt_id: 'original-text-task' });
+      if (url.includes('/history/')) return jsonResponse({ 'original-text-task': { status: { completed: true, status_str: 'success' },
+        outputs: { '1': { text: ['original saved input'] }, '7': { text: ['完整增强后的文本\n第二行'], files: [{ filename: 'enhanced.txt', type: 'output' }] } } } });
+      throw new Error(`Unexpected local text request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return { workflow, fetchMock };
+  }
+
+  it.each([false, true])('runs a local workflow without a provider key and preserves its SaveText result (string wrapper=%s)', async (stringWrapper) => {
+    const { workflow, fetchMock } = installTextWorkflow();
+    const params = { provider: 'comfyui', model: 'comfyui/workflow', nodeId: 'text-node',
+      workflowId: workflow.id, prompt: 'new prompt' };
+    const result = stringWrapper ? await generateText(params) : await generateTextResult(params);
+    expect(result).toEqual(stringWrapper ? '完整增强后的文本\n第二行'
+      : { text: '完整增强后的文本\n第二行', comfyTaskId: 'original-text-task' });
+    const posts = fetchMock.mock.calls.filter(([url, init]) => url.endsWith('/prompt') && init?.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0][1]?.body)).prompt['1'].inputs.text).toBe('new prompt');
+    expect(fetchMock.mock.calls.every(([url]) => url.startsWith('http://comfy-text.test:8188/'))).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => url.includes('/view') || url.includes('/chat') || url.includes('/images/generations'))).toBe(false);
+    expect(getPendingTasksForProject('text-project')[0]).toMatchObject({ nodeId: 'text-node', nodeType: 'ai-text',
+      taskId: 'original-text-task', submitted: true, comfyTextOutputNodeIds: ['7'], comfyRecoveryState: 'save_pending' });
+    expect(workflow.fileContent).toContain('original saved input');
+  });
+
+  it('uses an explicit input instead of the default and uploads reference images through that same local server', async () => {
+    const { workflow, fetchMock } = installTextWorkflow({
+      '1': { class_type: 'TE_text_display', inputs: { text: 'original saved input' } },
+      '2': { class_type: 'TE_Qwen_Image_2_1_Prompt_Enhancer', inputs: { 输入提示词: ['1', 0], 图片: ['3', 0] } },
+      '3': { class_type: 'LoadImage', inputs: { image: 'existing.png' } },
+      '7': { class_type: 'SaveText', inputs: { text: ['2', 0] } },
+    });
+    await generateTextResult({ provider: 'comfyui', model: 'comfyui/workflow', nodeId: 'text-node', workflowId: workflow.id,
+      workflowInputs: { '1': 'explicit input' }, prompt: 'default input', imageUrls: ['data:image/png;base64,AQID'] });
+    const upload = fetchMock.mock.calls.find(([url]) => url.endsWith('/upload/image'));
+    expect(upload?.[1]?.body).toBeInstanceOf(FormData);
+    expect(upload?.[1]?.headers).toBeUndefined();
+    const submission = fetchMock.mock.calls.find(([url]) => url.endsWith('/prompt'));
+    const sent = JSON.parse(String(submission?.[1]?.body)).prompt;
+    expect(sent['1'].inputs.text).toBe('explicit input');
+    expect(sent['3'].inputs.image).toBe('uploaded-reference.png');
+    expect(sent['7'].inputs.text).toEqual(['2', 0]);
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/prompt'))).toHaveLength(1);
+  });
+
+  it.each([false, true])('rejects an absent or ambiguous SaveText before submitting (multiple=%s)', async (multiple) => {
+    const { workflow, fetchMock } = installTextWorkflow({
+      '1': { class_type: 'TE_text_display', inputs: { text: 'input' } },
+      ...(multiple ? { '7': { class_type: 'SaveText', inputs: { text: ['1', 0] } },
+        '8': { class_type: 'SaveText', inputs: { text: ['1', 0] } } } : {}),
+    });
+    await expect(generateTextResult({ provider: 'comfyui', model: 'comfyui/workflow', nodeId: 'text-node',
+      workflowId: workflow.id, prompt: 'prompt' })).rejects.toThrow(multiple ? '多个 SaveText' : '缺少官方 SaveText');
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/prompt'))).toBe(false);
+    expect(getPendingTasksForProject('text-project')).toEqual([]);
+  });
+
+  it('does not submit a workflow after the project changes while its reference image upload is pending', async () => {
+    const { workflow, fetchMock } = installTextWorkflow({
+      '1': { class_type: 'TE_text_display', inputs: { text: 'original saved input' } },
+      '2': { class_type: 'TE_Qwen_Image_2_1_Prompt_Enhancer', inputs: { 输入提示词: ['1', 0], 图片: ['3', 0] } },
+      '3': { class_type: 'LoadImage', inputs: { image: 'existing.png' } },
+      '7': { class_type: 'SaveText', inputs: { text: ['2', 0] } },
+    });
+    let finishUpload!: (response: Response) => void;
+    const upload = new Promise<Response>((resolve) => { finishUpload = resolve; });
+    const normalRequest = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url, init) => url.endsWith('/upload/image') ? upload : normalRequest(url, init));
+    const pending = generateTextResult({ provider: 'comfyui', model: 'comfyui/workflow', nodeId: 'text-node', workflowId: workflow.id,
+      prompt: 'new prompt', imageUrls: ['data:image/png;base64,AQIDBA=='] });
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/upload/image'))).toBe(true));
+    useAppStore.setState({ currentProjectId: 'another-project' });
+    finishUpload(jsonResponse({ name: 'late-reference.png', subfolder: '', type: 'input' }));
+    await expect(pending).rejects.toThrow('未提交 ComfyUI 任务');
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/prompt'))).toBe(false);
+  });
+
+  it('stops before workflow preparation when the original project changes during prompt reference resolution', async () => {
+    const { workflow, fetchMock } = installTextWorkflow();
+    const resolver = await import('../../src/services/ai/promptResolver');
+    const resolved = await resolver.resolvePromptWithMediaRefs('new prompt');
+    let finishResolution!: (value: typeof resolved) => void;
+    const resolution = new Promise<typeof resolved>((resolve) => { finishResolution = resolve; });
+    const resolveReferences = vi.spyOn(resolver, 'resolvePromptWithMediaRefs').mockReturnValueOnce(resolution);
+    try {
+      const pending = generateTextResult({ provider: 'comfyui', model: 'comfyui/workflow', nodeId: 'text-node',
+        workflowId: workflow.id, prompt: 'new prompt' });
+      useAppStore.setState({ currentProjectId: 'another-project' });
+      finishResolution(resolved);
+      await expect(pending).rejects.toThrow('未提交 ComfyUI 任务');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { resolveReferences.mockRestore(); }
+  });
 });
 
 describe('custom text model protocol', () => {
+  it('keeps an explicit custom connection named comfyui on its HTTP text protocol when no workflow is selected', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { comfyui: {
+      name: '同名自定义连接', catalogId: 'custom-openai', apiKey: 'custom-fixture-key', baseUrl: 'https://custom-text.test/v1',
+    } } } }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ choices: [{ message: { content: '普通接口结果' } }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateTextResult({ provider: 'comfyui', model: 'comfyui/vendor-chat', prompt: '普通请求' }))
+      .resolves.toEqual({ text: '普通接口结果' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toBe('https://custom-text.test/v1/chat/completions');
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer custom-fixture-key' });
+  });
+
   it('does not start a request when its signal is already aborted', async () => {
     const controller = new AbortController();
     controller.abort();
@@ -160,6 +419,12 @@ describe('custom text model protocol', () => {
       response: { candidates: [{ content: { parts: [{ text: 'Gemini 回复' }] } }] },
       expectedHeader: 'x-goog-api-key',
     },
+    {
+      preset: 'openai-responses' as const,
+      expectedUrl: 'https://gateway.example/v1/responses',
+      response: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'Responses 回复' }] }] },
+      expectedHeader: 'Authorization',
+    },
   ])('lets a $preset model override the connection chat protocol', async ({
     preset, expectedUrl, response, expectedHeader,
   }) => {
@@ -184,9 +449,9 @@ describe('custom text model protocol', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(generateText({ provider: 'general', model: 'general/mixed-text', prompt: '你好' }))
-      .resolves.toBe(preset === 'anthropic-chat' ? 'Claude 回复' : 'Gemini 回复');
+      .resolves.toBe(preset === 'anthropic-chat' ? 'Claude 回复' : preset === 'openai-responses' ? 'Responses 回复' : 'Gemini 回复');
     expect(fetchMock.mock.calls[0]?.[0]).toBe(expectedUrl);
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ [expectedHeader]: 'secret' });
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ [expectedHeader]: expectedHeader === 'Authorization' ? 'Bearer secret' : 'secret' });
   });
 });
 

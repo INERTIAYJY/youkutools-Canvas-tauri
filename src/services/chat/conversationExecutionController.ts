@@ -7,7 +7,7 @@ import { subscribeAgentLifecycle } from './agentLifecycle';
  * 对话提交与恢复的统一控制层，按会话模式分派普通回复、Agent 任务和显式媒体生成。
  * 组件只调用本模块，不直接拼接运行时、调度器或审批流程。
  */
-import { completeMediaMessageDelivery, MEDIA_PERSIST_FAILED_MESSAGE, runMediaGeneration } from '../ai/generationRuntime';
+import { completeMediaMessageDelivery, deliverMediaMessageGroup, isMediaDeliveryGroup, MEDIA_PERSIST_FAILED_MESSAGE, runMediaGeneration } from '../ai/generationRuntime';
 import { getPendingTasksForProject, isMediaTaskPausedError } from '../pollManager';
 import { completeCanvasDerivation } from '../canvasDerivationGuard';
 import { completeRunningHubNodeTask } from '../ai/providers/runninghubWorkflow';
@@ -48,15 +48,26 @@ import {
   SKILL_CONTENT_LIMITS,
 } from '../skillPromptService';
 import { useAppStore } from '../../store/useAppStore';
+import { listEpisodes } from '../../store/store.utils';
+import { needsNativeEpisodeContent } from '../../store/nativeProjectView';
 import { formatChatImageReference, parseChatImageReferences, MAX_CHAT_IMAGES } from './chatImageReferenceService';
 import { GENERAL_ASSISTANT_SCOPE_ID, isGeneralAssistantScope, resolveAssistantToolAllowlist } from './assistantScope';
+import { resolveNativeConversationCanvas } from './conversationProjectScope';
 import type { ChatMessage } from '../../types/chat';
 import {
   type AgentApprovalResolution,
   type AgentMode,
+  type AgentTask,
 } from '../../types/agent';
 import { extendAgentSegmentBudget } from './agentBudgetService';
+import type { AssistantExecutionSelection } from '../../types/agentTeam';
+import { normalizeExecutionSelection } from './teams/teamProfileService';
+import { appendTeamInstruction, resumeTeamInvocation, submitTeamInvocation } from './teams/teamInvocationService';
+import { captureCreationProfile, intersectCreationTools } from '../creationProfiles/creationProfileService';
+import { beginAgentDispatch, settleAgentDispatch } from './agentDurabilityService';
 import type { MediaGenerationIntent } from '../../types/media';
+import { isWorkbenchAgentTaskInScope, readEpisodeWorkspaceScope, WORKBENCH_AGENT_READ_TOOLS } from '../episodeWorkspaceScope';
+import { buildStoryGraphWritingContext } from '../storyGraphWritingContext';
 import {
   failMediaPlaceholderLifecycle,
   MEDIA_PLACEHOLDER_STALE_ERROR,
@@ -75,6 +86,10 @@ interface StreamingMessageBuffer {
 }
 
 export interface SubmitConversationMessageOptions {
+  /** 仅由主窗口工作台入口提供；模型和独立助手操作不能声明此授权。 */
+  workbenchTarget?: AgentTask['workbenchTarget'];
+  executionSelection?: AssistantExecutionSelection;
+  requestId?: string;
   content: string;
   imageFileNames?: string[];
   conversationId: string;
@@ -95,6 +110,7 @@ export type SubmitConversationMessageResult =
     };
 
 interface StartAgentMessageExecutionOptions {
+  workbenchTarget?: AgentTask['workbenchTarget'];
   text: string;
   projectId: string;
   conversationId: string;
@@ -201,12 +217,15 @@ export function resolveConversationAgentApproval(
 }
 
 export function submitConversationMessage({
+  workbenchTarget,
   content,
   imageFileNames = [],
   conversationId,
   projectId,
   mode,
   dispatchMode = 'queue',
+  executionSelection,
+  requestId,
   onProgress,
 }: SubmitConversationMessageOptions): SubmitConversationMessageResult {
   const store = useAppStore.getState();
@@ -226,6 +245,38 @@ export function submitConversationMessage({
     store.showToast('文字与参考图引用超过当前任务追加上限，请缩短文字或使用排队发送', 'error');
     return { status: 'ignored' };
   }
+  const conversation = store.conversations.find((item) => item.id === conversationId);
+  const boundTarget = conversation?.workbenchTarget;
+  if (workbenchTarget && boundTarget && (workbenchTarget.seriesId !== boundTarget.seriesId
+    || workbenchTarget.episodeId !== boundTarget.episodeId)) {
+    store.showToast('工作台创作会话不能更换目标分集，请从工作台发起新任务', 'error');
+    return { status: 'ignored' };
+  }
+  workbenchTarget = boundTarget ?? workbenchTarget;
+  // 工作台会话持续绑定原分集；独立窗口提供的当前画布 ID 不能覆盖它。
+  const currentCanvas = conversation && resolveNativeConversationCanvas(store.projects, store.currentProjectId, conversation.projectId);
+  const executionProjectId = workbenchTarget?.episodeId ?? (isGeneralAssistantScope(conversation?.projectId)
+    ? GENERAL_ASSISTANT_SCOPE_ID : projectId ?? currentCanvas ?? conversation?.projectId ?? store.currentProjectId ?? '');
+  const selection = normalizeExecutionSelection(executionSelection ?? conversation?.executionSelection);
+  if (workbenchTarget) {
+    const scope = readEpisodeWorkspaceScope(store, workbenchTarget.episodeId);
+    if (!scope || scope.owner.id !== workbenchTarget.seriesId
+      || !conversation || conversation.deletedAt || conversation.projectId !== scope.owner.id) {
+      store.showToast('工作台分集或会话已变化，请重新发起创作任务', 'error');
+      return { status: 'ignored' };
+    }
+    if (selection.kind !== 'single' || images.length || parseChatImageReferences(text).length) {
+      store.showToast('工作台创作会话仅支持只读文字智能调度，请新建对话使用团队或图片', 'error');
+      return { status: 'ignored' };
+    }
+    if (!boundTarget) store.updateConversation(conversationId, { workbenchTarget: { ...workbenchTarget } });
+  }
+  const activeTaskId = dispatchMode === 'interject' ? getActiveConversationAgentTaskId(conversationId) : undefined;
+  if (activeTaskId && store.agentTasks.some((task) => task.id === activeTaskId && task.executionKind === 'team')
+    && parseChatImageReferences(text).length > 0) {
+    store.showToast('团队首期仅处理文字材料，追加要求前请先移除参考图', 'error');
+    return { status: 'ignored' };
+  }
 
   const interjectedTaskId = dispatchMode === 'interject'
     ? tryInterjectConversationMessage(conversationId, text)
@@ -236,10 +287,23 @@ export function submitConversationMessage({
     return { status: 'interjected', taskId: interjectedTaskId };
   }
 
-  const conversation = store.conversations.find((item) => item.id === conversationId);
-  // 窗口快照可能晚于项目切换；通用会话绝不能因此继承新画布权限。
-  const executionProjectId = isGeneralAssistantScope(conversation?.projectId)
-    ? GENERAL_ASSISTANT_SCOPE_ID : projectId ?? conversation?.projectId ?? store.currentProjectId ?? '';
+  if (selection.kind === 'team') {
+    if (images.length || parseChatImageReferences(text).length) {
+      store.showToast('团队首期仅处理文字材料，请先移除参考图，或切回单模型', 'error');
+      return { status: 'ignored' };
+    }
+    try {
+      const result = submitTeamInvocation({ content: text, projectId: executionProjectId, conversationId,
+        mode: mode ?? conversation?.agentMode ?? 'collaborative', templateId: selection.templateId,
+        requestId, context: { source: 'assistant' }, onProgress });
+      store.removeChatImageDrafts(conversationId, images.map((image) => image.fileName));
+      onProgress?.();
+      return { status: 'started', ...result };
+    } catch (error) {
+      store.showToast(sanitizeDomainText(error instanceof Error ? error.message : '团队未能发起').slice(0, 300), 'error');
+      return { status: 'ignored' };
+    }
+  }
   const userMessage: ChatMessage = {
     id: createMessageId(),
     conversationId,
@@ -262,6 +326,7 @@ export function submitConversationMessage({
   store.addMessage(assistantMessage);
 
   const taskId = startAgentMessageExecution({
+    workbenchTarget,
     text,
     projectId: executionProjectId,
     conversationId,
@@ -281,6 +346,7 @@ export function submitConversationMessage({
 }
 
 function startAgentMessageExecution({
+  workbenchTarget,
   text,
   projectId,
   conversationId,
@@ -300,18 +366,52 @@ function startAgentMessageExecution({
       throw new Error(`单个任务最多注入 ${SKILL_CONTENT_LIMITS.maxExplicitBindings} 个 Skill`);
     }
     const skillBindings = captureExplicitSkillBindings(text, runtimeSkills);
+    const selectedCreation = workbenchTarget
+      ? store.projects.find((entry) => entry.id === workbenchTarget.episodeId)?.creationProfile
+      : store.conversations.find((entry) => entry.id === conversationId)?.creationProfile;
+    const creationSelection = selectedCreation ? structuredClone(selectedCreation) : undefined;
+    const resolveTools = (requested?: string[]) => workbenchTarget
+      ? [...WORKBENCH_AGENT_READ_TOOLS].filter((id) => requested === undefined || requested.includes(id))
+      : resolveAssistantToolAllowlist(projectId, requested);
     const task = store.createAgentTask({
+      workbenchTarget,
       projectId,
       conversationId,
       userMessageId,
       mode,
       goal: text,
-      toolAllowlist: resolveAssistantToolAllowlist(projectId, resolveSkillBindingToolAllowlist(skillBindings)),
+      toolAllowlist: resolveTools(resolveSkillBindingToolAllowlist(skillBindings)),
       skillBindings,
+      creationProfilePreparation: creationSelection ? 'pending' : undefined,
     });
     taskId = task.id;
     store.updateMessage(assistantMessageId, { agentTaskId: task.id });
-    scheduleAgentTaskExecution(task.id, assistantMessageId, onProgress);
+    if (creationSelection) {
+      // 准备期间只登记 queued；真正模型调用必须等待能力预检及不可变快照。
+      void captureCreationProfile(structuredClone(creationSelection), projectId).then((captured) => {
+        const current = useAppStore.getState();
+        const pending = current.agentTasks.find((entry) => entry.id === task.id);
+        if (!pending || !['queued', 'paused'].includes(pending.status)) return;
+        if (!current.conversations.some((entry) => entry.id === conversationId && !entry.deletedAt)
+          || (workbenchTarget ? !isWorkbenchAgentTaskInScope(current, pending)
+            : !isGeneralAssistantScope(projectId) && current.currentProjectId !== projectId)) throw new Error('组合包准备期间项目或会话已变化');
+        const bindings = [...new Map([...skillBindings, ...captured.skillBindings].map((binding) => [binding.skillId, binding])).values()];
+        if (bindings.length > SKILL_CONTENT_LIMITS.maxExplicitBindings
+          || bindings.reduce((total, binding) => total + binding.content.length, 0) > SKILL_CONTENT_LIMITS.expansionTotalChars) throw new Error('组合包与本次引用的 Skill 总量超出上限，请减少选择');
+        const allowed = intersectCreationTools(resolveSkillBindingToolAllowlist(skillBindings), resolveSkillBindingToolAllowlist(captured.skillBindings));
+        current.updateAgentTask(task.id, { creationProfile: captured.snapshot, creationProfilePreparation: 'ready', skillBindings: bindings,
+          toolAllowlist: resolveTools(intersectCreationTools(allowed, captured.snapshot?.toolAllowlist)) });
+        if (pending.status === 'queued') scheduleAgentTaskExecution(task.id, assistantMessageId, onProgress);
+      }).catch((error: unknown) => {
+        const current = useAppStore.getState();
+        const pending = current.agentTasks.find((entry) => entry.id === task.id);
+        if (!pending || !['queued', 'paused'].includes(pending.status)) return;
+        if (pending.status === 'queued') stopAgentTask(task.id);
+        current.updateAgentTask(task.id, { creationProfilePreparation: 'failed', errorCode: 'CREATION_PROFILE_PREPARATION_FAILED', errorMessage: sanitizeDomainText(error instanceof Error ? error.message : '组合包准备失败').slice(0, 300) });
+        current.updateMessage(assistantMessageId, { content: sanitizeDomainText(error instanceof Error ? error.message : '组合包准备失败').slice(0, 300), status: 'error', finishReason: 'error' });
+        onProgress?.();
+      });
+    } else scheduleAgentTaskExecution(task.id, assistantMessageId, onProgress);
     return task.id;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : '未知错误';
@@ -378,6 +478,11 @@ export function resumeAgentTaskExecution(
 
   const store = useAppStore.getState();
   const task = store.agentTasks.find((item) => item.id === taskId)!;
+  if (task.executionKind === 'team') {
+    try { resumeTeamInvocation(taskId); onProgress?.(); return { ok: true }; }
+    catch (error) { return { ok: false, errorCode: 'TEAM_RESUME_FAILED',
+      message: sanitizeDomainText(error instanceof Error ? error.message : '团队无法继续').slice(0, 300) }; }
+  }
   const message = store.messages.find(
     (item) => item.agentTaskId === taskId && item.role === 'assistant',
   );
@@ -389,7 +494,7 @@ export function resumeAgentTaskExecution(
     };
   }
 
-  // 单段额度放宽后仍夹在终身上限内；继续次数计入 maxResumes（validateTaskResumable 已校验）
+  // 普通任务不因用量限额暂停；受限子任务仍沿用增额校验，继续次数只累计真实操作。
   store.updateAgentTask(taskId, {
     budget: extendAgentSegmentBudget(task),
     resumeCount: (task.resumeCount ?? 0) + 1,
@@ -398,6 +503,28 @@ export function resumeAgentTaskExecution(
   // 排队等待期间就切到 queued：状态若停在 paused，界面会继续显示「继续」按钮引诱重复点击
   if (scheduled?.state === 'queued') prepareAgentTaskResume(taskId);
   return { ok: true };
+}
+
+class LegacyPipelineNotStartedError extends Error {}
+
+/** 兼容的旧 pipeline 也必须先落盘；除明确未调用模型外，异常保守留为未知。 */
+async function withLegacyDispatch<T>(taskId: string, signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+  const record = await beginAgentDispatch({ taskId, kind: 'model', signal });
+  try {
+    const result = await run();
+    await settleAgentDispatch(taskId, record, 'succeeded');
+    return result;
+  } catch (error) {
+    const notStarted = error instanceof LegacyPipelineNotStartedError;
+    await settleAgentDispatch(taskId, record, notStarted ? 'failed' : 'unknown');
+    const state = useAppStore.getState();
+    const task = state.agentTasks.find((entry) => entry.id === taskId);
+    if (!notStarted && task && !['paused', 'stopped', 'completed'].includes(task.status)) state.updateAgentTask(taskId, {
+      status: 'paused', pausedReason: 'dispatch_outcome_unknown', errorCode: 'AGENT_DISPATCH_OUTCOME_UNKNOWN',
+      errorMessage: '原调用结果未知，请先核实；不会自动改走其他执行路径',
+    });
+    throw error;
+  }
 }
 
 function driveAgentTask(
@@ -440,18 +567,36 @@ function driveAgentTask(
           || isGeneralAssistantScope(projectId)
           || mode === 'plan'
           || task.toolAllowlist !== undefined
+          || !!task.creationProfile
         ) {
+          const target = task.workbenchTarget;
+          const before = useAppStore.getState();
+          const initialScope = target && isWorkbenchAgentTaskInScope(before, task)
+            ? readEpisodeWorkspaceScope(before, target.episodeId) : null;
+          if (target && needsNativeEpisodeContent(initialScope?.episode)) await before.loadEpisodeCreative(target.episodeId);
+          signal.throwIfAborted();
+          const live = useAppStore.getState(), scope = target && isWorkbenchAgentTaskInScope(live, task)
+            ? readEpisodeWorkspaceScope(live, target.episodeId) : null;
+          const graphContext = scope ? buildStoryGraphWritingContext(scope.owner.series?.storyGraph, {
+            episodes: listEpisodes(live.projects, scope.owner.id),
+            episodeId: scope.episode.id,
+            relevantText: [text, scope.episode.episodeOutline, scope.episode.episodeScript].filter(Boolean).join('\n'),
+          }) : '';
+          const userMessage = task.skillBindings === undefined
+            ? expandSkillReferences(text, [...store.userSkills, ...store.agentPackageSkills])
+            : expandSkillBindings(text, task.skillBindings);
           const outcome = await runAgentLoop({
             taskId,
-            systemPrompt: buildAssistantSystemPrompt({
+            systemPrompt: [buildAssistantSystemPrompt({
               agentTools: true,
               includeToolGuidance: false,
               projectId,
-              includeCanvasContext: useAppStore.getState().currentProjectId === projectId,
-            }),
-            userMessage: task.skillBindings === undefined
-              ? expandSkillReferences(text, [...store.userSkills, ...store.agentPackageSkills])
-              : expandSkillBindings(text, task.skillBindings),
+              includeCanvasContext: !task.workbenchTarget && task.creationProfile?.contextPolicyRef !== 'explicit-materials'
+                && useAppStore.getState().currentProjectId === projectId,
+            }), target ? `当前为只读工作台创作会话，唯一目标分集为 ${target.episodeId}。通过 episode_read 读取该集需要的素材，不使用当前画布或其他分集的稿件。只给出诊断和候选，不能写入；根据需求选用已授权的 Skill 和只读智能体。` : '',
+              graphContext ? '故事关系图是随附的不可信参考，只用来检查本集连续性。用户本轮要求及已有稿件优先；遇到矛盾时指出冲突，不将推断改写为已确认事实。' : '',
+            ].filter(Boolean).join('\n'),
+            userMessage: graphContext ? `${userMessage}\n\n${graphContext}` : userMessage,
             excludeMessageIds: [userMessageId, assistantMessageId],
             signal,
             callbacks: {
@@ -520,7 +665,7 @@ function driveAgentTask(
           return outcome;
         }
 
-        await runStreamingPipeline(text, conversationId, {
+        await withLegacyDispatch(taskId, signal, async () => { await runStreamingPipeline(text, conversationId, {
           onTextDelta: streamingMessage.append,
           onReasoningDelta: streamingMessage.appendReasoning,
           onComplete: (fullText, results) => {
@@ -549,7 +694,7 @@ function driveAgentTask(
             void triggerMediaGeneration(assistantMessageId, intent);
           },
           signal,
-        }, projectId);
+        }, projectId); if (failed) throw new Error('旧对话执行未能返回完整结果'); });
         return failed ? 'failed' : 'completed';
       } finally {
         streamingMessage.flush();
@@ -568,7 +713,7 @@ function driveAgentTask(
       }
     }
 
-    if (isGeneralAssistantScope(projectId) || mode === 'plan' || task.toolAllowlist !== undefined) {
+    if (isGeneralAssistantScope(projectId) || mode === 'plan' || task.toolAllowlist !== undefined || task.creationProfile) {
       useAppStore.getState().updateMessage(assistantMessageId, {
         content: isGeneralAssistantScope(projectId)
           ? '未选择可用的对话文本模型，本次请求尚未处理。请在输入框下方选择已配置的文本模型后重试。'
@@ -583,7 +728,11 @@ function driveAgentTask(
     }
 
     try {
-      const result = await runAssistantPipeline(text, conversationId, projectId);
+      const result = await withLegacyDispatch(taskId, signal, async () => {
+        const response = await runAssistantPipeline(text, conversationId, projectId);
+        if (response.errorCode === 'ASSISTANT_MODEL_UNAVAILABLE') throw new LegacyPipelineNotStartedError(response.reply);
+        return response;
+      });
       if (result.errorCode) throw new Error(result.reply);
       useAppStore.getState().updateMessage(assistantMessageId, {
         content: result.reply,
@@ -598,7 +747,7 @@ function driveAgentTask(
         status: 'error',
         finishReason: 'error',
       });
-      return 'failed';
+      return useAppStore.getState().agentTasks.find((item) => item.id === taskId)?.status === 'paused' ? 'paused' : 'failed';
     }
   }).then(() => undefined).catch((error) => {
     console.error('[AgentRuntime] failed to execute chat task:', error);
@@ -610,6 +759,16 @@ function tryInterjectConversationMessage(
   content: string,
 ): string | undefined {
   const taskId = getActiveConversationAgentTaskId(conversationId);
+  const team = useAppStore.getState().agentTasks.find((item) => item.id === taskId && item.executionKind === 'team');
+  if (team) {
+    if (!content.trim() || content.length > MAX_INTERJECTION_CHARS) return undefined;
+    useAppStore.getState().addMessage({ id: createMessageId(), conversationId, role: 'user', content,
+      timestamp: Date.now(), status: 'done', agentTaskId: team.id });
+    void appendTeamInstruction(team.id, content).catch((error: unknown) => {
+      useAppStore.getState().showToast(sanitizeDomainText(error instanceof Error ? error.message : '追加要求未能应用').slice(0, 300), 'error');
+    });
+    return team.id;
+  }
   if (!taskId || !enqueueAgentInterjection(taskId, content)) return undefined;
   useAppStore.getState().addMessage({
     id: createMessageId(),
@@ -630,6 +789,9 @@ export async function triggerMediaGeneration(
   const store = useAppStore.getState();
   const projectId = store.currentProjectId;
   const originMessage = store.messages.find((message) => message.id === messageId);
+  if (store.projectExecutionContext?.modelGeneration === 1 && originMessage?.mediaResult) {
+    store.showToast('此消息已有媒体产物，请从新消息发起生成', 'info'); return;
+  }
   const apiWorkflow = store.workflows.find((workflow) => workflow.adapterType === 'workflow-api' && `workflow-api/${workflow.id}` === intent.modelRef);
   const taskContext = projectId && originMessage ? {
     projectId, conversationId: originMessage.conversationId, messageId, deliveryMode: intent.deliveryMode,
@@ -661,6 +823,18 @@ export async function triggerMediaGeneration(
     store.updateMessage(messageId, { mediaStatus: 'generating' });
     const result = await runMediaGeneration(intent, projectId, undefined, targetNodeId, taskContext);
     if (!isCurrentApiMessage()) return;
+    if (isMediaDeliveryGroup(result)) {
+      try {
+        const delivered = await deliverMediaMessageGroup(messageId, result, { targetNodeId,
+          guard: placeholderLifecycle?.guard, isCurrent: isCurrentApiMessage,
+          allowCanvas: !targetNodeId || Boolean(placeholderLifecycle) });
+        if (targetNodeId && delivered.canvasReady) useAppStore.getState().incrementRevision();
+        if (!delivered.complete) store.showToast('候选图片已生成，部分保存或回填尚未完成，可继续取回原结果', 'info');
+      } finally {
+        if (placeholderLifecycle) completeCanvasDerivation(placeholderLifecycle.guard);
+      }
+      return;
+    }
     const nodeCreated = placeholderLifecycle
       ? settleMediaPlaceholderLifecycle(placeholderLifecycle, result)
       : targetNodeId ? useAppStore.getState().settleMediaPlaceholder(targetNodeId, result) : false;
@@ -700,6 +874,28 @@ export async function triggerMediaGeneration(
     }
   } catch (error) {
     if (!isCurrentApiMessage()) return;
+    const { captureLegacyCanvasContext } = await import('../projectExecutionContext');
+    const nativeContext = captureLegacyCanvasContext(useAppStore.getState());
+    if (nativeContext?.modelGeneration === 1 && nativeContext.canvasId === projectId) {
+      const { listNativeMediaTasks } = await import('../indexedDb/nativeMediaTaskRepository');
+      const pending = (await listNativeMediaTasks(nativeContext.projectId)).find((row) => row.canvasId === nativeContext.canvasId
+        && row.origin?.messageId === messageId && row.origin.conversationId === originMessage?.conversationId
+        && (['prepared', 'submitted', 'outcome-unknown'].includes(row.status)
+          || error instanceof Error && error.name === 'NativeMediaTaskDelivered' && row.status === 'delivered'));
+      if (pending) {
+        if (placeholderLifecycle) completeCanvasDerivation(placeholderLifecycle.guard);
+        if (pending.status === 'delivered') {
+          const { projectNativeMediaMessages } = await import('../nativeMediaMessages');
+          await projectNativeMediaMessages(originMessage?.conversationId); return;
+        }
+        if (isCurrentApiMessage()) useAppStore.getState().updateMessage(messageId, {
+          mediaStatus: pending.status === 'submitted' ? 'paused' : 'submit_unknown',
+          mediaError: `原任务已保留（${pending.operationId}），请续查原回执，不要重新生成。`,
+          canvasStatus: targetNodeId ? 'pending' : 'none', canvasNodeId: targetNodeId,
+        });
+        return;
+      }
+    }
     const recoverable = isMediaTaskPausedError(error);
     const submissionUnknown = recoverable && 'reason' in error && error.reason === 'submit_unknown';
     const message = error instanceof Error ? error.message : '未知错误';

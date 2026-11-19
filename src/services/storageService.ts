@@ -3,6 +3,7 @@
  * workflows, app config, user presets, and uploaded skills.
  */
 import { isTauriAssetUrl, localMediaUrlToPath } from '../utils/mediaUrl';
+import type { Node } from '@xyflow/react';
 import {
   saveProjectToDb,
   getAllProjects,
@@ -35,17 +36,24 @@ import {
   type CustomStyleRecord,
 } from './indexedDbService';
 import { exists, mkdir, writeFile } from '@tauri-apps/plugin-fs';
-import type { BaseNodeData, ProjectSettings } from '../types';
+import { invoke } from '@tauri-apps/api/core';
+import type { BaseNodeData, ProjectSettings, ProjectTextFileReference } from '../types';
+import { normalizeProjectTextFileReference } from '../utils/manuscriptFileReference';
 import {
   getAssetUrlFromPath,
   getProjectDataDir,
+  getNativeProjectOwner,
+  getMimeType,
   isTauriEnv,
   joinPath,
   notifyProjectDiskChanged,
   stripVerbatimPrefix,
 } from './fs/core';
 import { scanDirectoryFiles } from './fs/assetLibrary';
-import { identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
+import { collectNodeFileReferences, recoverUndoTrashReferences, waitForPendingNodeFileDeletions } from './fs/trash';
+import { isPathInsideDir } from './fs/undoTrashJournal';
+import { getRelativeAssetPath, identifyAsset, resolveIndexedAssetPath } from './fs/assetIndex';
+import { createNativeMediaDisplayResolver, isNativeMediaResultArtifact, nativeMediaContentDigest, type NativeMediaDisplayResolver } from './nativeMediaDisplay';
 import type { DramaAssetLibrary, DramaProp, DramaScene, DramaAssetReferenceImage } from '../types/dramaAssets';
 import { normalizeDramaAssetLibrary, normalizeDramaVisualAsset, syncDramaVisualAssetPrimary } from '../types/dramaAssets';
 import { normalizeEpisodeAssetRoster, type EpisodeAssetRoster } from '../types/episodeAssets';
@@ -53,6 +61,7 @@ import { deleteProviderSecretIfUnchanged, hasPlaintextSecret, readProviderSecret
 import { enqueueConfigPersistence } from './configPersistenceQueue';
 import { applyConfigPatch, ConfigConflictError, configValuesEqual, configWithoutSecrets, createConfigPatch, type ConfigChange } from './configPatch';
 import { classifyStorageError, readStorageWithRetry, storageError } from './storageDiagnostics';
+import { normalizeProjectSeriesInfo } from './indexedDb/projectSummary';
 import {
   decodeDataUrlBytesAsync,
   MEDIA_DATA_URL_BYTE_LIMITS,
@@ -102,6 +111,20 @@ interface MaterializedInlineMedia {
 
 interface ProjectFileLookup {
   existsByPath: Map<string, Promise<boolean>>;
+  nativeMediaDisplay?: Promise<{ defaultRootRef: string; primaryRootRef: string; resolve: NativeMediaDisplayResolver }>;
+}
+
+function nativeMediaDisplayContext(projectId: string, lookup: ProjectFileLookup): NonNullable<ProjectFileLookup['nativeMediaDisplay']> {
+  lookup.nativeMediaDisplay ??= (async () => {
+    const owner = getNativeProjectOwner(projectId);
+    if (!owner) throw new Error('原媒体作品归属不可用');
+    const { readNativeProjectSelection } = await import('./indexedDb/nativeProjectRepository');
+    const selection = await readNativeProjectSelection(owner, projectId);
+    if (!selection?.canvas || selection.canvas.id !== projectId || selection.project.id !== owner) throw new Error('原媒体画布归属不可用');
+    return { defaultRootRef: selection.canvas.storageRootRef, primaryRootRef: selection.project.storageRootRef,
+      resolve: createNativeMediaDisplayResolver(selection.project) };
+  })();
+  return lookup.nativeMediaDisplay;
 }
 
 interface MediaSerializationContext extends ProjectFileLookup {
@@ -114,7 +137,16 @@ interface MediaSerializationContext extends ProjectFileLookup {
 /** 只在当前项目的一次保存/加载内复用；不缓存授权，也不跨操作保留文件状态。 */
 function projectFileLookupKey(path: string): string {
   const normalized = stripVerbatimPrefix(path).replace(/\\/g, '/').replace(/\/+$/, '');
-  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+  return /^(?:[a-z]:\/|\/\/)/i.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+/** 新模型只保存平台无关的项目根内相对路径。 */
+function nativePortablePath(path: string): boolean {
+  return path.length > 0 && path.length <= 1024 && !/[\\:]/.test(path)
+    && path.split('/').every((part) => !!part && part !== '.' && part !== '..'
+      && !/[<>"|?*]/.test(part) && !/[. ]$/.test(part)
+      && !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(part)
+      && [...part].every((character) => character.charCodeAt(0) >= 32));
 }
 
 function projectFileExists(path: string, lookup: ProjectFileLookup): Promise<boolean> {
@@ -198,6 +230,20 @@ async function persistTransientMedia(
   const pending = (async () => {
     const bytes = await inlineMediaBytes(source, kind);
     const digest = await sha256BytesHex(bytes);
+    const owner = getNativeProjectOwner(context.projectId);
+    if (owner) {
+      const mimeType = getMimeType(inlineMediaExtension(source, kind).slice(1));
+      const reference = await invoke<{ relativePath: string; sha256: string; bytes: number; mimeType: string }>(
+        'write_native_project_media', { projectId: owner, mimeType, data: Array.from(bytes) },
+      );
+      if (reference.sha256 !== digest || reference.bytes !== bytes.byteLength || reference.mimeType !== mimeType
+        || reference.relativePath !== `media/${digest}${inlineMediaExtension(source, kind)}`) {
+        throw new Error('新项目素材写入回执不匹配');
+      }
+      const filePath = joinPath(context.projectDir, reference.relativePath);
+      notifyProjectDiskChanged({ source: 'save-materialization', projectId: context.projectId });
+      return { filePath, assetUrl: await getAssetUrlFromPath(filePath) };
+    }
     const fileName = `${inlineMediaPrefix(kind)}-${digest.slice(0, 20)}${inlineMediaExtension(source, kind)}`;
     const filePath = joinPath(context.projectDir, fileName);
     // 使用本次保存捕获的目录，等待初始化完成后再访问媒体文件。
@@ -207,7 +253,7 @@ async function persistTransientMedia(
     if (!await projectFileExists(filePath, context)) {
       await writeFile(filePath, bytes);
       context.existsByPath.set(projectFileLookupKey(filePath), Promise.resolve(true));
-      notifyProjectDiskChanged();
+      notifyProjectDiskChanged({ source: 'save-materialization', projectId: context.projectId });
     }
     return { filePath, assetUrl: await getAssetUrlFromPath(filePath) };
   })();
@@ -262,20 +308,58 @@ async function serializeAssetReference<T extends AssetReferenceLike>(
 ): Promise<T> {
   const { projectId, projectDir } = context;
   // 参考角色/参考帧的旧记录只有 URL；同样收敛为本地身份，避免目录变化后仍读取旧地址。
-  const filePath = data.filePath ?? assetUrlToPath(data.imageUrl || data.videoUrl || data.audioUrl || data.url);
+  let filePath = data.filePath ?? assetUrlToPath(data.imageUrl || data.videoUrl || data.audioUrl || data.url);
   if (!filePath) return data;
-  const normalizedPath = filePath.replace(/\\/g, '/');
-  const normalizedDir = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
-  if (!normalizedPath.toLowerCase().startsWith(`${normalizedDir.toLowerCase()}/`)) return data;
+  let normalizedPath = stripVerbatimPrefix(filePath).replace(/\\/g, '/');
+  const normalizedDir = stripVerbatimPrefix(projectDir).replace(/\\/g, '/').replace(/\/+$/, '');
+  let projectRelativePath = getRelativeAssetPath(normalizedPath, normalizedDir);
+  // POSIX 路径保留大小写；和资产索引共用归属判断，避免把另一个目录当成本项目。
+  if (getNativeProjectOwner(projectId) && projectRelativePath && !nativePortablePath(projectRelativePath)) {
+    throw new Error('项目素材路径无效');
+  }
+  if (!projectRelativePath) {
+    if (!getNativeProjectOwner(projectId)) return data;
+    // 外部选中的文件先复制入作品根，不能把原路径写进新模型或改变原资产索引。
+    const copied = await (await import('./fileService')).copyFileToProjectData(filePath, projectId, { throwOnError: true, redactErrors: true });
+    if (!copied) throw new Error('无法将外部素材复制到新项目');
+    const updated = { ...data, filePath: copied.filePath, assetId: undefined, relativePath: undefined };
+    for (const key of ASSET_REFERENCE_URL_KEYS) {
+      const path = assetUrlToPath(updated[key]);
+      if (path && projectFileLookupKey(path) === projectFileLookupKey(filePath)) (updated as AssetReferenceLike)[key] = copied.assetUrl;
+    }
+    const mediaFields = updated as unknown as Record<string, unknown>;
+    for (const key of NODE_MEDIA_URL_KEYS) {
+      const value = mediaFields[key];
+      const path = typeof value === 'string' ? assetUrlToPath(value) : undefined;
+      if (path && projectFileLookupKey(path) === projectFileLookupKey(filePath)) mediaFields[key] = copied.assetUrl;
+    }
+    data = updated;
+    filePath = copied.filePath;
+    normalizedPath = stripVerbatimPrefix(filePath).replace(/\\/g, '/');
+    projectRelativePath = getRelativeAssetPath(normalizedPath, normalizedDir);
+    if (!projectRelativePath || !nativePortablePath(projectRelativePath)) throw new Error('复制的素材不属于新项目');
+  }
   if (!await projectFileExists(normalizedPath, context).catch(() => false)) return data;
+  const stripNativeUrls = (value: T): T => {
+    if (!getNativeProjectOwner(projectId)) return value;
+    const result = { ...value };
+    for (const key of ASSET_REFERENCE_URL_KEYS) {
+      const url = result[key];
+      const path = assetUrlToPath(url);
+      if (path && projectFileLookupKey(path) === projectFileLookupKey(normalizedPath) && result.relativePath) {
+        (result as AssetReferenceLike)[key] = result.relativePath;
+      }
+    }
+    return result;
+  };
 
   // ponytail: 文件仍停在记录的相对路径上时直接沿用旧身份，省掉每次自动保存对每个节点的
   // stat + 索引读写；代价是索引里的 size/mtime 不会被保存刷新（加载扫描和资产库列举会刷）。
   if (data.assetId && data.relativePath
-    && normalizedPath.slice(normalizedDir.length + 1) === data.relativePath.replace(/\\/g, '/')) {
+    && projectRelativePath === data.relativePath.replace(/\\/g, '/')) {
     const reused: T = { ...data };
     delete (reused as AssetReferenceLike).filePath;
-    return reused;
+    return stripNativeUrls(reused);
   }
 
   // 文件可能已被外部删除/移动：identifyAsset 会 stat 失败抛错，
@@ -289,7 +373,7 @@ async function serializeAssetReference<T extends AssetReferenceLike>(
   if (!identity) return data;
   const serialized: T = { ...data, assetId: identity.assetId, relativePath: identity.relativePath };
   delete (serialized as AssetReferenceLike).filePath;
-  return serialized;
+  return stripNativeUrls(serialized);
 }
 
 async function mapWithConcurrency<T, R>(
@@ -319,6 +403,7 @@ function assetReferenceContainsInlineMedia(data: unknown): boolean {
 function nodeDataContainsInlineMedia(data: BaseNodeData | undefined): boolean {
   if (!data) return false;
   if (NODE_MEDIA_URL_KEYS.some((key) => isTransientMediaValue(data[key]))) return true;
+  if (assetReferenceContainsInlineMedia(data.outpaintInput)) return true;
   if ((data.storyboardOverrides ?? []).some(assetReferenceContainsInlineMedia)) return true;
   if ((data.shotlistRows ?? []).some((row) => assetReferenceContainsInlineMedia(row.frame)
     || assetReferenceContainsInlineMedia(row.video))) return true;
@@ -334,13 +419,62 @@ async function serializeProjectNodes(
   const concurrency = projectNodesContainInlineMedia(nodes) ? 1 : 4;
   return mapWithConcurrency(nodes as PersistedNodeLike[], concurrency, async (node) => {
     if (!node.data) return node;
+    let nodeData = node.data;
+    const missingFields = nodeData.__nativeUnavailableMediaFields;
+    if (getNativeProjectOwner(context.projectId) && typeof nodeData.relativePath === 'string'
+      && Array.isArray(missingFields)) {
+      nodeData = { ...nodeData };
+      for (const key of NODE_MEDIA_URL_KEYS) {
+        if (missingFields.includes(key) && !nodeData[key]) nodeData = { ...nodeData, [key]: nodeData.relativePath };
+      }
+      delete nodeData.__nativeUnavailableMediaFields;
+    }
     let data = await materializeMediaFields(
-      node.data as BaseNodeData & Record<string, unknown>,
+      nodeData as BaseNodeData & Record<string, unknown>,
       NODE_MEDIA_URL_KEYS,
       context,
       NODE_PRIMARY_MEDIA_KEYS,
     );
-    data = await serializeAssetReference(data, context);
+    let nativeResultDirectory: string | undefined;
+    if (getNativeProjectOwner(context.projectId) && isNativeMediaResultArtifact(data.artifactId) && nativeMediaContentDigest(data.relativePath)) {
+      const display = await nativeMediaDisplayContext(context.projectId, context);
+      if (data.storageRootRef !== undefined && typeof data.storageRootRef !== 'string') throw new Error('原媒体根身份无效');
+      const directory = await display.resolve.directory(data.storageRootRef ?? display.defaultRootRef);
+      const expected = joinPath(directory, data.relativePath!);
+      const actual = data.filePath ?? assetUrlToPath(data.imageUrl || data.videoUrl || data.audioUrl);
+      if (!actual || projectFileLookupKey(actual) === projectFileLookupKey(expected)) {
+        // 精确根内原文件只收敛展示地址，不能按作品主根重算子根relativePath。
+        nativeResultDirectory = directory; data = { ...data }; delete data.filePath;
+      }
+    }
+    if (!nativeResultDirectory) data = await serializeAssetReference(data, context);
+    if (getNativeProjectOwner(context.projectId) && data.relativePath) {
+      const expectedPath = joinPath(nativeResultDirectory ?? context.projectDir, data.relativePath);
+      for (const key of NODE_MEDIA_URL_KEYS) {
+        const value = data[key];
+        const path = typeof value === 'string' ? assetUrlToPath(value) : undefined;
+        if (path && projectFileLookupKey(path) === projectFileLookupKey(expectedPath)) data = { ...data, [key]: data.relativePath };
+      }
+    }
+    if (data.outpaintInput) {
+      const native = Boolean(getNativeProjectOwner(context.projectId));
+      let inputContext = context;
+      let storageRootRef = data.outpaintInput.storageRootRef;
+      if (native) {
+        const display = await nativeMediaDisplayContext(context.projectId, context);
+        storageRootRef ??= display.primaryRootRef;
+        if (isTransientMediaValue(data.outpaintInput.url) && storageRootRef !== display.primaryRootRef) {
+          throw new Error('新扩图垫图必须保存至作品主素材根');
+        }
+        inputContext = { ...context, projectDir: await display.resolve.directory(storageRootRef) };
+      }
+      const input = await serializeAssetReference(await materializeAssetReference(data.outpaintInput, inputContext), inputContext);
+      if (native && (!input.relativePath || !nativePortablePath(input.relativePath)
+        || (input as AssetReferenceLike).filePath || input.url !== undefined && input.url !== input.relativePath)) {
+        throw new Error('扩图垫图未能保存为项目素材');
+      }
+      data = { ...data, outpaintInput: { ...input, ...(native ? { storageRootRef } : {}) } };
+    }
     if (Array.isArray(data.storyboardOverrides)) {
       const storyboardOverrides = await mapWithConcurrency(data.storyboardOverrides, 4, async (override) => {
         if (!override) return null;
@@ -391,6 +525,15 @@ async function serializeProjectNodes(
         directorCaptureUrls: captures.map((capture) => capture.url),
         directorCaptureFilePaths: captures.map((capture) => capture.filePath),
       };
+      if (getNativeProjectOwner(context.projectId) && captures.some((capture) => capture.filePath)) {
+        const relativePaths = await Promise.all(captures.map(async (capture) => {
+          const relative = capture.filePath && getRelativeAssetPath(capture.filePath, context.projectDir);
+          if (!relative || !await projectFileExists(capture.filePath!, context)) throw new Error('导演台素材不属于当前项目');
+          return relative;
+        }));
+        data = { ...data, directorCaptureRelativePaths: relativePaths, directorCaptureFilePaths: undefined,
+          directorCaptureUrls: relativePaths };
+      }
     }
     return { ...node, data };
   });
@@ -411,11 +554,32 @@ async function serializeProjectSettings(
 ): Promise<ProjectSettings | undefined> {
   const reference = settings?.visualStyle?.styleReference;
   if (!settings?.visualStyle || !reference) return settings;
-  const materialized = await materializeAssetReference(reference, context);
+  const native = Boolean(getNativeProjectOwner(context.projectId));
+  const missingPath = (reference as typeof reference & { __nativeMissingStylePath?: string }).__nativeMissingStylePath;
+  if (native && missingPath && !reference.filePath && !reference.imageUrl) {
+    if (!nativePortablePath(missingPath)) throw new Error('风格参考图路径无效');
+    return { ...settings, visualStyle: { ...settings.visualStyle, styleReference: {
+      filePath: missingPath, fileName: reference.fileName, enabled: reference.enabled,
+    } } };
+  }
+  const relativePath = native && reference.filePath && !/^(?:[a-z]:[\\/]|[\\/])/i.test(reference.filePath)
+    ? reference.filePath : undefined;
+  if (relativePath && !nativePortablePath(relativePath)) throw new Error('风格参考图路径无效');
+  const materialized = await materializeAssetReference(relativePath
+    ? { ...reference, filePath: joinPath(context.projectDir, relativePath) } : reference, context);
   const styleReference = await serializeAssetReference(
     materialized,
     context,
   );
+  if (native) {
+    const serialized = styleReference as typeof styleReference & { relativePath?: string };
+    const portable = serialized.relativePath ?? relativePath;
+    if (reference.filePath && !portable) throw new Error('风格参考图未能保存到新项目');
+    return { ...settings, visualStyle: { ...settings.visualStyle, styleReference: {
+      ...(portable ? { filePath: portable, imageUrl: portable } : { imageUrl: serialized.imageUrl }),
+      fileName: serialized.fileName, enabled: serialized.enabled,
+    } } };
+  }
   return {
     ...settings,
     visualStyle: { ...settings.visualStyle, styleReference },
@@ -455,6 +619,9 @@ async function restoreAssetReference<T extends AssetReferenceLike>(
   lookup: ProjectFileLookup,
   projection?: AssetReferenceUrlKey,
 ): Promise<T> {
+  if (getNativeProjectOwner(projectId) && data.relativePath && !nativePortablePath(data.relativePath)) {
+    throw new Error('项目素材路径无效');
+  }
   const storedPath = data.filePath ? stripVerbatimPrefix(data.filePath) : undefined;
   const relativeCandidate = data.relativePath ? joinPath(projectDir, data.relativePath) : undefined;
   // 展示用的 URL 存的就是关掉项目那一刻正在显示的文件。0.8.13 之前重新生成不作废旧身份，
@@ -484,6 +651,8 @@ async function restoreAssetReference<T extends AssetReferenceLike>(
   if (!filePath && data.assetId) {
     filePath = await resolveIndexedAssetPath(data.assetId).catch(() => null) ?? undefined;
   }
+  // 新作品只能从已绑定作品根恢复普通素材；跨项目/全局身份由专门的来源逻辑处理。
+  if (filePath && getNativeProjectOwner(projectId) && !insideProject(filePath)) return data;
   if (!filePath) return data;
 
   // ponytail: 文件就在记录的相对路径上 → 身份没变，跳过 stat 与索引读写（同 serializeAssetReference）
@@ -544,12 +713,25 @@ async function restoreAssetReferenceSafely<T extends AssetReferenceLike>(
   projection?: AssetReferenceUrlKey,
 ): Promise<T> {
   try {
-    return await restoreAssetReference(data, projectId, projectDir, lookup, projection);
+    const restored = await restoreAssetReference(data, projectId, projectDir, lookup, projection);
+    if (getNativeProjectOwner(projectId) && restored.relativePath && !restored.filePath) {
+      // 仅隐藏无法解析的相对展示地址；保留素材身份，文件回来后可重新加载。
+      const missing = { ...restored };
+      for (const key of ASSET_REFERENCE_URL_KEYS) if (missing[key] === missing.relativePath) (missing as AssetReferenceLike)[key] = undefined;
+      console.warn('[项目加载] 新项目素材不可用，已保留素材身份', { projectId, assetId: restored.assetId });
+      return missing;
+    }
+    return restored;
   } catch {
     console.warn('[项目加载] 单个资产展示信息恢复失败，已保留节点', {
       projectId,
       assetId: data.assetId,
     });
+    if (getNativeProjectOwner(projectId) && data.relativePath) {
+      const missing = { ...data };
+      for (const key of ASSET_REFERENCE_URL_KEYS) if (missing[key] === missing.relativePath) (missing as AssetReferenceLike)[key] = undefined;
+      return missing;
+    }
     return data;
   }
 }
@@ -582,7 +764,8 @@ function nodeAssetReferences(node: PersistedNodeLike): AssetReferenceLike[] {
     ? node.data.shotlistRows.flatMap((row) => [row.frame, row.video]).filter(Boolean)
     : [];
   const videoReferences = Array.isArray(node.data.videoReferences) ? node.data.videoReferences : [];
-  return [node.data, ...overrides, ...shotBindings, ...videoReferences] as AssetReferenceLike[];
+  return [node.data, ...(node.data.outpaintInput ? [node.data.outpaintInput] : []),
+    ...overrides, ...shotBindings, ...videoReferences] as AssetReferenceLike[];
 }
 
 /** 旧视频引用按同一素材 URL 补齐身份，不按角色当前主图或文件名替换已选素材。 */
@@ -647,7 +830,7 @@ function hasUnresolvedAsset(node: PersistedNodeLike): boolean {
   ));
 }
 
-async function restoreProjectNodes(nodes: unknown, projectId: string, lookup: ProjectFileLookup): Promise<unknown> {
+async function restoreProjectNodes(nodes: unknown, projectId: string, lookup: ProjectFileLookup, refreshIndex = true): Promise<unknown> {
   if (!Array.isArray(nodes)) return nodes;
   const projectDir = await getProjectDataDir(projectId);
   if (!projectDir) return nodes;
@@ -658,7 +841,49 @@ async function restoreProjectNodes(nodes: unknown, projectId: string, lookup: Pr
     const projection = ['ai-image', 'source-image', 'ai-animation', 'ai-panorama', 'ai-storyboard'].includes(String(type))
       ? 'imageUrl' : ['ai-video', 'source-video'].includes(String(type)) ? 'videoUrl'
         : ['ai-audio', 'source-audio'].includes(String(type)) ? 'audioUrl' : undefined;
-    let data = await restoreAssetReferenceSafely(node.data, projectId, projectDir, lookup, projection);
+    const owner = getNativeProjectOwner(projectId), digest = nativeMediaContentDigest(node.data.relativePath);
+    let data: BaseNodeData;
+    if (owner && digest && isNativeMediaResultArtifact(node.data.artifactId) && projection) {
+      try {
+        const display = await nativeMediaDisplayContext(projectId, lookup);
+        if (node.data.storageRootRef !== undefined && typeof node.data.storageRootRef !== 'string') throw new Error('原媒体根身份无效');
+        const rootRef = node.data.storageRootRef ?? display.defaultRootRef;
+        const resolved = await display.resolve(rootRef, { relativePath: node.data.relativePath!, sha256: digest });
+        data = { ...node.data, [projection]: resolved.url, output: resolved.url, sourceUrl: resolved.url,
+          ...(projection !== 'audioUrl' ? { thumbnailUrl: resolved.url } : {}), filePath: resolved.filePath };
+        delete data.__nativeUnavailableMediaFields;
+      } catch {
+        // 摘要文件缺失/根归属不符时只保留原身份；不能借索引或另一根的同名文件冒充。
+        data = { ...node.data, [projection]: undefined, output: undefined, sourceUrl: undefined, thumbnailUrl: undefined,
+          filePath: undefined, __nativeUnavailableMediaFields: [projection, 'output', 'sourceUrl', 'thumbnailUrl'] };
+      }
+    } else data = await restoreAssetReferenceSafely(node.data, projectId, projectDir, lookup, projection);
+    if (getNativeProjectOwner(projectId) && data.relativePath && !data.filePath) {
+      const missing = NODE_MEDIA_URL_KEYS.filter((key) => data[key] === data.relativePath);
+      if (missing.length) {
+        data = { ...data, __nativeUnavailableMediaFields: missing };
+        for (const key of missing) data = { ...data, [key]: undefined };
+      }
+    }
+    if (getNativeProjectOwner(projectId) && data.filePath && data.relativePath) {
+      const url = await getAssetUrlFromPath(data.filePath);
+      for (const key of NODE_MEDIA_URL_KEYS) {
+        if (data[key] === data.relativePath) data = { ...data, [key]: url };
+      }
+    }
+    if (data.outpaintInput) {
+      const outpaintInput = data.outpaintInput;
+      if (getNativeProjectOwner(projectId)) {
+        try {
+          const display = await nativeMediaDisplayContext(projectId, lookup);
+          const storageRootRef = data.outpaintInput.storageRootRef ?? display.primaryRootRef;
+          const directory = await display.resolve.directory(storageRootRef);
+          data = { ...data, outpaintInput: { ...await restoreAssetReferenceSafely(data.outpaintInput, projectId, directory, lookup, 'url'), storageRootRef } };
+        } catch {
+          data = { ...data, outpaintInput: { ...outpaintInput, url: undefined } };
+        }
+      } else data = { ...data, outpaintInput: await restoreAssetReferenceSafely(data.outpaintInput, projectId, projectDir, lookup, 'url') };
+    }
     if (Array.isArray(data.storyboardOverrides)) {
       const storyboardOverrides = await mapWithConcurrency(data.storyboardOverrides, 4, async (override) => (
         override ? restoreAssetReferenceSafely(override, projectId, projectDir, lookup, 'url') : null
@@ -696,6 +921,9 @@ async function restoreProjectNodes(nodes: unknown, projectId: string, lookup: Pr
         const restored = await restoreAssetReferenceSafely({ relativePath } as AssetReferenceLike, projectId, projectDir, lookup);
         return { filePath: restored.filePath ?? '', url: restored.filePath ? await getAssetUrlFromPath(restored.filePath) : '' };
       });
+      if (getNativeProjectOwner(projectId) && captures.some((capture) => !capture.filePath)) {
+        console.warn('[项目加载] 部分导演台截图不可用，已保留素材身份', { projectId });
+      }
       data = { ...data, directorCaptureFilePaths: captures.map((capture) => capture.filePath), directorCaptureUrls: captures.map((capture) => capture.url) };
     } else if (Array.isArray(data.directorCaptureUrls) && Array.isArray(data.directorCaptureFilePaths)) {
       const directorCaptureUrls = await mapWithConcurrency(
@@ -716,11 +944,22 @@ async function restoreProjectNodes(nodes: unknown, projectId: string, lookup: Pr
   const restored = await mapWithConcurrency(nodes as PersistedNodeLike[], 4, restoreNode);
   // ponytail: 节点全都就位就不扫目录了 —— 只有解析失败（外部重命名/移动）才刷新索引再试一轮，
   // 省掉每次切画布对整个项目目录的两轮 stat + 索引写。
-  if (!restored.some(hasUnresolvedAsset)) return restored;
+  if (!refreshIndex || !restored.some(hasUnresolvedAsset)) return restored;
   await refreshProjectAssetIndex(projectId, projectDir);
   // 恢复阶段可能重新找到文件，重试不能复用第一轮的缺失或权限失败结果。
   lookup.existsByPath.clear();
   return mapWithConcurrency(nodes as PersistedNodeLike[], 4, restoreNode);
+}
+
+/** 生成前只收敛本轮节点的媒体身份；不保存画布、不扫描整库，也不替换调用方的运行状态。 */
+export async function normalizeProjectMediaNodes(projectId: string, nodes: Node<BaseNodeData>[]): Promise<Node<BaseNodeData>[]> {
+  const projectDir = await getProjectDataDir(projectId);
+  if (!projectDir || !getNativeProjectOwner(projectId)) throw new Error('当前项目的媒体目录不可用');
+  const context: MediaSerializationContext = {
+    projectId, projectDir, cache: new Map(), existsByPath: new Map(),
+  };
+  const serialized = await serializeProjectNodes(nodes, context);
+  return await restoreProjectNodes(serialized, projectId, context, false) as Node<BaseNodeData>[];
 }
 
 async function restoreProjectSettings(
@@ -731,6 +970,16 @@ async function restoreProjectSettings(
 ): Promise<ProjectSettings | undefined> {
   const reference = settings?.visualStyle?.styleReference;
   if (!settings?.visualStyle || !reference) return settings;
+  if (getNativeProjectOwner(projectId) && reference.filePath
+    && !/^(?:[a-z]:[\\/]|[\\/])/i.test(reference.filePath)) {
+    const relativePath = reference.filePath;
+    if (!nativePortablePath(relativePath)) throw new Error('风格参考图路径无效');
+    const restored = await restoreAssetReferenceSafely<AssetReferenceLike>({ relativePath, imageUrl: reference.imageUrl }, projectId, projectDir, lookup, 'imageUrl');
+    const styleReference = restored.filePath
+      ? { filePath: restored.filePath, imageUrl: restored.imageUrl, fileName: reference.fileName, enabled: reference.enabled }
+      : { __nativeMissingStylePath: relativePath, fileName: reference.fileName, enabled: reference.enabled };
+    return { ...settings, visualStyle: { ...settings.visualStyle, styleReference } };
+  }
   const styleReference = await restoreAssetReferenceSafely(reference, projectId, projectDir, lookup, 'imageUrl');
   return {
     ...settings,
@@ -742,10 +991,16 @@ async function restoreProjectSettings(
 async function resolveVisualAssetReference(
   reference: DramaAssetReferenceImage, lookup: ProjectFileLookup,
   resolveProject: (reference: DramaAssetReferenceImage) => Promise<DramaAssetReferenceImage>,
+  portable = false,
 ): Promise<DramaAssetReferenceImage> {
   const indexed = reference.assetId ? await getAssetIndexById(reference.assetId).catch(() => undefined) : undefined;
   if (reference.assetSource !== 'global' && indexed?.source !== 'global') return resolveProject(reference);
   const detached = { ...reference, assetSource: 'global' as const, sourceNodeId: undefined, filePath: undefined };
+  if (portable) {
+    if (reference.assetId) return { ...detached, imageUrl: undefined };
+    if (!reference.filePath && !assetUrlToPath(reference.imageUrl)) throw new Error('全局素材缺少可恢复的身份');
+    return resolveProject({ ...reference, assetSource: undefined });
+  }
   return indexed?.source !== 'global' || indexed.status !== 'online'
     || !await projectFileExists(indexed.path, lookup).catch(() => false)
     ? { ...detached, imageUrl: undefined }
@@ -782,13 +1037,15 @@ async function serializeProjectDramaAssets(
       referenceImages,
       voiceClips,
       actions,
+      // 新提取的人物可缺少参考包；只补缺省空集合，异常值仍交给仓储严格校验。
+      refmods: character.refmods === undefined ? [] : character.refmods,
       imageUrl: primaryReference?.imageUrl ?? topLevel.imageUrl,
     };
   });
   const serializeVisual = async <T extends DramaScene | DramaProp>(asset: T): Promise<T> => {
     const normalized = normalizeDramaVisualAsset(asset);
     const referenceImages = await mapWithConcurrency(normalized.referenceImages ?? [], 2,
-      (reference) => resolveVisualAssetReference(reference, context, serializeReference));
+      (reference) => resolveVisualAssetReference(reference, context, serializeReference, Boolean(getNativeProjectOwner(context.projectId))));
     return syncDramaVisualAssetPrimary({ ...normalized, referenceImages });
   };
   const scenes = await mapWithConcurrency(library.scenes, 2, (asset) => serializeVisual(asset));
@@ -797,6 +1054,12 @@ async function serializeProjectDramaAssets(
 }
 
 export async function serializeProjectRecord(data: ProjectSaveData): Promise<ProjectSaveData> {
+  if (data.episodeScriptFile !== undefined) data = { ...data, episodeScriptFile: normalizeProjectTextFileReference(data.episodeScriptFile) };
+  if (data.series !== undefined) {
+    const series = normalizeProjectSeriesInfo(data.series);
+    if (data.parentId && series?.storyGraph) throw new Error('故事关系图只能由所属剧集保存');
+    data = { ...data, series };
+  }
   if (data.episodeAssetRoster !== undefined) {
     data = { ...data, episodeAssetRoster: data.parentId ? normalizeEpisodeAssetRoster(data.episodeAssetRoster) : undefined };
   }
@@ -866,6 +1129,7 @@ async function restoreProjectDramaAssets(
 
 export interface ProjectSaveData {
   exchangeEpoch?: number;
+  revisionScope?: 'project' | 'global';
   id: string;
   name: string;
   createdAt: number;
@@ -884,8 +1148,11 @@ export interface ProjectSaveData {
   episodeNo?: number;
   episodeOutline?: string;
   episodeScript?: string;
+  episodeScriptFile?: ProjectTextFileReference;
   episodeCreative?: import('../types').EpisodeCreativeInfo;
   episodeAssetRoster?: EpisodeAssetRoster;
+  creationProfile?: import('../types/creationProfile').CreationProfileSelection;
+  teamProfileOverride?: import('../types/agentTeam').AgentTeamProfile;
   /** 剧集级原著与剧本；仅剧集项目有 */
   series?: import('../types').ProjectSeriesInfo;
 }
@@ -893,14 +1160,16 @@ export interface ProjectSaveData {
 export type ProjectSummaryData = Omit<ProjectSaveData, 'nodes' | 'edges' | 'groups' | 'dramaAssets'>;
 
 /** 保存项目到 IndexedDB */
-export async function saveProject(data: ProjectSaveData): Promise<string> {
+export async function saveProject(data: ProjectSaveData, signal?: AbortSignal): Promise<string> {
   try {
+    signal?.throwIfAborted();
     const payload = await serializeProjectRecord(data);
-    await saveProjectToDb(payload);
+    const saveOptions: [signal?: AbortSignal] = signal ? [signal] : [];
+    await saveProjectToDb(payload, ...saveOptions);
     console.log('Project saved to IndexedDB:', data.id);
     return data.id;
   } catch (error) {
-    console.error('Save project to IndexedDB failed:', error);
+    if (!signal?.aborted) console.error('Save project to IndexedDB failed:', error);
     throw error;
   }
 }
@@ -915,23 +1184,68 @@ export async function loadProjectsList(): Promise<ProjectSummaryData[]> {
   }
 }
 
-/** 从 IndexedDB 加载单个项目完整数据 */
-export async function loadProjectData(id: string): Promise<ProjectSaveData | null> {
-  try {
+async function recoverStagedProjectMedia(record: ProjectSaveData, root: string, assertCurrent?: () => void): Promise<void> {
+  const references = new Set<string>();
+  const add = (value: string) => {
+    const path = localMediaUrlToPath(value) ?? value;
+    if (isPathInsideDir(path, root)) references.add(path);
+  };
+  const relativeFields = new Set(['filePath', 'imageFilePath', 'relativePath', 'imageRelativePath', 'directorCaptureFilePaths', 'directorCaptureRelativePaths']);
+  let nativeDisplay: ProjectFileLookup['nativeMediaDisplay'];
+  const inputRoots = new Map<string, string>();
+  if (getNativeProjectOwner(record.id) && Array.isArray(record.nodes)) {
+    for (const node of record.nodes as PersistedNodeLike[]) {
+      const rootRef = node.data?.outpaintInput?.storageRootRef;
+      if (!rootRef || inputRoots.has(rootRef)) continue;
+      nativeDisplay ??= nativeMediaDisplayContext(record.id, { existsByPath: new Map() });
+      inputRoots.set(rootRef, await (await nativeDisplay).resolve.directory(rootRef));
+    }
+  }
+  const collect = (value: unknown, field = '', directory = root): void => {
+    if (typeof value === 'string') {
+      if (relativeFields.has(field) && value && !/^(?:[a-z][a-z0-9+.-]*:|[/\\])/i.test(value)) add(joinPath(directory, value));
+      else add(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) collect(item, field, directory);
+    } else if (value && typeof value === 'object') {
+      const row = value as Record<string, unknown>;
+      if (field === 'outpaintInput' && typeof row.storageRootRef === 'string' && inputRoots.has(row.storageRootRef)) {
+        directory = inputRoots.get(row.storageRootRef)!;
+      }
+      for (const [key, item] of Object.entries(row)) collect(item, key, directory);
+    }
+  };
+  collect([record.nodes, record.dramaAssets, record.settings]);
+  for (const node of Array.isArray(record.nodes) ? record.nodes as PersistedNodeLike[] : []) {
+    if (!node?.data) continue;
+    for (const reference of collectNodeFileReferences(node.data)) {
+      if (reference.startsWith('director-scene:')) add(joinPath(root, 'director', 'scenes', reference.slice('director-scene:'.length)));
+      else add(reference);
+    }
+  }
+  const groupNames = Array.isArray(record.groups) ? record.groups.flatMap((group) => typeof group?.name === 'string' ? [group.name] : []) : [];
+  await recoverUndoTrashReferences(root, references, groupNames, assertCurrent);
+}
+
+interface ProjectRestoreOptions {
+  recoverUndoTrash?: boolean;
+  assertCurrent?: () => void;
+}
+
+/** 将已读取的项目记录还原为运行时媒体引用。只有实际打开的持久化项目恢复暂存。 */
+export async function restoreProjectRecord(persistedRecord: ProjectSaveData, options?: ProjectRestoreOptions): Promise<ProjectSaveData> {
+    const id = persistedRecord.id;
     const lookup: ProjectFileLookup = { existsByPath: new Map() };
-    const record = await getProjectById(id);
-    if (!record) return null;
-    let persistedRecord = record as ProjectSaveData;
-    if (projectRecordContainsInlineMedia(persistedRecord)) {
+    let nodes = persistedRecord.nodes;
+    if (options?.recoverUndoTrash && isTauriEnv()) {
       try {
-        persistedRecord = await serializeProjectRecord(persistedRecord);
-        await saveProjectToDb(persistedRecord);
-        console.log('[项目加载] 已将旧的内嵌媒体迁移到项目目录:', id);
-      } catch (error) {
-        console.warn('[项目加载] 内嵌媒体迁移失败，未覆盖原项目数据', { projectId: id, error });
+        options.assertCurrent?.();
+        const root = await getProjectDataDir(id);
+        if (root) await recoverStagedProjectMedia(persistedRecord, root, options.assertCurrent);
+      } catch {
+        console.warn('[项目加载] 节点暂存记录暂不可用，已保留暂存文件');
       }
     }
-    let nodes = persistedRecord.nodes;
     try {
       nodes = await recoverVideoReferenceIdentities(nodes, persistedRecord.dramaAssets, persistedRecord.parentId);
       nodes = await restoreProjectNodes(nodes, id, lookup);
@@ -953,11 +1267,32 @@ export async function loadProjectData(id: string): Promise<ProjectSaveData | nul
     } catch {
       console.warn('[项目加载] 角色库本地文件恢复未完成，已使用原始角色数据', { projectId: id });
     }
-    return { ...persistedRecord, nodes, settings, dramaAssets,
+    return { ...persistedRecord, nodes, settings, dramaAssets, series: normalizeProjectSeriesInfo(persistedRecord.series),
+      ...(persistedRecord.episodeScriptFile !== undefined ? { episodeScriptFile: normalizeProjectTextFileReference(persistedRecord.episodeScriptFile) } : {}),
       ...(persistedRecord.episodeAssetRoster !== undefined ? {
         episodeAssetRoster: persistedRecord.parentId ? normalizeEpisodeAssetRoster(persistedRecord.episodeAssetRoster) : undefined,
       } : {}),
     };
+}
+
+/** 从 IndexedDB 加载单个旧项目完整数据 */
+export async function loadProjectData(id: string, options?: ProjectRestoreOptions): Promise<ProjectSaveData | null> {
+  try {
+    if (options?.recoverUndoTrash) await waitForPendingNodeFileDeletions();
+    const record = await getProjectById(id);
+    if (!record) return null;
+    options?.assertCurrent?.();
+    let persistedRecord = record as ProjectSaveData;
+    if (projectRecordContainsInlineMedia(persistedRecord)) {
+      try {
+        persistedRecord = await serializeProjectRecord(persistedRecord);
+        await saveProjectToDb(persistedRecord);
+        console.log('[项目加载] 已将旧的内嵌媒体迁移到项目目录:', id);
+      } catch (error) {
+        console.warn('[项目加载] 内嵌媒体迁移失败，未覆盖原项目数据', { projectId: id, error });
+      }
+    }
+    return await restoreProjectRecord(persistedRecord, options);
   } catch (error) {
     console.error('Load project data failed:', error);
     return null;

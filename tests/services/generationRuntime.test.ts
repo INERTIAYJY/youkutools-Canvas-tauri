@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiProviderConfig, GeneralModelConfig, WorkflowDefinition } from '../../src/types';
 import type { MediaTaskContext, MediaTaskReceipt } from '../../src/types/aiTypes';
 import type { ChatMessage } from '../../src/types/chat';
-import type { PendingTask } from '../../src/services/pollManager';
+import type { MediaTaskSnapshot, PendingTask } from '../../src/services/pollManager';
 
 const mocks = vi.hoisted(() => ({
   generateImage: vi.fn(),
@@ -19,12 +19,14 @@ const mocks = vi.hoisted(() => ({
   registerMediaNodeOperation: vi.fn(() => vi.fn()),
   registerMediaMessageRecoveryHandler: vi.fn(),
   getPendingTasksForProject: vi.fn<() => unknown[]>(() => []),
+  getMediaTaskSnapshot: vi.fn<() => readonly MediaTaskSnapshot[]>(() => []),
   getMediaTaskReceipt: vi.fn(),
   resumeMediaNodeTask: vi.fn(),
   completeMediaNodeTask: vi.fn(),
   pauseMediaTask: vi.fn(),
   updatePendingTask: vi.fn(),
   persistMessage: vi.fn(),
+  persistNativeMediaOrigin: vi.fn(),
   storeState: {
     config: {
       generalModels: [] as GeneralModelConfig[],
@@ -75,10 +77,13 @@ vi.mock('../../src/services/fs/generatedAssetTags', () => ({
   tagGeneratedProjectAssetSafely: mocks.tagGeneratedProjectAssetSafely,
 }));
 vi.mock('../../src/services/pollManager', () => ({
+  hasMuseQueryIdentity: (task: { taskType?: string; taskId: string }) => task.taskType === 'muse'
+    && task.taskId === 'ac655c56-b537-4c04-8913-fd150fc0e92a',
   bindMediaTaskContext: mocks.bindMediaTaskContext,
   registerMediaNodeOperation: mocks.registerMediaNodeOperation,
   registerMediaMessageRecoveryHandler: mocks.registerMediaMessageRecoveryHandler,
   getPendingTasksForProject: mocks.getPendingTasksForProject,
+  getMediaTaskSnapshot: mocks.getMediaTaskSnapshot,
   getMediaTaskReceipt: mocks.getMediaTaskReceipt,
   resumeMediaNodeTask: mocks.resumeMediaNodeTask,
   completeMediaNodeTask: mocks.completeMediaNodeTask,
@@ -86,6 +91,7 @@ vi.mock('../../src/services/pollManager', () => ({
   updatePendingTask: mocks.updatePendingTask,
 }));
 vi.mock('../../src/services/chat/chatHistoryService', () => ({ persistMessage: mocks.persistMessage }));
+vi.mock('../../src/services/nativeMediaOriginPersistence', () => ({ persistNativeMediaOrigin: mocks.persistNativeMediaOrigin }));
 
 import {
   MEDIA_PERSIST_FAILED_MESSAGE,
@@ -93,15 +99,29 @@ import {
   runMediaGeneration,
   retryMediaMessageTask,
   ensureMediaMessageRecoveryHandler,
+  getRecoverableMessageTask,
+  getRecoverableMessageTaskSnapshot,
+  deliverMediaMessageGroup,
+  completeMediaMessageDelivery,
+  mediaDeliveryResults,
 } from '../../src/services/ai/generationRuntime';
 import type { MediaGenerationResult } from '../../src/types/media';
+import { imageBatchArtifactId } from '../../src/services/imageBatchService';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.storeState.updateMessage.mockReset();
+  mocks.storeState.addMessage.mockReset();
+  mocks.completeMediaNodeTask.mockReset();
+  mocks.persistMessage.mockReset();
+  mocks.persistMessage.mockResolvedValue(undefined);
+  mocks.updatePendingTask.mockReset();
   mocks.bindMediaTaskContext.mockReturnValue(vi.fn());
   mocks.getPendingTasksForProject.mockReturnValue([]);
+  mocks.getMediaTaskSnapshot.mockReturnValue([]);
   mocks.getMediaTaskReceipt.mockReset();
   mocks.storeState.currentProjectId = 'project-1';
+  Object.assign(mocks.storeState, { projectExecutionContext: undefined });
   mocks.storeState.projects = [];
   mocks.storeState.customStyles = [];
   mocks.storeState.workflows = [];
@@ -126,6 +146,14 @@ beforeEach(() => {
 });
 
 describe('media generation cancellation', () => {
+  it('未适配的直接图片模型及缺少原目的地的新对话请求在提交前失败关闭', async () => {
+    Object.assign(mocks.storeState, { projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1,
+      projectId: 'p', projectEpoch: 0, canvasId: 'project-1', canvasEpoch: 0, canvasRevision: 0, episodeId: null, runtimeEpoch: 'run' } });
+    await expect(runMediaGeneration({ kind: 'image', prompt: '猫', modelRef: 'openai/image-model', deliveryMode: 'chat' }, 'project-1'))
+      .rejects.toThrow('未提交请求');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.bindMediaTaskContext).not.toHaveBeenCalled();
+  });
   it.each(['image', 'video'] as const)('passes %s download access and cancellation to persistence without adding it to the artifact', async (kind) => {
     const mediaDownloadAccess = { providerConfigId: 'relay-image', origin: 'https://relayonapi.com', auth: { type: 'bearer' as const } };
     (kind === 'image' ? mocks.generateImage : mocks.generateVideo).mockResolvedValueOnce({ url: 'https://relayonapi.com/result', mediaDownloadAccess });
@@ -185,6 +213,42 @@ describe('media generation project settings', () => {
     expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('image-node', expect.objectContaining({
       parameters: { resolution: '2K', aspectRatio: '1:1', imageQuality: 'high', imageBackground: '' },
     }), expect.any(Function));
+  });
+
+  it('GIF 默认参数随请求、原任务与结果保留，交付使用原件实际画布尺寸', async () => {
+    configureVisualModels();
+    // 格式声明必须有真实协议接线，不能用未配置协议的夹具绕过生产守卫。
+    mocks.storeState.config.generalModels[0].executionProfile = { preset: 'custom', protocol: { version: 2, mode: 'sync',
+      submit: { method: 'POST', path: '/images/generations', body: { model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}',
+        quality: '{{imageQuality}}', background: '{{imageBackground}}', output_format: '{{imageOutputFormat}}',
+        frame_count: '{{imageFrameCount}}', frame_duration_ms: '{{imageFrameDurationMs}}', transparent: '{{imageTransparent}}' } },
+      response: { type: 'json', result: { urlPath: 'data.*.url' } } } };
+    Object.assign(mocks.storeState.config.generalModels[0].imageCapability!, {
+      outputFormats: ['png', 'gif', 'svg'], defaultOutputFormat: 'png',
+      squareOnlyOutputFormats: ['gif', 'svg'], textOnlyOutputFormats: ['gif', 'svg'],
+      gifFrameCount: { min: 2, max: 16, default: 9 },
+      gifFrameDurationMs: { min: 20, max: 655350, step: 10, default: 200 }, supportsGifTransparency: true,
+    });
+    mocks.generateImage.mockResolvedValue({ url: 'https://cdn.example/animation.gif', width: 2048, height: 2048 });
+    mocks.persistMediaUrlToProjectData.mockResolvedValue({ filePath: '/projects/project-1/animation.gif',
+      mediaUrl: 'asset://animation.gif', sourceUrl: 'https://cdn.example/animation.gif', width: 768, height: 512 });
+    const output = { imageOutputFormat: 'gif', imageFrameCount: 9, imageFrameDurationMs: 200, imageTransparent: false };
+    const result = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', imageOutputFormat: 'gif' }, 'project-1', undefined, 'image-node');
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining(output), undefined);
+    expect(result.parameters).toMatchObject(output);
+    expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('image-node', expect.objectContaining({
+      parameters: expect.objectContaining(output),
+    }), expect.any(Function));
+    expect(result).toMatchObject({ width: 768, height: 512, url: 'asset://animation.gif' });
+  });
+
+  it('未声明输出格式的模型拒绝显式 GIF，不绑定任务或调用厂商', async () => {
+    configureVisualModels();
+    await expect(runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat', imageOutputFormat: 'gif' }, 'project-1')).rejects.toThrow('未声明');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.bindMediaTaskContext).not.toHaveBeenCalled();
   });
 
   it('锁定模型声明的默认质量和背景，显式接口默认仍能覆盖背景默认值', async () => {
@@ -265,6 +329,18 @@ describe('media generation project settings', () => {
     expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ imageSize: '2K', aspectRatio: '9:16', imageQuality: 'high' }), undefined);
     expect(result.parameters).toEqual({ resolution: '2K', aspectRatio: '9:16', imageQuality: 'high' });
     expect(mocks.bindMediaTaskContext).toHaveBeenCalledWith('image-node', expect.objectContaining({ parameters: result.parameters }), expect.any(Function));
+  });
+
+  it('图片省略比例时不从作品根借默认值，本集占位与实际请求均使用1:1', async () => {
+    configureVisualModels();
+    mocks.storeState.projects = [
+      { id: 'owner-project', settings: { generation: { imageAspectRatio: '9:16', imageSize: '4K' } } },
+      { id: 'project-1', parentId: 'owner-project' },
+    ];
+    const result = await runMediaGeneration({ kind: 'image', prompt: '山谷', modelRef: 'general/image-model',
+      deliveryMode: 'chat' }, 'project-1');
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ imageSize: '2K', aspectRatio: '1:1' }), undefined);
+    expect(result.parameters).toMatchObject({ resolution: '2K', aspectRatio: '1:1' });
   });
 
   it('视频自动时长、帧率和关闭音轨原样传递并保存在原任务快照', async () => {
@@ -684,6 +760,233 @@ describe('retryMediaArtifactPersist', () => {
 });
 
 describe('async media task identity', () => {
+  it('保存同一作业全部四张候选，运行期分组不进入单产物消息', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-original', attemptId: 'mj-attempt' };
+    const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/mj-${index}.png`);
+    mocks.generateImage.mockResolvedValue({ url: urls[0], width: 1024, height: 1024, taskReceipt: receipt,
+      expectedOutputCount: 4, additionalResults: urls.slice(1).map((url) => ({ url, width: 1024, height: 1024 })) });
+    mocks.persistMediaUrlToProjectData.mockImplementation(async (url: string, _project: string, _kind: string, name: string) => ({
+      mediaUrl: `asset://${name}.png`, sourceUrl: url, filePath: `${name}.png`,
+    }));
+    const delivery = await runMediaGeneration({ kind: 'image', prompt: '猫', modelRef: 'openai/image-model', deliveryMode: 'chat' }, 'project-1');
+    const artifacts = mediaDeliveryResults(delivery);
+    expect(artifacts).toHaveLength(4);
+    expect(artifacts.map((artifact) => artifact.id)).toEqual(urls.map((_, index) => imageBatchArtifactId(receipt, index)));
+    expect(artifacts.map((artifact) => artifact.sourceUrl)).toEqual(urls);
+    expect(artifacts.every((artifact) => artifact.persistence === 'saved')).toBe(true);
+    expect(artifacts.every((artifact) => !('additionalResults' in artifact) && !('expectedOutputCount' in artifact))).toBe(true);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledTimes(4);
+    expect(mocks.generateImage).toHaveBeenCalledOnce();
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+  });
+
+  it('固定四候选只返回第一张时仍使用稳定槽身份并保留其余待交付状态', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-original', attemptId: 'mj-attempt' };
+    mocks.generateImage.mockResolvedValue({ url: 'https://cdn.example/mj-first.png', width: 1024, height: 1024,
+      expectedOutputCount: 4, taskReceipt: receipt });
+    const delivery = await runMediaGeneration({ kind: 'image', prompt: '猫', modelRef: 'openai/image-model', deliveryMode: 'chat' }, 'project-1');
+    expect(delivery.id).toBe(imageBatchArtifactId(receipt, 0));
+    expect(delivery.expectedOutputCount).toBe(4);
+    expect(delivery.additionalResults).toEqual([]);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledWith('https://cdn.example/mj-first.png', 'project-1', 'ai-image',
+      `对话图片-${imageBatchArtifactId(receipt, 0)}`, { mediaDownloadAccess: undefined, signal: undefined });
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+    expect(mocks.generateImage).toHaveBeenCalledOnce();
+  });
+
+  it('没有远端任务的Base64候选保存失败也保留整组，继续处理后续候选', async () => {
+    const urls = ['AAAA', 'AAAB', 'AAAC', 'AAAD'].map((data) => `data:image/png;base64,${data}`);
+    mocks.generateImage.mockResolvedValue({ url: urls[0], width: 1024, height: 1024, expectedOutputCount: 4,
+      additionalResults: urls.slice(1).map((url) => ({ url, width: 1024, height: 1024 })) });
+    let saves = 0;
+    mocks.persistMediaUrlToProjectData.mockImplementation(async (url: string) => {
+      saves += 1;
+      if (saves === 3) throw new Error('disk full');
+      return { mediaUrl: `asset://candidate-${saves}.png`, sourceUrl: url, filePath: `candidate-${saves}.png` };
+    });
+    const delivery = await runMediaGeneration({ kind: 'image', prompt: '猫', modelRef: 'openai/image-model', deliveryMode: 'chat' }, 'project-1');
+    expect(mediaDeliveryResults(delivery).map((artifact) => artifact.persistence)).toEqual(['saved', 'saved', 'failed', 'saved']);
+    expect(mediaDeliveryResults(delivery).map((artifact) => artifact.sourceUrl)).toEqual(urls);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledTimes(4);
+    expect(delivery.taskReceipt).toBeUndefined();
+    expect(mocks.generateImage).toHaveBeenCalledOnce();
+  });
+
+  it('多候选保存中取消会保留已保存项和未保存候选，不补交生成', async () => {
+    const controller = new AbortController();
+    const urls = ['AAAA', 'AAAB', 'AAAC', 'AAAD'].map((data) => `data:image/png;base64,${data}`);
+    mocks.generateImage.mockResolvedValue({ url: urls[0], width: 1024, height: 1024, expectedOutputCount: 4,
+      additionalResults: urls.slice(1).map((url) => ({ url, width: 1024, height: 1024 })) });
+    let saves = 0;
+    mocks.persistMediaUrlToProjectData.mockImplementation(async (url: string) => {
+      saves += 1;
+      if (saves === 2) controller.abort();
+      return { mediaUrl: `asset://candidate-${saves}.png`, sourceUrl: url, filePath: `candidate-${saves}.png` };
+    });
+    const delivery = await runMediaGeneration({ kind: 'image', prompt: '猫', modelRef: 'openai/image-model', deliveryMode: 'chat' }, 'project-1', controller.signal);
+    expect(mediaDeliveryResults(delivery).map((artifact) => artifact.persistence)).toEqual(['saved', 'saved', 'failed', 'failed']);
+    expect(mediaDeliveryResults(delivery).map((artifact) => artifact.sourceUrl)).toEqual(urls);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledTimes(2);
+    expect(mocks.generateImage).toHaveBeenCalledOnce();
+  });
+
+  it('uses detached message props and exact project/conversation/attempt receipts for the pure display snapshot', () => {
+    const receipt = { projectId: 'project-1', nodeId: 'original-node', taskId: 'original-task', attemptId: 'original-attempt' };
+    const message: ChatMessage = { id: 'child-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1,
+      status: 'done', mediaResult: { id: 'child-image', kind: 'image', taskReceipt: receipt, deliveryMode: 'chat',
+        url: 'asset://image', sourceUrl: 'https://cdn.example/image.png', persistence: 'failed',
+        prompt: '', modelId: 'image-model', provider: 'general', createdAt: 1 } };
+    const task: MediaTaskSnapshot = { ...receipt, nodeId: 'recovery-node', submitted: true, expectedImageOutputs: 4,
+      imageOutputNodeIds: [receipt.nodeId], mediaContext: { conversationId: 'conversation-1', messageId: 'parent-message' },
+      mediaRecoveryState: 'delivery_pending', historyDownloadPending: true };
+    mocks.getMediaTaskSnapshot.mockReturnValue([task]);
+    // 独立窗口没有把消息写入本地 Store，展示仍从当前消息回执定位原作业。
+    expect(mocks.storeState.messages).toEqual([]);
+    expect(getRecoverableMessageTaskSnapshot(message, 'project-1')).toBe(task);
+    expect(getRecoverableMessageTaskSnapshot(message, 'project-1')).toBe(task);
+    expect(getRecoverableMessageTaskSnapshot(message, 'other-project')).toBeUndefined();
+    expect(getRecoverableMessageTaskSnapshot({ ...message, conversationId: 'other-conversation' }, 'project-1')).toBeUndefined();
+    for (const patch of [{ attemptId: 'other-attempt' }, { imageOutputNodeIds: ['unrelated-node'] }, { expectedImageOutputs: 1 }]) {
+      mocks.getMediaTaskSnapshot.mockReturnValue([{ ...task, ...patch }]);
+      expect(getRecoverableMessageTaskSnapshot(message, 'project-1')).toBeUndefined();
+    }
+    expect(mocks.getPendingTasksForProject).not.toHaveBeenCalled();
+    expect(mocks.resumeMediaNodeTask).not.toHaveBeenCalled();
+  });
+
+  it('第三张保存失败时保留其他三张和整组回执，子图可定位同一原任务', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-original', attemptId: 'mj-attempt' };
+    const task: PendingTask = { ...receipt, nodeType: 'ai-image', provider: 'general', taskType: 'custom-protocol',
+      submitted: true, batchCount: 4, expectedImageOutputs: 4, mediaContext: { projectId: 'project-1', conversationId: 'conversation-1',
+        messageId: 'mj-message', deliveryMode: 'message' } };
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    mocks.storeState.messages = [{ id: 'mj-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done' }];
+    mocks.storeState.updateMessage.mockImplementation((id: string, patch: Partial<ChatMessage>) => {
+      mocks.storeState.messages = mocks.storeState.messages.map((message) => message.id === id ? { ...message, ...patch } : message);
+    });
+    mocks.storeState.addMessage.mockImplementation((message: ChatMessage) => { mocks.storeState.messages.push(message); });
+    const artifacts: MediaGenerationResult[] = Array.from({ length: 4 }, (_, index) => ({
+      id: imageBatchArtifactId(receipt, index), kind: 'image', taskReceipt: receipt, deliveryMode: 'chat',
+      url: `asset://mj-${index}.png`, sourceUrl: `https://cdn.example/mj-${index}.png`,
+      persistence: index === 2 ? 'failed' : 'saved', filePath: index === 2 ? undefined : `mj-${index}.png`,
+      prompt: '猫', provider: 'general', modelId: 'general/mj', createdAt: 1,
+    }));
+    const delivered = await deliverMediaMessageGroup('mj-message', { ...artifacts[0], expectedOutputCount: 4, additionalResults: artifacts.slice(1) });
+    expect(delivered.complete).toBe(false);
+    expect(mocks.storeState.messages).toHaveLength(4);
+    expect(mocks.storeState.messages.map((message) => message.mediaResult?.id)).toEqual(artifacts.map((artifact) => artifact.id));
+    expect(mocks.persistMessage).toHaveBeenCalledTimes(4);
+    const childMessage = mocks.storeState.messages[2];
+    expect(getRecoverableMessageTask(childMessage.id)).toBe(task);
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+    const moved = { ...task, nodeId: 'recovery-node', imageOutputNodeIds: ['first-node', receipt.nodeId] };
+    mocks.getPendingTasksForProject.mockReturnValue([moved]);
+    expect(getRecoverableMessageTask(childMessage.id)).toBe(moved);
+    mocks.getPendingTasksForProject.mockReturnValue([{ ...moved, imageOutputNodeIds: ['unrelated-node'] }]);
+    expect(getRecoverableMessageTask(childMessage.id)).toBeUndefined();
+    const differentAttempt = { ...task, attemptId: 'new-attempt' };
+    mocks.getPendingTasksForProject.mockReturnValue([differentAttempt]);
+    expect(getRecoverableMessageTask(childMessage.id)).toBeUndefined();
+  });
+
+  it('从任何子图确认交付前都必须持久化同一作业全部四条消息', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-original', attemptId: 'mj-attempt' };
+    const task: PendingTask = { ...receipt, nodeType: 'ai-image', provider: 'general', taskType: 'custom-protocol',
+      submitted: true, batchCount: 4, expectedImageOutputs: 4, mediaContext: { projectId: 'project-1', conversationId: 'conversation-1',
+        messageId: 'mj-message', deliveryMode: 'message' } };
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    mocks.storeState.messages = Array.from({ length: 4 }, (_, index): ChatMessage => ({ id: `mj-${index}`,
+      conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done',
+      mediaResult: { id: imageBatchArtifactId(receipt, index), kind: 'image', taskReceipt: receipt, deliveryMode: 'chat',
+        url: `asset://mj-${index}.png`, sourceUrl: `https://cdn.example/mj-${index}.png`, persistence: 'saved',
+        prompt: '猫', provider: 'general', modelId: 'general/mj', createdAt: 1 } }));
+    mocks.persistMessage.mockRejectedValueOnce(new Error('history unavailable'));
+    await completeMediaMessageDelivery('mj-2', mocks.storeState.messages[2].mediaResult!, true);
+    expect(mocks.completeMediaNodeTask).not.toHaveBeenCalled();
+    mocks.persistMessage.mockResolvedValue(undefined);
+    await completeMediaMessageDelivery('mj-2', mocks.storeState.messages[2].mediaResult!, true);
+    expect(mocks.completeMediaNodeTask).toHaveBeenCalledWith(receipt);
+    expect(mocks.persistMessage.mock.calls.slice(-4).map(([message]) => message.id)).toEqual(['mj-0', 'mj-1', 'mj-2', 'mj-3']);
+  });
+
+  it('续存四图只重取失败项，不重新生成或新增重复候选消息', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-original', attemptId: 'mj-attempt' };
+    const task: PendingTask = { ...receipt, nodeId: 'second-recovery-node', imageOutputNodeIds: [receipt.nodeId, 'first-recovery-node'],
+      nodeType: 'ai-image', provider: 'general', taskType: 'custom-protocol',
+      submitted: true, batchCount: 4, expectedImageOutputs: 4, mediaContext: { projectId: 'project-1', conversationId: 'conversation-1',
+        messageId: 'mj-message', deliveryMode: 'message' } };
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/mj-${index}.png`);
+    mocks.storeState.messages = urls.map((sourceUrl, index): ChatMessage => ({
+      id: index === 0 ? 'mj-message' : `media-output-${imageBatchArtifactId(receipt, index)}`,
+      conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done',
+      mediaResult: { id: imageBatchArtifactId(receipt, index), kind: 'image', deliveryMode: 'chat',
+        taskReceipt: index === 1 ? { ...receipt, nodeId: 'first-recovery-node' } : receipt,
+        url: `asset://mj-${index}.png`, sourceUrl, filePath: index === 2 ? undefined : `mj-${index}.png`,
+        persistence: index === 2 ? 'failed' : 'saved', prompt: '猫', modelId: 'general/mj', provider: 'general', createdAt: 1 },
+    }));
+    mocks.storeState.updateMessage.mockImplementation((id: string, patch: Partial<ChatMessage>) => {
+      mocks.storeState.messages = mocks.storeState.messages.map((message) => message.id === id ? { ...message, ...patch } : message);
+    });
+    mocks.storeState.addMessage.mockImplementation((message: ChatMessage) => { mocks.storeState.messages.push(message); });
+    mocks.completeMediaNodeTask.mockImplementation(() => { mocks.getPendingTasksForProject.mockReturnValue([]); });
+    ensureMediaMessageRecoveryHandler();
+    const handler = mocks.registerMediaMessageRecoveryHandler.mock.calls.at(-1)![0] as
+      (savedTask: PendingTask, resultUrls: string[]) => Promise<void>;
+    await handler(task, urls);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledOnce();
+    expect(mocks.persistMediaUrlToProjectData.mock.calls[0][0]).toBe(urls[2]);
+    expect(mocks.storeState.messages).toHaveLength(4);
+    expect(mocks.storeState.messages.every((message) => message.mediaResult?.taskReceipt?.nodeId === task.nodeId)).toBe(true);
+    expect(mocks.storeState.addMessage).not.toHaveBeenCalled();
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.completeMediaNodeTask).toHaveBeenCalledOnce();
+  });
+
+  it('旧任务追加恢复消息后永久脱离已被新结果占用的画布目标', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'reused-node', taskId: 'old-task', attemptId: 'old-attempt' };
+    const task: PendingTask = { ...receipt, nodeType: 'ai-image', provider: 'general', taskType: 'custom-protocol',
+      submitted: true, batchCount: 4, expectedImageOutputs: 4, mediaContext: { projectId: 'project-1', conversationId: 'conversation-1',
+        messageId: 'original-message', deliveryMode: 'node+message', canvasNodeId: 'reused-node' } };
+    const newArtifact: MediaGenerationResult = { id: 'new-artifact', kind: 'image', deliveryMode: 'both',
+      url: 'asset://new.png', sourceUrl: 'https://cdn.example/new.png', filePath: 'new.png', persistence: 'saved',
+      prompt: '新请求提示词', modelId: 'general/new-model', provider: 'general', createdAt: 1 };
+    mocks.storeState.messages = [{ id: 'original-message', conversationId: 'conversation-1', role: 'assistant', content: '',
+      timestamp: 1, status: 'done', mediaResult: newArtifact }, {
+      id: `media-output-${imageBatchArtifactId(receipt, 1)}`, conversationId: 'conversation-1', role: 'assistant', content: '',
+      timestamp: 1, status: 'done', mediaResult: { ...newArtifact, id: imageBatchArtifactId(receipt, 1), taskReceipt: receipt,
+        prompt: '', url: 'asset://old-saved.png', sourceUrl: 'https://cdn.example/old-1.png', filePath: 'old-saved.png' },
+    }];
+    mocks.getPendingTasksForProject.mockReturnValue([task]);
+    mocks.storeState.updateMessage.mockImplementation((id: string, patch: Partial<ChatMessage>) => {
+      mocks.storeState.messages = mocks.storeState.messages.map((message) => message.id === id ? { ...message, ...patch } : message);
+    });
+    mocks.storeState.addMessage.mockImplementation((message: ChatMessage) => { mocks.storeState.messages.push(message); });
+    mocks.updatePendingTask.mockImplementation((_nodeId: string, patch: Partial<PendingTask>) => { Object.assign(task, patch); });
+    let saves = 0;
+    mocks.persistMediaUrlToProjectData.mockImplementation(async (url: string) => {
+      saves += 1;
+      if (saves === 2) throw new Error('disk unavailable');
+      return { mediaUrl: `asset://old-${saves}.png`, sourceUrl: url, filePath: `old-${saves}.png` };
+    });
+    ensureMediaMessageRecoveryHandler();
+    const handler = mocks.registerMediaMessageRecoveryHandler.mock.calls.at(-1)![0] as
+      (savedTask: PendingTask, resultUrls: string[]) => Promise<void>;
+    const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/old-${index}.png`);
+    await expect(handler(task, urls)).rejects.toThrow('原结果已保留');
+    expect(task.mediaContext).toMatchObject({ deliveryMode: 'message', canvasNodeId: undefined });
+    expect(mocks.storeState.messages.find((message) => message.id === 'original-message')?.mediaResult).toBe(newArtifact);
+    mocks.completeMediaNodeTask.mockImplementation(() => { mocks.getPendingTasksForProject.mockReturnValue([]); });
+    await handler(task, urls);
+    expect(mocks.storeState.messages).toHaveLength(5);
+    expect(mocks.storeState.messages.filter((message) => message.id !== 'original-message')
+      .every((message) => message.mediaResult?.deliveryMode === 'chat' && message.mediaResult?.prompt === '')).toBe(true);
+    expect(mocks.storeState.messages.find((message) => message.id === 'original-message')?.mediaResult).toBe(newArtifact);
+    expect(mocks.persistMediaUrlToProjectData).toHaveBeenCalledTimes(4);
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.completeMediaNodeTask).toHaveBeenCalledOnce();
+  });
+
   it('图片原任务恢复时沿用提交时的分辨率和比例，而不是当前项目默认', async () => {
     const parameters = { resolution: '2K', aspectRatio: '9:16', imageQuality: 'high', imageBackground: 'transparent' };
     const task: PendingTask = { projectId: 'project-1', nodeId: 'image-tracking', nodeType: 'ai-image',
@@ -791,5 +1094,16 @@ describe('async media task identity', () => {
     await expect(retryMediaMessageTask('message-1')).rejects.toThrow('提交状态未知');
     expect(mocks.resumeMediaNodeTask).not.toHaveBeenCalled();
     expect(mocks.generateImage).not.toHaveBeenCalled();
+  });
+
+  it('resumes only the saved Muse task when the send acknowledgment was lost', async () => {
+    mocks.getPendingTasksForProject.mockReturnValue([{ nodeId: 'tracking-1', projectId: 'project-1',
+      taskId: 'ac655c56-b537-4c04-8913-fd150fc0e92a', taskType: 'muse', submitted: false,
+      mediaContext: { messageId: 'message-1' } }]);
+    mocks.resumeMediaNodeTask.mockResolvedValue(undefined);
+    await retryMediaMessageTask('message-1');
+    expect(mocks.resumeMediaNodeTask).toHaveBeenCalledWith('tracking-1');
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+    expect(mocks.generateVideo).not.toHaveBeenCalled();
   });
 });

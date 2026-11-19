@@ -4,6 +4,10 @@
  * 本文件只描述可持久化的任务状态，不包含 AbortController、窗口句柄等运行时对象。
  */
 
+import type { AgentTeamRun } from './agentTeam';
+import type { AgentResultReference } from './agentResult';
+import type { CreationProfileSnapshot } from './creationProfile';
+
 export type AgentMode = 'collaborative' | 'autonomous' | 'plan';
 
 export const AGENT_EXPERT_ROLES = [
@@ -59,8 +63,8 @@ export type AgentApprovalStatus =
   | 'expired';
 
 /**
- * 任务终身上限：跨全部执行段（含每次「继续」与「重新规划」）累计。
- * 单段预算每次继续都会重新放宽，只有这层上限能约束任务的总成本。
+ * 受限子任务、显式团队任务的终身上限：跨全部执行段（含继续与重新规划）累计。
+ * 普通交互任务保留兼容字段与累计统计，不据此自动暂停。
  * 本改动之前持久化的任务不带这些字段，读取时用 resolveAgentLifetimeBudget 回退到默认值。
  */
 export interface AgentTaskLifetimeBudget {
@@ -72,7 +76,7 @@ export interface AgentTaskLifetimeBudget {
   maxResumes: number;
 }
 
-/** 单段执行预算；终身上限见 AgentTaskLifetimeBudget。 */
+/** 受限任务的单段执行预算；并发与重试限制对普通任务同样适用。 */
 export interface AgentTaskBudget extends Partial<AgentTaskLifetimeBudget> {
   maxModelRounds: number;
   maxToolCalls: number;
@@ -147,6 +151,8 @@ export interface AgentEvent {
 }
 
 export interface AgentCanvasCheckpoint {
+  /** 新项目历史只在捕获检查点的原运行租约下可重放/回退。 */
+  runtimeEpoch?: string;
   revisionBefore: number;
   revisionAfter: number;
   historyIndexBefore: number;
@@ -218,6 +224,26 @@ export interface AgentToolCallSnapshot {
   effect?: AgentApprovalKind | 'read';
   inputFingerprint?: string;
   canvasCheckpoint?: AgentCanvasCheckpoint;
+  resultReference?: AgentResultReference;
+}
+
+/** 调用前后持久化的安全回执；dispatched 不证明远端已受理。 */
+export interface AgentDispatchRecord {
+  id: string;
+  kind: 'model' | 'tool' | 'team-model';
+  phase: 'prepared' | 'dispatched' | 'settled' | 'not_started' | 'outcome_unknown';
+  toolId?: string;
+  stepId?: string;
+  runRevision?: number;
+  effect?: AgentApprovalKind | 'read';
+  inputDigest?: string;
+  preparedAt: number;
+  dispatchedAt?: number;
+  settledAt?: number;
+  outcome?: 'succeeded' | 'failed';
+  /** 已返回但无法接纳产物；事实已结算，普通继续仍不能再次提交该阶段。 */
+  materializationBlocked?: true;
+  recovery?: { decision: 'verified_completed' | 'abandoned'; decidedAt: number };
 }
 
 /** 供用户勾选的候选模型；category 用于在卡片里分组。 */
@@ -394,16 +420,31 @@ export interface McpOperationReceipt {
 export interface AgentTask {
   id: string;
   projectId: string;
+  /** 新请求原样捕获的跨连接并发前提；旧projectId仍保留原Canvas命名空间。 */
+  executionContext?: import('./project').ProjectExpectedContext;
+  /** legacy任务的持久身份/代际边界；正文和画布版本仍由既有专用守卫管理。 */
+  projectScope?: import('./project').ProjectExpectedContext;
   conversationId: string;
   userMessageId: string;
+  /** 团队任务不得在缺少/损坏团队快照时回退为普通单模型执行。 */
+  executionKind?: 'team';
+  teamRun?: AgentTeamRun;
+  /** 同一次团队提交的非敏感摘要，用于断线后的查重；不是调用模型的重试许可。 */
+  teamRequestDigest?: string;
+  /** 工作台发起的只读创作任务，仅授权目标分集正文，不授予其画布权限。 */
+  workbenchTarget?: { seriesId: string; episodeId: string };
   mode: AgentMode;
   goal: string;
   status: AgentTaskStatus;
   steps: AgentStep[];
+  dispatches?: AgentDispatchRecord[];
+  creationProfile?: CreationProfileSnapshot;
+  /** 组合包准备未完成时，暂停/重启不能绕过异步能力与持久化前置条件。 */
+  creationProfilePreparation?: 'pending' | 'ready' | 'failed';
   currentStepId?: string;
   modelRounds: number;
   toolCallCount: number;
-  /** 已执行的「继续 / 重新规划」次数，受 maxResumes 约束（历史记录可能缺省）。 */
+  /** 已执行的继续/重新规划次数；仅受限子任务、团队受 maxResumes 约束，历史记录可能缺省。 */
   resumeCount?: number;
   /** 用户请求重新规划后待模型消费的指令；消费后清除。 */
   replanRequest?: AgentReplanRequest;
@@ -427,6 +468,12 @@ export interface AgentTask {
   errorCode?: string;
   errorMessage?: string;
   mcpOperation?: McpOperationRecord;
+}
+
+/** 主窗口发起的任务定位请求，只用于当前 UI，不进入任务持久化。 */
+export interface AgentTaskFocusRequest {
+  taskId: string;
+  revision: number;
 }
 
 export const AGENT_TERMINAL_STATUSES = new Set<AgentTaskStatus>([

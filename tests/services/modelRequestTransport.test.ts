@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const transportMocks = vi.hoisted(() => ({
   corsSafeFetch: vi.fn(),
+  logAiResponse: vi.fn(),
 }));
 
 vi.mock('../../src/services/ai/httpTransport', () => transportMocks);
 
 import { streamAssistantReply } from '../../src/services/ai/assistantStream';
-import { generateImagesBatch } from '../../src/services/ai/generateImage';
+import { generateImage, generateImagesBatch, inspectImagePromptLength } from '../../src/services/ai/generateImage';
+import { registerCharacterImageTaskContext } from '../../src/services/characterImageTaskContext';
 import { generateText } from '../../src/services/ai/generateText';
 import { reversePromptAndTags } from '../../src/services/ai/reversePrompt';
 import { generateVideo } from '../../src/services/ai/generateVideo';
@@ -22,17 +24,20 @@ import { parseResponseError } from '../../src/services/ai/httpUtils';
 import { resolveImageDataUrlArray } from '../../src/services/ai/imageUtils';
 import { getProviderDefinition } from '../../src/services/ai/providerCatalogService';
 import { generateImageStandard } from '../../src/services/ai/providers/standardImage';
+import { mediaProviderRegistry } from '../../src/services/ai/mediaProviderRegistry';
+import { resolveImageParameterCapability } from '../../src/services/ai/mediaModelCapabilities';
+import { getImageSizePresets } from '../../src/services/ai/modelSizeProfiles';
 import { analyzeModelProtocolExamples } from '../../src/services/ai/modelProtocolImport';
 import { useAppStore } from '../../src/store/useAppStore';
 import { createImageQuickAdaptTemplate } from '../../src/services/ai/imageModelTemplates';
-import { uploadToRemote } from '../../src/services/uploadService';
+import { uploadMinimaxImageReference, uploadToRemote } from '../../src/services/uploadService';
 import { clearProjectTasks, getPendingTasksForProject, removePendingTask } from '../../src/services/pollManager';
 import { LIBAPI_MODEL_MANIFEST } from '../../src/services/ai/providers/libapiModelManifest';
 import { AIGCSI_BASE_URL, AIGCSI_MODEL_MANIFEST } from '../../src/services/ai/providers/aigcsiModelManifest';
 import { MINIMAX_BASE_URL, MINIMAX_MODEL_MANIFEST } from '../../src/services/ai/providers/minimaxModelManifest';
 import { pollResolvedModelProtocol } from '../../src/services/ai/modelProtocol';
 import { executeRunningHubModel } from '../../src/services/ai/providers/runninghubMedia';
-import type { ModelExecutionProfile } from '../../src/types/aiTypes';
+import type { ModelExecutionProfile, ProtocolJsonValue } from '../../src/types/aiTypes';
 
 function jsonResponse(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -41,8 +46,21 @@ function jsonResponse(payload: unknown): Response {
   });
 }
 
+const protocolSubmitDebug = () => expect.objectContaining({ debug: expect.objectContaining({
+  stage: 'submit', traceId: expect.any(String),
+}) });
+
+async function multipartImageRequest(init: RequestInit) {
+  expect(new Headers(init.headers).get('Content-Type')).toMatch(/^multipart\/form-data; boundary=/);
+  const form = await new Response(init.body, { headers: init.headers }).formData();
+  return { form, fields: Object.fromEntries([...form].filter(([, value]) => typeof value === 'string')),
+    files: [...form.getAll('image'), ...form.getAll('image[]')] as File[] };
+}
+
 beforeEach(() => {
   transportMocks.corsSafeFetch.mockReset();
+  transportMocks.corsSafeFetch.mockRejectedValue(new Error('未模拟的模型网络请求'));
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('未模拟的直接网络请求'));
   useAppStore.setState(useAppStore.getInitialState(), true);
 });
 
@@ -50,7 +68,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('MiniMax 官方素材直传与语音交付', () => {
+describe('MiniMax 官方素材直传与媒体交付', () => {
   function configureMinimax(id = 'speech-2.8-hd') {
     const selected = structuredClone(MINIMAX_MODEL_MANIFEST.find((item) => item.id === id)!);
     clearProjectTasks('minimax-audio-project');
@@ -59,7 +77,7 @@ describe('MiniMax 官方素材直传与语音交付', () => {
       baseUrl: MINIMAX_BASE_URL, selectedModels: [selected],
     });
     const model = useAppStore.getState().config.generalModels!.find((item) => item.providerConfigId === 'my-minimax')!;
-    const nodeType = selected.category === 'video' ? 'ai-video' as const : 'ai-audio' as const;
+    const nodeType = selected.category === 'video' ? 'ai-video' : selected.category === 'image' ? 'ai-image' : 'ai-audio';
     useAppStore.setState({ currentProjectId: 'minimax-audio-project', nodes: [{ id: 'minimax-audio-node', type: nodeType,
       position: { x: 0, y: 0 }, data: { type: nodeType, label: '官方媒体', status: 'loading' } }] });
     return { provider: 'general', model: `general/${model.id}`, nodeId: 'minimax-audio-node', prompt: '欢迎来到创作画布' };
@@ -107,6 +125,55 @@ describe('MiniMax 官方素材直传与语音交付', () => {
       `${MINIMAX_BASE_URL}/v1/files/upload`, `${MINIMAX_BASE_URL}/v1/files/upload`, 'https://api.minimax.io/v1/files/upload',
     ]);
     expect(transportMocks.corsSafeFetch.mock.calls[2][1].headers).toEqual({ Authorization: 'Bearer minimax-rotated-fixture' });
+  });
+
+  it('同一张本地图的图片编辑与视频上传分别使用自己的缓存和文件 ID', async () => {
+    configureMinimax('MiniMax-H3-Image');
+    const source = `data:image/png;base64,${btoa('minimax-image-purpose')}`;
+    for (const fileId of ['2101', '2102']) transportMocks.corsSafeFetch.mockResolvedValueOnce(
+      jsonResponse({ file: { file_id: fileId }, base_resp: { status_code: 0 } }),
+    );
+    await expect(uploadToRemote(source, 'my-minimax', 'image')).resolves.toBe('mm_file://2101');
+    await expect(uploadMinimaxImageReference(source, 'my-minimax')).resolves.toBe('mm_file://2102');
+    await expect(uploadMinimaxImageReference(source, 'my-minimax')).resolves.toBe('mm_file://2102');
+    await expect(uploadToRemote(source, 'my-minimax', 'image')).resolves.toBe('mm_file://2101');
+    await expect(uploadMinimaxImageReference('mm_file://2101', 'my-minimax')).rejects.toThrow('本机文件或可公开访问');
+    expect(transportMocks.corsSafeFetch.mock.calls.map(([url, init]) => [url, (init.body as FormData).get('purpose')]))
+      .toEqual([
+        [`${MINIMAX_BASE_URL}/v1/files/upload`, 'video_generation_input'],
+        [`${MINIMAX_BASE_URL}/v1/files/upload`, 'image_generation_input'],
+      ]);
+  });
+
+  it('H3 Image 文生图提交文生图端点，保留多张结果中成功的图片', async () => {
+    const params = configureMinimax('MiniMax-H3-Image');
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [
+      { url: 'https://cdn.example/minimax-image.png' }, { error: { code: '1027' } },
+    ] }));
+    const result = await generateImagesBatch({ ...params, imageSize: '2K', aspectRatio: '16:9' }, 2);
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0];
+    expect(url).toBe(`${MINIMAX_BASE_URL}/v1/images/generations`);
+    const body = JSON.parse(init.body as string);
+    expect(body).toMatchObject({ model: 'MiniMax-H3-Image', area: '2K', aspect_ratio: '16:9', n: 2, response_format: 'url' });
+    expect(body).not.toHaveProperty('images');
+    expect(result).toMatchObject({ requestedCount: 2, failedCount: 1, results: [{ url: 'https://cdn.example/minimax-image.png' }] });
+  });
+
+  it('H3 Image 高速版按参考图顺序提交编辑端点，私有素材使用图片上传用途', async () => {
+    const params = configureMinimax('MiniMax-H3-Image-Highspeed');
+    const source = `data:image/png;base64,${btoa('minimax-image-edit')}`;
+    const remote = 'https://cdn.example/reference.png';
+    transportMocks.corsSafeFetch
+      .mockResolvedValueOnce(jsonResponse({ file: { file_id: '2201' }, base_resp: { status_code: 0 } }))
+      .mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/minimax-edit.png' }] }));
+    await expect(generateImagesBatch({ ...params, imageSize: '1K', aspectRatio: '1:1', image_urls: [source, remote] }, 1))
+      .resolves.toMatchObject({ results: [{ url: 'https://cdn.example/minimax-edit.png' }] });
+    const [[uploadUrl, uploadInit], [editUrl, editInit]] = transportMocks.corsSafeFetch.mock.calls;
+    expect(uploadUrl).toBe(`${MINIMAX_BASE_URL}/v1/files/upload`);
+    expect((uploadInit.body as FormData).get('purpose')).toBe('image_generation_input');
+    expect(editUrl).toBe(`${MINIMAX_BASE_URL}/v1/images/edits`);
+    expect(JSON.parse(editInit.body as string)).toMatchObject({ model: 'MiniMax-H3-Image-Highspeed',
+      images: [{ image_url: 'mm_file://2201' }, { image_url: remote }] });
   });
 
   it('上传业务失败和非法格式明确报错，不回退 Uguu', async () => {
@@ -481,6 +548,63 @@ describe('standard image error credentials', () => {
 });
 
 describe('GPT Image 2.6 的厂商请求合同', () => {
+  it('超长提示词在标准 JSON 与 multipart 参考图读取和发送前拒绝', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    for (const edit of [false, true]) {
+      await expect(generateImageStandard({ apiKey: 'fixture', baseUrl: 'https://gateway.example/v1', modelName: 'gpt-image-2.6',
+        prompt: '图'.repeat(38_956), dimensions: { width: 1024, height: 1024 },
+        ...(edit ? { imageUrls: ['asset://localhost/reference.png'], imageReferenceRequestMode: 'edits-multipart' as const } : {}),
+      })).rejects.toMatchObject({ name: 'ImagePromptOverflowError', characters: 38_956, maxCharacters: 32_000 });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it('短 @ 引用展开为超长正文时，预检和实际提交使用相同长度', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: {
+      ...state.config.providers, cccapi: { name: 'CCC', apiKey: 'fixture' },
+    } }, nodes: [{ id: 'long-text', type: 'ai-text', position: { x: 0, y: 0 },
+      data: { type: 'ai-text', label: '长文', output: '图'.repeat(38_956) } }] }));
+    const params = { provider: 'cccapi', model: 'cccapi/gpt-image-2.6', prompt: '@{long-text:长文}' };
+    const overflow = await inspectImagePromptLength(params);
+    expect(overflow).toMatchObject({ characters: 38_956, inputCharacters: params.prompt.length });
+    await expect(generateImagesBatch(params, 1)).rejects.toMatchObject({ name: 'ImagePromptOverflowError', characters: 38_956 });
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/trimmed.png' }] }));
+    await generateImagesBatch({ ...params, imagePromptResolution: { original: overflow!.prompt, replacement: '图'.repeat(32_000) } }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body)).prompt).toHaveLength(32_000);
+  });
+
+  it('参考图与画幅说明也计入限制，旧提示词选择不能用于新正文', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { ...state.config.providers,
+      cccapi: { name: 'CCC', apiKey: 'fixture' } } } }));
+    const params = { provider: 'cccapi', model: 'cccapi/gpt-image-2.6', prompt: '图'.repeat(31_950),
+      image_urls: ['asset://localhost/reference.png'], aspectRatio: '9:16' };
+    const overflow = await inspectImagePromptLength(params);
+    expect(overflow!.characters).toBeGreaterThan(32_000);
+    expect(overflow!.prompt).toContain('9:16');
+    await expect(generateImagesBatch({ ...params, imagePromptResolution: { original: '旧正文', replacement: '精简描述' } }, 1))
+      .rejects.toThrow('生成输入已变化');
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it('原生项目允许提示词预检，但实际生成仍要求受信提交守卫', async () => {
+    useAppStore.setState((state) => ({ currentProjectId: 'native-canvas',
+      projectExecutionContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 1,
+        projectId: 'native-project', projectEpoch: 1, canvasId: 'native-canvas',
+        canvasEpoch: 1, canvasRevision: 1, episodeId: null },
+      config: { ...state.config, providers: { ...state.config.providers,
+        cccapi: { name: 'CCC', apiKey: 'fixture' } } } }));
+    const params = { provider: 'cccapi', model: 'cccapi/gpt-image-2.6', prompt: '图'.repeat(32_001) };
+    await expect(inspectImagePromptLength(params)).resolves.toMatchObject({
+      name: 'ImagePromptOverflowError', characters: 32_001, maxCharacters: 32_000,
+    });
+    await expect(generateImagesBatch({ ...params, prompt: '风景' }, 1))
+      .rejects.toThrow('没有可耐久续查的完整回执');
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])('CCC 基础款兼容同步／异步结果（async=%s），只使用原分组 Key', async (asyncResult) => {
     const projectId = 'ccc-26-project';
     clearProjectTasks(projectId);
@@ -674,6 +798,7 @@ describe('CCC 图片异步任务与旧同步响应', () => {
     { status: 200, payload: { error: { code: 'rate_limit_exceeded', message: 'CCC 已明确拒绝提交' } } },
     { status: 429, payload: { error: { code: 'rate_limit_exceeded', message: 'CCC 已明确拒绝提交' } } },
     { status: 500, payload: { error: { code: 'rate_limit_exceeded', message: 'CCC 已明确拒绝提交' } } },
+    { status: 200, payload: { data: [{ error: { code: 'content_policy_violation', message: 'Non posso generare questa immagine.' } }] } },
   ])('CCC HTTP $status 明确失败且没有任务 ID 时清理空记录，不误报提交未知', async ({ status, payload }) => {
     const params = configureCcc();
     transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response(JSON.stringify(payload), {
@@ -694,6 +819,25 @@ describe('CCC 图片异步任务与旧同步响应', () => {
     expect((error as Error).message).toContain('[REDACTED]');
     expect((error as Error).message).not.toContain('discount-fixture');
     expect(getPendingTasksForProject('ccc-project')).toEqual([]);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('CCC批项有规范内容拒绝码时保留意大利语原文并结算失败，不自动重投', async () => {
+    const params = configureCcc(), message = 'Non posso generare questa immagine per motivi di sicurezza.';
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ error: { code: 'content_policy_violation', message } }] }));
+    await expect(generateImagesBatch(params, 1)).rejects.toMatchObject({ definitiveFailure: true, message: `CCC 图片生成失败：${message}` });
+    expect(getPendingTasksForProject('ccc-project')).toEqual([]);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { error: { message: 'Non posso generare questa immagine.' } },
+    { error: { code: 'content_policy_violation' }, data: [{ error: { code: 'content_policy_violation' } }, { message: 'unknown outcome' }] },
+  ])('CCC只有文案或混合未知批项时仍保留原提交，不把整批误判失败', async (payload) => {
+    const params = configureCcc();
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse(payload));
+    await expect(generateImagesBatch(params, 1)).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
+    expect(getPendingTasksForProject('ccc-project')).toEqual([expect.objectContaining({ taskId: '', mediaRecoveryState: 'submit_unknown' })]);
     expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
   });
 
@@ -769,7 +913,8 @@ describe('RunningHub 模型提交失败分类', () => {
   function configureRunningHub() {
     removePendingTask('runninghub-rejection-node');
     const model = 'seedream-v5-pro/text-to-image';
-    useAppStore.setState((state) => ({ currentProjectId: 'runninghub-rejection-project', config: { ...state.config,
+    useAppStore.setState((state) => ({ currentProjectId: 'runninghub-rejection-project', projectLoadStatus: 'ready',
+      projects: [{ id: 'runninghub-rejection-project', name: 'RunningHub 测试项目', createdAt: 1, updatedAt: 1 }], config: { ...state.config,
       providers: { 'runninghub-model': { name: 'RunningHub', apiKey: 'runninghub-rejection-fixture', baseUrl: 'https://www.runninghub.cn' } } },
       nodes: [{ id: 'runninghub-rejection-node', type: 'ai-image', position: { x: 0, y: 0 },
         data: { type: 'ai-image', label: 'RunningHub 图片', status: 'loading', model, provider: 'runninghub' } }],
@@ -874,6 +1019,40 @@ describe('ToAPIs 参考素材上传与图片提交', () => {
     expect(JSON.parse(String(calls[1][1].body))).not.toHaveProperty('image_urls');
   });
 
+  it('角色工作台按 ToAPIs 原协议提交，登记任务 ID 后再查询图片', async () => {
+    const params = configure();
+    const reference = 'https://cdn.example/role-reference.png';
+    const result = 'https://cdn.example/role-candidate.png';
+    const taskId = 'toapis-role-task';
+    const delivered = new Error('角色候选已交付');
+    const received = vi.fn(async (_taskId: string) => {});
+    const destination = registerCharacterImageTaskContext({ assertCurrent: () => {}, execute: async (plan) => {
+      expect(plan.recovery).toMatchObject({ kind: 'protocol', providerBase: 'https://toapis.cn/v1' });
+      const outputs = await plan.execute(async () => {}, received, 'toapis-role-operation');
+      expect(outputs).toEqual([{ url: result }]);
+      throw delivered;
+    } });
+    transportMocks.corsSafeFetch
+      .mockResolvedValueOnce(jsonResponse({ id: taskId, status: 'queued' }))
+      .mockImplementationOnce(async () => {
+        expect(received).toHaveBeenCalledExactlyOnceWith(taskId, { submit: { id: taskId } });
+        return jsonResponse({ status: 'completed', result: { data: [{ url: result }] } });
+      });
+
+    try {
+      await expect(generateImagesBatch({ ...params, characterWorkbench: 'global', image_urls: [reference],
+        imageSize: '2k', aspectRatio: '16:9' }, 1, undefined, destination.beforeSubmit)).rejects.toBe(delivered);
+      const calls = transportMocks.corsSafeFetch.mock.calls;
+      expect(calls.map(([url, init]) => [init.method, url])).toEqual([
+        ['POST', 'https://toapis.cn/v1/images/generations'],
+        ['GET', `https://toapis.cn/v1/images/generations/${taskId}`],
+      ]);
+      expect(JSON.parse(String(calls[0][1].body))).toMatchObject({ reference_images: [reference] });
+    } finally {
+      destination.release();
+    }
+  });
+
   it('本连接未配置 Key 时不借用 APIMart 或其他连接 Key', async () => {
     configure('gpt-image-2', 'https://toapis.cn/v1', '');
     useAppStore.setState((state) => ({ config: { ...state.config, providers: { ...state.config.providers,
@@ -908,8 +1087,8 @@ describe('上传策略使用显式厂商身份', () => {
 });
 
 describe('RelayOnAPI 图片请求与连接身份', () => {
-  function configureRelayonImage(apiKey = 'relayon-image-fixture') {
-    const selected = getProviderDefinition('relayonapi')!.models!.find((model) => model.id === 'image-2-01')!;
+  function configureRelayonImage(apiKey = 'relayon-image-fixture', modelId = 'image-2-01') {
+    const selected = getProviderDefinition('relayonapi')!.models!.find((model) => model.id === modelId)!;
     useAppStore.getState().saveProviderConfig('my-relayon-images', {
       name: '我的万象连接', catalogId: 'relayonapi', relayonGroup: 'image', apiKey, baseUrl: 'https://relayonapi.com/v1',
       selectedModels: [selected],
@@ -918,7 +1097,262 @@ describe('RelayOnAPI 图片请求与连接身份', () => {
     return { provider: 'general', model: `general/${model.id}`, prompt: '生成角色立绘', imageSize: '2K', aspectRatio: '16:9' };
   }
 
-  it('文生和内联参考编辑各提交一次，像素、比例、分辨率一致且不经过公共上传', async () => {
+  it.each(['Midjourney v6', 'Midjourney v6.1', 'Midjourney v7', 'Midjourney v8.1', 'Midjourney v8.2'])(
+    '%s 单次作业仅提交 n=1，保留四个候选及整组原结果续存身份', async (modelId) => {
+      const params = configureRelayonImage('relayon-image-fixture', modelId);
+      clearProjectTasks('relayon-mj-four-results');
+      useAppStore.setState({ currentProjectId: 'relayon-mj-four-results', nodes: [{ id: 'mj-node', type: 'ai-image',
+        position: { x: 0, y: 0 }, data: { type: 'ai-image', label: 'MJ 候选', status: 'loading' } }] });
+      const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/mj-candidate-${index + 1}.png`);
+      transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: urls.map((url) => ({ url })) }));
+      const result = await generateImage({ ...params, imageSize: '1K', nodeId: 'mj-node', collectCandidates: true });
+      expect(result).toMatchObject({ url: urls[0], width: 1536, height: 864, expectedOutputCount: 4 });
+      expect(result.additionalResults?.map(({ url }) => url)).toEqual(urls.slice(1));
+      expect(result.additionalResults?.every((item) => !item.additionalResults && item.taskReceipt?.taskId === result.taskReceipt?.taskId)).toBe(true);
+      expect(getPendingTasksForProject('relayon-mj-four-results')).toEqual([expect.objectContaining({
+        nodeId: 'mj-node', batchCount: 4, expectedImageOutputs: 4, resultUrls: urls, submitted: true, mediaRecoveryState: 'delivery_pending',
+      })]);
+      expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = transportMocks.corsSafeFetch.mock.calls[0];
+      expect(url).toBe('https://api.relayonapi.com/v1/images/generations');
+      expect(JSON.parse(String(init.body))).toMatchObject({ model: modelId, n: 1, resolution: '1k',
+        size: '1536x864', aspect_ratio: '16:9' });
+      expect(new Headers(init.headers).get('Idempotency-Key')).toMatch(/^[a-f0-9-]{36}$/i);
+      expect(JSON.stringify(result)).not.toContain('relayon-image-fixture');
+    },
+  );
+
+  it('只能接收单图的消费者在 MJ 付费提交前明确拒绝，不按 nodeId 猜测候选交付能力', async () => {
+    const params = configureRelayonImage('relayon-image-fixture', 'Midjourney v8.2');
+    for (const nodeId of [undefined, 'ordinary-image-node', 'plugin-image-node']) {
+      await expect(generateImage({ ...params, nodeId })).rejects.toThrow('一次返回多张候选图');
+    }
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it('直接保存万象连接 ID 的节点仍使用原完整协议和 Key，交付四候选且不改配置', async () => {
+    configureRelayonImage('direct-mj-fixture', 'Midjourney v8.2');
+    const before = structuredClone(useAppStore.getState().config.providers['my-relayon-images']);
+    const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/direct-mj-${index}.png`);
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: urls.map((url) => ({ url })) }));
+    const result = await generateImage({ provider: 'my-relayon-images', model: 'my-relayon-images/Midjourney v8.2',
+      prompt: 'direct', imageSize: '2K', aspectRatio: '4:5', collectCandidates: true });
+    expect([result.url, ...result.additionalResults!.map(({ url }) => url)]).toEqual(urls);
+    expect(result.expectedOutputCount).toBe(4);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://api.relayonapi.com/v1/images/generations',
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer direct-mj-fixture' }) }), protocolSubmitDebug());
+    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body))).toMatchObject({
+      model: 'Midjourney v8.2', n: 1, resolution: '2k', size: '1632x2040', aspect_ratio: '4:5',
+    });
+    expect(useAppStore.getState().config.providers['my-relayon-images']).toEqual(before);
+  });
+
+  it.each(['custom-openai', 'relayonapi'])('%s 的同名 MJ 自定义协议不被固定四候选规则接管', async (catalogId) => {
+    const selected = structuredClone(getProviderDefinition('relayonapi')!.models!.find((item) => item.id === 'Midjourney v8.2')!);
+    selected.executionProfile!.protocol!.submit.path = '/custom/mj';
+    const before = structuredClone(selected);
+    useAppStore.getState().saveProviderConfig('my-custom-mj', { name: '我的图片接口', catalogId,
+      apiKey: 'custom-mj-fixture', baseUrl: 'https://gateway.example/v1', selectedModels: [selected] });
+    const model = useAppStore.getState().config.generalModels!.find((item) => item.providerConfigId === 'my-custom-mj')!;
+    const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/custom-mj-${index}.png`);
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: urls.map((url) => ({ url })) }));
+    const result = await generateImage({ provider: 'general', model: `general/${model.id}`, prompt: 'custom', imageSize: '2K', aspectRatio: '1:1' });
+    expect(result.url).toBe(urls[0]);
+    expect(result).not.toHaveProperty('additionalResults');
+    expect(result).not.toHaveProperty('expectedOutputCount');
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://gateway.example/v1/custom/mj', expect.anything(), protocolSubmitDebug());
+    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body))).toMatchObject({ resolution: '2K', n: 1 });
+    expect(useAppStore.getState().config.providers['my-custom-mj'].selectedModels).toEqual([before]);
+  });
+
+  it('万象直连节点的已修改协议仍使用自己的路径和单结果语义', async () => {
+    const selected = structuredClone(getProviderDefinition('relayonapi')!.models!.find((item) => item.id === 'Midjourney v8.2')!);
+    selected.executionProfile!.protocol!.submit.path = '/my-mj/images';
+    useAppStore.getState().saveProviderConfig('direct-custom-mj', { name: '万象自定义协议', catalogId: 'relayonapi',
+      apiKey: 'direct-custom-fixture', baseUrl: 'https://relayonapi.com/v1', selectedModels: [selected] });
+    const before = structuredClone(useAppStore.getState().config.providers['direct-custom-mj']);
+    const directFetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('自定义协议测试不能外联'));
+    transportMocks.corsSafeFetch.mockImplementation(async (url) => {
+      if (url !== 'https://relayonapi.com/v1/my-mj/images') throw new Error('未模拟的自定义模型请求');
+      return jsonResponse({ data: [{ url: 'https://cdn.example/direct-custom.png' }] });
+    });
+    const reference = 'https://custom.example/reference.png';
+    const result = await generateImage({ provider: 'direct-custom-mj', model: 'direct-custom-mj/Midjourney v8.2',
+      prompt: 'direct custom', imageSize: '1K', aspectRatio: '1:1', image_urls: [reference] });
+    expect(result).toMatchObject({ url: 'https://cdn.example/direct-custom.png' });
+    expect(result).not.toHaveProperty('additionalResults');
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://relayonapi.com/v1/my-mj/images', expect.anything(), protocolSubmitDebug());
+    expect(new Headers(transportMocks.corsSafeFetch.mock.calls[0][1].headers).get('Content-Type')).toBe('application/json');
+    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body)).image).toEqual([reference]);
+    expect(directFetch).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config.providers['direct-custom-mj']).toEqual(before);
+  });
+
+  it('MJ 参考编辑可交付四张 Base64，2K 使用型号公布尺寸，不额外提交或裁图', async () => {
+    const params = configureRelayonImage('relayon-image-fixture', 'Midjourney v8.2');
+    const encoded = ['YQ==', 'Yg==', 'Yw==', 'ZA=='];
+    const reference = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8Z0AAAAASUVORK5CYII=';
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: encoded.map((b64_json) => ({ b64_json })) }));
+    const result = await generateImagesBatch({ ...params, aspectRatio: '3:2', image_urls: [reference] }, 1);
+    expect(result).toMatchObject({ requestedCount: 1, expectedOutputCount: 4, failedCount: 0 });
+    expect(result.results.map(({ url }) => url)).toEqual(encoded.map((value) => `data:image/png;base64,${value}`));
+    expect(result.results.every((item) => item.width === 2048 && item.height === 1360)).toBe(true);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://api.relayonapi.com/v1/images/edits', expect.anything(), protocolSubmitDebug());
+    const { fields, files } = await multipartImageRequest(transportMocks.corsSafeFetch.mock.calls[0][1]);
+    expect(fields).toMatchObject({ model: 'Midjourney v8.2', n: '1', resolution: '2k', size: '2048x1360' });
+    expect(files).toHaveLength(1);
+    expect(files[0].type).toBe('image/png');
+    expect(Buffer.from(await files[0].arrayBuffer())).toEqual(Buffer.from(reference.split(',')[1], 'base64'));
+  });
+
+  it('MJ 少返回候选仍保留期望四张，不补交付费生成；一次请求不能把四候选当 n=4', async () => {
+    const params = configureRelayonImage('relayon-image-fixture', 'Midjourney v8.2');
+    const urls = Array.from({ length: 3 }, (_, index) => `https://cdn.example/mj-short-${index}.png`);
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: urls.map((url) => ({ url })) }));
+    await expect(generateImagesBatch(params, 1)).resolves.toMatchObject({ requestedCount: 1, expectedOutputCount: 4,
+      failedCount: 1, results: urls.map((url) => expect.objectContaining({ url })) });
+    await expect(generateImagesBatch(params, 4)).rejects.toThrow('单次最多生成 1');
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('2.6 01 文件编辑采用独立文档尺寸，不默认追加质量、背景或多候选', async () => {
+    const params = configureRelayonImage('relayon-image-fixture', 'image-2.6-01');
+    const reference = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8Z0AAAAASUVORK5CYII=';
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'aW1hZ2U=' }] }));
+    const result = await generateImage({ ...params, aspectRatio: '9:16', image_urls: [reference] });
+    expect(result).toMatchObject({ url: 'data:image/png;base64,aW1hZ2U=', width: 1440, height: 2560 });
+    expect(result).not.toHaveProperty('additionalResults');
+    expect(result).not.toHaveProperty('expectedOutputCount');
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://api.relayonapi.com/v1/images/edits', expect.anything(), protocolSubmitDebug());
+    const { fields, files } = await multipartImageRequest(transportMocks.corsSafeFetch.mock.calls[0][1]);
+    expect(fields).toMatchObject({ model: 'image-2.6-01', n: '1', size: '1440x2560' });
+    for (const key of ['resolution', 'aspect_ratio']) expect(fields).not.toHaveProperty(key);
+    expect(fields).not.toHaveProperty('quality');
+    expect(fields).not.toHaveProperty('background');
+    expect(files).toHaveLength(1);
+    expect(files[0].name).toBe('reference-1.png');
+    expect(files[0].type).toBe('image/png');
+    expect(Buffer.from(await files[0].arrayBuffer())).toEqual(Buffer.from(reference.split(',')[1], 'base64'));
+  });
+
+  it('已保存的 2.6 旧内置能力无需拉取即可发送新尺寸，参数面板与生成一致且不写回', async () => {
+    const params = configureRelayonImage('relayon-image-fixture', 'image-2.6-01');
+    const pixels = getImageSizePresets('relayon-image-2.5');
+    const provider = useAppStore.getState().config.providers['my-relayon-images'];
+    const selected = structuredClone(provider.selectedModels![0]);
+    const saved = { ...selected.imageCapability!, resolutions: Object.keys(pixels),
+      ratios: Object.keys(pixels['1K']), dimensionPresets: pixels };
+    selected.imageCapability = saved;
+    useAppStore.setState((state) => ({ config: { ...state.config,
+      providers: { ...state.config.providers, 'my-relayon-images': { ...provider, selectedModels: [selected] } },
+      generalModels: state.config.generalModels!.map((item) => item.providerConfigId === 'my-relayon-images'
+        ? { ...item, imageCapability: structuredClone(saved) } : item),
+    } }));
+    const before = structuredClone({ provider: useAppStore.getState().config.providers['my-relayon-images'],
+      models: useAppStore.getState().config.generalModels });
+    const capability = resolveImageParameterCapability(params.model, params.provider, useAppStore.getState().config);
+    expect(capability!.dimensionPresets!['2K']['16:9']).toEqual([2560, 1440]);
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/relayon-26-new-size.png' }] }));
+    await expect(generateImage(params)).resolves.toMatchObject({ width: 2560, height: 1440 });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://api.relayonapi.com/v1/images/generations', expect.anything(), protocolSubmitDebug());
+    const body = JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body));
+    expect(body).toMatchObject({ model: 'image-2.6-01', resolution: '2K', aspect_ratio: '16:9', size: '2560x1440' });
+    expect({ provider: useAppStore.getState().config.providers['my-relayon-images'],
+      models: useAppStore.getState().config.generalModels }).toEqual(before);
+  });
+
+  it.each(['image-2.6-flare-01', 'image-2.6-sunburst-01'])('%s 的格式、质量和GIF标量完整进入JSON请求且不改写配置', async (id) => {
+    const params = configureRelayonImage('format-fixture', id);
+    const before = structuredClone(useAppStore.getState().config);
+    for (const format of ['png', 'gif', 'svg'] as const) {
+      transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: `https://cdn.example/format-result.${format}` }] }));
+      await expect(generateImage({ ...params, imageSize: '4K', aspectRatio: '1:1', imageOutputFormat: format,
+        imageQuality: format === 'png' ? 'auto' : 'high',
+        ...(format === 'gif' ? { imageFrameCount: 16, imageFrameDurationMs: 30, imageTransparent: false } : {}),
+      })).resolves.toMatchObject({ url: `https://cdn.example/format-result.${format}`, width: 4096, height: 4096 });
+      const [url, init] = transportMocks.corsSafeFetch.mock.calls.at(-1)!;
+      expect(url).toBe('https://api.relayonapi.com/v1/images/generations');
+      const body = JSON.parse(String(init.body));
+      expect(body).toMatchObject({ model: id, size: '4096x4096', resolution: '4K', aspect_ratio: '1:1',
+        output_format: format, n: 1, response_format: 'url' });
+      expect(body).not.toHaveProperty('image');
+      if (format === 'gif') expect(body).toMatchObject({ frame_count: 16, frame_duration_ms: 30, transparent: false, quality: 'high' });
+      else for (const field of ['frame_count', 'frame_duration_ms', 'transparent']) expect(body).not.toHaveProperty(field);
+      if (format === 'png') expect(body).not.toHaveProperty('quality');
+      else expect(body.quality).toBe('high');
+    }
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(3);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config).toEqual(before);
+  });
+
+  it.each(['image-2.6-flare-01', 'image-2.6-sunburst-01'].flatMap((id) => (['gif', 'svg'] as const).map((format) => ({ id, format }))))(
+    '$id 的$format参考、非方图、无效帧字段在读取素材和提交前拒绝', async ({ id, format }) => {
+    const params = configureRelayonImage('format-fixture', id);
+    await expect(generateImage({ ...params, aspectRatio: '1:1', imageOutputFormat: format,
+      image_urls: ['asset://localhost/unreadable-reference.png'] })).rejects.toThrow('文生');
+    await expect(generateImage({ ...params, aspectRatio: '16:9', imageOutputFormat: format })).rejects.toThrow('方图');
+    await expect(generateImage({ ...params, aspectRatio: '1:1', imageOutputFormat: format,
+      imageFrameDurationMs: 21 })).rejects.toThrow();
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['image-2.6-flare-01', 'image-2.6-sunburst-01'].flatMap((id) => [1, 2].flatMap((count) => [false, true].map((explicit) => ({ id, count, explicit })))))(
+    '$id 的$count图PNG编辑不发送output_format，显式PNG=$explicit，文件有序且仅一个POST', async ({ id, count, explicit }) => {
+    const params = configureRelayonImage('format-fixture', id);
+    const references = [
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8Z0AAAAASUVORK5CYII=',
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    ].slice(0, count);
+    const before = structuredClone(useAppStore.getState().config);
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/variant-edited.png' }] }));
+    await expect(generateImage({ ...params, ...(explicit ? { imageOutputFormat: 'png' as const } : {}), image_urls: references }))
+      .resolves.toMatchObject({ url: 'https://cdn.example/variant-edited.png', width: 2560, height: 1440 });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://api.relayonapi.com/v1/images/edits', expect.anything(), protocolSubmitDebug());
+    const { form, fields, files } = await multipartImageRequest(transportMocks.corsSafeFetch.mock.calls[0][1]);
+    expect(form.getAll(count === 1 ? 'image' : 'image[]')).toHaveLength(count);
+    expect(form.has(count === 1 ? 'image[]' : 'image')).toBe(false);
+    expect(fields).toMatchObject({ model: id, size: '2560x1440', n: '1' });
+    for (const key of ['output_format', 'resolution', 'aspect_ratio']) expect(fields).not.toHaveProperty(key);
+    for (const field of ['frame_count', 'frame_duration_ms', 'transparent']) expect(fields).not.toHaveProperty(field);
+    expect(files.map((file) => file.type)).toEqual(Array(count).fill('image/png'));
+    expect(files.map((file) => file.name)).toEqual(Array.from({ length: count }, (_, index) => `reference-${index + 1}.png`));
+    for (const [index, file] of files.entries()) {
+      expect(Buffer.from(await file.arrayBuffer())).toEqual(Buffer.from(references[index].split(',')[1], 'base64'));
+    }
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config).toEqual(before);
+  });
+
+  it.each(['image-2.6-flare-01', 'image-2.6-sunburst-01'])('%s 同名自定义编辑协议保留原output_format，不被内置PNG省略规则接管', async (id) => {
+    const params = configureRelayonImage('custom-format-fixture', id);
+    const connection = useAppStore.getState().config.providers['my-relayon-images'];
+    const selected = structuredClone(connection.selectedModels![0]);
+    selected.executionProfile!.protocol!.submit.path = '/custom/edits';
+    useAppStore.getState().saveProviderConfig('my-relayon-images', { ...connection, selectedModels: [selected] });
+    const before = structuredClone(useAppStore.getState().config);
+    const reference = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8Z0AAAAASUVORK5CYII=';
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/custom-variant.png' }] }));
+    await expect(generateImage({ ...params, imageOutputFormat: 'png', image_urls: [reference] }))
+      .resolves.toMatchObject({ url: 'https://cdn.example/custom-variant.png', width: 2560, height: 1440 });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://relayonapi.com/v1/custom/edits', expect.anything(), protocolSubmitDebug());
+    const init = transportMocks.corsSafeFetch.mock.calls[0][1];
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
+    expect(JSON.parse(String(init.body))).toMatchObject({ model: id, output_format: 'png', size: '2560x1440',
+      resolution: '2K', aspect_ratio: '16:9', n: 1, image: [reference] });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config).toEqual(before);
+  });
+
+  it('未声明输出格式的旧型号在网络副作用前拒绝新增参数', async () => {
+    const params = configureRelayonImage();
+    await expect(generateImage({ ...params, imageOutputFormat: 'gif' })).rejects.toThrow('未声明');
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('文生 JSON 和参考文件编辑各提交一次，像素、比例、分辨率一致且不经过公共上传', async () => {
     const params = configureRelayonImage();
     useAppStore.setState((state) => ({ config: { ...state.config, providers: { ...state.config.providers,
       relayonapi: { name: '另一万象连接', catalogId: 'relayonapi', apiKey: 'wrong-default-key-fixture' },
@@ -939,19 +1373,22 @@ describe('RelayOnAPI 图片请求与连接身份', () => {
 
     const calls = transportMocks.corsSafeFetch.mock.calls;
     expect(calls.map(([url]) => url)).toEqual([
-      'https://relayonapi.com/v1/images/generations', 'https://relayonapi.com/v1/images/edits',
+      'https://api.relayonapi.com/v1/images/generations', 'https://api.relayonapi.com/v1/images/edits',
     ]);
     for (const [, init] of calls) {
       expect(init).toMatchObject({ method: 'POST', headers: { Authorization: 'Bearer relayon-image-fixture' } });
-      expect(JSON.parse(String(init.body))).toMatchObject({ model: 'image-2-01', size: '2048x1152',
-        aspect_ratio: '16:9', resolution: '2K', n: 1, response_format: 'url' });
-      expect(JSON.parse(String(init.body))).not.toHaveProperty('relayonGroup');
       expect(init.headers).not.toHaveProperty('relayonGroup');
-      expect(JSON.parse(String(init.body))).not.toHaveProperty('quality');
     }
-    const bodies = calls.map(([, init]) => JSON.parse(String(init.body)));
-    expect(bodies[0]).not.toHaveProperty('image');
-    expect(bodies[1].image).toEqual([reference]);
+    const generated = JSON.parse(String(calls[0][1].body));
+    expect(generated).toMatchObject({ model: 'image-2-01', size: '2048x1152', aspect_ratio: '16:9', resolution: '2K', n: 1, response_format: 'url' });
+    expect(generated).not.toHaveProperty('image');
+    const { fields, files } = await multipartImageRequest(calls[1][1]);
+    expect(fields).toMatchObject({ model: 'image-2-01', size: '2048x1152', aspect_ratio: '16:9', resolution: '2K', n: '1', response_format: 'url' });
+    expect(fields).not.toHaveProperty('relayonGroup');
+    expect(fields).not.toHaveProperty('quality');
+    expect(files).toHaveLength(1);
+    expect(files[0].type).toBe('image/png');
+    expect(Buffer.from(await files[0].arrayBuffer())).toEqual(Buffer.from(reference.split(',')[1], 'base64'));
     const keys = calls.map(([, init]) => new Headers(init.headers).get('Idempotency-Key'));
     expect(keys.every((key) => typeof key === 'string' && key.length > 0)).toBe(true);
     expect(new Set(keys).size).toBe(2);
@@ -963,21 +1400,24 @@ describe('RelayOnAPI 图片请求与连接身份', () => {
     useAppStore.getState().saveProviderConfig('relayonapi', {
       name: '同名自定义', catalogId: 'custom-openai', apiKey: 'custom-image-fixture', baseUrl: 'https://custom.example/v1',
       selectedModels: [{ id: 'image-2-01', name: '自定义图片', provider: 'relayonapi', category: 'image',
+        imageReferenceRequestMode: 'generation-json-image-data-urls',
         executionProfile: { preset: 'custom', protocol: { version: 2, mode: 'sync', auth: { type: 'bearer' },
-          submit: { method: 'POST', path: '/render', body: { model: '{{model}}', prompt: '{{prompt}}' } },
+          submit: { method: 'POST', path: '/render', body: { model: '{{model}}', prompt: '{{prompt}}', images: '{{imageUrls}}' } },
           response: { type: 'json', result: { urlPath: 'url' } } } },
       }],
     });
     const model = useAppStore.getState().config.generalModels!.find((item) => item.providerConfigId === 'relayonapi')!;
     transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ url: 'https://cdn.example/custom-relay.png' }));
 
-    await expect(generateImagesBatch({ provider: 'general', model: `general/${model.id}`, prompt: '使用自己的图片协议' }, 1))
+    const reference = 'data:image/png;base64,YQ==';
+    await expect(generateImagesBatch({ provider: 'general', model: `general/${model.id}`, prompt: '使用自己的图片协议', image_urls: [reference] }, 1))
       .resolves.toMatchObject({ results: [{ url: 'https://cdn.example/custom-relay.png' }] });
 
     expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://custom.example/v1/render', expect.objectContaining({
       method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer custom-image-fixture' }),
-    }));
+    }), protocolSubmitDebug());
     expect(new Headers(transportMocks.corsSafeFetch.mock.calls[0][1].headers).has('Idempotency-Key')).toBe(false);
+    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body)).images).toEqual([reference]);
   });
 
   it('当前别名连接缺少 Key 时不借用默认万象连接的凭据', async () => {
@@ -996,7 +1436,7 @@ describe('RelayOnAPI 图片请求与连接身份', () => {
     const url = 'https://relayonapi.com/v1/images/private-result';
     transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url }] }));
     const result = await generateImagesBatch({ ...params, nodeId: 'relayon-sync-image' }, 1);
-    const access = { providerConfigId: 'my-relayon-images', origin: 'https://relayonapi.com', auth: { type: 'bearer' } };
+    const access = { providerConfigId: 'my-relayon-images', origin: 'https://api.relayonapi.com', auth: { type: 'bearer' } };
     expect(result.mediaDownloadAccess).toEqual(access);
     expect(result.results[0]).toMatchObject({ url, mediaDownloadAccess: access });
     expect(result.taskReceipt).toMatchObject({ nodeId: 'relayon-sync-image', projectId: 'relayon-sync-delivery-project',
@@ -1011,12 +1451,30 @@ describe('RelayOnAPI 图片请求与连接身份', () => {
     expect(localStorage.getItem('ai_canvas_pending_tasks')).not.toContain('relayon-image-fixture');
     expect(JSON.stringify(result)).not.toContain('relayon-image-fixture');
     expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
-    expect(transportMocks.corsSafeFetch).toHaveBeenCalledWith('https://relayonapi.com/v1/images/generations',
-      expect.objectContaining({ method: 'POST' }));
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledWith('https://api.relayonapi.com/v1/images/generations',
+      expect.objectContaining({ method: 'POST' }), protocolSubmitDebug());
   });
 });
 
 describe('标准 Bearer 图片结果交付', () => {
+  it('旧 adapter 返回多项但未声明固定候选时仍保留首项和原 RunningHub 专用输出集合', async () => {
+    const outputs = ['https://cdn.example/legacy-first.png', 'https://cdn.example/legacy-second.png']
+      .map((url) => ({ url, kind: 'image' as const }));
+    const generate = vi.fn(async () => ({ requestedCount: 1, failedCount: 0,
+      results: outputs.map((output) => ({ url: output.url, width: 1024, height: 1024, runninghubOutputs: outputs })) }));
+    const unregister = mediaProviderRegistry.register({ providerId: 'legacy-multi-image', capabilities: ['image'], generateImage: generate });
+    try {
+      const result = await generateImage({ provider: 'legacy-multi-image', model: 'legacy-multi-image/legacy-model', prompt: 'legacy' });
+      expect(result).toEqual({ url: outputs[0].url, width: 1024, height: 1024, runninghubOutputs: outputs });
+      expect(result).not.toHaveProperty('additionalResults');
+      expect(result).not.toHaveProperty('expectedOutputCount');
+      expect(generate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ requestedCount: 1 }));
+      expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
   it('没有自定义协议的模型也保留下载身份和同步结果，不重新生成', async () => {
     useAppStore.getState().saveProviderConfig('plain-standard-images', {
       name: '标准图片', catalogId: 'custom-openai', apiKey: 'standard-key-fixture', baseUrl: 'https://standard.example/v1',
@@ -1086,16 +1544,20 @@ describe('RelayOnAPI 普通 2.5 旧连接的质量与背景', () => {
         .resolves.toMatchObject({ results: [{ url: 'https://cdn.example/relayon-alpha.png', width: 1152, height: 2048 }] });
     }
     expect(transportMocks.corsSafeFetch.mock.calls.map(([url]) => url)).toEqual([
-      'https://relayonapi.com/v1/images/generations', 'https://relayonapi.com/v1/images/edits',
+      'https://api.relayonapi.com/v1/images/generations', 'https://api.relayonapi.com/v1/images/edits',
     ]);
-    const bodies = transportMocks.corsSafeFetch.mock.calls.map(([, init]) => {
+    for (const [, init] of transportMocks.corsSafeFetch.mock.calls) {
       expect(init.headers).toMatchObject({ Authorization: 'Bearer relayon-options-fixture' });
-      return JSON.parse(String(init.body));
-    });
-    for (const body of bodies) expect(body).toMatchObject({ model: modelId, quality: 'high', background: 'transparent',
+    }
+    const generated = JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body));
+    expect(generated).toMatchObject({ model: modelId, quality: 'high', background: 'transparent',
       output_format: 'png', size: '1152x2048', aspect_ratio: '9:16', resolution: '2K', n: 1 });
-    expect(bodies[0]).not.toHaveProperty('image');
-    expect(bodies[1].image).toEqual([reference]);
+    expect(generated).not.toHaveProperty('image');
+    const edited = await multipartImageRequest(transportMocks.corsSafeFetch.mock.calls[1][1]);
+    expect(edited.fields).toMatchObject({ model: modelId, quality: 'high', background: 'transparent',
+      output_format: 'png', size: '1152x2048', aspect_ratio: '9:16', resolution: '2K', n: '1' });
+    expect(edited.files).toHaveLength(1);
+    expect(Buffer.from(await edited.files[0].arrayBuffer())).toEqual(Buffer.from(reference.split(',')[1], 'base64'));
     expect(directFetch).not.toHaveBeenCalled();
     const config = useAppStore.getState().config;
     expect(config.providers['relayon-old-options'].selectedModels).toEqual([original.selected]);
@@ -1127,11 +1589,12 @@ describe('RelayOnAPI 普通 2.5 旧连接的质量与背景', () => {
     await expect(generateImagesBatch({ ...params, imageQuality: 'high', imageBackground: 'transparent', image_urls: [reference] }, 1))
       .resolves.toMatchObject({ results: [{ url: 'https://cdn.example/relayon-recovered-options.png', width: 1152, height: 2048 }] });
 
-    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://relayonapi.com/v1/images/edits', expect.anything());
-    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body))).toMatchObject({
-      image: [reference], quality: 'high', background: 'transparent', output_format: 'png',
-      size: '1152x2048', aspect_ratio: '9:16', resolution: '2K', n: 1,
-    });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://api.relayonapi.com/v1/images/edits', expect.anything(), protocolSubmitDebug());
+    const { fields, files } = await multipartImageRequest(transportMocks.corsSafeFetch.mock.calls[0][1]);
+    expect(fields).toMatchObject({ quality: 'high', background: 'transparent', output_format: 'png',
+      size: '1152x2048', aspect_ratio: '9:16', resolution: '2K', n: '1' });
+    expect(files).toHaveLength(1);
+    expect(Buffer.from(await files[0].arrayBuffer())).toEqual(Buffer.from(reference.split(',')[1], 'base64'));
     expect(directFetch).not.toHaveBeenCalled();
     const after = useAppStore.getState().config;
     expect(after.providers['relayon-old-options'].selectedModels).toEqual([original.selected]);
@@ -1176,7 +1639,7 @@ describe('RelayOnAPI 普通 2.5 旧连接的质量与背景', () => {
     transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/relayon-custom.webp' }] }));
     await generateImagesBatch({ provider: 'general', model: `general/${model.id}`, prompt: '保留自己配置的图片协议',
       imageSize: '2K', aspectRatio: '9:16', imageQuality: 'high', imageBackground: 'opaque' }, 1);
-    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://relayonapi.com/v1/custom/images', expect.anything());
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith('https://relayonapi.com/v1/custom/images', expect.anything(), protocolSubmitDebug());
     expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body))).toMatchObject({
       quality: 'high', background: 'opaque', output_format: 'webp', size: '1152x2048', aspect_ratio: '9:16', resolution: '2K',
     });
@@ -1657,6 +2120,28 @@ describe('LibAPI 音频合同与原任务交付', () => {
 });
 
 describe('image quick template request transport', () => {
+  it('keeps a saved provider-specific custom image protocol independent of catalog size defaults', async () => {
+    useAppStore.getState().saveProviderConfig('custom-apimart-image', {
+      name: 'Custom APIMart image', catalogId: 'apimart', apiKey: 'template-fixture', baseUrl: 'https://images.example/v1',
+      selectedModels: [{ id: 'gpt-image-2.5-flare', name: 'Custom image', category: 'image', provider: 'custom-apimart-image',
+        executionProfile: { preset: 'custom', protocol: { version: 2, mode: 'sync',
+          submit: { method: 'POST', path: '/custom/image', body: { prompt: '{{prompt}}', tier: '{{imageSize}}' } },
+          response: { type: 'json', result: { urlPath: 'data.*.url' } },
+        } } }],
+    });
+    const selected = useAppStore.getState().config.providers['custom-apimart-image'].selectedModels![0];
+    useAppStore.getState().addGeneralModel({ name: selected.name, modelId: selected.id, category: 'image',
+      providerConfigId: 'custom-apimart-image', executionProfile: selected.executionProfile });
+    const model = useAppStore.getState().config.generalModels!.find((item) => item.providerConfigId === 'custom-apimart-image')!;
+    const before = structuredClone(useAppStore.getState().config);
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/custom.png' }] }));
+    await generateImagesBatch({ provider: 'general', model: `general/${model.id}`, prompt: 'Draw a cup', imageSize: 'HD' }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    expect(transportMocks.corsSafeFetch.mock.calls[0][0]).toBe('https://images.example/v1/custom/image');
+    expect(JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body))).toEqual({ prompt: 'Draw a cup', tier: 'HD' });
+    expect(useAppStore.getState().config).toEqual(before);
+  });
+
   function configureTemplate(templateId: string) {
     useAppStore.getState().saveProviderConfig('custom-template', {
       name: 'Custom images', catalogId: 'custom-openai', apiKey: 'template-fixture', baseUrl: 'https://images.example/v1',
@@ -1670,21 +2155,26 @@ describe('image quick template request transport', () => {
   it.each([
     { id: 'banana-pro:google', path: '/v1/models/actual-model-id:generateContent', auth: { 'x-goog-api-key': 'template-fixture' }, field: 'responseFormat' },
     { id: 'banana-pro:gemini-relay', path: '/v1beta/models/actual-model-id:generateContent', auth: { Authorization: 'Bearer template-fixture' }, field: 'imageConfig' },
-  ])('sends every prepared reference in the selected $id native contract', async ({ id, path, auth, field }) => {
+  ])('sends all seven prepared references in one POST using the selected $id native contract', async ({ id, path, auth, field }) => {
     const params = configureTemplate(id);
-    const references = ['data:image/png;base64,YQ==', 'data:image/png;base64,Yg==', 'data:image/png;base64,Yw=='];
+    const references = ['YQ==', 'Yg==', 'Yw==', 'ZA==', 'ZQ==', 'Zg==', 'Zw==']
+      .map((data) => `data:image/png;base64,${data}`);
+    const readReference = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Unexpected reference fetch'));
     transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ candidates: [{ content: { parts: [
       { text: 'Description' }, { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
     ] } }] }));
     const result = await generateImagesBatch({ ...params, image_urls: references, imageSize: '2K', aspectRatio: '16:9' }, 1);
     expect(result.results[0].url).toBe('data:image/png;base64,aW1hZ2U=');
+    expect(result.results[0]).toMatchObject({ width: 2752, height: 1536 });
     expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(1);
     const [url, init] = transportMocks.corsSafeFetch.mock.calls[0];
+    expect(init.method).toBe('POST');
+    expect(readReference).not.toHaveBeenCalled();
     expect(url).toBe(`https://images.example${path}`);
     expect(init.headers).toMatchObject(auth);
     const body = JSON.parse(String(init.body));
     expect(body.contents[0].parts[0].text).toContain(params.prompt);
-    expect(body.contents[0].parts[0].text).toContain('3 张参考图');
+    expect(body.contents[0].parts[0].text).toContain('7 张参考图');
     expect(body.contents[0].parts[0].text).toContain('16:9');
     expect(body.contents[0].parts).toEqual([{ text: expect.any(String) }, ...references.map((reference) => ({
       inlineData: { mimeType: 'image/png', data: reference.split(',')[1] },
@@ -1693,10 +2183,12 @@ describe('image quick template request transport', () => {
       ? { aspectRatio: '16:9', imageSize: '2K' } : { image: { aspectRatio: '16:9', imageSize: '2K' } });
   });
 
-  it('blocks references beyond the visible native transport budget before reading or submitting', async () => {
+  it('blocks references beyond the model-declared native limit before reading or submitting', async () => {
     const params = configureTemplate('banana-pro:google');
-    await expect(generateImagesBatch({ ...params, image_urls: Array.from({ length: 7 }, (_, index) =>
-      `https://cdn.example/reference-${index}.png`) }, 1)).rejects.toThrow('最多支持 6');
+    const readReference = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Unexpected reference fetch'));
+    await expect(generateImagesBatch({ ...params, image_urls: Array.from({ length: 15 }, (_, index) =>
+      `https://cdn.example/reference-${index}.png`) }, 1)).rejects.toThrow('最多支持 14');
+    expect(readReference).not.toHaveBeenCalled();
     expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
   });
 
@@ -1846,6 +2338,53 @@ describe('CCC Gemini 旧连接的原生图片路由', () => {
     },
   );
 
+  it.each([
+    ['Nano-Banana-pro', false], ['Nano-Banana-2', false], ['Nano-Banana-2.1', false],
+    ['Nano-Banana-pro', true], ['Nano-Banana-2', true], ['Nano-Banana-2.1', true],
+  ] as const)('CCC 当前型号 %s 的直接节点=%s 按用户选择发送三档分辨率并保留比例', async (modelId, direct) => {
+    const params = configureCccImage({ modelId, direct });
+    const saved = structuredClone(useAppStore.getState().config);
+    mockNativeCccImage();
+    for (const imageSize of ['1K', '2K', '4K']) {
+      transportMocks.corsSafeFetch.mockClear();
+      await generateImagesBatch({ ...params, imageSize, aspectRatio: '9:16' }, 1);
+      expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+      const [url, init] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`https://cccapi.cn/v1beta/models/${modelId}:generateContent`);
+      expect(init.headers).toMatchObject({ Authorization: 'Bearer banana-group-key-fixture' });
+      expect(JSON.parse(String(init.body)).generationConfig.imageConfig).toEqual({ imageSize, aspectRatio: '9:16' });
+    }
+    expect(useAppStore.getState().config).toEqual(saved);
+  });
+
+  it('当前 Nano-Banana-pro 的用户自定义协议保持原请求，不被目录能力替换', async () => {
+    const params = configureCccImage({ modelId: 'Nano-Banana-pro', profile: customCccImageProfile() });
+    const saved = structuredClone(useAppStore.getState().config);
+    expect(resolveImageParameterCapability(params.model, params.provider, useAppStore.getState().config))
+      .toMatchObject({ resolutions: [], ratios: [] });
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/custom-pro.png' }] }));
+    await generateImagesBatch({ ...params, imageSize: '4K', aspectRatio: '9:16' }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://cccapi.cn/v1/my-image-job');
+    expect(JSON.parse(String(init.body))).toEqual({ model: 'Nano-Banana-pro', prompt: '画一只猫' });
+    expect(useAppStore.getState().config).toEqual(saved);
+  });
+
+  it('旧 CCC 直连节点也按已选 custom 的参数映射展示并发送原请求', async () => {
+    const params = configureCccImage({ modelId: 'Nano-Banana-2.1', direct: true, selectedProfile: customCccImageProfile() });
+    const saved = structuredClone(useAppStore.getState().config);
+    expect(resolveImageParameterCapability(params.model, params.provider, useAppStore.getState().config))
+      .toMatchObject({ resolutions: [], ratios: [] });
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://cdn.example/custom-direct.png' }] }));
+    await generateImagesBatch({ ...params, imageSize: '4K', aspectRatio: '9:16' }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://cccapi.cn/v1/my-image-job');
+    expect(JSON.parse(String(init.body))).toEqual({ model: 'Nano-Banana-2.1', prompt: '画一只猫' });
+    expect(useAppStore.getState().config).toEqual(saved);
+  });
+
   it.each([false, true])('显式 custom 协议作为已保存模型／选中配置后备（%s）均不被覆盖', async (selectedFallback) => {
     const profile = customCccImageProfile();
     const params = configureCccImage({ modelId: 'gemini-unlisted-image',
@@ -1882,10 +2421,164 @@ describe('CCC Gemini 旧连接的原生图片路由', () => {
     expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('旧连接缺协议时仍在发送前阻止未接入的参考图（直接节点=%s）', async (direct) => {
+  it.each([false, true])('旧连接缺协议时通过原生 parts 完整发送多图（直接节点=%s）', async (direct) => {
     const params = configureCccImage({ direct });
-    await expect(generateImagesBatch({ ...params, image_urls: ['https://cdn.example/reference.png'] }, 1)).rejects.toThrow('参考图');
+    const publicUpload = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('不应上传公共图床'));
+    mockNativeCccImage();
+    await expect(generateImagesBatch({ ...params,
+      image_urls: ['data:image/png;base64,YQ==', 'data:image/webp;base64,Yg=='],
+    }, 1)).resolves.toMatchObject({ results: [{ url: 'data:image/png;base64,aW1hZ2U=' }] });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://cccapi.cn/v1beta/models/gemini-3.1-flash-image:generateContent');
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer banana-group-key-fixture' });
+    expect(JSON.parse(String(init.body)).contents[0].parts).toEqual([
+      { text: expect.stringContaining('画一只猫') },
+      { inlineData: { mimeType: 'image/png', data: 'YQ==' } },
+      { inlineData: { mimeType: 'image/webp', data: 'Yg==' } },
+    ]);
+    expect(publicUpload).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('完整旧文本模板临时升级后发送参考图，保存配置不变（直接节点=%s）', async (direct) => {
+    const modelId = 'gemini-3-pro-image-preview';
+    const profile = structuredClone(getProviderDefinition('cccapi')!.models!
+      .find((model) => model.id === modelId)!.executionProfile!);
+    (profile.protocol!.submit.body as Record<string, ProtocolJsonValue>).contents = [
+      { role: 'user', parts: [{ text: '{{prompt}}' }] },
+    ];
+    const params = configureCccImage({ modelId, direct, profile, selectedProfile: profile });
+    const saved = structuredClone(useAppStore.getState().config);
+    mockNativeCccImage();
+    await generateImagesBatch({ ...params, image_urls: ['data:image/webp;base64,YQ=='] }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`https://cccapi.cn/v1beta/models/${modelId}:generateContent`);
+    expect(JSON.parse(String(init.body)).contents[0].parts[1]).toEqual({
+      inlineData: { mimeType: 'image/webp', data: 'YQ==' },
+    });
+    expect(useAppStore.getState().config).toEqual(saved);
+  });
+
+  it('普通图片输入与 @ 引用合并，优先本地图片并保留素材顺序', async () => {
+    const params = configureCccImage({ modelId: 'gemini-3-pro-image-preview' });
+    useAppStore.setState({ nodes: [{ id: 'ccc-local-ref', type: 'ai-image', position: { x: 0, y: 0 },
+      data: { type: 'ai-image', label: '人物', imageUrl: 'asset://localhost/ccc-ref.webp',
+        sourceUrl: 'https://expired.example/ccc-ref.webp' } }] });
+    const localFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      expect(String(url)).toBe('asset://localhost/ccc-ref.webp');
+      return new Response('local-reference', { headers: { 'Content-Type': 'image/webp' } });
+    });
+    mockNativeCccImage();
+    await generateImagesBatch({ ...params, prompt: '@{ccc-local-ref:人物} 保持人物一致',
+      image_urls: ['data:image/webp;base64,YQ=='],
+    }, 1);
+    expect(localFetch).toHaveBeenCalledOnce();
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body));
+    expect(body.contents[0].parts).toEqual([
+      { text: expect.stringContaining('保持人物一致') },
+      { inlineData: { mimeType: 'image/webp', data: 'YQ==' } },
+      { inlineData: { mimeType: 'image/webp', data: btoa('local-reference') } },
+    ]);
+    expect(body.contents[0].parts[0].text).not.toContain('@{');
+    expect(body).not.toHaveProperty('images');
+    expect(body).not.toHaveProperty('image_urls');
+  });
+
+  it('公网参考图在本机读取为 inlineData，不把 URL 或 Key 发给外部图片站', async () => {
+    const params = configureCccImage();
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response('remote-reference', {
+      headers: { 'Content-Type': 'image/webp' },
+    }));
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ candidates: [{ content: {
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } }],
+    } }] }));
+    await generateImagesBatch({ ...params, image_urls: ['https://cdn.example/reference.webp'] }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledTimes(2);
+    expect(transportMocks.corsSafeFetch.mock.calls[0]).toEqual([
+      'https://cdn.example/reference.webp', { signal: undefined },
+    ]);
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('https://cccapi.cn/v1beta/models/gemini-3.1-flash-image:generateContent');
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer banana-group-key-fixture' });
+    expect(JSON.parse(String(init.body)).contents[0].parts[1]).toEqual({
+      inlineData: { mimeType: 'image/webp', data: btoa('remote-reference') },
+    });
+  });
+
+  it('读取参考图失败时不提交生成，也不回退 Images 或公共图床', async () => {
+    const params = configureCccImage();
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response('', { status: 403 }));
+    await expect(generateImagesBatch({ ...params, image_urls: ['https://cdn.example/denied.webp'] }, 1))
+      .rejects.toThrow('读取参考图 1 失败 (403)');
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    expect(transportMocks.corsSafeFetch.mock.calls[0][0]).toBe('https://cdn.example/denied.webp');
+  });
+
+  it.each([7, 14])('未声明张数上限的 CCC 原生合同完整发送 %s 张，不套用通用数量提示', async (count) => {
+    const params = configureCccImage({ modelId: 'gemini-3-pro-image-preview' });
+    const showToast = vi.fn();
+    useAppStore.setState({ showToast });
+    const images = Array.from({ length: count }, (_, index) => `data:image/webp;base64,${btoa(String(index))}`);
+    mockNativeCccImage();
+    await generateImagesBatch({ ...params, image_urls: images }, 1);
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body));
+    expect(body.contents[0].parts.slice(1)).toEqual(images.map((image) => ({
+      inlineData: { mimeType: 'image/webp', data: image.split(',')[1] },
+    })));
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('仍遵守用户保存的图片数量声明（直接节点=%s），不覆盖旧能力', async (direct) => {
+    const params = configureCccImage({ direct });
+    const imageCapability = { supportsImageReference: true, maxImageReferences: 2 };
+    useAppStore.setState((state) => ({ config: { ...state.config,
+      generalModels: state.config.generalModels!.map((model) => ({ ...model, imageCapability })),
+      providers: { ...state.config.providers, 'cccapi-banana': { ...state.config.providers['cccapi-banana'],
+        selectedModels: state.config.providers['cccapi-banana'].selectedModels!.map((model) => ({ ...model, imageCapability })),
+      } },
+    } }));
+    const saved = structuredClone(useAppStore.getState().config);
+    await expect(generateImagesBatch({ ...params, image_urls: [
+      'data:image/webp;base64,YQ==', 'data:image/webp;base64,Yg==', 'data:image/webp;base64,Yw==',
+    ] }, 1)).rejects.toThrow('最多支持 2 张参考图');
     expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config).toEqual(saved);
+  });
+
+  it('参考图超过 32 MiB 读取边界或用户取消时均不提交生成', async () => {
+    const params = configureCccImage();
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response('oversize', {
+      headers: { 'Content-Type': 'image/webp', 'Content-Length': String(33 * 1024 * 1024) },
+    }));
+    await expect(generateImagesBatch({ ...params,
+      image_urls: ['https://cdn.example/oversize.webp'],
+    }, 1)).rejects.toThrow('32');
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    expect(transportMocks.corsSafeFetch.mock.calls[0][0]).toBe('https://cdn.example/oversize.webp');
+    transportMocks.corsSafeFetch.mockClear();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(generateImagesBatch({ ...params,
+      image_urls: ['https://cdn.example/reference.webp'],
+    }, 1, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it('被用户修改的旧模板仍保持原样，缺少参考图映射时继续阻止丢图', async () => {
+    const profile = structuredClone(getProviderDefinition('cccapi')!.models!
+      .find((model) => model.id === 'gemini-3-pro-image-preview')!.executionProfile!);
+    const body = profile.protocol!.submit.body as Record<string, ProtocolJsonValue>;
+    body.contents = [{ role: 'user', parts: [{ text: '{{prompt}}' }] }];
+    body.customOption = true;
+    const params = configureCccImage({ modelId: 'gemini-3-pro-image-preview', profile });
+    const saved = structuredClone(useAppStore.getState().config);
+    await expect(generateImagesBatch({ ...params, image_urls: ['https://cdn.example/reference.webp'] }, 1))
+      .rejects.toThrow('参考图');
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config).toEqual(saved);
   });
 });
 
@@ -2166,11 +2859,19 @@ describe('model request transport boundary', () => {
       } },
     });
 
-    // 未接入的参考图必须在提交前报错，不能悄悄丢图。
+    // 各个已知型号均须发送完整原生多图内容。
     transportMocks.corsSafeFetch.mockClear();
-    await expect(generateImagesBatch({ ...params, image_urls: ['https://cdn.example/ref.png'] }, 1))
-      .rejects.toThrow('参考图');
-    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    await expect(generateImagesBatch({ ...params,
+      image_urls: ['data:image/webp;base64,YQ==', 'data:image/webp;base64,Yg=='],
+    }, 1)).resolves.toMatchObject({ results: [{ url: 'data:image/png;base64,aW1hZ2U=' }] });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledOnce();
+    const referenceBody = JSON.parse(String(transportMocks.corsSafeFetch.mock.calls[0][1].body));
+    expect(referenceBody.contents[0].parts).toEqual([
+      { text: expect.stringContaining('画一只猫') },
+      { inlineData: { mimeType: 'image/webp', data: 'YQ==' } },
+      { inlineData: { mimeType: 'image/webp', data: 'Yg==' } },
+    ]);
+    transportMocks.corsSafeFetch.mockClear();
 
     const controller = new AbortController();
     controller.abort();

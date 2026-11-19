@@ -3,6 +3,7 @@ import { webcrypto } from 'node:crypto';
 import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectSaveData } from '../../src/services/storageService';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
 import type { ArchiveAssetDigest } from '../../src/services/projectExchangeDomain';
 import type { ProjectArchiveChatPayload } from '../../src/services/projectTransferService';
 import type { ProjectExchangeRevision, ProjectExchangeState } from '../../src/types/projectExchange';
@@ -10,6 +11,7 @@ import type { ProjectExchangeRevision, ProjectExchangeState } from '../../src/ty
 const native = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn(), assets: new Map<string, Array<{ path: string; bytes: number; sha256: string }>>() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke, convertFileSrc: (value: string) => value }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: native.open }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ exists: async (path: string) => native.assets.has(path) }));
 vi.mock('../../src/services/fileService', () => ({
   isTauriEnv: () => true, buildProjectFolderName: (name: string, id: string) => `${name}-${id}`,
   registerProjectFolder: vi.fn(), registerProjectFolders: vi.fn(), notifyProjectDiskChanged: vi.fn(),
@@ -19,6 +21,7 @@ vi.mock('../../src/services/fileService', () => ({
     return directory;
   },
   deleteProjectDataDir: async (id: string) => { native.assets.delete(`/projects/${id}`); },
+  getProjectDataDir: async (id: string) => `/projects/${id}`,
 }));
 vi.mock('../../src/services/projectMergeWorkerClient', () => ({
   captureProjectSnapshot: async (...args: Parameters<typeof import('../../src/services/projectExchangeDomain').captureExchangeSnapshot>) =>
@@ -79,9 +82,13 @@ async function runtime() {
 }
 type Runtime = Awaited<ReturnType<typeof runtime>>;
 function sourceRecords(context: Runtime): ProjectSaveData[] {
+  const storyGraph = { ...createEmptyStoryGraph('graph'), revision: 8 };
+  storyGraph.nodes.push({ id: 'person', kind: 'character', label: '主角关系记录', description: '', aliases: [],
+    episodeIds: ['source-episode-1'], asset: { kind: 'character', id: 'character' },
+    evidence: [], origin: 'manual', certainty: 'explicit' });
   const owner: ProjectSaveData = { id: 'source', name: '整部剧', nodes: [
     { id: 'owner-node', type: 'ai-text', data: { type: 'ai-text', output: '剧集正文' } },
-  ], edges: [], groups: [], createdAt: 1, updatedAt: 2, dramaAssets: context.drama.normalizeDramaAssetLibrary({ characters: [
+  ], edges: [], groups: [], createdAt: 1, updatedAt: 2, series: { storyGraph }, dramaAssets: context.drama.normalizeDramaAssetLibrary({ characters: [
     { id: 'character', kind: 'character', name: '主角', primaryReferenceImageId: 'primary', referenceImages: [
       { id: 'primary', kind: 'primary', relativePath: sourceAssets[0].path },
       { id: 'selected', relativePath: sourceAssets[1].path },
@@ -146,8 +153,11 @@ async function assertExport(context: Runtime, ownerId: string) {
   const graph = await context.exchange.loadProjectExchangeGraph(state.lineageId), head = graph.revisions.find((revision) => revision.revisionId === state.headRevisionId)!;
   const directory = `/projects/${ownerId}`, assets = native.assets.get(directory)!;
   expect(context.domain.captureExchangeSnapshot(records, assets, state, head.snapshot, directory).snapshot).toEqual(head.snapshot);
-  const exported = await context.service.prepareExchangeExport(records, assets, directory);
-  expect(exported.headRevisionId).toBe(head.revisionId);
+  const prepared = await context.service.prepareExchangeExportMaterial(records, assets, directory);
+  expect(prepared.bundle.headRevisionId).toBe(head.revisionId);
+  // 准备归档不推进本机协作头；这里只在模拟原生发布已确认之后登记 checkpoint。
+  expect((await context.exchange.loadProjectExchangeState(ownerId))!.stateVersion).toBe(state.stateVersion);
+  await context.exchange.saveProjectExchangeCheckpoint(prepared.checkpoint);
   expect((await context.exchange.loadProjectExchangeState(ownerId))!.stateVersion).toBe(state.stateVersion + 1);
 }
 
@@ -218,6 +228,11 @@ describe('项目包真实持久化导入', () => {
     const result = await context.service.applyProjectImport(incoming.session, null, {}, { independent, appendChat: true, appendMemories: true });
     const records = await context.repository.readProjectImportScope(result.projectId), state = (await context.exchange.loadProjectExchangeState(result.projectId))!;
     expect(records).toHaveLength(3);
+    expect(records[0].series?.storyGraph?.nodes[0]).toMatchObject({
+      episodeIds: [records.find((record) => record.episodeNo === 1)!.id],
+      asset: { kind: 'character', id: records[0].dramaAssets!.characters[0].id },
+    });
+    expect(records[0].series?.storyGraph?.revision).toBe(1);
     expect(records.every((record) => record.exchangeEpoch === 1)).toBe(true);
     expect(records.every((record) => !source.some((original) => original.id === record.id))).toBe(true);
     expect(records.slice(1).every((record) => record.parentId === result.projectId && record.dataFolder === result.dataFolder)).toBe(true);

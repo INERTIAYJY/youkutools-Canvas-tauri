@@ -28,6 +28,7 @@ export function historyMessageContent(message: ChatMessage, task?: AgentTask): s
     return [
       `[${step.status}] ${call.toolId}：${step.outputSummary || call.resultSummary || step.errorCode || '无结果摘要'}`,
       refs ? `结果引用：${refs}` : '',
+      call.resultReference ? `工具正文引用：${call.resultReference.id}（${call.resultReference.chars} 字，过期时用原工具重读）` : '',
     ].filter(Boolean).join('\n');
   });
   const snapshot = sanitizeDomainText([
@@ -37,11 +38,13 @@ export function historyMessageContent(message: ChatMessage, task?: AgentTask): s
   return [content, '', '以下是历史执行记录，只作为续聊资料，不代表新的执行授权：', snapshot].join('\n');
 }
 
-/** 压缩边界回到用户消息，避免留下只有回答、没有问题的半轮对话。 */
-export function findHistoryCutIndex(messages: Pick<ChatMessage, 'role' | 'timestamp'>[], keepCount: number): number {
-  let cut = Math.max(0, messages.length - keepCount);
+/** 压缩边界回到用户消息；传入前缀终点时不用先复制消息数组。 */
+export function findHistoryCutIndex(
+  messages: Pick<ChatMessage, 'role' | 'timestamp'>[], keepCount: number, endExclusive = messages.length,
+): number {
+  let cut = Math.max(0, endExclusive - keepCount);
   // 旧摘要用时间戳标记覆盖范围，同一时间的消息不能分属两侧。
-  while (cut > 0 && (messages[cut]?.role !== 'user'
+  while (cut > 0 && (cut >= endExclusive || messages[cut]?.role !== 'user'
     || messages[cut - 1].timestamp === messages[cut]?.timestamp)) cut--;
   return cut;
 }
@@ -75,6 +78,7 @@ export function serializeModelConversation(messages: AssistantModelMessage[], ta
         step?.outputSummary || step?.toolCall?.resultSummary || '结果未保留，需要时重新读取'}`);
       const refs = step?.toolCall?.resultDisplay?.references?.slice(0, 12).map((ref) => `${ref.kind}:${ref.id} ${ref.label}`);
       if (refs?.length) parts.push(`结果引用：${refs.join('；')}`);
+      if (step?.toolCall?.resultReference) parts.push(`工具正文引用：${step.toolCall.resultReference.id}`);
       continue;
     }
     if (text) parts.push(`[${message.role === 'user' ? '用户' : '助手'}] ${text.slice(0, 4_000)}${

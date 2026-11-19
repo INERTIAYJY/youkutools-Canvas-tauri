@@ -20,6 +20,8 @@ import type { AnimationFrameEdit, AnimationProcessing, AnimationSheet } from './
 import type { AiAppReference } from './aiApp';
 import type { ComfyRefmodAsset, ComfyRefmodSelection } from './comfyRefmod';
 import type { EpisodeAssetRoster } from './episodeAssets';
+import type { AgentTeamProfile } from './agentTeam';
+import type { CreationProfile, CreationProfileSelection } from './creationProfile';
 
 export type {
   CanvasDrawingTool,
@@ -273,7 +275,17 @@ export interface BaseNodeData {
   groupCollapsed?: boolean;
   /** 分组节点：折叠前的尺寸，展开时还原 */
   groupExpandedSize?: { width: number; height: number };
+  /** 开合分组造成的水平展示偏移；历史位置比较时扣除，不是用户拖动。 */
+  groupLayoutOffsetX?: number;
+  /** 开合分组造成的垂直展示偏移，与水平偏移共用历史及持久化语义。 */
+  groupLayoutOffsetY?: number;
+  /** 开合的可逆让位；横向保持旧记录兼容，纵向按高度差分相应用。 */
+  groupCollapseLayout?: {
+    deltaX: number; nodeIds: string[]; parentId?: string; expandedNodeIds?: string[];
+    vertical?: { deltaY: number; nodeIds: string[]; expandedNodeIds?: string[] };
+  };
   mattingMask?: string;       // 遮罩编辑器蒙版数据（data URL，独立于图片存储）
+  outpaintInput?: import('./media').OutpaintInput; // 扩图垫图独立于结果图片保存，重试仍使用原输入
   annotation?: string;        // 旧版标注数据（data URL，透明 PNG；仅用于兼容读取）
   annotationLayer?: ImageAnnotationLayer; // 可编辑矢量标注层，独立于原图存储
   imageWidth?: number;        // 生成图片实际宽度
@@ -285,6 +297,10 @@ export interface BaseNodeData {
   imageSize?: string;         // 分辨率选择：'1K' | '2K' | '4K'
   imageQuality?: string;      // 厂商声明的生成质量，与分辨率独立
   imageBackground?: string;   // 厂商声明的图片背景；空字符串显式使用接口默认
+  imageOutputFormat?: import('./aiTypes').ImageOutputFormat;
+  imageFrameCount?: number;
+  imageFrameDurationMs?: number;
+  imageTransparent?: boolean;
   aspectRatio?: string;       // 图片比例：'1:1' | '16:9' | ...
   batchCount?: number;        // 单次批量生成图片数量，默认 1
   batchGroupId?: string;      // 同一次批量生成的结果分组 ID
@@ -380,6 +396,9 @@ export interface OutputHistoryEntry {
   error?: string;                // 错误信息
   mediaUrl?: string;             // 媒体资源 URL（imageUrl/videoUrl/audioUrl）
   filePath?: string;             // 本地文件路径
+  /** 新项目历史的可移植媒体身份；展示路径由本机项目绑定解析。 */
+  relativePath?: string;
+  storageRootRef?: string;
   params?: Record<string, unknown>; // 生成参数快照
 }
 
@@ -401,6 +420,15 @@ export interface EpisodeCreativeInfo {
   targetDurationSec?: number;
   /** 原著章节、页码或段落范围。 */
   sourceRange?: string;
+}
+
+/** 项目数据目录内的可移植 TXT 文件引用；不保存本机绝对路径。 */
+export interface ProjectTextFileReference {
+  fileName: string;
+  relativePath: string;
+  digest?: string;
+  /** 生成此稿件时按分集名称清洗后的目标文件名；与唯一后缀无关。 */
+  sourceName?: string;
 }
 
 export interface CanvasProject {
@@ -429,10 +457,15 @@ export interface CanvasProject {
   episodeOutline?: string;
   /** 本集完整剧本正文；与大纲分开保存。 */
   episodeScript?: string;
+  /** 与本集剧本正文一起保存的 TXT 稿件引用。 */
+  episodeScriptFile?: ProjectTextFileReference;
   /** 本集结构化创作要点。 */
   episodeCreative?: EpisodeCreativeInfo;
   /** 本集人物/道具提取清单；与整部剧共享的正式创作资产库分开保存。 */
   episodeAssetRoster?: EpisodeAssetRoster;
+  creationProfile?: CreationProfileSelection;
+  /** 当前分集对组合包团队默认值的显式覆盖。 */
+  teamProfileOverride?: AgentTeamProfile;
   /** 剧集级原著与剧本；仅剧集项目有。 */
   series?: ProjectSeriesInfo;
 }
@@ -450,6 +483,8 @@ export interface ProjectSeriesInfo {
   originalWork?: ProjectOriginalWork;
   /** 全剧剧本正文 */
   script?: string;
+  /** 整部剧共享的故事资料图；与主画布节点及撤销历史分开。 */
+  storyGraph?: import('./storyGraph').StoryGraph;
 }
 
 export type ProjectModelKind = 'text' | 'image' | 'video' | 'audio';
@@ -507,6 +542,7 @@ export type GeneralModelCategory = 'text' | 'image' | 'audio' | 'video';
 /** 连接级文本/对话 API 协议；缺省保持 OpenAI Chat Completions 兼容。 */
 export type ChatApiProtocol =
   | 'openai-compatible'
+  | 'openai-responses'
   | 'anthropic-compatible'
   | 'gemini-native';
 
@@ -563,6 +599,10 @@ export interface ApiProviderConfig {
   baseUrl?: string;
   /** 文本/对话请求协议；旧配置缺失时按 openai-compatible 处理。 */
   chatApiProtocol?: ChatApiProtocol;
+  /** 需要公网图片链接时，使用此连接自己的图床。 */
+  imageHosting?: import('./imageHosting').ImageHostingConfig;
+  /** 火山官方连接的私有北京 TOS 参考素材上传，仅保存 AK/SK bundle 引用。 */
+  tosUpload?: import('./volcengineTos').VolcengineTosConfig;
   /** @deprecated 仅用于读取此前连接级图片协议；编辑连接时复制到已选模型。 */
   imageProtocolDefault?: ModelExecutionProfile;
   /** @deprecated 仅用于读取此前连接级参考图模式。 */
@@ -834,6 +874,8 @@ export type AssetSortOrder = 'asc' | 'desc';
 
 export interface AppConfig {
   providers: Record<string, ApiProviderConfig>;
+  /** 无连接专用上传接口时使用的公共图床；未设置时为 Uguu。仅保存凭据引用。 */
+  imageHosting?: import('./imageHosting').GlobalImageHostingConfig;
   /** 当前用于 Agent 联网搜索的厂商；旧配置未设置时优先沿用 Tavily。 */
   webSearchProviderId?: WebSearchProviderId;
   theme: AppearanceMode;
@@ -894,6 +936,9 @@ export interface AppConfig {
   jianyingPath?: string;     // 剪映专业版安装路径，自动检测失败时手动配置
   premierePath?: string;     // Adobe Premiere Pro 安装路径，自动检测失败时手动配置
   assistantModelId?: string;  // 助手模型 ID：generalModels 中的 text 模型 id
+  /** 用户配置的团队角色模型引用；不含连接地址或凭据。 */
+  agentTeamProfile?: AgentTeamProfile;
+  creationProfiles?: CreationProfile[];
   assistantImageModelId?: string;  // 助手生图模型 ID：generalModels 中的 image 模型 id
   assistantVideoModelId?: string;  // 助手生视频模型 ID：generalModels 中的 video 模型 id
   cloudParseEnabled?: boolean; // 是否启用云端解析，默认 true；关闭后助手仅使用本地规则
@@ -1195,6 +1240,8 @@ export interface UserSkill {
   content: string;
   sourceType: 'file' | 'folder';
   storagePath?: string;
+  /** 原生持久登记的只读来源；前端路径不作为该来源的授权依据。 */
+  nativeSourceId?: string;
   entryFileName?: string;
   /** 从入口文件 frontmatter 解析的非执行型声明。 */
   manifest?: SkillManifest;

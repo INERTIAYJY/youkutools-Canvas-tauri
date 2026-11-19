@@ -2,10 +2,12 @@
  * storageServiceProjectLoad — 回归测试：project loading tolerates asset recovery failures。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 
 const mocks = vi.hoisted(() => ({
   exists: vi.fn(async (_path: string) => true),
   getProjectDataDir: vi.fn(async (_projectId: string): Promise<string | null> => '/project/data'),
+  getNativeProjectOwner: vi.fn((_projectId: string): string | undefined => undefined),
   identifyAsset: vi.fn(),
   resolveIndexedAssetPath: vi.fn(async (_assetId: string): Promise<string | null> => null),
   scanDirectoryFiles: vi.fn(),
@@ -15,6 +17,13 @@ const mocks = vi.hoisted(() => ({
   readDir: vi.fn(),
   notifyProjectDiskChanged: vi.fn(),
   resolveUniqueDestPath: vi.fn(async (dir: string, name: string) => `${dir}/${name}`),
+  nativeSelection: vi.fn(), invoke: vi.fn(),
+  copyFileToProjectData: vi.fn(async (_path: string, _projectId: string, _options?: object): Promise<{ filePath: string; assetUrl: string } | null> => null),
+}));
+
+vi.mock('@tauri-apps/api/core', async (original) => ({ ...await original<typeof import('@tauri-apps/api/core')>(), invoke: mocks.invoke }));
+vi.mock('../../src/services/indexedDb/nativeProjectRepository', async (original) => ({
+  ...await original<typeof import('../../src/services/indexedDb/nativeProjectRepository')>(), readNativeProjectSelection: mocks.nativeSelection,
 }));
 
 vi.mock('@tauri-apps/plugin-fs', () => ({
@@ -22,12 +31,14 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 }));
 vi.mock('../../src/services/fs/core', () => ({
   isTauriEnv: () => true,
-  getConvertFileSrc: async () => (path: string) => `asset://${path}`,
+  getConvertFileSrc: async () => (path: string) => `asset://localhost${path}`,
   getFileCategory: () => 'image',
   CATEGORY_EXTENSIONS: { image: ['.png'] },
   buildNodeFileName: (label: string | undefined, ext: string, fallback: string) => `${label || fallback}${ext}`,
-  getAssetUrlFromPath: vi.fn(async (path: string) => `asset://${path}`),
+  getAssetUrlFromPath: vi.fn(async (path: string) => `asset://localhost${path}`),
   getProjectDataDir: mocks.getProjectDataDir,
+  getNativeProjectOwner: mocks.getNativeProjectOwner,
+  getMimeType: (extension: string) => extension === 'png' ? 'image/png' : 'application/octet-stream',
   joinPath: (...parts: string[]) => parts.join('/'),
   notifyProjectDiskChanged: mocks.notifyProjectDiskChanged,
   resolveUniqueDestPath: mocks.resolveUniqueDestPath,
@@ -36,9 +47,13 @@ vi.mock('../../src/services/fs/core', () => ({
 vi.mock('../../src/services/fs/assetLibrary', () => ({
   scanDirectoryFiles: mocks.scanDirectoryFiles,
 }));
-vi.mock('../../src/services/fs/assetIndex', () => ({
+vi.mock('../../src/services/fileService', () => ({
+  copyFileToProjectData: mocks.copyFileToProjectData,
+}));
+vi.mock('../../src/services/fs/assetIndex', async (original) => ({
   identifyAsset: mocks.identifyAsset,
   resolveIndexedAssetPath: mocks.resolveIndexedAssetPath,
+  getRelativeAssetPath: (await original<typeof import('../../src/services/fs/assetIndex')>()).getRelativeAssetPath,
 }));
 
 import {
@@ -50,19 +65,54 @@ import {
   saveProjectToDb,
   setLastActiveProjectId,
 } from '../../src/services/indexedDbService';
-import { loadProjectData, saveProject, type ProjectSaveData } from '../../src/services/storageService';
+import { loadProjectData, normalizeProjectMediaNodes, restoreProjectRecord, saveProject, serializeProjectRecord, type ProjectSaveData } from '../../src/services/storageService';
+import type { Node } from '@xyflow/react';
+import type { BaseNodeData } from '../../src/types';
+import { nativeMediaInputMaterial } from '../../src/services/nativeMediaInput';
 import { normalizeDramaAssetLibrary, normalizeDramaVisualAsset, syncDramaVisualAssetPrimary, type DramaScene } from '../../src/types/dramaAssets';
 import { captureExchangeSnapshot, materializeExchangeSnapshot } from '../../src/services/projectExchangeDomain';
 import { resolveDramaAssetImageRef } from '../../src/services/dramaAssetPrompt';
 import type { ProjectExchangeIdentity, ProjectExchangeState } from '../../src/types/projectExchange';
 import type { AssetDirectoryScanResult } from '../../src/services/fs/assetLibrary';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
+import { mergeDramaExtractIntoLibrary, parseDramaExtractResponse } from '../../src/services/dramaAssetExtract';
+import { createNativeProject, readNativeProjectCapture, saveNativeProjectView } from '../../src/services/indexedDb/nativeProjectRepository';
 
 function scanResult(overrides: Partial<AssetDirectoryScanResult> = {}): AssetDirectoryScanResult {
   return { files: [], folders: [], truncated: false, complete: true, failedDirectories: 0, failedFiles: 0, ...overrides };
 }
 
+describe('故事图正式资料的保存与加载', () => {
+  it('保存加载保留 TXT 稿件引用，只留可移植字段而不回写本机路径', async () => {
+    mocks.getProjectDataDir.mockResolvedValue(null);
+    const record: ProjectSaveData = { id: `manuscript-storage-${Date.now()}`, name: '第一集', parentId: 'series',
+      createdAt: 1, updatedAt: 2, nodes: [], edges: [], episodeScript: '本集正文', episodeScriptFile: {
+        fileName: '旧名称.txt', relativePath: 'imports/op/第一集.txt', digest: 'A'.repeat(64), sourceName: '第一集.txt',
+        ...{ filePath: 'C:/private/第一集.txt', token: 'fixture-private' },
+      } };
+    await saveProject(record);
+    const reference = { fileName: '第一集.txt', relativePath: 'imports/op/第一集.txt', digest: 'a'.repeat(64), sourceName: '第一集.txt' };
+    expect((await getProjectById(record.id))?.episodeScriptFile).toEqual(reference);
+    expect((await loadProjectData(record.id))?.episodeScriptFile).toEqual(reference);
+    expect(record.episodeScriptFile).toHaveProperty('filePath');
+  });
+
+  it('无媒体目录的项目也保留正式图，运行态图字段在落盘前拒绝', async () => {
+    mocks.getProjectDataDir.mockResolvedValue(null);
+    const graph = { ...createEmptyStoryGraph('graph'), revision: 4 };
+    const record: ProjectSaveData = { id: `story-storage-${Date.now()}`, name: '故事图', createdAt: 1, updatedAt: 2,
+      nodes: [], edges: [], series: { script: '原文', storyGraph: graph } };
+    await saveProject(record);
+    expect((await loadProjectData(record.id))?.series?.storyGraph).toEqual(graph);
+    const invalid = { ...record, id: `${record.id}-bad`, series: { storyGraph: { ...graph, candidates: [] } } };
+    await expect(saveProject(invalid)).rejects.toThrow();
+    expect(await getProjectById(`${record.id}-bad`)).toBeUndefined();
+  });
+});
+
 describe('project loading tolerates asset recovery failures', () => {
   beforeEach(() => {
+    mocks.getNativeProjectOwner.mockReturnValue(undefined);
     mocks.exists.mockResolvedValue(true);
     mocks.getProjectDataDir.mockResolvedValue('/project/data');
     mocks.identifyAsset.mockRejectedValue(new Error('asset index unavailable'));
@@ -73,6 +123,248 @@ describe('project loading tolerates asset recovery failures', () => {
     mocks.mkdir.mockResolvedValue(undefined);
     mocks.stat.mockReset();
     mocks.readDir.mockReset();
+    mocks.nativeSelection.mockReset(); mocks.invoke.mockReset();
+    mocks.copyFileToProjectData.mockReset().mockResolvedValue(null);
+  });
+
+  it.each([
+    { label: '未关联参考包', refmods: undefined },
+    { label: '已关联参考包', refmods: [{ serverId: 'comfy-server', endpointFingerprint: 'a'.repeat(64),
+      loaderType: 'minimax-h3' as const, fileName: '人物/沈砚.refmod', strength: 0.8 }] },
+  ])('新提取人物序列化后可原子保存到新项目，保留参考包且不改变输入（$label）', async ({ refmods }) => {
+    const factory = new IDBFactory();
+    const initial = await createNativeProject({ name: '人物保存',
+      projectId: 'p2-11111111-1111-4111-8111-111111111111', canvasId: 'c2-22222222-2222-4222-8222-222222222222' }, { factory });
+    mocks.getNativeProjectOwner.mockReturnValue(initial.project.id);
+    const extracted = mergeDramaExtractIntoLibrary({ version: 2, characters: [], scenes: [], props: [] },
+      parseDramaExtractResponse(JSON.stringify({ kind: 'character', items: [{ name: '沈砚', identity: '侦探' }] })));
+    expect(extracted.characters[0].refmods).toBeUndefined();
+    const library = { ...extracted, characters: extracted.characters.map((character) => (
+      refmods === undefined ? character : { ...character, refmods }
+    )) };
+    const record: ProjectSaveData = { id: initial.canvas!.id, name: '人物保存', createdAt: 1, updatedAt: 2,
+      nodes: [{ id: 'text', type: 'ai-text', position: { x: 0, y: 0 }, data: { type: 'ai-text', prompt: '保留画布内容' } }],
+      edges: [], groups: [], dramaAssets: library };
+    const before = structuredClone(record);
+
+    const serialized = await serializeProjectRecord(record);
+    const persistedCharacter = serialized.dramaAssets!.characters[0];
+    expect(persistedCharacter.refmods).toEqual(refmods ?? []);
+    if (refmods !== undefined) expect(persistedCharacter.refmods).toBe(refmods);
+    expect(record).toEqual(before);
+    const saved = await saveNativeProjectView({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch,
+      expectedCanvasRevision: initial.canvas!.revision, document: { nodes: serialized.nodes as unknown[], edges: serialized.edges as unknown[], groups: (serialized.groups ?? []) as unknown[] },
+      shared: { expectedRevisions: { assets: 0 }, patch: { dramaAssets: serialized.dramaAssets } } }, { factory });
+
+    const loaded = await readNativeProjectCapture(initial.project.id, { factory });
+    expect(saved.canvas.revision).toBe(1);
+    expect(loaded?.aggregate.content.dramaAssets).toEqual(serialized.dramaAssets);
+    expect(loaded?.aggregate.content.dramaAssets?.characters[0]).toMatchObject({ name: '沈砚', identity: '侦探', refmods: refmods ?? [] });
+    expect(loaded?.aggregate.canvases[0].nodes).toEqual(serialized.nodes);
+    expect(record).toEqual(before);
+  });
+
+  it('人物已有参考包字段畸形时仍拒绝新项目保存，画布和共享资料均不部分提交', async () => {
+    const factory = new IDBFactory();
+    const initial = await createNativeProject({ name: '拒绝有损清洗',
+      projectId: 'p2-11111111-1111-4111-8111-111111111111', canvasId: 'c2-22222222-2222-4222-8222-222222222222' }, { factory });
+    mocks.getNativeProjectOwner.mockReturnValue(initial.project.id);
+    const before = await readNativeProjectCapture(initial.project.id, { factory });
+    const extracted = mergeDramaExtractIntoLibrary({ version: 2, characters: [], scenes: [], props: [] },
+      parseDramaExtractResponse(JSON.stringify({ kind: 'character', items: [{ name: '沈砚', identity: '侦探' }] })));
+    for (const refmods of [null, [{ fileName: '../invalid.refmod' }]]) {
+      const library = { ...extracted, characters: extracted.characters.map((character) => ({ ...character,
+        refmods: refmods as unknown as typeof character.refmods })) };
+      const serialized = await serializeProjectRecord({ id: initial.canvas!.id, name: '拒绝有损清洗', createdAt: 1, updatedAt: 2,
+        nodes: [{ id: 'unsaved', type: 'ai-text', position: { x: 0, y: 0 }, data: { type: 'ai-text', prompt: '不应部分提交' } }],
+        edges: [], groups: [], dramaAssets: library });
+      expect(serialized.dramaAssets!.characters[0].refmods).toBe(refmods);
+      await expect(saveNativeProjectView({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+        canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch,
+        expectedCanvasRevision: initial.canvas!.revision, document: { nodes: serialized.nodes as unknown[], edges: serialized.edges as unknown[], groups: (serialized.groups ?? []) as unknown[] },
+        shared: { expectedRevisions: { assets: 0 }, patch: { dramaAssets: serialized.dramaAssets } } }, { factory }))
+        .rejects.toThrow('invalid-drama-assets');
+      expect(await readNativeProjectCapture(initial.project.id, { factory })).toEqual(before);
+    }
+  });
+
+  it('新结构将本地展示地址保存为相对素材引用并恢复同一画布的地址', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'n1', type: 'ai-image', data: { type: 'ai-image', assetId: 'asset-1', relativePath: 'image.png',
+        filePath: '/project/data/image.png', imageUrl: 'asset://localhost/project/data/image.png', output: 'asset://localhost/project/data/image.png' } }] };
+    const persisted = await serializeProjectRecord(record);
+    expect(persisted.nodes).toMatchObject([{ data: { assetId: 'asset-1', relativePath: 'image.png', imageUrl: 'image.png', output: 'image.png' } }]);
+    expect((persisted.nodes as Array<{ data: object }>)[0].data).not.toHaveProperty('filePath');
+    const restored = await restoreProjectRecord(persisted);
+    expect(restored.nodes).toMatchObject([{ data: { filePath: '/project/data/image.png',
+      imageUrl: 'asset://localhost/project/data/image.png', output: 'asset://localhost/project/data/image.png' } }]);
+  });
+
+  it.each(['/home/user/project', '/Volumes/CaseSensitive/project'])('POSIX 根 %s 不将大小写不同的外部目录误判为项目内', async (root) => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.getProjectDataDir.mockResolvedValue(root);
+    const source = `${root.replace(/project$/, 'Project')}/image.png`;
+    const copied = `${root}/imports/copied.png`;
+    mocks.copyFileToProjectData.mockResolvedValue({ filePath: copied, assetUrl: `asset://localhost${copied}` });
+    mocks.identifyAsset.mockResolvedValue({ assetId: 'asset-copied', relativePath: 'imports/copied.png' });
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'image', data: { type: 'ai-image', filePath: source, imageUrl: `asset://localhost${source}` } }] };
+
+    const persisted = await serializeProjectRecord(record);
+
+    expect(mocks.copyFileToProjectData).toHaveBeenCalledWith(source, record.id, { throwOnError: true, redactErrors: true });
+    expect(persisted.nodes).toMatchObject([{ data: { assetId: 'asset-copied', relativePath: 'imports/copied.png', imageUrl: 'imports/copied.png' } }]);
+    expect((persisted.nodes as Array<{ data: object }>)[0].data).not.toHaveProperty('filePath');
+    expect(record.nodes).toMatchObject([{ data: { filePath: source } }]);
+  });
+
+  it('复制回执指向大小写不同的项目外目录时仍拒绝保存', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.copyFileToProjectData.mockResolvedValue({ filePath: '/project/DATA/copied.png', assetUrl: 'asset://localhost/project/DATA/copied.png' });
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'image', data: { type: 'ai-image', filePath: '/external/image.png' } }] };
+    await expect(serializeProjectRecord(record)).rejects.toThrow('复制的素材不属于新项目');
+  });
+
+  it('Windows 盘符路径仍忽略大小写并沿用已有素材，不重复复制', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.getProjectDataDir.mockResolvedValue('C:/Project/Data');
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'image', data: { type: 'ai-image', filePath: 'c:/project/data/image.png', assetId: 'asset-existing',
+        relativePath: 'image.png', imageUrl: 'asset://localhost/c:/project/data/image.png' } }] };
+    const persisted = await serializeProjectRecord(record);
+    expect(persisted.nodes).toMatchObject([{ data: { assetId: 'asset-existing', relativePath: 'image.png', imageUrl: 'image.png' } }]);
+    expect(mocks.copyFileToProjectData).not.toHaveBeenCalled();
+  });
+
+  it('生成前补齐已显示导入图片的身份，保存恢复后v3参考素材摘要保持一致且不扫描整库', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.identifyAsset.mockResolvedValue({ assetId: 'asset-import', relativePath: 'image.png' });
+    mocks.scanDirectoryFiles.mockClear();
+    const source: Node<BaseNodeData> = { id: 'source', type: 'ai-image', position: { x: 0, y: 0 }, data: {
+      type: 'ai-image', label: '外部图片', role: 'source', status: 'success',
+      filePath: '/project/data/image.png', imageUrl: 'asset://localhost/project/data/image.png',
+      output: 'asset://localhost/project/data/image.png',
+      mattingMask: 'asset://localhost/project/data/mask.png',
+    } };
+    const target: Node<BaseNodeData> = { id: 'target', type: 'ai-image', position: { x: 500, y: 0 }, data: {
+      type: 'ai-image', label: '图生图', prompt: '@{source:外部图片} 保留人物',
+    } };
+    const nodes = await normalizeProjectMediaNodes('native-canvas', [source, target]);
+    expect(nodes[0].data).toMatchObject({ assetId: 'asset-import', relativePath: 'image.png',
+      filePath: source.data.filePath, imageUrl: source.data.imageUrl, output: source.data.output, status: 'success' });
+    expect(nodes[0].data.mattingMask).toBe(source.data.mattingMask);
+    expect(nodes[0].data.mattingMask).not.toBe(nodes[0].data.imageUrl);
+    expect(source.data.assetId).toBeUndefined();
+    const edges = [{ id: 'edge', source: source.id, target: target.id }];
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, nodes, edges };
+    const restored = await restoreProjectRecord(await serializeProjectRecord(record));
+    const state = { currentProjectId: record.id, projects: [{ id: record.id, name: record.name, createdAt: 1, updatedAt: 2 }],
+      config: { theme: 'dark' as const, providers: {} }, customStyles: [], nodes, edges };
+    expect(nativeMediaInputMaterial(nodes[1], { ...state, nodes: restored.nodes as Node<BaseNodeData>[] }, 'media-input-v3'))
+      .toBe(nativeMediaInputMaterial(nodes[1], state, 'media-input-v3'));
+    expect(mocks.scanDirectoryFiles).not.toHaveBeenCalled();
+  });
+
+  it('本轮媒体规范化遇到缺失素材也不触发项目目录扫描', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.exists.mockResolvedValue(false); mocks.scanDirectoryFiles.mockClear();
+    const source: Node<BaseNodeData> = { id: 'source', type: 'ai-image', position: { x: 0, y: 0 }, data: {
+      type: 'ai-image', label: '丢失图片', assetId: 'asset-missing', relativePath: 'missing.png', imageUrl: 'missing.png',
+    } };
+    const normalized = await normalizeProjectMediaNodes('native-canvas', [source]);
+    expect(normalized[0].data.assetId).toBe('asset-missing');
+    expect(normalized[0].data.imageUrl).toBeUndefined();
+    expect(mocks.scanDirectoryFiles).not.toHaveBeenCalled();
+  });
+
+  it('新结构素材缺失时不把相对路径当网络地址，仍保留身份供文件恢复', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.exists.mockResolvedValue(false);
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'n1', type: 'ai-image', data: { type: 'ai-image', assetId: 'asset-1', relativePath: 'image.png',
+        imageUrl: 'image.png', output: 'image.png' } }] };
+    const restored = await restoreProjectRecord(record);
+    expect(restored.nodes).toMatchObject([{ data: { assetId: 'asset-1', relativePath: 'image.png', imageUrl: undefined, output: undefined } }]);
+    const saved = await serializeProjectRecord(restored);
+    expect(saved.nodes).toMatchObject([{ data: { assetId: 'asset-1', relativePath: 'image.png', output: 'image.png' } }]);
+  });
+
+  it('已交付摘要产物在普通fs.exists失败时从明确主根和子根恢复全部媒体展示，一次加载内去重SHA读取', async () => {
+    const owner = 'p2-11111111-1111-4111-8111-111111111111', canvasId = 'c2-22222222-2222-4222-8222-222222222222';
+    const primary = 'r2-11111111-1111-4111-8111-111111111111', child = 'r2-33333333-3333-4333-8333-333333333333';
+    const operationId = '44444444-4444-4444-8444-444444444444';
+    mocks.getNativeProjectOwner.mockReturnValue(owner);
+    mocks.exists.mockReset().mockRejectedValue(new Error('ordinary fs permission unavailable'));
+    mocks.identifyAsset.mockClear(); mocks.resolveIndexedAssetPath.mockClear();
+    mocks.nativeSelection.mockResolvedValue({ project: { id: owner, storageRootRef: primary, storageBindings: [{ rootRef: primary }, { rootRef: child }] },
+      canvas: { id: canvasId, storageRootRef: primary } });
+    mocks.invoke.mockImplementation(async (command: string, input: { rootRef?: string; selectedPaths?: string[]; assetsDir?: string }) => {
+      if (command === 'resolve_native_project_media_subroot') return `/project/data/roots/${input.rootRef}`;
+      if (command === 'inspect_project_archive_assets') return input.selectedPaths!.map((path) => ({ path, bytes: 10, sha256: /[a-f0-9]{64}/.exec(path)![0] }));
+      throw new Error(`unexpected native fixture command: ${command}`);
+    });
+    const types = ['ai-image', 'ai-animation', 'ai-panorama', 'source-image', 'ai-video', 'source-video', 'ai-audio', 'source-audio'] as const;
+    const nodes = types.map((type, ordinal) => {
+      const image = type.includes('image') || type === 'ai-animation' || type === 'ai-panorama';
+      const category = image ? 'image' : type.includes('video') ? 'video' : 'audio';
+      const sha256 = category === 'image' ? 'a'.repeat(64) : category === 'video' ? 'b'.repeat(64) : 'c'.repeat(64);
+      const relativePath = category === 'image' ? `imports/retained-${sha256}/${sha256}.png` : `media/${sha256}.${category === 'video' ? 'mp4' : 'wav'}`;
+      return { id: `result-${ordinal}`, type, data: { label: type, type, status: 'success', relativePath, artifactId: `native-media-${operationId}${ordinal ? `-${ordinal}` : ''}`,
+        storageRootRef: ordinal === 3 ? child : primary, imageUrl: undefined, videoUrl: undefined, audioUrl: undefined, output: relativePath } };
+    });
+    const restored = await restoreProjectRecord({ id: canvasId, name: '原画布', createdAt: 1, updatedAt: 1, nodes, edges: [] });
+    for (const [ordinal, node] of (restored.nodes as typeof nodes).entries()) {
+      const root = ordinal === 3 ? `/project/data/roots/${child}` : '/project/data';
+      const mediaKey = types[ordinal].includes('audio') ? 'audioUrl' : types[ordinal].includes('video') ? 'videoUrl' : 'imageUrl';
+      expect(node.data).toMatchObject({ relativePath: nodes[ordinal].data.relativePath,
+        [mediaKey]: `asset://localhost${root}/${nodes[ordinal].data.relativePath}`, output: `asset://localhost${root}/${nodes[ordinal].data.relativePath}` });
+    }
+    expect(mocks.nativeSelection).toHaveBeenCalledOnce();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'inspect_project_archive_assets')).toHaveLength(4);
+    expect(mocks.invoke).toHaveBeenCalledWith('resolve_native_project_media_subroot', { projectId: owner, rootRef: child, create: false });
+    expect(mocks.identifyAsset).not.toHaveBeenCalled(); expect(mocks.resolveIndexedAssetPath).not.toHaveBeenCalled();
+    const persisted = await serializeProjectRecord(restored);
+    for (const [ordinal, node] of (persisted.nodes as typeof nodes).entries()) {
+      const mediaKey = types[ordinal].includes('audio') ? 'audioUrl' : types[ordinal].includes('video') ? 'videoUrl' : 'imageUrl';
+      expect(node.data).toMatchObject({ relativePath: nodes[ordinal].data.relativePath, storageRootRef: nodes[ordinal].data.storageRootRef,
+        [mediaKey]: nodes[ordinal].data.relativePath, output: nodes[ordinal].data.relativePath });
+      expect(node.data).not.toHaveProperty('filePath');
+    }
+    expect(mocks.identifyAsset).not.toHaveBeenCalled();
+  });
+
+  it.each(['sha', 'root'] as const)('已交付摘要产物%s失配时保留身份且不借索引或主根同名文件复活展示', async (failure) => {
+    const owner = 'p2-11111111-1111-4111-8111-111111111111', canvasId = 'c2-22222222-2222-4222-8222-222222222222';
+    const primary = 'r2-11111111-1111-4111-8111-111111111111', other = 'r2-33333333-3333-4333-8333-333333333333';
+    const relativePath = `media/${'a'.repeat(64)}.png`;
+    mocks.getNativeProjectOwner.mockReturnValue(owner); mocks.exists.mockReset().mockResolvedValue(true);
+    mocks.resolveIndexedAssetPath.mockReset().mockResolvedValue(`/project/data/${relativePath}`);
+    mocks.nativeSelection.mockResolvedValue({ project: { id: owner, storageRootRef: primary, storageBindings: [{ rootRef: primary }] }, canvas: { id: canvasId, storageRootRef: primary } });
+    mocks.invoke.mockResolvedValue([{ path: relativePath, bytes: 10, sha256: 'b'.repeat(64) }]);
+    const restored = await restoreProjectRecord({ id: canvasId, name: '原画布', createdAt: 1, updatedAt: 1, edges: [],
+      nodes: [{ id: 'result', type: 'ai-image', data: { label: '图片', type: 'ai-image', status: 'success', assetId: 'unrelated-asset',
+        artifactId: 'native-media-44444444-4444-4444-8444-444444444444', relativePath, storageRootRef: failure === 'root' ? other : primary,
+        imageUrl: relativePath, output: relativePath } }] });
+    expect(restored.nodes).toMatchObject([{ data: { relativePath, assetId: 'unrelated-asset', imageUrl: undefined, output: undefined } }]);
+    expect(mocks.resolveIndexedAssetPath).not.toHaveBeenCalled();
+    if (failure === 'root') expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it('新结构风格参考图仅用模型允许的字段持久化，并恢复可用文件', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.identifyAsset.mockResolvedValue({ assetId: 'style-asset', relativePath: 'style.png' });
+    const record: ProjectSaveData = { id: 'native-canvas', name: '画布', createdAt: 1, updatedAt: 2, edges: [], nodes: [],
+      settings: { visualStyle: { styleReference: { filePath: '/project/data/style.png', imageUrl: 'asset://localhost/project/data/style.png',
+        fileName: 'style.png', enabled: true } } } };
+    const persisted = await serializeProjectRecord(record);
+    expect(persisted.settings?.visualStyle?.styleReference).toEqual({ filePath: 'style.png', imageUrl: 'style.png',
+      fileName: 'style.png', enabled: true });
+    const restored = await restoreProjectRecord(persisted);
+    expect(restored.settings?.visualStyle?.styleReference).toEqual({ filePath: '/project/data/style.png',
+      imageUrl: 'asset://localhost/project/data/style.png', fileName: 'style.png', enabled: true });
   });
 
   it('全局来源标记经重复归一化及 JSON 往返保留，明确改绑项目后不复活旧来源', () => {
@@ -108,7 +400,7 @@ describe('project loading tolerates asset recovery failures', () => {
       dramaAssets: { version: 2, characters: [], props: [], scenes: [{ id: 'scene', kind: 'scene', name: '场景', key: 'scene',
         summary: '', visualNotes: '', importance: 'main', confirmed: true, source: 'manual', createdAt: 1, updatedAt: 2,
         referenceImages: [{ id: 'global-ref', label: '', prompt: '', assetId, assetSource: 'global', relativePath,
-          imageUrl: 'asset:///old/same.png', createdAt: 1, updatedAt: 2 }], primaryReferenceImageId: 'global-ref' }],
+          imageUrl: 'asset://localhost/old/same.png', createdAt: 1, updatedAt: 2 }], primaryReferenceImageId: 'global-ref' }],
       } } as Parameters<typeof saveProjectToDb>[0]);
     const loaded = await loadProjectData(projectId);
     expect(loaded?.dramaAssets?.scenes[0].referenceImages?.[0]).toMatchObject({ assetId, assetSource: 'global', imageUrl: undefined });
@@ -123,15 +415,15 @@ describe('project loading tolerates asset recovery failures', () => {
       rootPath: '/global', source: 'global', fingerprint: '1:1', size: 1, mtimeMs: 1, status: 'online', updatedAt: 1 });
     const scene = { id: 'scene', kind: 'scene' as const, name: '客厅', key: 'scene', summary: '', visualNotes: '',
       importance: 'main' as const, confirmed: true, source: 'manual' as const, createdAt: 1, updatedAt: 2,
-      imageAssetId: 'global-scene-shared', imageRelativePath: 'old-scene.png', imageUrl: 'asset:///global/old-scene.png' };
+      imageAssetId: 'global-scene-shared', imageRelativePath: 'old-scene.png', imageUrl: 'asset://localhost/global/old-scene.png' };
     mocks.identifyAsset.mockClear(); mocks.writeFile.mockClear();
     await saveProject({ id: projectId, name: '全局复用', createdAt: 1, updatedAt: 2, nodes: [], edges: [],
       dramaAssets: { version: 2, characters: [], scenes: [scene], props: [{ ...scene, id: 'prop', kind: 'prop' }] } });
     const persisted = await getProjectById(projectId) as ProjectSaveData | null;
     expect(persisted?.dramaAssets?.scenes[0]).toMatchObject({ imageAssetId: 'global-scene-shared', imageRelativePath: 'new-scene.png' });
     const loaded = await loadProjectData(projectId);
-    expect(loaded?.dramaAssets?.scenes[0].imageUrl).toBe('asset:///global/new-scene.png');
-    expect(loaded?.dramaAssets?.props[0].imageUrl).toBe('asset:///global/new-scene.png');
+    expect(loaded?.dramaAssets?.scenes[0].imageUrl).toBe('asset://localhost/global/new-scene.png');
+    expect(loaded?.dramaAssets?.props[0].imageUrl).toBe('asset://localhost/global/new-scene.png');
     expect(mocks.identifyAsset).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
   });
@@ -142,7 +434,7 @@ describe('project loading tolerates asset recovery failures', () => {
       dramaAssets: { version: 2, characters: [], props: [], scenes: [{
         id: 'scene', kind: 'scene', name: '客厅', key: 'scene', summary: '', visualNotes: '', importance: 'main',
         confirmed: true, source: 'manual', createdAt: 1, updatedAt: 2, imageAssetId: 'global-image-no-index',
-        imageRelativePath: 'scene.png', imageUrl: 'asset:///old/scene.png',
+        imageRelativePath: 'scene.png', imageUrl: 'asset://localhost/old/scene.png',
       }] } } as Parameters<typeof saveProjectToDb>[0]);
     const loaded = await loadProjectData(projectId);
     expect(loaded?.dramaAssets?.scenes[0]).toMatchObject({ imageAssetId: 'global-image-no-index', imageUrl: undefined });
@@ -180,7 +472,7 @@ describe('project loading tolerates asset recovery failures', () => {
       data: expect.objectContaining({
         assetId: 'asset-saved',
         filePath: '/project/data/saved.png',
-        imageUrl: 'asset:///project/data/saved.png',
+        imageUrl: 'asset://localhost/project/data/saved.png',
       }),
     })]);
   });
@@ -243,13 +535,13 @@ describe('project loading tolerates asset recovery failures', () => {
 
     expect(character?.referenceImages?.[0]).toEqual(expect.objectContaining({
       filePath: '/project/data/character/shenyan.png',
-      imageUrl: 'asset:///project/data/character/shenyan.png',
+      imageUrl: 'asset://localhost/project/data/character/shenyan.png',
     }));
     expect(character?.voiceClips?.[0]).toEqual(expect.objectContaining({
       filePath: '/project/data/character/shenyan.mp3',
-      audioUrl: 'asset:///project/data/character/shenyan.mp3',
+      audioUrl: 'asset://localhost/project/data/character/shenyan.mp3',
     }));
-    expect(character?.imageUrl).toBe('asset:///project/data/character/shenyan.png');
+    expect(character?.imageUrl).toBe('asset://localhost/project/data/character/shenyan.png');
   });
 
   it('便携快照异机落库后恢复媒体和参考图展示，实际选图可用且再导出不改变快照', async () => {
@@ -259,29 +551,29 @@ describe('project loading tolerates asset recovery failures', () => {
     const source: ProjectSaveData = {
       id: sourceId, name: '跨设备项目', createdAt: 1, updatedAt: 2, edges: [], groups: [],
       nodes: [
-        { id: 'image', type: 'source-image', data: { type: 'source-image', relativePath: paths[0], imageUrl: 'asset:///old/image.png' } },
-        { id: 'video', type: 'ai-video', data: { type: 'ai-video', relativePath: paths[1], videoUrl: 'asset:///old/video.mp4',
-          videoReferences: [{ id: 'reference', kind: 'frame', role: 'reference', relativePath: paths[0], url: 'asset:///old/reference.png' }] } },
-        { id: 'audio', data: { type: 'source-audio', relativePath: paths[2], audioUrl: 'asset:///old/audio.wav' } },
+        { id: 'image', type: 'source-image', data: { type: 'source-image', relativePath: paths[0], imageUrl: 'asset://localhost/old/image.png' } },
+        { id: 'video', type: 'ai-video', data: { type: 'ai-video', relativePath: paths[1], videoUrl: 'asset://localhost/old/video.mp4',
+          videoReferences: [{ id: 'reference', kind: 'frame', role: 'reference', relativePath: paths[0], url: 'asset://localhost/old/reference.png' }] } },
+        { id: 'audio', data: { type: 'source-audio', relativePath: paths[2], audioUrl: 'asset://localhost/old/audio.wav' } },
         { id: 'markdown', type: 'ai-markdown', data: { type: 'ai-markdown', relativePath: paths[3], output: '# 原文\n中文说明' } },
         { id: 'sheet', data: { type: 'ai-shotlist', shotlistRows: [{ id: 'shot', shotNo: '1',
-          frame: { nodeId: 'image', kind: 'image', relativePath: paths[0], url: 'asset:///old/frame.png' },
-          video: { nodeId: 'video', kind: 'video', relativePath: paths[1], url: 'asset:///old/shot.mp4' } }] } },
-        { id: 'grid', data: { type: 'ai-storyboard', storyboardOverrides: [{ relativePath: paths[0], url: 'asset:///old/cell.png' }] } },
-        { id: 'workflow', data: { type: 'ai-image', relativePath: paths[0], imageUrl: 'asset:///old/primary.png',
-          runninghubOutputs: [{ kind: 'image', relativePath: paths[0], url: 'asset:///old/result.png' }],
-          workflowApiOutputs: [{ kind: 'video', relativePath: paths[1], url: 'asset:///old/result.mp4' }] } },
-        { id: 'director', data: { type: 'ai-director', directorCaptureRelativePaths: [paths[0]], directorCaptureUrls: ['asset:///old/capture.png'] } },
+          frame: { nodeId: 'image', kind: 'image', relativePath: paths[0], url: 'asset://localhost/old/frame.png' },
+          video: { nodeId: 'video', kind: 'video', relativePath: paths[1], url: 'asset://localhost/old/shot.mp4' } }] } },
+        { id: 'grid', data: { type: 'ai-storyboard', storyboardOverrides: [{ relativePath: paths[0], url: 'asset://localhost/old/cell.png' }] } },
+        { id: 'workflow', data: { type: 'ai-image', relativePath: paths[0], imageUrl: 'asset://localhost/old/primary.png',
+          runninghubOutputs: [{ kind: 'image', relativePath: paths[0], url: 'asset://localhost/old/result.png' }],
+          workflowApiOutputs: [{ kind: 'video', relativePath: paths[1], url: 'asset://localhost/old/result.mp4' }] } },
+        { id: 'director', data: { type: 'ai-director', directorCaptureRelativePaths: [paths[0]], directorCaptureUrls: ['asset://localhost/old/capture.png'] } },
       ],
-      settings: { visualStyle: { styleReference: { relativePath: paths[0], imageUrl: 'asset:///old/style.png' } } } as ProjectSaveData['settings'],
+      settings: { visualStyle: { styleReference: { relativePath: paths[0], imageUrl: 'asset://localhost/old/style.png' } } } as ProjectSaveData['settings'],
       dramaAssets: normalizeDramaAssetLibrary({ version: 2, characters: [{ id: 'hero', name: '角色', kind: 'character', relativePath: paths[0],
-        referenceImages: [{ id: 'hero-reference', kind: 'primary', relativePath: paths[0], imageUrl: 'asset:///old/hero.png' }],
+        referenceImages: [{ id: 'hero-reference', kind: 'primary', relativePath: paths[0], imageUrl: 'asset://localhost/old/hero.png' }],
         primaryReferenceImageId: 'hero-reference',
-        voiceClips: [{ id: 'hero-voice', kind: 'timbre', relativePath: paths[2], audioUrl: 'asset:///old/voice.wav' }],
+        voiceClips: [{ id: 'hero-voice', kind: 'timbre', relativePath: paths[2], audioUrl: 'asset://localhost/old/voice.wav' }],
         actions: [{ id: 'hero-action', name: '动作', prompt: '转身',
-          media: [{ id: 'hero-action-media', kind: 'video', relativePath: paths[1], url: 'asset:///old/action.mp4' }] }] }],
-        scenes: [{ id: 'scene', name: '场景', kind: 'scene', relativePath: paths[0], referenceImages: [{ id: 'scene-reference', relativePath: paths[0], imageUrl: 'asset:///old/scene.png' }] }],
-        props: [{ id: 'prop', name: '道具', kind: 'prop', relativePath: paths[0], referenceImages: [{ id: 'prop-reference', relativePath: paths[0], imageUrl: 'asset:///old/prop.png' }] }],
+          media: [{ id: 'hero-action-media', kind: 'video', relativePath: paths[1], url: 'asset://localhost/old/action.mp4' }] }] }],
+        scenes: [{ id: 'scene', name: '场景', kind: 'scene', relativePath: paths[0], referenceImages: [{ id: 'scene-reference', relativePath: paths[0], imageUrl: 'asset://localhost/old/scene.png' }] }],
+        props: [{ id: 'prop', name: '道具', kind: 'prop', relativePath: paths[0], referenceImages: [{ id: 'prop-reference', relativePath: paths[0], imageUrl: 'asset://localhost/old/prop.png' }] }],
       }),
     };
     const assets = paths.map((path, index) => ({ path, bytes: index + 1, sha256: String(index + 1).repeat(64) }));
@@ -300,7 +592,7 @@ describe('project loading tolerates asset recovery failures', () => {
     const loaded = (await loadProjectData(recipientId))!;
     const nodes = loaded.nodes as Array<{ id: string; data: Record<string, unknown> }>;
     const data = (id: string) => nodes.find((node) => node.id === id)!.data;
-    const url = (sourcePath: string) => `asset:///recipient/data/${published.get([...captured.files].find(([, path]) => path === sourcePath)![0])}`;
+    const url = (sourcePath: string) => `asset://localhost/recipient/data/${published.get([...captured.files].find(([, path]) => path === sourcePath)![0])}`;
     expect(data('image').imageUrl).toBe(url(paths[0]));
     expect(data('video').videoUrl).toBe(url(paths[1]));
     expect(data('audio').audioUrl).toBe(url(paths[2]));
@@ -372,7 +664,7 @@ describe('project loading tolerates asset recovery failures', () => {
     const loaded = await loadProjectData(projectId);
     const restored = loaded?.nodes as typeof stored.nodes;
     expect(restored[0].data.videoReferences[0]).toMatchObject({
-      url: 'asset:///project/moved/character/hero.png', filePath: '/project/moved/character/hero.png',
+      url: 'asset://localhost/project/moved/character/hero.png', filePath: '/project/moved/character/hero.png',
     });
     expect(restored[0].data.videoReferences.slice(1)).toEqual(references.slice(1));
   });
@@ -415,10 +707,10 @@ describe('project loading tolerates asset recovery failures', () => {
     const loaded = await loadProjectData(projectId);
     const restored = loaded?.nodes as Array<{ data: { videoReferences: Array<Record<string, unknown>> } }>;
     expect(restored[0].data.videoReferences[0]).toMatchObject({
-      url: 'asset:///project/data/character/hero.png', assetId: 'asset-hero-image',
+      url: 'asset://localhost/project/data/character/hero.png', assetId: 'asset-hero-image',
     });
     expect(restored[0].data.videoReferences[1]).toMatchObject({
-      url: 'asset:///project/data/character/hero.wav', assetId: 'asset-hero-voice', role: 'reference_audio',
+      url: 'asset://localhost/project/data/character/hero.wav', assetId: 'asset-hero-voice', role: 'reference_audio',
     });
     expect(restored[0].data.videoReferences[2].url).toBe(unmatchedUrl);
     const stored = await getProjectById(projectId) as { nodes: typeof restored };
@@ -460,7 +752,7 @@ describe('project loading tolerates asset recovery failures', () => {
             id: 'voice-1',
             kind: 'timbre',
             filePath: '/project/data/character/shared.mp3',
-            audioUrl: 'asset:///project/data/character/shared.mp3',
+            audioUrl: 'asset://localhost/project/data/character/shared.mp3',
             transcript: '',
             createdAt: 1,
             updatedAt: 2,
@@ -514,7 +806,7 @@ describe('project loading tolerates asset recovery failures', () => {
       id: projectId, name: '成片快照', createdAt: 1, updatedAt: 2, edges: [],
       nodes: [{ id: 'sheet', data: { type: 'ai-shotlist', shotlistRows: [{
         id: 'shot-1', shotNo: '1', frame: null,
-        video: { nodeId: 'deleted-source', kind: 'video', url: 'asset:///project/data/final.mp4',
+        video: { nodeId: 'deleted-source', kind: 'video', url: 'asset://localhost/project/data/final.mp4',
           filePath: '/project/data/final.mp4', sourceDuration: 4.5 },
       }] } }],
     });
@@ -531,7 +823,7 @@ describe('project loading tolerates asset recovery failures', () => {
     const loaded = await loadProjectData(projectId) as unknown as typeof persisted;
     expect(loaded.nodes[0].data.shotlistRows[0].video).toMatchObject({
       nodeId: 'deleted-source', assetId: 'shot-video', relativePath: 'final.mp4',
-      filePath: '/project/moved/final.mp4', url: 'asset:///project/moved/final.mp4',
+      filePath: '/project/moved/final.mp4', url: 'asset://localhost/project/moved/final.mp4',
     });
     expect(mocks.identifyAsset).not.toHaveBeenCalled();
   });
@@ -606,7 +898,7 @@ describe('project loading tolerates asset recovery failures', () => {
     expect((loaded?.nodes as Array<{ data: { filePath?: string; imageUrl?: string } }>)[0].data)
       .toMatchObject({
         filePath: '/project/data/shot (2).png',
-        imageUrl: 'asset:///project/data/shot (2).png',
+        imageUrl: 'asset://localhost/project/data/shot (2).png',
       });
   });
 
@@ -633,7 +925,7 @@ describe('project loading tolerates asset recovery failures', () => {
 
   it('checks a shared path once per save across nodes, references, settings and the asset library', async () => {
     const reference = { assetId: 'shared', relativePath: 'shared.png', filePath: '/project/data/shared.png',
-      imageUrl: 'asset:///project/data/shared.png' };
+      imageUrl: 'asset://localhost/project/data/shared.png' };
     const project = {
       id: `shared-save-${Date.now()}`, name: 'Shared asset', createdAt: 1, updatedAt: 2,
       nodes: [{ id: 'a', data: reference }, { id: 'b', data: { ...reference,
@@ -654,7 +946,7 @@ describe('project loading tolerates asset recovery failures', () => {
   });
 
   it('shares load path checks without reusing file state across later loads or projects', async () => {
-    const reference = { assetId: 'shared', relativePath: 'shared.png', imageUrl: 'asset:///project/data/shared.png' };
+    const reference = { assetId: 'shared', relativePath: 'shared.png', imageUrl: 'asset://localhost/project/data/shared.png' };
     const record = {
       id: `shared-load-${Date.now()}`, name: 'Shared asset', createdAt: 1, updatedAt: 2,
       nodes: [{ id: 'a', data: reference }, { id: 'b', data: { ...reference,
@@ -784,7 +1076,7 @@ describe('project loading tolerates asset recovery failures', () => {
       source: 'project', projectId, size: 10, mtimeMs: 20, fingerprint: '10:20', status: 'online', updatedAt: 1 });
     const { persistMediaRelocation } = await import('../../src/services/indexedDb/mediaRelocations');
     await persistMediaRelocation({ projectId, oldPath, newPath: currentPath,
-      assetUrl: `asset://${currentPath}`, relativePath: 'current.png' });
+      assetUrl: `asset://localhost${currentPath}`, relativePath: 'current.png' });
     const realIndex = await vi.importActual<typeof import('../../src/services/fs/assetIndex')>('../../src/services/fs/assetIndex');
     const realLibrary = await vi.importActual<typeof import('../../src/services/fs/assetLibrary')>('../../src/services/fs/assetLibrary');
     mocks.identifyAsset.mockImplementation(realIndex.identifyAsset);
@@ -841,7 +1133,7 @@ describe('project loading tolerates asset recovery failures', () => {
       assetId, rootPath: directory, projectId, source: 'project',
     });
     expect((loaded?.nodes as Array<{ data: Record<string, unknown> }>)[0].data).toMatchObject({
-      assetId, relativePath: 'renamed.png', filePath: newPath, imageUrl: `asset://${newPath}`,
+      assetId, relativePath: 'renamed.png', filePath: newPath, imageUrl: `asset://localhost${newPath}`,
     });
     expect(await getAssetIndexById(assetId)).toMatchObject({ path: newPath, source: 'project', projectId });
   });
@@ -907,13 +1199,135 @@ describe('project loading tolerates asset recovery failures', () => {
     expect(record.nodes[0].data).toMatchObject({
       assetId: 'asset-generated',
       relativePath: writtenPath.split('/').pop(),
-      imageUrl: `asset://${writtenPath}`,
-      sourceUrl: `asset://${writtenPath}`,
-      thumbnailUrl: `asset://${writtenPath}`,
-      output: `asset://${writtenPath}`,
+      imageUrl: `asset://localhost${writtenPath}`,
+      sourceUrl: `asset://localhost${writtenPath}`,
+      thumbnailUrl: `asset://localhost${writtenPath}`,
+      output: `asset://localhost${writtenPath}`,
     });
     expect(record.nodes[0].data).not.toHaveProperty('filePath');
     expect(JSON.stringify(record.nodes[0])).not.toContain('data:image');
+  });
+
+  it.each(['native', 'legacy'] as const)('marks %s inline-mask materialization for directory refresh without making a new autosave input', async (kind) => {
+    const sha256 = '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81';
+    mocks.notifyProjectDiskChanged.mockClear();
+    mocks.getNativeProjectOwner.mockReturnValue(kind === 'native' ? 'native-owner' : undefined);
+    mocks.invoke.mockResolvedValue({ relativePath: `media/${sha256}.png`, sha256, bytes: 3, mimeType: 'image/png' });
+    mocks.exists.mockResolvedValue(false);
+    const record: ProjectSaveData = { id: 'mask-project', name: '遮罩物化', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'source', data: { type: 'ai-image', imageUrl: 'https://example.invalid/source.png', mattingMask: 'data:image/png;base64,AQID' } }] };
+    await serializeProjectRecord(record);
+    mocks.exists.mockResolvedValue(true);
+    await serializeProjectRecord(record);
+    expect(mocks.notifyProjectDiskChanged.mock.calls).toEqual(Array.from({ length: kind === 'native' ? 2 : 1 }, () => [
+      { source: 'save-materialization', projectId: record.id },
+    ]));
+    expect(record.nodes).toMatchObject([{ data: { mattingMask: 'data:image/png;base64,AQID' } }]);
+  });
+
+  it('新项目扩图垫图独立落盘并可保存重开，不替换结果媒体或增加素材节点', async () => {
+    const factory = new IDBFactory();
+    const initial = await createNativeProject({ name: '扩图垫图',
+      projectId: 'p2-11111111-1111-4111-8111-111111111111', canvasId: 'c2-22222222-2222-4222-8222-222222222222' }, { factory });
+    const sha256 = '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81';
+    const relativePath = `media/${sha256}.png`;
+    mocks.getNativeProjectOwner.mockReturnValue(initial.project.id);
+    mocks.nativeSelection.mockResolvedValue({ project: initial.project, canvas: initial.canvas });
+    mocks.invoke.mockResolvedValue({ relativePath, sha256, bytes: 3, mimeType: 'image/png' });
+    mocks.identifyAsset.mockImplementation(async (path: string) => ({ assetId: 'asset-outpaint',
+      relativePath: path.slice('/project/data/'.length) }));
+    const record: ProjectSaveData = { id: initial.canvas!.id, name: '扩图垫图', createdAt: 1, updatedAt: 2, edges: [], groups: [],
+      nodes: [{ id: 'result', type: 'ai-image', position: { x: 0, y: 0 }, data: { type: 'ai-image', role: 'generator',
+        assetId: 'asset-result', relativePath: 'result.png', imageUrl: 'asset://localhost/project/data/result.png',
+        outpaintInput: { url: 'data:image/png;base64,AQID', width: 1024, height: 768 } } }] };
+    const original = structuredClone(record);
+
+    const serialized = await serializeProjectRecord(record);
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith('write_native_project_media', {
+      projectId: initial.project.id, mimeType: 'image/png', data: [1, 2, 3],
+    });
+    expect(serialized.nodes).toMatchObject([{ data: { imageUrl: 'result.png',
+      outpaintInput: { assetId: 'asset-outpaint', relativePath, url: relativePath,
+        storageRootRef: initial.project.storageRootRef, width: 1024, height: 768 } } }]);
+    expect(JSON.stringify(serialized.nodes)).not.toMatch(/data:image|asset:|\/project\/data/);
+    expect(record).toEqual(original);
+    await saveNativeProjectView({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch,
+      expectedCanvasRevision: initial.canvas!.revision,
+      document: { nodes: serialized.nodes as unknown[], edges: serialized.edges as unknown[], groups: (serialized.groups ?? []) as unknown[] } }, { factory });
+    const capture = await readNativeProjectCapture(initial.project.id, { factory });
+    const restored = await restoreProjectRecord({ ...serialized, nodes: capture!.aggregate.canvases[0].nodes });
+    expect(restored.nodes).toHaveLength(1);
+    expect(restored.nodes).toMatchObject([{ data: { imageUrl: 'asset://localhost/project/data/result.png',
+      outpaintInput: { assetId: 'asset-outpaint', relativePath,
+        url: `asset://localhost/project/data/${relativePath}`, width: 1024, height: 768 } } }]);
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+
+    mocks.exists.mockResolvedValue(false);
+    const missing = await restoreProjectRecord(serialized);
+    expect(missing.nodes).toMatchObject([{ data: { outpaintInput: { assetId: 'asset-outpaint', relativePath,
+      url: undefined, width: 1024, height: 768 } } }]);
+    expect((await serializeProjectRecord(missing)).nodes).toMatchObject([{ data: { outpaintInput: {
+      assetId: 'asset-outpaint', relativePath, url: undefined, width: 1024, height: 768,
+    } } }]);
+  });
+
+  it('新项目扩图垫图索引失败时拒绝保存本机路径，原输入保留', async () => {
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    const rootRef = 'r2-11111111-1111-4111-8111-111111111111';
+    mocks.nativeSelection.mockResolvedValue({ project: { id: 'native-owner', storageRootRef: rootRef, storageBindings: [{ rootRef }] },
+      canvas: { id: 'native-canvas', storageRootRef: rootRef } });
+    const record: ProjectSaveData = { id: 'native-canvas', name: '扩图', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'result', data: { type: 'ai-image', outpaintInput: {
+        url: 'asset://localhost/project/data/padding.png', width: 1024, height: 768,
+      } } }] };
+    const original = structuredClone(record);
+    await expect(serializeProjectRecord(record)).rejects.toThrow('扩图垫图未能保存为项目素材');
+    expect(record).toEqual(original);
+  });
+
+  it('子根画布扩图新垫图绑定作品主根，已存在子根输入保持独立归属，异常根不回退', async () => {
+    const primary = 'r2-11111111-1111-4111-8111-111111111111', child = 'r2-33333333-3333-4333-8333-333333333333';
+    const unknown = 'r2-44444444-4444-4444-8444-444444444444';
+    const sha256 = '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81';
+    mocks.getNativeProjectOwner.mockReturnValue('native-owner');
+    mocks.nativeSelection.mockResolvedValue({ project: { id: 'native-owner', storageRootRef: primary,
+      storageBindings: [{ rootRef: primary }, { rootRef: child }] }, canvas: { id: 'native-canvas', storageRootRef: child } });
+    mocks.invoke.mockImplementation(async (command: string) => command === 'resolve_native_project_media_subroot'
+      ? `/project/data/roots/${child}` : { relativePath: `media/${sha256}.png`, sha256, bytes: 3, mimeType: 'image/png' });
+    mocks.identifyAsset.mockImplementation(async (path: string, options: { rootPath: string }) => ({
+      assetId: 'asset-padding', relativePath: path.slice(options.rootPath.length + 1),
+    }));
+    const record = (outpaintInput: BaseNodeData['outpaintInput']): ProjectSaveData => ({ id: 'native-canvas', name: '子根画布',
+      createdAt: 1, updatedAt: 2, edges: [], nodes: [{ id: 'expanded', data: { type: 'ai-image', outpaintInput } }] });
+    const fresh = await serializeProjectRecord(record({ url: 'data:image/png;base64,AQID', width: 1024, height: 768 }));
+    expect(fresh.nodes).toMatchObject([{ data: { outpaintInput: { relativePath: `media/${sha256}.png`, storageRootRef: primary } } }]);
+    expect((await restoreProjectRecord(fresh)).nodes).toMatchObject([{ data: { outpaintInput: {
+      url: `asset://localhost/project/data/media/${sha256}.png`, storageRootRef: primary,
+    } } }]);
+
+    const existing = await serializeProjectRecord(record({ url: `asset://localhost/project/data/roots/${child}/padding.png`,
+      assetId: 'child-padding', relativePath: 'padding.png', storageRootRef: child, width: 1024, height: 768 }));
+    expect(existing.nodes).toMatchObject([{ data: { outpaintInput: { assetId: 'child-padding', url: 'padding.png', relativePath: 'padding.png', storageRootRef: child } } }]);
+    expect((await restoreProjectRecord(existing)).nodes).toMatchObject([{ data: { outpaintInput: {
+      url: `asset://localhost/project/data/roots/${child}/padding.png`, storageRootRef: child,
+    } } }]);
+    const invalid = record({ url: 'padding.png', relativePath: 'padding.png', storageRootRef: unknown, width: 1024, height: 768 });
+    await expect(serializeProjectRecord(invalid)).rejects.toThrow('根不属于该项目');
+    expect((await restoreProjectRecord(invalid)).nodes).toMatchObject([{ data: { outpaintInput: { url: undefined, storageRootRef: unknown } } }]);
+    expect(mocks.copyFileToProjectData).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('只有扩图垫图含临时媒体且无项目目录时仍拒绝落库', async () => {
+    mocks.getProjectDataDir.mockResolvedValue(null);
+    const id = `project-outpaint-no-directory-${Date.now()}`;
+    await expect(saveProject({ id, name: '扩图', createdAt: 1, updatedAt: 2, edges: [],
+      nodes: [{ id: 'result', data: { type: 'ai-image', outpaintInput: {
+        url: 'data:image/png;base64,AQID', width: 1024, height: 768,
+      } } }],
+    })).rejects.toThrow('没有项目目录');
+    expect(await getProjectById(id)).toBeUndefined();
   });
 
   it('creates the project directory before checking or writing inline media', async () => {
@@ -995,9 +1409,9 @@ describe('project loading tolerates asset recovery failures', () => {
     expect(mocks.writeFile).toHaveBeenCalledWith(writtenPath, new Uint8Array([1, 2, 3]));
     expect((loaded?.nodes as Array<{ data: Record<string, unknown> }>)[0].data).toMatchObject({
       filePath: writtenPath,
-      videoUrl: `asset://${writtenPath}`,
-      sourceUrl: `asset://${writtenPath}`,
-      output: `asset://${writtenPath}`,
+      videoUrl: `asset://localhost${writtenPath}`,
+      sourceUrl: `asset://localhost${writtenPath}`,
+      output: `asset://localhost${writtenPath}`,
     });
     expect(JSON.stringify(stored.nodes[0])).not.toContain('data:video');
   });
@@ -1029,6 +1443,7 @@ describe('project loading tolerates asset recovery failures', () => {
           filePath: '/project/data/missing.png',
           mattingMask: first,
           annotation: second,
+          outpaintInput: { url: second, width: 1024, height: 768 },
           storyboardOverrides: [{ url: first }],
           shotlistRows: [{
             id: 'shot-1',
@@ -1061,6 +1476,7 @@ describe('project loading tolerates asset recovery failures', () => {
       nodes: Array<{ data: {
         filePath?: string;
         storyboardOverrides: Array<Record<string, unknown>>;
+        outpaintInput: Record<string, unknown>;
         shotlistRows: Array<{ frame: Record<string, unknown>; video: Record<string, unknown> }>;
         videoReferences: Array<{ url: string }>;
         directorCaptureUrls: string[];
@@ -1070,10 +1486,13 @@ describe('project loading tolerates asset recovery failures', () => {
     expect(JSON.stringify(record)).not.toContain('data:image');
     expect(JSON.stringify(record)).not.toContain('data:video');
     expect(record.nodes[0].data.filePath).not.toBe('/project/data/missing.png');
+    expect(record.nodes[0].data.outpaintInput).toMatchObject({ assetId: expect.any(String),
+      relativePath: expect.stringMatching(/^embedded-image-/),
+      url: expect.stringMatching(/^asset:\/\/localhost\/project\/data\/embedded-image-/), width: 1024, height: 768 });
     expect(record.nodes[0].data.storyboardOverrides[0]).toEqual(expect.objectContaining({
       assetId: expect.any(String),
       relativePath: expect.stringMatching(/^embedded-image-/),
-      url: expect.stringMatching(/^asset:\/\/\/project\/data\/embedded-image-/),
+      url: expect.stringMatching(/^asset:\/\/localhost\/project\/data\/embedded-image-/),
     }));
     expect(record.nodes[0].data.shotlistRows[0].frame).toEqual(expect.objectContaining({
       assetId: expect.any(String),
@@ -1085,9 +1504,9 @@ describe('project loading tolerates asset recovery failures', () => {
     });
     expect(record.nodes[0].data.shotlistRows[0].video).not.toHaveProperty('filePath');
     expect(record.nodes[0].data.videoReferences[0].url)
-      .toMatch(/^asset:\/\/\/project\/data\/embedded-image-/);
+      .toMatch(/^asset:\/\/localhost\/project\/data\/embedded-image-/);
     expect(record.nodes[0].data.directorCaptureUrls[0])
-      .toMatch(/^asset:\/\/\/project\/data\/embedded-image-/);
+      .toMatch(/^asset:\/\/localhost\/project\/data\/embedded-image-/);
     expect(record.settings.visualStyle.styleReference).toEqual(expect.objectContaining({
       assetId: expect.any(String),
       relativePath: expect.stringMatching(/^embedded-image-/),

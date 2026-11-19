@@ -1,6 +1,11 @@
 /** GRSAI H3 复用声明式提交、轮询与恢复；生成提交不重试。 */
 import { GRSAI_BASE_URL } from '../../../constants/api';
 import { useAppStore } from '../../../store/useAppStore';
+import { captureLegacyCanvasContext } from '../../projectExecutionContext';
+import { assertNativeVideoSubmissionInput, captureNativeVideoSubmissionBaseline, isNativeVideoSubmissionGuard, type NativeMediaSubmissionPreparation } from '../../nativeVideoSubmission';
+import { assertNativeMediaPrepared, prepareNativeMediaTask, recordNativeMediaSubmission, type NativeMediaTaskRecord } from '../../indexedDb/nativeMediaTaskRepository';
+import { sha256BytesHex } from '../../mediaDataUrl';
+import { projectModelSourceToken } from '../../projectModelComparisonMaterial';
 import { captureVideoTaskGeneration, cleanupNodePolling, pauseMediaTask, registerNodePolling, removeFailedMediaTask, savePendingTask, updatePendingTask } from '../../pollManager';
 import { PollTaskFailedError } from '../../pollTask';
 import { getHttpResponseError } from '../httpUtils';
@@ -12,6 +17,8 @@ import { extractModelName } from '../helpers';
 import { resolveImageUrlArray } from '../imageUtils';
 import { pollResolvedModelProtocol, submitModelProtocol } from '../modelProtocol';
 import type { MediaProviderAdapter } from '../mediaProviderRegistry';
+import { continueNativeMediaTask, createNativeMediaPendingError } from '../../nativeMediaTaskContinuation';
+import { isSafeNativeProtocolTaskId } from '../../nativeProtocolContext';
 
 export const grsaiMediaProviderAdapter: MediaProviderAdapter = {
   providerId: 'grsai', capabilities: ['video'],
@@ -37,30 +44,62 @@ export const grsaiMediaProviderAdapter: MediaProviderAdapter = {
     if (!Number.isInteger(duration) || duration < 1 || duration > capability.maxDuration!) {
       throw new Error(`GRSAI H3 ${resolution} 时长仅支持 1–${capability.maxDuration} 秒`);
     }
-    const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
+    const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId, externalSignal) : undefined;
     const projectId = useAppStore.getState().currentProjectId;
     const videoGeneration = captureVideoTaskGeneration(params.nodeId);
     let receipt: MediaTaskReceipt | undefined;
     let requestSent = false;
     let rejected = false;
-    const signal = nodeSignal && externalSignal ? AbortSignal.any([nodeSignal, externalSignal]) : nodeSignal ?? externalSignal;
+    let nativeTask: NativeMediaTaskRecord | undefined;
+    let nativePreparation: NativeMediaSubmissionPreparation | undefined;
+    let nativeRemoteId: string | undefined;
+    const nativeContext = captureLegacyCanvasContext(useAppStore.getState());
+    const signal = nodeSignal ?? externalSignal;
     try {
       signal?.throwIfAborted();
       const imageReferences = input.references?.filter((ref) => ref.kind === 'image');
       const audioReferences = input.references?.filter((ref) => ref.kind === 'audio');
       const images = imageReferences?.length ? imageReferences.map(getMediaReferenceUrl) : input.imageUrls;
       const audios = audioReferences?.length ? audioReferences.map(getMediaReferenceUrl) : input.audioUrls;
+      if (useAppStore.getState().projectExecutionContext !== undefined && !nativeContext) throw new Error('当前画布尚未就绪，未提交视频任务');
+      if (nativeContext?.modelGeneration === 1 || isNativeVideoSubmissionGuard(beforeSubmit)) {
+        await beforeSubmit?.();
+        if (nativeContext?.modelGeneration !== 1) throw new Error('原生视频画布已切换，未提交请求');
+        if (!isNativeVideoSubmissionGuard(beforeSubmit) || !params.nodeId) throw new Error('请从原画布视频节点发起任务，无法验证输入时不提交');
+      }
       const imageUrls = await resolveImageUrlArray(images, 'grsai', signal);
       const audioUrls: string[] = [];
       for (const url of audios) audioUrls.push(await resolveMediaReferenceUrl(url, { provider: 'grsai', kind: 'audio', signal }));
+      const variables = { model, prompt: input.prompt, resolution, duration, aspectRatio: ratio === '9:16' ? 'portrait' : 'landscape', imageUrls, audioUrls };
+      if (nativeContext?.modelGeneration === 1 || isNativeVideoSubmissionGuard(beforeSubmit)) {
+        await beforeSubmit?.();
+        if (nativeContext?.modelGeneration !== 1) throw new Error('原生视频画布已切换，未提交请求');
+        nativePreparation = await useAppStore.getState().beginNativeMediaSubmissionPreparation(nativeContext);
+        signal?.throwIfAborted();
+        const baseline = await captureNativeVideoSubmissionBaseline(nativeContext, params.nodeId!, undefined, 'media-input-v3', { preparedReferences: true, preparation: nativePreparation });
+        const protocolDigest = await sha256BytesHex(new TextEncoder().encode(projectModelSourceToken(GRSAI_H3_PROTOCOL)));
+        nativeTask = await prepareNativeMediaTask({ context: nativeContext, operationId: crypto.randomUUID(), nodeId: params.nodeId!,
+          inputFingerprint: baseline.inputFingerprint, sourceCanvasRevision: baseline.canvasRevision, fingerprintScheme: 'media-input-v3',
+          modelRef: `grsai/${model}`, protocolDigest, requestFingerprint: await sha256BytesHex(new TextEncoder().encode(projectModelSourceToken(variables))),
+          recovery: { kind: 'builtin-video', modelId: model, digest: protocolDigest },
+          providerConfigId: 'grsai', providerBase: baseUrl, category: 'video' });
+      }
       signal?.throwIfAborted();
       if (beforeSubmit) await beforeSubmit();
       signal?.throwIfAborted();
-      if (params.nodeId && projectId) receipt = savePendingTask({ nodeId: params.nodeId, projectId, nodeType: 'ai-video',
+      if (!nativeTask && params.nodeId && projectId) receipt = savePendingTask({ nodeId: params.nodeId, projectId, nodeType: 'ai-video',
         provider: 'grsai', providerConfigId: 'grsai', taskId: '', taskType: 'custom-protocol', videoGeneration, submitted: false });
-      requestSent = true;
+      if (nativeTask) {
+        if (!nativeContext) throw new Error('原媒体画布已变化');
+        await assertNativeVideoSubmissionInput(nativeTask, nativeContext);
+        await assertNativeMediaPrepared(nativeTask, { preparation: nativePreparation });
+        await beforeSubmit?.();
+        await assertNativeVideoSubmissionInput(nativeTask, nativeContext);
+        signal?.throwIfAborted();
+      }
+      nativePreparation?.assertCurrent(); requestSent = true; nativePreparation?.release();
       const submitted = await submitModelProtocol({ apiKey: provider.apiKey, baseUrl, protocol: GRSAI_H3_PROTOCOL, signal,
-        variables: { model, prompt: input.prompt, resolution, duration, aspectRatio: ratio === '9:16' ? 'portrait' : 'landscape', imageUrls, audioUrls },
+        variables,
         validateResponse: (payload) => {
           const result = payload as { status?: string; error?: string } | null;
           if (result?.status === 'failed' || result?.status === 'violation') {
@@ -70,6 +109,12 @@ export const grsaiMediaProviderAdapter: MediaProviderAdapter = {
         },
       });
       if (!submitted.taskId || !submitted.poll) throw new Error('GRSAI H3 未返回任务 ID');
+      if (nativeTask) {
+        if (!isSafeNativeProtocolTaskId(submitted.taskId, [provider.apiKey])) throw new Error('原视频任务身份包含不安全字段，原提交已保留供核对');
+        nativeRemoteId = submitted.taskId;
+        await recordNativeMediaSubmission(nativeTask.operationId, nativeTask.lease, { taskId: nativeRemoteId });
+        return await continueNativeMediaTask(nativeTask, signal);
+      }
       if (params.nodeId) receipt = updatePendingTask(params.nodeId, { taskId: submitted.taskId,
         protocolPoll: submitted.poll, submitted: true }, receipt?.taskId, receipt?.attemptId) ?? receipt;
       const result = await pollResolvedModelProtocol(submitted.poll, provider.apiKey, signal, baseUrl);
@@ -78,7 +123,13 @@ export const grsaiMediaProviderAdapter: MediaProviderAdapter = {
       if (receipt) receipt = updatePendingTask(receipt.nodeId, { mediaRecoveryState: 'delivery_pending' }, receipt.taskId, receipt.attemptId) ?? receipt;
       return { url, ...(receipt ? { taskReceipt: receipt } : {}) };
     } catch (error) {
+      if (error instanceof Error && ['NativeMediaTaskPending', 'NativeMediaTaskDelivered', 'NativeMediaTaskFailed'].includes(error.name)) throw error;
       const certainHttpRejection = !receipt?.taskId && getHttpResponseError(error)?.definitiveFailure === true;
+      if (nativeTask) {
+        await recordNativeMediaSubmission(nativeTask.operationId, nativeTask.lease,
+          nativeRemoteId ? { taskId: nativeRemoteId } : !requestSent || rejected || certainHttpRejection ? { notStarted: true } : { unknown: true }).catch(() => undefined);
+        if (requestSent && !rejected && !certainHttpRejection) throw createNativeMediaPendingError(nativeTask, error);
+      }
       if (receipt) {
         if (rejected || !requestSent || certainHttpRejection || error instanceof PollTaskFailedError) {
           removeFailedMediaTask(receipt);
@@ -89,6 +140,7 @@ export const grsaiMediaProviderAdapter: MediaProviderAdapter = {
       }
       throw error;
     } finally {
+      nativePreparation?.release();
       if (params.nodeId) cleanupNodePolling(params.nodeId, nodeSignal);
     }
   },

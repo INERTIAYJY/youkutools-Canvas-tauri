@@ -13,7 +13,11 @@ const pollingMocks = vi.hoisted(() => {
   pauseMediaTask: vi.fn((receipt: { taskId: string }, _error?: unknown, reason?: string) => Object.assign(new Error('任务查询已暂停'),
     { name: 'MediaTaskPausedError', taskReceipt: receipt, reason: reason ?? 'query_interrupted' })),
   getMediaTaskReceipt: vi.fn((nodeId: string) => receipts.get(nodeId)),
-  registerNodePolling: vi.fn(() => new AbortController().signal),
+  registerNodePolling: vi.fn((_nodeId: string, parentSignal?: AbortSignal) => {
+    parentSignal?.throwIfAborted();
+    const signal = new AbortController().signal;
+    return parentSignal ? AbortSignal.any([signal, parentSignal]) : signal;
+  }),
   removePendingTask,
   removeFailedMediaTask: vi.fn((receipt: { nodeId: string; taskId: string; attemptId: string }) => {
     removePendingTask(receipt.nodeId, receipt.taskId, receipt.attemptId);
@@ -41,7 +45,7 @@ const serviceMocks = vi.hoisted(() => ({
     },
     currentProjectId: 'project-1',
   },
-  uploadToRemote: vi.fn(),
+  resolveMediaReferenceUrl: vi.fn(),
 }));
 
 vi.mock('../../src/services/pollManager', () => pollingMocks);
@@ -50,8 +54,7 @@ vi.mock('../../src/store/useAppStore', () => ({
 }));
 vi.mock('../../src/services/uploadService', () => ({
   isLocalImageUrl: (url: string) => url.startsWith('asset:') || url.includes('asset.localhost'),
-  uploadToRemote: serviceMocks.uploadToRemote,
-  resolveMediaReferenceUrl: async (url: string) => url,
+  resolveMediaReferenceUrl: serviceMocks.resolveMediaReferenceUrl,
 }));
 
 import {
@@ -60,6 +63,9 @@ import {
   generateApimartImagesBatch,
   generateApimartVideo,
 } from '../../src/services/ai/apimartGen';
+import { queryApimartImageResult } from '../../src/services/ai/apimartImageResult';
+import { queryApimartVideoResult } from '../../src/services/ai/apimartVideoResult';
+import { queryCompatibleImageTask } from '../../src/services/ai/asyncMediaResult';
 import { buildApimartSeedanceRequest, isApimartSeedanceModel } from '../../src/services/ai/apimartVideoModels';
 import { apimartMediaProviderAdapter } from '../../src/services/ai/providers/apimartMedia';
 import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, getApimartSeedanceCapability } from '../../src/services/ai/apimartVideoModels';
@@ -196,8 +202,8 @@ describe('APIMart Omni 视频合同', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
-    pollingMocks.registerNodePolling.mockReturnValue(new AbortController().signal);
-    serviceMocks.uploadToRemote.mockResolvedValue('https://upload.example/reference.png');
+    serviceMocks.resolveMediaReferenceUrl.mockImplementation(async (url: string) => url.startsWith('asset:')
+      ? 'https://upload.example/reference.png' : url);
   });
 
   it.each(APIMART_OMNI_MODELS.map((model) => model.id))('提交 %s 到视频端点并读取轮询产物', async (model) => {
@@ -282,6 +288,9 @@ describe('APIMart Omni 视频合同', () => {
         videoUrls: [], audioUrls: [], references: referenceMedia,
       }),
     })).rejects.toThrow('Omni failed');
+    expect(serviceMocks.resolveMediaReferenceUrl.mock.calls).toEqual(referenceMedia.map((reference) => [
+      reference.url, { provider: 'apimart', kind: 'image', signal: undefined },
+    ]));
     expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toMatchObject({
       first_frame_image: 'https://upload.example/reference.png', last_frame_image: 'https://cdn.example/last.png',
       image_urls: ['https://cdn.example/ref.png'],
@@ -298,7 +307,8 @@ describe('APIMart Omni 视频合同', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     controller.abort();
     await expect(request).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
-    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-omni', expect.any(AbortSignal));
+    expect(pollingMocks.registerNodePolling).toHaveBeenCalledWith('node-omni', controller.signal);
+    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-omni', pollingMocks.registerNodePolling.mock.results[0].value);
     expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
   });
 
@@ -346,8 +356,8 @@ describe('APIMart image polling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
-    pollingMocks.registerNodePolling.mockReturnValue(new AbortController().signal);
-    serviceMocks.uploadToRemote.mockResolvedValue('https://upload.example/reference.png');
+    serviceMocks.resolveMediaReferenceUrl.mockImplementation(async (url: string) => url.startsWith('asset:')
+      ? 'https://upload.example/reference.png' : url);
   });
 
   it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'])(
@@ -636,7 +646,8 @@ describe('APIMart image polling', () => {
 
     await expect(generation).rejects.toMatchObject({ name: 'MediaTaskPausedError', reason: 'submit_unknown' });
     expect(submitSignal?.aborted).toBe(true);
-    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-1', expect.any(AbortSignal));
+    expect(pollingMocks.registerNodePolling).toHaveBeenCalledWith('node-1', controller.signal);
+    expect(pollingMocks.cleanupNodePolling).toHaveBeenCalledWith('node-1', pollingMocks.registerNodePolling.mock.results[0].value);
     expect(pollingMocks.removePendingTask).not.toHaveBeenCalled();
   });
 });
@@ -645,8 +656,42 @@ describe('APIMart video polling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
-    pollingMocks.registerNodePolling.mockReturnValue(new AbortController().signal);
-    serviceMocks.uploadToRemote.mockResolvedValue('https://upload.example/reference.png');
+    serviceMocks.resolveMediaReferenceUrl.mockImplementation(async (url: string) => url.startsWith('asset:')
+      ? 'https://upload.example/reference.png' : url);
+  });
+
+  it('keeps ordered APIMart video candidates after empty entries and falls back only when no videos were returned', async () => {
+    const first = 'https://cdn.example/one.mp4?signature=a,b';
+    const second = 'https://cdn.example/two.mp4';
+    const fallback = 'https://cdn.example/fallback.mp4';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: {
+        videos: [{ url: [] }, { url: ['', first] }, { url: second }],
+        images: [{ url: fallback }],
+      } } }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'completed', result: {
+        videos: [{ url: [' '] }], images: [{ url: fallback }],
+      } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const options = { maxDuration: 1000 };
+
+    await expect(queryApimartVideoResult('key', 'https://api.example/v1', 'ordered', options))
+      .resolves.toEqual([first, second]);
+    await expect(queryApimartVideoResult('key', 'https://api.example/v1', 'fallback', options))
+      .resolves.toEqual([fallback]);
+  });
+
+  it('requires a real videos result collection for strict editor transition queries', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: {
+      videos: [{ url: [] }],
+      images: [{ url: 'https://cdn.example/preview.png' }],
+    } } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(queryApimartVideoResult('key', 'https://api.example/v1', 'transition', {
+      maxDuration: 1000, allowImageFallback: false, missingResult: '原 APIMart 任务完成但未返回视频',
+    })).rejects.toThrow('原 APIMart 任务完成但未返回视频');
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('uses the documented Seedance 2.0 defaults while preserving an explicit audio opt-out', () => {
@@ -714,12 +759,12 @@ describe('APIMart video polling', () => {
       }),
     })).rejects.toThrow('APIMart 视频生成失败: 参考图片无法访问');
 
-    expect(serviceMocks.uploadToRemote).toHaveBeenCalledWith(
-      'asset://localhost/reference.png',
-      'apimart',
-      'image',
-      undefined,
-    );
+    // 图片与音视频统一委托公开素材解析入口；请求正文仍须只使用解析后的公网 URL。
+    expect(serviceMocks.resolveMediaReferenceUrl.mock.calls).toEqual([
+      ['asset://localhost/reference.png', { provider: 'apimart', kind: 'image', signal: undefined }],
+      ['https://cdn.example/reference.mp4', { provider: 'apimart', kind: 'video', signal: undefined }],
+      ['https://cdn.example/reference.mp3', { provider: 'apimart', kind: 'audio', signal: undefined }],
+    ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const submitBody = JSON.parse(fetchMock.mock.calls[0][1]?.body as string) as Record<string, unknown>;
     expect(submitBody).toMatchObject({
@@ -1029,6 +1074,39 @@ describe('APIMart MiniMax-H3 video', () => {
 describe('媒体任务交付回执', () => {
   beforeEach(() => { vi.clearAllMocks(); pollingMocks.receipts.clear(); vi.unstubAllGlobals(); });
 
+  it('通用异步查询保留 result.data 的有序链接和内联候选', async () => {
+    const url = 'https://cdn.example/image.png?fields=a,b&signature=fixture';
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      status: 'completed', data: { result: { data: [{ url }, { b64_json: 'AQID' }] } },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(queryCompatibleImageTask('key', 'https://api.example/v1/', 'original', { maxDuration: 1000 }))
+      .resolves.toEqual([url, 'data:image/png;base64,AQID']);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('https://api.example/v1/tasks/original?language=zh', expect.objectContaining({
+      headers: { Authorization: 'Bearer key' },
+    }));
+  });
+
+  it('首次取图与原任务续查保留同样的有序候选，续查不再次提交', async () => {
+    const urls = ['https://cdn.example/first.png?fields=a,b&signature=fixture', 'https://cdn.example/second.png'];
+    const payload = { data: { status: 'completed', result: { images: [{ url: urls[0] }, {}, { url: [urls[1], ''] }] } } };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'image-original' }] }))
+      .mockResolvedValueOnce(jsonResponse(payload))
+      .mockResolvedValueOnce(jsonResponse(payload));
+    vi.stubGlobal('fetch', fetchMock);
+    const initial = await generateApimartImagesBatch('key', 'https://api.example/v1', 'gpt-image', 'prompt', '2K', '1:1',
+      { width: 2048, height: 2048 }, [], 2);
+    const resumed = await queryApimartImageResult('key', 'https://api.example/v1', 'image-original');
+    expect(initial.results.map((item) => item.url)).toEqual(urls);
+    expect(resumed).toEqual(urls);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      'https://api.example/v1/tasks/image-original?language=zh',
+      'https://api.example/v1/tasks/image-original?language=zh',
+    ]);
+  });
+
   it('图片拿到结果后保留真实 ID，等待调用方保存和回填确认', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: 'image-delivery' }] }))
       .mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/image.png'] }] } } }));
@@ -1138,6 +1216,54 @@ describe('媒体任务交付回执', () => {
 });
 
 describe('legacy general media requests', () => {
+  it.each([
+    ['APIMart', 'string'],
+    ['compatible', 'array'],
+  ] as const)('%s first fetch preserves the signed URL returned as a %s', async (provider, shape) => {
+    const baseUrl = 'https://api.example/v1';
+    const taskId = 'original-video-result';
+    const url = 'https://cdn.example/video.mp4?signature=alpha,beta&nonce=first-result';
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: taskId }] }))
+      .mockResolvedValueOnce(jsonResponse({ data: {
+        status: 'completed',
+        result: {
+          videos: [{ url: shape === 'array' ? [url, 'https://cdn.example/second.mp4'] : url }],
+          images: [{ url: 'https://cdn.example/preview.png' }],
+        },
+      } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = provider === 'APIMart'
+      ? await generateApimartVideo('key', baseUrl, 'wan3.0-video', 'prompt')
+      : await executeGeneralAsyncTask('key', baseUrl, 'video', 'prompt', 'videos', 'custom');
+
+    expect(result.url).toBe(url);
+    expect(fetchMock.mock.calls.map(([request, init]) => [String(request), init?.method ?? 'GET'])).toEqual([
+      [`${baseUrl}/videos/generations`, 'POST'],
+      [`${baseUrl}/tasks/${taskId}?language=zh`, 'GET'],
+    ]);
+  });
+
+  it('keeps the signed compatible audio URL on the first query of the submitted task', async () => {
+    const baseUrl = 'https://audio-gateway.example/v1';
+    const taskId = 'original-audio-result';
+    const signedUrl = 'https://cdn.example/track.mp3?signature=alpha,beta';
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ task_id: taskId }] }))
+      .mockResolvedValueOnce(jsonResponse({ data: { status: 'completed', result: {
+        audios: [{ url: [signedUrl, 'https://cdn.example/another.mp3'] }],
+      } } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await executeGeneralAsyncTask('fixture-key', baseUrl, 'audio-model', 'prompt', 'audios', 'custom', 'audio-node');
+
+    expect(result.url).toBe(signedUrl);
+    expect(result.taskReceipt).toMatchObject({ nodeId: 'audio-node', taskId });
+    expect(fetchMock.mock.calls.map(([request, init]) => [String(request), init?.method ?? 'GET'])).toEqual([
+      [`${baseUrl}/audio/generations`, 'POST'],
+      [`${baseUrl}/tasks/${taskId}?language=zh`, 'GET'],
+    ]);
+  });
+
   it('retains a known video task on query HTTP 504 without sending another POST', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ task_id: 'slow-task' }))
       .mockResolvedValueOnce(new Response('', { status: 504 }));

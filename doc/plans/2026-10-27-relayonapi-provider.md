@@ -1,15 +1,17 @@
 # RelayOnAPI 图片与视频接入
 
-状态：基础接入已提交（`63ec27a6`），普通 2.5 质量／透明背景、配置初始化保护及分组管理均已实现，待用户验收。质量／背景和分组原记录均未执行测试、类型检查、构建、桌面验收或付费调用；本次仅合并文档，不补作通过结论。
+状态：基础接入及型号公共模板已提交；2026-11-16 将内置图片编辑接到官方 API 子域的 multipart 文件直传，并兼容接入 SD 2.5 C2／C3。2026-11-17 按用户新表收窄视频时长：2.0 C 系列及 H3 固定 15 秒，2.5 C 系列固定 30 秒；A 系列与四款官转保持各自合同。本次未运行测试、lint、类型检查或构建，待用户桌面验收；历史图片复测及失败记录见文件直传一节，不作为本轮视频验证依据。
+
+2026-11-17 用户在新版请求日志及多图文件字段对齐后确认“可以了”，并要求提交推送。该回执对应本轮 Sunburst、双参考图、16:9／2K／PNG 的图片编辑路径；GIF／SVG、其他型号与恢复等仍按下文清单待验收。助手未运行当前版自动化、lint、类型检查或构建；此前获准的本机对照仅执行了隔离旧合同，3项断言失败，不作为当前版通过依据。普通提交推送不追加检查或触发正式版本发布。
 
 ## 范围与依据
 
 - 4 文本：Gemini 3.8 Flash、Gemini 4 Argon、GPT 6.1 Sol、Claude Opus 5.5。
-- 9 图片：`image-2-01`、`Image-2.5-Flare`、`image-2.5-flare-01`、`Image-2.5-Sunburst`、`image-2.5-sunburst-01`、`nano-banana-2`、`nano-banana-2.1`、`nano-banana-pro`、`Seedream 5.0 Pro`。
-- 8 视频：`doubao-seedance-2-0-260128`、`doubao-seedance-2-0-fast-260128`、`doubao-seedance-2-0-mini-260615`、`doubao-seedance-2-5-260628`、`sd-2.0-A`、`sd-2.5-A`、`sd-2.0-c1`、`sd-2.0-c2`。
-- 未接 Midjourney 的一任务四候选，也未接未公开的音频生成、视频编辑或样片流程。未添加依赖、原生能力、安全权限或数据库迁移。
+- 17 图片：`image-2-01`、`Image-2.5-Flare`、`image-2.5-flare-01`、`Image-2.5-Sunburst`、`image-2.5-sunburst-01`、`image-2.6-01`、`image-2.6-flare-01`、`image-2.6-sunburst-01`、`Midjourney v6`、`Midjourney v6.1`、`Midjourney v7`、`Midjourney v8.1`、`Midjourney v8.2`、`nano-banana-2`、`nano-banana-2.1`、`nano-banana-pro`、`Seedream 5.0 Pro`。
+- 13 视频：`doubao-seedance-2-0-260128`、`doubao-seedance-2-0-fast-260128`、`doubao-seedance-2-0-mini-260615`、`doubao-seedance-2-5-260628`、`sd-2.0-A`、`sd-2.5-A`、`sd-2.0-c1`、`sd-2.0-c2`、`minimax-h3`、`sd-2.0-c3`、`sd-2.5-c1`、`sd-2.5-c2`、`sd-2.5-c3`。视频均只属于 `video` 分组；原 SD 六款使用本地调用参考修正的客户接口，两款新增 2.5 型号由用户确认复用 C1 合同，真实生成仍待实测。
+- 未接未公开的音频生成、视频编辑或样片流程。未添加依赖、原生能力、安全权限或数据库迁移。
 
-来源为 [官网目录](https://relayonapi.com/api/pricing)与[型号文档](https://relayonapi.com/docs)，关键示例见 [Image 01](https://relayonapi.com/docs?model=image-2-01)、[Flare](https://relayonapi.com/docs?model=Image-2.5-Flare)、[Nano Banana](https://relayonapi.com/docs?model=nano-banana-2)、[Seedream](https://relayonapi.com/docs?model=Seedream%205.0%20Pro)、[官转 2.5](https://relayonapi.com/docs?model=doubao-seedance-2-5-260628)、[A](https://relayonapi.com/docs?model=sd-2.0-A)、[C1](https://relayonapi.com/docs?model=sd-2.0-c1)、[C2](https://relayonapi.com/docs?model=sd-2.0-c2)。
+图片及官转原来源为官网目录与[型号文档](https://relayonapi.com/docs)，关键示例见 [Image 01](https://relayonapi.com/docs?model=image-2-01)、[Flare](https://relayonapi.com/docs?model=Image-2.5-Flare)、[Nano Banana](https://relayonapi.com/docs?model=nano-banana-2)、[Seedream](https://relayonapi.com/docs?model=Seedream%205.0%20Pro)、[官转 2.5](https://relayonapi.com/docs?model=doubao-seedance-2-5-260628)。SD 请求、参考与取件合同沿用用户提供的 2026-11-10《SD系列视频调用参考.md》；输出秒数以《联序视频模型与可用秒数.md》（2026-11-17 整理）为准，覆盖此前 H3 四档／30 秒及 C 系列连续或离散时长说法。四款官转仅沿用已接入的官方合同，新表不推断其他范围；King 的采购协议、13 份素材及六画幅不套入万象客户接口。
 
 官网只标明兼容协议，缺少该站完整实际响应样例。用户确认先采用 [OpenAI Images 标准返回](https://developers.openai.com/api/reference/resources/images/methods/generate)及 [Videos 标准状态](https://developers.openai.com/api/reference/resources/videos/methods/retrieve)，辅以官网明确列出的三个视频 URL 字段。此为兼容实现依据，尚不是本站端到端验证结论；不借用其他部署的响应、尺寸或权限合同。
 
@@ -17,21 +19,140 @@
 
 厂商定义、模型 manifest 和策略表仍是主要接线入口。默认展示候选，不自动勾选；远端刷新以当前 Key 的实际目录求交，错误不变成本地验证成功。文本、图片、视频共用节点和对话菜单同步。
 
-图片为同步生成及 JSON 编辑，参考图保留顺序并通过现有内联通道处理，不经公共图床。厂商上限为 8／10／16 张，但当前应用内联通道只支持 6 张、单张 8 MiB、合计 24 MiB，本批能力和提交前检查采用这一有效上限，不静默截断，也不放宽内存保护。当前内置合同完整匹配时才切换生成／编辑路径，用户改过的协议保持原值。尺寸采用该型号公布的精确像素表；Seedream 首批只开放完整矩阵的共同六比例。单请求 `n=1`，批量沿用应用调度；不以异步返回不足为理由补交生成。
+图片为同步 JSON 文生图；有参考时，使用官方图片 API 子域的 multipart `/images/edits` 文件编辑。参考图保留顺序，不经公共图床。应用保持最多 6 张（MJ 为 1 张），万象文件准备采用单张 20 MiB、合计 48 MiB 预算，具体边界见下方文件直传说明；这些是应用预算，不是服务端容量承诺，不静默截断或全局放宽其他传输预算。当前内置合同完整匹配时才切换生成／编辑路径，用户改过的协议保持原值。尺寸采用该型号公布的精确像素表；Seedream 首批只开放完整矩阵的共同六比例。单请求 `n=1`，批量沿用应用调度；不以异步返回不足为理由补交生成。
 
 普通 `Image-2.5-Flare` 和 `Image-2.5-Sunburst` 是本次唯一补充质量和背景的型号。官网明确这些字段原值透传；用户确认先提供当前 OpenAI Images 2.5 的兼容候选 `auto/low/medium/high/xhigh/max` 和背景 `auto/opaque/transparent`，不把它们标为该平台已实测枚举。两项默认均不新增请求字段；只有用户选择时发送 `quality`／`background`，透明额外要求 PNG。`-01`、Nano、Seedream 不套用；比例、分辨率及其他请求字段不因选择质量或背景改变。
 
 针对旧保存的普通两型号，识别完整旧模板或完整新模板后，以临时有效副本补齐参数映射与能力；参数 UI、生成及保存／导入校验使用同一副本。原始保存、导出配置不自动改写。修改过的协议不因名称匹配而被覆盖，原安全校验依旧先执行。编辑初始化只为 RelayOnAPI 启用“缓存／已选配置优先”的合并选项，不更改其他厂商或常规目录刷新优先级。
 
-视频四种官转合同使用字符串 `seconds` 与 `metadata`；A 使用字符串 `seconds`、`output` 和普通 `references`；C1／C2 使用顶层 `duration`、`resolution`、`aspect_ratio` 与普通 `references`。不把其他渠道的同名参数套过来。C2 不接视频参考；未公布的首尾帧、比例或纯音频素材组合不开放，角色与组合错误在上传前拦截。本地视频参考沿用已有公共上传，最终 JSON 仅接受 HTTPS 素材；不制造专用 Files API，也不向公共图床传递 RelayOnAPI Key。
+视频四种官转合同保留字符串 `seconds` 与 `metadata`；A／2.5 C 系列使用既有字符串 `seconds` 及顶层 `resolution`、`aspect_ratio`、`references`；2.0 C 系列与 H3 使用顶层 `duration`、`resolution`、`aspect_ratio` 和普通 `references`。本轮仅修上传策略及编码，不随新示例替换这些非参考参数。2.0 C2／C3 不接视频参考，2.0 C3 当前不接参考音频；未公布的首尾帧或纯音频素材组合不开放，角色与组合错误在上传前拦截。参考文件按下表随生成请求直传，缺少合同的本地输入明确拒绝；不再经连接／全局图床或旧图床缓存，不制造独立 Files API。
 
-C1 按最终媒体顺序编译 `@图N`、`@视频N`、`@音频N`；C2 保留其合同使用的“图片N／音频N”。官网 A 渠道的 multipart `first_frame`／`last_frame` 未接入当前 JSON 普通参考，不能据此推测首尾帧的 JSON 字段或混用规则。其他部署的响应、尺寸或权限不能作为本站实测依据。
+SD 系列及 H3 按最终媒体顺序编译 `@图N`、`@视频N`、`@音频N`，仅转换有真实对应素材的编号，不重排或删减素材。首尾帧私有工作流不作为普通 JSON 参考的替代；其他部署的响应、尺寸或权限不能作为本站实测依据。
 
 共享执行器的幂等身份只进入新媒体提交的固定 `Idempotency-Key`，不进入持久化协议、轮询、结果下载或凭据。请求构建两次仍复用同一键；新调用用新键，不自动重试 POST。视频复用 `PendingTask`、取消、暂停、原任务恢复、保存和回填确认；只在真实厂商且完整匹配内置视频合同的查询描述中补入明确的 URL 备用路径，其他厂商和用户协议保持原行为。
 
+### 万象参考素材统一直传（2026-11-17）
+
+依据本日读取的[公共接口说明](https://relayonapi.com/docs#endpoints)、[A 型号指南](https://relayonapi.com/docs?model=sd-2.0-A)、[C1／H3 指南](https://relayonapi.com/docs?model=minimax-h3)、[C2／C3 指南](https://relayonapi.com/docs?model=sd-2.0-c3)及[当前公开能力](https://relayonapi.com/api-docs-data/media-capabilities.json)。所有真实万象连接，包括旧连接与用户添加型号，均禁止连接图床、全局图床和旧图床上传缓存；厂商身份来自目录及连接配置，不只匹配显示名。旧缓存命中不能跳过策略，未知上传合同不能通过图床补齐。
+
+| 模型范围 | 当前参考输入与提交合同 |
+|---|---|
+| 17 款内置图片 | `POST https://api.relayonapi.com/v1/images/edits`；单图 `image`，多图重复 `image[]`，均为真实文件，保留顺序；无参考仍 JSON 文生。GIF／SVG 仅方图文生，不因文件通道开放参考编辑。 |
+| `sd-2.0-A`、`sd-2.5-A` | 在既有能力允许时，图片／视频／音频随 `POST /v1/videos` multipart，字段 `image/images`、`video/videos`、`audio/audios`。官方另列 `first_frame/last_frame`，本轮不据此扩大应用参考角色能力。 |
+| `sd-2.0-c1`、`minimax-h3` | 在既有能力允许时，三类参考文件随 `POST /v1/videos`，使用同上字段；保留素材顺序及真实 `@图N`／`@视频N`／`@音频N` 编号。 |
+| `sd-2.0-c2`、`sd-2.0-c3` | 官方列 `image/images`、`audio/audios`；应用仅对当前模型能力允许的图片／音频直传，不接视频，不因上传修复开启原本被拦截的 C3 音频。 |
+| `sd-2.5-c1`、`sd-2.5-c2`、`sd-2.5-c3` | 独立本地图片示例明确单图 `image`、多图重复 `images`（无方括号），随 `POST /v1/videos` 提交。视频／音频仅接受当前能力允许的 HTTPS `references`；公开能力与实际示例未启用其本地多媒体文件合同，本地视频／音频提交前明确拒绝，不能转图床。 |
+| 四款 `doubao-seedance-*` 官转 | 当前专属指南仅明确文生及已有 `seconds/metadata`；保留应用既有文生能力，不把 A／C／H3 字段套入。通用端点的单图 `input_reference` 说明不等于四款均已确认高级参考能力。 |
+| 四款文本与用户自定义协议 | 文本保持既有 JSON 内联内容块，不改为图片／视频 multipart。用户修改的协议不自动覆盖；需要未确认上传变量时明确失败，不回退图床或捏造 Files。 |
+
+文件直传与生成是同一次请求，不先创建 `file_id`；当前官方明确公网 Files 未开放、视频不支持 `file_id`。多图视频示例使用重复 `images`，不能沿用图片编辑的 `image[]`。普通字段保持原名：对象／数组（包括已有 `output`、`metadata`、`references`）编码为 JSON 文本，标量转字符串，`false` 与 `0` 保留；由传输层生成 boundary。视频／音频的复数字段别名虽已在对应指南列明，但多文件重复 part 的编码仍需桌面／服务端验收，不把字段说明当成逐组合成功证据。
+
+本轮不改既有时长、数量、角色、保存配置或历史恢复。官网新增 C3 音频及 2.5 C2 数量限制与旧应用能力存在差异，另行跟进；不能借上传修复自动扩展或收窄。失败、取消及提交状态未知不改传其他服务、不重新生成，原任务查询与取件继续沿原合同。
+
+本次未运行测试、lint、类型检查、构建或真实上传，待用户 Tauri 桌面验证：
+
+1. 配置 Uguu 或自定义全局图床，并保留旧上传缓存；用已有万象连接及旧节点引用本地素材，核对无连接／全局图床请求，缓存不被当作本次上传结果，读取或上传失败停止生成。
+2. 内置图片分别单图／多图编辑，核对 `/images/edits` 的真实文件、MIME、原字节顺序和 `image`／重复 `image[]`；原 PNG 参数、GIF／SVG 文生限制、取消与结果保存保持。
+3. A、2.0 C1、H3 在当前能力允许的组合中分别选择图片／视频／音频，核对 `/videos` multipart 及同名文本字段；C2／C3 只允许既有能力通过的图／音，非法角色、数量或类型在提交前拦截。
+4. 2.5 C 单／多本地图只到 `/videos`；允许的 HTTPS 视频／音频保留原 `references`，本地视频／音频提示缺少官方文件合同且无上传／生成 POST。官转、四款文本及自定义协议按原入口回归，不被统一改写。
+5. 回归跨项目切换、取消、旧图床缓存、未知型号、连接改名及目录身份、401／502、超时与旧任务续查；核对原连接／Key／任务身份、字节与素材顺序，任何失败都不换服务或自动重投。
+
+### 内置中转上传边界（2026-11-17）
+
+用户将同一要求扩展到全部八个内置中转站。共同规则是按真实目录身份禁用连接／全局图床及旧图床缓存，保留各自已确认的上传或生成内联合同；不能把“禁用图床”解释成任意型号都拥有文件接口。专用上传优先，未知本地文件合同明确拒绝。`custom-openai` 等自定义连接及工作流不套此禁用策略；内置连接中用户改过的协议也不被自动覆盖。当前来源为既有 adapter 与 2026-11-17 读取的[万象文档](https://relayonapi.com/docs)、[Sora2U API](https://sora2u.com/en/developer/api)；未执行真实厂商调用。
+
+| 内置中转站 | 本地参考素材当前入口与缺口 |
+|---|---|
+| ToAPIs | 原连接 `/uploads/images`、`/uploads/videos`、`/uploads/audios`；保留分类型限制、鉴权及缓存身份，不被旧连接图床覆盖。 |
+| LibAPI | 原连接 `/files`；按已有图片／视频／音频上传合同，不先走公共托管。 |
+| APIMart | 图片沿专用 `/uploads/images`；音视频无已确认本地上传合同，明确报错，不转全局图床。 |
+| CCC API | 已确认图片合同继续原生 Google 内容块、JSON 内联或图片编辑文件；其他仅 URL 的路径不编造本地上传接口。 |
+| Amam（AIGC SI） | 图片保留异步编辑 JSON 内联；视频参考沿既有 URL 字段，本地图片的独立直传合同尚未确认，明确拒绝，不能塞 Base64 到 URL 字段。 |
+| GRSAI | 已确认图片模型保留 JSON data URL；H3 图片／音频的公开示例仅明确 HTTPS，未确认其本地文件／Base64 合同时明确拒绝。 |
+| Sora2U | 图片和视频共用 `/api/v1/videos` JSON。图片纯 HTTPS 放 `reference_urls: string[]`，含本地／data URL 时整组按原序内联到 `references: string[]`；不是 `{type,data}` 对象，不猜服务端跨数组合并顺序。视频沿既有内联合同及原能力校验。 |
+| 万象（RelayOnAPI） | 图片编辑随 `/v1/images/edits` 真实文件；视频按上一表区分已确认的文件类型与 HTTPS-only 路径，不新增 `/v1/files`。 |
+
+Sora2U 图片联合最多 4 张，内联解码后合计最多 20 MiB；`https://asset.localhost` 属于 Tauri 本地资产，读取后内联，不能冒充公开 HTTPS 参考。图片两型号的新旧完整内置协议在 raw／通用入口均可识别，只为新提交投影新字段；已改路径、请求体、查询或轮询的自定义协议保持原值，历史查询合同不重建。图片协议编辑器补齐 `referenceUrls`／`inlineReferences` 提示与真实供应；显式内联变量按应用生图预算准备素材，普通图片示例中的 `references`／`reference_urls` 仍不被自动推断为这两个厂商专用别名，保留原导入边界。
+
+本次未运行测试、lint、类型检查、构建或真实上传，待用户 Tauri 桌面验收。准备已保存八家连接、Uguu／连接图床配置及旧缓存，然后：
+
+1. 按上表逐家引用当前能力允许的素材，核对只到厂商自身上传／生成端点，没有 Uguu 或连接图床请求；ToAPIs、LibAPI 与 APIMart 图片在旧图床已启用时仍走专用上传。
+2. Sora2U 两图片型号分别从旧节点和通用模型入口提交纯 HTTPS 与混合本地／data URL 参考，前者不下载并只发 `reference_urls`，后者整组按原序内联并只发 `references`；核对 MIME、顺序和原连接 Key。五张、解码合计超 20 MiB、读取失败均应在生成前拒绝；Tauri 的 HTTPS 资产地址不能进入 `reference_urls`。
+3. Amam／GRSAI H3 等仅 URL 合同使用合法公网素材继续原路径；本地素材显示具体缺少的上传合同且不调用图床。万象 2.5 C 音视频、官转与其他边界仍按上一表验收，不能因统一策略扩大数量、秒数或角色能力。
+4. 自定义连接继续原图床规则；显式声明 `inlineReferences` 的自定义图片协议收到真实内联数组，普通图片协议导入不产生未供应变量。回归取消、错误鉴权、超时、旧缓存、连接改名／换 Key／切换项目和历史任务续取，失败不改服务、不重复生成。
+
+### SD 2.5 C2／C3 兼容接入（2026-11-16）
+
+用户提供新型号目录截图，并明确要求暂无独立文档时沿用已有 SD 2.5 参数。`sd-2.5-c2`、`sd-2.5-c3` 复用 `sd-2.5-c1` 的 720p、原比例及 21:9、参考能力和编号；三款时长现均按 2026-11-17 新表固定为 30 秒，替代最初兼容接入时的 4–30 秒整数范围。请求沿用字符串 `seconds`、顶层 `resolution/aspect_ratio/references`，完成后同源鉴权取回原任务 `/content`。实际素材组合及参数接受情况待实测，不把目录宣传或兼容配置记为独立官方能力。
+
+新增两款不制造历史协议，也不套用 `sd-2.0-c2/c3` 的视频或音频限制。模型与分组目录共用视频 ID 清单，仅属于 `video`，远端仍取 Key 目录与公开分组的交集；已有连接、选择、节点、任务恢复身份与自定义协议不自动覆盖。
+
+本次未运行测试，待用户验收。Tauri 桌面验收前置：打开测试项目，准备具有 `video` 权限的万象连接。
+
+1. 设置 → API Key → 万象 API → 展开已有 `video` 分组的启用模型；旧目录会自动补入两个精确 ID，新增默认不勾选，不需先拉取。显式勾选保存后在视频节点和对话模型选择中可用，图片分组不出现。候选不代表当前 Key 已获权限；手动拉取仍以远端目录为准，无权限、错误 Key 或断网时不能伪称拉取成功，原连接和选择应保留。
+2. 在两款与 2.5 C1 间切换，核对均仅显示 30 秒，720p、21:9 及原参考参数仍一致；2.0 C2／C3 仅显示 15 秒。非法时长和超量素材应在上传／生成前拒绝。
+3. 如用户决定使用受控服务或付费实测，核对只替换请求 `model`，`seconds`、顶层规格、参考顺序和 `@` 编号与 C1 一致；断网、取消、下载失败或重启后仅续取原任务，不重新提交生成。新两款恢复候选只有当前合同，不依赖不存在的旧协议。
+
+<a id="sd-当前路由与-h3-30-秒修正2026-11-10"></a>
+
+### SD 当前路由与时长规则（2026-11-17）
+
+| 型号 | 输出时长 | 当前输出比例 | 图片／视频／音频参考上限 |
+|---|---|---|---|
+| sd-2.0-c1 | 固定 15 秒 | 16:9、9:16、1:1 | 9／3／3 |
+| sd-2.0-c2 | 固定 15 秒 | 16:9、9:16、1:1 | 9／0／3；音频仅部分线路可调度 |
+| sd-2.0-c3 | 固定 15 秒 | 16:9、9:16、1:1 | 9／0／0；当前音频无可调度线路 |
+| sd-2.5-c1／c2／c3 | 固定 30 秒 | 原五项及 21:9 | 30／10／10；实际可用组合受线路限制 |
+| sd-2.0-A／sd-2.5-A | 4–15／4–30 秒整数 | 保留原已接通五比例 | 未公布的数量不从官方基线补齐 |
+| minimax-h3 | 固定 15 秒 | 保留万象五比例 | 9／3／3，总计最多 12 份 |
+| 四款 doubao-seedance 官转 | 沿用各型号已接入官方合同，不据新表推断 | 沿用各自合同 | 沿用各自合同 |
+
+这些限制均为万象渠道覆写。公共 Seedance／H3 模板及其他渠道不跟随收窄或扩展；不把 King 的采购 ID、`durationSeconds`、`ratio`、`data.taskId` 或 `data.downloadUrl` 发到万象。H3 保留既有四档输出分辨率及 `@图N` 约束，仅收窄输出秒数。按次计费型号不会因少秒而按比例便宜，仅作规则背景；本次不修改价格或用量账本，未进行真实出片验收。
+
+SD 系列和 H3 完成后从原任务 `/videos/{id}/content` 同源鉴权取件，不依赖查询响应存在公网 URL。只有官转四款继续原 URL 合同。提交响应接受有效 `id` 或 `task_id`，统一供轮询和安全恢复字段使用；双字段冲突保留提交未知，不选另一任务、不重投，也不保存完整响应或凭据。
+
+`resolveRelayonVideoCapability` 只对完整匹配的旧内置能力快照作读取时投影，包括此前 H3 四档、连续范围及 C 系列旧范围；节点、对话和 MCP 参数共用当前秒数规则，无需重新拉取模型，不写回保存配置。用户自定义协议、部分或修改过的能力不被目录覆盖。旧节点显式保存的非法秒数不静默替换，新提交在上传／生成前拒绝并要求用户重选。`resolveRelayonVideoExecutionProfile` 只为新提交投影修正后的合同。新项目与剪辑恢复通过 `nativeProtocolRecovery.ts`，先按原完整摘要在已确认的新旧协议中选择，再沿既有规则核对查询摘要与来源；旧 URL 回执不能被新版 `/content` 替换，新提交也不能因配置仍为旧模板而失去重启恢复。旧项目仍沿已保存的 `protocolPoll`，未知状态不自动重投。
+
+新建 `video` 分组采用文件明确的 `https://api.relayonapi.com/v1`；已有连接继续原绑定地址，其他分组不改。公开分组目录读取 API 子域且不带 Key。连接导入严格接受两个已确认的官方 `/v1` 来源，保留导入的原地址；拒绝凭据、非标准端口、额外路径、查询参数和伪装主机。不自动搬动任何旧回执的 origin。
+
+本次时长修正未运行测试、lint、类型检查或构建，待用户 Tauri 桌面验收。此前模板统一测试及 H3 30 秒相关记录是历史依据，不证明本轮固定秒数规则已通过。前置：使用测试项目，准备已有完整旧万象视频连接及新视频分组；先看参数和受控请求预览，真实生成由用户自行决定。
+
+1. 不拉取、不重建已有万象连接，逐一切换 2.0 C1／C2／C3、H3，节点及对话参数仅有 15 秒；切换 2.5 C1／C2／C3，仅有 30 秒。核对 MCP 参数工具同样返回这些候选，分辨率、比例和参考限制保持原合同。
+2. 打开保存了 H3 20／25／30 秒、2.0 C 5／10 秒或 2.5 C 7 秒的旧节点，提交应在素材上传及生成 POST 前提示重选；不得静默换秒数。重选 15／30 秒后再核对预览中 `duration` 或字符串 `seconds`；C3 的参考音频拦截仍保留。
+3. A2.0 核对 4、15 秒，A2.5 核对 4、30 秒均可选；通过受控调用传入 3、超上界或小数，应在上传前拒绝。四款官转分别对照原有参数与 `seconds/metadata` 请求，不套用 C／H3 的固定时长。
+4. 在测试连接中修改内置能力或自定义协议后重开、查询参数，核对这些定制保留，未被秒数表覆盖；其他渠道 H3 保持原范围。配置导出不被自动改写，仍不含凭据。
+5. 回归 A／2.5 C 的顶层字段、真实素材编号、两种有效任务 ID 及冲突保护；使用已有旧 URL／新 `/content` 回执继续查询或保存，下载失败、断网、切集、重启和配置刷新后仍续取原任务及原地址，无新增生成 POST。
+6. 新建视频分组、导入新／旧官方地址及编辑旧 Key，核对原 ID、其他分组与 origin 不变；带 Key 的下载不得跨源转发。
+
+此前路由修正的回归源码通过还原七款有意变更字段继续对照旧目录基线，其余渠道摘要不变；这不是本轮执行结果。以下相关回归命令留供用户在仓库根目录执行，本次没有执行：
+
+```powershell
+npx vitest run tests/services/relayonModelManifest.test.ts tests/services/modelProtocolTaskIdentity.test.ts tests/services/nativeProtocolRecovery.test.ts tests/services/relayonProviderGroups.test.ts tests/services/generateVideo.test.ts tests/services/modelProtocol.test.ts tests/services/videoModelCapabilityResolver.test.ts tests/services/providerCatalogService.test.ts tests/components/relayonGroupConnection.test.tsx tests/services/modelCapabilityTemplateCompatibility.test.ts
+```
+
+### MJ 四候选与 2.6 补充（2026-11-06）
+
+逐页核对 [MJ v6](https://relayonapi.com/docs?model=Midjourney%20v6)、[v6.1](https://relayonapi.com/docs?model=Midjourney%20v6.1)、[v7](https://relayonapi.com/docs?model=Midjourney%20v7)、[v8.1](https://relayonapi.com/docs?model=Midjourney%20v8.1)、[v8.2](https://relayonapi.com/docs?model=Midjourney%20v8.2)：前三款只有 1K，后两款为 1K／2K；十种比例使用该型号的精确像素表，尺寸仅选择画幅／档位，实际像素以返回结果为准。每次最多一张参考图，应用编辑采用文件直传，生成与编辑分别走 `/v1/images/generations` 和 `/v1/images/edits`。未完整公布的 quality、style、seed、stylize、chaos、weird、HD 枚举不新增控件或推测请求字段；不把 GPT 的质量或透明参数套给 MJ。
+
+MJ 的 `n` 为作业次数，不是候选图张数。应用每次提交固定 `n=1`，四张返回全部保留，URL／Base64 沿用已有兼容响应解析。长按发送选择 2～8 次作业，复用串行调度；一次点击四图、三作业十二图，不能为凑足图片补交生成。作业数与期待输出数分开记录；四图共享一个原任务回执，并有稳定的输出序号、产物与消息身份。四张都保存、所有所需节点回填及消息持久化成功后才确认；部分失败保留整组，继续保存只取原结果，不重复节点、消息或历史。对话拆为四条既有单媒体消息，不新增持久化嵌套输出结构；项目包仍遵循现有只导出对话文本的边界，画布四节点沿用既有素材导出。
+
+`image-2.6-01` 初次接入时详情无法加载，按用户确认复用 2.5-01 合同。2026-11-16 用户报告 `Unsupported size` 并确认实际型号后，已改用[普通 2.6 独立文档](https://relayonapi.com/docs?model=image-2.6-01)的十比例、三档共 30 个像素规格：2K／16:9 为 `2560x1440`，2K／9:16 为 `1440x2560`，4K／1:1 为 `3840x3840`，不使用 Flare 变体的 `4096x4096`。该表独立于万象 2.5，未新增变体或 GIF／SVG 功能。
+
+`modelSizeProfiles.ts` 管理 `relayon-image-2.6`，目录与请求沿同一份尺寸源。`resolveRelayonImageModelContract` 只在完整内置协议且能力完整匹配旧 2.6 快照时临时换用新表，让已有连接无需重新拉取；不写回配置，不覆盖用户修改的能力、协议或历史任务。回归源码同步更新过时的 2.5 尺寸断言；用户明确自行测试，**本次未运行测试，待用户验收**，也未执行 lint、类型检查、构建或生成提交。
+
+新增六款图片只属于 `image`，已保存连接和节点不自动启用或改写 ID。完整匹配内置 MJ 合同且连接身份为真实万象时才使用固定四候选规则；同名自定义连接、用户修改的协议保持原样。保留兼容的用户比例／分辨率、原连接地址、任务 origin 与分组 Key 隔离，不因示例出现 API 子域而迁移旧任务。
+
+固定四候选仅在能接收完整产物组的图片节点、提示词和对话／MCP 生成入口开放。动画、全景、分镜单帧和插件等仍只消费一个图片结果的入口，在提交前明确拒绝固定多候选合同，不付费后再丢掉额外三张。HTTP(S) 结果使用现有无密钥交付记录续存；Base64 不写入任务存储，四图在本次调用中完整保存并各自记录状态，但无远端任务 ID 且内联结果未保存时，不能保证跨重启恢复或重新查询。任务和文件存储边界不因接入 MJ 放宽。
+
+原对话消息已承载另一轮结果时，旧任务追加四条恢复消息并转为仅对话交付，明确提示可逐图添加到画布；不能在第二次续取时重新绑定并覆盖新图。显式再次生成导致旧任务移到待恢复节点时，产物组身份沿同一尝试保留，已成功的候选文件继续复用。
+
 ## 分组连接与迁移
 
-`src/services/ai/relayonProviderGroups.ts` 管理 ClaudeMax号池、GPTpro号池、Gemini号池、default、image、video 六个可见候选分组，各组以独立连接保存 Key 和模型，统一入口汇总。候选取应用适配清单、Key 实际模型目录及公开分组目录的交集；公开目录请求不附带 Key，目录可见不代表具备调用或计费权限。2026-10-27 的分组快照中 default 没有已适配候选，不自动补入其他组模型。
+`src/services/ai/relayonProviderGroups.ts` 管理 ClaudeMax号池、GPTpro号池、Gemini号池、default、image、video 六个可见候选分组，各组以独立连接保存 Key 和模型，统一入口汇总。手动拉取时，候选取应用适配清单、Key 实际模型目录及公开分组目录的交集；公开目录请求不附带 Key，目录可见不代表具备调用或计费权限。2026-10-27 的分组快照中 default 没有已适配候选，不自动补入其他组模型。
+
+2026-11-16 调整已有万象分组的编辑初始化：打开时在保存目录后补齐当前分组缺失的内置候选，已有模型对象和勾选优先，新增默认不勾选，不请求网络、不更新目录时间或立即写入配置。补齐项仅表示本地候选；历史目录没有排除原因，因此曾未获 Key 权限的内置型号也可能重新显示。手动拉取后仍按远端交集筛选，当前编辑会话不立即补回；拉取失败保留当前候选和选择。CCC 与同名自定义连接保持原行为。
+
+本次未运行测试，待用户验收。Tauri 桌面前置：使用已保存旧目录、已勾选 11 款视频的万象连接，保留至少一个自定义模型参数。打开设置 → API Key → 万象 API，展开 `video`，预期为原 11 项勾选、共 13 个候选，C2／C3 未勾选且不出现在 `image`。直接取消后配置不变；重新打开勾选 C2 并保存，旧选择、自定义参数、Key 和连接身份不变，重开仍能看到 C3 未勾选。手动拉取只开放部分型号时以远端结果为准，缺失的已选项保留并提示；模拟断网则保留编辑中的候选和选择。
 
 旧连接不推断分组，用户明确指定后保留原连接 ID、Key 与已保存配置；同组多条连接各自保留，不按组名合并。单组删除只处理所选连接，统一入口删除须确认。配置分享保留分组但不携带凭据；待恢复任务仍绑定原连接及原任务身份，只读取当前 Key 查询，不自动重投。用户更换 Key 后能否查询旧任务由平台权限决定。
 
@@ -39,9 +160,9 @@ C1 按最终媒体顺序编译 `@图N`、`@视频N`、`@音频N`；C2 保留其�
 
 ## 验收
 
-本次质量／背景补充完成源码、引用、差异空白与 UTF-8 静态复核；提交按仓库钩子执行改动文件的定向 ESLint。测试、类型检查、构建、Tauri 实机及真实厂商调用均未运行。
+本次质量／背景补充完成源码、引用、差异空白与 UTF-8 静态复核；本地质检仅在用户明确授权后执行。测试、类型检查、构建、Tauri 实机及真实厂商调用均未运行。
 
-不付费：新建厂商确认 21 个默认候选均未勾选；填 Key 后拉目录，勾选各类模型并保存，确认节点和对话按正确类别显示、重启保持勾选。错误 Key／断网时旧目录和选择保留，不能提示远端验证成功；显式自定义且同名的连接不继承本厂商白名单、上传或幂等策略。切换模型保留用户比例，不支持的值应明确拦截。
+不付费：新建厂商确认 32 个默认候选均未勾选；填 Key 后拉目录，勾选各类模型并保存，确认节点和对话按正确类别显示、重启保持勾选。错误 Key／断网时旧目录和选择保留，不能提示远端验证成功；显式自定义且同名的连接不继承本厂商白名单、上传或幂等策略。切换模型保留用户比例，不支持的值应明确拦截。
 
 分组的无付费回归：添加万象 API 后逐组核对独立 Key 输入、候选和 default 空提示；分别保存图片／视频分组，检查节点、对话和 MCP 按选中连接显示对应组。给旧连接指定分组，确认与同组新连接并存，连接 ID、高级参数及用户协议不被覆盖。断网或无效 Key 保留原候选；单组删除不影响其他连接，统一删除需确认；复制／导出配置不含 Key。对已有任务只检查恢复仍使用原连接和任务身份，平台查询权限另行验收。
 
@@ -49,7 +170,7 @@ C1 按最终媒体顺序编译 `@图N`、`@视频N`、`@音频N`；C2 保留其�
 
 以下真实生成由用户自行决定执行，会产生厂商计费：
 
-1. 选择 Image 01，16:9、2K，无参考生成一次；预期请求像素为 2048×1152，返回后保存并展示。单张参考编辑应切换到编辑端点，内联参考不经公共图床；超过上限在提交前拒绝。
+1. 选择 Image 01，16:9、2K，无参考生成一次；预期请求像素为 2048×1152，返回后保存并展示。单张参考编辑应切换到编辑端点，图片作为 multipart `image` 文件提交，不经公共图床；超过上限在提交前拒绝。
 2. 选择一款 Nano Banana 与 Seedream，核对各自像素及参考数量；Seedream 不应把不存在的 1K／2:3 规格发送给平台。
 3. 官转视频生成 4 秒、480p、16:9，确认只提交一次并保存任务 ID，完成后从官方 URL 保存、回填并结束加载。A 与 C1 分别核对参数层级；C1 参考编号与最终图片／视频／音频顺序一致，C2 接视频参考应在上传和生成前拒绝。
 4. 任务取得 ID 后断网或暂停，再继续查询；应复用原 ID、不出现新 POST。查询返回三种已公布 URL 字段任一种均应取回；返回陌生结构不能伪称成功，任务应保留。结果保存或回填失败后继续取回，不能重新扣费生成。
@@ -57,6 +178,76 @@ C1 按最终媒体顺序编译 `@图N`、`@视频N`、`@音频N`；C2 保留其�
 6. 仅在用户决定付费验收时，对普通 Flare／Sunburst 各检查无参考文生和单图编辑：选择 `high`、透明，预期请求含相同值及 PNG 输出要求，产物原图应为保留 alpha 的 PNG。未选两项时不应额外发送字段；自动／不透明背景不强制附加 PNG。平台若拒绝某兼容档位，应保留真实错误，不伪称成功或自动换档重投。
 
 本次补充的回归源码：`relayonModelManifest.test.ts`、`mediaModelCapabilities.test.ts`、`modelRequestTransport.test.ts`、`providerCatalogService.test.ts`、`providerConnectionModels.test.ts`；覆盖完整旧模板、缺字段的模型缓存、用户自定义协议、默认省略和透明 PNG。基础接入另有 `providerPolicies.test.ts`、`defaultModels.test.ts`、`generateVideo.test.ts`、`modelProtocol.test.ts`。有相应授权后可在仓库根目录运行对应文件的定向 Vitest，本轮未执行。
+
+### 本轮 MJ／2.6 桌面验收
+
+前置：Tauri 桌面打开项目，准备具有 `image`／`video` 权限的独立万象连接。先只检查配置：设置 → API Key → 万象 API → 对应分组重新拉取，图片应新增六款且未自动勾选，视频仍有 `minimax-h3`、`sd-2.0-c3`、`sd-2.5-c1`。保存后检查节点、对话与 MCP 的模型目录，不能跨组串 Key；取消编辑、旧协议、同名自定义连接及兼容的用户比例／分辨率保持原状。
+
+以下需要真实模型或受控测试服务，由用户决定执行；真实模型会计费：
+
+1. MJ v6／v6.1／v7 仅显示 1K，v8.1／v8.2 可选 1K／2K；各自十比例与型号表一致。点发送应提示一次四候选；长按选 3 次作业，只有三次 `n=1` 提交、十二个完整图片结果及相应历史，不把 `n` 发成 12。单张参考走编辑端点；两张参考提交前拒绝。
+2. 用受控服务返回四个图片 URL，令第三张下载失败：其他图片可保留，整组原回执继续存在。点击继续保存，只重试原结果，不新增生成 POST、不重复节点、消息或历史。再模拟取消、换项目、删目标和新一轮生成，旧结果不能写入错误目标。
+3. 在普通对话及 Agent／MCP 分别生成一次，检查四条独立图片消息；需要画布时交付四个节点。任一图片保存或消息持久化失败，不能用首张成功清回执；从子消息继续也应恢复同一组。仅对话产物沿既有项目包文本导出边界，不据此承诺图片归档。
+4. 分别返回 URL 与四项 Base64，检查当次交付不截图、不丢图。Base64 保存失败逐项显示失败；无远端 ID 时不承诺重启后重取，不把大 Base64 或 Key 写进 PendingTask。动画、全景、插件或单帧入口使用固定四候选模型应在 POST 前拒绝。
+5. `image-2.6-01` 使用已有未重拉连接选择 16:9／2K，文生及参考图编辑的 `size` 应为 `2560x1440`；再核对 9:16／2K 的 `1440x2560`、方图／4K 的 `3840x3840` 以及独立文档完整 30 档。检查自定义能力／协议及万象 2.5 仍保留原值。平台拒绝字段时保留原错误，不自动换模型、改参数或重投；成功生成、保存与回填待用户验收。
+
+本批只补 `relayonModelManifest`、`providerCatalogService`、`mediaModelCapabilities`、`modelRequestTransport`、`modelProtocol`、`pollManager`、`imageBatchService`、`generationServiceReplicaLease`、`generationRuntime`、对话执行／媒体工具和节点／分组交互回归源码；没有运行自动化检查。需要自行运行时，在仓库根目录执行 `npx vitest run tests/services/relayonModelManifest.test.ts tests/services/modelRequestTransport.test.ts tests/services/pollManager.test.ts tests/services/imageBatchService.test.ts tests/services/generationRuntime.test.ts tests/services/chat/conversationExecutionController.test.ts tests/services/chat/mediaTools.test.ts tests/components/nodeCriticalInteractions.test.tsx tests/components/relayonGroupConnection.test.tsx`。这不是已通过结论。
+
+## 参考图文件直传（2026-11-16）
+
+已实现按独立图片文档向官方 API 子域直接提交 multipart 编辑；Files 方案已撤回。恢复后的定向回归尚未运行；只读核对确认用户最新 API 子域请求仍被 HTTP 400 拒绝，成功生成与交付待用户验收，不沿用旧模拟合同通过结果冒充本站出图成功。
+
+依据为当前[官方图片文档](https://relayonapi.com/docs)及其实际加载的[独立文档脚本](https://relayonapi.com/static/js/async/1439.c1fe91643c.js)：Image 01 系列、大写 Image 2.5／MJ／Seedream、Nano 三组独立生成示例均使用 `https://api.relayonapi.com/v1/images/generations`；同段编辑说明为 `POST /v1/images/edits`，支持 multipart `image`／`image[]` 文件，因此新编辑请求采用同一 API origin。[官方公开配置](https://relayonapi.com/api/status)也将 API 地址声明为该子域与 `/v1`。
+
+先前误将同一 bundle 中未启用通用示例生成器的 Files 片段视为本站开放合同。该生成器依赖的能力接口实际只返回 HTML 壳，不能证明支持 Files；实际尝试第一张 `/files` 上传又被 HTTP 400“未指定模型名称，模型名称不能为空”拒绝，尚未提交生成。不能据此给 Files 猜加 `model`，也不能拿别站能力表证明支持。已移除 Files helper、file_id 编辑接线及相应模拟合同测试；此处纠正前轮结论。
+
+`resolveRelayonImageExecutionProfile` 仅对精确型号及完整匹配的新旧内置模板生成临时 multipart 合同；2026-11-17 按新版实际上传组件修正为单图 `image`、多图重复 `image[]`，字段均使用 `$file`。按原顺序生成文件，MIME／后缀跟随真实图片。普通节点、通用模型和受信角色工作台共用准备链路，MJ 保留一次四候选与原交付语义。没有参考图继续 JSON 文生图，不调用 Files 或图床；当前型号、尺寸、可选参数、`n=1` 和完整用户自定义协议保持各自原语义。
+
+新图片／视频分组默认使用其独立文档中的 API 子域。旧连接不自动改写配置：只有真实万象连接、完整内置图片合同及精确的已确认官方 `/v1` 地址，才在新图片提交时选用 API 子域；非官方自定义地址、文本／视频的旧连接及已提交回执不被此映射搬动。下载仍要求目标严格匹配捕获的原 `access.origin`；仅真实万象连接的两个已确认官方来源可作为该连接的别名，外部 CDN 或同名自定义连接不因此获得 Key。新角色任务保存实际提交 base，旧任务仍沿原回执来源，不扩大通用跨域权限。
+
+图片先取本地副本，只有 HTTP(S) 链接时读取成文件。data URL 仅在受限准备内存中使用；保留已有无损优化，不作有损缩放或改传公共图床。应用最多 6 张（MJ 为 1 张）、单张 20 MiB、总 48 MiB，这些是应用预算，平台实际限制同时生效。官方编辑说明的单文件 20 MiB 限制不代表总请求上限，后者尚未公开。读取／格式／数量／预算失败或取消时停止，提交未知时沿原回执，不自动重投。
+
+修复依据的早期桌面实测：两张 PNG 分别为 3,611,982 与 1,262,103 字节；旧网页 origin `https://relayonapi.com/v1/images/edits` 的 multipart 请求共 4,875,616 字节（约 4.65 MiB），返回 HTTP 400 请求体过大，未出图。之后的 Files 尝试在首图阶段失败，也未开始生成。随后只读桌面 DevTools 核对用户已有的最新失败记录，确认请求已发往 `https://api.relayonapi.com/v1/images/edits`，multipart ArrayBuffer 同为 4,875,616 字节，仍返回 HTTP 400“请求体超过允许大小”。本轮只读取已有失败记录，没有新增生成提交或运行测试；API 子域切换尚未解决该体积错误，不能据此推断其他体积请求的成功情况。
+
+Tauri 桌面验收：使用已有万象图片组、原两张参考图及 `image-2.6-01`、16:9、2K。提交前核对模型与两图均保留；本次应只向官方 API 子域 `/images/edits` 发一个 multipart POST，按11月17日新版文档单图用 `image`，多图用重复 `image[]` 文件，不出现 `/files` 或图床请求。成功后检查图片本地保存和节点回填；故意取消、断网、超限或修改协议时核对停止／隔离语义，未知结果不能自动重新生成。自定义来源不改域，旧回执下载仍绑定其捕获来源。
+
+后续用户称服务方已修复请求体限制，又报告图片地址无法访问。只读核对该次已有桌面日志：官方 API `/images/edits`、multipart ArrayBuffer 4,875,616 字节，HTTP 400 原始响应为 `source_fetch_failed`、`origin=upstream`，并带 `billing_status=refunded`。这是接口的错误归因和退款标记，不是生成成功或账户余额核验；万象内部是否转存为不可达、签名失效的素材 URL 仍需服务方排查。本次未修改上传产品代码、重投生成或运行检查，不因错误文案提到 URL 就改回公共图床。
+
+恢复后的定向回归计划覆盖模型合同、实际图片传输、分组默认地址及原媒体下载边界，尚未执行；本轮未运行 lint、类型检查或构建。当前成功生成、保存和节点回填仍待用户验收；总请求上限未公开，11月17日公开能力说明明确Files上传尚未开放。
+
+## 新版图片文档与三格式（2026-11-17）
+
+用户确认完整 PNG／GIF／SVG 范围及多文件方案，测试仍由用户执行。本阶段源码与回归源码已补；本次未运行测试，待用户验收，未执行 lint、类型检查、构建、Rust检查或生成请求。先前上游取图400的实际解决情况不由文档同步或本地静态差异推断。
+
+来源为新版真实 docs 路由及[共享型号/本地上传组件](https://relayonapi.com/static/js/async/5577.7f34fae519.js)、[公开17款图片目录](https://relayonapi.com/api/pricing)。新公共能力JSON的image目录为空，图片按独立型号页实施；公网Files入口仍未开放。Image01、大写2.5和2.5-01五款现有尺寸表逐项与官方一致，不改动。普通2.6仍为4K方图3840，显式旧2880方图只保留文档允许的原像素；新两变体的4K方图为4096，不套用其他型号。
+
+| 形式 | 本次接线 |
+|---|---|
+| PNG | 两变体默认输出，10比例×3档；允许文生和参考编辑，文件及顺序保持 |
+| GIF | 仅方图文生；`frame_count`默认9，2–16整数；`frame_duration_ms`默认200，20–655350且10ms步进；`transparent`布尔值，false也提交 |
+| SVG | 仅方图文生，原始矢量文件保留；不作为可执行页面或DOM片段插入 |
+| GIF/SVG尺寸 | 1K 1024、2K 2048、4K 4096；非法参考/蒙版/非方图在上传前拒绝，不改成PNG |
+| 质量 | low／medium／high，auto表示省略；PNG/GIF/SVG共用该可选项 |
+| 参考文件 | 单图 `image`，多图重复 `image[]`；应用6图、单张20MiB、合计48MiB预算仍有效，不能将平台8/16图误写为应用已支持 |
+
+共享 `ImageOutputParameters` 四标量通过参数面板、节点、对话/MCP、角色任务、历史及恢复白名单传递。能力声明控制选项，不在UI内按型号散落判断。PNG/SVG请求不携带GIF专属字段；切换格式/模型时清理不适用参数，显式无效MCP输入仍报错。原生下载继续验证真实容器、尺寸及字节预算，真实格式用于无后缀受控结果的扩展名；保存/取消/冲突仍沿既有路径授权、唯一目标和任务身份。GIF实际画布可能与请求尺寸不同，原件及检测到的尺寸用于交付，不转码或裁剪。
+
+PNG文件编辑的格式字段另按操作区分：用户真实 `image-2.6-sunburst-01` 双图编辑返回400，明确拒绝`output_format=png`。12:08–12:09（北京时间）重新对照官网独立页及当前示例脚本，变体JSON文生示例含格式字段，本地multipart编辑示例省略它；文档未明文声称所有编辑都禁止该参数。因此只在两款新变体的PNG带参考图调用中省略实际提交的`output_format`，UI仍选择PNG、保存参数及canonical格式映射不改；PNG/GIF/SVG文生继续传原格式。维持尺寸、model、image/image[]、原文件与单次提交；不连带推断quality也不支持，不自动重投已拒绝或未知状态请求。这是原三格式接入范围内的参数映射纠偏，尚未实际调用验证。
+
+随后按用户提供的Node FormData示例进一步对齐三个2.6型号的文件编辑：单图仍为`image`、多图仍为独立重复`image[]`，文件名显式使用`reference-1.png`、`reference-2.png`等（实际MIME为JPEG/WebP时同步改后缀），规格仅通过`size`表达，省略额外`resolution/aspect_ratio`。默认PNG编辑的普通字段对应`model/prompt/size/n/response_format`，保留幂等头和准备后上传副本的字节/顺序；其他型号、自定义协议和文生不改。原编码已经是独立multipart文件部分；上述差异不是已证明的`source_fetch_failed`根因。用户曾授权仅本机合成素材对照，已隔离运行旧构造合同并得到3个不匹配断言；当前源码未继续运行对照或模型生成，随后用户选择直接桌面测试。不能把旧合同断言失败当成当前出图成功。
+
+大写2.5的mask/stream/output_compression仍是未开放产品入口的可选能力，本批不新增也不宣称已支持。维持现有同步合同，不将公共 `Prefer: respond-async` 范例与 `/image01/v1/tasks` 混接；不新增依赖、权限、安全配置或数据库schema。
+
+Tauri用户验收：
+
+1. 打开已保存万象image组，确认新两款自动出现未勾选候选；勾选保存，仍使用该组Key。
+2. 新两款分别选择PNG、16:9、2K，一图/两图参考提交字段分别为 `image`/重复 `image[]`，准备后副本的顺序和字节不变，只有一个POST；图生请求应没有`output_format`、`resolution`、`aspect_ratio`及GIF字段，仍为model原ID、size=`2560x1440`、n=1，文件摘要显示独立`reference-N`文件名。普通`image-2.6-01`编辑同样按size表达规格。再去掉参考图，文生仍保留原分辨率/比例字段，新变体PNG文生仍显式传`output_format=png`。质量上游默认不发quality。
+3. 切GIF，方图2K、9帧、200ms、透明关闭；请求含 `output_format=gif`、`transparent=false`，结果本地后缀gif且保留动画；另存、预览、重开仍为原字节。
+4. 切SVG方图4K，尺寸4096；请求没有GIF字段，受控无后缀结果落 `.svg` 并保留矢量。普通2.6的4K仍3840，2.5不改。
+5. 非方图GIF/SVG、带参考或蒙版、帧数1/17、时长201ms应在上传/生成前拒绝；未声明格式的模型不接受这些字段。取消、断网、保存冲突不自动生成第二次。
+6. 分别从图片节点、对话/MCP及角色入口确认参数和文件，重开、历史重用、归档导入后格式/false/帧参数仍在，旧任务不能覆盖新设置。
+
+定向回归源码入口包含 `relayonModelManifest`、`modelRequestTransport`、`imageOutputParameters`、`modelProtocolVariables`、`qualityRatioSelector`、生成工具/历史、`fileServiceDownload/SaveAs`、`characterVisualFiles` 及Rust文件校验用例。用户可在仓库根运行 `npm run check`；构建为 `npm run build`，Rust在 `src-tauri/` 运行 `cargo check --lib` 和对应文件模块的 `cargo test ... --lib`。这些均是待执行步骤，不是已通过的结果；逐项状态和完整文件清单在本阶段工作台账。
 
 ## 回滚
 

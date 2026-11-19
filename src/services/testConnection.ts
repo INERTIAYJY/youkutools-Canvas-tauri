@@ -4,10 +4,12 @@
 import { APIMART_BASE_URL, VOLCENGINE_BASE_URL } from '../constants/api';
 import type { ChatApiProtocol, WebSearchProviderId } from '../types';
 import { corsSafeFetch } from './ai/httpTransport';
-import { getProviderDefinition } from './ai/providerCatalogService';
+import { getProviderDefinition, isRetiredProviderConnection } from './ai/providerCatalogService';
 import { baseUrlCandidates, normalizeBaseUrl } from './ai/providerBaseUrl';
 import { getChatApiHeaders, resolveChatApiProtocol } from './ai/chatApiProtocol';
 import { invoke } from '@tauri-apps/api/core';
+import { isTauriEnv } from './fs/core';
+import { pollTask, PollTimeoutError } from './pollTask';
 import { assertMinimaxResponse, resolveMinimaxBaseUrl } from './ai/providers/minimaxModelManifest';
 
 export interface TestResult {
@@ -25,7 +27,7 @@ export interface TestResult {
 /** 仅供设置面板展示，不进入连接配置、用量账本或导出。 */
 export interface ProviderBalance {
   amount: string;
-  unit: 'GP' | '积分' | '算力' | 'USD' | '';
+  unit: '积分' | '算力' | 'USD' | '';
   scope: 'account' | 'key';
 }
 
@@ -44,6 +46,7 @@ function readBalance(value: unknown, unit: ProviderBalance['unit'], scope: Provi
 interface BalanceEndpoint {
   path: string;
   bodyKey?: 'apiKey' | 'apikey';
+  bearerWithBody?: boolean;
   /** 根接口只移除已知 API 后缀，保留用户代理地址中的路径前缀。 */
   root?: boolean;
   read: (payload: Record<string, unknown>) => ProviderBalance | undefined;
@@ -57,8 +60,6 @@ function readUserCredits(payload: Record<string, unknown>): ProviderBalance | un
 
 // 新厂商先核实文档的鉴权、字段、单位和账户/Key 口径，再登记；不探测相似站点的路径。
 const BALANCE_ENDPOINTS: Readonly<Record<string, BalanceEndpoint>> = {
-  sora2u: { path: '/api/v1/credits', root: true,
-    read: (payload) => payload.success === true && payload.currency === 'GP' ? readBalance(payload.balance, 'GP', 'account') : undefined },
   apimart: { path: '/user/balance', read: readUserCredits },
   toapis: { path: '/user/balance', read: readUserCredits },
   libapi: { path: '/skills/balance', read: (payload) => {
@@ -73,7 +74,7 @@ const BALANCE_ENDPOINTS: Readonly<Record<string, BalanceEndpoint>> = {
     ? readBalance(payload.balance, '积分', 'account') : undefined },
   grsai: { path: '/client/openapi/getAPIKeyCredits', root: true, bodyKey: 'apiKey', read: (payload) => payload.code === 0
     ? readBalance((payload.data as Record<string, unknown> | undefined)?.credits, '积分', 'key') : undefined },
-  'runninghub-model': { path: '/uc/openapi/accountStatus', root: true, bodyKey: 'apikey', read: (payload) => payload.code === 0
+  'runninghub-model': { path: '/uc/openapi/accountStatus', root: true, bodyKey: 'apikey', bearerWithBody: true, read: (payload) => payload.code === 0
     ? readBalance((payload.data as Record<string, unknown> | undefined)?.remainCoins, '积分', 'account') : undefined },
 };
 // 工作流和模型密钥分别查询，保持当前站点和凭据身份，不互相回退或相加。
@@ -86,6 +87,18 @@ function balanceEndpoint(provider: string): BalanceEndpoint | undefined {
 
 export function supportsProviderBalance(provider: string): boolean {
   return !!balanceEndpoint(provider);
+}
+
+function accountRequestInit(apiKey: string, { bodyKey, bearerWithBody }: BalanceEndpoint): RequestInit {
+  const key = apiKey.trim();
+  const headers: Record<string, string> = {};
+  if (bodyKey) headers['Content-Type'] = 'application/json';
+  if (!bodyKey || bearerWithBody) headers.Authorization = `Bearer ${key}`;
+  return {
+    method: bodyKey ? 'POST' : 'GET',
+    headers,
+    ...(bodyKey ? { body: JSON.stringify({ [bodyKey]: key }) } : {}),
+  };
 }
 
 /** 独立无计费查询；失败不影响连接状态，不调用模型、不获取网页账户令牌。 */
@@ -106,13 +119,8 @@ export async function queryProviderBalance(
     const apiBase = /\/v\d[^/]*$/i.test(base) ? base : `${base}/v1`;
     const url = new URL(`${endpoint.root ? root : apiBase}${endpoint.path}`);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return undefined;
-    if (provider === 'sora2u') {
-      for (const [name, value] of Object.entries(definition?.requestQuery ?? {})) url.searchParams.set(name, value);
-    }
     const response = await corsSafeFetch(url.toString(), {
-      method: endpoint.bodyKey ? 'POST' : 'GET',
-      headers: endpoint.bodyKey ? { 'Content-Type': 'application/json' } : { Authorization: `Bearer ${apiKey.trim()}` },
-      ...(endpoint.bodyKey ? { body: JSON.stringify({ [endpoint.bodyKey]: apiKey.trim() }) } : {}),
+      ...accountRequestInit(apiKey, endpoint),
       signal: controller.signal,
     });
     if (!response.ok) return undefined;
@@ -235,15 +243,11 @@ async function testApimart(apiKey: string, baseUrl = APIMART_BASE_URL): Promise<
   return result;
 }
 
-/** RunningHUB — 模型 API 密钥，有余额 */
+/** RunningHub 模型和工作流密钥共用账户信息接口。 */
 async function testRunninghubModel(apiKey: string, baseUrl?: string): Promise<TestResult> {
   const root = (baseUrl || 'https://www.runninghub.cn').replace(/\/openapi\/v2\/?$/, '').replace(/\/+$/, '');
-  const url = `${root}/uc/openapi/accountStatus`;
-  const res = await corsSafeFetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apikey: apiKey }),
-  });
+  const url = `${root}${RUNNINGHUB_BALANCE_ENDPOINT.path}`;
+  const res = await corsSafeFetch(url, accountRequestInit(apiKey, RUNNINGHUB_BALANCE_ENDPOINT));
   const data = await res.json().catch(() => ({}));
   if (data.code === 0 && data.data) {
     const coins = data.data.remainCoins;
@@ -342,6 +346,28 @@ export async function testProviderConnection(
   baseUrl?: string,
   chatApiProtocol?: ChatApiProtocol,
 ): Promise<TestResult> {
+  if (isRetiredProviderConnection(provider)) return { success: false, unsupported: true, error: '该内置厂商已下架，请选择其他连接' };
+  if (provider === 'muse') {
+    if (!isTauriEnv()) return { success: false, unsupported: true, error: 'Muse 登录仅在桌面应用中可用' };
+    try {
+      type Status = { loggedIn: boolean; checking?: boolean; sessionState?: string; credentialStored?: boolean };
+      const initial = await invoke<Status>('muse_auth_status', { verify: true });
+      const status = initial.checking ? await pollTask<Status, Status>({
+        fetchState: () => invoke<Status>('muse_auth_status'),
+        isComplete: (current) => current.checking ? null : current,
+        interval: 500, maxDuration: 60_000,
+        timeoutMsg: 'Muse 会话仍在验证，请稍后在连接设置中刷新；已保存 Cookie 不会删除',
+      }) : initial;
+      if (status.loggedIn && status.sessionState === 'verified') return { success: true };
+      return { success: false, error: status.sessionState === 'invalid'
+        ? 'Muse 已明确拒绝此会话，请重新登录或更新 Cookie'
+        : status.credentialStored ? 'Muse 会话已保存，但尚未在线验证，请在连接设置中重试'
+          : '请先在 Muse 官网窗口登录或手动填写 Cookie' };
+    } catch (error) {
+      if (error instanceof PollTimeoutError) return { success: false, error: 'Muse 会话仍在验证，请稍后在连接设置中刷新；已保存 Cookie 不会删除' };
+      return { success: false, error: '无法读取 Muse 登录状态，请重试' };
+    }
+  }
   if (!apiKey && getProviderDefinition(provider)?.kind !== 'workflow-api') return { success: false, error: '请先填写 API 密钥' };
   const fn = testFns[provider as ProviderTestKey];
   try {

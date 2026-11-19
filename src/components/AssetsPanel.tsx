@@ -29,7 +29,7 @@ import { motion, AnimatePresence, MotionConfig, useReducedMotion } from 'framer-
 import { useShallow } from 'zustand/react/shallow';
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore } from '../store/useAppStore';
-import { listTopLevelProjects, listEpisodes, seriesOwnerId } from '../store/store.utils';
+import { listTopLevelProjects, listEpisodes, projectMemoryOwnerId, seriesOwnerId } from '../store/store.utils';
 import {
   getProjectDataDir,
   listGlobalFolderContents,
@@ -166,7 +166,7 @@ export default function AssetsPanel() {
     dramaAssetsPanelOpen,
     setDramaAssetsPanelOpen,
     markDramaAssetsViewed,
-    unreadDramaAssetCount,
+    dramaAssetsForCount,
     dramaAssetCount,
     canvasNodeCount,
     currentProjectId,
@@ -190,7 +190,7 @@ export default function AssetsPanel() {
         dramaAssetsPanelOpen: s.dramaAssetsPanelOpen,
         setDramaAssetsPanelOpen: s.setDramaAssetsPanelOpen,
         markDramaAssetsViewed: s.markDramaAssetsViewed,
-        unreadDramaAssetCount: countUnreadDramaAssets(s.dramaAssets),
+        dramaAssetsForCount: s.assetsPanelOpen ? s.dramaAssets : undefined,
         dramaAssetCount:
           s.dramaAssets.characters.length
           + s.dramaAssets.scenes.length
@@ -209,12 +209,21 @@ export default function AssetsPanel() {
       })),
     );
 
+  const unreadDramaAssetCount = useMemo(() => dramaAssetsForCount ? countUnreadDramaAssets(dramaAssetsForCount) : 0, [dramaAssetsForCount]);
+
   const [activeTab, setActiveTab] = useState<FileTabKey>('project');
   const [globalCreativeKind, setGlobalCreativeKind] = useState<DramaAssetCategory | null>(null);
   const [creativeFile, setCreativeFile] = useState<{ file: AssetFileEntry; kind: DramaAssetKind; scope: string } | null>(null);
-  const creativeCounts = useAppStore(useShallow((state) => ({ character: state.globalCharacters?.length ?? 0, scene: state.globalScenes?.length ?? 0,
-    prop: (state.globalProps ?? []).filter((asset) => matchesDramaAssetCategory(asset, 'prop')).length,
-    weapon: (state.globalProps ?? []).filter((asset) => matchesDramaAssetCategory(asset, 'weapon')).length })));
+  const { globalCharacterCount, globalSceneCount, globalPropsForCount } = useAppStore(useShallow((state) => ({
+    globalCharacterCount: state.assetsPanelOpen ? state.globalCharacters?.length ?? 0 : 0,
+    globalSceneCount: state.assetsPanelOpen ? state.globalScenes?.length ?? 0 : 0,
+    globalPropsForCount: state.assetsPanelOpen ? state.globalProps : undefined,
+  })));
+  const creativeCounts = useMemo(() => ({
+    character: globalCharacterCount, scene: globalSceneCount,
+    prop: globalPropsForCount?.filter((asset) => matchesDramaAssetCategory(asset, 'prop')).length ?? 0,
+    weapon: globalPropsForCount?.filter((asset) => matchesDramaAssetCategory(asset, 'weapon')).length ?? 0,
+  }), [globalCharacterCount, globalSceneCount, globalPropsForCount]);
   const loadGlobalDramaAssets = useAppStore((state) => state.loadGlobalDramaAssets);
   const [arkLibraryOpen, setArkLibraryOpen] = useState(false);
   const [refmodLibraryOpen, setRefmodLibraryOpen] = useState(false);
@@ -232,12 +241,13 @@ export default function AssetsPanel() {
   const selectedOwnerId = selectedProjectId ?? currentProjectId;
   const viewProjectId = selectedOwnerId ? seriesOwnerId(projects, selectedOwnerId) : null;
   const currentOwnerId = currentProjectId ? seriesOwnerId(projects, currentProjectId) : null;
+  const sharingOwnerId = currentProjectId ? projectMemoryOwnerId(projects, currentProjectId) : null;
   const sharingProjectReady = useAppStore((state) => state.projectInitialized && state.projectLoadStatus === 'ready');
   const canManageProjectSharing = sharingProjectReady && !!currentOwnerId && currentOwnerId === viewProjectId
     && (visibleTab === 'project' || visibleTab === 'drama');
   const [sharingOwner, setSharingOwner] = useState<{ id: string; name: string; sync?: boolean } | null>(null);
   // 视图离开时撤销弹窗，返回旧视图也不能重新打开已取消的操作。
-  if (sharingOwner && (!assetsPanelOpen || !canManageProjectSharing || sharingOwner.id !== currentOwnerId)) setSharingOwner(null);
+  if (sharingOwner && (!assetsPanelOpen || !canManageProjectSharing || sharingOwner.id !== sharingOwnerId)) setSharingOwner(null);
   const viewProjectIds = useMemo(() => viewProjectId
     ? [viewProjectId, ...listEpisodes(projects, viewProjectId).map((project) => project.id)] : [], [projects, viewProjectId]);
   const [projectFileOwners, setProjectFileOwners] = useState(new Map<string, string>());
@@ -1129,7 +1139,7 @@ export default function AssetsPanel() {
         if (!inName && !inTags) return false;
       }
       return true;
-    }), sortBy, sortOrder, assetUsage);
+    }), sortBy, sortOrder, assetUsage, activeCategory === null);
   }, [files, activeCategory, activeTag, deferredSearch, sortBy, sortOrder, assetUsage]);
 
   const visibleFiles = useMemo(() => filteredFiles.slice(0, visibleCount), [filteredFiles, visibleCount]);
@@ -1451,10 +1461,10 @@ export default function AssetsPanel() {
                 </h2>
                 {canManageProjectSharing && <div className="ml-auto flex shrink-0 items-center gap-1">
                   <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={!isTauriEnv()} onClick={() => {
-                    if (currentOwnerId) setSharingOwner({ id: currentOwnerId, name: projects.find((project) => project.id === currentOwnerId)?.name ?? '' });
+                    if (sharingOwnerId) setSharingOwner({ id: sharingOwnerId, name: projects.find((project) => project.id === currentOwnerId)?.name ?? '' });
                   }}><Cloud size={14} aria-hidden="true" />{translate('项目共享')}</button>
                   <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!isTauriEnv()} onClick={() => {
-                    if (currentOwnerId) setSharingOwner({ id: currentOwnerId, name: projects.find((project) => project.id === currentOwnerId)?.name ?? '', sync: true });
+                    if (sharingOwnerId) setSharingOwner({ id: sharingOwnerId, name: projects.find((project) => project.id === currentOwnerId)?.name ?? '', sync: true });
                   }}><RefreshCw size={14} aria-hidden="true" />{translate('立即同步')}</button>
                 </div>}
                 {isDrawer ? (
@@ -1889,7 +1899,7 @@ export default function AssetsPanel() {
     if (loadControllerRef.current) void loadFiles().then(loadTags);
   };
   return <>{presentationPanel}
-    {assetsPanelOpen && sharingOwner && canManageProjectSharing && sharingOwner.id === currentOwnerId && <Suspense fallback={null}>
+    {assetsPanelOpen && sharingOwner && canManageProjectSharing && sharingOwner.id === sharingOwnerId && <Suspense fallback={null}>
       <SharedProjectBindingDialog key={sharingOwner.id} localOwnerId={sharingOwner.id} ownerName={sharingOwner.name} autoPreview={sharingOwner.sync} onClose={() => setSharingOwner(null)} />
     </Suspense>}
     {assetsPanelOpen && batchReverse?.scope === previewScope && <Suspense fallback={null}>

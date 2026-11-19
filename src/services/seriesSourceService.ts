@@ -4,8 +4,72 @@
 import type { SeriesSourceChapter, SeriesSourcePart, SeriesSourceReference, SeriesSourceSnapshot } from '../types/seriesSource';
 import { useAppStore } from '../store/useAppStore';
 import { seriesOwnerId } from '../store/store.utils';
-import { getProjectDataDir, joinPath, readAgentAuthorizedTextFile } from './fileService';
+import { getProjectDataDir, joinPath, readAgentAuthorizedTextFile, uploadSourceFileToProject } from './fileService';
+import { getRelativeAssetPath } from './fs/assetIndex';
+import { configValuesEqual } from './configPatch';
 import { MAX_AGENT_FILE_READ_BYTES } from './chat/fileGrantService';
+
+/** 选文件、复制和写入引用始终使用打开选择器时的项目与原著版本。 */
+export async function attachSeriesOriginalFile(projectId: string, seriesId: string): Promise<void> {
+  const initial = useAppStore.getState();
+  const owner = initial.projects.find((item) => item.id === seriesId);
+  if (!owner) throw new Error('原著所属项目不存在');
+  const expectedOriginalWork = owner.series?.originalWork ? { ...owner.series.originalWork } : null;
+  const expectedExchangeEpoch = owner.exchangeEpoch ?? 0;
+  const runtimeEpoch = initial.projectExecutionContext?.runtimeEpoch;
+  const sameNavigation = (state: typeof initial) => state.currentProjectId === projectId && state.projectLoadStatus === 'ready'
+    && state.switchingProjectName === null && !state.isCreatingProject && !state.isReturningToStartPage
+    && state.projectExecutionContext?.runtimeEpoch === runtimeEpoch;
+  let navigationChanged = false;
+  const assertCurrent = (checkOriginal = true) => {
+    const state = useAppStore.getState();
+    const liveOwner = state.projects.find((item) => item.id === seriesId);
+    if (navigationChanged || !sameNavigation(state)
+      || seriesOwnerId(state.projects, projectId) !== seriesId || !liveOwner
+      || (liveOwner.exchangeEpoch ?? 0) !== expectedExchangeEpoch || liveOwner.dataFolder !== owner.dataFolder
+      || state.config.baseDataDir !== initial.config.baseDataDir
+      || checkOriginal && !configValuesEqual(liveOwner.series?.originalWork ?? null, expectedOriginalWork)) {
+      throw new Error('原著所属项目或引用已变化，请重新添加');
+    }
+  };
+  assertCurrent();
+  const unsubscribe = useAppStore.subscribe((state) => { if (!sameNavigation(state)) navigationChanged = true; });
+  try {
+    const uploaded = await uploadSourceFileToProject('txt,md', projectId, undefined, { assertCurrent });
+    assertCurrent();
+    if (!uploaded) return;
+    if (!uploaded.filePath) throw new Error('原著需要保存到项目目录，请在桌面端添加');
+    const directory = await getProjectDataDir(projectId);
+    assertCurrent();
+    const relativePath = directory ? getRelativeAssetPath(uploaded.filePath, directory) : undefined;
+    if (!relativePath) throw new Error('无法确认原著位于原项目目录，请重新添加');
+    const saved = await useAppStore.getState().updateSeriesInfo({
+      originalWork: { fileName: uploaded.fileName, relativePath, addedAt: Date.now() },
+    }, { expectedSeriesId: seriesId, expectedExchangeEpoch, expectedOriginalWork, assertCurrent: () => assertCurrent(false) });
+    if (!saved) throw new Error('原著引用未保存，已复制的文件保留在原项目目录');
+  } finally { unsubscribe(); }
+}
+
+export interface SeriesSplitMaterialScope {
+  seriesId: string;
+  version: string;
+  chapterIds?: string[];
+}
+
+export interface SeriesSplitMaterialIndex {
+  seriesId: string;
+  part: SeriesSourcePart;
+  version: string;
+  chapters: Array<{ id: string; title: string; ordinal: number; characterCount: number }>;
+  characterCount: number;
+}
+
+function seriesChapterTitle(line: string): string | undefined {
+  if (line.length > 120) return undefined;
+  const markdown = line.match(/^#{1,3}\s+(.+?)(?:\s+#+)?$/)?.[1];
+  const chapter = /^(?:第[零〇一二三四五六七八九十百千万两\d]+[章节回卷部集]|(?:chapter|part)\s+(?:\d+|[ivxlcdm]+)\b)/i.test(line);
+  return (markdown ?? (chapter ? line : undefined))?.slice(0, 96);
+}
 
 export function indexSeriesChapters(text: string): SeriesSourceChapter[] {
   const headings: Array<{ start: number; title: string }> = [];
@@ -18,10 +82,9 @@ export function indexSeriesChapters(text: string): SeriesSourceChapter[] {
       else if (marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
       continue;
     }
-    if (fence || value.length > 120) continue;
-    const markdown = value.match(/^#{1,3}\s+(.+?)(?:\s+#+)?$/)?.[1];
-    const chapter = /^(?:第[零〇一二三四五六七八九十百千万两\d]+[章节回卷部集]|(?:chapter|part)\s+(?:\d+|[ivxlcdm]+)\b)/i.test(value);
-    if (markdown || chapter) headings.push({ start: line.index, title: (markdown ?? value).slice(0, 96) });
+    if (fence) continue;
+    const title = seriesChapterTitle(value);
+    if (title) headings.push({ start: line.index, title });
   }
   if (!text.length) return [];
   if (!headings.length) headings.push({ start: 0, title: '全文' });
@@ -30,6 +93,37 @@ export function indexSeriesChapters(text: string): SeriesSourceChapter[] {
     const end = headings[index + 1]?.start ?? text.length;
     return { ...heading, id: `chapter-${heading.start}-${end}`, ordinal: index + 1, end };
   });
+}
+
+/** 只向设置弹窗交付标题与正文计数；正文留在源快照。 */
+export function indexSeriesSplitMaterial(snapshot: SeriesSourceSnapshot): SeriesSplitMaterialIndex {
+  const chapters = snapshot.chapters.map(({ id, title, ordinal, start, end }) => {
+    const section = snapshot.text.slice(start, end);
+    const firstLine = section.match(/^[^\r\n]*/)?.[0] ?? '';
+    const body = seriesChapterTitle(firstLine.trim()) ? section.slice(firstLine.length) : section;
+    return { id, title, ordinal, characterCount: body.replace(/\s/g, '').length };
+  });
+  return {
+    seriesId: snapshot.seriesId,
+    part: snapshot.part,
+    version: snapshot.version,
+    chapters,
+    characterCount: chapters.reduce((total, chapter) => total + chapter.characterCount, 0),
+  };
+}
+
+/** 精确使用已选择的材料版本，按源顺序保留所选章节的原始标题及正文。 */
+export function readScopedSeriesMaterial(snapshot: SeriesSourceSnapshot, scope: SeriesSplitMaterialScope): string {
+  if (snapshot.seriesId !== scope.seriesId || snapshot.version !== scope.version) {
+    throw new Error('材料版本已变化，请重新选择拆分范围');
+  }
+  if (scope.chapterIds === undefined) return snapshot.text;
+  const selectedIds = new Set(scope.chapterIds);
+  const chapters = snapshot.chapters.filter((chapter) => selectedIds.has(chapter.id));
+  if (!selectedIds.size || selectedIds.size !== scope.chapterIds.length || chapters.length !== selectedIds.size) {
+    throw new Error('所选章节无效，请重新选择拆分范围');
+  }
+  return chapters.map(({ start, end }) => snapshot.text.slice(start, end)).join('');
 }
 
 function sourceState(projectId: string, part: SeriesSourcePart) {

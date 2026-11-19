@@ -16,6 +16,32 @@
 6. 任务记录不保存凭据、本地路径或完整请求正文。原有画布派生守卫、专用取消协议与站点身份继续有效。
 7. RunningHub、工作流 API 和 ComfyUI 继续沿用各自专用提交及取消流程；本批将已有 ComfyUI 任务接入对话交付恢复，不改其首轮提交服务，不承诺恢复没有留下任务记录的 ComfyUI 中断。RunningHub／工作流 API 的纯消息任务仍在重开原项目、加载原会话后专用恢复，尚未接入通用手动恢复按钮；通用 MCP 列表不将这些任务标为可直接续查。同步接口没有远端 ID 时也无法补出原任务查询能力。
 
+## 公用方法索引
+
+### 查询与候选解析
+
+首次取回和原任务续查调用同一个厂商查询方法，使用原连接及任务 ID。查询层返回结果，待续回执、下载和回填由调用方结算。
+
+| 场景 | 源码与方法 | 复用边界 |
+| --- | --- | --- |
+| 异步终态与候选解析 | [asyncMediaResult.ts](../../src/services/ai/asyncMediaResult.ts) 的 `queryAsyncMediaResult`、`queryAsyncImageResult`、`readAsyncMediaResultUrls` | 统一完成、失败、取消与空结果处理。按目标媒体字段读取一个有序候选集合，保留签名 URL 的字面逗号。调用方选择首项、完整集合或允许有效部分候选。 |
+| 兼容 `/tasks` 的图、视、音 | [asyncMediaResult.ts](../../src/services/ai/asyncMediaResult.ts) 的 `queryCompatibleMediaTask`、`queryCompatibleImageTask` | 用原 ID 执行 GET。普通生成、旧回执和原生恢复共用，角色图片续查通过图片包装调用。 |
+| APIMart 图片与视频 | [apimartImageResult.ts](../../src/services/ai/apimartImageResult.ts) 的 `fetchApimartTask`、`queryApimartImageResult` 和 [apimartVideoResult.ts](../../src/services/ai/apimartVideoResult.ts) 的 `queryApimartVideoResult` | 共用任务状态请求，图片保留候选顺序，视频优先取 `videos`，按合同允许兼容历史 `images`。 |
+| CCC 与声明式协议 | [cccImageResult.ts](../../src/services/ai/cccImageResult.ts) 的 `createCccImageResultPoll`、`queryCccImageResult` 和 [modelProtocolPoll.ts](../../src/services/ai/modelProtocolPoll.ts) 的 `pollResolvedModelProtocol` | CCC 首次取图、角色续查和原生恢复使用同一查询合同。声明式协议按已解析、已核对的查询合同读取原任务。 |
+| 即梦 | [dreaminaResult.ts](../../src/services/dreaminaResult.ts) 的 `queryDreaminaResult` | 图片、视频首次等待和恢复均查询原 `submitId`。优先读取 CLI 的本地产物，调用方决定取首项或整组。 |
+| APIMart 音乐与旧音频 | [apimartAudio.ts](../../src/services/ai/apimartAudio.ts) 的 `queryApimartMusicTask`、`extractFlowMusicLyrics`、`extractFlowMusicTrack`、`extractFlowMusicTracks` 和 [pollManagerQueries.ts](../../src/services/pollManagerQueries.ts) 的 `queryLegacyApimartAudioResult` | FlowMusic、Suno 共用 `/music/tasks` 查询，歌词与音轨分别提取。旧音频回执仍走 `/tasks`，保留 `audios` 和历史 `images` 的兼容。 |
+| RunningHub 标准模型 | [runninghubModelResult.ts](../../src/services/ai/providers/runninghubModelResult.ts) 的 `readRunningHubModelStatus`、`parseRunningHubModelOutputs` | 统一读取标准模型的状态和指定媒体类型候选。工作流保留自己的查询与输出合同。 |
+| ComfyUI 文件输出 | [comfyOutputs.ts](../../src/services/comfyOutputs.ts) 的 `resolveComfyOutputUrl`、`findComfyOutputFiles`、`buildComfyFileUrl` | 普通入口取首个匹配文件，原生交付可保留完整候选。动态工作流按既有规则扩展候选类型，通用音频优先音频、再试视频。 |
+
+### 轮询、交付与落盘
+
+| 场景 | 源码与方法 | 复用边界 |
+| --- | --- | --- |
+| 取消与清理轮询 | [pollManager.ts](../../src/services/pollManager.ts) 的 `registerNodePolling`、`isNodePollingCurrent`、`cleanupNodePolling` | 调用方直接传父信号，并保留登记返回的信号用于核对和清理。已取消的调用在替换登记前退出。ComfyUI 用登记身份区分调用方暂停和轮询被替换。 |
+| 续查与结算回执 | [pollManager.ts](../../src/services/pollManager.ts) 的 `resumeMediaNodeTask`、`pauseMediaTask`、`completeMediaNodeTask` | 支持的旧回执沿原任务续查或继续下载，回填成功后按原任务与尝试身份确认。RunningHub、Workflow API 等专用入口继续使用各自的恢复流程。 |
+| 画布和节点弹窗生成 | [generationService.ts](../../src/services/generationService.ts) 的 `executeGeneration` | 共用生成、保存、回填和写输出历史。旧音频弹窗在进入前仍要求显式选择模型。 |
+| 保存单个原生产物 | [nativeMediaResultPersistence.ts](../../src/services/nativeMediaResultPersistence.ts) 的 `persistNativeMediaResult` | 通用任务、工作流、内置图片、音乐和剪辑转场共用。由调用方传原画布、媒体类型及适用的鉴权和取消信号，并决定候选顺序与回执结算。方法核验文件路径和内容摘要，同步接口的唯一首返按原流程先留存到原画布。 |
+
 ## 当前状态
 
 - 已补齐共享任务回执、CCC 异步图片适配、节点及批量交付、主窗口普通对话与 Agent/MCP 恢复入口，并补充回归源码。
@@ -48,3 +74,55 @@
 ## 回滚
 
 撤销本批代码即可回滚；新增任务字段为可选兼容字段，不清空原有记录，不迁移数据库。保留其他任务的未提交改动。
+
+## 音频结果查询收口
+
+2026-11-18 已接入共享查询，待用户验收。本批未运行自动化检查或真实厂商调用。
+
+- 兼容 `/tasks` 的首次取回、旧回执续查及原生恢复均使用 `queryCompatibleMediaTask` 查询原 ID。音频签名地址保留字面逗号。交互入口沿用首条产物，原生恢复验证并保存有序的完整候选。查询 408／504 保留原任务以便续查。
+- 旧 APIMart 音频回执复用 APIMart 任务请求和媒体解析，兼容原 `audios` 及旧的 `images` 字段。FlowMusic 和 Suno 的 `/music/tasks` 查询共用终态判断并识别取消。歌词查询只读取原阶段，下一阶段仍需现有授权的生成入口。
+- ComfyUI 共用音频优先、视频兜底的候选类型顺序。动态工作流保留其末位图片兜底，新旧调用方沿用各自的候选数量和保存归属。三部分可独立回滚，沿用原回执结构。
+
+在配置可模拟异步结果的 Tauri 测试项目中，分别验证兼容 `/tasks` 音频、原 APIMart 音频回执、FlowMusic 与 Suno。先检查首次取回，再让查询超时或项目目录暂不可写，恢复后点击「继续查询」。确认同一任务 ID、一次生成提交，且带逗号的签名地址可保存。检查歌词续查只回填歌词、取消结果正确结束，以及 ComfyUI 同时返回多个音轨和视频时按原目标交付。
+
+在仓库根目录执行定向模拟验证：
+
+```powershell
+npx vitest run tests/services/apimartGen.test.ts tests/services/pollManager.test.ts tests/services/nativeGeneralAsyncTask.test.ts tests/services/apimartMusic.test.ts tests/services/nativeBuiltinAudioRecovery.test.ts tests/services/mediaProviderRegistry.test.ts tests/services/comfyOutputs.test.ts tests/services/comfyTaskRecovery.test.ts
+```
+
+## 生成轮询取消与回执归属
+
+2026-11-18 首批改动已落地，待用户验收。本次未运行自动化检查或桌面验收。
+
+- APIMart、兼容 `/tasks`、火山方舟、CCC、GRSAI、声明式模型协议、即梦和工作流把调用方信号交给 `registerNodePolling`。已取消的信号在登记前退出，清理使用本次登记返回的信号。无跟踪 ID 的调用沿用调用方信号。RunningHub 与 Workflow API 保留按消息登记的任务，Muse 沿用已有网页和原生取消流程。
+- ComfyUI 文本、图片、视频和音频沿用工作流各自的回执。调用方取消时，本轮仍持有登记才更新恢复状态。节点已被取消或替换时，旧执行不能修改后续登记的回执。
+- 即梦原生图片和视频的轮询登记覆盖等待阶段。停止等待后，已提交的 CLI 任务仍可记录迟到的任务 ID。旧项目的即梦清理按本次任务 ID 和尝试 ID 匹配，并保留视频转场回执规则。已有回执继续通过原任务 ID 查询，续查不重新提交。
+
+桌面验收使用可记录请求的测试连接。在兼容 `/tasks` 的节点启动旧任务续查，再模拟同节点收到一个已取消的调用，确认原查询继续取回结果。用 ComfyUI 提交视频，查询中取消调用方，再续查，核对两次查询对应同一个 ID、生成只提交一次。用即梦原生入口在 CLI 返回前停止等待，核对迟到的 ID 仍可在重开后续查。分别回归普通画布节点、RunningHub 与 Workflow API 的纯消息结果归属，以及无跟踪 ID 的调用。回滚可单独撤销本批代码，无需变更或清空任务记录。
+
+在仓库根目录执行定向模拟验证。
+
+```powershell
+npx vitest run tests/services/pollManager.test.ts tests/services/comfyTaskRecovery.test.ts tests/services/apimartGen.test.ts tests/services/apimartMusic.test.ts tests/services/grsaiMedia.test.ts tests/services/nativeBuiltinImageTask.test.ts tests/services/dreaminaResult.test.ts
+```
+
+## 节点音频交付与原生产物保存
+
+2026-11-18 两批改动待用户验收。本次未运行自动化测试和 Tauri 桌面验收。
+
+- **节点音频交付。** 旧项目音频节点及源音频节点的弹窗入口接入 `executeGeneration`，和画布生成共用保存、回填原节点、写输出历史和确认回执的流程。弹窗在调用前核对项目、节点及输入快照，旧项目仍要求明确选择模型。其他节点类型继续沿用各自的路由。
+- **原生产物保存。** 通用任务、工作流、内置图片、音乐和剪辑转场共用单个 URL 的保存、文件路径检查与内容摘要核验。各调用方仍决定原画布、下载授权、候选顺序和何时结算回执。内置图片按原任务 ID 取回时，下载接收取消信号，摘要核验前后也检查取消。同步接口只有首个响应可取结果时，先在原画布留存结果，之后按既有流程交付。
+
+桌面验收使用可观察生成与查询次数的测试连接。
+
+1. 在旧项目的音频节点弹窗和画布分别触发生成。检查两种入口都向对应模型传入音色或音乐参数，各提交一次生成、回填原节点、写入一条输出历史。再检查源音频节点、工作流和原生项目的音频节点。项目设置了默认模型而旧弹窗的节点还未选模型时，确认弹窗提示选择模型。
+2. 暂停音频结果下载或切换画布、替换节点，确认结果只交付给原节点。恢复可续查的任务，核对原任务 ID 和提交次数。
+3. 用多个候选验收原生通用任务、工作流、内置图片、音乐和剪辑转场。核对原画布目录、候选顺序和摘要身份。下载内置图片时取消或切项目，回到原画布续查，生成提交数保持一次。同步接口的首返结果在切走后应留存在原画布，可在重开后交付。
+
+两批可分别撤销代码回滚，沿用既有回执和目录布局。在仓库根目录执行对应的定向模拟验证。
+
+```powershell
+npx vitest run tests/components/nodeCriticalInteractions.test.tsx tests/services/audioSpeechSettings.test.ts tests/services/generationServiceReplicaLease.test.ts
+npx vitest run tests/services/nativeMediaLocalResult.test.ts tests/services/nativeGeneralAsyncTask.test.ts tests/services/nativeWorkflowTasks.test.ts tests/services/nativeBuiltinImageTask.test.ts tests/services/nativeBuiltinAudioRecovery.test.ts tests/services/nativeEditorProtocols.test.ts tests/services/nativeEditorMediaTaskRepository.test.ts
+```

@@ -5,14 +5,19 @@
  */
 import { useAppStore } from '../../../store/useAppStore';
 import { listEpisodes, seriesOwnerId } from '../../../store/store.utils';
-import { readSeriesSource } from '../../seriesSourceService';
+import { readScopedSeriesMaterial, readSeriesSource, type SeriesSplitMaterialScope } from '../../seriesSourceService';
 import { registerAgentTool, type AgentToolExecutionResult } from '../toolRegistry';
 import type { AgentToolSchema } from '../agentToolSchemas';
 import {
   CREATIVE_FIELD_IDS,
   type CreativeFieldId,
 } from '../../seriesCreativeService';
-import type { EpisodeCreativeInfo } from '../../../types';
+import type { CanvasProject, EpisodeCreativeInfo } from '../../../types';
+import { needsNativeEpisodeContent, type NativeProjectViewBinding } from '../../../store/nativeProjectView';
+import { captureLegacyEpisodeContext } from '../../projectExecutionContext';
+import { isWorkbenchAgentTaskInScope } from '../../episodeWorkspaceScope';
+import { EpisodeEditorWriteBlockedError, prepareEpisodeEditorRebase, withEpisodeEditorWrite } from '../../episodeEditorSessionService';
+import { AGENT_RESULT_PREVIEW_CHARS } from '../agentResultService';
 
 /** 单次回给模型的正文上限；原著动辄几十万字，必须分段读。 */
 const MAX_TEXT_CHUNK = 6000;
@@ -21,6 +26,7 @@ const MAX_EPISODES_PER_CALL = 60;
 interface SeriesReadInput {
   part?: 'script' | 'original';
   offset?: number;
+  scope?: SeriesSplitMaterialScope;
 }
 
 interface EpisodeReadInput {
@@ -54,9 +60,38 @@ function currentSeries() {
   return { state, series };
 }
 
+/** 接受旧画布别名及新分集 ID，只在当前作品内解析唯一目标。 */
+function nativeEpisodeId(item: CanvasProject): string | null | undefined {
+  return (item as CanvasProject & { nativeView?: NativeProjectViewBinding }).nativeView?.episodeId;
+}
+
+function resolveEpisode(state: ReturnType<typeof useAppStore.getState>, seriesId: string, episodeId: string) {
+  const episodes = listEpisodes(state.projects, seriesId);
+  const matching = episodes.filter((item) => item.id === episodeId || nativeEpisodeId(item) === episodeId);
+  return matching.length === 1 ? matching[0] : undefined;
+}
+
+async function writeEpisodeContent(episodeId: string, write: () => Promise<boolean>): Promise<boolean | AgentToolExecutionResult> {
+  let writeStarted = false;
+  try {
+    return await withEpisodeEditorWrite(episodeId, async () => {
+      const rebaseEditors = prepareEpisodeEditorRebase(episodeId);
+      writeStarted = true;
+      const saved = await write();
+      if (saved) rebaseEditors();
+      return saved;
+    });
+  } catch (error) {
+    // 只把写入前的明确冲突交付为业务拒绝；写入后的任何异常仍交给执行器核实。
+    if (writeStarted || !(error instanceof EpisodeEditorWriteBlockedError)) throw error;
+    return { status: 'error', errorCode: error.code, summary: error.message, retryable: false,
+      modelContent: JSON.stringify({ episodeId, errorCode: error.code, message: error.message, retryable: false }) };
+  }
+}
+
 /** 正文一律按"不可信资料"回传，防止原著或剧本里的句子被当成指令执行。 */
-function wrapUntrustedText(label: string, text: string, offset: number): AgentToolExecutionResult {
-  const chunk = text.slice(offset, offset + MAX_TEXT_CHUNK);
+function wrapUntrustedText(label: string, text: string, offset: number, limit = MAX_TEXT_CHUNK): AgentToolExecutionResult {
+  const chunk = text.slice(offset, offset + limit);
   const nextOffset = offset + chunk.length;
   const hasMore = nextOffset < text.length;
   return {
@@ -80,6 +115,21 @@ const readInputSchema: AgentToolSchema = {
   properties: {
     part: { type: 'string', enum: ['script', 'original'], description: '读剧本还是原著，缺省读剧本' },
     offset: { type: 'number', minimum: 0, description: '从第几个字开始读，用于续读长文' },
+    scope: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['seriesId', 'version'],
+      description: '使用指定材料版本与所选章节。提供 scope 时必须显式传入 part；续读时保持原 part 与 scope。',
+      properties: {
+        seriesId: { type: 'string', minLength: 1, maxLength: 160 },
+        version: { type: 'string', minLength: 64, maxLength: 64 },
+        chapterIds: {
+          type: 'array', minItems: 1,
+          items: { type: 'string', minLength: 1, maxLength: 100 },
+          description: '目录中的所选章节 ID。省略则读取指定版本的全文。',
+        },
+      },
+    },
   },
 };
 
@@ -139,6 +189,7 @@ export function registerSeriesAgentTools(): Array<() => void> {
   return [
     registerAgentTool<Record<string, never>>({
       id: 'series_get_state',
+      resultPolicy: { storage: 'project', source: 'project-derived' },
       title: '读取剧集与分集状态',
       description: '读取当前剧集元数据和分集清单，不返回原著路径或完整正文。',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -147,15 +198,26 @@ export function registerSeriesAgentTools(): Array<() => void> {
       execute: async () => {
         const { state, series } = currentSeries();
         if (!series) return { status: 'error', summary: '当前项目没有剧集信息', modelContent: '当前项目没有剧集信息', errorCode: 'SERIES_NOT_FOUND' };
-        const episodes = listEpisodes(state.projects, series.id).map((episode) => ({
-          id: episode.id,
-          episodeNo: episode.episodeNo,
-          name: episode.name,
-          outline: episode.episodeOutline ?? '',
-          scriptLength: episode.episodeScript?.length ?? 0,
-          creative: episode.episodeCreative,
-          current: episode.id === state.currentProjectId,
-        }));
+        const roster = listEpisodes(state.projects, series.id);
+        const bodies = await Promise.allSettled(roster.map((episode) => needsNativeEpisodeContent(episode) ? state.loadEpisodeCreative(episode.id) : episode));
+        const current = useAppStore.getState();
+        if (current.currentProjectId !== state.currentProjectId
+          || current.projectExecutionContext?.runtimeEpoch !== state.projectExecutionContext?.runtimeEpoch) {
+          return { status: 'error', summary: '当前剧集已变化', modelContent: '请重新读取当前剧集状态', errorCode: 'SERIES_CHANGED' };
+        }
+        const episodes = roster.map((initial, index) => {
+          const body = bodies[index];
+          const episode = body.status === 'fulfilled' ? body.value : initial;
+          return {
+            id: episode.id,
+            ...(nativeEpisodeId(episode) ? { episodeId: nativeEpisodeId(episode), canvasId: episode.id } : {}),
+            episodeNo: episode.episodeNo,
+            name: episode.name,
+            ...(body.status === 'fulfilled' ? { outline: episode.episodeOutline ?? '',
+              scriptLength: episode.episodeScript?.length ?? 0, creative: episode.episodeCreative } : { contentUnavailable: true }),
+            current: episode.id === state.currentProjectId,
+          };
+        });
         return { status: 'success', summary: `已读取剧集“${series.name}”的 ${episodes.length} 个分集`, modelContent: JSON.stringify({ series: { id: series.id, name: series.name, hasOriginalWork: !!series.series?.originalWork, scriptLength: series.series?.script?.length ?? 0 }, episodes }) };
       },
     }),
@@ -165,13 +227,23 @@ export function registerSeriesAgentTools(): Array<() => void> {
       description: '读取指定分集的大纲、完整剧本正文或结构化创作要点；长正文可按 offset 续读。',
       inputSchema: episodeReadInputSchema,
       effect: 'read',
-      authorize: authorizeCurrentProject,
+      authorize: (context, input) => {
+        const state = useAppStore.getState();
+        const task = state.agentTasks.find((item) => item.id === context.taskId);
+        if (!task?.workbenchTarget) return authorizeCurrentProject(context);
+        return task.projectId === context.projectId && task.conversationId === context.conversationId
+          && (task.workbenchTarget.episodeId === input.episodeId
+            || !!captureLegacyEpisodeContext(state, input.episodeId)
+              && captureLegacyEpisodeContext(state, input.episodeId)?.episodeId === captureLegacyEpisodeContext(state, task.workbenchTarget.episodeId)?.episodeId)
+          && isWorkbenchAgentTaskInScope(state, task, 'episode_read')
+          ? { allowed: true }
+          : { allowed: false, reason: '工作台只允许读取当前任务明确绑定的分集' };
+      },
       summarizeInput: (input) => `读取分集 ${input.episodeId} 的${input.part === 'script' ? '正文' : input.part === 'creative' ? '创作要点' : '大纲'}`,
       execute: async (_context, input) => {
         const { state, series } = currentSeries();
-        const episode = series && listEpisodes(state.projects, series.id)
-          .find((item) => item.id === input.episodeId);
-        if (!episode) {
+        const target = series && resolveEpisode(state, series.id, input.episodeId);
+        if (!target) {
           return {
             status: 'error',
             summary: '分集不存在',
@@ -179,6 +251,7 @@ export function registerSeriesAgentTools(): Array<() => void> {
             errorCode: 'EPISODE_NOT_FOUND',
           };
         }
+        const episode = needsNativeEpisodeContent(target) ? await state.loadEpisodeCreative(target.id) : target;
         if (input.part === 'creative') {
           return {
             status: 'success',
@@ -223,7 +296,7 @@ export function registerSeriesAgentTools(): Array<() => void> {
       execute: async (_context, input) => {
         const { series } = currentSeries();
         if (!series) return { status: 'error', summary: '当前项目没有剧集信息', modelContent: '当前项目没有剧集信息', errorCode: 'SERIES_NOT_FOUND' };
-        const saved = await useAppStore.getState().updateSeriesInfo({ ...series.series, script: input.script });
+        const saved = await useAppStore.getState().updateSeriesInfo({ script: input.script });
         return saved ? { status: 'success', summary: '已更新全剧剧本', modelContent: JSON.stringify({ seriesId: series.id, scriptLength: input.script.length }) } : { status: 'error', summary: '全剧剧本更新失败', modelContent: '全剧剧本更新失败', errorCode: 'SERIES_UPDATE_FAILED' };
       },
     }),
@@ -236,9 +309,10 @@ export function registerSeriesAgentTools(): Array<() => void> {
       authorize: authorizeCurrentProject,
       execute: async (_context, input) => {
         const { state, series } = currentSeries();
-        const episode = series && listEpisodes(state.projects, series.id).find((item) => item.id === input.episodeId);
+        const episode = series && resolveEpisode(state, series.id, input.episodeId);
         if (!episode) return { status: 'error', summary: '分集不存在', modelContent: '分集不存在', errorCode: 'EPISODE_NOT_FOUND' };
-        const saved = await state.updateEpisodeOutline(episode.id, input.outline);
+        const saved = await writeEpisodeContent(episode.id, () => state.updateEpisodeOutline(episode.id, input.outline));
+        if (typeof saved !== 'boolean') return saved;
         return saved ? { status: 'success', summary: `已更新“${episode.name}”`, modelContent: JSON.stringify({ episodeId: episode.id, outlineLength: input.outline.length }) } : { status: 'error', summary: '分集更新失败', modelContent: '分集更新失败', errorCode: 'EPISODE_UPDATE_FAILED' };
       },
     }),
@@ -260,8 +334,7 @@ export function registerSeriesAgentTools(): Array<() => void> {
       summarizeInput: (input) => `更新本集剧本（${input.script.length} 字）`,
       execute: async (_context, input) => {
         const { state, series } = currentSeries();
-        const episode = series && listEpisodes(state.projects, series.id)
-          .find((item) => item.id === input.episodeId);
+        const episode = series && resolveEpisode(state, series.id, input.episodeId);
         if (!episode) {
           return {
             status: 'error',
@@ -270,7 +343,8 @@ export function registerSeriesAgentTools(): Array<() => void> {
             errorCode: 'EPISODE_NOT_FOUND',
           };
         }
-        const saved = await state.updateEpisodeCreative(episode.id, { script: input.script });
+        const saved = await writeEpisodeContent(episode.id, () => state.updateEpisodeCreative(episode.id, { script: input.script }));
+        if (typeof saved !== 'boolean') return saved;
         return saved
           ? {
               status: 'success',
@@ -298,9 +372,8 @@ export function registerSeriesAgentTools(): Array<() => void> {
       summarizeInput: (input) => `更新分集 ${input.episodeId} 的 ${input.field}`,
       execute: async (_context, input) => {
         const { state, series } = currentSeries();
-        const episode = series && listEpisodes(state.projects, series.id)
-          .find((item) => item.id === input.episodeId);
-        if (!episode) {
+        const target = series && resolveEpisode(state, series.id, input.episodeId);
+        if (!target) {
           return {
             status: 'error',
             summary: '分集不存在',
@@ -309,6 +382,7 @@ export function registerSeriesAgentTools(): Array<() => void> {
           };
         }
 
+        const episode = needsNativeEpisodeContent(target) ? await state.loadEpisodeCreative(target.id) : target;
         const creative: EpisodeCreativeInfo = { ...episode.episodeCreative };
         if (input.field === 'beats') {
           const beats = input.value
@@ -322,7 +396,8 @@ export function registerSeriesAgentTools(): Array<() => void> {
         const nextCreative = Object.values(creative).some((value) => value !== undefined)
           ? creative
           : undefined;
-        const saved = await state.updateEpisodeCreative(episode.id, { creative: nextCreative });
+        const saved = await writeEpisodeContent(episode.id, () => state.updateEpisodeCreative(episode.id, { creative: nextCreative }));
+        if (typeof saved !== 'boolean') return saved;
         return saved
           ? {
               status: 'success',
@@ -349,21 +424,27 @@ export function registerSeriesAgentTools(): Array<() => void> {
       effect: 'canvas_write',
       authorize: authorizeCurrentProject,
       execute: async (_context, input) => {
-        const moved = await useAppStore.getState().moveEpisode(input.episodeId, input.direction);
+        const { state, series } = currentSeries();
+        const episode = series && resolveEpisode(state, series.id, input.episodeId);
+        const moved = episode ? await state.moveEpisode(episode.id, input.direction) : false;
         return moved ? { status: 'success', summary: '已调整分集顺序', modelContent: JSON.stringify({ episodeId: input.episodeId, direction: input.direction }) } : { status: 'error', summary: '分集无法继续移动', modelContent: '分集不存在或已位于边界', errorCode: 'EPISODE_MOVE_FAILED' };
       },
     }),
     registerAgentTool<{ episodeId: string }>({
       id: 'episode_delete',
       title: '删除分集',
-      description: '永久删除指定分集画布；共享剧集素材不会随单集删除。',
+      description: '删除指定分集记录；共享素材和历史回执保留。旧项目格式暂不允许删除最后一集。',
       inputSchema: { type: 'object', required: ['episodeId'], additionalProperties: false, properties: { episodeId: { type: 'string', minLength: 1, maxLength: 160 } } },
       effect: 'permanent_delete',
-      authorize: (context, input) => { const state = useAppStore.getState(); const ownerId = seriesOwnerId(state.projects, context.projectId); const episode = state.projects.find((item) => item.id === input.episodeId); return { allowed: state.currentProjectId === context.projectId && episode?.parentId === ownerId, reason: '分集不存在或不属于当前剧集' }; },
+      authorize: (context, input) => { const state = useAppStore.getState(); const ownerId = seriesOwnerId(state.projects, context.projectId); const episode = ownerId ? resolveEpisode(state, ownerId, input.episodeId) : undefined; return { allowed: state.currentProjectId === context.projectId && episode?.parentId === ownerId, reason: '分集不存在或不属于当前剧集' }; },
       execute: async (_context, input) => {
-        const episode = useAppStore.getState().projects.find((item) => item.id === input.episodeId);
+        const { state, series } = currentSeries();
+        const episode = series && resolveEpisode(state, series.id, input.episodeId);
         if (!episode?.parentId) return { status: 'error', summary: '分集不存在', modelContent: '分集不存在', errorCode: 'EPISODE_NOT_FOUND' };
         await useAppStore.getState().deleteProject(episode.id);
+        if (useAppStore.getState().projects.some((item) => item.id === episode.id)) {
+          return { status: 'error', summary: '分集未删除，已保留原记录', modelContent: '删除被阻止或未完成，请重新核对分集状态；旧格式最后一集不会删除。', errorCode: 'EPISODE_DELETE_FAILED' };
+        }
         return { status: 'success', summary: `已删除分集“${episode.name}”`, modelContent: JSON.stringify({ deleted: true, episodeId: episode.id }) };
       },
     }),
@@ -372,7 +453,8 @@ export function registerSeriesAgentTools(): Array<() => void> {
       title: '读取剧集原著与剧本',
       description:
         '读取当前剧集的剧本正文或原著文件正文，并列出已有分集。'
-        + '正文很长时分段返回，按返回的 offset 续读。拆分分集前必须先读。',
+        + '正文很长时分段返回，按返回的 offset 续读。拆分分集前必须先读。'
+        + '如请求指定材料版本与所选章节，传入 part 和原有 scope，只在该范围读取。',
       inputSchema: readInputSchema,
       effect: 'read',
       authorize: authorizeCurrentProject,
@@ -388,6 +470,25 @@ export function registerSeriesAgentTools(): Array<() => void> {
           };
         }
         const offset = Math.max(0, Math.floor(input.offset ?? 0));
+
+        if (input.scope) {
+          try {
+            if (!input.part) throw new Error('读取指定范围时必须指定素材类型');
+            const snapshot = await readSeriesSource(context.projectId, input.part, context.signal);
+            const text = readScopedSeriesMaterial(snapshot, input.scope);
+            if (offset >= text.length) throw new Error('续读偏移已到所选范围末尾');
+            // 给不可信资料提示和续读偏移留出空间，保证预览层不会截掉当页正文。
+            return wrapUntrustedText(input.part === 'original' ? '所选原著' : '所选剧本', text, offset, AGENT_RESULT_PREVIEW_CHARS - 200);
+          } catch (error) {
+            context.signal.throwIfAborted();
+            return {
+              status: 'error',
+              summary: '读取所选素材失败',
+              modelContent: error instanceof Error ? error.message : '读取所选素材失败',
+              errorCode: 'SERIES_SCOPED_READ_FAILED',
+            };
+          }
+        }
 
         if (input.part === 'original') {
           try {

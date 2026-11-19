@@ -1,8 +1,8 @@
 /** 用户显式选择的图片快速模板：能力、协议和参考图方式作为一个草稿更新。 */
 import type { ImageReferenceRequestMode, ProviderModelSelection } from '../../types';
 import type { ImageModelCapability, ModelExecutionProfile, NormalizedModelExecutionProtocol, ProtocolJsonValue } from '../../types/aiTypes';
-import { mapImageDimensions } from '../aiDimensions';
-import { VLM_MAX_IMAGES } from './imageUtils';
+import { getImageSizePresets, resolveImageDimensions } from './modelSizeProfiles';
+import { getImageCapabilityTemplate } from './modelCapabilityTemplates';
 
 type GptVariant = 'gpt-2' | 'gpt-2.5';
 type BananaVariant = 'banana' | 'banana-pro' | 'banana-2' | 'banana-2.1';
@@ -42,65 +42,38 @@ export const IMAGE_QUICK_ADAPT_OPTIONS: readonly ImageTemplateOption[] = [
     .map((transport) => templateOption('banana', variant, name, transport))),
 ];
 
-const BANANA_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
-const BANANA_EXTRA_RATIOS = ['1:4', '4:1', '1:8', '8:1'];
-// 客户端选择的合法像素组合；遵守 GPT Image 2/2.5 的 16 对齐、比例和总像素限制。
-// https://developers.openai.com/api/docs/guides/image-generation
-const GPT_DIMENSIONS: NonNullable<ImageModelCapability['dimensionPresets']> = {
-  '1K': {
-    '1:1': [1024, 1024], '3:2': [1536, 1024], '2:3': [1024, 1536],
-    '4:3': [1024, 768], '3:4': [768, 1024], '5:4': [1280, 1024], '4:5': [1024, 1280],
-    '16:9': [1536, 864], '9:16': [864, 1536], '2:1': [1536, 768], '1:2': [768, 1536],
-    '21:9': [2016, 864], '9:21': [864, 2016], '3:1': [1536, 512], '1:3': [512, 1536],
-  },
-  '2K': {
-    '1:1': [2048, 2048], '3:2': [2048, 1360], '2:3': [1360, 2048],
-    '4:3': [2048, 1536], '3:4': [1536, 2048], '5:4': [2560, 2048], '4:5': [2048, 2560],
-    '16:9': [2048, 1152], '9:16': [1152, 2048], '2:1': [2688, 1344], '1:2': [1344, 2688],
-    '21:9': [2688, 1152], '9:21': [1152, 2688], '3:1': [3072, 1024], '1:3': [1024, 3072],
-  },
-  '4K': {
-    '1:1': [2880, 2880], '3:2': [3520, 2336], '2:3': [2336, 3520],
-    '4:3': [3312, 2480], '3:4': [2480, 3312], '5:4': [3216, 2576], '4:5': [2576, 3216],
-    '16:9': [3840, 2160], '9:16': [2160, 3840], '2:1': [3840, 1920], '1:2': [1920, 3840],
-    '21:9': [3840, 1648], '9:21': [1648, 3840], '3:1': [3840, 1280], '1:3': [1280, 3840],
-  },
-};
+const GPT_DIMENSIONS = getImageSizePresets('openai-gpt');
 function gptCapability(variant: ImageVariant, transport: ImageTransport): ImageModelCapability {
   const apimart = transport === 'apimart';
   // 官方 2.5 与 APIMart 2.5 Flare/Sunburst 已确认六档；未知 JSON 中转不继承同名能力。
   // APIMart 普通 GPT Image 2 没有公布 quality 字段。
   const qualities = transport === 'openai' || (apimart && variant === 'gpt-2.5')
     ? ['auto', 'low', 'medium', 'high', ...(variant === 'gpt-2.5' ? ['xhigh', 'max'] : [])] : undefined;
-  return {
-    resolutions: apimart ? ['1k', '2k', '4k'] : ['1K', '2K', '4K'],
-    defaultResolution: apimart ? '1k' : '1K',
-    ratios: Object.keys(GPT_DIMENSIONS['1K']),
-    defaultRatio: '1:1', supportsBatch: !(apimart && variant === 'gpt-2'),
+  return getImageCapabilityTemplate(variant === 'gpt-2.5' ? 'gpt-image-2.5' : 'gpt-image-2', {
+    ...(apimart ? { resolutions: ['1k', '2k', '4k'], defaultResolution: '1k' } : {}),
+    supportsBatch: !(apimart && variant === 'gpt-2'),
     maxBatchCount: apimart ? variant === 'gpt-2' ? 1 : 4 : 8,
-    supportsImageReference: true,
     maxImageReferences: transport === 'images-json' ? 8 : 16,
     supportsDataUrlReference: !(apimart && variant === 'gpt-2.5'),
-    ...(qualities ? { qualities, defaultQuality: 'auto' } : {}),
-    ...(variant === 'gpt-2.5' && (transport === 'openai' || apimart)
-      ? { backgrounds: ['auto', 'opaque', 'transparent'] } : {}),
-    ...(!apimart ? { dimensionPresets: structuredClone(GPT_DIMENSIONS) } : {}),
-  };
+    qualities, defaultQuality: qualities ? 'auto' : undefined,
+    backgrounds: variant === 'gpt-2.5' && (transport === 'openai' || apimart)
+      ? ['auto', 'opaque', 'transparent'] : undefined,
+    ...(!apimart ? { dimensionPresets: structuredClone(GPT_DIMENSIONS) }
+      : variant === 'gpt-2.5' ? { dimensionPresets: getImageSizePresets('apimart-gpt-2.5') } : {}),
+  });
 }
 
 function bananaCapability(variant: ImageVariant, transport: ImageTransport): ImageModelCapability {
   const original = variant === 'banana';
   const flash = variant === 'banana-2';
-  return {
-    resolutions: original ? ['1K'] : flash ? [transport === 'apimart' ? '0.5K' : '512', '1K', '2K', '4K'] : ['1K', '2K', '4K'],
-    defaultResolution: '1K',
-    ratios: [...BANANA_RATIOS, ...(flash || variant === 'banana-2.1' ? BANANA_EXTRA_RATIOS : [])],
-    defaultRatio: '1:1', supportsBatch: false, maxBatchCount: 1,
-    supportsImageReference: true,
-    // 原生 inlineData 沿用应用现有 Base64 内存预算；URL 型 APIMart 保留渠道上限。
-    maxImageReferences: Math.min(original ? 3 : 14, transport === 'apimart' ? 14 : VLM_MAX_IMAGES),
-    supportsDataUrlReference: true,
-  };
+  const dimensionPresets = transport === 'apimart' || flash ? undefined
+    : getImageSizePresets(original ? 'google-gemini-2.5-flash'
+      : variant === 'banana-pro' ? 'google-gemini-3-pro' : 'google-nano-banana-2.1');
+  return getImageCapabilityTemplate(original ? 'nano-banana' : variant === 'banana-pro' ? 'nano-banana-pro'
+    : flash ? 'nano-banana-2' : 'nano-banana-2.1', {
+    ...(flash && transport === 'apimart' ? { resolutions: ['0.5K', '1K', '2K', '4K'] } : {}),
+    ...(dimensionPresets ? { dimensionPresets } : {}),
+  });
 }
 
 // https://docs.apimart.ai/cn/api-reference/images/gpt-image-2.5/generation
@@ -169,15 +142,7 @@ export function createImageQuickAdaptTemplate(templateId: string): Pick<Provider
 
 /** 有显式像素表时不能再走通用短边换算，也不能把编辑后的未映射组合静默降级。 */
 export function resolveImageTemplateDimensions(capability: ImageModelCapability | undefined, resolution: string, ratio: string) {
-  if (!capability?.dimensionPresets) {
-    const halfK = resolution === '512' || resolution.toUpperCase() === '0.5K';
-    const dimensions = mapImageDimensions(halfK ? '1K' : resolution.toUpperCase(), ratio);
-    return halfK ? { width: Math.round(dimensions.width / 2), height: Math.round(dimensions.height / 2) } : dimensions;
-  }
-  const resolutionKey = Object.keys(capability.dimensionPresets).find((key) => key.toLowerCase() === resolution.toLowerCase());
-  const dimensions = resolutionKey ? capability.dimensionPresets[resolutionKey][ratio] : undefined;
-  if (!dimensions) throw new Error(`图片参数 ${resolution} / ${ratio} 缺少像素尺寸映射，请重新应用模板或补齐尺寸表`);
-  return { width: dimensions[0], height: dimensions[1] };
+  return resolveImageDimensions(capability, resolution, ratio);
 }
 
 /** 请求与本地预览共用，不上传、不打印参考图。素材已由现有准备路径转为 data URL。 */

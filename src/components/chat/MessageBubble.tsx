@@ -3,7 +3,7 @@
  *
  * 渲染用户 / 助手 / 系统消息，含头像、状态指示器、生成图片 / 视频。
  */
-import { memo, useState, useSyncExternalStore } from 'react';
+import { memo, useEffect, useState, useSyncExternalStore } from 'react';
 import { Icon } from '@iconify/react';
 import type { ChatMessage } from '../../types/chat';
 import type { AgentTask } from '../../types/agent';
@@ -20,8 +20,8 @@ import ViewportVideo from '../shared/ViewportVideo';
 import ViewportAudio from '../shared/ViewportAudio';
 import ChatImageAttachments from './ChatImageAttachments';
 import { parseChatImageReferences, stripChatImageReferences } from '../../services/chat/chatImageReferenceService';
-import { getRecoverableMessageTask } from '../../services/ai/generationRuntime';
-import { subscribeMediaTasks } from '../../services/pollManager';
+import { getRecoverableMessageTaskSnapshot } from '../../services/ai/generationRuntime';
+import { hasMuseQueryIdentity, hasPendingMessageMediaTask, initializeMediaTaskSnapshot, subscribeMediaTasks, type MediaTaskSnapshot } from '../../services/pollManager';
 import { useAppStore } from '../../store/useAppStore';
 
 interface MessageBubbleProps extends ChatReferenceHandlers {
@@ -34,6 +34,7 @@ interface MessageBubbleProps extends ChatReferenceHandlers {
   onEditMessage?: (content: string) => void;
   regeneratePrompt?: string;
   onRegenerate?: (content: string) => void;
+  onBranch?: (messageId: string) => Promise<void>;
   agentControls?: AgentTaskControls;
 }
 
@@ -43,7 +44,36 @@ function formatMessageTime(timestamp: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function MessageBubble({
+function MessageBubble(props: MessageBubbleProps) {
+  return props.message.role === 'assistant' ? <AssistantMessageBubble {...props} /> : <MessageBubbleContent {...props} />;
+}
+
+function AssistantMessageBubble(props: MessageBubbleProps) {
+  const { message } = props;
+  const projectId = useAppStore((state) => state.currentProjectId);
+  const hasMedia = !!message.mediaStatus || !!message.mediaResult;
+  const identity = JSON.stringify([projectId, message.conversationId, message.id]);
+  const [legacyMediaIdentity, setLegacyMediaIdentity] = useState<string | null>(null);
+  useEffect(() => {
+    if (hasMedia || !projectId) return;
+    let active = true;
+    // 旧消息可能只有账本 mediaContext；同批挂载共享一次初始化，不长期订阅普通文本。
+    void initializeMediaTaskSnapshot().then(() => {
+      if (active) setLegacyMediaIdentity(hasPendingMessageMediaTask(projectId, message.conversationId, message.id) ? identity : null);
+    });
+    return () => { active = false; };
+  }, [hasMedia, identity, projectId, message.conversationId, message.id]);
+  return hasMedia || legacyMediaIdentity === identity
+    ? <MediaMessageBubble {...props} projectId={projectId} /> : <MessageBubbleContent {...props} />;
+}
+
+function MediaMessageBubble({ projectId, ...props }: MessageBubbleProps & { projectId: string | null }) {
+  const recoveryTask = useSyncExternalStore(subscribeMediaTasks,
+    () => getRecoverableMessageTaskSnapshot(props.message, projectId), () => undefined);
+  return <MessageBubbleContent {...props} recoveryTask={recoveryTask} />;
+}
+
+function MessageBubbleContent({
   message,
   imagePreviewUrls,
   agentTask,
@@ -52,21 +82,20 @@ function MessageBubble({
   onEditMessage,
   regeneratePrompt,
   onRegenerate,
+  onBranch,
   onNodeActivate,
   onNodeHover,
   onModelActivate,
   agentControls,
-}: MessageBubbleProps) {
+  recoveryTask,
+}: MessageBubbleProps & { recoveryTask?: MediaTaskSnapshot }) {
   const t = useT();
+  const [branching, setBranching] = useState(false);
+  const [branchError, setBranchError] = useState('');
   const [copied, setCopied] = useState(false);
   const [savingMedia, setSavingMedia] = useState(false);
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
-  const projectId = useAppStore((state) => state.currentProjectId);
-  const recoveryIdentity = useSyncExternalStore(subscribeMediaTasks, () => {
-    const task = getRecoverableMessageTask(message.id, projectId);
-    return task ? `${task.attemptId ?? ''}:${task.taskId}:${task.mediaRecoveryState ?? ''}:${task.mediaSubmissionUncertain ?? false}:${task.submitted}` : '';
-  }, () => '');
 
   if (isSystem) {
     return (
@@ -83,13 +112,12 @@ function MessageBubble({
   const hasImage = showMediaInChat && mediaResult?.kind === 'image';
   const hasVideo = showMediaInChat && mediaResult?.kind === 'video';
   const hasAudio = showMediaInChat && mediaResult?.kind === 'audio';
-  const recoveryTask = getRecoverableMessageTask(message.id, projectId);
   const isGenerating = (message.mediaStatus === 'queued' || message.mediaStatus === 'generating')
     && !recoveryTask?.mediaRecoveryState;
-  const taskUnknown = message.mediaStatus === 'submit_unknown'
-    || !!recoveryTask && (!recoveryTask.taskId || !recoveryTask.submitted || !!recoveryTask.mediaSubmissionUncertain || recoveryTask.mediaRecoveryState === 'submit_unknown')
+  const taskUnknown = !(recoveryTask && hasMuseQueryIdentity(recoveryTask)) && (message.mediaStatus === 'submit_unknown'
+    || !!recoveryTask && (!recoveryTask.taskId || !recoveryTask.submitted || !!recoveryTask.mediaSubmissionUncertain || recoveryTask.mediaRecoveryState === 'submit_unknown'))
     || !!onRetryMediaSave && message.mediaStatus === 'paused' && !recoveryTask && !mediaResult;
-  const mediaRecoverable = !isGenerating && (!!recoveryIdentity || !onRetryMediaSave && message.mediaStatus === 'paused'
+  const mediaRecoverable = !isGenerating && (!!recoveryTask || !onRetryMediaSave && message.mediaStatus === 'paused'
     || taskUnknown || !!mediaResult?.taskReceipt && mediaResult.persistence === 'failed');
   // 生成成功 ≠ 已保存到项目：落盘失败时 url 只是临时地址，重启后会失效
   const mediaUnsaved = !isGenerating && mediaResult?.persistence === 'failed';
@@ -370,8 +398,17 @@ function MessageBubble({
                 <Icon icon="mdi:refresh" width="15" />
               </button>
             )}
+            {message.role === 'assistant' && message.status === 'done' && onBranch && (
+              <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={branching}
+                aria-label={t('从这里分支继续')} onClick={() => {
+                  setBranching(true); setBranchError('');
+                  void onBranch(message.id).catch((error: unknown) => setBranchError(error instanceof Error ? error.message : t('创建分支失败')))
+                    .finally(() => setBranching(false));
+                }}><Icon icon="lucide:git-branch" width={14} />{t('从这里分支')}</button>
+            )}
           </div>
         )}
+        {branchError && <p role="alert" className="text-xs text-danger-light">{branchError}</p>}
       </div>
 
       {/* 悬停时间戳（助手消息在右侧） */}

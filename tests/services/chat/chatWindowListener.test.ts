@@ -1,9 +1,14 @@
 /**
  * chatWindowListener — 回归测试：initMainWindowListener。
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ProjectWindowFrame } from '../../../src/types/projectWindow';
 
 const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
+const nativeWindow = vi.hoisted(() => ({ getByLabel: vi.fn(async () => ({} as object | null)) }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
+vi.mock('../../../src/services/chat/chatWindowLifecycle', () => ({ waitForChatWindowOpen: () => null }));
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: { getByLabel: nativeWindow.getByLabel } }));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
@@ -13,26 +18,259 @@ vi.mock('@tauri-apps/api/event', () => ({
     return () => set.delete(handler);
   }),
   emit: vi.fn(async () => undefined),
+  emitTo: vi.fn(async () => undefined),
 }));
 
-import { emit } from '@tauri-apps/api/event';
+import { emit, emitTo, listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 
 import {
   CHAT_ACTION_EVENT,
   CHAT_CLOSE_REQUEST,
+  CHAT_CLOSE_EVENT,
+  emitCloseChatWindow,
   emitCloseRequest,
   initMainWindowListener,
+  requestManagedChatOperation,
+  CHAT_MANAGED_RESPONSE_EVENT,
+  CHAT_SEND_RESPONSE_EVENT,
+  CHAT_TEAM_ARTIFACT_EVENT,
+  CHAT_SYNC_EVENT,
+  beginChatWindowSession,
+  emitAction,
+  finishChatWindowClose,
+  getMainChatWindowSessionId,
+  initChatWindowListener,
+  requestChatMessage,
+  requestTeamArtifactText,
 } from '../../../src/services/chat/chatWindowService';
 
+beforeEach(() => {
+  listeners.clear();
+  vi.mocked(emitTo).mockClear();
+  nativeWindow.getByLabel.mockReset().mockResolvedValue({});
+  vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
+  beginChatWindowSession();
+});
+
+describe('chat response waits', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }); vi.mocked(emit).mockClear(); });
+  afterEach(() => { vi.useRealTimers(); vi.mocked(listen).mockReset(); });
+
+  it.each(['artifact', 'managed'] as const)('%s 监听同步抛错仍使用固定连接错误', async (kind) => {
+    vi.mocked(listen).mockImplementationOnce(() => { throw new Error('private-native-detail'); });
+    const pending = kind === 'artifact' ? requestTeamArtifactText('task-1', 'artifact-1')
+      : requestManagedChatOperation('project-1', 'conversation-1', { kind: 'refresh_external_agents' });
+    await expect(pending).rejects.toThrow(kind === 'artifact' ? '无法连接主窗口读取团队成果' : '无法连接主窗口；未自动重试');
+    expect(emit).not.toHaveBeenCalled(); expect(emitTo).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { kind: 'message', timeout: 30000 }, { kind: 'artifact', timeout: 20000 }, { kind: 'managed', timeout: 30000 },
+  ] as const)('$kind 超时后不发送，迟到安装的监听仍立即释放', async ({ kind, timeout }) => {
+    let installed!: (dispose: () => void) => void, ready!: () => void;
+    const listening = new Promise<void>((resolve) => { ready = resolve; });
+    vi.mocked(listen).mockImplementationOnce(() => { ready(); return new Promise((resolve) => { installed = resolve; }); });
+    const frame = { sessionId: 'delayed-window' } as ProjectWindowFrame;
+    const pending = kind === 'message' ? requestChatMessage({ type: 'send_message', content: '保留草稿' }, frame)
+      : kind === 'artifact' ? requestTeamArtifactText('task-1', 'artifact-1', frame)
+      : requestManagedChatOperation('project-1', 'conversation-1', { kind: 'refresh_external_agents' }, undefined, frame);
+    let settled = false;
+    const outcome = pending.then((value) => { settled = true; return { value, error: undefined }; },
+      (error: Error) => { settled = true; return { value: undefined, error }; });
+    await listening;
+    await vi.advanceTimersByTimeAsync(timeout - 1); expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await outcome;
+    if (kind === 'message') expect(result).toEqual({ value: false, error: undefined });
+    else expect(result.error?.message).toContain(kind === 'artifact' ? '主窗口未返回团队成果' : '主窗口尚未确认操作结果');
+    const dispose = vi.fn();
+    installed(dispose);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(emit).not.toHaveBeenCalled(); expect(emitTo).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { kind: 'limit', text: 'x'.repeat(120000), hostError: undefined, expectedError: undefined },
+    { kind: 'oversized', text: 'x'.repeat(120001), hostError: undefined, expectedError: '产物超过窗口预览上限' },
+    { kind: 'error', text: '', hostError: '原产物已不可用', expectedError: '原产物已不可用' },
+  ])('产物 $kind 响应逐项校验身份，并清理监听和计时器', async ({ text, hostError, expectedError }) => {
+    const frame = { sessionId: 'artifact-window' } as ProjectWindowFrame;
+    let settled = false;
+    const pending = requestTeamArtifactText('task-1', 'artifact-1', frame).then(
+      (value) => { settled = true; return { value, error: undefined }; },
+      (error: Error) => { settled = true; return { value: undefined, error }; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emit).toHaveBeenCalledOnce();
+    const request = vi.mocked(emit).mock.lastCall![1] as { requestId: string };
+    const response = { requestId: request.requestId, sessionId: frame.sessionId, taskId: 'task-1', artifactId: 'artifact-1', text, error: hostError };
+    const handlers = [...listeners.get(CHAT_TEAM_ARTIFACT_EVENT)!];
+    for (const wrong of [{ requestId: 'other' }, { sessionId: 'old' }, { taskId: 'other' }, { artifactId: 'other' }]) {
+      handlers.forEach((handler) => handler({ payload: { ...response, ...wrong } }));
+    }
+    await vi.advanceTimersByTimeAsync(0); expect(settled).toBe(false);
+    handlers.forEach((handler) => handler({ payload: response }));
+    const result = await pending;
+    if (expectedError) expect(result.error?.message).toContain(expectedError);
+    else expect(result.value).toBe(text);
+    expect(listeners.get(CHAT_TEAM_ARTIFACT_EVENT)?.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('initMainWindowListener', () => {
+  it('草稿 ack 后继续等待原生销毁，成功前保留会话，同 session 只关闭一次', async () => {
+    let finish!: () => void;
+    vi.mocked(invoke).mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const sessionId = getMainChatWindowSessionId()!;
+    let settled = false;
+    const closing = emitCloseChatWindow().then(() => { settled = true; });
+    await vi.waitFor(() => expect(vi.mocked(emitTo).mock.calls.some((call) => call[1] === CHAT_CLOSE_EVENT)).toBe(true));
+    const sent = vi.mocked(emitTo).mock.calls.find((call) => call[1] === CHAT_CLOSE_EVENT)![2] as { requestId: string };
+    for (const handler of listeners.get('chat:close-ack') ?? []) handler({ payload: { requestId: sent.requestId, sessionId, accepted: true } });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledExactlyOnceWith('close_chat_window', { sessionId }));
+    const concurrent = finishChatWindowClose(sessionId);
+    expect(getMainChatWindowSessionId()).toBe(sessionId);
+    expect(settled).toBe(false);
+    finish();
+    await Promise.all([closing, concurrent]);
+    expect(getMainChatWindowSessionId()).toBeUndefined();
+    expect(invoke).toHaveBeenCalledOnce();
+  });
+
+  it('原生销毁失败仍保留旧 session，可重试，不撤销新窗口的会话', async () => {
+    const sessionId = getMainChatWindowSessionId()!;
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('close failed'));
+    await expect(finishChatWindowClose(sessionId)).rejects.toThrow('close failed');
+    expect(getMainChatWindowSessionId()).toBe(sessionId);
+    let finish!: () => void;
+    vi.mocked(invoke).mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const retry = finishChatWindowClose(sessionId);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    const reopened = beginChatWindowSession();
+    finish();
+    await retry;
+    expect(getMainChatWindowSessionId()).toBe(reopened);
+  });
+
+  it('原生关闭已经开始时合并外层请求，不再等已销毁子窗的 ack', async () => {
+    let finish!: () => void;
+    vi.mocked(invoke).mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const sessionId = getMainChatWindowSessionId()!;
+    const nativeClose = finishChatWindowClose(sessionId);
+    const outer = emitCloseChatWindow();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    finish();
+    await Promise.all([nativeClose, outer]);
+    expect(vi.mocked(emitTo).mock.calls.some((call) => call[1] === CHAT_CLOSE_EVENT)).toBe(false);
+  });
+
+  it('收回窗口等待草稿交接 ack，拒绝时保留窗口；已关闭窗口不等待不存在的回执', async () => {
+    const closing = emitCloseChatWindow();
+    const rejected = expect(closing).rejects.toThrow('草稿仍保留');
+    await vi.waitFor(() => expect(vi.mocked(emitTo).mock.calls.some((call) => call[1] === CHAT_CLOSE_EVENT)).toBe(true));
+    const sent = vi.mocked(emitTo).mock.calls.find((call) => call[1] === CHAT_CLOSE_EVENT)![2] as { requestId: string; sessionId: string };
+    let settled = false;
+    void closing.then(() => { settled = true; }, () => { settled = true; });
+    for (const handler of listeners.get('chat:close-ack') ?? []) handler({ payload: { requestId: sent.requestId, sessionId: 'old-window-session', accepted: true } });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    for (const handler of listeners.get('chat:close-ack') ?? []) handler({ payload: { requestId: sent.requestId, sessionId: sent.sessionId, accepted: false } });
+    await rejected;
+    expect(listeners.get('chat:close-ack')?.size).toBe(0);
+    nativeWindow.getByLabel.mockResolvedValueOnce(null);
+    await expect(emitCloseChatWindow()).resolves.toBeUndefined();
+    vi.mocked(emitTo).mockClear();
+  });
+  it('只接受 URL 固定会话快照，同窗重连沿用已接受序号，旧窗 request_sync 不换 nonce', async () => {
+    const sessionId = getMainChatWindowSessionId()!;
+    vi.stubGlobal('window', { location: { search: `?view=chat&session=${sessionId}` } });
+    const onSync = vi.fn();
+    const dispose = await initChatWindowListener(onSync, vi.fn());
+    try {
+      for (const handler of listeners.get(CHAT_SYNC_EVENT) ?? []) {
+        handler({ payload: { type: 'snapshot', sessionId: 'old-window-session', acceptedSequence: 999999, revision: 1, snapshot: {} } });
+        handler({ payload: { type: 'snapshot', sessionId, acceptedSequence: 999999, revision: 2, snapshot: { windowFrame: { sessionId: 'other-window-session' } } } });
+        handler({ payload: { type: 'snapshot', sessionId, acceptedSequence: 10000, revision: 2, snapshot: {} } });
+      }
+      expect(onSync).toHaveBeenCalledOnce();
+      await emitAction({ type: 'request_sync' });
+      expect(vi.mocked(emitTo).mock.lastCall?.[2]).toMatchObject({ type: 'request_sync', sessionId });
+      expect((vi.mocked(emitTo).mock.lastCall?.[2] as { sequence: number }).sequence).toBeGreaterThan(10000);
+      expect(getMainChatWindowSessionId()).toBe(sessionId);
+    } finally { dispose(); vi.unstubAllGlobals(); }
+  });
+  it('关闭失败仅通知同 URL 会话，注销时清理新增监听', async () => {
+    const sessionId = getMainChatWindowSessionId()!;
+    vi.stubGlobal('window', { location: { search: `?view=chat&session=${sessionId}` } });
+    const failed = vi.fn();
+    const dispose = await initChatWindowListener(vi.fn(), vi.fn(), failed);
+    try {
+      for (const handler of listeners.get('chat:close-failed') ?? []) {
+        handler({ payload: { sessionId: 'old-session' } });
+        handler({ payload: { sessionId } });
+      }
+      expect(failed).toHaveBeenCalledOnce();
+      dispose();
+      expect(listeners.get('chat:close-failed')?.size).toBe(0);
+    } finally { dispose(); vi.unstubAllGlobals(); }
+  });
+
+  it('窗口查询等待期间出现新会话时，不将旧关闭请求绑定新 nonce', async () => {
+    const original = getMainChatWindowSessionId()!;
+    let finish!: (window: object | null) => void;
+    nativeWindow.getByLabel.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const closing = emitCloseChatWindow(original);
+    const rejected = expect(closing).rejects.toThrow('会话已失效');
+    await vi.waitFor(() => expect(nativeWindow.getByLabel).toHaveBeenCalled());
+    const next = beginChatWindowSession();
+    finish({});
+    await rejected;
+    expect(getMainChatWindowSessionId()).toBe(next);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(vi.mocked(emitTo).mock.calls.some((call) => call[1] === CHAT_CLOSE_EVENT)).toBe(false);
+  });
+  it('新窗同一请求 ID 不接受旧窗迟到发送回执', async () => {
+    const frame = { sessionId: 'new-window-session' } as ProjectWindowFrame;
+    let completed = false;
+    const pending = requestChatMessage({ type: 'send_message', content: '保留输入', requestId: 'same-request-id' }, frame)
+      .then((accepted) => { completed = true; return accepted; });
+    await vi.waitFor(() => expect(listeners.get(CHAT_SEND_RESPONSE_EVENT)?.size).toBe(1));
+    for (const handler of listeners.get(CHAT_SEND_RESPONSE_EVENT) ?? []) handler({ payload: { requestId: 'same-request-id', sessionId: 'old-window-session', accepted: true } });
+    await Promise.resolve(); expect(completed).toBe(false);
+    for (const handler of listeners.get(CHAT_SEND_RESPONSE_EVENT) ?? []) handler({ payload: { requestId: 'same-request-id', sessionId: frame.sessionId, accepted: false } });
+    await expect(pending).resolves.toBe(false);
+  });
+  it('waits for the matching main-window acknowledgement before reporting saved', async () => {
+    let completed = false;
+    const sessionId = 'new-managed-window';
+    const pending = requestManagedChatOperation('project-1', 'conversation-1', { kind: 'save_team_profile',
+      profile: { version: 1, name: 'team', roles: { architect: '', writer: '', continuity: '', dialogue: '', director: '', storyboard: '', editor: '' }, maxCalls: 8, maxTotalTokens: 240000, maxOutputChars: 16000 } }, undefined, { sessionId } as ProjectWindowFrame)
+      .then(() => { completed = true; });
+    await vi.waitFor(() => expect(emitTo).toHaveBeenCalled());
+    const args = vi.mocked(emitTo).mock.lastCall!;
+    const request = args[2] as { requestId: string };
+    expect(args[0]).toBe('main');
+    expect(completed).toBe(false);
+    for (const handler of listeners.get(CHAT_MANAGED_RESPONSE_EVENT) ?? []) handler({ payload: { requestId: request.requestId, scopeId: 'other', conversationId: 'conversation-1', value: true } });
+    await Promise.resolve(); expect(completed).toBe(false);
+    for (const handler of listeners.get(CHAT_MANAGED_RESPONSE_EVENT) ?? []) handler({ payload: { requestId: request.requestId, sessionId: 'old-managed-window', scopeId: 'project-1', conversationId: 'conversation-1', value: true } });
+    await Promise.resolve(); expect(completed).toBe(false);
+    for (const handler of listeners.get(CHAT_MANAGED_RESPONSE_EVENT) ?? []) handler({ payload: { requestId: request.requestId, sessionId, scopeId: 'project-1', conversationId: 'conversation-1', value: true } });
+    await pending; expect(completed).toBe(true);
+    expect(listeners.get(CHAT_MANAGED_RESPONSE_EVENT)?.size).toBe(0);
+  });
   it('carries the last composer edit with the close request', async () => {
     const onClose = vi.fn();
     const dispose = await initMainWindowListener(vi.fn(), onClose);
     const composerDraft = { conversationId: 'conversation-1', draft: '还没来得及防抖的输入' };
     await emitCloseRequest(composerDraft);
-    expect(emit).toHaveBeenCalledWith(CHAT_CLOSE_REQUEST, { composerDraft });
+    expect(emit).toHaveBeenCalledWith(CHAT_CLOSE_REQUEST, { composerDraft, sessionId: undefined });
     for (const handler of listeners.get(CHAT_CLOSE_REQUEST) ?? []) handler({ payload: { composerDraft } });
-    expect(onClose).toHaveBeenCalledWith(composerDraft);
+    expect(onClose).toHaveBeenCalledWith(composerDraft, undefined);
     dispose();
   });
   it('re-registers after a disposed mount (StrictMode double-invoke)', async () => {

@@ -8,17 +8,11 @@ import type { BaseNodeData, NodeType } from '../../../types';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { useToolbarEdit } from '../../../hooks/useToolbarEdit';
 import ToolbarEditor from './toolbar/ToolbarEditor';
-import ToolbarMoreMenu from './toolbar/ToolbarMoreMenu';
+import ToolbarZones from './toolbar/ToolbarZones';
 import { useNodePluginToolbar } from './toolbar/NodePluginToolbarButtons';
-import {
-  getHiddenDefaultToolbarButtons,
-  TOOLBAR_MORE_KEY,
-} from './toolbar/toolbarRegistry';
-import { resolvePresetAction, resolvePresetDef, createPresetNode } from './toolbar/presetAction';
-import { executeGeneration } from '../../../services/generationService';
-import { requestPresetSequence } from '../../../services/presetSequenceService';
+import { getHiddenDefaultToolbarButtons } from './toolbar/toolbarRegistry';
+import { executeToolbarPreset, resolvePresetDef } from './toolbar/presetAction';
 import { useAppStore } from '../../../store/useAppStore';
-import type { Node } from '@xyflow/react';
 
 interface TextNodeToolbarProps {
   nodeId: string;
@@ -59,25 +53,12 @@ function TextNodeToolbar({ nodeId, data, onCopy, onClearEmptyLines, onShowPrompt
     [data.output, onClearEmptyLines],
   );
 
-  const addNodeWithEdge = useAppStore((s) => s.addNodeWithEdge);
-
   const handlePresetClick = useCallback(
     (key: string) => (e: React.MouseEvent) => {
       e.stopPropagation();
-      // 实时从 store 读取，避免闭包过期导致对话框内容/ @引用丢失
-      const liveNode = useAppStore.getState().nodes.find((n) => n.id === nodeId) as Node<BaseNodeData> | undefined;
-      if (!liveNode) return;
-      const livePrompt = (liveNode.data?.prompt as string) ?? '';
-      const livePresets = useAppStore.getState().userPresets;
-      if (requestPresetSequence(key, nodeType as NodeType, nodeId, livePresets)) return;
-      const resolved = resolvePresetAction(key, nodeType as NodeType, livePrompt, livePresets);
-      if (!resolved) return;
-      const { node: newNode, edge } = createPresetNode(liveNode, resolved);
-      addNodeWithEdge(newNode, edge);
-      // 强制用带 @ 引用的 prompt（createPresetNode 已拼好）
-      executeGeneration(newNode.id, newNode.data.prompt as string, resolved.postProcess, newNode.data);
+      executeToolbarPreset(key, nodeType, nodeId);
     },
-    [nodeId, addNodeWithEdge],
+    [nodeId],
   );
 
   const actionMap: Record<string, (e: React.MouseEvent) => void> = {
@@ -140,24 +121,11 @@ function TextNodeToolbar({ nodeId, data, onCopy, onClearEmptyLines, onShowPrompt
         className="node-floating-toolbar text-toolbar nodrag"
         {...edit.longPressHandlers}
       >
-        {edit.layout.zones.map((zone, zi) => (
-          <div key={zone.id} className="img-toolbar-zone nodrag">
-            {zone.buttonKeys.map((key) => (
-              key === TOOLBAR_MORE_KEY
-                ? (
-                  <ToolbarMoreMenu
-                    key={key}
-                    items={hiddenDefaultButtons}
-                    renderItem={renderActionButton}
-                  />
-                )
-                : renderActionButton(key)
-            ))}
-            {zi < edit.layout.zones.length - 1 && (
-              <div className="ftb-divider img-toolbar-main-divider" />
-            )}
-          </div>
-        ))}
+        <ToolbarZones
+          zones={edit.layout.zones}
+          hiddenButtons={hiddenDefaultButtons}
+          renderButton={renderActionButton}
+        />
       </div>
       {pluginToolbar.dialog}
     </>

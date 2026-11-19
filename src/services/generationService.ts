@@ -4,14 +4,16 @@
  * 供 Toolbar 快捷指令直接调用，也供 AINodeDialog 复用。
  */
 import { ANIMATION_FRAME_GRIDS } from '../types';
+import { t } from '../i18n';
+import { pickImageOutputParameters, resolveConfiguredImageOutput } from './ai/imageOutputParameters';
 import { buildAnimationSpritePrompt, resolveAnimationSheetAspectRatio } from './ai/animationPrompt';
 import { animationProcessing, animationResultPatch } from './animationService';
 import { resolveGenerationSelection } from './generationInput';
 import type { AppConfig, BaseNodeData, ImagePostProcess } from '../types';
-import { MAX_IMAGE_BATCH_COUNT, type MediaTaskReceipt } from '../types/aiTypes';
-import { generateText, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from './aiService';
+import { MAX_IMAGE_BATCH_COUNT, type GenerationRecovery, type MediaTaskReceipt, type TextGenerationResult } from '../types/aiTypes';
+import { generateText, generateTextResult, generateImage, generateImagesBatch, generateVideo, generateAudio, buildPanoramaPrompt } from './aiService';
 import { persistAudioGenerationResult } from './ai/generateAudio';
-import { persistMediaUrlToProjectData } from './fileService';
+import { moveToTrash, persistMediaUrlToProjectData, type PersistedProjectMedia } from './fileService';
 import { ensurePlayableVideoFile, playableVideoUrl } from './videoPlaybackCompat';
 import {
   applyImageBatchResults,
@@ -19,7 +21,7 @@ import {
   prepareImageBatchNodes,
 } from './imageBatchService';
 import { derivedNodePlacement, generateId } from '../store/store.utils';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, type AppState } from '../store/useAppStore';
 import {
   parseProjectModelRef,
   resolveProjectGenerationPrompt,
@@ -32,17 +34,102 @@ import { getCloudWorkflowPersistedOutput } from './workflowExecutionService';
 import { completeWorkflowApiNodeTask } from './workflowApi/workflowApiAdapter';
 import { completeRunningHubNodeTask } from './ai/providers/runninghubWorkflow';
 import { registerCanvasDerivation, isCanvasDerivationFresh, completeCanvasDerivation } from './canvasDerivationGuard';
-import { videoInputFingerprint } from './videoBatchPlanning';
-import { beginComfyNodeDelivery, cancelNodePolling, cleanupNodePolling, completeComfyNodeTask, completeMediaNodeTask, getPendingTasksForProject, pauseComfyNodeDelivery, pauseMediaNodeTask, pauseMediaTask, prepareMediaNodeGeneration, registerMediaNodeOperation, registerNodePolling, isMediaTaskPausedError } from './pollManager';
+import { videoInputFingerprint, videoInputFingerprintMaterial } from './videoBatchPlanning';
+import { registerNativeVideoSubmissionGuard } from './nativeVideoSubmission';
+import { nativeMediaInputMaterial } from './nativeMediaInput';
+import { nativeMediaOutputArtifactId } from './nativeMediaCollectionCanvas';
+import { beginComfyNodeDelivery, cancelNodePolling, cleanupNodePolling, completeComfyNodeTask, completeMediaNodeTask, getPendingTasksForProject, pauseComfyNodeDelivery, pauseMediaNodeTask, pauseMediaTask, prepareMediaNodeGeneration, registerMediaNodeOperation, registerNodePolling, isMediaTaskPausedError, showNativeComfyVideoRecovery } from './pollManager';
+import { isProjectExpectedContextCurrent } from './projectExecutionContext';
 import { resolveGenerationNodeData } from '../utils/nodeGeneration';
 import { applyGenerationCameraPrompt } from './shotlistPromptService';
-import { resolveImageParameterCapability } from './ai/mediaModelCapabilities';
+import { resolveImageOutputsPerJob, resolveImageParameterCapability } from './ai/mediaModelCapabilities';
 import { resolveConfiguredImageBackground, resolveConfiguredImageQuality } from './ai/modelCapabilityValidation';
 import { historyMediaTaskReceipt, isHistoryMediaDownloadFailure, isHistoryMediaDownloadPending, sameHistoryMediaTask } from './historyMediaRecovery';
+import { configValuesEqual } from './configPatch';
 
 export interface GenerationResult {
   success: boolean;
   message?: string;
+  recovery?: GenerationRecovery;
+}
+
+const DIRECTION_IMAGE_FIELDS = ['filePath', 'imageUrl', 'sourceUrl', 'thumbnailUrl', 'relativePath',
+  'storageRootRef', 'artifactId', 'assetId', 'mediaVersion', 'mattingMask', 'annotation', 'annotationLayer'] as const;
+
+function sameDirectionImage(first: BaseNodeData, second: BaseNodeData): boolean {
+  return DIRECTION_IMAGE_FIELDS.every((field) => configValuesEqual(first[field], second[field]));
+}
+
+async function addCharacterDirectionGrid(
+  nodeId: string,
+  original: { filePath?: string } | { nativeOperationId: string },
+  ownsGeneration: (state: AppState) => boolean,
+  notify: AppState['showToast'],
+): Promise<void> {
+  const state = useAppStore.getState();
+  if (!ownsGeneration(state)) return;
+  const source = state.nodes.find((node) => node.id === nodeId);
+  const filePath = source?.data.filePath;
+  const failed = () => notify(t('原图已生成，8 向宫格处理失败'), 'error');
+  if (!source || source.data.status !== 'success' || !filePath
+    || ('nativeOperationId' in original
+      ? !source.data.relativePath || source.data.artifactId !== nativeMediaOutputArtifactId(original.nativeOperationId, 0)
+      : filePath !== original.filePath)) {
+    failed();
+    return;
+  }
+  // 原生交付会推进画布 revision，宫格从已交付的产物重新登记派生。
+  const guard = registerCanvasDerivation(state, nodeId);
+  if (!guard) return;
+  const currentSource = () => {
+    const current = useAppStore.getState();
+    const node = current.nodes.find((item) => item.id === nodeId);
+    return ownsGeneration(current) && isCanvasDerivationFresh(guard, current)
+      && node && node.type === source.type && node.data.status === 'success'
+      && sameDirectionImage(node.data, source.data) ? { current, node } : undefined;
+  };
+  let unusedPath: string | undefined;
+  try {
+    const { createCharacterDirectionGrid } = await import('./onnxService');
+    if (!currentSource()) return;
+    const grid = await createCharacterDirectionGrid(filePath);
+    unusedPath = grid.grid_path;
+    const target = currentSource();
+    if (!target) return;
+    target.current.addNode({
+      id: `node-${generateId()}`,
+      type: 'ai-storyboard',
+      ...derivedNodePlacement(target.node, 60),
+      data: { label: `${target.node.data.label} 8向宫格`, type: 'ai-storyboard', role: 'source', status: 'success',
+        imageUrl: convertFileSrc(grid.grid_path), filePath: grid.grid_path, imageWidth: grid.grid_size, imageHeight: grid.grid_size,
+        storyboardRows: 3, storyboardCols: 3, nodeWidth: 360, nodeHeight: 360 },
+    });
+    unusedPath = undefined;
+    notify(t('角色 8 向宫格已生成'));
+  } catch {
+    if (currentSource()) failed();
+  } finally {
+    completeCanvasDerivation(guard);
+    if (unusedPath) await moveToTrash(unusedPath, { throwOnError: true }).catch(() => undefined);
+  }
+}
+
+function mediaRecovery(error: Error, receipt?: MediaTaskReceipt): GenerationRecovery {
+  const reason = 'reason' in error ? error.reason : undefined;
+  return {
+    state: reason === 'submit_unknown' ? 'unknown' : reason === 'delivery_pending' ? 'delivery_pending' : 'paused',
+    ...(receipt ? { receipt } : {}),
+  };
+}
+
+function pendingVideoRecovery(projectId: string, nodeId: string): GenerationRecovery | undefined {
+  const task = getPendingTasksForProject(projectId).find((row) => row.nodeId === nodeId && !row.terminalFailure
+    && (row.runninghubRecoveryState || row.workflowApi?.state));
+  if (!task) return undefined;
+  const unknown = !task.submitted || !task.taskId || task.runninghubSubmissionUncertain
+    || task.runninghubRecoveryState === 'submit_unknown' || task.workflowApi?.state === 'submit_unknown';
+  return { state: unknown ? 'unknown' : isHistoryMediaDownloadPending(task) ? 'delivery_pending' : 'paused',
+    receipt: historyMediaTaskReceipt(task) };
 }
 
 /** 全片复刻等宿主任务的执行租约；不持久化到节点或项目。 */
@@ -53,6 +140,7 @@ export interface GenerationLease {
 
 /** 宿主批量调度共用执行器，但由外层管理一次历史和汇总提示。 */
 export interface GenerationOptions {
+  imagePromptResolution?: { original: string; replacement: string };
   comfyH3ExpectedSettings?: string;
   history?: 'transient';
   silent?: boolean;
@@ -82,7 +170,9 @@ export function subscribeImageBatches(listener: () => void): () => void {
 export function usesSequentialImageBatch(
   provider: string | undefined, model: string | undefined, config: AppConfig, workflowId?: string,
 ): boolean {
-  if (provider !== 'general' || workflowId) return false;
+  if (workflowId) return false;
+  if (resolveImageOutputsPerJob(model ?? '', provider ?? '', config) > 1) return true;
+  if (provider !== 'general') return false;
   const capability = resolveImageParameterCapability(model, provider, config);
   return capability?.supportsBatch === false || capability?.maxBatchCount === 1;
 }
@@ -107,10 +197,13 @@ function settleUnstartedImages(owner: SequentialImageBatch): void {
 }
 
 function imageBatchInputSignature(data: BaseNodeData): string {
+  const imageOutput = pickImageOutputParameters(data);
   return JSON.stringify([
     data.type, data.prompt, data.provider, data.model, data.workflowId, data.workflowInputs,
     data.imageSize, data.imageQuality, data.imageBackground, data.aspectRatio,
     data.cameraSettings, data.runninghubModelParameters, data.batchCount,
+    ...(data.outpaintInput ? [data.outpaintInput] : []),
+    ...(Object.keys(imageOutput).length ? [['imageOutput', imageOutput]] : []),
   ]);
 }
 
@@ -140,7 +233,9 @@ async function runSequentialImageBatch(
   try {
     // 与单次生成共用旧任务保护；创建新批次前不能覆盖原节点的恢复身份。
     prepareMediaNodeGeneration(nodeId);
-    const nodeIds = prepareImageBatchNodes({ nodeId, count, projectId, commitHistory: options?.history !== 'transient' }).nodeIds;
+    const outputsPerJob = resolveImageOutputsPerJob(data.model ?? '', data.provider ?? '', state.config);
+    const nodeIds = prepareImageBatchNodes({ nodeId, count, projectId, commitHistory: options?.history !== 'transient',
+      ...(outputsPerJob > 1 ? { slotStride: outputsPerJob } : {}) }).nodeIds;
     owner = { projectId, nodeIds, remainingNodeIds: new Set(nodeIds), controller: new AbortController() };
     const activeOwner = owner;
     const baselineRevision = useAppStore.getState().getCurrentRevision();
@@ -148,7 +243,8 @@ async function runSequentialImageBatch(
       .map((node) => [node.id, imageBatchInputSignature(node.data)]));
     for (const targetId of nodeIds) imageBatchOwners.set(targetId, activeOwner);
     notifyImageBatches();
-    if (!options?.silent) state.showToast(`正在逐张生成 ${count} 张图片`);
+    if (!options?.silent) state.showToast(outputsPerJob > 1
+      ? `正在生成 ${count} 次作业，共 ${count * outputsPerJob} 张候选` : `正在逐张生成 ${count} 张图片`);
     const signal = parentLease?.signal ? AbortSignal.any([parentLease.signal, activeOwner.controller.signal]) : activeOwner.controller.signal;
     for (const targetId of nodeIds) {
       const lease: GenerationLease = { signal, assertFresh: async () => {
@@ -174,7 +270,8 @@ async function runSequentialImageBatch(
       activeOwner.currentNodeId = undefined;
       completed += 1;
     }
-    if (!options?.silent) state.showToast(`批量生成完成：共 ${completed} 张`);
+    if (!options?.silent) state.showToast(outputsPerJob > 1
+      ? `批量生成完成：${completed} 次作业，共 ${completed * outputsPerJob} 张候选` : `批量生成完成：共 ${completed} 张`);
     return { success: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : '批量生成已停止';
@@ -196,6 +293,10 @@ async function runSequentialImageBatch(
   }
 }
 
+/**
+ * 画布和节点弹窗共用的新生成入口，协调提交、保存、回填和输出历史。
+ * 使用项目、节点及执行租约校验交付，原任务续查交给 resumeMediaNodeTask。
+ */
 export async function executeGeneration(
   nodeId: string,
   overridePrompt?: string,
@@ -238,14 +339,53 @@ export async function executeGeneration(
       return { success: false, message: '项目或生成输入已变化，未提交生成' };
     }
   }
+  const preparing = useAppStore.getState();
+  const preparationTarget = preparing.nodes.find((node) => node.id === nodeId);
+  const preparationData = resolveGenerationNodeData(passData ?? preparationTarget?.data);
+  if (preparing.projectExecutionContext?.modelGeneration === 1 && preparationData
+    && ['ai-image', 'ai-animation', 'ai-panorama', 'ai-video', 'ai-audio'].includes(preparationData.type)) {
+    try {
+      const { targetPatch: mediaPatch } = await preparing.normalizeNativeMediaGenerationInputs(nodeId, {
+        ...preparationData, ...(overridePrompt === undefined ? {} : { prompt: overridePrompt }),
+      });
+      if (passData && preparationTarget) {
+        const next = { ...passData };
+        // 调用方的临时正文/参数保留；只有仍指向原 Store 素材的字段才能跟随身份规范化。
+        for (const field of Object.keys(mediaPatch) as (keyof BaseNodeData)[]) {
+          if (configValuesEqual(passData[field], preparationTarget.data[field])) next[field] = mediaPatch[field] as never;
+        }
+        passData = next;
+      }
+      await assertLease();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '参考素材身份准备失败，未提交生成';
+      if (!batchOptions?.silent && useAppStore.getState().currentProjectId === preparing.currentProjectId) preparing.showToast(message, 'error');
+      return { success: false, message };
+    }
+  }
   const store = useAppStore.getState();
   const notify: typeof store.showToast = (...args) => { if (!batchOptions?.silent) store.showToast(...args); };
   const updateResult = batchOptions?.history === 'transient' ? store.updateNodeDataTransient : store.updateNodeData;
   const data = resolveGenerationNodeData(passData ?? store.nodes.find((n) => n.id === nodeId)?.data);
   if (!data) return { success: false, message: '节点不存在' };
+  if (data.type === 'ai-image' && data.outpaintInput
+    && (typeof data.outpaintInput.url !== 'string' || !data.outpaintInput.url.trim())) {
+    const message = '扩图垫图不可用，请重新打开原图创建扩图';
+    notify(message, 'error');
+    return { success: false, message };
+  }
 
   const nodeType = data?.type;
   const rawPrompt = overridePrompt ?? (data?.prompt as string) ?? '';
+  if (nodeType === 'ai-video' && store.projectExecutionContext?.modelGeneration === 1) {
+    const original = store.nodes.find((node) => node.id === nodeId);
+    if (!original || rawPrompt !== (original.data.prompt ?? '')
+      || videoInputFingerprintMaterial({ ...original, data }, store) !== videoInputFingerprintMaterial(original, store)) {
+      const message = '新项目视频任务需要先保存节点输入，临时覆盖不能安全恢复，未提交请求';
+      notify(message, 'error');
+      return { success: false, message };
+    }
+  }
 
   if (data.model === '' && !data.workflowId) {
     notify('请先在底部模型选择器中选择一个模型', 'error');
@@ -296,13 +436,21 @@ export async function executeGeneration(
     notify(inputError === '提示词为空' ? '请输入提示词' : '请先在底部模型选择器中选择一个模型', 'error');
     return { success: false, message: inputError ?? '未选择模型' };
   }
+  if (nodeType === 'ai-image' && data.outpaintInput && !workflowId
+    && resolveImageOutputsPerJob(nodeModel, nodeProvider, store.config) > 1) {
+    const message = '扩图请选择单图输出模型';
+    notify(message, 'error');
+    return { success: false, message };
+  }
   let effectivePrompt = resolveProjectGenerationPrompt({
     prompt: rawPrompt, data, settings: projectSettings, customStyles: store.customStyles,
   });
   const sequentialCount = Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(data.batchCount) || 1)));
-  if (nodeType === 'ai-image' && sequentialCount > 1 && usesSequentialImageBatch(nodeProvider, nodeModel, store.config, workflowId)) {
+  const nativeSequentialImages = store.projectExecutionContext?.modelGeneration === 1 && !workflowId && !['apimart', 'runninghub'].includes(nodeProvider);
+  if (nodeType === 'ai-image' && sequentialCount > 1 && (nativeSequentialImages || usesSequentialImageBatch(nodeProvider, nodeModel, store.config, workflowId))) {
     if (postProcess) {
-      const message = '批量生成暂不支持图片后处理，请将数量设为 1';
+      const message = resolveImageOutputsPerJob(nodeModel, nodeProvider, store.config) > 1
+        ? '固定多候选模型暂不支持图片后处理，请选择单图模型' : '批量生成暂不支持图片后处理，请将数量设为 1';
       notify(message, 'error');
       return { success: false, message };
     }
@@ -321,16 +469,19 @@ export async function executeGeneration(
 
   const submittingProjectId = store.currentProjectId;
   const mediaSubmission = ['ai-image', 'ai-animation', 'ai-panorama', 'ai-video', 'ai-audio'].includes(nodeType);
-  if (mediaSubmission) {
+  const localComfyTask = !!workflowId && !cloudWorkflow;
+  const executionContext = store.projectExecutionContext;
+  const nativeComfyVideoContext = nodeType === 'ai-video' && localComfyTask
+    && executionContext?.kind === 'canvas' && executionContext.modelGeneration === 1 ? executionContext : undefined;
+  if (mediaSubmission || localComfyTask) {
     try { prepareMediaNodeGeneration(nodeId); }
     catch (error) {
       const message = error instanceof Error ? error.message : '暂时无法保留旧任务，请稍后再生成';
       notify(message, 'error');
-      return { success: false, message };
+      return { success: false, message, ...(isMediaTaskPausedError(error) ? { recovery: mediaRecovery(error, error.taskReceipt) } : {}) };
     }
   }
   const runningHubTask = cloudWorkflow || nodeProvider === 'runninghub';
-  const localComfyTask = !!workflowId && !cloudWorkflow;
   let comfyTaskId: string | undefined;
   let comfyDeliveryError: unknown;
   let savingSignal: AbortSignal | undefined;
@@ -340,6 +491,11 @@ export async function executeGeneration(
   const videoNode = store.nodes.find((n) => n.id === nodeId);
   const videoFingerprint = nodeType === 'ai-video' && videoNode
     ? videoInputFingerprint({ ...videoNode, data: { ...data, prompt: rawPrompt } }, store) : undefined;
+  const nativeVideoMaterial = nodeType === 'ai-video' && store.projectExecutionContext?.modelGeneration === 1 && videoNode
+    ? videoInputFingerprintMaterial(videoNode, store) : undefined;
+  const nativeMediaMaterial = ['ai-image', 'ai-audio', 'ai-animation', 'ai-panorama'].includes(nodeType) && store.projectExecutionContext?.modelGeneration === 1 && videoNode
+    ? nativeMediaInputMaterial(videoNode, store, 'media-input-v3') : undefined;
+  const directionReference = postProcess === 'character-8-direction-grid' ? videoNode?.data : undefined;
   const hasShotReference = nodeType === 'ai-video'
     && `${rawPrompt}\n${JSON.stringify(data.workflowInputs ?? {})}`.includes('/shot/');
   const hasProtectedVideoInputs = hasShotReference || (nodeType === 'ai-video'
@@ -348,11 +504,12 @@ export async function executeGeneration(
   const videoOwner = nodeType === 'ai-video' ? Symbol(nodeId) : undefined;
   if (videoOwner) videoSubmissionOwners.set(submissionKey, videoOwner);
   const promptOverride = overridePrompt === undefined ? {} : { prompt: rawPrompt };
+  const ownsGeneration = (state: AppState) => leaseValid && !lease?.signal?.aborted && !savingSignal?.aborted
+    && state.currentProjectId === submittingProjectId && endOperation?.isCurrent?.() !== false;
   const isStillCurrentSubmission = () => {
     const s = useAppStore.getState();
     const currentVideo = hasProtectedVideoInputs ? s.nodes.find((node) => node.id === nodeId) : undefined;
-    return leaseValid && !lease?.signal?.aborted && !savingSignal?.aborted && s.currentProjectId === submittingProjectId && s.nodes.some((n) => n.id === nodeId)
-      && endOperation?.isCurrent?.() !== false
+    return ownsGeneration(s) && s.nodes.some((n) => n.id === nodeId)
       && (!guardedSubmission || (!!cloudGuard && isCanvasDerivationFresh(cloudGuard, s)))
       && (!videoOwner || videoSubmissionOwners.get(submissionKey) === videoOwner)
       && (!hasProtectedVideoInputs || (!!currentVideo
@@ -362,10 +519,20 @@ export async function executeGeneration(
 
   // 文本和分镜也领取节点运行所有权，旧请求的取消收尾不能清掉新一轮的 loading。
   const endOperation = registerMediaNodeOperation(nodeId, true);
+  const ownsNativeComfyVideo = () => nativeComfyVideoContext && endOperation.isCurrent?.() !== false
+    && isProjectExpectedContextCurrent(nativeComfyVideoContext, useAppStore.getState(), { checkCanvasRevision: false });
+  const nativeMediaGuard = nativeMediaMaterial === undefined ? undefined : registerNativeVideoSubmissionGuard(async () => {
+    if (lease) await assertLease();
+    const current = useAppStore.getState(), node = current.nodes.find((item) => item.id === nodeId);
+    if (!isStillCurrentSubmission() || !node || nativeMediaInputMaterial(node, current, 'media-input-v3') !== nativeMediaMaterial
+      || directionReference && !sameDirectionImage(directionReference, node.data)) throw new Error('原媒体输入已变化，未提交请求');
+  });
   store.updateNodeDataTransient(nodeId, { status: 'loading', error: undefined, videoTaskState: undefined, mediaTaskState: undefined });
   let batchNodeIds: string[] | undefined;
   let taskReceipt: MediaTaskReceipt | undefined;
   let mediaDelivered = false;
+  let videoExecutionStarted = false;
+  let videoResultReceived = false;
   const confirmMediaDelivery = () => {
     if (taskReceipt) completeMediaNodeTask(taskReceipt);
     else if (runningHubTask) completeRunningHubNodeTask(nodeId);
@@ -379,6 +546,7 @@ export async function executeGeneration(
       const imageCapability = isAnimation || workflowId ? undefined : resolveImageParameterCapability(nodeModel, nodeProvider, store.config);
       const imageQuality = resolveConfiguredImageQuality(imageCapability, data.imageQuality);
       const imageBackground = resolveConfiguredImageBackground(imageCapability, data.imageBackground);
+      const imageOutput = isAnimation ? {} : resolveConfiguredImageOutput(imageCapability, data);
       const animationAction = data.animationAction ?? 'idle';
       const animationFrames = data.animationFrames ?? 8;
       const aspectRatio = isAnimation ? resolveAnimationSheetAspectRatio(animationFrames, nodeProvider)
@@ -386,26 +554,44 @@ export async function executeGeneration(
       const spriteProcessing = isAnimation ? animationProcessing({ ...data, animationSheet: undefined }) : undefined;
       if (isAnimation) effectivePrompt = buildAnimationSpritePrompt(effectivePrompt, animationAction, animationFrames, aspectRatio, spriteProcessing);
       const batchCount = cloudWorkflow || isAnimation ? 1 : Math.min(MAX_IMAGE_BATCH_COUNT, Math.max(1, Math.floor(Number(data.batchCount) || 1)));
-      if (batchCount > 1) {
-        if (postProcess) throw new Error('批量生成暂不支持图片后处理，请将数量设为 1');
+      const outputsPerJob = workflowId || isAnimation ? 1 : resolveImageOutputsPerJob(nodeModel, nodeProvider, store.config);
+      const outpaintReferences = data.outpaintInput?.url ? { image_urls: [data.outpaintInput.url] } : {};
+      if (postProcess && (batchCount > 1 || outputsPerJob > 1)) throw new Error(outputsPerJob > 1
+        ? '固定多候选模型暂不支持图片后处理，请选择单图模型' : '批量生成暂不支持图片后处理，请将数量设为 1');
+      if (nativeMediaGuard) {
+        await generateImagesBatch({ prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
+          ...(batchOptions?.imagePromptResolution ? { imagePromptResolution: batchOptions.imagePromptResolution } : {}),
+          imageSize, imageQuality, imageBackground: data.imageBackground === '' ? '' : imageBackground, ...imageOutput, aspectRatio, nodeId,
+          workflowId, workflowInputs: data.workflowInputs, runninghubModelParameters: data.runninghubModelParameters,
+          ...outpaintReferences,
+          ...(outputsPerJob > 1 ? { collectCandidates: true } : {}) },
+        batchCount, lease?.signal, nativeMediaGuard);
+        throw new Error('原生图片生成缺少耐久原回执，未确认交付');
+      }
+      if (batchCount > 1 || outputsPerJob > 1) {
+        const outputCount = batchCount * outputsPerJob;
+        const commitHistory = batchOptions?.history !== 'transient' && !(lease && imageBatchLeases.has(lease));
         batchNodeIds = prepareImageBatchNodes({
           nodeId,
-          count: batchCount,
-          commitHistory: batchOptions?.history !== 'transient',
+          count: outputCount,
+          commitHistory,
           projectId: submittingProjectId,
         }).nodeIds;
         if (cloudGuard) completeCanvasDerivation(cloudGuard);
         cloudGuard = guardedSubmission ? registerCanvasDerivation(useAppStore.getState(), nodeId) : null;
-        notify(`正在批量生成 ${batchCount} 张图片`);
+        notify(`正在批量生成 ${outputCount} 张图片`);
         const imageOptions = {
+          ...(batchOptions?.imagePromptResolution ? { imagePromptResolution: batchOptions.imagePromptResolution } : {}),
           prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
-          imageSize, imageQuality, imageBackground: data.imageBackground === '' ? '' : imageBackground, aspectRatio, nodeId,
+          imageSize, imageQuality, imageBackground: data.imageBackground === '' ? '' : imageBackground, ...imageOutput, aspectRatio, nodeId,
           workflowId, workflowInputs: data.workflowInputs, runninghubModelParameters: data.runninghubModelParameters,
+          ...outpaintReferences,
+          ...(outputsPerJob > 1 ? { collectCandidates: true } : {}),
         };
         if (lease) await assertLease();
         const batch = lease ? await generateImagesBatch(imageOptions, batchCount, lease.signal)
           : await generateImagesBatch(imageOptions, batchCount);
-        taskReceipt = batch.results.find((result) => result.taskReceipt)?.taskReceipt;
+        taskReceipt = batch.taskReceipt ?? batch.results.find((result) => result.taskReceipt)?.taskReceipt;
         comfyTaskId = batch.results.find((result) => result.comfyTaskId)?.comfyTaskId;
         if (comfyTaskId) beginComfyNodeDelivery(nodeId, comfyTaskId);
         if (lease) await assertLease();
@@ -415,26 +601,31 @@ export async function executeGeneration(
           targetNodeIds: batchNodeIds,
           isCurrent: guardedSubmission ? isStillCurrentSubmission : undefined,
           signal: beginMediaSaving(),
-          batch,
+          batch: outputsPerJob > 1 ? { ...batch, expectedOutputCount: batch.expectedOutputCount ?? outputCount } : batch,
+          commitHistory,
           silent: batchOptions?.silent,
           model: nodeModel, provider: nodeProvider,
           projectId: submittingProjectId,
-          prompt: effectivePrompt,
+          prompt: batchOptions?.imagePromptResolution?.replacement ?? effectivePrompt,
           imageSize,
           imageQuality,
           imageBackground,
+          ...imageOutput,
           aspectRatio,
         });
         return mediaDelivered ? { success: true } : { success: false, message: taskReceipt
           ? '部分图片仍待保存或取回，原任务已保留' : '部分图片未能保存或生成，请核对已返回结果' };
       }
       const imageOptions = {
+        ...(batchOptions?.imagePromptResolution ? { imagePromptResolution: batchOptions.imagePromptResolution } : {}),
         prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
-        imageSize, imageQuality, imageBackground: data.imageBackground === '' ? '' : imageBackground, aspectRatio, nodeId,
+        imageSize, imageQuality, imageBackground: data.imageBackground === '' ? '' : imageBackground, ...imageOutput, aspectRatio, nodeId,
         workflowId, workflowInputs: data.workflowInputs, runninghubModelParameters: data.runninghubModelParameters,
+        ...outpaintReferences,
       };
       if (lease) await assertLease();
-      const result = lease ? await generateImage(imageOptions, lease.signal) : await generateImage(imageOptions);
+      const result = nativeMediaGuard ? await generateImage(imageOptions, lease?.signal, nativeMediaGuard)
+        : lease ? await generateImage(imageOptions, lease.signal) : await generateImage(imageOptions);
       taskReceipt = result.taskReceipt;
       comfyTaskId = result.comfyTaskId;
       if (comfyTaskId) beginComfyNodeDelivery(nodeId, comfyTaskId);
@@ -443,7 +634,7 @@ export async function executeGeneration(
 
       if (taskReceipt) store.updateNodeDataTransient(nodeId, { mediaTaskStage: 'saving' });
       const signal = beginMediaSaving();
-      const persisted = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (submittingProjectId
+      const persisted: PersistedProjectMedia = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (submittingProjectId
         ? await persistMediaUrlToProjectData(result.url, submittingProjectId, 'ai-image', data.label, { mediaDownloadAccess: result.mediaDownloadAccess, signal })
         : { mediaUrl: result.url, sourceUrl: result.url });
       if (lease) await assertLease();
@@ -453,7 +644,7 @@ export async function executeGeneration(
       applyImageData(nodeId, {
         imageUrl: mediaUrl, sourceUrl: persisted.sourceUrl, filePath: persisted.filePath,
         thumbnailUrl: mediaUrl, output: persisted.sourceUrl, status: 'success',
-        imageWidth: result.width, imageHeight: result.height,
+        imageWidth: persisted.width ?? result.width, imageHeight: persisted.height ?? result.height,
         ...(isAnimation ? { aspectRatio, ...animationResultPatch(data) } : {}),
       });
       confirmMediaDelivery();
@@ -461,33 +652,16 @@ export async function executeGeneration(
       if (result.comfyTaskId) completeComfyNodeTask(nodeId, result.comfyTaskId);
       store.syncDramaAssetImageFromNode?.(nodeId, mediaUrl);
       store.recordOutputHistory(nodeId, {
-        nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: effectivePrompt,
+        nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: batchOptions?.imagePromptResolution?.replacement ?? effectivePrompt,
         output: persisted.sourceUrl, nodeType, model: nodeModel, provider: nodeProvider,
         status: 'success', mediaUrl, filePath: persisted.filePath,
         params: isAnimation ? { imageSize, aspectRatio, animationAction, animationFrames,
           grid: ANIMATION_FRAME_GRIDS[animationFrames], animationProcessing: spriteProcessing, animationPromptVersion: 1 }
-          : { imageSize, imageQuality, imageBackground, aspectRatio },
+          : { imageSize, imageQuality, imageBackground, ...imageOutput, aspectRatio },
       });
 
       if (postProcess === 'character-8-direction-grid' && persisted.filePath) {
-        const { createCharacterDirectionGrid } = await import('./onnxService');
-        try {
-          const gridResult = await createCharacterDirectionGrid(persisted.filePath);
-          if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
-
-          const sourceNode = useAppStore.getState().nodes.find((item) => item.id === nodeId);
-          if (sourceNode) {
-            store.addNode({
-              id: `node-${generateId()}`,
-              type: 'ai-storyboard',
-              ...derivedNodePlacement(sourceNode, 60),
-              data: { label: `${data.label} 8向宫格`, type: 'ai-storyboard', role: 'source', status: 'success', imageUrl: convertFileSrc(gridResult.grid_path), filePath: gridResult.grid_path, imageWidth: gridResult.grid_size, imageHeight: gridResult.grid_size, storyboardRows: 3, storyboardCols: 3, nodeWidth: 360, nodeHeight: 360 },
-            });
-          }
-          notify('角色 8 向宫格已生成');
-        } catch {
-          notify(`原图已生成，8 向宫格处理失败`, 'error');
-        }
+        await addCharacterDirectionGrid(nodeId, { filePath: persisted.filePath }, ownsGeneration, notify);
       } else {
         notify(isAnimation ? '帧动画生成完成' : '图片生成完成');
       }
@@ -496,11 +670,13 @@ export async function executeGeneration(
       const aspectRatio = (data.aspectRatio as string) || '2:1';
       const imageOptions = {
         prompt: buildPanoramaPrompt(effectivePrompt), model: nodeModel, provider: nodeProvider,
+        ...(batchOptions?.imagePromptResolution ? { imagePromptResolution: batchOptions.imagePromptResolution } : {}),
         imageSize, aspectRatio, nodeId,
         workflowId, workflowInputs: data.workflowInputs, runninghubModelParameters: data.runninghubModelParameters,
       };
       if (lease) await assertLease();
-      const result = lease ? await generateImage(imageOptions, lease.signal) : await generateImage(imageOptions);
+      const result = nativeMediaGuard ? await generateImage(imageOptions, lease?.signal, nativeMediaGuard)
+        : lease ? await generateImage(imageOptions, lease.signal) : await generateImage(imageOptions);
       taskReceipt = result.taskReceipt;
       comfyTaskId = result.comfyTaskId;
       if (comfyTaskId) beginComfyNodeDelivery(nodeId, comfyTaskId);
@@ -522,7 +698,7 @@ export async function executeGeneration(
       confirmMediaDelivery();
       if (result.comfyTaskId) completeComfyNodeTask(nodeId, result.comfyTaskId);
       store.recordOutputHistory(nodeId, {
-        nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: effectivePrompt,
+        nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: batchOptions?.imagePromptResolution?.replacement ?? effectivePrompt,
         output: persisted.sourceUrl, nodeType: 'ai-panorama', model: nodeModel, provider: nodeProvider,
         status: 'success', mediaUrl, filePath: persisted.filePath,
         params: { imageSize, aspectRatio },
@@ -574,15 +750,22 @@ export async function executeGeneration(
       const assertVideoSubmission = async () => {
         if (lease) await assertLease();
         if (!isStillCurrentSubmission()) throw new Error('镜头或生成输入已变化，请重新生成');
+        if (nativeVideoMaterial !== undefined) {
+          const current = useAppStore.getState(), node = current.nodes.find((item) => item.id === nodeId);
+          if (!node || nativeVideoMaterial !== videoInputFingerprintMaterial(node, current)) throw new Error('视频输入已变化，未提交请求');
+        }
       };
-      const result = lease || hasProtectedVideoInputs
+      if (nativeVideoMaterial !== undefined) registerNativeVideoSubmissionGuard(assertVideoSubmission);
+      videoExecutionStarted = true;
+      const result = lease || hasProtectedVideoInputs || nativeVideoMaterial !== undefined
         ? await generateVideo(videoOptions, lease?.signal, assertVideoSubmission)
         : await generateVideo(videoOptions);
+      videoResultReceived = true;
       taskReceipt = result.taskReceipt;
       if (lease) await assertLease();
       if (!isStillCurrentSubmission()) {
         if (taskReceipt) pauseMediaTask(taskReceipt, undefined, 'canvas_changed');
-        return { success: false, message: '任务已取消' };
+        return { success: false, message: '任务已取消', recovery: { state: taskReceipt ? 'delivery_pending' : 'unknown', receipt: taskReceipt } };
       }
       if (taskReceipt) store.updateNodeDataTransient(nodeId, { mediaTaskStage: 'saving' });
       const signal = beginMediaSaving();
@@ -597,10 +780,12 @@ export async function executeGeneration(
       if (lease) await assertLease();
       if (!isStillCurrentSubmission()) {
         if (taskReceipt) pauseMediaTask(taskReceipt, undefined, 'canvas_changed');
-        return { success: false, message: lease ? '任务已取消' : '画布已变化，任务已保留' };
+        return { success: false, message: lease ? '任务已取消' : '画布已变化，任务已保留',
+          recovery: { state: taskReceipt ? 'delivery_pending' : 'unknown', receipt: taskReceipt } };
       }
       if (lease) await assertLease();
-      if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
+      if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消',
+        recovery: { state: taskReceipt ? 'delivery_pending' : 'unknown', receipt: taskReceipt } };
       updateResult(nodeId, {
         videoUrl: persisted.mediaUrl, sourceUrl: persisted.sourceUrl, filePath: persisted.filePath,
         thumbnailUrl: persisted.mediaUrl, output: persisted.sourceUrl, status: 'success', videoBatchFingerprint: videoFingerprint, videoTaskState: undefined,
@@ -633,7 +818,8 @@ export async function executeGeneration(
         workflowInputs: data.workflowInputs, runninghubModelParameters: data.runninghubModelParameters,
       };
       if (lease) await assertLease();
-      const result = lease ? await generateAudio(audioOptions, lease.signal) : await generateAudio(audioOptions);
+      const result = nativeMediaGuard ? await generateAudio(audioOptions, lease?.signal, nativeMediaGuard)
+        : lease ? await generateAudio(audioOptions, lease.signal) : await generateAudio(audioOptions);
       taskReceipt = result.taskReceipt;
       comfyTaskId = result.comfyTaskId;
       if (comfyTaskId) beginComfyNodeDelivery(nodeId, comfyTaskId);
@@ -647,7 +833,7 @@ export async function executeGeneration(
         : await persistAudioGenerationResult(result, submittingProjectId, data.label);
       if (lease) await assertLease();
       if (guardedSubmission && !isStillCurrentSubmission()) return { success: false, message: '画布已变化，任务已保留' };
-      if (persisted.persistence === 'failed') throw new Error('音频已生成，但保存失败；请继续保存原结果');
+      if (persisted.persistence === 'failed') throw new Error(t('音频已生成，但保存失败；请继续保存原结果'));
       updateResult(nodeId, {
         audioUrl: persisted.mediaUrl, sourceUrl: persisted.sourceUrl, filePath: persisted.filePath,
         thumbnailUrl: persisted.mediaUrl, output: persisted.outputUrl,
@@ -674,7 +860,6 @@ export async function executeGeneration(
           autoGenerateLyrics: data.autoGenerateLyrics,
         },
       });
-      if (result.workflowApiTaskId) completeWorkflowApiNodeTask(nodeId, result.workflowApiTaskId);
       notify('音频生成完成');
     } else if (nodeType === 'ai-shotlist') {
       if (lease) {
@@ -687,17 +872,34 @@ export async function executeGeneration(
         prompt: textSource, data, settings: projectSettings, customStyles: store.customStyles,
       });
       if (lease) await assertLease();
-      const result = await generateText({ prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
-        ...(lease ? { signal: lease.signal } : {}) });
+      const textParams = { prompt: effectivePrompt, model: nodeModel, provider: nodeProvider,
+        ...(lease ? { signal: lease.signal } : {}) };
+      const result: TextGenerationResult = localComfyTask
+        ? await generateTextResult({ ...textParams, nodeId, workflowId, workflowInputs: data.workflowInputs })
+        : { text: await generateText(textParams) };
+      comfyTaskId = result.comfyTaskId;
+      if (comfyTaskId) { beginMediaSaving(); beginComfyNodeDelivery(nodeId, comfyTaskId); }
+      const textTask = comfyTaskId && submittingProjectId ? getPendingTasksForProject(submittingProjectId)
+        .find((task) => task.nodeId === nodeId && task.taskId === comfyTaskId && task.taskType === 'comfyui') : undefined;
+      const textReceipt = textTask ? historyMediaTaskReceipt(textTask) : undefined;
       if (lease) await assertLease();
       if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
-      const processed = postProcessDramaExtractOutput(effectivePrompt, result);
+      const processed = postProcessDramaExtractOutput(effectivePrompt, result.text);
       if (!processed.ok) throw new Error(processed.error);
       updateResult(nodeId, { output: processed.output, status: 'success' });
-      store.recordOutputHistory(nodeId, {
+      if (comfyTaskId && cloudGuard) {
+        completeCanvasDerivation(cloudGuard);
+        cloudGuard = registerCanvasDerivation(useAppStore.getState(), nodeId);
+      }
+      const textHistory = {
         nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: effectivePrompt,
-        output: processed.output, nodeType: 'ai-text', model: nodeModel, provider: nodeProvider, status: 'success',
-      });
+        output: processed.output, nodeType: 'ai-text' as const, model: nodeModel, provider: nodeProvider, status: 'success' as const,
+        ...(textReceipt ? { params: { comfyTextTaskId: textReceipt.taskId, comfyTextAttemptId: textReceipt.attemptId } } : {}),
+      };
+      if (comfyTaskId) await store.recordOutputHistory(nodeId, textHistory, true, textReceipt);
+      else await store.recordOutputHistory(nodeId, textHistory);
+      if (!isStillCurrentSubmission()) return { success: false, message: '画布已变化，任务已保留' };
+      if (comfyTaskId) completeComfyNodeTask(nodeId, comfyTaskId);
       if (processed.kind) {
         if (processed.parsed) {
           store.mergeDramaExtract(processed.parsed, {
@@ -713,39 +915,87 @@ export async function executeGeneration(
     return { success: true };
   } catch (err) {
     comfyDeliveryError = err;
+    if (err instanceof Error && err.name === 'NativeMediaTaskDelivered') {
+      mediaDelivered = true;
+      if (postProcess === 'character-8-direction-grid' && nodeType === 'ai-image' && executionContext?.kind === 'canvas') {
+        const ownsDeliveredImage = (state: AppState) => ownsGeneration(state)
+          && isProjectExpectedContextCurrent(executionContext, state, { checkCanvasRevision: false });
+        if ('nativeOperationId' in err && typeof err.nativeOperationId === 'string' && err.nativeOperationId) {
+          await addCharacterDirectionGrid(nodeId, { nativeOperationId: err.nativeOperationId }, ownsDeliveredImage, notify);
+        } else if (ownsDeliveredImage(useAppStore.getState())) {
+          notify(t('原图已生成，8 向宫格处理失败'), 'error');
+        }
+      }
+      return { success: true };
+    }
     const pausedError = isMediaTaskPausedError(err);
+    if (err instanceof Error && (err.name === 'NativeVolcengineTaskPending' || err.name === 'NativeMediaTaskPending')) {
+      const nativeOperationId = 'nativeOperationId' in err && typeof err.nativeOperationId === 'string' ? err.nativeOperationId : undefined;
+      const state = 'localResultAvailable' in err && err.localResultAvailable === true ? 'delivery_pending'
+        : 'remoteTaskKnown' in err && err.remoteTaskKnown === true ? 'paused' : 'unknown';
+      if (nativeComfyVideoContext && nativeOperationId && ownsNativeComfyVideo() && state !== 'unknown') {
+        const currentNode = useAppStore.getState().nodes.find((node) => node.id === nodeId);
+        const saving = state === 'delivery_pending' || currentNode?.data.mediaTaskStage === 'saving';
+        showNativeComfyVideoRecovery(nativeComfyVideoContext, nodeId, nativeOperationId, saving);
+        return { success: false, message: err.message, recovery: { state: saving ? 'delivery_pending' : state, nativeOperationId } };
+      }
+      if (isStillCurrentSubmission() || ownsNativeComfyVideo()) {
+        store.updateNodeDataTransient(nodeId, { status: 'idle', error: err.message, mediaTaskState: 'paused', mediaTaskStage: undefined });
+        notify(err.message);
+      }
+      return { success: false, message: err.message, recovery: { state, ...(nativeOperationId ? { nativeOperationId } : {}) } };
+    }
     const paused = !mediaDelivered && taskReceipt && !pausedError ? pauseMediaTask(taskReceipt, err, 'delivery_pending') : undefined;
     const expectedReceipt = taskReceipt ?? (pausedError ? err.taskReceipt : undefined);
     const retained = !mediaDelivered && submittingProjectId && (expectedReceipt || isHistoryMediaDownloadFailure(err))
       ? getPendingTasksForProject(submittingProjectId).find((task) => task.nodeId === nodeId && isHistoryMediaDownloadPending(task)
         && (!expectedReceipt || sameHistoryMediaTask(historyMediaTaskReceipt(task), expectedReceipt))) : undefined;
-    if (retained && isStillCurrentSubmission()) {
+    if (retained) {
       const message = '生成已完成，待下载';
-      store.updateNodeDataTransient(nodeId, { status: 'idle', error: undefined, mediaTaskState: 'delivery_pending',
-        ...(retained.taskType.startsWith('runninghub') ? { runninghubStage: message } : {}) });
-      await store.recordOutputHistory(nodeId, {
-        nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: effectivePrompt,
-        output: '', nodeType, model: nodeModel, provider: nodeProvider, status: 'download_pending',
-        recoveryTask: historyMediaTaskReceipt(retained),
-        error: isHistoryMediaDownloadFailure(err) && err instanceof Error ? err.message : '下载或保存尚未完成，可重新取回原结果',
-      });
-      notify(message);
-      return { success: false, message };
+      const receipt = historyMediaTaskReceipt(retained);
+      if (isStillCurrentSubmission()) {
+        store.updateNodeDataTransient(nodeId, { status: 'idle', error: undefined, mediaTaskState: 'delivery_pending',
+          ...(retained.taskType.startsWith('runninghub') ? { runninghubStage: message } : {}) });
+        await store.recordOutputHistory(nodeId, {
+          nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: batchOptions?.imagePromptResolution?.replacement ?? effectivePrompt,
+          output: '', nodeType, model: nodeModel, provider: nodeProvider, status: 'download_pending',
+          recoveryTask: receipt,
+          error: isHistoryMediaDownloadFailure(err) && err instanceof Error ? err.message : '下载或保存尚未完成，可重新取回原结果',
+        });
+        notify(message);
+      }
+      return { success: false, message, recovery: { state: 'delivery_pending', receipt } };
     }
-    if (pausedError) return { success: false, message: err instanceof Error ? err.message : '任务已保留' };
+    if (pausedError) return { success: false, message: err.message, recovery: mediaRecovery(err, err.taskReceipt) };
     if (paused) {
-      return { success: false, message: '结果保存暂未完成，任务已保留，可继续保存原结果' };
+      return { success: false, message: '结果保存暂未完成，任务已保留，可继续保存原结果',
+        recovery: mediaRecovery(paused, taskReceipt) };
+    }
+    const workflowRecovery = nodeType === 'ai-video' && submittingProjectId && !mediaDelivered
+      ? pendingVideoRecovery(submittingProjectId, nodeId) : undefined;
+    if (workflowRecovery) {
+      if (isStillCurrentSubmission()) store.updateNodeDataTransient(nodeId, { status: 'idle', mediaTaskStage: undefined });
+      return { success: false, message: '任务已保留', recovery: workflowRecovery };
+    }
+    if (videoResultReceived && !mediaDelivered && !isStillCurrentSubmission()) {
+      return { success: false, message: '任务已取消', recovery: { state: taskReceipt ? 'delivery_pending' : 'unknown', receipt: taskReceipt } };
     }
     if (lease) {
-      try { await assertLease(); } catch { return { success: false, message: '任务已取消' }; }
+      try { await assertLease(); } catch {
+        return { success: false, message: '任务已取消', ...(videoExecutionStarted && !mediaDelivered ? { recovery: { state: 'unknown' as const } } : {}) };
+      }
     }
     const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '生成失败');
-    if (msg === '任务已被取消') return { success: false, message: '任务已取消' };
-    if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消' };
+    const audioCancelled = nodeType === 'ai-audio'
+      && (msg === '请求已取消' || (err instanceof DOMException && err.name === 'AbortError'));
+    if (msg === '任务已被取消' || audioCancelled) return { success: false, message: '任务已取消',
+      ...(nodeType === 'ai-video' ? { recovery: { state: 'unknown' as const } } : {}) };
+    if (!isStillCurrentSubmission()) return { success: false, message: '任务已取消',
+      ...(nodeType === 'ai-video' && !lease ? { recovery: { state: 'unknown' as const } } : {}) };
     if (batchNodeIds) failImageBatchNodes(batchNodeIds, msg, submittingProjectId);
     store.updateNodeDataTransient(nodeId, { status: 'error', error: msg });
     store.recordOutputHistory(nodeId, {
-      nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: effectivePrompt,
+      nodeId, nodeLabel: data.label, timestamp: Date.now(), prompt: batchOptions?.imagePromptResolution?.replacement ?? effectivePrompt,
       output: '', nodeType: nodeType as 'ai-text' | 'ai-image' | 'ai-video' | 'ai-audio' | 'ai-panorama',
       model: nodeModel, provider: nodeProvider, status: 'error', error: msg,
     });
@@ -757,6 +1007,10 @@ export async function executeGeneration(
     if (savingSignal) cleanupNodePolling(nodeId, savingSignal);
     const current = useAppStore.getState();
     const currentNode = current.nodes.find((node) => node.id === nodeId);
+    if (!mediaDelivered && ownsNativeComfyVideo() && currentNode?.type === 'ai-video'
+      && currentNode.data.role !== 'source' && currentNode.data.status === 'loading') {
+      current.updateNodeDataTransient(nodeId, { status: 'idle', mediaTaskStage: undefined });
+    }
     const leaseRevoked = Boolean(lease && (!leaseValid || lease.signal?.aborted));
     if (leaseRevoked && endOperation.isCurrent?.()
       && current.currentProjectId === submittingProjectId && currentNode?.data.status === 'loading') {

@@ -41,6 +41,12 @@ vi.mock('../../src/services/indexedDbService', async (importOriginal) => ({
   getProjectById: mocks.getProjectById,
 }));
 vi.mock('../../src/services/indexedDb/projectImportRepository', () => ({ listProjectImportRecoveries: async () => [] }));
+vi.mock('../../src/services/projectModelRouter', () => ({ listProjectCatalog: async () => (await mocks.getAllProjects())
+  .map((project: CanvasProject) => ({ dataModel: 'legacy', project })) }));
+vi.mock('../../src/services/indexedDb/legacyProjectWriteGuard', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/services/indexedDb/legacyProjectWriteGuard')>(),
+  assertLegacyProjectWritesAllowed: async () => undefined,
+}));
 vi.mock('../../src/services/fs/core', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/services/fs/core')>(),
   isTauriEnv: () => true,
@@ -131,6 +137,21 @@ describe('project thumbnail directories stay outside asset scans', () => {
     expect(mocks.identifyAsset).toHaveBeenCalledTimes(2);
     expect(mocks.identifyAsset.mock.calls.every(([, options]) => options.source === 'project'
       && options.projectId === 'project' && options.mtimeMs === 0)).toBe(true);
+  });
+
+  it('单层目录列举也在 stat 前隐藏原生暂存件，原件与普通 pending 保留', async () => {
+    const hash = 'a'.repeat(64);
+    const pending = [`.native-media-${hash}.pending`, `.native-media-${hash}.png.pending`];
+    addDirectory('/single', [...pending, 'photo.png', 'ordinary.pending', '.notes']);
+    const core = await vi.importActual<typeof import('../../src/services/fs/core')>('../../src/services/fs/core');
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: { convertFileSrc: (path: string) => `asset://${path}` } });
+    try {
+      const files = await core.listDirectoryFiles('/single');
+      expect(files.map((file) => file.name).sort()).toEqual(['.notes', 'ordinary.pending', 'photo.png']);
+      for (const name of pending) expect(mocks.stat).not.toHaveBeenCalledWith(`/single/${name}`);
+      expect(mocks.directories.get('/single')).toHaveLength(5);
+      expect(mocks.remove).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('publishes the first stable project asset before later assets are identified', async () => {

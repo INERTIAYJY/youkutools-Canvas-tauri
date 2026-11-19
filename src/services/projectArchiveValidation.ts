@@ -3,6 +3,8 @@ import type { ProjectSaveData } from './storageService';
 import type { ProjectArchiveChatPayload } from './projectTransferService';
 import type { ProjectExchangeSnapshot, ProjectExchangeState } from '../types/projectExchange';
 import { safeExchangePath, type ArchiveAssetDigest } from './projectExchangeDomain';
+import { normalizeProjectSeriesInfo } from './indexedDb/projectSummary';
+import { normalizeConversationWorkbenchTarget } from './chat/workbenchConversationScope';
 
 const privateFields = new Set(['filepath', 'imagefilepath', 'directorcapturefilepaths', 'taskid', 'agenttaskid',
   'apikey', 'apikeyref', 'accesskeyid', 'secretaccesskey', 'sessiontoken', 'token', 'accesstoken', 'refreshtoken',
@@ -10,6 +12,8 @@ const privateFields = new Set(['filepath', 'imagefilepath', 'directorcapturefile
   'videotaskstate', 'mediataskstate', 'mediataskstage', 'runninghubstage', 'workflowapistage', 'generationstartedat']);
 
 export function sanitizeLegacyArchiveProject(record: ProjectSaveData): ProjectSaveData {
+  if (record.series !== undefined) record = { ...record, series: normalizeProjectSeriesInfo(record.series) };
+  if (record.parentId && record.series?.storyGraph) throw new Error('分集归档不能持有所属剧集的故事图');
   let count = 0;
   const visit = (value: unknown, key = '', depth = 0): unknown => {
     if (++count > 1_000_000 || depth > 32) throw new Error('项目记录嵌套或数量超过上限');
@@ -55,6 +59,7 @@ export function portableArchiveChat(payload: ProjectArchiveChatPayload): Project
   for (const message of payload.messages) counts.set(message.conversationId, (counts.get(message.conversationId) ?? 0) + 1);
   return {
     conversations: payload.conversations.map((row) => ({ id: row.id, ...origin(row), projectId: text(row.projectId),
+      workbenchTarget: normalizeConversationWorkbenchTarget(row.workbenchTarget, text(row.projectId)),
       title: text(row.title), titleSource: row.titleSource === 'user' ? 'user' : 'auto', pinned: false,
       archived: row.archived === true, agentMode: 'plan', messageCount: counts.get(row.id) ?? 0,
       createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt) })),

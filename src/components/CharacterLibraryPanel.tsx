@@ -3,21 +3,21 @@
  * 列出项目级与全局角色，支持新建、编辑（打开 CharacterAssetDialog）、删除与筛选，
  * 头像取自角色主视觉参考图，全局角色可被跨项目复用。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { Swords } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
-import { generateId, useAppStore } from '../store/useAppStore';
+import { generateId, useAppStore, type AppState } from '../store/useAppStore';
 import { isEligibleCharacterVoiceNode } from '../store/store.dramaAssets';
 import {
   assertMediaDataUrlSize,
   assertMediaDataUrlWithinLimit,
   inferMediaDataUrlKind,
+  isTauriEnv,
   saveBinaryToProjectData,
 } from '../services/fileService';
-import type { BaseNodeData } from '../types';
 import type {
   CharacterActionCategory,
   CharacterActionMedia,
@@ -37,6 +37,7 @@ import CharacterAssetDialog from './CharacterAssetDialog';
 import CharacterReferenceGallery from './character/CharacterReferenceGallery';
 import CharacterDock from './character/CharacterDock';
 import CharacterWeaponDialog from './character/CharacterWeaponDialog';
+import LazyLoadBoundary, { LazyLoadFallback } from './shared/LazyLoadBoundary';
 import { sortCharactersForLibrary } from '../services/characterOrder';
 import type { ReferenceStageBox } from './character/CharacterReferenceGallery';
 import {
@@ -46,11 +47,14 @@ import {
   voiceClipTitle,
 } from './character/characterReferencePresentation';
 import { readAudioDuration } from './character/characterVoiceMedia';
-import { acquireComfyMediaSource } from '../services/comfyMediaSource';
+import { actionMediaFromCanvasNode } from './character/characterActionMedia';
+import { useCharacterVoicePreview } from '../hooks/useCharacterVoicePreview';
 import { copyDramaAssetSelection } from '../services/dramaAssetBatchCopy';
 import { configValuesEqual } from '../services/configPatch';
 
 type CharacterLibraryScope = 'project' | 'global';
+const CharacterVisualPendingTasks = lazy(() => import('./character/CharacterVisualPendingTasks'));
+const EMPTY_CANVAS_NODES: AppState['nodes'] = [];
 
 const CHARACTER_ACTION_CATEGORIES: Array<{
   id: CharacterActionCategory;
@@ -102,73 +106,6 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('媒体读取失败'));
     reader.readAsDataURL(file);
   });
-}
-
-function actionMediaFromCanvasNode(node: { data: BaseNodeData }): CharacterActionMedia | null {
-  const data = node.data;
-  const name = data.fileName || data.label || '画布动作素材';
-  if (data.videoUrl) {
-    const extension = (data.fileName || data.filePath || data.videoUrl)
-      .split(/[?#]/, 1)[0]
-      .split('.')
-      .pop()
-      ?.toLowerCase();
-    const mimeType = extension === 'webm'
-      ? 'video/webm'
-      : extension === 'mov'
-        ? 'video/quicktime'
-        : extension === 'm4v'
-          ? 'video/x-m4v'
-          : 'video/mp4';
-    const now = Date.now();
-    return {
-      id: `action-media-${generateId()}`,
-      kind: 'video',
-      name,
-      mimeType,
-      assetId: data.assetId,
-      relativePath: data.relativePath,
-      filePath: data.filePath,
-      url: data.videoUrl,
-      createdAt: now,
-      updatedAt: now,
-    };
-  }
-  const imageUrl = data.imageUrl || data.thumbnailUrl;
-  if (!imageUrl) return null;
-  const imageIdentity = [data.fileName, data.filePath, imageUrl]
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ');
-  const isGif = /\.gif(?:[?#]|$)/i.test(imageIdentity) || imageUrl.startsWith('data:image/gif');
-  const extension = (data.fileName || data.filePath || imageUrl)
-    .split(/[?#]/, 1)[0]
-    .split('.')
-    .pop()
-    ?.toLowerCase();
-  const dataMimeType = imageUrl.match(/^data:(image\/[^;,]+)/i)?.[1]?.toLowerCase();
-  const mimeType = isGif
-    ? 'image/gif'
-    : dataMimeType
-      ?? (extension === 'jpg' || extension === 'jpeg'
-        ? 'image/jpeg'
-        : extension === 'webp'
-          ? 'image/webp'
-          : extension === 'avif'
-            ? 'image/avif'
-            : 'image/png');
-  const now = Date.now();
-  return {
-    id: `action-media-${generateId()}`,
-    kind: isGif ? 'gif' : 'image',
-    name,
-    mimeType,
-    assetId: data.assetId,
-    relativePath: data.relativePath,
-    filePath: data.filePath,
-    url: imageUrl,
-    createdAt: now,
-    updatedAt: now,
-  };
 }
 
 function characterAvatar(character: DramaCharacter): CharacterReferenceImage | undefined {
@@ -246,7 +183,7 @@ export default function CharacterLibraryPanel() {
       copyGlobalCharacterToProject: state.copyGlobalCharacterToProject,
       deleteDramaAsset: state.deleteDramaAsset,
       deleteGlobalCharacter: state.deleteGlobalCharacter,
-      nodes: state.nodes,
+      nodes: state.characterLibraryOpen || state.characterActionLibraryOpen ? state.nodes : EMPTY_CANVAS_NODES,
       setCharacterLibraryNodeHidden: state.setCharacterLibraryNodeHidden,
       createImageNodeFromCharacterReference: state.createImageNodeFromCharacterReference,
       bindAudioNodeToCharacterVoice: state.bindAudioNodeToCharacterVoice,
@@ -275,16 +212,12 @@ export default function CharacterLibraryPanel() {
   }, []);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [pendingTasksScope, setPendingTasksScope] = useState<{ scope: CharacterLibraryScope; projectId: string | null }>();
   const [dialogCharacter, setDialogCharacter] = useState<DramaCharacter | null>(null);
   const [dialogReferenceId, setDialogReferenceId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [voiceDockState, setVoiceDockState] = useState({ context: '', expanded: false });
-  // 记角色归属，切换角色时自然失效，不必在 effect 里回收状态
-  const [playingVoice, setPlayingVoice] = useState<{
-    characterId: string;
-    clipId: string;
-  } | null>(null);
   const [bindingVoice, setBindingVoice] = useState(false);
   const [captureNodeId, setCaptureNodeId] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -303,23 +236,6 @@ export default function CharacterLibraryPanel() {
   const [hideActionNode, setHideActionNode] = useState(true);
   const [uploadingActionMedia, setUploadingActionMedia] = useState(false);
   const [savingAction, setSavingAction] = useState(false);
-  const voicePlayerRef = useRef<HTMLAudioElement>(null);
-  const voicePlaybackRef = useRef<{
-    clipId: string;
-    player: HTMLAudioElement;
-    controller: AbortController;
-    release?: () => void;
-  } | null>(null);
-  const stopVoicePlayback = useCallback(() => {
-    const playback = voicePlaybackRef.current;
-    voicePlaybackRef.current = null;
-    const player = playback?.player ?? voicePlayerRef.current;
-    player?.pause();
-    player?.removeAttribute('src');
-    player?.load();
-    playback?.controller.abort();
-    playback?.release?.();
-  }, []);
   const actionMediaInputRef = useRef<HTMLInputElement>(null);
 
   // 资源库分类可直接定位同一份全局人物、声音或动作，不另建角色状态。
@@ -420,18 +336,18 @@ export default function CharacterLibraryPanel() {
     : 'lucide:square-plus';
 
   // 画布上还没进过角色库的图片节点，可当作新视角参考图
-  const pickableNodes = useMemo(() => nodes.filter((node) => (
+  const pickableNodes = useMemo(() => open && pickerOpen ? nodes.filter((node) => (
     !node.data.hiddenByCharacterLibrary
     && (node.data.imageUrl || node.data.thumbnailUrl)
-  )), [nodes]);
+  )) : [], [nodes, open, pickerOpen]);
   // 画布上带音频产物的节点，可绑定为角色声音
   const pickableAudioNodes = useMemo(
-    () => nodes.filter((node) => isEligibleCharacterVoiceNode(node)),
-    [nodes],
+    () => open && voicePickerOpen ? nodes.filter((node) => isEligibleCharacterVoiceNode(node)) : [],
+    [nodes, open, voicePickerOpen],
   );
   const pickableActionNodes = useMemo(
-    () => nodes.filter((node) => actionMediaFromCanvasNode(node) !== null),
-    [nodes],
+    () => actionLibraryOpen && actionNodePickerTargetId ? nodes.filter((node) => actionMediaFromCanvasNode(node) !== null) : [],
+    [nodes, actionLibraryOpen, actionNodePickerTargetId],
   );
   const voiceClips = selectedCharacter?.voiceClips ?? [];
   const voiceDockContext = `${open}:${scope}:${selectedCharacter?.id ?? ''}`;
@@ -441,9 +357,9 @@ export default function CharacterLibraryPanel() {
     setVoiceDockState({ context: voiceDockContext, expanded: false });
     if (voicePickerOpen) setVoicePickerOpen(false);
   }
-  const visibleActions = (selectedCharacter?.actions ?? []).filter((action) => (
+  const visibleActions = useMemo(() => actionLibraryOpen ? (selectedCharacter?.actions ?? []).filter((action) => (
     actionFilter === 'all' || action.category === actionFilter
-  ));
+  )) : [], [actionLibraryOpen, actionFilter, selectedCharacter?.actions]);
   const videoPreview = useResourceVideoPreview(
     JSON.stringify([open, actionLibraryOpen, scope, currentProjectId, selectedCharacter?.id, search, actionFilter, actionNodePickerTargetId]),
     [
@@ -452,12 +368,14 @@ export default function CharacterLibraryPanel() {
       ...(actionNodePickerTargetId ? pickableActionNodes.map((node) => `node:${node.id}`) : []),
     ],
   );
-  const playingVoiceClipId = playingVoice?.characterId === selectedCharacter?.id
-    ? playingVoice?.clipId ?? null
-    : null;
-
-  // 切换角色或关闭面板时停止试听，避免声音跟着上一个角色继续播
-  useEffect(() => stopVoicePlayback, [open, scope, selectedCharacter?.id, stopVoicePlayback]);
+  const { playingId: playingVoiceClipId, toggle: toggleVoicePlayback, stop: stopVoicePlayback } = useCharacterVoicePreview(
+    JSON.stringify([open, scope, currentProjectId, selectedCharacter?.id]),
+    {
+      stopOnPause: true,
+      getSource: (id) => voiceClips.find((clip) => clip.id === id)?.audioUrl,
+      onError: () => showToast(t('音频播放失败'), 'error'),
+    },
+  );
 
   const switchScope = (nextScope: CharacterLibraryScope) => {
     setWeaponTarget(null);
@@ -467,38 +385,11 @@ export default function CharacterLibraryPanel() {
     setVoicePickerOpen(false);
   };
 
-  const toggleVoicePlayback = async (clip: CharacterVoiceClip) => {
-    const player = voicePlayerRef.current;
-    if (!player || !clip.audioUrl || !selectedCharacter) return;
-    if (voicePlaybackRef.current?.clipId === clip.id) {
-      stopVoicePlayback();
-      setPlayingVoice(null);
-      return;
-    }
-    stopVoicePlayback();
-    setPlayingVoice(null);
-    const playback = { clipId: clip.id, player, controller: new AbortController(), release: undefined as (() => void) | undefined };
-    voicePlaybackRef.current = playback;
-    try {
-      const lease = await acquireComfyMediaSource(clip.audioUrl, playback.controller.signal);
-      if (playback.controller.signal.aborted || voicePlaybackRef.current !== playback || voicePlayerRef.current !== player) {
-        lease.release();
-        return;
-      }
-      playback.release = lease.release;
-      player.src = lease.src;
-      await player.play();
-      if (voicePlaybackRef.current === playback) setPlayingVoice({ characterId: selectedCharacter.id, clipId: clip.id });
-    } catch {
-      if (playback.controller.signal.aborted || voicePlaybackRef.current !== playback) return;
-      stopVoicePlayback();
-      showToast(t('音频播放失败'), 'error');
-    }
-  };
-
   const handleBindVoiceNode = async (nodeId: string) => {
     if (!selectedCharacter) return;
-    const node = nodes.find((item) => item.id === nodeId);
+    const state = useAppStore.getState();
+    if (state.currentProjectId !== currentProjectId) return;
+    const node = state.nodes.find((item) => item.id === nodeId);
     const audioUrl = node?.data.audioUrl;
     if (!audioUrl) {
       showToast(t('该节点没有可用的音频'), 'error');
@@ -520,7 +411,7 @@ export default function CharacterLibraryPanel() {
 
   const handleRemoveVoiceClip = async (clip: CharacterVoiceClip) => {
     if (!selectedCharacter) return;
-    if (voicePlaybackRef.current?.clipId === clip.id) { stopVoicePlayback(); setPlayingVoice(null); }
+    stopVoicePlayback(clip.id);
     if (await removeCharacterVoiceClip(scope, selectedCharacter.id, clip.id)) {
       showToast(t('已移除该声音'));
     }
@@ -645,8 +536,12 @@ export default function CharacterLibraryPanel() {
 
   const handleBindActionNode = async (nodeId: string) => {
     if (!selectedCharacter || !actionNodePickerTargetId) return;
-    const action = selectedCharacter.actions?.find((item) => item.id === actionNodePickerTargetId);
-    const node = nodes.find((item) => item.id === nodeId);
+    const state = useAppStore.getState();
+    if (state.currentProjectId !== currentProjectId) return;
+    const character = (scope === 'project' ? state.dramaAssets.characters : state.globalCharacters)
+      .find((item) => item.id === selectedCharacter.id);
+    const action = character?.actions?.find((item) => item.id === actionNodePickerTargetId);
+    const node = state.nodes.find((item) => item.id === nodeId);
     const media = node ? actionMediaFromCanvasNode(node) : null;
     if (!action || !media) {
       showToast(t('该节点没有可用的图片、GIF 或视频'), 'error');
@@ -771,7 +666,7 @@ export default function CharacterLibraryPanel() {
     <>
       <ModalOverlay
         isOpen={open}
-        onClose={() => setOpen(false)}
+        onClose={() => { setPendingTasksScope(undefined); setOpen(false); }}
         ariaLabel={t('角色库')}
         className="character-library-panel ui-dialog-surface"
       >
@@ -811,11 +706,16 @@ export default function CharacterLibraryPanel() {
               </button>
             ) : null}
           </label>
+          {isTauriEnv() && (scope === 'global' || currentProjectId) && <button type="button"
+            className="ui-icon-btn ui-icon-btn--sm" title={t('待处理生图任务')} aria-label={t('待处理生图任务')}
+            onClick={() => setPendingTasksScope({ scope, projectId: currentProjectId })}>
+            <Icon icon="lucide:list-todo" width="15" height="15" aria-hidden="true" />
+          </button>}
           <button type="button" className="character-library-new" onClick={() => openEditor(null)}>
             <Icon icon="lucide:plus" width="13" height="13" aria-hidden="true" />
             {t('新建角色')}
           </button>
-          <PopupCloseButton onClick={() => setOpen(false)} />
+          <PopupCloseButton onClick={() => { setPendingTasksScope(undefined); setOpen(false); }} />
         </div>
 
         <main className="character-library-content">
@@ -936,7 +836,7 @@ export default function CharacterLibraryPanel() {
                             className="character-voice-play"
                             aria-label={playingVoiceClipId === clip.id ? t('暂停试听') : t('试听')}
                             disabled={!clip.audioUrl}
-                            onClick={() => void toggleVoicePlayback(clip)}
+                            onClick={() => void toggleVoicePlayback(clip.id, clip.audioUrl)}
                           >
                             <Icon
                               icon={playingVoiceClipId === clip.id ? 'lucide:pause' : 'lucide:play'}
@@ -1100,21 +1000,6 @@ export default function CharacterLibraryPanel() {
                   </div>
                 </section>
               </div>
-
-              <audio
-                ref={voicePlayerRef}
-                className="sr-only"
-                onPause={(event) => {
-                  if (event.currentTarget.paused && voicePlaybackRef.current?.release) stopVoicePlayback();
-                  setPlayingVoice(null);
-                }}
-                onEnded={() => { stopVoicePlayback(); setPlayingVoice(null); }}
-                onError={(event) => {
-                  if (!event.currentTarget.error || !voicePlaybackRef.current) return;
-                  stopVoicePlayback(); setPlayingVoice(null);
-                  showToast(t('音频播放失败'), 'error');
-                }}
-              />
             </section>
           ) : (
             <div className="character-library-empty">
@@ -1154,6 +1039,13 @@ export default function CharacterLibraryPanel() {
           />
         </footer>
       </ModalOverlay>
+
+      {open && pendingTasksScope?.scope === scope && (scope === 'global' || pendingTasksScope.projectId === currentProjectId)
+        && <LazyLoadBoundary label="待处理生图任务" resetKey={scope}>
+          <Suspense fallback={<LazyLoadFallback label="待处理生图任务" />}>
+            <CharacterVisualPendingTasks scope={scope} onClose={() => setPendingTasksScope(undefined)} />
+          </Suspense>
+        </LazyLoadBoundary>}
 
       {open && weaponTarget && weaponTarget.scope === scope && weaponTarget.id === selectedCharacter?.id
         && weaponTarget.projectId === currentProjectId && <CharacterWeaponDialog

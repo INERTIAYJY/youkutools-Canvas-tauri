@@ -7,6 +7,12 @@ import { getBaseDir, isTauriEnv, joinPath } from '../fs/core';
 import { useAppStore } from '../../store/useAppStore';
 import type { AppConfig } from '../../types';
 import type { PriceQuote } from './volcenginePricing';
+import type { LegacyProjectBinding } from '../../types/project';
+import { getLegacyCanvasAliases } from '../projectExecutionCompatibility';
+import { resolveProviderCatalogId } from '../ai/providerPolicies';
+import { createPublicBillingStorageError } from './billingStorageErrors';
+
+export { getBillingStorageErrorMessage } from './billingStorageErrors';
 
 export type BillingStatus = 'submitting' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 
@@ -57,20 +63,40 @@ export async function setBillingStoragePath(path: string): Promise<string> {
     window.dispatchEvent(new Event(BILLING_STORAGE_CHANGED_EVENT));
     return result;
   } catch (error) {
-    throw new Error(typeof error === 'string' ? error : '账本目录切换失败，原账本已保留', { cause: error });
+    throw createPublicBillingStorageError(error);
   }
 }
 
-/** 配置与目录授权完成后同步；未单独设置账本目录时，跟随文件保存根目录。 */
-export async function syncBillingStoragePath(config: Pick<AppConfig, 'volcengineBillingPath'>): Promise<void> {
-  if (!isTauriEnv()) return;
+type BillingStorageConfig = Pick<AppConfig, 'volcengineBillingPath'> & Partial<Pick<AppConfig, 'providers'>>;
+
+async function resolveBillingDirectory(config: BillingStorageConfig): Promise<string> {
   const customDirectory = config.volcengineBillingPath?.trim();
   const root = customDirectory ? null : await getBaseDir();
   const directory = customDirectory || (root ? joinPath(root, 'billing') : null);
   if (!directory) throw new Error('无法确定账本的文件保存根目录');
-  if (synchronizedDirectory === directory) return;
-  if (!customDirectory) await mkdir(directory, { recursive: true });
-  await setBillingStoragePath(directory);
+  return directory;
+}
+
+/** 只检查已有文件，不能用 billing_query 探测：查询会初始化空库。 */
+export async function hasBillingHistory(config: BillingStorageConfig = {}): Promise<boolean> {
+  if (!isTauriEnv()) return false;
+  try {
+    return await invoke<boolean>('billing_has_history', { path: await resolveBillingDirectory(config) });
+  } catch (error) { throw createPublicBillingStorageError(error); }
+}
+
+/** 配置与目录授权完成后同步；没有火山连接且没有已有账本时不初始化。 */
+export async function syncBillingStoragePath(config: BillingStorageConfig): Promise<void> {
+  if (!isTauriEnv()) return;
+  try {
+    const directory = await resolveBillingDirectory(config);
+    if (synchronizedDirectory === directory) return;
+    const configured = Object.entries(config.providers ?? {}).some(([id, provider]) =>
+      resolveProviderCatalogId(id, provider) === 'volcengine' && Boolean(provider.apiKey?.trim() || provider.apiKeyRef?.trim()));
+    if (!configured && !await invoke<boolean>('billing_has_history', { path: directory })) return;
+    if (!config.volcengineBillingPath?.trim()) await mkdir(directory, { recursive: true });
+    await setBillingStoragePath(directory);
+  } catch (error) { throw createPublicBillingStorageError(error); }
 }
 
 export const getBillingStoragePath = () =>
@@ -123,6 +149,13 @@ export function sanitizeBillingError(message: string): string {
 
 export const queryBillingRuns = (filter: BillingFilter, page = 1, pageSize = 30) =>
   invoke<BillingPage>('billing_query', { filter, page, pageSize });
+/** 只读owner汇总：在SQLite原Canvas alias集合上统一分页/求和，不搬账、不重算费用。 */
+export function queryOwnerBillingRuns(projectId: string, bindings: readonly LegacyProjectBinding[],
+  filter: Omit<BillingFilter, 'appProjectId'> = {}, page = 1, pageSize = 30) {
+  const appProjectIds = getLegacyCanvasAliases(projectId, bindings);
+  if (appProjectIds.length > 512) throw new Error('项目历史画布数量超过单次账本查询上限，请按画布查询');
+  return invoke<BillingPage>('billing_query', { filter: { ...filter, appProjectIds }, page, pageSize });
+}
 export const findBillingRunByTask = (taskId: string, appProjectId: string) =>
   invoke<BillingRun | null>('billing_get_by_task', { taskId, appProjectId });
 export const previewBillingClear = (filter: BillingFilter) =>

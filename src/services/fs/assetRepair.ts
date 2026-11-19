@@ -12,6 +12,7 @@ import { fingerprintAssetImage } from './assetImageMetadata';
 import { getGlobalFilesDir } from './assetLibrary';
 import { getRelativeAssetPath } from './assetIndex';
 import { getAssetUrlFromPath, getFileCategory, getProjectDataDir, isTauriEnv, joinPath, notifyProjectDiskChanged, stripVerbatimPrefix } from './core';
+import { isNativeMediaPendingFile } from '../../utils/nativeMediaPendingFile';
 
 export type AssetRepairTarget = { kind: 'file'; assetId?: string; path: string; name: string } | { kind: 'folder'; path: string; name: string } | { kind: 'all' };
 export interface AssetRepairCandidate {
@@ -47,6 +48,7 @@ async function inspect(path: string, options: DramaAssetWriteOptions) {
 export async function listUnavailableAssetIndexes(target: AssetRepairTarget, options: DramaAssetWriteOptions = {}): Promise<AssetRepairScan> {
   const indexes = await guarded(getAllAssetIndexes, options);
   const selected = indexes.filter((entry) => {
+    if (isNativeMediaPendingFile(entry.path)) return false;
     if (target.kind === 'all') return true;
     if (target.kind === 'file') return target.assetId ? entry.assetId === target.assetId : key(entry.path) === key(target.path);
     return getRelativeAssetPath(entry.path, target.path) !== undefined;
@@ -154,6 +156,7 @@ export async function applyAssetRepairs(
   onCommitted: (moves: readonly MediaRelocation[]) => void, options: DramaAssetWriteOptions = {},
 ): Promise<number> {
   const selected = preview.candidates.filter((candidate) => assetIds.includes(candidate.index.assetId));
+  if (selected.some((candidate) => candidate.index.assetId.startsWith('na2-'))) throw new Error(t('新项目恢复素材请通过项目恢复点重建，不能沿用旧素材修复入口'));
   if (!selected.length || selected.length !== new Set(assetIds).size || selected.some((candidate) => candidate.status !== 'ready' || !candidate.digest || !candidate.targetPath)) throw new Error(t('请选择已核对的可修复项'));
   if (new Set(selected.map((candidate) => key(candidate.targetPath!))).size !== selected.length) throw new Error(t('多个素材选择了同一个目标，请分别选择文件'));
   const globalRoot = await guarded(getGlobalFilesDir, options);

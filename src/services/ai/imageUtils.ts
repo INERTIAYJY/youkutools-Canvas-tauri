@@ -2,9 +2,10 @@
  * ai/imageUtils — 图片加载、URL 解析、上传辅助
  */
 import { isLocalMediaUrl, isRemoteMediaUrl } from '../../utils/mediaUrl';
-import { uploadToRemote, isLocalImageUrl, prepareReferenceImageDataUrl } from '../uploadService';
+import { resolveMediaReferenceUrl, prepareReferenceImageDataUrl } from '../uploadService';
 import { assertMediaDataUrlSize, getAssetUrlFromPath } from '../fileService';
 import { bytePartsToBase64Async } from '../fs/core';
+import { MEDIA_DATA_URL_BYTE_LIMITS } from '../mediaDataUrl';
 import { corsSafeFetch } from './httpTransport';
 import { readNativeComfyImageBlob, shouldLoadNativeComfyImage } from '../comfyImageSource';
 import { mapReferenceImagesInOrder, prepareReferenceImageUpload } from './referenceImageUpload';
@@ -13,6 +14,25 @@ const BASE64_IMAGE_DATA_URL_RE = /^data:image\/[^;,]+(?:;[^,]*)*;base64,/i;
 export const VLM_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const VLM_MAX_IMAGES = 6;
 export const VLM_MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
+
+interface ImageDataUrlBudget {
+  maxImages?: number;
+  maxImageBytes: number;
+  maxTotalBytes: number;
+}
+
+const VLM_IMAGE_DATA_URL_BUDGET: Readonly<ImageDataUrlBudget> = {
+  maxImages: VLM_MAX_IMAGES,
+  maxImageBytes: VLM_MAX_IMAGE_BYTES,
+  maxTotalBytes: VLM_MAX_TOTAL_IMAGE_BYTES,
+};
+
+// 生图数量由模型能力检查；32 MiB 沿用图片读取边界，48 MiB Base64 后为 64 MiB，
+// 为既有 65 MiB 整份请求上限预留 JSON／提示词空间。这是应用预算，不是厂商限制。
+export const IMAGE_GENERATION_DATA_URL_BUDGET: Readonly<ImageDataUrlBudget> = {
+  maxImageBytes: MEDIA_DATA_URL_BYTE_LIMITS.image,
+  maxTotalBytes: 48 * 1024 * 1024,
+};
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   avif: 'image/avif',
@@ -38,6 +58,7 @@ function inferImageMimeType(url: string): string | undefined {
 async function referenceImageToDataUrl(
   url: string,
   index: number,
+  accountBytes: (bytes: number) => void,
   signal?: AbortSignal,
 ): Promise<string> {
   signal?.throwIfAborted();
@@ -45,9 +66,7 @@ async function referenceImageToDataUrl(
     const prepared = await prepareReferenceImageDataUrl(url, signal);
     const encoded = prepared.slice(prepared.indexOf(',') + 1).replace(/\s/g, '');
     const estimatedBytes = Math.floor(encoded.length * 3 / 4) - (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
-    if (estimatedBytes > VLM_MAX_IMAGE_BYTES) {
-      throw new Error(`参考图 ${index + 1} 超过 8 MB 上限`);
-    }
+    accountBytes(estimatedBytes);
     return prepared;
   }
 
@@ -72,7 +91,7 @@ async function referenceImageToDataUrl(
   }
 
   const prepared = await prepareReferenceImageUpload(blob.type === mimeType ? blob : new Blob([blob], { type: mimeType }), signal);
-  if (prepared.size > VLM_MAX_IMAGE_BYTES) throw new Error(`参考图 ${index + 1} 超过 8 MB 上限`);
+  accountBytes(prepared.size);
   const bytes = new Uint8Array(await prepared.arrayBuffer());
   const encoded = await bytePartsToBase64Async([bytes], signal);
   signal?.throwIfAborted();
@@ -145,18 +164,40 @@ export async function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 /** ComfyUI 原生读取后探测解码，其他来源沿用原来的 <img> 可达性检查。 */
-export function imageUrlReachable(url: string, timeoutMs = 6000): Promise<boolean> {
+export async function imageUrlReachable(url: string, timeoutMs = 6000, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   if (shouldLoadNativeComfyImage(url)) {
-    return loadNativeComfyImage(url, AbortSignal.timeout(timeoutMs)).then(() => true, () => false);
+    const timeout = AbortSignal.timeout(timeoutMs);
+    try {
+      await loadNativeComfyImage(url, signal ? AbortSignal.any([signal, timeout]) : timeout);
+      signal?.throwIfAborted();
+      return true;
+    } catch {
+      signal?.throwIfAborted();
+      return false;
+    }
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (typeof Image === 'undefined') { resolve(true); return; }
     const img = new Image();
-    let settled = false;
-    const finish = (v: boolean) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      img.onload = img.onerror = null;
+    };
+    const finish = (reachable: boolean) => {
+      cleanup();
+      resolve(reachable);
+    };
+    const abort = () => {
+      cleanup();
+      img.removeAttribute('src');
+      reject(signal?.reason);
+    };
     const timer = setTimeout(() => finish(false), timeoutMs);
     img.onload = () => finish(true);
     img.onerror = () => finish(false);
+    signal?.addEventListener('abort', abort, { once: true });
     img.src = url;
   });
 }
@@ -209,7 +250,7 @@ export async function mergeImageWithOverlays(
   return canvas.toDataURL('image/png');
 }
 
-/** 上传 content 数组中本地图片 URL 到远端，替换为公网 URL */
+/** 按连接解析参考图片；方舟的本地与外部 URL 都经 TOS。 */
 export async function resolveContentImageUrls(
   content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>,
   provider = '',
@@ -218,8 +259,8 @@ export async function resolveContentImageUrls(
   if (typeof content === 'string') return content;
   return mapReferenceImagesInOrder(
     content, async (part) => {
-      if (part.type === 'image_url' && part.image_url?.url && isLocalImageUrl(part.image_url.url)) {
-        const publicUrl = await uploadToRemote(part.image_url.url, provider, 'image', signal);
+      if (part.type === 'image_url' && part.image_url?.url) {
+        const publicUrl = await resolveMediaReferenceUrl(part.image_url.url, { provider, kind: 'image', signal });
         return { ...part, image_url: { url: publicUrl } };
       }
       return part;
@@ -227,35 +268,36 @@ export async function resolveContentImageUrls(
   );
 }
 
-/** 上传 imageUrls 数组中的本地图片到远端 */
+/** 所有参考图片复用连接级解析，避免外部 URL 绕过方舟 TOS。 */
 export async function resolveImageUrlArray(
   urls: string[],
   provider = '',
   signal?: AbortSignal,
 ): Promise<string[]> {
   return mapReferenceImagesInOrder(
-    urls, async (url) => {
-      if (isLocalImageUrl(url)) {
-        return await uploadToRemote(url, provider, 'image', signal);
-      }
-      return url;
-    }, signal,
+    urls, (url) => resolveMediaReferenceUrl(url, { provider, kind: 'image', signal }), signal,
   );
 }
 
-/** 将参考图统一转换为 JSON 图片接口可接收的 base64 data URL 数组。 */
+/** 转换参考图并逐张计入预算；默认保留文本视觉限制，生图可显式使用独立预算。 */
 export async function resolveImageDataUrlArray(
   urls: string[],
   signal?: AbortSignal,
+  budget: Readonly<ImageDataUrlBudget> = VLM_IMAGE_DATA_URL_BUDGET,
 ): Promise<string[]> {
-  if (urls.length > VLM_MAX_IMAGES) throw new Error(`视觉输入最多允许 ${VLM_MAX_IMAGES} 张图片`);
-  const values = await mapReferenceImagesInOrder(urls, (url, index) => referenceImageToDataUrl(url, index, signal), signal);
-  const totalBytes = values.reduce((sum, value) => {
-    const encoded = value.slice(value.indexOf(',') + 1).replace(/\s/g, '');
-    return sum + Math.floor(encoded.length * 3 / 4) - (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
-  }, 0);
-  if (totalBytes > VLM_MAX_TOTAL_IMAGE_BYTES) throw new Error('视觉输入图片总大小超过 24 MB 上限');
-  return values;
+  if (budget.maxImages !== undefined && urls.length > budget.maxImages) {
+    throw new Error(`视觉输入最多允许 ${budget.maxImages} 张图片`);
+  }
+  let totalBytes = 0;
+  return mapReferenceImagesInOrder(urls, (url, index) => referenceImageToDataUrl(url, index, (bytes) => {
+    if (bytes > budget.maxImageBytes) {
+      throw new Error(`参考图 ${index + 1} 超过应用单图转换上限（${budget.maxImageBytes / 1024 / 1024} MiB）`);
+    }
+    totalBytes += bytes;
+    if (totalBytes > budget.maxTotalBytes) {
+      throw new Error(`参考图合计超过应用转换上限（${budget.maxTotalBytes / 1024 / 1024} MiB）`);
+    }
+  }, signal), signal);
 }
 
 export type OpenAiChatContent = string | Array<{

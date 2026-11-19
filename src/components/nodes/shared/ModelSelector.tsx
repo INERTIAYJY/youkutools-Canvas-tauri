@@ -27,6 +27,7 @@ import { resolveAppearanceMode } from '../../../services/appearance/appearanceRu
 import { comfyBaseUrlFor, DEFAULT_COMFY_URL, probeComfyServer } from '../../../services/comfyServers';
 import { getGenerationNodeType } from '../../../utils/nodeGeneration';
 import { getModelPreferenceType, saveModelPreference, saveWorkflowModelPreference } from '../../../services/modelPreferenceService';
+import { isTauriEnv } from '../../../services/fs/core';
 
 interface ModelSelectorProps {
   nodeType: NodeType;
@@ -35,6 +36,8 @@ interface ModelSelectorProps {
   persistPreference?: boolean;
   /** 节点提示词栏用紧凑透明入口展示当前模型。 */
   appearance?: 'default' | 'pill';
+  /** 紧凑配置行使用 UI Kit 的最小控件尺寸；默认保留现有显示。 */
+  size?: 'sm' | 'md';
   /** 提示词栏将编辑入口放到右侧工具区；null 表示目标尚未挂载。 */
   workflowEditorTarget?: HTMLElement | null;
   /** 独立窗口使用自身已应用的主题；省略时沿用主窗口配置。 */
@@ -60,6 +63,7 @@ export default function ModelSelector({
   disabled = false,
   persistPreference = true,
   appearance = 'default',
+  size = 'md',
   workflowEditorTarget,
   theme,
   selectedModel,
@@ -140,6 +144,9 @@ export default function ModelSelector({
       if (groupId === 'seedling') {
         return !!configProviders.seedling?.apiKey || !!config.seedlingAuth?.loggedIn;
       }
+      // Muse 会话由原生保管；这里只确认桌面入口和连接，实际登录态在执行前复核。
+      if (groupId === 'muse') return isTauriEnv() && !!configProviders.muse
+        && (!configProviders.muse.catalogId || configProviders.muse.catalogId === 'muse');
       const providerKey = groupId === 'runninghubwf'
         ? 'runninghub'
         : groupId === 'runninghub'
@@ -368,7 +375,9 @@ export default function ModelSelector({
     description: group.description,
     icon: renderProviderBadge(group, undefined, 'small'),
     disabled: !isGroupAvailable(group.id),
-    disabledReason: isGroupAvailable(group.id) ? undefined : t('请先在设置中配置 {name} API Key', { name: group.name }),
+    disabledReason: isGroupAvailable(group.id) ? undefined : group.id === 'muse'
+      ? t('请在桌面应用的设置中连接 Muse 并完成网页登录')
+      : t('请先在设置中配置 {name} API Key', { name: group.name }),
     items: group.models.map((model) => ({ value: model.value, label: model.label, description: model.description })),
   }));
   if (onWorkflowSelect && visibleWorkflows.length > 0) {
@@ -431,7 +440,7 @@ export default function ModelSelector({
   ) : null;
 
   return (
-    <div className={`model-selector${appearance === 'pill' ? ' model-selector--pill' : ''}`} ref={ref}>
+    <div className={`model-selector${appearance === 'pill' ? ' model-selector--pill' : ''}${size === 'sm' ? ' model-selector--sm' : ''}`} ref={ref}>
       <button
         type="button"
         className={`model-selector-trigger${appearance === 'pill' ? ' prompt-btn text-xs' : ''}${selectedWorkflowId ? ' has-workflow' : ''}${currentModel ? ' has-model' : ''}${canEditWorkflow && workflowEditorTarget === undefined ? ' has-workflow-editor' : ''}`}

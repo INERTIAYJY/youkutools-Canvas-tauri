@@ -2,32 +2,83 @@
  * assetUsageService — 回归测试：asset usage identity matching。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GENERAL_ASSISTANT_SCOPE_ID } from '../../src/services/chat/assistantScope';
 import type { AssetUsageTarget } from '../../src/types/assetUsage';
-const io = vi.hoisted(() => ({ projects: vi.fn(), project: vi.fn(), globals: vi.fn(), details: vi.fn(),
+const io = vi.hoisted(() => ({ projects: vi.fn(), project: vi.fn(), globals: vi.fn(), details: vi.fn(), nativeCapture: vi.fn(), retired: vi.fn(), history: vi.fn(),
+  conversations: vi.fn(), trashConversations: vi.fn(), messages: vi.fn(), tasks: vi.fn(),
+  nativeCatalog: [] as unknown[],
   state: { value: {} as Record<string, unknown> } }));
+vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => '/data/secondary'),
+}));
+vi.mock('../../src/services/projectModelRouter', () => ({ listProjectCatalog: async () => [
+  ...(await io.projects()).map((project: unknown) => ({ dataModel: 'legacy', project })), ...io.nativeCatalog,
+] }));
+vi.mock('../../src/services/indexedDb/nativeProjectRepository', () => ({ readNativeProjectCapture: io.nativeCapture, listNativeRetiredCanvasIds: io.retired }));
 vi.mock('../../src/services/fileService', () => ({ getBaseDir: async () => '/base', getProjectDataDir: async (id: string) => `/data/${id}`,
   joinPath: (...parts: string[]) => parts.join('/') }));
 vi.mock('../../src/store/useAppStore', () => ({ useAppStore: { getState: () => io.state.value } }));
 vi.mock('../../src/services/indexedDbService', () => ({
   getAllProjects: io.projects, getProjectById: io.project, getAllGlobalCharacters: io.globals,
-  getAllGlobalDramaAssets: async () => [], getHistoryEntriesPage: async () => ({ records: [], hasMore: false }),
-  getProjectConversations: async () => [], getTrashConversations: async () => [], getConversationMessages: async () => ({ messages: [], total: 0 }),
-  getProjectAgentTasks: async () => [], listVideoEditorProjectsByProject: async () => [], getAllWorkflows: async () => [], getAllPresets: async () => [], getAssetImageRecords: io.details,
+  getAllGlobalDramaAssets: async () => [], getHistoryEntriesPage: io.history,
+  getProjectConversations: io.conversations, getTrashConversations: io.trashConversations, getConversationMessages: io.messages,
+  getProjectAgentTasks: io.tasks, listVideoEditorProjectsByProject: async () => [], getAllWorkflows: async () => [], getAllPresets: async () => [], getAssetImageRecords: io.details,
 }));
-import { loadAssetUsage, matchesAssetUsage } from '../../src/services/assetUsageService';
+import { assetUsageFileTreesOverlap, loadAssetDirectoryUsage, loadAssetUsage, matchesAssetUsage } from '../../src/services/assetUsageService';
 const file: AssetUsageTarget = { kind: 'file', path: 'D:/media/a b.png', assetId: 'file-a', name: '图' };
 beforeEach(() => {
   vi.clearAllMocks(); io.projects.mockResolvedValue([{ id: 'project', name: '项目' }]); io.globals.mockResolvedValue([]); io.details.mockResolvedValue([]);
+  io.nativeCatalog = []; io.retired.mockResolvedValue([]); io.history.mockResolvedValue({ records: [], hasMore: false });
+  io.conversations.mockResolvedValue([]); io.trashConversations.mockResolvedValue([]); io.messages.mockResolvedValue({ messages: [], total: 0 });
+  io.tasks.mockResolvedValue([]);
   io.state.value = { currentProjectId: 'project', projects: [{ id: 'project', name: '项目' }], projectName: '项目', nodes: [],
     dramaAssets: { characters: [], scenes: [], props: [] }, globalCharacters: [], globalScenes: [], globalProps: [], history: [], messages: [], workflows: [], userPresets: [] };
 });
 describe('asset usage identity matching', () => {
+  it('checks a whole directory by absolute path ancestry, encoded mentions and owned asset IDs', () => {
+    const target = { kind: 'file' as const, path: 'D:/data/retired', name: '', directoryAssetIds: new Set(['asset-owned']) };
+    expect(matchesAssetUsage({ filePath: 'd:\\DATA\\retired\\images\\asset.png' }, target)).toBe(true);
+    expect(matchesAssetUsage(`参考 @asset{${encodeURIComponent('D:/data/retired/refs/图.png')}}`, target)).toBe(true);
+    expect(matchesAssetUsage({ imageAssetId: 'asset-owned' }, target)).toBe(true);
+    expect(matchesAssetUsage({ imageRelativePath: '../retired/refs/图.png' }, target, { root: 'D:/data/active' })).toBe(true);
+    expect(matchesAssetUsage({ filePath: 'D:/data/retired-other/asset.png' }, target)).toBe(false);
+    expect(assetUsageFileTreesOverlap('D:/data', target.path)).toBe(true);
+    expect(assetUsageFileTreesOverlap('D:/data/retired-other', target.path)).toBe(false);
+  });
+
+  it('protects persisted general assistant messages and tasks when checking a directory for recycling', async () => {
+    io.projects.mockResolvedValue([]);
+    Object.assign(io.state.value, { currentProjectId: null, projects: [], projectLoadStatus: 'ready', edges: [], groups: [], conversations: [] });
+    io.conversations.mockResolvedValue([{ id: 'general' }]);
+    io.trashConversations.mockResolvedValue([{ id: 'general-trash' }]);
+    io.messages.mockImplementation(async (id: string) => ({ messages: [{ id, content: `@asset{${encodeURIComponent(file.path)}}` }], total: 1 }));
+    io.tasks.mockResolvedValue([{ id: 'general-task', input: { assetId: 'owned' } }]);
+
+    expect((await loadAssetUsage(file)).locations).toEqual([]);
+    expect(io.conversations).not.toHaveBeenCalled();
+    const report = await loadAssetDirectoryUsage('D:/media', new Set(['owned']), new Set());
+    expect(io.conversations).toHaveBeenCalledWith(GENERAL_ASSISTANT_SCOPE_ID);
+    expect(io.trashConversations).toHaveBeenCalledWith(GENERAL_ASSISTANT_SCOPE_ID);
+    expect(io.tasks).toHaveBeenCalledWith(GENERAL_ASSISTANT_SCOPE_ID);
+    expect(report.locations.map(({ key }) => key)).toEqual(['chat:general', 'chat:general-trash', 'task:general-task']);
+  });
+
   it('matches encoded asset tokens and exact local identities without matching names or partial paths', () => {
     expect(matchesAssetUsage(`参考 @asset{${encodeURIComponent(file.path)}}`, file)).toBe(true);
     expect(matchesAssetUsage('参考 @asset{D%3A%2Fmedia%2Fother%2Fa%20b.png}', file)).toBe(false);
     expect(matchesAssetUsage('参考 @asset{%ZZ}', file)).toBe(false);
     expect(matchesAssetUsage({ imageAssetId: 'file-a' }, file)).toBe(true);
+    expect(matchesAssetUsage({ imageRelativePath: 'a b.png' }, file, { root: 'D:/media' })).toBe(true);
     expect(matchesAssetUsage({ name: 'a b.png' }, file)).toBe(false);
+  });
+
+  it('扩图垫图的独立素材根覆盖画布根，未知根不按当前画布路径猜测', () => {
+    const roots = new Map([['primary', 'D:/media'], ['child', 'D:/child']]);
+    const value = { storageRootRef: 'child', outpaintInput: { storageRootRef: 'primary', relativePath: 'a b.png' } };
+    expect(matchesAssetUsage(value, file, { root: 'D:/child', roots })).toBe(true);
+    expect(matchesAssetUsage(value, { ...file, path: 'D:/child/a b.png' }, { root: 'D:/child', roots })).toBe(false);
+    expect(matchesAssetUsage({ outpaintInput: { storageRootRef: 'unknown', relativePath: 'a b.png' } },
+      file, { root: 'D:/media', roots })).toBe(false);
   });
   it('resolves same-ID creative mentions by the real kind priority and project owner', () => {
     const character: AssetUsageTarget = { kind: 'creative', scope: 'project', ownerId: 'series', assetKind: 'character', assetId: 'same', name: '人物' };
@@ -81,5 +132,47 @@ describe('asset usage identity matching', () => {
     io.state.value.history = [{ nodes: [{ id: 'old', data: { filePath: file.path, label: '旧画布节点' } }], edges: [], groups: [] }];
     const report = await loadAssetUsage(file);
     expect(report.locations.find((location) => location.key === 'undo:0:old')).toMatchObject({ kind: 'history', live: true });
+  });
+  it('新项目从独立仓储读取画布和共享素材，不把画布 ID 当旧项目读取', async () => {
+    const root = { id: 'native-root', name: '新项目', kind: 'standalone', createdAt: 1, updatedAt: 2, epoch: 1,
+      dataFolder: 'folder', storageRootRef: 'root', storageBindings: [{ rootRef: 'root' }] };
+    const canvas = { id: 'native-canvas', projectId: root.id, episodeId: null, storageRootRef: 'root',
+      nodes: [{ id: 'n', data: { relativePath: 'media.png', label: '新画布图' } }], edges: [], groups: [] };
+    io.nativeCatalog = [{ dataModel: 'native', project: root, episodes: [], episodeIds: [], canvasIds: [canvas.id] }];
+    io.nativeCapture.mockResolvedValue({ changeRevision: 2, aggregate: { project: root, content: { projectId: root.id,
+      dramaAssets: { characters: [], scenes: [], props: [] } }, episodes: [], episodeContents: [], canvases: [canvas], canvas } });
+    io.project.mockResolvedValue({ id: 'project', name: '项目', nodes: [] });
+    const report = await loadAssetUsage({ kind: 'file', path: '/data/native-canvas/media.png', name: '媒体' });
+    expect(report.locations).toContainEqual(expect.objectContaining({ kind: 'node', projectId: canvas.id, nodeId: 'n' }));
+    expect(io.project).not.toHaveBeenCalledWith(canvas.id);
+    expect(io.project).not.toHaveBeenCalledWith(root.id);
+  });
+  it('新项目聚合读取失败或扫描期间发生变化时不生成可用于删除的报告', async () => {
+    const root = { id: 'native-root', name: '新项目', kind: 'standalone', createdAt: 1, updatedAt: 2, epoch: 1,
+      dataFolder: 'folder', storageRootRef: 'root', storageBindings: [{ rootRef: 'root' }] };
+    io.nativeCatalog = [{ dataModel: 'native', project: root, episodes: [], episodeIds: [], canvasIds: ['native-canvas'] }];
+    io.nativeCapture.mockResolvedValue(null);
+    await expect(loadAssetUsage(file)).rejects.toThrow('读取不完整');
+    const aggregate = { project: root, content: { projectId: root.id }, episodes: [], episodeContents: [],
+      canvases: [{ id: 'native-canvas', projectId: root.id, episodeId: null, storageRootRef: 'root', nodes: [], edges: [], groups: [] }] };
+    io.nativeCapture.mockResolvedValueOnce({ changeRevision: 1, aggregate }).mockResolvedValueOnce({ changeRevision: 2, aggregate });
+    io.project.mockResolvedValue({ id: 'project', name: '项目', nodes: [] });
+    await expect(loadAssetUsage(file)).rejects.toThrow('引用已变化');
+  });
+  it('已删除画布的历史仍参与引用扫描', async () => {
+    const root = { id: 'native-root', name: '剧集', kind: 'series', createdAt: 1, updatedAt: 2, epoch: 1,
+      dataFolder: 'folder', storageRootRef: 'root', storageBindings: [{ rootRef: 'root' }] };
+    io.nativeCatalog = [{ dataModel: 'native', project: root, episodes: [], episodeIds: [], canvasIds: [] }];
+    io.nativeCapture.mockResolvedValue({ changeRevision: 1, aggregate: { project: root, content: { projectId: root.id },
+      episodes: [], episodeContents: [], canvases: [] } });
+    io.retired.mockResolvedValue(['retired-canvas']);
+    io.history.mockImplementation(async (id: string) => ({ records: id === 'retired-canvas' ? [{ id: 'old-history',
+      nodeId: 'old-node', nodeLabel: '旧历史', filePath: file.path }] : [], hasMore: false }));
+    io.project.mockResolvedValue({ id: 'project', name: '项目', nodes: [] });
+    const report = await loadAssetUsage(file);
+    expect(report.locations).toContainEqual(expect.objectContaining({ kind: 'history', key: 'history:old-history' }));
+    io.history.mockImplementation(async (id: string) => ({ records: id === 'retired-canvas' ? [{ id: 'old-history',
+      nodeId: 'old-node', nodeLabel: '旧历史', prompt: '@{removed-node:引用}' }] : [], hasMore: false }));
+    await expect(loadAssetUsage(file)).rejects.toThrow('历史引用无法确认');
   });
 });

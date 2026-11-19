@@ -8,6 +8,7 @@
 import { getNodeTypeConfig } from '../types';
 import type { BaseNodeData, NodeGroup } from '../types';
 import { t } from '../i18n';
+import { getGroupLayoutComparisonPosition } from './groupCollapseLayout';
 
 export interface HistorySnapshotLike {
   nodes: {
@@ -59,6 +60,9 @@ function hasContentChange(before: BaseNodeData, after: BaseNodeData): boolean {
   keys.delete('nodeHeight');
   keys.delete('groupCollapsed');
   keys.delete('groupExpandedSize');
+  keys.delete('groupLayoutOffsetX');
+  keys.delete('groupLayoutOffsetY');
+  keys.delete('groupCollapseLayout');
   for (const key of keys) {
     const left = (before as Record<string, unknown>)?.[key];
     const right = (after as Record<string, unknown>)?.[key];
@@ -159,7 +163,9 @@ export function describeCanvasChange(
   const moved = after.nodes.filter((node) => {
     const previous = beforeNodes.get(node.id);
     if (!previous) return false;
-    return previous.position.x !== node.position.x || previous.position.y !== node.position.y;
+    const beforePosition = getGroupLayoutComparisonPosition(previous);
+    const afterPosition = getGroupLayoutComparisonPosition(node);
+    return beforePosition.x !== afterPosition.x || beforePosition.y !== afterPosition.y;
   });
   if (moved.length > 0) {
     return { title: translate('移动节点位置'), icon: 'mdi:cursor-move' };

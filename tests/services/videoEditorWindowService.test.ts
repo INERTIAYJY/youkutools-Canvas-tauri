@@ -2,9 +2,26 @@
  * videoEditorWindowService — 回归测试：videoEditorWindowService。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { VideoEditorWindowBinding, VideoEditorWindowEnvelope } from '../../src/services/videoEditorWindowService';
+import { captureLegacyCanvasContext } from '../../src/services/projectExecutionContext';
+
+const app = vi.hoisted(() => ({
+  state: { currentProjectId: 'proj-1' as string | null, projectLoadStatus: 'ready', switchingProjectName: null as string | null,
+    projects: [{ id: 'proj-1', exchangeEpoch: 0 }, { id: 'proj-2', exchangeEpoch: 0 }],
+    nodes: [{ id: 'node-7' }, { id: 'node-9' }], getCurrentRevision: () => 7 },
+  subscribers: new Set<() => void>(),
+}));
+vi.mock('../../src/store/useAppStore', () => ({ useAppStore: {
+  getState: () => app.state,
+  subscribe: (callback: () => void) => { app.subscribers.add(callback); return () => { app.subscribers.delete(callback); }; },
+} }));
+function setApp(partial: Partial<typeof app.state>): void {
+  app.state = { ...app.state, ...partial };
+  for (const callback of app.subscribers) callback();
+}
 
 const tauriMocks = vi.hoisted(() => ({
-  emitTo: vi.fn(async () => undefined),
+  emitTo: vi.fn<(target: string, event: string, payload: unknown) => Promise<void>>(async () => undefined),
   eventHandler: null as null | ((event: { payload: unknown }) => void),
   hostHandler: null as null | ((event: { payload: unknown }) => void),
   existingWindow: null as MockWindow | null,
@@ -59,12 +76,30 @@ import {
   parseVideoEditorHostEnvelope,
   parseVideoEditorWindowEnvelope,
   postVideoEditorAiTransitionResult,
+  postVideoEditorAiTransitionRequest,
   postVideoEditorExported,
   postVideoEditorFrameExported,
   postVideoEditorModels,
+  postVideoEditorModelsRequest,
+  postVideoEditorReady,
   subscribeVideoEditorHost,
   subscribeVideoEditorWindow,
 } from '../../src/services/videoEditorWindowService';
+
+function activeBinding(): VideoEditorWindowBinding {
+  const url = String(tauriMocks.created.at(-1)?.options.url);
+  const value = new URLSearchParams(url.slice(url.indexOf('?') + 1)).get('executionBinding');
+  if (!value) throw new Error('missing typed window binding');
+  return JSON.parse(value) as VideoEditorWindowBinding;
+}
+async function openEditor(nodeId = 'node-7'): Promise<VideoEditorWindowBinding> {
+  const expectedContext = captureLegacyCanvasContext(app.state)!;
+  await openVideoEditorWindow({ instanceId: `proj-1::${nodeId}`, projectId: 'proj-1', nodeId, expectedContext });
+  return activeBinding();
+}
+function useChildBinding(binding: VideoEditorWindowBinding): void {
+  window.location.search = `?${new URLSearchParams({ executionBinding: JSON.stringify(binding) })}`;
+}
 
 /** ensureMainListener 走动态 import + await listen，需要让出若干轮事件循环 */
 async function flushListener(): Promise<void> {
@@ -76,6 +111,10 @@ async function flushListener(): Promise<void> {
 describe('videoEditorWindowService', () => {
   beforeEach(() => {
     __resetVideoEditorWindowServiceForTests();
+    app.subscribers.clear();
+    app.state = { currentProjectId: 'proj-1', projectLoadStatus: 'ready', switchingProjectName: null,
+      projects: [{ id: 'proj-1', exchangeEpoch: 0 }, { id: 'proj-2', exchangeEpoch: 0 }],
+      nodes: [{ id: 'node-7' }, { id: 'node-9' }], getCurrentRevision: () => 7 };
     tauriMocks.emitTo.mockClear();
     tauriMocks.eventHandler = null;
     tauriMocks.hostHandler = null;
@@ -87,7 +126,7 @@ describe('videoEditorWindowService', () => {
       configurable: true,
       value: {
         __TAURI__: {},
-        location: { origin: 'http://localhost:1420' },
+        location: { origin: 'http://localhost:1420', search: '' },
         setTimeout,
         clearTimeout,
       },
@@ -209,46 +248,125 @@ describe('videoEditorWindowService', () => {
   });
 
   it('creates one window carrying the editor route', async () => {
+    const expectedContext = captureLegacyCanvasContext(app.state)!;
     await openVideoEditorWindow({
       instanceId: 'proj-1::node-7',
       projectId: 'proj-1',
       nodeId: 'node-7',
       theme: 'dark',
+      expectedContext,
     });
 
     expect(tauriMocks.created).toHaveLength(1);
     expect(tauriMocks.created[0]?.label).toBe(VIDEO_EDITOR_WINDOW_LABEL);
     expect(String(tauriMocks.created[0]?.options.url)).toContain('view=video-editor');
     expect(String(tauriMocks.created[0]?.options.url)).toContain('nodeId=node-7');
+    expect(activeBinding().expectedContext).toEqual(expectedContext);
     // 与资源搜索窗口一致的自绘标题栏外观
     expect(tauriMocks.created[0]?.options.decorations).toBe(false);
     expect(tauriMocks.created[0]?.options.transparent).toBe(true);
   });
 
-  it('focuses the existing window and re-targets it instead of creating a second one', async () => {
+  it('旧的无租约窗口不能改绑为新工程，保留草稿并要求手动关闭重开', async () => {
     const existing = new MockWindow(VIDEO_EDITOR_WINDOW_LABEL);
     tauriMocks.created.length = 0;
     tauriMocks.existingWindow = existing;
 
-    await openVideoEditorWindow({
+    await expect(openVideoEditorWindow({
       instanceId: 'proj-1::node-9',
       projectId: 'proj-1',
       nodeId: 'node-9',
-    });
+      expectedContext: captureLegacyCanvasContext(app.state)!,
+    })).rejects.toThrow('不能改绑');
 
     expect(tauriMocks.created).toHaveLength(0);
-    expect(existing.setFocus).toHaveBeenCalled();
+    expect(existing.close).not.toHaveBeenCalled();
+    expect(existing.setFocus).not.toHaveBeenCalled();
+  });
+
+  it('只复用同一 instance、同一持久代际的活动窗口', async () => {
+    const binding = await openEditor();
+    const existing = tauriMocks.created[0]!;
+    tauriMocks.existingWindow = existing;
+    await openVideoEditorWindow({ instanceId: 'proj-1::node-7', projectId: 'proj-1', nodeId: 'node-7',
+      expectedContext: captureLegacyCanvasContext(app.state)! });
+    expect(tauriMocks.created).toHaveLength(1);
+    expect(existing.setFocus).toHaveBeenCalledOnce();
     expect(tauriMocks.emitTo).toHaveBeenCalledWith(
       VIDEO_EDITOR_WINDOW_LABEL,
       VIDEO_EDITOR_HOST_EVENT,
       expect.objectContaining({
-        instanceId: 'proj-1::node-9',
+        instanceId: 'proj-1::node-7', binding,
         message: expect.objectContaining({ type: 'storyai:video-editor-session' }),
       }),
     );
   });
 
+  it('已有租约也不能把另一个节点借同一子窗改绑', async () => {
+    await openEditor();
+    const existing = tauriMocks.created[0]!;
+    tauriMocks.existingWindow = existing;
+    await expect(openVideoEditorWindow({ instanceId: 'proj-1::node-9', projectId: 'proj-1', nodeId: 'node-9',
+      expectedContext: captureLegacyCanvasContext(app.state)! })).rejects.toThrow('不能改绑');
+    expect(existing.close).not.toHaveBeenCalled();
+    expect(tauriMocks.created).toHaveLength(1);
+  });
+
+  it('旧窗口缺少 typed context 时保留读取协议，但拒绝写入和新开窗执行', async () => {
+    await expect(openVideoEditorWindow({ instanceId: 'proj-1::node-7', projectId: 'proj-1', nodeId: 'node-7' })).rejects.toThrow();
+    await expect(postVideoEditorExported('proj-1::node-7', { videoUrl: 'asset://old.mp4', fileName: 'old.mp4', duration: 1 })).rejects.toThrow('旧剪辑窗口');
+    await expect(postVideoEditorFrameExported('proj-1::node-7', { imageUrl: 'asset://old.png', fileName: 'old.png', time: 1,
+      width: 1920, height: 1080 })).rejects.toThrow('旧剪辑窗口');
+    await expect(postVideoEditorAiTransitionRequest('proj-1::node-7', { requestId: 'old-ai', prompt: '旧请求', model: 'model',
+      provider: 'provider', firstFrameUrl: 'asset://first.png', lastFrameUrl: 'asset://last.png' })).rejects.toThrow('旧剪辑窗口');
+    expect(tauriMocks.created).toHaveLength(0);
+    expect(tauriMocks.emitTo).not.toHaveBeenCalled();
+  });
+
+  it.each(['storyai:video-editor-exported', 'storyai:video-editor-frame-exported', 'storyai:video-editor-ai-transition-request'] as const)(
+    '主窗口拒绝没有原 binding 的 %s', async (type) => {
+      await openEditor();
+      const subscriber = vi.fn();
+      subscribeVideoEditorWindow('proj-1::node-7', subscriber);
+      await flushListener();
+      tauriMocks.eventHandler?.({ payload: { instanceId: 'proj-1::node-7', message: { type, payload: {} } } });
+      expect(subscriber).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['storyai:video-editor-exported', 'storyai:video-editor-frame-exported', 'storyai:video-editor-ai-transition-request'] as const)(
+    '主窗口只接受活动 binding 的 %s', async (type) => {
+      const binding = await openEditor();
+      const subscriber = vi.fn();
+      subscribeVideoEditorWindow('proj-1::node-7', subscriber);
+      await flushListener();
+      const message = { type, payload: { requestId: 'current-ai', videoUrl: 'asset://current.mp4', imageUrl: 'asset://current.png',
+        fileName: 'current.mp4', duration: 1, prompt: '当前请求', model: 'model', provider: 'provider',
+        firstFrameUrl: 'asset://first.png', lastFrameUrl: 'asset://last.png' } };
+      tauriMocks.eventHandler?.({ payload: { instanceId: 'proj-1::node-7', binding, message } });
+      expect(subscriber).toHaveBeenCalledWith(message, binding);
+    },
+  );
+
+  it.each(['epoch', 'switch', 'node'] as const)('%s 变化永久撤销旧窗口，迟到导出/转场不能再获主窗 effect', async (boundary) => {
+    const binding = await openEditor();
+    const subscriber = vi.fn();
+    subscribeVideoEditorWindow('proj-1::node-7', subscriber);
+    await flushListener();
+    if (boundary === 'epoch') setApp({ projects: app.state.projects.map((project) => project.id === 'proj-1' ? { ...project, exchangeEpoch: 1 } : project) });
+    else if (boundary === 'switch') { setApp({ currentProjectId: 'proj-2' }); setApp({ currentProjectId: 'proj-1' }); }
+    else { setApp({ nodes: [{ id: 'node-9' }] }); setApp({ nodes: [{ id: 'node-7' }, { id: 'node-9' }] }); }
+    for (const type of ['storyai:video-editor-exported', 'storyai:video-editor-frame-exported', 'storyai:video-editor-ai-transition-request']) {
+      tauriMocks.eventHandler?.({ payload: { instanceId: 'proj-1::node-7', binding,
+        message: { type, payload: { requestId: 'late-ai', videoUrl: 'asset://late.mp4' } } } });
+    }
+    expect(subscriber).not.toHaveBeenCalled();
+    await expect(postVideoEditorAiTransitionResult('proj-1::node-7', { requestId: 'late-ai', videoUrl: 'asset://late.mp4' }, binding)).rejects.toThrow('已撤销');
+    expect(tauriMocks.emitTo).not.toHaveBeenCalled();
+  });
+
   it('delivers export results only to the matching instance subscriber', async () => {
+    const binding = await openEditor();
     const forNode7 = vi.fn();
     const forNode9 = vi.fn();
     subscribeVideoEditorWindow('proj-1::node-7', forNode7);
@@ -258,6 +376,7 @@ describe('videoEditorWindowService', () => {
     tauriMocks.eventHandler?.({
       payload: {
         instanceId: 'proj-1::node-7',
+        binding,
         message: {
           type: 'storyai:video-editor-exported',
           payload: { videoUrl: 'asset://out.mp4', fileName: 'out.mp4', duration: 3 },
@@ -267,11 +386,13 @@ describe('videoEditorWindowService', () => {
 
     expect(forNode7).toHaveBeenCalledWith(expect.objectContaining({
       type: 'storyai:video-editor-exported',
-    }));
+    }), binding);
     expect(forNode9).not.toHaveBeenCalled();
   });
 
   it('delivers host messages only to the matching editor subscriber', async () => {
+    const binding = await openEditor();
+    useChildBinding(binding);
     const forNode7 = vi.fn();
     const forNode9 = vi.fn();
     subscribeVideoEditorHost('proj-1::node-7', forNode7);
@@ -281,6 +402,7 @@ describe('videoEditorWindowService', () => {
     tauriMocks.hostHandler?.({
       payload: {
         instanceId: 'proj-1::node-7',
+        binding,
         message: {
           type: 'storyai:video-editor-ai-transition-result',
           payload: { requestId: 'ait-1', videoUrl: 'asset://t.mp4' },
@@ -290,11 +412,12 @@ describe('videoEditorWindowService', () => {
 
     expect(forNode7).toHaveBeenCalledWith(expect.objectContaining({
       type: 'storyai:video-editor-ai-transition-result',
-    }));
+    }), binding);
     expect(forNode9).not.toHaveBeenCalled();
   });
 
   it('posts the model list and the AI transition result down to the editor window', async () => {
+    const binding = await openEditor();
     await postVideoEditorModels('proj-1::node-7', [
       { value: 'volcengine/seedance', label: 'Seedance', provider: 'volcengine', groupName: '火山方舟' },
     ]);
@@ -308,6 +431,7 @@ describe('videoEditorWindowService', () => {
       VIDEO_EDITOR_HOST_EVENT,
       expect.objectContaining({
         instanceId: 'proj-1::node-7',
+        binding,
         message: expect.objectContaining({ type: 'storyai:video-editor-models' }),
       }),
     );
@@ -316,12 +440,103 @@ describe('videoEditorWindowService', () => {
       VIDEO_EDITOR_HOST_EVENT,
       expect.objectContaining({
         instanceId: 'proj-1::node-7',
+        binding,
         message: expect.objectContaining({
           type: 'storyai:video-editor-ai-transition-result',
           payload: { requestId: 'ait-1', videoUrl: 'asset://t.mp4' },
         }),
       }),
     );
+  });
+
+  it.each([
+    ['storyai:video-editor-ready', postVideoEditorReady],
+    ['storyai:video-editor-models-request', postVideoEditorModelsRequest],
+  ] as const)('%s 向固定主窗口通道发送无 payload 消息，并保留导入前的 binding', async (type, post) => {
+    const binding = await openEditor();
+    useChildBinding(binding);
+    const pending = post('proj-1::node-7');
+    useChildBinding({ ...binding, sessionId: crypto.randomUUID() });
+    await pending;
+    expect(tauriMocks.emitTo).toHaveBeenCalledExactlyOnceWith('main', VIDEO_EDITOR_MESSAGE_EVENT, {
+      instanceId: 'proj-1::node-7', binding, message: { type },
+    });
+  });
+
+  it.each(['video', 'frame'] as const)('%s 导出在 event 导入让出期间读取更新输入，发送后保留浅副本', async (kind) => {
+    const binding = await openEditor();
+    useChildBinding(binding);
+    const result = { videoUrl: 'asset://out.mp4', imageUrl: 'asset://frame.png', fileName: 'before',
+      duration: 3, time: 1, width: 1920, height: 1080 };
+    const pending = kind === 'video' ? postVideoEditorExported('proj-1::node-7', result)
+      : postVideoEditorFrameExported('proj-1::node-7', result);
+    expect(tauriMocks.emitTo).not.toHaveBeenCalled();
+    result.fileName = 'during-import';
+    await pending;
+    const envelope = tauriMocks.emitTo.mock.calls[0][2] as VideoEditorWindowEnvelope;
+    expect(envelope.message.payload?.fileName).toBe('during-import');
+    expect(envelope.message.payload).not.toBe(result);
+    result.fileName = 'after-emit';
+    expect(envelope.message.payload?.fileName).toBe('during-import');
+  });
+
+  it('AI 转场请求沿用固定主窗口通道，在导入后才复制请求', async () => {
+    const binding = await openEditor();
+    useChildBinding(binding);
+    const request = { requestId: 'request', prompt: 'before', model: 'model', provider: 'provider',
+      firstFrameUrl: 'asset://first.png', lastFrameUrl: 'asset://last.png' };
+    const pending = postVideoEditorAiTransitionRequest('proj-1::node-7', request);
+    request.prompt = 'during-import';
+    await pending;
+    expect(tauriMocks.emitTo).toHaveBeenCalledExactlyOnceWith('main', VIDEO_EDITOR_MESSAGE_EVENT, {
+      instanceId: 'proj-1::node-7', binding,
+      message: { type: 'storyai:video-editor-ai-transition-request', payload: { ...request } },
+    });
+    const envelope = tauriMocks.emitTo.mock.calls[0][2] as VideoEditorWindowEnvelope;
+    request.prompt = 'after-emit';
+    expect(envelope.message.payload?.prompt).toBe('during-import');
+  });
+
+  it('主窗口消息导入后再复制转场结果，模型列表仍保留原数组引用', async () => {
+    const binding = await openEditor();
+    const result = { requestId: 'request', videoUrl: 'asset://before.mp4' };
+    const pending = postVideoEditorAiTransitionResult('proj-1::node-7', result, binding);
+    result.videoUrl = 'asset://during-import.mp4';
+    await pending;
+    const envelope = tauriMocks.emitTo.mock.calls[0][2] as VideoEditorWindowEnvelope;
+    expect(envelope.message.payload).toEqual(result);
+    expect(envelope.message.payload).not.toBe(result);
+    result.videoUrl = 'asset://after-emit.mp4';
+    expect(envelope.message.payload?.videoUrl).toBe('asset://during-import.mp4');
+    const models = [{ value: 'model', label: '模型', provider: 'provider', groupName: '组' }];
+    const modelsPending = postVideoEditorModels('proj-1::node-7', models);
+    models.push({ value: 'second', label: '第二模型', provider: 'provider', groupName: '组' });
+    await modelsPending;
+    const modelsEnvelope = tauriMocks.emitTo.mock.calls[1][2] as VideoEditorWindowEnvelope;
+    expect(modelsEnvelope.message.payload?.models).toBe(models);
+  });
+
+  it.each(['models', 'result'] as const)('%s 在 event 导入期间撤销 binding，不发送也不读取迟到结果', async (kind) => {
+    const binding = await openEditor();
+    const readResult = vi.fn(() => 'asset://result.mp4');
+    const result = { requestId: 'request', get videoUrl() { return readResult(); } };
+    const pending = kind === 'models' ? postVideoEditorModels('proj-1::node-7', [])
+      : postVideoEditorAiTransitionResult('proj-1::node-7', result, binding);
+    setApp({ currentProjectId: 'proj-2' });
+    await expect(pending).rejects.toThrow('已撤销');
+    expect(readResult).not.toHaveBeenCalled();
+    expect(tauriMocks.emitTo).not.toHaveBeenCalled();
+  });
+
+  it.each(['main', 'editor'] as const)('%s 发送失败原样透传且不重试', async (target) => {
+    const binding = await openEditor();
+    useChildBinding(binding);
+    const failure = new Error('emit failed');
+    tauriMocks.emitTo.mockRejectedValueOnce(failure);
+    const pending = target === 'main' ? postVideoEditorReady('proj-1::node-7')
+      : postVideoEditorModels('proj-1::node-7', []);
+    await expect(pending).rejects.toBe(failure);
+    expect(tauriMocks.emitTo).toHaveBeenCalledOnce();
   });
 
   it('ignores envelopes whose message type is not allowed', async () => {
@@ -346,14 +561,17 @@ describe('videoEditorWindowService', () => {
       instanceId: 'proj-1::node-7',
       projectId: 'proj-1',
       nodeId: 'node-7',
+      expectedContext: captureLegacyCanvasContext(app.state)!,
     });
 
     tauriMocks.destroyHandlers.forEach((handler) => handler());
 
-    expect(subscriber).toHaveBeenCalledWith({ type: 'storyai:video-editor-close' });
+    expect(subscriber).toHaveBeenCalledWith({ type: 'storyai:video-editor-close' }, activeBinding());
   });
 
   it('posts export results back to the main window', async () => {
+    const binding = await openEditor();
+    useChildBinding(binding);
     await postVideoEditorExported('proj-1::node-7', {
       videoUrl: 'asset://out.mp4',
       filePath: '/data/out.mp4',
@@ -366,6 +584,7 @@ describe('videoEditorWindowService', () => {
       VIDEO_EDITOR_MESSAGE_EVENT,
       expect.objectContaining({
         instanceId: 'proj-1::node-7',
+        binding,
         message: expect.objectContaining({
           type: 'storyai:video-editor-exported',
           payload: expect.objectContaining({ videoUrl: 'asset://out.mp4', duration: 4.5 }),
@@ -375,6 +594,8 @@ describe('videoEditorWindowService', () => {
   });
 
   it('posts the exported current frame back to the main window', async () => {
+    const binding = await openEditor();
+    useChildBinding(binding);
     await postVideoEditorFrameExported('proj-1::node-7', {
       imageUrl: 'asset://frame.png',
       filePath: '/data/frame.png',
@@ -389,6 +610,7 @@ describe('videoEditorWindowService', () => {
       VIDEO_EDITOR_MESSAGE_EVENT,
       expect.objectContaining({
         instanceId: 'proj-1::node-7',
+        binding,
         message: expect.objectContaining({
           type: 'storyai:video-editor-frame-exported',
           payload: expect.objectContaining({

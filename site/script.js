@@ -59,12 +59,15 @@
           function (n) { return n.classList && n.classList.contains('reveal'); }
         );
         var i = siblings.indexOf(el);
-        el.style.transitionDelay = Math.min(i, 6) * 60 + 'ms';
+        el.style.setProperty('--reveal-delay', Math.min(i, 4) * 60 + 'ms');
         el.classList.add('in');
         io.unobserve(el);
       });
     }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
-    items.forEach(function (el) { io.observe(el); });
+    items.forEach(function (el) {
+      io.observe(el);
+      el.classList.add('will-reveal');
+    });
   }
 
   /* ---- 数字滚动 ---- */
@@ -107,17 +110,6 @@
     }, { passive: true });
   }
 
-  /* ---- 卡片跟随指针的高光 ---- */
-  if (window.matchMedia('(hover: hover)').matches && !reduceMotion) {
-    document.querySelectorAll('.card').forEach(function (card) {
-      card.addEventListener('pointermove', function (e) {
-        var r = card.getBoundingClientRect();
-        card.style.setProperty('--mx', (e.clientX - r.left) + 'px');
-        card.style.setProperty('--my', (e.clientY - r.top) + 'px');
-      });
-    });
-  }
-
   /* ---- 平台识别 ---- */
   var ua = navigator.userAgent;
   var platform = navigator.platform || '';
@@ -147,7 +139,7 @@
     win: '下载 Windows 版',
     mac: '下载 macOS 版',
     'mac-intel': '下载 macOS 版',
-    linux: '下载 Linux 版'
+    linux: '查看 Linux 历史版本'
   };
 
   var label = document.getElementById('heroDownloadLabel');

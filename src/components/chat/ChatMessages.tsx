@@ -14,9 +14,16 @@ import type { AgentTaskControls } from './AgentTaskTimeline';
 import type { ChatReferenceHandlers } from './ChatReferenceText';
 import { useT } from '../../i18n';
 
+export interface ChatScrollRequest {
+  conversationId: string;
+  sequence: number;
+}
+
 interface ChatMessagesProps extends ChatReferenceHandlers {
   hasCanvas?: boolean;
   messages: ChatMessage[];
+  conversationId?: string | null;
+  scrollRequest?: ChatScrollRequest | null;
   imagePreviewUrls?: Record<string, string>;
   agentTasks?: AgentTask[];
   showEmptyState: boolean;
@@ -32,6 +39,7 @@ interface ChatMessagesProps extends ChatReferenceHandlers {
   onExampleClick?: (text: string) => void;
   onEditMessage?: (content: string) => void;
   onRegenerateMessage?: (content: string) => void;
+  onBranchMessage?: (messageId: string) => Promise<void>;
 }
 
 const EMPTY_AGENT_TASKS: AgentTask[] = [];
@@ -77,6 +85,8 @@ function mapChatMessageRows<T>(
 export default function ChatMessages({
   hasCanvas = false,
   messages,
+  conversationId: requestedConversationId,
+  scrollRequest,
   imagePreviewUrls,
   agentTasks = EMPTY_AGENT_TASKS,
   showEmptyState,
@@ -89,6 +99,7 @@ export default function ChatMessages({
   agentControls,
   onExampleClick,
   onEditMessage,
+  onBranchMessage,
   onRegenerateMessage,
   onNodeActivate,
   onNodeHover,
@@ -96,8 +107,15 @@ export default function ChatMessages({
 }: ChatMessagesProps) {
   const t = useT();
   const reduceMotion = useReducedMotion();
-  const conversationId = messages[0]?.conversationId ?? '';
+  const conversationId = requestedConversationId ?? messages[0]?.conversationId ?? '';
   const messagesRef = useRef<HTMLDivElement>(null);
+  const scrollFrameRef = useRef<number | null>(null);
+  const previousScrollRequestRef = useRef<ChatScrollRequest | null>(null);
+  const cancelPendingScroll = useCallback(() => {
+    if (scrollFrameRef.current === null) return;
+    cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = null;
+  }, []);
   const isNearBottomRef = useRef(true);
   const activeConversationRef = useRef(conversationId);
   const previousMessagesRef = useRef<{ conversationId: string; messages: ChatMessage[] }>({
@@ -161,6 +179,7 @@ export default function ChatMessages({
         onEditMessage={onEditMessage}
         regeneratePrompt={regeneratePrompt}
         onRegenerate={onRegenerateMessage}
+        onBranch={onBranchMessage}
         onNodeActivate={onNodeActivate}
         onNodeHover={onNodeHover}
         onModelActivate={onModelActivate}
@@ -174,6 +193,7 @@ export default function ChatMessages({
       onAddMediaToCanvas,
       onRetryMediaSave,
       onEditMessage,
+      onBranchMessage,
       onModelActivate,
       onNodeActivate,
       onNodeHover,
@@ -205,6 +225,7 @@ export default function ChatMessages({
 
   useLayoutEffect(() => {
     if (activeConversationRef.current !== conversationId) {
+      cancelPendingScroll();
       activeConversationRef.current = conversationId;
       isNearBottomRef.current = true;
       previousMessagesRef.current = { conversationId, messages };
@@ -228,7 +249,7 @@ export default function ChatMessages({
     if (!pending || pending.conversationId !== conversationId || !container) return;
     container.scrollTop = pending.top + (container.scrollHeight - pending.height);
     pendingOlderScrollRef.current = null;
-  }, [conversationId, messages, renderLimit, renderWindow.conversationId]);
+  }, [cancelPendingScroll, conversationId, messages, renderLimit, renderWindow.conversationId]);
 
   const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const container = event.currentTarget;
@@ -236,6 +257,7 @@ export default function ChatMessages({
     const nextIsNearBottom = distanceFromBottom < 80;
     const wasNearBottom = isNearBottomRef.current;
     isNearBottomRef.current = nextIsNearBottom;
+    if (!nextIsNearBottom) cancelPendingScroll();
     setScrollState((current) => ({
       conversationId,
       isNearBottom: nextIsNearBottom,
@@ -250,7 +272,7 @@ export default function ChatMessages({
         messageCount: messages.length,
       });
     }
-  }, [conversationId, messages.length, renderLimit]);
+  }, [cancelPendingScroll, conversationId, messages.length, renderLimit]);
 
   const jumpToLatest = useCallback(() => {
     const container = messagesRef.current;
@@ -261,6 +283,19 @@ export default function ChatMessages({
     container.style.scrollBehavior = previousScrollBehavior;
   }, []);
 
+  const followLatestOnNextFrame = useCallback(() => {
+    cancelPendingScroll();
+    const container = messagesRef.current;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      if (activeConversationRef.current !== conversationId || messagesRef.current !== container
+        || !isNearBottomRef.current) return;
+      jumpToLatest();
+    });
+  }, [cancelPendingScroll, conversationId, jumpToLatest]);
+
+  useEffect(() => () => cancelPendingScroll(), [cancelPendingScroll, conversationId]);
+
   useEffect(() => {
     const previousSnapshot = previousMessagesRef.current;
     const previousMessages = previousSnapshot.conversationId === conversationId
@@ -270,10 +305,8 @@ export default function ChatMessages({
 
     if (isNearBottomRef.current) {
       jumpToLatest();
-      const frameId = requestAnimationFrame(() => {
-        jumpToLatest();
-      });
-      return () => cancelAnimationFrame(frameId);
+      followLatestOnNextFrame();
+      return cancelPendingScroll;
     }
 
     const previousIds = new Set(previousMessages.map((message) => message.id));
@@ -301,7 +334,7 @@ export default function ChatMessages({
       });
     }
     return undefined;
-  }, [conversationId, jumpToLatest, messages]);
+  }, [cancelPendingScroll, conversationId, followLatestOnNextFrame, jumpToLatest, messages]);
 
   const scrollToLatest = useCallback(() => {
     const container = messagesRef.current;
@@ -317,8 +350,16 @@ export default function ChatMessages({
       limit: INITIAL_MESSAGE_BATCH,
       messageCount: messages.length,
     });
-    requestAnimationFrame(jumpToLatest);
-  }, [conversationId, jumpToLatest, messages.length, reduceMotion]);
+    followLatestOnNextFrame();
+  }, [conversationId, followLatestOnNextFrame, messages.length, reduceMotion]);
+
+  useEffect(() => {
+    if (!scrollRequest) return;
+    const previous = previousScrollRequestRef.current;
+    if (previous?.conversationId === scrollRequest.conversationId && previous.sequence === scrollRequest.sequence) return;
+    previousScrollRequestRef.current = scrollRequest;
+    if (scrollRequest.conversationId === conversationId) scrollToLatest();
+  }, [conversationId, scrollRequest, scrollToLatest]);
 
   useEffect(() => () => {
     onNodeHover?.(null);

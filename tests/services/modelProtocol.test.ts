@@ -2,10 +2,11 @@
  * modelProtocol — 回归测试：声明式协议、共享基础规则与执行边界。
  */
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import type { ModelExecutionProfile, ModelExecutionProtocol, ProtocolJsonValue } from '../../src/types/aiTypes';
+import type { ModelExecutionProfile, ModelExecutionProtocol, NormalizedModelExecutionProtocol, ProtocolJsonValue } from '../../src/types/aiTypes';
 import {
   buildModelProtocolRequest,
   comparableProtocol,
+  resolveModelExecutionProfile,
   executeModelProtocol,
   getDefaultCustomProtocol,
   getModelProtocolPreset,
@@ -18,6 +19,13 @@ import {
   previewModelProtocolResponse,
   validateModelExecutionProtocol,
 } from '../../src/services/ai/modelProtocol';
+
+it('does not execute plugin references as declarative JSON or a default image preset', () => {
+  const profile = { preset: 'plugin' as const, plugin: { pluginId: 'example.responses', presetId: 'responses' } };
+  expect(() => resolveModelExecutionProfile(profile)).toThrow('原生活动');
+  expect(() => getModelProtocolPreset('plugin' as never)).toThrow('不支持');
+  expect(comparableProtocol(profile)).toContain('example.responses');
+});
 import {
   findModelProtocolForEachCapabilityConflicts,
   findUnusedReferenceVariables,
@@ -30,7 +38,7 @@ import { isRecord } from '../../src/services/ai/modelProtocolShared';
 import { serializeModelProtocolBody } from '../../src/services/ai/modelProtocolBody';
 import {
   fetchSameOriginResultUrls, ModelProtocolHttpError, pcmS16LeToWav,
-  readBinaryModelProtocolResult, redactModelProtocolError,
+  readBinaryModelProtocolResult, readJsonResponse, redactModelProtocolError, throwIfDefinitiveModelResponseFailure,
 } from '../../src/services/ai/modelProtocolHttp';
 import { PollTaskFailedError, PollTimeoutError } from '../../src/services/pollTask';
 import { buildGeneralVideoProtocolVariables } from '../../src/services/ai/generateVideo';
@@ -39,8 +47,19 @@ import {
   assertImageModelCapability, assertModelCapabilityProtocol, resolveConfiguredImageParameters, resolveConfiguredImageQuality,
   resolveConfiguredImageBackground,
 } from '../../src/services/ai/modelCapabilityValidation';
-import { RELAYON_MODEL_MANIFEST, RELAYON_VIDEO_RESULT_URL_PATHS } from '../../src/services/ai/providers/relayonModelManifest';
+import { RELAYON_MODEL_MANIFEST, RELAYON_VIDEO_RESULT_URL_PATHS, getRelayonVideoRecoveryProfiles } from '../../src/services/ai/providers/relayonModelManifest';
 import { getHttpResponseError, HttpResponseError } from '../../src/services/ai/httpUtils';
+import * as httpTransport from '../../src/services/ai/httpTransport';
+
+it('结构化批项拒绝使用数值下标errorPath保留上游原文与失败元数据', () => {
+  const message = 'Non posso generare questa immagine per motivi di sicurezza.';
+  let error: unknown;
+  try {
+    throwIfDefinitiveModelResponseFailure({ data: [{ error: { code: 'content_policy_violation', message } }] }, 200, 'data.0.error.message');
+  } catch (cause) { error = cause; }
+  expect(error).toBeInstanceOf(ModelProtocolHttpError);
+  expect(error).toMatchObject({ status: 200, definitiveFailure: true, message });
+});
 
 const jsonResponse = (
   payload: unknown,
@@ -59,12 +78,297 @@ const pngResult = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1
 const wavResult = Uint8Array.from(pcmS16LeToWav(new Uint8Array([0, 0]), 24000, 1));
 const encodedResult = (bytes: Uint8Array, mime: string) => `data:${mime};base64,${btoa(String.fromCharCode(...bytes))}`;
 
+describe('声明式协议的请求响应调试关联', () => {
+  it.each([200, 400])('HTTP %s 在既有消费点记录原JSON且只读取一次，不clone响应', async (status) => {
+    const payload = status === 200 ? { data: [{ url: 'https://cdn.example/original.png' }], usage: { input_tokens: 7 } }
+      : { error: { code: 'source_fetch_failed', message: '参考素材无法读取' } };
+    const response = jsonResponse(payload, status);
+    const json = vi.spyOn(response, 'json'); const text = vi.spyOn(response, 'text');
+    const clone = vi.spyOn(response, 'clone').mockImplementation(() => { throw new Error('调试日志不能克隆响应'); });
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    const debug = { url: 'https://gateway.example/v1/images/edits', method: 'POST', source: 'Model Protocol',
+      traceId: 'read-response-fixture', apiKey: 'fixture-response-key', sensitive: false };
+    try {
+      const pending = readJsonResponse(response, '模型请求失败', 'error.message', debug.apiKey, debug);
+      if (status === 200) await expect(pending).resolves.toEqual(payload);
+      else await expect(pending).rejects.toMatchObject({ status: 400, message: expect.stringContaining('参考素材无法读取') });
+      expect(log).toHaveBeenCalledExactlyOnceWith(response, payload, debug);
+      expect(text).toHaveBeenCalledOnce(); expect(json).not.toHaveBeenCalled();
+      expect(clone).not.toHaveBeenCalled(); expect(response.bodyUsed).toBe(true);
+    } finally { log.mockRestore(); clone.mockRestore(); text.mockRestore(); json.mockRestore(); }
+  });
+
+  it.each(['<!doctype html><html>upstream gateway returned HTML</html>', '{"unfinished":'])(
+    'HTTP200非JSON原文进入调试日志且保留原结构错误：%s', async (rawText) => {
+      const response = new Response(rawText, { headers: { 'Content-Type': 'text/html' } });
+      const text = vi.spyOn(response, 'text'); const json = vi.spyOn(response, 'json'); const clone = vi.spyOn(response, 'clone');
+      const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+      const debug = { url: 'https://gateway.example/v1/images/edits', method: 'POST', source: 'Model Protocol', traceId: 'invalid-json-fixture' };
+      try {
+        await expect(readJsonResponse(response, '模型请求失败', undefined, '', debug))
+          .rejects.toThrow('模型请求失败：响应必须是 JSON 对象或数组');
+        expect(log).toHaveBeenCalledExactlyOnceWith(response, rawText, debug);
+        expect(text).toHaveBeenCalledOnce(); expect(json).not.toHaveBeenCalled(); expect(clone).not.toHaveBeenCalled();
+        expect(response.bodyUsed).toBe(true);
+      } finally { log.mockRestore(); clone.mockRestore(); json.mockRestore(); text.mockRestore(); }
+    },
+  );
+
+  it('HTTP200业务失败在验证器抛错前记录完整原始返回，不进行第二次请求', async () => {
+    const payload = { status: 'failed', error: { code: 'upstream_failed', message: '上游业务拒绝' }, usage: { output_tokens: 0 } };
+    const response = jsonResponse(payload);
+    const fetchMock = vi.fn().mockResolvedValue(response); vi.stubGlobal('fetch', fetchMock);
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    const validateResponse = vi.fn(() => {
+      expect(log).toHaveBeenCalledWith(response, payload, expect.objectContaining({ source: 'Model Protocol' }));
+      throw new Error('保留原业务失败');
+    });
+    try {
+      await expect(submitModelProtocol({ apiKey: 'business-key-fixture', baseUrl: 'https://gateway.example/v1', variables: {},
+        protocol: { version: 2, mode: 'sync', submit: { method: 'POST', path: '/render', body: { model: 'image-fixture' } },
+          response: { type: 'json', result: { urlPath: 'url' } } }, validateResponse })).rejects.toThrow('保留原业务失败');
+      expect(validateResponse).toHaveBeenCalledOnce(); expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { log.mockRestore(); }
+  });
+
+  it('文本提交分支沿原读取记录返回文本，不clone或再次请求', async () => {
+    const text = 'model-text-output-fixture';
+    const response = new Response(text, { headers: { 'Content-Type': 'text/plain' } });
+    const fetchMock = vi.fn().mockResolvedValue(response); vi.stubGlobal('fetch', fetchMock);
+    const read = vi.spyOn(response, 'text'); const clone = vi.spyOn(response, 'clone');
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    try {
+      await expect(submitModelProtocol({ apiKey: 'text-key-fixture', baseUrl: 'https://gateway.example/v1', variables: {},
+        protocol: { version: 2, mode: 'sync', submit: { method: 'POST', path: '/text', body: { model: 'text-fixture' } },
+          response: { type: 'text' } } })).resolves.toEqual({ text });
+      expect(log).toHaveBeenCalledExactlyOnceWith(response, text, expect.objectContaining({
+        url: 'https://gateway.example/v1/text', method: 'POST', source: 'Model Protocol',
+        apiKey: 'text-key-fixture', traceId: expect.any(String),
+      }));
+      expect(read).toHaveBeenCalledOnce(); expect(clone).not.toHaveBeenCalled();
+      expect(response.bodyUsed).toBe(true); expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { log.mockRestore(); clone.mockRestore(); read.mockRestore(); }
+  });
+
+  it('二进制提交分支只记录安全摘要，原结果和单次流读取保持不变', async () => {
+    const response = new Response(pngResult, { headers: { 'Content-Type': 'image/png' } });
+    const fetchMock = vi.fn().mockResolvedValue(response); vi.stubGlobal('fetch', fetchMock);
+    const read = vi.spyOn(response.body!, 'getReader'); const clone = vi.spyOn(response, 'clone');
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    const url = encodedResult(pngResult, 'image/png');
+    try {
+      await expect(submitModelProtocol({ apiKey: 'binary-key-fixture', baseUrl: 'https://gateway.example/v1', variables: {},
+        protocol: { version: 2, mode: 'sync', submit: { method: 'POST', path: '/binary', body: { model: 'image-fixture' } },
+          response: { type: 'binary', result: { mimeType: 'image/png' } } } })).resolves.toEqual({ urls: [url] });
+      expect(log).toHaveBeenCalledExactlyOnceWith(response, { type: 'binary', mimeType: 'image/png', encodedLength: url.length },
+        expect.objectContaining({ url: 'https://gateway.example/v1/binary', method: 'POST', source: 'Model Protocol',
+          apiKey: 'binary-key-fixture', traceId: expect.any(String) }));
+      expect(JSON.stringify(log.mock.calls.map((call) => call[1]))).not.toContain(url);
+      expect(read).toHaveBeenCalledOnce(); expect(clone).not.toHaveBeenCalled();
+      expect(response.bodyUsed).toBe(true); expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { log.mockRestore(); clone.mockRestore(); read.mockRestore(); }
+  });
+
+  it.each([false, true])('每次轮询关联自己的请求响应，保留POST标量及隐私标记：sensitive=%s', async (sensitive) => {
+    const payloads = [{ status: 'running', progress: 25 }, { status: 'completed', url: 'https://cdn.example/query-result.mp4' }];
+    const responses = payloads.map((payload) => jsonResponse(payload));
+    const fetchMock = vi.fn().mockResolvedValueOnce(responses[0]).mockResolvedValueOnce(responses[1]);
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = vi.spyOn(httpTransport, 'corsSafeFetch');
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    const body = { task_id: 'existing-task', transparent: false, frame_count: 9 };
+    try {
+      await expect(pollResolvedModelProtocol({ method: 'POST', url: 'https://gateway.example/v1/tasks/query',
+        bodyEncoding: 'json', body, statusPath: 'status', successValues: ['completed'], failureValues: ['failed'],
+        resultUrlPath: 'url', intervalMs: 1, maxAttempts: 2, retry: { maxRetries: 0 }, sensitive,
+      }, 'poll-key-fixture', undefined, 'https://gateway.example/v1')).resolves.toMatchObject({ urls: [payloads[1].url] });
+      expect(fetchMock).toHaveBeenCalledTimes(2); expect(log).toHaveBeenCalledTimes(2);
+      const traces = transport.mock.calls.map(([, , options]) => options?.debug?.traceId);
+      if (!sensitive) {
+        expect(traces.every((id) => typeof id === 'string' && id.length > 0)).toBe(true);
+        expect(new Set(traces).size).toBe(2);
+      } else expect(traces).toEqual([undefined, undefined]);
+      for (const [index, call] of transport.mock.calls.entries()) {
+        expect(call[2]?.sensitive === true).toBe(sensitive);
+        if (!sensitive) expect(call[2]?.debug).toMatchObject({ body, bodyEncoding: 'json', traceId: traces[index], stage: 'poll', apiKey: 'poll-key-fixture' });
+        else expect(call[2]).toEqual({ sensitive: true });
+        expect(JSON.parse(String(call[1]?.body))).toEqual(body);
+        expect(log.mock.calls[index]).toEqual([responses[index], payloads[index], {
+          url: 'https://gateway.example/v1/tasks/query', method: 'POST', source: 'Model Protocol',
+          traceId: traces[index], apiKey: 'poll-key-fixture', sensitive,
+        }]);
+      }
+    } finally { log.mockRestore(); transport.mockRestore(); }
+  });
+
+  it('缺少crypto.randomUUID时日志标识使用后备值，不阻断原轮询', async () => {
+    vi.stubGlobal('crypto', {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ status: 'completed', url: 'https://cdn.example/fallback.mp4' })));
+    const transport = vi.spyOn(httpTransport, 'corsSafeFetch');
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    try {
+      await expect(pollResolvedModelProtocol({ method: 'GET', url: 'https://gateway.example/v1/tasks/original',
+        statusPath: 'status', successValues: ['completed'], failureValues: ['failed'], resultUrlPath: 'url',
+        intervalMs: 1,
+      }, 'fallback-key', undefined, 'https://gateway.example/v1')).resolves.toMatchObject({ urls: ['https://cdn.example/fallback.mp4'] });
+      expect(transport).toHaveBeenCalledOnce();
+      expect(transport.mock.calls[0][2]?.debug).toMatchObject({ traceId: expect.stringMatching(/^ai-/), stage: 'poll' });
+    } finally { log.mockRestore(); transport.mockRestore(); }
+  });
+
+  it.each([false, true])('同源结果下载失败把敏感标记交给响应日志，保留错误语义：sensitive=%s', async (sensitive) => {
+    const payload = { error: { message: 'download-key-fixture refused result' } };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload, 403)));
+    const log = vi.spyOn(httpTransport, 'logAiResponse').mockImplementation(() => undefined);
+    try {
+      await expect(fetchSameOriginResultUrls(['https://gateway.example/content/original'], 'https://gateway.example/v1',
+        undefined, 'download-key-fixture', 'image/png', undefined, undefined, sensitive))
+        .rejects.toMatchObject({ status: 403, message: expect.stringContaining('[REDACTED]') });
+      expect(log).toHaveBeenCalledOnce();
+      expect(log.mock.calls[0][1]).toEqual(payload);
+      expect(log.mock.calls[0][2]).toEqual({ url: 'https://gateway.example/content/original', method: 'GET',
+        source: 'Model Protocol', apiKey: 'download-key-fixture', sensitive });
+    } finally { log.mockRestore(); }
+  });
+});
+
+describe('火山声明式协议的 TOS 隐私边界', () => {
+  const signed = 'https://reference-bucket.tos-cn-beijing.ivolces.com/ai-canvas/ark-reference/input.png?X-Tos-Signature=private-fixture-signature';
+  const asyncProtocol = (): NormalizedModelExecutionProtocol => ({ version: 2, mode: 'async',
+    submit: { method: 'POST', path: '/generate', body: { image: '{{imageUrls}}' } },
+    response: { type: 'json', taskIdPath: 'id' }, poll: { method: 'GET', path: '/tasks/{{submit.id}}',
+      retry: { maxRetries: 0 }, response: { statusPath: 'status', successValues: ['completed'], failureValues: ['failed'],
+        errorPath: 'error.message', result: { urlPath: 'url' } } } });
+  const configure = (connectionId = 'ark-protocol', catalogId = 'volcengine') => {
+    const previous = useAppStore.getState(); localStorage.clear();
+    useAppStore.setState({ currentProjectId: 'ark-protocol-project', projectExecutionContext: undefined, nodes: [],
+      config: { ...previous.config, providers: { ...previous.config.providers, [connectionId]: {
+        name: 'Protocol fixture', catalogId, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', apiKey: 'private-ark-key',
+      } } } });
+    return () => { localStorage.clear(); useAppStore.setState(previous, true); };
+  };
+  const model = (protocol: ModelExecutionProtocol, providerConfigId = 'ark-protocol') => ({
+    id: 'ark-model', name: 'Ark fixture', modelId: 'ark-image', category: 'image' as const, providerConfigId,
+    executionProfile: { preset: 'custom' as const, protocol },
+  });
+
+  it.each([true, false])('按真实catalog开启敏感传输，custom同名连接保持原行为：official=%s', async (official) => {
+    const restore = configure('volcengine', official ? 'volcengine' : 'custom-openai');
+    const transport = vi.spyOn(httpTransport, 'corsSafeFetch');
+    const protocol: ModelExecutionProtocol = { version: 2, mode: 'sync', submit: asyncProtocol().submit,
+      response: { type: 'json', result: { urlPath: 'url' } } };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ url: 'https://cdn.example/result.png' }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await runConfiguredModelProtocol({ category: 'image', model: model(protocol, 'volcengine'), variables: { imageUrls: [signed] } });
+      expect(transport).toHaveBeenCalledOnce();
+      expect(transport.mock.calls[0][2]?.sensitive === true).toBe(official);
+      if (!official) expect(transport.mock.calls[0][2]?.debug).toMatchObject({ stage: 'submit', bodyEncoding: 'json',
+        body: { image: [signed] }, traceId: expect.any(String) });
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).image).toEqual([signed]);
+    } finally { transport.mockRestore(); restore(); }
+  });
+
+  it('已提交火山查询中断时保留ID与敏感标记，恢复查询错误也在出口脱敏', async () => {
+    const restore = configure(); const transport = vi.spyOn(httpTransport, 'corsSafeFetch');
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'accepted-ark-task' }))
+      .mockRejectedValueOnce(new TypeError(`network error ${signed}`));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(runConfiguredModelProtocol({ category: 'image', nodeId: 'ark-node', model: model(asyncProtocol()),
+        variables: { imageUrls: [signed] } })).rejects.toMatchObject({ name: 'MediaTaskPausedError',
+        taskReceipt: { taskId: 'accepted-ark-task' } });
+      const saved = getPendingTasksForProject('ark-protocol-project')[0];
+      expect(saved).toMatchObject({ taskId: 'accepted-ark-task', submitted: true, protocolPoll: { sensitive: true } });
+      expect(JSON.stringify(saved)).not.toContain('X-Tos-');
+      fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'failed', error: { message: `下载失败 ${signed}` } }));
+      const error = await pollResolvedModelProtocol(saved.protocolPoll!, 'private-ark-key', undefined,
+        'https://ark.cn-beijing.volces.com/api/v3').catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(PollTaskFailedError);
+      expect((error as Error).message).toContain('[REDACTED]');
+      expect((error as Error).stack).not.toContain('X-Tos-');
+      expect(transport.mock.calls.every((call) => call[2]?.sensitive === true)).toBe(true);
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    } finally { transport.mockRestore(); restore(); }
+  });
+
+  it.each(['variable', 'literal'] as const)('提交前拒绝会将签名素材写入持久化轮询的%s模板', async (source) => {
+    const restore = configure(); const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    const protocol = asyncProtocol();
+    protocol.poll = { ...protocol.poll!, method: 'POST', body: { source: source === 'variable' ? '{{imageUrls}}' : signed } };
+    try {
+      await expect(runConfiguredModelProtocol({ category: 'image', nodeId: 'ark-node', model: model(protocol),
+        variables: { imageUrls: [signed] } })).rejects.toThrow('轮询描述不能保存 TOS 签名');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(getPendingTasksForProject('ark-protocol-project')).toEqual([]);
+    } finally { restore(); }
+  });
+
+  it('响应回显签名素材时仅保留已付费任务ID，不落盘轮询输入或重新提交', async () => {
+    const restore = configure(); const protocol = asyncProtocol();
+    protocol.poll!.headers = { 'X-Reference': '{{submit.reference}}' };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'known-ark-task', reference: signed }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(runConfiguredModelProtocol({ category: 'image', nodeId: 'ark-node', model: model(protocol),
+        variables: { imageUrls: [signed] } })).rejects.toMatchObject({ name: 'MediaTaskPausedError',
+        taskReceipt: { taskId: 'known-ark-task' } });
+      const saved = getPendingTasksForProject('ark-protocol-project')[0];
+      expect(saved).toMatchObject({ submitted: true, taskId: 'known-ark-task', mediaRecoveryState: 'query_paused' });
+      expect(saved.protocolPoll).toBeUndefined();
+      expect(JSON.stringify(saved)).not.toContain('X-Tos-');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { restore(); }
+  });
+
+  it('敏感的异步文本协议把隐私标记传至提交、轮询和同源结果下载', async () => {
+    const protocol = asyncProtocol();
+    protocol.poll!.response.result = { mimeType: 'image/png', download: { method: 'GET', path: '/tasks/{{submit.id}}/content' } };
+    const transport = vi.spyOn(httpTransport, 'corsSafeFetch');
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'private-task' }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'completed' }))
+      .mockResolvedValueOnce(new Response(pngResult, { headers: { 'Content-Type': 'image/png' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = await executeModelProtocol({ apiKey: 'private-key', baseUrl: 'https://gateway.example/v1', protocol,
+        variables: { imageUrls: [signed] }, sensitive: true });
+      expect(result.urls).toEqual([encodedResult(pngResult, 'image/png')]);
+      expect(transport).toHaveBeenCalledTimes(3);
+      expect(transport.mock.calls.every((call) => call[2]?.sensitive === true)).toBe(true);
+    } finally { transport.mockRestore(); }
+  });
+});
+
 describe('structured submission failures', () => {
   const protocol: ModelExecutionProtocol = { version: 2, mode: 'async',
     submit: { method: 'POST', path: '/images', body: { prompt: '{{prompt}}' } },
     response: { type: 'json', taskIdPath: 'id', errorPath: 'error.message' },
     poll: { method: 'GET', path: '/tasks/{{submit.id}}', retry: { maxRetries: 0 },
       response: { statusPath: 'status', successValues: ['completed'], failureValues: ['failed'], result: { urlPath: 'url' } } } };
+
+  it('新项目同步与异步声明式媒体缺少宿主提交守卫时拒绝，不创建旧待续回执', async () => {
+    const previous = useAppStore.getState();
+    localStorage.clear();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    useAppStore.setState({ currentProjectId: 'new-canvas', projectExecutionContext: { kind: 'canvas', schemaVersion: 2,
+      modelGeneration: 1, projectId: 'p', projectEpoch: 1, canvasId: 'new-canvas', canvasEpoch: 1,
+      canvasRevision: 0, episodeId: null, runtimeEpoch: 'run' },
+      config: { ...previous.config, providers: { ...previous.config.providers,
+        'structured-submit': { name: 'Fixture', baseUrl: 'https://gateway.example/v1', apiKey: 'fixture' } } } });
+    try {
+      await expect(runConfiguredModelProtocol({ category: 'image', nodeId: 'new-node',
+        model: { id: 'structured', name: 'Fixture', modelId: 'fixture', category: 'image', providerConfigId: 'structured-submit',
+          executionProfile: { preset: 'custom', protocol } }, variables: { prompt: 'scene' } })).rejects.toThrow('未提交请求');
+      const synchronous: ModelExecutionProtocol = { version: 2, mode: 'sync', submit: protocol.submit,
+        response: { type: 'json', result: { urlPath: 'url' } } };
+      await expect(runConfiguredModelProtocol({ category: 'image', nodeId: 'new-node',
+        model: { id: 'structured', name: 'Fixture', modelId: 'fixture', category: 'image', providerConfigId: 'structured-submit',
+          executionProfile: { preset: 'custom', protocol: synchronous } }, variables: { prompt: 'scene' } })).rejects.toThrow('未提交请求');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(getPendingTasksForProject('new-canvas')).toEqual([]);
+    } finally { localStorage.clear(); useAppStore.setState(previous, true); }
+  });
 
   async function configuredRequest(response: Response | Error, queryResponse?: Response) {
     const previous = useAppStore.getState();
@@ -129,6 +433,24 @@ describe('structured submission failures', () => {
       response: { type: 'json', errorPath: 'error', result: { urlPath: 'data.*.url' } } };
     expect(await submitModelProtocol({ protocol: sync, apiKey: 'fixture', baseUrl: 'https://gateway.example/v1', variables: {} }))
       .toEqual({ urls: ['https://cdn.example/result.png'] });
+  });
+
+  it('保留已经收到的原任务 ID，即使恢复投影被安全校验拒绝也不重新提交', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'accepted-original', token: 'private-query-value' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(submitModelProtocol({ protocol, apiKey: 'fixture', baseUrl: 'https://gateway.example/v1', variables: {},
+      captureRecoveryContext: () => { throw new Error('不可持久化凭据'); } })).rejects.toMatchObject({ nativeTaskId: 'accepted-original' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+  it('恢复投影错误的 ID fallback 不保存服务商回显的 Key 或地址', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    for (const id of ['private-credential', 'https://untrusted.invalid/id', 'C:/private/path']) {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ id }));
+      const error = await submitModelProtocol({ protocol, apiKey: 'private-credential', baseUrl: 'https://gateway.example/v1', variables: {},
+        captureRecoveryContext: () => { throw new Error('unsafe context'); } }).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(Error); expect(error).not.toHaveProperty('nativeTaskId');
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('does not infer failure from a numeric provider code or override a usable result with unrelated error metadata', async () => {
@@ -218,6 +540,35 @@ describe('厂商提交幂等身份与明确结果路径', () => {
     submit: { method: 'POST', path: '/images', body: { model: '{{model}}', prompt: '{{prompt}}' } },
     response: { type: 'json', result: { urlPath: 'data.*.url' } } };
 
+  it('固定四候选的同步协议保存全部结果和交付数量，请求 n 仍为一个作业', async () => {
+    const previous = useAppStore.getState();
+    localStorage.clear();
+    const urls = Array.from({ length: 4 }, (_, index) => `https://cdn.example/mj-${index + 1}.png`);
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ data: urls.map((url) => ({ url })) }));
+    vi.stubGlobal('fetch', fetchMock);
+    useAppStore.setState({ currentProjectId: 'four-candidates-project', nodes: [], config: { ...previous.config,
+      providers: { ...previous.config.providers, 'relay-four': { name: '图片组', catalogId: 'relayonapi',
+        baseUrl: 'https://relayonapi.com/v1', apiKey: 'four-candidates-fixture' } } } });
+    try {
+      const result = await runConfiguredModelProtocol({ category: 'image', nodeId: 'four-candidates-node',
+        expectedImageOutputs: 4, variables: { model: 'Midjourney v8.2', prompt: 'test', n: 1 },
+        model: { id: 'mj-four', name: 'MJ', modelId: 'Midjourney v8.2', category: 'image', providerConfigId: 'relay-four',
+          executionProfile: { preset: 'custom', protocol: { ...syncProtocol, submit: { ...syncProtocol.submit,
+            body: { model: '{{model}}', prompt: '{{prompt}}', n: '{{n}}' } } } } } });
+      expect([...result]).toEqual(urls);
+      expect(result.taskReceipt).toMatchObject({ nodeId: 'four-candidates-node', projectId: 'four-candidates-project' });
+      const tasks = getPendingTasksForProject('four-candidates-project');
+      expect(tasks).toEqual([expect.objectContaining({ batchCount: 4, expectedImageOutputs: 4, resultUrls: urls, submitted: true,
+        mediaRecoveryState: 'delivery_pending', taskId: result.taskReceipt!.taskId })]);
+      expect(JSON.stringify(tasks)).not.toContain('four-candidates-fixture');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({ model: 'Midjourney v8.2', prompt: 'test', n: 1 });
+    } finally {
+      localStorage.clear();
+      useAppStore.setState(previous, true);
+    }
+  });
+
   it('重复本地构建复用同一内部幂等标识，合并不同大小写而不改鉴权', () => {
     const protocol = structuredClone(syncProtocol);
     protocol.submit.headers = { 'idempotency-key': 'user-static-key', 'IDEMPOTENCY-KEY': 'another-static-key' };
@@ -279,12 +630,14 @@ describe('厂商提交幂等身份与明确结果路径', () => {
         expect([...result]).toEqual(['https://cdn.example/image.png']);
         expect(result.mediaDownloadAccess).toEqual({ providerConfigId: 'relay-alias', origin: 'https://relayonapi.com' });
       }
-      expect(uuidSpy).toHaveBeenCalledTimes(2);
       const keys = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
         .map(([, init]) => new Headers(init?.headers).get('Idempotency-Key'));
       expect(keys).toHaveLength(2);
       expect(keys.every((key) => /^[a-f0-9-]{36}$/i.test(key ?? ''))).toBe(true);
       expect(new Set(keys).size).toBe(2);
+      // 调试 trace 也生成 UUID；仅把实际 POST 头中的标识计作业务幂等号。
+      expect(uuidSpy.mock.results.filter((result) => result.type === 'return' && keys.includes(result.value))
+        .map((result) => result.value)).toEqual(keys);
     } finally {
       uuidSpy.mockRestore();
       useAppStore.setState({ config: previous.config });
@@ -310,9 +663,43 @@ describe('厂商提交幂等身份与明确结果路径', () => {
     }
   });
 
+  it('万象完整旧 A 模板的新提交采用顶层参数，task_id 同时用于轮询和鉴权取件', async () => {
+    const previous = useAppStore.getState();
+    const selected = RELAYON_MODEL_MANIFEST.find((model) => model.id === 'sd-2.0-A')!;
+    const profile = getRelayonVideoRecoveryProfiles(selected.id, selected.executionProfile).find((candidate) => (
+      candidate.protocol?.version === 2 && (candidate.protocol.submit.body as Record<string, ProtocolJsonValue>).output !== undefined
+    ))!;
+    const model = { ...selected, executionProfile: profile, modelId: selected.id, providerConfigId: 'relay-alias' };
+    const before = structuredClone(model);
+    const video = await mp4Result();
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ task_id: 'task-id-only' }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'completed' }))
+      .mockResolvedValueOnce(new Response(video, { headers: { 'Content-Type': 'video/mp4' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    useAppStore.setState({ currentProjectId: null, projectExecutionContext: undefined,
+      config: { ...previous.config, providers: { ...previous.config.providers,
+        'relay-alias': { name: '原万象视频', catalogId: 'relayonapi', baseUrl: 'https://relayonapi.com/v1', apiKey: 'own-key' },
+      } } });
+    try {
+      const urls = await runConfiguredModelProtocol({ category: 'video', model,
+        variables: { model: selected.id, prompt: 'draft', durationText: '10', resolution: '720p', aspectRatio: '9:16' } });
+      expect([...urls]).toEqual([encodedResult(video, 'video/mp4')]);
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ model: selected.id, prompt: 'draft',
+        seconds: '10', resolution: '720p', aspect_ratio: '9:16', references: [] });
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://relayonapi.com/v1/videos',
+        'https://relayonapi.com/v1/videos/task-id-only', 'https://relayonapi.com/v1/videos/task-id-only/content']);
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+      expect(urls.mediaDownloadAccess?.origin).toBe('https://relayonapi.com');
+      for (const [, init] of fetchMock.mock.calls) expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer own-key');
+      expect(model).toEqual(before);
+    } finally {
+      useAppStore.setState({ config: previous.config, currentProjectId: previous.currentProjectId, projectExecutionContext: previous.projectExecutionContext });
+    }
+  });
+
   it.each(['url', 'video_url', 'content.video_url'])('RelayOn 内置视频只读取本批确认的兼容结果路径 %s', async (path) => {
     const previous = useAppStore.getState();
-    const selected = RELAYON_MODEL_MANIFEST.find((model) => model.id === 'sd-2.0-c1')!;
+    const selected = RELAYON_MODEL_MANIFEST.find((model) => model.id === 'doubao-seedance-2-0-260128')!;
     const resultUrl = 'https://cdn.example/video.mp4?signature=keep%2Fthis';
     const result = path === 'content.video_url' ? { content: { video_url: resultUrl } } : { [path]: resultUrl };
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'video-original' }))
@@ -337,7 +724,7 @@ describe('厂商提交幂等身份与明确结果路径', () => {
   it.each(['取消查询', '非法结果地址'])('%s 保留原任务及明确结果路径，继续查询不重新生成', async (failure) => {
     const previous = useAppStore.getState();
     localStorage.clear();
-    const selected = RELAYON_MODEL_MANIFEST.find((model) => model.id === 'sd-2.0-c1')!;
+    const selected = RELAYON_MODEL_MANIFEST.find((model) => model.id === 'doubao-seedance-2-0-260128')!;
     const controller = new AbortController();
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'recover-original' }))
       .mockImplementationOnce(async () => {
@@ -377,7 +764,7 @@ describe('厂商提交幂等身份与明确结果路径', () => {
 
   it.each(['自定义同名连接', '修改过的协议'])('%s 不继承 RelayOn 结果兜底', async (scenario) => {
     const previous = useAppStore.getState();
-    const selected = structuredClone(RELAYON_MODEL_MANIFEST.find((model) => model.id === 'sd-2.0-c1')!);
+    const selected = structuredClone(RELAYON_MODEL_MANIFEST.find((model) => model.id === 'doubao-seedance-2-0-260128')!);
     if (scenario === '修改过的协议') {
       const protocol = parseModelExecutionProtocol(selected.executionProfile!.protocol!);
       protocol.poll!.response.result.urlPath = 'user_result';
@@ -796,6 +1183,13 @@ describe('declarative model execution protocol', () => {
       operationCapabilities: { 'text-to-video': { ratios: ['16:9', '9:16'] } },
       inputModeCapabilities: { text: { ratios: ['16:9'] } } };
     expect(() => assertModelCapabilityProtocol({ ...model, videoCapability: singleMode })).not.toThrow();
+  });
+
+  it('checks fixed pixel combinations without inventing pixels for adaptive image ratios', () => {
+    const capability = { resolutions: ['2K'], ratios: ['1:1', 'auto', 'adaptive'],
+      dimensionPresets: { '2K': { '1:1': [2048, 2048] as const } } };
+    expect(() => assertImageModelCapability(capability)).not.toThrow();
+    expect(() => assertImageModelCapability({ ...capability, ratios: ['16:9'] })).toThrow('缺少像素尺寸映射');
   });
 
   it('keeps interface-default background distinct from an explicit auto parameter', () => {
@@ -3089,7 +3483,7 @@ describe('协议共享基础规则', () => {
 
   it('未配置、无自定义协议及原生文本协议均不产生比较键', () => {
     const profiles: Array<ModelExecutionProfile | undefined> = [
-      undefined, { preset: 'custom' }, { preset: 'anthropic-chat' }, { preset: 'gemini-chat' },
+      undefined, { preset: 'custom' }, { preset: 'openai-responses' }, { preset: 'anthropic-chat' }, { preset: 'gemini-chat' },
     ];
     for (const profile of profiles) expect(comparableProtocol(profile)).toBeUndefined();
   });

@@ -4,7 +4,7 @@
 import { t, useT } from '../../i18n';
 import { Icon } from '@iconify/react';
 import { motion } from 'framer-motion';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import pluginDeveloperGuide from '../../../doc/插件开发规范.md?raw';
 import { isTauriEnv, saveBinaryToLocalFile } from '../../services/fileService';
 import { readLocalPluginPackage, selectNativePluginDirectory } from '../../services/fs/pluginPackageFiles';
@@ -36,6 +36,9 @@ import ModalOverlay from '../shared/ModalOverlay';
 import PopupCloseButton from '../shared/PopupCloseButton';
 import DownloadProgress from '../shared/DownloadProgress';
 import ModelDownloadDialog from '../shared/ModelDownloadDialog';
+import PluginDiagnosticsPanel from './plugins/PluginDiagnosticsPanel';
+
+const PluginPreviewDialog = lazy(() => import('./plugins/PluginPreviewDialog'));
 
 const CATEGORY_LABELS: Record<PluginCategory, string> = {
   content: '内容处理',
@@ -363,6 +366,7 @@ async function resolveResourcePayloads(
 }
 
 export default function PluginSettings() {
+  const [previewOpen, setPreviewOpen] = useState(false);
   useT();
   const inputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -1000,7 +1004,7 @@ export default function PluginSettings() {
                         {item.repository.replace('https://github.com/', '')}{item.directory ? ` / ${item.directory}` : ''}
                       </a>
                       <div className="mt-1 break-words text-[10px] text-canvas-text-muted">
-                        {t(CATEGORY_LABELS[item.manifest.category])} {t("· 权限：")}{item.manifest.permissions.join('、')}
+                        {t(CATEGORY_LABELS[item.manifest.category])} {t("· 权限：")}{item.manifest.permissions.join('、') || t('无')}
                       </div>
                     </details>
                   </div>
@@ -1028,6 +1032,11 @@ export default function PluginSettings() {
         </div>
       </section>
 
+      <section className="ui-card flex flex-wrap items-center gap-2 p-3">
+        <button type="button" className="ui-btn ui-btn--sm" onClick={() => setPreviewOpen(true)}>{t('开发界面预览')}</button>
+        <span className="text-xs text-canvas-text-muted">{t('使用模拟数据，不安装插件或运行主工具。')}</span>
+      </section>
+      {previewOpen && <Suspense fallback={null}><PluginPreviewDialog onClose={() => setPreviewOpen(false)} /></Suspense>}
       {pluginRegistryRepairRequired && (
         <section className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-3">
           <div className="flex items-start gap-3">
@@ -1054,6 +1063,7 @@ export default function PluginSettings() {
         {plugins.map((plugin) => {
           const nodeTypes = [...new Set(plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.nodeTypes))];
           const customNodes = plugin.manifest.contributes.nodes ?? [];
+          const modelProtocols = plugin.manifest.contributes.modelProtocols ?? [];
           const inputFields = [...new Set(plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.inputFields))];
           const outputFields = [...new Set(plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.output.fields))];
           const placementLabels = [...new Set([
@@ -1082,6 +1092,7 @@ export default function PluginSettings() {
                   <p className="mt-1 text-[11px] leading-4 text-canvas-text-secondary">
                     {plugin.manifest.description || t('未提供说明')}
                   </p>
+                  <PluginDiagnosticsPanel plugin={plugin} plugins={plugins} />
                   {pluginUsesSpeechModels(plugin.manifest) && speechModels.ready !== true && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <span className="text-[11px] text-canvas-text-muted">{t('对白转写使用本地语音模型')}</span>
@@ -1107,6 +1118,11 @@ export default function PluginSettings() {
                         {node.title}
                       </span>
                     ))}
+                    {modelProtocols.map((protocol) => (
+                      <span key={`protocol:${protocol.id}`} className="rounded bg-indigo-500/10 px-1.5 py-0.5 text-[10px] text-indigo-400">
+                        {t('协议预设')} · {protocol.name}
+                      </span>
+                    ))}
                   </div>
                   <details className="mt-2 text-[11px] text-canvas-text-secondary">
                     <summary className="w-fit cursor-pointer select-none rounded hover:text-canvas-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-canvas-text-muted">
@@ -1115,8 +1131,9 @@ export default function PluginSettings() {
                     <div className="mt-1 break-words text-[10px] leading-4 text-canvas-text-muted">
                       API v{plugin.manifest.apiVersion} · {plugin.manifest.entry} {t("· 入口：")}{placementLabels || t('未声明')}<br />
                       {t('{tools} 个工具 · {nodes} 个自定义节点', { tools: plugin.manifest.contributes.nodeTools.length, nodes: customNodes.length })}<br />
+                      {t('{count} 个协议预设', { count: modelProtocols.length })}<br />
                       {t("读取：")}{inputFields.join('、') || t('无')} {t("· 写入：")}{outputFields.join('、') || t('无')}<br />
-                      {t("权限：")}{plugin.manifest.permissions.join('、')}<br />
+                      {t("权限：")}{plugin.manifest.permissions.join('、') || t('无')}<br />
                       {t("代码 SHA-256：")}<span className="break-all font-mono" title={plugin.sourceDigest}>{plugin.sourceDigest ?? t('待原生迁移')}</span>
                     </div>
                   </details>

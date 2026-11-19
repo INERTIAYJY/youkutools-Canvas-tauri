@@ -848,6 +848,7 @@ function CanvasInner({ onReady }: CanvasProps) {
     handlePointerDownCapture: handleDrawingPointerDown,
     handlePointerMoveCapture: handleDrawingPointerMove,
     handlePointerUpCapture: handleDrawingPointerUp,
+    handlePointerCancelCapture: handleDrawingPointerCancel,
   } = useCanvasDrawing();
 
   useEffect(() => {
@@ -975,6 +976,7 @@ function CanvasInner({ onReady }: CanvasProps) {
     handleDelete,
     handleShowInFolder,
     showInFolder,
+    handleCopyFilePath,
     handleSaveAs,
     showSaveAs,
     cancelSaveAsDownload,
@@ -1033,6 +1035,7 @@ function CanvasInner({ onReady }: CanvasProps) {
   // ── External clipboard paste (native paste event → DataTransfer) ──
   useEffect(() => {
     const handler = (e: ClipboardEvent) => {
+      if (useAppStore.getState().projectWorkspaceView === 'script') return;
       // Skip if user is editing an input
       if (isEditableTarget(e.target)) return;
       // Skip if internal clipboard has nodes (handled by keyboard shortcut)
@@ -1334,13 +1337,14 @@ function CanvasInner({ onReady }: CanvasProps) {
     [smoothLine],
   );
 
-  const renderedCanvasNodes = useMemo(() => {
-    const projected = projectCanvasNodesForReactFlow(
-      renderableGraph.nodes,
-      nodeProjectionCache,
-    );
-    return draftNode ? [...projected, projectTransientCanvasNode(draftNode)] : projected;
-  }, [draftNode, nodeProjectionCache, renderableGraph.nodes]);
+  const projectedCanvasNodes = useMemo(
+    () => projectCanvasNodesForReactFlow(renderableGraph.nodes, nodeProjectionCache),
+    [nodeProjectionCache, renderableGraph.nodes],
+  );
+  const renderedCanvasNodes = useMemo(
+    () => draftNode ? [...projectedCanvasNodes, projectTransientCanvasNode(draftNode)] : projectedCanvasNodes,
+    [draftNode, projectedCanvasNodes],
+  );
 
   // 仅派生渲染状态，不把隐藏和节点选中效果写回可持久化的边数据。
   const edgeProjection = useMemo(
@@ -1633,6 +1637,8 @@ function CanvasInner({ onReady }: CanvasProps) {
       onPointerDownCapture={handleDrawingPointerDown}
       onPointerMoveCapture={handleDrawingPointerMove}
       onPointerUpCapture={handleDrawingPointerUp}
+      onPointerCancelCapture={handleDrawingPointerCancel}
+      onLostPointerCaptureCapture={handleDrawingPointerCancel}
     >
       <ReactFlow
         nodes={renderedCanvasNodes}
@@ -1835,6 +1841,7 @@ function CanvasInner({ onReady }: CanvasProps) {
         onOpenGroupFolder={isGroupNode ? handleOpenGroupFolder : undefined}
         onDelete={handleDelete}
         onShowInFolder={showInFolder ? handleShowInFolder : undefined}
+        onCopyFilePath={showInFolder ? handleCopyFilePath : undefined}
         onSaveAs={showSaveAs ? handleSaveAs : undefined}
         onOpenInPS={showOpenInPS ? handleOpenInPS : undefined}
         onEditVideo={showEditVideo ? handleEditVideo : undefined}

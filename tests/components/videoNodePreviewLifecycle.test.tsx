@@ -6,13 +6,19 @@ vi.mock('../../src/components/shared/ViewportImage', () => ({ default: 'img' }))
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface Element { type: unknown; props: Record<string, unknown> & { children?: unknown } }
+type EditorSubscriber = Parameters<typeof import('../../src/services/videoEditorWindowService').subscribeVideoEditorWindow>[1];
 const driver = vi.hoisted(() => ({
   states: [] as unknown[], refs: [] as Array<{ current: unknown }>,
   effects: [] as Array<{ deps?: readonly unknown[]; cleanup?: () => void }>,
   pending: [] as Array<() => void>, stateIndex: 0, refIndex: 0, effectIndex: 0,
   callbacks: [] as Array<{ callback: unknown; deps?: readonly unknown[] }>, upload: vi.fn(),
   acquire: vi.fn(), ready: vi.fn(), seek: vi.fn(), rerender: undefined as (() => void) | undefined,
+  editorSubscriber: undefined as EditorSubscriber | undefined, editorBindingCurrent: false,
+  transitionImports: 0, transitionLoadStarted: undefined as (() => void) | undefined,
+  transitionLoadGate: undefined as Promise<void> | undefined,
+  listEditorModels: vi.fn(), runTransition: vi.fn(), postEditorModels: vi.fn(), postTransitionResult: vi.fn(),
   gesture: false,
+  extractAudio: vi.fn(), saveAudio: vi.fn(),
 }));
 
 vi.mock('react', async () => {
@@ -56,13 +62,23 @@ vi.mock('../../src/hooks/useCompletionFlash', () => ({ useCompletionFlash: () =>
 vi.mock('../../src/hooks/useCanvasNodeLod', () => ({ useCanvasNodeLodProtection: vi.fn() }));
 vi.mock('../../src/components/nodes/shared/useNodeRename', () => ({ useNodeRename: () => ({ displayLabel: 'Video', handleRename: vi.fn() }) }));
 vi.mock('../../src/components/nodes/shared/useSourceFileUpload', () => ({ useSourceFileUpload: () => ({ isUploading: false, handleUpload: driver.upload }) }));
-vi.mock('../../src/services/fileService', () => ({ downloadUrlAndSave: vi.fn(), saveDataUrlToProjectData: vi.fn(), buildNodeFileName: () => 'frame.jpg' }));
+vi.mock('../../src/services/fileService', () => ({
+  downloadUrlAndSave: vi.fn(), saveDataUrlToProjectData: vi.fn(), buildNodeFileName: () => 'frame.jpg',
+  isTauriEnv: () => true, saveBinaryToProjectData: driver.saveAudio,
+}));
 vi.mock('../../src/services/clipboardService', () => ({ copyFile: vi.fn() }));
 vi.mock('../../src/services/indexedDbService', () => ({ buildVideoEditorProjectId: () => 'editor' }));
-vi.mock('../../src/services/videoEditorWindowService', () => ({
-  postVideoEditorAiTransitionResult: vi.fn(), postVideoEditorModels: vi.fn(), subscribeVideoEditorWindow: () => vi.fn(),
+vi.mock('../../src/services/videoEditorWindowService', async (original) => ({
+  // 普通预览默认没有活动剪辑会话，只有交接测试显式启用绑定。
+  ...await original<typeof import('../../src/services/videoEditorWindowService')>(),
+  postVideoEditorAiTransitionResult: driver.postTransitionResult,
+  postVideoEditorModels: driver.postEditorModels,
+  isVideoEditorWindowBindingCurrent: () => driver.editorBindingCurrent,
+  subscribeVideoEditorWindow: (_instanceId: string, subscriber: EditorSubscriber) => {
+    driver.editorSubscriber = subscriber;
+    return () => { if (driver.editorSubscriber === subscriber) driver.editorSubscriber = undefined; };
+  },
 }));
-vi.mock('../../src/services/videoEditorAiTransitionService', () => ({ listVideoEditorVideoModels: vi.fn(), runVideoEditorAiTransition: vi.fn() }));
 vi.mock('../../src/store/store.utils', () => ({ blobToDataUrl: async () => 'data:image/jpeg;base64,frame', derivedNodePlacement: () => ({ position: { x: 0, y: 0 } }) }));
 vi.mock('../../src/utils/videoSeek', () => ({ seekVideoTo: driver.seek }));
 vi.mock('../../src/components/shared/VideoPlayer', () => ({ default: 'VideoPlayer' }));
@@ -148,6 +164,21 @@ beforeEach(async () => {
   driver.ready.mockReset().mockResolvedValue(undefined);
   driver.seek.mockReset().mockImplementation(async (video: FakeVideo, time: number) => { video.currentTime = time; });
   driver.upload.mockReset().mockResolvedValue(null);
+  driver.extractAudio.mockReset();
+  driver.saveAudio.mockReset().mockResolvedValue({ assetUrl: 'asset://extracted.m4a', filePath: 'extracted.m4a' });
+  vi.doMock('../../src/services/videoAudioExtractionService', () => ({ extractVideoAudio: driver.extractAudio }));
+  driver.editorSubscriber = undefined; driver.editorBindingCurrent = false;
+  driver.transitionImports = 0; driver.transitionLoadStarted = undefined; driver.transitionLoadGate = undefined;
+  driver.listEditorModels.mockReset().mockReturnValue([{ value: 'video/model', label: 'Video model', provider: 'video', groupName: 'Video' }]);
+  driver.runTransition.mockReset().mockResolvedValue({ videoUrl: 'asset://transition.mp4', fileName: 'transition.mp4' });
+  driver.postEditorModels.mockReset().mockResolvedValue(undefined);
+  driver.postTransitionResult.mockReset().mockResolvedValue(undefined);
+  vi.doMock('../../src/services/videoEditorAiTransitionService', async () => {
+    driver.transitionImports++;
+    driver.transitionLoadStarted?.();
+    await driver.transitionLoadGate;
+    return { listVideoEditorVideoModels: driver.listEditorModels, runVideoEditorAiTransition: driver.runTransition };
+  });
   driver.rerender = () => { render(); };
   selected = false; compact = undefined; fullscreen = undefined; compactMediaRef = undefined; revision = 1;
   store = {
@@ -172,9 +203,143 @@ afterEach(() => {
   driver.effects.forEach((effect) => effect.cleanup?.());
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('video node demand loading', () => {
+  it('extracts audio once while deselection unloads the player', async () => {
+    const started = deferred<void>();
+    const extracted = deferred<{ bytes: Uint8Array; extension: string; mimeType: string }>();
+    driver.extractAudio.mockImplementation(() => { started.resolve(); return extracted.promise; });
+    selected = true;
+    render();
+    const extract = named('VideoNodeToolbar').props.onExtractAudio as () => Promise<void>;
+    const completion = extract();
+    await started.promise;
+    await extract();
+    render();
+    expect(named('VideoNodeToolbar').props.isExtractingAudio).toBe(true);
+    expect(driver.extractAudio).toHaveBeenCalledOnce();
+    selected = false;
+    store.selectedNodeIds = [];
+    render();
+    expect((driver.extractAudio.mock.calls[0][1] as AbortSignal).aborted).toBe(false);
+    extracted.resolve({ bytes: new Uint8Array([1]), extension: 'm4a', mimeType: 'audio/mp4' });
+    await completion;
+    expect(store.addNode).toHaveBeenCalledOnce();
+    expect(store.addNode.mock.calls[0][0]).toMatchObject({
+      type: 'ai-audio', data: { audioUrl: 'asset://extracted.m4a', role: 'source', status: 'success' },
+    });
+  });
+
+  it.each(['project', 'source', 'revision', 'deleted'])('discards audio after the %s changes during extraction', async (change) => {
+    const started = deferred<void>();
+    const extracted = deferred<{ bytes: Uint8Array; extension: string; mimeType: string }>();
+    driver.extractAudio.mockImplementation(() => { started.resolve(); return extracted.promise; });
+    selected = true;
+    render();
+    const completion = (named('VideoNodeToolbar').props.onExtractAudio as () => Promise<void>)();
+    await started.promise;
+    if (change === 'project') store.currentProjectId = 'project-b';
+    if (change === 'source') store.nodes[0].data.videoUrl = 'asset://replacement.mp4';
+    if (change === 'revision') revision++;
+    if (change === 'deleted') store.nodes = [];
+    if (change === 'project' || change === 'source') render();
+    extracted.resolve({ bytes: new Uint8Array([1]), extension: 'm4a', mimeType: 'audio/mp4' });
+    await completion;
+    expect(driver.saveAudio).not.toHaveBeenCalled();
+    expect(store.addNode).not.toHaveBeenCalled();
+    expect(store.showToast).not.toHaveBeenCalled();
+  });
+
+  it('discards saved audio if the canvas changes while the file is being written', async () => {
+    const started = deferred<void>();
+    const saved = deferred<{ assetUrl: string; filePath: string }>();
+    driver.extractAudio.mockResolvedValue({ bytes: new Uint8Array([1]), extension: 'm4a', mimeType: 'audio/mp4' });
+    driver.saveAudio.mockImplementation(() => { started.resolve(); return saved.promise; });
+    selected = true;
+    render();
+    const completion = (named('VideoNodeToolbar').props.onExtractAudio as () => Promise<void>)();
+    await started.promise;
+    revision++;
+    saved.resolve({ assetUrl: 'asset://extracted.m4a', filePath: 'extracted.m4a' });
+    await completion;
+    expect(store.addNode).not.toHaveBeenCalled();
+    expect(store.showToast).not.toHaveBeenCalled();
+  });
+
+  it('does not create an audio node when saving fails', async () => {
+    driver.extractAudio.mockResolvedValue({ bytes: new Uint8Array([1]), extension: 'm4a', mimeType: 'audio/mp4' });
+    driver.saveAudio.mockRejectedValue(new Error('磁盘写入失败'));
+    selected = true;
+    render();
+    await (named('VideoNodeToolbar').props.onExtractAudio as () => Promise<void>)();
+    expect(store.addNode).not.toHaveBeenCalled();
+    expect(store.showToast).toHaveBeenCalledWith('提取音频失败：{message}', 'error');
+    render();
+    expect(named('VideoNodeToolbar').props.isExtractingAudio).toBe(false);
+  });
+
+  it('does not import the transition runtime while rendering an ordinary video node', () => {
+    render();
+    expect(driver.editorSubscriber).toBeDefined();
+    expect(driver.transitionImports).toBe(0);
+    expect(driver.listEditorModels).not.toHaveBeenCalled();
+    expect(driver.runTransition).not.toHaveBeenCalled();
+  });
+
+  it('loads the transition runtime only after an editor requests video models', async () => {
+    const posted = deferred<void>();
+    driver.postEditorModels.mockImplementation(async () => { posted.resolve(); });
+    render();
+    driver.editorBindingCurrent = true;
+    driver.editorSubscriber!({ type: 'storyai:video-editor-models-request' }, {
+      sessionId: 'editor-session', expectedContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 0,
+        projectId: 'project-a', projectEpoch: 0, canvasId: 'project-a', episodeId: null, canvasEpoch: 0, canvasRevision: 1 },
+    });
+    await posted.promise;
+    expect(driver.transitionImports).toBe(1);
+    expect(driver.listEditorModels).toHaveBeenCalledOnce();
+    expect(driver.postEditorModels).toHaveBeenCalledExactlyOnceWith('editor', driver.listEditorModels.mock.results[0].value);
+    expect(driver.runTransition).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: 'storyai:video-editor-models-request', log: '[videoEditor] 下发视频模型列表失败:' },
+    { type: 'storyai:video-editor-ai-transition-request', log: '[videoEditor] AI 转场生成失败:' },
+  ])('rejects a revoked editor binding while $type is loading its runtime', async ({ type, log }) => {
+    const loading = deferred<void>();
+    const release = deferred<void>();
+    const reported = deferred<void>();
+    driver.transitionLoadStarted = () => { loading.resolve(); };
+    driver.transitionLoadGate = release.promise;
+    const originalError = console.error.bind(console);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      if (args.length === 2 && args[0] === log && args[1] instanceof Error
+        && args[1].message === '剪辑窗口原画布上下文已撤销') reported.resolve();
+      else originalError(...args);
+    });
+    try {
+      render();
+      driver.editorBindingCurrent = true;
+      driver.editorSubscriber!({ type, payload: { requestId: 'transition-request' } }, {
+        sessionId: 'editor-session', expectedContext: { kind: 'canvas', schemaVersion: 2, modelGeneration: 0,
+          projectId: 'project-a', projectEpoch: 0, canvasId: 'project-a', episodeId: null, canvasEpoch: 0, canvasRevision: 1 },
+      });
+      await loading.promise;
+      driver.editorBindingCurrent = false;
+      release.resolve();
+      await reported.promise;
+      expect(driver.transitionImports).toBe(1);
+      expect(driver.listEditorModels).not.toHaveBeenCalled();
+      expect(driver.runTransition).not.toHaveBeenCalled();
+      expect(driver.postEditorModels).not.toHaveBeenCalled();
+      expect(driver.postTransitionResult).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledExactlyOnceWith(log,
+        expect.objectContaining({ message: '剪辑窗口原画布上下文已撤销' }));
+    } finally { release.resolve(); errorSpy.mockRestore(); }
+  });
+
   it('旧空节点的比例和保存尺寸不一致时按当前比例显示，切换后即时更新', () => {
     store.nodes[0].data = { type: 'ai-video', role: 'generator', seedanceRatio: '9:16', nodeWidth: 280, nodeHeight: 158 };
     render();

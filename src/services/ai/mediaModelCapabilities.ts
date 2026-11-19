@@ -10,12 +10,17 @@ import type { AudioModelCapability, ImageModelCapability, ModelExecutionProfile 
 import type { AppConfig } from '../../types';
 import { getRunningHubModel } from './providers/runninghubModelManifest';
 import { getGrsaiImageCapability } from './grsaiModels';
+import { MUSE_IMAGE_CAPABILITY, MUSE_IMAGE_MODEL } from './museModels';
 import { getProviderDefinition } from './providerCatalogService';
+import { isCccBananaModelId } from './cccProviderGroups';
+import { comparableProtocol, modelProtocolUsesVariable, resolveModelExecutionProfile } from './modelProtocol';
 import { resolveToapisImageModelContract } from './providers/toapisModelManifest';
-import { resolveRelayonImageModelContract } from './providers/relayonModelManifest';
+import { getRelayonImageOutputsPerJob, resolveRelayonImageModelContract } from './providers/relayonModelManifest';
 import { getLibapiAudioCapability, usesLibapiModelProtocol } from './providers/libapiModelManifest';
 import { getMinimaxAudioCapability, resolveMinimaxExecutionProfile, usesMinimaxModelProtocol } from './providers/minimaxModelManifest';
 import { resolveConfiguredImageBackground, resolveConfiguredImageQuality } from './modelCapabilityValidation';
+import { getImageSizePresets, resolveImageDimensions } from './modelSizeProfiles';
+import { getImageCapabilityTemplate } from './modelCapabilityTemplates';
 
 /* ── 生图能力表 ── */
 
@@ -67,36 +72,14 @@ export interface ImageCapability extends ImageModelCapability {
 // https://docs.apimart.ai/cn/api-reference/images/gpt-image-2.5/generation
 // 已核实的 APIMart 2.5／2.6 共用尺寸与批量合同；质量只在其精确型号覆盖中声明。
 const GPT_IMAGE_25_CAPABILITY: Omit<ImageCapability, 'modelId'> = {
-  resolutions: ['1k', '2k', '4k'],
-  defaultResolution: '1k',
-  ratios: ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5', '16:9', '9:16', '2:1', '1:2', '21:9', '9:21', '3:1', '1:3'],
-  defaultRatio: '1:1',
   resolutionStyle: 'K',
-  supportsBatch: true,
-  maxBatchCount: 4,
-  supportsImageReference: true,
-  maxImageReferences: 16,
-  supportsDataUrlReference: false,
-  dimensionPresets: {
-    '1k': {
-      '1:1': [1024, 1024], '3:2': [1536, 1024], '2:3': [1024, 1536],
-      '4:3': [1024, 768], '3:4': [768, 1024], '5:4': [1280, 1024], '4:5': [1024, 1280],
-      '16:9': [1536, 864], '9:16': [864, 1536], '2:1': [2048, 1024], '1:2': [1024, 2048],
-      '21:9': [2016, 864], '9:21': [864, 2016], '3:1': [1536, 512], '1:3': [512, 1536],
-    },
-    '2k': {
-      '1:1': [2048, 2048], '3:2': [2048, 1360], '2:3': [1360, 2048],
-      '4:3': [2048, 1536], '3:4': [1536, 2048], '5:4': [2560, 2048], '4:5': [2048, 2560],
-      '16:9': [2048, 1152], '9:16': [1152, 2048], '2:1': [2688, 1344], '1:2': [1344, 2688],
-      '21:9': [2688, 1152], '9:21': [1152, 2688], '3:1': [3072, 1024], '1:3': [1024, 3072],
-    },
-    '4k': {
-      '1:1': [2880, 2880], '3:2': [3520, 2336], '2:3': [2336, 3520],
-      '4:3': [3312, 2480], '3:4': [2480, 3312], '5:4': [3216, 2576], '4:5': [2576, 3216],
-      '16:9': [3840, 2160], '9:16': [2160, 3840], '2:1': [3840, 1920], '1:2': [1920, 3840],
-      '21:9': [3840, 1648], '9:21': [1648, 3840], '3:1': [3840, 1280], '1:3': [1280, 3840],
-    },
-  },
+  ...getImageCapabilityTemplate('gpt-image-2.5', {
+    resolutions: ['1k', '2k', '4k'], defaultResolution: '1k',
+    ratios: ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5', '16:9', '9:16', '2:1', '1:2', '21:9', '9:21', '3:1', '1:3'],
+    maxBatchCount: 4, supportsDataUrlReference: false,
+    qualities: undefined, defaultQuality: undefined, backgrounds: undefined,
+    dimensionPresets: getImageSizePresets('apimart-gpt-2.5'),
+  }),
 };
 
 /**
@@ -107,39 +90,22 @@ const IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
   // ── Nano Banana / Gemini 系列 ──
   'gemini-3.1-flash-image-preview': {
     modelId: 'gemini-3.1-flash-image-preview',
-    resolutions: ['1K'],
-    defaultResolution: '1K',
-    ratios: [...COMMON_RATIOS, '4:5', '5:4', '21:9'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: false,
-    supportsImageReference: true,
-    maxImageReferences: 14,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('nano-banana-2', {
+      resolutions: ['1K'], ratios: [...COMMON_RATIOS, '4:5', '5:4', '21:9'], maxBatchCount: undefined,
+    }),
   },
   'gemini-3-pro-image-preview': {
     modelId: 'gemini-3-pro-image-preview',
-    resolutions: ['1K'],
-    defaultResolution: '1K',
-    ratios: [...COMMON_RATIOS, '4:5', '5:4', '21:9'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: false,
-    supportsImageReference: true,
-    maxImageReferences: 14,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('nano-banana-pro', {
+      resolutions: ['1K'], ratios: [...COMMON_RATIOS, '4:5', '5:4', '21:9'], maxBatchCount: undefined,
+    }),
   },
   'gemini-2.5-flash-image-preview': {
     modelId: 'gemini-2.5-flash-image-preview',
-    resolutions: ['1K'],
-    defaultResolution: '1K',
-    ratios: ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: false,
-    supportsImageReference: true,
-    maxImageReferences: 14,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('nano-banana', { maxImageReferences: 14, maxBatchCount: undefined }),
   },
 
   // ── GPT-Image 系列 ──
@@ -153,42 +119,29 @@ const IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
   },
   'gpt-image-1': {
     modelId: 'gpt-image-1',
-    resolutions: ['1k', '2k', '4k'],
-    defaultResolution: '1k',
-    ratios: ['1:1', '3:2', '2:3'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: true,
-    maxBatchCount: 4,
-    supportsImageReference: true,
-    maxImageReferences: 15,
-    supportsDataUrlReference: false,
+    ...getImageCapabilityTemplate('gpt-image-1', {
+      resolutions: ['1k', '2k', '4k'], defaultResolution: '1k', maxBatchCount: 4,
+      supportsDataUrlReference: false, qualities: undefined, defaultQuality: undefined,
+    }),
   },
   'gpt-image-1.5': {
     modelId: 'gpt-image-1.5',
-    resolutions: ['1k', '2k', '4k'],
-    defaultResolution: '1k',
-    ratios: ['1:1', '3:2', '2:3'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: true,
-    maxBatchCount: 4,
-    supportsImageReference: true,
-    maxImageReferences: 15,
-    supportsDataUrlReference: false,
+    ...getImageCapabilityTemplate('gpt-image-1.5', {
+      resolutions: ['1k', '2k', '4k'], defaultResolution: '1k', maxBatchCount: 4,
+      supportsDataUrlReference: false, qualities: undefined, defaultQuality: undefined,
+    }),
   },
   'gpt-image-2': {
     modelId: 'gpt-image-2',
-    resolutions: ['1k', '2k', '4k'],
-    defaultResolution: '1k',
-    ratios: ['1:1', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5', '16:9', '9:16', '1:2', '2:1', '1:3', '3:1', '21:9', '9:21'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
     // APIMart 的 gpt-image-2 不接受 n>1；多图由调用层拆成多次 n=1 请求。
-    supportsBatch: false,
-    supportsImageReference: true,
-    maxImageReferences: 16,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('gpt-image-2', {
+      resolutions: ['1k', '2k', '4k'], defaultResolution: '1k',
+      ratios: ['1:1', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5', '16:9', '9:16', '1:2', '2:1', '1:3', '3:1', '21:9', '9:21'],
+      supportsBatch: false, maxBatchCount: undefined, qualities: undefined, defaultQuality: undefined,
+    }),
   },
 
   // ── Imagen 4.0（仅文生图）──
@@ -375,71 +328,28 @@ const IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
   // ── Seedream 系列（doubao-seedream-*）──
   'doubao-seedream-4.0': {
     modelId: 'doubao-seedream-4.0',
-    resolutions: ['1K', '2K', '4K'],
-    defaultResolution: '2K',
-    ratios: [...COMMON_RATIOS, '21:9', '9:21'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: true,
-    maxBatchCount: 15,
-    supportsImageReference: true,
-    maxImageReferences: 15,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('seedream-4'),
   },
   'doubao-seedream-4.5': {
     modelId: 'doubao-seedream-4.5',
-    resolutions: ['2K', '4K'],
-    defaultResolution: '2K',
-    ratios: [...COMMON_RATIOS, '21:9', '9:21'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: true,
-    maxBatchCount: 15,
-    supportsImageReference: true,
-    maxImageReferences: 15,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('seedream-4.5'),
   },
   'doubao-seedream-5.0-lite': {
     modelId: 'doubao-seedream-5-0-lite',
-    resolutions: ['2K', '3K', '4K'],
-    defaultResolution: '2K',
-    ratios: [...COMMON_RATIOS, '21:9'],
-    defaultRatio: '1:1',
     resolutionStyle: 'K',
-    supportsBatch: true,
-    maxBatchCount: 15,
-    supportsImageReference: true,
-    maxImageReferences: 15,
-    supportsDataUrlReference: true,
+    ...getImageCapabilityTemplate('seedream-5-lite'),
   },
   'doubao-seedream-5.0-pro': {
     modelId: 'doubao-seedream-5-0-pro',
-    resolutions: ['1K', '1.5K', '2K'],
-    defaultResolution: '2K',
-    ratios: ['auto', ...COMMON_RATIOS, '21:9'],
-    defaultRatio: 'auto',
     resolutionStyle: 'K',
-    supportsBatch: false,
-    supportsImageReference: true,
-    maxImageReferences: 10,
-    supportsDataUrlReference: true,
-    dimensionPresets: {
-      '1K': {
-        '1:1': [1024, 1024], '4:3': [1152, 864], '3:4': [864, 1152],
-        '16:9': [1424, 800], '9:16': [800, 1424], '3:2': [1248, 832],
-        '2:3': [832, 1248], '21:9': [1568, 672],
-      },
-      '1.5K': {
-        '1:1': [1536, 1536], '4:3': [1792, 1344], '3:4': [1344, 1792],
-        '16:9': [2048, 1152], '9:16': [1152, 2048], '3:2': [1872, 1248],
-        '2:3': [1248, 1872], '21:9': [2352, 1008],
-      },
-      '2K': {
-        '1:1': [2048, 2048], '4:3': [2368, 1776], '3:4': [1776, 2368],
-        '16:9': [2816, 1584], '9:16': [1584, 2816], '3:2': [2496, 1664],
-        '2:3': [1664, 2496], '21:9': [3136, 1344],
-      },
-    },
+    ...getImageCapabilityTemplate('seedream-5-pro', { dimensionPresets: getImageSizePresets('volcengine-seedream-5-pro') }),
+  },
+  'doubao-seedream-5.0-flash': {
+    modelId: 'doubao-seedream-5-0-flash',
+    resolutionStyle: 'K',
+    ...getImageCapabilityTemplate('seedream-5-pro', { dimensionPresets: getImageSizePresets('volcengine-seedream-5-pro') }),
   },
 };
 
@@ -487,11 +397,7 @@ const APIMART_IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
   ...Object.fromEntries(['seedream-5-0-pro', 'seedream-5-0-flash'].map((modelId) => [modelId, {
     ...IMAGE_CAPABILITIES['doubao-seedream-5.0-pro'], modelId, defaultResolution: '1K',
     ratios: ['auto', ...COMMON_RATIOS, '2:1', '1:2', '21:9'],
-    dimensionPresets: {
-      '1K': { '1:1': [1024, 1024], '4:3': [1152, 864], '3:4': [864, 1152], '16:9': [1312, 736], '9:16': [736, 1312], '3:2': [1248, 832], '2:3': [832, 1248], '2:1': [1440, 720], '1:2': [720, 1440], '21:9': [1568, 672] },
-      '1.5K': { '1:1': [1536, 1536], '4:3': [1792, 1344], '3:4': [1344, 1792], '16:9': [2048, 1152], '9:16': [1152, 2048], '3:2': [1872, 1248], '2:3': [1248, 1872], '2:1': [2176, 1088], '1:2': [1088, 2176], '21:9': [2352, 1008] },
-      '2K': { '1:1': [2048, 2048], '4:3': [2304, 1728], '3:4': [1728, 2304], '16:9': [2560, 1440], '9:16': [1440, 2560], '3:2': [2496, 1664], '2:3': [1664, 2496], '2:1': [2880, 1440], '1:2': [1440, 2880], '21:9': [3024, 1296] },
-    },
+    dimensionPresets: getImageSizePresets('apimart-seedream-5'),
   }])),
   'grok-imagine-1.5-apimart': {
     ...IMAGE_CAPABILITIES['grok-imagine-1.5-apimart'], maxImageReferences: 5, supportsDataUrlReference: false,
@@ -534,6 +440,10 @@ function normalizeImageModelId(model: string): string {
 }
 
 export function getImageCapability(model?: string): ImageCapability | undefined {
+  if (model === `muse/${MUSE_IMAGE_MODEL}`) {
+    // 空数组仅供运行期隐藏控件；持久化声明省略分辨率选项。
+    return { ...MUSE_IMAGE_CAPABILITY, resolutions: [], modelId: MUSE_IMAGE_MODEL, resolutionStyle: 'none' };
+  }
   if (model?.startsWith('grsai/')) {
     const capability = getGrsaiImageCapability(model);
     if (capability) return { ...capability, modelId: model.slice('grsai/'.length), resolutionStyle: 'none' };
@@ -566,6 +476,23 @@ export function getImageCapability(model?: string): ImageCapability | undefined 
   return versionedKey ? IMAGE_CAPABILITIES[versionedKey] : undefined;
 }
 
+/** 固定候选数量绑定真实厂商和完整内置协议，不改变同名自定义连接。 */
+export function resolveImageOutputsPerJob(
+  model: string | undefined,
+  provider: string | undefined,
+  config: Pick<AppConfig, 'providers' | 'generalModels'>,
+): number {
+  if (!model) return 1;
+  const generalModel = provider === 'general'
+    ? config.generalModels?.find((item) => item.id === model.replace(/^general\//, '')) : undefined;
+  const connectionId = generalModel?.providerConfigId ?? provider;
+  if (!connectionId || getProviderDefinition(connectionId, config.providers[connectionId])?.id !== 'relayonapi') return 1;
+  const modelId = generalModel?.modelId ?? (model.startsWith(`${connectionId}/`) ? model.slice(connectionId.length + 1) : model);
+  const profile = generalModel?.executionProfile
+    ?? config.providers[connectionId]?.selectedModels?.find((item) => item.id === modelId)?.executionProfile;
+  return getRelayonImageOutputsPerJob(modelId, profile);
+}
+
 /** 参数面板按生成入口相同的连接身份解析，兼容旧节点的原始 ID 和通用模型引用。 */
 export function resolveImageParameterCapability(
   model: string | undefined,
@@ -585,7 +512,8 @@ export function resolveImageParameterCapability(
   const catalogModel = definition?.models?.find((item) => item.id === modelId && item.category === 'image');
   // CCC 已确认的原生 Images 合同在生成入口优先于旧连接协议，参数面板必须使用相同边界。
   const catalogStandard = definition?.id === 'cccapi' && catalogModel?.imageReferenceRequestMode === 'edits-multipart';
-  const profile = catalogStandard ? undefined : generalModel?.executionProfile;
+  const profile = catalogStandard ? undefined : generalModel?.executionProfile
+    ?? (definition?.id === 'cccapi' ? selection?.executionProfile : undefined);
   if (definition?.id === 'grsai') {
     return getImageCapability(modelId.startsWith('grsai/') ? modelId : `grsai/${modelId}`);
   }
@@ -605,7 +533,9 @@ export function resolveImageParameterCapability(
   }
   if (generalModel) {
     // 自定义网关的同名模型不能继承其他厂商能力。
-    if (definition?.id === 'custom-openai') {
+    if (definition?.id === 'custom-openai' || definition?.id !== 'cccapi' && profile?.preset === 'custom'
+      && comparableProtocol(profile) !== comparableProtocol(catalogModel?.executionProfile)) {
+      if (definition?.id !== 'custom-openai' && !declared && !catalogModel) return undefined;
       const effective = imageCapabilityForProtocol({ modelId, resolutionStyle: 'none', ...declared }, profile);
       return { ...effective, resolutions: effective.resolutions ?? [], ratios: effective.ratios ?? [] };
     }
@@ -614,8 +544,12 @@ export function resolveImageParameterCapability(
   const catalog = catalogModel?.imageCapability;
   const parameterDeclaration = catalogStandard ? catalog : declared;
   const standard = !profile || profile.preset === 'openai-image' || profile.preset === 'openai-gpt-image';
-  const capability = imageCapabilityForProtocol({ modelId, resolutionStyle: fallback?.resolutionStyle ?? 'none',
+  let capability = imageCapabilityForProtocol({ modelId, resolutionStyle: fallback?.resolutionStyle ?? 'none',
     ...fallback, ...catalog, ...declared,
+    // 通用同名回退可能来自 APIMart；CCC 未声明精确像素时不得借用另一渠道的表。
+    ...(definition?.id === 'cccapi' ? {
+      dimensionPresets: catalogStandard ? catalog?.dimensionPresets : declared?.dimensionPresets ?? catalog?.dimensionPresets,
+    } : {}),
     ...(standard && definition?.id !== 'custom-openai' ? {
       qualities: parameterDeclaration?.qualities ?? catalog?.qualities ?? fallback?.qualities,
       defaultQuality: parameterDeclaration?.qualities ? parameterDeclaration.defaultQuality
@@ -628,9 +562,41 @@ export function resolveImageParameterCapability(
       backgrounds: declared?.backgrounds, defaultBackground: declared?.defaultBackground,
     }),
   }, profile);
+  if (definition?.id === 'cccapi' && (isCccBananaModelId(modelId) || catalogModel?.executionProfile?.preset === 'custom')
+    && profile?.preset === 'custom') {
+    const source = JSON.stringify(profile.protocol?.submit) ?? '';
+    const mapsDimensions = modelProtocolUsesVariable(source, 'width') && modelProtocolUsesVariable(source, 'height');
+    // 用户声明仍是权威；只有从目录继承的选项需要复核是否能进入改写后的请求。
+    if (declared?.resolutions !== undefined) capability = { ...capability, defaultResolution: declared.defaultResolution };
+    if (declared?.ratios !== undefined) capability = { ...capability, defaultRatio: declared.defaultRatio };
+    if (declared?.resolutions?.length === 0
+      || (declared?.resolutions === undefined && !mapsDimensions && !modelProtocolUsesVariable(source, 'imageSize', 'size'))) {
+      capability = { ...capability, resolutions: [], defaultResolution: declared?.defaultResolution, resolutionStyle: 'none' };
+    }
+    if (declared?.ratios?.length === 0
+      || (declared?.ratios === undefined && !mapsDimensions && !modelProtocolUsesVariable(source, 'aspectRatio', 'size'))) {
+      capability = { ...capability, ratios: [], defaultRatio: declared?.defaultRatio };
+    }
+  }
   if (!fallback && !catalog && !declared) return undefined;
   return { ...capability,
     ...(generalModel ? { resolutions: capability.resolutions ?? [], ratios: capability.ratios ?? [] } : {}) };
+}
+
+/** 生成沿用参数面板的有效合同，移除仅供隐藏控件的空数组，不把它们当成持久化声明。 */
+export function resolveImageExecutionCapability(
+  model: string | undefined,
+  provider: string | undefined,
+  config: Pick<AppConfig, 'providers' | 'generalModels'>,
+): ImageModelCapability | undefined {
+  const capability = resolveImageParameterCapability(model, provider, config);
+  if (!capability) return undefined;
+  return { ...capability,
+    resolutions: capability.resolutions?.length ? capability.resolutions : undefined,
+    ratios: capability.ratios?.length ? capability.ratios : undefined,
+    qualities: capability.qualities?.length ? capability.qualities : undefined,
+    backgrounds: capability.backgrounds?.length ? capability.backgrounds : undefined,
+  };
 }
 
 /** 旧自定义协议的固定参数保持固定；未映射时不能展示一个不会进入请求的可调控件。 */
@@ -639,10 +605,12 @@ function imageCapabilityForProtocol(
   profile: ModelExecutionProfile | undefined,
 ): ImageCapability {
   let effective: ImageCapability = { ...capability, backgroundIsFixed: undefined };
-  if (profile?.preset !== 'custom') return effective;
-  const source = JSON.stringify(profile.protocol?.submit) ?? '';
-  const body = profile.protocol?.submit.body;
-  for (const [variable, field, options, fallback] of [
+  if (profile?.preset !== 'custom' && !capability.outputFormats?.length) return effective;
+  const submit = profile?.preset === 'custom' ? profile.protocol?.submit
+    : capability.outputFormats?.length ? resolveModelExecutionProfile(profile)?.submit : undefined;
+  const source = JSON.stringify(submit) ?? '';
+  const body = submit?.body;
+  if (profile?.preset === 'custom') for (const [variable, field, options, fallback] of [
     ['imageQuality', 'quality', 'qualities', 'defaultQuality'],
     ['imageBackground', 'background', 'backgrounds', 'defaultBackground'],
   ] as const) {
@@ -653,27 +621,18 @@ function imageCapabilityForProtocol(
       ...(field === 'background' ? { backgroundIsFixed: fixed !== undefined } : {}),
     };
   }
+  const fixedFormat = body && typeof body === 'object' && !Array.isArray(body) ? body.output_format : undefined;
+  const supportedFixedFormat = effective.outputFormats?.length === 1 && fixedFormat === effective.outputFormats[0];
+  if (effective.outputFormats?.length && !modelProtocolUsesVariable(source, 'imageOutputFormat') && !supportedFixedFormat) {
+    // 固定/未接线的协议不能显示可变格式控件，也不能继承GIF专属选项。
+    effective = { ...effective, outputFormats: undefined, defaultOutputFormat: undefined,
+      textOnlyOutputFormats: undefined, squareOnlyOutputFormats: undefined,
+      gifFrameCount: undefined, gifFrameDurationMs: undefined, supportsGifTransparency: undefined };
+  }
+  if (!modelProtocolUsesVariable(source, 'imageFrameCount')) effective.gifFrameCount = undefined;
+  if (!modelProtocolUsesVariable(source, 'imageFrameDurationMs')) effective.gifFrameDurationMs = undefined;
+  if (!modelProtocolUsesVariable(source, 'imageTransparent')) effective.supportsGifTransparency = undefined;
   return effective;
-}
-
-/** 将分辨率档位换算为像素短边，用于结果回填的尺寸。 */
-function shortSideFromResolution(resolution: string | undefined): number {
-  if (!resolution) return 1024;
-  const normalized = resolution.toLowerCase().trim();
-  const map: Record<string, number> = {
-    '0.5k': 512,
-    '1k': 1024, '1mp': 1024, '720p': 720, '720': 720,
-    '2k': 2048, '2mp': 1536, '3k': 3072, '3mp': 2048,
-    '4k': 4096, '4mp': 2560, '1.5k': 1536,
-  };
-  return map[normalized] ?? 1024;
-}
-
-function shortSideToDimensions(shortSide: number, ratio: string): { width: number; height: number } {
-  const [w, h] = ratio.split(':').map(Number);
-  if (!w || !h) return { width: shortSide, height: shortSide };
-  if (w >= h) return { width: Math.round(shortSide * (w / h)), height: shortSide };
-  return { width: shortSide, height: Math.round(shortSide * (h / w)) };
 }
 
 /**
@@ -735,13 +694,7 @@ export function buildImageCapabilityRequest(
     body.image_urls = imageUrls;
   }
 
-  // 优先使用厂商公布的像素；auto 仅用方图估算布局，实际尺寸由产物加载确认。
-  const presets = capability.dimensionPresets?.[resolution ?? ''];
-  const preset = presets?.[ratio] ?? (ratio === 'auto' ? presets?.['1:1'] : undefined);
-  const shortSide = shortSideFromResolution(resolution);
-  const dimensions = preset
-    ? { width: preset[0], height: preset[1] }
-    : shortSideToDimensions(shortSide, ratio);
+  const dimensions = resolveImageDimensions(capability, resolution, ratio);
 
   return { body, dimensions, requestedCount };
 }

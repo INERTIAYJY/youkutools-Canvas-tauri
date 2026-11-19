@@ -1,13 +1,15 @@
 /**
- * uploadService — 本地图片上传到远端图床
- * 将 asset://localhost/... 或 data:... 等本地图片转为公网可访问的 URL
+ * uploadService — 本地参考媒体上传到远端托管服务
+ * 将 asset://localhost/... 或 data:... 等本地媒体转为模型可读取的 URL
  *
  * 上传策略：
- *  - provider === 'apimart' → APIMart /uploads/images（需 API Key）
+ *  - APIMart 连接 → /uploads/images（仅图片，需 API Key）
  *  - ToAPIs 连接 → 当前站点 /uploads/{images,videos,audios}（仅使用该连接 Key）
  *  - LibAPI 连接 → /v1/files（仅使用该连接 Key）
  *  - MiniMax 官方连接 → /v1/files/upload（返回当前连接的 mm_file 素材引用）
- *  - 其他 provider → uguu.se 免费图床（无需 API Key，直接返回无轮询）
+ *  - 火山方舟官方连接 → 私有北京 TOS 公网上传、内网预签名链接（只在内存缓存）
+ *  - 内置中转站 → 优先专用上传或随模型请求传文件，不改传图床
+ *  - 其他连接 → 启用的连接图片图床或全局公共托管（默认 Uguu）
  *
  * 缓存策略：
  *  - 内存缓存：同一进程内即时复用
@@ -30,11 +32,16 @@ import { invoke } from '@tauri-apps/api/core';
 import { lstat } from '@tauri-apps/plugin-fs';
 import { prepareReferenceImageUpload, prepareApimartImageUpload } from './ai/referenceImageUpload';
 import { corsSafeFetch } from './ai/httpTransport';
-import { getProviderPolicy, resolveProviderCatalogId } from './ai/providerPolicies';
+import { getProviderPolicy, resolveProviderCatalogId, type ProviderPolicy } from './ai/providerPolicies';
 import { sha256BytesHex } from './mediaDataUrl';
 import { redactModelProtocolError, redactModelProtocolErrorText } from './ai/modelProtocolHttp';
 import { assertMinimaxResponse, resolveMinimaxBaseUrl } from './ai/providers/minimaxModelManifest';
 import type { ApiProviderConfig } from '../types';
+import { uploadCustomImage } from './imageHostingService';
+import { startUploadDiagnostics, logUploadFailureResponse, logUploadNetworkFailure, logUploadTransport } from './uploadDiagnostics';
+import { resolveGlobalImageHosting } from './imageHostingTemplates';
+import type { ImageHostingConfig, PublicImageHostingProvider } from '../types/imageHosting';
+import { assertVolcengineTosEndpoint, assertVolcengineTosMediaSize, uploadVolcengineTosReference } from './ai/providers/volcengineTosUpload';
 
 const DEFAULT_UPLOAD_BASE = APIMART_BASE_URL;
 
@@ -63,17 +70,41 @@ interface UploadIdentity {
   source?: { digest: string; bytes: number };
 }
 
-type UploadConnection = Readonly<Pick<ApiProviderConfig, 'catalogId' | 'baseUrl' | 'apiKey'>>;
+type MinimaxFilePurpose = 'video_generation_input' | 'image_generation_input';
 
-function captureUploadConnection(provider: string): UploadConnection {
-  const connection = useAppStore.getState().config.providers[provider];
-  return { catalogId: connection?.catalogId, baseUrl: connection?.baseUrl, apiKey: connection?.apiKey?.trim() ?? '' };
+type UploadConnection = Readonly<Pick<ApiProviderConfig, 'catalogId' | 'baseUrl' | 'apiKey' | 'imageHosting' | 'tosUpload'> & {
+  kind: MediaDataUrlKind;
+  globalImageHosting?: { provider: PublicImageHostingProvider; config: ImageHostingConfig };
+}>;
+
+function dedicatedUploadForKind(policy: Readonly<ProviderPolicy>, kind: MediaDataUrlKind): ProviderPolicy['upload'] {
+  return policy.upload === 'apimart' && kind !== 'image' ? undefined : policy.upload;
+}
+
+function captureUploadConnection(provider: string, kind: MediaDataUrlKind = 'image'): UploadConnection {
+  const config = useAppStore.getState().config;
+  const connection = config.providers[provider];
+  const policy = getProviderPolicy(resolveProviderCatalogId(provider, connection));
+  const upload = dedicatedUploadForKind(policy, kind);
+  // 专用上传及禁止公共托管的连接忽略无效图床配置，也不把它纳入缓存与换配置检查。
+  const allowsHosting = !upload && policy.publicUploadFallback !== 'deny';
+  const imageHosting = allowsHosting ? connection?.imageHosting : undefined;
+  const useGlobalHosting = allowsHosting && kind !== 'other' && !(kind === 'image' && imageHosting?.enabled);
+  return { catalogId: connection?.catalogId, baseUrl: connection?.baseUrl, apiKey: connection?.apiKey?.trim() ?? '',
+    imageHosting: imageHosting ? structuredClone(imageHosting) : undefined, kind,
+    tosUpload: upload === 'volcengine-tos' && connection?.tosUpload ? structuredClone(connection.tosUpload) : undefined,
+    globalImageHosting: useGlobalHosting ? {
+      provider: config.imageHosting?.provider ?? 'uguu', config: resolveGlobalImageHosting(config.imageHosting),
+    } : undefined };
 }
 
 function assertUploadConnection(provider: string, expected: UploadConnection): void {
-  const current = captureUploadConnection(provider);
-  if (current.catalogId !== expected.catalogId || current.baseUrl !== expected.baseUrl || current.apiKey !== expected.apiKey) {
-    throw new Error('参考素材上传期间连接配置已变化，请重新发起');
+  const current = captureUploadConnection(provider, expected.kind);
+  if (current.catalogId !== expected.catalogId || current.baseUrl !== expected.baseUrl || current.apiKey !== expected.apiKey
+    || JSON.stringify(current.imageHosting) !== JSON.stringify(expected.imageHosting)
+    || JSON.stringify(current.tosUpload) !== JSON.stringify(expected.tosUpload)
+    || JSON.stringify(current.globalImageHosting) !== JSON.stringify(expected.globalImageHosting)) {
+    throw new Error('参考素材上传期间连接配置已变化（含图床设置），请重新发起');
   }
 }
 
@@ -130,7 +161,9 @@ async function cacheKey(
 ): Promise<UploadIdentity> {
   // 只持久化单向摘要；换站点或换 Key 后不能沿用另一连接的上传结果。
   const connectionDigest = await sha256BytesHex(new TextEncoder().encode(JSON.stringify([
-    'native-lossless-v1', provider, connection.catalogId ?? '', connection.baseUrl ?? '', connection.apiKey,
+    'native-lossless-v1', provider, connection.catalogId ?? '', connection.baseUrl ?? '', connection.apiKey, connection.imageHosting,
+    connection.globalImageHosting,
+    connection.tosUpload,
   ])));
   signal?.throwIfAborted();
   const scope = `${provider || 'default'}:${kind}:${connectionDigest}`;
@@ -139,7 +172,8 @@ async function cacheKey(
     if (path && isTauriEnv()) {
       try {
         const info = await lstat(path);
-        assertMediaDataUrlSize(info.size, kind, mediaKindLabel(kind));
+        if (getProviderPolicy(resolveProviderCatalogId(provider, connection)).upload === 'volcengine-tos') assertVolcengineTosMediaSize(info.size, kind);
+        else assertMediaDataUrlSize(info.size, kind, mediaKindLabel(kind));
         const { fingerprintAssetImage } = await import('./fs/assetImageMetadata');
         const source = await fingerprintAssetImage(path, signal);
         signal?.throwIfAborted();
@@ -423,6 +457,17 @@ async function urlToBlob(
   return blob === source.blob ? source : { blob, ext: blob.type === 'image/png' ? 'png' : blob.type === 'image/jpeg' ? 'jpg' : source.ext };
 }
 
+/** 公共托管保留媒体 MIME 和原字节，仅把 MIME 别名转换为常见文件后缀。 */
+function publicUploadExtension(url: string, kind: MediaDataUrlKind, ext: string): string {
+  const mimeExtension = ext.toLowerCase().split(';')[0].trim();
+  const pathExtension = localMediaUrlToPath(url)?.match(/\.([a-z0-9]{1,10})$/i)?.[1]?.toLowerCase();
+  const extension = mimeExtension === 'octet-stream' && pathExtension ? pathExtension : mimeExtension;
+  const aliases: Record<string, string> = { jpeg: 'jpg', quicktime: 'mov', 'x-wav': 'wav', wave: 'wav', 'vnd.wave': 'wav', 'x-m4a': 'm4a' };
+  const normalized = kind === 'audio' && extension === 'mp4' ? 'm4a'
+    : kind === 'audio' && extension === 'mpeg' ? 'mp3' : aliases[extension] ?? extension;
+  return normalized.replace(/[^a-z0-9]/g, '') || 'bin';
+}
+
 /** ToAPIs 不回退到其他连接凭据或公共图床；同一 Key 的两站由用户显式选择。 */
 async function uploadToToapis(url: string, connection: UploadConnection, kind: MediaDataUrlKind, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
   const apiKey = connection?.apiKey?.trim();
@@ -627,13 +672,15 @@ async function readMinimaxUploadResponse(response: Response, signal?: AbortSigna
   }
 }
 
-/** 官方素材直传失败不回退公共图床；私有引用只交付给本次连接的 H3 请求。 */
-async function uploadToMinimax(url: string, connection: UploadConnection, kind: MediaDataUrlKind, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
+/** 官方素材直传失败不回退公共图床；私有引用只交付给本次连接及上传用途。 */
+async function uploadToMinimax(url: string, connection: UploadConnection, kind: MediaDataUrlKind,
+  purpose: MinimaxFilePurpose, signal?: AbortSignal, source?: UploadIdentity['source']): Promise<string> {
   const apiKey = connection.apiKey?.trim();
   if (!apiKey) throw new Error('MiniMax 素材上传失败：请在「设置 → API Key → MiniMax 官方」填写当前连接的 Key');
   const baseUrl = resolveMinimaxBaseUrl(connection.baseUrl);
   const { blob, ext } = await urlToBlob(url, kind, undefined, signal, source);
-  const limitMb = kind === 'image' ? 30 : kind === 'video' ? 50 : kind === 'audio' ? 15 : 0;
+  const limitMb = purpose === 'image_generation_input' ? 64
+    : kind === 'image' ? 30 : kind === 'video' ? 50 : kind === 'audio' ? 15 : 0;
   if (!limitMb) throw new Error('MiniMax 官方上传仅支持图片、视频或音频参考');
   if (!blob.size || blob.size > limitMb * 1024 * 1024) throw new Error(`MiniMax ${mediaKindLabel(kind)}必须为非空文件，单个文件不能超过 ${limitMb} MB`);
   const mimeExtension = ext.toLowerCase().split(';')[0];
@@ -644,10 +691,14 @@ async function uploadToMinimax(url: string, connection: UploadConnection, kind: 
   const allowed = kind === 'image' ? ['jpg', 'png', 'webp', 'heic', 'heif'] : kind === 'video' ? ['mp4', 'mov'] : ['mp3', 'wav'];
   if (!allowed.includes(filenameExt)) throw new Error(`MiniMax ${mediaKindLabel(kind)}格式不支持，请改用${kind === 'image' ? ' JPG / PNG / WebP / HEIC / HEIF' : kind === 'video' ? ' MP4 / MOV' : ' MP3 / WAV'}`);
   const form = new FormData();
-  form.append('purpose', 'video_generation_input');
+  form.append('purpose', purpose);
   form.append('file', blob, `reference.${filenameExt}`);
   const response = await corsSafeFetch(`${baseUrl}/v1/files/upload`, {
     method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
+  }).catch((error: unknown) => {
+    signal?.throwIfAborted();
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    throw new Error('MiniMax 官方参考素材上传失败，本轮尚未提交生成请求。请检查连接后重试。', { cause: error });
   });
   const payload = await readMinimaxUploadResponse(response, signal);
   assertMinimaxResponse(payload);
@@ -741,7 +792,8 @@ async function uploadToUguu(
   const { blob, ext } = await urlToBlob(url, kind, undefined, signal, source);
 
   const formData = new FormData();
-  formData.append('files[]', blob, `canvas-upload-${Date.now()}.${ext}`);
+  formData.append('files[]', blob, `canvas-upload-${Date.now()}.${publicUploadExtension(url, kind, ext)}`);
+  const diagnostic = startUploadDiagnostics('uguu', UGUU_UPLOAD_URL, formData);
 
   // Tauri 环境：走 Rust proxy_fetch 绕过浏览器 CORS
   if (isTauriEnv()) {
@@ -753,29 +805,43 @@ async function uploadToUguu(
       });
     };
     signal?.addEventListener('abort', cancelNativeRequest, { once: true });
-    let result: { status: number; body: string };
+    let result: { status: number; body: string; headers?: [string, string][]; uploadDiagnostics?: unknown };
+    const headers: [string, string][] = [
+      ['Content-Type', contentType],
+      ['User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'],
+      ['Accept', '*/*'],
+      ['Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8'],
+    ];
+    logUploadTransport(diagnostic, { transport: 'tauri-buffered', requestId, contentType, headers,
+      wireBytes: body.length * 3 / 4 - (body.endsWith('==') ? 2 : body.endsWith('=') ? 1 : 0) });
     try {
       if (signal?.aborted) throw abortReason(signal);
-      result = await invoke<{ status: number; body: string }>('proxy_fetch', {
+      result = await invoke<typeof result>('proxy_fetch', {
         req: {
           requestId,
           url: UGUU_UPLOAD_URL,
           method: 'POST',
-          headers: [
-            ['Content-Type', contentType],
-            ['User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'],
-            ['Accept', '*/*'],
-            ['Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8'],
-          ],
+          headers,
           body,
+          ...(diagnostic ? { uploadDiagnosticId: diagnostic.id } : {}),
         },
       });
       if (signal?.aborted) throw abortReason(signal);
+      logUploadTransport(diagnostic, { transport: 'tauri-buffered', requestId, native: result.uploadDiagnostics });
+    } catch (cause) {
+      logUploadNetworkFailure(diagnostic, cause);
+      throw cause;
     } finally {
       signal?.removeEventListener('abort', cancelNativeRequest);
     }
 
     if (result.status < 200 || result.status >= 300) {
+      if (diagnostic) {
+        try {
+          const bytes = Uint8Array.from(atob(result.body), (char) => char.charCodeAt(0));
+          await logUploadFailureResponse(diagnostic, new Response(bytes, { status: result.status, headers: result.headers }), signal);
+        } catch { /* 诊断解码失败也必须保留下面的原始 HTTP 错误。 */ }
+      }
       const errBody = (() => { try { return atob(result.body); } catch { return result.body; } })();
       throw new Error(`Uguu 上传失败 (${result.status}): ${errBody.slice(0, 200)}`);
     }
@@ -787,10 +853,15 @@ async function uploadToUguu(
   }
 
   // 浏览器开发模式：直接 fetch（ugu.se 无 CORS 头，仅在开发代理下可用）
-  const resp = await fetch(UGUU_UPLOAD_URL, { method: 'POST', body: formData, signal });
+  logUploadTransport(diagnostic, { transport: 'browser-fetch' });
+  let resp: Response;
+  try { resp = await fetch(UGUU_UPLOAD_URL, { method: 'POST', body: formData, signal }); }
+  catch (cause) { logUploadNetworkFailure(diagnostic, cause); throw cause; }
 
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => '');
+    if (diagnostic) await logUploadFailureResponse(diagnostic,
+      new Response(errBody, { status: resp.status, headers: resp.headers }), signal).catch(() => undefined);
     throw new Error(`Uguu 上传失败 (${resp.status}): ${errBody.slice(0, 200)}`);
   }
 
@@ -804,12 +875,13 @@ async function uploadToUguu(
 // ── 缓存查/写 ──
 
 /** 查缓存：先内存后 localStorage，命中且未过期则返回，过期则清除 */
-function getCachedUrl(key: string): string | null {
+function getCachedUrl(key: string, persist = true): string | null {
 
   // 内存缓存（最快）
   const mem = memCache.get(key);
   if (mem && Date.now() - mem.uploadedAt < UPLOAD_TTL_MS) return mem.remoteUrl;
   if (mem) memCache.delete(key);
+  if (!persist) return null;
 
   // localStorage 持久化缓存
   const persistent = loadPersistentCache();
@@ -829,10 +901,11 @@ function getCachedUrl(key: string): string | null {
 }
 
 /** 写缓存：同时写内存和 localStorage */
-function setCachedUrl(key: string, remoteUrl: string) {
+function setCachedUrl(key: string, remoteUrl: string, persist = true) {
   const entry = { remoteUrl, uploadedAt: Date.now() };
   pruneExpiredMemoryCache(entry.uploadedAt);
   memCache.set(key, entry);
+  if (!persist) return;
 
   const persistent = loadPersistentCache();
   persistent[key] = entry;
@@ -840,30 +913,72 @@ function setCachedUrl(key: string, remoteUrl: string) {
 }
 
 /**
- * 上传单个本地文件到远端图床
- * @param url    本地文件 URL（data: / asset: / file:）
- * @param provider 连接身份；MiniMax / ToAPIs / LibAPI 走当前连接上传，APIMart 图片走其图床，其余走 uguu.se
+ * 上传参考文件；方舟同时把外部 HTTP(S) 素材导入自己的 TOS。
+ * @param url    素材 URL（其他连接的已有公网地址仍直接使用）
+ * @param provider 连接身份；图片优先使用显式配置的图床，否则沿用厂商上传策略
  * @returns 公网 URL；MiniMax 官方返回仅供该连接生成请求使用的 mm_file 引用
  */
-export async function uploadToRemote(
+export function uploadToRemote(
   url: string,
   provider = '',
   kind: MediaDataUrlKind = 'image',
   signal?: AbortSignal,
 ): Promise<string> {
-  if (!isLocalImageUrl(url)) return url;
+  return uploadReference(url, provider, kind, signal);
+}
+
+/** H3 Image 的私有文件 ID 与视频参考用途隔离，只接受本机素材或公网 HTTPS 引用。 */
+export function uploadMinimaxImageReference(url: string, provider: string, signal?: AbortSignal): Promise<string> {
+  return uploadReference(url, provider, 'image', signal, 'image_generation_input');
+}
+
+async function uploadReference(
+  url: string,
+  provider: string,
+  kind: MediaDataUrlKind,
+  signal?: AbortSignal,
+  minimaxPurpose: MinimaxFilePurpose = 'video_generation_input',
+): Promise<string> {
+  const providerConfig = useAppStore.getState().config.providers[provider];
+  const policy = getProviderPolicy(resolveProviderCatalogId(provider, providerConfig));
+  const usesTos = policy.upload === 'volcengine-tos';
+  const isMinimaxImage = minimaxPurpose === 'image_generation_input';
+  if (isMinimaxImage) {
+    signal?.throwIfAborted();
+    if (policy.upload !== 'minimax') throw new Error('H3 Image 参考素材需要使用 MiniMax 官方连接');
+    if (!isLocalImageUrl(url)) {
+      if (isRemoteMediaUrl(url)) {
+        const reference = new URL(url);
+        if (reference.protocol === 'https:' && !reference.username && !reference.password) return url;
+      }
+      throw new Error('MiniMax 参考图须为本机文件或可公开访问的 HTTPS 地址');
+    }
+  }
+  // 已入库的方舟 Asset ID 是官方逻辑引用，不是待下载的本地 asset protocol。
+  if (usesTos && /^asset:\/\/(?!localhost$)[a-zA-Z0-9][a-zA-Z0-9_-]{0,255}$/i.test(url)) {
+    signal?.throwIfAborted();
+    return url;
+  }
+  if (!isLocalImageUrl(url) && !(usesTos && isRemoteMediaUrl(url))) return url;
   if (signal?.aborted) throw abortReason(signal);
+  if (policy.referenceTransport === 'request-files') {
+    throw new Error('万象本地参考素材须随模型请求提交文件；当前调用路径仅接收公网 URL，请配置该模型支持的文件或内联传输协议，不会改传全局图床');
+  }
+  if (policy.publicUploadFallback === 'deny' && !dedicatedUploadForKind(policy, kind)) {
+    throw new Error(`当前内置连接尚未接入${mediaKindLabel(kind)}独立文件上传，请使用模型支持的文件或内联传输协议，或公开可访问的 HTTPS 素材地址；不会改传图床`);
+  }
   if (uploadQueueQuarantine) throw new UploadQueueQuarantinedError();
-  const connection = captureUploadConnection(provider);
+  const connection = captureUploadConnection(provider, kind);
+  if (usesTos) assertVolcengineTosEndpoint(connection.baseUrl);
   if (isMediaDataUrl(url)) {
     await assertMediaDataUrlWithinLimitAsync(url, kind, mediaKindLabel(kind), signal);
   }
   const identity = await cacheKey(url, provider, kind, connection, signal);
   assertUploadConnection(provider, connection);
-  const { key } = identity;
+  const key = isMinimaxImage ? `${identity.key}:image_generation_input` : identity.key;
 
   // 查缓存（内存 → localStorage），命中且未过期则直接返回
-  const cached = identity.cacheable ? getCachedUrl(key) : null;
+  const cached = identity.cacheable ? getCachedUrl(key, !usesTos) : null;
   if (cached) return cached;
 
   const existing = pendingUploads.get(key);
@@ -880,28 +995,40 @@ export async function uploadToRemote(
   const pending = runUploadSerially(async (operationSignal) => {
     assertUploadConnection(provider, connection);
     // 排队期间另一个调用可能已完成上传，再查一次缓存避免重复传输。
-    const queuedCached = identity.cacheable ? getCachedUrl(key) : null;
+    const queuedCached = identity.cacheable ? getCachedUrl(key, !usesTos) : null;
     if (queuedCached) return queuedCached;
 
-    const upload = getProviderPolicy(resolveProviderCatalogId(provider, connection)).upload;
-    const publicUrl = upload === 'toapis'
+    const upload = dedicatedUploadForKind(getProviderPolicy(resolveProviderCatalogId(provider, connection)), kind);
+    const customImageHosting = upload ? undefined : kind === 'image' && connection.imageHosting?.enabled ? connection.imageHosting
+      : connection.globalImageHosting?.provider !== 'uguu' ? connection.globalImageHosting?.config : undefined;
+    let customUrl: string | undefined;
+    if (customImageHosting && kind !== 'other') {
+      const { blob, ext } = await urlToBlob(url, kind, undefined, operationSignal, identity.source);
+      assertUploadConnection(provider, connection);
+      customUrl = await uploadCustomImage(blob, `reference.${publicUploadExtension(url, kind, ext)}`, customImageHosting, operationSignal,
+        { connection, kind, beforeUpload: () => assertUploadConnection(provider, connection) });
+    }
+    const publicUrl = customUrl ?? (usesTos
+      ? await uploadVolcengineTosReference(url, kind, connection.tosUpload, operationSignal, identity.source,
+        () => assertUploadConnection(provider, connection))
+      : upload === 'toapis'
       ? await uploadToToapis(url, connection, kind, operationSignal, identity.source)
       : upload === 'libapi'
       ? await uploadToLibapi(url, connection, kind, operationSignal, identity.source)
       : upload === 'minimax'
-      ? await uploadToMinimax(url, connection, kind, operationSignal, identity.source)
-      : provider === 'apimart' && kind === 'image'
+      ? await uploadToMinimax(url, connection, kind, minimaxPurpose, operationSignal, identity.source)
+      : upload === 'apimart'
       ? await uploadToApimart(url, connection, operationSignal, identity.source)
-      : await uploadToUguu(url, kind, operationSignal, identity.source);
+      : await uploadToUguu(url, kind, operationSignal, identity.source));
 
     // 写入双层缓存（2.5 小时有效期）
     operationSignal.throwIfAborted();
     assertUploadConnection(provider, connection);
-    if (identity.cacheable) setCachedUrl(key, publicUrl);
+    if (identity.cacheable) setCachedUrl(key, publicUrl, !usesTos);
     return publicUrl;
   }, controller.signal).catch((err) => {
     const sourceType = isMediaDataUrl(url) ? 'data' : url.split(':', 1)[0] || 'unknown';
-    const currentKey = captureUploadConnection(provider).apiKey;
+    const currentKey = useAppStore.getState().config.providers[provider]?.apiKey?.trim() ?? '';
     const safeError = redactModelProtocolError(redactModelProtocolError(err, connection.apiKey), currentKey);
     const reason = safeError instanceof Error ? safeError.message : typeof safeError === 'string' ? safeError : '媒体上传失败';
     console.error('[uploadService] Upload failed:', { sourceType, sourceLength: url.length, provider, reason });
@@ -923,7 +1050,7 @@ export async function uploadToRemote(
  *  - `dataUrl`   → 读取本地文件转 base64 data URL（general 通用协议等）
  *  - `publicUrl` → 按当前连接上传；MiniMax 返回 mm_file，其他返回公网 URL
  *
- * @param url     原始 URL（公网原样返回；data: 按目标 mode 保留或上传）
+ * @param url     原始 URL（方舟统一经 TOS；其他连接公网原样返回）
  * @param options.provider 提供商标识，决定上传图床
  * @param options.mode     目标形态：'publicUrl'（默认）| 'dataUrl'
  * @param options.kind     媒体类型（image / video / audio），用于 apimart 图床分流
@@ -942,6 +1069,11 @@ export async function resolveMediaReferenceUrl(
     provider = '', mode = 'publicUrl', kind = 'image', signal, dataUrlBudget,
   } = options;
   if (signal?.aborted) throw abortReason(signal);
+  // 方舟本地与远端参考统一经 TOS；内联只作受限原生传输，不向上游发送 Base64。
+  const providerConfig = useAppStore.getState().config.providers[provider];
+  if (getProviderPolicy(resolveProviderCatalogId(provider, providerConfig)).upload === 'volcengine-tos') {
+    return uploadToRemote(url, provider, kind, signal);
+  }
   // Windows 的 Tauri asset URL 也使用 HTTP，仍需读取并上传本地素材。
   if (isRemoteMediaUrl(url)) return url;
   if (isMediaDataUrl(url) && mode === 'dataUrl') {
@@ -968,7 +1100,6 @@ export async function resolveMediaReferenceUrl(
     return kind === 'image' ? prepareReferenceImageDataUrl(dataUrl, signal) : dataUrl;
   }
 
-  // APIMart 的 /uploads/images 只接受图片；uploadToRemote 会让视频/音频走通用图床，
-  // 但缓存仍保留原 provider 作用域，避免不同调用方互相污染。
+  // 内置中转站缺少对应媒体的上传合同时明确失败，不改传连接或全局图床。
   return uploadToRemote(url, provider, kind, signal);
 }

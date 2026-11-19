@@ -6,7 +6,7 @@
 
 [![GitHub Stars](https://img.shields.io/github/stars/Tenney95/AI-Canvas-tauri?style=flat&label=Star%20on%20GitHub)](https://github.com/Tenney95/AI-Canvas-tauri/stargazers)
 
-**[在线体验](https://tenney95.github.io/AI-Canvas-tauri/) · [下载桌面版](https://github.com/Tenney95/AI-Canvas-tauri/releases) · [分享作品与交流](https://github.com/Tenney95/AI-Canvas-tauri/discussions)**
+**[在线体验](https://tenney95.github.io/AI-Canvas-tauri/) · [下载桌面版](https://github.com/Tenney95/AI-Canvas-tauri/releases) · [分享作品与交流](https://github.com/Tenney95/AI-Canvas-tauri/discussions) · [爱发电支持](https://ifdian.net/a/AI-Canvas) · [参与开发](#代码贡献)**
 
 > ⭐ **开源计划：** 当本项目的 GitHub Stars 达到 **10,000（10k）** 时，项目自有代码将转用 **[MIT License（MIT 许可证）](https://opensource.org/license/mit)**，允许自由使用、修改、分发和商用，须保留版权声明和许可文本。在此之前，仍以 [LICENSE](LICENSE) 中的当前许可条款为准。
 
@@ -16,7 +16,7 @@
 
 AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown、分镜、360° 全景和手绘笔记组织成可连接的画布节点。你可以在同一个项目中编排生成链路、统一管理角色库、人物/场景/道具与本地素材、执行 ComfyUI 工作流、安装 JavaScript 或可信 Python 用户插件，也可以通过对话助手查询或修改画布、生成媒体、派出只读子智能体、读取授权文件并沉淀项目记忆。项目还能拆成剧集与分集，一部 AI短剧的每一集各占一张画布，角色库与素材整部剧共用。
 
-![Version](https://img.shields.io/badge/version-0.10.34-6366f1)
+![Version](https://img.shields.io/badge/version-0.11.10-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
 ![React Flow](https://img.shields.io/badge/React_Flow-12-ff0072)
@@ -27,7 +27,7 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 
 **下载：** <https://github.com/tenney95/AI-Canvas-tauri/releases>（获取桌面安装包）
 
-[在线体验](https://tenney95.github.io/AI-Canvas-tauri/) · [下载](https://github.com/tenney95/AI-Canvas-tauri/releases) · [赞助支持](#赞助支持) · [核心能力](#核心能力) · [快速开始](#快速开始) · [项目文档](#项目文档) · [License](#license)
+[在线体验](https://tenney95.github.io/AI-Canvas-tauri/) · [下载](https://github.com/tenney95/AI-Canvas-tauri/releases) · [赞助支持](#赞助支持) · [核心能力](#核心能力) · [快速开始](#快速开始) · [参与开发](#代码贡献) · [项目文档](#项目文档) · [License](#license)
 
 > 在线版适合体验画布与界面。用户插件、文件系统、凭据存储、独立窗口、3D 导演台、本地模型等能力依赖 Tauri 桌面环境；完整体验请按下方步骤启动桌面应用。
 
@@ -55,6 +55,16 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 
 ## 赞助支持
 
+### 为项目与贡献者发电
+
+如果 AI Canvas 帮到了你，欢迎通过[爱发电支持项目](https://ifdian.net/a/AI-Canvas)。赞助自愿，量力而行；反馈问题、分享作品、点一颗 Star 或贡献代码，同样都是支持。
+
+**我会留出大部分赞助收入，与优秀的代码贡献者一起分红，让认真参与开发的人也能分享项目成长的收益。具体评选与分配方式后续公开。**
+
+[了解项目与贡献者分红的想法](https://ifdian.net/p/172129e4e27a11f1b27452540025c377) · [一起参与开发](#代码贡献)
+
+### 项目赞助方
+
 <table>
   <tr>
     <td align="center" width="140">
@@ -80,6 +90,7 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 | 能力 | 说明 |
 | --- | --- |
 | 多模态节点画布 | 用可连接的节点组织文本、图像、视频、音频、动画、Markdown、分镜、全景、3D 导演台与画布笔记。 |
+| 分组开合让位 | 双击分组头部收起、双击文件夹展开；同排右侧内容随开合自动让位，保留原间距与手动移动。 |
 | 帧动画编辑与导出 | 导入或生成 Sprite Sheet，编辑动画帧与播放效果，导出 GIF、PNG 序列帧或图集。 |
 | AI 与工作流 | 连接云端与自定义模型、CCC、LibAPI 的文本/图片/视频/音频模型、ComfyUI 多服务器、RunningHub、通用工作流 API、Dreamina 和本地 ONNX 模型。 |
 | 工作流参数配置 | 本地 ComfyUI 与 RunningHub 共用参数浮层，按真实声明提供比例、分辨率、步数、调度器等设置；标记 `C#` 节点编号和提示词用途，默认正文与参考素材沿用节点输入框。 |
@@ -88,15 +99,17 @@ AI Canvas Tauri 将文本、图像、视频、音频、逐帧动画、Markdown�
 | 快捷指令编排与分享 | 高级步骤可参考原始输入或上一步结果，按顺序或依赖并发执行；复制、导出或导入 JSON 创建独立指令副本。 |
 | 视频参数保持 | 切换视频型号保留已有比例和兼容的分辨率、帧率、时长及音轨设置，生成前按所选模型核对。 |
 | 用户插件 | 通过本地文件、市场或 GitHub Release 安装插件，扩展工具、节点与界面。支持受限运行的 JavaScript 和拥有当前用户权限的可信 Python 插件。 |
-| 剧本与分镜制作 | 浏览原著、编写分集剧本、生成和修改分镜，准备配音与视频素材并推送剪辑时间轴。 |
+| 剧本与原文写作 | 在主窗口或独立工作台编写大纲、分集剧本和原文，右侧工具随页签切换；原文使用普通文本编辑，支持 AI 起笔、续写和润色，候选采用后手动保存。原文与分集剧本以 TXT 保存到项目 `manuscripts` 目录。 |
+| 故事关系图 | 在工作台整理人物、事件、伏笔及关系，切换关系图、时间线和列表，保留原文证据；AI 提取先预览，确认后再入图。 |
 | 内置视频剪辑 | 在独立编辑器中完成多轨编排、裁剪、转场、字幕、贴纸与音量编辑，支持视频导出和 MCP 控制。 |
-| 对话 Agent | 通过对话查询和编辑画布、生成媒体并管理任务，支持多会话、Plan/B/C 模式、项目记忆、独立窗口与只读子智能体。 |
+| 对话 Agent 与创作协作 | 助手与剧本工作台可按需求调度已授权智能体和 Skill，支持多模型团队、候选成果审阅和应用。工作台顶部「Agent协作」统一配置执行方式、成员、模型与任务权限，沿用 Plan/B/C 模式、项目记忆和只读子智能体边界。 |
+| 助手窗口与常用 Skill | 独立窗口交接会话草稿，关闭失败恢复编辑；节点 `/` 一级菜单提供最近 5 个可用的上传或包内 Skill，主／独立助手选择也更新共享近期记录。选择后加入输入，不自动生成。 |
 | AI 应用节点 | 由 Agent 或 MCP 创建交互应用，仅访问绑定的画布素材，可执行只读操作并保存结果。 |
 | 项目资产云同步 | 通过 S3 兼容存储连接共享项目，预览并手动同步项目媒体、人物、场景和道具及关联资料；支持仅云端的清空与删除，本地资产保留。全局资产和自动同步暂不纳入。 |
 | 万象 API 分组 | 按分组管理独立连接与密钥，选择已适配的文本、图片和视频模型。 |
 | 角色与创作资产 | 管理项目与全局人物、场景、道具和武器；角色可绑定声音、动作与多把同库武器，资产包、复制和项目云同步保留武器关联。场景与道具支持多参考图及单图精准引用。 |
 | MCP 外部控制 | 让外部 AI 工具通过本机 stdio 或 Streamable HTTP 控制画布、媒体和剪辑项目。默认关闭，远程连接需确认启用。 |
-| 本地存储 | 在本地保存项目与媒体，使用独立的凭据存储管理 API Key；存储健康区分文件占用与应用数据配额，清理前确认并复核引用，可打开未引用文件所在位置。 |
+| 本地存储 | 在本地保存项目与媒体，使用独立的凭据存储管理 API Key；存储健康区分文件占用与应用数据配额，可检查新旧项目的未引用普通原件，清理前确认并复核引用；新项目不可变媒体、导入区与未完成操作涉及的范围继续保护。 |
 | 图片无损压缩 | 图片节点支持 PNG / JPEG 无损压缩，仅在体积变小时创建独立副本，保留原图。 |
 | 剧集与分集 | 每集使用独立画布，整部剧共享角色库、项目记忆与素材；本集角色／道具可 AI 提取到清单，确认后再添加或绑定资产库，不直接自动入库。 |
 | 资产库与资源编辑 | 统一预览与编辑素材、提示词和标签，支持图片批量反推与文本/Markdown 编辑；创作资产支持多选、跨项目复制、资产包导入导出、使用位置查询、失效素材重连及不可撤销的失效记录清理；清理保留磁盘文件。 |
@@ -200,9 +213,21 @@ npm run tauri build
 
 ## Contact
 
+Discord: [加入 AI Canvas 社区](https://discord.gg/wZ5Qqab78B)
+
 开发沟通 QQ 群：873354155
 
 ## 代码贡献
+
+欢迎开发者一起把 AI Canvas 做得更好。无论你熟悉 React / TypeScript、Tauri / Rust、模型与工作流适配、插件开发，还是文档与多语言，都可以找到参与的方向。
+
+1. 先读[开发指南](doc/开发指南.md)和[模块文档导航](doc/文档导航.md)，了解项目结构与工程边界。
+2. 在 [Issues](https://github.com/Tenney95/AI-Canvas-tauri/issues) 提交可复现的问题，在 [Discussions](https://github.com/Tenney95/AI-Canvas-tauri/discussions) 交流想法；较大的功能或结构调整先讨论方案。
+3. 从范围明确的小改动开始，通过 [Pull Request](https://github.com/Tenney95/AI-Canvas-tauri/pulls) 提交修复、功能、文档或翻译，并说明解决的问题、改动内容和验证情况。
+
+优秀代码贡献者的赞助收益分享计划见[赞助支持](#赞助支持)，具体评选与分配方式后续公开。
+
+感谢每一位参与项目建设的贡献者：
 
 <p>
   <a href="https://github.com/zhurui0523" title="zhurui0523"><img src="https://images.weserv.nl/?url=github.com/zhurui0523.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="zhurui0523" /></a>
@@ -210,5 +235,6 @@ npm run tauri build
   <a href="https://github.com/luckcatlin2000" title="luckcatlin2000"><img src="https://images.weserv.nl/?url=github.com/luckcatlin2000.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="luckcatlin2000" /></a>
   <a href="https://github.com/orlova851986-debug" title="orlova851986-debug"><img src="https://images.weserv.nl/?url=github.com/orlova851986-debug.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="orlova851986-debug" /></a>
   <a href="https://github.com/Lazzz-y" title="Lazzz-y"><img src="https://images.weserv.nl/?url=github.com/Lazzz-y.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="Lazzz-y" /></a>
+  <a href="https://github.com/lalanbv" title="lalanbv"><img src="https://images.weserv.nl/?url=github.com/lalanbv.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="lalanbv" /></a>
   <a href="https://github.com/xiaozangao" title="xiaozangao"><img src="https://images.weserv.nl/?url=github.com/xiaozangao.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="xiaozangao" /></a>
 </p>

@@ -63,7 +63,8 @@ beforeEach(() => {
   binding = fixtureBinding();
   revoke = () => {};
   mocks.isTauri.mockReturnValue(true);
-  mocks.getState.mockReturnValue({ currentProjectId: 'project-1', installedPlugins: [plugin], showToast: vi.fn() });
+  mocks.getState.mockReturnValue({ currentProjectId: 'project-1', projects: [{ id: 'project-1', exchangeEpoch: 0 }],
+    getCurrentRevision: () => 7, installedPlugins: [plugin], showToast: vi.fn() });
   dispose.mockImplementation(() => { active = false; });
   finishRequest.mockImplementation(() => {});
   request.mockResolvedValue({ ok: true, value: { theme: 'dark' } });
@@ -333,6 +334,19 @@ describe('pluginUiWindowService', () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
+  it('rejects an event whose canvas lease was changed while retaining the legacy binding fields', async () => {
+    const expectedContext = { kind: 'canvas' as const, schemaVersion: 2 as const, modelGeneration: 0,
+      runtimeEpoch: 'test-process', projectId: 'owner', projectEpoch: 2, canvasId: 'project-1', episodeId: null,
+      canvasEpoch: 3, canvasRevision: 7 };
+    binding = { ...binding, expectedContext };
+    await openPluginUiWindow(options);
+    emit({ type: 'request', binding: { ...binding, expectedContext: { ...expectedContext, canvasEpoch: 4 } },
+      requestId: crypto.randomUUID(), kind: 'effect', payload: {} });
+    expect(request).not.toHaveBeenCalled();
+    expect(replies()).toHaveLength(0);
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it('revokes on native close, drops late results and ignores subsequent events', async () => {
     let finish!: (reply: { ok: boolean }) => void;
     request.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
@@ -445,7 +459,7 @@ describe('pluginUiWindowService', () => {
     await expect(openPluginUiWindow({ ...options, plugin: { ...plugin, revisionDigest: 'd'.repeat(64) } })).rejects.toThrow('revision');
     const pending = openPluginUiWindow(options);
     mocks.getState().currentProjectId = 'project-2';
-    await expect(pending).rejects.toThrow('项目已变化');
+    await expect(pending).rejects.toThrow('项目上下文已变化');
     expect(mocks.create).not.toHaveBeenCalled();
   });
 });

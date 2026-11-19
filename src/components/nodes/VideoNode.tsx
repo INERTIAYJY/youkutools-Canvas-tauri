@@ -17,6 +17,7 @@ import ViewportImage from '../shared/ViewportImage';
 import { acquireComfyMediaSource } from '../../services/comfyMediaSource';
 import VideoNodeToolbar, { type CaptureFramePosition } from './shared/VideoNodeToolbar';
 import NodeToolbarShell from './shared/NodeToolbarShell';
+import { useVideoAudioExtraction } from './shared/video/useVideoAudioExtraction';
 import {
   acquireCanvasVideoPoster,
   releaseCanvasVideo,
@@ -42,21 +43,21 @@ import {
   registerCanvasDerivation,
 } from '../../services/canvasDerivationGuard';
 import { buildVideoEditorProjectId } from '../../services/indexedDbService';
+import { pauseMediaTask } from '../../services/pollManager';
+import type { MediaTaskReceipt } from '../../types/aiTypes';
 import {
   postVideoEditorAiTransitionResult,
   postVideoEditorModels,
   subscribeVideoEditorWindow,
+  isVideoEditorWindowBindingCurrent,
   type VideoEditorAiTransitionRequest,
   type VideoEditorExportResult,
   type VideoEditorFrameExportResult,
 } from '../../services/videoEditorWindowService';
-import {
-  listVideoEditorVideoModels,
-  runVideoEditorAiTransition,
-} from '../../services/videoEditorAiTransitionService';
 import { useT } from '../../i18n';
 import NodeGenerationProgress from './shared/NodeGenerationProgress';
 import VideoTaskStatus from './shared/VideoTaskStatus';
+import VideoEditorTransitionRecovery from './shared/VideoEditorTransitionRecovery';
 import { COMFY_REFMOD_MIME } from '../../utils/comfyRefmod';
 import { readComfyRefmodDragPayload } from '../../utils/comfyRefmodDrag';
 import { appendRefmodsToVideoNode } from '../../services/comfyRefmodNodeService';
@@ -548,6 +549,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
      Fullscreen State — 双击 / 工具栏按钮打开全屏预览
      ════════════════════════════════════════════ */
   const [isReversingPrompt, setIsReversingPrompt] = useState(false);
+  const { isExtractingAudio, handleExtractAudio } = useVideoAudioExtraction(id, data.videoUrl);
   const handleOpenFullscreen = useCallback(() => {
     if (!data.videoUrl && !data.thumbnailUrl) return;
     const compactVideo = videoRef.current;
@@ -612,11 +614,18 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
     if (!projectId) return;
 
     const instanceId = buildVideoEditorProjectId(projectId, id);
-    return subscribeVideoEditorWindow(instanceId, (message) => {
+    return subscribeVideoEditorWindow(instanceId, (message, binding) => {
+      if (!binding || !isVideoEditorWindowBindingCurrent(instanceId, binding)) return;
+      const assertCurrent = () => {
+        if (!isVideoEditorWindowBindingCurrent(instanceId, binding)) throw new Error('剪辑窗口原画布上下文已撤销');
+      };
       // 编辑器没有 Store 也没有 API Key：模型目录与转场生成都由主窗口代跑
       if (message.type === 'storyai:video-editor-models-request') {
-        void postVideoEditorModels(instanceId, listVideoEditorVideoModels())
-          .catch((error) => console.error('[videoEditor] 下发视频模型列表失败:', error));
+        void (async () => {
+          const { listVideoEditorVideoModels } = await import('../../services/videoEditorAiTransitionService');
+          assertCurrent();
+          await postVideoEditorModels(instanceId, listVideoEditorVideoModels());
+        })().catch((error) => console.error('[videoEditor] 下发视频模型列表失败:', error));
         return;
       }
 
@@ -625,18 +634,32 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
         const requestId = typeof request.requestId === 'string' ? request.requestId : '';
         if (!requestId) return;
         void (async () => {
+          let receipt: MediaTaskReceipt | undefined;
           try {
+            const { runVideoEditorAiTransition } = await import('../../services/videoEditorAiTransitionService');
+            assertCurrent();
             const outcome = await runVideoEditorAiTransition(
               request as VideoEditorAiTransitionRequest,
               projectId,
+              id,
+              undefined,
+              assertCurrent,
             );
-            await postVideoEditorAiTransitionResult(instanceId, { requestId, ...outcome });
+            receipt = outcome.taskReceipt;
+            assertCurrent();
+            await postVideoEditorAiTransitionResult(instanceId, { requestId, videoUrl: outcome.videoUrl,
+              filePath: outcome.filePath, fileName: outcome.fileName }, binding);
+            // emitTo 成功不等于剪辑器已接纳片段；原目标可能被删除，保留主动取回入口。
           } catch (error) {
+            if (receipt) pauseMediaTask(receipt, error,
+              isVideoEditorWindowBindingCurrent(instanceId, binding) ? 'delivery_pending' : 'canvas_changed');
             console.error('[videoEditor] AI 转场生成失败:', error);
+            if (!isVideoEditorWindowBindingCurrent(instanceId, binding)) return;
             await postVideoEditorAiTransitionResult(instanceId, {
               requestId,
-              error: error instanceof Error ? error.message : String(error),
-            }).catch(() => {});
+              ...(error instanceof Error && error.name === 'NativeEditorTransitionPending'
+                ? { pending: true } : { error: error instanceof Error ? error.message : String(error) }),
+            }, binding).catch(() => {});
           }
         })();
         return;
@@ -964,7 +987,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   }, [activateCompactVideo, data.videoUrl, id, t]);
 
   useCanvasNodeLodProtection(id, isFullscreen || !!playingSource || !!activatedSource
-    || isUploading || isReversingPrompt || !!failedCover);
+    || isUploading || isReversingPrompt || isExtractingAudio || !!failedCover);
 
   return (
     <div className={`node-wrapper relative ${refmodDragOver ? 'rounded-xl ring-2 ring-brand' : ''}`} style={{ width: nodeWidth }}
@@ -986,6 +1009,8 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           <VideoNodeToolbar
             nodeId={id}
             onCaptureFrame={handleCaptureFrame}
+            onExtractAudio={handleExtractAudio}
+            isExtractingAudio={isExtractingAudio}
             onFullscreen={handleOpenFullscreen}
             onCopyFile={handleCopyFile}
             onReversePrompt={handleReversePrompt}
@@ -1085,6 +1110,8 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
           <GooeyBtn className="gooey-btn-right" hue={217} />
         </Handle>
       </div>
+
+      {selected && projectId && <VideoEditorTransitionRecovery projectId={projectId} anchorNodeId={id} />}
 
       <ResizeHandle
         nodeId={id}

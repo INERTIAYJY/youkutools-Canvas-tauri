@@ -1,0 +1,611 @@
+/** 仓储测试仅使用独立 fake IndexedDB，不操作真实项目。 */
+import { webcrypto } from 'node:crypto';
+import { IDBFactory, IDBIndex, IDBKeyRange } from 'fake-indexeddb';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createNativeProject, readNativeProject, readNativeProjectByCanvasId, listNativeProjectIdentities,
+  listNativeEpisodes, convertNativeProjectToSeries, createNativeEpisode, saveNativeCanvas, saveNativeEpisodeContent,
+  reorderNativeEpisodes, deleteNativeEpisode, readNativeProjectCapture, readNativeProjectSelection, readNativeProjectContent,
+  readNativeEpisodeContent, saveNativeProjectContent, saveNativeProjectView, deleteNativeProject, transitionNativeProjectRecycle,
+  openNativeProjectDatabase, transact, RETIRED, EXCHANGE,
+  updateNativeProjectMetadata, updateNativeEpisodeMetadata, updateNativeEpisodeComposite, NATIVE_PROJECT_DATABASE_NAME } from '../../src/services/indexedDb/nativeProjectRepository';
+import { prepareNativeProjectExport, advanceNativeProjectExport, readNativeProjectExport, abandonNativeProjectExport,
+  listNativeProjectPendingTransfers, prepareNativeProjectImport,
+  advanceNativeProjectImport, commitNativeProjectImport, replaceNativeContentWithRecovery,
+  listNativeContentRecoveryPoints } from '../../src/services/indexedDb/nativeProjectRepository';
+import { prepareProjectModelArchiveCapture, materializeProjectModelArchiveBusiness } from '../../src/services/projectModelArchiveService';
+import type { ProjectModelTransferCapture, ProjectModelTransferExchange } from '../../src/types/projectModelTransfer';
+import { listNativeVideoEditorProjectsForProject } from '../../src/services/indexedDb/nativeVideoEditorRepository';
+import { readNativeProjectExchange, verifiedExchange } from '../../src/services/indexedDb/projectModelTransferRepository';
+import { readNativeProjectView } from '../../src/services/nativeProjectNavigation';
+
+const id = (prefix: 'p2' | 'e2' | 'c2', digit: string) => `${prefix}-${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`;
+let factory: IDBFactory;
+beforeEach(() => { factory = new IDBFactory(); vi.stubGlobal('crypto', webcrypto); vi.stubGlobal('IDBKeyRange', IDBKeyRange); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+async function readRetiredProject(projectId: string): Promise<unknown> {
+  const db = (await openNativeProjectDatabase(false, { factory }))!;
+  try {
+    return await transact(db, 'readonly', { factory }, (tx) => new Promise((resolve, reject) => {
+      const request = tx.objectStore(RETIRED).get(projectId);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    }), [RETIRED]);
+  } finally { db.close(); }
+}
+
+describe('独立新项目仓储', () => {
+  it('无媒体更新原子保存恢复点，过期预览和媒体引用不能覆盖结果', async () => {
+    const root = await createNativeProject({ name: '恢复点', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const initial = await readNativeProjectCapture(root.project.id, { factory });
+    expect(initial).not.toBeNull();
+    const expected: ProjectModelTransferCapture = { schemaVersion: 1, generation: 1, sessionId: 'native-project',
+      sessionRevision: initial!.changeRevision, sourceToken: 'a'.repeat(64), includesHistory: false,
+      aggregate: { ...initial!.aggregate, previews: [], bindings: [] }, exchange: null, history: [], historyBindings: [] };
+    const next = structuredClone(expected.aggregate); next.content.script = '更新正文';
+    await replaceNativeContentWithRecovery({ operationId: 'update-1', expected, next, exchange: null }, { factory });
+    await replaceNativeContentWithRecovery({ operationId: 'update-1', expected, next, exchange: null }, { factory });
+    const points = await listNativeContentRecoveryPoints(root.project.id, { factory });
+    expect(points).toHaveLength(1); expect(points[0].aggregate.content.script).toBe(expected.aggregate.content.script);
+    const changedIntent = structuredClone(next); changedIntent.content.script = '不同内容';
+    await expect(replaceNativeContentWithRecovery({ operationId: 'update-1', expected, next: changedIntent, exchange: null }, { factory }))
+      .rejects.toThrow('project-transfer-present');
+    expect((await readNativeProject(root.project.id, { factory }))?.content.script).toBe('更新正文');
+    await expect(replaceNativeContentWithRecovery({ operationId: 'update-2', expected, next, exchange: null }, { factory }))
+      .rejects.toThrow('project-version-conflict');
+    const withMedia = structuredClone(next);
+    withMedia.canvases[0].nodes = [{ id: 'image', type: 'image', position: { x: 0, y: 0 }, data: { imageUrl: 'data:image/png;base64,AA==' } }] as typeof withMedia.canvases[0]['nodes'];
+    await expect(replaceNativeContentWithRecovery({ operationId: 'update-3', expected, next: withMedia, exchange: null }, { factory }))
+      .rejects.toThrow('content-update-media-not-supported');
+    expect(await listNativeContentRecoveryPoints(root.project.id, { factory })).toHaveLength(1);
+  });
+  it('未结算的跨库共享同步冻结新项目的普通写入，完成后可继续保存', async () => {
+    const project = await createNativeProject({ name: '共享锁', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = factory.open(NATIVE_PROJECT_DATABASE_NAME); opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+    });
+    const mark = (phase: string) => new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('nativeTransferJournal', 'readwrite');
+      tx.objectStore('nativeTransferJournal').put({ operationId: 'shared-1', projectId: project.project.id, kind: 'native-shared-sync', phase });
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+    });
+    try {
+      await mark('prepared');
+      const input = { projectId: project.project.id, expectedProjectEpoch: project.project.epoch, canvasId: project.canvas!.id,
+        episodeId: null, expectedCanvasEpoch: project.canvas!.epoch, expectedCanvasRevision: project.canvas!.revision,
+        document: { nodes: [], edges: [], groups: [] } };
+      await expect(saveNativeCanvas(input, { factory })).rejects.toThrow('project-shared-sync-pending');
+      await expect(saveNativeProjectContent({ projectId: project.project.id, expectedProjectEpoch: project.project.epoch,
+        expectedRevisions: { script: 0 }, patch: { script: '不应写入' } }, { factory })).rejects.toThrow('project-shared-sync-pending');
+      expect((await readNativeProject(project.project.id, { factory }))?.content.script).toBeUndefined();
+      await mark('finalized');
+      expect((await saveNativeCanvas(input, { factory })).revision).toBe(1);
+    } finally { db.close(); }
+  });
+  it('过期导出可按原操作和版本结束，保留已发布回执', async () => {
+    const root = await createNativeProject({ name: '导出', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const capture: ProjectModelTransferCapture = { schemaVersion: 1, generation: 1, sessionId: 'native-project', sessionRevision: 0,
+      sourceToken: 'a'.repeat(64), includesHistory: true, aggregate: { ...root, previews: [], bindings: [] }, exchange: null, history: [], historyBindings: [] };
+    const prepared = await prepareProjectModelArchiveCapture(capture, []);
+    const input = { operationId: 'export-1', projectId: root.project.id, expectedChangeRevision: 0, sourceToken: capture.sourceToken,
+      expectedExchange: null, exchange: prepared.exchange, includesHistory: true };
+    const journal = await prepareNativeProjectExport(input, { factory });
+    const packing = await advanceNativeProjectExport(journal.operationId, journal.sequence, 'packing', undefined, { factory });
+    const receipt = { outputRef: 'opaque-receipt', packageDigest: 'b'.repeat(64) };
+    const published = await advanceNativeProjectExport(journal.operationId, packing.sequence, 'published', receipt, { factory });
+    await saveNativeCanvas({ projectId: root.project.id, expectedProjectEpoch: root.project.epoch, canvasId: root.canvas!.id, episodeId: null,
+      expectedCanvasEpoch: root.canvas!.epoch, expectedCanvasRevision: root.canvas!.revision, document: { nodes: [], edges: [], groups: [] } }, { factory });
+    await expect(advanceNativeProjectExport(journal.operationId, published.sequence, 'registered', receipt, { factory })).rejects.toThrow('project-version-conflict');
+    expect((await readNativeProjectExport(journal.operationId, { factory }))?.phase).toBe('published');
+    expect((await readNativeProjectCapture(root.project.id, { factory }))?.exchange).toBeNull();
+
+    const anotherProjectId = id('p2', '3');
+    expect(await listNativeProjectPendingTransfers(anotherProjectId, { factory })).toEqual([]);
+    expect(await listNativeProjectPendingTransfers(root.project.id, { factory })).toEqual([{
+      kind: 'export', phase: 'published', operationId: journal.operationId, updatedAt: published.updatedAt,
+    }]);
+    await expect(abandonNativeProjectExport(anotherProjectId, journal.operationId, published.sequence, { factory }))
+      .rejects.toThrow('export-journal-conflict');
+    await expect(abandonNativeProjectExport(root.project.id, journal.operationId, packing.sequence, { factory }))
+      .rejects.toThrow('export-journal-conflict');
+    expect(await readNativeProjectExport(journal.operationId, { factory })).toEqual(published);
+
+    await abandonNativeProjectExport(root.project.id, journal.operationId, published.sequence, { factory });
+    expect(await readNativeProjectExport(journal.operationId, { factory })).toMatchObject({
+      phase: 'aborted', sequence: published.sequence + 1, ...receipt, head: published.head,
+    });
+    await expect(advanceNativeProjectExport(journal.operationId, published.sequence + 1, 'registered', receipt, { factory }))
+      .rejects.toThrow('export-journal-conflict');
+    expect(await listNativeProjectPendingTransfers(root.project.id, { factory })).toEqual([]);
+    expect((await readNativeProjectCapture(root.project.id, { factory }))?.exchange).toBeNull();
+  });
+
+  it.each([false, true])('连续导出不保存原生统计字段；既有污染回执只读兼容，原操作可续接（旧回执=%s）', async (legacyReceipt) => {
+    const root = await createNativeProject({ name: '连续导出', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const capture = async (): Promise<ProjectModelTransferCapture> => {
+      const value = (await readNativeProjectCapture(root.project.id, { factory }))!;
+      return { schemaVersion: 1, generation: 1, sessionId: 'native-project', sessionRevision: value.changeRevision,
+        sourceToken: 'a'.repeat(64), includesHistory: true, aggregate: { ...value.aggregate, previews: [], bindings: [] },
+        exchange: value.exchange, history: [], historyBindings: [] };
+    };
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = factory.open(NATIVE_PROJECT_DATABASE_NAME); opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+    });
+    const storedExchange = () => new Promise<ProjectModelTransferExchange>((resolve, reject) => {
+      const tx = db.transaction('nativeProjectExchange', 'readonly'), request = tx.objectStore('nativeProjectExchange').get(root.project.id);
+      request.onsuccess = () => resolve(request.result.exchange); request.onerror = () => reject(request.error);
+    });
+    try {
+      for (const ordinal of [1, 2]) {
+        const before = await capture(), prepared = await prepareProjectModelArchiveCapture(before, []);
+        const journal = await prepareNativeProjectExport({ operationId: `export-${ordinal}`, projectId: root.project.id,
+          expectedChangeRevision: before.sessionRevision, expectedExchange: before.exchange, exchange: prepared.exchange,
+          includesHistory: true, sourceToken: before.sourceToken }, { factory });
+        const packing = await advanceNativeProjectExport(journal.operationId, journal.sequence, 'packing', undefined, { factory });
+        // 与原生 pack 返回合同一致，统计字段只供结果展示，不能进入交换回执。
+        const receipt = { outputRef: `opaque-receipt-${ordinal}`, packageDigest: String(ordinal).repeat(64), archiveBytes: 1024 };
+        const published = await advanceNativeProjectExport(journal.operationId, packing.sequence, 'published', receipt, { factory });
+        const resumed = (await readNativeProjectExport(journal.operationId, { factory }))!;
+        expect(resumed.phase).toBe('published');
+        await advanceNativeProjectExport(journal.operationId, resumed.sequence, 'registered',
+          ordinal === 1 ? receipt : { outputRef: published.outputRef!, packageDigest: published.packageDigest! }, { factory });
+        const exchange = await storedExchange();
+        expect(exchange.published).toHaveLength(ordinal);
+        expect(exchange.published.every((item) => !Object.hasOwn(item, 'archiveBytes'))).toBe(true);
+        if (ordinal === 1 && legacyReceipt) {
+          Object.assign(exchange.published[0], { archiveBytes: 1024 });
+          await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction('nativeProjectExchange', 'readwrite');
+            tx.objectStore('nativeProjectExchange').put({ projectId: root.project.id, exchange });
+            tx.oncomplete = () => resolve(); tx.onerror = tx.onabort = () => reject(tx.error);
+          });
+          expect((await capture()).exchange!.published[0]).not.toHaveProperty('archiveBytes');
+          expect((await storedExchange()).published[0]).toHaveProperty('archiveBytes', 1024);
+          // 兼容只作用于本机新库读取，不能放宽外部或隔离传输合同。
+          await expect(verifiedExchange(exchange)).rejects.toThrow('unsupported-transfer-fields');
+        }
+      }
+    } finally { db.close(); }
+  });
+
+  it('本机回执兼容只接受已知正整数统计字段，未知字段和版本继续拒绝', async () => {
+    const root = await createNativeProject({ name: '严格回执', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const capture: ProjectModelTransferCapture = { schemaVersion: 1, generation: 1, sessionId: 'native-project', sessionRevision: 0,
+      sourceToken: 'a'.repeat(64), includesHistory: false, aggregate: { ...root, previews: [], bindings: [] }, exchange: null, history: [], historyBindings: [] };
+    const prepared = await prepareProjectModelArchiveCapture(capture, []);
+    const exchange = { ...prepared.exchange, published: [{ operationId: 'first-export', outputRef: 'opaque-receipt',
+      packageDigest: 'b'.repeat(64), head: prepared.exchange.localHead, archiveBytes: 1024 }] };
+    const clean = readNativeProjectExchange(exchange)!;
+    expect(clean.published[0]).not.toHaveProperty('archiveBytes');
+    expect(exchange.published[0].archiveBytes).toBe(1024);
+    for (const archiveBytes of [undefined, null, '1024', 0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => readNativeProjectExchange({ ...exchange, published: [{ ...exchange.published[0], archiveBytes }] } as unknown as ProjectModelTransferExchange))
+        .toThrow('invalid-publication-receipt');
+    }
+    expect(() => readNativeProjectExchange({ ...exchange, published: [{ ...exchange.published[0], futureField: true }] } as unknown as ProjectModelTransferExchange))
+      .toThrow('unsupported-transfer-fields');
+    expect(() => readNativeProjectExchange({ ...exchange, futureField: true } as unknown as ProjectModelTransferExchange))
+      .toThrow('unsupported-transfer-fields');
+    expect(() => readNativeProjectExchange({ ...exchange, bundle: { ...exchange.bundle, version: 3 } } as unknown as ProjectModelTransferExchange))
+      .toThrow('invalid-exchange-state');
+    expect(() => readNativeProjectExchange({ ...exchange, published: [{ ...exchange.published[0], head: { canonicalVersion: 3, revisionId: 'b'.repeat(64) } }] } as unknown as ProjectModelTransferExchange))
+      .toThrow('invalid-head-reference');
+  });
+
+  it('新副本的操作先落 journal，再原子提交聚合和交换状态', async () => {
+    const original = await createNativeProject({ name: '源作品', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const capture: ProjectModelTransferCapture = { schemaVersion: 1, generation: 1, sessionId: 'native-project', sessionRevision: 0,
+      sourceToken: 'a'.repeat(64), includesHistory: false, aggregate: { ...original, previews: [], bindings: [] }, exchange: null, history: [], historyBindings: [] };
+    const prepared = await prepareProjectModelArchiveCapture(capture, []), target = id('p2', '4');
+    const material = await materializeProjectModelArchiveBusiness(prepared.payload, prepared.snapshot, null, target, 'import-1', undefined,
+      { folderName: `project-${target}`, allocateId: (kind) => kind === 'canvas' ? id('c2', '5') : `r2-${id('p2', '6').slice(3)}` });
+    const exchange: ProjectModelTransferExchange = { ...prepared.exchange, identities: material.identities, fileBindings: material.fileBindings };
+    const canvasId = id('c2', '5');
+    const editor = { id: `${canvasId}::node`, schemaVersion: 1, projectId: canvasId, nodeId: 'node', name: '剪辑', tracks: [], createdAt: 1, updatedAt: 1 };
+    const clip = { id: 'clip', kind: 'video' as const, fileName: 'clip.mp4', timelineStart: 0, sourceIn: 0, sourceOut: 1 };
+    const withClip = (value: typeof clip & { sourceUrl?: string; relativePath?: string }) => ({ ...editor,
+      tracks: [{ id: 'track', kind: 'video' as const, name: '视频', clips: [value] }] });
+    const base = { mode: 'import-new' as const, packageDigest: 'a'.repeat(64), intentDigest: 'b'.repeat(64),
+      targetProjectId: target, expected: null, next: material.aggregate, exchange, idMap: material.identities, history: [], media: [] };
+    for (const [operationId, value] of [
+      ['missing-file', clip],
+      ['remote-url', { ...clip, sourceUrl: 'https://example.invalid/video.mp4', relativePath: 'clip.mp4' }],
+      ['missing-binding', { ...clip, relativePath: 'clip.mp4' }],
+    ] as const) {
+      await expect(prepareNativeProjectImport({ ...base, operationId, editorRecords: [withClip(value)] }, { factory }))
+        .rejects.toThrow('invalid-import-editor-media');
+    }
+    let journal = await prepareNativeProjectImport({ operationId: 'import-1', mode: 'import-new', packageDigest: 'a'.repeat(64), intentDigest: 'b'.repeat(64),
+      targetProjectId: target, expected: null, next: material.aggregate, exchange, idMap: material.identities, history: [], media: [],
+      editorRecords: [editor], sourceRef: 'native-import-11111111-1111-4111-8111-111111111111', sourceFiles: [] }, { factory });
+    expect(await readNativeProject(target, { factory })).toBeNull();
+    expect(await listNativeVideoEditorProjectsForProject(target, { factory })).toEqual([]);
+    journal = await advanceNativeProjectImport(journal.operationId, journal.sequence, 'media_publishing', undefined, { factory });
+    journal = await advanceNativeProjectImport(journal.operationId, journal.sequence, 'media_ready', 'media_v1_import-1', { factory });
+    journal = await commitNativeProjectImport(journal.operationId, journal.sequence, { factory });
+    expect((await readNativeProjectCapture(target, { factory }))?.aggregate.canvas?.id).toBe(id('c2', '5'));
+    expect(await listNativeVideoEditorProjectsForProject(target, { factory })).toEqual([editor]);
+    await advanceNativeProjectImport(journal.operationId, journal.sequence, 'finalized', undefined, { factory });
+    await deleteNativeProject({ projectId: target, expectedProjectEpoch: material.aggregate.project.epoch, expectedChangeRevision: 0 }, { factory });
+    expect(await readNativeProject(target, { factory })).toBeNull();
+  });
+  it('作品和分集元数据按各自版本更新，过期写入不能覆盖', async () => {
+    const root = await createNativeProject({ name: '作品', kind: 'series', projectId: id('p2', '1') }, { factory });
+    const initial = await createNativeEpisode({ projectId: root.project.id, expectedProjectEpoch: root.project.epoch,
+      episodeId: id('e2', '2'), canvasId: id('c2', '3'), name: '第一集' }, { factory });
+    const renamed = await updateNativeProjectMetadata({ projectId: root.project.id, expectedProjectEpoch: initial.project.epoch,
+      name: '新作品名', defaultSettings: { promptSuffix: '风格' } }, { factory });
+    expect(renamed.project).toMatchObject({ name: '新作品名', epoch: initial.project.epoch + 1,
+      defaultSettings: { promptSuffix: '风格' } });
+    await expect(updateNativeProjectMetadata({ projectId: root.project.id, expectedProjectEpoch: initial.project.epoch,
+      name: '过期名称' }, { factory })).rejects.toThrow('project-version-conflict');
+    const episode = renamed.episodes[0];
+    const updated = await updateNativeEpisodeMetadata({ projectId: root.project.id, expectedProjectEpoch: renamed.project.epoch,
+      episodeId: episode.id, expectedEpisodeRevision: episode.revision, name: '新集名',
+      settingsPolicy: { mode: 'inherit', overrides: { visionModelId: { op: 'set', value: 'vision' } } } }, { factory });
+    expect(updated.episodes[0]).toMatchObject({ name: '新集名', revision: episode.revision + 1 });
+    await expect(updateNativeEpisodeMetadata({ projectId: root.project.id, expectedProjectEpoch: renamed.project.epoch,
+      episodeId: episode.id, expectedEpisodeRevision: episode.revision, name: '过期集名' }, { factory }))
+      .rejects.toThrow('episode-version-conflict');
+    expect((await readNativeProject(root.project.id, { factory }))?.episodes[0].name).toBe('新集名');
+  });
+
+  it('分集配置和正文同事务更新，任一版本冲突均保留原内容', async () => {
+    const root = await createNativeProject({ name: '作品', kind: 'series', projectId: id('p2', '1') }, { factory });
+    const created = await createNativeEpisode({ projectId: root.project.id, expectedProjectEpoch: root.project.epoch,
+      episodeId: id('e2', '2'), canvasId: id('c2', '3'), name: '一' }, { factory });
+    const input = { projectId: root.project.id, expectedProjectEpoch: created.project.epoch, episodeId: id('e2', '2'),
+      expectedCanvasId: id('c2', '3'), expectedEpisodeRevision: 0, expectedContentRevision: 0,
+      contentPatch: { outline: '新大纲' }, creationProfile: { id: 'profile', version: '1.0.0', sha256: 'a'.repeat(64) } };
+    await expect(updateNativeEpisodeComposite({ ...input, expectedContentRevision: 2 }, { factory })).rejects.toThrow('episode-version-conflict');
+    expect((await readNativeProject(root.project.id, { factory }))?.episodeContents[0].outline).toBeUndefined();
+    const result = await updateNativeEpisodeComposite(input, { factory });
+    expect(result).toMatchObject({ episode: { revision: 1, creationProfile: input.creationProfile }, content: { revision: 1, outline: '新大纲' } });
+    await expect(updateNativeEpisodeComposite(input, { factory })).rejects.toThrow('episode-version-conflict');
+    const cleared = await updateNativeEpisodeComposite({ ...input, expectedEpisodeRevision: 1, expectedContentRevision: 1,
+      contentPatch: undefined, creationProfile: null }, { factory });
+    expect(cleared.episode.creationProfile).toBeUndefined();
+    expect(cleared.content.outline).toBe('新大纲');
+  });
+  it('每个逻辑素材根只允许映射到其专属固定分区', async () => {
+    const initial = await createNativeProject({ name: '素材分区', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const secondary = `r2-${id('p2', '3').slice(3)}`, other = `r2-${id('p2', '4').slice(3)}`;
+    const primary = initial.project.storageBindings[0], folder = initial.project.dataFolder;
+    const binding = { rootRef: secondary, folderName: `${folder}/roots/${secondary}`, sourceRecordIds: [], source: 'project-managed' as const };
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = factory.open(NATIVE_PROJECT_DATABASE_NAME); opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+    });
+    const replaceBindings = async (bindings: typeof initial.project.storageBindings) => new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('projectRoots', 'readwrite');
+      tx.objectStore('projectRoots').put({ ...initial.project, storageBindings: bindings });
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+    });
+    try {
+      await replaceBindings([primary, binding]);
+      expect((await readNativeProject(initial.project.id, { factory }))?.project.storageBindings).toHaveLength(2);
+      for (const bindings of [
+        [primary, { ...binding, folderName: folder }],
+        [primary, { ...binding, folderName: `${folder}/roots/${other}` }],
+        [primary, { ...binding, folderName: `${binding.folderName}/extra` }],
+        [primary, binding, { ...binding }],
+        [{ ...primary, folderName: `${folder}/roots/${primary.rootRef}` }, binding],
+      ]) {
+        await replaceBindings(bindings);
+        await expect(readNativeProject(initial.project.id, { factory })).rejects.toThrow('invalid-membership');
+        await expect(listNativeProjectIdentities({ factory })).rejects.toThrow('invalid-membership');
+      }
+    } finally { db.close(); }
+  });
+
+  it('共享内容按域 CAS 更新并推进统一版本；过期请求不覆盖最新内容', async () => {
+    const initial = await createNativeProject({ name: '共享资料', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    expect((await readNativeProjectCapture(initial.project.id, { factory }))?.changeRevision).toBe(0);
+    const saved = await saveNativeProjectContent({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      expectedRevisions: { script: 0 }, patch: { script: '全剧原稿' } }, { factory });
+    expect(saved).toMatchObject({ changeRevision: 1, content: { script: '全剧原稿', revisions: { script: 1, source: 0 } } });
+    await expect(saveNativeProjectContent({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      expectedRevisions: { script: 0 }, patch: { script: '不应覆盖' } }, { factory })).rejects.toThrow('content-version-conflict');
+    expect((await readNativeProjectContent(initial.project.id, { factory }))?.content.script).toBe('全剧原稿');
+    expect((await readNativeProjectCapture(initial.project.id, { factory }))?.changeRevision).toBe(1);
+  });
+
+  it('画布、共享资料和分集正文同时提交；任一版本冲突均不留下部分保存', async () => {
+    const root = await createNativeProject({ name: '剧集', kind: 'series', projectId: id('p2', '1') }, { factory });
+    const created = await createNativeEpisode({ projectId: root.project.id, expectedProjectEpoch: root.project.epoch,
+      episodeId: id('e2', '2'), canvasId: id('c2', '3'), name: '一' }, { factory });
+    const input = { projectId: root.project.id, expectedProjectEpoch: created.project.epoch,
+      canvasId: id('c2', '3'), episodeId: id('e2', '2'), expectedCanvasEpoch: 1, expectedCanvasRevision: 0,
+      document: { nodes: [], edges: [], groups: [] },
+      shared: { expectedRevisions: { script: 0 }, patch: { script: '全剧' } },
+      episode: { expectedEpisodeRevision: 0, expectedContentRevision: 0, patch: { script: '分集' } } };
+    await expect(saveNativeProjectView({ ...input, episode: { ...input.episode, expectedContentRevision: 9 } }, { factory }))
+      .rejects.toThrow('episode-version-conflict');
+    let after = await readNativeProjectCapture(root.project.id, { factory });
+    expect(after?.aggregate.canvases[0].revision).toBe(0);
+    expect(after?.aggregate.content.revisions.script).toBe(0);
+    expect(after?.aggregate.episodeContents[0].revision).toBe(0);
+    const saved = await saveNativeProjectView(input, { factory });
+    expect(saved).toMatchObject({ canvas: { revision: 1 }, content: { script: '全剧', revisions: { script: 1 } },
+      episodeContent: { script: '分集', revision: 1 }, changeRevision: 2 });
+    await expect(saveNativeProjectView({ ...input, expectedCanvasRevision: 1 }, { factory })).rejects.toThrow('content-version-conflict');
+    after = await readNativeProjectCapture(root.project.id, { factory });
+    expect(after?.changeRevision).toBe(2);
+    expect(after?.aggregate.canvases[0].revision).toBe(1);
+  });
+
+  it('整项目删除检查统一版本并保留身份墓碑；过期删除不改变任何内容', async () => {
+    const root = await createNativeProject({ name: '剧集', kind: 'series', projectId: id('p2', '1') }, { factory });
+    const created = await createNativeEpisode({ projectId: root.project.id, expectedProjectEpoch: root.project.epoch,
+      episodeId: id('e2', '2'), canvasId: id('c2', '3'), name: '一' }, { factory });
+    await saveNativeCanvas({ projectId: root.project.id, expectedProjectEpoch: created.project.epoch,
+      canvasId: id('c2', '3'), episodeId: id('e2', '2'), expectedCanvasEpoch: 1, expectedCanvasRevision: 0,
+      document: { nodes: [], edges: [], groups: [] } }, { factory });
+    await expect(deleteNativeProject({ projectId: root.project.id, expectedProjectEpoch: created.project.epoch, expectedChangeRevision: 1 }, { factory }))
+      .rejects.toThrow('project-version-conflict');
+    expect((await readNativeProjectCapture(root.project.id, { factory }))?.aggregate.canvases[0].revision).toBe(1);
+    await deleteNativeProject({ projectId: root.project.id, expectedProjectEpoch: created.project.epoch, expectedChangeRevision: 2 }, { factory });
+    expect(await readNativeProject(root.project.id, { factory })).toBeNull();
+    expect(await readNativeProjectCapture(root.project.id, { factory })).toBeNull();
+    await expect(createNativeProject({ name: '复用根', projectId: root.project.id }, { factory })).rejects.toThrow('retired-identity');
+    const next = await createNativeProject({ name: '其他剧集', kind: 'series', projectId: id('p2', '4') }, { factory });
+    await expect(createNativeEpisode({ projectId: next.project.id, expectedProjectEpoch: next.project.epoch,
+      episodeId: id('e2', '2'), canvasId: id('c2', '5'), name: '复用集' }, { factory })).rejects.toThrow('identity-conflict');
+    await expect(createNativeEpisode({ projectId: next.project.id, expectedProjectEpoch: next.project.epoch,
+      episodeId: id('e2', '6'), canvasId: id('c2', '3'), name: '复用画布' }, { factory })).rejects.toThrow('identity-conflict');
+  });
+
+  it('只有提交明确的整项目删除才登记回收请求，请求只能被认领一次', async () => {
+    const { project } = await createNativeProject({ name: '待回收' }, { factory });
+    const requestId = crypto.randomUUID();
+    const input = { projectId: project.id, expectedProjectEpoch: project.epoch, expectedChangeRevision: 0, recycleRequestId: requestId, now: 200 };
+
+    await expect(deleteNativeProject({ ...input, expectedChangeRevision: 1 }, { factory })).rejects.toThrow('project-version-conflict');
+    expect(await readRetiredProject(project.id)).toBeUndefined();
+    expect(await transitionNativeProjectRecycle(project.id, requestId, 'pending', 'recycling', { factory })).toBe(false);
+
+    await deleteNativeProject(input, { factory });
+    expect(await readNativeProject(project.id, { factory })).toBeNull();
+    expect(await readRetiredProject(project.id)).toEqual({ id: project.id, projectId: project.id, kind: 'project', deletedAt: 200,
+      recycle: { requestId, phase: 'pending', projectEpoch: project.epoch, storageRootRef: project.storageRootRef } });
+    expect(await transitionNativeProjectRecycle(project.id, crypto.randomUUID(), 'pending', 'recycling', { factory })).toBe(false);
+    expect(await transitionNativeProjectRecycle(project.id, requestId, 'pending', 'recycled', { factory })).toBe(false);
+
+    const concurrentClaims = await Promise.all([1, 2].map(() =>
+      transitionNativeProjectRecycle(project.id, requestId, 'pending', 'recycling', { factory })));
+    expect(concurrentClaims.filter(Boolean)).toHaveLength(1);
+    expect(await transitionNativeProjectRecycle(project.id, requestId, 'recycling', 'recycled', { factory })).toBe(true);
+    expect(await transitionNativeProjectRecycle(project.id, requestId, 'recycling', 'retained', { factory })).toBe(false);
+    expect(await readRetiredProject(project.id)).toMatchObject({ recycle: { requestId, phase: 'recycled' } });
+  });
+
+  it('回收请求不能附加到没有明确回收意图的项目墓碑', async () => {
+    const { project } = await createNativeProject({ name: '仅删除记录' }, { factory });
+    await deleteNativeProject({ projectId: project.id, expectedProjectEpoch: project.epoch, expectedChangeRevision: 0, now: 200 }, { factory });
+    expect(await transitionNativeProjectRecycle(project.id, crypto.randomUUID(), 'pending', 'recycling', { factory })).toBe(false);
+    expect(await readRetiredProject(project.id)).toEqual({ id: project.id, projectId: project.id, kind: 'project', deletedAt: 200 });
+  });
+
+  it('回收墓碑写入失败时，回滚事务中已排队的项目和画布删除', async () => {
+    const { project, canvas } = await createNativeProject({ name: '墓碑冲突' }, { factory });
+    const occupied = { id: project.id, projectId: project.id, kind: 'project', deletedAt: 100 };
+    const db = (await openNativeProjectDatabase(false, { factory }))!;
+    try {
+      await transact(db, 'readwrite', { factory }, (tx) => new Promise((resolve, reject) => {
+        const request = tx.objectStore(RETIRED).add(occupied);
+        request.onsuccess = () => resolve(undefined);
+        request.onerror = () => reject(request.error);
+      }), [RETIRED]);
+    } finally { db.close(); }
+    await expect(deleteNativeProject({ projectId: project.id, expectedProjectEpoch: project.epoch, expectedChangeRevision: 0,
+      recycleRequestId: crypto.randomUUID() }, { factory })).rejects.toMatchObject({ name: 'ConstraintError' });
+    expect(await readNativeProject(project.id, { factory })).toMatchObject({ project, canvas });
+    expect(await readRetiredProject(project.id)).toEqual(occupied);
+  });
+
+  it('逻辑删除不等待原媒体任务，未结束的任务阻止认领目录回收', async () => {
+    const { project } = await createNativeProject({ name: '在途媒体' }, { factory });
+    const db = (await openNativeProjectDatabase(false, { factory }))!;
+    try {
+      const operationId = crypto.randomUUID();
+      await transact(db, 'readwrite', { factory }, (tx) => new Promise((resolve, reject) => {
+        const request = tx.objectStore(EXCHANGE).add({ projectId: `media-task:${operationId}`,
+          ownerProjectId: project.id, kind: 'native-media-task-v1', operationId, status: 'submitted' });
+        request.onsuccess = () => resolve(undefined);
+        request.onerror = () => reject(request.error);
+      }), [EXCHANGE]);
+    } finally { db.close(); }
+    const requestId = crypto.randomUUID();
+    await deleteNativeProject({ projectId: project.id, expectedProjectEpoch: project.epoch, expectedChangeRevision: 0, recycleRequestId: requestId }, { factory });
+    expect(await readNativeProject(project.id, { factory })).toBeNull();
+    await expect(transitionNativeProjectRecycle(project.id, requestId, 'pending', 'recycling', { factory })).rejects.toThrow('project-media-task-pending');
+    expect(await readRetiredProject(project.id)).toMatchObject({ recycle: { requestId, phase: 'pending' } });
+    expect(await transitionNativeProjectRecycle(project.id, requestId, 'pending', 'retained', { factory })).toBe(true);
+  });
+
+  it('存在传输 journal 时阻止整项目删除，保留交换记录与身份墓碑', async () => {
+    const root = await createNativeProject({ name: '审计', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = factory.open(NATIVE_PROJECT_DATABASE_NAME); opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+    });
+    const change = async (keepJournal: boolean) => new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(['nativeProjectExchange', 'nativeTransferJournal'], 'readwrite');
+      tx.objectStore('nativeProjectExchange').put({ projectId: root.project.id, retained: true });
+      if (keepJournal) tx.objectStore('nativeTransferJournal').put({ operationId: 'test-operation', projectId: root.project.id });
+      else tx.objectStore('nativeTransferJournal').delete('test-operation');
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+    });
+    try {
+      await change(true);
+      const deletion = { projectId: root.project.id, expectedProjectEpoch: root.project.epoch, expectedChangeRevision: 0 };
+      await expect(deleteNativeProject(deletion, { factory })).rejects.toThrow('project-transfer-present');
+      expect(await readNativeProject(root.project.id, { factory })).not.toBeNull();
+      await change(false);
+      await deleteNativeProject(deletion, { factory });
+      expect(await readNativeProjectCapture(root.project.id, { factory })).toBeNull();
+      const exchange = await new Promise<unknown>((resolve, reject) => {
+        const request = db.transaction('nativeProjectExchange').objectStore('nativeProjectExchange').get(root.project.id);
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      });
+      expect(exchange).toEqual({ projectId: root.project.id, retained: true });
+    } finally { db.close(); }
+  });
+
+  it('单集读写只访问该集正文与画布；其他画布损坏不被覆盖，整体捕获仍会拒绝', async () => {
+    const initial = await createNativeProject({ name: '剧集', kind: 'series', projectId: id('p2', '1') }, { factory });
+    const first = await createNativeEpisode({ projectId: initial.project.id, expectedProjectEpoch: 1, name: '一',
+      episodeId: id('e2', '2'), canvasId: id('c2', '3') }, { factory });
+    const second = await createNativeEpisode({ projectId: initial.project.id, expectedProjectEpoch: first.project.epoch, name: '二',
+      episodeId: id('e2', '4'), canvasId: id('c2', '5') }, { factory });
+    const listCanvasKeys = vi.spyOn(IDBIndex.prototype, 'getAllKeys');
+    expect((await readNativeEpisodeContent(initial.project.id, id('e2', '4'), { factory }))?.episode.canvasId).toBe(id('c2', '5'));
+    expect(listCanvasKeys).not.toHaveBeenCalled();
+    listCanvasKeys.mockRestore();
+    const other = second.canvases.find((item) => item.id === id('c2', '5'))!;
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = factory.open(NATIVE_PROJECT_DATABASE_NAME); opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(['canvasDocuments', 'episodeContents'], 'readwrite');
+        tx.objectStore('canvasDocuments').put({ ...other, nodes: 'broken-other-canvas' });
+        tx.objectStore('episodeContents').put({ ...second.episodeContents.find((item) => item.episodeId === id('e2', '4'))!,
+          revision: 'broken-other-body' });
+        tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+      });
+    } finally { db.close(); }
+    const selection = await readNativeProjectSelection(initial.project.id, id('c2', '3'), { factory });
+    expect(selection?.context).toMatchObject({ projectId: initial.project.id, episodeId: id('e2', '2'), canvasId: id('c2', '3') });
+    expect((await readNativeProjectView(initial.project.id, id('c2', '3'), { factory }))?.episodeContent?.episodeId).toBe(id('e2', '2'));
+    await expect(readNativeEpisodeContent(initial.project.id, id('e2', '4'), { factory })).rejects.toThrow();
+    const saved = await saveNativeCanvas({ projectId: initial.project.id, expectedProjectEpoch: second.project.epoch,
+      canvasId: id('c2', '3'), episodeId: id('e2', '2'), expectedCanvasEpoch: 1, expectedCanvasRevision: 0,
+      document: { nodes: [], edges: [], groups: [] } }, { factory });
+    expect(saved.revision).toBe(1);
+    const body = await readNativeEpisodeContent(initial.project.id, id('e2', '2'), { factory });
+    expect(body?.episode.canvasId).toBe(id('c2', '3'));
+    await expect(readNativeProjectCapture(initial.project.id, { factory })).rejects.toThrow();
+  });
+
+  it('空库只读不创建数据库，非新模型身份不打开库', async () => {
+    const open = vi.spyOn(factory, 'open');
+    expect(await readNativeProject(id('p2', '1'), { factory })).toBeNull();
+    expect(await factory.databases()).toEqual([]);
+    open.mockClear();
+    await expect(readNativeProject('旧项目', { factory })).rejects.toThrow('invalid-project-id');
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('原子创建独立根、正文与主画布；任一画布冲突不留下半个新项目', async () => {
+    const first = await createNativeProject({ name: '新项目', projectId: id('p2', '1'), canvasId: id('c2', '2'), now: 1 }, { factory });
+    expect((await factory.databases()).map((database) => database.name)).toEqual([NATIVE_PROJECT_DATABASE_NAME]);
+    expect(await readNativeProject(first.project.id, { factory })).toEqual(first);
+    expect(await readNativeProjectByCanvasId(first.canvas!.id, { factory })).toEqual(first);
+    await expect(createNativeProject({ name: '重复画布', projectId: id('p2', '3'), canvasId: first.canvas!.id }, { factory })).rejects.toThrow();
+    expect(await readNativeProject(id('p2', '3'), { factory })).toBeNull();
+    expect((await listNativeProjectIdentities({ factory })).map((entry) => entry.project.id)).toEqual([first.project.id]);
+  });
+
+  it('普通项目转剧集保留根和画布 ID，旧画布条件不能跨转换写入', async () => {
+    const initial = await createNativeProject({ name: '原项目', projectId: id('p2', '1'), canvasId: id('c2', '2'), now: 1 }, { factory });
+    const converted = await convertNativeProjectToSeries({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      expectedCanvasId: initial.canvas!.id, expectedCanvasEpoch: initial.canvas!.epoch, expectedCanvasRevision: initial.canvas!.revision, expectedStandaloneRevision: 0,
+      episodeId: id('e2', '3'), name: '第一集', now: 2 }, { factory });
+    expect(converted.project).toMatchObject({ id: initial.project.id, kind: 'series', epoch: 2 });
+    expect(converted.canvas).toMatchObject({ id: initial.canvas!.id, episodeId: id('e2', '3'), epoch: 2 });
+    await expect(saveNativeCanvas({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch, expectedCanvasRevision: 0,
+      document: { nodes: [], edges: [], groups: [] } }, { factory })).rejects.toThrow('project-version-conflict');
+    expect((await listNativeEpisodes(initial.project.id, { factory })).map((episode) => episode.id)).toEqual([id('e2', '3')]);
+  });
+
+  it('分集正文先保存时旧删除被拒；删除末集保留剧集且墓碑阻止 ID 重用', async () => {
+    const initial = await createNativeProject({ name: '零集剧集', kind: 'series', projectId: id('p2', '1'), now: 1 }, { factory });
+    expect(initial.canvas).toBeNull();
+    const one = await createNativeEpisode({ projectId: initial.project.id, expectedProjectEpoch: 1, name: '第一集',
+      episodeId: id('e2', '3'), canvasId: id('c2', '2'), now: 2 }, { factory });
+    const deletion = { projectId: initial.project.id, expectedProjectEpoch: one.project.epoch, episodeId: id('e2', '3'),
+      expectedCanvasId: id('c2', '2'), expectedEpisodeRevision: 0, expectedContentRevision: 0, expectedCanvasEpoch: 1, expectedCanvasRevision: 0 };
+    await saveNativeEpisodeContent({ projectId: initial.project.id, expectedProjectEpoch: one.project.epoch, episodeId: id('e2', '3'),
+      expectedCanvasId: id('c2', '2'), expectedEpisodeRevision: 0, expectedContentRevision: 0, patch: { script: '较新正文' } }, { factory });
+    await expect(deleteNativeEpisode(deletion, { factory })).rejects.toThrow('episode-version-conflict');
+    expect((await readNativeProject(initial.project.id, { factory }))?.episodeContents[0].script).toBe('较新正文');
+    const removed = await deleteNativeEpisode({ ...deletion, expectedContentRevision: 1 }, { factory });
+    expect(removed.project).toMatchObject({ id: initial.project.id, kind: 'series' });
+    expect(removed.canvas).toBeNull(); expect(removed.episodes).toEqual([]);
+    await expect(createNativeEpisode({ projectId: initial.project.id, expectedProjectEpoch: removed.project.epoch, name: '重用',
+      episodeId: id('e2', '3'), canvasId: id('c2', '4') }, { factory })).rejects.toThrow('identity-conflict');
+  });
+
+  it('换序要求所有分集的当前 revision，画布不能直接保存新本机路径', async () => {
+    const initial = await createNativeProject({ name: '剧集', kind: 'series', projectId: id('p2', '1') }, { factory });
+    const one = await createNativeEpisode({ projectId: initial.project.id, expectedProjectEpoch: 1, name: '一',
+      episodeId: id('e2', '2'), canvasId: id('c2', '3') }, { factory });
+    const two = await createNativeEpisode({ projectId: initial.project.id, expectedProjectEpoch: one.project.epoch, name: '二',
+      episodeId: id('e2', '4'), canvasId: id('c2', '5') }, { factory });
+    const order = { projectId: initial.project.id, expectedProjectEpoch: two.project.epoch,
+      expectedEpisodes: two.episodes.map(({ id: episodeId, revision }) => ({ id: episodeId, revision })),
+      orderedEpisodeIds: [id('e2', '4'), id('e2', '2')] };
+    expect((await reorderNativeEpisodes(order, { factory })).map((episode) => episode.id)).toEqual(order.orderedEpisodeIds);
+    await expect(reorderNativeEpisodes(order, { factory })).rejects.toThrow('project-version-conflict');
+    const current = (await readNativeProject(initial.project.id, { factory }))!;
+    const canvas = current.canvases.find((item) => item.id === id('c2', '3'))!;
+    await expect(saveNativeCanvas({ projectId: initial.project.id, expectedProjectEpoch: current.project.epoch,
+      canvasId: canvas.id, episodeId: canvas.episodeId, expectedCanvasEpoch: canvas.epoch, expectedCanvasRevision: canvas.revision,
+      document: { nodes: [{ id: 'n', data: { filePath: 'C:\\user\\private.png' } }], edges: [], groups: [] } }, { factory })).rejects.toThrow();
+  });
+
+  it.each(['data:image/png;base64,YQ==', 'data:video/mp4;base64,YQ==', 'data:audio/wav;base64,YQ==',
+    '  DATA:application/octet-stream;base64,YQ=='])('未落盘的内联数据 %s 不能作为新画布内容保存', async (url) => {
+    const initial = await createNativeProject({ name: '素材', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    await expect(saveNativeCanvas({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch, expectedCanvasRevision: 0,
+      document: { nodes: [{ id: 'node', data: { unknown: { media: url } } }], edges: [], groups: [] } }, { factory }))
+      .rejects.toThrow('inline-media-not-persisted');
+    expect((await readNativeProject(initial.project.id, { factory }))?.canvas?.revision).toBe(0);
+  });
+
+  it('笔记、提示词和文本节点输出可以把 data: 当普通文字', async () => {
+    const initial = await createNativeProject({ name: '文本', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const nodes = [
+      { id: 'note', data: { type: 'canvas-note', note: { kind: 'text', text: 'data: 笔记正文' } } },
+      { id: 'text', data: { type: 'ai-text', prompt: 'data: 提示词', output: 'data:image/png;base64,作为文本示例' } },
+    ];
+    const saved = await saveNativeCanvas({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch, expectedCanvasRevision: 0,
+      document: { nodes, edges: [], groups: [] } }, { factory });
+    expect(saved.nodes).toEqual(nodes);
+  });
+
+  it.each(['text', 'prompt', 'label', 'output'])('未知嵌套字段不能借 %s 冒充文本豁免', async (field) => {
+    const initial = await createNativeProject({ name: '未知字段', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    await expect(saveNativeCanvas({ projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch,
+      canvasId: initial.canvas!.id, episodeId: null, expectedCanvasEpoch: initial.canvas!.epoch, expectedCanvasRevision: 0,
+      document: { nodes: [{ id: 'node', data: { type: 'ai-text', unknown: { [field]: 'data:image/png;base64,YQ==' } } }], edges: [], groups: [] } },
+    { factory })).rejects.toThrow('inline-media-not-persisted');
+  });
+
+  it('已保存的完全相同旧内联值可保留，但不能新增另一个内联值', async () => {
+    const initial = await createNativeProject({ name: '兼容', projectId: id('p2', '1'), canvasId: id('c2', '2') }, { factory });
+    const inline = 'data:image/png;base64,YQ==';
+    const existing = { ...initial.canvas!, nodes: [{ id: 'node', data: { url: inline, text: '旧文字' } }] };
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = factory.open(NATIVE_PROJECT_DATABASE_NAME); opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('canvasDocuments', 'readwrite'); tx.objectStore('canvasDocuments').put(existing);
+        tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+      });
+    } finally { db.close(); }
+    const input = { projectId: initial.project.id, expectedProjectEpoch: initial.project.epoch, canvasId: existing.id,
+      episodeId: null, expectedCanvasEpoch: existing.epoch, expectedCanvasRevision: existing.revision,
+      document: { nodes: [{ id: 'node', data: { url: inline, text: '新文字' } }], edges: [], groups: [] } };
+    expect((await saveNativeCanvas(input, { factory })).revision).toBe(1);
+    await expect(saveNativeCanvas({ ...input, expectedCanvasRevision: 1,
+      document: { ...input.document, nodes: [...input.document.nodes, { id: 'extra', data: { url: inline } }] } }, { factory }))
+      .rejects.toThrow('inline-media-not-persisted');
+    await expect(saveNativeCanvas({ ...input, expectedCanvasRevision: 1,
+      document: { ...input.document, nodes: [{ id: 'node', data: { url: 'data:image/png;base64,Yg==' } }] } }, { factory }))
+      .rejects.toThrow('inline-media-not-persisted');
+  });
+});

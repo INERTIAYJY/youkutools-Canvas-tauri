@@ -1,0 +1,153 @@
+/** 只冻结公开内置目录与显式快速模板，不读取用户配置或发起模型请求。 */
+import { createHash } from 'node:crypto';
+import { describe, expect, it } from 'vitest';
+import { TOAPIS_MODEL_MANIFEST } from '../../src/services/ai/providers/toapisModelManifest';
+import { LIBAPI_MODEL_MANIFEST } from '../../src/services/ai/providers/libapiModelManifest';
+import { RELAYON_MODEL_MANIFEST, getRelayonVideoRecoveryProfiles } from '../../src/services/ai/providers/relayonModelManifest';
+import { SEEDANCE_COMMON_RATIOS } from '../../src/services/ai/seedanceModelCapabilities';
+import { AIGCSI_MODEL_MANIFEST } from '../../src/services/ai/providers/aigcsiModelManifest';
+import { SORA2U_MODEL_MANIFEST } from '../../src/services/ai/providers/sora2uModelManifest';
+import { RUNNINGHUB_MODEL_MANIFEST } from '../../src/services/ai/providers/runninghubModelManifest';
+import { getProviderDefinition } from '../../src/services/ai/providerCatalogService';
+import { getGrsaiImageCapability, getGrsaiVideoCapability } from '../../src/services/ai/grsaiModels';
+import { IMAGE_QUICK_ADAPT_OPTIONS, createImageQuickAdaptTemplate } from '../../src/services/ai/imageModelTemplates';
+import { getImageCapability } from '../../src/services/ai/mediaModelCapabilities';
+import { getImageSizePresets } from '../../src/services/ai/modelSizeProfiles';
+
+const IMAGE_SAMPLE_IDS = [
+  'gpt-image-1', 'gpt-image-1.5', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst',
+  'gemini-2.5-flash-image-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview',
+  'doubao-seedream-4.0', 'doubao-seedream-4.5', 'doubao-seedream-5.0-lite', 'doubao-seedream-5.0-pro',
+  ...[
+    'gpt-image-1', 'gpt-image-1.5', 'gpt-image-2', 'gpt-image-1-official', 'gpt-image-1.5-official', 'gpt-image-2-official',
+    'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst', 'gpt-image-2.5-ext',
+    'gemini-3.1-flash-lite-image', 'gemini-3.1-flash-lite-image-ext',
+    'gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image-preview-official',
+    'gemini-3-pro-image-preview', 'gemini-3-pro-image-preview-official', 'gemini-2.5-flash-image-preview',
+    'seedream-5-0-pro', 'seedream-5-0-flash', 'doubao-seedream-4.0', 'doubao-seedream-4.5',
+  ].map((id) => `apimart/${id}`),
+];
+
+const GRSAI_IMAGE_SAMPLE_IDS = [
+  'nano-banana-2.1', 'nano-banana-2', 'nano-banana-pro', 'nano-banana-2-lite', 'nano-banana-fast',
+  'nano-banana-2-cl', 'nano-banana-pro-cl', 'nano-banana-2-2k-cl', 'nano-banana-2-4k-cl',
+  'nano-banana-pro-4k-vip', 'nano-banana-pro-vip',
+  'gpt-image-2', 'gpt-image-2.5', 'gpt-image-2.6', 'gpt-image-2-vip', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst',
+];
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry)
+    ? Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+    : entry);
+}
+
+function withoutDimensionPresets(value: ReturnType<typeof getGrsaiImageCapability>) {
+  if (!value) return value;
+  const result = { ...value };
+  delete result.dimensionPresets;
+  return result;
+}
+
+// 用户补充的 SD 文档及 2026-11-17 秒数表有意更新了七款视频合同；只还原这些明确差异，
+// 普通2.6独立尺寸同样只还原已确认的像素差异，原摘要继续锁住其余字段和旧协议。
+// 新合同另由逐字段用例验证，不用重新生成摘要掩盖未声明的变化。
+function relayonBeforeDocumentCorrection() {
+  // 后续新增的2.5视频C2/C3及两款2.6格式变体没有历史合同，不进入原三十款摘要。
+  return RELAYON_MODEL_MANIFEST.filter((entry) => !['sd-2.5-c2', 'sd-2.5-c3',
+    'image-2.6-flare-01', 'image-2.6-sunburst-01'].includes(entry.id)).map((entry) => {
+    if (entry.id === 'image-2.6-01') {
+      const model = structuredClone(entry);
+      const pixels = getImageSizePresets('relayon-image-2.5');
+      model.imageCapability!.resolutions = Object.keys(pixels);
+      model.imageCapability!.ratios = Object.keys(pixels['1K']);
+      model.imageCapability!.dimensionPresets = pixels;
+      return model;
+    }
+    if (entry.category !== 'video' || (!entry.id.startsWith('sd-') && entry.id !== 'minimax-h3')) return entry;
+    const model = structuredClone(entry);
+    const capability = model.videoCapability!;
+    if (model.id === 'minimax-h3') {
+      delete capability.durations;
+      capability.minDuration = 4;
+      capability.maxDuration = 15;
+      capability.defaultDuration = 4;
+      return model;
+    }
+    const profiles = getRelayonVideoRecoveryProfiles(model.id, model.executionProfile);
+    const previous = profiles.find((profile) => profile.protocol?.version === 2
+      && profile.protocol.poll?.response.result.urlPath === 'url');
+    if (!previous) throw new Error(`缺少保留的旧万象视频协议：${model.id}`);
+    model.executionProfile = previous;
+    capability.ratios = [...SEEDANCE_COMMON_RATIOS];
+    if (model.id === 'sd-2.0-c2' || model.id === 'sd-2.0-c3') {
+      delete capability.durations;
+      capability.minDuration = 4;
+      capability.defaultDuration = 4;
+    }
+    if (model.id === 'sd-2.0-c1' || model.id === 'sd-2.5-c1') {
+      // 秒数表改为固定 15／30 秒；历史摘要仍验证此前完整合同，不更新原摘要常量。
+      delete capability.durations;
+      capability.minDuration = model.id === 'sd-2.0-c1' ? 10 : 4;
+      capability.defaultDuration = model.id === 'sd-2.0-c1' ? 10 : 4;
+    }
+    if (model.id === 'sd-2.0-c3') capability.maxAudioReferences = 3;
+    if (model.id.endsWith('-A') || model.id === 'sd-2.5-c1') capability.supportsAudio = true;
+    return model;
+  });
+}
+
+// Sora 图片已按用户确认增加内联字段；历史摘要仅还原这两处有意变更，其余合同继续由原哈希锁定。
+// 新旧识别、实际 references/reference_urls 及字节限制由 Sora 专项逐字段用例验证。
+function sora2uBeforeInlineImageTransport() {
+  return SORA2U_MODEL_MANIFEST.map((entry) => {
+    if (entry.category !== 'image') return entry;
+    const model = structuredClone(entry);
+    const protocol = model.executionProfile?.protocol;
+    if (protocol?.version !== 2) throw new Error('缺少已确认的 Sora2U 旧图片协议');
+    const body = protocol.submit.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Sora2U 图片请求体无效');
+    body.reference_urls = '{{imageUrls}}';
+    delete body.references;
+    return model;
+  });
+}
+
+const PUBLIC_CONTRACTS = {
+  toapis: TOAPIS_MODEL_MANIFEST,
+  libapi: LIBAPI_MODEL_MANIFEST,
+  relayon: relayonBeforeDocumentCorrection(),
+  aigcsi: AIGCSI_MODEL_MANIFEST,
+  sora2u: sora2uBeforeInlineImageTransport(),
+  runninghub: RUNNINGHUB_MODEL_MANIFEST,
+  ccc: getProviderDefinition('cccapi')!.models!,
+  grsaiVideo: [undefined, '480p', '768p', '1080p'].map((resolution) => ({
+    resolution, capability: getGrsaiVideoCapability('minimax-h3', resolution),
+  })),
+  imageTemplates: IMAGE_QUICK_ADAPT_OPTIONS.map((option) => ({ id: option.id, template: createImageQuickAdaptTemplate(option.id) })),
+  imageSamples: IMAGE_SAMPLE_IDS.map((id) => ({ id, capability: getImageCapability(id) })),
+  grsaiImages: GRSAI_IMAGE_SAMPLE_IDS.map((id) => ({ id, capability: withoutDimensionPresets(getGrsaiImageCapability(id)) })),
+};
+
+// 来自独立 detached worktree 的 4b00f146 原合同。JSON 语义忽略 undefined 与对象键顺序，保留数组顺序。
+// 有意变更渠道合同时需明确核对并更新摘要；不能用当前实现重新生成来掩盖兼容性变化。
+const BASELINE = {
+  toapis: [88, '070c57e7871460bc94b30cf8aae7503368a42549d2bc57ed66d8aa5a503b31bc'],
+  libapi: [67, '3faf89e7dec462002deb9b8a2ec903c9681565f0c414e4387fe699c24f34be61'],
+  relayon: [30, '80be2d653ee37d26592fc506619d302e7efd0c5e848f80859c502a509f46c034'],
+  aigcsi: [21, '97449c478afea8efb174486dfe8f778bfcc8fb99d1bc0c0be735e83370e2d430'],
+  sora2u: [9, 'bfcd6fc46796da2556b4c3159e2975480b4c92f4a19d3103e61122c17dff711d'],
+  runninghub: [347, '662eb139544f7aed05d65bea84dd33c4b76c5ea95f9087ab72569a01931f389a'],
+  ccc: [85, '48cc3fce182243d81521221bfe80ed9fbdd400504e23e49bcb0734a12b058016'],
+  grsaiVideo: [4, '9ed1bd6b32bbaf80600468638354ea490ea3c983e6fad5398125d49939ba6d34'],
+  imageTemplates: [18, '3f50cb4221a8caa468ac676fa1024d8c9b3aae794c3028921acf23e216ea67d1'],
+  imageSamples: [34, 'd9ad2ff2daf65f4db8b0db7464602dd91ec552e4fa167ecb741e7277edafb1ae'],
+  grsaiImages: [17, 'ac52b2acba59a665654fa17c702dbdf6296ea87f78322413ce07f1a1b230b21e'],
+} as const;
+
+describe('基础模板与渠道覆写的旧合同兼容', () => {
+  it.each(Object.entries(PUBLIC_CONTRACTS))('%s 保留旧合同、默认值、协议与候选顺序', (name, contracts) => {
+    const [count, digest] = BASELINE[name as keyof typeof BASELINE];
+    expect(contracts).toHaveLength(count);
+    expect(createHash('sha256').update(stableJson(contracts)).digest('hex')).toBe(digest);
+  });
+});

@@ -4,7 +4,8 @@
 //! Renderer 只持有不透明 `sourceId`。真实目录映射保存在 Rust 私有注册表中；
 //! 后续读取只接受安全相对路径。这里不会执行包内脚本，也不会把智能体内容注册成插件。
 
-use crate::path_policy::{authorize_path, ensure_trusted_caller, PathAccess};
+use crate::path_policy::{authorize_path, ensure_trusted_caller, simplify_verbatim, PathAccess};
+use crate::registry_write::{write_registry_file, RegistryWriteErrors, RegistryWriteMode};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -164,7 +165,7 @@ fn unix_now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-fn agent_private_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+pub(crate) fn agent_private_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
         .map(|directory| directory.join(PRIVATE_DIR_NAME))
@@ -189,20 +190,6 @@ fn managed_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
         .app_local_data_dir()
         .map(|directory| directory.join(MANAGED_ROOT_NAME))
         .map_err(|_| "无法定位智能体托管目录".to_string())
-}
-
-fn simplify_verbatim(path: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let text = path.to_string_lossy().into_owned();
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            return PathBuf::from(
-                rest.strip_prefix(r"UNC\")
-                    .map_or_else(|| rest.to_string(), |unc| format!(r"\\{unc}")),
-            );
-        }
-    }
-    path
 }
 
 fn normalized_for_compare(path: &Path) -> PathBuf {
@@ -261,8 +248,12 @@ pub fn deny_agent_private_dir_access<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn read_registry<R: Runtime>(app: &AppHandle<R>) -> Result<SourceRegistry, String> {
-    let file = registry_file(app)?;
-    match fs::read(&file) {
+    read_registry_at(&registry_file(app)?)
+}
+
+/// 按 Agent 的规则读取主表。缺失时返回空表，损坏或版本不符时返回错误。
+fn read_registry_at(file: &Path) -> Result<SourceRegistry, String> {
+    match fs::read(file) {
         Ok(bytes) => {
             let registry = serde_json::from_slice::<SourceRegistry>(&bytes)
                 .map_err(|_| "智能体来源注册表损坏".to_string())?;
@@ -286,21 +277,18 @@ fn write_registry<R: Runtime>(app: &AppHandle<R>, registry: &SourceRegistry) -> 
         serde_json::to_vec(registry).map_err(|_| "无法序列化智能体来源注册表".to_string())?;
     let temporary = directory.join(REGISTRY_TEMP_FILE_NAME);
     let backup = directory.join(REGISTRY_BACKUP_FILE_NAME);
-    fs::write(&temporary, body).map_err(|_| "无法写入智能体来源注册表".to_string())?;
-
-    if !file.exists() {
-        return fs::rename(&temporary, &file).map_err(|_| "无法提交智能体来源注册表".to_string());
-    }
-
-    let _ = fs::remove_file(&backup);
-    fs::rename(&file, &backup).map_err(|_| "无法准备智能体来源注册表更新".to_string())?;
-    if let Err(_error) = fs::rename(&temporary, &file) {
-        let _ = fs::rename(&backup, &file);
-        let _ = fs::remove_file(&temporary);
-        return Err("无法提交智能体来源注册表".to_string());
-    }
-    let _ = fs::remove_file(&backup);
-    Ok(())
+    write_registry_file(
+        &file,
+        &temporary,
+        &backup,
+        &body,
+        RegistryWriteMode::FixedTemporary,
+        RegistryWriteErrors {
+            write: "无法写入智能体来源注册表",
+            prepare: "无法准备智能体来源注册表更新",
+            commit: "无法提交智能体来源注册表",
+        },
+    )
 }
 
 fn load_source<R: Runtime>(app: &AppHandle<R>, source_id: &str) -> Result<StoredSource, String> {
@@ -1558,6 +1546,86 @@ mod tests {
         assert_eq!(stored.content_hash, preview.content_hash);
         assert_eq!(stored.entrypoints, preview.entrypoints);
         fs::remove_dir_all(root).ok();
+    }
+
+    struct RegistryFixtureDirectory(PathBuf);
+
+    impl Drop for RegistryFixtureDirectory {
+        fn drop(&mut self) {
+            for filename in [
+                "AGENTS.md",
+                REGISTRY_FILE_NAME,
+                REGISTRY_BACKUP_FILE_NAME,
+                REGISTRY_TEMP_FILE_NAME,
+            ] {
+                let _ = fs::remove_file(self.0.join(filename));
+            }
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+
+    fn with_registry_backup(test: impl FnOnce(&Path)) {
+        let nonce = u64::from_le_bytes(crate::secure_random::random_bytes().unwrap());
+        let directory = std::env::temp_dir().join(format!("ai-canvas-agent-registry-fixture-{nonce:016x}"));
+        // 独占创建成功后才允许写入和清理，已有目录即使重名也不会被碰触。
+        fs::create_dir(&directory).expect("应创建独立的注册表测试目录");
+        let fixture = RegistryFixtureDirectory(directory);
+        fs::write(fixture.0.join("AGENTS.md"), "# Agent fixture").unwrap();
+        let source_id = "src_registrybackup";
+        let preview = inspect_source(
+            &fixture.0,
+            source_id,
+            AgentSourceType::Folder,
+            "备份来源",
+        )
+        .unwrap();
+        let mut backup_registry = SourceRegistry::default();
+        backup_registry.sources.insert(
+            source_id.into(),
+            StoredSource {
+                source_id: source_id.into(),
+                source_type: AgentSourceType::Folder,
+                root_path: fixture.0.to_string_lossy().into_owned(),
+                managed_container_path: None,
+                preview: preview_for_registry(&preview),
+                updated_at: 1,
+            },
+        );
+        let backup = fixture.0.join(REGISTRY_BACKUP_FILE_NAME);
+        let backup_bytes = serde_json::to_vec(&backup_registry).unwrap();
+        fs::write(&backup, &backup_bytes).unwrap();
+        assert!(read_registry_at(&backup)
+            .unwrap()
+            .sources
+            .contains_key(source_id));
+
+        test(&fixture.0.join(REGISTRY_FILE_NAME));
+
+        assert_eq!(fs::read(backup).unwrap(), backup_bytes);
+    }
+
+    #[test]
+    fn registry_missing_primary_returns_empty_even_with_valid_backup() {
+        with_registry_backup(|primary| {
+            let registry = read_registry_at(primary).unwrap();
+            assert_eq!(registry.schema_version, REGISTRY_SCHEMA_VERSION);
+            assert!(registry.sources.is_empty());
+            assert_eq!(
+                fs::symlink_metadata(primary).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+        });
+    }
+
+    #[test]
+    fn registry_corrupt_primary_reports_error_even_with_valid_backup() {
+        with_registry_backup(|primary| {
+            let corrupt = b"{";
+            fs::write(primary, corrupt).unwrap();
+
+            assert_eq!(read_registry_at(primary).unwrap_err(), "智能体来源注册表损坏");
+            assert_eq!(fs::read(primary).unwrap(), corrupt);
+        });
     }
 
     #[test]

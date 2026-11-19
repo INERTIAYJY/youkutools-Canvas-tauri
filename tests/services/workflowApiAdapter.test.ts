@@ -18,7 +18,9 @@ import {
 } from '../../src/services/pollManager';
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), upload: vi.fn(), persist: vi.fn(), desktop: vi.fn(() => true) }));
-vi.mock('../../src/services/ai/httpTransport', () => ({ corsSafeFetch: mocks.fetch }));
+vi.mock('../../src/services/ai/httpTransport', async (original) => ({
+  ...await original<typeof import('../../src/services/ai/httpTransport')>(), corsSafeFetch: mocks.fetch,
+}));
 vi.mock('../../src/services/uploadService', async (original) => ({
   ...await original<typeof import('../../src/services/uploadService')>(), resolveMediaReferenceUrl: mocks.upload,
 }));
@@ -47,7 +49,8 @@ beforeEach(() => {
   localStorage.clear(); useAppStore.setState(useAppStore.getInitialState(), true);
   const store = useAppStore.getState();
   useAppStore.setState({
-    currentProjectId: 'p1',
+    currentProjectId: 'p1', projectLoadStatus: 'ready',
+    projects: [{ id: 'p1', name: '测试项目', createdAt: 1, updatedAt: 1 }, { id: 'p2', name: '切换项目', createdAt: 1, updatedAt: 1 }],
     config: { ...store.config, providers: { 'autodl-test': { name: 'AutoDL', apiKey: key, baseUrl: 'https://autodl.art' } } },
     nodes: [{ id: 'n1', type: 'ai-video', position: { x: 0, y: 0 }, data: {
       type: 'ai-video', label: 'H3', workflowId: 'wf1', provider: 'workflow-api', status: 'loading',

@@ -25,7 +25,7 @@ import type {
   ProviderModelSelection,
   WebSearchProviderId,
 } from '../../types';
-import type { ModelExecutionProfile, NormalizedModelExecutionProtocol } from '../../types/aiTypes';
+import type { ImageOutputFormat, ImageParameterRange, ModelExecutionProfile, NormalizedModelExecutionProtocol } from '../../types/aiTypes';
 import { corsSafeFetch } from './httpTransport';
 import { fetchSeedlingModels, type SeedlingModelInfo } from '../seedlingService';
 import type { VideoModelCapability } from '../../types/aiTypes';
@@ -36,6 +36,7 @@ import { getChatApiHeaders, normalizeGeminiModelId, resolveChatApiProtocol } fro
 import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
 import { GRSAI_ADDED_MODELS } from './grsaiModels';
 import { DREAMINA_IMAGE_MODELS, DREAMINA_VIDEO_MODELS } from './dreaminaModels';
+import { MUSE_BASE_URL, MUSE_MODEL_MANIFEST } from './museModels';
 import { matchToapisCatalog, resolveToapisImageModelContract, TOAPIS_MODEL_MANIFEST } from './providers/toapisModelManifest';
 import { LIBAPI_MODEL_MANIFEST, matchLibapiCatalog, resolveLibapiModelId } from './providers/libapiModelManifest';
 import { RELAYON_BASE_URL, RELAYON_MODEL_MANIFEST, matchRelayonCatalog, resolveRelayonImageModelContract } from './providers/relayonModelManifest';
@@ -43,8 +44,10 @@ import { AIGCSI_BASE_URL, AIGCSI_MODEL_MANIFEST, matchAigcsiCatalog, normalizeAi
 import { MINIMAX_BASE_URL, MINIMAX_MODEL_MANIFEST } from './providers/minimaxModelManifest';
 import { assertImageModelCapability, isModelProtocolPresetId } from './modelCapabilityValidation';
 import { validateModelExecutionProtocol } from './modelProtocolValidation';
-import { filterCccGroupModels } from './cccProviderGroups';
+import { comparableProtocol } from './modelProtocol';
+import { CCC_BANANA_MODEL_IDS, filterCccGroupModels } from './cccProviderGroups';
 import { filterRelayonGroupPricing } from './relayonProviderGroups';
+import { getImageCapabilityTemplate, type ImageCapabilityTemplateId } from './modelCapabilityTemplates';
 import {
   GOOGLE_GEMINI_BASE_URL,
   GOOGLE_MODEL_MANIFEST,
@@ -55,7 +58,7 @@ import {
   SORA2U_REQUEST_QUERY,
 } from './providers/sora2uModelManifest';
 
-export type ProviderAuthType = 'api-key' | 'oauth';
+export type ProviderAuthType = 'api-key' | 'oauth' | 'browser-session';
 export type ProviderCredentialKey = 'apiKey' | 'baseUrl';
 
 export interface ProviderCredentialField {
@@ -86,6 +89,8 @@ export interface ProviderDefinition {
   requestQuery?: Readonly<Record<string, string>>;
   /** 暂时不向用户暴露的模型 ID；保留底层协议，便于后续恢复。 */
   hiddenModelIds?: readonly string[];
+  /** 下架的内置厂商仅为已保存的连接提供历史查询信息。 */
+  retired?: true;
   credentials: ProviderCredentialField[];
   /** 内置厂商随应用发布的模型及声明式执行协议。 */
   models?: readonly ProviderModelSelection[];
@@ -117,13 +122,13 @@ const API_KEY_FIELD: ProviderCredentialField = {
 
 // CCC 的 Gemini 渠道沿用 generateContent；鉴权用中转 Key，不复用 Google 直连协议。
 // https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/server/routes/gateway.go
-function cccGeminiImageProtocol(supportsImageSize: boolean): NormalizedModelExecutionProtocol {
+function cccGeminiImageProtocol(supportsImageSize: boolean, acceptsReferences = true): NormalizedModelExecutionProtocol {
   return {
     version: 2, mode: 'sync', auth: { type: 'bearer' },
     submit: {
       method: 'POST', path: '/v1beta/models/{{model}}:generateContent', pathMode: 'origin',
       body: {
-        contents: [{ role: 'user', parts: [{ text: '{{prompt}}' }] }],
+        contents: [{ role: 'user', parts: acceptsReferences ? '{{googleImageParts}}' : [{ text: '{{prompt}}' }] }],
         generationConfig: {
           responseModalities: ['TEXT', 'IMAGE'],
           imageConfig: {
@@ -146,6 +151,21 @@ function cccGeminiImageProtocol(supportsImageSize: boolean): NormalizedModelExec
  * inputModalities 只在与按 ID 猜模态的兜底规则不一致时才显式声明，
  * 避免把 gpt-4 / o3-mini 这类纯文本模型误判成能吃图。
  */
+const CCC_BANANA_TEMPLATES: Record<string, ImageCapabilityTemplateId> = {
+  'gemini-3-pro-image-preview': 'nano-banana-pro', 'gemini-3-pro-image': 'nano-banana-pro',
+  'nano-banana-pro': 'nano-banana-pro', 'Nano-Banana-pro': 'nano-banana-pro',
+  'gemini-3.1-flash-image': 'nano-banana-2', 'nano-banana2': 'nano-banana-2',
+  'Nano-Banana-2': 'nano-banana-2', 'Nano-Banana-2.1': 'nano-banana-2.1',
+};
+
+function cccGptImageOptions() {
+  return getImageCapabilityTemplate('gpt-image-2.5', {
+    resolutions: undefined, defaultResolution: undefined, ratios: undefined, defaultRatio: undefined,
+    supportsBatch: undefined, maxBatchCount: undefined, supportsImageReference: undefined,
+    maxImageReferences: undefined, supportsDataUrlReference: undefined,
+  });
+}
+
 const CCCAPI_MODEL_MANIFEST: readonly ProviderModelSelection[] = [
   ...[
     'DeepSeek-V4.1-Flash', 'GLM-5.3-Flash', 'Qwen3.8-Flash', 'mI MiMo-V2.5', 'Hy3',
@@ -213,11 +233,18 @@ const CCCAPI_MODEL_MANIFEST: readonly ProviderModelSelection[] = [
     'gemini-3-pro-image-preview', 'gemini-3-pro-image', 'gemini-3.1-flash-image',
     'gemini-2.5-flash-image', 'nano-banana2', 'nano-banana-pro',
     // 当前模型广场写法；旧别名保留兼容，实际请求始终保留 Key 目录中的 ID。
-    'Nano-Banana-pro', 'Nano-Banana-2', 'Nano-Banana-2.1',
+    ...CCC_BANANA_MODEL_IDS,
   ].map((id): ProviderModelSelection => ({
     id, name: id, category: 'image', provider: 'cccapi',
-    description: 'CCC Gemini 原生文生图（当前不接收参考图）',
-    inputModalities: ['text'],
+    description: 'CCC Gemini 原生文生图与参考编辑，参考图片通过 inlineData 完整发送',
+    inputModalities: ['text', 'image'],
+    // 同一原生合同的旧 Pro／3.x 别名沿用现行香蕉档位，不退回通用旧表的单项 1K。
+    ...(CCC_BANANA_TEMPLATES[id] ? { imageCapability: getImageCapabilityTemplate(CCC_BANANA_TEMPLATES[id], {
+      resolutions: ['1K', '2K', '4K'],
+      ratios: ['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3', '4:5', '5:4', '21:9'],
+      supportsBatch: undefined, maxBatchCount: undefined, supportsImageReference: undefined,
+      maxImageReferences: undefined, supportsDataUrlReference: undefined,
+    }) } : {}),
     executionProfile: { preset: 'custom', protocol: cccGeminiImageProtocol(id !== 'gemini-2.5-flash-image') },
   })),
   {
@@ -227,8 +254,7 @@ const CCCAPI_MODEL_MANIFEST: readonly ProviderModelSelection[] = [
     provider: 'cccapi',
     description: '速度优先的轻量图片模型，支持文生图与图片编辑',
     imageReferenceRequestMode: 'edits-multipart',
-    imageCapability: { qualities: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'], defaultQuality: 'auto',
-      backgrounds: ['auto', 'opaque', 'transparent'] },
+    imageCapability: cccGptImageOptions(),
   },
   {
     id: 'gpt-image-2.5-sunburst',
@@ -237,8 +263,7 @@ const CCCAPI_MODEL_MANIFEST: readonly ProviderModelSelection[] = [
     provider: 'cccapi',
     description: '质量优先的高画质图片模型，支持文生图与图片编辑',
     imageReferenceRequestMode: 'edits-multipart',
-    imageCapability: { qualities: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'], defaultQuality: 'auto',
-      backgrounds: ['auto', 'opaque', 'transparent'] },
+    imageCapability: cccGptImageOptions(),
   },
   {
     id: 'gpt-image-2',
@@ -311,6 +336,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = ([
     description: '国内站与国际站共用账号和 API Key，按所选站点拉取可用模型。',
     badgeText: 'T', authType: 'api-key', catalogAdapter: 'openai-compatible',
     defaultBaseUrl: TOAPIS_BASE_URL, modelsPath: '/models', allowCustomBaseUrl: false,
+    requestQuery: { type: 'all' },
     externalUrl: 'https://toapis.cn/login?aff=SnMr',
     credentials: [{ ...API_KEY_FIELD, placeholder: 'sk-...' }], models: TOAPIS_MODEL_MANIFEST,
   },
@@ -342,7 +368,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = ([
   },
   {
     id: 'minimax', name: 'MiniMax 官方', badgeText: 'MM', authType: 'api-key', catalogAdapter: 'local-manifest',
-    description: '官方 H3 视频与 Speech 2.8 语音；参考素材上传到当前官方连接。国内与国际连接分别配置密钥。',
+    description: '支持 H3 视频、H3 Image 图片和 Speech 2.8 语音。本地参考素材上传到当前官方连接，国内与国际连接分别配置密钥。',
     defaultBaseUrl: MINIMAX_BASE_URL, allowCustomBaseUrl: true, externalUrl: 'https://platform.minimax.cn',
     credentials: [{ ...API_KEY_FIELD, placeholder: '填写 MiniMax 官方 API Key' },
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: MINIMAX_BASE_URL }],
@@ -376,16 +402,14 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = ([
   },
   {
     id: 'sora2u',
+    retired: true,
     name: 'Sora2U',
     description: 'Seedance 全模态视频与 Gemini/Kontext 图片模型',
     badgeText: 'S2U',
     authType: 'api-key',
     catalogAdapter: 'openai-compatible',
     defaultBaseUrl: SORA2U_BASE_URL,
-    modelsPath: '/api/v1/models',
     allowCustomBaseUrl: false,
-    externalUrl: 'https://sora2u.com/?utm_source=tenney&utm_medium=canvas&utm_content=wx',
-    connectionTestPath: '/api/v1/credits',
     requestQuery: SORA2U_REQUEST_QUERY,
     hiddenModelIds: SORA2U_HIDDEN_MODEL_IDS,
     credentials: [
@@ -474,6 +498,19 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = ([
     ],
   },
   {
+    id: 'muse',
+    name: 'Muse',
+    description: '在桌面应用中登录 Muse，使用文本与看图对话、图片和视频生成',
+    badgeText: 'MU',
+    authType: 'browser-session',
+    catalogAdapter: 'local-manifest',
+    defaultBaseUrl: MUSE_BASE_URL,
+    externalUrl: MUSE_BASE_URL,
+    allowCustomBaseUrl: false,
+    models: MUSE_MODEL_MANIFEST,
+    credentials: [],
+  },
+  {
     id: 'tavily',
     name: 'Tavily',
     description: '面向 AI Agent 的搜索与来源服务',
@@ -545,12 +582,17 @@ export function isProviderModelVisible(catalogId: string | undefined, modelId: s
     }
   }
   const definition = BUILT_IN_PROVIDER_DEFINITIONS.find((item) => item.id === catalogId);
-  return !definition?.hiddenModelIds?.includes(modelId);
+  return !definition?.retired && !definition?.hiddenModelIds?.includes(modelId);
 }
 
 const PROVIDER_DEFINITION_MAP = new Map(
   BUILT_IN_PROVIDER_DEFINITIONS.map((definition) => [definition.id, definition]),
 );
+const AVAILABLE_PROVIDER_DEFINITIONS = BUILT_IN_PROVIDER_DEFINITIONS.filter((definition) => !definition.retired);
+
+export function isRetiredProviderConnection(providerId: string, config?: Pick<ApiProviderConfig, 'catalogId'>): boolean {
+  return PROVIDER_DEFINITION_MAP.get(resolveProviderCatalogId(providerId, config))?.retired === true;
+}
 
 /**
  * 落库的目录缓存上限。catalogModels 只是「下次打开对话框免去重新拉取」的缓存，
@@ -571,7 +613,7 @@ export function capCatalogModels(
 }
 
 export function getProviderDefinitions(): readonly ProviderDefinition[] {
-  return BUILT_IN_PROVIDER_DEFINITIONS;
+  return AVAILABLE_PROVIDER_DEFINITIONS;
 }
 
 export function isWebSearchProviderId(value: string | undefined): value is WebSearchProviderId {
@@ -604,17 +646,21 @@ export function createConnectionId(providerId: string): string {
   return `${providerId === 'custom-openai' ? 'custom' : providerId}-${suffix}`;
 }
 
-/** 只补 CCC 已核实图片型号的缺省／旧 Images 预设，不覆盖用户自定义协议。 */
+/** 只补已知 CCC 的缺省／旧 Images 预设及完整旧内置模板，不覆盖用户改写的协议。 */
 export function resolveCccGeminiImageExecutionProfile(
   modelId: string,
   profile?: ModelExecutionProfile,
 ): ModelExecutionProfile | undefined {
   if (!/^(?:gemini-.*image|nano-banana)/i.test(modelId)) return profile;
-  if (profile && (!['openai-image', 'openai-gpt-image'].includes(profile.preset)
-    || profile.protocol !== undefined
-    || Object.keys(profile).some((key) => key !== 'preset' && key !== 'protocol'))) return profile;
   const known = CCCAPI_MODEL_MANIFEST.find((item) => item.category === 'image'
     && item.id.toLowerCase() === modelId.toLowerCase() && item.executionProfile?.preset === 'custom');
+  const legacyNative = profile?.preset === 'custom' && known
+    && Object.keys(profile).every((key) => key === 'preset' || key === 'protocol')
+    && comparableProtocol(profile) === comparableProtocol({ preset: 'custom',
+      protocol: cccGeminiImageProtocol(known.id.toLowerCase() !== 'gemini-2.5-flash-image', false) });
+  if (profile && (!['openai-image', 'openai-gpt-image'].includes(profile.preset)
+    || profile.protocol !== undefined
+    || Object.keys(profile).some((key) => key !== 'preset' && key !== 'protocol')) && !legacyNative) return profile;
   return known?.executionProfile ? structuredClone(known.executionProfile) : profile;
 }
 
@@ -622,7 +668,8 @@ export function getProviderDefinition(
   providerId: string,
   config?: Pick<ApiProviderConfig, 'catalogId'>,
 ): ProviderDefinition | undefined {
-  return PROVIDER_DEFINITION_MAP.get(resolveProviderCatalogId(providerId, config));
+  const definition = PROVIDER_DEFINITION_MAP.get(resolveProviderCatalogId(providerId, config));
+  return definition?.retired && !config ? undefined : definition;
 }
 
 /** 设置与导入只校验有效合同的临时副本；保存的用户协议和能力声明保持原样。 */
@@ -660,7 +707,8 @@ export function resolveProviderImageModelForValidation(
 function inferModelCategory(modelId: string): GeneralModelCategory {
   const id = modelId.toLowerCase();
   if (/tts|speech|audio|music|voice|whisper|transcri/.test(id)) return 'audio';
-  // minimax-h3 及其 Context-IR / Regeneration 变体均为视频生成模型；
+  if (/minimax[-\s_.]?h3[-\s_.]?image/.test(id)) return 'image';
+  // 普通 minimax-h3 及其视频 Context-IR / Regeneration 变体按视频识别；
   // 中转站/自定义目录可能返回 MiniMax_H3、MiniMax H3 等写法，统一按分隔符变体识别。
   if (/video|seedance|sora|veo|kling|hailuo|wan\d|skyreels|vidu|minimax[-\s_.]?h3/.test(id)) return 'video';
   if (/image|seedream|imagen|flux|banana|midjourney|recraft|dall-e/.test(id)) return 'image';
@@ -735,7 +783,21 @@ function parseImageCapability(record: Record<string, unknown>, category: General
   const declared = readRecord(record.imageCapability ?? record.image_capability) ?? record;
   const limit = readRecord(declared.reference_limits ?? declared.referenceLimits);
   const boolean = (value: unknown) => typeof value === 'boolean' ? value : undefined;
+  const outputFormats = (value: unknown) => readStringArray(value) as ImageOutputFormat[] | undefined;
+  const range = (value: unknown): ImageParameterRange | undefined => {
+    const item = readRecord(value);
+    return item ? { min: readFiniteNumber(item.min) ?? NaN, max: readFiniteNumber(item.max) ?? NaN,
+      default: readFiniteNumber(item.default) ?? NaN,
+      ...(item.step !== undefined ? { step: readFiniteNumber(item.step) ?? NaN } : {}) } : undefined;
+  };
   const capability: NonNullable<ProviderModelSelection['imageCapability']> = {
+    outputFormats: outputFormats(declared.outputFormats ?? declared.output_formats),
+    defaultOutputFormat: (declared.defaultOutputFormat ?? declared.default_output_format) as ImageOutputFormat | undefined,
+    textOnlyOutputFormats: outputFormats(declared.textOnlyOutputFormats ?? declared.text_only_output_formats),
+    squareOnlyOutputFormats: outputFormats(declared.squareOnlyOutputFormats ?? declared.square_only_output_formats),
+    gifFrameCount: range(declared.gifFrameCount ?? declared.gif_frame_count),
+    gifFrameDurationMs: range(declared.gifFrameDurationMs ?? declared.gif_frame_duration_ms),
+    supportsGifTransparency: boolean(declared.supportsGifTransparency ?? declared.supports_gif_transparency),
     resolutions: readStringArray(declared.resolutions),
     defaultResolution: typeof (declared.defaultResolution ?? declared.default_resolution) === 'string'
       ? String(declared.defaultResolution ?? declared.default_resolution) : undefined,
@@ -1022,21 +1084,26 @@ async function fetchOpenAiCompatibleCatalog(
   throw lastError instanceof Error ? lastError : new Error('模型列表拉取失败');
 }
 
-/** 先校验 Key 可访问目录；公开技能目录仅排退役，不保证生成或文件权限，也不携带凭据。 */
+/** 用公开逻辑目录筛选未退役型号；生成和文件权限仍以调用结果为准。 */
 async function matchActiveLibapiCatalog(
   models: ProviderModelSelection[],
   baseUrl: string,
   signal?: AbortSignal,
 ): Promise<ProviderModelSelection[]> {
-  const response = await corsSafeFetch(`${baseUrl}/skills/models`, { method: 'GET', signal });
+  const response = await corsSafeFetch(`${baseUrl}/logical-models`, { method: 'GET', credentials: 'omit', signal });
   if (!response.ok) throw new Error(`模型列表拉取失败 (HTTP ${response.status})`);
   const payload: unknown = await response.json().catch(() => null);
-  const activeIds = new Set(readCatalogItems(payload).flatMap((item) => {
+  const logicalModels = readCatalogItems(payload).flatMap((item) => {
     if (!item || typeof item !== 'object') return [];
-    const name = (item as Record<string, unknown>).name;
-    return typeof name === 'string' && name.trim() ? [name.trim()] : [];
-  }));
-  if (activeIds.size === 0) throw new Error('模型列表拉取失败 (HTTP 200)');
+    const { id, public_id: publicId, deprecated } = item as Record<string, unknown>;
+    if (typeof id !== 'string' || !id.trim()) return [];
+    const internalId = id.trim();
+    const knownId = resolveLibapiModelId(internalId)
+      ?? (typeof publicId === 'string' ? resolveLibapiModelId(publicId.trim()) : undefined);
+    return [{ id: knownId ?? internalId, deprecated: deprecated === true }];
+  });
+  if (logicalModels.length === 0) throw new Error('模型列表拉取失败 (HTTP 200)');
+  const activeIds = new Set(logicalModels.filter((model) => !model.deprecated).map((model) => model.id));
   return matchLibapiCatalog(models.filter((model) => {
     const id = resolveLibapiModelId(model.id);
     return id !== undefined && activeIds.has(id);
@@ -1047,7 +1114,7 @@ async function matchActiveLibapiCatalog(
 async function matchRelayonGroupCatalog(
   models: ProviderModelSelection[], group: string, signal?: AbortSignal,
 ): Promise<ProviderModelSelection[]> {
-  const response = await corsSafeFetch('https://relayonapi.com/api/pricing', { method: 'GET', credentials: 'omit', signal });
+  const response = await corsSafeFetch('https://api.relayonapi.com/api/pricing', { method: 'GET', credentials: 'omit', signal });
   if (!response.ok) throw new Error(`模型列表拉取失败 (HTTP ${response.status})`);
   const payload: unknown = await response.json().catch(() => null);
   return filterRelayonGroupPricing(models, group, payload);
@@ -1060,6 +1127,7 @@ export async function fetchProviderModelCatalog(
   if (signal?.aborted) throw new DOMException('模型列表拉取已取消', 'AbortError');
   const definition = getProviderDefinition(providerId, config);
   if (!definition) throw new Error('未知厂商目录');
+  if (definition.retired) throw new Error('该内置厂商已下架');
   const normalizedFallback = normalizeModels(fallbackModels, providerId)
     .filter((model) => isProviderModelVisible(definition.id, model.id));
 
@@ -1082,7 +1150,7 @@ export async function fetchProviderModelCatalog(
   }
   if (definition.catalogAdapter === 'local-manifest') {
     // 即梦与 MiniMax 使用已核实的本地合同；过期的界面 fallback 不能隐藏新型号，也不代表 Key 已验证。
-    if (definition.id === 'dreamina' || definition.id === 'minimax') {
+    if (definition.id === 'dreamina' || definition.id === 'minimax' || definition.id === 'muse') {
       return { models: normalizeModels([...(definition.models ?? [])], providerId), source: 'local-manifest',
         ...(definition.id === 'minimax' ? { warning: '当前仅展示内置候选模型，未验证 API Key 或各模型权限；请使用「验证连接」检查当前密钥。' } : {}) };
     }
@@ -1122,7 +1190,7 @@ export async function fetchProviderModelCatalog(
         source: 'remote',
         resolvedBaseUrl: baseUrl,
         ...(models.some((model) => !matched.some((known) => known.id === model.id))
-          ? { warning: '已获取官方目录，仅展示仍在售且已适配的文本、图片、视频与音频型号；尚无完整调用合同的型号暂不展示。' }
+          ? { warning: '已获取官方目录，仅展示未退役且已适配的文本、图片、视频与音频型号。' }
           : {}),
       };
     }
@@ -1135,7 +1203,7 @@ export async function fetchProviderModelCatalog(
         ...(group
           ? { warning: '已按当前 Key 的目录和公开分组目录筛选已适配型号；实际调用权限以平台为准。' }
           : matched.length < models.length
-            ? { warning: '已获取当前 Key 的目录，仅展示已适配的文本、图片与视频型号；Midjourney 和其他未适配型号暂不展示。' }
+            ? { warning: '已获取当前 Key 的目录，仅展示已适配的文本、图片与视频型号；其他未适配型号暂不展示。' }
           : {}),
       };
     }

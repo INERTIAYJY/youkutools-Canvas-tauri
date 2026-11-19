@@ -2,7 +2,7 @@
  * ConversationList — 会话列表组件
  * 展示当前项目的全部会话，支持新建、切换、搜索、置顶、归档、重命名、删除
  */
-import { useState, useCallback } from 'react';
+import { Fragment, useState, useCallback } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
@@ -144,6 +144,25 @@ export default function ConversationList({
     [isExternal, onDeleteConversation, store],
   );
 
+  const renderConversationItem = (conv: ChatConversation) => (
+    <ConversationItem
+      key={conv.id}
+      conv={conv}
+      agentTaskStatus={latestTaskByConversation.get(conv.id)?.status}
+      reduceMotion={reduceMotion}
+      active={conv.id === activeConversationId}
+      renaming={renamingId === conv.id}
+      renameValue={renameValue}
+      onRenameValueChange={setRenameValue}
+      onRenameConfirm={() => handleRenameConfirm(conv)}
+      onClick={() => onSelect(conv.id)}
+      onRename={() => handleRename(conv)}
+      onTogglePin={() => handleTogglePin(conv)}
+      onArchive={() => handleArchive(conv)}
+      onDelete={() => handleDelete(conv)}
+    />
+  );
+
   // 分组：置顶 / 普通
   const pinned = filtered.filter((c) => c.pinned);
   const normal = filtered.filter((c) => !c.pinned);
@@ -193,6 +212,7 @@ export default function ConversationList({
         <AnimatePresence>
           {filtered.length === 0 && (
             <motion.div
+              key="empty"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ duration: reduceMotion ? 0.1 : 0.18 }}
@@ -205,58 +225,24 @@ export default function ConversationList({
 
           {/* Pinned section */}
           {pinned.length > 0 && (
-            <>
+            <Fragment key="pinned">
               <div className="px-2 py-1 text-[11px] font-medium text-canvas-text-muted">
                 {t('置顶')}
               </div>
-              {pinned.map((conv) => (
-                <ConversationItem
-                  key={conv.id}
-                  conv={conv}
-                  agentTaskStatus={latestTaskByConversation.get(conv.id)?.status}
-                  reduceMotion={reduceMotion}
-                  active={conv.id === activeConversationId}
-                  renaming={renamingId === conv.id}
-                  renameValue={renameValue}
-                  onRenameValueChange={setRenameValue}
-                  onRenameConfirm={() => handleRenameConfirm(conv)}
-                  onClick={() => onSelect(conv.id)}
-                  onRename={() => handleRename(conv)}
-                  onTogglePin={() => handleTogglePin(conv)}
-                  onArchive={() => handleArchive(conv)}
-                  onDelete={() => handleDelete(conv)}
-                />
-              ))}
-            </>
+              {pinned.map(renderConversationItem)}
+            </Fragment>
           )}
 
           {/* Normal section */}
           {normal.length > 0 && (
-            <>
+            <Fragment key="normal">
               {pinned.length > 0 && (
                 <div className="px-2 py-1 text-[11px] font-medium text-canvas-text-muted">
                   {t('最近')}
                 </div>
               )}
-              {normal.map((conv) => (
-                <ConversationItem
-                  key={conv.id}
-                  conv={conv}
-                  agentTaskStatus={latestTaskByConversation.get(conv.id)?.status}
-                  reduceMotion={reduceMotion}
-                  active={conv.id === activeConversationId}
-                  renaming={renamingId === conv.id}
-                  renameValue={renameValue}
-                  onRenameValueChange={setRenameValue}
-                  onRenameConfirm={() => handleRenameConfirm(conv)}
-                  onClick={() => onSelect(conv.id)}
-                  onRename={() => handleRename(conv)}
-                  onTogglePin={() => handleTogglePin(conv)}
-                  onArchive={() => handleArchive(conv)}
-                  onDelete={() => handleDelete(conv)}
-                />
-              ))}
-            </>
+              {normal.map(renderConversationItem)}
+            </Fragment>
           )}
         </AnimatePresence>
       </div>

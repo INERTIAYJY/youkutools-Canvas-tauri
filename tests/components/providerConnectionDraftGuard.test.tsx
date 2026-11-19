@@ -3,9 +3,11 @@
  */
 import type { ComponentProps, ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ApiProviderConfig } from '../../src/types';
 
 interface HookScope { values: unknown[]; index: number }
-const driver = vi.hoisted(() => ({ scope: null as HookScope | null, confirm: vi.fn() }));
+const driver = vi.hoisted(() => ({ scope: null as HookScope | null, confirm: vi.fn(), persistTos: vi.fn(), removeTos: vi.fn(),
+  providers: {} as Record<string, ApiProviderConfig>, toast: vi.fn() }));
 vi.mock('react', async () => ({
   ...await vi.importActual<typeof import('react')>('react'),
   useState: <T,>(initial: T | (() => T)) => {
@@ -18,21 +20,35 @@ vi.mock('react', async () => ({
   },
   useRef: <T,>(value: T) => { const scope = driver.scope!; return scope.values[scope.index++] ??= { current: value }; },
   useMemo: <T,>(factory: () => T) => factory(),
+  useId: () => 'tos-field',
   useEffect: () => {},
 }));
 vi.mock('react-dom', () => ({ createPortal: (children: unknown) => children }));
 vi.mock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
-vi.mock('../../src/store/useAppStore', () => ({ useAppStore: { getState: () => ({ workflows: [] }) } }));
+vi.mock('../../src/store/useAppStore', () => ({ useAppStore: { getState: () => ({ workflows: [], config: { providers: driver.providers }, showToast: driver.toast }) } }));
 vi.mock('../../src/services/confirmDialog', () => ({ confirmAction: (...args: unknown[]) => driver.confirm(...args) }));
+vi.mock('../../src/services/volcengineTosConfigService', async () => ({
+  ...await vi.importActual<typeof import('../../src/services/volcengineTosConfigService')>('../../src/services/volcengineTosConfigService'),
+  persistVolcengineTosConfig: driver.persistTos, deleteVolcengineTosCredential: driver.removeTos,
+}));
 
 import ProviderConnectionDialog from '../../src/components/settings/ProviderConnectionDialog';
 import ProviderConnectionForm from '../../src/components/settings/providerConnection/ProviderConnectionForm';
 import ProviderModelSection from '../../src/components/settings/providerConnection/ProviderModelSection';
+import ProviderImageHostingSettings from '../../src/components/settings/providerConnection/ProviderImageHostingSettings';
+import Select from '../../src/components/shared/Select';
+import VolcengineTosSettings from '../../src/components/settings/VolcengineTosSettings';
+import type { VolcengineTosConfig, VolcengineTosCredentials } from '../../src/types/volcengineTos';
+import type { ImageHostingConfig } from '../../src/types/imageHosting';
+import { IMAGE_HOSTING_TEMPLATES } from '../../src/services/imageHostingTemplates';
+import { MUSE_MODEL_MANIFEST } from '../../src/services/ai/museModels';
 import type { ProviderModelSelection } from '../../src/types';
 
 type Element = ReactElement<Record<string, unknown> & { children?: unknown }>;
 let props: ComponentProps<typeof ProviderConnectionDialog>;
 let tree: unknown;
+let tosScope: HookScope;
+let tosKey: string | null | undefined;
 function elements(value: unknown): Element[] {
   if (Array.isArray(value)) return value.flatMap(elements);
   if (!value || typeof value !== 'object' || !('props' in value)) return [];
@@ -45,6 +61,22 @@ function form() {
 }
 function section() {
   return elements(tree).find((element) => element.type === ProviderModelSection)!.props as unknown as ComponentProps<typeof ProviderModelSection>;
+}
+function hosting() {
+  return elements(tree).find((element) => element.type === ProviderImageHostingSettings)!.props as unknown as ComponentProps<typeof ProviderImageHostingSettings>;
+}
+function tos() {
+  return elements(tree).find((element) => element.type === VolcengineTosSettings)!.props as unknown as ComponentProps<typeof VolcengineTosSettings>;
+}
+function renderTos() {
+  const element = elements(tree).find((item) => item.type === VolcengineTosSettings)!;
+  const mounted = tosKey !== element.key;
+  if (mounted) { tosScope = { values: [], index: 0 }; tosKey = element.key; }
+  const parentScope = driver.scope;
+  driver.scope = tosScope; tosScope.index = 0;
+  const rendered = VolcengineTosSettings(tos());
+  driver.scope = parentScope;
+  return rendered;
 }
 function button(text: string) {
   return elements(tree).find((element) => element.props.children === text && typeof element.props.onClick === 'function')!;
@@ -59,7 +91,13 @@ function invalidateProtocol() {
 
 beforeEach(() => {
   driver.scope = { values: [], index: 0 };
+  tosScope = { values: [], index: 0 }; tosKey = undefined;
   driver.confirm.mockReset().mockResolvedValue(false);
+  driver.providers = {};
+  driver.persistTos.mockReset().mockImplementation(async (config: VolcengineTosConfig | undefined, keys: VolcengineTosCredentials) =>
+    config?.bucket ? { ...config, credentialRef: keys.accessKeyId ? 'secret:provider/volcengine/tos/22222222-2222-2222-2222-222222222222' : config.credentialRef } : undefined);
+  driver.removeTos.mockReset().mockResolvedValue(undefined);
+  driver.toast.mockClear();
   vi.stubGlobal('document', { body: {} });
   const models: ProviderModelSelection[] = [
     { id: 'text-a', name: 'Text A', category: 'text', provider: 'custom-user', executionProfile: { preset: 'openai-chat' } },
@@ -77,7 +115,322 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+function prepareVolcengine(config?: VolcengineTosConfig) {
+  driver.scope = { values: [], index: 0 };
+  const initial: ApiProviderConfig = { name: '火山方舟', catalogId: 'volcengine', apiKey: 'fixture-ark-api-key',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', tosUpload: config,
+    selectedModels: [{ id: 'fixture-text-model', name: 'Fixture Text', category: 'text', provider: 'volcengine' }] };
+  driver.providers = { volcengine: initial };
+  props = { ...props, connectionId: 'volcengine', initialConfig: initial, initialModelId: undefined,
+    providerConfigs: driver.providers, connectedProviderIds: ['volcengine'],
+    onSave: vi.fn().mockImplementation(async (id: string, saved: ApiProviderConfig) => { driver.providers[id] = saved; }) };
+  render();
+}
+
+describe('火山 TOS 配置草稿', () => {
+  const existing: VolcengineTosConfig = { bucket: 'reference-bucket', region: 'cn-beijing',
+    credentialRef: 'secret:provider/volcengine/tos/11111111-1111-1111-1111-111111111111' };
+  const keys: VolcengineTosCredentials = { accessKeyId: 'draft-tos-access-key', secretAccessKey: 'draft-tos-secret-key' };
+
+  it('TOS 字段使用密码输入，区域固定北京，清除只更新本地草稿', () => {
+    prepareVolcengine(existing);
+    const rendered = renderTos();
+    const inputs = elements(rendered).filter((element) => element.type === 'input');
+    expect(inputs.filter((element) => element.props.type === 'password')).toHaveLength(2);
+    expect(inputs.some((element) => element.props.readOnly === true && element.props.value === '北京（cn-beijing）')).toBe(true);
+    const clear = elements(rendered).find((element) => element.props.children === '清除 TOS 配置')!;
+    (clear.props.onClick as () => void)(); render();
+    expect(tos().config).toBeUndefined();
+    expect(driver.persistTos).not.toHaveBeenCalled();
+    expect(driver.removeTos).not.toHaveBeenCalled();
+  });
+
+  it('掩码聚焦和失焦不标记草稿，未编辑保存沿用旧引用且不把占位写入配置', async () => {
+    prepareVolcengine(existing);
+    let rendered = renderTos();
+    let input = elements(rendered).find((item) => item.props.id === 'tos-field-accessKeyId')!;
+    expect(input.props).toMatchObject({ type: 'password', value: '••••••••••••••••' });
+    (input.props.onFocus as () => void)(); rendered = renderTos();
+    input = elements(rendered).find((item) => item.props.id === 'tos-field-accessKeyId')!;
+    expect(input.props.value).toBe('');
+    (input.props.onBlur as () => void)(); rendered = renderTos();
+    expect(elements(rendered).find((item) => item.props.id === 'tos-field-accessKeyId')?.props.value).toBe('••••••••••••••••');
+    expect(tos().credentials).toEqual({ accessKeyId: '', secretAccessKey: '' });
+    click('保存更改'); await settle();
+    expect(driver.persistTos).toHaveBeenLastCalledWith(existing, { accessKeyId: '', secretAccessKey: '' });
+    const saved = vi.mocked(props.onSave).mock.calls[0][1];
+    expect(saved.tosUpload?.credentialRef).toBe(existing.credentialRef);
+    expect(JSON.stringify(saved)).not.toContain('••••');
+    click('取消'); await settle();
+    expect(driver.confirm).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
+  it('清除 TOS 后子表单重新挂载，掩码和密钥草稿不残留', () => {
+    prepareVolcengine(existing);
+    const rendered = renderTos();
+    const input = elements(rendered).find((item) => item.props.id === 'tos-field-accessKeyId')!;
+    (input.props.onFocus as () => void)();
+    (input.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: 'replacement-ak' } }); render();
+    const clear = elements(renderTos()).find((item) => item.props.children === '清除 TOS 配置')!;
+    (clear.props.onClick as () => void)(); render();
+    const cleared = elements(renderTos()).filter((item) => item.props.id === 'tos-field-accessKeyId' || item.props.id === 'tos-field-secretAccessKey');
+    expect(cleared).toHaveLength(2);
+    for (const input of cleared) expect(input.props).toMatchObject({ type: 'password', value: '' });
+    expect(driver.persistTos).not.toHaveBeenCalled();
+  });
+
+  it('取消含 TOS 凭据的草稿会确认，确认文案不含 AK/SK，取消不保存凭据', async () => {
+    prepareVolcengine();
+    tos().onChange({ bucket: 'reference-bucket', region: 'cn-beijing', credentialRef: '' }); render();
+    tos().onCredentialsChange(keys); render();
+    click('取消'); await settle();
+    expect(driver.confirm).toHaveBeenCalledOnce();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(driver.persistTos).not.toHaveBeenCalled();
+    expect(JSON.stringify(driver.confirm.mock.calls)).not.toContain(keys.accessKeyId);
+    expect(JSON.stringify(driver.confirm.mock.calls)).not.toContain(keys.secretAccessKey);
+    driver.confirm.mockResolvedValueOnce(true);
+    click('取消'); await settle();
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(driver.persistTos).not.toHaveBeenCalled();
+  });
+
+  it('未配置 TOS 仍可保存连接；填写一项密钥则阻止保存', async () => {
+    prepareVolcengine();
+    click('保存更改'); await settle();
+    expect(props.onSave).toHaveBeenCalledOnce();
+    expect(vi.mocked(props.onSave).mock.calls[0][1].tosUpload).toBeUndefined();
+    vi.mocked(props.onSave).mockClear(); driver.persistTos.mockClear();
+    tos().onChange({ bucket: 'reference-bucket', region: 'cn-beijing', credentialRef: '' }); render();
+    tos().onCredentialsChange({ accessKeyId: keys.accessKeyId, secretAccessKey: '' }); render();
+    click('保存更改'); await settle();
+    expect(props.onSave).not.toHaveBeenCalled();
+    expect(driver.persistTos).not.toHaveBeenCalled();
+    expect(form().catalogMessage).toContain('同时填写');
+  });
+
+  it('连接保存失败后保留新引用供重试，成功后清理未被其他连接使用的旧引用', async () => {
+    prepareVolcengine(existing);
+    vi.mocked(props.onSave).mockRejectedValueOnce(new Error('连接保存失败'));
+    tos().onCredentialsChange(keys); render();
+    click('保存更改'); await settle();
+    const nextRef = 'secret:provider/volcengine/tos/22222222-2222-2222-2222-222222222222';
+    expect(tos().config?.credentialRef).toBe(nextRef);
+    expect(tos().credentials).toEqual({ accessKeyId: '', secretAccessKey: '' });
+    expect(driver.removeTos).not.toHaveBeenCalled();
+    const saved = vi.mocked(props.onSave).mock.calls[0][1];
+    expect(saved.tosUpload?.credentialRef).toBe(nextRef);
+    expect(JSON.stringify(saved)).not.toContain(keys.accessKeyId);
+    expect(JSON.stringify(saved)).not.toContain(keys.secretAccessKey);
+    click('保存更改'); await settle();
+    expect(driver.persistTos).toHaveBeenLastCalledWith(expect.objectContaining({ credentialRef: nextRef }), { accessKeyId: '', secretAccessKey: '' });
+    expect(driver.removeTos).toHaveBeenCalledExactlyOnceWith(existing.credentialRef);
+    driver.confirm.mockClear(); click('取消'); await settle();
+    expect(driver.confirm).not.toHaveBeenCalled();
+  });
+
+  it('旧 TOS 引用仍被其他连接使用时不清理', async () => {
+    prepareVolcengine(existing);
+    driver.providers.shared = { name: '共享引用连接', apiKey: '', tosUpload: existing };
+    tos().onCredentialsChange(keys); render();
+    click('保存更改'); await settle();
+    expect(props.onSave).toHaveBeenCalledOnce();
+    expect(driver.removeTos).not.toHaveBeenCalled();
+  });
+
+  it('返回厂商选择后重置 TOS 和明文凭据草稿', async () => {
+    prepareVolcengine();
+    tos().onChange({ bucket: 'reference-bucket', region: 'cn-beijing', credentialRef: '' }); render();
+    tos().onCredentialsChange(keys); render();
+    driver.confirm.mockResolvedValueOnce(true);
+    form().onReturnToPicker(); await settle();
+    const option = elements(tree).find((element) => element.key === 'volcengine')!;
+    (option.props.onClick as () => void)(); await settle();
+    expect(tos().config).toBeUndefined();
+    expect(tos().credentials).toEqual({ accessKeyId: '', secretAccessKey: '' });
+    expect(driver.persistTos).not.toHaveBeenCalled();
+  });
+});
+
+it.each([
+  { mode: '新增', editing: false, legacy: false, saveLabel: '添加厂商' },
+  { mode: '编辑', editing: true, legacy: false, saveLabel: '保存更改' },
+  { mode: '编辑旧缓存', editing: true, legacy: true, saveLabel: '保存更改' },
+])('Muse $mode 连接可保存三个真实模型，不携带 Cookie 或虚构分辨率', async ({ editing, legacy, saveLabel }) => {
+  driver.scope = { values: [], index: 0 };
+  const models = structuredClone([...MUSE_MODEL_MANIFEST]);
+  const configured = models.map((model) => legacy && model.category === 'image'
+    ? { ...model, imageCapability: { ...model.imageCapability, resolutions: [] } } : model);
+  const config = { name: 'Muse', catalogId: 'muse', apiKey: '', baseUrl: 'https://muse.ai', selectedModels: configured, catalogModels: configured };
+  props = { ...props, connectionId: 'muse', initialConfig: editing ? config : undefined, initialModelId: undefined,
+    providerConfigs: editing ? { muse: config } : {}, connectedProviderIds: editing ? ['muse'] : [], fallbackModels: { muse: models } };
+  render();
+  if (!editing) { section().onToggleVisibleModels(); render(); }
+  expect(button(saveLabel).props.disabled).toBe(true);
+  // 已保存凭据可先保存连接，在线会话验证独立进行。
+  form().onMuseCredentialReadyChange?.(true);
+  render();
+  expect(button(saveLabel).props.disabled).toBe(false);
+  click(saveLabel); await settle();
+  expect(props.onSave).toHaveBeenCalledOnce();
+  const [connectionId, saved] = vi.mocked(props.onSave).mock.calls[0];
+  expect(connectionId).toBe('muse');
+  expect(saved.selectedModels).toEqual(models);
+  expect(saved.catalogModels).toEqual(models);
+  const image = saved.selectedModels!.find((model) => model.id === 'muse-image')!;
+  expect(image.imageCapability?.resolutions).toBeUndefined();
+  expect(image.imageCapability?.defaultResolution).toBeUndefined();
+  expect(image.imageCapability?.hasResolutionField).toBe(false);
+  expect(saved.apiKey).toBe('');
+  expect(saved).not.toHaveProperty('cookie');
+  expect(saved).not.toHaveProperty('credentialStored');
+});
+
+describe('自定义图床复用表单', () => {
+  const baseConfig: ImageHostingConfig = { enabled: true, uploadUrl: 'https://host.example/upload', fileField: 'file',
+    responseUrlPath: 'data.url', auth: 'bearer', credentialSource: 'separate' };
+  function contents(value: unknown): string {
+    if (Array.isArray(value)) return value.map(contents).join('');
+    if (value && typeof value === 'object' && 'props' in value) return contents((value as Element).props.children);
+    return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+  }
+
+  it('默认连接模式保留开关、格式模板、连接 Key 来源与原地址提示', () => {
+    const rendered = ProviderImageHostingSettings({ config: baseConfig, onChange: vi.fn(), apiKey: '', onApiKeyChange: vi.fn() });
+    expect(elements(rendered).some((item) => item.props.role === 'switch')).toBe(true);
+    expect(contents(rendered)).toContain('套用内置上传格式');
+    expect(contents(rendered)).toContain('沿用当前连接 API Key（仅同源）');
+    expect(contents(rendered)).toContain('填写完整地址，或用 {{baseUrl}}');
+    expect(contents(rendered)).not.toContain('图床响应格式');
+    expect(contents(rendered)).toContain('关闭后恢复默认上传方式。');
+  });
+
+  it('全局模式隐藏连接专属控件，显示媒体字段和独立密钥，修改不会沿用连接 Key', () => {
+    const onChange = vi.fn();
+    const rendered = ProviderImageHostingSettings({ scope: 'global', config: { ...baseConfig, credentialSource: 'connection' },
+      onChange, apiKey: '', onApiKeyChange: vi.fn() });
+    expect(contents(rendered)).toContain('自定义上传配置');
+    expect(contents(rendered)).toContain('上传文件字段');
+    expect(contents(rendered)).not.toContain('套用内置上传格式');
+    expect(contents(rendered)).not.toContain('沿用当前连接 API Key');
+    expect(contents(rendered)).not.toContain('{{baseUrl}}');
+    expect(contents(rendered)).not.toContain('关闭后恢复默认上传方式。');
+    expect(elements(rendered).some((item) => item.props.role === 'switch')).toBe(false);
+    expect(elements(rendered).filter((item) => item.type === 'input' && item.props.type === 'password')).toHaveLength(1);
+    const address = elements(rendered).find((item) => item.type === 'input' && item.props.value === baseConfig.uploadUrl)!;
+    (address.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: 'https://new-host.example/upload' } });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith({ ...baseConfig, uploadUrl: 'https://new-host.example/upload' });
+  });
+
+  it('全局纯文本模式清理 JSON 判断并隐藏路径，切回 JSON 恢复默认路径', () => {
+    let config: ImageHostingConfig = { ...baseConfig, successPath: 'success', successValue: 'true' };
+    const onChange = (next: ImageHostingConfig) => { config = next; };
+    const renderFields = () => ProviderImageHostingSettings({ scope: 'global', config, onChange, apiKey: '', onApiKeyChange: vi.fn() });
+    let rendered = renderFields();
+    let format = elements(rendered).find((item) => item.type === Select && item.props.value === 'json')!;
+    (format.props.onChange as (value: string) => void)('text');
+    expect(config).toMatchObject({ responseFormat: 'text', responseUrlPath: '' });
+    expect(config.successPath).toBeUndefined();
+    expect(config.successValue).toBeUndefined();
+    rendered = renderFields();
+    expect(contents(rendered)).not.toContain('返回链接路径');
+    expect(contents(rendered)).not.toContain('成功标记路径（可选）');
+    expect(contents(rendered)).toContain('附加表单参数');
+    format = elements(rendered).find((item) => item.type === Select && item.props.value === 'text')!;
+    (format.props.onChange as (value: string) => void)('json');
+    expect(config).toMatchObject({ responseFormat: 'json', responseUrlPath: 'data.url' });
+    expect(contents(renderFields())).toContain('返回链接路径');
+    expect(contents(renderFields())).toContain('成功标记路径（可选）');
+  });
+
+  it('全局表单鉴权提供 Basic 并说明密钥作为用户名，普通表单鉴权仍单独声明密钥字段', () => {
+    let config: ImageHostingConfig = { ...baseConfig, auth: 'none' };
+    const onChange = (next: ImageHostingConfig) => { config = next; };
+    const renderFields = () => ProviderImageHostingSettings({ scope: 'global', config, onChange, apiKey: '', onApiKeyChange: vi.fn() });
+    let rendered = renderFields();
+    expect(elements(rendered).filter((item) => item.type === 'input' && item.props.type === 'password')).toHaveLength(0);
+    const auth = elements(rendered).find((item) => item.type === Select && item.props.value === 'none')!;
+    expect(elements(auth).some((item) => item.type === 'option' && item.props.value === 'basic')).toBe(true);
+    (auth.props.onChange as (value: string) => void)('form');
+    expect(config).toMatchObject({ auth: 'form', authField: 'key', credentialSource: 'separate' });
+    rendered = renderFields();
+    expect(contents(rendered)).toContain('密钥表单字段');
+    const formAuth = elements(rendered).find((item) => item.type === Select && item.props.value === 'form')!;
+    (formAuth.props.onChange as (value: string) => void)('basic');
+    expect(contents(renderFields())).toContain('Basic 方式将密钥作为用户名，密码留空；密钥保存在本机凭据存储中。');
+  });
+
+  it('保存忙碌时禁用复用表单及下拉，字段和密钥回调不再修改草稿', () => {
+    const onChange = vi.fn();
+    const onApiKeyChange = vi.fn();
+    const rendered = ProviderImageHostingSettings({ scope: 'global', disabled: true, config: baseConfig, onChange,
+      apiKey: '', onApiKeyChange });
+    expect(elements(rendered).find((item) => item.type === 'fieldset')?.props.disabled).toBe(true);
+    expect(elements(rendered).filter((item) => item.type === Select).every((item) => item.props.disabled === true)).toBe(true);
+    const address = elements(rendered).find((item) => item.type === 'input' && item.props.value === baseConfig.uploadUrl)!;
+    (address.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: 'https://changed.example/upload' } });
+    const key = elements(rendered).find((item) => item.type === 'input' && item.props.type === 'password')!;
+    (key.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: 'unsaved-fixture-key' } });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onApiKeyChange).not.toHaveBeenCalled();
+  });
+});
+
 describe('自定义连接未完成草稿保护', () => {
+  it('套用内置上传格式后保存普通配置，沿用 Key 不额外保存密钥', async () => {
+    const config = structuredClone(IMAGE_HOSTING_TEMPLATES.find((item) => item.id === 'toapis')!.config);
+    hosting().onChange(config);
+    render();
+    click('保存更改');
+    await settle();
+    expect(props.onSave).toHaveBeenCalledOnce();
+    const saved = vi.mocked(props.onSave).mock.calls[0][1].imageHosting;
+    expect(saved).toEqual(config);
+    expect(JSON.stringify(saved)).not.toContain('fixture-private-key');
+    click('取消');
+    await settle();
+    expect(driver.confirm).not.toHaveBeenCalled();
+  });
+
+  it('图床配置和未保存密钥受连接草稿保护，取消不写入', async () => {
+    hosting().onApiKeyChange('unsaved-image-host-secret');
+    render();
+    click('取消');
+    await settle();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(props.onSave).not.toHaveBeenCalled();
+    expect(driver.confirm).toHaveBeenCalledOnce();
+    expect(JSON.stringify(driver.confirm.mock.calls)).not.toContain('unsaved-image-host-secret');
+    hosting().onApiKeyChange('');
+    hosting().onChange({ enabled: true, uploadUrl: 'https://host.example/upload', fileField: 'file', responseUrlPath: 'data.url', auth: 'none' });
+    render();
+    driver.confirm.mockResolvedValueOnce(true);
+    click('取消');
+    await settle();
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(props.onSave).not.toHaveBeenCalled();
+  });
+
+  it('有效图床配置与连接一起保存，无效地址阻止提交', async () => {
+    const config = { enabled: true, uploadUrl: 'file:///private', fileField: 'file', responseUrlPath: 'data.url', auth: 'none' as const };
+    hosting().onChange(config);
+    render();
+    click('保存更改');
+    await settle();
+    expect(props.onSave).not.toHaveBeenCalled();
+    expect(form().catalogStatus).toBe('error');
+    hosting().onChange({ ...config, uploadUrl: 'https://host.example/upload' });
+    render();
+    click('保存更改');
+    await settle();
+    expect(props.onSave).toHaveBeenCalledOnce();
+    expect(vi.mocked(props.onSave).mock.calls[0][1].imageHosting).toEqual({ ...config, uploadUrl: 'https://host.example/upload' });
+    click('取消');
+    await settle();
+    expect(driver.confirm).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['图片参数', () => section().onOpenModelSettings('image-c', 'image')],
     ['视频参数', () => section().onOpenModelSettings('text-a', 'video')],

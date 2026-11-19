@@ -6,7 +6,7 @@
 //!
 //! 1. 调用方校验：只接受加载本地前端的自有窗口，拒绝远程页面（如即梦登录窗）。
 //! 2. 路径校验：解析真实路径（含符号链接），要求落在应用自有数据目录，
-//!    或用户通过对话框 / 外部素材目录显式授权过的 fs scope 内。
+//!    或用户通过对话框、原生拖放或外部素材目录显式授权过的 fs scope 内。
 
 use std::{
     path::{Component, Path, PathBuf},
@@ -77,13 +77,72 @@ pub(crate) fn is_theme_asset_name(name: &str) -> bool {
         && matches!(extension, "png" | "jpg" | "webp" | "svg")
 }
 
+/// Skill 托管目录固定在可执行文件旁，不接受前端提供根目录，也不扩大公共 scope。
+pub(crate) fn authorize_skill_storage_root<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    create: bool,
+) -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|_| "无法定位应用安装目录")?;
+    let install = canonicalize_simplified(executable.parent().ok_or("无法定位应用安装目录")?)
+        .map_err(|_| "无法解析应用安装目录")?;
+    ensure_plain_skill_directory_chain(&install)?;
+    let directory = install.join("skills");
+    if overlaps_private_app_path(app, &directory) {
+        return Err("Skill 托管目录与应用私有区域重叠".into());
+    }
+    if create {
+        match std::fs::create_dir(&directory) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(_) => return Err("安装目录的 skills 文件夹不可写，请检查安装目录权限".into()),
+        }
+    }
+    ensure_plain_skill_directory_chain(&directory)?;
+    let resolved = canonicalize_simplified(&directory).map_err(|_| "Skill 托管目录不可访问")?;
+    if resolved != directory || overlaps_private_app_path(app, &resolved) {
+        return Err("Skill 托管目录超出安装目录或与私有区域重叠".into());
+    }
+    Ok(resolved)
+}
+
+/// 持久 Skill 来源逐级拒绝软链及 Windows junction，仅兼容 macOS 固定的系统目录别名。
+pub(crate) fn ensure_plain_skill_directory_chain(path: &Path) -> Result<(), String> {
+    for ancestor in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|_| "Skill 目录不存在或不可访问")?;
+        if (!metadata.is_dir() || is_link_or_reparse(&metadata)) && !is_macos_system_skill_alias(ancestor) {
+            return Err("Skill 目录不能包含符号链接或目录联接".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_system_skill_alias(path: &Path) -> bool {
+    let expected = match path.to_str() {
+        Some("/var") => Path::new("/private/var"),
+        Some("/tmp") => Path::new("/private/tmp"),
+        Some("/etc") => Path::new("/private/etc"),
+        _ => return false,
+    };
+    canonicalize_simplified(path).is_ok_and(|resolved| resolved == expected)
+        && std::fs::metadata(expected).is_ok_and(|metadata| metadata.is_dir())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_macos_system_skill_alias(_path: &Path) -> bool { false }
+
 /// 校验命令来自自有本地窗口，而不是远程页面或第三方运行时窗口。
 pub fn ensure_trusted_caller<R: Runtime>(webview: &Webview<R>) -> Result<(), String> {
     let label = webview.label();
     if !TRUSTED_WINDOW_LABELS.contains(&label) {
         return Err(format!("窗口 {label} 无权调用该命令"));
     }
+    ensure_local_frontend_caller(webview)
+}
 
+/// 校验来源；调用方必须另外明确限制允许的窗口标签。
+pub(crate) fn ensure_local_frontend_caller<R: Runtime>(webview: &Webview<R>) -> Result<(), String> {
+    let label = webview.label();
     // 窗口即使标签可信，也可能被导航到远程地址，必须再确认当前来源仍是本地前端。
     let url = webview
         .url()
@@ -107,12 +166,12 @@ pub fn ensure_trusted_caller<R: Runtime>(webview: &Webview<R>) -> Result<(), Str
 /// 命令返回的路径会被前端存进节点数据，而前端所有「这个文件在不在项目目录里」的判断
 /// 都是字符串前缀比较（改名同步、分组搬运、相对路径索引）。带前缀的路径一律比不中，
 /// 且失败都是静默的。fs 插件和前端拼出来的路径本来就是普通形式，这里统一成同一种。
-fn canonicalize_simplified(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn canonicalize_simplified(path: &Path) -> std::io::Result<PathBuf> {
     Ok(simplify_verbatim(path.canonicalize()?))
 }
 
 #[cfg(windows)]
-fn simplify_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn simplify_verbatim(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy().into_owned();
     match text.strip_prefix(r"\\?\") {
         // `\\?\UNC\server\share` 还原成 `\\server\share`
@@ -125,7 +184,7 @@ fn simplify_verbatim(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn simplify_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn simplify_verbatim(path: PathBuf) -> PathBuf {
     path
 }
 
@@ -164,6 +223,7 @@ fn is_private_app_path<R: Runtime>(app: &tauri::AppHandle<R>, resolved: &Path) -
         || crate::agent_package::is_agent_private_path(app, resolved)
         || crate::plugin_registry::is_plugin_private_path(app, resolved)
         || crate::comfyui::installation::is_private_path(app, resolved)
+        || crate::project_model_safety::is_private_path(app, resolved, false)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -188,6 +248,7 @@ fn overlaps_private_app_path<R: Runtime>(
         || crate::plugin_registry::is_plugin_private_path_overlap(app, resolved)
         || crate::blender_runtime::is_blender_private_path_overlap(app, resolved)
         || crate::comfyui::installation::overlaps_private_path(app, resolved)
+        || crate::project_model_safety::is_private_path(app, resolved, true)
 }
 
 /// 凭据目录可能尚未创建（无法 canonicalize），因此同时按原始路径与解析后路径比对。
@@ -263,16 +324,20 @@ fn is_authorized<R: Runtime>(
 }
 
 #[cfg(windows)]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
 
+    metadata.file_type().is_symlink() || has_windows_reparse_attribute(metadata.file_attributes())
+}
+
+#[cfg(windows)]
+fn has_windows_reparse_attribute(attributes: u32) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
@@ -550,21 +615,48 @@ pub fn authorize_app_owned_path<R: Runtime>(
     Ok(resolved)
 }
 
-/// 用户把文件拖入自有窗口，等同于对该文件的一次显式授权（与文件对话框选中同义）。
-/// 登记进 fs scope 后，后续的复制 / 读取命令才能通过路径校验。
-pub fn grant_dropped_paths<R: Runtime>(app: &tauri::AppHandle<R>, paths: &[PathBuf]) {
+/// 在 Wry 通知前端前登记用户实际拖入的路径。启用 Tauri unstable 时，主窗口也收到 WebviewEvent。
+pub(crate) fn authorize_native_drop<R: Runtime>(app: &tauri::AppHandle<R>, event: &tauri::RunEvent) {
+    use tauri::{DragDropEvent, RunEvent, WebviewEvent, WindowEvent};
+
+    let (label, paths) = match event {
+        RunEvent::WebviewEvent {
+            label,
+            event: WebviewEvent::DragDrop(DragDropEvent::Drop { paths, .. }),
+            ..
+        }
+        | RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }),
+            ..
+        } => (label, paths),
+        _ => return,
+    };
+    if !matches!(label.as_str(), "main" | "chat-assistant") || paths.is_empty() {
+        return;
+    }
+    let Some(webview) = app.get_webview(label) else {
+        return;
+    };
+    if ensure_local_frontend_caller(&webview).is_err() {
+        return;
+    }
+
     let scope = app.fs_scope();
     for path in paths {
         let Ok(canonical) = path.canonicalize() else {
             continue;
         };
+        if overlaps_private_app_path(app, &simplify_verbatim(canonical.clone())) {
+            continue;
+        }
         let result = if canonical.is_dir() {
             scope.allow_directory(&canonical, true)
         } else {
             scope.allow_file(&canonical)
         };
-        if let Err(error) = result {
-            eprintln!("[path-policy] 登记拖入路径失败 {}: {error}", canonical.display());
+        if result.is_err() {
+            eprintln!("[path-policy] 登记拖入路径失败");
         }
     }
 }
@@ -661,7 +753,14 @@ pub fn authorize_launch_target<R: Runtime>(
 /// `sync_authorized_directories` 重新带入。需要落到用户目录的派生数据
 /// （例如智能体压缩包解压目录）通过它定位，避免默认写进系统盘。
 #[derive(Default)]
-pub struct UserStorageRoot(pub Mutex<Option<PathBuf>>);
+pub struct UserStorageRoot(Mutex<UserStorageRootValue>);
+
+#[derive(Default)]
+struct UserStorageRootValue {
+    root: Option<PathBuf>,
+    synced: bool,
+    configured: bool,
+}
 
 /// 记录用户设置的保存根目录；传入空值表示回退到应用自有目录。
 ///
@@ -669,14 +768,15 @@ pub struct UserStorageRoot(pub Mutex<Option<PathBuf>>);
 /// 私有子树内。校验失败时静默清空并回退，不阻断设置同步 —— 否则用户把一个
 /// 暂时不可用的盘符设为保存根目录后，整个设置面板都会报错。
 pub fn set_user_storage_root<R: Runtime>(app: &tauri::AppHandle<R>, raw: Option<&str>) {
-    let next = raw
+    let configured = raw.map(str::trim).is_some_and(|value| !value.is_empty());
+    let root = raw
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .and_then(|value| resolve_user_storage_root(app, value));
 
     if let Some(state) = app.try_state::<UserStorageRoot>() {
         if let Ok(mut guard) = state.0.lock() {
-            *guard = next;
+            *guard = UserStorageRootValue { root, configured, synced: true };
         }
     }
 }
@@ -708,12 +808,65 @@ pub fn user_storage_root<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBu
         .0
         .lock()
         .ok()
-        .and_then(|guard| guard.clone())
+        .and_then(|guard| guard.root.clone())
+}
+
+/// 新项目不能在配置尚未同步或自定义目录失效时静默写到默认盘。
+pub fn verified_user_storage_root<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Option<PathBuf>, String> {
+    let state = app.try_state::<UserStorageRoot>().ok_or("项目存储配置不可用")?;
+    let value = state.0.lock().map_err(|_| "项目存储配置不可用")?;
+    if !value.synced || value.configured && value.root.is_none() { return Err("项目存储目录尚未同步或不可用".into()); }
+    Ok(value.root.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_windows_reparse_attribute_deterministically() {
+        assert!(!has_windows_reparse_attribute(0));
+        assert!(!has_windows_reparse_attribute(0x0020));
+        assert!(has_windows_reparse_attribute(0x0400));
+        assert!(has_windows_reparse_attribute(0x0420));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplification_preserves_unc_and_plain_windows_paths() {
+        assert_eq!(simplify_verbatim(PathBuf::from(r"\\?\C:\资料\image.png")), PathBuf::from(r"C:\资料\image.png"));
+        assert_eq!(simplify_verbatim(PathBuf::from(r"\\?\UNC\server\share\资料.png")), PathBuf::from(r"\\server\share\资料.png"));
+        let plain = PathBuf::from(r"C:\资料\image.png");
+        assert_eq!(simplify_verbatim(plain.clone()), plain);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn simplification_does_not_reinterpret_windows_prefixes_on_other_platforms() {
+        let path = PathBuf::from(r"\\?\UNC\server\share\image.png");
+        assert_eq!(simplify_verbatim(path.clone()), path);
+    }
+
+    #[test]
+    fn shared_link_predicate_accepts_plain_entries_and_rejects_unix_symlinks() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("ai-canvas-shared-path-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("plain.bin");
+        std::fs::write(&file, b"plain").unwrap();
+        assert!(!is_link_or_reparse(&std::fs::symlink_metadata(&directory).unwrap()));
+        assert!(!is_link_or_reparse(&std::fs::symlink_metadata(&file).unwrap()));
+        #[cfg(unix)]
+        {
+            let link = directory.join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(is_link_or_reparse(&std::fs::symlink_metadata(&link).unwrap()));
+            std::fs::remove_file(link).unwrap();
+        }
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn refuses_paths_inside_the_secret_dir() {
@@ -821,5 +974,18 @@ mod tests {
 
         let nested_missing = dir.join("ai-canvas-missing-dir").join("file.bin");
         assert!(resolve_path(&nested_missing.to_string_lossy(), PathAccess::Write).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn skill_directory_checks_accept_only_verified_fixed_macos_system_aliases() {
+        for (alias, expected) in [("/var", "/private/var"), ("/tmp", "/private/tmp"), ("/etc", "/private/etc")] {
+            assert_eq!(canonicalize_simplified(Path::new(alias)).unwrap(), Path::new(expected));
+            assert!(is_macos_system_skill_alias(Path::new(alias)));
+            assert!(ensure_plain_skill_directory_chain(Path::new(alias)).is_ok());
+        }
+        for path in ["/var/tmp", "/tmp/user-skill", "/etc/skill", "/Users/alias"] {
+            assert!(!is_macos_system_skill_alias(Path::new(path)));
+        }
     }
 }

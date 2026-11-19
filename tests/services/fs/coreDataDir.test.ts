@@ -16,6 +16,19 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+describe('project disk notifications', () => {
+  it('keeps default notifications compatible and exposes materialization details to directory listeners', async () => {
+    const events = new EventTarget();
+    vi.stubGlobal('window', events);
+    const core = await import('../../../src/services/fs/core');
+    const received: unknown[] = [];
+    events.addEventListener(core.PROJECT_DISK_CHANGED_EVENT, (event) => received.push((event as CustomEvent).detail));
+    core.notifyProjectDiskChanged();
+    core.notifyProjectDiskChanged({ source: 'save-materialization', projectId: 'p1' });
+    expect(received).toEqual([null, { source: 'save-materialization', projectId: 'p1' }]);
+  });
+});
+
 describe('default storage directory', () => {
   it('coalesces concurrent path queries and reuses a successful system directory', async () => {
     let resolve!: (directory: string) => void;
@@ -86,4 +99,18 @@ describe('default storage directory', () => {
     expect(await core.getBaseDir()).toBe('/chosen');
     expect(await core.getProjectDataDir('project')).toBe('/chosen/project');
   });
+
+  it.each(['\\\\server\\share\\', '//server/share/'])(
+    'preserves the UNC prefix of a custom storage root %s', async (root) => {
+      const core = await import('../../../src/services/fs/core');
+      core.setBaseDataDir(root);
+      core.registerProjectFolder('episode', '剧集');
+      const directory = await core.getProjectDataDir('episode');
+      expect(directory).toBe('//server/share/剧集');
+      expect(core.joinPath(directory ?? '', 'Library', '候选.png')).toBe('//server/share/剧集/Library/候选.png');
+      expect(core.joinPath('C:\\projects\\', 'Library')).toBe('C:/projects/Library');
+      expect(core.joinPath('/projects//', 'Library')).toBe('/projects/Library');
+      expect(core.joinPath('\\\\?\\UNC\\server\\share', 'Library')).toBe('//?/UNC/server/share/Library');
+    },
+  );
 });

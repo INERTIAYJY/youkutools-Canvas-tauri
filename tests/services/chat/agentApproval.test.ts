@@ -11,6 +11,7 @@ vi.mock('../../../src/services/chat/tools', () => ({ ensureAgentToolsRegistered:
 
 vi.mock('../../../src/services/ai/assistantStream', () => ({
   streamAssistantReply: streamAssistantReplyMock,
+  resolveAssistantModel: () => ({ supportsTools: true }),
 }));
 
 vi.mock('../../../src/services/chat/contextManager', () => ({
@@ -69,6 +70,8 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-approval',
+    projectLoadStatus: 'ready',
+    projects: [{ id: 'project-approval', name: '审批测试项目', createdAt: 1, updatedAt: 1 }],
     activeConversationId: 'conversation-approval',
     conversations: [{
       id: 'conversation-approval',

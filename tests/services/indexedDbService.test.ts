@@ -3,6 +3,7 @@
  */
 import { forceCloseDatabase, IDBFactory } from 'fake-indexeddb';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
 
 const DB_NAME = 'ai-canvas-db';
 const EXPECTED_STORES = [
@@ -89,6 +90,72 @@ function readRecord(db: IDBDatabase, store: string, key: string): Promise<unknow
   });
 }
 
+describe('故事图原子保存', () => {
+  it.each(['project-model-source-freeze', 'activeDataModel', 'project-model-business-fixture'])(
+    '%s 阻止旧故事图与迟到封面写入冻结源', async (marker) => {
+      const service = await import('../../src/services/indexedDbService');
+      const graph = createEmptyStoryGraph('frozen-graph');
+      const record = { ...RECOVERY_PROJECT, nodes: [], series: { script: '原剧本', storyGraph: graph } };
+      await service.saveProjectToDb(record);
+      const database = await openDatabase(DB_NAME);
+      try {
+        const before = await readRecord(database, 'projects', record.id);
+        await new Promise<void>((resolve, reject) => {
+          const transaction = database.transaction('metadata', 'readwrite');
+          transaction.objectStore('metadata').put({ id: marker });
+          transaction.oncomplete = () => resolve(); transaction.onabort = () => reject(transaction.error);
+        });
+        await expect(service.updateProjectStoryGraphCAS(record.id, { graphId: graph.id }, 0, 0)).rejects.toThrow('旧项目写入已停止');
+        await expect(service.updateProjectSnapshot(record.id, 'data:image/webp;base64,LATE')).rejects.toThrow('旧项目写入已停止');
+        expect(await readRecord(database, 'projects', record.id)).toEqual(before);
+      } finally { database.close(); }
+    },
+  );
+
+  it('并发 CAS 只有一个成功，迟到的普通保存不能覆盖正式图或项目摘要', async () => {
+    const db = await import('../../src/services/indexedDbService');
+    const graph = { ...createEmptyStoryGraph('graph'), revision: 6 };
+    const record = { id: 'series-graph', name: '整部剧', createdAt: 1, updatedAt: 2, nodes: [], edges: [],
+      series: { script: '原剧本', storyGraph: graph } };
+    await db.saveProjectToDb(record);
+    const node = { id: 'event', kind: 'event' as const, label: '关键事件', description: '', aliases: [],
+      episodeIds: [], evidence: [], origin: 'manual' as const, certainty: 'explicit' as const };
+    const writes = await Promise.allSettled([
+      db.updateProjectStoryGraphCAS(record.id, { graphId: graph.id, upsertNodes: [node] }, 6, 0),
+      db.updateProjectStoryGraphCAS(record.id, { graphId: graph.id, upsertNodes: [{ ...node, label: '另一编辑' }] }, 6, 0),
+    ]);
+    expect(writes.filter((write) => write.status === 'fulfilled')).toHaveLength(1);
+    expect(writes.filter((write) => write.status === 'rejected')).toHaveLength(1);
+    const committed = (await db.getProjectById(record.id))!.series!.storyGraph!;
+    expect(committed.revision).toBe(7);
+    await db.saveProjectToDb({ ...record, series: { ...record.series, script: '较新的正文' } });
+    expect((await db.getProjectById(record.id))!.series).toEqual({ script: '较新的正文', storyGraph: committed });
+    expect((await db.getAllProjects()).find((item) => item.id === record.id)?.series?.storyGraph).toEqual(committed);
+  });
+
+  it('归档代际变化或宿主守卫拒绝时不产生图写入', async () => {
+    const db = await import('../../src/services/indexedDbService');
+    const record = { id: 'series-epoch', name: '整部剧', exchangeEpoch: 3, createdAt: 1, updatedAt: 2, nodes: [], edges: [] };
+    await db.saveProjectToDb({ ...record, exchangeEpoch: 0 });
+    // 非零代际由导入事务产生，普通保存不能创建带有导入代际的新记录。
+    const database = await openDatabase(DB_NAME);
+    const { toProjectSummaryRecord } = await import('../../src/services/indexedDb/projectSummary');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(['projects', 'projectSummaries'], 'readwrite');
+        transaction.objectStore('projects').put(record);
+        transaction.objectStore('projectSummaries').put(toProjectSummaryRecord(record));
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = transaction.onerror = () => reject(transaction.error);
+      });
+    } finally { database.close(); }
+    await expect(db.updateProjectStoryGraphCAS(record.id, { graphId: 'graph' }, 0, 2)).rejects.toThrow('已变化');
+    await expect(db.updateProjectStoryGraphCAS(record.id, { graphId: 'graph' }, 0, 3,
+      () => { throw new Error('编辑会话已关闭'); })).rejects.toThrow('会话已关闭');
+    expect((await db.getProjectById(record.id))?.series?.storyGraph).toBeUndefined();
+  });
+});
+
 beforeEach(() => {
   Object.defineProperty(globalThis, 'indexedDB', {
     configurable: true,
@@ -98,6 +165,40 @@ beforeEach(() => {
 });
 
 describe('project snapshot updates', () => {
+  it('keeps episode creation references and role overrides in the persisted lightweight list', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const { createDefaultTeamProfile } = await import('../../src/services/chat/teams/teamProfileService');
+    const { toProjectSummaryRecord } = await import('../../src/services/indexedDb/projectSummary');
+    const creationProfile = { id: 'script-team', version: '1.0.0', sha256: 'a'.repeat(64) };
+    const teamProfileOverride = createDefaultTeamProfile('text');
+    const episode = { ...RECOVERY_PROJECT, parentId: 'series', creationProfile, teamProfileOverride };
+    await service.saveProjectToDb(episode);
+    const listed = (await service.getAllProjects())[0];
+    expect(listed.creationProfile).toEqual(creationProfile);
+    expect(listed.teamProfileOverride).toEqual(teamProfileOverride);
+    expect(listed).not.toHaveProperty('nodes');
+    expect((await service.getProjectById(episode.id))?.creationProfile).toEqual(creationProfile);
+    await service.saveProjectToDb({ ...episode, creationProfile: undefined, teamProfileOverride: undefined });
+    expect((await service.getAllProjects())[0]).not.toHaveProperty('creationProfile');
+    expect(toProjectSummaryRecord(RECOVERY_PROJECT)).not.toHaveProperty('teamProfileOverride');
+    const invalid = toProjectSummaryRecord({ ...episode, creationProfile: { ...creationProfile, apiKey: 'fixture-private' } });
+    expect(invalid?.creationProfile?.id).toBe('invalid-creation-profile');
+    expect(JSON.stringify(invalid)).not.toContain('fixture-private');
+  });
+
+  it('keeps creation selection CAS changes when an older conversation snapshot later saves', async () => {
+    const service = await import('../../src/services/indexedDbService');
+    const original = { id: 'conv-profile', projectId: 'project', title: '旧标题', titleSource: 'user' as const,
+      pinned: false, archived: false, agentMode: 'collaborative' as const, createdAt: 1, updatedAt: 1, messageCount: 0 };
+    await service.putChatConversation(original);
+    const selection = { id: 'creation', version: '1.0.0', sha256: 'a'.repeat(64) };
+    await service.setConversationCreationProfileCAS(original.id, undefined, selection, { executionSelection: { kind: 'team', templateId: 'outline' } });
+    await service.putChatConversation({ ...original, title: '新标题', messageCount: 3 });
+    const saved = (await service.getProjectConversations('project'))[0];
+    expect(saved.creationProfile).toEqual(selection); expect(saved.creationProfileRevision).toBe(1);
+    expect(saved.executionSelection).toEqual({ kind: 'team', templateId: 'outline' }); expect(saved.messageCount).toBe(3);
+    await expect(service.setConversationCreationProfileCAS(original.id, undefined, undefined)).rejects.toThrow('CONFLICT');
+  });
   it('clears only the preview for an empty canvas while keeping persisted data', async () => {
     const service = await import('../../src/services/indexedDbService');
     const { openDB } = await import('../../src/services/indexedDb/schema');

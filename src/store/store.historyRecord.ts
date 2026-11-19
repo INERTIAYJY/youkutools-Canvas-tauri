@@ -58,11 +58,13 @@ async function normalizeHistoryMediaRecord(
   record: OutputHistoryEntry,
   projectId: string,
 ): Promise<NormalizedHistoryRecord> {
-  if (!isTransientMediaUrl(record.output) && !isTransientMediaUrl(record.mediaUrl)) {
+  // 文本正文中的 data:/blob: 是普通字符；只有媒体输出或显式附件才需要迁移。
+  const transientOutput = record.nodeType !== 'ai-text' && isTransientMediaUrl(record.output);
+  if (!transientOutput && !isTransientMediaUrl(record.mediaUrl)) {
     return { record, changed: false, failed: false };
   }
   try {
-    const outputSource = typeof record.output === 'string' && isTransientMediaUrl(record.output)
+    const outputSource = typeof record.output === 'string' && transientOutput
       ? record.output
       : undefined;
     const mediaSource = typeof record.mediaUrl === 'string' && isTransientMediaUrl(record.mediaUrl)
@@ -123,7 +125,7 @@ async function normalizeHistoryMediaRecord(
     return {
       record: {
         ...record,
-        output: isTransientMediaUrl(record.output) ? '媒体未能迁移到项目目录' : record.output,
+        output: transientOutput ? '媒体未能迁移到项目目录' : record.output,
         mediaUrl: isTransientMediaUrl(record.mediaUrl) ? undefined : record.mediaUrl,
         status: 'error',
       },
@@ -216,7 +218,9 @@ export const createHistoryRecordSlice: StateCreator<AppState, [], [], HistoryRec
       historyLoading: true,
     });
     try {
-      await claimLegacyHistoryEntries(projectId, get().nodes.map((node) => node.id));
+      if (get().projectExecutionContext?.modelGeneration !== 1) {
+        await claimLegacyHistoryEntries(projectId, get().nodes.map((node) => node.id));
+      }
       const [page, totalCount] = await Promise.all([
         getHistoryEntriesPage(projectId, HISTORY_PAGE_SIZE, null, query),
         getHistoryEntryCount(projectId),
@@ -281,6 +285,10 @@ export const createHistoryRecordSlice: StateCreator<AppState, [], [], HistoryRec
 
   migrateHistoryAndLoad: async () => {
     const { currentProjectId, nodes } = get();
+    if (get().projectExecutionContext?.modelGeneration === 1) {
+      await get().loadHistoryFromDb();
+      return;
+    }
     if (currentProjectId) {
       try {
         const completed = await hasCompletedHistoryMigration(currentProjectId);

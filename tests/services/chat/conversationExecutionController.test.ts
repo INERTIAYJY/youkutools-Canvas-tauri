@@ -24,6 +24,11 @@ const interjectionMocks = vi.hoisted(() => ({
 
 const mediaRuntimeMocks = vi.hoisted(() => ({ generate: vi.fn(), complete: vi.fn() }));
 const mediaHistoryMocks = vi.hoisted(() => ({ persist: vi.fn() }));
+const creationMocks = vi.hoisted(() => ({ capture: vi.fn() }));
+vi.mock('../../../src/services/creationProfiles/creationProfileService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/services/creationProfiles/creationProfileService')>(),
+  captureCreationProfile: creationMocks.capture,
+}));
 vi.mock('../../../src/services/ai/generationRuntime', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/services/ai/generationRuntime')>(),
   runMediaGeneration: mediaRuntimeMocks.generate,
@@ -61,11 +66,19 @@ import { useAppStore } from '../../../src/store/useAppStore';
 import { DEFAULT_AGENT_TASK_BUDGET, type AgentTask } from '../../../src/types/agent';
 import { GENERAL_ASSISTANT_SCOPE_ID, isGeneralAssistantTool } from '../../../src/services/chat/assistantScope';
 import { getPendingTasksForProject, MediaTaskPausedError, savePendingTask } from '../../../src/services/pollManager';
+import { imageBatchArtifactId } from '../../../src/services/imageBatchService';
+import type { MediaGenerationResult } from '../../../src/types/media';
+import type { ChatMessage } from '../../../src/types/chat';
+import type { CreationProfileSnapshot } from '../../../src/types/creationProfile';
+import { pauseAgentTask } from '../../../src/services/chat/agentTaskControl';
+import { WORKBENCH_AGENT_READ_TOOLS } from '../../../src/services/episodeWorkspaceScope';
 
 function arrangeConversation(): void {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-1',
+    projectLoadStatus: 'ready',
+    projects: [{ id: 'project-1', name: 'Controller test', createdAt: 1, updatedAt: 1 }],
     activeConversationId: 'conversation-1',
     conversations: [{
       id: 'conversation-1',
@@ -90,6 +103,7 @@ beforeEach(() => {
   mediaRuntimeMocks.complete.mockReset();
   mediaHistoryMocks.persist.mockReset();
   mediaHistoryMocks.persist.mockResolvedValue(undefined);
+  creationMocks.capture.mockReset().mockResolvedValue({ skillBindings: [] });
   arrangeConversation();
   schedulerMocks.activeTaskId = undefined;
   schedulerMocks.scheduledTaskIds.clear();
@@ -106,7 +120,231 @@ beforeEach(() => {
   interjectionMocks.enqueue.mockReturnValue(true);
 });
 
+describe('creation profile preparation and scheduling', () => {
+  const selection = { id: 'creation', version: '1.0.0', sha256: 'a'.repeat(64) };
+  const snapshot: CreationProfileSnapshot = { ...selection, name: '组合', contextPolicyRef: 'explicit-materials',
+    pluginRefs: [], agentPackageRefs: [], skillRefs: [] };
+  const select = () => useAppStore.setState({ conversations: useAppStore.getState().conversations.map((conversation) => ({ ...conversation, creationProfile: selection })) });
+
+  it('keeps the original synchronous scheduling path without a selected profile', () => {
+    const result = submitConversationMessage({ content: '普通请求', conversationId: 'conversation-1' });
+    expect(result.status).toBe('started'); expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
+    expect(creationMocks.capture).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0].creationProfilePreparation).toBeUndefined();
+  });
+
+  it('does not dispatch before preparation and cannot resume around a paused preparation', async () => {
+    select();
+    let complete!: (value: { snapshot: CreationProfileSnapshot; skillBindings: [] }) => void;
+    const preparing = new Promise<{ snapshot: CreationProfileSnapshot; skillBindings: [] }>((resolve) => { complete = resolve; });
+    creationMocks.capture.mockReturnValueOnce(preparing);
+    const result = submitConversationMessage({ content: '使用选定组合', conversationId: 'conversation-1' });
+    if (result.status !== 'started' || !result.taskId) throw new Error('Expected queued preparation');
+    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0].creationProfilePreparation).toBe('pending');
+    pauseAgentTask(result.taskId);
+    expect(resumeAgentTaskExecution(result.taskId)).toMatchObject({ ok: false, errorCode: 'CREATION_PROFILE_NOT_PREPARED' });
+    complete({ snapshot, skillBindings: [] }); await preparing;
+    const task = useAppStore.getState().agentTasks.find((entry) => entry.id === result.taskId)!;
+    expect(task.creationProfilePreparation).toBe('ready'); expect(task.creationProfile).toEqual(snapshot);
+    expect(task.status).toBe('paused'); expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(resumeAgentTaskExecution(result.taskId).ok).toBe(true);
+    expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
+  });
+
+  it('preparation rejection stops the queued task without running the legacy path', async () => {
+    select(); creationMocks.capture.mockRejectedValueOnce(new Error('组合能力不可用'));
+    const result = submitConversationMessage({ content: '使用选定组合', conversationId: 'conversation-1' });
+    await Promise.resolve(); await Promise.resolve();
+    expect(result.status).toBe('started'); expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({ status: 'stopped', creationProfilePreparation: 'failed', errorCode: 'CREATION_PROFILE_PREPARATION_FAILED' });
+  });
+});
+
+describe('工作台分集 Agent 接线', () => {
+  const target = { seriesId: 'series', episodeId: 'episode-b' };
+  const episodeSelection = { id: 'episode-profile', version: '1.0.0', sha256: 'b'.repeat(64) };
+  const conversationSelection = { id: 'conversation-profile', version: '1.0.0', sha256: 'c'.repeat(64) };
+  const snapshot: CreationProfileSnapshot = { ...episodeSelection, name: '本集组合', contextPolicyRef: 'explicit-materials',
+    pluginRefs: [], agentPackageRefs: [], skillRefs: [], toolAllowlist: ['episode_read', 'skill_load', 'canvas_query', 'media_generate'] };
+
+  beforeEach(() => {
+    useAppStore.setState({
+      currentProjectId: 'episode-a', projectLoadStatus: 'ready', isCreatingProject: false,
+      isReturningToStartPage: false, switchingProjectName: null,
+      projects: [
+        { id: 'series', name: '剧集', createdAt: 1, updatedAt: 1 },
+        { id: 'episode-a', parentId: 'series', name: '第一集', createdAt: 1, updatedAt: 1 },
+        { id: 'episode-b', parentId: 'series', name: '第二集', createdAt: 1, updatedAt: 1 },
+        { id: 'other-series', name: '其他剧集', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: useAppStore.getState().conversations.map((conversation) => ({ ...conversation, projectId: 'series',
+        creationProfile: conversationSelection, executionSelection: { kind: 'team' as const, templateId: 'review' as const } })),
+    });
+  });
+
+  const submit = () => submitConversationMessage({ content: '检查本集结构', projectId: 'episode-b',
+    conversationId: 'conversation-1', workbenchTarget: target, executionSelection: { kind: 'single' } });
+
+  it('允许离画布同剧集分集任务，仅开放固定只读工具，不继承会话组合或团队', () => {
+    const result = submit();
+    expect(result.status).toBe('started');
+    const task = useAppStore.getState().agentTasks[0];
+    expect(task).toMatchObject({ projectId: 'episode-b', conversationId: 'conversation-1', workbenchTarget: target,
+      toolAllowlist: [...WORKBENCH_AGENT_READ_TOOLS] });
+    expect(task.executionKind).toBeUndefined();
+    expect(task.creationProfile).toBeUndefined();
+    expect(creationMocks.capture).not.toHaveBeenCalled();
+    expect(schedulerMocks.schedule).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().currentProjectId).toBe('episode-a');
+  });
+
+  it('准备本集组合包后仍与只读固定集合及显式 Skill 限制取交集', async () => {
+    useAppStore.setState({
+      projects: useAppStore.getState().projects.map((project) => project.id === 'episode-b'
+        ? { ...project, creationProfile: episodeSelection } : project),
+      userSkills: [{ id: 'restrict', name: '只读规则', description: '', fileName: 'SKILL.md', sourceType: 'file', createdAt: 1,
+        content: '按证据分析', manifest: { allowedTools: ['skill_load', 'canvas_query'] } }],
+    });
+    let finish!: (value: { snapshot: CreationProfileSnapshot; skillBindings: [] }) => void;
+    const preparing = new Promise<{ snapshot: CreationProfileSnapshot; skillBindings: [] }>((resolve) => { finish = resolve; });
+    creationMocks.capture.mockReturnValueOnce(preparing);
+    const result = submitConversationMessage({ content: '检查本集 @skill{restrict|只读规则}', projectId: 'episode-b',
+      conversationId: 'conversation-1', workbenchTarget: target, executionSelection: { kind: 'single' } });
+    if (result.status !== 'started' || !result.taskId) throw new Error('Expected workbench task');
+    expect(creationMocks.capture).toHaveBeenCalledWith(episodeSelection, 'episode-b');
+    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({ creationProfilePreparation: 'pending', toolAllowlist: ['skill_load'] });
+    finish({ snapshot, skillBindings: [] });
+    await preparing;
+    const task = useAppStore.getState().agentTasks.find((entry) => entry.id === result.taskId)!;
+    expect(task).toMatchObject({ creationProfile: snapshot, creationProfilePreparation: 'ready', toolAllowlist: ['skill_load'], workbenchTarget: target });
+    expect(task.toolAllowlist).not.toContain('canvas_query');
+    expect(task.toolAllowlist).not.toContain('media_generate');
+    expect(schedulerMocks.schedule).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().currentProjectId).toBe('episode-a');
+  });
+
+  it('清理旧任务后续聊仍继承会话分集，当前画布参数不能改变只读目标', () => {
+    const first = submit();
+    expect(first.status).toBe('started');
+    useAppStore.getState().updateConversation('conversation-1', { executionSelection: { kind: 'single' } });
+    useAppStore.setState({ agentTasks: [] });
+    const next = submitConversationMessage({ content: '继续检查人物动机', projectId: 'episode-a', conversationId: 'conversation-1' });
+    expect(next.status).toBe('started');
+    expect(useAppStore.getState().conversations[0].workbenchTarget).toEqual(target);
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({ projectId: 'episode-b', workbenchTarget: target,
+      toolAllowlist: [...WORKBENCH_AGENT_READ_TOOLS] });
+    expect(useAppStore.getState().currentProjectId).toBe('episode-a');
+  });
+
+  it('已绑定会话不能通过新提交参数改绑另一个分集', () => {
+    submit();
+    const before = useAppStore.getState();
+    expect(submitConversationMessage({ content: '换一集', projectId: 'episode-a', conversationId: 'conversation-1',
+      executionSelection: { kind: 'single' }, workbenchTarget: { seriesId: 'series', episodeId: 'episode-a' } }))
+      .toEqual({ status: 'ignored' });
+    expect(useAppStore.getState().conversations[0].workbenchTarget).toEqual(target);
+    expect(useAppStore.getState().agentTasks).toHaveLength(before.agentTasks.length);
+    expect(useAppStore.getState().messages).toHaveLength(before.messages.length);
+  });
+
+  it('离开所属剧集后插话也不能绕过绑定范围进入旧任务', () => {
+    const first = submit();
+    if (first.status !== 'started' || !first.taskId) throw new Error('Expected workbench task');
+    schedulerMocks.activeTaskId = first.taskId;
+    useAppStore.getState().updateConversation('conversation-1', { executionSelection: { kind: 'single' } });
+    useAppStore.setState({ currentProjectId: 'other-series' });
+    expect(submitConversationMessage({ content: '继续分析', conversationId: 'conversation-1', dispatchMode: 'interject' }))
+      .toEqual({ status: 'ignored' });
+    expect(interjectionMocks.enqueue).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks).toHaveLength(1);
+    expect(useAppStore.getState().messages).toHaveLength(2);
+  });
+
+  it.each(['global', 'wrong-series', 'deleted-conversation', 'missing-conversation'] as const)('%s 不能声明工作台分集授权', (reason) => {
+    if (reason === 'global') useAppStore.setState({ conversations: useAppStore.getState().conversations.map((conversation) => ({ ...conversation, projectId: GENERAL_ASSISTANT_SCOPE_ID })) });
+    if (reason === 'wrong-series') useAppStore.setState({ currentProjectId: 'other-series' });
+    if (reason === 'deleted-conversation') useAppStore.setState({ conversations: useAppStore.getState().conversations.map((conversation) => ({ ...conversation, deletedAt: 2 })) });
+    if (reason === 'missing-conversation') useAppStore.setState({ conversations: [] });
+    expect(submit()).toEqual({ status: 'ignored' });
+    expect(useAppStore.getState().agentTasks).toHaveLength(0);
+    expect(useAppStore.getState().messages).toHaveLength(0);
+    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(creationMocks.capture).not.toHaveBeenCalled();
+  });
+
+  it.each(['wrong-series', 'deleted-conversation'] as const)('组合包准备期间 %s 不再调度', async (reason) => {
+    useAppStore.setState({ projects: useAppStore.getState().projects.map((project) => project.id === 'episode-b'
+      ? { ...project, creationProfile: episodeSelection } : project) });
+    let finish!: (value: { snapshot: CreationProfileSnapshot; skillBindings: [] }) => void;
+    const preparing = new Promise<{ snapshot: CreationProfileSnapshot; skillBindings: [] }>((resolve) => { finish = resolve; });
+    creationMocks.capture.mockReturnValueOnce(preparing);
+    const result = submit();
+    expect(result.status).toBe('started');
+    if (reason === 'wrong-series') useAppStore.setState({ currentProjectId: 'other-series' });
+    else useAppStore.setState({ conversations: useAppStore.getState().conversations.map((conversation) => ({ ...conversation, deletedAt: 2 })) });
+    finish({ snapshot, skillBindings: [] });
+    await preparing;
+    await Promise.resolve();
+    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(useAppStore.getState().agentTasks[0]).toMatchObject({ status: 'stopped', creationProfilePreparation: 'failed' });
+  });
+});
+
 describe('ordinary conversation media recovery', () => {
+  it('普通对话把同一作业四张候选拆成独立消息并整组确认', async () => {
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-task', attemptId: 'mj-attempt' };
+    const artifacts: MediaGenerationResult[] = Array.from({ length: 4 }, (_, index) => ({
+      id: imageBatchArtifactId(receipt, index), kind: 'image', deliveryMode: 'chat', taskReceipt: receipt,
+      url: `asset://candidate-${index}.png`, sourceUrl: `https://cdn.test/candidate-${index}.png`,
+      filePath: `candidate-${index}.png`, persistence: 'saved', prompt: '猫', provider: 'general', modelId: 'general/mj', createdAt: 1,
+    }));
+    useAppStore.getState().addMessage({ id: 'mj-message', conversationId: 'conversation-1', role: 'assistant', content: '', timestamp: 1, status: 'done' });
+    savePendingTask({ ...receipt, nodeType: 'ai-image', taskType: 'custom-protocol', provider: 'general', submitted: true,
+      batchCount: 4, expectedImageOutputs: 4, resultUrls: artifacts.map((artifact) => artifact.sourceUrl),
+      mediaContext: { projectId: 'project-1', messageId: 'mj-message', conversationId: 'conversation-1', deliveryMode: 'message' } });
+    const writes = artifacts.map(() => {
+      let finish!: () => void;
+      const promise = new Promise<void>((resolve) => { finish = resolve; });
+      return { promise, finish };
+    });
+    const durableMessageIds = new Set<string>();
+    mediaHistoryMocks.persist.mockImplementation(async (message: ChatMessage) => {
+      const index = artifacts.findIndex((item) => item.id === message.mediaResult?.id);
+      if (index < 0) return;
+      await writes[index].promise;
+      durableMessageIds.add(message.id);
+    });
+    mediaRuntimeMocks.generate.mockResolvedValue({ ...artifacts[0], expectedOutputCount: 4, additionalResults: artifacts.slice(1) });
+    let settled = false;
+    const running = triggerMediaGeneration('mj-message', { kind: 'image', prompt: '猫', modelRef: 'general/mj', deliveryMode: 'chat' })
+      .then(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(useAppStore.getState().messages.filter((message) => message.mediaResult)).toHaveLength(4));
+      expect(durableMessageIds.size).toBe(0);
+      expect(settled).toBe(false);
+      expect(getPendingTasksForProject('project-1')).toHaveLength(1);
+      for (const [index, write] of writes.slice(0, 3).entries()) {
+        write.finish();
+        await vi.waitFor(() => expect(durableMessageIds.size).toBe(index + 1));
+        expect(settled).toBe(false);
+        expect(getPendingTasksForProject('project-1')).toHaveLength(1);
+      }
+    } finally { writes.forEach((write) => write.finish()); }
+    await running;
+    const messages = useAppStore.getState().messages.filter((message) => message.mediaResult);
+    expect(messages.map((message) => message.mediaResult?.id)).toEqual(artifacts.map((artifact) => artifact.id));
+    expect(messages.every((message) => !('additionalResults' in message.mediaResult!)
+      && !('expectedOutputCount' in message.mediaResult!))).toBe(true);
+    expect(new Set(messages.map((message) => message.id)).size).toBe(4);
+    expect(durableMessageIds).toEqual(new Set(messages.map((message) => message.id)));
+    for (const message of messages) expect(mediaHistoryMocks.persist).toHaveBeenCalledWith(expect.objectContaining({ id: message.id,
+      mediaResult: artifacts.find((item) => item.id === message.mediaResult?.id) }), 'project-1', 'conversation-1');
+    expect(getPendingTasksForProject('project-1')).toEqual([]);
+    expect(mediaRuntimeMocks.generate).toHaveBeenCalledOnce();
+  });
+
   it('passes message context to ordinary providers and acknowledges only after message delivery', async () => {
     const artifact = { id: 'artifact-1', kind: 'image', deliveryMode: 'chat', url: 'asset://saved.png', sourceUrl: 'https://cdn.test/image.png',
       persistence: 'saved', prompt: '猫', provider: 'general', modelId: 'general/image', createdAt: 1,
@@ -205,6 +443,8 @@ describe('conversation execution controller', () => {
       await execution!.run();
       const state = useAppStore.getState();
       expect(state.agentTasks.find((task) => task.id === result.taskId)?.status).toBe('failed');
+      if (mode !== 'plan') expect(state.agentTasks.find((task) => task.id === result.taskId)?.dispatches)
+        .toEqual([expect.objectContaining({ phase: 'settled', outcome: 'failed' })]);
       const reply = state.messages.find((message) => message.id === result.assistantMessageId)!;
       expect(reply).toMatchObject({ status: 'error', finishReason: 'error' });
       expect(reply.content).toContain('文本模型');
@@ -486,14 +726,16 @@ function arrangePausedTask(partial: Partial<AgentTask> = {}): AgentTask {
 }
 
 describe('agent task resume budget', () => {
-  it('counts the resume and widens the segment budget within the lifetime cap', () => {
+  it('counts ordinary task resumes without changing or resetting legacy budget counters', () => {
     arrangePausedTask();
 
     expect(resumeAgentTaskExecution('task-paused')).toEqual({ ok: true });
 
     const task = useAppStore.getState().agentTasks[0];
     expect(task.resumeCount).toBe(1);
-    expect(task.budget).toMatchObject({ maxModelRounds: 24, maxToolCalls: 48 });
+    expect(task.budget).toMatchObject({ maxModelRounds: 12, maxToolCalls: 24 });
+    expect(task.modelRounds).toBe(12);
+    expect(task.toolCallCount).toBe(24);
     expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
   });
 
@@ -510,7 +752,7 @@ describe('agent task resume budget', () => {
     expect(schedulerMocks.schedule).toHaveBeenCalledTimes(1);
     const task = useAppStore.getState().agentTasks[0];
     expect(task.resumeCount).toBe(1);
-    expect(task.budget.maxModelRounds).toBe(24);
+    expect(task.budget.maxModelRounds).toBe(12);
   });
 
   it('marks a queued resume as queued so the UI stops offering 继续', () => {
@@ -526,22 +768,21 @@ describe('agent task resume budget', () => {
     expect(useAppStore.getState().messages[0].status).toBe('queued');
   });
 
-  it('refuses to resume and stops widening the budget at the lifetime cap', () => {
+  it('resumes an ordinary task at its former lifetime cap without clearing its spent usage', () => {
     const spent = DEFAULT_AGENT_TASK_BUDGET.maxTotalModelRounds;
     arrangePausedTask({
       modelRounds: spent,
-      resumeCount: 4,
+      resumeCount: 8,
+      pausedReason: 'lifetime_budget_exhausted',
       budget: { ...DEFAULT_AGENT_TASK_BUDGET, maxModelRounds: spent },
     });
 
-    expect(resumeAgentTaskExecution('task-paused')).toMatchObject({
-      ok: false,
-      errorCode: 'AGENT_LIFETIME_BUDGET_EXHAUSTED',
-    });
+    expect(resumeAgentTaskExecution('task-paused')).toEqual({ ok: true });
 
     const task = useAppStore.getState().agentTasks[0];
-    expect(task.resumeCount).toBe(4);
+    expect(task.resumeCount).toBe(9);
+    expect(task.modelRounds).toBe(spent);
     expect(task.budget.maxModelRounds).toBe(spent);
-    expect(schedulerMocks.schedule).not.toHaveBeenCalled();
+    expect(schedulerMocks.schedule).toHaveBeenCalledOnce();
   });
 });

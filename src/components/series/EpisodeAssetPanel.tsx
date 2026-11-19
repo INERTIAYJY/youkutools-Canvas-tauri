@@ -1,7 +1,7 @@
 /**
- * EpisodeAssetPanel — 提供本集角色与道具清单界面与交互。
+ * EpisodeAssetPanel — 提供本集角色、场景与道具清单界面与交互。
  */
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Icon } from '@iconify/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useT } from '../../i18n';
@@ -10,10 +10,11 @@ import type { DramaAsset } from '../../types/dramaAssets';
 import {
   emptyEpisodeAssetRoster, episodeScriptFingerprint, EPISODE_ASSET_LIMITS,
   type EpisodeAssetEntry, type EpisodeAssetKind,
+  type EpisodeAssetPanelSnapshot, type EpisodeAssetPanelAction, type EpisodeAssetPanelActionResult,
 } from '../../types/episodeAssets';
+export type { EpisodeAssetPanelSnapshot, EpisodeAssetPanelAction, EpisodeAssetPanelActionResult } from '../../types/episodeAssets';
 import {
-  addLibraryAssetToEpisode, bindEpisodeAsset, extractEpisodeAssetCandidates, mergeEpisodeAssetCandidates,
-  promoteEpisodeAssetEntries, removeEpisodeAssetEntry, saveEpisodeAssetEntry,
+  buildEpisodeAssetPanelSnapshot, executeEpisodeAssetPanelAction,
 } from '../../services/episodeAssetService';
 import { resolveDramaAssetImageRef } from '../../services/dramaAssetPrompt';
 import ViewportImage from '../shared/ViewportImage';
@@ -26,6 +27,10 @@ interface EpisodeAssetPanelProps {
   episodeId: string;
   kind: EpisodeAssetKind;
   onBeforeExtract: () => Promise<boolean>;
+  remoteHost?: {
+    snapshot: EpisodeAssetPanelSnapshot;
+    dispatchAction: (action: EpisodeAssetPanelAction) => Promise<EpisodeAssetPanelActionResult>;
+  };
 }
 
 const nameKey = (name: string) => name.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
@@ -80,7 +85,8 @@ function EntryEditor({ entry, busy, onSave, onClose }: {
             <input className="ui-input ui-input--sm" disabled={busy} value={draft.identity ?? ''} maxLength={EPISODE_ASSET_LIMITS.identity}
               onChange={(event) => patch('identity', event.target.value)} />
           </label>
-        </> : <label className="ui-field"><span className="ui-label">{t('所属人物')}</span>
+        </> : null}
+        {entry.kind === 'prop' && <label className="ui-field"><span className="ui-label">{t('所属人物')}</span>
           <input className="ui-input ui-input--sm" disabled={busy} value={draft.ownerName ?? ''} maxLength={EPISODE_ASSET_LIMITS.name}
             onChange={(event) => patch('ownerName', event.target.value)} />
         </label>}
@@ -110,17 +116,35 @@ function EntryEditor({ entry, busy, onSave, onClose }: {
   );
 }
 
-/** 本集清单只保存文本与业务资产 ID，媒体继续由正式资产库管理。 */
-export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: EpisodeAssetPanelProps) {
+export default function EpisodeAssetPanel(props: EpisodeAssetPanelProps) {
+  return props.remoteHost ? <EpisodeAssetPanelView {...props} host={props.remoteHost} /> : <LocalEpisodeAssetPanel {...props} />;
+}
+
+function LocalEpisodeAssetPanel(props: EpisodeAssetPanelProps) {
+  const source = useAppStore(useShallow((state) => ({
+    projects: state.projects, currentProjectId: state.currentProjectId, projectLoadStatus: state.projectLoadStatus,
+    isCreatingProject: state.isCreatingProject, isReturningToStartPage: state.isReturningToStartPage,
+    switchingProjectName: state.switchingProjectName, dramaAssets: state.dramaAssets, nodes: state.nodes,
+    globalCharacters: state.globalCharacters, globalScenes: state.globalScenes, globalProps: state.globalProps,
+  })));
+  const snapshot = useMemo(() => buildEpisodeAssetPanelSnapshot(source, props.episodeId), [props.episodeId, source]);
+  const dispatchAction = useCallback((action: EpisodeAssetPanelAction) => executeEpisodeAssetPanelAction(props.episodeId, props.kind, action),
+    [props.episodeId, props.kind]);
+  return <EpisodeAssetPanelView {...props} host={{ snapshot, dispatchAction }} />;
+}
+
+/** 内嵌与独立窗口共用纯快照视图；模型与保存只经过宿主 dispatcher。 */
+function EpisodeAssetPanelView({ episodeId, kind, onBeforeExtract, host }: EpisodeAssetPanelProps & {
+  host: NonNullable<EpisodeAssetPanelProps['remoteHost']>;
+}) {
   const t = useT();
   const checkboxId = useId();
-  const { episode, currentProjectId, projectLoadStatus, library, nodes } = useAppStore(useShallow((state) => ({
-    episode: state.projects.find((project) => project.id === episodeId), currentProjectId: state.currentProjectId,
-    projectLoadStatus: state.projectLoadStatus, library: state.dramaAssets, nodes: state.nodes,
-  })));
+  const { episode, library, nodes } = host.snapshot;
+  const snapshotRef = useRef(host.snapshot);
+  useLayoutEffect(() => { snapshotRef.current = host.snapshot; }, [host.snapshot]);
   const roster = episode?.episodeAssetRoster ?? emptyEpisodeAssetRoster();
-  const entries = kind === 'character' ? roster.characters : roster.props;
-  const assets = kind === 'character' ? library.characters : library.props;
+  const entries = kind === 'character' ? roster.characters : kind === 'scene' ? roster.scenes ?? [] : roster.props;
+  const assets = kind === 'character' ? library.characters : kind === 'scene' ? library.scenes : library.props;
   const assetsById = useMemo(() => new Map<string, DramaAsset>(assets.map((asset) => [asset.id, asset] as const)), [assets]);
   const [query, setQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -132,7 +156,7 @@ export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: 
   const [preview, setPreview] = useState<{ items: EpisodeAssetEntry[]; revision: number; fingerprint: string }>();
   const aliveRef = useRef(true);
   useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false; }; }, []);
-  const ready = currentProjectId === episodeId && projectLoadStatus === 'ready';
+  const ready = host.snapshot.ready && episode?.id === episodeId;
   const term = query.trim().toLocaleLowerCase();
   const filtered = entries.filter((entry) => !term || `${entry.name}\n${entry.summary}\n${entry.notes}\n${entry.aliases?.join(' ') ?? ''}`.toLocaleLowerCase().includes(term));
   const selected = entries.filter((entry) => selectedIds.has(entry.id));
@@ -141,7 +165,7 @@ export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: 
   const sourceFingerprint = roster.sourceFingerprints?.[kind];
   const stale = Boolean(sourceFingerprint && sourceFingerprint !== episodeScriptFingerprint(episode?.episodeScript ?? ''));
   const assertVisible = () => {
-    if (!aliveRef.current || useAppStore.getState().currentProjectId !== episodeId) throw new Error(t('项目已切换'));
+    if (!aliveRef.current || !snapshotRef.current.ready || snapshotRef.current.episode?.id !== episodeId) throw new Error(t('项目已切换'));
   };
   const perform = async (action: () => Promise<void>, propagate = false) => {
     if (busyRef.current || !ready) {
@@ -165,12 +189,10 @@ export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: 
   const extract = () => perform(async () => {
     if (!await onBeforeExtract()) return;
     assertVisible();
-    const project = useAppStore.getState().projects.find((item) => item.id === episodeId);
-    const revision = project?.episodeAssetRoster?.revision ?? 0;
-    const fingerprint = episodeScriptFingerprint(project?.episodeScript ?? '');
-    const items = await extractEpisodeAssetCandidates({ episodeId, kind });
+    const result = await host.dispatchAction({ type: 'extract' });
     assertVisible();
-    setPreview({ items, revision, fingerprint });
+    if (result.type !== 'candidates') throw new Error(t('提取来源已变化，请重新提取'));
+    setPreview({ items: result.items, revision: result.revision, fingerprint: result.fingerprint });
   });
   const beginAdd = () => {
     const now = Date.now();
@@ -208,10 +230,9 @@ export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: 
         <span className="text-canvas-text-muted">{t('已选择 {count} 项', { count: selected.length })}</span>
         <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm ml-auto" disabled={busy || !ready || !promotable.length}
           onClick={() => { void perform(async () => {
-            const count = await promoteEpisodeAssetEntries(episodeId, kind, promotable.map((entry) => entry.id));
+            await host.dispatchAction({ type: 'promote', entryIds: promotable.map((entry) => entry.id) });
             assertVisible();
             setSelectedIds(new Set());
-            useAppStore.getState().showToast(t('已入库并绑定 {count} 项', { count }));
           }); }}>{t('所选加入资产库')}</button>
       </div>}
       <div className="space-y-2" aria-busy={busy}>
@@ -232,7 +253,7 @@ export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: 
               </span>
               <span className="flex h-16 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-canvas-border bg-canvas-surface">
                 {thumb ? <ViewportImage src={thumb} alt="" className="h-full w-full object-cover" />
-                  : <Icon icon={kind === 'character' ? 'lucide:user-round' : 'lucide:box'} className="h-5 w-5 text-canvas-text-muted" />}
+                  : <Icon icon={kind === 'character' ? 'lucide:user-round' : kind === 'scene' ? 'lucide:map-pin' : 'lucide:box'} className="h-5 w-5 text-canvas-text-muted" />}
               </span>
               <div className="min-w-0 flex-1 space-y-1">
                 <h3 className="break-words text-sm font-semibold">{entry.name}</h3>
@@ -255,37 +276,41 @@ export default function EpisodeAssetPanel({ episodeId, kind, onBeforeExtract }: 
               <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={busy || !ready}
                 onClick={() => setPicker({ entryId: entry.id, revision: roster.revision })}>{entry.boundDramaAssetId ? t('更换绑定') : t('绑定已有资产')}</button>
               {entry.boundDramaAssetId ? <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={busy || !ready}
-                onClick={() => { void perform(() => bindEpisodeAsset(episodeId, entry.id, kind, null, 'project', roster.revision)); }}>{t('解除绑定')}</button>
+                onClick={() => { void perform(async () => { await host.dispatchAction({ type: 'bind', entryId: entry.id,
+                  targetId: null, scope: 'project', expectedRevision: roster.revision }); }); }}>{t('解除绑定')}</button>
                 : <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={busy || !ready}
                   onClick={() => { void perform(async () => {
-                    const count = await promoteEpisodeAssetEntries(episodeId, kind, [entry.id]);
+                    await host.dispatchAction({ type: 'promote', entryIds: [entry.id] });
                     assertVisible();
-                    useAppStore.getState().showToast(t('已入库并绑定 {count} 项', { count }));
                   }); }}>{t('加入资产库')}</button>}
               <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm ml-auto" disabled={busy || !ready}
-                onClick={() => { void perform(() => removeEpisodeAssetEntry(episodeId, entry.id, kind, roster.revision)); }}>{t('移出本集')}</button>
+                onClick={() => { void perform(async () => { await host.dispatchAction({ type: 'remove-entry', entryId: entry.id,
+                  expectedRevision: roster.revision }); }); }}>{t('移出本集')}</button>
             </div>
           </article>;
         })}
         {!filtered.length && <div role="status" className="ui-card items-center gap-2 p-3 text-center text-xs text-canvas-text-muted">
-          <Icon icon={kind === 'character' ? 'lucide:users-round' : 'lucide:package-open'} className="h-6 w-6" />
-          <p>{entries.length ? t('没有匹配的本集条目') : t(kind === 'character' ? '本集还没有角色清单' : '本集还没有道具清单')}</p>
+          <Icon icon={kind === 'character' ? 'lucide:users-round' : kind === 'scene' ? 'lucide:map-pin' : 'lucide:package-open'} className="h-6 w-6" />
+          <p>{entries.length ? t('没有匹配的本集条目') : t(kind === 'character' ? '本集还没有角色清单' : kind === 'scene' ? '本集还没有场景清单' : '本集还没有道具清单')}</p>
           {!entries.length && <p>{t('可以从剧本 AI 提取、手动新增，或选择资产库中的已有条目。')}</p>}
         </div>}
       </div>
       {editing && <EntryEditor key={editing.entry.id} entry={editing.entry} busy={busy} onClose={() => setEditing(undefined)}
-        onSave={(entry) => perform(() => saveEpisodeAssetEntry(episodeId, entry, editing.revision), true)} />}
+        onSave={(entry) => perform(async () => { await host.dispatchAction({ type: 'save-entry', entry, expectedRevision: editing.revision }); }, true)} />}
       {picker && <EpisodeAssetPicker kind={kind} initialQuery={entries.find((entry) => entry.id === picker.entryId)?.name}
+        snapshot={host.snapshot} onLoadGlobal={async () => { await host.dispatchAction({ type: 'load-global' }); }}
         onClose={() => setPicker(undefined)} onSelect={(assetId, scope) => perform(async () => {
-        if (picker.entryId) await bindEpisodeAsset(episodeId, picker.entryId, kind, assetId, scope, picker.revision);
-        else await addLibraryAssetToEpisode(episodeId, kind, assetId, scope, picker.revision);
+        await host.dispatchAction(picker.entryId
+          ? { type: 'bind', entryId: picker.entryId, targetId: assetId, scope, expectedRevision: picker.revision }
+          : { type: 'add-library', targetId: assetId, scope, expectedRevision: picker.revision });
       }, true)} />}
-      {preview && <AssetExtractionPreviewDialog title={t(kind === 'character' ? '核对本集角色提取结果' : '核对本集道具提取结果')}
+      {preview && <AssetExtractionPreviewDialog title={t(kind === 'character' ? '核对本集角色提取结果' : kind === 'scene' ? '核对本集场景提取结果' : '核对本集道具提取结果')}
         items={preview.items} existingItems={entries} confirmLabel={t('加入本集清单')} onClose={() => setPreview(undefined)}
         onConfirm={(ids) => perform(async () => {
-          const latestEpisode = useAppStore.getState().projects.find((project) => project.id === episodeId);
+          const latestEpisode = snapshotRef.current.episode;
           if (preview.fingerprint !== episodeScriptFingerprint(latestEpisode?.episodeScript ?? '')) throw new Error(t('本集剧本已变化，请重新提取'));
-          await mergeEpisodeAssetCandidates(episodeId, kind, preview.items.filter((entry) => ids.includes(entry.id)), preview.revision);
+          await host.dispatchAction({ type: 'merge-candidates', candidateIds: ids,
+            expectedRevision: preview.revision, fingerprint: preview.fingerprint });
         }, true)} />}
     </div>
   );

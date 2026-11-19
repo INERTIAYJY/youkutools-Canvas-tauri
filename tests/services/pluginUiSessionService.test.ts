@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   subscribers: new Set<() => void>(),
   registerCanvasDerivation: vi.fn(),
   isCanvasDerivationFresh: vi.fn(),
+  isCanvasDerivationTargetCurrent: vi.fn(),
   completeCanvasDerivation: vi.fn(),
   mintResources: vi.fn(),
   clearResources: vi.fn(),
@@ -45,6 +46,7 @@ vi.mock('../../src/store/useAppStore', () => ({
 vi.mock('../../src/services/canvasDerivationGuard', () => ({
   registerCanvasDerivation: mocks.registerCanvasDerivation,
   isCanvasDerivationFresh: mocks.isCanvasDerivationFresh,
+  isCanvasDerivationTargetCurrent: mocks.isCanvasDerivationTargetCurrent,
   completeCanvasDerivation: mocks.completeCanvasDerivation,
 }));
 vi.mock('../../src/services/plugins/pluginModelCatalog', () => ({
@@ -235,6 +237,20 @@ describe('pluginUiSessionService', () => {
     expect(signal.aborted).toBe(true);
     finish();
     expect(await pending).toMatchObject({ ok: false, error: expect.stringContaining('关闭') });
+  });
+
+  it('revokes UI and resources when a dependency changes without changing the owner revision', async () => {
+    const dependent = { ...plugin, manifest: { ...plugin.manifest, apiVersion: 2 as const,
+      requiredCapabilities: ['plugin.dependencies'], dependencies: [{ pluginId: 'example.base' }] } };
+    const base = { ...plugin, id: 'example.base', manifest: { ...plugin.manifest, id: 'example.base' } };
+    const state = mocks.getState();
+    state.installedPlugins = [dependent, base];
+    const session = await native();
+    state.installedPlugins = [dependent, { ...base, revisionDigest: 'd'.repeat(64) }];
+    notify();
+    expect(session.isActive()).toBe(false);
+    expect(mocks.clearResources).toHaveBeenCalledWith(session.binding.sessionId);
+    expect(mocks.subscribers.size).toBe(0);
   });
 
   it('does not resurrect a session when resource minting finishes after invalidation', async () => {
@@ -457,6 +473,17 @@ describe('pluginUiSessionService', () => {
     session.dispose();
   });
 
+  it('still checks target epochs when a replica observer skips canvas revision checks', async () => {
+    mocks.findReplicaJob.mockResolvedValue(replicaSummary);
+    const session = await replicaNative();
+    mocks.isCanvasDerivationFresh.mockReturnValue(false);
+    mocks.isCanvasDerivationTargetCurrent.mockReturnValue(false);
+    expect(await session.request('effect', { type: 'video.replicaJob.status', jobId: replicaSummary.jobId }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('变化') });
+    expect(mocks.getReplicaJob).not.toHaveBeenCalled();
+    expect(session.isActive()).toBe(false);
+  });
+
   it('restores display data with an active observer and keeps progress queries bound to its original job', async () => {
     mocks.findReplicaJob.mockResolvedValue(replicaSummary);
     const replicaUi = { version: 1, scene: '微调背景', duration: 29.188, frames: [{ format: 'jpeg', base64: 'AAAA', actualTime: 0 }] };
@@ -674,6 +701,7 @@ describe('pluginUiSessionService', () => {
       baseRevision: 7,
     });
     mocks.isCanvasDerivationFresh.mockReturnValue(true);
+    mocks.isCanvasDerivationTargetCurrent.mockReturnValue(true);
     mocks.mintResources.mockResolvedValue(resources);
     mocks.collectMedia.mockReturnValue(new Set(['https://example.com/frame.png']));
     mocks.executeEffect.mockResolvedValue({ type: 'resource.readText', ok: true, value: { content: 'ok' } });

@@ -14,7 +14,16 @@ import { getPendingTasksForProject, registerMediaNodeOperation, savePendingTask 
 import * as generationRuntime from '../../../src/services/ai/generationRuntime';
 import * as operationProgress from '../../../src/services/mcp/mcpOperationService';
 import { DEFAULT_AGENT_TASK_BUDGET, type AgentTask } from '../../../src/types/agent';
+import type { ImageModelCapability, ModelExecutionProfile } from '../../../src/types/aiTypes';
 import type { MediaGenerationResult } from '../../../src/types/media';
+import { imageBatchArtifactId } from '../../../src/services/imageBatchService';
+import * as chatHistory from '../../../src/services/chat/chatHistoryService';
+import * as nativeMedia from '../../../src/services/indexedDb/nativeMediaTaskRepository';
+import * as nativeRecovery from '../../../src/services/nativeVolcengineRecovery';
+import * as recoverySummary from '../../../src/services/nativeMediaRecoverySummary';
+import { evaluateAgentToolPolicy } from '../../../src/services/chat/policyEngine';
+import type { CanvasContext } from '../../../src/types/project';
+import type { BaseNodeData } from '../../../src/types';
 
 const context: Omit<AgentToolContext, 'signal'> = {
   taskId: 'task-media',
@@ -29,6 +38,7 @@ beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   useAppStore.setState({
     currentProjectId: 'project-1',
+    projectLoadStatus: 'ready',
     nodes: [{
       id: 'n1',
       type: 'source-image',
@@ -52,6 +62,29 @@ beforeEach(() => {
   registerMediaAgentTools();
 });
 
+describe('read-only pending task source', () => {
+  it('does not migrate legacy storage during a query and refuses corrupted source without claiming no paid tasks', async () => {
+    const query = getAgentTool('media_pending_tasks')!;
+    const raw = JSON.stringify([{ projectId: 'project-1', nodeId: 'old-node', taskId: 'old-task', nodeType: 'ai-image',
+      taskType: 'apimart', provider: 'apimart', submitted: true, apiKey: 'private-key' }]);
+    localStorage.setItem('ai_canvas_pending_tasks', raw);
+    const write = vi.spyOn(localStorage, 'setItem');
+    try {
+      const read = await query.execute({ ...context, signal: new AbortController().signal }, {});
+      expect(read.status).toBe('success');
+      expect(read.modelContent).not.toContain('private-key');
+      expect(localStorage.getItem('ai_canvas_pending_tasks')).toBe(raw);
+      expect(write).not.toHaveBeenCalled();
+      localStorage.setItem('ai_canvas_pending_tasks', '{broken');
+      write.mockClear();
+      const broken = await query.execute({ ...context, signal: new AbortController().signal }, {});
+      expect(broken).toMatchObject({ status: 'error', errorCode: 'MEDIA_PENDING_SOURCE_INVALID' });
+      expect(localStorage.getItem('ai_canvas_pending_tasks')).toBe('{broken');
+      expect(write).not.toHaveBeenCalled();
+    } finally { write.mockRestore(); }
+  });
+});
+
 describe('keyed media operation progress', () => {
   function keyedMedia(deliveryMode: 'chat' | 'both' = 'both') {
     const conversationId = 'mcp-control-project-1';
@@ -71,6 +104,84 @@ describe('keyed media operation progress', () => {
       prompt: input.prompt, modelId: input.modelRef, provider: 'general', createdAt: 1 };
     return { definition: getAgentTool('media_generate')!, toolContext, controller, input, artifact };
   }
+
+  it('MCP完整交付四条单图消息，操作摘要仅包含产物身份', async () => {
+    const { definition, toolContext, input, artifact } = keyedMedia('chat');
+    const receipt = { projectId: 'project-1', nodeId: 'mj-tracking', taskId: 'mj-task', attemptId: 'mj-attempt' };
+    const artifacts: MediaGenerationResult[] = Array.from({ length: 4 }, (_, index) => ({ ...artifact,
+      id: imageBatchArtifactId(receipt, index), taskReceipt: receipt,
+      url: `asset://mj-${index}.png`, sourceUrl: `https://private.example/mj-${index}`, filePath: `mj-${index}.png`,
+    }));
+    savePendingTask({ ...receipt, nodeType: 'ai-image', provider: 'general', taskType: 'custom-protocol', submitted: true,
+      batchCount: 4, expectedImageOutputs: 4, resultUrls: artifacts.map((item) => item.sourceUrl),
+      mediaContext: { projectId: 'project-1', conversationId: toolContext.conversationId,
+        messageId: 'receipt-message', deliveryMode: 'message' } });
+    vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockResolvedValue(undefined);
+    const writes = artifacts.map(() => {
+      let finish!: () => void;
+      const promise = new Promise<void>((resolve) => { finish = resolve; });
+      return { promise, finish };
+    });
+    const durableMessageIds = new Set<string>();
+    const history = vi.spyOn(chatHistory, 'persistMessage').mockImplementation(async (message) => {
+      const index = artifacts.findIndex((item) => item.id === message.mediaResult?.id);
+      if (index < 0) return;
+      await writes[index].promise;
+      durableMessageIds.add(message.id);
+    });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue({ ...artifacts[0],
+      expectedOutputCount: 4, additionalResults: artifacts.slice(1) });
+    let settled = false;
+    const running = definition.execute(toolContext, input).then((result) => { settled = true; return result; });
+    try {
+      await vi.waitFor(() => expect(useAppStore.getState().messages.filter((message) => message.mediaResult)).toHaveLength(4));
+      expect(durableMessageIds.size).toBe(0);
+      expect(settled).toBe(false);
+      expect(getPendingTasksForProject('project-1')).toHaveLength(1);
+      for (const [index, write] of writes.slice(0, 3).entries()) {
+        write.finish();
+        await vi.waitFor(() => expect(durableMessageIds.size).toBe(index + 1));
+        expect(settled).toBe(false);
+        expect(getPendingTasksForProject('project-1')).toHaveLength(1);
+      }
+    } finally { writes.forEach((write) => write.finish()); }
+    const result = await running;
+    expect(result).toMatchObject({ status: 'success' });
+    expect(JSON.parse(result.modelContent)).toMatchObject({ outputCount: 4, artifactIds: artifacts.map((item) => item.id), deliveryPending: false });
+    const messages = useAppStore.getState().messages.filter((message) => message.mediaResult);
+    expect(messages).toHaveLength(4);
+    expect(messages.every((message) => !('additionalResults' in message.mediaResult!))).toBe(true);
+    expect(new Set(messages.map((message) => message.id)).size).toBe(4);
+    expect(durableMessageIds).toEqual(new Set(messages.map((message) => message.id)));
+    for (const message of messages) expect(history).toHaveBeenCalledWith(expect.objectContaining({ id: message.id,
+      mediaResult: artifacts.find((item) => item.id === message.mediaResult?.id) }), toolContext.projectId, toolContext.conversationId);
+    expect(getPendingTasksForProject('project-1')).toEqual([]);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(result.modelContent).not.toContain('https://');
+    expect(result.modelContent).not.toContain(input.prompt);
+  });
+
+  it('候选返回后取消也保留四条独立保存状态，不伪称完整交付', async () => {
+    const { definition, toolContext, controller, input, artifact } = keyedMedia('chat');
+    const artifacts: MediaGenerationResult[] = Array.from({ length: 4 }, (_, index) => ({ ...artifact,
+      id: `cancelled-candidate-${index}`, filePath: index === 2 ? undefined : `candidate-${index}.png`,
+      url: index === 2 ? 'data:image/png;base64,AAAC' : `asset://candidate-${index}.png`,
+      sourceUrl: `data:image/png;base64,AAA${index}`, persistence: index === 2 ? 'failed' : 'saved',
+    }));
+    vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockResolvedValue(undefined);
+    vi.spyOn(chatHistory, 'persistMessage').mockResolvedValue(undefined);
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockImplementation(async () => {
+      controller.abort();
+      return { ...artifacts[0], expectedOutputCount: 4, additionalResults: artifacts.slice(1) };
+    });
+    const result = await definition.execute(toolContext, input);
+    expect(result).toMatchObject({ status: 'success', errorCode: 'AGENT_MEDIA_DELIVERY_INCOMPLETE' });
+    const messages = useAppStore.getState().messages.filter((message) => message.mediaResult);
+    expect(messages.map((message) => message.mediaResult?.persistence)).toEqual(['saved', 'saved', 'failed', 'saved']);
+    expect(messages.every((message) => !('additionalResults' in message.mediaResult!))).toBe(true);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(result.modelContent).not.toContain('data:image');
+  });
 
   it('durably binds node/message and local started before invoking generation, without persisting URLs or prompts', async () => {
     const { definition, toolContext, input, artifact } = keyedMedia();
@@ -204,6 +315,50 @@ describe('keyed media operation progress', () => {
     expect(await pending).toMatchObject({ status: 'success' });
     expect(progress).not.toHaveBeenCalled();
   });
+
+  it.each(['current', 'changed-input', 'changed-runtime'] as const)('原生未知提交退出占位等待并保留原回执：%s', async (scenario) => {
+    const { definition, toolContext, input } = keyedMedia();
+    const id = '22222222-2222-4222-8222-222222222222';
+    const scope: CanvasContext = { kind: 'canvas', schemaVersion: 2, modelGeneration: 1, projectId: `p2-${id}`, canvasId: `c2-${id}`,
+      episodeId: null, projectEpoch: 1, canvasEpoch: 1, canvasRevision: 0, runtimeEpoch: 'original-runtime' };
+    useAppStore.setState({ currentProjectId: scope.canvasId, projectExecutionContext: scope });
+    let row: nativeMedia.NativeMediaTaskRecord | undefined;
+    let currentDraft: BaseNodeData | undefined;
+    vi.spyOn(nativeMedia, 'listNativeMediaTasks').mockImplementation(async () => row ? [row] : []);
+    vi.spyOn(recoverySummary, 'readNativeMediaRecoverySummary').mockImplementation(async (record) => recoverySummary.describeNativeMediaRecovery(record));
+    vi.spyOn(operationProgress, 'recordMcpOperationProgress').mockResolvedValue(undefined);
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockImplementation(async (_intent, _projectId, _signal, nodeId) => {
+      row = { projectId: `media-task:${id}`, kind: 'native-media-task-v1', operationId: id,
+        ownerProjectId: scope.projectId, canvasId: scope.canvasId, episodeId: null, projectEpoch: 1, canvasEpoch: 1, sourceCanvasRevision: 0,
+        nodeId: nodeId!, inputFingerprint: 'a'.repeat(64), requestFingerprint: 'b'.repeat(64), fingerprintScheme: 'media-input-v3',
+        providerConfigId: 'ccc', providerBase: 'https://fixture.example', modelRef: input.modelRef, protocolDigest: 'c'.repeat(64),
+        recovery: { kind: 'builtin-image', modelId: 'image-x' }, category: 'image', status: 'outcome-unknown', lease: id, revision: 0, createdAt: 1, updatedAt: 1,
+        origin: { conversationId: toolContext.conversationId, messageId: 'receipt-message', deliveryMode: 'both' } };
+      if (scenario === 'changed-input') {
+        useAppStore.getState().updateNodeDataTransient(nodeId!, { prompt: 'new-user-draft', imageUrl: 'asset://current-selection',
+          aspectRatio: '16:9', nodeWidth: 560, nodeHeight: 315 });
+        currentDraft = structuredClone(useAppStore.getState().nodes.find((node) => node.id === nodeId)!.data);
+      }
+      if (scenario === 'changed-runtime') useAppStore.setState({ projectExecutionContext: { ...scope, runtimeEpoch: 'next-runtime' } });
+      throw Object.assign(new Error('原操作保留'), { name: 'NativeMediaTaskPending' });
+    });
+    const result = await definition.execute({ ...toolContext, projectId: scope.canvasId, executionContext: scope }, input);
+    expect(result).toMatchObject({ status: 'success', errorCode: 'AGENT_MEDIA_RECOVERY_PENDING' });
+    const node = useAppStore.getState().nodes.at(-1)!;
+    if (scenario !== 'changed-runtime') {
+      expect(node.data).toMatchObject({ status: 'error', mediaTaskState: 'submit_unknown', error: expect.stringContaining('已停止等待') });
+      expect(result.summary).toContain('已停止等待');
+    } else {
+      expect(node.data.mediaTaskState).not.toBe('submit_unknown');
+    }
+    if (scenario === 'changed-input') expect(node.data).toEqual({ ...currentDraft, status: 'error',
+      error: expect.stringContaining('已停止等待'), generationStartedAt: undefined,
+      mediaTaskState: 'submit_unknown', mediaTaskStage: undefined, videoTaskState: undefined });
+    expect(row!.status).toBe('outcome-unknown');
+    expect(generate).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -306,6 +461,59 @@ describe('media task recovery tools', () => {
   });
 });
 
+describe('原生媒体阶段恢复的effect边界', () => {
+  function nativeMusic() {
+    const id = '11111111-1111-4111-8111-111111111111';
+    const scope: CanvasContext = { kind: 'canvas', schemaVersion: 2, modelGeneration: 1, projectId: `p2-${id}`, canvasId: `c2-${id}`,
+      episodeId: null, projectEpoch: 1, canvasEpoch: 1, canvasRevision: 0, runtimeEpoch: 'original-runtime' };
+    useAppStore.setState({ currentProjectId: scope.canvasId, projectExecutionContext: scope });
+    const toolContext: AgentToolContext = { ...context, projectId: scope.canvasId, executionContext: scope, signal: new AbortController().signal };
+    const row: nativeMedia.NativeMediaTaskRecord = { projectId: `media-task:${id}`, kind: 'native-media-task-v1', operationId: id,
+      ownerProjectId: scope.projectId, canvasId: scope.canvasId, episodeId: null, projectEpoch: 1, canvasEpoch: 1, sourceCanvasRevision: 0,
+      nodeId: `media-message-${id}`, inputFingerprint: 'a'.repeat(64), requestFingerprint: 'b'.repeat(64), fingerprintScheme: 'media-input-v3',
+      providerConfigId: 'apimart', providerBase: 'https://private.example', modelRef: 'apimart/flowmusic', protocolDigest: 'c'.repeat(64),
+      recovery: { kind: 'builtin-audio', modelId: 'flowmusic' }, category: 'audio', status: 'prepared', lease: id, revision: 0, createdAt: 1, updatedAt: 1,
+      origin: { conversationId: toolContext.conversationId, messageId: 'original-result-message', deliveryMode: 'chat' } };
+    const music = { lyrics: { submissionId: id, state: 'submitted' as const, taskId: 'original-lyrics' }, music: { submissionId: id, state: 'prepared' as const } };
+    vi.spyOn(nativeMedia, 'listNativeMediaTasks').mockImplementation(async () => [row]);
+    vi.spyOn(recoverySummary, 'readNativeMediaRecoverySummary').mockImplementation(async (record) => recoverySummary.describeNativeMediaRecovery(record,
+      { music: record.status === 'delivered' ? { ...music, music: { ...music.music, state: 'submitted', taskId: 'original-music' } } : music }));
+    const resume = vi.spyOn(nativeRecovery, 'resumeNativeVolcengineTask').mockImplementation(async () => { row.status = 'delivered'; });
+    return { row, toolContext, resume, input: { nodeId: row.nodeId, operationId: row.operationId } };
+  }
+  it('已提交歌词不误称unknown，纯续查拒绝代为首发后续付费阶段', async () => {
+    const { row, toolContext, resume, input } = nativeMusic();
+    const listed = await getAgentTool('media_pending_tasks')!.execute(toolContext, {});
+    expect(JSON.parse(listed.modelContent)).toEqual([expect.objectContaining({ operationId: row.operationId, canResume: false, canContinueGenerationStage: true,
+      recovery: expect.objectContaining({ currentStage: 'lyrics', unknownSubmissions: 0, needsReview: false }) })]);
+    expect(listed.modelContent).not.toContain('https://'); expect(listed.modelContent).not.toContain('inputFingerprint');
+    const original = getAgentTool('media_resume_task')!;
+    expect(original.effect).toBe('canvas_write');
+    expect(await original.execute(toolContext, input)).toMatchObject({ status: 'error', errorCode: 'MEDIA_STAGE_CONFIRMATION_REQUIRED' });
+    expect(resume).not.toHaveBeenCalled();
+  });
+  it('显式阶段续接沿媒体生成Policy，B需确认，Plan拒绝，不接受新模型或提示词', async () => {
+    const { toolContext, resume, input } = nativeMusic();
+    const stage = getAgentTool('media_resume_generation_stage')!;
+    expect(stage.effect).toBe('media_generation');
+    expect(evaluateAgentToolPolicy(stage, input, { ...toolContext, mode: 'collaborative' })).toMatchObject({ outcome: 'require_approval' });
+    expect(evaluateAgentToolPolicy(stage, input, { ...toolContext, mode: 'plan' })).toMatchObject({ outcome: 'deny' });
+    expect(evaluateAgentToolPolicy(stage, input, { ...toolContext, mode: 'autonomous' })).toMatchObject({ outcome: 'allow' });
+    expect(prepareAgentToolCall({ callId: 'no-new-prompt', toolId: stage.id, input: { ...input, prompt: 'new request' } }, toolContext)).toMatchObject({ ok: false });
+    expect(await stage.execute(toolContext, input)).toMatchObject({ status: 'success' });
+    expect(resume).toHaveBeenCalledWith(input.operationId, toolContext.signal, { allowUnstartedStage: true });
+  });
+  it('已结束跟踪或属于另一对话的阶段不能继续付费提交', async () => {
+    const { row, toolContext, resume, input } = nativeMusic();
+    row.status = 'reviewed';
+    const stage = getAgentTool('media_resume_generation_stage')!;
+    expect(await stage.execute(toolContext, input)).toMatchObject({ status: 'error' });
+    row.status = 'prepared'; row.origin = { ...row.origin!, conversationId: 'different-conversation' };
+    expect(await stage.execute(toolContext, input)).toMatchObject({ status: 'error', errorCode: 'MEDIA_RECOVERY_STALE' });
+    expect(resume).not.toHaveBeenCalled();
+  });
+});
+
 describe('media_generate display parameters', () => {
   it('同型号的万象分组以独立模型引用选择各自连接', async () => {
     useAppStore.setState((state) => ({ config: { ...state.config, providers: {
@@ -344,13 +552,48 @@ describe('media_generate display parameters', () => {
         apiKey: 'fixture-private-key', baseUrl: 'https://private.example/v1' } },
       generalModels: [
         { id: 'image-custom', name: '图片', modelId: 'image-x', category: 'image', providerConfigId: 'custom',
-          imageCapability: { resolutions: ['2K'], ratios: ['1:1'], qualities: ['low', 'high'], backgrounds: ['opaque', 'transparent'] } },
+          imageCapability: { resolutions: ['2K'], ratios: ['1:1'], dimensionPresets: { '2K': { '1:1': [2048, 2048] } },
+            qualities: ['low', 'high'], backgrounds: ['opaque', 'transparent'] } },
         { id: 'video-custom', name: '视频', modelId: 'video-x', category: 'video', providerConfigId: 'custom',
           videoCapability: { operations: ['text-to-video'], frameRates: [24, 30], supportsAudio: true,
             minDuration: 4, maxDuration: 15, automaticDurationValue: -1 } },
       ],
     } }));
   }
+
+  it('发现并传递模型声明的 GIF 参数，显式 false 保留且未声明模型拒绝格式', async () => {
+    configureVisualModels();
+    useAppStore.setState((state) => ({ config: { ...state.config, generalModels: state.config.generalModels!.map((model) =>
+      model.id !== 'image-custom' ? model : { ...model,
+        executionProfile: { preset: 'custom', protocol: { version: 2, mode: 'sync',
+          submit: { method: 'POST', path: '/images/generations', body: { model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}',
+            quality: '{{imageQuality}}', background: '{{imageBackground}}', output_format: '{{imageOutputFormat}}',
+            frame_count: '{{imageFrameCount}}', frame_duration_ms: '{{imageFrameDurationMs}}', transparent: '{{imageTransparent}}' } },
+          response: { type: 'json', result: { urlPath: 'data.*.url' } } } } satisfies ModelExecutionProfile,
+        imageCapability: { ...model.imageCapability,
+        outputFormats: ['png', 'gif', 'svg'], defaultOutputFormat: 'png',
+        squareOnlyOutputFormats: ['gif', 'svg'], textOnlyOutputFormats: ['gif', 'svg'],
+        gifFrameCount: { min: 2, max: 16, default: 9 }, gifFrameDurationMs: { min: 20, max: 655350, step: 10, default: 200 },
+        supportsGifTransparency: true } satisfies ImageModelCapability }) } }));
+    const capability = await getAgentTool('media_model_parameters')!.execute({ ...context, signal: new AbortController().signal },
+      { modelRef: 'general/image-custom' });
+    expect(JSON.parse(capability.modelContent).capability).toMatchObject({ outputFormats: ['png', 'gif', 'svg'],
+      squareOnlyOutputFormats: ['gif', 'svg'], gifFrameCount: { min: 2, max: 16, default: 9 }, supportsGifTransparency: true });
+    useAppStore.setState({ messages: [{ id: 'gif-message', conversationId: context.conversationId,
+      role: 'assistant', content: '', timestamp: 1, status: 'executing', agentTaskId: context.taskId }] });
+    const generate = vi.spyOn(generationRuntime, 'runMediaGeneration').mockResolvedValue({ id: 'gif-artifact', kind: 'image',
+      deliveryMode: 'chat', url: 'https://cdn.example/animation.gif', sourceUrl: 'https://cdn.example/animation.gif',
+      persistence: 'skipped', prompt: '山谷', modelId: 'general/image-custom', provider: 'general', createdAt: 1 });
+    const input = { kind: 'image', prompt: '山谷', modelRef: 'general/image-custom', deliveryMode: 'chat',
+      imageOutputFormat: 'gif', imageFrameCount: 8, imageFrameDurationMs: 300, imageTransparent: false };
+    const prepared = prepareAgentToolCall({ callId: 'gif', toolId: 'media_generate', input }, context);
+    expect(prepared.ok).toBe(true); if (!prepared.ok) return;
+    await getAgentTool('media_generate')!.execute({ ...context, signal: new AbortController().signal }, prepared.prepared.input);
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining(input), context.projectId, expect.any(AbortSignal),
+      undefined, expect.objectContaining({ messageId: 'gif-message' }));
+    configureVisualModels();
+    expect(getAgentTool('media_generate')!.authorize?.(context, input).allowed).toBe(false);
+  });
 
   it('普通模型能力发现只返回声明的参数，不返回连接地址、协议或 Key', async () => {
     configureVisualModels();
@@ -359,6 +602,7 @@ describe('media_generate display parameters', () => {
     const image = await tool.execute(toolContext, { modelRef: 'general/image-custom' });
     expect(JSON.parse(image.modelContent)).toMatchObject({ kind: 'image', capability: {
       qualities: ['low', 'high'], backgrounds: ['opaque', 'transparent'],
+      dimensionPresets: { '2K': { '1:1': [2048, 2048] } },
     } });
     const video = await tool.execute(toolContext, { modelRef: 'general/video-custom' });
     expect(JSON.parse(video.modelContent)).toMatchObject({ kind: 'video', capability: {

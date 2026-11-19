@@ -1,18 +1,53 @@
 /**
  * testConnection — 回归测试：provider connection tests。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const transportMocks = vi.hoisted(() => ({
   corsSafeFetch: vi.fn(),
+  invoke: vi.fn(),
 }));
 
 vi.mock('../../src/services/ai/httpTransport', () => transportMocks);
+vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: transportMocks.invoke,
+}));
 
 import { queryProviderBalance, supportsProviderBalance, testProviderConnection } from '../../src/services/testConnection';
 
 beforeEach(() => {
   transportMocks.corsSafeFetch.mockReset();
+  transportMocks.invoke.mockReset();
+});
+
+describe('Muse 显式在线验证', () => {
+  beforeEach(() => { vi.stubGlobal('window', { __TAURI_INTERNALS__: {} }); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('先请求后台验证，再读缓存结果，不把已保存 Cookie 当作已登录', async () => {
+    transportMocks.invoke.mockResolvedValueOnce({ loggedIn: false, credentialStored: true, sessionState: 'unverified', checking: true })
+      .mockResolvedValueOnce({ loggedIn: true, credentialStored: true, sessionState: 'verified', checking: false });
+    await expect(testProviderConnection('muse', '')).resolves.toEqual({ success: true });
+    expect(transportMocks.invoke.mock.calls).toEqual([['muse_auth_status', { verify: true }], ['muse_auth_status']]);
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it('仅本地保存或明确拒绝时不能报告连接成功', async () => {
+    for (const state of ['unverified', 'invalid']) {
+      transportMocks.invoke.mockResolvedValueOnce({ loggedIn: false, credentialStored: true, sessionState: state, checking: false });
+      const result = await testProviderConnection('muse', '');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain(state === 'invalid' ? '明确拒绝' : '尚未在线验证');
+    }
+  });
+
+  it('不回显原生错误中的凭据或请求内容', async () => {
+    transportMocks.invoke.mockRejectedValueOnce('fake-cookie-value request-detail');
+    const result = await testProviderConnection('muse', '');
+    expect(result.success).toBe(false);
+    expect(result.error).not.toContain('fake-cookie-value');
+    expect(result.error).not.toContain('request-detail');
+  });
 });
 
 describe('MiniMax 官方无生成验证', () => {
@@ -106,16 +141,18 @@ describe('独立剩余额度查询', () => {
 
   it.each(['runninghub', 'runninghub-model'].flatMap((provider) => ['cn', 'ai'].map((site) => [provider, site] as const)))('RH %s 仅使用指定 %s 站点密钥', async (provider, site) => {
     transportMocks.corsSafeFetch.mockResolvedValueOnce(Response.json({ code: 0, data: { remainCoins: '120.5', currentTaskCounts: 3 } }));
-    await expect(queryProviderBalance(provider, 'rh-key', `https://www.runninghub.${site}/openapi/v2`)).resolves.toEqual({ amount: '120.5', unit: '积分', scope: 'account' });
+    const key = `${provider}-${site}-fixture`;
+    await expect(queryProviderBalance(provider, ` ${key} `, `https://www.runninghub.${site}/openapi/v2`)).resolves.toEqual({ amount: '120.5', unit: '积分', scope: 'account' });
     expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith(`https://www.runninghub.${site}/uc/openapi/accountStatus`, expect.objectContaining({
-      method: 'POST', body: JSON.stringify({ apikey: 'rh-key' }),
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ apikey: key }),
     }));
   });
 
-  it('Sora2U 沿用已有 GP 和来源参数，0 也可展示', async () => {
-    transportMocks.corsSafeFetch.mockResolvedValueOnce(Response.json({ success: true, balance: 0, currency: 'GP' }));
-    await expect(queryProviderBalance('sora2u', 'sora-key')).resolves.toEqual({ amount: '0', unit: 'GP', scope: 'account' });
-    expect(transportMocks.corsSafeFetch.mock.calls[0]?.[0]).toBe('https://sora2u.com/api/v1/credits?utm_source=tenney&utm_medium=canvas&utm_content=wx');
+  it('Sora2U 下架后不再支持余额查询，即使显式提供历史地址', async () => {
+    expect(supportsProviderBalance('sora2u')).toBe(false);
+    await expect(queryProviderBalance('sora2u', 'sora-key', 'https://sora2u.com')).resolves.toBeUndefined();
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -164,8 +201,12 @@ describe('独立剩余额度查询', () => {
 describe('provider connection tests', () => {
   it.each(['runninghub', 'runninghub-model'].flatMap((provider) => ['cn', 'ai'].map((site) => [provider, site] as const)))('RunningHub %s 连接使用 %s 站点的只读账户接口', async (provider, site) => {
     transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { remainCoins: '12', currentTaskCounts: '0' } })));
-    await expect(testProviderConnection(provider, 'secret', `https://www.runninghub.${site}/openapi/v2`)).resolves.toMatchObject({ success: true, balance: '12 积分' });
-    expect(transportMocks.corsSafeFetch).toHaveBeenCalledWith(`https://www.runninghub.${site}/uc/openapi/accountStatus`, expect.objectContaining({ method: 'POST', body: JSON.stringify({ apikey: 'secret' }) }));
+    const key = `${provider}-${site}-fixture`;
+    await expect(testProviderConnection(provider, ` ${key} `, `https://www.runninghub.${site}/openapi/v2`)).resolves.toMatchObject({ success: true, balance: '12 积分' });
+    expect(transportMocks.corsSafeFetch).toHaveBeenCalledExactlyOnceWith(`https://www.runninghub.${site}/uc/openapi/accountStatus`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ apikey: key }),
+    });
   });
   it.each([
     ['apimart', 'https://api.example/v1/', 'https://api.example/v1/models'],
@@ -367,27 +408,12 @@ describe('provider connection tests', () => {
     );
   });
 
-  it('tests Sora2U through the tracked read-only credits endpoint', async () => {
-    transportMocks.corsSafeFetch.mockResolvedValueOnce(new Response(JSON.stringify({
-      success: true,
-      balance: 1280,
-      currency: 'GP',
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }));
-
-    await expect(testProviderConnection('sora2u', 'sk_sora_secret')).resolves.toEqual({
-      success: true,
-      balance: '1280 GP',
-      baseUrl: 'https://sora2u.com',
+  it('rejects old Sora2U connection probes before falling back to a model-list request', async () => {
+    await expect(testProviderConnection('sora2u', 'sk_sora_secret', 'https://sora2u.com')).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('内置厂商已下架'),
     });
-    expect(transportMocks.corsSafeFetch).toHaveBeenCalledWith(
-      'https://sora2u.com/api/v1/credits?utm_source=tenney&utm_medium=canvas&utm_content=wx',
-      {
-        method: 'GET',
-        headers: { Authorization: 'Bearer sk_sora_secret' },
-      },
-    );
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+    expect(transportMocks.invoke).not.toHaveBeenCalled();
   });
 });

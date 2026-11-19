@@ -6,6 +6,7 @@ import {
   buildAssistantSystemPrompt,
   resolveAssistantModel,
   streamAssistantReply,
+  type AssistantModelMessage,
 } from '../../src/services/ai/assistantStream';
 import { runAssistantPipeline, runStreamingPipeline } from '../../src/services/chat/assistantService';
 import { parseRules } from '../../src/services/chat/rulesEngine';
@@ -14,6 +15,20 @@ import { useAppStore } from '../../src/store/useAppStore';
 import type { ModelExecutionProfile } from '../../src/types/aiTypes';
 import type { ChatApiProtocol, UserSkill } from '../../src/types';
 import { buildAssistantToolGuidance } from '../../src/services/chat/agentPromptGuidance';
+import type { InstalledPlugin } from '../../src/types/plugin';
+import { revokePluginProtocolPresets } from '../../src/services/plugins/pluginProtocolPresetService';
+
+const protocolNative = vi.hoisted(() => ({ invoke: vi.fn(), desktop: false }));
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...await original<typeof import('@tauri-apps/api/core')>(),
+  invoke: (...args: unknown[]) => protocolNative.invoke(...args), isTauri: () => protocolNative.desktop,
+}));
+
+const museMocks = vi.hoisted(() => ({
+  streamMuseText: vi.fn<(input: { messages: AssistantModelMessage[]; signal?: AbortSignal;
+    onText: (snapshot: string) => void }) => Promise<string>>(),
+}));
+vi.mock('../../src/services/ai/museTextService', () => museMocks);
 
 const configureAssistant = (
   executionProfile?: ModelExecutionProfile,
@@ -47,7 +62,214 @@ const configureAssistant = (
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+  museMocks.streamMuseText.mockReset();
   useAppStore.setState(useAppStore.getInitialState(), true);
+  protocolNative.desktop = false;
+  protocolNative.invoke.mockReset();
+  revokePluginProtocolPresets();
+});
+
+describe('plugin Responses execution', () => {
+  const reference = { pluginId: 'example.responses', presetId: 'responses' };
+  function install() {
+    const plugin: InstalledPlugin = { id: reference.pluginId, enabled: true, source: 'definePlugin({tools:{}});', sourceDigest: 'a'.repeat(64), revisionDigest: 'b'.repeat(64), installedAt: 1, updatedAt: 1,
+      manifest: { apiVersion: 2, requiredCapabilities: ['model.protocolPresets'], id: reference.pluginId, name: 'Responses', version: '1.0.0', category: 'utility', runtime: 'javascript', entry: 'main.js', permissions: [],
+        contributes: { nodeTools: [], modelProtocols: [{ id: 'responses', name: 'Responses', category: 'text', adapter: 'openai-responses' }] } } };
+    configureAssistant({ preset: 'plugin', plugin: reference }, 'anthropic-compatible');
+    useAppStore.setState({ installedPlugins: [plugin] });
+    protocolNative.desktop = true;
+    protocolNative.invoke.mockResolvedValue({ pluginId: plugin.id, exists: true, enabled: true, snapshotVerified: true, healthCode: 'ready',
+      activeSourceDigest: plugin.sourceDigest, activeRevisionDigest: plugin.revisionDigest, dependencyFingerprint: 'c'.repeat(64), modelProtocols: plugin.manifest.contributes.modelProtocols });
+    return plugin;
+  }
+  it.each([false, true])('routes plugin selection through Responses and preserves five images (nonStream=%s)', async (nonStream) => {
+    install();
+    const payload = { status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '五图分析' }] }] };
+    const fetch = vi.fn().mockResolvedValue(new Response(nonStream ? JSON.stringify(payload) : `data: ${JSON.stringify({ type: 'response.completed', response: payload })}\n\n`,
+      { headers: { 'Content-Type': nonStream ? 'application/json' : 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    const images = Array.from({ length: 5 }, (_, i) => `data:image/png;base64,${i}AAA`);
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '', nonStream, onEvent, tools: [], resolveVisualReferences: false,
+      messages: [{ role: 'system', content: '分析每张' }, { role: 'user', content: [{ type: 'text', text: '五图' }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))] }] })).resolves.toBe('五图分析');
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0][0]).toBe('https://gateway.example/v1/responses');
+    expect(JSON.parse(fetch.mock.calls[0][1].body).input[1].content.filter((item: { type: string }) => item.type === 'input_image')).toHaveLength(5);
+    expect(protocolNative.invoke.mock.calls).toHaveLength(3);
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'stop' });
+  });
+  it('does not send a request when the native plugin becomes unavailable before submission', async () => {
+    const plugin = install();
+    protocolNative.invoke.mockResolvedValueOnce({ pluginId: plugin.id, exists: true, enabled: true,
+      snapshotVerified: true, healthCode: 'ready', activeSourceDigest: plugin.sourceDigest,
+      activeRevisionDigest: plugin.revisionDigest, dependencyFingerprint: 'c'.repeat(64),
+      modelProtocols: plugin.manifest.contributes.modelProtocols })
+      .mockResolvedValueOnce({ pluginId: plugin.id, exists: true, enabled: false, healthCode: 'disabled' });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '查询', nonStream: true,
+      resolveVisualReferences: false, onEvent, tools: [] })).rejects.toThrow('取消');
+    expect(protocolNative.invoke).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'canceled' });
+  });
+  it('rejects late tool proposals and the next tool round after plugin revocation', async () => {
+    install();
+    const payload = { status: 'completed', output: [{ type: 'function_call', call_id: 'call-late', name: 'canvas_query', arguments: '{}' }] };
+    const onEvent = vi.fn();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, headers: new Headers({ 'Content-Type': 'application/json' }), json: async () => {
+      revokePluginProtocolPresets(reference.pluginId);
+      useAppStore.setState((state) => ({ installedPlugins: state.installedPlugins.map((item) => ({ ...item, enabled: false })) }));
+      return payload;
+    } }));
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '查询', nonStream: true, onEvent, tools: [] })).rejects.toThrow('取消');
+    expect(onEvent.mock.calls.some(([event]) => event.type === 'tool.call.final')).toBe(false);
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'canceled' });
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '下一轮', onEvent: vi.fn(), tools: [] })).rejects.toThrow('未启用');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('Responses image messages', () => {
+  it.each([false, true])('keeps five images and history in the actual request (model override %s)', async (modelOverride) => {
+    configureAssistant(modelOverride ? { preset: 'openai-responses' } : undefined,
+      modelOverride ? 'anthropic-compatible' : 'openai-responses');
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '五图已收到' }] }],
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const images = Array.from({ length: 5 }, (_, index) => `data:image/png;base64,${index}AAA`);
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '', nonStream: true, tools: [], onEvent: vi.fn(),
+      messages: [
+        { role: 'system', content: '分析风格' },
+        { role: 'assistant', content: '请提供图片' },
+        { role: 'user', content: [{ type: 'text', text: '这是图片1到5' }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))] },
+      ],
+    })).resolves.toBe('五图已收到');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://gateway.example/v1/responses');
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.input.map((item: { role: string }) => item.role)).toEqual(['system', 'assistant', 'user']);
+    expect(body.input[2].content.filter((part: { type: string }) => part.type === 'input_image').map((part: { image_url: string }) => part.image_url)).toEqual(images);
+  });
+});
+
+describe('Muse assistant text transport', () => {
+  const configureMuse = () => useAppStore.setState((state) => ({ config: { ...state.config,
+    assistantModelId: 'muse/muse-chat', generalModels: [], providers: { muse: { name: 'Muse', apiKey: '', catalogId: 'muse',
+      selectedModels: [{ id: 'muse-chat', name: 'Muse 问答', category: 'text', provider: 'muse', inputModalities: ['text', 'image'] }] } },
+  } }));
+
+  it('resolves the explicit Muse model without an API key and declares no tool capability', () => {
+    configureMuse();
+    expect(resolveAssistantModel(undefined, 'muse/muse-chat')).toMatchObject({
+      modelName: 'muse-chat', apiKey: '', transport: 'muse-webview', supportsTools: false, supportsVision: true,
+    });
+    expect(resolveAssistantModel(undefined, 'muse/unavailable')).toBeNull();
+  });
+
+  it('routes complete snapshots to text deltas without OpenAI requests or fabricated tool events', async () => {
+    configureMuse();
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    museMocks.streamMuseText.mockImplementation(async ({ onText }) => {
+      onText('你'); onText('你好'); onText('你好'); return '你好！';
+    });
+    const onEvent = vi.fn();
+    await expect(streamAssistantReply({ systemPrompt: '系统', userMessage: '你好', tools: [],
+      modelId: 'muse/muse-chat', onEvent })).resolves.toBe('你好！');
+    expect(museMocks.streamMuseText.mock.calls[0][0].messages).toEqual([
+      { role: 'system', content: '系统' }, { role: 'user', content: '你好' },
+    ]);
+    expect(onEvent.mock.calls.map(([event]) => event).filter((event) => event.type === 'text.delta')).toEqual([
+      { type: 'text.delta', delta: '你' }, { type: 'text.delta', delta: '好' }, { type: 'text.delta', delta: '！' },
+    ]);
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'stop' });
+    expect(onEvent.mock.calls.some(([event]) => event.type.startsWith('tool.'))).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('resolves explicit project image references before handing messages to the Muse service', async () => {
+    configureMuse();
+    useAppStore.setState({ currentProjectId: 'muse-project',
+      nodes: [{ id: 'muse-image', type: 'ai-image', position: { x: 0, y: 0 },
+        data: { type: 'ai-image', label: '参考图', imageUrl: 'data:image/png;base64,QUJDRA==' } }] });
+    museMocks.streamMuseText.mockResolvedValue('看到了图片');
+    await streamAssistantReply({ systemPrompt: '', userMessage: '分析 @{muse-image:参考图}', projectId: 'muse-project',
+      tools: [], onEvent: vi.fn() });
+    expect(museMocks.streamMuseText.mock.calls[0][0].messages).toEqual([{ role: 'user', content: [
+      { type: 'text', text: '分析 图片1' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
+    ] }]);
+  });
+
+  it('rejects nonempty tools before preparing visual references or creating a Muse task', async () => {
+    configureMuse();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '读取 @asset{unavailable}', onEvent: vi.fn(),
+      tools: [{ type: 'function', function: { name: 'file_read_text', description: '读取', parameters: {} } }],
+    })).rejects.toThrow('不支持工具调用');
+    expect(museMocks.streamMuseText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { messages: [{ role: 'tool', content: '已脱敏的历史工具摘要', tool_call_id: 'call-1' }] as AssistantModelMessage[] },
+    { messages: [{ role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'file_read_text', arguments: '{}' } }] }] as AssistantModelMessage[] },
+  ])('passes sanitized past tool history to the text service as background while defining no current tools', async ({ messages }) => {
+    configureMuse();
+    museMocks.streamMuseText.mockResolvedValue('继续回答');
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '', messages, tools: [], onEvent: vi.fn() }))
+      .resolves.toBe('继续回答');
+    expect(museMocks.streamMuseText.mock.calls[0][0].messages).toEqual(messages);
+  });
+
+  it('keeps streamed partial text on cancellation and never emits successful completion', async () => {
+    configureMuse(); const controller = new AbortController(); const onEvent = vi.fn();
+    museMocks.streamMuseText.mockImplementation(async ({ onText }) => {
+      onText('部分回复'); controller.abort(); onText('迟到的回复'); return '迟到的完整回复';
+    });
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', tools: [], signal: controller.signal, onEvent }))
+      .rejects.toThrow('请求已取消');
+    expect(onEvent).toHaveBeenCalledWith({ type: 'text.delta', delta: '部分回复' });
+    expect(onEvent).toHaveBeenCalledWith({ type: 'done', finishReason: 'canceled' });
+    expect(onEvent).not.toHaveBeenCalledWith({ type: 'done', finishReason: 'stop' });
+    expect(JSON.stringify(onEvent.mock.calls)).not.toContain('迟到');
+    expect(useAppStore.getState().activeRequestAbort).toBeNull();
+  });
+
+  it('does not append a rewritten snapshot to the old partial response', async () => {
+    configureMuse(); const onEvent = vi.fn();
+    museMocks.streamMuseText.mockImplementation(async ({ onText }) => { onText('旧片段'); onText('改写片段'); return '改写片段'; });
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', tools: [], onEvent })).rejects.toThrow('发生改写');
+    expect(onEvent).toHaveBeenCalledWith({ type: 'text.delta', delta: '旧片段' });
+    expect(onEvent).not.toHaveBeenCalledWith({ type: 'text.delta', delta: '改写片段' });
+    expect(onEvent).not.toHaveBeenCalledWith({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('keeps nonstream mode as one final text delta', async () => {
+    configureMuse(); const onEvent = vi.fn();
+    museMocks.streamMuseText.mockImplementation(async ({ onText }) => { onText('部分'); return '完整回复'; });
+    await streamAssistantReply({ systemPrompt: '', userMessage: '你好', tools: [], nonStream: true, onEvent });
+    expect(onEvent.mock.calls.map(([event]) => event).filter((event) => event.type === 'text.delta')).toEqual([
+      { type: 'text.delta', delta: '完整回复' },
+    ]);
+  });
+
+  it('lets a tool-capable assistant offer the explicitly mentioned Muse media model without a Muse API key', async () => {
+    configureAssistant();
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { ...state.config.providers,
+      muse: { name: 'Muse', apiKey: '', catalogId: 'muse', selectedModels: [
+        { id: 'muse-image', name: 'Muse 图片', category: 'image', provider: 'muse' },
+      ] },
+    } } }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [
+      { message: { content: '准备调用' }, finish_reason: 'stop' },
+    ] }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await streamAssistantReply({ systemPrompt: '', userMessage: '生成 @model{muse/muse-image}', nonStream: true, onEvent: vi.fn() });
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.tools[0].function.name).toBe('media_generate');
+    expect(body.tools[0].function.parameters.properties.modelRef.enum).toEqual(['muse/muse-image']);
+    expect(museMocks.streamMuseText).not.toHaveBeenCalled();
+  });
 });
 
 describe('assistant custom protocol boundary', () => {
@@ -214,6 +436,13 @@ describe('assistant custom protocol boundary', () => {
       body: 'data: {"candidates":[{"content":{"parts":[{"text":"Gemini 回复"}]},"finishReason":"STOP"}]}\n\n',
       expectedText: 'Gemini 回复',
     },
+    {
+      preset: 'openai-responses' as const,
+      expectedUrl: 'https://gateway.example/v1/responses',
+      expectedHeader: 'Authorization',
+      body: 'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Responses 回复"}]}]}}\n\n',
+      expectedText: 'Responses 回复',
+    },
   ])('streams a $preset model through its native adapter despite an OpenAI connection default', async ({
     preset, expectedUrl, expectedHeader, body, expectedText,
   }) => {
@@ -227,7 +456,7 @@ describe('assistant custom protocol boundary', () => {
     await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent }))
       .resolves.toBe(expectedText);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(expectedUrl);
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ [expectedHeader]: 'secret' });
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ [expectedHeader]: expectedHeader === 'Authorization' ? 'Bearer secret' : 'secret' });
     expect(onEvent).toHaveBeenCalledWith({ type: 'text.delta', delta: expectedText });
   });
 
@@ -663,6 +892,17 @@ describe('assistant custom protocol boundary', () => {
 });
 
 describe('Agent 工具说明与执行策略', () => {
+  it('按需求主动选择专业能力，保留简单任务、真实执行与授权边界', () => {
+    const prompt = buildAssistantToolGuidance(['skill_search', 'skill_load', 'agent_run_sub_agent']);
+    expect(prompt).toContain('用户无需先指定智能体或 Skill');
+    expect(prompt).toContain('不为每条消息强行调用');
+    expect(prompt).toContain('不要求用户再次手动引用');
+    expect(prompt).toContain('不把只读流程资料称为已经运行了独立智能体');
+    expect(prompt).toContain('只有收到成功的工具结果后');
+    expect(prompt).toContain('未授权自动调用');
+    expect(prompt).toContain('通用对话不读取任何项目画布或资产');
+  });
+
   it('只说明本轮开放的工具，不注入禁用工具的规则和索引', () => {
     const prompt = buildAssistantToolGuidance(['file_read_text'], 'plan');
     expect(prompt).toContain('Plan 规划模式');

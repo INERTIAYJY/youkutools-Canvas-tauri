@@ -4,6 +4,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectDataDirRenameResult } from '../../src/services/fs/core';
 import type { DramaAssetLibrary } from '../../src/types/dramaAssets';
+import type { ProjectOriginalWork } from '../../src/types';
+import type { EpisodeScriptFileWriteOptions } from '../../src/services/episodeScriptFileService';
+import { createEmptyStoryGraph } from '../../src/services/storyGraphService';
 
 type SavedRecord = import('../../src/services/storageService').ProjectSaveData;
 
@@ -29,6 +32,16 @@ const fileMocks = vi.hoisted(() => ({
 const memoryMocks = vi.hoisted(() => ({
   reassignProjectMemories: vi.fn(async () => undefined),
 }));
+const scriptFileMocks = vi.hoisted(() => ({ prepare: vi.fn() }));
+const lifecycleMocks = vi.hoisted(() => ({
+  swap: vi.fn(),
+  deleteContent: vi.fn(async (input: { expectedProjects: Array<{ id: string }> }) => input.expectedProjects.map((item) => item.id)),
+}));
+vi.mock('../../src/services/indexedDb/legacyProjectLifecycleRepository', () => ({
+  swapLegacyEpisodeOrder: lifecycleMocks.swap,
+  deleteLegacyProjectContent: lifecycleMocks.deleteContent,
+}));
+vi.mock('../../src/services/episodeScriptFileService', () => ({ prepareEpisodeScriptFileWrite: scriptFileMocks.prepare }));
 
 vi.mock('../../src/services/fileService', () => ({
   ...fileMocks,
@@ -38,6 +51,7 @@ vi.mock('../../src/services/fileService', () => ({
 vi.mock('../../src/services/pollManager', () => ({
   cancelNodePolling: vi.fn(),
   clearProjectTasks: vi.fn(),
+  stopPollingForDeletedProjects: vi.fn(),
   resumePendingTasks: vi.fn(async () => undefined),
 }));
 vi.mock('../../src/services/projectSnapshotService', () => ({
@@ -115,6 +129,20 @@ beforeEach(() => {
   fileMocks.deleteProjectData.mockClear();
   fileMocks.deleteProjectDataDir.mockClear();
   memoryMocks.reassignProjectMemories.mockClear();
+  scriptFileMocks.prepare.mockReset().mockResolvedValue(undefined);
+  lifecycleMocks.swap.mockReset().mockImplementation(async (input: {
+    episodeId: string; direction: number; expectedEpisodes: Array<{ id: string; episodeNo: number; exchangeEpoch?: number }>; assertCurrent?: () => void;
+  }) => {
+    input.assertCurrent?.();
+    const ordered = input.expectedEpisodes.slice().sort((left, right) => left.episodeNo - right.episodeNo);
+    const index = ordered.findIndex((item) => item.id === input.episodeId);
+    const current = ordered[index], neighbour = ordered[index + input.direction];
+    return [{ id: current.id, episodeNo: neighbour.episodeNo, updatedAt: 3, exchangeEpoch: (current.exchangeEpoch ?? 0) + 1 },
+      { id: neighbour.id, episodeNo: current.episodeNo, updatedAt: 3, exchangeEpoch: (neighbour.exchangeEpoch ?? 0) + 1 }];
+  });
+  lifecycleMocks.deleteContent.mockReset().mockImplementation(async (input: {
+    expectedProjects: Array<{ id: string }>; assertCurrent?: () => void;
+  }) => { input.assertCurrent?.(); return input.expectedProjects.map((item) => item.id); });
 });
 
 describe('新增分集', () => {
@@ -406,10 +434,193 @@ describe('原著 / 剧本 / 大纲', () => {
     // 到顶了就不再动
     await expect(useAppStore.getState().moveEpisode('ep-2', -1)).resolves.toBe(false);
   });
+
+  it('原子排序失败不先改内存中的第一集，也不回写整条旧画布', async () => {
+    useAppStore.setState({ projects: [
+      { id: 'series', name: '整剧', createdAt: 1, updatedAt: 1 },
+      { id: 'ep-1', name: '一', parentId: 'series', episodeNo: 1, createdAt: 1, updatedAt: 1 },
+      { id: 'ep-2', name: '二', parentId: 'series', episodeNo: 2, createdAt: 1, updatedAt: 1 },
+    ], currentProjectId: 'ep-1', projectName: '一' });
+    lifecycleMocks.swap.mockRejectedValueOnce(new Error('fixture quota'));
+    await expect(useAppStore.getState().moveEpisode('ep-2', -1)).resolves.toBe(false);
+    expect(useAppStore.getState().projects.filter((item) => item.parentId).map((item) => item.episodeNo)).toEqual([1, 2]);
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+  });
+});
+
+describe('剧集原著的条件保存', () => {
+  const original: ProjectOriginalWork = { fileName: '新原著.md', relativePath: 'original/new.md', addedAt: 2 };
+  const otherOriginal: ProjectOriginalWork = { fileName: '其他原著.md', relativePath: 'original/other.md', addedAt: 3 };
+  const options = { expectedSeriesId: 'series', expectedExchangeEpoch: 4, expectedOriginalWork: null };
+  const owner = () => useAppStore.getState().projects.find((project) => project.id === 'series')!;
+  function prepare(currentProjectId = 'ep-1', originalWork?: ProjectOriginalWork) {
+    const series = { id: 'series', name: '整部剧', createdAt: 1, updatedAt: 1, exchangeEpoch: 4,
+      series: { script: '原剧本', storyGraph: createEmptyStoryGraph('graph'), ...(originalWork ? { originalWork } : {}) } };
+    const episode = { id: 'ep-1', name: '第一集', createdAt: 1, updatedAt: 1, parentId: series.id };
+    useAppStore.setState({ projects: [series, episode], currentProjectId, projectName: '第一集', showToast: vi.fn() });
+    mockPersistedProjects([{ ...emptyCanvas(series.id, series.name), ...series }, { ...emptyCanvas(episode.id, episode.name), ...episode }]);
+  }
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  it('首次绑定接受自己的乐观引用，并合并排队前较新的剧本和正式关系图', async () => {
+    prepare();
+    const graph = owner().series!.storyGraph;
+    const assertCurrent = vi.fn();
+    const scriptWrite = useAppStore.getState().updateSeriesInfo({ script: '刚保存的新剧本' }, {
+      expectedSeriesId: 'series', expectedExchangeEpoch: 4,
+    });
+    const originalWrite = useAppStore.getState().updateSeriesInfo({ originalWork: original }, { ...options, assertCurrent });
+    await expect(scriptWrite).resolves.toBe(true);
+    await expect(originalWrite).resolves.toBe(true);
+    expect(owner().series).toEqual({ originalWork: original, script: '刚保存的新剧本', storyGraph: graph });
+    const saved = fileMocks.saveProject.mock.calls.map(([record]) => record).filter((record) => record.id === 'series').at(-1);
+    expect(saved?.series).toEqual(owner().series);
+    expect(assertCurrent.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it('明确指定原剧集后，导航到其他普通项目不能触发项目升级或保存', async () => {
+    prepare();
+    const plain = { id: 'plain', name: '其他普通项目', createdAt: 1, updatedAt: 1 };
+    useAppStore.setState((state) => ({ projects: [...state.projects, plain], currentProjectId: plain.id }));
+    await expect(useAppStore.getState().updateSeriesInfo({ originalWork: original }, options)).rejects.toThrow('已变化');
+    expect(useAppStore.getState().projects).toHaveLength(3);
+    expect(useAppStore.getState().projects.find((project) => project.id === plain.id)?.parentId).toBeUndefined();
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(fileMocks.loadProjectData).not.toHaveBeenCalled();
+    expect(memoryMocks.reassignProjectMemories).not.toHaveBeenCalled();
+  });
+
+  it('首次绑定条件不允许已有原著，旧归档代际也在文件操作前拒绝', async () => {
+    prepare('ep-1', otherOriginal);
+    await expect(useAppStore.getState().updateSeriesInfo({ originalWork: original }, options)).rejects.toThrow('原著引用已变化');
+    await expect(useAppStore.getState().updateSeriesInfo({ originalWork: original }, {
+      ...options, expectedOriginalWork: { ...otherOriginal }, expectedExchangeEpoch: 3,
+    })).rejects.toThrow('已变化');
+    expect(owner().series?.originalWork).toEqual(otherOriginal);
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(fileMocks.loadProjectData).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { isCreatingProject: true }, { isReturningToStartPage: true }, { switchingProjectName: '其他项目' }, { projectLoadStatus: 'loading' as const },
+  ])('导航或加载过渡期不绑定文件：%j', async (navigation) => {
+    prepare();
+    useAppStore.setState(navigation);
+    await expect(useAppStore.getState().updateSeriesInfo({ originalWork: original }, options)).resolves.toBe(false);
+    expect(owner().series?.originalWork).toBeUndefined();
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(fileMocks.loadProjectData).not.toHaveBeenCalled();
+  });
+
+  it('排队期间出现其他引用时拒绝首次绑定，不覆盖新引用及其剧本', async () => {
+    prepare();
+    const initial = { ...emptyCanvas('series', '整部剧'), ...owner() };
+    const started = deferred<void>(), loading = deferred<SavedRecord>();
+    fileMocks.loadProjectData.mockImplementationOnce(() => { started.resolve(); return loading.promise; });
+    const first = useAppStore.getState().updateSeriesInfo({ script: '先排队的旧改稿' });
+    await started.promise;
+    const pending = useAppStore.getState().updateSeriesInfo({ originalWork: original }, options);
+    // 立即安装拒绝处理器，避免前一个等待结束时产生未处理的拒绝。
+    const rejected = expect(pending).rejects.toThrow('原著引用已变化');
+    useAppStore.setState((state) => ({ projects: state.projects.map((project) => project.id === 'series'
+      ? { ...project, series: { ...project.series, originalWork: otherOriginal, script: '并发保留的新剧本' } } : project) }));
+    loading.resolve(initial);
+    await expect(first).resolves.toBe(false);
+    await rejected;
+    expect(owner().series).toMatchObject({ originalWork: otherOriginal, script: '并发保留的新剧本' });
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+  });
+
+  it('异步读取后再次检查宿主会话，拒绝保存并撤回本次乐观绑定', async () => {
+    prepare();
+    const initial = { ...emptyCanvas('series', '整部剧'), ...owner() };
+    const started = deferred<void>(), loading = deferred<SavedRecord>();
+    let current = true;
+    fileMocks.loadProjectData.mockImplementationOnce(() => { started.resolve(); return loading.promise; });
+    const saving = useAppStore.getState().updateSeriesInfo({ originalWork: original }, {
+      ...options, assertCurrent: () => { if (!current) throw new Error('草稿已改变'); },
+    });
+    await started.promise;
+    expect(owner().series?.originalWork).toEqual(original);
+    current = false;
+    loading.resolve(initial);
+    await expect(saving).resolves.toBe(false);
+    expect(owner().series?.originalWork).toBeUndefined();
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+  });
+
+  it('当前画布就是剧集时，实际保存队列提交前仍复核导航状态', async () => {
+    prepare('series');
+    const activeStarted = deferred<void>(), releaseActive = deferred<string>(), guardedQueued = deferred<void>();
+    fileMocks.saveProject.mockImplementationOnce(() => { activeStarted.resolve(); return releaseActive.promise; });
+    const previousSave = useAppStore.getState().saveCurrentProjectSilent();
+    await activeStarted.promise;
+    const binding = useAppStore.getState().updateSeriesInfo({ originalWork: original }, {
+      ...options, assertCurrent: () => { if (owner().series?.originalWork?.relativePath === original.relativePath) guardedQueued.resolve(); },
+    });
+    await guardedQueued.promise;
+    useAppStore.setState({ isReturningToStartPage: true });
+    releaseActive.resolve('series');
+    await previousSave;
+    await expect(binding).resolves.toBe(false);
+    expect(fileMocks.saveProject).toHaveBeenCalledOnce();
+    expect(owner().series?.originalWork).toBeUndefined();
+  });
+});
+
+describe('本集正文与 TXT 保存回执', () => {
+  const scriptReference = { fileName: '第一集.txt', relativePath: 'manuscripts/第一集.txt', digest: 'a'.repeat(64), sourceName: '第一集.txt' };
+  function prepare() {
+    const owner = { id: 'series', name: '整部剧', createdAt: 1, updatedAt: 1 };
+    const episode = { id: 'ep-1', name: '第一集', parentId: owner.id, createdAt: 1, updatedAt: 1, episodeScript: '数据库旧正文' };
+    useAppStore.setState({ projects: [owner, episode], currentProjectId: episode.id, projectName: episode.name, showToast: vi.fn() });
+    mockPersistedProjects([{ ...emptyCanvas(owner.id, owner.name), ...owner }, { ...emptyCanvas(episode.id, episode.name), ...episode }]);
+  }
+  function fileReceipt() {
+    const result = { reference: scriptReference, confirm: vi.fn(), rollback: vi.fn(async (assertCurrent?: () => void) => { assertCurrent?.(); return true; }) };
+    scriptFileMocks.prepare.mockImplementation(async (options: EpisodeScriptFileWriteOptions) => {
+      options.assertCurrent(); options.onPrepared?.(result); return result;
+    });
+    return result;
+  }
+
+  it('旧数据库正文无 TXT 时，同文保存也绑定文件，后续通用保存不丢相对引用', async () => {
+    prepare();
+    const result = fileReceipt();
+    await expect(useAppStore.getState().updateEpisodeCreative('ep-1', { script: '数据库旧正文' })).resolves.toBe(true);
+    expect(scriptFileMocks.prepare).toHaveBeenCalledWith(expect.objectContaining({ episodeId: 'ep-1', projectId: 'series', previousText: '数据库旧正文', text: '数据库旧正文' }));
+    expect(useAppStore.getState().projects.find((project) => project.id === 'ep-1')?.episodeScriptFile).toEqual(scriptReference);
+    expect(result.confirm).toHaveBeenCalledOnce(); expect(result.rollback).not.toHaveBeenCalled();
+    await useAppStore.getState().saveCurrentProjectSilent();
+    const record = fileMocks.saveProject.mock.calls.map(([value]) => value).filter((value) => value.id === 'ep-1').at(-1);
+    expect(record?.episodeScriptFile).toEqual(scriptReference);
+  });
+
+  it('TXT 写成而项目提交失败时返回失败并有条件恢复文件，保留原数据库正文', async () => {
+    prepare();
+    const result = fileReceipt();
+    fileMocks.saveProject.mockRejectedValueOnce(new Error('disk full'));
+    await expect(useAppStore.getState().updateEpisodeCreative('ep-1', { script: '新正文' })).resolves.toBe(false);
+    expect(useAppStore.getState().projects.find((project) => project.id === 'ep-1')).toMatchObject({ episodeScript: '数据库旧正文' });
+    expect(useAppStore.getState().projects.find((project) => project.id === 'ep-1')?.episodeScriptFile).toBeUndefined();
+    expect(result.confirm).not.toHaveBeenCalled(); expect(result.rollback).toHaveBeenCalledOnce();
+  });
+
+  it('TXT 外改冲突在项目写入前停止，不把新正文或引用写进项目', async () => {
+    prepare();
+    scriptFileMocks.prepare.mockRejectedValueOnce(new Error('本集 TXT 已被修改'));
+    await expect(useAppStore.getState().updateEpisodeCreative('ep-1', { script: '新正文' })).rejects.toThrow('已被修改');
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(useAppStore.getState().projects.find((project) => project.id === 'ep-1')?.episodeScript).toBe('数据库旧正文');
+  });
 });
 
 describe('删除剧集', () => {
-  it('连分集一起删，且只清一次共用素材目录', async () => {
+  it('整剧业务聚合删除，保留共用素材与审计资料，不按分集逐条级联', async () => {
     useAppStore.setState({
       projects: [
         { id: 'series', name: '月球列车', createdAt: 1, updatedAt: 1, dataFolder: 'moon' },
@@ -428,13 +639,15 @@ describe('删除剧集', () => {
 
     const state = useAppStore.getState();
     expect(state.projects.map((project) => project.id)).toEqual(['plain']);
-    expect(fileMocks.deleteProjectData.mock.calls.map((call) => call[0]).sort())
+    expect(lifecycleMocks.deleteContent).toHaveBeenCalledTimes(1);
+    expect(lifecycleMocks.deleteContent.mock.calls[0][0].expectedProjects.map((item) => item.id).sort())
       .toEqual(['ep-1', 'ep-2', 'series']);
-    expect(fileMocks.deleteProjectDataDir.mock.calls.map((call) => call[0])).toEqual(['series']);
+    expect(fileMocks.deleteProjectData).not.toHaveBeenCalled();
+    expect(fileMocks.deleteProjectDataDir).not.toHaveBeenCalled();
     expect(state.currentProjectId).toBe('plain');
   });
 
-  it('删掉最后一集时剧集项目一并清掉', async () => {
+  it('旧格式拒删最后一集，绝不顺带删除整部剧或素材目录', async () => {
     useAppStore.setState({
       projects: [
         { id: 'series', name: '月球列车', createdAt: 1, updatedAt: 1, dataFolder: 'moon' },
@@ -447,7 +660,50 @@ describe('删除剧集', () => {
 
     await useAppStore.getState().deleteProject('ep-1');
 
-    expect(useAppStore.getState().projects.map((project) => project.id)).toEqual(['plain']);
-    expect(fileMocks.deleteProjectDataDir.mock.calls.map((call) => call[0])).toEqual(['series']);
+    expect(useAppStore.getState().projects.map((project) => project.id)).toEqual(['series', 'ep-1', 'plain']);
+    expect(lifecycleMocks.deleteContent).not.toHaveBeenCalled();
+    expect(fileMocks.deleteProjectData).not.toHaveBeenCalled();
+    expect(fileMocks.deleteProjectDataDir).not.toHaveBeenCalled();
+  });
+
+  it('删除替补加载迟到时不覆盖已经打开的其他项目', async () => {
+    let finish!: (record: SavedRecord) => void;
+    const loading = new Promise<SavedRecord>((resolve) => { finish = resolve; });
+    useAppStore.setState({ projects: [
+      { id: 'delete-me', name: '待删', createdAt: 1, updatedAt: 1 },
+      { id: 'fallback', name: '替补', createdAt: 1, updatedAt: 1 },
+      { id: 'other', name: '新打开', createdAt: 1, updatedAt: 1 },
+    ], currentProjectId: 'delete-me', projectName: '待删' });
+    fileMocks.loadProjectData.mockImplementation(async () => loading);
+    const deleting = useAppStore.getState().deleteProject('delete-me');
+    // 等到逻辑删除提交且替补读取已开始；不运行真实应用或持久化。
+    await vi.waitUntil(() => fileMocks.loadProjectData.mock.calls.length > 0);
+    useAppStore.setState({ currentProjectId: 'other', projectName: '新打开', projectLoadStatus: 'ready',
+      nodes: [{ id: 'new-canvas', type: 'source-text', position: { x: 0, y: 0 }, data: { type: 'source-text', label: '新画布', output: '保留新画布' } }] });
+    finish(emptyCanvas('fallback', '旧替补'));
+    await deleting;
+    expect(useAppStore.getState().currentProjectId).toBe('other');
+    expect(useAppStore.getState().projectName).toBe('新打开');
+    expect(useAppStore.getState().nodes[0].id).toBe('new-canvas');
+  });
+
+  it('删除等待期间其他项目的新消息和改名仍从最新状态保留', async () => {
+    let committed!: (ids: string[]) => void;
+    const commit = new Promise<string[]>((resolve) => { committed = resolve; });
+    lifecycleMocks.deleteContent.mockImplementationOnce(async () => commit);
+    useAppStore.setState({ projects: [
+      { id: 'delete-me', name: '待删', createdAt: 1, updatedAt: 1 },
+      { id: 'active', name: '原名称', createdAt: 1, updatedAt: 1 },
+    ], currentProjectId: 'active', projectName: '原名称', messages: [] });
+    const deleting = useAppStore.getState().deleteProject('delete-me');
+    await vi.waitUntil(() => lifecycleMocks.deleteContent.mock.calls.length > 0);
+    const message = { id: 'new-message', conversationId: 'active-chat', role: 'assistant' as const,
+      content: '后台新到的回复', status: 'done' as const, timestamp: 3 };
+    useAppStore.setState({ projects: useAppStore.getState().projects.map((item) => item.id === 'active'
+      ? { ...item, name: '最新名称', updatedAt: 3 } : item), projectName: '最新名称', messages: [message] });
+    committed(['delete-me']); await deleting;
+    expect(useAppStore.getState().projects).toMatchObject([{ id: 'active', name: '最新名称' }]);
+    expect(useAppStore.getState().messages).toEqual([message]);
+    expect(useAppStore.getState().projectName).toBe('最新名称');
   });
 });

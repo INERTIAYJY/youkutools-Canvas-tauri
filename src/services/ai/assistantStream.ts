@@ -1,8 +1,8 @@
 /**
  * assistantStream — 助手模型流式请求服务
  *
- * 封装对 OpenAI-compatible Chat Completions API 的流式调用，
- * 使用 streamParsers 解析 SSE 事件流。
+ * 封装兼容 API 与 Muse 原生网页问答；HTTP 使用 streamParsers 解析事件流，
+ * 网页累计文本快照转换为相同的增量事件。
  *
  * 前端通过 ChatPanel → assistantService → assistantStream 调用，
  * 流事件驱动消息状态更新。
@@ -10,8 +10,11 @@
 import { useAppStore } from '../../store/useAppStore';
 import { parseStream, parseNonStream } from './streamParsers';
 import type { AssistantStreamEvent } from '../../types/chat';
+import type { ChatApiMessage } from './chatApiProtocol';
 import type { ChatApiProtocol } from '../../types';
-import type { ModelExecutionProtocol, ProtocolJsonValue } from '../../types/aiTypes';
+import type { ModelExecutionProfile, ModelExecutionProtocol, ProtocolJsonValue } from '../../types/aiTypes';
+import type { PluginProtocolLease } from '../plugins/pluginProtocolPresetService';
+import { resolvePluginModelProtocol } from './pluginModelProtocol';
 import {
   findMediaModelOption,
   getConfiguredModelGroups,
@@ -22,6 +25,9 @@ import { DEFAULT_BASE_URLS } from '../../constants/api';
 import { extractModelName, resolveGeneralModelConnection } from './helpers';
 import { corsSafeFetch } from './httpTransport';
 import { redactModelProtocolError, redactModelProtocolErrorText } from './modelProtocolHttp';
+import { redactVolcengineError, redactVolcengineErrorText } from './providers/volcengineError';
+import { getProviderPolicy, resolveProviderCatalogId } from './providerPolicies';
+import { resolveContentImageUrls } from './imageUtils';
 import { buildAssistantToolGuidance, buildMediaPrompt } from '../chat/agentPromptGuidance';
 import {
   buildModelProtocolRequest,
@@ -32,6 +38,7 @@ import { getAssistantTextModelCandidates } from '../projectSettingsService';
 import { isGeneralAssistantScope } from '../chat/assistantScope';
 import { prepareAssistantVisualMessages } from '../chat/assistantVisualContext';
 import { buildChatApiRequest, resolveChatApiProtocol, resolveNativeTextChatProtocol } from './chatApiProtocol';
+import { MUSE_BASE_URL, MUSE_TEXT_MODEL } from './museModels';
 
 // ============================================
 // Config resolution
@@ -39,6 +46,7 @@ import { buildChatApiRequest, resolveChatApiProtocol, resolveNativeTextChatProto
 
 interface ResolvedModelConfig {
   selectionId: string;
+  providerConfigId: string;
   baseUrl: string;
   apiKey: string;
   modelName: string;
@@ -46,6 +54,10 @@ interface ResolvedModelConfig {
   chatApiProtocol: ChatApiProtocol;
   usesChatApiProtocol: boolean;
   supportsVision: boolean;
+  /** 网页问答没有原生 function calling；省略时沿用既有模型工具能力。 */
+  supportsTools?: boolean;
+  transport?: 'muse-webview';
+  pluginProfile?: ModelExecutionProfile;
 }
 
 /**
@@ -83,7 +95,7 @@ function resolveAssistantModelById(assistantModelId: string): ResolvedModelConfi
     const nativeTextProtocol = resolveNativeTextChatProtocol(gm.executionProfile);
     let protocol: ModelExecutionProtocol;
     try {
-      protocol = gm.executionProfile && !nativeTextProtocol
+      protocol = gm.executionProfile && gm.executionProfile.preset !== 'plugin' && !nativeTextProtocol
         ? resolveModelExecutionProfile(gm.executionProfile) ?? getModelProtocolPreset('openai-chat')
         : getModelProtocolPreset('openai-chat');
     } catch {
@@ -92,12 +104,14 @@ function resolveAssistantModelById(assistantModelId: string): ResolvedModelConfi
 
     return {
       selectionId: assistantModelId,
+      providerConfigId: connection.providerConfigId,
       baseUrl: baseUrl.replace(/\/+$/, ''),
       apiKey: provider.apiKey || '',
       modelName: gm.modelId,
       protocol,
       chatApiProtocol: nativeTextProtocol ?? resolveChatApiProtocol(provider.chatApiProtocol),
-      usesChatApiProtocol: !gm.executionProfile || !!nativeTextProtocol,
+      usesChatApiProtocol: !gm.executionProfile || !!nativeTextProtocol || gm.executionProfile.preset === 'plugin',
+      pluginProfile: gm.executionProfile?.preset === 'plugin' ? gm.executionProfile : undefined,
       supportsVision: hasVisionInputCapability(gm),
     };
   }
@@ -107,12 +121,30 @@ function resolveAssistantModelById(assistantModelId: string): ResolvedModelConfi
     .find((model) => model.value === assistantModelId);
   if (!builtInModel) return null;
   const provider = config.providers[builtInModel.provider];
+  if (builtInModel.provider === 'muse') {
+    if (!provider || (provider.catalogId ?? 'muse') !== 'muse'
+      || extractModelName(builtInModel.value, 'muse') !== MUSE_TEXT_MODEL) return null;
+    return {
+      selectionId: assistantModelId,
+      providerConfigId: builtInModel.provider,
+      baseUrl: MUSE_BASE_URL,
+      apiKey: '',
+      modelName: MUSE_TEXT_MODEL,
+      protocol: getModelProtocolPreset('openai-chat'),
+      chatApiProtocol: 'openai-compatible',
+      usesChatApiProtocol: true,
+      supportsVision: builtInModel.inputModalities?.includes('image') ?? true,
+      supportsTools: false,
+      transport: 'muse-webview',
+    };
+  }
   const baseUrl = provider?.baseUrl || DEFAULT_BASE_URLS[builtInModel.provider] || '';
   if (!provider?.apiKey || !baseUrl) return null;
   const modelName = extractModelName(builtInModel.value, builtInModel.provider);
 
   return {
     selectionId: assistantModelId,
+    providerConfigId: builtInModel.provider,
     baseUrl: baseUrl.replace(/\/+$/, ''),
     apiKey: provider.apiKey,
     modelName,
@@ -155,6 +187,10 @@ export interface StreamingCallOptions {
   projectId?: string;
   /** 本次调用显式选择的文本模型；不可用时拒绝，不回退或修改默认配置。 */
   modelId?: string;
+  /** 冻结材料的无工具执行器设 false，避免参考文本中的 @ 再读取文件或发起视觉描述。 */
+  resolveVisualReferences?: boolean;
+  /** 私人创作草稿请求不写入传输调试日志。 */
+  sensitive?: boolean;
 }
 
 export interface AssistantModelToolCall {
@@ -172,12 +208,7 @@ export type AssistantModelContent = string | Array<{
   image_url?: { url: string };
 }>;
 
-export interface AssistantModelMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: AssistantModelContent;
-  tool_call_id?: string;
-  tool_calls?: AssistantModelToolCall[];
-}
+export type AssistantModelMessage = ChatApiMessage;
 
 export interface AssistantToolDefinition {
   type: 'function';
@@ -195,6 +226,7 @@ function buildAssistantTools(userMessage: string): AssistantToolDefinition[] {
   const mentionedModel = findMediaModelOption(mentionedModelId, config.generalModels ?? [], config);
   if (!mentionedModel) return [];
   const providerAvailable = mentionedModel.provider === 'general'
+    || mentionedModel.provider === 'muse' && !!config.providers.muse
     || (mentionedModel.provider === 'dreamina'
       ? !!config.dreaminaAuth?.loggedIn
       : !!config.providers[mentionedModel.provider]?.apiKey);
@@ -252,6 +284,8 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
   if (!modelConfig.usesChatApiProtocol && modelConfig.protocol.streamFormat !== 'openai-sse') {
     throw new Error('当前助手模型协议未声明 OpenAI SSE 兼容能力，不能用于对话助手或 Agent 工具调用');
   }
+  const usesVolcengineTos = getProviderPolicy(resolveProviderCatalogId(modelConfig.providerConfigId,
+    useAppStore.getState().config.providers[modelConfig.providerConfigId])).upload === 'volcengine-tos';
 
   const {
     systemPrompt,
@@ -268,7 +302,7 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
 
   // 解析器会先发错误事件，再抛异常；两条出口都要在交给消息层前脱敏。
   const onEvent = (event: AssistantStreamEvent) => emitEvent(event.type === 'error'
-    ? { ...event, message: redactModelProtocolErrorText(event.message, modelConfig.apiKey) }
+    ? { ...event, message: (usesVolcengineTos ? redactVolcengineErrorText : redactModelProtocolErrorText)(event.message, modelConfig.apiKey) }
     : event);
 
   const requestId = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -291,16 +325,53 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
   if (trackAbort) useAppStore.getState().setActiveRequestAbort(controller);
 
   const tools = providedTools ?? buildAssistantTools(toolContextMessage ?? userMessage);
+  let pluginLease: PluginProtocolLease | undefined;
+  const terminalEvents: AssistantStreamEvent[] = [];
 
   try {
     controller.signal.throwIfAborted();
+    if (modelConfig.pluginProfile) {
+      pluginLease = await resolvePluginModelProtocol(modelConfig.pluginProfile, () => useAppStore.getState().installedPlugins, controller);
+      modelConfig.chatApiProtocol = pluginLease.adapter;
+    }
+    if (modelConfig.transport === 'muse-webview' && tools.length > 0) {
+      throw new Error('Muse 当前仅支持普通文本/图片问答，不支持工具调用；请选择支持工具的模型执行工具');
+    }
     const state = useAppStore.getState();
-    const requestMessages = await prepareAssistantVisualMessages({
-      messages,
-      projectId: projectId ?? state.currentProjectId,
-      supportsVision: modelConfig.supportsVision,
-      signal: controller.signal,
-    });
+    const resolveImageContent = usesVolcengineTos
+      ? (content: AssistantModelContent, uploadSignal?: AbortSignal) => resolveContentImageUrls(content, modelConfig.providerConfigId, uploadSignal)
+      : undefined;
+    let requestMessages: AssistantModelMessage[];
+    if (options.resolveVisualReferences === false) {
+      requestMessages = resolveImageContent ? await Promise.all(messages.map(async (message) => ({
+        ...message, content: await resolveImageContent(message.content, controller.signal),
+      }))) : messages;
+    } else {
+      requestMessages = await prepareAssistantVisualMessages({
+        messages,
+        projectId: projectId ?? state.currentProjectId,
+        supportsVision: modelConfig.supportsVision,
+        signal: controller.signal,
+        resolveImageContent,
+      });
+    }
+    if (modelConfig.transport === 'muse-webview') {
+      const { streamMuseText } = await import('./museTextService');
+      controller.signal.throwIfAborted();
+      let emitted = '';
+      const emitSnapshot = (snapshot: string) => {
+        controller.signal.throwIfAborted();
+        if (!snapshot.startsWith(emitted)) throw new Error('Muse 回复文本发生改写，已保留当前片段，请在原网页核对完整回答');
+        const delta = snapshot.slice(emitted.length);
+        if (delta) { emitted = snapshot; onEvent({ type: 'text.delta', delta }); }
+      };
+      const result = await streamMuseText({ messages: requestMessages, signal: controller.signal,
+        onText: nonStream ? () => { controller.signal.throwIfAborted(); } : emitSnapshot });
+      controller.signal.throwIfAborted();
+      emitSnapshot(result);
+      onEvent({ type: 'done', finishReason: 'stop' });
+      return result;
+    }
     const builtRequest = modelConfig.usesChatApiProtocol
       ? buildChatApiRequest({
           protocol: modelConfig.chatApiProtocol,
@@ -326,7 +397,13 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
             toolChoice: tools.length > 0 ? 'auto' : undefined,
           },
         });
-    const response = await corsSafeFetch(builtRequest.url, builtRequest.init);
+
+    await pluginLease?.assertCurrent();
+    controller.signal.throwIfAborted();
+    const response = await (options.sensitive || usesVolcengineTos
+      ? corsSafeFetch(builtRequest.url, builtRequest.init, { sensitive: true })
+      : corsSafeFetch(builtRequest.url, builtRequest.init));
+
     const responseProtocol = modelConfig.usesChatApiProtocol
       ? modelConfig.chatApiProtocol
       : 'openai-compatible';
@@ -335,12 +412,21 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
     const parserOptions = { signal: controller.signal, protocol: responseProtocol,
       onEvent: (event: AssistantStreamEvent) => {
         controller.signal.throwIfAborted();
+        pluginLease?.assertActive();
+        // 工具提议及终态等到原生身份复核后才交付，避免停用后的迟到工具执行。
+        if (pluginLease && event.type !== 'text.delta' && event.type !== 'reasoning.delta' && event.type !== 'error') {
+          terminalEvents.push(event);
+          return;
+        }
         onEvent(event);
       } };
     const result = nonStream
       ? await parseNonStream(response, parserOptions)
       : await parseStream(response, { ...parserOptions, requestId, modelId: modelConfig.modelName });
     controller.signal.throwIfAborted();
+    await pluginLease?.assertCurrent();
+    controller.signal.throwIfAborted();
+    for (const event of terminalEvents) onEvent(event);
     return result;
   } catch (error: unknown) {
     if (controller.signal.aborted || (error as { name?: string } | null)?.name === 'AbortError') {
@@ -349,12 +435,13 @@ export async function streamAssistantReply(options: StreamingCallOptions): Promi
       // eslint-disable-next-line preserve-caught-error
       throw new Error('请求已取消');
     }
-    const safeError = redactModelProtocolError(error, modelConfig.apiKey);
+    const safeError = (usesVolcengineTos ? redactVolcengineError : redactModelProtocolError)(error, modelConfig.apiKey);
     const msg = safeError instanceof Error ? safeError.message : typeof safeError === 'string' ? safeError : '未知错误';
     onEvent({ type: 'error', code: 'FETCH_ERROR', message: msg, retryable: true });
     onEvent({ type: 'done', finishReason: 'error' });
     throw safeError;
   } finally {
+    pluginLease?.release();
     signal?.removeEventListener('abort', cancelFromCaller);
     const currentCtrl = useAppStore.getState().activeRequestAbort;
     if (currentCtrl === controller) {

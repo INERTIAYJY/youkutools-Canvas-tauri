@@ -17,6 +17,14 @@ use url::Url;
 
 #[path = "agent/package.rs"]
 mod agent_package;
+#[path = "agent/codex_contract.rs"]
+mod codex_contract;
+#[path = "agent/codex_process.rs"]
+mod codex_process;
+#[path = "agent/codex_protocol.rs"]
+mod codex_protocol;
+#[path = "agent/codex_runtime.rs"]
+mod codex_runtime;
 #[path = "agent/web.rs"]
 mod assistant_web;
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
@@ -35,8 +43,16 @@ mod comfyui;
 mod director_desk_runtime;
 #[path = "media/dreamina.rs"]
 mod dreamina;
+#[path = "media/muse.rs"]
+mod muse;
+#[path = "media/xiaohongshu_reference.rs"]
+mod xiaohongshu_reference;
 #[path = "files/transfer.rs"]
 mod file_transfer;
+#[path = "files/registry_write.rs"]
+mod registry_write;
+#[path = "files/native_project_media.rs"]
+mod native_project_media;
 #[path = "files/object_storage/mod.rs"]
 mod project_asset_storage;
 #[path = "files/github_fallback.rs"]
@@ -52,6 +68,8 @@ mod local_fonts;
 mod reference_image_upload;
 #[path = "media/ffmpeg.rs"]
 mod video_ffmpeg;
+#[path = "media/volcengine_tos.rs"]
+mod volcengine_tos;
 #[path = "mcp/bridge.rs"]
 mod mcp_bridge;
 #[path = "mcp/client.rs"]
@@ -153,6 +171,11 @@ pub mod onnx {
     }
 }
 mod path_policy;
+#[path = "platform/secure_random.rs"]
+mod secure_random;
+#[cfg(windows)]
+#[path = "platform/process_job.rs"]
+mod process_job;
 // 源文件按领域归类；crate 根模块名保持稳定，避免改变 IPC、测试与安全调用路径。
 #[path = "plugins/registry.rs"]
 mod plugin_registry;
@@ -170,8 +193,14 @@ mod plugin_ui;
 mod plugin_window;
 #[path = "files/project_archive.rs"]
 mod project_archive;
+#[path = "files/project_model_safety.rs"]
+mod project_model_safety;
+#[path = "files/project_execution_context.rs"]
+mod project_execution_context;
 #[path = "files/skill_archive.rs"]
 mod skill_archive;
+#[path = "files/skill_storage.rs"]
+mod skill_storage;
 #[path = "agent/provider_docs.rs"]
 mod provider_docs;
 mod secret_store;
@@ -329,7 +358,7 @@ fn sync_authorized_directories(
     directories: Vec<String>,
     base_data_dir: Option<String>,
 ) -> Result<Vec<String>, String> {
-    path_policy::set_user_storage_root(&app, base_data_dir.as_deref());
+    native_project_media::sync_project_recycle_roots(&app, &directories, base_data_dir.as_deref());
 
     let fs_scope = app.fs_scope();
     let asset_scope = app.state::<tauri::scope::Scopes>();
@@ -416,11 +445,121 @@ const DREAMINA_LOGIN_WATCHER: &str = r#"
 #[serde(rename_all = "camelCase")]
 struct ProxyFetchRequest {
     request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upload_diagnostic_id: Option<String>,
     url: String,
     method: String,
     headers: Vec<(String, String)>,
     body: Option<String>, // base64 编码的请求体
     text_body: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct UploadProxyEnvironment {
+    name: String,
+    value: String,
+}
+
+#[derive(Clone)]
+struct UploadProxySnapshot {
+    environment: Vec<UploadProxyEnvironment>,
+    no_proxy_present: bool,
+    time_ms: u64,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadDiagnostics {
+    http_version: String,
+    remote_address: Option<String>,
+    final_url: String,
+    proxy_environment: Vec<UploadProxyEnvironment>,
+    no_proxy_present: bool,
+    proxy_snapshot_time_ms: u64,
+    user_agent: String,
+    proxy_policy: &'static str,
+}
+
+fn sanitized_upload_proxy(value: &str) -> String {
+    let raw = value.trim();
+    if raw.len() > 4096 || raw.chars().any(char::is_control) {
+        return "configured".into();
+    }
+    let parsed = if raw.contains("://") {
+        Url::parse(raw)
+    } else {
+        Url::parse(&format!("http://{raw}"))
+    };
+    let Ok(proxy) = parsed else { return "configured".into(); };
+    let default_port = match proxy.scheme() {
+        "http" => 80,
+        "https" => 443,
+        "socks4" | "socks4a" | "socks5" | "socks5h" => 1080,
+        _ => return "configured".into(),
+    };
+    let Some(host) = proxy.host() else { return "configured".into(); };
+    let host = match host {
+        url::Host::Ipv6(address) => format!("[{address}]"),
+        host => host.to_string(),
+    };
+    format!("{}://{}:{}", proxy.scheme(), host, proxy.port().unwrap_or(default_port))
+}
+
+impl UploadProxySnapshot {
+    fn capture() -> Self {
+        let mut environment = Vec::new();
+        let mut no_proxy_present = false;
+        for (name, value) in std::env::vars_os() {
+            let Some(name) = name.to_str() else { continue; };
+            let matches = |expected: &str| name == expected || cfg!(windows) && name.eq_ignore_ascii_case(expected);
+            if ["NO_PROXY", "no_proxy"].into_iter().any(matches) {
+                no_proxy_present = true;
+            } else if ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"].into_iter().any(matches) {
+                environment.push(UploadProxyEnvironment {
+                    name: name.into(),
+                    value: value.to_str().map(sanitized_upload_proxy).unwrap_or_else(|| "configured".into()),
+                });
+            }
+        }
+        environment.sort_by(|left, right| left.name.cmp(&right.name));
+        Self {
+            environment,
+            no_proxy_present,
+            time_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64).unwrap_or(0),
+        }
+    }
+}
+
+fn upload_diagnostic_user_agent(req: &ProxyFetchRequest) -> Option<String> {
+    let id = req.upload_diagnostic_id.as_deref()?;
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|value| value.is_ascii_alphanumeric() || b"._:-".contains(&value)) {
+        return None;
+    }
+    Some(req.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, value)| value.clone()).unwrap_or_else(|| "AI-Canvas/0.1".into()))
+}
+
+fn sanitized_upload_response_url(url: &Url) -> String {
+    let mut final_url = url.clone();
+    let _ = final_url.set_username("");
+    let _ = final_url.set_password(None);
+    final_url.set_query(None);
+    final_url.set_fragment(None);
+    final_url.to_string()
+}
+
+fn upload_response_diagnostics(response: &reqwest::Response, snapshot: &UploadProxySnapshot, user_agent: String) -> UploadDiagnostics {
+    UploadDiagnostics {
+        http_version: format!("{:?}", response.version()),
+        remote_address: response.remote_addr().map(|address| address.to_string()),
+        final_url: sanitized_upload_response_url(response.url()),
+        proxy_environment: snapshot.environment.clone(),
+        no_proxy_present: snapshot.no_proxy_present,
+        proxy_snapshot_time_ms: snapshot.time_ms,
+        user_agent,
+        proxy_policy: "reqwest automatic; actual route not exposed",
+    }
 }
 
 // 分别限制在途请求和提前到达的取消；128 项远高于正常模型与工具并发。
@@ -510,15 +649,19 @@ struct ProxyHttpState {
     download_client: reqwest::Client,
     cancellations: ProxyFetchCancellations,
     body_slots: tokio::sync::Semaphore,
+    upload_proxy_snapshot: UploadProxySnapshot,
 }
 
 impl ProxyHttpState {
     fn new() -> Result<Self, String> {
+        // 在本进程创建 HTTP 客户端时仅保留脱敏代理摘要，不读取其他进程环境。
+        let upload_proxy_snapshot = UploadProxySnapshot::capture();
         Ok(Self {
             client: build_proxy_http_client(true)?,
             download_client: build_proxy_http_client(false)?,
             cancellations: Mutex::default(),
             body_slots: tokio::sync::Semaphore::new(2),
+            upload_proxy_snapshot,
         })
     }
 }
@@ -631,6 +774,8 @@ struct ProxyFetchResponse {
     status: u16,
     body: String, // base64 编码的响应体
     headers: Vec<(String, String)>,
+    #[serde(rename = "uploadDiagnostics", skip_serializing_if = "Option::is_none")]
+    upload_diagnostics: Option<UploadDiagnostics>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -639,6 +784,8 @@ enum ProxyFetchStreamEvent {
     Meta {
         status: u16,
         headers: Vec<(String, String)>,
+        #[serde(rename = "uploadDiagnostics", skip_serializing_if = "Option::is_none")]
+        upload_diagnostics: Option<UploadDiagnostics>,
     },
     Chunk {
         body: String,
@@ -783,6 +930,7 @@ async fn proxy_fetch(
     state: tauri::State<'_, ProxyHttpState>,
     req: ProxyFetchRequest,
 ) -> Result<ProxyFetchResponse, String> {
+    let upload_user_agent = upload_diagnostic_user_agent(&req);
     let request_id = req.request_id.clone().unwrap_or_else(|| {
         format!(
             "legacy-proxy-{}",
@@ -798,6 +946,9 @@ async fn proxy_fetch(
 
     let request = async {
         let response = send_proxy_request(&state, req).await?;
+        let upload_diagnostics = upload_user_agent.map(|user_agent| {
+            upload_response_diagnostics(&response, &state.upload_proxy_snapshot, user_agent)
+        });
 
         let status = response.status().as_u16();
         let res_headers: Vec<(String, String)> = response
@@ -814,6 +965,7 @@ async fn proxy_fetch(
             status,
             body: body_b64,
             headers: res_headers,
+            upload_diagnostics,
         })
     };
 
@@ -826,6 +978,7 @@ async fn proxy_stream_fetch(
     req: ProxyFetchRequest,
     on_event: Channel<ProxyFetchStreamEvent>,
 ) -> Result<(), String> {
+    let upload_user_agent = upload_diagnostic_user_agent(&req);
     let request_id = req
         .request_id
         .clone()
@@ -839,6 +992,9 @@ async fn proxy_stream_fetch(
 
     let request = async {
         let mut response = send_proxy_request(&state, req).await?;
+        let upload_diagnostics = upload_user_agent.map(|user_agent| {
+            upload_response_diagnostics(&response, &state.upload_proxy_snapshot, user_agent)
+        });
         ensure_content_length_within_limit(&response, PROXY_RESPONSE_MAX_BYTES, "代理响应体")?;
         let status = response.status().as_u16();
         let headers = response
@@ -847,7 +1003,7 @@ async fn proxy_stream_fetch(
             .map(|(key, value)| (key.to_string(), value.to_str().unwrap_or("").to_string()))
             .collect();
         on_event
-            .send(ProxyFetchStreamEvent::Meta { status, headers })
+            .send(ProxyFetchStreamEvent::Meta { status, headers, upload_diagnostics })
             .map_err(|e| format!("发送 HTTP 响应状态失败: {e}"))?;
 
         let mut total_bytes = 0;
@@ -884,6 +1040,7 @@ async fn fetch_image_data_url(
 ) -> Result<String, String> {
     let response = send_proxy_request(&state, ProxyFetchRequest {
         request_id: None,
+        upload_diagnostic_id: None,
         url: url.clone(),
         method: "GET".into(),
         headers: Vec::new(),
@@ -941,9 +1098,65 @@ mod proxy_http_tests {
 
     fn test_request(url: String, method: &str) -> ProxyFetchRequest {
         ProxyFetchRequest {
-            request_id: None, url, method: method.into(), headers: Vec::new(),
+            request_id: None, upload_diagnostic_id: None, url, method: method.into(), headers: Vec::new(),
             body: None, text_body: None,
         }
+    }
+
+    #[test]
+    fn upload_diagnostics_remove_proxy_secrets_and_response_url_credentials() {
+        assert_eq!(sanitized_upload_proxy("http://user:private-key@127.0.0.1:18719/path?token=private#fragment"),
+            "http://127.0.0.1:18719");
+        assert_eq!(sanitized_upload_proxy("127.0.0.1:18719"), "http://127.0.0.1:18719");
+        assert_eq!(sanitized_upload_proxy("https://user:private-key@proxy.example/path"), "https://proxy.example:443");
+        assert_eq!(sanitized_upload_proxy("socks5h://user:private-key@[::1]:1081/path"), "socks5h://[::1]:1081");
+        for invalid in ["", "not a valid proxy", "file:///private/credentials", "http://proxy.example\nprivate"] {
+            assert_eq!(sanitized_upload_proxy(invalid), "configured");
+        }
+        let response_url = Url::parse("https://user:private-key@upload.example/upload?token=private#private").unwrap();
+        assert_eq!(sanitized_upload_response_url(&response_url), "https://upload.example/upload");
+    }
+
+    #[test]
+    fn upload_diagnostics_are_optional_and_use_camel_case_in_both_response_modes() {
+        let legacy: ProxyFetchRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://upload.example/upload", "method": "POST", "headers": [], "body": null,
+        })).unwrap();
+        assert!(upload_diagnostic_user_agent(&legacy).is_none());
+        let mut request = legacy;
+        for invalid in [String::new(), "upload diagnostic".into(), "x".repeat(129)] {
+            request.upload_diagnostic_id = Some(invalid);
+            assert!(upload_diagnostic_user_agent(&request).is_none());
+        }
+        request.upload_diagnostic_id = Some("upload:diagnostic-1".into());
+        assert_eq!(upload_diagnostic_user_agent(&request).as_deref(), Some("AI-Canvas/0.1"));
+        request.headers.push(("uSeR-aGeNt".into(), "upload-fixture".into()));
+        assert_eq!(upload_diagnostic_user_agent(&request).as_deref(), Some("upload-fixture"));
+        let legacy_response = serde_json::to_value(ProxyFetchResponse {
+            status: 502, body: String::new(), headers: Vec::new(), upload_diagnostics: None,
+        }).unwrap();
+        assert!(legacy_response.get("uploadDiagnostics").is_none());
+        let legacy_meta = serde_json::to_value(ProxyFetchStreamEvent::Meta {
+            status: 502, headers: Vec::new(), upload_diagnostics: None,
+        }).unwrap();
+        assert!(legacy_meta.get("uploadDiagnostics").is_none());
+        let diagnostics = UploadDiagnostics {
+            http_version: "HTTP/2.0".into(), remote_address: Some("127.0.0.1:18719".into()),
+            final_url: "https://upload.example/upload".into(), proxy_environment: Vec::new(),
+            no_proxy_present: false, proxy_snapshot_time_ms: 123, user_agent: "upload-fixture".into(),
+            proxy_policy: "reqwest automatic; actual route not exposed",
+        };
+        let response = serde_json::to_value(ProxyFetchResponse {
+            status: 502, body: String::new(), headers: Vec::new(), upload_diagnostics: Some(diagnostics.clone()),
+        }).unwrap();
+        let meta = serde_json::to_value(ProxyFetchStreamEvent::Meta {
+            status: 502, headers: Vec::new(), upload_diagnostics: Some(diagnostics),
+        }).unwrap();
+        assert_eq!(meta["event"], "meta");
+        assert_eq!(response["uploadDiagnostics"], meta["uploadDiagnostics"]);
+        assert_eq!(response["uploadDiagnostics"]["proxySnapshotTimeMs"], 123);
+        assert_eq!(response["uploadDiagnostics"]["httpVersion"], "HTTP/2.0");
+        assert!(response.get("upload_diagnostics").is_none());
     }
 
     fn read_test_request(listener: &TcpListener) -> (TcpStream, String) {
@@ -1410,7 +1623,11 @@ async fn move_to_trash(
     app: tauri::AppHandle,
     webview: tauri::Webview,
     path: String,
+    native_project_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(project_id) = native_project_id {
+        return native_project_media::recycle_native_project_media_root(&webview, &project_id, &path);
+    }
     path_policy::ensure_trusted_caller(&webview)?;
     let target = path_policy::authorize_path(&app, &path, path_policy::PathAccess::Read)?;
     trash::delete(&target).map_err(|e| format!("移动文件到回收站失败: {}", e))
@@ -1549,12 +1766,38 @@ async fn toggle_devtools(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn valid_chat_window_session(session_id: &str) -> bool {
+    (8..=160).contains(&session_id.len())
+        && session_id.bytes().all(|value| value.is_ascii_alphanumeric() || value == b'_' || value == b'-')
+}
+
+/// 同名窗口重建后旧请求不得关闭新实例；URL 由原生创建时绑定。
+fn chat_window_session_matches(url: &Url, session_id: &str) -> bool {
+    if !valid_chat_window_session(session_id) { return false; }
+    let sessions: Vec<_> = url.query_pairs().filter(|(key, _)| key == "session").collect();
+    let views: Vec<_> = url.query_pairs().filter(|(key, _)| key == "view").collect();
+    sessions.len() == 1 && sessions[0].1 == session_id && views.len() == 1 && views[0].1 == "chat"
+}
+
+fn ensure_chat_window_host(webview: &tauri::Webview) -> Result<(), String> {
+    path_policy::ensure_trusted_caller(webview)?;
+    if webview.label() != "main" { return Err("对话窗口由主窗口管理".into()); }
+    Ok(())
+}
+
 /// 打开独立的 AI 对话助手窗口
 #[tauri::command]
-async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_chat_window(app: tauri::AppHandle, webview: tauri::Webview, session_id: String, reuse_existing: Option<bool>) -> Result<(), String> {
+    ensure_chat_window_host(&webview)?;
     let _guard = CHAT_WINDOW_LIFECYCLE_LOCK.lock().await;
+    if !valid_chat_window_session(&session_id) {
+        return Err("对话窗口会话无效".to_string());
+    }
     // 复用当前窗口，保留输入、同步握手及位置锁；close 是异步事件，不能同名立即重建。
     if let Some(window) = app.get_webview_window("chat-assistant") {
+        if !chat_window_session_matches(&window.url().map_err(|_| "无法核对对话窗口会话")?, &session_id) {
+            return Err("原独立窗口会话尚未结束，未覆盖已有窗口".into());
+        }
         window
             .unminimize()
             .map_err(|e| format!("恢复对话窗口失败: {e}"))?;
@@ -1566,14 +1809,17 @@ async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
             .map_err(|e| format!("聚焦对话窗口失败: {e}"))?;
         return Ok(());
     }
+    // Renderer 查询与原生命令之间旧窗口可能已释放；旧 nonce 只能复用，不能创建新实例。
+    if reuse_existing.unwrap_or(false) { return Err("原对话窗口已关闭，请重新打开".into()); }
     CHAT_WINDOW_LOCKED.store(false, Ordering::Release);
 
     #[cfg(debug_assertions)]
     let url = WebviewUrl::External(
-        Url::parse("http://localhost:1420/?view=chat").map_err(|e| e.to_string())?,
+        Url::parse(&format!("http://localhost:1420/?view=chat&session={session_id}"))
+            .map_err(|e| e.to_string())?,
     );
     #[cfg(not(debug_assertions))]
-    let url = WebviewUrl::App("index.html?view=chat".into());
+    let url = WebviewUrl::App(format!("index.html?view=chat&session={session_id}").into());
 
     let main_window = app.get_webview_window("main");
     let (chat_width, chat_height) = load_chat_window_size(&app, main_window.as_ref());
@@ -1633,25 +1879,28 @@ async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
     if !positioned {
         let _ = chat_window.center();
     }
-    chat_window
-        .show()
-        .map_err(|e| format!("显示对话窗口失败: {e}"))?;
-    chat_window
-        .set_focus()
-        .map_err(|e| format!("聚焦对话窗口失败: {e}"))?;
+    if let Err(error) = chat_window.show().and_then(|_| chat_window.set_focus()) {
+        // 持有生命周期锁和本次 build 返回的实例，页面未加载完成也可回收；复用窗口不走此分支。
+        let _ = chat_window.destroy();
+        return Err(format!("显示或聚焦对话窗口失败: {error}"));
+    }
 
     Ok(())
 }
 
-/// 关闭独立的 AI 对话助手窗口
+/// 仅由主窗口在草稿交接成功后销毁绑定实例，不依赖子 Renderer 再次处理 close 事件。
 #[tauri::command]
-async fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn close_chat_window(app: tauri::AppHandle, webview: tauri::Webview, session_id: String) -> Result<(), String> {
+    ensure_chat_window_host(&webview)?;
+    if !valid_chat_window_session(&session_id) { return Err("对话窗口会话无效".into()); }
     let _guard = CHAT_WINDOW_LIFECYCLE_LOCK.lock().await;
-    CHAT_WINDOW_LOCKED.store(false, Ordering::Release);
     if let Some(window) = app.get_webview_window("chat-assistant") {
+        if !chat_window_session_matches(&window.url().map_err(|_| "无法核对对话窗口会话")?, &session_id) {
+            return Err("对话窗口已重新打开，未关闭新会话".into());
+        }
         persist_current_chat_window_size(&window);
         window
-            .close()
+            .destroy()
             .map_err(|e| format!("关闭对话窗口失败: {e}"))?;
         // 等注册表释放标签后再允许下一次打开，防止快速收回/重开命中旧窗口。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -1662,7 +1911,30 @@ async fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+    CHAT_WINDOW_LOCKED.store(false, Ordering::Release);
     Ok(())
+}
+
+#[cfg(test)]
+mod chat_window_session_tests {
+    use super::chat_window_session_matches;
+    use url::Url;
+
+    #[test]
+    fn only_bound_chat_instance_matches() {
+        for source in ["http://localhost:1420/?view=chat&session=session-1234", "http://tauri.localhost/index.html?view=chat&session=session-1234"] {
+            let url = Url::parse(source).unwrap();
+            assert!(chat_window_session_matches(&url, "session-1234"));
+            assert!(!chat_window_session_matches(&url, "session-5678"));
+        }
+        for source in ["http://localhost:1420/?view=chat&session=session-1234&session=session-5678",
+            "http://localhost:1420/?view=chat&view=main&session=session-1234",
+            "http://localhost:1420/?view=main&session=session-1234",
+            "http://localhost:1420/?view=chat"] {
+            assert!(!chat_window_session_matches(&Url::parse(source).unwrap(), "session-1234"));
+        }
+        assert!(!chat_window_session_matches(&Url::parse("http://localhost:1420/?view=chat&session=short").unwrap(), "short"));
+    }
 }
 
 /// 锁定或解锁对话窗口与主窗口的相对位置。
@@ -1757,6 +2029,12 @@ async fn dreamina_login(app: tauri::AppHandle) -> Result<DreaminaLoginPayload, S
 pub fn run() {
     #[allow(unused_mut)]
     let mut context = tauri::generate_context!();
+    let maintenance_request = project_model_safety::cold_request()
+        .expect("项目模型维护启动参数无效或此构建不允许维护");
+    if maintenance_request.is_some() {
+        // Must happen before Builder creates any configured webview, on every OS.
+        for window in &mut context.config_mut().app.windows { window.create = false; }
+    }
     #[cfg(windows)]
     let main_window_config = native_rendering::defer_main_window(context.config_mut());
     // Windows WebView2/Chromium 渲染优化：
@@ -1800,15 +2078,23 @@ pub fn run() {
         .manage(blender_runtime::production_blender_job_core())
         .manage(mcp_bridge::McpBridgeState::default())
         .manage(mcp_client::McpClientState::default())
+        .manage(codex_runtime::CodexRuntimeState::default())
         .manage(project_asset_storage::ObjectStorageState::default())
         .manage(path_policy::UserStorageRoot::default())
+        .manage(native_project_media::AssetSearchNativeRoots::default())
+        .manage(native_project_media::VideoEditorNativeRoot::default())
+        .manage(native_project_media::NativeProjectRecycleRoots::default())
         .manage(billing::BillingStoragePath::default())
+        .manage(project_model_safety::ProjectModelMaintenanceState::default())
+        .register_uri_scheme_protocol("project-model-maintenance", project_model_safety::handle_protocol)
         .register_uri_scheme_protocol("director-desk", director_desk_runtime::handle_protocol)
         .register_uri_scheme_protocol("plugin-ui", plugin_ui::handle_protocol)
         .register_uri_scheme_protocol("plugin-window", plugin_window::handle_protocol)
         .register_uri_scheme_protocol("theme-image", theme_assets::handle_protocol)
+        .register_uri_scheme_protocol("xhs-reference-toolbar", xiaohongshu_reference::toolbar_protocol)
         .register_asynchronous_uri_scheme_protocol("comfy-media", comfyui::media_source::handle_protocol)
         .plugin(tauri_plugin_fs::init())
+        .plugin(skill_storage::privacy_plugin())
         .plugin(comfyui::installation::privacy_plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -1818,9 +2104,29 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(canvas_input::init())
         .invoke_handler(tauri::generate_handler![
+            native_project_media::claim_native_project_media_root,
+            native_project_media::resolve_native_project_media_root,
+            native_project_media::sync_native_asset_search_roots,
+            native_project_media::resolve_asset_search_native_project_root,
+            native_project_media::bind_video_editor_native_root,
+            native_project_media::revoke_video_editor_native_root,
+            native_project_media::resolve_video_editor_native_root,
+            native_project_media::resolve_native_project_media_subroot,
+            native_project_media::write_native_project_media,
+            native_project_media::read_native_project_media,
+            project_model_safety::project_model_get_maintenance_lease,
+            project_model_safety::project_model_verify_maintenance_lease,
+            project_model_safety::project_model_get_production_stop_evidence,
+            project_model_safety::project_model_open_backup,
+            project_model_safety::project_model_write_backup_entry,
+            project_model_safety::project_model_read_backup_entry,
+            project_model_safety::project_model_seal_backup,
+            project_model_safety::project_model_verify_backup_seal,
             theme_assets::store_theme_image,
             reference_image_upload::optimize_reference_png,
             reference_image_upload::optimize_reference_jpeg,
+            volcengine_tos::upload_volcengine_tos_reference,
+            volcengine_tos::cancel_volcengine_tos_upload,
             billing::billing_upsert,
             billing::billing_query,
             billing::billing_get_by_task,
@@ -1829,6 +2135,7 @@ pub fn run() {
             billing::billing_export,
             billing::billing_set_storage_path,
             billing::billing_get_storage_path,
+            billing::billing_has_history,
             fetch_image_data_url,
             comfyui::media_source::open_comfy_media_source,
             comfyui::media_source::close_comfy_media_source,
@@ -1853,10 +2160,16 @@ pub fn run() {
             agent_package::agent_source_remove,
             agent_package::agent_source_read_text,
             project_archive::pack_project_archive,
+            project_archive::verify_project_archive_publication,
             project_archive::unpack_project_archive,
             project_archive::inspect_project_archive_assets,
             project_archive::publish_project_import_assets,
             skill_archive::read_skill_archive,
+            skill_storage::save_skill_files,
+            skill_storage::register_skill_folder,
+            skill_storage::list_skill_source_files,
+            skill_storage::read_skill_source_file,
+            skill_storage::remove_skill_source_files,
             thumbnail_cache::prepare_project_thumbnail,
             thumbnail_cache::write_project_thumbnail,
             file_transfer::copy_file_streamed,
@@ -1898,6 +2211,22 @@ pub fn run() {
             dreamina::dreamina_status,
             dreamina::dreamina_generate,
             dreamina::dreamina_query_result,
+            muse::muse_login_open,
+            muse::muse_auth_status,
+            muse::muse_import_cookies,
+            muse::muse_logout,
+            muse::muse_prepare,
+            muse::muse_submit,
+            muse::muse_send,
+            muse::muse_cancel_prepared,
+            muse::muse_release,
+            muse::muse_query,
+            muse::muse_task_open,
+            xiaohongshu_reference::xiaohongshu_reference_open,
+            xiaohongshu_reference::xiaohongshu_reference_focus,
+            xiaohongshu_reference::xiaohongshu_reference_import,
+            xiaohongshu_reference::xiaohongshu_reference_set_status,
+            xiaohongshu_reference::xiaohongshu_reference_close,
             open_chat_window,
             close_chat_window,
             set_chat_window_locked,
@@ -1964,6 +2293,13 @@ pub fn run() {
             secret_store::secret_get,
             secret_store::secret_delete,
             secret_store::secret_store_available,
+            codex_runtime::codex_runtime_status,
+            codex_runtime::codex_runtime_register,
+            codex_runtime::codex_runtime_configure,
+            codex_runtime::codex_runtime_remove,
+            codex_runtime::codex_runtime_start,
+            codex_runtime::codex_runtime_cancel,
+            codex_runtime::codex_runtime_collect,
             local_fonts::list_local_fonts,
             seedling::seedling_cli_status,
             seedling::seedling_install_cli,
@@ -2004,15 +2340,11 @@ pub fn run() {
             plugin_runtime::get_python_plugin_runtime_status,
         ])
         .on_window_event(|window, event| {
+            project_model_safety::on_window_event(window, event);
             plugin_window::on_window_event(window, event);
             comfyui::progress::on_window_event(window, event);
             comfyui::media_source::on_window_event(window, event);
-            // 用户把文件拖进自有窗口 = 一次显式授权，登记后复制/读取命令才放行。
-            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                if window.label() == "main" || window.label() == "chat-assistant" {
-                    path_policy::grant_dropped_paths(window.app_handle(), paths);
-                }
-            }
+            xiaohongshu_reference::on_window_event(window, event);
             if window.label() == "chat-assistant" {
                 if let tauri::WindowEvent::Resized(size) = event {
                     let Ok(scale_factor) = window.scale_factor() else {
@@ -2058,6 +2390,11 @@ pub fn run() {
             agent_package::deny_agent_private_dir_access(_app.handle());
             // 插件入口源码与活动/回滚版本只保存在 Rust 私有注册表中。
             plugin_registry::deny_plugin_private_dir_access(_app.handle());
+            project_model_safety::deny_private_access(_app.handle()).map_err(std::io::Error::other)?;
+            if let Some(request) = maintenance_request {
+                project_model_safety::start_maintenance(_app, request).map_err(std::io::Error::other)?;
+                return Ok(());
+            }
             if let Err(error) = blender_runtime::prepare_blender_private_runtime(_app.handle()) {
                 eprintln!("[blender-runtime] {error}");
             }
@@ -2069,7 +2406,9 @@ pub fn run() {
         .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            path_policy::authorize_native_drop(app_handle, &event);
             if matches!(event, tauri::RunEvent::Exit) {
+                codex_runtime::shutdown(app_handle);
                 comfyui::progress::shutdown_progress(app_handle);
                 comfyui::installer::shutdown_installation(app_handle);
                 comfyui::runtime_console::shutdown_runtime(app_handle);

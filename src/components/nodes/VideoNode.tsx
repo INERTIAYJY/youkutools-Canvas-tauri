@@ -31,6 +31,7 @@ import { blobToDataUrl, derivedNodePlacement } from '../../store/store.utils';
 import { seekVideoTo } from '../../utils/videoSeek';
 import { downloadUrlAndSave, saveDataUrlToProjectData, buildNodeFileName } from '../../services/fileService';
 import { copyFile as copyFileToClipboard } from '../../services/clipboardService';
+import { playableVideoUrl, repairUnplayableVideoFile } from '../../services/videoPlaybackCompat';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { getPerformanceModeBudget } from '../../services/performanceModeRuntime';
 import { useCanvasNodeLodProtection } from '../../hooks/useCanvasNodeLod';
@@ -497,6 +498,34 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
   const dismissInitialCover = useCallback(() => {
     if (data.videoUrl) setDismissedCoverSource(data.videoUrl);
   }, [data.videoUrl]);
+
+  /**
+   * 播放器报编码不兼容（错误码 3/4）时的兜底修复：
+   * 按节点已保存的本地文件重新探测编码，命中 HEVC 就转成 H.264 并回写节点。
+   * 只在当前项目、当前节点仍是同一份来源时写回，避免过期结果覆盖新产物。
+   */
+  const repairingRef = useRef(false);
+  const handlePlaybackError = useCallback(async (code?: number) => {
+    dismissInitialCover();
+    if (code !== 3 && code !== 4) return;
+    const filePath = data.filePath;
+    if (!filePath || repairingRef.current) return;
+    repairingRef.current = true;
+    try {
+      const { path, repaired } = await repairUnplayableVideoFile(filePath);
+      if (!repaired) return;
+      const state = useAppStore.getState();
+      const liveData = getCanvasNodeById(state.nodes, id)?.data;
+      if (state.currentProjectId !== projectId || !liveData || liveData.videoUrl !== data.videoUrl) return;
+      state.updateNodeData(id, {
+        videoUrl: playableVideoUrl(path),
+        filePath: path,
+        thumbnailUrl: playableVideoUrl(path),
+      });
+    } finally {
+      repairingRef.current = false;
+    }
+  }, [data.filePath, data.videoUrl, dismissInitialCover, id, projectId]);
 
   // ── Upload handler for source nodes ──
   const { isUploading, handleUpload: doUpload } = useSourceFileUpload('.mp4,.webm,.avi,.mov,.mkv');
@@ -994,7 +1023,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
               onEnded={() => { setPlayingSource(null); setActivatedSource(null); }}
               onPosterError={() => { if (suppliedCover) setFailedCover(suppliedCover); }}
               onRequestPlayback={activateCompactVideo}
-              onError={dismissInitialCover}
+              onError={(code) => { void handlePlaybackError(code); }}
               onRequestSeek={() => { dismissInitialCover(); activateCompactVideo(); }}
               onFullscreen={handleOpenFullscreen}
             />
@@ -1090,6 +1119,7 @@ function AIVideoNode({ id, data, selected }: { id: string; data: BaseNodeData; s
                 autoPlay
                 crossOrigin="anonymous"
                 onLoadedMetadata={handleFullscreenLoadedMetadata}
+                onError={(code) => { void handlePlaybackError(code); }}
                 onEscape={handleCloseFullscreen}
               />
             </div>

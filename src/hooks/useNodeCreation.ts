@@ -9,6 +9,8 @@ import { useReactFlow } from '@xyflow/react';
 import type { Node as RFNode } from '@xyflow/react';
 import { useAppStore, generateId, computeImageNodeDimensions } from '../store/useAppStore';
 import { arrayBufferToBase64, copyFileToProjectData, readBinaryFile } from '../services/fileService';
+import { moveToUndoTrash } from '../services/fs/trash';
+import { playableVideoUrl, transcodeImportedVideo } from '../services/videoPlaybackCompat';
 import type { BaseNodeData } from '../types';
 import { isExternalDropCaptured } from '../utils/dropCapture';
 import { nativeDropClientPosition } from '../utils/nativeDropPosition';
@@ -23,6 +25,11 @@ export type { FileCategory } from '../utils/sourceFileType';
 
 function getFileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
+}
+
+/** 「导入自动转码H264」开关；缺省开启，仅桌面端才有意义。 */
+function isImportAutoTranscodeEnabled(): boolean {
+  return useAppStore.getState().config?.importAutoTranscodeH264 !== false;
 }
 
 
@@ -291,11 +298,28 @@ export function useNodeCreation() {
                     if (!canWrite()) return;
                     url = `data:${MIME_MAP[ext] || 'application/octet-stream'};base64,${arrayBufferToBase64(content.buffer)}`;
                   }
+                  let filePath = result?.filePath;
+                  let fileName = result?.fileName;
+                  const savedFile = Boolean(result?.assetUrl);
+                  // 拖入的 H.265 视频按设置开关自动转成 H.264，并替换工程内的副本。
+                  // 外部原文件不动；被替换的旧副本移入项目回收区，便于撤销。
+                  if (cat === 'video' && filePath && savedFile && isImportAutoTranscodeEnabled()) {
+                    const transcoded = await transcodeImportedVideo(filePath);
+                    if (!canWrite()) return;
+                    if (transcoded.replaced) {
+                      const replacedPath = filePath;
+                      filePath = transcoded.path;
+                      fileName = filePath.split(/[/\\]/).pop() || fileName;
+                      url = playableVideoUrl(transcoded.path);
+                      await moveToUndoTrash(replacedPath, projectId);
+                    }
+                  }
                   const dims = cat === 'image' ? await computeImageNodeDimensions(url) : {};
                   if (!canWrite()) return;
                   useAppStore.getState().updateNodeDataTransient(nodeId, {
                     [field]: url, status: 'success', ...dims,
-                    ...(result?.assetUrl ? { label: result.fileName, filePath: result.filePath, fileName: result.fileName } : {}),
+                    // 只有落盘成功才记录文件路径；data URL 兜底时不能把路径写成空值。
+                    ...(savedFile ? { label: fileName, filePath, fileName } : {}),
                   });
                   recordSuccessfulDrop(fp, nodeId, projectId);
                 } catch (err) {

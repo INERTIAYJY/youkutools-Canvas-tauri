@@ -8,6 +8,7 @@ const driver = vi.hoisted(() => ({
   state: {} as AppState, effects: [] as Array<() => void | (() => void)>,
   onDrag: undefined as ((event: DropEvent) => void) | undefined,
   copy: vi.fn(), read: vi.fn(), mark: vi.fn(), ids: 0,
+  transcode: vi.fn(), trash: vi.fn(),
 }));
 vi.mock('react', async () => ({ ...await vi.importActual<typeof import('react')>('react'),
   useState: <T,>(value: T) => [value, vi.fn()], useRef: <T,>(value: T) => ({ current: value }),
@@ -21,6 +22,11 @@ vi.mock('../../src/store/useAppStore', () => ({
 }));
 vi.mock('../../src/services/fileService', () => ({ copyFileToProjectData: driver.copy, readBinaryFile: driver.read,
   arrayBufferToBase64: () => 'AA==' }));
+vi.mock('../../src/services/fs/trash', () => ({ moveToUndoTrash: driver.trash }));
+vi.mock('../../src/services/videoPlaybackCompat', () => ({
+  playableVideoUrl: (path: string) => `asset://${path}`,
+  transcodeImportedVideo: driver.transcode,
+}));
 vi.mock('../../src/utils/dropCapture', () => ({ isExternalDropCaptured: () => false }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => vi.fn() }));
 vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: () => ({
@@ -34,6 +40,8 @@ beforeEach(async () => {
   driver.effects = []; driver.ids = 0; driver.onDrag = undefined;
   driver.copy.mockReset().mockResolvedValue({ assetUrl: 'asset://copied', fileName: 'copied', filePath: '/project/copied' });
   driver.read.mockReset().mockResolvedValue(new Uint8Array([0])); driver.mark.mockReset().mockResolvedValue(true);
+  driver.trash.mockReset().mockResolvedValue(undefined);
+  driver.transcode.mockReset().mockResolvedValue({ path: '/project/copied', replaced: false });
   driver.state = { getCurrentRevision: () => 0, currentProjectId: 'project', projects: [], nodes: [], workflowPanelOpen: false, showToast: vi.fn(), markAssetUsed: driver.mark,
     addNode: vi.fn((node: AppState['nodes'][number]) => { driver.state.nodes = [...driver.state.nodes, node]; }),
     updateNodeDataTransient: vi.fn((id: string, patch: Record<string, unknown>) => {
@@ -120,5 +128,42 @@ describe('成功导入后的最近使用记录', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(driver.state.addNode).not.toHaveBeenCalled();
     expect(driver.mark).not.toHaveBeenCalled();
+  });
+});
+
+describe('拖入视频的自动转码', () => {
+  it('命中 HEVC 时改用 H.264 副本，并把旧副本移入回收区', async () => {
+    driver.transcode.mockResolvedValue({ path: '/project/copied_h264.mp4', replaced: true });
+    drag('drop', '/external/source.mp4');
+    await vi.waitFor(() => expect(driver.state.nodes[0].data.status).toBe('success'));
+    expect(driver.transcode).toHaveBeenCalledWith('/project/copied');
+    expect(driver.trash).toHaveBeenCalledWith('/project/copied', 'project');
+    expect(driver.state.nodes[0].data.videoUrl).toBe('asset:///project/copied_h264.mp4');
+    expect(driver.state.nodes[0].data.filePath).toBe('/project/copied_h264.mp4');
+  });
+
+  it('未发生转码时保留原副本，不动回收区', async () => {
+    drag('drop', '/external/source.mp4');
+    await vi.waitFor(() => expect(driver.state.nodes[0].data.status).toBe('success'));
+    expect(driver.trash).not.toHaveBeenCalled();
+    expect(driver.state.nodes[0].data.videoUrl).toBe('asset://copied');
+    expect(driver.state.nodes[0].data.filePath).toBe('/project/copied');
+  });
+
+  it('关闭开关后不探测也不转码', async () => {
+    driver.state = { ...driver.state, config: { importAutoTranscodeH264: false } } as unknown as AppState;
+    drag('drop', '/external/source.mp4');
+    await vi.waitFor(() => expect(driver.state.nodes[0].data.status).toBe('success'));
+    expect(driver.transcode).not.toHaveBeenCalled();
+    expect(driver.trash).not.toHaveBeenCalled();
+  });
+
+  it('复制失败退回内存读取时，不写空的文件路径', async () => {
+    driver.copy.mockResolvedValue(null);
+    drag('drop', '/external/source.mp4');
+    await vi.waitFor(() => expect(driver.state.nodes[0].data.status).toBe('success'));
+    expect(driver.transcode).not.toHaveBeenCalled();
+    expect(driver.state.nodes[0].data.filePath).toBeUndefined();
+    expect(driver.state.nodes[0].data.videoUrl).toContain('data:video/mp4;base64,');
   });
 });

@@ -852,6 +852,8 @@ export interface AppConfig {
   nodeLabelVisible?: boolean; // 是否显示节点顶部标题标签，默认 true
   canvasNoteToolbarVisible?: boolean; // 是否显示画布笔记工具栏，默认 true
   autoMentionOnConnect?: boolean; // 连线后自动在生成节点提示词中 @ 上游素材，默认 true
+  /** 外部拖入的 H.265/HEVC 视频自动转成 H.264 并替换工程内副本，默认 true */
+  importAutoTranscodeH264?: boolean;
   promptSubmitShortcut?: PromptSubmitShortcut; // 节点与助手输入框共用的发送快捷键，未设置时为 Shift+Enter
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
   outputHistoryPinned?: boolean; // 输出历史面板是否固定常驻（固定后跳转节点不关闭面板）

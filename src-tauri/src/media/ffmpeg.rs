@@ -218,6 +218,11 @@ pub async fn ffmpeg_ensure(
 }
 
 /// 读取 MP4 sample entry 判断编码，不依赖 ffmpeg。
+///
+/// 森之灵等服务端边下边写的 MP4 把 `moov`（含 sample entry）放在文件尾，
+/// 因此必须同时扫描头部与尾部。以前只有文件大于 8MB 时才读尾部，
+/// 4–8MB 的短片会被判成 unknown 而跳过转码，所以表现为「偶尔」。
+/// 这里只要文件比一个窗口长就补读尾部。
 fn detect_codec(path: &Path) -> Result<&'static str, String> {
     let metadata = std::fs::metadata(path).map_err(|e| format!("读取视频信息失败: {e}"))?;
     let length = metadata.len();
@@ -226,7 +231,7 @@ fn detect_codec(path: &Path) -> Result<&'static str, String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("打开视频失败: {e}"))?;
     let read = file.read(&mut head).map_err(|e| format!("读取视频失败: {e}"))?;
     let mut buffer = head[..read].to_vec();
-    if length > window * 2 {
+    if length > window {
         use std::io::Seek;
         file.seek(std::io::SeekFrom::End(-(window as i64)))
             .map_err(|e| format!("读取视频失败: {e}"))?;
@@ -379,4 +384,57 @@ pub async fn video_transcode_h264(
         "codec": "h264",
         "transcoded": true,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_codec;
+    use std::io::Write;
+
+    /// 构造一个「moov 在文件尾」的最小 MP4：头部只有 ftyp，尾部写 sample entry。
+    /// 森之灵等服务端边下边写出的文件就是这种结构。
+    fn write_streamed_mp4(path: &std::path::Path, total_len: usize, tag: &[u8; 4]) {
+        let mut file = std::fs::File::create(path).expect("创建测试文件");
+        file.write_all(b"ftypisom").expect("写入头部");
+        // 用无关字节填满中段，保证文件长度大于探测窗口的一半
+        let filler = vec![0u8; total_len.saturating_sub(64)];
+        file.write_all(&filler).expect("写入中段");
+        file.write_all(tag).expect("写入 sample entry");
+        file.write_all(b"moov").expect("写入 moov");
+        file.flush().expect("刷新文件");
+    }
+
+    #[test]
+    fn detects_hevc_when_sample_entry_sits_at_the_file_tail() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ai-canvas-probe-hevc-tail.mp4");
+        // 长度落在 4–8MB：以前这一段不会读文件尾，会被判成 unknown
+        write_streamed_mp4(&path, 6 * 1024 * 1024, b"hvc1");
+        let codec = detect_codec(&path).expect("探测编码");
+        assert_eq!(codec, "hevc");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detects_h264_from_a_small_file_with_tail_sample_entry() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ai-canvas-probe-h264-tail.mp4");
+        write_streamed_mp4(&path, 1024, b"avc1");
+        let codec = detect_codec(&path).expect("探测编码");
+        assert_eq!(codec, "h264");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reports_unknown_for_a_file_without_a_known_sample_entry() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ai-canvas-probe-unknown.mp4");
+        let mut file = std::fs::File::create(&path).expect("创建测试文件");
+        file.write_all(b"ftypisom").expect("写入头部");
+        file.write_all(&vec![0u8; 4096]).expect("写入中段");
+        file.flush().expect("刷新文件");
+        let codec = detect_codec(&path).expect("探测编码");
+        assert_eq!(codec, "unknown");
+        let _ = std::fs::remove_file(&path);
+    }
 }

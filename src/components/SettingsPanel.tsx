@@ -232,6 +232,7 @@ export default function SettingsPanel() {
   const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
   const canvasNoteToolbarVisible = config.canvasNoteToolbarVisible !== false; // 默认开启
   const autoMentionOnConnect = config.autoMentionOnConnect !== false;
+  const importAutoTranscodeH264 = config.importAutoTranscodeH264 !== false;
   const startupView = config.startupView ?? 'project-library';
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
@@ -976,6 +977,50 @@ export default function SettingsPanel() {
                     <div className="sidebar-pref-text">
                       <div id="auto-mention-on-connect-label" className="sidebar-pref-title">{t('连线后自动 @ 素材')}</div>
                       <div id="auto-mention-on-connect-desc" className="sidebar-pref-desc">{t('新建连线时，将上游素材追加到生成节点的提示词中，已有引用不会重复添加。')}</div>
+                    </div>
+
+                    <div className="sidebar-pref-switch" aria-hidden="true">
+                      <span />
+                    </div>
+                  </button>
+                </section>
+
+                <section>
+                  <h3 className="text-sm font-medium text-canvas-text mb-2">{t('视频导入')}</h3>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-labelledby="import-auto-transcode-h264-label"
+                    aria-describedby="import-auto-transcode-h264-desc"
+                    aria-checked={importAutoTranscodeH264}
+                    className={`sidebar-pref-card${importAutoTranscodeH264 ? ' is-floating' : ''}`}
+                    onClick={() => {
+                      updateConfig({ importAutoTranscodeH264: !importAutoTranscodeH264 });
+                      void persist();
+                    }}
+                  >
+                    <div className="sidebar-pref-window flex items-center justify-center gap-1 p-1.5" aria-hidden="true">
+                      <span className="flex h-8 w-9 shrink-0 flex-col justify-center gap-1 rounded-[4px] border border-canvas-border bg-canvas-bg p-1">
+                        <span className="h-0.5 w-4 rounded-full bg-canvas-text-muted/40" />
+                        <span className="h-0.5 w-4 rounded-full bg-canvas-text-muted/40" />
+                      </span>
+                      <span className="flex w-3 shrink-0 items-center text-canvas-text-muted">
+                        <span className="h-px flex-1 bg-canvas-text-muted" />
+                        <span className="text-[9px] leading-none">▸</span>
+                      </span>
+                      <span className="flex h-8 w-9 shrink-0 flex-col justify-center gap-1 rounded-[4px] border border-canvas-border bg-canvas-bg p-1">
+                        <span className={`h-0.5 w-4 rounded-full transition-opacity duration-200 ${importAutoTranscodeH264 ? 'bg-brand/70 opacity-100' : 'bg-canvas-text-muted/40 opacity-60'}`} />
+                        <span className="h-0.5 w-4 rounded-full bg-canvas-text-muted/40" />
+                      </span>
+                    </div>
+
+                    <div className="sidebar-pref-text">
+                      <div id="import-auto-transcode-h264-label" className="sidebar-pref-title">{t('导入自动转码H264')}</div>
+                      <div id="import-auto-transcode-h264-desc" className="sidebar-pref-desc">
+                        {importAutoTranscodeH264
+                          ? t('从外部拖入 H.265 视频时，自动转成 H.264 并替换工程内的副本，原始文件保持不变。首次转码需准备解码组件。')
+                          : t('关闭后，拖入的 H.265 视频按原样导入，可能无法在应用内预览。')}
+                      </div>
                     </div>
 
                     <div className="sidebar-pref-switch" aria-hidden="true">

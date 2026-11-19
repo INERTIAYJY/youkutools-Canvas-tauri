@@ -34,7 +34,8 @@ export interface VideoPlayerProps {
   onRequestSeek?: () => void;
   onFullscreen?: () => void;
   onMetadata?: (metadata: VideoPlayerMetadata) => void;
-  onError?: () => void;
+  /** 媒体错误回调；`code` 为 HTMLMediaElement 错误码（3 解码失败、4 格式/编码不兼容）。 */
+  onError?: (code?: number) => void;
   onEnded?: () => void;
   /** 全屏预览宿主可提供关闭入口；普通嵌入不拦截页面 Esc。 */
   onEscape?: () => void;
@@ -126,7 +127,7 @@ export default function VideoPlayer({ src: source, poster: sourcePoster, name, a
   const src = useComfyMediaSource(active && !retryingSource ? source : undefined, () => {
     failedNativeSource.current = source;
     setFailed({ src: source ?? '', message: videoErrorMessage(2) });
-    errorCallback.current?.();
+    errorCallback.current?.(2);
   });
   const failure = failed && (failed.src === src || failed.src === source) ? failed : null;
   // 时长绑定原始来源，暂停释放原生媒体租约后仍可操作进度。
@@ -146,7 +147,7 @@ export default function VideoPlayer({ src: source, poster: sourcePoster, name, a
     if (errorName === 'NotAllowedError' && !video.error) { setFailed(null); return; }
     const code = video.error?.code ?? (errorName === 'NotSupportedError' ? 4 : undefined);
     setFailed({ src: source ?? playbackSource, code, message: videoErrorMessage(code) });
-    errorCallback.current?.();
+    errorCallback.current?.(code);
   }, [source]);
   const changeAudio = (nextVolume: number, nextMuted: boolean) => {
     // 音量设置不依赖媒体实例；封面模式或暂停释放实例后仍可调节，下次挂载再应用。

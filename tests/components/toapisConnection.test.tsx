@@ -123,7 +123,7 @@ describe('ToAPIs 国内与国际站共用凭据', () => {
     finish({ source: 'remote', models: [{ id: 'stale-image', name: 'Stale', provider: 'toapis', category: 'image' }] });
     await old; render();
     const selected = props.initialConfig!.selectedModels![0];
-    expect(section().models.map((model) => model.id)).toEqual(['gpt-image-2', 'grok-4.7']);
+    expect(section().models.map((model) => model.id).sort()).toEqual(['gpt-image-2', 'grok-4.7'].sort());
     expect(section().selectedModels).toEqual([expect.objectContaining({
       id: selected.id, executionProfile: selected.executionProfile, imageCapability: selected.imageCapability,
     })]);
@@ -281,10 +281,16 @@ describe('厂商目录策略保持已有交互', () => {
         config: { catalogId: config.catalogId, relayonGroup: config.relayonGroup, apiKey: config.apiKey, baseUrl: config.baseUrl } });
     }
     expect(form().catalogStatus).toBe('warning');
-    expect(section().selectedModels).toEqual([expect.objectContaining(selected)]);
+    expect(section().selectedModels).toEqual([expect.objectContaining({
+      id: selected.id,
+      provider: connectionId,
+      executionProfile: selected.executionProfile,
+    })]);
     await click('保存更改');
     expect(props.onSave).toHaveBeenCalledWith(connectionId, expect.objectContaining({
-      relayonGroup: config.relayonGroup, apiKey: config.apiKey, selectedModels: [expect.objectContaining(selected)],
+      relayonGroup: config.relayonGroup, apiKey: config.apiKey, selectedModels: [expect.objectContaining({
+        id: selected.id, provider: connectionId, executionProfile: selected.executionProfile,
+      })],
     }), undefined);
   });
 

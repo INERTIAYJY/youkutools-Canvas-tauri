@@ -1035,6 +1035,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         fallbackModels={fallbackModels}
         dreaminaLoggedIn={!!dreaminaAuth?.loggedIn}
         dreaminaLoading={dreaminaLoading}
+        seedlingLoggedIn={!!seedlingAuth?.loggedIn}
         runninghubWorkflowApiKey={config.providers.runninghub?.apiKey}
         onDreaminaLogin={() => void handleDreaminaLogin(!!dreaminaAuth?.loggedIn)}
         onClose={closeConnectionDialog}

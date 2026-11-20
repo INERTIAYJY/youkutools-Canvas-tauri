@@ -77,6 +77,7 @@ export interface ProviderConnectionDialogProps {
   fallbackModels: Record<string, ProviderModelSelection[]>;
   dreaminaLoggedIn: boolean;
   dreaminaLoading: boolean;
+  seedlingLoggedIn?: boolean;
   runninghubWorkflowApiKey?: string;
   onDreaminaLogin: () => void;
   onClose: () => void;

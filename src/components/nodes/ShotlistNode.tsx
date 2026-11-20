@@ -372,7 +372,7 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     setPicker(null);
     setColumnMenuRequested(false);
     setIsFullscreen(true);
-  }, [cancelRowDrag]);
+  }, [cancelRowDrag, setPicker, setColumnMenuRequested, setIsFullscreen]);
 
   const closeFullscreen = useCallback(() => {
     cancelRowDrag();
@@ -381,7 +381,7 @@ function ShotlistNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     setPicker(null);
     setColumnMenuRequested(false);
     setIsFullscreen(false);
-  }, [cancelRowDrag]);
+  }, [cancelRowDrag, setPicker, setColumnMenuRequested, setIsFullscreen]);
 
   const prepareFrameModel = useCallback(() => {
     const state = useAppStore.getState();

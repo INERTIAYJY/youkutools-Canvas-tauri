@@ -111,6 +111,7 @@ export default function ProviderConnectionDialog({
   fallbackModels,
   dreaminaLoggedIn,
   dreaminaLoading,
+  seedlingLoggedIn = false,
   runninghubWorkflowApiKey = '',
   onDreaminaLogin,
   onClose,
@@ -128,7 +129,6 @@ export default function ProviderConnectionDialog({
   onEditRelayGroup?: (connectionId: string) => void;
 }) {
   const t = useT();
-  const seedlingLoggedIn = useAppStore((state) => state.config.seedlingAuth?.loggedIn === true);
   const editing = !!connectionId && !!initialConfig;
   const initialDefinitionId = initialConfig?.catalogId || connectionId || '';
   const initialDefinition = getProviderDefinition(initialDefinitionId, initialConfig);

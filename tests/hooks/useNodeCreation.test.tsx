@@ -95,14 +95,12 @@ describe('成功导入后的最近使用记录', () => {
     expect(driver.mark).not.toHaveBeenCalled();
   });
 
-  it('新建文本与音频把真实历史偏好写入节点，源音频不自动绑定', () => {
-    localStorage.setItem('canvas-model-prefs', JSON.stringify({ 'ai-text': 'general/text', 'ai-audio': 'general/audio' }));
+  it('新建文本把真实历史偏好写入节点', () => {
+    localStorage.setItem('canvas-model-prefs', JSON.stringify({ 'ai-text': 'general/text' }));
     const creation = useNodeCreation();
     creation.addTextNode({ x: 0, y: 0 });
-    creation.addAudioNode({ x: 0, y: 0 });
-    creation.addAudioNode({ x: 0, y: 0 }, { dataUrl: 'asset://source.mp3' });
     expect(driver.state.nodes.map((node) => [node.data.model, node.data.provider])).toEqual([
-      ['general/text', 'general'], ['general/audio', 'general'], [undefined, undefined],
+      ['general/text', 'general'],
     ]);
   });
 

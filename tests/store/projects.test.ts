@@ -100,6 +100,7 @@ const assetSyncMocks = vi.hoisted(() => ({ applySharedAssetSyncCommit: vi.fn() }
 
 vi.mock('../../src/services/fileService', () => ({
   ...fileMocks,
+  isTauriEnv: () => false,
   setBaseDataDir: vi.fn(),
   syncAuthorizedDirectories: vi.fn(async () => undefined),
 }));
@@ -729,6 +730,8 @@ describe('project creation', () => {
   });
 
   it('saves the current project and persists the new project before switching', async () => {
+    // 项目激活会等待首次会话修复；本用例只测试项目持久化顺序，隔离真实聊天仓储 IO。
+    stubInitializationActions();
     let resolveNewProjectSave: (() => void) | undefined;
     let markNewProjectSaveStarted: (() => void) | undefined;
     const newProjectSaveStarted = new Promise<void>((resolve) => {

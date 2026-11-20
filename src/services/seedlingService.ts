@@ -2,12 +2,10 @@
  * seedlingService — 森之灵（Seedling）CLI 前端封装
  *
  * 通过 Rust 受控命令驱动 seedling 二进制：
- *   - 认证：CLI 登录态（auth login 浏览器授权）或 API Token（SEEDLING_TOKEN 环境变量）
+ *   - 认证：仅使用 CLI 浏览器授权登录态；
  *   - 视频生成：task create → task get 轮询 → videoUrl / task download
  *   - 素材上传：resource upload（本地文件 → 在线 URL）
  *
- * 安全约定：API Token 只从 config.providers.seedling.apiKey（内存态）读取，
- * 随 invoke 参数交给 Rust 命令（Rust 侧只放入进程环境变量），不写入日志与节点数据。
  */
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store/useAppStore';
@@ -97,13 +95,6 @@ export interface SeedlingCreateTaskInput {
   resources?: string[];
 }
 
-// ── Token 读取与调用封装 ──
-
-/** 读取 API Token（内存态；持久化在 Rust secret_store，这里只拿运行期明文）。 */
-export function getSeedlingApiToken(): string | undefined {
-  return useAppStore.getState().config.providers?.seedling?.apiKey || undefined;
-}
-
 /**
  * 该模型的配乐能力（目录 `models list` → `supportsAudio`）。
  *
@@ -125,7 +116,7 @@ async function invokeTauri<T>(
 ): Promise<T> {
   try {
     if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-    // 日志不携带 apiToken：凭据不得进入任何日志
+    // 不记录 Seedling 的认证令牌或本机素材路径。
     logAiRequest(`tauri://${cmd}`, {
       method: 'INVOKE',
       headers: { 'Content-Type': 'application/json' },
@@ -158,17 +149,9 @@ async function invokeTauri<T>(
 
 // ── CLI / 认证 ──
 
-/**
- * 查询 CLI 状态。
- * includeApiToken=true（默认）：以应用内配置的 API Token 作为 SEEDLING_TOKEN 环境变量验证
- * （用于整体可用性与模型加载判断）；
- * includeApiToken=false：仅按 CLI 配置文件中的登录态验证（用于「CLI 认证区」独立显示，
- * 退出登录后能看到 CLI 真实未登录状态，而不是被备用 API Token 掩盖）。
- */
-export async function fetchSeedlingCliStatus(includeApiToken = true): Promise<SeedlingCliStatus> {
-  return invokeTauri<SeedlingCliStatus>('seedling_cli_status', {
-    apiToken: includeApiToken ? getSeedlingApiToken() : undefined,
-  });
+/** 查询仅由 Seedling CLI 配置文件提供的登录态。 */
+export async function fetchSeedlingCliStatus(): Promise<SeedlingCliStatus> {
+  return invokeTauri<SeedlingCliStatus>('seedling_cli_status', {});
 }
 
 /**
@@ -197,15 +180,13 @@ export async function logoutSeedling(): Promise<SeedlingAuthLoginRuntime> {
 
 // ── 模型 ──
 
-export async function fetchSeedlingModels(
-  apiTokenOverride?: string,
-): Promise<{
+export async function fetchSeedlingModels(): Promise<{
   models: SeedlingModelInfo[];
   statuses: SeedlingModelStatus[];
 }> {
   return invokeTauri<{ models: SeedlingModelInfo[]; statuses: SeedlingModelStatus[] }>(
     'seedling_models',
-    { apiToken: apiTokenOverride ?? getSeedlingApiToken() },
+    {},
   );
 }
 
@@ -216,15 +197,11 @@ export async function createSeedlingVideoTask(
 ): Promise<{ taskId: number }> {
   return invokeTauri<{ taskId: number }>('seedling_task_create', {
     params: input,
-    apiToken: getSeedlingApiToken(),
   });
 }
 
 export async function fetchSeedlingTask(taskId: number): Promise<SeedlingTaskDetail> {
-  return invokeTauri<SeedlingTaskDetail>('seedling_task_get', {
-    taskId,
-    apiToken: getSeedlingApiToken(),
-  });
+  return invokeTauri<SeedlingTaskDetail>('seedling_task_get', { taskId });
 }
 
 export async function listSeedlingTasks(options?: {
@@ -238,12 +215,11 @@ export async function listSeedlingTasks(options?: {
       limit: options?.limit,
       offset: options?.offset,
     },
-    apiToken: getSeedlingApiToken(),
   });
 }
 
 export async function cancelSeedlingTask(taskId: number): Promise<unknown> {
-  return invokeTauri('seedling_task_cancel', { taskId, apiToken: getSeedlingApiToken() });
+  return invokeTauri('seedling_task_cancel', { taskId });
 }
 
 /**
@@ -254,7 +230,6 @@ export async function downloadSeedlingTask(taskId: number, output: string): Prom
   return invokeTauri<string>('seedling_task_download', {
     taskId,
     output,
-    apiToken: getSeedlingApiToken(),
   });
 }
 
@@ -262,7 +237,6 @@ export async function downloadSeedlingTask(taskId: number, output: string): Prom
 export async function uploadSeedlingResource(filePath: string): Promise<{ url: string }> {
   return invokeTauri<{ url: string }>('seedling_resource_upload', {
     filePath,
-    apiToken: getSeedlingApiToken(),
   });
 }
 

@@ -14,6 +14,7 @@ import { useAppStore } from '../../src/store/useAppStore';
 import {
   createSeedlingVideoTask,
   fetchSeedlingCliStatus,
+  fetchSeedlingModels,
   waitSeedlingTask,
 } from '../../src/services/seedlingService';
 
@@ -27,11 +28,12 @@ afterEach(() => {
 });
 
 describe('createSeedlingVideoTask', () => {
-  it('把输入参数与 API Token 一并传给 Rust 命令', async () => {
+  it('仅传入任务参数，不接收应用侧 API Token', async () => {
+    // 即使旧版配置中残留 apiKey，新版服务也不读取或传给 CLI 命令。
     useAppStore.setState({
       config: {
         ...useAppStore.getState().config,
-        providers: { ...useAppStore.getState().config.providers, seedling: { name: 'seedling', apiKey: 'sl-test-token' } },
+        providers: { ...useAppStore.getState().config.providers, seedling: { name: 'seedling', apiKey: 'legacy-inert-token' } },
       },
     });
     coreMocks.invoke.mockResolvedValue({ taskId: 20001 });
@@ -55,7 +57,6 @@ describe('createSeedlingVideoTask', () => {
         ratio: '16:9',
         audio: true,
       },
-      apiToken: 'sl-test-token',
     });
   });
 });
@@ -72,6 +73,34 @@ describe('fetchSeedlingCliStatus', () => {
     const status = await fetchSeedlingCliStatus();
     expect(status.found).toBe(true);
     expect(status.auth?.username).toBe('测试用户');
+  });
+});
+
+describe('fetchSeedlingCliStatus', () => {
+  it('查询登录态时不附带应用侧 API Token', async () => {
+    useAppStore.setState((state) => ({
+      config: {
+        ...state.config,
+        providers: { ...state.config.providers, seedling: { name: '森之灵', apiKey: 'legacy-inert-token' } },
+      },
+    }));
+    coreMocks.invoke.mockResolvedValue({ found: true, source: 'system', version: '0.0.4', auth: { loggedIn: true } });
+    await fetchSeedlingCliStatus();
+    expect(coreMocks.invoke).toHaveBeenCalledWith('seedling_cli_status', {});
+  });
+});
+
+describe('fetchSeedlingModels', () => {
+  it('拉取模型目录时不附带应用侧 API Token', async () => {
+    useAppStore.setState((state) => ({
+      config: {
+        ...state.config,
+        providers: { ...state.config.providers, seedling: { name: '森之灵', apiKey: 'legacy-inert-token' } },
+      },
+    }));
+    coreMocks.invoke.mockResolvedValue({ models: [], statuses: [] });
+    await fetchSeedlingModels();
+    expect(coreMocks.invoke).toHaveBeenCalledWith('seedling_models', {});
   });
 });
 

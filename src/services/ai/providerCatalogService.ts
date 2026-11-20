@@ -58,7 +58,7 @@ import {
   SORA2U_REQUEST_QUERY,
 } from './providers/sora2uModelManifest';
 
-export type ProviderAuthType = 'api-key' | 'oauth' | 'browser-session';
+export type ProviderAuthType = 'api-key' | 'oauth' | 'browser-session' | 'cli-session';
 export type ProviderCredentialKey = 'apiKey' | 'baseUrl';
 
 export interface ProviderCredentialField {
@@ -483,19 +483,11 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = ([
   {
     id: 'seedling',
     name: '森之灵',
-    description: 'Seedling CLI 视频生成；支持 CLI 浏览器授权登录或 API Token',
+    description: 'Seedling CLI 视频生成；使用 CLI 浏览器授权登录',
     badgeText: 'SL',
-    authType: 'api-key',
+    authType: 'cli-session',
     catalogAdapter: 'seedling-cli',
-    credentials: [
-      {
-        key: 'apiKey',
-        label: 'API Token（机器令牌）',
-        required: false,
-        secret: true,
-        placeholder: '可留空，使用 CLI 浏览器授权登录态',
-      },
-    ],
+    credentials: [],
   },
   {
     id: 'muse',
@@ -1046,11 +1038,10 @@ export function buildSeedlingCatalogModels(models: readonly SeedlingModelInfo[])
 
 /** 通过 Seedling CLI 拉取模型目录（models list --json → ProviderModelSelection）。 */
 async function fetchSeedlingCliCatalog(
-  apiToken: string,
   signal?: AbortSignal,
 ): Promise<ProviderModelSelection[]> {
   if (signal?.aborted) throw new DOMException('模型列表拉取已取消', 'AbortError');
-  const payload = await fetchSeedlingModels(apiToken);
+  const payload = await fetchSeedlingModels();
   const models = buildSeedlingCatalogModels(payload.models ?? []);
   const normalized = normalizeModels(models, 'seedling');
   if (normalized.length === 0) throw new Error('Seedling 未返回可用模型');
@@ -1162,7 +1153,7 @@ export async function fetchProviderModelCatalog(
   if (definition.catalogAdapter === 'seedling-cli') {
     try {
       return {
-        models: await fetchSeedlingCliCatalog(config.apiKey, signal),
+        models: await fetchSeedlingCliCatalog(signal),
         source: 'remote',
       };
     } catch (error) {

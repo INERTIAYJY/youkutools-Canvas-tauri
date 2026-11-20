@@ -12,6 +12,13 @@ describe('API Key 设置连接列表', () => {
     }, 'api-key')).toBe(true);
   });
 
+  it('Seedling CLI session 即使遗留旧 API Key 也不按 API Key 认证显示', () => {
+    expect(shouldListProviderConnection({
+      apiKey: 'legacy-inert-token',
+      catalogId: 'seedling',
+    }, 'cli-session')).toBe(false);
+  });
+
   it('继续隐藏没有密钥的内置连接', () => {
     expect(shouldListProviderConnection({
       apiKey: '',

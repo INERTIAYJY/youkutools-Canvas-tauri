@@ -178,9 +178,8 @@ export function resolveMediaModel(kind: MediaKind, modelRef?: string): ResolvedM
   if (option.provider === 'dreamina') {
     if (!config.dreaminaAuth?.loggedIn) throw new Error('请先登录即梦账号');
   } else if (option.provider === 'seedling') {
-    // 森之灵：API Token（config.providers.seedling.apiKey）或 CLI 登录态任一可用
-    if (!config.providers.seedling?.apiKey && !config.seedlingAuth?.loggedIn) {
-      throw new Error('请先配置森之灵：在「设置 → 森之灵」中填写 API Token 或完成 CLI 登录');
+    if (!config.seedlingAuth?.loggedIn) {
+      throw new Error('请先在「设置 → 森之灵」完成 CLI 浏览器授权登录');
     }
   } else if (option.provider === 'muse') {
     if (!isTauriEnv()) throw new Error('Muse 图片和视频生成仅在 Tauri 桌面端可用');

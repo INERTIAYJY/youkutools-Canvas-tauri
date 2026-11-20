@@ -7,9 +7,9 @@
  *   - seedling_query_task（read）：查询任务状态
  *
  * 安全边界：
- *   - 认证检查放在 authorize：API Token（config.providers.seedling.apiKey）或 CLI 登录态任一可用；
+ *   - 认证检查放在 authorize：仅允许已登录的 Seedling CLI 会话；
  *   - 参考素材只接受 http(s) URL，不接受本地路径（避免模型诱导读取本地文件）；
- *   - 返回的 modelContent 不含 API Token 与敏感路径，仅含任务状态与结果摘要。
+ *   - 返回的 modelContent 不含认证信息与敏感路径，仅含任务状态与结果摘要。
  */
 import { useAppStore } from '../../../store/useAppStore';
 import type { AgentToolDisplaySnapshot } from '../../../types/agent';
@@ -26,8 +26,7 @@ const SEEDLING_RESOLUTIONS = ['480p', '720p', '1080p'];
 const SEEDLING_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'];
 
 function seedlingAuthorized(): boolean {
-  const config = useAppStore.getState().config;
-  return Boolean(config.providers?.seedling?.apiKey) || Boolean(config.seedlingAuth?.loggedIn);
+  return Boolean(useAppStore.getState().config.seedlingAuth?.loggedIn);
 }
 
 function summarizeError(error: unknown): string {
@@ -78,7 +77,7 @@ export function registerSeedlingAgentTools(): Array<() => void> {
       effect: 'read',
       authorize: () => {
         if (!seedlingAuthorized()) {
-          return { allowed: false, reason: '请先在「设置 → 森之灵」中填写 API Token 或完成 CLI 登录' };
+          return { allowed: false, reason: '请先在「设置 → 森之灵」完成 CLI 浏览器授权登录' };
         }
         return { allowed: true };
       },
@@ -143,7 +142,7 @@ export function registerSeedlingAgentTools(): Array<() => void> {
       buildInputDisplay: (input) => buildCreateVideoDisplay(input),
       authorize: () => {
         if (!seedlingAuthorized()) {
-          return { allowed: false, reason: '请先在「设置 → 森之灵」中填写 API Token 或完成 CLI 登录' };
+          return { allowed: false, reason: '请先在「设置 → 森之灵」完成 CLI 浏览器授权登录' };
         }
         return { allowed: true };
       },
@@ -211,7 +210,7 @@ export function registerSeedlingAgentTools(): Array<() => void> {
       effect: 'read',
       authorize: () => {
         if (!seedlingAuthorized()) {
-          return { allowed: false, reason: '请先在「设置 → 森之灵」中填写 API Token 或完成 CLI 登录' };
+          return { allowed: false, reason: '请先在「设置 → 森之灵」完成 CLI 浏览器授权登录' };
         }
         return { allowed: true };
       },

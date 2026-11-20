@@ -128,6 +128,7 @@ export default function ProviderConnectionDialog({
   onEditRelayGroup?: (connectionId: string) => void;
 }) {
   const t = useT();
+  const seedlingLoggedIn = useAppStore((state) => state.config.seedlingAuth?.loggedIn === true);
   const editing = !!connectionId && !!initialConfig;
   const initialDefinitionId = initialConfig?.catalogId || connectionId || '';
   const initialDefinition = getProviderDefinition(initialDefinitionId, initialConfig);
@@ -307,6 +308,7 @@ export default function ProviderConnectionDialog({
     if (!definition) return true;
     if (definition.kind === 'workflow-api') return !baseUrl.trim();
     if (definition.authType === 'oauth') return !dreaminaLoggedIn;
+    if (definition.authType === 'cli-session') return !seedlingLoggedIn;
     // RunningHub 允许只用工作流 Key 建连接，此时 apiKey 为空不算缺凭据。
     if (definition.authType === 'browser-session') return !museCredentialReady;
     if (definition.id === 'runninghub-model') return activeRunningHubSite
@@ -319,7 +321,7 @@ export default function ProviderConnectionDialog({
     return definition.credentials.some(
       (field) => field.required && field.key === 'baseUrl' && !baseUrl.trim(),
     );
-  }, [apiKey, baseUrl, definition, dreaminaLoggedIn, museCredentialReady, workflowApiKey, activeRunningHubSite, siteKeys]);
+  }, [apiKey, baseUrl, definition, dreaminaLoggedIn, seedlingLoggedIn, museCredentialReady, workflowApiKey, activeRunningHubSite, siteKeys]);
   const workflowOnlyConnection = definition?.id === 'runninghub-model' && !apiKey.trim();
 
   const hasConnectionChanges = () => (definition?.id === 'custom-openai' || definition?.id === 'volcengine')
@@ -836,7 +838,10 @@ export default function ProviderConnectionDialog({
         {
           ...(definition.id === 'relayonapi' ? initialConfig : {}),
           name: connectionName.trim() || definition.name,
-          apiKey: definition.authType === 'api-key' ? apiKey.trim() : '',
+          // Legacy Seedling key is kept inert for compatibility; cli-session never authenticates with it.
+          apiKey: definition.id === 'seedling'
+            ? (initialConfig?.apiKey ?? '')
+            : definition.authType === 'api-key' ? apiKey.trim() : '',
           baseUrl: isWorkflowApi ? normalizeWorkflowApiBaseUrl(baseUrl, true) : normalizeBaseUrl(baseUrl, chatApiProtocol) || undefined,
           catalogId: definition.id,
           ...(definition.id === 'custom-openai' ? { chatApiProtocol, imageHosting: savedImageHosting } : {}),

@@ -58,7 +58,7 @@ function buildRequest(overrides?: {
 }
 
 beforeEach(() => {
-  // 认证预检（assertSeedlingAuthorized）需要 CLI 登录态或 API Token
+  // 认证预检只接受 CLI 登录态，旧版遗留 API Key 不再作为认证方式。
   useAppStore.setState({
     config: {
       ...useAppStore.getInitialState().config,
@@ -99,6 +99,22 @@ describe('seedlingMediaProviderAdapter.generateVideo', () => {
       resources: [],
     });
     expect(seedlingMocks.waitSeedlingTask).toHaveBeenCalledWith(10001, undefined);
+  });
+
+  it('即使旧配置残留 API Key，CLI 未登录时也拒绝生成', async () => {
+    useAppStore.setState((state) => ({
+      config: {
+        ...state.config,
+        seedlingAuth: { loggedIn: false },
+        providers: {
+          ...state.config.providers,
+          seedling: { name: '森之灵', apiKey: 'legacy-inert-token' },
+        },
+      },
+    }));
+    await expect(seedlingMediaProviderAdapter.generateVideo!(buildRequest()))
+      .rejects.toThrow('CLI 未登录');
+    expect(seedlingMocks.createSeedlingVideoTask).not.toHaveBeenCalled();
   });
 
   it('节点未显式选择配乐时按模型能力兜底开启（CLI --audio 默认 false）', async () => {

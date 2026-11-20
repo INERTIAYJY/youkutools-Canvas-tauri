@@ -477,6 +477,10 @@ export default function ProviderConnectionForm({
             {dreaminaLoading ? t('处理中...') : dreaminaLoggedIn ? t('重新登录') : t('OAuth 登录')}
           </AnimatedButton>
         </div>
+      ) : definition.authType === 'cli-session' ? (
+        <p className="ui-hint">
+          {t('森之灵连接仅使用 Seedling CLI 浏览器授权登录，请前往设置中的森之灵页面管理登录态。')}
+        </p>
       ) : (
         <div className={definition.id === 'runninghub-model' ? 'grid grid-cols-1 gap-3 md:grid-cols-3' : 'provider-fields-grid'}>
           {definition.id === 'runninghub-model' && <label className="provider-field">

@@ -637,7 +637,7 @@ export interface SeedlingAuthMirror {
   loggedIn: boolean;
   username?: string;          // 账户昵称
   endpoint?: string;          // 服务地址
-  tokenSource?: string;       // 'file'（CLI 配置文件）| 'env' | 'api-key'（应用内 API Token）
+  tokenSource?: string;       // Seedling CLI 登录态的凭据来源
   checkTs?: number;           // 最近一次在线验证时间戳
 }
 

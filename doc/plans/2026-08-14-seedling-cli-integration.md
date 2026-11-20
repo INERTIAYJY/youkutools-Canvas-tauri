@@ -10,9 +10,7 @@
 
 1. **视频节点**：视频节点模型选择器可选 Seedling 模型（动态来自 `seedling models list`），参数面板按模型能力约束时长/分辨率/比例/参考图/配乐。
 2. **对话 Agent**：注册受控 Agent 工具（`seedling_list_models` / `seedling_create_video` / `seedling_query_task`），走现有 Tool Registry / Policy Engine 边界。
-3. **双认证方式并存**：
-   - 方式 A：CLI 浏览器授权登录（`seedling auth login`，登录令牌由 CLI 配置文件持久化，90 天有效）。
-   - 方式 B：API Token（机器令牌，永久），应用设置中填写，经 `providerSecretService` 存入 Rust `secret_store`，运行时以 `SEEDLING_TOKEN` 环境变量传给 CLI（CLI 优先级：环境变量 > 配置文件）。
+3. **认证**：仅使用 CLI 浏览器授权登录（`seedling auth login`，登录令牌由 CLI 配置文件持久化）。
 4. **CLI 管理**：混合模式——优先检测系统已安装 CLI（PATH → 标准安装目录 → 应用数据目录缓存），缺失或版本过低时从官方 CDN 下载缓存固定版本（参考 `dreamina.rs` 的 `dreamina_cli` 模式）。
 
 ## CLI 接口（v0.0.7 官方文档 + 实测）
@@ -49,15 +47,14 @@
 ### 关键设计
 
 - **Provider 目录**：`providerCatalogService.ts` 新增 `seedling` 定义（`catalogAdapter: 'seedling-cli'`），模型经 `seedling models list --json` 拉取并映射为 `ProviderModelSelection`（含 `videoCapability`）。
-- **节点分组**：`defaultModelGroups` 新增 `seedling` 分组（模型动态填充）；`getConfiguredModelGroups` 与 `ModelSelector` 的可用性判断为「API Token 或 CLI 登录态任一可用」。
+- **节点分组**：`defaultModelGroups` 新增 `seedling` 分组（模型动态填充）；`getConfiguredModelGroups` 与 `ModelSelector` 的可用性判断为 CLI 登录态。
 - **参数能力**：`VideoParamSelector` 读取目录模型的 `videoCapability`（分辨率/比例/时长/配乐），时长按 CLI 约束 4~15 秒钳制。
-- **对话路由**：`generationRuntime.resolveMediaModel` 对 `seedling` 单独校验认证（不要求 apiKey 字段），通用媒体工具经 `@模型` 引用即可路由。
+- **对话路由**：`generationRuntime.resolveMediaModel` 对 `seedling` 单独校验 CLI 登录态，通用媒体工具经 `@模型` 引用即可路由。
 - **结果处理**：Adapter 返回 `videoUrl`，上层 `downloadUrlAndSave` 统一落盘到项目目录（与 dreamina/APIMart 一致）。
 
 ## 安全边界
 
-- Rust 命令全部参数白名单/枚举校验（resolution/ratio/duration/status/limit），禁止任意参数拼接。
-- API Token 只进 `SEEDLING_TOKEN` 环境变量，绝不进命令行参数、日志或返回结果；持久化走 `secret_store`。
+- Rust 命令全部参数白名单/枚举校验（resolution/ratio/duration/status/limit），禁止任意参数拼接；CLI 子进程屏蔽继承的 `SEEDLING_TOKEN`，认证使用 CLI 配置文件中的浏览器登录态。
 - `seedling_task_download`（`--output`）与 `seedling_resource_upload`（本地路径）必须经过 `path_policy` 的 `ensure_trusted_caller` 与 `authorize_path` 授权校验。
 - Agent 工具 `seedling_create_video` 的参考素材只接受 http(s) URL，不接受本地路径。
 - CLI stdout 按 UTF-8 解码（Windows 下避免 GBK 乱码）；错误信息截断回传。
@@ -75,3 +72,7 @@
 - 模型 ID 差异：`models list` 返回 `quality` 等基础 ID，历史任务参数显示 `quality-oii` 变体；提交任务使用 `models list` 的 ID。
 - `seedling auth login` 的交互登录在应用内通过「授权链接 + 配对码」引导完成（`--no-browser --json`），登录态由 CLI 配置文件持久化。
 - 应用内下载的 CLI 与系统 CLI 读取同一 `%APPDATA%\seedling` 配置文件，登录态共享。
+
+## 后续认证策略变更（2026-11-20）
+
+v0.11.11 移除原计划中的方式 B（应用侧 API Token）：Seedling 设置页不再收集 Token；前端 invoke 不再带 token 字段；Rust 命令不再接收该字段并对 CLI 子进程 `env_remove("SEEDLING_TOKEN")`。模型目录、模型选择器、生成执行预检和 Agent 工具只接受 `config.seedlingAuth.loggedIn` 的 CLI 登录态。旧 API Token secret 保留但惰性，不自动删除，也不读取或使用。请以[森之灵认证使用说明](../森之灵CLI认证使用说明.md)为当前用户说明；本文件中的“双认证”条目仅记录历史实施方案，已被本节取代。

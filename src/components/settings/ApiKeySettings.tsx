@@ -177,7 +177,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       const definition = getProviderDefinition(id, providerConfig);
       if (!definition || definition.retired) continue;
       if (definition.kind === 'web-search' && id !== activeWebSearchProviderId) continue;
-      // 森之灵：仅 CLI 登录态（无 API Token）时也允许出现在列表
+      // 森之灵通过独立的 Seedling CLI 登录态提供连接入口。
       if (!['cccapi', 'relayonapi'].includes(definition.id)
         && !shouldListProviderConnection(providerConfig, definition.authType, config.providers.runninghub?.apiKey)
         && !(id === 'seedling' && seedlingAuth?.loggedIn)) continue;
@@ -195,8 +195,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         config: { name: '即梦', apiKey: '', catalogId: 'dreamina' },
       });
     }
-    if ((seedlingAuth?.loggedIn || config.providers.seedling?.apiKey)
-      && !config.providers.seedling) {
+    if (seedlingAuth?.loggedIn && !config.providers.seedling) {
       items.push({
         id: 'seedling',
         config: { name: '森之灵', apiKey: '', catalogId: 'seedling' },
@@ -820,6 +819,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 : item.config.selectedModels?.length;
               const summaryUrl = providerSummaryUrl(item.config, definition.defaultBaseUrl);
               const isDreamina = definition.id === 'dreamina';
+              const isSeedling = definition.id === 'seedling';
               const isRunningHub = definition.id === 'runninghub-model';
               const siteOptions = definition.id === 'toapis' ? TOAPIS_API_SITES : isRunningHub ? RUNNINGHUB_API_SITES : undefined;
               const activeSiteUrl = isRunningHub
@@ -846,7 +846,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 ? getCustomConnectionReadiness(item.config.selectedModels) : undefined;
               const statusLabel = isDreamina
                 ? t('OAuth 已连接')
-                : definition.authType === 'browser-session'
+                : isSeedling
+                  ? t(seedlingAuth?.loggedIn ? 'Seedling CLI 已登录' : 'Seedling CLI 未登录')
+                  : definition.authType === 'browser-session'
                   ? t('网页登录')
                 : isRunningHub
                   ? t('{count}/2 密钥已配置', { count: runningHubKeyCount })

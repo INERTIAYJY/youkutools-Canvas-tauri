@@ -140,10 +140,8 @@ export default function ModelSelector({
       }
       // 即梦：走 OAuth 登录，无 API Key，按登录态判定
       if (groupId === 'dreamina') return dreaminaLoggedIn;
-      // 森之灵：API Token 或 CLI 登录态任一可用即可
-      if (groupId === 'seedling') {
-        return !!configProviders.seedling?.apiKey || !!config.seedlingAuth?.loggedIn;
-      }
+      // 森之灵仅使用 CLI 浏览器授权登录态。
+      if (groupId === 'seedling') return !!config.seedlingAuth?.loggedIn;
       // Muse 会话由原生保管；这里只确认桌面入口和连接，实际登录态在执行前复核。
       if (groupId === 'muse') return isTauriEnv() && !!configProviders.muse
         && (!configProviders.muse.catalogId || configProviders.muse.catalogId === 'muse');

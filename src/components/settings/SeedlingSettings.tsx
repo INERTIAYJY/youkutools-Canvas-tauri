@@ -1,16 +1,8 @@
 /**
  * SeedlingSettings — 森之灵（Seedling）CLI 连接设置
  *
- * 认证说明：森之灵（Seedling）只有 CLI 一个接入通道（应用内驱动 seedling 二进制
- * 发起所有请求），认证凭据有两种，任一可用即可：
- *   A. CLI 登录态（seedling auth login 浏览器授权）：登录令牌由 CLI 配置文件持久化，
- *      本页展示授权链接/配对码并镜像登录状态到 config.seedlingAuth；
- *   B. API Token（机器令牌）：与方式 A 一样经 CLI 使用——写入 config.providers.seedling.apiKey，
- *      持久化时由 providerSecretService 摘进 Rust secret_store，运行时以
- *      SEEDLING_TOKEN 环境变量注入 CLI（CLI 优先级：环境变量 > 配置文件）。
- *      API Token 不能脱离 CLI 单独调用平台接口（平台未公开独立 REST API）。
- *
- * 同时展示 CLI 检测状态（found / version / source）与可用模型列表。
+ * 认证只使用 CLI 浏览器授权登录：登录令牌由 Seedling CLI 配置文件持久化，
+ * 本页展示授权链接/配对码并镜像登录状态到 config.seedlingAuth。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
@@ -39,25 +31,19 @@ function StatusDot({ ok }: { ok: boolean }) {
 }
 
 export default function SeedlingSettings() {
-  const setProviderKey = useAppStore((state) => state.setProviderKey);
   const updateConfig = useAppStore((state) => state.updateConfig);
-  const saveConfig = useAppStore((state) => state.saveConfig);
   const config = useAppStore((state) => state.config);
 
   const [cliStatus, setCliStatus] = useState<SeedlingCliStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [models, setModels] = useState<SeedlingModelInfo[]>([]);
-  const [apiToken, setApiToken] = useState('');
-  const [tokenSaving, setTokenSaving] = useState(false);
-  const [tokenSavedMsg, setTokenSavedMsg] = useState('');
 
   const [loginRuntime, setLoginRuntime] = useState<SeedlingAuthLoginRuntime | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
   const [logoutLoading, setLogoutLoading] = useState(false);
 
   const authMirror = config.seedlingAuth;
-  const savedToken = config.providers?.seedling?.apiKey ?? '';
 
   const loadModels = useCallback(async () => {
     try {
@@ -109,9 +95,8 @@ export default function SeedlingSettings() {
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
     try {
-      // CLI 认证区独立显示：不带 API Token，只反映 CLI 配置文件的登录态。
-      // 否则仅配置 API Token 时，退出 CLI 登录后仍会被 Token 验证成「已登录」。
-      const status = await fetchSeedlingCliStatus(false);
+      // 认证状态只读取 Seedling CLI 自己的登录配置。
+      const status = await fetchSeedlingCliStatus();
       setCliStatus(status);
       if (status.auth) {
         updateConfig({
@@ -124,11 +109,7 @@ export default function SeedlingSettings() {
           },
         });
       }
-      // 模型加载：CLI 登录态或 API Token 任一可用即可（两者均经 CLI 使用）
-      const hasSavedToken = Boolean(
-        useAppStore.getState().config.providers?.seedling?.apiKey,
-      );
-      if (status.auth?.loggedIn || hasSavedToken) {
+      if (status.auth?.loggedIn) {
         void ensureSeedlingModelsEnabled();
       }
     } catch (error) {
@@ -158,10 +139,7 @@ export default function SeedlingSettings() {
       }
       if (status.found) {
         useAppStore.getState().showToast(`Seedling CLI 安装完成（v${status.version ?? '?'}）`);
-        const hasSavedToken = Boolean(
-          useAppStore.getState().config.providers?.seedling?.apiKey,
-        );
-        if (status.auth?.loggedIn || hasSavedToken) {
+        if (status.auth?.loggedIn) {
           void ensureSeedlingModelsEnabled();
         }
         void loadModels();
@@ -261,42 +239,6 @@ export default function SeedlingSettings() {
     }
   };
 
-  const handleSaveToken = async () => {
-    const token = apiToken.trim();
-    if (!token) {
-      useAppStore.getState().showToast('请输入 API Token', 'error');
-      return;
-    }
-    setTokenSaving(true);
-    try {
-      setProviderKey('seedling', token);
-      // 注意：不写 seedlingAuth 镜像（那是 CLI 登录态），API Token 是另一份认证凭据
-      await saveConfig();
-      setTokenSavedMsg('API Token 已保存（经 CLI 使用）');
-      setApiToken('');
-      await refreshStatus();
-      await loadModels();
-    } catch (error) {
-      setTokenSavedMsg('');
-      useAppStore.getState().showToast(error instanceof Error ? error.message : '保存失败', 'error');
-    } finally {
-      setTokenSaving(false);
-    }
-  };
-
-  const handleClearToken = async () => {
-    try {
-      setProviderKey('seedling', '');
-      await saveConfig();
-      setTokenSavedMsg('API Token 已清除，将回退使用 CLI 登录态');
-      await refreshStatus();
-    } catch (error) {
-      useAppStore.getState().showToast(error instanceof Error ? error.message : '清除失败', 'error');
-    }
-  };
-
-  // CLI 认证区独立判断：authMirror 只反映 CLI 配置文件的登录态（refreshStatus 不带 API Token 查询）。
-  // API Token 是另一份认证凭据，存在性单独由 savedToken 判断，不再混入 CLI 登录态。
   const cliLoggedIn = authMirror?.loggedIn === true;
   const loginPhase = loginRuntime?.phase || 'idle';
   const loginReady = loginPhase === 'oauth_ready' || loginPhase === 'polling';
@@ -371,9 +313,9 @@ export default function SeedlingSettings() {
         </div>
       </div>
 
-      {/* ── 认证方式 A：CLI 浏览器授权登录（CLI 登录态凭据） ── */}
+      {/* ── Seedling CLI 浏览器授权登录 ── */}
       <div>
-        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 A — CLI 浏览器授权登录（CLI 登录态凭据）</h3>
+        <h3 className="mb-2 text-sm font-medium text-canvas-text">Seedling CLI 浏览器授权登录</h3>
         <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
           {cliLoggedIn ? (
             <div className="flex items-center justify-between gap-3">
@@ -395,7 +337,7 @@ export default function SeedlingSettings() {
               <div className="min-w-0">
                 <p className="text-xs text-canvas-text-secondary">CLI 未登录</p>
                 <p className="mt-0.5 text-xs text-canvas-text-muted leading-relaxed">
-                  在浏览器中确认配对码完成授权，登录态由 Seedling CLI 持久化（90 天有效）。CLI 登录态与 API Token 均为认证凭据，视频生成统一经 CLI 发起。
+                  在浏览器中确认配对码完成授权，登录态由 Seedling CLI 持久化（90 天有效）。视频生成统一经已登录的 CLI 发起。
                 </p>
               </div>
               <button
@@ -471,47 +413,6 @@ export default function SeedlingSettings() {
           {loginRuntime?.phase === 'failed' && (
             <p className="text-xs text-red-400">{loginRuntime.error || loginRuntime.message}</p>
           )}
-        </div>
-      </div>
-
-      {/* ── 认证方式 B：API Token（机器令牌凭据，经 CLI 使用） ── */}
-      <div>
-        <h3 className="mb-2 text-sm font-medium text-canvas-text">认证方式 B — API Token（机器令牌凭据）</h3>
-        <div className="rounded-lg border border-canvas-border bg-canvas-card p-3 space-y-2">
-          <div className="flex items-center gap-2 text-xs text-canvas-text-secondary">
-            <StatusDot ok={Boolean(savedToken)} />
-            <span>{savedToken ? 'API Token 已配置（经 CLI 使用）' : '未配置 API Token（仅使用 CLI 登录态）'}</span>
-          </div>
-          <p className="text-xs text-canvas-text-muted leading-relaxed">
-            在 Seedling Web 端 → 头像菜单 → API 访问令牌 中创建（永久有效）。Token 以 SEEDLING_TOKEN 环境变量注入 CLI 使用，不能脱离 CLI 单独接入平台。
-          </p>
-          <div className="flex items-center gap-1.5">
-            <input
-              className="dreamina-manual-link-input"
-              type="password"
-              placeholder={savedToken ? '已保存（输入新值可覆盖）' : '粘贴 API Token'}
-              value={apiToken}
-              onChange={(event) => setApiToken(event.target.value)}
-            />
-            <button
-              type="button"
-              className="settings-save-btn shrink-0"
-              disabled={tokenSaving || !apiToken.trim()}
-              onClick={() => void handleSaveToken()}
-            >
-              {tokenSaving ? '保存中…' : '保存 Token'}
-            </button>
-            {savedToken && (
-              <button
-                type="button"
-                className="settings-save-btn settings-btn-ghost shrink-0"
-                onClick={() => void handleClearToken()}
-              >
-                清除
-              </button>
-            )}
-          </div>
-          {tokenSavedMsg && <p className="text-xs text-green-500">{tokenSavedMsg}</p>}
         </div>
       </div>
 

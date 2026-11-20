@@ -1389,6 +1389,15 @@ describe('Sora2U 目录下架', () => {
   });
 });
 
+describe('森之灵 CLI 登录目录', () => {
+  it('厂商连接定义仅声明 CLI session，不提供 API Token 字段', () => {
+    const definition = getProviderDefinition('seedling')!;
+    expect(definition).toMatchObject({ authType: 'cli-session', catalogAdapter: 'seedling-cli' });
+    expect(definition.credentials).toEqual([]);
+    expect(definition.description).not.toMatch(/API Token/i);
+  });
+});
+
 describe('森之灵模型能力解析', () => {
   it('models list 能力映射为视频能力声明（配乐 / 上限 / 时长）', () => {
     expect(mapSeedlingModelCapability({

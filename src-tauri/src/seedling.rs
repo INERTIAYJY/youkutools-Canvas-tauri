@@ -2,14 +2,11 @@
 //!
 //! 管理模式参考 dreamina.rs：优先复用系统已安装的 `seedling` 二进制
 //! （PATH → 标准安装目录 → 应用数据目录缓存），缺失或版本过低时从官方 CDN
-//! 下载并缓存。认证支持两种方式并存：
-//!   1. CLI 登录态：`seedling auth login` 浏览器授权，登录令牌由 CLI 配置文件持久化；
-//!   2. API Token：前端经 providerSecretService 存入 secret_store，调用命令时以
-//!      `SEEDLING_TOKEN` 环境变量传入（CLI 官方优先级：环境变量 > 配置文件）。
+//! 下载并缓存。认证仅使用 CLI 浏览器授权登录态，由 CLI 配置文件管理。
 //!
 //! 安全边界：
 //!   - 所有命令参数白名单 / 枚举校验，禁止任意参数拼接；
-//!   - API Token 只进进程环境变量，绝不进命令行参数、日志或返回结果；
+//!   - 认证只由 Seedling CLI 配置文件中的登录态提供；
 //!   - 接收路径参数的命令必须经过 path_policy 的调用方与授权目录校验。
 
 use std::io::{BufRead, BufReader};
@@ -268,7 +265,7 @@ fn download_cli(app: &AppHandle) -> Result<PathBuf, String> {
 /// 配置文件里没有 endpoint 时，models list / auth 等所有联网命令都会失败。
 /// 查询当前 endpoint，未配置时写入官方默认地址（幂等，已配置则跳过）。
 fn ensure_seedling_endpoint(cli: &ResolvedCli) {
-    let mut query = base_command(cli, None);
+    let mut query = base_command(cli);
     query
         .args(["config", "get", "endpoint"])
         .stdout(Stdio::piped())
@@ -280,7 +277,7 @@ fn ensure_seedling_endpoint(cli: &ResolvedCli) {
     if already_configured {
         return;
     }
-    let mut set = base_command(cli, None);
+    let mut set = base_command(cli);
     set.args(["config", "set", "endpoint", SEEDLING_ENDPOINT])
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -364,12 +361,11 @@ fn resolve_cli(app: &AppHandle) -> Result<ResolvedCli, String> {
 // CLI 执行器
 // ──────────────────────────────────────────────
 
-fn base_command(cli: &ResolvedCli, api_token: Option<&str>) -> Command {
+fn base_command(cli: &ResolvedCli) -> Command {
     let mut cmd = Command::new(&cli.path);
     cmd.arg("--no-color");
-    if let Some(token) = api_token.filter(|t| !t.trim().is_empty()) {
-        cmd.env("SEEDLING_TOKEN", token);
-    }
+    // The app only supports the CLI's persisted browser login; ignore any legacy host token.
+    cmd.env_remove("SEEDLING_TOKEN");
     no_window(&mut cmd);
     cmd
 }
@@ -377,10 +373,9 @@ fn base_command(cli: &ResolvedCli, api_token: Option<&str>) -> Command {
 /// 执行 CLI 命令并解析 JSON 输出；非零退出码返回 stderr/输出尾部。
 fn run_cli_json(
     cli: &ResolvedCli,
-    api_token: Option<&str>,
     args: &[&str],
 ) -> Result<serde_json::Value, String> {
-    let mut cmd = base_command(cli, api_token);
+    let mut cmd = base_command(cli);
     cmd.args(args)
         .arg("--json")
         .stdout(Stdio::piped())
@@ -410,10 +405,9 @@ fn run_cli_json(
 /// 执行 CLI 命令并返回文本输出（用于 download / logout 等无 JSON 的命令）。
 fn run_cli_text(
     cli: &ResolvedCli,
-    api_token: Option<&str>,
     args: &[&str],
 ) -> Result<String, String> {
-    let mut cmd = base_command(cli, api_token);
+    let mut cmd = base_command(cli);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = cmd.output().map_err(|e| format!("执行 seedling 失败: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -435,13 +429,12 @@ fn run_cli_text(
 
 async fn run_cli_json_blocking(
     app: AppHandle,
-    api_token: Option<String>,
     args: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cli = resolve_cli(&app)?;
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_cli_json(&cli, api_token.as_deref(), &arg_refs)
+        run_cli_json(&cli, &arg_refs)
     })
     .await
     .map_err(|e| format!("执行 seedling 失败: {e}"))?
@@ -494,9 +487,9 @@ fn parse_auth_status(text: &str) -> AuthStatus {
     status
 }
 
-/// 查询认证状态；`api_token` 非空时以环境变量方式验证（CLI 优先级 env > file）。
-fn fetch_auth_status(cli: &ResolvedCli, api_token: Option<&str>) -> AuthStatus {
-    let mut cmd = base_command(cli, api_token);
+/// 查询 Seedling CLI 配置文件中的登录状态。
+fn fetch_auth_status(cli: &ResolvedCli) -> AuthStatus {
+    let mut cmd = base_command(cli);
     cmd.args(["auth", "status"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -531,15 +524,11 @@ pub struct CliStatus {
 }
 
 #[tauri::command]
-pub async fn seedling_cli_status(
-    app: AppHandle,
-    api_token: Option<String>,
-) -> Result<CliStatus, String> {
+pub async fn seedling_cli_status(app: AppHandle) -> Result<CliStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let token = api_token.as_deref();
         match resolve_cli(&app) {
             Ok(cli) => {
-                let auth = fetch_auth_status(&cli, token);
+                let auth = fetch_auth_status(&cli);
                 Ok(CliStatus {
                     found: true,
                     source: cli.source.to_string(),
@@ -562,12 +551,9 @@ pub async fn seedling_cli_status(
 }
 
 #[tauri::command]
-pub async fn seedling_models(
-    app: AppHandle,
-    api_token: Option<String>,
-) -> Result<serde_json::Value, String> {
+pub async fn seedling_models(app: AppHandle) -> Result<serde_json::Value, String> {
     let args = vec!["models".to_string(), "list".to_string()];
-    run_cli_json_blocking(app, api_token, args).await
+    run_cli_json_blocking(app, args).await
 }
 
 /// 显式安装 / 更新应用内置 CLI：强制从官方 CDN 下载最新版到应用数据目录缓存，
@@ -583,7 +569,7 @@ pub async fn seedling_install_cli(app: AppHandle) -> Result<CliStatus, String> {
             source: "bundled",
         };
         ensure_seedling_endpoint(&cli);
-        let auth = fetch_auth_status(&cli, None);
+        let auth = fetch_auth_status(&cli);
         Ok(CliStatus {
             found: true,
             source: "bundled".to_string(),
@@ -698,20 +684,18 @@ fn validate_task_create(params: &TaskCreateParams) -> Result<Vec<String>, String
 pub async fn seedling_task_create(
     app: AppHandle,
     params: TaskCreateParams,
-    api_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let args = validate_task_create(&params)?;
-    run_cli_json_blocking(app, api_token, args).await
+    run_cli_json_blocking(app, args).await
 }
 
 #[tauri::command]
 pub async fn seedling_task_get(
     app: AppHandle,
     task_id: u64,
-    api_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let args = vec!["task".to_string(), "get".to_string(), task_id.to_string()];
-    run_cli_json_blocking(app, api_token, args).await
+    run_cli_json_blocking(app, args).await
 }
 
 #[derive(serde::Deserialize)]
@@ -729,7 +713,6 @@ pub struct TaskListParams {
 pub async fn seedling_task_list(
     app: AppHandle,
     params: TaskListParams,
-    api_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mut args = vec!["task".to_string(), "list".to_string()];
     if !params.status.trim().is_empty() {
@@ -754,17 +737,16 @@ pub async fn seedling_task_list(
         args.push("--offset".to_string());
         args.push(offset.to_string());
     }
-    run_cli_json_blocking(app, api_token, args).await
+    run_cli_json_blocking(app, args).await
 }
 
 #[tauri::command]
 pub async fn seedling_task_cancel(
     app: AppHandle,
     task_id: u64,
-    api_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let args = vec!["task".to_string(), "cancel".to_string(), task_id.to_string()];
-    run_cli_json_blocking(app, api_token, args).await
+    run_cli_json_blocking(app, args).await
 }
 
 // ──────────────────────────────────────────────
@@ -777,7 +759,6 @@ pub async fn seedling_task_download(
     webview: Webview,
     task_id: u64,
     output: String,
-    api_token: Option<String>,
 ) -> Result<String, String> {
     ensure_trusted_caller(&webview)?;
     let output_path = authorize_path(&app, &output, PathAccess::Write)?;
@@ -791,7 +772,7 @@ pub async fn seedling_task_download(
             output_path.to_string_lossy().into_owned(),
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_cli_text(&cli, api_token.as_deref(), &arg_refs)
+        run_cli_text(&cli, &arg_refs)
     })
     .await
     .map_err(|e| format!("执行 seedling 下载失败: {e}"))?
@@ -802,7 +783,6 @@ pub async fn seedling_resource_upload(
     app: AppHandle,
     webview: Webview,
     file_path: String,
-    api_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     ensure_trusted_caller(&webview)?;
     // 用户素材路径：仅校验 app owned roots / fs scope，跳过 private 检查
@@ -816,7 +796,7 @@ pub async fn seedling_resource_upload(
             file.to_string_lossy().into_owned(),
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_cli_json(&cli, api_token.as_deref(), &arg_refs)
+        run_cli_json(&cli, &arg_refs)
     })
     .await
     .map_err(|e| format!("执行 seedling 上传失败: {e}"))?
@@ -965,7 +945,7 @@ fn run_login_sequence(app: AppHandle) {
         r.error.clear();
     });
 
-    let mut cmd = base_command(&cli, None);
+    let mut cmd = base_command(&cli);
     cmd.args(["auth", "login", "--no-browser", "--json"])
         .stdout(Stdio::piped())
         // stderr 重定向到空设备而不是 piped：授权成功/失败信息会写 stderr，
@@ -1020,7 +1000,7 @@ fn run_login_sequence(app: AppHandle) {
 
     match status {
         Ok(s) if s.success() => {
-            let auth = fetch_auth_status(&cli, None);
+            let auth = fetch_auth_status(&cli);
             update(&app, |r| {
                 r.active = false;
                 r.phase = "success".into();
@@ -1096,7 +1076,7 @@ pub async fn seedling_auth_logout(
         };
         let args = vec!["auth".to_string(), "logout".to_string(), "--local".to_string()];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match run_cli_text(&cli, None, &arg_refs) {
+        match run_cli_text(&cli, &arg_refs) {
             Ok(_) => Ok(update(&app, |r| {
                 r.active = false;
                 r.phase = "idle".into();
@@ -1117,6 +1097,19 @@ pub async fn seedling_auth_logout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seedling_commands_never_inherit_legacy_api_token_environment() {
+        let cli = ResolvedCli {
+            path: PathBuf::from("seedling"),
+            version: MIN_VERSION.to_string(),
+            source: "path",
+        };
+        let command = base_command(&cli);
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("SEEDLING_TOKEN") && value.is_none()
+        }));
+    }
 
     #[test]
     fn parses_version() {

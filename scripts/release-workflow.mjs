@@ -127,7 +127,7 @@ async function sourceWorkflow(api) {
 }
 
 function trustedSourceRun(run, workflow, repository) {
-  return run?.event === 'push' && run.repository?.full_name === repository
+  return ['push', 'workflow_dispatch'].includes(run?.event) && run.repository?.full_name === repository
     && run.head_repository?.full_name === repository && run.workflow_id === workflow.id
     && run.path === workflow.path && Number.isSafeInteger(run.id) && run.id > 0;
 }
@@ -212,7 +212,9 @@ export async function inspectSourceCi(api, { repository, branch, tag, sha }) {
   validSha(sha);
   validateTag(tag);
   const workflow = await sourceWorkflow(api);
-  const runs = (await workflowRuns(api, `/actions/workflows/${workflow.id}/runs?head_sha=${sha}&event=push&branch=${encodeURIComponent(tag)}&per_page=100`))
+  const candidateRuns = await Promise.all(['push', 'workflow_dispatch'].map((event) =>
+    workflowRuns(api, `/actions/workflows/${workflow.id}/runs?head_sha=${sha}&branch=${encodeURIComponent(tag)}&event=${event}&per_page=100`)));
+  const runs = candidateRuns.flat()
     .filter((run) => trustedSourceRun(run, workflow, repository) && run.head_sha === sha && run.head_branch === tag);
   const run = runs.sort((a, b) => b.id - a.id)[0];
   if (!run || run.status !== 'completed') return { status: run ? 'pending' : 'missing' };

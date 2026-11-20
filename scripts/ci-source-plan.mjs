@@ -18,11 +18,15 @@ function fullPlan(identity, reason) {
     lintFiles: [], relatedFiles: [], explicitTests: [] };
 }
 
-export async function planSourceCi({ repository, branch, event, ref, sha, api }, repositoryState) {
-  if (!repository || !branch || event !== 'push' || !ref?.startsWith('refs/tags/') || !shaPattern.test(sha)) {
+export async function planSourceCi({ repository, branch, event, ref, releaseTag, sha, api }, repositoryState) {
+  if (!repository || !branch || !['push', 'workflow_dispatch'].includes(event)
+    || !ref?.startsWith('refs/tags/') || !shaPattern.test(sha)) {
     throw new Error('源码 CI 仅允许正式版本标签的打包请求');
   }
   const tag = validateTag(ref.slice('refs/tags/'.length));
+  if (event === 'workflow_dispatch' && releaseTag !== tag) {
+    throw new Error('手动源码 CI 必须显式指定与当前标签 ref 完全一致的 release_tag');
+  }
   if (repositoryState.head() !== sha) throw new Error('检出 SHA 与版本标签的提交不一致');
   if (!repositoryState.isDefaultBranchAncestor(sha, branch)) {
     throw new Error('版本标签的提交不属于默认分支历史，拒绝打包检查');
@@ -74,6 +78,7 @@ async function main(command = 'plan') {
     branch: env.DEFAULT_BRANCH,
     event: env.GITHUB_EVENT_NAME,
     ref: env.GITHUB_REF,
+    releaseTag: env.RELEASE_TAG,
     sha: env.GITHUB_SHA,
     api: (...args) => createGitHubApi(env.GITHUB_REPOSITORY, env.GH_TOKEN)(...args),
   }, {

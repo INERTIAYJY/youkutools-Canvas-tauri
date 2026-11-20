@@ -52,7 +52,8 @@ function fixture() {
     if (path.startsWith('/actions/workflows/17/runs?head_sha=')) {
       const query = new URL(path, 'https://fixture.invalid').searchParams;
       const requestedSha = query.get('head_sha');
-      if (requestedSha === sha) return { workflow_runs: state.runs };
+      const requestedEvent = query.get('event');
+      if (requestedSha === sha) return { workflow_runs: state.runs.filter((run) => run.event === requestedEvent) };
       return { workflow_runs: state.baselineExactRuns.get(requestedSha)
         ?? state.baselineRuns.filter((run) => run.head_sha === requestedSha) };
     }
@@ -256,10 +257,14 @@ describe('完整源码基线', () => {
 });
 
 describe('可信源码 CI 与前端 artifact 证明', () => {
-  it('只接受同仓库同版本标签 push 的准确工作流与 SHA', async () => {
+  it('只接受同仓库同版本tag的push或受控workflow_dispatch源码CI', async () => {
     const { state, api } = fixture();
-    await expect(inspectSourceCi(api, context)).resolves.toMatchObject({ status: 'success', mode: 'full', base: '', runId: 71, artifactId: 90 });
-    expect(api).toHaveBeenCalledWith(`/actions/workflows/17/runs?head_sha=${sha}&event=push&branch=v1.2.3&per_page=100`);
+    state.runs = [{ ...state.runs[0], event: 'workflow_dispatch' }];
+    await expect(inspectSourceCi(api, context)).resolves.toMatchObject({
+      status: 'success', mode: 'full', runId: 71, artifactId: 90,
+    });
+    expect(api).toHaveBeenCalledWith(`/actions/workflows/17/runs?head_sha=${sha}&branch=v1.2.3&event=push&per_page=100`);
+    expect(api).toHaveBeenCalledWith(`/actions/workflows/17/runs?head_sha=${sha}&branch=v1.2.3&event=workflow_dispatch&per_page=100`);
     for (const changes of [{ head_sha: otherSha }, { event: 'pull_request' }, { head_branch: 'master' },
       { head_branch: 'v1.2.4' }, { head_branch: 'fork' },
       { head_repository: { full_name: 'fork/repo' } }, { repository: { full_name: 'other/repo' } },

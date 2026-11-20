@@ -11,7 +11,7 @@ const sha = '1'.repeat(40), base = '2'.repeat(40);
 
 function fixture() {
   return {
-    input: { repository: 'example/ai-canvas', branch: 'master', event: 'push', ref: 'refs/tags/v1.2.3', sha, api: vi.fn() },
+    input: { repository: 'example/ai-canvas', branch: 'master', event: 'push', ref: 'refs/tags/v1.2.3', releaseTag: undefined, sha, api: vi.fn() },
     state: {
       head: vi.fn(() => sha), isDefaultBranchAncestor: vi.fn(() => true), ancestors: vi.fn(() => [sha, base]),
       readPlan: vi.fn(() => ({ base, sha, mode: 'affected', rust: false, reason: '普通组件改动',
@@ -55,7 +55,7 @@ describe('仅在版本打包时选择可靠检查范围', () => {
   });
 
   it.each([
-    { event: 'pull_request' }, { event: 'workflow_dispatch' }, { ref: 'refs/heads/master' },
+    { event: 'pull_request' }, { event: 'workflow_dispatch', releaseTag: 'v1.2.4' }, { event: 'workflow_dispatch' }, { ref: 'refs/heads/master' },
     { ref: 'refs/heads/feature' }, { ref: 'refs/tags/not-a-release' }, { ref: 'refs/tags/v1.2.3-rc.1' },
     { ref: 'refs/tags/v01.2.3' }, { sha: '0'.repeat(40) }, { repository: '' }, { branch: '' },
   ])('非正式打包请求直接拒绝（%j）', async (overrides) => {
@@ -63,6 +63,16 @@ describe('仅在版本打包时选择可靠检查范围', () => {
     await expect(planSourceCi({ ...input, ...overrides }, state)).rejects.toThrow();
     expect(state.head).not.toHaveBeenCalled();
     expect(baseline).not.toHaveBeenCalled();
+  });
+
+  it('允许手动运行CI仅检查输入与当前ref一致的正式tag', async () => {
+    const { input, state } = fixture();
+    await expect(planSourceCi({ ...input, event: 'workflow_dispatch', releaseTag: 'v1.2.3' }, state))
+      .resolves.toMatchObject({ mode: 'affected', tag: 'v1.2.3', sha, release: true });
+    await expect(planSourceCi({ ...input, event: 'workflow_dispatch', releaseTag: 'v1.2.4' }, state))
+      .rejects.toThrow('完全一致');
+    await expect(planSourceCi({ ...input, event: 'workflow_dispatch' }, state)).rejects.toThrow('release_tag');
+    expect(state.isDefaultBranchAncestor).toHaveBeenCalledWith(sha, 'master');
   });
 
   it('错误检出和默认分支以外的提交不能获得打包检查计划', async () => {
@@ -75,11 +85,13 @@ describe('仅在版本打包时选择可靠检查范围', () => {
     expect(baseline).not.toHaveBeenCalled();
   });
 
-  it('工作流保留标签触发、同次冻结计划、真实增量证明和完整前端产物', () => {
+  it('工作流保留标签push与严格校验的人工tag入口、同次冻结计划和真实产物证明', () => {
     const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     const trigger = workflow.slice(workflow.indexOf('\non:'), workflow.indexOf('\npermissions:'));
     expect(trigger).toContain("tags:\n      - 'v*'");
-    expect(trigger).not.toMatch(/pull_request:|branches:|workflow_dispatch:|schedule:/);
+    expect(trigger).toContain('workflow_dispatch:');
+    expect(trigger).toContain('release_tag:');
+    expect(workflow).toContain('RELEASE_TAG: ${{ inputs.release_tag }}');
     expect(workflow).toContain('node scripts/ci-source-plan.mjs finalize');
     expect(workflow).toContain('ci-plan-${{ github.sha }}-${{ github.run_attempt }}');
     expect(workflow).toContain('ci:affected -- --execute-plan release-ci-plan.json --build');

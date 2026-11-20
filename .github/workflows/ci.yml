@@ -1,9 +1,16 @@
 name: CI
+run-name: 源码检查 ${{ inputs.release_tag || github.ref_name }}
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 精确的正式版本标签（vX.Y.Z），工作流会校验当前 ref 完全匹配
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -40,6 +47,7 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: node scripts/ci-source-plan.mjs plan
 
       - name: Install dependencies to resolve related tests

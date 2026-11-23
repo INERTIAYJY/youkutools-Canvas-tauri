@@ -15,11 +15,9 @@ import type { AnimationAction, BaseNodeData, CameraGenerationSettings, ImagePost
 import { ANIMATION_FRAME_GRIDS } from '../../types';
 import { generateShotlistRows } from '../../services/shotlistService';
 import { MAX_IMAGE_BATCH_COUNT, type MediaTaskReceipt, type TextGenerationResult, type AudioSpeechSettings, type AudioSpeechReference, type AudioOutputFormat, type AudioTtsVoice, type VideoReferenceItem } from '../../types/aiTypes';
-import { generateText, generateTextResult, generateImage, generateImagesBatch, generateVideo, buildPanoramaPrompt } from '../../services/aiService';
-import { resolveVideoSubmissionControls } from '../../services/ai/videoRequestResolver';
+import { generateText, generateTextResult, generateImage, generateImagesBatch, buildPanoramaPrompt } from '../../services/aiService';
 import { removeAudioSpeechReference } from '../../services/ai/audioSpeechSettings';
 import { persistMediaUrlToProjectData, type PersistedProjectMedia } from '../../services/fileService';
-import { ensurePlayableVideoFile, playableVideoUrl } from '../../services/videoPlaybackCompat';
 import {
   applyImageBatchResults,
   failImageBatchNodes,
@@ -435,7 +433,6 @@ function AINodeDialog() {
     const sourceNode = store.nodes.find((n) => n.id === submittingNodeId);
     if (!sourceNode) return;
     const latestData = sourceNode.data as BaseNodeData;
-    const rawPrompt = latestData.prompt ?? '';
     const nodeModel = latestData.model;
     const nodeProvider = latestData.provider;
     const nodeLabel = latestData.label ?? '视频';
@@ -443,39 +440,6 @@ function AINodeDialog() {
       showToast('请先在底部模型选择器中选择一个模型', 'error');
       return;
     }
-    const projectSettings = store.projects.find((p) => p.id === submittingProjectId)?.settings;
-    const projectPrompt = resolveProjectGenerationPrompt({
-      prompt: rawPrompt,
-      data: latestData,
-      settings: projectSettings,
-      customStyles: store.customStyles,
-    });
-    // 与统一提交入口一致：镜头设置由 shotlistPromptService 解析节点引用后并入提示词。
-    const effectivePrompt = applyGenerationCameraPrompt(projectPrompt, store.nodes, latestData.cameraSettings);
-    const videoControls = resolveVideoSubmissionControls({
-      provider: nodeProvider,
-      workflowId: latestData.workflowId,
-      videoResolution: latestData.videoResolution as number | undefined,
-      videoFps: latestData.videoFps as number | undefined,
-      videoFrames: latestData.videoFrames as number | undefined,
-      seedanceResolution: latestData.seedanceResolution as string | undefined,
-      seedanceRatio: latestData.seedanceRatio as string | undefined,
-      seedanceDuration: latestData.seedanceDuration as number | undefined,
-    });
-    const baseParams = {
-      prompt: effectivePrompt,
-      model: nodeModel,
-      provider: nodeProvider,
-      videoResolution: videoControls.videoResolution,
-      videoFps: videoControls.videoFps,
-      videoFrames: videoControls.videoFrames,
-      seedanceResolution: videoControls.seedanceResolution,
-      seedanceRatio: videoControls.seedanceRatio,
-      seedanceDuration: videoControls.seedanceDuration,
-      generateAudio: latestData.generateAudio,
-      workflowId: latestData.workflowId,
-      workflowInputs: latestData.workflowInputs,
-    };
     const isStill = () => {
       const s = useAppStore.getState();
       return s.currentProjectId === submittingProjectId
@@ -503,6 +467,12 @@ function AINodeDialog() {
           filePath: undefined,
           thumbnailUrl: undefined,
           output: undefined,
+          // 新节点是独立的生成器，不能继承源节点的角色或进行中任务身份。
+          role: 'generator',
+          videoTaskState: undefined,
+          mediaTaskState: undefined,
+          mediaTaskStage: undefined,
+          videoBatchFingerprint: undefined,
           status: 'loading',
           error: undefined,
           generateInPlace: true,
@@ -527,53 +497,23 @@ function AINodeDialog() {
     });
     showToast(`正在并行生成 ${count} 条视频`);
 
-    // 2. 并行提交生成请求，每个结果填入对应空白节点
-    await Promise.all(newNodes.map(async (node, index) => {
-      const nodeParams = { ...baseParams, nodeId: node.id };
-      try {
-        if (!isStill()) return;
-        const result = await generateVideo(nodeParams);
-        if (!isStill()) return;
-        const persistedRaw = submittingProjectId
-          ? await persistMediaUrlToProjectData(result.url, submittingProjectId, 'ai-video', `${nodeLabel}-${index + 1}`)
-            .catch(() => ({ mediaUrl: result.url, sourceUrl: result.url, filePath: undefined }))
-          : { mediaUrl: result.url, sourceUrl: result.url, filePath: undefined };
-        // HEVC(10bit) 结果无法在 WebView 内解码，落盘后按需转成 H.264 再交给节点。
-        const playablePath = await ensurePlayableVideoFile(persistedRaw.filePath);
-        const persisted = playablePath && playablePath !== persistedRaw.filePath
-          ? { ...persistedRaw, filePath: playablePath, mediaUrl: playableVideoUrl(playablePath) }
-          : persistedRaw;
-        useAppStore.getState().updateNodeData(node.id, {
-          videoUrl: persisted.mediaUrl,
-          sourceUrl: persisted.sourceUrl,
-          filePath: persisted.filePath,
-          thumbnailUrl: persisted.mediaUrl,
-          output: persisted.sourceUrl,
-          status: 'success',
-          error: undefined,
-        });
-        recordOutputHistory(node.id, {
-          nodeId: node.id,
-          nodeLabel: `${nodeLabel}-${index + 1}`,
-          timestamp: Date.now(),
-          prompt: effectivePrompt,
-          output: persisted.sourceUrl,
-          nodeType: 'ai-video',
-          model: nodeModel,
-          provider: nodeProvider,
-          status: 'success',
-          mediaUrl: persisted.mediaUrl,
-          filePath: persisted.filePath,
-          params: { videoResolution: baseParams.videoResolution, videoFps: baseParams.videoFps, videoFrames: baseParams.videoFrames, seedanceResolution: baseParams.seedanceResolution, seedanceRatio: baseParams.seedanceRatio, seedanceDuration: baseParams.seedanceDuration, generateAudio: baseParams.generateAudio },
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : (typeof err === 'string' && err.trim() ? err : '视频生成失败');
-        if (isStill()) useAppStore.getState().updateNodeData(node.id, { status: 'error', error: msg });
-      }
+    // 2. 每个新节点都走统一提交入口：原生提交守卫、媒体任务账本、H.265 兼容落盘与
+    //    操作历史都由 executeGeneration 处理。直接调 generateVideo 缺少守卫，会被拒绝提交。
+    const { executeGeneration } = await import('../../services/generationService');
+    const results = await Promise.all(newNodes.map(async (node) => {
+      if (!isStill()) return undefined;
+      return executeGeneration(node.id);
     }));
 
-    if (isStill()) updateNodeDataTransient(submittingNodeId, { status: 'idle' });
-  }, [activeNodeId, currentProjectId, showToast, updateNodeDataTransient, recordOutputHistory, addNodesWithEdges]);
+    if (isStill()) {
+      updateNodeDataTransient(submittingNodeId, { status: 'idle' });
+      const failed = results.filter((result) => result && result.success === false);
+      if (failed.length) {
+        const reason = failed[0]?.message;
+        showToast(`批量生成：${failed.length} 条未成功${reason ? `（${reason}）` : ''}，可重新点生成重试`, 'error');
+      }
+    }
+  }, [activeNodeId, currentProjectId, showToast, updateNodeDataTransient, addNodesWithEdges]);
 
   // 调用选中模型生成（文本 or 图片）
   // overridePrompt: / 指令菜单直接触发时传入的整合后模板，不走 store → 对话框不闪烁

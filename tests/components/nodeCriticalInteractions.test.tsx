@@ -46,6 +46,7 @@ interface TestStore {
   setNodes: (nodes: TestNode[]) => void;
   addNode: ReturnType<typeof vi.fn>;
   addNodeTransient: ReturnType<typeof vi.fn>;
+  addNodesWithEdges: ReturnType<typeof vi.fn>;
   updateNodeData: ReturnType<typeof vi.fn>;
   updateNodeDataTransient: ReturnType<typeof vi.fn<(nodeId: string, patch: Record<string, unknown>) => void>>;
   commitToHistory: ReturnType<typeof vi.fn<AppState['commitToHistory']>>;
@@ -139,7 +140,7 @@ function createStore(nodes: TestNode[], getRevision: () => number): TestStore {
     currentProjectId: 'project-a',
     projectLoadStatus: 'ready',
     nodes,
-    edges: [],
+    edges: [] as Array<{ id: string; source: string; target: string }>,
     projects: [{ id: 'project-a', settings: { styleReferenceId: 'style-project' } }],
     customStyles: [{ id: 'style-project', name: 'Project style' }],
     workflows: [],
@@ -149,6 +150,10 @@ function createStore(nodes: TestNode[], getRevision: () => number): TestStore {
     setNodes: (nextNodes: TestNode[]) => { store.nodes = nextNodes; },
     addNode: vi.fn((node: TestNode) => { store.nodes = [...store.nodes, node]; }),
     addNodeTransient: vi.fn((node: TestNode) => { store.nodes = [...store.nodes, node]; }),
+    addNodesWithEdges: vi.fn((nodes: TestNode[], edges: TestStore['edges']) => {
+      store.nodes = [...store.nodes, ...nodes];
+      store.edges = [...store.edges, ...edges];
+    }),
     updateNodeData: vi.fn((nodeId: string, patch: Record<string, unknown>) => {
       store.nodes = store.nodes.map((node) => (
         node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node
@@ -2854,6 +2859,77 @@ describe('critical canvas node interactions', () => {
       }
       expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
       expect(store.recordOutputHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('AINodeDialog video generation to new nodes', () => {
+    afterEach(() => {
+      vi.doUnmock('../../src/services/generationService');
+      vi.doUnmock('../../src/services/aiService');
+      vi.doUnmock('../../src/store/store.utils');
+      vi.doUnmock('../../src/components/nodes/shared/defaultModels');
+    });
+
+    it('routes every derived node through the shared executor instead of a raw provider call', async () => {
+      const store = createStore([{
+        id: 'video-node', type: 'ai-video', position: { x: 0, y: 0 },
+        data: { type: 'ai-video', label: '视频', prompt: '同一条提示词', model: 'general/video', provider: 'general',
+          role: 'source', generateInPlace: false, generateCount: 2, videoUrl: 'asset://source.mp4',
+          videoTaskState: 'paused', mediaTaskState: 'paused', videoBatchFingerprint: 'stale' },
+      }], () => 1);
+      store.activeNodeId = 'video-node';
+      const executeGeneration = vi.fn().mockResolvedValue({ success: true });
+      const generateVideo = vi.fn();
+      let generated = 0;
+      await installReactHookDriver();
+      // 同文件前面的用例可能替换过这些模块，这里显式恢复成本用例需要的实现。
+      vi.doMock('../../src/store/store.utils', async () => (
+        await vi.importActual<typeof import('../../src/store/store.utils')>('../../src/store/store.utils')
+      ));
+      const useAppStore = Object.assign(
+        <T,>(selector: (state: TestStore) => T) => selector(store),
+        { getState: () => store, subscribe: () => () => undefined },
+      );
+      vi.doMock('../../src/store/useAppStore', () => ({
+        generateId: () => `generated-${++generated}`,
+        computeImageNodeDimensions: vi.fn(),
+        useAppStore,
+      }));
+      vi.doMock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
+      vi.doMock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
+      vi.doMock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => path }));
+      vi.doMock('../../src/components/nodes/shared/PromptPanel', () => ({
+        default: function PromptPanelMock() { return null; },
+      }));
+      vi.doMock('../../src/components/nodes/shared/defaultModels', () => ({ findMediaModelOption: vi.fn() }));
+      vi.doMock('../../src/services/aiService', () => ({
+        generateText: vi.fn(), generateTextResult: vi.fn(), generateImage: vi.fn(), generateImagesBatch: vi.fn(),
+        generateVideo, buildPanoramaPrompt: vi.fn(), generateAudio: vi.fn(),
+      }));
+      vi.doMock('../../src/services/pollManager', () => ({
+        ...mockComfyDeliveries(), getPendingTasksForProject: () => [],
+      }));
+      vi.doMock('../../src/services/generationService', () => ({
+        executeGeneration, subscribeImageBatches: () => () => {}, isImageBatchGenerating: () => false,
+        cancelImageBatchGeneration: vi.fn(), usesSequentialImageBatch: () => false,
+      }));
+
+      const Dialog = (await import('../../src/components/nodes/AINodeDialog')).default as unknown as () => unknown;
+      const panel = findElement(Dialog(), (element) => componentName(element) === 'PromptPanelMock');
+      await (panel.props.onSubmit as () => Promise<void>)();
+
+      const [nodes, edges] = store.addNodesWithEdges.mock.calls[0] as [TestNode[], TestStore['edges']];
+      expect(nodes).toHaveLength(2);
+      expect(edges).toEqual(nodes.map((node) => expect.objectContaining({ source: 'video-node', target: node.id })));
+      // 新节点是独立生成器：不继承源节点的 source 角色、旧视频或进行中任务身份。
+      for (const node of nodes) {
+        expect(node.data).toMatchObject({ role: 'generator', status: 'loading', generateInPlace: true,
+          videoUrl: undefined, videoTaskState: undefined, mediaTaskState: undefined, videoBatchFingerprint: undefined });
+      }
+      // 关键回归：每个新节点都经统一提交入口（含原生提交守卫），不再直接调用供应商层。
+      expect(executeGeneration.mock.calls).toEqual(nodes.map((node) => [node.id]));
+      expect(generateVideo).not.toHaveBeenCalled();
+      expect(store.showToast).toHaveBeenCalledWith('正在并行生成 2 条视频');
     });
   });
 

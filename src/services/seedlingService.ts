@@ -257,7 +257,13 @@ export async function waitSeedlingTask(
     isComplete: (task) => task.status === 'succeeded' ? task : null,
     isFailed: (task) =>
       ['failed', 'expired', 'cancelled'].includes(task.status)
-        ? (task.errorMessage || `Seedling 任务${task.status}`)
+        ? (() => {
+          const reason = task.errorMessage || task.errorCode || `Seedling 任务${task.status}`;
+          // 提交失败是服务端瞬时拒单（无上游任务 ID），可直接重试；其余终态保留原文。
+          const retryHint = task.errorCode === 'SubmitFailed'
+            ? '；这是森之灵服务端瞬时拒单，请在该节点重新点生成重试' : '';
+          return `森之灵任务 #${task.taskId} ${reason}${retryHint}`;
+        })()
         : null,
     interval: SEEDLING_POLL_INTERVAL_MS,
     maxDuration: SEEDLING_MAX_POLL_MS,
